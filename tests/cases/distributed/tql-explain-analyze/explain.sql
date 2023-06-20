@@ -9,3 +9,18 @@ INSERT INTO test VALUES (1, 1, "a"), (1, 1, "b"), (2, 2, "a");
 TQL EXPLAIN (0, 10, '5s') test;
 
 DROP TABLE test;
+
+CREATE TABLE host_load1 (
+  ts TIMESTAMP(3) NOT NULL,
+  collector STRING NULL,
+  host STRING NULL,
+  val DOUBLE NULL,
+  TIME INDEX (ts),
+  PRIMARY KEY (collector, host)
+);
+
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (peer-.*) REDACTED
+TQL EXPLAIN host_load1{__field__="val"};
+
+DROP TABLE host_load1;
