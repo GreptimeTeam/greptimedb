@@ -19,7 +19,7 @@ mod test_util;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use catalog::local::{MemoryCatalogProvider, MemorySchemaProvider};
+use catalog::RegisterSchemaRequest;
 use common_test_util::temp_dir::TempDir;
 use datanode::instance::Instance as DatanodeInstance;
 use frontend::instance::Instance;
@@ -71,17 +71,18 @@ pub(crate) async fn create_standalone_instance(test_name: &str) -> MockStandalon
         .await
         .unwrap();
 
-    // create another catalog and schema for testing
-    let another_catalog = Arc::new(MemoryCatalogProvider::new());
-    let _ = another_catalog
-        .register_schema_sync(
-            "another_schema".to_string(),
-            Arc::new(MemorySchemaProvider::new()),
-        )
-        .unwrap();
-    let _ = dn_instance
+    dn_instance
         .catalog_manager()
-        .register_catalog("another_catalog".to_string(), another_catalog)
+        .register_catalog("another_catalog".to_string())
+        .await
+        .unwrap();
+    let req = RegisterSchemaRequest {
+        catalog: "another_catalog".to_string(),
+        schema: "another_schema".to_string(),
+    };
+    dn_instance
+        .catalog_manager()
+        .register_schema(req)
         .await
         .unwrap();
 

@@ -467,10 +467,9 @@ impl DistInstance {
         let catalog = query_ctx.current_catalog();
         if self
             .catalog_manager
-            .schema(&catalog, &expr.database_name)
+            .schema_exist(&catalog, &expr.database_name)
             .await
             .context(CatalogSnafu)?
-            .is_some()
         {
             return if expr.create_if_not_exists {
                 Ok(Output::AffectedRows(1))

@@ -130,10 +130,9 @@ impl StatementExecutor {
         let catalog = &query_ctx.current_catalog();
         ensure!(
             self.catalog_manager
-                .schema(catalog, &db)
+                .schema_exist(catalog, &db)
                 .await
-                .context(CatalogSnafu)?
-                .is_some(),
+                .context(CatalogSnafu)?,
             SchemaNotFoundSnafu { schema_info: &db }
         );
 
