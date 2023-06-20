@@ -755,16 +755,21 @@ mod tests {
     async fn test_batch_put() {
         let tc = new_client("test_batch_put").await;
 
-        let req = BatchPutRequest::new()
-            .add_kv(tc.key("key"), b"value".to_vec())
-            .add_kv(tc.key("key2"), b"value2".to_vec());
+        let mut req = BatchPutRequest::new();
+        for i in 0..256 {
+            req = req.add_kv(
+                tc.key(&format!("key-{}", i)),
+                format!("value-{}", i).into_bytes(),
+            );
+        }
+
         let res = tc.client.batch_put(req).await;
         assert_eq!(0, res.unwrap().take_prev_kvs().len());
 
-        let req = RangeRequest::new().with_range(tc.key("key"), tc.key("key3"));
+        let req = RangeRequest::new().with_prefix(tc.key("key-"));
         let res = tc.client.range(req).await;
         let kvs = res.unwrap().take_kvs();
-        assert_eq!(2, kvs.len());
+        assert_eq!(256, kvs.len());
     }
 
     #[tokio::test]
@@ -772,16 +777,17 @@ mod tests {
         let tc = new_client("test_batch_get").await;
         tc.gen_data().await;
 
-        let req = BatchGetRequest::default()
-            .add_key(tc.key("key-1"))
-            .add_key(tc.key("key-2"));
+        let mut req = BatchGetRequest::default();
+        for i in 0..256 {
+            req = req.add_key(tc.key(&format!("key-{}", i)));
+        }
         let mut res = tc.client.batch_get(req).await.unwrap();
 
-        assert_eq!(2, res.take_kvs().len());
+        assert_eq!(10, res.take_kvs().len());
 
         let req = BatchGetRequest::default()
             .add_key(tc.key("key-1"))
-            .add_key(tc.key("key-222"));
+            .add_key(tc.key("key-999"));
         let mut res = tc.client.batch_get(req).await.unwrap();
 
         assert_eq!(1, res.take_kvs().len());
