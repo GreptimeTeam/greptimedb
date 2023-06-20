@@ -36,6 +36,7 @@ pub(crate) mod handler;
 
 pub struct HeartbeatTask {
     node_id: u64,
+    node_epoch: u64,
     server_addr: String,
     server_hostname: Option<String>,
     running: Arc<AtomicBool>,
@@ -65,6 +66,8 @@ impl HeartbeatTask {
     ) -> Self {
         Self {
             node_id,
+            // We use datanode's start time millis as the node's epoch.
+            node_epoch: common_time::util::current_time_millis() as u64,
             server_addr,
             server_hostname,
             running: Arc::new(AtomicBool::new(false)),
@@ -133,6 +136,7 @@ impl HeartbeatTask {
         }
         let interval = self.interval;
         let node_id = self.node_id;
+        let node_epoch = self.node_epoch;
         let addr = resolve_addr(&self.server_addr, &self.server_hostname);
         info!("Starting heartbeat to Metasrv with interval {interval}. My node id is {node_id}, address is {addr}.");
 
@@ -201,6 +205,7 @@ impl HeartbeatTask {
                             }),
                             region_stats,
                             duration_since_epoch: (Instant::now() - epoch).as_millis() as u64,
+                            node_epoch,
                             ..Default::default()
                         };
                         sleep.as_mut().reset(Instant::now() + Duration::from_millis(interval));

@@ -183,7 +183,11 @@ mod tests {
         assert_eq!(10, val.stats.len());
     }
 
-    async fn handle_request_many_times(mut ctx: Context, handler: &PersistStatsHandler, loop_times: i32) {
+    async fn handle_request_many_times(
+        mut ctx: Context,
+        handler: &PersistStatsHandler,
+        loop_times: i32,
+    ) {
         let req = HeartbeatRequest::default();
         for i in 1..=loop_times {
             let mut acc = HeartbeatAccumulator {
