@@ -199,6 +199,7 @@ impl Instance {
             }
         };
 
+        catalog_manager.start().await.context(CatalogSnafu)?;
         let factory = QueryEngineFactory::new(catalog_manager.clone(), false);
         let query_engine = factory.query_engine();
 

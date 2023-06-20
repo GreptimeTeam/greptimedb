@@ -74,11 +74,11 @@ impl LocalCatalogManager {
                 engine_name: MITO_ENGINE,
             })?;
         let table = SystemCatalogTable::new(engine.clone()).await?;
-        let memory_catalog_list = crate::local::memory::new_memory_catalog_manager()?;
+        let memory_catalog_manager = crate::local::memory::new_memory_catalog_manager()?;
         let system_catalog = Arc::new(SystemCatalog::new(table));
         Ok(Self {
             system: system_catalog,
-            catalogs: memory_catalog_list,
+            catalogs: memory_catalog_manager,
             engine_manager,
             next_table_id: AtomicU32::new(MIN_USER_TABLE_ID),
             init_lock: Mutex::new(false),
