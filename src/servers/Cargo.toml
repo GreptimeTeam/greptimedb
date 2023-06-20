@@ -17,7 +17,6 @@ async-trait = "0.1"
 axum = "0.6"
 axum-macros = "0.3"
 base64 = "0.13"
-build-data = "0.1.4"
 bytes = "1.2"
 catalog = { path = "../catalog" }
 chrono.workspace = true
@@ -101,3 +100,6 @@ table = { path = "../table" }
 tokio-postgres = "0.7"
 tokio-postgres-rustls = "0.10"
 tokio-test = "0.4"
+
+[build-dependencies]
+build-data = "0.1.4"
