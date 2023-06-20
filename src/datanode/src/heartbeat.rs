@@ -30,6 +30,7 @@ use snafu::ResultExt;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
+use crate::datanode::DatanodeOptions;
 use crate::error::{self, MetaClientInitSnafu, Result};
 
 pub(crate) mod handler;
@@ -57,23 +58,23 @@ impl HeartbeatTask {
     /// Create a new heartbeat task instance.
     pub fn new(
         node_id: u64,
-        server_addr: String,
-        server_hostname: Option<String>,
+        opts: &DatanodeOptions,
         meta_client: Arc<MetaClient>,
         catalog_manager: CatalogManagerRef,
         resp_handler_executor: HeartbeatResponseHandlerExecutorRef,
+        heartbeat_interval_millis: u64,
         region_alive_keepers: Arc<RegionAliveKeepers>,
     ) -> Self {
         Self {
             node_id,
             // We use datanode's start time millis as the node's epoch.
             node_epoch: common_time::util::current_time_millis() as u64,
-            server_addr,
-            server_hostname,
+            server_addr: opts.rpc_addr.clone(),
+            server_hostname: opts.rpc_hostname.clone(),
             running: Arc::new(AtomicBool::new(false)),
             meta_client,
             catalog_manager,
-            interval: 5_000, // default interval is set to 5 secs
+            interval: heartbeat_interval_millis,
             resp_handler_executor,
             region_alive_keepers,
         }
@@ -140,7 +141,7 @@ impl HeartbeatTask {
         let addr = resolve_addr(&self.server_addr, &self.server_hostname);
         info!("Starting heartbeat to Metasrv with interval {interval}. My node id is {node_id}, address is {addr}.");
 
-        self.region_alive_keepers.start(interval).await;
+        self.region_alive_keepers.start().await;
 
         let meta_client = self.meta_client.clone();
         let catalog_manager_clone = self.catalog_manager.clone();

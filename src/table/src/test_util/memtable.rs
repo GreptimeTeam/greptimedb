@@ -56,7 +56,7 @@ impl MemTable {
         Self::new_with_catalog(
             table_name,
             recordbatch,
-            0,
+            1,
             "greptime".to_string(),
             "public".to_string(),
             regions,

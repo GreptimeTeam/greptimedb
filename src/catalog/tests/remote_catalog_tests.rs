@@ -19,6 +19,7 @@ mod tests {
     use std::assert_matches::assert_matches;
     use std::collections::HashSet;
     use std::sync::Arc;
+    use std::time::Duration;
 
     use catalog::helper::{CatalogKey, CatalogValue, SchemaKey, SchemaValue};
     use catalog::remote::mock::{MockKvBackend, MockTableEngine};
@@ -29,11 +30,27 @@ mod tests {
     };
     use catalog::{CatalogManager, RegisterTableRequest};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO_ENGINE};
+    use common_meta::ident::TableIdent;
     use datatypes::schema::RawSchema;
     use futures_util::StreamExt;
     use table::engine::manager::{MemoryTableEngineManager, TableEngineManagerRef};
     use table::engine::{EngineContext, TableEngineRef};
     use table::requests::CreateTableRequest;
+    use table::test_util::EmptyTable;
+    use tokio::time::Instant;
+
+    struct TestingComponents {
+        kv_backend: KvBackendRef,
+        catalog_manager: Arc<RemoteCatalogManager>,
+        table_engine_manager: TableEngineManagerRef,
+        region_alive_keepers: Arc<RegionAliveKeepers>,
+    }
+
+    impl TestingComponents {
+        fn table_engine(&self) -> TableEngineRef {
+            self.table_engine_manager.engine(MITO_ENGINE).unwrap()
+        }
+    }
 
     #[tokio::test]
     async fn test_backend() {
@@ -121,14 +138,7 @@ mod tests {
         assert!(ret.is_none());
     }
 
-    async fn prepare_components(
-        node_id: u64,
-    ) -> (
-        KvBackendRef,
-        TableEngineRef,
-        Arc<RemoteCatalogManager>,
-        TableEngineManagerRef,
-    ) {
+    async fn prepare_components(node_id: u64) -> TestingComponents {
         let cached_backend = Arc::new(CachedMetaKvBackend::wrap(
             Arc::new(MockKvBackend::default()),
         ));
@@ -136,30 +146,34 @@ mod tests {
         let table_engine = Arc::new(MockTableEngine::default());
         let engine_manager = Arc::new(MemoryTableEngineManager::alias(
             MITO_ENGINE.to_string(),
-            table_engine.clone(),
+            table_engine,
         ));
+
+        let region_alive_keepers = Arc::new(RegionAliveKeepers::new(engine_manager.clone(), 5000));
 
         let catalog_manager = RemoteCatalogManager::new(
             engine_manager.clone(),
             node_id,
             cached_backend.clone(),
-            Arc::new(RegionAliveKeepers::new(engine_manager.clone())),
+            region_alive_keepers.clone(),
         );
         catalog_manager.start().await.unwrap();
 
-        (
-            cached_backend,
-            table_engine,
-            Arc::new(catalog_manager),
-            engine_manager as Arc<_>,
-        )
+        TestingComponents {
+            kv_backend: cached_backend,
+            catalog_manager: Arc::new(catalog_manager),
+            table_engine_manager: engine_manager,
+            region_alive_keepers,
+        }
     }
 
     #[tokio::test]
     async fn test_remote_catalog_default() {
         common_telemetry::init_default_ut_logging();
         let node_id = 42;
-        let (_, _, catalog_manager, _) = prepare_components(node_id).await;
+        let TestingComponents {
+            catalog_manager, ..
+        } = prepare_components(node_id).await;
         assert_eq!(
             vec![DEFAULT_CATALOG_NAME.to_string()],
             catalog_manager.catalog_names().await.unwrap()
@@ -180,14 +194,16 @@ mod tests {
     async fn test_remote_catalog_register_nonexistent() {
         common_telemetry::init_default_ut_logging();
         let node_id = 42;
-        let (_, table_engine, catalog_manager, _) = prepare_components(node_id).await;
+        let components = prepare_components(node_id).await;
+
         // register a new table with an nonexistent catalog
         let catalog_name = "nonexistent_catalog".to_string();
         let schema_name = "nonexistent_schema".to_string();
         let table_name = "fail_table".to_string();
         // this schema has no effect
         let table_schema = RawSchema::new(vec![]);
-        let table = table_engine
+        let table = components
+            .table_engine()
             .create_table(
                 &EngineContext {},
                 CreateTableRequest {
@@ -213,7 +229,7 @@ mod tests {
             table_id: 1,
             table,
         };
-        let res = catalog_manager.register_table(reg_req).await;
+        let res = components.catalog_manager.register_table(reg_req).await;
 
         // because nonexistent_catalog does not exist yet.
         assert_matches!(
@@ -225,7 +241,8 @@ mod tests {
     #[tokio::test]
     async fn test_register_table() {
         let node_id = 42;
-        let (_, table_engine, catalog_manager, _) = prepare_components(node_id).await;
+        let components = prepare_components(node_id).await;
+        let catalog_manager = &components.catalog_manager;
         let default_catalog = catalog_manager
             .catalog(DEFAULT_CATALOG_NAME)
             .await
@@ -249,7 +266,8 @@ mod tests {
         let table_id = 1;
         // this schema has no effect
         let table_schema = RawSchema::new(vec![]);
-        let table = table_engine
+        let table = components
+            .table_engine()
             .create_table(
                 &EngineContext {},
                 CreateTableRequest {
@@ -285,8 +303,10 @@ mod tests {
     #[tokio::test]
     async fn test_register_catalog_schema_table() {
         let node_id = 42;
-        let (backend, table_engine, catalog_manager, engine_manager) =
-            prepare_components(node_id).await;
+        let components = prepare_components(node_id).await;
+        let backend = &components.kv_backend;
+        let catalog_manager = components.catalog_manager.clone();
+        let engine_manager = components.table_engine_manager.clone();
 
         let catalog_name = "test_catalog".to_string();
         let schema_name = "nonexistent_schema".to_string();
@@ -295,6 +315,7 @@ mod tests {
             backend.clone(),
             engine_manager.clone(),
             node_id,
+            components.region_alive_keepers.clone(),
         ));
 
         // register catalog to catalog manager
@@ -308,7 +329,8 @@ mod tests {
             HashSet::from_iter(catalog_manager.catalog_names().await.unwrap().into_iter())
         );
 
-        let table_to_register = table_engine
+        let table_to_register = components
+            .table_engine()
             .create_table(
                 &EngineContext {},
                 CreateTableRequest {
@@ -355,6 +377,7 @@ mod tests {
             node_id,
             engine_manager,
             backend.clone(),
+            components.region_alive_keepers.clone(),
         ));
 
         let prev = new_catalog
@@ -373,5 +396,95 @@ mod tests {
                 .into_iter()
                 .collect()
         )
+    }
+
+    #[tokio::test]
+    async fn test_register_table_before_and_after_region_alive_keeper_started() {
+        let components = prepare_components(42).await;
+        let catalog_manager = &components.catalog_manager;
+        let region_alive_keepers = &components.region_alive_keepers;
+
+        let table_before = TableIdent {
+            catalog: DEFAULT_CATALOG_NAME.to_string(),
+            schema: DEFAULT_SCHEMA_NAME.to_string(),
+            table: "table_before".to_string(),
+            table_id: 1,
+            engine: MITO_ENGINE.to_string(),
+        };
+        let request = RegisterTableRequest {
+            catalog: table_before.catalog.clone(),
+            schema: table_before.schema.clone(),
+            table_name: table_before.table.clone(),
+            table_id: table_before.table_id,
+            table: Arc::new(EmptyTable::new(CreateTableRequest {
+                id: table_before.table_id,
+                catalog_name: table_before.catalog.clone(),
+                schema_name: table_before.schema.clone(),
+                table_name: table_before.table.clone(),
+                desc: None,
+                schema: RawSchema::new(vec![]),
+                region_numbers: vec![0],
+                primary_key_indices: vec![],
+                create_if_not_exists: false,
+                table_options: Default::default(),
+                engine: MITO_ENGINE.to_string(),
+            })),
+        };
+        assert!(catalog_manager.register_table(request).await.unwrap());
+
+        let keeper = region_alive_keepers
+            .find_keeper(&table_before)
+            .await
+            .unwrap();
+        let deadline = keeper.deadline(0).await.unwrap();
+        let far_future = Instant::now() + Duration::from_secs(86400 * 365 * 29);
+        // assert region alive countdown is not started
+        assert!(deadline > far_future);
+
+        region_alive_keepers.start().await;
+
+        let table_after = TableIdent {
+            catalog: DEFAULT_CATALOG_NAME.to_string(),
+            schema: DEFAULT_SCHEMA_NAME.to_string(),
+            table: "table_after".to_string(),
+            table_id: 2,
+            engine: MITO_ENGINE.to_string(),
+        };
+        let request = RegisterTableRequest {
+            catalog: table_after.catalog.clone(),
+            schema: table_after.schema.clone(),
+            table_name: table_after.table.clone(),
+            table_id: table_after.table_id,
+            table: Arc::new(EmptyTable::new(CreateTableRequest {
+                id: table_after.table_id,
+                catalog_name: table_after.catalog.clone(),
+                schema_name: table_after.schema.clone(),
+                table_name: table_after.table.clone(),
+                desc: None,
+                schema: RawSchema::new(vec![]),
+                region_numbers: vec![0],
+                primary_key_indices: vec![],
+                create_if_not_exists: false,
+                table_options: Default::default(),
+                engine: MITO_ENGINE.to_string(),
+            })),
+        };
+        assert!(catalog_manager.register_table(request).await.unwrap());
+
+        let keeper = region_alive_keepers
+            .find_keeper(&table_after)
+            .await
+            .unwrap();
+        let deadline = keeper.deadline(0).await.unwrap();
+        // assert countdown is started for the table registered after [RegionAliveKeepers] started
+        assert!(deadline <= Instant::now() + Duration::from_secs(20));
+
+        let keeper = region_alive_keepers
+            .find_keeper(&table_before)
+            .await
+            .unwrap();
+        let deadline = keeper.deadline(0).await.unwrap();
+        // assert countdown is started for the table registered before [RegionAliveKeepers] started, too
+        assert!(deadline <= Instant::now() + Duration::from_secs(20));
     }
 }

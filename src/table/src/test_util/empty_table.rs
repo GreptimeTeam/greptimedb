@@ -37,8 +37,10 @@ impl EmptyTable {
             .next_column_id(0)
             .options(req.table_options)
             .region_numbers(req.region_numbers)
+            .engine(req.engine)
             .build();
         let table_info = TableInfoBuilder::default()
+            .table_id(req.id)
             .catalog_name(req.catalog_name)
             .schema_name(req.schema_name)
             .name(req.table_name)
