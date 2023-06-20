@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -30,7 +31,7 @@ use table::engine::manager::TableEngineManagerRef;
 use table::engine::{CloseTableResult, EngineContext, TableEngineRef};
 use table::requests::CloseTableRequest;
 use table::TableRef;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant};
 
@@ -40,6 +41,8 @@ use crate::error::{Result, TableEngineNotFoundSnafu};
 pub struct RegionAliveKeepers {
     table_engine_manager: TableEngineManagerRef,
     keepers: Arc<Mutex<HashMap<TableIdent, Arc<RegionAliveKeeper>>>>,
+    heartbeat_interval_millis: u64,
+    started: AtomicBool,
 
     /// The epoch when [RegionAliveKeepers] is created. It's used to get a monotonically non-decreasing
     /// elapsed time when submitting heartbeats to Metasrv (because [Instant] is monotonically
@@ -49,23 +52,24 @@ pub struct RegionAliveKeepers {
 }
 
 impl RegionAliveKeepers {
-    pub fn new(table_engine_manager: TableEngineManagerRef) -> Self {
+    pub fn new(
+        table_engine_manager: TableEngineManagerRef,
+        heartbeat_interval_millis: u64,
+    ) -> Self {
         Self {
             table_engine_manager,
             keepers: Arc::new(Mutex::new(HashMap::new())),
+            heartbeat_interval_millis,
+            started: AtomicBool::new(false),
             epoch: Instant::now(),
         }
     }
 
-    async fn find_keeper(&self, table_ident: &TableIdent) -> Option<Arc<RegionAliveKeeper>> {
+    pub async fn find_keeper(&self, table_ident: &TableIdent) -> Option<Arc<RegionAliveKeeper>> {
         self.keepers.lock().await.get(table_ident).cloned()
     }
 
-    pub(crate) async fn register_table(
-        &self,
-        table_ident: TableIdent,
-        table: TableRef,
-    ) -> Result<()> {
+    pub async fn register_table(&self, table_ident: TableIdent, table: TableRef) -> Result<()> {
         let keeper = self.find_keeper(&table_ident).await;
         if keeper.is_some() {
             return Ok(());
@@ -78,17 +82,28 @@ impl RegionAliveKeepers {
                 engine_name: &table_ident.engine,
             })?;
 
-        let keeper = Arc::new(RegionAliveKeeper::new(table_engine, table_ident.clone()));
+        let keeper = Arc::new(RegionAliveKeeper::new(
+            table_engine,
+            table_ident.clone(),
+            self.heartbeat_interval_millis,
+        ));
         for r in table.table_info().meta.region_numbers.iter() {
             keeper.register_region(*r).await;
         }
 
         info!("Register RegionAliveKeeper for table {table_ident}");
-        self.keepers.lock().await.insert(table_ident, keeper);
+        self.keepers
+            .lock()
+            .await
+            .insert(table_ident, keeper.clone());
+
+        if self.started.load(Ordering::Relaxed) {
+            keeper.start().await;
+        }
         Ok(())
     }
 
-    pub(crate) async fn deregister_table(&self, table_ident: &TableIdent) {
+    pub async fn deregister_table(&self, table_ident: &TableIdent) {
         if self.keepers.lock().await.remove(table_ident).is_some() {
             info!("Deregister RegionAliveKeeper for table {table_ident}");
         }
@@ -114,10 +129,11 @@ impl RegionAliveKeepers {
         keeper.deregister_region(region_ident.region_number).await
     }
 
-    pub async fn start(&self, heartbeat_interval_millis: u64) {
+    pub async fn start(&self) {
         for keeper in self.keepers.lock().await.values() {
-            keeper.start(heartbeat_interval_millis).await;
+            keeper.start().await;
         }
+        self.started.store(true, Ordering::Relaxed);
     }
 
     pub fn epoch(&self) -> Instant {
@@ -171,18 +187,26 @@ impl HeartbeatResponseHandler for RegionAliveKeepers {
 /// opened regions to Metasrv, in heartbeats. If Metasrv decides some region could be resided in this
 /// Datanode, it will "extend" the region's "lease", with a deadline for [RegionAliveKeeper] to
 /// countdown.
-struct RegionAliveKeeper {
+pub struct RegionAliveKeeper {
     table_engine: TableEngineRef,
     table_ident: TableIdent,
     countdown_task_handles: Arc<Mutex<HashMap<RegionNumber, Arc<CountdownTaskHandle>>>>,
+    heartbeat_interval_millis: u64,
+    started: AtomicBool,
 }
 
 impl RegionAliveKeeper {
-    fn new(table_engine: TableEngineRef, table_ident: TableIdent) -> Self {
+    fn new(
+        table_engine: TableEngineRef,
+        table_ident: TableIdent,
+        heartbeat_interval_millis: u64,
+    ) -> Self {
         Self {
             table_engine,
             table_ident,
             countdown_task_handles: Arc::new(Mutex::new(HashMap::new())),
+            heartbeat_interval_millis,
+            started: AtomicBool::new(false),
         }
     }
 
@@ -213,11 +237,15 @@ impl RegionAliveKeeper {
         self.countdown_task_handles
             .lock()
             .await
-            .insert(region, handle);
+            .insert(region, handle.clone());
         info!(
             "Register alive countdown for new region {region} in table {}",
             self.table_ident
-        )
+        );
+
+        if self.started.load(Ordering::Relaxed) {
+            handle.start(self.heartbeat_interval_millis).await;
+        }
     }
 
     async fn deregister_region(&self, region: RegionNumber) {
@@ -235,10 +263,12 @@ impl RegionAliveKeeper {
         }
     }
 
-    async fn start(&self, heartbeat_interval_millis: u64) {
+    async fn start(&self) {
         for handle in self.countdown_task_handles.lock().await.values() {
-            handle.start(heartbeat_interval_millis).await;
+            handle.start(self.heartbeat_interval_millis).await;
         }
+
+        self.started.store(true, Ordering::Relaxed);
         info!(
             "RegionAliveKeeper for table {} is started!",
             self.table_ident
@@ -253,15 +283,24 @@ impl RegionAliveKeeper {
             // Else the region alive keeper might be triggered by lagging messages, we can safely ignore it.
         }
     }
+
+    pub async fn deadline(&self, region: RegionNumber) -> Option<Instant> {
+        let mut deadline = None;
+        if let Some(handle) = self.find_handle(&region).await {
+            let (s, r) = oneshot::channel();
+            if handle.tx.send(CountdownCommand::Deadline(s)).await.is_ok() {
+                deadline = r.await.ok()
+            }
+        }
+        deadline
+    }
 }
 
 #[derive(Debug)]
 enum CountdownCommand {
     Start(u64),
     Reset(Instant),
-
-    #[cfg(test)]
-    Deadline(tokio::sync::oneshot::Sender<Instant>),
+    Deadline(oneshot::Sender<Instant>),
 }
 
 struct CountdownTaskHandle {
@@ -378,10 +417,8 @@ impl CountdownTask {
                             );
                             break;
                         },
-
-                        #[cfg(test)]
                         Some(CountdownCommand::Deadline(tx)) => {
-                            tx.send(countdown.deadline()).unwrap()
+                            let _ = tx.send(countdown.deadline());
                         }
                     }
                 }
@@ -433,7 +470,6 @@ mod test {
     use table::engine::{TableEngine, TableReference};
     use table::requests::{CreateTableRequest, TableOptions};
     use table::test_util::EmptyTable;
-    use tokio::sync::oneshot;
 
     use super::*;
     use crate::remote::mock::MockTableEngine;
@@ -441,7 +477,7 @@ mod test {
     async fn prepare_keepers() -> (TableIdent, RegionAliveKeepers) {
         let table_engine = Arc::new(MockTableEngine::default());
         let table_engine_manager = Arc::new(MemoryTableEngineManager::new(table_engine));
-        let keepers = RegionAliveKeepers::new(table_engine_manager);
+        let keepers = RegionAliveKeepers::new(table_engine_manager, 5000);
 
         let catalog = "my_catalog";
         let schema = "my_schema";
@@ -483,7 +519,7 @@ mod test {
     async fn test_handle_heartbeat_response() {
         let (table_ident, keepers) = prepare_keepers().await;
 
-        keepers.start(5000).await;
+        keepers.start().await;
         let startup_protection_until = Instant::now() + Duration::from_secs(21);
 
         let duration_since_epoch = (Instant::now() - keepers.epoch).as_millis() as _;
@@ -517,8 +553,7 @@ mod test {
             keep_alive_until: Instant,
             is_kept_live: bool,
         ) {
-            let handles = keeper.countdown_task_handles.lock().await;
-            let deadline = deadline(&handles.get(&region_number).unwrap().tx).await;
+            let deadline = keeper.deadline(region_number).await.unwrap();
             if is_kept_live {
                 assert!(deadline > startup_protection_until && deadline == keep_alive_until);
             } else {
@@ -555,11 +590,16 @@ mod test {
             })
             .await;
 
-        keepers.start(5000).await;
+        keepers.start().await;
         for keeper in keepers.keepers.lock().await.values() {
-            for handle in keeper.countdown_task_handles.lock().await.values() {
+            let regions = {
+                let handles = keeper.countdown_task_handles.lock().await;
+                handles.keys().copied().collect::<Vec<_>>()
+            };
+            for region in regions {
                 // assert countdown tasks are started
-                assert!(deadline(&handle.tx).await <= Instant::now() + Duration::from_secs(20));
+                let deadline = keeper.deadline(region).await.unwrap();
+                assert!(deadline <= Instant::now() + Duration::from_secs(20));
             }
         }
 
@@ -598,21 +638,12 @@ mod test {
             table_id: 1024,
             engine: "mito".to_string(),
         };
-        let keeper = RegionAliveKeeper::new(table_engine, table_ident);
+        let keeper = RegionAliveKeeper::new(table_engine, table_ident, 1000);
 
         let region = 1;
         assert!(keeper.find_handle(&region).await.is_none());
         keeper.register_region(region).await;
         assert!(keeper.find_handle(&region).await.is_some());
-
-        let sender = &keeper
-            .countdown_task_handles
-            .lock()
-            .await
-            .get(&region)
-            .unwrap()
-            .tx
-            .clone();
 
         let ten_seconds_later = || Instant::now() + Duration::from_secs(10);
 
@@ -622,12 +653,12 @@ mod test {
 
         let far_future = Instant::now() + Duration::from_secs(86400 * 365 * 29);
         // assert if keeper is not started, keep_lived is of no use
-        assert!(deadline(sender).await > far_future);
+        assert!(keeper.deadline(region).await.unwrap() > far_future);
 
-        keeper.start(1000).await;
+        keeper.start().await;
         keeper.keep_lived(vec![1, 2, 3], ten_seconds_later()).await;
         // assert keep_lived works if keeper is started
-        assert!(deadline(sender).await <= ten_seconds_later());
+        assert!(keeper.deadline(region).await.unwrap() <= ten_seconds_later());
 
         keeper.deregister_region(region).await;
         assert!(keeper.find_handle(&region).await.is_none());
@@ -726,6 +757,12 @@ mod test {
             task.run().await;
         });
 
+        async fn deadline(tx: &mpsc::Sender<CountdownCommand>) -> Instant {
+            let (s, r) = oneshot::channel();
+            tx.send(CountdownCommand::Deadline(s)).await.unwrap();
+            r.await.unwrap()
+        }
+
         // if countdown task is not started, its deadline is set to far future
         assert!(deadline(&tx).await > Instant::now() + Duration::from_secs(86400 * 365 * 29));
 
@@ -746,11 +783,5 @@ mod test {
         // spare 500ms for the task to close the table
         tokio::time::sleep(Duration::from_millis(2000)).await;
         assert!(!table_engine.table_exists(ctx, &table_ref));
-    }
-
-    async fn deadline(tx: &mpsc::Sender<CountdownCommand>) -> Instant {
-        let (s, r) = oneshot::channel();
-        tx.send(CountdownCommand::Deadline(s)).await.unwrap();
-        r.await.unwrap()
     }
 }
