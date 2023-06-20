@@ -117,15 +117,13 @@ impl MysqlInstanceShim {
     }
 
     /// Execute the logical plan and return the output
-    async fn do_exec_plan(&self, query: &str, plan: LogicalPlan) -> Vec<Result<Output>> {
+    async fn do_exec_plan(&self, query: &str, plan: LogicalPlan) -> Result<Output> {
         if let Some(output) = crate::mysql::federated::check(query, self.session.context()) {
-            vec![Ok(output)]
+            Ok(output)
         } else {
-            vec![
-                self.query_handler
-                    .do_exec_plan(plan, self.session.context())
-                    .await,
-            ]
+            self.query_handler
+                .do_exec_plan(plan, self.session.context())
+                .await
         }
     }
 
@@ -296,7 +294,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
                 }
                 let plan = replace_params_with_values(&plan, param_types, params)?;
                 logging::debug!("Mysql execute prepared plan: {}", plan.display_indent());
-                let outputs = self.do_exec_plan(&sql_plan.query, plan).await;
+                let outputs = vec![self.do_exec_plan(&sql_plan.query, plan).await];
 
                 (sql_plan.query, outputs)
             }
