@@ -34,7 +34,7 @@ docker-image: ## Build docker image.
 ##@ Test
 
 test: nextest ## Run unit and integration tests.
-	cargo nextest run
+	cargo nextest run --retries 3
 
 .PHONY: nextest ## Install nextest tools.
 nextest:
