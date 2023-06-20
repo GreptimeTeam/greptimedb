@@ -509,20 +509,12 @@ impl SqlQueryHandler for Instance {
         }
     }
 
-    async fn do_exec_plan(
-        &self,
-        _query: &str,
-        plan: LogicalPlan,
-        query_ctx: QueryContextRef,
-    ) -> Vec<Result<Output>> {
+    async fn do_exec_plan(&self, plan: LogicalPlan, query_ctx: QueryContextRef) -> Result<Output> {
         let _timer = timer!(metrics::METRIC_EXEC_PLAN_ELAPSED);
-        let output = self
-            .query_engine
+        self.query_engine
             .execute(plan, query_ctx)
             .await
-            .context(ExecLogicalPlanSnafu);
-
-        vec![output]
+            .context(ExecLogicalPlanSnafu)
     }
 
     async fn do_promql_query(

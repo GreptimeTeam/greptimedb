@@ -40,10 +40,9 @@ pub trait SqlQueryHandler {
 
     async fn do_exec_plan(
         &self,
-        query: &str,
         plan: LogicalPlan,
         query_ctx: QueryContextRef,
-    ) -> Vec<std::result::Result<Output, Self::Error>>;
+    ) -> std::result::Result<Output, Self::Error>;
 
     async fn do_promql_query(
         &self,
@@ -91,21 +90,12 @@ where
             .collect()
     }
 
-    async fn do_exec_plan(
-        &self,
-        query: &str,
-        plan: LogicalPlan,
-        query_ctx: QueryContextRef,
-    ) -> Vec<Result<Output>> {
+    async fn do_exec_plan(&self, plan: LogicalPlan, query_ctx: QueryContextRef) -> Result<Output> {
         self.0
-            .do_exec_plan(query, plan, query_ctx)
+            .do_exec_plan(plan, query_ctx)
             .await
-            .into_iter()
-            .map(|x| {
-                x.map_err(BoxedError::new)
-                    .context(error::ExecuteQuerySnafu { query })
-            })
-            .collect()
+            .map_err(BoxedError::new)
+            .context(error::ExecutePlanSnafu)
     }
 
     async fn do_promql_query(

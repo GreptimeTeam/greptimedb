@@ -98,10 +98,9 @@ impl SqlQueryHandler for DummyInstance {
 
     async fn do_exec_plan(
         &self,
-        _query: &str,
         _plan: LogicalPlan,
         _query_ctx: QueryContextRef,
-    ) -> Vec<std::result::Result<Output, Self::Error>> {
+    ) -> std::result::Result<Output, Self::Error> {
         unimplemented!()
     }
 

@@ -75,6 +75,12 @@ pub enum Error {
         source: BoxedError,
     },
 
+    #[snafu(display("Failed to execute plan, source: {}", source))]
+    ExecutePlan {
+        location: Location,
+        source: BoxedError,
+    },
+
     #[snafu(display("{source}"))]
     ExecuteGrpcQuery {
         location: Location,
@@ -337,6 +343,7 @@ impl ErrorExt for Error {
             InsertScript { source, .. }
             | ExecuteScript { source, .. }
             | ExecuteQuery { source, .. }
+            | ExecutePlan { source, .. }
             | ExecuteGrpcQuery { source, .. }
             | CheckDatabaseValidity { source, .. } => source.status_code(),
 

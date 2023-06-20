@@ -125,9 +125,11 @@ impl MysqlInstanceShim {
             if let Some(output) = crate::mysql::federated::check(query, self.session.context()) {
                 vec![Ok(output)]
             } else {
-                self.query_handler
-                    .do_exec_plan(query, plan, self.session.context())
-                    .await
+                vec![
+                    self.query_handler
+                        .do_exec_plan(plan, self.session.context())
+                        .await,
+                ]
             };
 
         trace!(
@@ -426,10 +428,8 @@ fn replace_params_with_values(
 
     let mut values = Vec::with_capacity(params.len());
 
-    for i in 0..param_types.len() {
+    for (i, param) in params.iter().enumerate() {
         if let Some(Some(t)) = param_types.get(&format_placeholder(i + 1)) {
-            // Safety: length checked before
-            let param = params.get(i).unwrap();
             let value = helper::convert_value(param, t)?;
 
             values.push(value);
