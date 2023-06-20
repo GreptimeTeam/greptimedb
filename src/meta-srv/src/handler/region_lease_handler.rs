@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::v1::meta::{HeartbeatRequest, RegionLease, Role};
@@ -20,7 +20,6 @@ use async_trait::async_trait;
 use catalog::helper::TableGlobalKey;
 use common_meta::ident::TableIdent;
 use common_meta::ClusterId;
-use common_telemetry::warn;
 use store_api::storage::RegionNumber;
 
 use crate::error::Result;
@@ -106,21 +105,12 @@ impl HeartbeatHandler for RegionLeaseHandler {
                 .push(table::engine::region_number(x.id));
         });
 
-        let keys = if datanode_regions.len() > 128 {
-            let key_set: HashSet<&TableGlobalKey> = datanode_regions.keys().collect();
-            warn!(
-                "before shrink:{}, after shrink: {}",
-                datanode_regions.len(),
-                key_set.len()
-            );
-            key_set.into_iter().collect::<Vec<_>>()
-        } else {
-            datanode_regions.keys().collect::<Vec<_>>()
-        };
-
         // TODO(LFC): Retrieve table global values from some cache here.
-        let table_global_values =
-            table_routes::batch_get_table_global_value(&self.kv_store, keys).await?;
+        let table_global_values = table_routes::batch_get_table_global_value(
+            &self.kv_store,
+            datanode_regions.keys().collect::<Vec<_>>(),
+        )
+        .await?;
 
         let mut region_leases = Vec::with_capacity(datanode_regions.len());
         for (table_global_key, local_regions) in datanode_regions {
