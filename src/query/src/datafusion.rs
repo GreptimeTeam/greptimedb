@@ -38,7 +38,6 @@ use datafusion::physical_plan::ExecutionPlan;
 use datafusion_common::ResolvedTableReference;
 use datafusion_expr::{DmlStatement, LogicalPlan as DfLogicalPlan, WriteOp};
 use datatypes::prelude::VectorRef;
-use datatypes::schema::Schema;
 use futures_util::StreamExt;
 use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
@@ -59,7 +58,7 @@ use crate::physical_planner::PhysicalPlanner;
 use crate::physical_wrapper::PhysicalWrapperRef;
 use crate::plan::LogicalPlan;
 use crate::planner::{DfLogicalPlanner, LogicalPlanner};
-use crate::query_engine::{QueryEngineContext, QueryEngineState};
+use crate::query_engine::{DescribeResult, QueryEngineContext, QueryEngineState};
 use crate::{metrics, QueryEngine};
 
 pub struct DatafusionQueryEngine {
@@ -234,11 +233,12 @@ impl QueryEngine for DatafusionQueryEngine {
         "datafusion"
     }
 
-    async fn describe(&self, plan: LogicalPlan) -> Result<Schema> {
-        // TODO(sunng87): consider cache optmised logical plan between describe
-        // and execute
+    async fn describe(&self, plan: LogicalPlan) -> Result<DescribeResult> {
         let optimised_plan = self.optimize(&plan)?;
-        optimised_plan.schema()
+        Ok(DescribeResult {
+            schema: optimised_plan.schema()?,
+            logical_plan: optimised_plan,
+        })
     }
 
     async fn execute(&self, plan: LogicalPlan, query_ctx: QueryContextRef) -> Result<Output> {
@@ -553,7 +553,10 @@ mod tests {
             .await
             .unwrap();
 
-        let schema = engine.describe(plan).await.unwrap();
+        let DescribeResult {
+            schema,
+            logical_plan,
+        } = engine.describe(plan).await.unwrap();
 
         assert_eq!(
             schema.column_schemas()[0],
@@ -563,5 +566,6 @@ mod tests {
                 true
             )
         );
+        assert_eq!("Limit: skip=0, fetch=20\n  Aggregate: groupBy=[[]], aggr=[[SUM(numbers.number)]]\n    TableScan: numbers projection=[number]", format!("{}", logical_plan.display_indent()));
     }
 }

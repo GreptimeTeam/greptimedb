@@ -53,7 +53,9 @@ use meta_client::MetaClientOptions;
 use partition::manager::PartitionRuleManager;
 use partition::route::TableRoutes;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
+use query::plan::LogicalPlan;
 use query::query_engine::options::{validate_catalog_and_schema, QueryOptions};
+use query::query_engine::DescribeResult;
 use query::{QueryEngineFactory, QueryEngineRef};
 use servers::error as server_error;
 use servers::error::{ExecuteQuerySnafu, ParsePromQLSnafu};
@@ -73,8 +75,9 @@ use sql::statements::statement::Statement;
 
 use crate::catalog::FrontendCatalogManager;
 use crate::error::{
-    self, Error, ExecutePromqlSnafu, ExternalSnafu, InvalidInsertRequestSnafu,
-    MissingMetasrvOptsSnafu, ParseSqlSnafu, PlanStatementSnafu, Result, SqlExecInterceptedSnafu,
+    self, Error, ExecLogicalPlanSnafu, ExecutePromqlSnafu, ExternalSnafu,
+    InvalidInsertRequestSnafu, MissingMetasrvOptsSnafu, ParseSqlSnafu, PlanStatementSnafu, Result,
+    SqlExecInterceptedSnafu,
 };
 use crate::expr_factory::{CreateExprFactoryRef, DefaultCreateExprFactory};
 use crate::frontend::FrontendOptions;
@@ -506,6 +509,14 @@ impl SqlQueryHandler for Instance {
         }
     }
 
+    async fn do_exec_plan(&self, plan: LogicalPlan, query_ctx: QueryContextRef) -> Result<Output> {
+        let _timer = timer!(metrics::METRIC_EXEC_PLAN_ELAPSED);
+        self.query_engine
+            .execute(plan, query_ctx)
+            .await
+            .context(ExecLogicalPlanSnafu)
+    }
+
     async fn do_promql_query(
         &self,
         query: &PromQuery,
@@ -523,8 +534,11 @@ impl SqlQueryHandler for Instance {
         &self,
         stmt: Statement,
         query_ctx: QueryContextRef,
-    ) -> Result<Option<Schema>> {
-        if let Statement::Query(_) = stmt {
+    ) -> Result<Option<DescribeResult>> {
+        if matches!(
+            stmt,
+            Statement::Insert(_) | Statement::Query(_) | Statement::Delete(_)
+        ) {
             let plan = self
                 .query_engine
                 .planner()

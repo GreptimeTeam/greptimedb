@@ -197,8 +197,12 @@ impl Instance {
 
                 let kv_backend = Arc::new(CachedMetaKvBackend::new(meta_client.clone()));
 
-                let region_alive_keepers =
-                    Arc::new(RegionAliveKeepers::new(engine_manager.clone()));
+                let heartbeat_interval_millis = 5000;
+
+                let region_alive_keepers = Arc::new(RegionAliveKeepers::new(
+                    engine_manager.clone(),
+                    heartbeat_interval_millis,
+                ));
 
                 let catalog_manager = Arc::new(RemoteCatalogManager::new(
                     engine_manager.clone(),
@@ -224,11 +228,11 @@ impl Instance {
 
                 let heartbeat_task = Some(HeartbeatTask::new(
                     opts.node_id.context(MissingNodeIdSnafu)?,
-                    opts.rpc_addr.clone(),
-                    opts.rpc_hostname.clone(),
+                    opts,
                     meta_client,
                     catalog_manager.clone(),
                     Arc::new(handlers_executor),
+                    heartbeat_interval_millis,
                     region_alive_keepers,
                 ));
 
