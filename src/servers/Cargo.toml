@@ -33,6 +33,9 @@ common-runtime = { path = "../common/runtime" }
 common-telemetry = { path = "../common/telemetry" }
 common-time = { path = "../common/time" }
 datafusion.workspace = true
+datafusion-common.workspace = true
+datafusion-expr.workspace = true
+
 datatypes = { path = "../datatypes" }
 derive_builder = "0.12"
 digest = "0.10"

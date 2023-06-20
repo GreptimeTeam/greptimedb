@@ -17,8 +17,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use common_error::prelude::*;
 use common_query::Output;
-use datatypes::schema::Schema;
 use query::parser::PromQuery;
+use query::plan::LogicalPlan;
 use session::context::QueryContextRef;
 use sql::statements::statement::Statement;
 
@@ -26,6 +26,7 @@ use crate::error::{self, Result};
 
 pub type SqlQueryHandlerRef<E> = Arc<dyn SqlQueryHandler<Error = E> + Send + Sync>;
 pub type ServerSqlQueryHandlerRef = SqlQueryHandlerRef<error::Error>;
+use query::query_engine::DescribeResult;
 
 #[async_trait]
 pub trait SqlQueryHandler {
@@ -37,6 +38,12 @@ pub trait SqlQueryHandler {
         query_ctx: QueryContextRef,
     ) -> Vec<std::result::Result<Output, Self::Error>>;
 
+    async fn do_exec_plan(
+        &self,
+        plan: LogicalPlan,
+        query_ctx: QueryContextRef,
+    ) -> std::result::Result<Output, Self::Error>;
+
     async fn do_promql_query(
         &self,
         query: &PromQuery,
@@ -47,7 +54,7 @@ pub trait SqlQueryHandler {
         &self,
         stmt: Statement,
         query_ctx: QueryContextRef,
-    ) -> std::result::Result<Option<Schema>, Self::Error>;
+    ) -> std::result::Result<Option<DescribeResult>, Self::Error>;
 
     async fn is_valid_schema(
         &self,
@@ -83,6 +90,14 @@ where
             .collect()
     }
 
+    async fn do_exec_plan(&self, plan: LogicalPlan, query_ctx: QueryContextRef) -> Result<Output> {
+        self.0
+            .do_exec_plan(plan, query_ctx)
+            .await
+            .map_err(BoxedError::new)
+            .context(error::ExecutePlanSnafu)
+    }
+
     async fn do_promql_query(
         &self,
         query: &PromQuery,
@@ -107,7 +122,7 @@ where
         &self,
         stmt: Statement,
         query_ctx: QueryContextRef,
-    ) -> Result<Option<Schema>> {
+    ) -> Result<Option<DescribeResult>> {
         self.0
             .do_describe(stmt, query_ctx)
             .await

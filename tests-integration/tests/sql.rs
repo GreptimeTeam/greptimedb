@@ -11,6 +11,7 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
 use sqlx::mysql::MySqlPoolOptions;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::Row;
@@ -62,20 +63,24 @@ pub async fn test_mysql_crud(store_type: StorageType) {
         .await
         .unwrap();
 
-    sqlx::query("create table demo(i bigint, ts timestamp time index)")
+    sqlx::query("create table demo(i bigint, ts timestamp time index, d date, dt datetime)")
         .execute(&pool)
         .await
         .unwrap();
     for i in 0..10 {
-        sqlx::query("insert into demo values(?, ?)")
+        let dt = DateTime::<Utc>::from_utc(NaiveDateTime::from_timestamp_opt(60, i).unwrap(), Utc);
+        let d = NaiveDate::from_yo_opt(2015, 100).unwrap();
+        sqlx::query("insert into demo values(?, ?, ?, ?)")
             .bind(i)
             .bind(i)
+            .bind(d)
+            .bind(dt)
             .execute(&pool)
             .await
             .unwrap();
     }
 
-    let rows = sqlx::query("select i from demo")
+    let rows = sqlx::query("select i, d, dt from demo")
         .fetch_all(&pool)
         .await
         .unwrap();
@@ -83,7 +88,34 @@ pub async fn test_mysql_crud(store_type: StorageType) {
 
     for (i, row) in rows.iter().enumerate() {
         let ret: i64 = row.get(0);
+        let d: NaiveDate = row.get(1);
+        let dt: DateTime<Utc> = row.get(2);
         assert_eq!(ret, i as i64);
+
+        let expected_d = NaiveDate::from_yo_opt(2015, 100).unwrap();
+        assert_eq!(expected_d, d);
+
+        let expected_dt = DateTime::<Utc>::from_utc(
+            NaiveDateTime::from_timestamp_opt(60, i as u32).unwrap(),
+            Utc,
+        );
+
+        assert_eq!(
+            format!("{}", expected_dt.format("%Y-%m-%d %H:%M:%S")),
+            format!("{}", dt.format("%Y-%m-%d %H:%M:%S"))
+        );
+    }
+
+    let rows = sqlx::query("select i from demo where i=?")
+        .bind(6)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+
+    for row in rows {
+        let ret: i64 = row.get(0);
+        assert_eq!(ret, 6);
     }
 
     sqlx::query("delete from demo")
@@ -131,6 +163,18 @@ pub async fn test_postgres_crud(store_type: StorageType) {
     for (i, row) in rows.iter().enumerate() {
         let ret: i64 = row.get(0);
         assert_eq!(ret, i as i64);
+    }
+
+    let rows = sqlx::query("select i from demo where i=$1")
+        .bind(6)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+
+    for row in rows {
+        let ret: i64 = row.get(0);
+        assert_eq!(ret, 6);
     }
 
     sqlx::query("delete from demo")

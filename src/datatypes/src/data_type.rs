@@ -183,6 +183,12 @@ impl ConcreteDataType {
     }
 }
 
+impl From<&ConcreteDataType> for ConcreteDataType {
+    fn from(t: &ConcreteDataType) -> Self {
+        t.clone()
+    }
+}
+
 impl TryFrom<&ArrowDataType> for ConcreteDataType {
     type Error = Error;
 
