@@ -26,7 +26,6 @@ pub trait KvStoreExt {
     async fn exists(&self, key: Vec<u8>) -> Result<bool>;
 
     /// Delete the value by the given key. If prev_kv is true,
-    /// gets the previous key-value pairs before deleting it.
     /// The previous key-value pairs will be returned.
     async fn delete(&self, key: Vec<u8>, prev_kv: bool) -> Result<Option<KeyValue>>;
 }
