@@ -63,7 +63,7 @@ pub async fn test_mysql_crud(store_type: StorageType) {
         .await
         .unwrap();
 
-    sqlx::query("create table demo(i bigint, ts timestamp time index,d date, dt datetime)")
+    sqlx::query("create table demo(i bigint, ts timestamp time index, d date, dt datetime)")
         .execute(&pool)
         .await
         .unwrap();
