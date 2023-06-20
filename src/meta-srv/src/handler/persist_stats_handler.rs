@@ -100,7 +100,7 @@ impl HeartbeatHandler for PersistStatsHandler {
             }
         } else {
             epoch_stats.set_epoch(current_stat.node_epoch);
-            // If the epoch is empty, it indicates that the current node sending the heartbeat 
+            // If the epoch is empty, it indicates that the current node sending the heartbeat
             // for the first time to the current meta leader, so it is necessary to persist
             // the data to the KV store as soon as possible.
             true
