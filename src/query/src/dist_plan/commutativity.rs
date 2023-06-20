@@ -37,7 +37,8 @@ impl Categorizer {
     pub fn check_plan(plan: &LogicalPlan) -> Commutativity {
         match plan {
             LogicalPlan::Projection(_) => Commutativity::Unimplemented,
-            LogicalPlan::Filter(_) => Commutativity::Commutative,
+            // TODO(ruihang): Change this to Commutative once Like is supported in substrait
+            LogicalPlan::Filter(_) => Commutativity::Unimplemented,
             LogicalPlan::Window(_) => Commutativity::Unimplemented,
             LogicalPlan::Aggregate(_) => {
                 // check all children exprs and uses the strictest level
