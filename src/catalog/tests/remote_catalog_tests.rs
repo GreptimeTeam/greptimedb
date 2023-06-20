@@ -36,7 +36,7 @@ mod tests {
     use table::engine::manager::{MemoryTableEngineManager, TableEngineManagerRef};
     use table::engine::{EngineContext, TableEngineRef};
     use table::requests::CreateTableRequest;
-    use table::test_util::MemTable;
+    use table::test_util::EmptyTable;
     use tokio::time::Instant;
 
     struct TestingComponents {
@@ -315,6 +315,7 @@ mod tests {
             backend.clone(),
             engine_manager.clone(),
             node_id,
+            components.region_alive_keepers.clone(),
         ));
 
         // register catalog to catalog manager
@@ -376,6 +377,7 @@ mod tests {
             node_id,
             engine_manager,
             backend.clone(),
+            components.region_alive_keepers.clone(),
         ));
 
         let prev = new_catalog
@@ -402,22 +404,34 @@ mod tests {
         let catalog_manager = &components.catalog_manager;
         let region_alive_keepers = &components.region_alive_keepers;
 
-        let request = RegisterTableRequest {
-            catalog: DEFAULT_CATALOG_NAME.to_string(),
-            schema: DEFAULT_SCHEMA_NAME.to_string(),
-            table_name: "table_before".to_string(),
-            table_id: 1,
-            table: Arc::new(MemTable::default_numbers_table()),
-        };
-        assert!(catalog_manager.register_table(request).await.unwrap());
-
         let table_before = TableIdent {
             catalog: DEFAULT_CATALOG_NAME.to_string(),
             schema: DEFAULT_SCHEMA_NAME.to_string(),
             table: "table_before".to_string(),
             table_id: 1,
-            engine: "mito".to_string(),
+            engine: MITO_ENGINE.to_string(),
         };
+        let request = RegisterTableRequest {
+            catalog: table_before.catalog.clone(),
+            schema: table_before.schema.clone(),
+            table_name: table_before.table.clone(),
+            table_id: table_before.table_id,
+            table: Arc::new(EmptyTable::new(CreateTableRequest {
+                id: table_before.table_id,
+                catalog_name: table_before.catalog.clone(),
+                schema_name: table_before.schema.clone(),
+                table_name: table_before.table.clone(),
+                desc: None,
+                schema: RawSchema::new(vec![]),
+                region_numbers: vec![0],
+                primary_key_indices: vec![],
+                create_if_not_exists: false,
+                table_options: Default::default(),
+                engine: MITO_ENGINE.to_string(),
+            })),
+        };
+        assert!(catalog_manager.register_table(request).await.unwrap());
+
         let keeper = region_alive_keepers
             .find_keeper(&table_before)
             .await
@@ -429,22 +443,34 @@ mod tests {
 
         region_alive_keepers.start().await;
 
-        let request = RegisterTableRequest {
-            catalog: DEFAULT_CATALOG_NAME.to_string(),
-            schema: DEFAULT_SCHEMA_NAME.to_string(),
-            table_name: "table_after".to_string(),
-            table_id: 2,
-            table: Arc::new(MemTable::default_numbers_table()),
-        };
-        assert!(catalog_manager.register_table(request).await.unwrap());
-
         let table_after = TableIdent {
             catalog: DEFAULT_CATALOG_NAME.to_string(),
             schema: DEFAULT_SCHEMA_NAME.to_string(),
             table: "table_after".to_string(),
             table_id: 2,
-            engine: "mito".to_string(),
+            engine: MITO_ENGINE.to_string(),
         };
+        let request = RegisterTableRequest {
+            catalog: table_after.catalog.clone(),
+            schema: table_after.schema.clone(),
+            table_name: table_after.table.clone(),
+            table_id: table_after.table_id,
+            table: Arc::new(EmptyTable::new(CreateTableRequest {
+                id: table_after.table_id,
+                catalog_name: table_after.catalog.clone(),
+                schema_name: table_after.schema.clone(),
+                table_name: table_after.table.clone(),
+                desc: None,
+                schema: RawSchema::new(vec![]),
+                region_numbers: vec![0],
+                primary_key_indices: vec![],
+                create_if_not_exists: false,
+                table_options: Default::default(),
+                engine: MITO_ENGINE.to_string(),
+            })),
+        };
+        assert!(catalog_manager.register_table(request).await.unwrap());
+
         let keeper = region_alive_keepers
             .find_keeper(&table_after)
             .await

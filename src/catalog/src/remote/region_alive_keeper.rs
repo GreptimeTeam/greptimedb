@@ -91,14 +91,15 @@ impl RegionAliveKeepers {
             keeper.register_region(*r).await;
         }
 
-        info!("Register RegionAliveKeeper for table {table_ident}");
-        self.keepers
-            .lock()
-            .await
-            .insert(table_ident, keeper.clone());
+        let mut keepers = self.keepers.lock().await;
+        keepers.insert(table_ident.clone(), keeper.clone());
 
         if self.started.load(Ordering::Relaxed) {
             keeper.start().await;
+
+            info!("RegionAliveKeeper for table {table_ident} is started!");
+        } else {
+            info!("RegionAliveKeeper for table {table_ident} is registered but not started yet!");
         }
         Ok(())
     }
@@ -130,10 +131,16 @@ impl RegionAliveKeepers {
     }
 
     pub async fn start(&self) {
-        for keeper in self.keepers.lock().await.values() {
+        let keepers = self.keepers.lock().await;
+        for keeper in keepers.values() {
             keeper.start().await;
         }
         self.started.store(true, Ordering::Relaxed);
+
+        info!(
+            "RegionAliveKeepers for tables {:?} are started!",
+            keepers.keys().map(|x| x.to_string()).collect::<Vec<_>>(),
+        );
     }
 
     pub fn epoch(&self) -> Instant {
@@ -234,17 +241,21 @@ impl RegionAliveKeeper {
             || on_task_finished,
         ));
 
-        self.countdown_task_handles
-            .lock()
-            .await
-            .insert(region, handle.clone());
-        info!(
-            "Register alive countdown for new region {region} in table {}",
-            self.table_ident
-        );
+        let mut handles = self.countdown_task_handles.lock().await;
+        handles.insert(region, handle.clone());
 
         if self.started.load(Ordering::Relaxed) {
             handle.start(self.heartbeat_interval_millis).await;
+
+            info!(
+                "Region alive countdown for region {region} in table {} is started!",
+                self.table_ident
+            );
+        } else {
+            info!(
+                "Region alive countdown for region {region} in table {} is registered but not started yet!",
+                self.table_ident
+            );
         }
     }
 
@@ -264,15 +275,17 @@ impl RegionAliveKeeper {
     }
 
     async fn start(&self) {
-        for handle in self.countdown_task_handles.lock().await.values() {
+        let handles = self.countdown_task_handles.lock().await;
+        for handle in handles.values() {
             handle.start(self.heartbeat_interval_millis).await;
         }
 
         self.started.store(true, Ordering::Relaxed);
         info!(
-            "RegionAliveKeeper for table {} is started!",
+            "Region alive countdowns for regions {:?} in table {} are started!",
+            handles.keys().copied().collect::<Vec<_>>(),
             self.table_ident
-        )
+        );
     }
 
     async fn keep_lived(&self, designated_regions: Vec<RegionNumber>, deadline: Instant) {
@@ -401,7 +414,10 @@ impl CountdownTask {
                         },
                         Some(CountdownCommand::Reset(deadline)) => {
                             if countdown.deadline() < deadline {
-                                debug!("Reset deadline to region {region} of table {table_ident} to {deadline:?}");
+                                debug!(
+                                    "Reset deadline of region {region} of table {table_ident} to approximately {} seconds later",
+                                    (deadline - Instant::now()).as_secs_f32(),
+                                );
                                 countdown.set(tokio::time::sleep_until(deadline));
                             }
                             // Else the countdown could be either:
