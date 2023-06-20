@@ -250,8 +250,11 @@ pub enum Error {
         source: query::error::Error,
     },
 
-    #[snafu(display("Failed to get param types, source: {source}"))]
-    GetPreparedStmtParams { source: query::error::Error },
+    #[snafu(display("Failed to get param types, source: {source}, location: {location}"))]
+    GetPreparedStmtParams {
+        source: query::error::Error,
+        location: Location,
+    },
 
     #[snafu(display("{}", reason))]
     UnexpectedResult { reason: String, location: Location },
