@@ -55,7 +55,7 @@ once_cell = "1.16"
 openmetrics-parser = "0.4"
 opensrv-mysql = "0.4"
 parking_lot = "0.12"
-pgwire = "0.14.1"
+pgwire = { git = "https://github.com/sunng87/pgwire", branch = "feature/async-query-parser" }
 pin-project = "1.0"
 postgres-types = { version = "0.2", features = ["with-chrono-0_4"] }
 promql-parser = "0.1.1"

@@ -14,7 +14,6 @@
 
 use std::fmt;
 
-use datatypes::prelude::ConcreteDataType;
 use sqlparser::ast::Query as SpQuery;
 
 use crate::error::Error;
@@ -23,7 +22,6 @@ use crate::error::Error;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Query {
     pub inner: SpQuery,
-    pub param_types: Vec<ConcreteDataType>,
 }
 
 /// Automatically converts from sqlparser Query instance to SqlQuery.
@@ -31,10 +29,7 @@ impl TryFrom<SpQuery> for Query {
     type Error = Error;
 
     fn try_from(q: SpQuery) -> Result<Self, Self::Error> {
-        Ok(Query {
-            inner: q,
-            param_types: vec![],
-        })
+        Ok(Query { inner: q })
     }
 }
 
@@ -46,27 +41,9 @@ impl TryFrom<Query> for SpQuery {
     }
 }
 
-impl Query {
-    pub fn param_types(&self) -> &Vec<ConcreteDataType> {
-        &self.param_types
-    }
-
-    pub fn param_types_mut(&mut self) -> &mut Vec<ConcreteDataType> {
-        &mut self.param_types
-    }
-}
-
 impl fmt::Display for Query {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{} ", self.inner)?;
-        write!(f, "[")?;
-        for i in 0..self.param_types.len() {
-            write!(f, "{}", self.param_types[i])?;
-            if i != self.param_types.len() - 1 {
-                write!(f, ",")?;
-            }
-        }
-        write!(f, "]")?;
         Ok(())
     }
 }
@@ -103,7 +80,7 @@ mod test {
             )
             .unwrap()
             .to_string(),
-            "SELECT * FROM abc LEFT JOIN bcd WHERE abc.a = 1 AND bcd.d = 7 AND abc.id = bcd.id []"
+            "SELECT * FROM abc LEFT JOIN bcd WHERE abc.a = 1 AND bcd.d = 7 AND abc.id = bcd.id"
         );
     }
 }

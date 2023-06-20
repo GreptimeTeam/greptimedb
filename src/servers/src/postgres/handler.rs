@@ -20,6 +20,7 @@ use common_query::Output;
 use common_recordbatch::error::Result as RecordBatchResult;
 use common_recordbatch::RecordBatch;
 use common_telemetry::timer;
+use datafusion_common::ScalarValue;
 use datatypes::prelude::{ConcreteDataType, Value};
 use datatypes::schema::{Schema, SchemaRef};
 use futures::{future, stream, Stream, StreamExt};
@@ -34,12 +35,14 @@ use pgwire::api::store::MemPortalStore;
 use pgwire::api::{ClientInfo, Type};
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 use query::query_engine::DescribeResult;
+use session::Session;
 use sql::dialect::PostgreSqlDialect;
 use sql::parser::ParserContext;
-use sql::statements::statement::Statement;
 
 use super::PostgresServerHandler;
 use crate::error::{self, Error, Result};
+use crate::query_handler::sql::ServerSqlQueryHandlerRef;
+use crate::SqlPlan;
 
 #[async_trait]
 impl SimpleQueryHandler for PostgresServerHandler {
@@ -232,6 +235,7 @@ fn type_gt_to_pg(origin: &ConcreteDataType) -> Result<Type> {
     }
 }
 
+#[allow(dead_code)]
 fn type_pg_to_gt(origin: &Type) -> Result<ConcreteDataType> {
     // Note that we only support a small amount of pg data types
     match origin {
@@ -253,13 +257,25 @@ fn type_pg_to_gt(origin: &Type) -> Result<ConcreteDataType> {
     }
 }
 
-#[derive(Default)]
-pub struct POCQueryParser;
+pub struct DefaultQueryParser {
+    query_handler: ServerSqlQueryHandlerRef,
+    session: Arc<Session>,
+}
 
-impl QueryParser for POCQueryParser {
-    type Statement = (Statement, String);
+impl DefaultQueryParser {
+    pub fn new(query_handler: ServerSqlQueryHandlerRef, session: Arc<Session>) -> Self {
+        DefaultQueryParser {
+            query_handler,
+            session,
+        }
+    }
+}
 
-    fn parse_sql(&self, sql: &str, types: &[Type]) -> PgWireResult<Self::Statement> {
+#[async_trait]
+impl QueryParser for DefaultQueryParser {
+    type Statement = SqlPlan;
+
+    async fn parse_sql(&self, sql: &str, _types: &[Type]) -> PgWireResult<Self::Statement> {
         increment_counter!(crate::metrics::METRIC_POSTGRES_PREPARED_COUNT);
         let mut stmts = ParserContext::create_with_dialect(sql, &PostgreSqlDialect {})
             .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
@@ -270,21 +286,32 @@ impl QueryParser for POCQueryParser {
                 "invalid_prepared_statement_definition".to_owned(),
             ))))
         } else {
-            let mut stmt = stmts.remove(0);
-            if let Statement::Query(qs) = &mut stmt {
-                for t in types {
-                    let gt_type =
-                        type_pg_to_gt(t).map_err(|e| PgWireError::ApiError(Box::new(e)))?;
-                    qs.param_types_mut().push(gt_type);
-                }
-            }
+            let stmt = stmts.remove(0);
+            let describe_result = self
+                .query_handler
+                .do_describe(stmt, self.session.context())
+                .await
+                .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
 
-            Ok((stmt, sql.to_owned()))
+            let (plan, schema) = if let Some(DescribeResult {
+                logical_plan,
+                schema,
+            }) = describe_result
+            {
+                (Some(logical_plan), Some(schema))
+            } else {
+                (None, None)
+            };
+            Ok(SqlPlan {
+                query: sql.to_owned(),
+                plan,
+                schema,
+            })
         }
     }
 }
 
-fn parameter_to_string(portal: &Portal<(Statement, String)>, idx: usize) -> PgWireResult<String> {
+fn parameter_to_string(portal: &Portal<SqlPlan>, idx: usize) -> PgWireResult<String> {
     // the index is managed from portal's parameters count so it's safe to
     // unwrap here.
     let param_type = portal.statement().parameter_types().get(idx).unwrap();
@@ -332,8 +359,8 @@ fn parameter_to_string(portal: &Portal<(Statement, String)>, idx: usize) -> PgWi
 // confirm it's support for other SQL command like INSERT, UPDATE.
 #[async_trait]
 impl ExtendedQueryHandler for PostgresServerHandler {
-    type Statement = (Statement, String);
-    type QueryParser = POCQueryParser;
+    type Statement = SqlPlan;
+    type QueryParser = DefaultQueryParser;
     type PortalStore = MemPortalStore<Self::Statement>;
 
     fn portal_store(&self) -> Arc<Self::PortalStore> {
@@ -366,20 +393,29 @@ impl ExtendedQueryHandler for PostgresServerHandler {
                 )
             ]
         );
-        let (_, sql) = portal.statement().statement();
+        let sql_plan = portal.statement().statement();
 
-        // manually replace variables in prepared statement
-        // FIXME(sunng87)
-        let mut sql = sql.clone();
-        for i in 0..portal.parameter_len() {
-            sql = sql.replace(&format!("${}", i + 1), &parameter_to_string(portal, i)?);
-        }
+        let output = if let Some(plan) = &sql_plan.plan {
+            let plan = plan
+                .replace_params_with_values(parameters_to_scalar_values(portal)?.as_ref())
+                .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+            self.query_handler
+                .do_exec_plan(plan, self.session.context())
+                .await
+        } else {
+            // manually replace variables in prepared statement when no
+            // logical_plan is generated. This happens when logical plan is not
+            // supported for certain statements.
+            let mut sql = sql_plan.query.clone();
+            for i in 0..portal.parameter_len() {
+                sql = sql.replace(&format!("${}", i + 1), &parameter_to_string(portal, i)?);
+            }
 
-        let output = self
-            .query_handler
-            .do_query(&sql, self.session.context())
-            .await
-            .remove(0);
+            self.query_handler
+                .do_query(&sql, self.session.context())
+                .await
+                .remove(0)
+        };
 
         output_to_query_response(output, portal.result_column_format())
     }
@@ -392,7 +428,7 @@ impl ExtendedQueryHandler for PostgresServerHandler {
     where
         C: ClientInfo + Unpin + Send + Sync,
     {
-        let (param_types, stmt, format) = match target {
+        let (param_types, sql_plan, format) = match target {
             StatementOrPortal::Statement(stmt) => {
                 let param_types = Some(stmt.parameter_types().clone());
                 (param_types, stmt.statement(), &Format::UnifiedBinary)
@@ -403,22 +439,59 @@ impl ExtendedQueryHandler for PostgresServerHandler {
                 portal.result_column_format(),
             ),
         };
-        // get Statement part of the tuple
-        let (stmt, _) = stmt;
 
-        if let Some(DescribeResult { schema, .. }) = self
-            .query_handler
-            .do_describe(stmt.clone(), self.session.context())
-            .await
-            .map_err(|e| PgWireError::ApiError(Box::new(e)))?
-        {
-            schema_to_pg(&schema, format)
+        if let Some(schema) = &sql_plan.schema {
+            schema_to_pg(schema, format)
                 .map(|fields| DescribeResponse::new(param_types, fields))
                 .map_err(|e| PgWireError::ApiError(Box::new(e)))
         } else {
             Ok(DescribeResponse::new(param_types, vec![]))
         }
     }
+}
+
+fn parameters_to_scalar_values(portal: &Portal<SqlPlan>) -> PgWireResult<Vec<ScalarValue>> {
+    let param_count = portal.parameter_len();
+    let mut results = Vec::with_capacity(param_count);
+
+    for idx in 0..param_count {
+        let param_type = portal.statement().parameter_types().get(idx).unwrap();
+        let value = match param_type {
+            &Type::VARCHAR | &Type::TEXT => {
+                let data = portal.parameter::<String>(idx)?;
+                ScalarValue::Utf8(data)
+            }
+            &Type::BOOL => {
+                let data = portal.parameter::<bool>(idx)?;
+                ScalarValue::Boolean(data)
+            }
+            &Type::INT4 => {
+                let data = portal.parameter::<i32>(idx)?;
+                ScalarValue::Int32(data)
+            }
+            &Type::INT8 => {
+                let data = portal.parameter::<i64>(idx)?;
+                ScalarValue::Int64(data)
+            }
+            &Type::FLOAT4 => {
+                let data = portal.parameter::<f32>(idx)?;
+                ScalarValue::Float32(data)
+            }
+            &Type::FLOAT8 => {
+                let data = portal.parameter::<f64>(idx)?;
+                ScalarValue::Float64(data)
+            }
+            _ => Err(PgWireError::UserError(Box::new(ErrorInfo::new(
+                "ERROR".to_owned(),
+                "22023".to_owned(),
+                "unsupported_parameter_value".to_owned(),
+            ))))?,
+        };
+
+        results.push(value);
+    }
+
+    Ok(results)
 }
 
 #[cfg(test)]
