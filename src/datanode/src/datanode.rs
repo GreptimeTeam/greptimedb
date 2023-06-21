@@ -192,8 +192,8 @@ impl Default for WalConfig {
     fn default() -> Self {
         Self {
             dir: None,
-            file_size: ReadableSize::gb(1),        // log file size 1G
-            purge_threshold: ReadableSize::gb(50), // purge threshold 50G
+            file_size: ReadableSize::mb(256), // log file size 256MB
+            purge_threshold: ReadableSize::gb(4), // purge threshold 4GB
             purge_interval: Duration::from_secs(600),
             read_batch_size: 128,
             sync_write: false,

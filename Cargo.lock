@@ -8520,6 +8520,7 @@ dependencies = [
  "axum-macros",
  "axum-test-helper",
  "base64 0.13.1",
+ "build-data",
  "bytes",
  "catalog",
  "chrono",
