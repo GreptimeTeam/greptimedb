@@ -168,8 +168,7 @@ impl DropTableProcedure {
                 return DeregisterTableSnafu {
                     name: request.table_ref().to_string(),
                 }
-                .fail()
-                .map_err(|e| e.into());
+                .fail()?;
             }
         }
 

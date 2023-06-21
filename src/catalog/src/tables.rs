@@ -92,7 +92,7 @@ impl SystemCatalog {
         &self,
         request: &DeregisterTableRequest,
         table_id: TableId,
-    ) -> CatalogResult<bool> {
+    ) -> CatalogResult<()> {
         self.information_schema
             .system
             .delete(build_table_deletion_request(request, table_id))
@@ -106,10 +106,6 @@ impl SystemCatalog {
                     );
                     logging::warn!("Failed to delete table record from information_schema, unexpected returned result: {x}, table: {table}");
                 }
-
-                // Returns true even though the returned result is unexpected.
-                // If there are no IO or other unexpected errors, the `deregister_table` is idempotent.
-                true
             })
             .with_context(|_| error::DeregisterTableSnafu {
                 request: request.clone(),
