@@ -20,6 +20,7 @@ use std::task::{Context, Poll};
 use datafusion::arrow::datatypes::SchemaRef as DfSchemaRef;
 use datafusion::error::Result as DfResult;
 use datafusion::parquet::arrow::async_reader::{AsyncFileReader, ParquetRecordBatchStream};
+use datafusion::physical_plan::metrics::BaselineMetrics;
 use datafusion::physical_plan::RecordBatchStream as DfRecordBatchStream;
 use datafusion_common::DataFusionError;
 use datatypes::schema::{Schema, SchemaRef};
@@ -115,13 +116,31 @@ impl Stream for DfRecordBatchStreamAdapter {
 pub struct RecordBatchStreamAdapter {
     schema: SchemaRef,
     stream: DfSendableRecordBatchStream,
+    metrics: Option<BaselineMetrics>,
 }
 
 impl RecordBatchStreamAdapter {
     pub fn try_new(stream: DfSendableRecordBatchStream) -> Result<Self> {
         let schema =
             Arc::new(Schema::try_from(stream.schema()).context(error::SchemaConversionSnafu)?);
-        Ok(Self { schema, stream })
+        Ok(Self {
+            schema,
+            stream,
+            metrics: None,
+        })
+    }
+
+    pub fn try_new_with_metrics(
+        stream: DfSendableRecordBatchStream,
+        metrics: BaselineMetrics,
+    ) -> Result<Self> {
+        let schema =
+            Arc::new(Schema::try_from(stream.schema()).context(error::SchemaConversionSnafu)?);
+        Ok(Self {
+            schema,
+            stream,
+            metrics: Some(metrics),
+        })
     }
 }
 
@@ -135,6 +154,12 @@ impl Stream for RecordBatchStreamAdapter {
     type Item = Result<RecordBatch>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let timer = self
+            .metrics
+            .as_ref()
+            .map(|m| m.elapsed_compute().clone())
+            .unwrap_or_default();
+        let _guard = timer.timer();
         match Pin::new(&mut self.stream).poll_next(cx) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Some(df_record_batch)) => {

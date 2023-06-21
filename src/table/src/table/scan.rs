@@ -21,6 +21,7 @@ use common_query::error::Result as QueryResult;
 use common_query::physical_plan::{Partitioning, PhysicalPlan, PhysicalPlanRef};
 use common_recordbatch::SendableRecordBatchStream;
 use datafusion::execution::context::TaskContext;
+use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricsSet};
 use datafusion_physical_expr::PhysicalSortExpr;
 use datatypes::schema::SchemaRef;
 use snafu::OptionExt;
@@ -30,6 +31,7 @@ pub struct StreamScanAdapter {
     stream: Mutex<Option<SendableRecordBatchStream>>,
     schema: SchemaRef,
     output_ordering: Option<Vec<PhysicalSortExpr>>,
+    metric: ExecutionPlanMetricsSet,
 }
 
 impl Debug for StreamScanAdapter {
@@ -49,6 +51,7 @@ impl StreamScanAdapter {
             stream: Mutex::new(Some(stream)),
             schema,
             output_ordering: None,
+            metric: ExecutionPlanMetricsSet::new(),
         }
     }
 
@@ -90,6 +93,10 @@ impl PhysicalPlan for StreamScanAdapter {
     ) -> QueryResult<SendableRecordBatchStream> {
         let mut stream = self.stream.lock().unwrap();
         stream.take().context(query_error::ExecuteRepeatedlySnafu)
+    }
+
+    fn metrics(&self) -> Option<MetricsSet> {
+        Some(self.metric.clone_inner())
     }
 }
 
