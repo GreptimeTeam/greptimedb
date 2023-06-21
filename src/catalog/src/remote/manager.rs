@@ -662,7 +662,7 @@ impl CatalogManager for RemoteCatalogManager {
                 .await;
         }
 
-        Ok(result.is_none())
+        Ok(true)
     }
 
     async fn register_schema(&self, request: RegisterSchemaRequest) -> Result<bool> {
