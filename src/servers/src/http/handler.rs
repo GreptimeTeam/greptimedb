@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::env;
 use std::time::Instant;
 
 use aide::transform::TransformOperation;
@@ -157,4 +158,27 @@ pub struct HealthResponse {}
 #[axum_macros::debug_handler]
 pub async fn health(Query(_params): Query<HealthQuery>) -> Json<HealthResponse> {
     Json(HealthResponse {})
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct StatusResponse<'a> {
+    pub source_time: &'a str,
+    pub commit: &'a str,
+    pub branch: &'a str,
+    pub rustc_version: &'a str,
+    pub hostname: &'a str,
+    pub version: &'a str,
+}
+
+/// Handler to expose information info about runtime, build, etc.
+#[axum_macros::debug_handler]
+pub async fn status() -> Json<StatusResponse<'static>> {
+    Json(StatusResponse {
+        source_time: env!("SOURCE_TIMESTAMP"),
+        commit: env!("GIT_COMMIT"),
+        branch: env!("GIT_BRANCH"),
+        rustc_version: env!("RUSTC_VERSION"),
+        hostname: env!("BUILD_HOSTNAME"),
+        version: env!("CARGO_PKG_VERSION"),
+    })
 }

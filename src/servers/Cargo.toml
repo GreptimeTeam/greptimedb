@@ -103,3 +103,6 @@ table = { path = "../table" }
 tokio-postgres = "0.7"
 tokio-postgres-rustls = "0.10"
 tokio-test = "0.4"
+
+[build-dependencies]
+build-data = "0.1.4"
