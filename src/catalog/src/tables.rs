@@ -19,6 +19,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use common_catalog::consts::{INFORMATION_SCHEMA_NAME, SYSTEM_CATALOG_TABLE_NAME};
+use common_telemetry::logging;
 use snafu::ResultExt;
 use table::metadata::TableId;
 use table::{Table, TableRef};
@@ -96,7 +97,19 @@ impl SystemCatalog {
             .system
             .delete(build_table_deletion_request(request, table_id))
             .await
-            .map(|x| x == 1)
+            .map(|x| {
+                if x !=1 {
+                    logging::warn!("Failed to delete table record from information_schema, unexpected returned result: {}, table: {}", x, common_catalog::format_full_table_name(
+                        &request.catalog,
+                        &request.schema,
+                        &request.table_name
+                    ));
+                }
+
+                // Returns true even though the returned result is unexpected.
+                // If there are no IO or other unexpected errors, the `deregister_table` is idempotent.
+                true
+            })
             .with_context(|_| error::DeregisterTableSnafu {
                 request: request.clone(),
             })

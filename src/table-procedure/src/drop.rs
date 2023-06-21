@@ -28,7 +28,8 @@ use table::engine::{EngineContext, TableEngineProcedureRef, TableReference};
 use table::requests::DropTableRequest;
 
 use crate::error::{
-    AccessCatalogSnafu, DeserializeProcedureSnafu, SerializeProcedureSnafu, TableNotFoundSnafu,
+    AccessCatalogSnafu, DeregisterTableSnafu, DeserializeProcedureSnafu, SerializeProcedureSnafu,
+    TableNotFoundSnafu,
 };
 
 /// Procedure to drop a table.
@@ -158,10 +159,18 @@ impl DropTableProcedure {
                 schema: self.data.request.schema_name.clone(),
                 table_name: self.data.request.table_name.clone(),
             };
-            self.catalog_manager
+            if !self
+                .catalog_manager
                 .deregister_table(deregister_table_req)
                 .await
-                .context(AccessCatalogSnafu)?;
+                .context(AccessCatalogSnafu)?
+            {
+                return DeregisterTableSnafu {
+                    name: request.table_ref().to_string(),
+                }
+                .fail()
+                .map_err(|e| e.into());
+            }
         }
 
         self.data.state = DropTableState::EngineDropTable;
