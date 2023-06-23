@@ -39,7 +39,7 @@ Affected Rows: 0
 SHOW TABLES FROM test_public_schema;
 
 +--------+
-| Tables |
+| tables |
 +--------+
 | hello  |
 +--------+
@@ -47,7 +47,7 @@ SHOW TABLES FROM test_public_schema;
 SHOW TABLES FROM public;
 
 +---------+
-| Tables  |
+| tables  |
 +---------+
 | numbers |
 | scripts |
@@ -70,7 +70,7 @@ SELECT * FROM hello;
 SHOW TABLES;
 
 +--------+
-| Tables |
+| tables |
 +--------+
 | hello  |
 +--------+
@@ -86,17 +86,25 @@ Error: 4001(TableNotFound), Table not found: greptime.test_public_schema.hello
 SHOW TABLES FROM test_public_schema;
 
 +--------+
-| Tables |
+| tables |
 +--------+
 +--------+
 
 SHOW TABLES FROM public;
 
 +---------+
-| Tables  |
+| tables  |
 +---------+
 | numbers |
 | scripts |
++---------+
+
+SHOW TABLES FROM public WHERE tables='numbers';
+
++---------+
+| tables  |
++---------+
+| numbers |
 +---------+
 
 DROP SCHEMA test_public_schema;

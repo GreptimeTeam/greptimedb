@@ -410,7 +410,7 @@ async fn test_execute_show_databases_tables(instance: Arc<dyn MockInstance>) {
 
     let expected = "\
 +---------+
-| Tables  |
+| tables  |
 +---------+
 | numbers |
 | scripts |
@@ -427,7 +427,7 @@ async fn test_execute_show_databases_tables(instance: Arc<dyn MockInstance>) {
     let output = execute_sql(&instance, "show tables").await;
     let expected = "\
 +---------+
-| Tables  |
+| tables  |
 +---------+
 | demo    |
 | numbers |
@@ -785,7 +785,7 @@ async fn test_rename_table(instance: Arc<dyn MockInstance>) {
     let output = execute_sql_with(&instance, "show tables", query_ctx.clone()).await;
     let expect = "\
 +------------+
-| Tables     |
+| tables     |
 +------------+
 | test_table |
 +------------+";
@@ -852,7 +852,7 @@ async fn test_create_table_after_rename_table(instance: Arc<dyn MockInstance>) {
 
     let expect = "\
 +------------+
-| Tables     |
+| tables     |
 +------------+
 | demo       |
 | test_table |
@@ -1011,7 +1011,7 @@ async fn test_use_database(instance: Arc<dyn MockInstance>) {
     let output = execute_sql_with(&instance, "show tables", query_ctx.clone()).await;
     let expected = "\
 +--------+
-| Tables |
+| tables |
 +--------+
 | tb1    |
 +--------+";

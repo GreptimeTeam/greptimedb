@@ -26,7 +26,7 @@ use common_datasource::lister::{Lister, Source};
 use common_datasource::object_store::build_backend;
 use common_datasource::util::find_dir_and_filename;
 use common_query::Output;
-use common_recordbatch::RecordBatches;
+use common_recordbatch::{RecordBatch, RecordBatches};
 use datatypes::prelude::*;
 use datatypes::schema::{ColumnSchema, RawSchema, Schema};
 use datatypes::vectors::{Helper, StringVector};
@@ -42,10 +42,11 @@ use sql::statements::show::{ShowDatabases, ShowKind, ShowTables};
 use table::requests::{IMMUTABLE_TABLE_LOCATION_KEY, IMMUTABLE_TABLE_PATTERN_KEY};
 use table::TableRef;
 
+use crate::datafusion::execute_show_with_filter;
 use crate::error::{self, Result};
 
 const SCHEMAS_COLUMN: &str = "Schemas";
-const TABLES_COLUMN: &str = "Tables";
+const TABLES_COLUMN: &str = "tables";
 const COLUMN_NAME_COLUMN: &str = "Field";
 const COLUMN_TYPE_COLUMN: &str = "Type";
 const COLUMN_NULLABLE_COLUMN: &str = "Null";
@@ -133,13 +134,6 @@ pub async fn show_tables(
     catalog_manager: CatalogManagerRef,
     query_ctx: QueryContextRef,
 ) -> Result<Output> {
-    ensure!(
-        matches!(stmt.kind, ShowKind::All | ShowKind::Like(_)),
-        error::UnsupportedExprSnafu {
-            name: stmt.kind.to_string(),
-        }
-    );
-
     let schema = if let Some(database) = stmt.database {
         database
     } else {
@@ -154,20 +148,46 @@ pub async fn show_tables(
     // TODO(dennis): Specify the order of the results in schema provider API
     tables.sort();
 
-    let tables = if let ShowKind::Like(ident) = stmt.kind {
-        Helper::like_utf8(tables, &ident.value).context(error::VectorComputationSnafu)?
-    } else {
-        Arc::new(StringVector::from(tables))
-    };
+    match stmt.kind {
+        ShowKind::All => {
+            let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+                TABLES_COLUMN,
+                ConcreteDataType::string_datatype(),
+                false,
+            )]));
+            let columns = vec![Arc::new(StringVector::from(tables)) as _];
+            let record_batch =
+                RecordBatch::new(schema, columns).context(error::CreateRecordBatchSnafu)?;
+            let result = execute_show_with_filter(record_batch, None, "tables".to_string()).await?;
+            Ok(result)
+        }
+        ShowKind::Where(filter) => {
+            let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+                TABLES_COLUMN,
+                ConcreteDataType::string_datatype(),
+                false,
+            )]));
+            let columns = vec![Arc::new(StringVector::from(tables)) as _];
+            let record_batch =
+                RecordBatch::new(schema, columns).context(error::CreateRecordBatchSnafu)?;
+            let result =
+                execute_show_with_filter(record_batch, Some(filter), "tables".to_string()).await?;
+            Ok(result)
+        }
+        ShowKind::Like(ident) => {
+            let tables =
+                Helper::like_utf8(tables, &ident.value).context(error::VectorComputationSnafu)?;
 
-    let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
-        TABLES_COLUMN,
-        ConcreteDataType::string_datatype(),
-        false,
-    )]));
-    let records = RecordBatches::try_from_columns(schema, vec![tables])
-        .context(error::CreateRecordBatchSnafu)?;
-    Ok(Output::RecordBatches(records))
+            let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+                TABLES_COLUMN,
+                ConcreteDataType::string_datatype(),
+                false,
+            )]));
+            let records = RecordBatches::try_from_columns(schema, vec![tables])
+                .context(error::CreateRecordBatchSnafu)?;
+            Ok(Output::RecordBatches(records))
+        }
+    }
 }
 
 pub fn show_create_table(table: TableRef, partitions: Option<Partitions>) -> Result<Output> {

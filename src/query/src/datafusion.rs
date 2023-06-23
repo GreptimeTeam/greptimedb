@@ -30,24 +30,30 @@ use common_query::physical_plan::{DfPhysicalPlanAdapter, PhysicalPlan, PhysicalP
 use common_query::prelude::ScalarUdf;
 use common_query::Output;
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
-use common_recordbatch::{EmptyRecordBatchStream, SendableRecordBatchStream};
+use common_recordbatch::{
+    EmptyRecordBatchStream, RecordBatch, RecordBatches, SendableRecordBatchStream,
+};
 use common_telemetry::timer;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::ExecutionPlan;
+use datafusion::prelude::SessionContext;
 use datafusion_common::ResolvedTableReference;
 use datafusion_expr::{DmlStatement, LogicalPlan as DfLogicalPlan, WriteOp};
 use datatypes::prelude::VectorRef;
+use datatypes::schema::Schema;
 use futures_util::StreamExt;
 use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
+use sql::ast::Expr;
 use table::requests::{DeleteRequest, InsertRequest};
 use table::TableRef;
 
 use crate::dataframe::DataFrame;
 pub use crate::datafusion::planner::DfContextProviderAdapter;
 use crate::error::{
-    CatalogSnafu, CreateRecordBatchSnafu, DataFusionSnafu, MissingTimestampColumnSnafu,
-    QueryExecutionSnafu, Result, TableNotFoundSnafu, UnsupportedExprSnafu,
+    CatalogNotFoundSnafu, CatalogSnafu, CreateRecordBatchSnafu, CreateSchemaSnafu, DataFusionSnafu,
+    MissingTimestampColumnSnafu, QueryExecutionSnafu, Result, SchemaNotFoundSnafu,
+    TableNotFoundSnafu, UnsupportedExprSnafu,
 };
 use crate::executor::QueryExecutor;
 use crate::logical_optimizer::LogicalOptimizer;
@@ -373,6 +379,54 @@ impl QueryExecutor for DatafusionQueryEngine {
     }
 }
 
+/// Creates a table in memory and executes a show statement on the table.
+pub async fn execute_show_with_filter(
+    record_batch: RecordBatch,
+    filter: Option<Expr>,
+    table_name: String,
+) -> Result<Output> {
+    let sql = if let Some(filter) = filter {
+        format!("SELECT * FROM {table_name} WHERE {}", filter)
+    } else {
+        format!("SELECT * FROM {table_name}")
+    };
+    let column_schemas = record_batch.schema.column_schemas().to_vec();
+    let context = SessionContext::new();
+    context
+        .register_batch(&table_name, record_batch.into_df_record_batch())
+        .context(error::DatafusionSnafu {
+            msg: "Fail to register a record batch as a table",
+        })
+        .map_err(BoxedError::new)
+        .context(QueryExecutionSnafu)?;
+    let dataframe = context
+        .sql(&sql)
+        .await
+        .context(error::DatafusionSnafu {
+            msg: "Fail to execute a sql",
+        })
+        .map_err(BoxedError::new)
+        .context(QueryExecutionSnafu)?;
+
+    let df_batches = dataframe
+        .collect()
+        .await
+        .context(error::DatafusionSnafu {
+            msg: "Fail to collect the record batches",
+        })
+        .map_err(BoxedError::new)
+        .context(QueryExecutionSnafu)?;
+    let mut batches = Vec::with_capacity(df_batches.len());
+    let schema = Arc::new(Schema::try_new(column_schemas).context(CreateSchemaSnafu)?);
+    for df_batch in df_batches.into_iter() {
+        let batch = RecordBatch::try_from_df_record_batch(schema.clone(), df_batch)
+            .context(CreateRecordBatchSnafu)?;
+        batches.push(batch);
+    }
+    let record_batches = RecordBatches::try_new(schema, batches).context(CreateRecordBatchSnafu)?;
+    Ok(Output::RecordBatches(record_batches))
+}
+
 #[cfg(test)]
 mod tests {
     use std::borrow::Cow::Borrowed;
@@ -381,13 +435,19 @@ mod tests {
     use catalog::{CatalogManager, RegisterTableRequest};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, NUMBERS_TABLE_ID};
     use common_query::Output;
-    use common_recordbatch::util;
+    use common_recordbatch::{util, RecordBatch};
     use datafusion::prelude::{col, lit};
-    use datatypes::prelude::ConcreteDataType;
-    use datatypes::schema::ColumnSchema;
-    use datatypes::vectors::{Helper, UInt32Vector, UInt64Vector, VectorRef};
+    use datatypes::prelude::{ConcreteDataType, MutableVector, ScalarVectorBuilder};
+    use datatypes::schema::{ColumnSchema, Schema};
+    use datatypes::types::StringType;
+    use datatypes::vectors::{Helper, StringVectorBuilder, UInt32Vector, UInt64Vector, VectorRef};
     use session::context::QueryContext;
     use table::table::numbers::{NumbersTable, NUMBERS_TABLE_NAME};
+    use sql::dialect::GreptimeDbDialect;
+    use sql::parser::ParserContext;
+    use sql::statements::show::{ShowKind, ShowTables};
+    use sql::statements::statement::Statement;
+    use table::table::numbers::NumbersTable;
 
     use super::*;
     use crate::parser::QueryLanguageParser;
@@ -530,5 +590,65 @@ mod tests {
             )
         );
         assert_eq!("Limit: skip=0, fetch=20\n  Aggregate: groupBy=[[]], aggr=[[SUM(numbers.number)]]\n    TableScan: numbers projection=[number]", format!("{}", logical_plan.display_indent()));
+    }
+
+    #[tokio::test]
+    async fn test_show_() {
+        // No filter
+        let column_schemas = vec![ColumnSchema::new(
+            "tables",
+            ConcreteDataType::String(StringType),
+            false,
+        )];
+        let schema = Arc::new(Schema::new(column_schemas));
+        let mut builder = StringVectorBuilder::with_capacity(3);
+        builder.push(Some("monitor"));
+        builder.push(Some("system_metrics"));
+        let columns = vec![builder.to_vector()];
+        let record_batch = RecordBatch::new(schema, columns).unwrap();
+        let output = execute_show_with_filter(record_batch, None, "tables".to_string())
+            .await
+            .unwrap();
+        let Output::RecordBatches(record_batches) = output else {unreachable!()};
+        let expected = "\
++----------------+
+| tables         |
++----------------+
+| monitor        |
+| system_metrics |
++----------------+";
+        assert_eq!(record_batches.pretty_print().unwrap(), expected);
+
+        // Filter
+        let column_schemas = vec![ColumnSchema::new(
+            "tables",
+            ConcreteDataType::String(StringType),
+            false,
+        )];
+        let schema = Arc::new(Schema::new(column_schemas));
+        let mut builder = StringVectorBuilder::with_capacity(3);
+        builder.push(Some("monitor"));
+        builder.push(Some("system_metrics"));
+        let columns = vec![builder.to_vector()];
+        let record_batch = RecordBatch::new(schema, columns).unwrap();
+        let statement = ParserContext::create_with_dialect(
+            "SHOW TABLES WHERE tables='monitor'",
+            &GreptimeDbDialect {},
+        )
+        .unwrap()[0]
+            .clone();
+        let Statement::ShowTables(ShowTables { kind, .. }) = statement else {unreachable!()};
+        let ShowKind::Where(filter) = kind else {unreachable!()};
+        let output = execute_show_with_filter(record_batch, Some(filter), "tables".to_string())
+            .await
+            .unwrap();
+        let Output::RecordBatches(record_batches) = output else {unreachable!()};
+        let expected = "\
++---------+
+| tables  |
++---------+
+| monitor |
++---------+";
+        assert_eq!(record_batches.pretty_print().unwrap(), expected);
     }
 }
