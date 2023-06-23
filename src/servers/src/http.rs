@@ -512,6 +512,8 @@ impl HttpServer {
             routing::get(handler::health).post(handler::health),
         );
 
+        router = router.route("/status", routing::get(handler::status));
+
         #[cfg(feature = "dashboard")]
         {
             if !self.options.disable_dashboard {

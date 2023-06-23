@@ -17,7 +17,6 @@ use sqlparser::ast::Statement as SpStatement;
 
 use crate::error::{ConvertToDfStatementSnafu, Error};
 use crate::statements::alter::AlterTable;
-use crate::statements::copy::CopyTable;
 use crate::statements::create::{CreateDatabase, CreateExternalTable, CreateTable};
 use crate::statements::delete::Delete;
 use crate::statements::describe::DescribeTable;
@@ -60,7 +59,7 @@ pub enum Statement {
     Explain(Explain),
     Use(String),
     // COPY
-    Copy(CopyTable),
+    Copy(crate::statements::copy::Copy),
     Tql(Tql),
 }
 

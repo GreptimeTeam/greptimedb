@@ -20,6 +20,7 @@ use std::time::Duration;
 
 use common_base::readable_size::ReadableSize;
 use common_query::AddColumnLocation;
+use common_time::range::TimestampRange;
 use datatypes::prelude::VectorRef;
 use datatypes::schema::{ColumnSchema, RawSchema};
 use serde::{Deserialize, Serialize};
@@ -268,6 +269,7 @@ pub struct CopyTableRequest {
     pub connection: HashMap<String, String>,
     pub pattern: Option<String>,
     pub direction: CopyDirection,
+    pub timestamp_range: Option<TimestampRange>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -291,6 +293,16 @@ macro_rules! meter_insert_request {
             $req
         );
     };
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct CopyDatabaseRequest {
+    pub catalog_name: String,
+    pub schema_name: String,
+    pub location: String,
+    pub with: HashMap<String, String>,
+    pub connection: HashMap<String, String>,
+    pub time_range: Option<TimestampRange>,
 }
 
 #[cfg(test)]

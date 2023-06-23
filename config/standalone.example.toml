@@ -81,9 +81,9 @@ addr = "127.0.0.1:4004"
 # WAL data directory
 # dir = "/tmp/greptimedb/wal"
 # WAL file size in bytes.
-file_size = "1GB"
-# WAL purge threshold in bytes.
-purge_threshold = "50GB"
+file_size = "256MB"
+# WAL purge threshold.
+purge_threshold = "4GB"
 # WAL purge interval in seconds.
 purge_interval = "10m"
 # WAL read batch size.

@@ -541,7 +541,7 @@ impl PromPlanner {
                             result_set.insert(matcher.value.clone());
                         } else {
                             return Err(ColumnNotFoundSnafu {
-                                col: self.ctx.table_name.clone().unwrap(),
+                                col: matcher.value.clone(),
                             }
                             .build());
                         }
@@ -550,8 +550,8 @@ impl PromPlanner {
                         if col_set.contains(&matcher.value) {
                             reverse_set.insert(matcher.value.clone());
                         } else {
-                            return Err(ValueNotFoundSnafu {
-                                table: self.ctx.table_name.clone().unwrap(),
+                            return Err(ColumnNotFoundSnafu {
+                                col: matcher.value.clone(),
                             }
                             .build());
                         }

@@ -756,7 +756,7 @@ mod tests {
         let tc = new_client("test_batch_put").await;
 
         let mut req = BatchPutRequest::new();
-        for i in 0..256 {
+        for i in 0..275 {
             req = req.add_kv(
                 tc.key(&format!("key-{}", i)),
                 format!("value-{}", i).into_bytes(),
@@ -769,7 +769,7 @@ mod tests {
         let req = RangeRequest::new().with_prefix(tc.key("key-"));
         let res = tc.client.range(req).await;
         let kvs = res.unwrap().take_kvs();
-        assert_eq!(256, kvs.len());
+        assert_eq!(275, kvs.len());
     }
 
     #[tokio::test]

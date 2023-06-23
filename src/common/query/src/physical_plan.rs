@@ -22,7 +22,7 @@ use datafusion::arrow::datatypes::SchemaRef as DfSchemaRef;
 use datafusion::error::Result as DfResult;
 pub use datafusion::execution::context::{SessionContext, TaskContext};
 use datafusion::physical_plan::expressions::PhysicalSortExpr;
-use datafusion::physical_plan::metrics::MetricsSet;
+use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 pub use datafusion::physical_plan::Partitioning;
 use datafusion::physical_plan::Statistics;
 use datatypes::schema::SchemaRef;
@@ -71,7 +71,6 @@ pub trait PhysicalPlan: Debug + Send + Sync {
         context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream>;
 
-    /// Returns metrics of this plan during execution
     fn metrics(&self) -> Option<MetricsSet> {
         None
     }
@@ -82,11 +81,16 @@ pub trait PhysicalPlan: Debug + Send + Sync {
 pub struct PhysicalPlanAdapter {
     schema: SchemaRef,
     df_plan: Arc<dyn DfPhysicalPlan>,
+    metric: ExecutionPlanMetricsSet,
 }
 
 impl PhysicalPlanAdapter {
     pub fn new(schema: SchemaRef, df_plan: Arc<dyn DfPhysicalPlan>) -> Self {
-        Self { schema, df_plan }
+        Self {
+            schema,
+            df_plan,
+            metric: ExecutionPlanMetricsSet::new(),
+        }
     }
 
     pub fn df_plan(&self) -> Arc<dyn DfPhysicalPlan> {
@@ -133,18 +137,20 @@ impl PhysicalPlan for PhysicalPlanAdapter {
         partition: usize,
         context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
+        let baseline_metric = BaselineMetrics::new(&self.metric, partition);
+
         let df_plan = self.df_plan.clone();
         let stream = df_plan
             .execute(partition, context)
             .context(error::GeneralDataFusionSnafu)?;
-        let adapter = RecordBatchStreamAdapter::try_new(stream)
+        let adapter = RecordBatchStreamAdapter::try_new_with_metrics(stream, baseline_metric)
             .context(error::ConvertDfRecordBatchStreamSnafu)?;
 
         Ok(Box::pin(adapter))
     }
 
     fn metrics(&self) -> Option<MetricsSet> {
-        self.df_plan.metrics()
+        Some(self.metric.clone_inner())
     }
 }
 
@@ -203,12 +209,12 @@ impl DfPhysicalPlan for DfPhysicalPlanAdapter {
         Ok(Box::pin(DfRecordBatchStreamAdapter::new(stream)))
     }
 
-    fn metrics(&self) -> Option<MetricsSet> {
-        self.0.metrics()
-    }
-
     fn statistics(&self) -> Statistics {
         Statistics::default()
+    }
+
+    fn metrics(&self) -> Option<MetricsSet> {
+        self.0.metrics()
     }
 }
 

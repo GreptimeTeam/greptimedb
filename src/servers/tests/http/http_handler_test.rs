@@ -365,3 +365,18 @@ async fn test_health() {
         expected_json_str
     );
 }
+
+#[tokio::test]
+async fn test_status() {
+    let expected_json = http_handler::StatusResponse {
+        source_time: env!("SOURCE_TIMESTAMP"),
+        commit: env!("GIT_COMMIT"),
+        branch: env!("GIT_BRANCH"),
+        rustc_version: env!("RUSTC_VERSION"),
+        hostname: env!("BUILD_HOSTNAME"),
+        version: env!("CARGO_PKG_VERSION"),
+    };
+
+    let Json(json) = http_handler::status().await;
+    assert_eq!(json, expected_json);
+}

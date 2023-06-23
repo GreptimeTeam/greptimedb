@@ -662,7 +662,7 @@ impl CatalogManager for RemoteCatalogManager {
                 .await;
         }
 
-        Ok(result.is_none())
+        Ok(true)
     }
 
     async fn register_schema(&self, request: RegisterSchemaRequest) -> Result<bool> {
@@ -954,15 +954,26 @@ impl SchemaProvider for RemoteSchemaProvider {
     async fn table_names(&self) -> Result<Vec<String>> {
         let key_prefix = build_table_regional_prefix(&self.catalog_name, &self.schema_name);
         let iter = self.backend.range(key_prefix.as_bytes());
-        let table_names = iter
+        let regional_keys = iter
             .map(|kv| {
                 let Kv(key, _) = kv?;
                 let regional_key = TableRegionalKey::parse(String::from_utf8_lossy(&key))
                     .context(InvalidCatalogValueSnafu)?;
-                Ok(regional_key.table_name)
+                Ok(regional_key)
             })
-            .try_collect()
+            .try_collect::<Vec<_>>()
             .await?;
+
+        let table_names = regional_keys
+            .into_iter()
+            .filter_map(|x| {
+                if x.node_id == self.node_id {
+                    Some(x.table_name)
+                } else {
+                    None
+                }
+            })
+            .collect();
         Ok(table_names)
     }
 
