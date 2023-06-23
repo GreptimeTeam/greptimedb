@@ -332,6 +332,7 @@ fn parse_immutable_file_table_format(
             Format::Csv(format) => Box::new(format),
             Format::Json(format) => Box::new(format),
             Format::Parquet(format) => Box::new(format),
+            format => unimplemented!("{format:?}"),
         },
     )
 }

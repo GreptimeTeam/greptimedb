@@ -500,6 +500,12 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to read orc schema, source: {}", source))]
+    ReadOrc {
+        source: common_datasource::error::Error,
+        location: Location,
+    },
+
     #[snafu(display("Failed to build parquet record batch stream, source: {}", source))]
     BuildParquetRecordBatchStream {
         location: Location,
@@ -667,7 +673,9 @@ impl ErrorExt for Error {
 
             Error::TableScanExec { source, .. } => source.status_code(),
 
-            Error::ReadObject { .. } | Error::ReadParquet { .. } => StatusCode::StorageUnavailable,
+            Error::ReadObject { .. } | Error::ReadParquet { .. } | Error::ReadOrc { .. } => {
+                StatusCode::StorageUnavailable
+            }
 
             Error::ListObjects { source }
             | Error::ParseUrl { source }

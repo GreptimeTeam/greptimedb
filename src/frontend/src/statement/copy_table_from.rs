@@ -20,6 +20,9 @@ use async_compat::CompatExt;
 use common_base::readable_size::ReadableSize;
 use common_datasource::file_format::csv::{CsvConfigBuilder, CsvOpener};
 use common_datasource::file_format::json::JsonOpener;
+use common_datasource::file_format::orc::{
+    create_orc_schema, create_orc_stream_reader, OrcArrowStreamReaderAdapter,
+};
 use common_datasource::file_format::{FileFormat, Format};
 use common_datasource::lister::{Lister, Source};
 use common_datasource::object_store::{build_backend, parse_url};
@@ -109,6 +112,18 @@ impl StatementExecutor {
                     .await
                     .context(error::ReadParquetSnafu)?;
                 Ok(builder.schema().clone())
+            }
+            &Format::Orc(_) => {
+                let reader = object_store
+                    .reader(path)
+                    .await
+                    .context(error::ReadObjectSnafu { path })?;
+
+                let schema = create_orc_schema(reader)
+                    .await
+                    .context(error::ReadOrcSnafu)?;
+
+                Ok(Arc::new(schema))
             }
         }
     }
@@ -200,6 +215,18 @@ impl StatementExecutor {
                     .context(error::BuildParquetRecordBatchStreamSnafu)?;
 
                 Ok(Box::pin(ParquetRecordBatchStreamAdapter::new(upstream)))
+            }
+            &Format::Orc(_) => {
+                let reader = object_store
+                    .reader(path)
+                    .await
+                    .context(error::ReadObjectSnafu { path })?;
+                let stream = create_orc_stream_reader(reader)
+                    .await
+                    .context(error::ReadOrcSnafu)?;
+                let stream = OrcArrowStreamReaderAdapter::new(stream);
+
+                Ok(Box::pin(stream))
             }
         }
     }
