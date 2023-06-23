@@ -43,7 +43,7 @@ impl TryFrom<Query> for SpQuery {
 
 impl fmt::Display for Query {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} ", self.inner)?;
+        write!(f, "{}", self.inner)?;
         Ok(())
     }
 }
@@ -72,7 +72,7 @@ mod test {
             create_query("select * from abc where x = 1 and y = 7")
                 .unwrap()
                 .to_string(),
-            "SELECT * FROM abc WHERE x = 1 AND y = 7 []"
+            "SELECT * FROM abc WHERE x = 1 AND y = 7"
         );
         assert_eq!(
             create_query(

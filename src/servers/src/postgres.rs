@@ -15,6 +15,7 @@
 mod auth_handler;
 mod handler;
 mod server;
+mod types;
 
 pub(crate) const METADATA_USER: &str = "user";
 pub(crate) const METADATA_DATABASE: &str = "database";
