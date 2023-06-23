@@ -94,7 +94,10 @@ impl CreateImmutableFileTable {
         let engine_ctx = EngineContext::default();
         let table_ref = self.data.table_ref();
         // Safety: Current get_table implementation always returns Ok.
-        if self.engine.table_exists(&engine_ctx, &table_ref) {
+        if self
+            .engine
+            .table_exists(&engine_ctx, &table_ref, self.data.request.id)
+        {
             // The table already exists.
             ensure!(
                 self.data.request.create_if_not_exists,
@@ -114,7 +117,10 @@ impl CreateImmutableFileTable {
     async fn on_create_table(&mut self) -> Result<Status> {
         let engine_ctx = EngineContext::default();
         let table_ref = self.data.table_ref();
-        if self.engine.table_exists(&engine_ctx, &table_ref) {
+        if self
+            .engine
+            .table_exists(&engine_ctx, &table_ref, self.data.request.id)
+        {
             // Table already created. We don't need to check create_if_not_exists as
             // we have checked it in prepare state.
             return Ok(Status::Done);

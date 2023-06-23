@@ -42,7 +42,11 @@ async fn test_get_table() {
     };
 
     let got = table_engine
-        .get_table(&EngineContext::default(), &table_ref)
+        .get_table(
+            &EngineContext::default(),
+            &table_ref,
+            table_info.ident.table_id,
+        )
         .unwrap()
         .unwrap();
 
@@ -110,12 +114,14 @@ async fn test_close_all_table() {
     let TestEngineComponents {
         table_engine,
         dir: _dir,
+        table_ref: table,
         ..
     } = test_util::setup_test_engine_and_table("test_close_all_table").await;
 
     table_engine.close().await.unwrap();
 
-    let exist = table_engine.table_exists(&EngineContext::default(), &table_ref);
+    let table_id = table.table_info().ident.table_id;
+    let exist = table_engine.table_exists(&EngineContext::default(), &table_ref, table_id);
 
     assert!(!exist);
 }
@@ -180,7 +186,11 @@ async fn test_drop_table() {
 
     assert!(dropped);
 
-    let exist = table_engine.table_exists(&EngineContext::default(), &table_ref);
+    let exist = table_engine.table_exists(
+        &EngineContext::default(),
+        &table_ref,
+        table_info.ident.table_id,
+    );
     assert!(!exist);
 
     // check table_dir manifest
@@ -203,13 +213,14 @@ async fn test_create_drop_table_procedure() {
     let engine_ctx = EngineContext::default();
     // Test create table by procedure.
     let create_request = test_util::new_create_request(schema);
+    let table_id = create_request.id;
     let mut procedure = table_engine
         .create_table_procedure(&engine_ctx, create_request.clone())
         .unwrap();
     common_procedure_test::execute_procedure_until_done(&mut procedure).await;
 
     assert!(table_engine
-        .get_table(&engine_ctx, &create_request.table_ref())
+        .get_table(&engine_ctx, &create_request.table_ref(), table_id)
         .unwrap()
         .is_some());
 
@@ -225,7 +236,7 @@ async fn test_create_drop_table_procedure() {
     common_procedure_test::execute_procedure_until_done(&mut procedure).await;
 
     assert!(table_engine
-        .get_table(&engine_ctx, &create_request.table_ref())
+        .get_table(&engine_ctx, &create_request.table_ref(), table_id)
         .unwrap()
         .is_none());
 }

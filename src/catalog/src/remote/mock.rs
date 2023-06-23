@@ -17,7 +17,7 @@ use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock as StdRwLock};
 
 use async_stream::stream;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
@@ -167,7 +167,7 @@ impl KvBackend for MockKvBackend {
 
 #[derive(Default)]
 pub struct MockTableEngine {
-    tables: RwLock<HashMap<String, TableRef>>,
+    tables: StdRwLock<HashMap<String, TableRef>>,
 }
 
 #[async_trait::async_trait]
@@ -214,7 +214,7 @@ impl TableEngine for MockTableEngine {
             vec![0],
         )) as Arc<_>;
 
-        let mut tables = self.tables.write().await;
+        let mut tables = self.tables.write().unwrap();
         tables.insert(table_full_name, table.clone() as TableRef);
         Ok(table)
     }
@@ -224,7 +224,12 @@ impl TableEngine for MockTableEngine {
         _ctx: &EngineContext,
         request: OpenTableRequest,
     ) -> table::Result<Option<TableRef>> {
-        Ok(self.tables.read().await.get(&request.table_name).cloned())
+        Ok(self
+            .tables
+            .read()
+            .unwrap()
+            .get(&request.table_name)
+            .cloned())
     }
 
     async fn alter_table(
@@ -239,24 +244,26 @@ impl TableEngine for MockTableEngine {
         &self,
         _ctx: &EngineContext,
         table_ref: &TableReference,
+        _table_id: TableId,
     ) -> table::Result<Option<TableRef>> {
-        futures::executor::block_on(async {
-            Ok(self
-                .tables
-                .read()
-                .await
-                .get(&table_ref.to_string())
-                .cloned())
-        })
+        Ok(self
+            .tables
+            .read()
+            .unwrap()
+            .get(&table_ref.to_string())
+            .cloned())
     }
 
-    fn table_exists(&self, _ctx: &EngineContext, table_ref: &TableReference) -> bool {
-        futures::executor::block_on(async {
-            self.tables
-                .read()
-                .await
-                .contains_key(&table_ref.to_string())
-        })
+    fn table_exists(
+        &self,
+        _ctx: &EngineContext,
+        table_ref: &TableReference,
+        _table_id: TableId,
+    ) -> bool {
+        self.tables
+            .read()
+            .unwrap()
+            .contains_key(&table_ref.to_string())
     }
 
     async fn drop_table(
@@ -275,7 +282,7 @@ impl TableEngine for MockTableEngine {
         let _ = self
             .tables
             .write()
-            .await
+            .unwrap()
             .remove(&request.table_ref().to_string());
         Ok(CloseTableResult::Released(vec![]))
     }

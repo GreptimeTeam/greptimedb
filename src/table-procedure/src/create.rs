@@ -356,7 +356,7 @@ mod tests {
         };
         let engine_ctx = EngineContext::default();
         assert!(table_engine
-            .get_table(&engine_ctx, &table_ref)
+            .get_table(&engine_ctx, &table_ref, request.id)
             .unwrap()
             .is_none());
 
@@ -365,7 +365,7 @@ mod tests {
         watcher.changed().await.unwrap();
 
         assert!(table_engine
-            .get_table(&engine_ctx, &table_ref)
+            .get_table(&engine_ctx, &table_ref, request.id)
             .unwrap()
             .is_some());
     }
@@ -397,7 +397,7 @@ mod tests {
         };
         let engine_ctx = EngineContext::default();
         assert!(table_engine
-            .get_table(&engine_ctx, &table_ref)
+            .get_table(&engine_ctx, &table_ref, request.id)
             .unwrap()
             .is_none());
 
@@ -452,7 +452,7 @@ mod tests {
 
         // The table is created.
         assert!(table_engine
-            .get_table(&engine_ctx, &table_ref)
+            .get_table(&engine_ctx, &table_ref, request.id)
             .unwrap()
             .is_some());
     }

@@ -197,6 +197,8 @@ impl TableRegionalKey {
     }
 }
 
+// FIXME(yingwen): TableRegionalValue doesn't contains table id. We have to get it from the global
+// table value if we need to access the table id.
 /// Regional table info of specific datanode, including table version on that datanode and
 /// region ids allocated by metasrv.
 #[derive(Debug, Serialize, Deserialize, Clone)]

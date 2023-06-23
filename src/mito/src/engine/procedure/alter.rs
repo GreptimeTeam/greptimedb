@@ -369,13 +369,14 @@ mod tests {
             table: &request.table_name,
         };
         let table = table_engine
-            .get_table(&engine_ctx, &table_ref)
+            .get_table(&engine_ctx, &table_ref, request.id)
             .unwrap()
             .unwrap();
         let old_info = table.table_info();
         let old_meta = &old_info.meta;
 
         // Alter the table.
+        let table_id = request.id;
         let request = new_add_columns_req();
         let mut procedure = table_engine
             .alter_table_procedure(&engine_ctx, request.clone())
@@ -384,7 +385,7 @@ mod tests {
 
         // Validate.
         let table = table_engine
-            .get_table(&engine_ctx, &table_ref)
+            .get_table(&engine_ctx, &table_ref, table_id)
             .unwrap()
             .unwrap();
         let new_info = table.table_info();
@@ -413,7 +414,7 @@ mod tests {
 
         // Validate.
         let table = table_engine
-            .get_table(&engine_ctx, &table_ref)
+            .get_table(&engine_ctx, &table_ref, table_id)
             .unwrap()
             .unwrap();
         let new_info = table.table_info();
@@ -456,6 +457,7 @@ mod tests {
         procedure_test_util::execute_procedure_until_done(&mut procedure).await;
 
         // Add columns.
+        let table_id = request.id;
         let request = new_add_columns_req();
         let mut procedure = table_engine
             .alter_table_procedure(&engine_ctx, request.clone())
@@ -469,7 +471,7 @@ mod tests {
             table: &request.table_name,
         };
         let table = table_engine
-            .get_table(&engine_ctx, &table_ref)
+            .get_table(&engine_ctx, &table_ref, table_id)
             .unwrap()
             .unwrap();
         let old_info = table.table_info();
@@ -527,7 +529,7 @@ mod tests {
             table: &create_request.table_name,
         };
         let table = table_engine
-            .get_table(&engine_ctx, &table_ref)
+            .get_table(&engine_ctx, &table_ref, create_request.id)
             .unwrap()
             .unwrap();
 
@@ -546,12 +548,12 @@ mod tests {
         let info = table.table_info();
         assert_eq!(new_name, info.name);
         assert!(table_engine
-            .get_table(&engine_ctx, &table_ref)
+            .get_table(&engine_ctx, &table_ref, create_request.id)
             .unwrap()
             .is_none());
         table_ref.table = &new_name;
         assert!(table_engine
-            .get_table(&engine_ctx, &table_ref)
+            .get_table(&engine_ctx, &table_ref, create_request.id)
             .unwrap()
             .is_some());
     }

@@ -179,11 +179,17 @@ impl<S: StorageEngine> TableEngine for MitoEngine<S> {
         &self,
         _ctx: &EngineContext,
         table_ref: &TableReference,
+        _table_id: TableId,
     ) -> TableResult<Option<TableRef>> {
         Ok(self.inner.get_table(table_ref))
     }
 
-    fn table_exists(&self, _ctx: &EngineContext, table_ref: &TableReference) -> bool {
+    fn table_exists(
+        &self,
+        _ctx: &EngineContext,
+        table_ref: &TableReference,
+        _table_id: TableId,
+    ) -> bool {
         self.inner.get_table(table_ref).is_some()
     }
 

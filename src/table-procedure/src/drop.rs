@@ -277,7 +277,7 @@ mod tests {
     async fn test_drop_table_procedure() {
         let env = TestEnv::new("drop");
         let table_name = "test_drop";
-        env.create_table(table_name).await;
+        let table_id = env.create_table(table_name).await;
 
         let request = DropTableRequest {
             catalog_name: DEFAULT_CATALOG_NAME.to_string(),
@@ -311,7 +311,8 @@ mod tests {
                 catalog: DEFAULT_CATALOG_NAME,
                 schema: DEFAULT_SCHEMA_NAME,
                 table: table_name,
-            }
+            },
+            table_id,
         ));
     }
 }

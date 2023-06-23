@@ -800,8 +800,9 @@ async fn test_drop_table() {
         table: &table_info.name,
     };
 
+    let table_id = 1;
     let create_table_request = CreateTableRequest {
-        id: 1,
+        id: table_id,
         catalog_name: DEFAULT_CATALOG_NAME.to_string(),
         schema_name: DEFAULT_SCHEMA_NAME.to_string(),
         table_name: table_info.name.to_string(),
@@ -819,7 +820,7 @@ async fn test_drop_table() {
         .await
         .unwrap();
     assert_eq!(table_info, created_table.table_info());
-    assert!(table_engine.table_exists(&engine_ctx, &table_reference));
+    assert!(table_engine.table_exists(&engine_ctx, &table_reference, table_id));
 
     let drop_table_request = DropTableRequest {
         catalog_name: table_reference.catalog.to_string(),
@@ -831,11 +832,12 @@ async fn test_drop_table() {
         .await
         .unwrap();
     assert!(table_dropped);
-    assert!(!table_engine.table_exists(&engine_ctx, &table_reference));
+    assert!(!table_engine.table_exists(&engine_ctx, &table_reference, table_id));
 
     // should be able to re-create
+    let table_id = 2;
     let request = CreateTableRequest {
-        id: 2,
+        id: table_id,
         catalog_name: DEFAULT_CATALOG_NAME.to_string(),
         schema_name: DEFAULT_SCHEMA_NAME.to_string(),
         table_name: table_info.name.to_string(),
@@ -848,7 +850,7 @@ async fn test_drop_table() {
         engine: MITO_ENGINE.to_string(),
     };
     table_engine.create_table(&ctx, request).await.unwrap();
-    assert!(table_engine.table_exists(&engine_ctx, &table_reference));
+    assert!(table_engine.table_exists(&engine_ctx, &table_reference, table_id));
 }
 
 #[tokio::test]

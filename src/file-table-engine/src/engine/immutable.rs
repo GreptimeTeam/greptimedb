@@ -25,7 +25,7 @@ use object_store::ObjectStore;
 use snafu::ResultExt;
 use table::engine::{table_dir, EngineContext, TableEngine, TableEngineProcedure, TableReference};
 use table::error::TableOperationSnafu;
-use table::metadata::{TableInfo, TableInfoBuilder, TableMetaBuilder, TableType};
+use table::metadata::{TableId, TableInfo, TableInfoBuilder, TableMetaBuilder, TableType};
 use table::requests::{AlterTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest};
 use table::{error as table_error, Result as TableResult, Table, TableRef};
 use tokio::sync::Mutex;
@@ -92,11 +92,17 @@ impl TableEngine for ImmutableFileTableEngine {
         &self,
         _ctx: &EngineContext,
         table_ref: &TableReference,
+        _table_id: TableId,
     ) -> TableResult<Option<TableRef>> {
         Ok(self.inner.get_table(table_ref))
     }
 
-    fn table_exists(&self, _ctx: &EngineContext, table_ref: &TableReference) -> bool {
+    fn table_exists(
+        &self,
+        _ctx: &EngineContext,
+        table_ref: &TableReference,
+        _table_id: TableId,
+    ) -> bool {
         self.inner.get_table(table_ref).is_some()
     }
 

@@ -438,7 +438,7 @@ mod tests {
             table: &request.table_name,
         };
         assert!(table_engine
-            .get_table(&EngineContext::default(), &table_ref)
+            .get_table(&EngineContext::default(), &table_ref, request.id)
             .unwrap()
             .is_some());
     }

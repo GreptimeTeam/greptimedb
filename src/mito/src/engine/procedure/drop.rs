@@ -182,6 +182,7 @@ mod tests {
         procedure_test_util::execute_procedure_until_done(&mut procedure).await;
 
         // Drop the table.
+        let table_id = request.id;
         let request = test_util::new_drop_request();
         let mut procedure = table_engine
             .drop_table_procedure(&engine_ctx, request.clone())
@@ -195,7 +196,7 @@ mod tests {
             table: &request.table_name,
         };
         assert!(table_engine
-            .get_table(&engine_ctx, &table_ref)
+            .get_table(&engine_ctx, &table_ref, table_id)
             .unwrap()
             .is_none());
     }

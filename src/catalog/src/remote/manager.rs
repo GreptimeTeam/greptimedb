@@ -943,6 +943,25 @@ impl RemoteSchemaProvider {
             node_id: self.node_id,
         }
     }
+
+    async fn table_global_value(
+        &self,
+        table_name: impl AsRef<str>,
+    ) -> Result<Option<TableGlobalValue>> {
+        let key = TableGlobalKey {
+            catalog_name: self.catalog_name.clone(),
+            schema_name: self.schema_name.clone(),
+            table_name: table_name.as_ref().to_string(),
+        };
+        self.backend
+            .get(&key.to_raw_key())
+            .await?
+            .map(|Kv(_, v)| {
+                TableGlobalValue::parse(String::from_utf8_lossy(&v))
+                    .context(InvalidCatalogValueSnafu)
+            })
+            .transpose()
+    }
 }
 
 #[async_trait]
@@ -978,6 +997,10 @@ impl SchemaProvider for RemoteSchemaProvider {
     }
 
     async fn table(&self, name: &str) -> Result<Option<TableRef>> {
+        let Some(global_value) = self.table_global_value(name).await? else {
+            return Ok(None);
+        };
+
         let key = self.build_regional_table_key(name).to_string();
         let table_opt = self
             .backend
@@ -998,7 +1021,7 @@ impl SchemaProvider for RemoteSchemaProvider {
                     .engine(engine_name)
                     .context(TableEngineNotFoundSnafu { engine_name })?;
                 let table = engine
-                    .get_table(&EngineContext {}, &reference)
+                    .get_table(&EngineContext {}, &reference, global_value.table_id())
                     .with_context(|_| OpenTableSnafu {
                         table_info: reference.to_string(),
                     })?;
@@ -1054,6 +1077,10 @@ impl SchemaProvider for RemoteSchemaProvider {
     }
 
     async fn deregister_table(&self, name: &str) -> Result<Option<TableRef>> {
+        let Some(global_value) = self.table_global_value(name).await? else {
+            return Ok(None);
+        };
+
         let table_key = self.build_regional_table_key(name).to_string();
 
         let engine_opt = self
@@ -1090,7 +1117,7 @@ impl SchemaProvider for RemoteSchemaProvider {
             .engine_manager
             .engine(engine_name)
             .context(TableEngineNotFoundSnafu { engine_name })?
-            .get_table(&EngineContext {}, &reference)
+            .get_table(&EngineContext {}, &reference, global_value.table_id())
             .with_context(|_| OpenTableSnafu {
                 table_info: reference.to_string(),
             })?;
