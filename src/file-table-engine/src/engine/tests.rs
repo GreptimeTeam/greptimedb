@@ -132,6 +132,7 @@ async fn test_alter_table() {
     let TestEngineComponents {
         table_engine,
         dir: _dir,
+        table_ref,
         ..
     } = test_util::setup_test_engine_and_table("test_alter_table").await;
 
@@ -139,6 +140,7 @@ async fn test_alter_table() {
         catalog_name: DEFAULT_CATALOG_NAME.to_string(),
         schema_name: DEFAULT_SCHEMA_NAME.to_string(),
         table_name: TEST_TABLE_NAME.to_string(),
+        table_id: table_ref.table_info().ident.table_id,
         alter_kind: AlterKind::RenameTable {
             new_table_name: "foo".to_string(),
         },

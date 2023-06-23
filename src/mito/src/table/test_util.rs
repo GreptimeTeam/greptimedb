@@ -28,7 +28,7 @@ use storage::compaction::noop::NoopCompactionScheduler;
 use storage::config::EngineConfig as StorageEngineConfig;
 use storage::EngineImpl;
 use table::engine::{EngineContext, TableEngine};
-use table::metadata::{TableInfo, TableInfoBuilder, TableMetaBuilder, TableType};
+use table::metadata::{TableId, TableInfo, TableInfoBuilder, TableMetaBuilder, TableType};
 use table::requests::{
     AlterKind, AlterTableRequest, CreateTableRequest, DropTableRequest, InsertRequest, TableOptions,
 };
@@ -39,6 +39,7 @@ use crate::engine::{MitoEngine, MITO_ENGINE};
 pub use crate::table::test_util::mock_engine::{MockEngine, MockRegion};
 
 pub const TABLE_NAME: &str = "demo";
+pub const TABLE_ID: TableId = 1;
 
 /// Create a InsertRequest with default catalog and schema.
 pub fn new_insert_request(
@@ -107,7 +108,7 @@ pub async fn new_test_object_store(prefix: &str) -> (TempDir, ObjectStore) {
 
 pub fn new_create_request(schema: SchemaRef) -> CreateTableRequest {
     CreateTableRequest {
-        id: 1,
+        id: TABLE_ID,
         catalog_name: DEFAULT_CATALOG_NAME.to_string(),
         schema_name: DEFAULT_SCHEMA_NAME.to_string(),
         table_name: TABLE_NAME.to_string(),
@@ -126,6 +127,7 @@ pub fn new_alter_request(alter_kind: AlterKind) -> AlterTableRequest {
         catalog_name: DEFAULT_CATALOG_NAME.to_string(),
         schema_name: DEFAULT_SCHEMA_NAME.to_string(),
         table_name: TABLE_NAME.to_string(),
+        table_id: TABLE_ID,
         alter_kind,
     }
 }

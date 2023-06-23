@@ -406,7 +406,7 @@ mod tests {
             ConcreteDataType::string_datatype(),
             true,
         );
-        let request = new_add_columns_req_with_location(&new_tag, &new_field);
+        let request = new_add_columns_req_with_location(table_id, &new_tag, &new_field);
         let mut procedure = table_engine
             .alter_table_procedure(&engine_ctx, request.clone())
             .unwrap();

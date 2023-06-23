@@ -14,6 +14,7 @@
 
 use api::v1::{AlterExpr, CreateTableExpr, DropTableExpr, FlushTableExpr};
 use common_catalog::consts::IMMUTABLE_FILE_ENGINE;
+use common_catalog::format_full_table_name;
 use common_grpc_expr::{alter_expr_to_request, create_expr_to_request};
 use common_query::Output;
 use common_telemetry::info;
@@ -22,8 +23,8 @@ use snafu::prelude::*;
 use table::requests::{DropTableRequest, FlushTableRequest};
 
 use crate::error::{
-    AlterExprToRequestSnafu, BumpTableIdSnafu, CreateExprToRequestSnafu,
-    IncorrectInternalStateSnafu, Result,
+    AlterExprToRequestSnafu, BumpTableIdSnafu, CatalogSnafu, CreateExprToRequestSnafu,
+    IncorrectInternalStateSnafu, Result, TableNotFoundSnafu,
 };
 use crate::instance::Instance;
 use crate::sql::SqlRequest;
@@ -69,7 +70,21 @@ impl Instance {
     }
 
     pub(crate) async fn handle_alter(&self, expr: AlterExpr) -> Result<Output> {
-        let request = alter_expr_to_request(expr).context(AlterExprToRequestSnafu)?;
+        let table = self
+            .catalog_manager
+            .table(&expr.catalog_name, &expr.schema_name, &expr.table_name)
+            .await
+            .context(CatalogSnafu)?
+            .with_context(|| TableNotFoundSnafu {
+                table_name: format_full_table_name(
+                    &expr.catalog_name,
+                    &expr.schema_name,
+                    &expr.table_name,
+                ),
+            })?;
+
+        let request = alter_expr_to_request(table.table_info().ident.table_id, expr)
+            .context(AlterExprToRequestSnafu)?;
         self.sql_handler()
             .execute(SqlRequest::Alter(request), QueryContext::arc())
             .await

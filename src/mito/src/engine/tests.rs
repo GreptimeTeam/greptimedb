@@ -537,11 +537,16 @@ fn test_region_id() {
     assert_eq!(18446744069414584330, region_id(u32::MAX, 10));
 }
 
-fn new_add_columns_req(new_tag: &ColumnSchema, new_field: &ColumnSchema) -> AlterTableRequest {
+fn new_add_columns_req(
+    table_id: TableId,
+    new_tag: &ColumnSchema,
+    new_field: &ColumnSchema,
+) -> AlterTableRequest {
     AlterTableRequest {
         catalog_name: DEFAULT_CATALOG_NAME.to_string(),
         schema_name: DEFAULT_SCHEMA_NAME.to_string(),
         table_name: TABLE_NAME.to_string(),
+        table_id,
         alter_kind: AlterKind::AddColumns {
             columns: vec![
                 AddColumnRequest {
@@ -560,6 +565,7 @@ fn new_add_columns_req(new_tag: &ColumnSchema, new_field: &ColumnSchema) -> Alte
 }
 
 pub(crate) fn new_add_columns_req_with_location(
+    table_id: TableId,
     new_tag: &ColumnSchema,
     new_field: &ColumnSchema,
 ) -> AlterTableRequest {
@@ -567,6 +573,7 @@ pub(crate) fn new_add_columns_req_with_location(
         catalog_name: DEFAULT_CATALOG_NAME.to_string(),
         schema_name: DEFAULT_SCHEMA_NAME.to_string(),
         table_name: TABLE_NAME.to_string(),
+        table_id,
         alter_kind: AlterKind::AddColumns {
             columns: vec![
                 AddColumnRequest {
@@ -597,7 +604,7 @@ async fn test_alter_table_add_column() {
 
     let new_tag = ColumnSchema::new("my_tag", ConcreteDataType::string_datatype(), true);
     let new_field = ColumnSchema::new("my_field", ConcreteDataType::string_datatype(), true);
-    let req = new_add_columns_req(&new_tag, &new_field);
+    let req = new_add_columns_req(table.table_info().ident.table_id, &new_tag, &new_field);
     let table = table_engine
         .alter_table(&EngineContext::default(), req)
         .await
@@ -633,7 +640,7 @@ async fn test_alter_table_add_column() {
         ConcreteDataType::string_datatype(),
         true,
     );
-    let req = new_add_columns_req_with_location(&new_tag, &new_field);
+    let req = new_add_columns_req_with_location(new_info.ident.table_id, &new_tag, &new_field);
     let table = table_engine
         .alter_table(&EngineContext::default(), req)
         .await
@@ -653,13 +660,13 @@ async fn test_alter_table_add_column() {
 
 #[tokio::test]
 async fn test_alter_table_remove_column() {
-    let (_engine, table_engine, _table, _object_store, _dir) =
+    let (_engine, table_engine, table, _object_store, _dir) =
         test_util::setup_mock_engine_and_table().await;
 
     // Add two columns to the table first.
     let new_tag = ColumnSchema::new("my_tag", ConcreteDataType::string_datatype(), true);
     let new_field = ColumnSchema::new("my_field", ConcreteDataType::string_datatype(), true);
-    let req = new_add_columns_req(&new_tag, &new_field);
+    let req = new_add_columns_req(table.table_info().ident.table_id, &new_tag, &new_field);
     let table = table_engine
         .alter_table(&EngineContext::default(), req)
         .await
@@ -674,6 +681,7 @@ async fn test_alter_table_remove_column() {
         catalog_name: DEFAULT_CATALOG_NAME.to_string(),
         schema_name: DEFAULT_SCHEMA_NAME.to_string(),
         table_name: TABLE_NAME.to_string(),
+        table_id: table.table_info().ident.table_id,
         alter_kind: AlterKind::DropColumns {
             names: vec![String::from("memory"), String::from("my_field")],
         },
@@ -706,11 +714,13 @@ async fn test_alter_rename_table() {
     let TestEngineComponents {
         table_engine,
         storage_engine,
+        table_ref,
         object_store,
         dir: _dir,
         ..
     } = test_util::setup_test_engine_and_table().await;
     let ctx = EngineContext::default();
+    let table_id = table_ref.table_info().ident.table_id;
 
     // register another table
     let another_name = "another_table";
@@ -736,6 +746,7 @@ async fn test_alter_rename_table() {
         catalog_name: DEFAULT_CATALOG_NAME.to_string(),
         schema_name: DEFAULT_SCHEMA_NAME.to_string(),
         table_name: TABLE_NAME.to_string(),
+        table_id,
         alter_kind: AlterKind::RenameTable {
             new_table_name: another_name.to_string(),
         },
@@ -752,6 +763,7 @@ async fn test_alter_rename_table() {
         catalog_name: DEFAULT_CATALOG_NAME.to_string(),
         schema_name: DEFAULT_SCHEMA_NAME.to_string(),
         table_name: TABLE_NAME.to_string(),
+        table_id,
         alter_kind: AlterKind::RenameTable {
             new_table_name: new_table_name.to_string(),
         },
@@ -765,7 +777,7 @@ async fn test_alter_rename_table() {
         catalog_name: DEFAULT_CATALOG_NAME.to_string(),
         schema_name: DEFAULT_SCHEMA_NAME.to_string(),
         table_name: new_table_name.to_string(),
-        table_id: 1,
+        table_id,
         region_numbers: vec![0],
     };
 
