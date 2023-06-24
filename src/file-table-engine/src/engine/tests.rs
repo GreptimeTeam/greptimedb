@@ -57,12 +57,14 @@ async fn test_get_table() {
 async fn test_open_table() {
     common_telemetry::init_default_ut_logging();
     let ctx = EngineContext::default();
+    // the test table id is 1
+    let table_id = 1;
     let open_req = OpenTableRequest {
         catalog_name: DEFAULT_CATALOG_NAME.to_string(),
         schema_name: DEFAULT_SCHEMA_NAME.to_string(),
         table_name: test_util::TEST_TABLE_NAME.to_string(),
         // the test table id is 1
-        table_id: 1,
+        table_id,
         region_numbers: vec![0],
     };
 
@@ -81,7 +83,7 @@ async fn test_open_table() {
 
     assert_eq!(IMMUTABLE_FILE_ENGINE, table_engine.name());
 
-    table_engine.close_table(&table_ref).await.unwrap();
+    table_engine.close_table(table_id).await.unwrap();
 
     let reopened = table_engine
         .open_table(&ctx, open_req.clone())

@@ -92,18 +92,18 @@ impl TableEngine for ImmutableFileTableEngine {
         &self,
         _ctx: &EngineContext,
         table_ref: &TableReference,
-        _table_id: TableId,
+        table_id: TableId,
     ) -> TableResult<Option<TableRef>> {
-        Ok(self.inner.get_table(table_ref))
+        Ok(self.inner.get_table(table_id))
     }
 
     fn table_exists(
         &self,
         _ctx: &EngineContext,
         table_ref: &TableReference,
-        _table_id: TableId,
+        table_id: TableId,
     ) -> bool {
-        self.inner.get_table(table_ref).is_some()
+        self.inner.get_table(table_id).is_some()
     }
 
     async fn drop_table(
@@ -157,8 +157,8 @@ impl TableEngineProcedure for ImmutableFileTableEngine {
 
 #[cfg(test)]
 impl ImmutableFileTableEngine {
-    pub async fn close_table(&self, table_ref: &TableReference<'_>) -> TableResult<()> {
-        self.inner.close_table(table_ref).await
+    pub async fn close_table(&self, table_id: TableId) -> TableResult<()> {
+        self.inner.close_table(table_id).await
     }
 }
 
@@ -179,10 +179,10 @@ impl ImmutableFileTableEngine {
 }
 
 struct EngineInner {
-    /// All tables opened by the engine. Map key is formatted [TableReference].
+    /// All tables opened by the engine.
     ///
     /// Writing to `tables` should also hold the `table_mutex`.
-    tables: RwLock<HashMap<String, ImmutableFileTableRef>>,
+    tables: RwLock<HashMap<TableId, ImmutableFileTableRef>>,
     object_store: ObjectStore,
 
     /// Table mutex is used to protect the operations such as creating/opening/closing
@@ -205,6 +205,7 @@ impl EngineInner {
         request: CreateTableRequest,
     ) -> Result<TableRef> {
         let CreateTableRequest {
+            id: table_id,
             catalog_name,
             schema_name,
             table_name,
@@ -218,7 +219,7 @@ impl EngineInner {
             table: &table_name,
         };
 
-        if let Some(table) = self.get_table(&table_ref) {
+        if let Some(table) = self.get_table(table_id) {
             return if create_if_not_exists {
                 Ok(table)
             } else {
@@ -229,14 +230,13 @@ impl EngineInner {
         let table_schema =
             Arc::new(Schema::try_from(request.schema).context(InvalidRawSchemaSnafu)?);
 
-        let table_id = request.id;
         let table_dir = table_dir(&catalog_name, &schema_name, table_id);
 
         let table_full_name = table_ref.to_string();
 
         let _lock = self.table_mutex.lock().await;
         // Checks again, read lock should be enough since we are guarded by the mutex.
-        if let Some(table) = self.get_table_by_full_name(&table_full_name) {
+        if let Some(table) = self.get_table(table_id) {
             return if request.create_if_not_exists {
                 Ok(table)
             } else {
@@ -285,25 +285,18 @@ impl EngineInner {
             table_id
         );
 
-        self.tables
-            .write()
-            .unwrap()
-            .insert(table_full_name, table.clone());
+        self.tables.write().unwrap().insert(table_id, table.clone());
 
         Ok(table)
     }
 
-    fn get_table_by_full_name(&self, full_name: &str) -> Option<TableRef> {
+    fn get_table(&self, table_id: TableId) -> Option<TableRef> {
         self.tables
             .read()
             .unwrap()
-            .get(full_name)
+            .get(&table_id)
             .cloned()
             .map(|table| table as _)
-    }
-
-    fn get_table(&self, table_ref: &TableReference) -> Option<TableRef> {
-        self.get_table_by_full_name(&table_ref.to_string())
     }
 
     async fn open_table(
@@ -315,6 +308,7 @@ impl EngineInner {
             catalog_name,
             schema_name,
             table_name,
+            table_id,
             ..
         } = request;
         let table_ref = TableReference {
@@ -323,16 +317,15 @@ impl EngineInner {
             table: &table_name,
         };
 
-        let table_full_name = table_ref.to_string();
-
-        if let Some(table) = self.get_table_by_full_name(&table_full_name) {
+        if let Some(table) = self.get_table(table_id) {
             return Ok(Some(table));
         }
 
+        let table_full_name = table_ref.to_string();
         let table = {
             let _lock = self.table_mutex.lock().await;
             // Checks again, read lock should be enough since we are guarded by the mutex.
-            if let Some(table) = self.get_table_by_full_name(&table_full_name) {
+            if let Some(table) = self.get_table(table_id) {
                 return Ok(Some(table));
             }
 
@@ -356,10 +349,7 @@ impl EngineInner {
                     .context(table_error::TableOperationSnafu)?,
             );
 
-            self.tables
-                .write()
-                .unwrap()
-                .insert(table_full_name, table.clone());
+            self.tables.write().unwrap().insert(table_id, table.clone());
             Some(table as _)
         };
 
@@ -381,7 +371,7 @@ impl EngineInner {
 
         let table_full_name = table_ref.to_string();
         let _lock = self.table_mutex.lock().await;
-        if let Some(table) = self.get_table_by_full_name(&table_full_name) {
+        if let Some(table) = self.get_table(req.table_id) {
             let table_id = table.table_info().ident.table_id;
             let table_dir = table_dir(&req.catalog_name, &req.schema_name, table_id);
 
@@ -395,7 +385,7 @@ impl EngineInner {
             .context(DropTableSnafu {
                 table_name: &table_full_name,
             })?;
-            self.tables.write().unwrap().remove(&table_full_name);
+            self.tables.write().unwrap().remove(&req.table_id);
 
             Ok(true)
         } else {
@@ -435,12 +425,10 @@ impl EngineInner {
 
 #[cfg(test)]
 impl EngineInner {
-    pub async fn close_table(&self, table_ref: &TableReference<'_>) -> TableResult<()> {
-        let full_name = table_ref.to_string();
-
+    pub async fn close_table(&self, table_id: TableId) -> TableResult<()> {
         let _lock = self.table_mutex.lock().await;
 
-        if let Some(table) = self.get_table_by_full_name(&full_name) {
+        if let Some(table) = self.get_table(table_id) {
             let regions = Vec::new();
             table
                 .close(&regions)
@@ -449,7 +437,7 @@ impl EngineInner {
                 .context(table_error::TableOperationSnafu)?;
         }
 
-        self.tables.write().unwrap().remove(&full_name);
+        self.tables.write().unwrap().remove(&table_id);
 
         Ok(())
     }
