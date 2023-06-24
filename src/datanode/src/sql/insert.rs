@@ -29,8 +29,8 @@ use table::TableRef;
 
 use crate::error::{
     CatalogSnafu, ColumnDefaultValueSnafu, ColumnNoneDefaultValueSnafu, ColumnNotFoundSnafu,
-    ColumnValuesNumberMismatchSnafu, InsertSnafu, MissingInsertBodySnafu, ParseSqlSnafu,
-    ParseSqlValueSnafu, Result, TableNotFoundSnafu,
+    ColumnValuesNumberMismatchSnafu, InsertSnafu, MissingInsertBodySnafu, ParseSqlSnafu, Result,
+    TableNotFoundSnafu,
 };
 use crate::sql::{table_idents_to_full_name, SqlHandler};
 
@@ -58,12 +58,9 @@ impl SqlHandler {
     fn build_request_from_values(
         table_ref: TableReference,
         table: &TableRef,
-        stmt: Insert,
+        mut stmt: Insert,
     ) -> Result<InsertRequest> {
-        let values = stmt
-            .values_body()
-            .context(ParseSqlValueSnafu)?
-            .context(MissingInsertBodySnafu)?;
+        let values = stmt.values_body().clone().context(MissingInsertBodySnafu)?;
         let columns = stmt.columns();
         let schema = table.schema();
         let columns_num = if columns.is_empty() {

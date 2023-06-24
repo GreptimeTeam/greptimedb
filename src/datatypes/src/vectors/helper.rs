@@ -223,6 +223,11 @@ impl Helper {
             ArrowDataType::Null => Arc::new(NullVector::try_from_arrow_array(array)?),
             ArrowDataType::Boolean => Arc::new(BooleanVector::try_from_arrow_array(array)?),
             ArrowDataType::LargeBinary => Arc::new(BinaryVector::try_from_arrow_array(array)?),
+            ArrowDataType::Binary => {
+                let array =
+                    arrow::compute::cast(array.as_ref(), &ArrowDataType::LargeBinary).unwrap();
+                Arc::new(BinaryVector::try_from_arrow_array(array)?)
+            }
             ArrowDataType::Int8 => Arc::new(Int8Vector::try_from_arrow_array(array)?),
             ArrowDataType::Int16 => Arc::new(Int16Vector::try_from_arrow_array(array)?),
             ArrowDataType::Int32 => Arc::new(Int32Vector::try_from_arrow_array(array)?),
@@ -256,7 +261,6 @@ impl Helper {
             | ArrowDataType::Time64(_)
             | ArrowDataType::Duration(_)
             | ArrowDataType::Interval(_)
-            | ArrowDataType::Binary
             | ArrowDataType::FixedSizeBinary(_)
             | ArrowDataType::LargeUtf8
             | ArrowDataType::LargeList(_)

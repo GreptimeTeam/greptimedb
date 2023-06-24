@@ -15,16 +15,26 @@ use sqlparser::ast::{ObjectName, Query, SetExpr, Statement, UnaryOperator, Value
 use sqlparser::parser::ParserError;
 
 use crate::ast::{Expr, Value};
-use crate::error::{self, Result};
+use crate::error::Result;
 use crate::statements::query::Query as GtQuery;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Insert {
     // Can only be sqlparser::ast::Statement::Insert variant
     pub inner: Statement,
+    parsed_values: bool,
+    values: Option<Vec<Vec<Value>>>,
 }
 
 impl Insert {
+    pub fn new(inner: Statement) -> Self {
+        Self {
+            inner,
+            parsed_values: false,
+            values: None,
+        }
+    }
+
     pub fn table_name(&self) -> &ObjectName {
         match &self.inner {
             Statement::Insert { table_name, .. } => table_name,
@@ -39,7 +49,11 @@ impl Insert {
         }
     }
 
-    pub fn values_body(&self) -> Result<Option<Vec<Vec<Value>>>> {
+    pub fn values_body(&mut self) -> &Option<Vec<Vec<Value>>> {
+        if self.parsed_values {
+            return &self.values;
+        }
+
         let values = match &self.inner {
             Statement::Insert {
                 source:
@@ -48,11 +62,13 @@ impl Insert {
                         ..
                     },
                 ..
-            } => Some(sql_exprs_to_values(rows)?),
+            } => sql_exprs_to_values(rows),
             _ => None,
         };
+        self.values = values;
+        self.parsed_values = true;
 
-        Ok(values)
+        &self.values
     }
 
     pub fn query_body(&self) -> Result<Option<GtQuery>> {
@@ -78,7 +94,7 @@ impl Insert {
     }
 }
 
-fn sql_exprs_to_values(exprs: &Vec<Vec<Expr>>) -> Result<Vec<Vec<Value>>> {
+fn sql_exprs_to_values(exprs: &Vec<Vec<Expr>>) -> Option<Vec<Vec<Value>>> {
     let mut values = Vec::with_capacity(exprs.len());
     for es in exprs.iter() {
         let mut vs = Vec::with_capacity(es.len());
@@ -102,23 +118,19 @@ fn sql_exprs_to_values(exprs: &Vec<Vec<Expr>>) -> Result<Vec<Vec<Value>>> {
                             _ => unreachable!(),
                         }
                     } else {
-                        return error::ParseSqlValueSnafu {
-                            msg: format!("{expr:?}"),
-                        }
-                        .fail();
+                        // leave expr to query engine
+                        return None;
                     }
                 }
                 _ => {
-                    return error::ParseSqlValueSnafu {
-                        msg: format!("{expr:?}"),
-                    }
-                    .fail()
+                    // leave expr to query engine
+                    return None;
                 }
             });
         }
         values.push(vs);
     }
-    Ok(values)
+    Some(values)
 }
 
 impl TryFrom<Statement> for Insert {
@@ -126,7 +138,7 @@ impl TryFrom<Statement> for Insert {
 
     fn try_from(value: Statement) -> std::result::Result<Self, Self::Error> {
         match value {
-            Statement::Insert { .. } => Ok(Insert { inner: value }),
+            Statement::Insert { .. } => Ok(Insert::new(value)),
             unexp => Err(ParserError::ParserError(format!(
                 "Not expected to be {unexp}"
             ))),
