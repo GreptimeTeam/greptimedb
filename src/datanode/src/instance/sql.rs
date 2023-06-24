@@ -120,10 +120,13 @@ impl Instance {
             Statement::DropTable(drop_table) => {
                 let (catalog_name, schema_name, table_name) =
                     table_idents_to_full_name(drop_table.table_name(), query_ctx.clone())?;
+                let table_ref = TableReference::full(&catalog_name, &schema_name, &table_name);
+                let table = self.sql_handler.get_table(&table_ref).await?;
                 let req = DropTableRequest {
                     catalog_name,
                     schema_name,
                     table_name,
+                    table_id: table.table_info().ident.table_id,
                 };
                 self.sql_handler
                     .execute(SqlRequest::DropTable(req), query_ctx)

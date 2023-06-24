@@ -838,6 +838,7 @@ async fn test_drop_table() {
         catalog_name: table_reference.catalog.to_string(),
         schema_name: table_reference.schema.to_string(),
         table_name: table_reference.table.to_string(),
+        table_id,
     };
     let table_dropped = table_engine
         .drop_table(&engine_ctx, drop_table_request)

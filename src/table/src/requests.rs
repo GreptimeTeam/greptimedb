@@ -201,6 +201,7 @@ pub struct DropTableRequest {
     pub catalog_name: String,
     pub schema_name: String,
     pub table_name: String,
+    pub table_id: TableId,
 }
 
 impl DropTableRequest {

@@ -91,10 +91,24 @@ impl Instance {
     }
 
     pub(crate) async fn handle_drop_table(&self, expr: DropTableExpr) -> Result<Output> {
+        let table = self
+            .catalog_manager
+            .table(&expr.catalog_name, &expr.schema_name, &expr.table_name)
+            .await
+            .context(CatalogSnafu)?
+            .with_context(|| TableNotFoundSnafu {
+                table_name: format_full_table_name(
+                    &expr.catalog_name,
+                    &expr.schema_name,
+                    &expr.table_name,
+                ),
+            })?;
+
         let req = DropTableRequest {
             catalog_name: expr.catalog_name,
             schema_name: expr.schema_name,
             table_name: expr.table_name,
+            table_id: table.table_info().ident.table_id,
         };
         self.sql_handler()
             .execute(SqlRequest::DropTable(req), QueryContext::arc())

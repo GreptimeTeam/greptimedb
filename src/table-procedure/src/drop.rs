@@ -283,6 +283,7 @@ mod tests {
             catalog_name: DEFAULT_CATALOG_NAME.to_string(),
             schema_name: DEFAULT_SCHEMA_NAME.to_string(),
             table_name: table_name.to_string(),
+            table_id,
         };
         let TestEnv {
             dir: _dir,

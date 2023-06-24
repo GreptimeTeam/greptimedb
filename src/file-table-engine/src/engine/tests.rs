@@ -159,12 +159,6 @@ async fn test_alter_table() {
 async fn test_drop_table() {
     common_telemetry::init_default_ut_logging();
 
-    let drop_req = DropTableRequest {
-        catalog_name: DEFAULT_CATALOG_NAME.to_string(),
-        schema_name: DEFAULT_SCHEMA_NAME.to_string(),
-        table_name: TEST_TABLE_NAME.to_string(),
-    };
-
     let TestEngineComponents {
         table_engine,
         object_store,
@@ -181,6 +175,12 @@ async fn test_drop_table() {
         table: &table_info.name,
     };
 
+    let drop_req = DropTableRequest {
+        catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+        schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+        table_name: TEST_TABLE_NAME.to_string(),
+        table_id: table_info.ident.table_id,
+    };
     let dropped = table_engine
         .drop_table(&EngineContext::default(), drop_req)
         .await
@@ -231,6 +231,7 @@ async fn test_create_drop_table_procedure() {
         catalog_name: DEFAULT_CATALOG_NAME.to_string(),
         schema_name: DEFAULT_SCHEMA_NAME.to_string(),
         table_name: TEST_TABLE_NAME.to_string(),
+        table_id,
     };
     let mut procedure = table_engine
         .drop_table_procedure(&engine_ctx, drop_request)

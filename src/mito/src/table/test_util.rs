@@ -137,6 +137,7 @@ pub fn new_drop_request() -> DropTableRequest {
         catalog_name: DEFAULT_CATALOG_NAME.to_string(),
         schema_name: DEFAULT_SCHEMA_NAME.to_string(),
         table_name: TABLE_NAME.to_string(),
+        table_id: TABLE_ID,
     }
 }
 
