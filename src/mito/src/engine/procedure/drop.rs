@@ -84,8 +84,7 @@ impl<S: StorageEngine> DropMitoTable<S> {
             state: DropTableState::Prepare,
             request,
         };
-        let table_ref = data.table_ref();
-        let table = engine_inner.get_mito_table(&table_ref);
+        let table = engine_inner.get_mito_table(data.request.table_id);
 
         Ok(DropMitoTable {
             data,
@@ -115,8 +114,7 @@ impl<S: StorageEngine> DropMitoTable<S> {
     /// Recover the procedure from json.
     fn from_json(json: &str, engine_inner: Arc<MitoEngineInner<S>>) -> Result<Self> {
         let data: DropTableData = serde_json::from_str(json).context(FromJsonSnafu)?;
-        let table_ref = data.table_ref();
-        let table = engine_inner.get_mito_table(&table_ref);
+        let table = engine_inner.get_mito_table(data.request.table_id);
 
         Ok(DropMitoTable {
             data,

@@ -107,12 +107,11 @@ impl<S: StorageEngine> AlterMitoTable<S> {
             table_version: 0,
         };
         let table_ref = data.table_ref();
-        let table =
-            engine_inner
-                .get_mito_table(&table_ref)
-                .with_context(|| TableNotFoundSnafu {
-                    table_name: table_ref.to_string(),
-                })?;
+        let table = engine_inner
+            .get_mito_table(data.request.table_id)
+            .with_context(|| TableNotFoundSnafu {
+                table_name: table_ref.to_string(),
+            })?;
         let info = table.table_info();
         data.table_version = info.ident.version;
 
@@ -148,12 +147,11 @@ impl<S: StorageEngine> AlterMitoTable<S> {
     fn from_json(json: &str, engine_inner: Arc<MitoEngineInner<S>>) -> Result<Self> {
         let data: AlterTableData = serde_json::from_str(json).context(FromJsonSnafu)?;
         let table_ref = data.table_ref();
-        let table =
-            engine_inner
-                .get_mito_table(&table_ref)
-                .with_context(|| TableNotFoundSnafu {
-                    table_name: table_ref.to_string(),
-                })?;
+        let table = engine_inner
+            .get_mito_table(data.request.table_id)
+            .with_context(|| TableNotFoundSnafu {
+                table_name: table_ref.to_string(),
+            })?;
 
         Ok(AlterMitoTable {
             data,
@@ -176,17 +174,8 @@ impl<S: StorageEngine> AlterMitoTable<S> {
             }
         );
 
-        if let AlterKind::RenameTable { new_table_name } = &self.data.request.alter_kind {
-            let mut table_ref = self.data.table_ref();
-            table_ref.table = new_table_name;
-            ensure!(
-                self.engine_inner.get_mito_table(&table_ref).is_none(),
-                TableExistsSnafu {
-                    table_name: table_ref.to_string(),
-                }
-            );
-        }
-
+        // We don't check the table name in the table engine as it is the catalog
+        // manager's duty to ensure the table name is unused.
         self.data.state = AlterTableState::EngineAlterTable;
 
         Ok(Status::executing(true))
@@ -251,22 +240,6 @@ impl<S: StorageEngine> AlterMitoTable<S> {
 
         // Update in memory metadata of the table.
         self.table.set_table_info(new_info.clone());
-
-        // Rename key in tables map.
-        if let AlterKind::RenameTable { new_table_name } = &self.data.request.alter_kind {
-            let mut table_ref = self.data.table_ref();
-            let removed = {
-                let _lock = self.engine_inner.table_mutex.lock(table_ref.to_string());
-                self.engine_inner.tables.remove(&table_ref.to_string())
-            };
-            ensure!(removed.is_some(), TableNotFoundSnafu { table_name });
-
-            table_ref.table = new_table_name.as_str();
-            let _lock = self.engine_inner.table_mutex.lock(table_ref.to_string());
-            self.engine_inner
-                .tables
-                .insert(table_ref.to_string(), self.table.clone());
-        }
 
         Ok(self.table.clone())
     }
