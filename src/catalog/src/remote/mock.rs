@@ -181,9 +181,6 @@ impl TableEngine for MockTableEngine {
         _ctx: &EngineContext,
         request: CreateTableRequest,
     ) -> table::Result<TableRef> {
-        let table_name = request.table_name.clone();
-        let catalog_name = request.catalog_name.clone();
-        let schema_name = request.schema_name.clone();
         let table_id = request.id;
 
         let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
@@ -195,11 +192,11 @@ impl TableEngine for MockTableEngine {
         let data = vec![Arc::new(StringVector::from(vec!["a", "b", "c"])) as _];
         let record_batch = RecordBatch::new(schema, data).unwrap();
         let table: TableRef = Arc::new(MemTable::new_with_catalog(
-            &table_name,
+            &request.table_name,
             record_batch,
             table_id,
-            catalog_name,
-            schema_name,
+            request.catalog_name,
+            request.schema_name,
             vec![0],
         )) as Arc<_>;
 
