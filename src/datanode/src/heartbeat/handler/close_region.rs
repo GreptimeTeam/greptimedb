@@ -178,6 +178,7 @@ impl CloseRegionHandler {
                         schema_name: table_ref.schema.to_string(),
                         table_name: table_ref.table.to_string(),
                         region_numbers: region_numbers.clone(),
+                        table_id: region_ident.table_ident.table_id,
                         flush: true,
                     },
                 )

@@ -475,6 +475,7 @@ impl CountdownTask {
                 catalog_name: table_ident.catalog.clone(),
                 schema_name: table_ident.schema.clone(),
                 table_name: table_ident.table.clone(),
+                table_id: table_ident.table_id,
                 region_numbers: vec![region],
                 flush: true,
             };
