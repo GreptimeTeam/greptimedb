@@ -14,6 +14,7 @@
 
 use std::any::Any;
 
+use common_datasource::file_format::Format;
 use common_error::prelude::*;
 use datafusion::parquet;
 use datatypes::arrow::error::ArrowError;
@@ -443,6 +444,9 @@ pub enum Error {
         source: common_datasource::error::Error,
     },
 
+    #[snafu(display("Unsupported format: {:?}", format))]
+    UnsupportedFormat { location: Location, format: Format },
+
     #[snafu(display("Failed to parse file format, source: {}", source))]
     ParseFileFormat {
         #[snafu(backtrace)]
@@ -581,7 +585,8 @@ impl ErrorExt for Error {
             | Error::InvalidSchema { .. }
             | Error::PrepareImmutableTable { .. }
             | Error::BuildCsvConfig { .. }
-            | Error::ProjectSchema { .. } => StatusCode::InvalidArguments,
+            | Error::ProjectSchema { .. }
+            | Error::UnsupportedFormat { .. } => StatusCode::InvalidArguments,
 
             Error::NotSupported { .. } => StatusCode::Unsupported,
 

@@ -52,18 +52,11 @@ pub async fn new_orc_stream_reader<R: AsyncRead + AsyncSeek + Unpin + Send + 'st
     Ok(ArrowStreamReader::new(cursor, None))
 }
 
-pub async fn create_orc_schema<R: AsyncRead + AsyncSeek + Unpin + Send + 'static>(
+pub async fn infer_orc_schema<R: AsyncRead + AsyncSeek + Unpin + Send + 'static>(
     reader: R,
 ) -> Result<Schema> {
     let cursor = new_orc_cursor(reader).await?;
     Ok(create_arrow_schema(&cursor))
-}
-
-pub async fn create_orc_stream_reader<R: AsyncRead + AsyncSeek + Unpin + Send + 'static>(
-    reader: R,
-) -> Result<ArrowStreamReader<R>> {
-    let cursor = new_orc_cursor(reader).await?;
-    Ok(ArrowStreamReader::new(cursor, None))
 }
 
 pub struct OrcArrowStreamReaderAdapter<T: AsyncRead + AsyncSeek + Unpin + Send + 'static> {
@@ -104,7 +97,7 @@ impl FileFormat for OrcFormat {
             .await
             .context(error::ReadObjectSnafu { path })?;
 
-        let schema = create_orc_schema(reader).await?;
+        let schema = infer_orc_schema(reader).await?;
 
         Ok(schema)
     }

@@ -68,7 +68,7 @@ impl StatementExecutor {
 
                 Ok(rows_copied)
             }
-            _ => unimplemented!("{format:?}"),
+            _ => error::UnsupportedFormatSnafu { format: *format }.fail(),
         }
     }
 

@@ -21,7 +21,7 @@ use common_base::readable_size::ReadableSize;
 use common_datasource::file_format::csv::{CsvConfigBuilder, CsvOpener};
 use common_datasource::file_format::json::JsonOpener;
 use common_datasource::file_format::orc::{
-    create_orc_schema, create_orc_stream_reader, OrcArrowStreamReaderAdapter,
+    infer_orc_schema, new_orc_stream_reader, OrcArrowStreamReaderAdapter,
 };
 use common_datasource::file_format::{FileFormat, Format};
 use common_datasource::lister::{Lister, Source};
@@ -119,7 +119,7 @@ impl StatementExecutor {
                     .await
                     .context(error::ReadObjectSnafu { path })?;
 
-                let schema = create_orc_schema(reader)
+                let schema = infer_orc_schema(reader)
                     .await
                     .context(error::ReadOrcSnafu)?;
 
@@ -221,7 +221,7 @@ impl StatementExecutor {
                     .reader(path)
                     .await
                     .context(error::ReadObjectSnafu { path })?;
-                let stream = create_orc_stream_reader(reader)
+                let stream = new_orc_stream_reader(reader)
                     .await
                     .context(error::ReadOrcSnafu)?;
                 let stream = OrcArrowStreamReaderAdapter::new(stream);

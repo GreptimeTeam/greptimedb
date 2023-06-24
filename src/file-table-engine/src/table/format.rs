@@ -382,7 +382,7 @@ pub fn create_physical_plan(
         Format::Csv(format) => new_csv_scan_plan(ctx, config, format),
         Format::Json(format) => new_json_scan_plan(ctx, config, format),
         Format::Parquet(format) => new_parquet_scan_plan(ctx, config, format),
-        _ => unimplemented!("{format:?}"),
+        _ => error::UnsupportedFormatSnafu { format: *format }.fail(),
     }
 }
 
@@ -395,6 +395,6 @@ pub fn create_stream(
         Format::Csv(format) => new_csv_stream(ctx, config, format),
         Format::Json(format) => new_json_stream(ctx, config, format),
         Format::Parquet(format) => new_parquet_stream(ctx, config, format),
-        _ => unimplemented!("{format:?}"),
+        _ => error::UnsupportedFormatSnafu { format: *format }.fail(),
     }
 }

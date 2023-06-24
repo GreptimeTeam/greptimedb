@@ -189,7 +189,7 @@ impl ErrorExt for Error {
     fn location_opt(&self) -> Option<common_error::snafu::Location> {
         use Error::*;
         match self {
-            &OrcReader { location, .. } => Some(location),
+            OrcReader { location, .. } => Some(*location),
             BuildBackend { location, .. } => Some(*location),
             ReadObject { location, .. } => Some(*location),
             ListObjects { location, .. } => Some(*location),
