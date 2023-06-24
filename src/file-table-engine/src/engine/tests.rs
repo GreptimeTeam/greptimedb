@@ -16,7 +16,7 @@ use std::assert_matches::assert_matches;
 use std::sync::Arc;
 
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, IMMUTABLE_FILE_ENGINE};
-use table::engine::{EngineContext, TableEngine, TableEngineProcedure, TableReference};
+use table::engine::{EngineContext, TableEngine, TableEngineProcedure};
 use table::requests::{AlterKind, AlterTableRequest, DropTableRequest, OpenTableRequest};
 use table::{error as table_error, Table};
 
@@ -57,12 +57,6 @@ async fn test_open_table() {
         // the test table id is 1
         table_id,
         region_numbers: vec![0],
-    };
-
-    let table_ref = TableReference {
-        catalog: DEFAULT_CATALOG_NAME,
-        schema: DEFAULT_SCHEMA_NAME,
-        table: test_util::TEST_TABLE_NAME,
     };
 
     let TestEngineComponents {

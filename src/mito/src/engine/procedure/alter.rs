@@ -29,9 +29,7 @@ use table::requests::{AlterKind, AlterTableRequest};
 use table::{Table, TableRef};
 
 use crate::engine::MitoEngineInner;
-use crate::error::{
-    TableExistsSnafu, TableNotFoundSnafu, UpdateTableManifestSnafu, VersionChangedSnafu,
-};
+use crate::error::{TableNotFoundSnafu, UpdateTableManifestSnafu, VersionChangedSnafu};
 use crate::manifest::action::{TableChange, TableMetaAction, TableMetaActionList};
 use crate::metrics;
 use crate::table::MitoTable;
@@ -39,7 +37,6 @@ use crate::table::MitoTable;
 /// Procedure to alter a [MitoTable].
 pub(crate) struct AlterMitoTable<S: StorageEngine> {
     data: AlterTableData,
-    engine_inner: Arc<MitoEngineInner<S>>,
     table: Arc<MitoTable<S::Region>>,
     /// The table info after alteration.
     new_info: Option<TableInfo>,
@@ -117,7 +114,6 @@ impl<S: StorageEngine> AlterMitoTable<S> {
 
         Ok(AlterMitoTable {
             data,
-            engine_inner,
             table,
             new_info: None,
             alter_op: None,
@@ -155,7 +151,6 @@ impl<S: StorageEngine> AlterMitoTable<S> {
 
         Ok(AlterMitoTable {
             data,
-            engine_inner,
             table,
             new_info: None,
             alter_op: None,

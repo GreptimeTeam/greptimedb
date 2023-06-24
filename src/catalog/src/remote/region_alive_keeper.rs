@@ -500,7 +500,7 @@ mod test {
     use common_meta::heartbeat::mailbox::HeartbeatMailbox;
     use datatypes::schema::RawSchema;
     use table::engine::manager::MemoryTableEngineManager;
-    use table::engine::{TableEngine, TableReference};
+    use table::engine::TableEngine;
     use table::requests::{CreateTableRequest, TableOptions};
     use table::test_util::EmptyTable;
 

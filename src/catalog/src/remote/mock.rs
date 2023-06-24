@@ -16,7 +16,6 @@ use std::any::Any;
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::{Display, Formatter};
-use std::str::FromStr;
 use std::sync::{Arc, RwLock as StdRwLock};
 
 use async_stream::stream;
@@ -27,7 +26,7 @@ use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::vectors::StringVector;
 use serde::Serializer;
-use table::engine::{CloseTableResult, EngineContext, TableEngine, TableReference};
+use table::engine::{CloseTableResult, EngineContext, TableEngine};
 use table::metadata::TableId;
 use table::requests::{
     AlterTableRequest, CloseTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest,

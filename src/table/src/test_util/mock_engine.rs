@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use common_procedure::BoxedProcedure;
 use tokio::sync::Mutex;
 
-use crate::engine::{EngineContext, TableEngine, TableEngineProcedure, TableReference};
+use crate::engine::{EngineContext, TableEngine, TableEngineProcedure};
 use crate::metadata::TableId;
 use crate::requests::{AlterTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest};
 use crate::test_util::EmptyTable;
