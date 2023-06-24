@@ -754,7 +754,7 @@ mod test {
         let table = "my_table";
         let table_id = 1;
         let request = CreateTableRequest {
-            id: 1,
+            id: table_id,
             catalog_name: catalog.to_string(),
             schema_name: schema.to_string(),
             table_name: table.to_string(),
@@ -770,7 +770,6 @@ mod test {
             table_options: TableOptions::default(),
             engine: "mito".to_string(),
         };
-        let table_ref = TableReference::full(catalog, schema, table);
 
         let table_engine = Arc::new(MockTableEngine::default());
         table_engine.create_table(ctx, request).await.unwrap();
@@ -815,9 +814,9 @@ mod test {
         .unwrap();
 
         // assert the table is closed after deadline is reached
-        assert!(table_engine.table_exists(ctx, &table_ref, table_id));
+        assert!(table_engine.table_exists(ctx, table_id));
         // spare 500ms for the task to close the table
         tokio::time::sleep(Duration::from_millis(2000)).await;
-        assert!(!table_engine.table_exists(ctx, &table_ref, table_id));
+        assert!(!table_engine.table_exists(ctx, table_id));
     }
 }

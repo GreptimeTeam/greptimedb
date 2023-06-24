@@ -188,13 +188,8 @@ mod tests {
         procedure_test_util::execute_procedure_until_done(&mut procedure).await;
 
         // The table is dropped.
-        let table_ref = TableReference {
-            catalog: &request.catalog_name,
-            schema: &request.schema_name,
-            table: &request.table_name,
-        };
         assert!(table_engine
-            .get_table(&engine_ctx, &table_ref, table_id)
+            .get_table(&engine_ctx, table_id)
             .unwrap()
             .is_none());
     }

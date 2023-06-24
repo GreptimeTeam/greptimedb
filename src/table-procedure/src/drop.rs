@@ -306,14 +306,6 @@ mod tests {
         let schema = catalog.schema(DEFAULT_SCHEMA_NAME).await.unwrap().unwrap();
         assert!(schema.table(table_name).await.unwrap().is_none());
         let ctx = EngineContext::default();
-        assert!(!table_engine.table_exists(
-            &ctx,
-            &TableReference {
-                catalog: DEFAULT_CATALOG_NAME,
-                schema: DEFAULT_SCHEMA_NAME,
-                table: table_name,
-            },
-            table_id,
-        ));
+        assert!(!table_engine.table_exists(&ctx, table_id,));
     }
 }

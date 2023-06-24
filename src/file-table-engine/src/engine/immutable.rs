@@ -88,21 +88,11 @@ impl TableEngine for ImmutableFileTableEngine {
         .fail()
     }
 
-    fn get_table(
-        &self,
-        _ctx: &EngineContext,
-        table_ref: &TableReference,
-        table_id: TableId,
-    ) -> TableResult<Option<TableRef>> {
+    fn get_table(&self, _ctx: &EngineContext, table_id: TableId) -> TableResult<Option<TableRef>> {
         Ok(self.inner.get_table(table_id))
     }
 
-    fn table_exists(
-        &self,
-        _ctx: &EngineContext,
-        table_ref: &TableReference,
-        table_id: TableId,
-    ) -> bool {
+    fn table_exists(&self, _ctx: &EngineContext, table_id: TableId) -> bool {
         self.inner.get_table(table_id).is_some()
     }
 

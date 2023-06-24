@@ -435,13 +435,8 @@ mod tests {
             .unwrap();
         procedure_test_util::execute_procedure_until_done(&mut procedure).await;
 
-        let table_ref = TableReference {
-            catalog: &request.catalog_name,
-            schema: &request.schema_name,
-            table: &request.table_name,
-        };
         assert!(table_engine
-            .get_table(&EngineContext::default(), &table_ref, request.id)
+            .get_table(&EngineContext::default(), request.id)
             .unwrap()
             .is_some());
     }

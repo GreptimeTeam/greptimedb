@@ -35,18 +35,9 @@ async fn test_get_table() {
         ..
     } = test_util::setup_test_engine_and_table("test_get_table").await;
     let table_info = table.table_info();
-    let table_ref = TableReference {
-        catalog: &table_info.catalog_name,
-        schema: &table_info.schema_name,
-        table: &table_info.name,
-    };
 
     let got = table_engine
-        .get_table(
-            &EngineContext::default(),
-            &table_ref,
-            table_info.ident.table_id,
-        )
+        .get_table(&EngineContext::default(), table_info.ident.table_id)
         .unwrap()
         .unwrap();
 
@@ -107,12 +98,6 @@ async fn test_open_table() {
 async fn test_close_all_table() {
     common_telemetry::init_default_ut_logging();
 
-    let table_ref = TableReference {
-        catalog: DEFAULT_CATALOG_NAME,
-        schema: DEFAULT_SCHEMA_NAME,
-        table: test_util::TEST_TABLE_NAME,
-    };
-
     let TestEngineComponents {
         table_engine,
         dir: _dir,
@@ -123,7 +108,7 @@ async fn test_close_all_table() {
     table_engine.close().await.unwrap();
 
     let table_id = table.table_info().ident.table_id;
-    let exist = table_engine.table_exists(&EngineContext::default(), &table_ref, table_id);
+    let exist = table_engine.table_exists(&EngineContext::default(), table_id);
 
     assert!(!exist);
 }
@@ -171,11 +156,6 @@ async fn test_drop_table() {
     } = test_util::setup_test_engine_and_table("test_drop_table").await;
 
     let table_info = table.table_info();
-    let table_ref = TableReference {
-        catalog: &table_info.catalog_name,
-        schema: &table_info.schema_name,
-        table: &table_info.name,
-    };
 
     let drop_req = DropTableRequest {
         catalog_name: DEFAULT_CATALOG_NAME.to_string(),
@@ -190,11 +170,7 @@ async fn test_drop_table() {
 
     assert!(dropped);
 
-    let exist = table_engine.table_exists(
-        &EngineContext::default(),
-        &table_ref,
-        table_info.ident.table_id,
-    );
+    let exist = table_engine.table_exists(&EngineContext::default(), table_info.ident.table_id);
     assert!(!exist);
 
     // check table_dir manifest
@@ -224,7 +200,7 @@ async fn test_create_drop_table_procedure() {
     common_procedure_test::execute_procedure_until_done(&mut procedure).await;
 
     assert!(table_engine
-        .get_table(&engine_ctx, &create_request.table_ref(), table_id)
+        .get_table(&engine_ctx, table_id)
         .unwrap()
         .is_some());
 
@@ -241,7 +217,7 @@ async fn test_create_drop_table_procedure() {
     common_procedure_test::execute_procedure_until_done(&mut procedure).await;
 
     assert!(table_engine
-        .get_table(&engine_ctx, &create_request.table_ref(), table_id)
+        .get_table(&engine_ctx, table_id)
         .unwrap()
         .is_none());
 }

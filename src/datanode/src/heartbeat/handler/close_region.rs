@@ -164,7 +164,7 @@ impl CloseRegionHandler {
         }
 
         if engine
-            .get_table(&ctx, table_ref, region_ident.table_ident.table_id)
+            .get_table(&ctx, region_ident.table_ident.table_id)
             .with_context(|_| error::GetTableSnafu {
                 table_name: table_ref.to_string(),
             })?

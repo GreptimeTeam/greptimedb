@@ -336,13 +336,8 @@ mod tests {
         procedure_test_util::execute_procedure_until_done(&mut procedure).await;
 
         // Get metadata of the created table.
-        let table_ref = TableReference {
-            catalog: &request.catalog_name,
-            schema: &request.schema_name,
-            table: &request.table_name,
-        };
         let table = table_engine
-            .get_table(&engine_ctx, &table_ref, request.id)
+            .get_table(&engine_ctx, request.id)
             .unwrap()
             .unwrap();
         let old_info = table.table_info();
@@ -358,7 +353,7 @@ mod tests {
 
         // Validate.
         let table = table_engine
-            .get_table(&engine_ctx, &table_ref, table_id)
+            .get_table(&engine_ctx, table_id)
             .unwrap()
             .unwrap();
         let new_info = table.table_info();
@@ -387,7 +382,7 @@ mod tests {
 
         // Validate.
         let table = table_engine
-            .get_table(&engine_ctx, &table_ref, table_id)
+            .get_table(&engine_ctx, table_id)
             .unwrap()
             .unwrap();
         let new_info = table.table_info();
@@ -438,13 +433,8 @@ mod tests {
         procedure_test_util::execute_procedure_until_done(&mut procedure).await;
 
         // Get metadata.
-        let table_ref = TableReference {
-            catalog: &request.catalog_name,
-            schema: &request.schema_name,
-            table: &request.table_name,
-        };
         let table = table_engine
-            .get_table(&engine_ctx, &table_ref, table_id)
+            .get_table(&engine_ctx, table_id)
             .unwrap()
             .unwrap();
         let old_info = table.table_info();
@@ -496,13 +486,8 @@ mod tests {
         procedure_test_util::execute_procedure_until_done(&mut procedure).await;
 
         // Get metadata of the created table.
-        let mut table_ref = TableReference {
-            catalog: &create_request.catalog_name,
-            schema: &create_request.schema_name,
-            table: &create_request.table_name,
-        };
         let table = table_engine
-            .get_table(&engine_ctx, &table_ref, create_request.id)
+            .get_table(&engine_ctx, create_request.id)
             .unwrap()
             .unwrap();
 
@@ -521,12 +506,7 @@ mod tests {
         let info = table.table_info();
         assert_eq!(new_name, info.name);
         assert!(table_engine
-            .get_table(&engine_ctx, &table_ref, create_request.id)
-            .unwrap()
-            .is_none());
-        table_ref.table = &new_name;
-        assert!(table_engine
-            .get_table(&engine_ctx, &table_ref, create_request.id)
+            .get_table(&engine_ctx, create_request.id)
             .unwrap()
             .is_some());
     }

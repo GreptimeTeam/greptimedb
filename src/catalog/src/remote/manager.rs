@@ -1010,18 +1010,19 @@ impl SchemaProvider for RemoteSchemaProvider {
                 let TableRegionalValue { engine_name, .. } =
                     TableRegionalValue::parse(String::from_utf8_lossy(&v))
                         .context(InvalidCatalogValueSnafu)?;
-                let reference = TableReference {
-                    catalog: &self.catalog_name,
-                    schema: &self.schema_name,
-                    table: name,
-                };
+
                 let engine_name = engine_name.as_deref().unwrap_or(MITO_ENGINE);
                 let engine = self
                     .engine_manager
                     .engine(engine_name)
                     .context(TableEngineNotFoundSnafu { engine_name })?;
+                let reference = TableReference {
+                    catalog: &self.catalog_name,
+                    schema: &self.schema_name,
+                    table: name,
+                };
                 let table = engine
-                    .get_table(&EngineContext {}, &reference, global_value.table_id())
+                    .get_table(&EngineContext {}, global_value.table_id())
                     .with_context(|_| OpenTableSnafu {
                         table_info: reference.to_string(),
                     })?;
@@ -1117,7 +1118,7 @@ impl SchemaProvider for RemoteSchemaProvider {
             .engine_manager
             .engine(engine_name)
             .context(TableEngineNotFoundSnafu { engine_name })?
-            .get_table(&EngineContext {}, &reference, global_value.table_id())
+            .get_table(&EngineContext {}, global_value.table_id())
             .with_context(|_| OpenTableSnafu {
                 table_info: reference.to_string(),
             })?;

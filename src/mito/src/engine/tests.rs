@@ -722,41 +722,6 @@ async fn test_alter_rename_table() {
     let ctx = EngineContext::default();
     let table_id = table_ref.table_info().ident.table_id;
 
-    // register another table
-    let another_name = "another_table";
-    let req = CreateTableRequest {
-        id: 1024,
-        catalog_name: DEFAULT_CATALOG_NAME.to_string(),
-        schema_name: DEFAULT_SCHEMA_NAME.to_string(),
-        table_name: another_name.to_string(),
-        desc: Some("another test table".to_string()),
-        schema: RawSchema::from(&schema_for_test()),
-        region_numbers: vec![0],
-        primary_key_indices: vec![0],
-        create_if_not_exists: true,
-        table_options: TableOptions::default(),
-        engine: MITO_ENGINE.to_string(),
-    };
-    table_engine
-        .create_table(&ctx, req)
-        .await
-        .expect("create table must succeed");
-    // test renaming a table with an existing name.
-    let req = AlterTableRequest {
-        catalog_name: DEFAULT_CATALOG_NAME.to_string(),
-        schema_name: DEFAULT_SCHEMA_NAME.to_string(),
-        table_name: TABLE_NAME.to_string(),
-        table_id,
-        alter_kind: AlterKind::RenameTable {
-            new_table_name: another_name.to_string(),
-        },
-    };
-    let err = table_engine.alter_table(&ctx, req).await.err().unwrap();
-    assert!(
-        err.to_string().contains("Table already exists"),
-        "Unexpected error: {err}"
-    );
-
     let new_table_name = "test_table";
     // test rename table
     let req = AlterTableRequest {
@@ -806,18 +771,13 @@ async fn test_drop_table() {
     let engine_ctx = EngineContext {};
 
     let table_info = table.table_info();
-    let table_reference = TableReference {
-        catalog: DEFAULT_CATALOG_NAME,
-        schema: DEFAULT_SCHEMA_NAME,
-        table: &table_info.name,
-    };
 
     let table_id = 1;
     let create_table_request = CreateTableRequest {
         id: table_id,
         catalog_name: DEFAULT_CATALOG_NAME.to_string(),
         schema_name: DEFAULT_SCHEMA_NAME.to_string(),
-        table_name: table_info.name.to_string(),
+        table_name: table_info.name.clone(),
         schema: RawSchema::from(&*table_info.meta.schema),
         create_if_not_exists: true,
         desc: None,
@@ -832,12 +792,12 @@ async fn test_drop_table() {
         .await
         .unwrap();
     assert_eq!(table_info, created_table.table_info());
-    assert!(table_engine.table_exists(&engine_ctx, &table_reference, table_id));
+    assert!(table_engine.table_exists(&engine_ctx, table_id));
 
     let drop_table_request = DropTableRequest {
-        catalog_name: table_reference.catalog.to_string(),
-        schema_name: table_reference.schema.to_string(),
-        table_name: table_reference.table.to_string(),
+        catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+        schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+        table_name: table_info.name.clone(),
         table_id,
     };
     let table_dropped = table_engine
@@ -845,7 +805,7 @@ async fn test_drop_table() {
         .await
         .unwrap();
     assert!(table_dropped);
-    assert!(!table_engine.table_exists(&engine_ctx, &table_reference, table_id));
+    assert!(!table_engine.table_exists(&engine_ctx, table_id));
 
     // should be able to re-create
     let table_id = 2;
@@ -863,7 +823,7 @@ async fn test_drop_table() {
         engine: MITO_ENGINE.to_string(),
     };
     table_engine.create_table(&ctx, request).await.unwrap();
-    assert!(table_engine.table_exists(&engine_ctx, &table_reference, table_id));
+    assert!(table_engine.table_exists(&engine_ctx, table_id));
 }
 
 #[tokio::test]

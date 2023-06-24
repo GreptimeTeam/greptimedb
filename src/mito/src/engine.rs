@@ -159,21 +159,11 @@ impl<S: StorageEngine> TableEngine for MitoEngine<S> {
             .context(table_error::TableOperationSnafu)
     }
 
-    fn get_table(
-        &self,
-        _ctx: &EngineContext,
-        table_ref: &TableReference,
-        table_id: TableId,
-    ) -> TableResult<Option<TableRef>> {
+    fn get_table(&self, _ctx: &EngineContext, table_id: TableId) -> TableResult<Option<TableRef>> {
         Ok(self.inner.get_table(table_id))
     }
 
-    fn table_exists(
-        &self,
-        _ctx: &EngineContext,
-        table_ref: &TableReference,
-        table_id: TableId,
-    ) -> bool {
+    fn table_exists(&self, _ctx: &EngineContext, table_id: TableId) -> bool {
         self.inner.get_table(table_id).is_some()
     }
 
@@ -244,7 +234,7 @@ impl<S: StorageEngine> TableEngineProcedure for MitoEngine<S> {
 }
 
 pub(crate) struct MitoEngineInner<S: StorageEngine> {
-    /// All tables opened by the engine. Map key is formatted [TableReference].
+    /// All tables opened by the engine.
     ///
     /// Writing to `tables` should also hold the `table_mutex`.
     tables: DashMap<TableId, Arc<MitoTable<S::Region>>>,
