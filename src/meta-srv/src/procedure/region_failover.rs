@@ -21,12 +21,13 @@ mod update_metadata;
 
 use std::collections::HashSet;
 use std::fmt::Debug;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use catalog::helper::TableGlobalKey;
-use common_meta::RegionIdent;
+use common_meta::ident::TableIdent;
+use common_meta::{ClusterId, RegionIdent};
 use common_procedure::error::{
     Error as ProcedureError, FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu,
 };
@@ -38,6 +39,7 @@ use common_telemetry::{error, info, warn};
 use failover_start::RegionFailoverStart;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
+use store_api::storage::RegionNumber;
 
 use crate::error::{Error, RegisterProcedureLoaderSnafu, Result};
 use crate::lock::DistLockRef;
@@ -48,26 +50,41 @@ use crate::service::store::ext::KvStoreExt;
 const OPEN_REGION_MESSAGE_TIMEOUT: Duration = Duration::from_secs(30);
 const CLOSE_REGION_MESSAGE_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// A key for the preventing running multiple failover procedures for the same region.
+#[derive(PartialEq, Eq, Hash, Clone)]
+pub(crate) struct RegionFailoverKey {
+    pub(crate) cluster_id: ClusterId,
+    pub(crate) table_ident: TableIdent,
+    pub(crate) region_number: RegionNumber,
+}
+
+impl From<RegionIdent> for RegionFailoverKey {
+    fn from(region_ident: RegionIdent) -> Self {
+        Self {
+            cluster_id: region_ident.cluster_id,
+            table_ident: region_ident.table_ident,
+            region_number: region_ident.region_number,
+        }
+    }
+}
+
 pub(crate) struct RegionFailoverManager {
     mailbox: MailboxRef,
     procedure_manager: ProcedureManagerRef,
     selector: SelectorRef,
     selector_ctx: SelectorContext,
     dist_lock: DistLockRef,
-    running_procedures: Arc<Mutex<HashSet<RegionIdent>>>,
+    running_procedures: Arc<RwLock<HashSet<RegionFailoverKey>>>,
 }
 
-struct FailoverProcedureGuard<'a> {
-    running_procedures: Arc<Mutex<HashSet<RegionIdent>>>,
-    failed_region: &'a RegionIdent,
+struct FailoverProcedureGuard {
+    running_procedures: Arc<RwLock<HashSet<RegionFailoverKey>>>,
+    key: RegionFailoverKey,
 }
 
-impl Drop for FailoverProcedureGuard<'_> {
+impl Drop for FailoverProcedureGuard {
     fn drop(&mut self) {
-        self.running_procedures
-            .lock()
-            .unwrap()
-            .remove(self.failed_region);
+        self.running_procedures.write().unwrap().remove(&self.key);
     }
 }
 
@@ -85,11 +102,11 @@ impl RegionFailoverManager {
             selector,
             selector_ctx,
             dist_lock,
-            running_procedures: Arc::new(Mutex::new(HashSet::new())),
+            running_procedures: Arc::new(RwLock::new(HashSet::new())),
         }
     }
 
-    fn create_context(&self) -> RegionFailoverContext {
+    pub(crate) fn create_context(&self) -> RegionFailoverContext {
         RegionFailoverContext {
             mailbox: self.mailbox.clone(),
             selector: self.selector.clone(),
@@ -113,19 +130,36 @@ impl RegionFailoverManager {
             })
     }
 
-    fn insert_running_procedures(&self, failed_region: &RegionIdent) -> bool {
-        let mut procedures = self.running_procedures.lock().unwrap();
-        if procedures.contains(failed_region) {
-            return false;
+    pub(crate) fn is_region_failover_running(&self, key: &RegionFailoverKey) -> bool {
+        self.running_procedures.read().unwrap().contains(key)
+    }
+
+    fn insert_running_procedures(
+        &self,
+        failed_region: &RegionIdent,
+    ) -> Option<FailoverProcedureGuard> {
+        let key = RegionFailoverKey::from(failed_region.clone());
+        let mut procedures = self.running_procedures.write().unwrap();
+        if procedures.insert(key.clone()) {
+            Some(FailoverProcedureGuard {
+                running_procedures: self.running_procedures.clone(),
+                key,
+            })
+        } else {
+            None
         }
-        procedures.insert(failed_region.clone())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn running_procedures(&self) -> Arc<RwLock<HashSet<RegionFailoverKey>>> {
+        self.running_procedures.clone()
     }
 
     pub(crate) async fn do_region_failover(&self, failed_region: &RegionIdent) -> Result<()> {
-        if !self.insert_running_procedures(failed_region) {
+        let Some(guard) = self.insert_running_procedures(failed_region) else {
             warn!("Region failover procedure for region {failed_region} is already running!");
             return Ok(());
-        }
+        };
 
         if !self.table_exists(failed_region).await? {
             // The table could be dropped before the failure detector knows it. Then the region
@@ -142,13 +176,9 @@ impl RegionFailoverManager {
         info!("Starting region failover procedure {procedure_id} for region {failed_region:?}");
 
         let procedure_manager = self.procedure_manager.clone();
-        let running_procedures = self.running_procedures.clone();
         let failed_region = failed_region.clone();
         common_runtime::spawn_bg(async move {
-            let _guard = FailoverProcedureGuard {
-                running_procedures,
-                failed_region: &failed_region,
-            };
+            let _ = guard;
 
             let watcher = &mut match procedure_manager.submit(procedure_with_id).await {
                 Ok(watcher) => watcher,
@@ -178,7 +208,7 @@ impl RegionFailoverManager {
         let table_global_value = self
             .selector_ctx
             .kv_store
-            .get(table_global_key.to_string().into_bytes())
+            .get(table_global_key.to_raw_key())
             .await?;
         Ok(table_global_value.is_some())
     }
@@ -232,7 +262,8 @@ trait State: Sync + Send + Debug {
 ///                  │         │    │
 ///                  └─────────┘    │ Sends "Close Region" request
 ///                                 │ to the failed Datanode, and
-///                  ┌─────────┐    │ wait for 2 seconds
+///                                 | wait for the Region lease expiry
+///                  ┌─────────┐    │ seconds
 ///                  │         │    │
 ///                  │      ┌──▼────▼──────┐
 /// Wait candidate   │      │ActivateRegion◄───────────────────────┐
@@ -259,7 +290,6 @@ trait State: Sync + Send + Debug {
 ///                                 │
 ///                                 │ Broadcast Invalidate Table
 ///                                 │ Cache
-///                                 │
 ///                                 │
 ///                        ┌────────▼────────┐
 ///                        │RegionFailoverEnd│
@@ -343,7 +373,8 @@ mod tests {
     use api::v1::meta::{HeartbeatResponse, MailboxMessage, Peer, RequestHeader};
     use catalog::helper::TableGlobalKey;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO_ENGINE};
-    use common_meta::instruction::{Instruction, InstructionReply, SimpleReply, TableIdent};
+    use common_meta::ident::TableIdent;
+    use common_meta::instruction::{Instruction, InstructionReply, SimpleReply};
     use common_meta::DatanodeId;
     use common_procedure::BoxedProcedure;
     use rand::prelude::SliceRandom;

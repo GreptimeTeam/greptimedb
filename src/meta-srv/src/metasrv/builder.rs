@@ -20,6 +20,7 @@ use common_procedure::local::{LocalManager, ManagerConfig};
 use crate::cluster::MetaPeerClient;
 use crate::error::Result;
 use crate::handler::mailbox_handler::MailboxHandler;
+use crate::handler::region_lease_handler::RegionLeaseHandler;
 use crate::handler::{
     CheckLeaderHandler, CollectStatsHandler, HeartbeatHandlerGroup, HeartbeatMailbox,
     KeepLeaseHandler, OnLeaderStartHandler, PersistStatsHandler, Pushers, RegionFailureHandler,
@@ -146,24 +147,36 @@ impl MetaSrvBuilder {
         let handler_group = match handler_group {
             Some(handler_group) => handler_group,
             None => {
-                let region_failover_manager = Arc::new(RegionFailoverManager::new(
-                    mailbox.clone(),
-                    procedure_manager.clone(),
-                    selector.clone(),
-                    SelectorContext {
-                        server_addr: options.server_addr.clone(),
-                        datanode_lease_secs: options.datanode_lease_secs,
-                        kv_store: kv_store.clone(),
-                        catalog: None,
-                        schema: None,
-                        table: None,
-                    },
-                    lock.clone(),
-                ));
+                let region_failover_handler = if options.disable_region_failover {
+                    None
+                } else {
+                    let region_failover_manager = Arc::new(RegionFailoverManager::new(
+                        mailbox.clone(),
+                        procedure_manager.clone(),
+                        selector.clone(),
+                        SelectorContext {
+                            server_addr: options.server_addr.clone(),
+                            datanode_lease_secs: options.datanode_lease_secs,
+                            kv_store: kv_store.clone(),
+                            catalog: None,
+                            schema: None,
+                            table: None,
+                        },
+                        lock.clone(),
+                    ));
 
-                let region_failure_handler =
-                    RegionFailureHandler::try_new(election.clone(), region_failover_manager)
-                        .await?;
+                    Some(
+                        RegionFailureHandler::try_new(election.clone(), region_failover_manager)
+                            .await?,
+                    )
+                };
+
+                let region_lease_handler = RegionLeaseHandler::new(
+                    kv_store.clone(),
+                    region_failover_handler
+                        .as_ref()
+                        .map(|x| x.region_failover_manager().clone()),
+                );
 
                 let group = HeartbeatHandlerGroup::new(pushers);
                 let keep_lease_handler = KeepLeaseHandler::new(kv_store.clone());
@@ -174,9 +187,12 @@ impl MetaSrvBuilder {
                 group.add_handler(keep_lease_handler).await;
                 group.add_handler(CheckLeaderHandler::default()).await;
                 group.add_handler(OnLeaderStartHandler::default()).await;
-                group.add_handler(CollectStatsHandler).await;
-                group.add_handler(MailboxHandler).await;
-                group.add_handler(region_failure_handler).await;
+                group.add_handler(CollectStatsHandler::default()).await;
+                group.add_handler(MailboxHandler::default()).await;
+                if let Some(region_failover_handler) = region_failover_handler {
+                    group.add_handler(region_failover_handler).await;
+                }
+                group.add_handler(region_lease_handler).await;
                 group.add_handler(PersistStatsHandler::default()).await;
                 group
             }

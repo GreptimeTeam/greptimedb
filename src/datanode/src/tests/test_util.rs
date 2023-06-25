@@ -23,6 +23,7 @@ use servers::Mode;
 use snafu::ResultExt;
 use table::engine::{EngineContext, TableEngineRef};
 use table::requests::{CreateTableRequest, TableOptions};
+use table::TableRef;
 
 use crate::datanode::{
     DatanodeOptions, FileConfig, ObjectStoreConfig, ProcedureConfig, StorageConfig, WalConfig,
@@ -85,7 +86,7 @@ fn create_tmp_dir_and_datanode_opts(name: &str) -> (DatanodeOptions, TestGuard) 
 pub(crate) async fn create_test_table(
     instance: &Instance,
     ts_type: ConcreteDataType,
-) -> Result<()> {
+) -> Result<TableRef> {
     let column_schemas = vec![
         ColumnSchema::new("host", ConcreteDataType::string_datatype(), true),
         ColumnSchema::new("cpu", ConcreteDataType::float64_datatype(), true),
@@ -124,8 +125,8 @@ pub(crate) async fn create_test_table(
         schema: DEFAULT_SCHEMA_NAME.to_string(),
         table_name: table_name.to_string(),
         table_id: table.table_info().ident.table_id,
-        table,
+        table: table.clone(),
     };
     instance.catalog_manager.register_table(req).await.unwrap();
-    Ok(())
+    Ok(table)
 }

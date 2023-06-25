@@ -33,6 +33,7 @@ use pgwire::api::stmt::QueryParser;
 use pgwire::api::store::MemPortalStore;
 use pgwire::api::{ClientInfo, Type};
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
+use query::query_engine::DescribeResult;
 use sql::dialect::PostgreSqlDialect;
 use sql::parser::ParserContext;
 use sql::statements::statement::Statement;
@@ -405,7 +406,7 @@ impl ExtendedQueryHandler for PostgresServerHandler {
         // get Statement part of the tuple
         let (stmt, _) = stmt;
 
-        if let Some(schema) = self
+        if let Some(DescribeResult { schema, .. }) = self
             .query_handler
             .do_describe(stmt.clone(), self.session.context())
             .await

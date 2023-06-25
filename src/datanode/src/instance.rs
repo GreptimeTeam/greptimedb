@@ -18,7 +18,8 @@ use std::time::Duration;
 use std::{fs, path};
 
 use api::v1::meta::Role;
-use catalog::remote::CachedMetaKvBackend;
+use catalog::remote::region_alive_keeper::RegionAliveKeepers;
+use catalog::remote::{CachedMetaKvBackend, RemoteCatalogManager};
 use catalog::{CatalogManager, CatalogManagerRef, RegisterTableRequest};
 use common_base::paths::{CLUSTER_DIR, WAL_DIR};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID};
@@ -56,9 +57,9 @@ use table::Table;
 
 use crate::datanode::{DatanodeOptions, ObjectStoreConfig, ProcedureConfig, WalConfig};
 use crate::error::{
-    self, CatalogSnafu, MetaClientInitSnafu, MissingMetasrvOptsSnafu, MissingNodeIdSnafu,
-    NewCatalogSnafu, OpenLogStoreSnafu, RecoverProcedureSnafu, Result, ShutdownInstanceSnafu,
-    StartProcedureManagerSnafu, StopProcedureManagerSnafu,
+    self, CatalogSnafu, IncorrectInternalStateSnafu, MetaClientInitSnafu, MissingMetasrvOptsSnafu,
+    MissingNodeIdSnafu, NewCatalogSnafu, OpenLogStoreSnafu, RecoverProcedureSnafu, Result,
+    ShutdownInstanceSnafu, StartProcedureManagerSnafu, StopProcedureManagerSnafu,
 };
 use crate::heartbeat::handler::close_region::CloseRegionHandler;
 use crate::heartbeat::handler::open_region::OpenRegionHandler;
@@ -150,7 +151,7 @@ impl Instance {
         );
 
         // create remote catalog manager
-        let (catalog_manager, table_id_provider) = match opts.mode {
+        let (catalog_manager, table_id_provider, heartbeat_task) = match opts.mode {
             Mode::Standalone => {
                 if opts.enable_memory_catalog {
                     let catalog = Arc::new(catalog::local::MemoryCatalogManager::default());
@@ -170,6 +171,7 @@ impl Instance {
                     (
                         catalog.clone() as CatalogManagerRef,
                         Some(catalog as TableIdProviderRef),
+                        None,
                     )
                 } else {
                     let catalog = Arc::new(
@@ -181,51 +183,64 @@ impl Instance {
                     (
                         catalog.clone() as CatalogManagerRef,
                         Some(catalog as TableIdProviderRef),
+                        None,
                     )
                 }
             }
 
             Mode::Distributed => {
-                let kv_backend = Arc::new(CachedMetaKvBackend::new(
-                    meta_client.as_ref().unwrap().clone(),
+                let meta_client = meta_client.context(IncorrectInternalStateSnafu {
+                    state: "meta client is not provided when creating distributed Datanode",
+                })?;
+
+                let kv_backend = Arc::new(CachedMetaKvBackend::new(meta_client.clone()));
+
+                let heartbeat_interval_millis = 5000;
+
+                let region_alive_keepers = Arc::new(RegionAliveKeepers::new(
+                    engine_manager.clone(),
+                    heartbeat_interval_millis,
                 ));
 
-                let catalog = Arc::new(catalog::remote::RemoteCatalogManager::new(
+                let catalog_manager = Arc::new(RemoteCatalogManager::new(
                     engine_manager.clone(),
                     opts.node_id.context(MissingNodeIdSnafu)?,
                     kv_backend,
+                    region_alive_keepers.clone(),
                 ));
-                (catalog as CatalogManagerRef, None)
+
+                let handlers_executor = HandlerGroupExecutor::new(vec![
+                    Arc::new(ParseMailboxMessageHandler::default()),
+                    Arc::new(OpenRegionHandler::new(
+                        catalog_manager.clone(),
+                        engine_manager.clone(),
+                        region_alive_keepers.clone(),
+                    )),
+                    Arc::new(CloseRegionHandler::new(
+                        catalog_manager.clone(),
+                        engine_manager.clone(),
+                        region_alive_keepers.clone(),
+                    )),
+                    region_alive_keepers.clone(),
+                ]);
+
+                let heartbeat_task = Some(HeartbeatTask::new(
+                    opts.node_id.context(MissingNodeIdSnafu)?,
+                    opts,
+                    meta_client,
+                    catalog_manager.clone(),
+                    Arc::new(handlers_executor),
+                    heartbeat_interval_millis,
+                    region_alive_keepers,
+                ));
+
+                (catalog_manager as CatalogManagerRef, None, heartbeat_task)
             }
         };
 
         catalog_manager.start().await.context(CatalogSnafu)?;
         let factory = QueryEngineFactory::new(catalog_manager.clone(), false);
         let query_engine = factory.query_engine();
-
-        let handlers_executor = HandlerGroupExecutor::new(vec![
-            Arc::new(ParseMailboxMessageHandler::default()),
-            Arc::new(OpenRegionHandler::new(
-                catalog_manager.clone(),
-                engine_manager.clone(),
-            )),
-            Arc::new(CloseRegionHandler::new(
-                catalog_manager.clone(),
-                engine_manager.clone(),
-            )),
-        ]);
-
-        let heartbeat_task = match opts.mode {
-            Mode::Standalone => None,
-            Mode::Distributed => Some(HeartbeatTask::new(
-                opts.node_id.context(MissingNodeIdSnafu)?,
-                opts.rpc_addr.clone(),
-                opts.rpc_hostname.clone(),
-                meta_client.as_ref().unwrap().clone(),
-                catalog_manager.clone(),
-                Arc::new(handlers_executor),
-            )),
-        };
 
         let procedure_manager =
             create_procedure_manager(opts.node_id.unwrap_or(0), &opts.procedure, object_store)
@@ -350,7 +365,7 @@ impl Instance {
 fn create_compaction_scheduler<S: LogStore>(opts: &DatanodeOptions) -> CompactionSchedulerRef<S> {
     let picker = SimplePicker::default();
     let config = SchedulerConfig::from(opts);
-    let handler = CompactionHandler::new(picker);
+    let handler = CompactionHandler { picker };
     let scheduler = LocalScheduler::new(config, handler);
     Arc::new(scheduler)
 }

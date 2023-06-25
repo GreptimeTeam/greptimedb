@@ -71,5 +71,6 @@ pub fn build_region_edit(
                 file_size: DEFAULT_TEST_FILE_SIZE,
             })
             .collect(),
+        compaction_time_window: None,
     }
 }

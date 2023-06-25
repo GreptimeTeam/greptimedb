@@ -246,7 +246,7 @@ impl FailureDetectorContainer {
 #[cfg(test)]
 mod tests {
     use common_catalog::consts::MITO_ENGINE;
-    use common_meta::instruction::TableIdent;
+    use common_meta::ident::TableIdent;
     use rand::Rng;
 
     use super::*;

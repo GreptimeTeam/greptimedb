@@ -14,6 +14,7 @@
 
 use std::any::Any;
 
+use common_datasource::file_format::Format;
 use common_error::prelude::*;
 use datafusion::arrow::error::ArrowError;
 use datafusion::error::DataFusionError;
@@ -175,6 +176,9 @@ pub enum Error {
         source: datatypes::error::Error,
         location: Location,
     },
+
+    #[snafu(display("Unsupported format: {:?}", format))]
+    UnsupportedFormat { format: Format, location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -191,7 +195,8 @@ impl ErrorExt for Error {
             | BuildCsvConfig { .. }
             | ProjectSchema { .. }
             | MissingRequiredField { .. }
-            | ConvertSchema { .. } => StatusCode::InvalidArguments,
+            | ConvertSchema { .. }
+            | UnsupportedFormat { .. } => StatusCode::InvalidArguments,
 
             BuildBackend { source, .. } => source.status_code(),
             BuildStreamAdapter { source, .. } => source.status_code(),

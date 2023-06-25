@@ -20,7 +20,7 @@ use api::v1::meta::Peer;
 use catalog::helper::TableGlobalKey;
 use catalog::remote::{CachedMetaKvBackend, Kv};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO_ENGINE};
-use common_meta::instruction::TableIdent;
+use common_meta::ident::TableIdent;
 use common_meta::rpc::router::TableRoute;
 use common_meta::table_name::TableName;
 use common_meta::RegionIdent;

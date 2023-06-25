@@ -20,11 +20,13 @@ use async_compat::CompatExt;
 use common_base::readable_size::ReadableSize;
 use common_datasource::file_format::csv::{CsvConfigBuilder, CsvOpener};
 use common_datasource::file_format::json::JsonOpener;
+use common_datasource::file_format::orc::{
+    infer_orc_schema, new_orc_stream_reader, OrcArrowStreamReaderAdapter,
+};
 use common_datasource::file_format::{FileFormat, Format};
 use common_datasource::lister::{Lister, Source};
 use common_datasource::object_store::{build_backend, parse_url};
 use common_datasource::util::find_dir_and_filename;
-use common_query::Output;
 use common_recordbatch::adapter::ParquetRecordBatchStreamAdapter;
 use common_recordbatch::DfSendableRecordBatchStream;
 use datafusion::datasource::listing::PartitionedFile;
@@ -110,6 +112,18 @@ impl StatementExecutor {
                     .await
                     .context(error::ReadParquetSnafu)?;
                 Ok(builder.schema().clone())
+            }
+            Format::Orc(_) => {
+                let reader = object_store
+                    .reader(path)
+                    .await
+                    .context(error::ReadObjectSnafu { path })?;
+
+                let schema = infer_orc_schema(reader)
+                    .await
+                    .context(error::ReadOrcSnafu)?;
+
+                Ok(Arc::new(schema))
             }
         }
     }
@@ -202,10 +216,22 @@ impl StatementExecutor {
 
                 Ok(Box::pin(ParquetRecordBatchStreamAdapter::new(upstream)))
             }
+            Format::Orc(_) => {
+                let reader = object_store
+                    .reader(path)
+                    .await
+                    .context(error::ReadObjectSnafu { path })?;
+                let stream = new_orc_stream_reader(reader)
+                    .await
+                    .context(error::ReadOrcSnafu)?;
+                let stream = OrcArrowStreamReaderAdapter::new(stream);
+
+                Ok(Box::pin(stream))
+            }
         }
     }
 
-    pub async fn copy_table_from(&self, req: CopyTableRequest) -> Result<Output> {
+    pub async fn copy_table_from(&self, req: CopyTableRequest) -> Result<usize> {
         let table_ref = TableReference {
             catalog: &req.catalog_name,
             schema: &req.schema_name,
@@ -313,7 +339,7 @@ impl StatementExecutor {
             }
         }
 
-        Ok(Output::AffectedRows(rows_inserted))
+        Ok(rows_inserted)
     }
 }
 

@@ -21,8 +21,9 @@ use async_trait::async_trait;
 use catalog::local::MemoryCatalogManager;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::Output;
-use datatypes::schema::Schema;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
+use query::plan::LogicalPlan;
+use query::query_engine::DescribeResult;
 use query::{QueryEngineFactory, QueryEngineRef};
 use script::engine::{CompileContext, EvalContext, Script, ScriptEngine};
 use script::python::{PyEngine, PyScript};
@@ -78,6 +79,10 @@ impl SqlQueryHandler for DummyInstance {
         vec![Ok(output)]
     }
 
+    async fn do_exec_plan(&self, plan: LogicalPlan, query_ctx: QueryContextRef) -> Result<Output> {
+        Ok(self.query_engine.execute(plan, query_ctx).await.unwrap())
+    }
+
     async fn do_promql_query(
         &self,
         _: &PromQuery,
@@ -90,7 +95,7 @@ impl SqlQueryHandler for DummyInstance {
         &self,
         stmt: Statement,
         query_ctx: QueryContextRef,
-    ) -> Result<Option<Schema>> {
+    ) -> Result<Option<DescribeResult>> {
         if let Statement::Query(_) = stmt {
             let plan = self
                 .query_engine

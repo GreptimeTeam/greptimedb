@@ -54,6 +54,12 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to build orc reader, source: {}", source))]
+    OrcReader {
+        location: Location,
+        source: orc_rust::error::Error,
+    },
+
     #[snafu(display("Failed to read object from path: {}, source: {}", path, source))]
     ReadObject {
         path: String,
@@ -171,7 +177,8 @@ impl ErrorExt for Error {
             | ReadRecordBatch { .. }
             | WriteRecordBatch { .. }
             | EncodeRecordBatch { .. }
-            | BufferedWriterClosed { .. } => StatusCode::Unexpected,
+            | BufferedWriterClosed { .. }
+            | OrcReader { .. } => StatusCode::Unexpected,
         }
     }
 
@@ -182,6 +189,7 @@ impl ErrorExt for Error {
     fn location_opt(&self) -> Option<common_error::snafu::Location> {
         use Error::*;
         match self {
+            OrcReader { location, .. } => Some(*location),
             BuildBackend { location, .. } => Some(*location),
             ReadObject { location, .. } => Some(*location),
             ListObjects { location, .. } => Some(*location),

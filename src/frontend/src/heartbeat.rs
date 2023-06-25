@@ -20,8 +20,7 @@ use common_meta::heartbeat::handler::{
 };
 use common_meta::heartbeat::mailbox::{HeartbeatMailbox, MailboxRef, OutgoingMessage};
 use common_meta::heartbeat::utils::outgoing_message_to_mailbox_message;
-use common_telemetry::tracing::trace;
-use common_telemetry::{error, info};
+use common_telemetry::{debug, error, info};
 use meta_client::client::{HeartbeatSender, HeartbeatStream, MetaClient};
 use snafu::ResultExt;
 use tokio::sync::mpsc;
@@ -83,16 +82,15 @@ impl HeartbeatTask {
             loop {
                 match resp_stream.message().await {
                     Ok(Some(resp)) => {
-                        trace!("Received a heartbeat response: {:?}", resp);
+                        debug!("Receiving heartbeat response: {:?}", resp);
                         let ctx = HeartbeatResponseHandlerContext::new(mailbox.clone(), resp);
-                        if let Err(e) = capture_self.handle_response(ctx) {
+                        if let Err(e) = capture_self.handle_response(ctx).await {
                             error!(e; "Error while handling heartbeat response");
                         }
                     }
                     Ok(None) => break,
                     Err(e) => {
                         error!(e; "Occur error while reading heartbeat response");
-
                         capture_self
                             .start_with_retry(Duration::from_secs(retry_interval))
                             .await;
@@ -148,16 +146,17 @@ impl HeartbeatTask {
                         error!(e; "Failed to send heartbeat to metasrv");
                         break;
                     } else {
-                        trace!("Send a heartbeat request to metasrv, content: {:?}", req);
+                        debug!("Send a heartbeat request to metasrv, content: {:?}", req);
                     }
                 }
             }
         });
     }
 
-    fn handle_response(&self, ctx: HeartbeatResponseHandlerContext) -> Result<()> {
+    async fn handle_response(&self, ctx: HeartbeatResponseHandlerContext) -> Result<()> {
         self.resp_handler_executor
             .handle(ctx)
+            .await
             .context(error::HandleHeartbeatResponseSnafu)
     }
 

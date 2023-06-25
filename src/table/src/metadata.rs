@@ -162,15 +162,14 @@ impl TableMeta {
     }
 
     pub fn field_column_names(&self) -> impl Iterator<Item = &String> {
-        let columns_schemas = &self.schema.column_schemas();
-        self.value_indices.iter().filter_map(|idx| {
-            let column = &columns_schemas[*idx];
-            if column.is_time_index() {
-                None
-            } else {
-                Some(&column.name)
-            }
-        })
+        // `value_indices` is wrong under distributed mode. Use the logic copied from DESC TABLE
+        let columns_schemas = self.schema.column_schemas();
+        let primary_key_indices = &self.primary_key_indices;
+        columns_schemas
+            .iter()
+            .enumerate()
+            .filter(|(i, cs)| !primary_key_indices.contains(i) && !cs.is_time_index())
+            .map(|(_, cs)| &cs.name)
     }
 
     /// Returns the new [TableMetaBuilder] after applying given `alter_kind`.

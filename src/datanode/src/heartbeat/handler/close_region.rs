@@ -14,15 +14,16 @@
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
+use catalog::remote::region_alive_keeper::RegionAliveKeepers;
 use catalog::{CatalogManagerRef, DeregisterTableRequest};
 use common_catalog::format_full_table_name;
 use common_meta::error::Result as MetaResult;
 use common_meta::heartbeat::handler::{
     HandleControl, HeartbeatResponseHandler, HeartbeatResponseHandlerContext,
 };
-use common_meta::instruction::{
-    Instruction, InstructionReply, RegionIdent, SimpleReply, TableIdent,
-};
+use common_meta::instruction::{Instruction, InstructionReply, SimpleReply};
+use common_meta::RegionIdent;
 use common_telemetry::{error, info, warn};
 use snafu::ResultExt;
 use store_api::storage::RegionNumber;
@@ -36,8 +37,10 @@ use crate::error::{self, Result};
 pub struct CloseRegionHandler {
     catalog_manager: CatalogManagerRef,
     table_engine_manager: TableEngineManagerRef,
+    region_alive_keepers: Arc<RegionAliveKeepers>,
 }
 
+#[async_trait]
 impl HeartbeatResponseHandler for CloseRegionHandler {
     fn is_acceptable(&self, ctx: &HeartbeatResponseHandlerContext) -> bool {
         matches!(
@@ -46,35 +49,15 @@ impl HeartbeatResponseHandler for CloseRegionHandler {
         )
     }
 
-    fn handle(&self, ctx: &mut HeartbeatResponseHandlerContext) -> MetaResult<HandleControl> {
+    async fn handle(&self, ctx: &mut HeartbeatResponseHandlerContext) -> MetaResult<HandleControl> {
         let Some((meta, Instruction::CloseRegion(region_ident))) = ctx.incoming_message.take() else {
             unreachable!("CloseRegionHandler: should be guarded by 'is_acceptable'");
         };
 
         let mailbox = ctx.mailbox.clone();
         let self_ref = Arc::new(self.clone());
-
-        let RegionIdent {
-            table_ident:
-                TableIdent {
-                    engine,
-                    catalog,
-                    schema,
-                    table,
-                    ..
-                },
-            region_number,
-            ..
-        } = region_ident;
-
         common_runtime::spawn_bg(async move {
-            let result = self_ref
-                .close_region_inner(
-                    engine,
-                    &TableReference::full(&catalog, &schema, &table),
-                    vec![region_number],
-                )
-                .await;
+            let result = self_ref.close_region_inner(region_ident).await;
 
             if let Err(e) = mailbox
                 .send((meta, CloseRegionHandler::map_result(result)))
@@ -92,10 +75,12 @@ impl CloseRegionHandler {
     pub fn new(
         catalog_manager: CatalogManagerRef,
         table_engine_manager: TableEngineManagerRef,
+        region_alive_keepers: Arc<RegionAliveKeepers>,
     ) -> Self {
         Self {
             catalog_manager,
             table_engine_manager,
+            region_alive_keepers,
         }
     }
 
@@ -151,20 +136,21 @@ impl CloseRegionHandler {
         Ok(true)
     }
 
-    async fn close_region_inner(
-        &self,
-        engine: String,
-        table_ref: &TableReference<'_>,
-        region_numbers: Vec<RegionNumber>,
-    ) -> Result<bool> {
-        let engine =
-            self.table_engine_manager
-                .engine(&engine)
-                .context(error::TableEngineNotFoundSnafu {
-                    engine_name: &engine,
-                })?;
+    async fn close_region_inner(&self, region_ident: RegionIdent) -> Result<bool> {
+        let table_ident = &region_ident.table_ident;
+        let engine_name = &table_ident.engine;
+        let engine = self
+            .table_engine_manager
+            .engine(engine_name)
+            .context(error::TableEngineNotFoundSnafu { engine_name })?;
         let ctx = EngineContext::default();
 
+        let table_ref = &TableReference::full(
+            &table_ident.catalog,
+            &table_ident.schema,
+            &table_ident.table,
+        );
+        let region_numbers = vec![region_ident.region_number];
         if self
             .regions_closed(
                 table_ref.catalog,
@@ -202,7 +188,15 @@ impl CloseRegionHandler {
                 })? {
                 CloseTableResult::NotFound | CloseTableResult::Released(_) => {
                     // Deregister table if The table released.
-                    self.deregister_table(table_ref).await
+                    let deregistered = self.deregister_table(table_ref).await?;
+
+                    if deregistered {
+                        self.region_alive_keepers
+                            .deregister_table(table_ident)
+                            .await;
+                    }
+
+                    Ok(deregistered)
                 }
                 CloseTableResult::PartialClosed(regions) => {
                     // Requires caller to update the region_numbers
@@ -210,6 +204,11 @@ impl CloseRegionHandler {
                         "Close partial regions: {:?} in table: {}",
                         regions, table_ref
                     );
+
+                    self.region_alive_keepers
+                        .deregister_region(&region_ident)
+                        .await;
+
                     Ok(true)
                 }
             };

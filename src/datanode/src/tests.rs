@@ -14,26 +14,29 @@
 
 use std::assert_matches::assert_matches;
 use std::sync::Arc;
+use std::time::Duration;
 
 use api::v1::greptime_request::Request as GrpcRequest;
 use api::v1::meta::HeartbeatResponse;
 use api::v1::query_request::Query;
 use api::v1::QueryRequest;
+use catalog::remote::region_alive_keeper::RegionAliveKeepers;
 use catalog::CatalogManagerRef;
 use common_meta::heartbeat::handler::{
     HandlerGroupExecutor, HeartbeatResponseHandlerContext, HeartbeatResponseHandlerExecutor,
 };
 use common_meta::heartbeat::mailbox::{HeartbeatMailbox, MessageMeta};
-use common_meta::instruction::{
-    Instruction, InstructionReply, RegionIdent, SimpleReply, TableIdent,
-};
+use common_meta::ident::TableIdent;
+use common_meta::instruction::{Instruction, InstructionReply, RegionIdent, SimpleReply};
 use common_query::Output;
 use datatypes::prelude::ConcreteDataType;
 use servers::query_handler::grpc::GrpcQueryHandler;
 use session::context::QueryContext;
 use table::engine::manager::TableEngineManagerRef;
+use table::TableRef;
 use test_util::MockInstance;
 use tokio::sync::mpsc::{self, Receiver};
+use tokio::time::Instant;
 
 use crate::heartbeat::handler::close_region::CloseRegionHandler;
 use crate::heartbeat::handler::open_region::OpenRegionHandler;
@@ -61,7 +64,11 @@ async fn test_close_region_handler() {
     } = prepare_handler_test("test_close_region_handler").await;
 
     let executor = Arc::new(HandlerGroupExecutor::new(vec![Arc::new(
-        CloseRegionHandler::new(catalog_manager_ref.clone(), engine_manager_ref.clone()),
+        CloseRegionHandler::new(
+            catalog_manager_ref.clone(),
+            engine_manager_ref.clone(),
+            Arc::new(RegionAliveKeepers::new(engine_manager_ref.clone(), 5000)),
+        ),
     )]));
 
     prepare_table(instance.inner()).await;
@@ -71,7 +78,8 @@ async fn test_close_region_handler() {
         executor.clone(),
         mailbox.clone(),
         close_region_instruction(),
-    );
+    )
+    .await;
     let (_, reply) = rx.recv().await.unwrap();
     assert_matches!(
         reply,
@@ -85,7 +93,8 @@ async fn test_close_region_handler() {
         executor.clone(),
         mailbox.clone(),
         close_region_instruction(),
-    );
+    )
+    .await;
     let (_, reply) = rx.recv().await.unwrap();
     assert_matches!(
         reply,
@@ -108,7 +117,8 @@ async fn test_close_region_handler() {
             cluster_id: 1,
             datanode_id: 2,
         }),
-    );
+    )
+    .await;
     let (_, reply) = rx.recv().await.unwrap();
     assert_matches!(
         reply,
@@ -127,56 +137,81 @@ async fn test_open_region_handler() {
         ..
     } = prepare_handler_test("test_open_region_handler").await;
 
+    let region_alive_keepers = Arc::new(RegionAliveKeepers::new(engine_manager_ref.clone(), 5000));
+    region_alive_keepers.start().await;
+
     let executor = Arc::new(HandlerGroupExecutor::new(vec![
         Arc::new(OpenRegionHandler::new(
             catalog_manager_ref.clone(),
             engine_manager_ref.clone(),
+            region_alive_keepers.clone(),
         )),
         Arc::new(CloseRegionHandler::new(
             catalog_manager_ref.clone(),
             engine_manager_ref.clone(),
+            region_alive_keepers.clone(),
         )),
     ]));
 
-    prepare_table(instance.inner()).await;
+    let instruction = open_region_instruction();
+    let Instruction::OpenRegion(region_ident) = instruction.clone() else { unreachable!() };
+    let table_ident = &region_ident.table_ident;
+
+    let table = prepare_table(instance.inner()).await;
+    region_alive_keepers
+        .register_table(table_ident.clone(), table)
+        .await
+        .unwrap();
 
     // Opens a opened table
-    handle_instruction(executor.clone(), mailbox.clone(), open_region_instruction());
+    handle_instruction(executor.clone(), mailbox.clone(), instruction.clone()).await;
     let (_, reply) = rx.recv().await.unwrap();
     assert_matches!(
         reply,
         InstructionReply::OpenRegion(SimpleReply { result: true, .. })
     );
 
+    let keeper = region_alive_keepers.find_keeper(table_ident).await.unwrap();
+    let deadline = keeper.deadline(0).await.unwrap();
+    assert!(deadline <= Instant::now() + Duration::from_secs(20));
+
     // Opens a non-exist table
+    let non_exist_table_ident = TableIdent {
+        catalog: "greptime".to_string(),
+        schema: "public".to_string(),
+        table: "non-exist".to_string(),
+        table_id: 2024,
+        engine: "mito".to_string(),
+    };
     handle_instruction(
         executor.clone(),
         mailbox.clone(),
         Instruction::OpenRegion(RegionIdent {
-            table_ident: TableIdent {
-                catalog: "greptime".to_string(),
-                schema: "public".to_string(),
-                table: "non-exist".to_string(),
-                table_id: 2024,
-                engine: "mito".to_string(),
-            },
+            table_ident: non_exist_table_ident.clone(),
             region_number: 0,
             cluster_id: 1,
             datanode_id: 2,
         }),
-    );
+    )
+    .await;
     let (_, reply) = rx.recv().await.unwrap();
     assert_matches!(
         reply,
         InstructionReply::OpenRegion(SimpleReply { result: false, .. })
     );
 
+    assert!(region_alive_keepers
+        .find_keeper(&non_exist_table_ident)
+        .await
+        .is_none());
+
     // Closes demo table
     handle_instruction(
         executor.clone(),
         mailbox.clone(),
         close_region_instruction(),
-    );
+    )
+    .await;
     let (_, reply) = rx.recv().await.unwrap();
     assert_matches!(
         reply,
@@ -184,8 +219,13 @@ async fn test_open_region_handler() {
     );
     assert_test_table_not_found(instance.inner()).await;
 
+    assert!(region_alive_keepers
+        .find_keeper(table_ident)
+        .await
+        .is_none());
+
     // Opens demo table
-    handle_instruction(executor.clone(), mailbox.clone(), open_region_instruction());
+    handle_instruction(executor.clone(), mailbox.clone(), instruction).await;
     let (_, reply) = rx.recv().await.unwrap();
     assert_matches!(
         reply,
@@ -220,7 +260,7 @@ pub fn test_message_meta(id: u64, subject: &str, to: &str, from: &str) -> Messag
     }
 }
 
-fn handle_instruction(
+async fn handle_instruction(
     executor: Arc<dyn HeartbeatResponseHandlerExecutor>,
     mailbox: Arc<HeartbeatMailbox>,
     instruction: Instruction,
@@ -229,7 +269,7 @@ fn handle_instruction(
     let mut ctx: HeartbeatResponseHandlerContext =
         HeartbeatResponseHandlerContext::new(mailbox, response);
     ctx.incoming_message = Some((test_message_meta(1, "hi", "foo", "bar"), instruction));
-    executor.handle(ctx).unwrap();
+    executor.handle(ctx).await.unwrap();
 }
 
 fn close_region_instruction() -> Instruction {
@@ -262,10 +302,10 @@ fn open_region_instruction() -> Instruction {
     })
 }
 
-async fn prepare_table(instance: &Instance) {
+async fn prepare_table(instance: &Instance) -> TableRef {
     test_util::create_test_table(instance, ConcreteDataType::timestamp_millisecond_datatype())
         .await
-        .unwrap();
+        .unwrap()
 }
 
 async fn assert_test_table_not_found(instance: &Instance) {

@@ -20,13 +20,14 @@ use std::sync::Arc;
 use async_stream::stream;
 use async_trait::async_trait;
 use common_catalog::consts::{MAX_SYS_TABLE_ID, MITO_ENGINE};
+use common_meta::ident::TableIdent;
 use common_telemetry::{debug, error, info, warn};
 use dashmap::DashMap;
 use futures::Stream;
 use futures_util::{StreamExt, TryStreamExt};
 use metrics::{decrement_gauge, increment_gauge};
 use parking_lot::RwLock;
-use snafu::ResultExt;
+use snafu::{ensure, OptionExt, ResultExt};
 use table::engine::manager::TableEngineManagerRef;
 use table::engine::{EngineContext, TableReference};
 use table::requests::{CreateTableRequest, OpenTableRequest};
@@ -42,6 +43,7 @@ use crate::helper::{
     build_table_regional_prefix, CatalogKey, CatalogValue, SchemaKey, SchemaValue, TableGlobalKey,
     TableGlobalValue, TableRegionalKey, TableRegionalValue, CATALOG_KEY_PREFIX,
 };
+use crate::remote::region_alive_keeper::RegionAliveKeepers;
 use crate::remote::{Kv, KvBackendRef};
 use crate::{
     handle_system_table_request, CatalogManager, CatalogProviderRef, DeregisterTableRequest,
@@ -55,18 +57,35 @@ pub struct RemoteCatalogManager {
     catalogs: Arc<RwLock<DashMap<String, CatalogProviderRef>>>,
     engine_manager: TableEngineManagerRef,
     system_table_requests: Mutex<Vec<RegisterSystemTableRequest>>,
+    region_alive_keepers: Arc<RegionAliveKeepers>,
 }
 
 impl RemoteCatalogManager {
-    pub fn new(engine_manager: TableEngineManagerRef, node_id: u64, backend: KvBackendRef) -> Self {
+    pub fn new(
+        engine_manager: TableEngineManagerRef,
+        node_id: u64,
+        backend: KvBackendRef,
+        region_alive_keepers: Arc<RegionAliveKeepers>,
+    ) -> Self {
         Self {
             engine_manager,
             node_id,
             backend,
             catalogs: Default::default(),
             system_table_requests: Default::default(),
+            region_alive_keepers,
         }
     }
+
+    // fn new_catalog_provider(&self, catalog_name: &str) -> CatalogProviderRef {
+    //     Arc::new(RemoteCatalogProvider {
+    //         node_id: self.node_id,
+    //         catalog_name: catalog_name.to_string(),
+    //         backend: self.backend.clone(),
+    //         engine_manager: self.engine_manager.clone(),
+    //         region_alive_keepers: self.region_alive_keepers.clone(),
+    //     }) as _
+    // }
 
     async fn iter_remote_catalogs(
         &self,
@@ -108,7 +127,14 @@ impl RemoteCatalogManager {
 
             increment_gauge!(crate::metrics::METRIC_CATALOG_MANAGER_CATALOG_COUNT, 1.0);
 
-            joins.push(self.initiate_schemas(node_id, backend, engine_manager, catalog_name));
+            let region_alive_keepers = self.region_alive_keepers.clone();
+            joins.push(self.initiate_schemas(
+                node_id,
+                backend,
+                engine_manager,
+                catalog_name,
+                region_alive_keepers,
+            ));
         }
 
         futures::future::try_join_all(joins).await?;
@@ -120,7 +146,20 @@ impl RemoteCatalogManager {
         &self,
         catalog_name: &str,
         schema_name: &str,
-    ) -> Result<()> {
+    ) -> Result<CatalogProviderRef> {
+        let schema_provider = new_schema_provider(
+            self.node_id,
+            self.backend.clone(),
+            self.engine_manager.clone(),
+            catalog_name,
+            schema_name,
+        );
+
+        let catalog_provider = self.new_catalog_provider(catalog_name);
+        catalog_provider
+            .register_schema(schema_name.to_string(), schema_provider.clone())
+            .await?;
+
         let schema_key = SchemaKey {
             catalog_name: catalog_name.to_string(),
             schema_name: schema_name.to_string(),
@@ -411,6 +450,23 @@ impl RemoteCatalogManager {
         Ok(())
     }
 }
+// fn new_schema_provider(
+//     node_id: u64,
+//     backend: KvBackendRef,
+//     engine_manager: TableEngineManagerRef,
+//     catalog_name: &str,
+//     schema_name: &str,
+//     region_alive_keepers: Arc<RegionAliveKeepers>,
+// ) -> SchemaProviderRef {
+//     Arc::new(RemoteSchemaProvider {
+//         catalog_name: catalog_name.to_string(),
+//         schema_name: schema_name.to_string(),
+//         node_id,
+//         backend,
+//         engine_manager,
+//         region_alive_keepers,
+//     }) as _
+// }
 
 async fn iter_remote_schemas<'a>(
     backend: &'a KvBackendRef,
@@ -661,7 +717,22 @@ impl CatalogManager for RemoteCatalogManager {
             1.0,
             &[crate::metrics::db_label(&catalog_name, &schema_name)],
         );
-        Ok(result.is_none())
+
+        if let Some(table) = result.as_ref() {
+            let table_info = table.table_info();
+            let table_ident = TableIdent {
+                catalog: request.catalog,
+                schema: request.schema,
+                table: request.table_name,
+                table_id: table_info.ident.table_id,
+                engine: table_info.meta.engine.clone(),
+            };
+            self.region_alive_keepers
+                .deregister_table(&table_ident)
+                .await;
+        }
+
+        Ok(true)
     }
 
     async fn register_schema(&self, request: RegisterSchemaRequest) -> Result<bool> {

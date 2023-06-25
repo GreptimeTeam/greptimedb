@@ -27,9 +27,11 @@ use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::vectors::StringVector;
 use serde::Serializer;
-use table::engine::{EngineContext, TableEngine, TableReference};
+use table::engine::{CloseTableResult, EngineContext, TableEngine, TableReference};
 use table::metadata::TableId;
-use table::requests::{AlterTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest};
+use table::requests::{
+    AlterTableRequest, CloseTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest,
+};
 use table::test_util::MemTable;
 use table::TableRef;
 use tokio::sync::RwLock;
@@ -183,6 +185,8 @@ impl TableEngine for MockTableEngine {
         let table_name = request.table_name.clone();
         let catalog_name = request.catalog_name.clone();
         let schema_name = request.schema_name.clone();
+        let table_full_name =
+            TableReference::full(&catalog_name, &schema_name, &table_name).to_string();
 
         let default_table_id = "0".to_owned();
         let table_id = TableId::from_str(
@@ -211,7 +215,7 @@ impl TableEngine for MockTableEngine {
         )) as Arc<_>;
 
         let mut tables = self.tables.write().await;
-        tables.insert(table_name, table.clone() as TableRef);
+        tables.insert(table_full_name, table.clone() as TableRef);
         Ok(table)
     }
 
@@ -261,6 +265,19 @@ impl TableEngine for MockTableEngine {
         _request: DropTableRequest,
     ) -> table::Result<bool> {
         unimplemented!()
+    }
+
+    async fn close_table(
+        &self,
+        _ctx: &EngineContext,
+        request: CloseTableRequest,
+    ) -> table::Result<CloseTableResult> {
+        let _ = self
+            .tables
+            .write()
+            .await
+            .remove(&request.table_ref().to_string());
+        Ok(CloseTableResult::Released(vec![]))
     }
 
     async fn close(&self) -> table::Result<()> {

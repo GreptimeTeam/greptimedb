@@ -14,6 +14,7 @@
 
 #![feature(let_chains)]
 
+pub mod dataframe;
 pub mod datafusion;
 pub mod dist_plan;
 pub mod error;

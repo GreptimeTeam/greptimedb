@@ -94,29 +94,8 @@ fn build_scan_plan<T: FileOpener + Send + 'static>(
     projection: Option<&Vec<usize>>,
     limit: Option<usize>,
 ) -> Result<PhysicalPlanRef> {
-    let stream = FileStream::new(
-        &FileScanConfig {
-            object_store_url: ObjectStoreUrl::parse("empty://").unwrap(), // won't be used
-            file_schema,
-            file_groups: vec![files
-                .iter()
-                .map(|filename| PartitionedFile::new(filename.to_string(), 0))
-                .collect::<Vec<_>>()],
-            statistics: Default::default(),
-            projection: projection.cloned(),
-            limit,
-            table_partition_cols: vec![],
-            output_ordering: None,
-            infinite_source: false,
-        },
-        0, // partition: hard-code
-        opener,
-        &ExecutionPlanMetricsSet::new(),
-    )
-    .context(error::BuildStreamSnafu)?;
-    let adapter = RecordBatchStreamAdapter::try_new(Box::pin(stream))
-        .context(error::BuildStreamAdapterSnafu)?;
-    Ok(Arc::new(StreamScanAdapter::new(Box::pin(adapter))))
+    let adapter = build_record_batch_stream(opener, file_schema, files, projection, limit)?;
+    Ok(Arc::new(StreamScanAdapter::new(adapter)))
 }
 
 fn build_record_batch_stream<T: FileOpener + Send + 'static>(
@@ -382,6 +361,7 @@ pub fn create_physical_plan(
         Format::Csv(format) => new_csv_scan_plan(ctx, config, format),
         Format::Json(format) => new_json_scan_plan(ctx, config, format),
         Format::Parquet(format) => new_parquet_scan_plan(ctx, config, format),
+        _ => error::UnsupportedFormatSnafu { format: *format }.fail(),
     }
 }
 
@@ -394,5 +374,6 @@ pub fn create_stream(
         Format::Csv(format) => new_csv_stream(ctx, config, format),
         Format::Json(format) => new_json_stream(ctx, config, format),
         Format::Parquet(format) => new_parquet_stream(ctx, config, format),
+        _ => error::UnsupportedFormatSnafu { format: *format }.fail(),
     }
 }

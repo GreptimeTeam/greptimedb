@@ -11,7 +11,6 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
 use std::any::Any;
 use std::net::SocketAddr;
 use std::string::FromUtf8Error;
@@ -23,6 +22,7 @@ use base64::DecodeError;
 use catalog;
 use common_error::prelude::*;
 use common_telemetry::logging;
+use datatypes::prelude::ConcreteDataType;
 use query::parser::PromQuery;
 use serde_json::json;
 use snafu::Location;
@@ -71,6 +71,12 @@ pub enum Error {
     #[snafu(display("Failed to execute query: {}, source: {}", query, source))]
     ExecuteQuery {
         query: String,
+        location: Location,
+        source: BoxedError,
+    },
+
+    #[snafu(display("Failed to execute plan, source: {}", source))]
+    ExecutePlan {
         location: Location,
         source: BoxedError,
     },
@@ -250,6 +256,12 @@ pub enum Error {
         source: query::error::Error,
     },
 
+    #[snafu(display("Failed to get param types, source: {source}, location: {location}"))]
+    GetPreparedStmtParams {
+        source: query::error::Error,
+        location: Location,
+    },
+
     #[snafu(display("{}", reason))]
     UnexpectedResult { reason: String, location: Location },
 
@@ -269,14 +281,42 @@ pub enum Error {
 
     #[cfg(feature = "pprof")]
     #[snafu(display("Failed to dump pprof data, source: {}", source))]
-    DumpPprof {
-        #[snafu(backtrace)]
-        source: common_pprof::Error,
-    },
+    DumpPprof { source: common_pprof::Error },
 
     #[snafu(display("Failed to update jemalloc metrics, source: {source}, location: {location}"))]
     UpdateJemallocMetrics {
         source: tikv_jemalloc_ctl::Error,
+        location: Location,
+    },
+
+    #[snafu(display("DataFrame operation error, source: {source}, location: {location}"))]
+    DataFrame {
+        source: datafusion::error::DataFusionError,
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Failed to replace params with values in prepared statement, source: {source}, location: {location}"
+    ))]
+    ReplacePreparedStmtParams {
+        source: query::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to convert scalar value, source: {source}, location: {location}"))]
+    ConvertScalarValue {
+        source: datatypes::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Expected type: {:?}, actual: {:?}, location: {location}",
+        expected,
+        actual
+    ))]
+    PreparedStmtTypeMismatch {
+        expected: ConcreteDataType,
+        actual: opensrv_mysql::ColumnType,
         location: Location,
     },
 }
@@ -303,6 +343,7 @@ impl ErrorExt for Error {
             InsertScript { source, .. }
             | ExecuteScript { source, .. }
             | ExecuteQuery { source, .. }
+            | ExecutePlan { source, .. }
             | ExecuteGrpcQuery { source, .. }
             | CheckDatabaseValidity { source, .. } => source.status_code(),
 
@@ -317,6 +358,8 @@ impl ErrorExt for Error {
             | InvalidPromRemoteRequest { .. }
             | InvalidFlightTicket { .. }
             | InvalidPrepareStatement { .. }
+            | DataFrame { .. }
+            | PreparedStmtTypeMismatch { .. }
             | TimePrecision { .. } => StatusCode::InvalidArguments,
 
             InfluxdbLinesWrite { source, .. } | PromSeriesWrite { source, .. } => {
@@ -340,7 +383,9 @@ impl ErrorExt for Error {
             DumpProfileData { source, .. } => source.status_code(),
             InvalidFlushArgument { .. } => StatusCode::InvalidArguments,
 
-            ParsePromQL { source, .. } => source.status_code(),
+            ReplacePreparedStmtParams { source, .. }
+            | GetPreparedStmtParams { source, .. }
+            | ParsePromQL { source, .. } => source.status_code(),
             Other { source, .. } => source.status_code(),
 
             UnexpectedResult { .. } => StatusCode::Unexpected,
@@ -359,6 +404,8 @@ impl ErrorExt for Error {
             DumpPprof { source, .. } => source.status_code(),
 
             UpdateJemallocMetrics { .. } => StatusCode::Internal,
+
+            ConvertScalarValue { source, .. } => source.status_code(),
         }
     }
 

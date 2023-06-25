@@ -29,6 +29,7 @@ mod manager;
 
 #[cfg(feature = "testing")]
 pub mod mock;
+pub mod region_alive_keeper;
 
 #[derive(Debug, Clone)]
 pub struct Kv(pub Vec<u8>, pub Vec<u8>);

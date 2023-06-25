@@ -14,6 +14,7 @@
 
 use std::any::Any;
 
+use common_datasource::file_format::Format;
 use common_error::prelude::*;
 use datafusion::parquet;
 use datatypes::arrow::error::ArrowError;
@@ -279,6 +280,13 @@ pub enum Error {
         source: query::error::Error,
     },
 
+    #[snafu(display("Failed to read table: {table_name}, source: {source}"))]
+    ReadTable {
+        table_name: String,
+        #[snafu(backtrace)]
+        source: query::error::Error,
+    },
+
     #[snafu(display("Failed to execute logical plan, source: {}", source))]
     ExecLogicalPlan {
         #[snafu(backtrace)]
@@ -363,9 +371,18 @@ pub enum Error {
     },
 
     // TODO(ruihang): merge all query execution error kinds
-    #[snafu(display("failed to execute PromQL query {}, source: {}", query, source))]
+    #[snafu(display("Failed to execute PromQL query {}, source: {}", query, source))]
     ExecutePromql {
         query: String,
+        #[snafu(backtrace)]
+        source: servers::error::Error,
+    },
+
+    #[snafu(display(
+        "Failed to create logical plan for prometheus query, source: {}",
+        source
+    ))]
+    PrometheusRemoteQueryPlan {
         #[snafu(backtrace)]
         source: servers::error::Error,
     },
@@ -427,6 +444,9 @@ pub enum Error {
         source: common_datasource::error::Error,
     },
 
+    #[snafu(display("Unsupported format: {:?}", format))]
+    UnsupportedFormat { location: Location, format: Format },
+
     #[snafu(display("Failed to parse file format, source: {}", source))]
     ParseFileFormat {
         #[snafu(backtrace)]
@@ -484,6 +504,12 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to read orc schema, source: {}", source))]
+    ReadOrc {
+        source: common_datasource::error::Error,
+        location: Location,
+    },
+
     #[snafu(display("Failed to build parquet record batch stream, source: {}", source))]
     BuildParquetRecordBatchStream {
         location: Location,
@@ -532,6 +558,13 @@ pub enum Error {
         #[snafu(backtrace)]
         source: query::error::Error,
     },
+
+    #[snafu(display("Invalid COPY parameter, key: {}, value: {}", key, value))]
+    InvalidCopyParameter {
+        key: String,
+        value: String,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -552,14 +585,16 @@ impl ErrorExt for Error {
             | Error::InvalidSchema { .. }
             | Error::PrepareImmutableTable { .. }
             | Error::BuildCsvConfig { .. }
-            | Error::ProjectSchema { .. } => StatusCode::InvalidArguments,
+            | Error::ProjectSchema { .. }
+            | Error::UnsupportedFormat { .. } => StatusCode::InvalidArguments,
 
             Error::NotSupported { .. } => StatusCode::Unsupported,
 
             Error::HandleHeartbeatResponse { source, .. } => source.status_code(),
 
             Error::RuntimeResource { source, .. } => source.status_code(),
-            Error::ExecutePromql { source, .. } => source.status_code(),
+            Error::PrometheusRemoteQueryPlan { source, .. }
+            | Error::ExecutePromql { source, .. } => source.status_code(),
 
             Error::SqlExecIntercepted { source, .. } => source.status_code(),
             Error::StartServer { source, .. } => source.status_code(),
@@ -621,6 +656,7 @@ impl ErrorExt for Error {
             Error::ExecuteStatement { source, .. }
             | Error::PlanStatement { source }
             | Error::ParseQuery { source }
+            | Error::ReadTable { source, .. }
             | Error::ExecLogicalPlan { source }
             | Error::DescribeStatement { source } => source.status_code(),
 
@@ -642,13 +678,16 @@ impl ErrorExt for Error {
 
             Error::TableScanExec { source, .. } => source.status_code(),
 
-            Error::ReadObject { .. } | Error::ReadParquet { .. } => StatusCode::StorageUnavailable,
+            Error::ReadObject { .. } | Error::ReadParquet { .. } | Error::ReadOrc { .. } => {
+                StatusCode::StorageUnavailable
+            }
 
             Error::ListObjects { source }
             | Error::ParseUrl { source }
             | Error::BuildBackend { source } => source.status_code(),
 
             Error::WriteParquet { source, .. } => source.status_code(),
+            Error::InvalidCopyParameter { .. } => StatusCode::InvalidArguments,
         }
     }
 

@@ -14,6 +14,7 @@
 
 pub mod csv;
 pub mod json;
+pub mod orc;
 pub mod parquet;
 #[cfg(test)]
 pub mod tests;
@@ -35,12 +36,12 @@ use datafusion::physical_plan::SendableRecordBatchStream;
 use futures::StreamExt;
 use object_store::ObjectStore;
 use snafu::ResultExt;
-use tokio_util::compat::FuturesAsyncWriteCompatExt;
 
 use self::csv::CsvFormat;
 use self::json::JsonFormat;
+use self::orc::OrcFormat;
 use self::parquet::ParquetFormat;
-use crate::buffered_writer::{BufferedWriter, DfRecordBatchEncoder};
+use crate::buffered_writer::{DfRecordBatchEncoder, LazyBufferedWriter};
 use crate::compression::CompressionType;
 use crate::error::{self, Result};
 use crate::share_buffer::SharedBuffer;
@@ -57,6 +58,18 @@ pub enum Format {
     Csv(CsvFormat),
     Json(JsonFormat),
     Parquet(ParquetFormat),
+    Orc(OrcFormat),
+}
+
+impl Format {
+    pub fn suffix(&self) -> &'static str {
+        match self {
+            Format::Csv(_) => ".csv",
+            Format::Json(_) => ".json",
+            Format::Parquet(_) => ".parquet",
+            &Format::Orc(_) => ".orc",
+        }
+    }
 }
 
 impl TryFrom<&HashMap<String, String>> for Format {
@@ -72,6 +85,7 @@ impl TryFrom<&HashMap<String, String>> for Format {
             "CSV" => Ok(Self::Csv(CsvFormat::try_from(options)?)),
             "JSON" => Ok(Self::Json(JsonFormat::try_from(options)?)),
             "PARQUET" => Ok(Self::Parquet(ParquetFormat::default())),
+            "ORC" => Ok(Self::Orc(OrcFormat)),
             _ => error::UnsupportedFormatSnafu { format: &format }.fail(),
         }
     }
@@ -181,15 +195,14 @@ pub async fn stream_to_file<T: DfRecordBatchEncoder, U: Fn(SharedBuffer) -> T>(
     threshold: usize,
     encoder_factory: U,
 ) -> Result<usize> {
-    let writer = store
-        .writer(path)
-        .await
-        .context(error::WriteObjectSnafu { path })?
-        .compat_write();
-
     let buffer = SharedBuffer::with_capacity(threshold);
     let encoder = encoder_factory(buffer.clone());
-    let mut writer = BufferedWriter::new(threshold, buffer, encoder, writer);
+    let mut writer = LazyBufferedWriter::new(threshold, buffer, encoder, path, |path| async {
+        store
+            .writer(&path)
+            .await
+            .context(error::WriteObjectSnafu { path })
+    });
 
     let mut rows = 0;
 
@@ -201,8 +214,7 @@ pub async fn stream_to_file<T: DfRecordBatchEncoder, U: Fn(SharedBuffer) -> T>(
 
     // Flushes all pending writes
     writer.try_flush(true).await?;
-
-    writer.close().await?;
+    writer.close_inner_writer().await?;
 
     Ok(rows)
 }

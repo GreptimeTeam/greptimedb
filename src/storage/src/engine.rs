@@ -89,7 +89,7 @@ impl<S: LogStore> StorageEngine for EngineImpl<S> {
 
     async fn drop_region(&self, _ctx: &EngineContext, region: Self::Region) -> Result<()> {
         region.drop_region().await?;
-        self.inner.remove_reigon(region.name());
+        self.inner.remove_region(region.name());
         Ok(())
     }
 
@@ -395,7 +395,6 @@ impl<S: LogStore> EngineInner<S> {
                 name,
                 &self.config,
                 opts.ttl,
-                opts.compaction_time_window,
             )
             .await?;
 
@@ -441,7 +440,6 @@ impl<S: LogStore> EngineInner<S> {
                 &region_name,
                 &self.config,
                 opts.ttl,
-                opts.compaction_time_window,
             )
             .await?;
 
@@ -462,7 +460,7 @@ impl<S: LogStore> EngineInner<S> {
         self.regions.get_region(name)
     }
 
-    fn remove_reigon(&self, name: &str) {
+    fn remove_region(&self, name: &str) {
         self.regions.remove(name)
     }
 
@@ -473,7 +471,6 @@ impl<S: LogStore> EngineInner<S> {
         region_name: &str,
         config: &EngineConfig,
         region_ttl: Option<Duration>,
-        compaction_time_window: Option<i64>,
     ) -> Result<StoreConfig<S>> {
         let parent_dir = util::normalize_dir(parent_dir);
 
@@ -504,7 +501,6 @@ impl<S: LogStore> EngineInner<S> {
             engine_config: self.config.clone(),
             file_purger: self.file_purger.clone(),
             ttl,
-            compaction_time_window,
             write_buffer_size: write_buffer_size
                 .unwrap_or(self.config.region_write_buffer_size.as_bytes() as usize),
         })

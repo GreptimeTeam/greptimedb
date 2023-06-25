@@ -1228,6 +1228,45 @@ async fn test_execute_copy_from_s3(instance: Arc<dyn MockInstance>) {
 }
 
 #[apply(both_instances_cases)]
+async fn test_execute_copy_from_orc(instance: Arc<dyn MockInstance>) {
+    logging::init_default_ut_logging();
+    let instance = instance.frontend();
+
+    // setups
+    execute_sql(
+        &instance,
+        "create table demo(double_a double, a float, b boolean, str_direct string, d string, e string, f string, int_short_repeated int, int_neg_short_repeated int, int_delta int, int_neg_delta int, int_direct int, int_neg_direct int, bigint_direct bigint, bigint_neg_direct bigint, bigint_other bigint, utf8_increase string, utf8_decrease string, timestamp_simple timestamp(9) time index, date_simple date);",
+    )
+    .await;
+
+    let filepath = get_data_dir("../src/common/datasource/tests/orc/test.orc")
+        .canonicalize()
+        .unwrap()
+        .display()
+        .to_string();
+
+    let output = execute_sql(
+        &instance,
+        &format!("copy demo from '{}' WITH(FORMAT='orc');", &filepath),
+    )
+    .await;
+
+    assert!(matches!(output, Output::AffectedRows(5)));
+
+    let output = execute_sql(&instance, "select * from demo order by double_a;").await;
+    let expected = r#"+----------+-----+-------+------------+-----+-----+-------+--------------------+------------------------+-----------+---------------+------------+----------------+---------------+-------------------+--------------+---------------+---------------+----------------------------+-------------+
+| double_a | a   | b     | str_direct | d   | e   | f     | int_short_repeated | int_neg_short_repeated | int_delta | int_neg_delta | int_direct | int_neg_direct | bigint_direct | bigint_neg_direct | bigint_other | utf8_increase | utf8_decrease | timestamp_simple           | date_simple |
++----------+-----+-------+------------+-----+-----+-------+--------------------+------------------------+-----------+---------------+------------+----------------+---------------+-------------------+--------------+---------------+---------------+----------------------------+-------------+
+| 1.0      | 1.0 | true  | a          | a   | ddd | aaaaa | 5                  | -5                     | 1         | 5             | 1          | -1             | 1             | -1                | 5            | a             | eeeee         | 2023-04-01T20:15:30.002    | 2023-04-01  |
+| 2.0      | 2.0 | false | cccccc     | bb  | cc  | bbbbb | 5                  | -5                     | 2         | 4             | 6          | -6             | 6             | -6                | -5           | bb            | dddd          | 2021-08-22T07:26:44.525777 | 2023-03-01  |
+| 3.0      |     |       |            |     |     |       |                    |                        |           |               |            |                |               |                   | 1            | ccc           | ccc           | 2023-01-01T00:00:00        | 2023-01-01  |
+| 4.0      | 4.0 | true  | ddd        | ccc | bb  | ccccc | 5                  | -5                     | 4         | 2             | 3          | -3             | 3             | -3                | 5            | dddd          | bb            | 2023-02-01T00:00:00        | 2023-02-01  |
+| 5.0      | 5.0 | false | ee         | ddd | a   | ddddd | 5                  | -5                     | 5         | 1             | 2          | -2             | 2             | -2                | 5            | eeeee         | a             | 2023-03-01T00:00:00        | 2023-03-01  |
++----------+-----+-------+------------+-----+-----+-------+--------------------+------------------------+-----------+---------------+------------+----------------+---------------+-------------------+--------------+---------------+---------------+----------------------------+-------------+"#;
+    check_output_stream(output, expected).await;
+}
+
+#[apply(both_instances_cases)]
 async fn test_cast_type_issue_1594(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
 

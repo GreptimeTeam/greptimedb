@@ -17,6 +17,7 @@
 mod error;
 mod planner;
 
+use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -36,13 +37,13 @@ use datafusion::physical_plan::ExecutionPlan;
 use datafusion_common::ResolvedTableReference;
 use datafusion_expr::{DmlStatement, LogicalPlan as DfLogicalPlan, WriteOp};
 use datatypes::prelude::VectorRef;
-use datatypes::schema::Schema;
 use futures_util::StreamExt;
 use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
 use table::requests::{DeleteRequest, InsertRequest};
 use table::TableRef;
 
+use crate::dataframe::DataFrame;
 pub use crate::datafusion::planner::DfContextProviderAdapter;
 use crate::error::{
     CatalogSnafu, CreateRecordBatchSnafu, DataFusionSnafu, MissingTimestampColumnSnafu,
@@ -54,7 +55,7 @@ use crate::physical_optimizer::PhysicalOptimizer;
 use crate::physical_planner::PhysicalPlanner;
 use crate::plan::LogicalPlan;
 use crate::planner::{DfLogicalPlanner, LogicalPlanner};
-use crate::query_engine::{QueryEngineContext, QueryEngineState};
+use crate::query_engine::{DescribeResult, QueryEngineContext, QueryEngineState};
 use crate::{metrics, QueryEngine};
 
 pub struct DatafusionQueryEngine {
@@ -190,6 +191,10 @@ impl DatafusionQueryEngine {
 
 #[async_trait]
 impl QueryEngine for DatafusionQueryEngine {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
     fn planner(&self) -> Arc<dyn LogicalPlanner> {
         Arc::new(DfLogicalPlanner::new(self.state.clone()))
     }
@@ -198,11 +203,12 @@ impl QueryEngine for DatafusionQueryEngine {
         "datafusion"
     }
 
-    async fn describe(&self, plan: LogicalPlan) -> Result<Schema> {
-        // TODO(sunng87): consider cache optmised logical plan between describe
-        // and execute
+    async fn describe(&self, plan: LogicalPlan) -> Result<DescribeResult> {
         let optimised_plan = self.optimize(&plan)?;
-        optimised_plan.schema()
+        Ok(DescribeResult {
+            schema: optimised_plan.schema()?,
+            logical_plan: optimised_plan,
+        })
     }
 
     async fn execute(&self, plan: LogicalPlan, query_ctx: QueryContextRef) -> Result<Output> {
@@ -231,6 +237,18 @@ impl QueryEngine for DatafusionQueryEngine {
 
     fn register_function(&self, func: FunctionRef) {
         self.state.register_udf(create_udf(func));
+    }
+
+    fn read_table(&self, table: TableRef) -> Result<DataFrame> {
+        Ok(DataFrame::DataFusion(
+            self.state
+                .read_table(table)
+                .context(error::DatafusionSnafu {
+                    msg: "Fail to create dataframe for table",
+                })
+                .map_err(BoxedError::new)
+                .context(QueryExecutionSnafu)?,
+        ))
     }
 }
 
@@ -357,18 +375,21 @@ impl QueryExecutor for DatafusionQueryEngine {
 
 #[cfg(test)]
 mod tests {
+    use std::borrow::Cow::Borrowed;
     use std::sync::Arc;
 
     use catalog::{CatalogManager, RegisterTableRequest};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, NUMBERS_TABLE_ID};
     use common_query::Output;
     use common_recordbatch::util;
+    use datafusion::prelude::{col, lit};
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
-    use datatypes::vectors::{UInt64Vector, VectorRef};
+    use datatypes::vectors::{Helper, UInt32Vector, UInt64Vector, VectorRef};
     use session::context::QueryContext;
     use table::table::numbers::{NumbersTable, NUMBERS_TABLE_NAME};
 
+    use super::*;
     use crate::parser::QueryLanguageParser;
     use crate::query_engine::{QueryEngineFactory, QueryEngineRef};
 
@@ -447,6 +468,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_read_table() {
+        let engine = create_test_engine().await;
+
+        let engine = engine
+            .as_any()
+            .downcast_ref::<DatafusionQueryEngine>()
+            .unwrap();
+        let table = engine
+            .find_table(&ResolvedTableReference {
+                catalog: Borrowed("greptime"),
+                schema: Borrowed("public"),
+                table: Borrowed("numbers"),
+            })
+            .await
+            .unwrap();
+
+        let DataFrame::DataFusion(df) = engine.read_table(table).unwrap();
+        let df = df
+            .select_columns(&["number"])
+            .unwrap()
+            .filter(col("number").lt(lit(10)))
+            .unwrap();
+        let batches = df.collect().await.unwrap();
+        assert_eq!(1, batches.len());
+        let batch = &batches[0];
+
+        assert_eq!(1, batch.num_columns());
+        assert_eq!(batch.column(0).len(), 10);
+
+        assert_eq!(
+            Helper::try_into_vector(batch.column(0)).unwrap(),
+            Arc::new(UInt32Vector::from_slice([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])) as VectorRef
+        );
+    }
+
+    #[tokio::test]
     async fn test_describe() {
         let engine = create_test_engine().await;
         let sql = "select sum(number) from numbers limit 20";
@@ -459,7 +516,10 @@ mod tests {
             .await
             .unwrap();
 
-        let schema = engine.describe(plan).await.unwrap();
+        let DescribeResult {
+            schema,
+            logical_plan,
+        } = engine.describe(plan).await.unwrap();
 
         assert_eq!(
             schema.column_schemas()[0],
@@ -469,5 +529,6 @@ mod tests {
                 true
             )
         );
+        assert_eq!("Limit: skip=0, fetch=20\n  Aggregate: groupBy=[[]], aggr=[[SUM(numbers.number)]]\n    TableScan: numbers projection=[number]", format!("{}", logical_plan.display_indent()));
     }
 }

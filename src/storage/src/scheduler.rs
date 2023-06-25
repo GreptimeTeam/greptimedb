@@ -312,7 +312,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::AtomicI32;
+    use std::sync::atomic::{AtomicBool, AtomicI32};
     use std::time::Duration;
 
     use store_api::storage::RegionId;
@@ -564,7 +564,9 @@ mod tests {
         let task_scheduled = Arc::new(AtomicI32::new(0));
         let task_scheduled_cloned = task_scheduled.clone();
 
-        common_runtime::spawn_write(async move {
+        let scheduling = Arc::new(AtomicBool::new(true));
+        let scheduling_clone = scheduling.clone();
+        let handle = common_runtime::spawn_write(async move {
             for i in 0..10000 {
                 if let Ok(res) = scheduler_cloned.schedule(MockRequest {
                     region_id: i as RegionId,
@@ -573,12 +575,19 @@ mod tests {
                         task_scheduled_cloned.fetch_add(1, Ordering::Relaxed);
                     }
                 }
+
+                if !scheduling_clone.load(Ordering::Relaxed) {
+                    break;
+                }
             }
         });
 
-        tokio::time::sleep(Duration::from_millis(1)).await;
         scheduler.stop(true).await.unwrap();
+        scheduling.store(false, Ordering::Relaxed);
+
         let finished = finished.load(Ordering::Relaxed);
+        handle.await.unwrap();
+
         assert_eq!(finished, task_scheduled.load(Ordering::Relaxed));
     }
 }

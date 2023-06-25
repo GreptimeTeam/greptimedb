@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use datafusion_expr::{LogicalPlan, UserDefinedLogicalNode};
+use datafusion_expr::{Expr, LogicalPlan, UserDefinedLogicalNode};
 use promql::extension_plan::{
     EmptyMetric, InstantManipulate, RangeManipulate, SeriesDivide, SeriesNormalize,
 };
@@ -37,7 +37,8 @@ impl Categorizer {
     pub fn check_plan(plan: &LogicalPlan) -> Commutativity {
         match plan {
             LogicalPlan::Projection(_) => Commutativity::Unimplemented,
-            LogicalPlan::Filter(_) => Commutativity::Commutative,
+            // TODO(ruihang): Change this to Commutative once Like is supported in substrait
+            LogicalPlan::Filter(filter) => Self::check_expr(&filter.predicate),
             LogicalPlan::Window(_) => Commutativity::Unimplemented,
             LogicalPlan::Aggregate(_) => {
                 // check all children exprs and uses the strictest level
@@ -83,6 +84,50 @@ impl Categorizer {
                 Commutativity::Commutative
             }
             _ => Commutativity::Unsupported,
+        }
+    }
+
+    pub fn check_expr(expr: &Expr) -> Commutativity {
+        match expr {
+            Expr::Alias(_, _)
+            | Expr::Column(_)
+            | Expr::ScalarVariable(_, _)
+            | Expr::Literal(_)
+            | Expr::BinaryExpr(_)
+            | Expr::Not(_)
+            | Expr::IsNotNull(_)
+            | Expr::IsNull(_)
+            | Expr::IsTrue(_)
+            | Expr::IsFalse(_)
+            | Expr::IsNotTrue(_)
+            | Expr::IsNotFalse(_)
+            | Expr::Negative(_)
+            | Expr::Between(_)
+            | Expr::Sort(_)
+            | Expr::Exists(_) => Commutativity::Commutative,
+
+            Expr::Like(_)
+            | Expr::ILike(_)
+            | Expr::SimilarTo(_)
+            | Expr::IsUnknown(_)
+            | Expr::IsNotUnknown(_)
+            | Expr::GetIndexedField(_)
+            | Expr::Case(_)
+            | Expr::Cast(_)
+            | Expr::TryCast(_)
+            | Expr::ScalarFunction(_)
+            | Expr::ScalarUDF(_)
+            | Expr::AggregateFunction(_)
+            | Expr::WindowFunction(_)
+            | Expr::AggregateUDF(_)
+            | Expr::InList(_)
+            | Expr::InSubquery(_)
+            | Expr::ScalarSubquery(_)
+            | Expr::Wildcard => Commutativity::Unimplemented,
+            Expr::QualifiedWildcard { .. }
+            | Expr::GroupingSet(_)
+            | Expr::Placeholder(_)
+            | Expr::OuterReferenceColumn(_, _) => Commutativity::Unimplemented,
         }
     }
 }

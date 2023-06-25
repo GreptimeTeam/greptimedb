@@ -35,6 +35,7 @@ jobs:
   build-macos:
     name: Build macOS binary
     strategy:
+      fail-fast: false
       matrix:
         # The file format is greptime-<os>-<arch>
         include:
@@ -129,6 +130,7 @@ jobs:
   build-linux:
     name: Build linux binary
     strategy:
+      fail-fast: false
       matrix:
         # The file format is greptime-<os>-<arch>
         include:

@@ -15,10 +15,25 @@
 use std::collections::HashMap;
 
 use sqlparser::ast::ObjectName;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Copy {
+    CopyTable(CopyTable),
+    CopyDatabase(CopyDatabaseArgument),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CopyTable {
     To(CopyTableArgument),
     From(CopyTableArgument),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CopyDatabaseArgument {
+    pub database_name: ObjectName,
+    pub with: HashMap<String, String>,
+    pub connection: HashMap<String, String>,
+    pub location: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

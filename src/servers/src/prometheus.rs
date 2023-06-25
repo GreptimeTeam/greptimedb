@@ -24,8 +24,11 @@ use api::v1::{InsertRequest as GrpcInsertRequest, InsertRequests};
 use common_grpc::writer::{LinesWriter, Precision};
 use common_recordbatch::{RecordBatch, RecordBatches};
 use common_time::timestamp::TimeUnit;
+use datafusion::prelude::{col, lit, regexp_match, Expr};
 use datatypes::prelude::{ConcreteDataType, Value};
 use openmetrics_parser::{MetricsExposition, PrometheusType, PrometheusValue};
+use query::dataframe::DataFrame;
+use query::plan::LogicalPlan;
 use snafu::{ensure, OptionExt, ResultExt};
 use snap::raw::{Decoder, Encoder};
 
@@ -40,14 +43,11 @@ pub struct Metrics {
     pub exposition: MetricsExposition<PrometheusType, PrometheusValue>,
 }
 
-/// Generate a sql from a remote request query
-/// TODO(dennis): maybe use logical plan in future to prevent sql injection
-pub fn query_to_sql(q: &Query) -> Result<(String, String)> {
-    let start_timestamp_ms = q.start_timestamp_ms;
-    let end_timestamp_ms = q.end_timestamp_ms;
-
+/// Get table name from remote query
+pub fn table_name(q: &Query) -> Result<String> {
     let label_matches = &q.matchers;
-    let table_name = label_matches
+
+    label_matches
         .iter()
         .find_map(|m| {
             if m.name == METRIC_NAME_LABEL {
@@ -58,13 +58,22 @@ pub fn query_to_sql(q: &Query) -> Result<(String, String)> {
         })
         .context(error::InvalidPromRemoteRequestSnafu {
             msg: "missing '__name__' label in timeseries",
-        })?;
+        })
+}
 
-    let mut conditions: Vec<String> = Vec::with_capacity(label_matches.len());
+/// Create a DataFrame from a remote Query
+pub fn query_to_plan(dataframe: DataFrame, q: &Query) -> Result<LogicalPlan> {
+    let DataFrame::DataFusion(dataframe) = dataframe;
 
-    conditions.push(format!(
-        "{TIMESTAMP_COLUMN_NAME}>={start_timestamp_ms} AND {TIMESTAMP_COLUMN_NAME}<={end_timestamp_ms}",
-    ));
+    let start_timestamp_ms = q.start_timestamp_ms;
+    let end_timestamp_ms = q.end_timestamp_ms;
+
+    let label_matches = &q.matchers;
+
+    let mut conditions = Vec::with_capacity(label_matches.len() + 1);
+
+    conditions.push(col(TIMESTAMP_COLUMN_NAME).gt_eq(lit(start_timestamp_ms)));
+    conditions.push(col(TIMESTAMP_COLUMN_NAME).lt_eq(lit(end_timestamp_ms)));
 
     for m in label_matches {
         let name = &m.name;
@@ -81,28 +90,30 @@ pub fn query_to_sql(q: &Query) -> Result<(String, String)> {
 
         match m_type {
             MatcherType::Eq => {
-                conditions.push(format!("{name}='{value}'"));
+                conditions.push(col(name).eq(lit(value)));
             }
             MatcherType::Neq => {
-                conditions.push(format!("{name}!='{value}'"));
+                conditions.push(col(name).not_eq(lit(value)));
             }
             // Case sensitive regexp match
             MatcherType::Re => {
-                conditions.push(format!("{name}~'{value}'"));
+                conditions.push(regexp_match(vec![col(name), lit(value)]).is_not_null());
             }
             // Case sensitive regexp not match
             MatcherType::Nre => {
-                conditions.push(format!("{name}!~'{value}'"));
+                conditions.push(regexp_match(vec![col(name), lit(value)]).is_null());
             }
         }
     }
 
-    let conditions = conditions.join(" AND ");
+    // Safety: conditions MUST not be empty, reduce always return Some(expr).
+    let conditions = conditions.into_iter().reduce(Expr::and).unwrap();
 
-    Ok((
-        table_name.to_string(),
-        format!("select * from {table_name} where {conditions} order by {TIMESTAMP_COLUMN_NAME}",),
-    ))
+    let dataframe = dataframe
+        .filter(conditions)
+        .context(error::DataFrameSnafu)?;
+
+    Ok(LogicalPlan::DfPlan(dataframe.into_parts().1))
 }
 
 #[inline]
@@ -433,8 +444,11 @@ mod tests {
     use std::sync::Arc;
 
     use api::prometheus::remote::LabelMatcher;
+    use datafusion::prelude::SessionContext;
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::{Float64Vector, StringVector, TimestampMillisecondVector};
+    use table::table::adapter::DfTableProviderAdapter;
+    use table::test_util::MemTable;
 
     use super::*;
 
@@ -443,14 +457,14 @@ mod tests {
     const RE_TYPE: i32 = MatcherType::Re as i32;
 
     #[test]
-    fn test_query_to_sql() {
+    fn test_table_name() {
         let q = Query {
             start_timestamp_ms: 1000,
             end_timestamp_ms: 2000,
             matchers: vec![],
             ..Default::default()
         };
-        let err = query_to_sql(&q).unwrap_err();
+        let err = table_name(&q).unwrap_err();
         assert!(matches!(err, error::Error::InvalidPromRemoteRequest { .. }));
 
         let q = Query {
@@ -463,9 +477,56 @@ mod tests {
             }],
             ..Default::default()
         };
-        let (table, sql) = query_to_sql(&q).unwrap();
-        assert_eq!("test", table);
-        assert_eq!("select * from test where greptime_timestamp>=1000 AND greptime_timestamp<=2000 order by greptime_timestamp", sql);
+        assert_eq!("test", table_name(&q).unwrap());
+    }
+
+    #[test]
+    fn test_query_to_plan() {
+        let q = Query {
+            start_timestamp_ms: 1000,
+            end_timestamp_ms: 2000,
+            matchers: vec![LabelMatcher {
+                name: METRIC_NAME_LABEL.to_string(),
+                value: "test".to_string(),
+                r#type: EQ_TYPE,
+            }],
+            ..Default::default()
+        };
+
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                TIMESTAMP_COLUMN_NAME,
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                true,
+            ),
+            ColumnSchema::new(
+                FIELD_COLUMN_NAME,
+                ConcreteDataType::float64_datatype(),
+                true,
+            ),
+            ColumnSchema::new("instance", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new("job", ConcreteDataType::string_datatype(), true),
+        ]));
+        let recordbatch = RecordBatch::new(
+            schema,
+            vec![
+                Arc::new(TimestampMillisecondVector::from_vec(vec![1000])) as _,
+                Arc::new(Float64Vector::from_vec(vec![3.0])) as _,
+                Arc::new(StringVector::from(vec!["host1"])) as _,
+                Arc::new(StringVector::from(vec!["job"])) as _,
+            ],
+        )
+        .unwrap();
+
+        let ctx = SessionContext::new();
+        let table = Arc::new(MemTable::new("test", recordbatch));
+        let table_provider = Arc::new(DfTableProviderAdapter::new(table));
+
+        let dataframe = ctx.read_table(table_provider.clone()).unwrap();
+        let plan = query_to_plan(DataFrame::DataFusion(dataframe), &q).unwrap();
+        let display_string = format!("{}", plan.display_indent());
+
+        assert_eq!("Filter: ?table?.greptime_timestamp >= Int64(1000) AND ?table?.greptime_timestamp <= Int64(2000)\n  TableScan: ?table?", display_string);
 
         let q = Query {
             start_timestamp_ms: 1000,
@@ -489,9 +550,12 @@ mod tests {
             ],
             ..Default::default()
         };
-        let (table, sql) = query_to_sql(&q).unwrap();
-        assert_eq!("test", table);
-        assert_eq!("select * from test where greptime_timestamp>=1000 AND greptime_timestamp<=2000 AND job~'*prom*' AND instance!='localhost' order by greptime_timestamp", sql);
+
+        let dataframe = ctx.read_table(table_provider).unwrap();
+        let plan = query_to_plan(DataFrame::DataFusion(dataframe), &q).unwrap();
+        let display_string = format!("{}", plan.display_indent());
+
+        assert_eq!("Filter: ?table?.greptime_timestamp >= Int64(1000) AND ?table?.greptime_timestamp <= Int64(2000) AND regexp_match(?table?.job, Utf8(\"*prom*\")) IS NOT NULL AND ?table?.instance != Utf8(\"localhost\")\n  TableScan: ?table?", display_string);
     }
 
     #[test]

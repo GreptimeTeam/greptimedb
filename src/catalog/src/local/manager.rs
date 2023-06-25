@@ -473,10 +473,7 @@ impl CatalogManager for LocalCatalogManager {
                 .ident
                 .table_id;
 
-            if !self.system.deregister_table(&request, table_id).await? {
-                return Ok(false);
-            }
-
+            self.system.deregister_table(&request, table_id).await?;
             self.catalogs.deregister_table(request).await
         }
     }

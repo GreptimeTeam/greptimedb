@@ -87,10 +87,9 @@ impl FlushTester {
     async fn reopen(&mut self) {
         self.regions.clear();
         // Close the old region.
-        if let Some(base) = self.base.as_ref() {
+        if let Some(base) = self.base.take() {
             base.close().await;
         }
-        self.base = None;
         // Reopen the region.
         let mut store_config = config_util::new_store_config(
             REGION_NAME,

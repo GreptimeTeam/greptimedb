@@ -55,6 +55,9 @@ pub enum Error {
 
     #[snafu(display("Table already exists: {}", name))]
     TableExists { name: String },
+
+    #[snafu(display("Failed to deregister table: {}", name))]
+    DeregisterTable { name: String },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -64,7 +67,9 @@ impl ErrorExt for Error {
         use Error::*;
 
         match self {
-            SerializeProcedure { .. } | DeserializeProcedure { .. } => StatusCode::Internal,
+            DeregisterTable { .. } | SerializeProcedure { .. } | DeserializeProcedure { .. } => {
+                StatusCode::Internal
+            }
             InvalidRawSchema { source, .. } => source.status_code(),
             AccessCatalog { source, .. } => source.status_code(),
             CatalogNotFound { .. } | SchemaNotFound { .. } | TableExists { .. } => {

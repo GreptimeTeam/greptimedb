@@ -65,12 +65,15 @@ pub struct LevelMetas {
     levels: LevelMetaVec,
     sst_layer: AccessLayerRef,
     file_purger: FilePurgerRef,
+    /// Compaction time window in seconds
+    compaction_time_window: Option<i64>,
 }
 
 impl std::fmt::Debug for LevelMetas {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LevelMetas")
             .field("levels", &self.levels)
+            .field("compaction_time_window", &self.compaction_time_window)
             .finish()
     }
 }
@@ -82,6 +85,7 @@ impl LevelMetas {
             levels: new_level_meta_vec(),
             sst_layer,
             file_purger,
+            compaction_time_window: Default::default(),
         }
     }
 
@@ -89,6 +93,10 @@ impl LevelMetas {
     #[inline]
     pub fn level_num(&self) -> usize {
         self.levels.len()
+    }
+
+    pub fn compaction_time_window(&self) -> Option<i64> {
+        self.compaction_time_window
     }
 
     #[inline]
@@ -104,6 +112,7 @@ impl LevelMetas {
         &self,
         files_to_add: impl Iterator<Item = FileMeta>,
         files_to_remove: impl Iterator<Item = FileMeta>,
+        compaction_time_window: Option<i64>,
     ) -> LevelMetas {
         let mut merged = self.clone();
         for file in files_to_add {
@@ -117,6 +126,11 @@ impl LevelMetas {
             if let Some(removed_file) = merged.levels[level as usize].remove_file(file.file_id) {
                 removed_file.mark_deleted();
             }
+        }
+        // we only update region's compaction time window iff region's window is not set and VersionEdit's
+        // compaction time window is present.
+        if let Some(window) = compaction_time_window {
+            merged.compaction_time_window.get_or_insert(window);
         }
         merged
     }
@@ -726,6 +740,7 @@ mod tests {
             ]
             .into_iter(),
             vec![].into_iter(),
+            None,
         );
 
         assert_eq!(
@@ -740,6 +755,7 @@ mod tests {
             ]
             .into_iter(),
             vec![].into_iter(),
+            None,
         );
         assert_eq!(
             HashSet::from([file_ids[0], file_ids[1]]),
@@ -758,6 +774,7 @@ mod tests {
                 create_file_meta(file_ids[2], 0),
             ]
             .into_iter(),
+            None,
         );
         assert_eq!(
             HashSet::from([file_ids[1]]),
@@ -776,6 +793,7 @@ mod tests {
                 create_file_meta(file_ids[3], 1),
             ]
             .into_iter(),
+            None,
         );
         assert_eq!(
             HashSet::from([file_ids[1]]),

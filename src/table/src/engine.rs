@@ -28,7 +28,7 @@ use crate::TableRef;
 pub mod manager;
 
 /// Represents a resolved path to a table of the form “catalog.schema.table”
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub struct TableReference<'a> {
     pub catalog: &'a str,
     pub schema: &'a str,

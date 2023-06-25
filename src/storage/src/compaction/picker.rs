@@ -120,6 +120,7 @@ impl<S: LogStore> Picker for SimplePicker<S> {
         }
 
         let ctx = &PickerContext::with(req.compaction_time_window);
+
         for level_num in 0..levels.level_num() {
             let level = levels.level(level_num as u8);
             let (compaction_time_window, outputs) = self.strategy.pick(ctx, level);
@@ -130,8 +131,8 @@ impl<S: LogStore> Picker for SimplePicker<S> {
             }
 
             debug!(
-                "Found SST files to compact {:?} on level: {}",
-                outputs, level_num
+                "Found SST files to compact {:?} on level: {}, compaction window: {:?}",
+                outputs, level_num, compaction_time_window,
             );
             return Ok(Some(CompactionTaskImpl {
                 schema: req.schema(),

@@ -14,5 +14,6 @@
 
 mod federated;
 pub mod handler;
+mod helper;
 pub mod server;
 pub mod writer;

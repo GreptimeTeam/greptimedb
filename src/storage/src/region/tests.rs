@@ -94,6 +94,13 @@ impl<S: LogStore> TesterBase<S> {
     }
 
     pub async fn close(&self) {
+        self.region.inner.flush_scheduler.stop().await.unwrap();
+        self.region
+            .inner
+            .compaction_scheduler
+            .stop(true)
+            .await
+            .unwrap();
         self.region.close(&CloseContext::default()).await.unwrap();
         self.region.inner.wal.close().await.unwrap();
     }
@@ -556,7 +563,6 @@ async fn create_store_config(region_name: &str, root: &str) -> StoreConfig<NoopL
         engine_config: Default::default(),
         file_purger,
         ttl: None,
-        compaction_time_window: None,
         write_buffer_size: ReadableSize::mb(32).0 as usize,
     }
 }

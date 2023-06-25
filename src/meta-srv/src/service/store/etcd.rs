@@ -24,12 +24,19 @@ use common_error::prelude::*;
 use common_telemetry::{timer, warn};
 use etcd_client::{
     Client, Compare, CompareOp, DeleteOptions, GetOptions, PutOptions, Txn, TxnOp, TxnOpResponse,
+    TxnResponse,
 };
 
 use crate::error;
 use crate::error::Result;
 use crate::metrics::METRIC_META_KV_REQUEST;
 use crate::service::store::kv::{KvStore, KvStoreRef};
+
+// Maximum number of operations permitted in a transaction.
+// The etcd default configuration's `--max-txn-ops` is 128.
+//
+// For more detail, see: https://etcd.io/docs/v3.5/op-guide/configuration/
+const MAX_TXN_SIZE: usize = 128;
 
 pub struct EtcdStore {
     client: Client,
@@ -50,6 +57,32 @@ impl EtcdStore {
 
     pub fn with_etcd_client(client: Client) -> Result<KvStoreRef> {
         Ok(Arc::new(Self { client }))
+    }
+
+    async fn do_multi_txn(&self, txn_ops: Vec<TxnOp>) -> Result<Vec<TxnResponse>> {
+        if txn_ops.len() < MAX_TXN_SIZE {
+            // fast path
+            let txn = Txn::new().and_then(txn_ops);
+            let txn_res = self
+                .client
+                .kv_client()
+                .txn(txn)
+                .await
+                .context(error::EtcdFailedSnafu)?;
+            return Ok(vec![txn_res]);
+        }
+
+        let txns = txn_ops
+            .chunks(MAX_TXN_SIZE)
+            .map(|part| async move {
+                let txn = Txn::new().and_then(part);
+                self.client.kv_client().txn(txn).await
+            })
+            .collect::<Vec<_>>();
+
+        futures::future::try_join_all(txns)
+            .await
+            .context(error::EtcdFailedSnafu)
     }
 }
 
@@ -142,23 +175,19 @@ impl KvStore for EtcdStore {
             .into_iter()
             .map(|k| TxnOp::get(k, options.clone()))
             .collect();
-        let txn = Txn::new().and_then(get_ops);
 
-        let txn_res = self
-            .client
-            .kv_client()
-            .txn(txn)
-            .await
-            .context(error::EtcdFailedSnafu)?;
+        let txn_responses = self.do_multi_txn(get_ops).await?;
 
         let mut kvs = vec![];
-        for op_res in txn_res.op_responses() {
-            let get_res = match op_res {
-                TxnOpResponse::Get(get_res) => get_res,
-                _ => unreachable!(),
-            };
+        for txn_res in txn_responses {
+            for op_res in txn_res.op_responses() {
+                let get_res = match op_res {
+                    TxnOpResponse::Get(get_res) => get_res,
+                    _ => unreachable!(),
+                };
 
-            kvs.extend(get_res.kvs().iter().map(KvPair::from_etcd_kv));
+                kvs.extend(get_res.kvs().iter().map(KvPair::from_etcd_kv));
+            }
         }
 
         let header = Some(ResponseHeader::success(cluster_id));
@@ -185,24 +214,20 @@ impl KvStore for EtcdStore {
             .into_iter()
             .map(|kv| (TxnOp::put(kv.key, kv.value, options.clone())))
             .collect::<Vec<_>>();
-        let txn = Txn::new().and_then(put_ops);
 
-        let txn_res = self
-            .client
-            .kv_client()
-            .txn(txn)
-            .await
-            .context(error::EtcdFailedSnafu)?;
+        let txn_responses = self.do_multi_txn(put_ops).await?;
 
         let mut prev_kvs = vec![];
-        for op_res in txn_res.op_responses() {
-            match op_res {
-                TxnOpResponse::Put(put_res) => {
-                    if let Some(prev_kv) = put_res.prev_key() {
-                        prev_kvs.push(KvPair::from_etcd_kv(prev_kv));
+        for txn_res in txn_responses {
+            for op_res in txn_res.op_responses() {
+                match op_res {
+                    TxnOpResponse::Put(put_res) => {
+                        if let Some(prev_kv) = put_res.prev_key() {
+                            prev_kvs.push(KvPair::from_etcd_kv(prev_kv));
+                        }
                     }
+                    _ => unreachable!(),
                 }
-                _ => unreachable!(), // never get here
             }
         }
 
@@ -232,28 +257,23 @@ impl KvStore for EtcdStore {
             .into_iter()
             .map(|k| TxnOp::delete(k, options.clone()))
             .collect::<Vec<_>>();
-        let txn = Txn::new().and_then(delete_ops);
 
-        let txn_res = self
-            .client
-            .kv_client()
-            .txn(txn)
-            .await
-            .context(error::EtcdFailedSnafu)?;
+        let txn_responses = self.do_multi_txn(delete_ops).await?;
 
-        for op_res in txn_res.op_responses() {
-            match op_res {
-                TxnOpResponse::Delete(delete_res) => {
-                    delete_res.prev_kvs().iter().for_each(|kv| {
-                        prev_kvs.push(KvPair::from_etcd_kv(kv));
-                    });
+        for txn_res in txn_responses {
+            for op_res in txn_res.op_responses() {
+                match op_res {
+                    TxnOpResponse::Delete(delete_res) => {
+                        delete_res.prev_kvs().iter().for_each(|kv| {
+                            prev_kvs.push(KvPair::from_etcd_kv(kv));
+                        });
+                    }
+                    _ => unreachable!(),
                 }
-                _ => unreachable!(), // never get here
             }
         }
 
         let header = Some(ResponseHeader::success(cluster_id));
-
         Ok(BatchDeleteResponse { header, prev_kvs })
     }
 
@@ -308,7 +328,7 @@ impl KvStore for EtcdStore {
         let prev_kv = match op_res {
             TxnOpResponse::Put(res) => res.prev_key().map(KvPair::from_etcd_kv),
             TxnOpResponse::Get(res) => res.kvs().first().map(KvPair::from_etcd_kv),
-            _ => unreachable!(), // never get here
+            _ => unreachable!(),
         };
 
         let header = Some(ResponseHeader::success(cluster_id));

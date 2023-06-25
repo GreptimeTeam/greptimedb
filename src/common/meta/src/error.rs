@@ -52,6 +52,9 @@ pub enum Error {
         err_msg: String,
         location: Location,
     },
+
+    #[snafu(display("Invalid protobuf message, err: {}", err_msg))]
+    InvalidProtoMsg { err_msg: String, location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -61,7 +64,10 @@ impl ErrorExt for Error {
         use Error::*;
         match self {
             IllegalServerState { .. } => StatusCode::Internal,
-            SerdeJson { .. } | RouteInfoCorrupted { .. } => StatusCode::Unexpected,
+
+            SerdeJson { .. } | RouteInfoCorrupted { .. } | InvalidProtoMsg { .. } => {
+                StatusCode::Unexpected
+            }
 
             SendMessage { .. } => StatusCode::Internal,
 

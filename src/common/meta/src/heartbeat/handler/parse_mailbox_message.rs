@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use async_trait::async_trait;
+
 use crate::error::Result;
 use crate::heartbeat::handler::{
     HandleControl, HeartbeatResponseHandler, HeartbeatResponseHandlerContext,
@@ -21,12 +23,13 @@ use crate::heartbeat::utils::mailbox_message_to_incoming_message;
 #[derive(Default)]
 pub struct ParseMailboxMessageHandler;
 
+#[async_trait]
 impl HeartbeatResponseHandler for ParseMailboxMessageHandler {
     fn is_acceptable(&self, _ctx: &HeartbeatResponseHandlerContext) -> bool {
         true
     }
 
-    fn handle(&self, ctx: &mut HeartbeatResponseHandlerContext) -> Result<HandleControl> {
+    async fn handle(&self, ctx: &mut HeartbeatResponseHandlerContext) -> Result<HandleControl> {
         if let Some(message) = &ctx.response.mailbox_message {
             if message.payload.is_some() {
                 // mailbox_message_to_incoming_message will raise an error if payload is none

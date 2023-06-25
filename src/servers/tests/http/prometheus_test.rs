@@ -23,9 +23,10 @@ use axum::Router;
 use axum_test_helper::TestClient;
 use common_query::Output;
 use common_test_util::ports;
-use datatypes::schema::Schema;
 use prost::Message;
 use query::parser::PromQuery;
+use query::plan::LogicalPlan;
+use query::query_engine::DescribeResult;
 use servers::error::{Error, Result};
 use servers::http::{HttpOptions, HttpServerBuilder};
 use servers::prometheus;
@@ -95,6 +96,14 @@ impl SqlQueryHandler for DummyInstance {
         unimplemented!()
     }
 
+    async fn do_exec_plan(
+        &self,
+        _plan: LogicalPlan,
+        _query_ctx: QueryContextRef,
+    ) -> std::result::Result<Output, Self::Error> {
+        unimplemented!()
+    }
+
     async fn do_promql_query(
         &self,
         _: &PromQuery,
@@ -107,7 +116,7 @@ impl SqlQueryHandler for DummyInstance {
         &self,
         _stmt: sql::statements::statement::Statement,
         _query_ctx: QueryContextRef,
-    ) -> Result<Option<Schema>> {
+    ) -> Result<Option<DescribeResult>> {
         unimplemented!()
     }
 

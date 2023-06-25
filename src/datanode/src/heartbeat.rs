@@ -17,24 +17,27 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::meta::{HeartbeatRequest, NodeStat, Peer};
+use catalog::remote::region_alive_keeper::RegionAliveKeepers;
 use catalog::{datanode_stat, CatalogManagerRef};
 use common_meta::heartbeat::handler::{
     HeartbeatResponseHandlerContext, HeartbeatResponseHandlerExecutorRef,
 };
 use common_meta::heartbeat::mailbox::{HeartbeatMailbox, MailboxRef};
 use common_meta::heartbeat::utils::outgoing_message_to_mailbox_message;
-use common_telemetry::{error, info, trace, warn};
+use common_telemetry::{debug, error, info, trace, warn};
 use meta_client::client::{HeartbeatSender, MetaClient};
 use snafu::ResultExt;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
+use crate::datanode::DatanodeOptions;
 use crate::error::{self, MetaClientInitSnafu, Result};
 
 pub(crate) mod handler;
 
 pub struct HeartbeatTask {
     node_id: u64,
+    node_epoch: u64,
     server_addr: String,
     server_hostname: Option<String>,
     running: Arc<AtomicBool>,
@@ -42,6 +45,7 @@ pub struct HeartbeatTask {
     catalog_manager: CatalogManagerRef,
     interval: u64,
     resp_handler_executor: HeartbeatResponseHandlerExecutorRef,
+    region_alive_keepers: Arc<RegionAliveKeepers>,
 }
 
 impl Drop for HeartbeatTask {
@@ -54,21 +58,25 @@ impl HeartbeatTask {
     /// Create a new heartbeat task instance.
     pub fn new(
         node_id: u64,
-        server_addr: String,
-        server_hostname: Option<String>,
+        opts: &DatanodeOptions,
         meta_client: Arc<MetaClient>,
         catalog_manager: CatalogManagerRef,
         resp_handler_executor: HeartbeatResponseHandlerExecutorRef,
+        heartbeat_interval_millis: u64,
+        region_alive_keepers: Arc<RegionAliveKeepers>,
     ) -> Self {
         Self {
             node_id,
-            server_addr,
-            server_hostname,
+            // We use datanode's start time millis as the node's epoch.
+            node_epoch: common_time::util::current_time_millis() as u64,
+            server_addr: opts.rpc_addr.clone(),
+            server_hostname: opts.rpc_hostname.clone(),
             running: Arc::new(AtomicBool::new(false)),
             meta_client,
             catalog_manager,
-            interval: 5_000, // default interval is set to 5 secs
+            interval: heartbeat_interval_millis,
             resp_handler_executor,
+            region_alive_keepers,
         }
     }
 
@@ -94,7 +102,7 @@ impl HeartbeatTask {
                 }
 
                 let ctx = HeartbeatResponseHandlerContext::new(mailbox.clone(), res);
-                if let Err(e) = Self::handle_response(ctx, handler_executor.clone()) {
+                if let Err(e) = Self::handle_response(ctx, handler_executor.clone()).await {
                     error!(e; "Error while handling heartbeat response");
                 }
                 if !running.load(Ordering::Acquire) {
@@ -106,13 +114,14 @@ impl HeartbeatTask {
         Ok(tx)
     }
 
-    fn handle_response(
+    async fn handle_response(
         ctx: HeartbeatResponseHandlerContext,
         handler_executor: HeartbeatResponseHandlerExecutorRef,
     ) -> Result<()> {
         trace!("heartbeat response: {:?}", ctx.response);
         handler_executor
             .handle(ctx)
+            .await
             .context(error::HandleHeartbeatResponseSnafu)
     }
 
@@ -128,8 +137,11 @@ impl HeartbeatTask {
         }
         let interval = self.interval;
         let node_id = self.node_id;
+        let node_epoch = self.node_epoch;
         let addr = resolve_addr(&self.server_addr, &self.server_hostname);
         info!("Starting heartbeat to Metasrv with interval {interval}. My node id is {node_id}, address is {addr}.");
+
+        self.region_alive_keepers.start().await;
 
         let meta_client = self.meta_client.clone();
         let catalog_manager_clone = self.catalog_manager.clone();
@@ -147,6 +159,7 @@ impl HeartbeatTask {
         )
         .await?;
 
+        let epoch = self.region_alive_keepers.epoch();
         common_runtime::spawn_bg(async move {
             let sleep = tokio::time::sleep(Duration::from_millis(0));
             tokio::pin!(sleep);
@@ -192,6 +205,8 @@ impl HeartbeatTask {
                                 ..Default::default()
                             }),
                             region_stats,
+                            duration_since_epoch: (Instant::now() - epoch).as_millis() as u64,
+                            node_epoch,
                             ..Default::default()
                         };
                         sleep.as_mut().reset(Instant::now() + Duration::from_millis(interval));
@@ -199,6 +214,7 @@ impl HeartbeatTask {
                     }
                 };
                 if let Some(req) = req {
+                    debug!("Sending heartbeat request: {:?}", req);
                     if let Err(e) = tx.send(req).await {
                         error!("Failed to send heartbeat to metasrv, error: {:?}", e);
                         match Self::create_streams(

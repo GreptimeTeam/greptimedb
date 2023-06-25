@@ -23,7 +23,8 @@ use common_meta::heartbeat::handler::{
     HandlerGroupExecutor, HeartbeatResponseHandlerContext, HeartbeatResponseHandlerExecutor,
 };
 use common_meta::heartbeat::mailbox::{HeartbeatMailbox, MessageMeta};
-use common_meta::instruction::{Instruction, InstructionReply, SimpleReply, TableIdent};
+use common_meta::ident::TableIdent;
+use common_meta::instruction::{Instruction, InstructionReply, SimpleReply};
 use common_meta::table_name::TableName;
 use partition::manager::TableRouteCacheInvalidator;
 use tokio::sync::mpsc;
@@ -89,7 +90,8 @@ async fn test_invalidate_table_cache_handler() {
             table_id: 0,
             engine: "mito".to_string(),
         }),
-    );
+    )
+    .await;
 
     let (_, reply) = rx.recv().await.unwrap();
     assert_matches!(
@@ -125,7 +127,8 @@ async fn test_invalidate_table_cache_handler() {
             table_id: 0,
             engine: "mito".to_string(),
         }),
-    );
+    )
+    .await;
 
     let (_, reply) = rx.recv().await.unwrap();
     assert_matches!(
@@ -143,7 +146,7 @@ pub fn test_message_meta(id: u64, subject: &str, to: &str, from: &str) -> Messag
     }
 }
 
-fn handle_instruction(
+async fn handle_instruction(
     executor: Arc<dyn HeartbeatResponseHandlerExecutor>,
     mailbox: Arc<HeartbeatMailbox>,
     instruction: Instruction,
@@ -152,5 +155,5 @@ fn handle_instruction(
     let mut ctx: HeartbeatResponseHandlerContext =
         HeartbeatResponseHandlerContext::new(mailbox, response);
     ctx.incoming_message = Some((test_message_meta(1, "hi", "foo", "bar"), instruction));
-    executor.handle(ctx).unwrap();
+    executor.handle(ctx).await.unwrap();
 }

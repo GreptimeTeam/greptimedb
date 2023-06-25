@@ -24,6 +24,7 @@ use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_query::physical_plan::SessionContext;
 use common_query::prelude::ScalarUdf;
 use datafusion::catalog::catalog::MemoryCatalogList;
+use datafusion::dataframe::DataFrame;
 use datafusion::error::Result as DfResult;
 use datafusion::execution::context::{QueryPlanner, SessionConfig, SessionState};
 use datafusion::execution::runtime_env::RuntimeEnv;
@@ -38,6 +39,8 @@ use datafusion_optimizer::analyzer::Analyzer;
 use datafusion_optimizer::optimizer::Optimizer;
 use partition::manager::PartitionRuleManager;
 use promql::extension_plan::PromExtensionPlanner;
+use table::table::adapter::DfTableProviderAdapter;
+use table::TableRef;
 
 use crate::dist_plan::{DistExtensionPlanner, DistPlannerAnalyzer};
 use crate::extension_serializer::ExtensionSerializer;
@@ -59,8 +62,9 @@ pub struct QueryEngineState {
 
 impl fmt::Debug for QueryEngineState {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        // TODO(dennis) better debug info
-        write!(f, "QueryEngineState: <datafusion context>")
+        f.debug_struct("QueryEngineState")
+            .field("state", &self.df_context.state())
+            .finish()
     }
 }
 
@@ -187,6 +191,12 @@ impl QueryEngineState {
 
     pub(crate) fn session_state(&self) -> SessionState {
         self.df_context.state()
+    }
+
+    /// Create a DataFrame for a table
+    pub fn read_table(&self, table: TableRef) -> DfResult<DataFrame> {
+        self.df_context
+            .read_table(Arc::new(DfTableProviderAdapter::new(table)))
     }
 }
 
