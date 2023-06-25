@@ -113,7 +113,7 @@ impl StatementExecutor {
                     .context(error::ReadParquetSnafu)?;
                 Ok(builder.schema().clone())
             }
-            &Format::Orc(_) => {
+            Format::Orc(_) => {
                 let reader = object_store
                     .reader(path)
                     .await
@@ -216,7 +216,7 @@ impl StatementExecutor {
 
                 Ok(Box::pin(ParquetRecordBatchStreamAdapter::new(upstream)))
             }
-            &Format::Orc(_) => {
+            Format::Orc(_) => {
                 let reader = object_store
                     .reader(path)
                     .await

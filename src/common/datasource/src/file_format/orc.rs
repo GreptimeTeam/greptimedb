@@ -60,14 +60,12 @@ pub async fn infer_orc_schema<R: AsyncRead + AsyncSeek + Unpin + Send + 'static>
 }
 
 pub struct OrcArrowStreamReaderAdapter<T: AsyncRead + AsyncSeek + Unpin + Send + 'static> {
-    stream: Box<ArrowStreamReader<T>>,
+    stream: ArrowStreamReader<T>,
 }
 
 impl<T: AsyncRead + AsyncSeek + Unpin + Send + 'static> OrcArrowStreamReaderAdapter<T> {
     pub fn new(stream: ArrowStreamReader<T>) -> Self {
-        Self {
-            stream: Box::new(stream),
-        }
+        Self { stream }
     }
 }
 
