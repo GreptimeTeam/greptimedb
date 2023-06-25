@@ -24,6 +24,7 @@ datafusion.workspace = true
 derive_builder = "0.12"
 futures.workspace = true
 object-store = { path = "../../object-store" }
+orc-rust = "0.2.3"
 regex = "1.7"
 snafu.workspace = true
 tokio.workspace = true

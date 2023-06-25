@@ -44,3 +44,5 @@ benchmarks/data
 
 # Vscode workspace
 *.code-workspace
+
+venv/

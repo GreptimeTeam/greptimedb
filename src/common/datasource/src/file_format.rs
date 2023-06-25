@@ -14,6 +14,7 @@
 
 pub mod csv;
 pub mod json;
+pub mod orc;
 pub mod parquet;
 #[cfg(test)]
 pub mod tests;
@@ -38,6 +39,7 @@ use snafu::ResultExt;
 
 use self::csv::CsvFormat;
 use self::json::JsonFormat;
+use self::orc::OrcFormat;
 use self::parquet::ParquetFormat;
 use crate::buffered_writer::{DfRecordBatchEncoder, LazyBufferedWriter};
 use crate::compression::CompressionType;
@@ -56,6 +58,7 @@ pub enum Format {
     Csv(CsvFormat),
     Json(JsonFormat),
     Parquet(ParquetFormat),
+    Orc(OrcFormat),
 }
 
 impl Format {
@@ -64,6 +67,7 @@ impl Format {
             Format::Csv(_) => ".csv",
             Format::Json(_) => ".json",
             Format::Parquet(_) => ".parquet",
+            &Format::Orc(_) => ".orc",
         }
     }
 }
@@ -81,6 +85,7 @@ impl TryFrom<&HashMap<String, String>> for Format {
             "CSV" => Ok(Self::Csv(CsvFormat::try_from(options)?)),
             "JSON" => Ok(Self::Json(JsonFormat::try_from(options)?)),
             "PARQUET" => Ok(Self::Parquet(ParquetFormat::default())),
+            "ORC" => Ok(Self::Orc(OrcFormat)),
             _ => error::UnsupportedFormatSnafu { format: &format }.fail(),
         }
     }
