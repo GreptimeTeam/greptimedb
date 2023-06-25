@@ -38,9 +38,9 @@ use crate::error::{
     ParallelOpenTableSnafu, Result, SchemaNotFoundSnafu, TableEngineNotFoundSnafu,
 };
 use crate::helper::{
-    build_catalog_prefix, build_schema_prefix, build_table_regional_prefix, CatalogKey,
-    CatalogValue, SchemaKey, SchemaValue, TableGlobalKey, TableGlobalValue, TableRegionalKey,
-    TableRegionalValue, CATALOG_KEY_PREFIX,
+    build_catalog_prefix, build_schema_prefix, build_table_global_prefix,
+    build_table_regional_prefix, CatalogKey, CatalogValue, SchemaKey, SchemaValue, TableGlobalKey,
+    TableGlobalValue, TableRegionalKey, TableRegionalValue, CATALOG_KEY_PREFIX,
 };
 use crate::remote::{Kv, KvBackendRef};
 use crate::{
@@ -441,7 +441,7 @@ async fn iter_remote_tables<'a>(
     catalog_name: &'a str,
     schema_name: &'a str,
 ) -> Pin<Box<dyn Stream<Item = Result<(TableGlobalKey, TableGlobalValue)>> + Send + 'a>> {
-    let table_prefix = build_table_regional_prefix(catalog_name, schema_name);
+    let table_prefix = build_table_global_prefix(catalog_name, schema_name);
     let mut tables = backend.range(table_prefix.as_bytes());
     Box::pin(stream!({
         while let Some(r) = tables.next().await {
