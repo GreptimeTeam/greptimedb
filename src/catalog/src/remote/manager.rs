@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::any::Any;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -22,11 +22,9 @@ use async_trait::async_trait;
 use common_catalog::consts::{MAX_SYS_TABLE_ID, MITO_ENGINE};
 use common_meta::ident::TableIdent;
 use common_telemetry::{debug, error, info, warn};
-use dashmap::DashMap;
 use futures::Stream;
 use futures_util::{StreamExt, TryStreamExt};
 use metrics::{decrement_gauge, increment_gauge};
-use parking_lot::RwLock;
 use snafu::ResultExt;
 use table::engine::manager::TableEngineManagerRef;
 use table::engine::{EngineContext, TableReference};
@@ -46,15 +44,14 @@ use crate::helper::{
 use crate::remote::region_alive_keeper::RegionAliveKeepers;
 use crate::remote::{Kv, KvBackendRef};
 use crate::{
-    handle_system_table_request, CatalogManager, CatalogProviderRef, DeregisterTableRequest,
-    RegisterSchemaRequest, RegisterSystemTableRequest, RegisterTableRequest, RenameTableRequest,
+    handle_system_table_request, CatalogManager, DeregisterTableRequest, RegisterSchemaRequest,
+    RegisterSystemTableRequest, RegisterTableRequest, RenameTableRequest,
 };
 
 /// Catalog manager based on metasrv.
 pub struct RemoteCatalogManager {
     node_id: u64,
     backend: KvBackendRef,
-    catalogs: Arc<RwLock<DashMap<String, CatalogProviderRef>>>,
     engine_manager: TableEngineManagerRef,
     system_table_requests: Mutex<Vec<RegisterSystemTableRequest>>,
     region_alive_keepers: Arc<RegionAliveKeepers>,
@@ -71,21 +68,10 @@ impl RemoteCatalogManager {
             engine_manager,
             node_id,
             backend,
-            catalogs: Default::default(),
             system_table_requests: Default::default(),
             region_alive_keepers,
         }
     }
-
-    // fn new_catalog_provider(&self, catalog_name: &str) -> CatalogProviderRef {
-    //     Arc::new(RemoteCatalogProvider {
-    //         node_id: self.node_id,
-    //         catalog_name: catalog_name.to_string(),
-    //         backend: self.backend.clone(),
-    //         engine_manager: self.engine_manager.clone(),
-    //         region_alive_keepers: self.region_alive_keepers.clone(),
-    //     }) as _
-    // }
 
     async fn iter_remote_catalogs(
         &self,
@@ -111,10 +97,7 @@ impl RemoteCatalogManager {
     }
 
     /// Fetch catalogs/schemas/tables from remote catalog manager along with max table id allocated.
-    async fn initiate_catalogs(&self) -> Result<HashMap<String, CatalogProviderRef>> {
-        #[allow(unused_mut)]
-        let mut res = HashMap::new();
-
+    async fn initiate_catalogs(&self) -> Result<()> {
         let mut catalogs = self.iter_remote_catalogs().await;
         let mut joins = Vec::new();
         while let Some(r) = catalogs.next().await {
@@ -131,7 +114,7 @@ impl RemoteCatalogManager {
 
         futures::future::try_join_all(joins).await?;
 
-        Ok(res)
+        Ok(())
     }
 
     pub async fn create_catalog_and_schema(
@@ -614,18 +597,7 @@ async fn open_or_create_table(
 #[async_trait]
 impl CatalogManager for RemoteCatalogManager {
     async fn start(&self) -> Result<()> {
-        let catalogs = self.initiate_catalogs().await?;
-        info!(
-            "Initialized catalogs: {:?}",
-            catalogs.keys().cloned().collect::<Vec<_>>()
-        );
-
-        {
-            let self_catalogs = self.catalogs.read();
-            catalogs.into_iter().for_each(|(k, v)| {
-                self_catalogs.insert(k, v);
-            });
-        }
+        self.initiate_catalogs().await?;
 
         let mut system_table_requests = self.system_table_requests.lock().await;
         let engine = self

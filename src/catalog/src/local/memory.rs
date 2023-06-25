@@ -19,7 +19,6 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID};
-use common_telemetry::error;
 use metrics::{decrement_gauge, increment_gauge};
 use snafu::OptionExt;
 use table::metadata::TableId;
@@ -30,8 +29,8 @@ use crate::error::{
     CatalogNotFoundSnafu, Result, SchemaNotFoundSnafu, TableExistsSnafu, TableNotFoundSnafu,
 };
 use crate::{
-    CatalogManager, CatalogProvider, DeregisterTableRequest, RegisterSchemaRequest,
-    RegisterSystemTableRequest, RegisterTableRequest, RenameTableRequest,
+    CatalogManager, DeregisterTableRequest, RegisterSchemaRequest, RegisterSystemTableRequest,
+    RegisterTableRequest, RenameTableRequest,
 };
 
 type SchemaEntries = HashMap<String, HashMap<String, TableRef>>;
@@ -316,108 +315,6 @@ impl MemoryCatalogManager {
     }
 }
 
-impl Default for MemoryCatalogProvider {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Simple in-memory implementation of a catalog.
-pub struct MemoryCatalogProvider {
-    schemas: RwLock<HashMap<String, HashMap<String, TableRef>>>,
-}
-
-impl MemoryCatalogProvider {
-    /// Instantiates a new MemoryCatalogProvider with an empty collection of schemas.
-    pub fn new() -> Self {
-        Self {
-            schemas: RwLock::new(HashMap::new()),
-        }
-    }
-
-    pub fn schema_names_sync(&self) -> Result<Vec<String>> {
-        let schemas = self.schemas.read().unwrap();
-        Ok(schemas.keys().cloned().collect())
-    }
-}
-
-#[async_trait::async_trait]
-impl CatalogProvider for MemoryCatalogProvider {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    async fn schema_names(&self) -> Result<Vec<String>> {
-        self.schema_names_sync()
-    }
-}
-
-/// Simple in-memory implementation of a schema.
-pub struct MemorySchemaProvider {
-    tables: RwLock<HashMap<String, TableRef>>,
-}
-
-impl MemorySchemaProvider {
-    /// Instantiates a new MemorySchemaProvider with an empty collection of tables.
-    pub fn new() -> Self {
-        Self {
-            tables: RwLock::new(HashMap::new()),
-        }
-    }
-
-    pub fn register_table_sync(&self, name: String, table: TableRef) -> Result<Option<TableRef>> {
-        let mut tables = self.tables.write().unwrap();
-        if let Some(existing) = tables.get(name.as_str()) {
-            // if table with the same name but different table id exists, then it's a fatal bug
-            if existing.table_info().ident.table_id != table.table_info().ident.table_id {
-                error!(
-                    "Unexpected table register: {:?}, existing: {:?}",
-                    table.table_info(),
-                    existing.table_info()
-                );
-                return TableExistsSnafu { table: name }.fail()?;
-            }
-            Ok(Some(existing.clone()))
-        } else {
-            Ok(tables.insert(name, table))
-        }
-    }
-
-    pub fn rename_table_sync(&self, name: &str, new_name: String) -> Result<TableRef> {
-        let mut tables = self.tables.write().unwrap();
-        let Some(table) = tables.remove(name) else {
-            return TableNotFoundSnafu {
-                table_info: name.to_string(),
-            }
-                .fail()?;
-        };
-        let e = match tables.entry(new_name) {
-            Entry::Vacant(e) => e,
-            Entry::Occupied(e) => {
-                return TableExistsSnafu { table: e.key() }.fail();
-            }
-        };
-        e.insert(table.clone());
-        Ok(table)
-    }
-
-    pub fn table_exist_sync(&self, name: &str) -> Result<bool> {
-        let tables = self.tables.read().unwrap();
-        Ok(tables.contains_key(name))
-    }
-
-    pub fn deregister_table_sync(&self, name: &str) -> Result<Option<TableRef>> {
-        let mut tables = self.tables.write().unwrap();
-        Ok(tables.remove(name))
-    }
-}
-
-impl Default for MemorySchemaProvider {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /// Create a memory catalog list contains a numbers table for test
 pub fn new_memory_catalog_manager() -> Result<Arc<MemoryCatalogManager>> {
     Ok(Arc::new(MemoryCatalogManager::default()))
@@ -462,26 +359,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_mem_provider() {
-        let provider = MemorySchemaProvider::new();
-        let table_name = "numbers";
-        assert!(!provider.table_exist_sync(table_name).unwrap());
-        provider.deregister_table_sync(table_name).unwrap();
-        let test_table = NumbersTable::default();
-        // register table successfully
-        assert!(provider
-            .register_table_sync(table_name.to_string(), Arc::new(test_table))
-            .unwrap()
-            .is_none());
-        assert!(provider.table_exist_sync(table_name).unwrap());
-        let other_table = NumbersTable::new(12);
-        let result = provider.register_table_sync(table_name.to_string(), Arc::new(other_table));
-        let err = result.err().unwrap();
-        assert_eq!(StatusCode::TableAlreadyExists, err.status_code());
-    }
-
-    #[tokio::test]
-    async fn test_mem_provider_rename_table() {
+    async fn test_mem_manager_rename_table() {
         let catalog = MemoryCatalogManager::default();
         let table_name = "test_table";
         assert!(!catalog

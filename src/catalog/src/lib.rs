@@ -41,25 +41,6 @@ pub mod system;
 pub mod table_source;
 pub mod tables;
 
-/// Represents a catalog, comprising a number of named schemas.
-#[async_trait::async_trait]
-pub trait CatalogProvider: Sync + Send {
-    /// Returns the catalog provider as [`Any`](std::any::Any)
-    /// so that it can be downcast to a specific implementation.
-    fn as_any(&self) -> &dyn Any;
-
-    /// Retrieves the list of available schema names in this catalog.
-    async fn schema_names(&self) -> Result<Vec<String>>;
-
-    // async fn register_schema(
-    //     &self,
-    //     name: String,
-    //     schema: SchemaProviderRef,
-    // ) -> Result<Option<SchemaProviderRef>>;
-}
-
-pub type CatalogProviderRef = Arc<dyn CatalogProvider>;
-
 #[async_trait::async_trait]
 pub trait CatalogManager: Send + Sync {
     fn as_any(&self) -> &dyn Any;
@@ -173,10 +154,6 @@ pub struct DeregisterTableRequest {
 pub struct RegisterSchemaRequest {
     pub catalog: String,
     pub schema: String,
-}
-
-pub trait CatalogProviderFactory {
-    fn create(&self, catalog_name: String) -> CatalogProviderRef;
 }
 
 pub(crate) async fn handle_system_table_request<'a, M: CatalogManager>(
