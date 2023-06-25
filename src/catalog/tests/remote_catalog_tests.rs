@@ -237,7 +237,6 @@ mod tests {
     #[tokio::test]
     async fn test_register_table() {
         let node_id = 42;
-        // let (_, table_engine, catalog_manager, _) = prepare_components(node_id).await;
         let components = prepare_components(node_id).await;
         assert_eq!(
             vec![DEFAULT_SCHEMA_NAME.to_string()],
@@ -300,8 +299,6 @@ mod tests {
     #[tokio::test]
     async fn test_register_catalog_schema_table() {
         let node_id = 42;
-        // let (_backend, table_engine, catalog_manager, _engine_manager) =
-        //     prepare_components(node_id).await;
         let components = prepare_components(node_id).await;
 
         let catalog_name = "test_catalog".to_string();

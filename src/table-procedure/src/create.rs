@@ -213,31 +213,6 @@ impl CreateTableProcedure {
     }
 
     async fn on_register_catalog(&mut self) -> Result<Status> {
-        // let catalog = self
-        //     .catalog_manager
-        //     .catalog(&self.data.request.catalog_name)
-        //     .await
-        //     .context(AccessCatalogSnafu)?
-        //     .context(CatalogNotFoundSnafu {
-        //         name: &self.data.request.catalog_name,
-        //     })?;
-        // let schema = catalog
-        //     .schema(&self.data.request.schema_name)
-        //     .await
-        //     .context(AccessCatalogSnafu)?
-        //     .context(SchemaNotFoundSnafu {
-        //         name: &self.data.request.schema_name,
-        //     })?;
-        // let table_exists = schema
-        //     .table(&self.data.request.table_name)
-        //     .await
-        //     .map_err(Error::from_error_ext)?
-        //     .is_some();
-        // if table_exists {
-        //     // Table already exists.
-        //     return Ok(Status::Done);
-        // }
-
         if self
             .catalog_manager
             .table_exist(
