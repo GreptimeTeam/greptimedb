@@ -20,6 +20,3 @@ out/
 
 # Rust
 target/
-
-# Git
-.git
