@@ -24,7 +24,7 @@ datafusion.workspace = true
 derive_builder = "0.12"
 futures.workspace = true
 object-store = { path = "../../object-store" }
-orc-rust = { git = "https://github.com/WenyXu/orc-rs", rev = "71e18ce0a5f8d280c7df7939fa3da5782abfd434" }
+orc-rust = "0.2.3"
 regex = "1.7"
 snafu.workspace = true
 tokio.workspace = true
