@@ -27,7 +27,7 @@ use futures::Stream;
 use futures_util::{StreamExt, TryStreamExt};
 use metrics::{decrement_gauge, increment_gauge};
 use parking_lot::RwLock;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::ResultExt;
 use table::engine::manager::TableEngineManagerRef;
 use table::engine::{EngineContext, TableReference};
 use table::requests::{CreateTableRequest, OpenTableRequest};
@@ -126,15 +126,7 @@ impl RemoteCatalogManager {
             let engine_manager = self.engine_manager.clone();
 
             increment_gauge!(crate::metrics::METRIC_CATALOG_MANAGER_CATALOG_COUNT, 1.0);
-
-            let region_alive_keepers = self.region_alive_keepers.clone();
-            joins.push(self.initiate_schemas(
-                node_id,
-                backend,
-                engine_manager,
-                catalog_name,
-                region_alive_keepers,
-            ));
+            joins.push(self.initiate_schemas(node_id, backend, engine_manager, catalog_name));
         }
 
         futures::future::try_join_all(joins).await?;
@@ -146,20 +138,7 @@ impl RemoteCatalogManager {
         &self,
         catalog_name: &str,
         schema_name: &str,
-    ) -> Result<CatalogProviderRef> {
-        let schema_provider = new_schema_provider(
-            self.node_id,
-            self.backend.clone(),
-            self.engine_manager.clone(),
-            catalog_name,
-            schema_name,
-        );
-
-        let catalog_provider = self.new_catalog_provider(catalog_name);
-        catalog_provider
-            .register_schema(schema_name.to_string(), schema_provider.clone())
-            .await?;
-
+    ) -> Result<()> {
         let schema_key = SchemaKey {
             catalog_name: catalog_name.to_string(),
             schema_name: schema_name.to_string(),
@@ -450,23 +429,6 @@ impl RemoteCatalogManager {
         Ok(())
     }
 }
-// fn new_schema_provider(
-//     node_id: u64,
-//     backend: KvBackendRef,
-//     engine_manager: TableEngineManagerRef,
-//     catalog_name: &str,
-//     schema_name: &str,
-//     region_alive_keepers: Arc<RegionAliveKeepers>,
-// ) -> SchemaProviderRef {
-//     Arc::new(RemoteSchemaProvider {
-//         catalog_name: catalog_name.to_string(),
-//         schema_name: schema_name.to_string(),
-//         node_id,
-//         backend,
-//         engine_manager,
-//         region_alive_keepers,
-//     }) as _
-// }
 
 async fn iter_remote_schemas<'a>(
     backend: &'a KvBackendRef,
@@ -687,9 +649,21 @@ impl CatalogManager for RemoteCatalogManager {
             catalog_name.clone(),
             schema_name.clone(),
             request.table_name,
-            request.table,
+            request.table.clone(),
         )
         .await?;
+
+        let table_info = request.table.table_info();
+        let table_ident = TableIdent {
+            catalog: table_info.catalog_name.clone(),
+            schema: table_info.schema_name.clone(),
+            table: table_info.name.clone(),
+            table_id: table_info.ident.table_id,
+            engine: table_info.meta.engine.clone(),
+        };
+        self.region_alive_keepers
+            .register_table(table_ident, request.table)
+            .await?;
 
         increment_gauge!(
             crate::metrics::METRIC_CATALOG_MANAGER_TABLE_COUNT,
@@ -702,6 +676,7 @@ impl CatalogManager for RemoteCatalogManager {
     async fn deregister_table(&self, request: DeregisterTableRequest) -> Result<bool> {
         let catalog_name = request.catalog;
         let schema_name = request.schema;
+        let table_name = request.table_name;
         self.check_catalog_schema_exist(&catalog_name, &schema_name)
             .await?;
 
@@ -709,7 +684,7 @@ impl CatalogManager for RemoteCatalogManager {
             .deregister_table(
                 catalog_name.clone(),
                 schema_name.clone(),
-                request.table_name,
+                table_name.clone(),
             )
             .await?;
         decrement_gauge!(
@@ -720,10 +695,10 @@ impl CatalogManager for RemoteCatalogManager {
 
         if let Some(table) = result.as_ref() {
             let table_info = table.table_info();
-            let table_ident = TableIdent {
-                catalog: request.catalog,
-                schema: request.schema,
-                table: request.table_name,
+            let table_ident: TableIdent = TableIdent {
+                catalog: catalog_name,
+                schema: schema_name,
+                table: table_name,
                 table_id: table_info.ident.table_id,
                 engine: table_info.meta.engine.clone(),
             };

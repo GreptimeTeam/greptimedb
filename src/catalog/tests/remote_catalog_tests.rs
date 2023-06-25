@@ -23,6 +23,7 @@ mod tests {
 
     use catalog::helper::{CatalogKey, CatalogValue, SchemaKey, SchemaValue};
     use catalog::remote::mock::{MockKvBackend, MockTableEngine};
+    use catalog::remote::region_alive_keeper::RegionAliveKeepers;
     use catalog::remote::{CachedMetaKvBackend, KvBackend, KvBackendRef, RemoteCatalogManager};
     use catalog::{CatalogManager, RegisterSchemaRequest, RegisterTableRequest};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO_ENGINE};
@@ -36,6 +37,7 @@ mod tests {
     use tokio::time::Instant;
 
     struct TestingComponents {
+        #[allow(dead_code)]
         kv_backend: KvBackendRef,
         catalog_manager: Arc<RemoteCatalogManager>,
         table_engine_manager: TableEngineManagerRef,
@@ -235,10 +237,12 @@ mod tests {
     #[tokio::test]
     async fn test_register_table() {
         let node_id = 42;
-        let (_, table_engine, catalog_manager, _) = prepare_components(node_id).await;
+        // let (_, table_engine, catalog_manager, _) = prepare_components(node_id).await;
+        let components = prepare_components(node_id).await;
         assert_eq!(
             vec![DEFAULT_SCHEMA_NAME.to_string()],
-            catalog_manager
+            components
+                .catalog_manager
                 .schema_names(DEFAULT_CATALOG_NAME)
                 .await
                 .unwrap()
@@ -278,10 +282,15 @@ mod tests {
             table_id,
             table,
         };
-        assert!(catalog_manager.register_table(reg_req).await.unwrap());
+        assert!(components
+            .catalog_manager
+            .register_table(reg_req)
+            .await
+            .unwrap());
         assert_eq!(
             vec![table_name],
-            catalog_manager
+            components
+                .catalog_manager
                 .table_names(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME)
                 .await
                 .unwrap()
@@ -291,14 +300,16 @@ mod tests {
     #[tokio::test]
     async fn test_register_catalog_schema_table() {
         let node_id = 42;
-        let (_backend, table_engine, catalog_manager, _engine_manager) =
-            prepare_components(node_id).await;
+        // let (_backend, table_engine, catalog_manager, _engine_manager) =
+        //     prepare_components(node_id).await;
+        let components = prepare_components(node_id).await;
 
         let catalog_name = "test_catalog".to_string();
         let schema_name = "nonexistent_schema".to_string();
 
         // register catalog to catalog manager
-        catalog_manager
+        components
+            .catalog_manager
             .register_catalog(catalog_name.clone())
             .await
             .unwrap();
@@ -306,7 +317,14 @@ mod tests {
             HashSet::<String>::from_iter(
                 vec![DEFAULT_CATALOG_NAME.to_string(), catalog_name.clone()].into_iter()
             ),
-            HashSet::from_iter(catalog_manager.catalog_names().await.unwrap().into_iter())
+            HashSet::from_iter(
+                components
+                    .catalog_manager
+                    .catalog_names()
+                    .await
+                    .unwrap()
+                    .into_iter()
+            )
         );
 
         let table_to_register = components
@@ -339,7 +357,8 @@ mod tests {
         };
         // this register will fail since schema does not exist yet
         assert_matches!(
-            catalog_manager
+            components
+                .catalog_manager
                 .register_table(reg_req.clone())
                 .await
                 .unwrap_err(),
@@ -350,15 +369,21 @@ mod tests {
             catalog: catalog_name.to_string(),
             schema: schema_name.to_string(),
         };
-        assert!(catalog_manager
+        assert!(components
+            .catalog_manager
             .register_schema(register_schema_request)
             .await
             .expect("Register schema should not fail"));
-        assert!(catalog_manager.register_table(reg_req).await.unwrap());
+        assert!(components
+            .catalog_manager
+            .register_table(reg_req)
+            .await
+            .unwrap());
 
         assert_eq!(
             HashSet::from([schema_name.clone()]),
-            catalog_manager
+            components
+                .catalog_manager
                 .schema_names(&catalog_name)
                 .await
                 .unwrap()

@@ -16,8 +16,6 @@
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
-use common_catalog::consts::{INFORMATION_SCHEMA_NAME, SYSTEM_CATALOG_TABLE_NAME};
 use common_telemetry::logging;
 use snafu::ResultExt;
 use table::metadata::TableId;
