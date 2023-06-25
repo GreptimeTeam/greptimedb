@@ -116,7 +116,6 @@ impl Stream for DfRecordBatchStreamAdapter {
 pub struct RecordBatchStreamAdapter {
     schema: SchemaRef,
     stream: DfSendableRecordBatchStream,
-    #[allow(dead_code)]
     metrics: Option<BaselineMetrics>,
 }
 
@@ -155,12 +154,12 @@ impl Stream for RecordBatchStreamAdapter {
     type Item = Result<RecordBatch>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        // let timer = self
-        //     .metrics
-        //     .as_ref()
-        //     .map(|m| m.elapsed_compute().clone())
-        //     .unwrap_or_default();
-        // let _guard = timer.timer();
+        let timer = self
+            .metrics
+            .as_ref()
+            .map(|m| m.elapsed_compute().clone())
+            .unwrap_or_default();
+        let _guard = timer.timer();
         match Pin::new(&mut self.stream).poll_next(cx) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Some(df_record_batch)) => {

@@ -119,7 +119,8 @@ impl Stream for StreamWithMetricWrapper {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
-        let _timer = this.metric.elapsed_compute().timer();
+        // todo(shuiyisong): remove scan timer for now
+        // let _timer = this.metric.elapsed_compute().timer();
         let poll = this.stream.poll_next_unpin(cx);
         if let Poll::Ready(Option::Some(Result::Ok(record_batch))) = &poll {
             this.metric.record_output(record_batch.num_rows());
