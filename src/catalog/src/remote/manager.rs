@@ -992,6 +992,7 @@ impl SchemaProvider for RemoteSchemaProvider {
                     .context(InvalidCatalogValueSnafu)?;
 
                 let Some(table_id) = table_id else {
+                    warn!("Cannot find table id for {key}, the value has an old format");
                     return Ok(None);
                 };
                 let engine_name = engine_name.as_deref().unwrap_or(MITO_ENGINE);
@@ -1090,7 +1091,6 @@ impl SchemaProvider for RemoteSchemaProvider {
 
         let Some((engine_name, table_id)) = engine_opt else {
             warn!("Cannot find table id and engine name for {table_key}");
-            // If table
             return Ok(None);
         };
         let reference = TableReference {
