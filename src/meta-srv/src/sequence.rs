@@ -165,6 +165,7 @@ mod tests {
     use super::*;
     use crate::service::store::kv::KvStore;
     use crate::service::store::memory::MemStore;
+    use crate::service::store::txn::TxnService;
 
     #[tokio::test]
     async fn test_sequence() {
@@ -198,6 +199,8 @@ mod tests {
     #[tokio::test]
     async fn test_sequence_force_quit() {
         struct Noop;
+
+        impl TxnService for Noop {}
 
         #[async_trait::async_trait]
         impl KvStore for Noop {

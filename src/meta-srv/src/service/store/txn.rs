@@ -19,8 +19,10 @@ use crate::error::Result;
 mod etcd;
 
 #[async_trait::async_trait]
-pub trait TxnService: Send + Sync {
-    async fn txn(&self, txn: Txn) -> Result<TxnResponse>;
+pub trait TxnService: Sync + Send {
+    async fn txn(&self, _txn: Txn) -> Result<TxnResponse> {
+        unimplemented!("txn is not implemented")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -49,14 +51,14 @@ impl Compare {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum TxnOp {
     Put(Vec<u8>, Vec<u8>),
     Get(Vec<u8>),
     Delete(Vec<u8>),
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct TxnRequest {
     pub compare: Vec<Compare>,
     pub success: Vec<TxnOp>,
@@ -74,7 +76,7 @@ pub struct TxnResponse {
     pub responses: Vec<TxnOpResponse>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Txn {
     req: TxnRequest,
     c_when: bool,
@@ -128,5 +130,115 @@ impl Txn {
 impl From<Txn> for TxnRequest {
     fn from(txn: Txn) -> Self {
         txn.req
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use api::v1::meta::PutRequest;
+
+    use super::*;
+    use crate::service::store::kv::KvStoreRef;
+    use crate::service::store::memory::MemStore;
+
+    #[test]
+    fn test_txn() {
+        let txn = Txn::new()
+            .when(vec![Compare {
+                key: vec![1],
+                target: vec![1],
+                op: CompareOp::Equal,
+            }])
+            .and_then(vec![TxnOp::Put(vec![1], vec![1])])
+            .or_else(vec![TxnOp::Put(vec![1], vec![2])]);
+
+        assert_eq!(
+            txn,
+            Txn {
+                req: TxnRequest {
+                    compare: vec![Compare {
+                        key: vec![1],
+                        target: vec![1],
+                        op: CompareOp::Equal,
+                    }],
+                    success: vec![TxnOp::Put(vec![1], vec![1])],
+                    failure: vec![TxnOp::Put(vec![1], vec![2])],
+                },
+                c_when: true,
+                c_then: true,
+                c_else: true,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn test_txn_one_compare_op() {
+        let kv_store = create_kv_store().await;
+
+        let _ = kv_store
+            .put(PutRequest {
+                key: vec![1],
+                value: vec![3],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        let txn = Txn::new()
+            .when(vec![Compare {
+                key: vec![1],
+                target: vec![1],
+                op: CompareOp::Greater,
+            }])
+            .and_then(vec![TxnOp::Put(vec![1], vec![1])])
+            .or_else(vec![TxnOp::Put(vec![1], vec![2])]);
+
+        let txn_response = kv_store.txn(txn).await.unwrap();
+
+        assert!(txn_response.succeeded);
+        assert_eq!(txn_response.responses.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_txn_multi_compare_op() {
+        let kv_store = create_kv_store().await;
+
+        for i in 1..3 {
+            let _ = kv_store
+                .put(PutRequest {
+                    key: vec![i],
+                    value: vec![i],
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+        }
+
+        let when: Vec<_> = (1..3u8)
+            .map(|i| Compare {
+                key: vec![i],
+                target: vec![i],
+                op: CompareOp::Equal,
+            })
+            .collect();
+
+        let txn = Txn::new()
+            .when(when)
+            .and_then(vec![
+                TxnOp::Put(vec![1], vec![10]),
+                TxnOp::Put(vec![2], vec![20]),
+            ])
+            .or_else(vec![TxnOp::Put(vec![1], vec![11])]);
+
+        let txn_response = kv_store.txn(txn).await.unwrap();
+
+        assert!(txn_response.succeeded);
+        assert_eq!(txn_response.responses.len(), 2);
+    }
+
+    async fn create_kv_store() -> KvStoreRef {
+        Arc::new(MemStore::new())
     }
 }
