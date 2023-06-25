@@ -58,7 +58,7 @@ impl<C: Accessor + Clone> LruCacheLayer<C> {
         let mut lru_cache = self.lru_cache.lock().await;
         while let Some(entries) = pager.next().await? {
             for entry in entries {
-                lru_cache.push(entry.path().to_string(), ());
+                let _ = lru_cache.push(entry.path().to_string(), ());
             }
         }
 
@@ -128,7 +128,7 @@ impl<I: Accessor, C: Accessor> LayeredAccessor for LruCacheAccessor<I, C> {
 
                 // update lru when cache hit
                 let mut lru_cache = lru_cache.lock().await;
-                lru_cache.get_or_insert(cache_path.clone(), || ());
+                let _ = lru_cache.get_or_insert(cache_path.clone(), || ());
                 Ok(to_output_reader((rp, r)))
             }
             Err(err) if err.kind() == ErrorKind::NotFound => {
@@ -187,7 +187,7 @@ impl<I: Accessor, C: Accessor> LayeredAccessor for LruCacheAccessor<I, C> {
                 .map(|(k, _v)| k.clone())
                 .collect::<Vec<_>>();
             for k in &cache_files {
-                lru.pop(k);
+                let _ = lru.pop(k);
             }
             cache_files
         };

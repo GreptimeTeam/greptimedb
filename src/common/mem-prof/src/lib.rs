@@ -62,7 +62,8 @@ pub async fn dump_profile() -> error::Result<Vec<u8>> {
         .await
         .context(OpenTempFileSnafu { path: &path })?;
     let mut buf = vec![];
-    f.read_to_end(&mut buf)
+    let _ = f
+        .read_to_end(&mut buf)
         .await
         .context(OpenTempFileSnafu { path })?;
     Ok(buf)

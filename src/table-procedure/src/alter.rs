@@ -245,7 +245,8 @@ impl AlterTableProcedure {
                 table_id,
             };
 
-            self.catalog_manager
+            let _ = self
+                .catalog_manager
                 .rename_table(rename_req)
                 .await
                 .map_err(Error::from_error_ext)?;

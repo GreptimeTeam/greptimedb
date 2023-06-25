@@ -84,7 +84,7 @@ impl OpentsdbServer {
                         let connection = Connection::new(stream);
                         let mut handler = Handler::new(query_handler, connection, shutdown);
 
-                        io_runtime.spawn(async move {
+                        let _handle = io_runtime.spawn(async move {
                             if let Err(e) = handler.run().await {
                                 error!(e; "Unexpected error when handling OpenTSDB connection");
                             }

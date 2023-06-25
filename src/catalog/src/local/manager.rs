@@ -118,9 +118,10 @@ impl LocalCatalogManager {
 
     async fn init_system_catalog(&self) -> Result<()> {
         // register SystemCatalogTable
-        self.catalogs
+        let _ = self
+            .catalogs
             .register_catalog_sync(SYSTEM_CATALOG_NAME.to_string())?;
-        self.catalogs.register_schema_sync(RegisterSchemaRequest {
+        let _ = self.catalogs.register_schema_sync(RegisterSchemaRequest {
             catalog: SYSTEM_CATALOG_NAME.to_string(),
             schema: INFORMATION_SCHEMA_NAME.to_string(),
         })?;
@@ -131,12 +132,13 @@ impl LocalCatalogManager {
             table_id: SYSTEM_CATALOG_TABLE_ID,
             table: self.system.information_schema.system.clone(),
         };
-        self.catalogs.register_table(register_table_req).await?;
+        let _ = self.catalogs.register_table(register_table_req).await?;
 
         // register default catalog and default schema
-        self.catalogs
+        let _ = self
+            .catalogs
             .register_catalog_sync(DEFAULT_CATALOG_NAME.to_string())?;
-        self.catalogs.register_schema_sync(RegisterSchemaRequest {
+        let _ = self.catalogs.register_schema_sync(RegisterSchemaRequest {
             catalog: DEFAULT_CATALOG_NAME.to_string(),
             schema: DEFAULT_SCHEMA_NAME.to_string(),
         })?;
@@ -151,7 +153,8 @@ impl LocalCatalogManager {
             table: numbers_table,
         };
 
-        self.catalogs
+        let _ = self
+            .catalogs
             .register_table(register_number_table_req)
             .await?;
 
@@ -226,7 +229,8 @@ impl LocalCatalogManager {
         for entry in entries {
             match entry {
                 Entry::Catalog(c) => {
-                    self.catalogs
+                    let _ = self
+                        .catalogs
                         .register_catalog_if_absent(c.catalog_name.clone());
                     info!("Register catalog: {}", c.catalog_name);
                 }
@@ -235,7 +239,7 @@ impl LocalCatalogManager {
                         catalog: s.catalog_name.clone(),
                         schema: s.schema_name.clone(),
                     };
-                    self.catalogs.register_schema_sync(req)?;
+                    let _ = self.catalogs.register_schema_sync(req)?;
                     info!("Registered schema: {:?}", s);
                 }
                 Entry::Table(t) => {
@@ -297,7 +301,7 @@ impl LocalCatalogManager {
             table_id: t.table_id,
             table: table_ref,
         };
-        self.catalogs.register_table(register_request).await?;
+        let _ = self.catalogs.register_table(register_request).await?;
 
         Ok(())
     }
@@ -389,8 +393,9 @@ impl CatalogManager for LocalCatalogManager {
                 let engine = request.table.table_info().meta.engine.to_string();
                 let table_name = request.table_name.clone();
                 let table_id = request.table_id;
-                self.catalogs.register_table(request).await?;
-                self.system
+                let _ = self.catalogs.register_table(request).await?;
+                let _ = self
+                    .system
                     .register_table(
                         catalog_name.clone(),
                         schema_name.clone(),
@@ -438,7 +443,8 @@ impl CatalogManager for LocalCatalogManager {
 
         let engine = old_table.table_info().meta.engine.to_string();
         // rename table in system catalog
-        self.system
+        let _ = self
+            .system
             .register_table(
                 catalog_name.clone(),
                 schema_name.clone(),
@@ -499,7 +505,8 @@ impl CatalogManager for LocalCatalogManager {
                     schema: schema_name,
                 }
             );
-            self.system
+            let _ = self
+                .system
                 .register_schema(request.catalog.clone(), schema_name.clone())
                 .await?;
             self.catalogs.register_schema_sync(request)

@@ -38,7 +38,7 @@ impl SqlHandler {
                 .table_names(&req.catalog_name, &req.schema_name)
                 .await
                 .context(CatalogSnafu)?;
-            futures::future::join_all(all_table_names.iter().map(|table| {
+            let _ = futures::future::join_all(all_table_names.iter().map(|table| {
                 self.flush_table_inner(
                     &self.catalog_manager,
                     &req.catalog_name,

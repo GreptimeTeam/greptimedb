@@ -291,20 +291,20 @@ mod tests {
 
     #[test]
     fn test_try_from() {
-        let mut map = HashMap::new();
+        let map = HashMap::new();
         let format: CsvFormat = CsvFormat::try_from(&map).unwrap();
 
         assert_eq!(format, CsvFormat::default());
 
-        map.insert(
-            FORMAT_SCHEMA_INFER_MAX_RECORD.to_string(),
-            "2000".to_string(),
-        );
-
-        map.insert(FORMAT_COMPRESSION_TYPE.to_string(), "zstd".to_string());
-        map.insert(FORMAT_DELIMITER.to_string(), b'\t'.to_string());
-        map.insert(FORMAT_HAS_HEADER.to_string(), "false".to_string());
-
+        let map = HashMap::from([
+            (
+                FORMAT_SCHEMA_INFER_MAX_RECORD.to_string(),
+                "2000".to_string(),
+            ),
+            (FORMAT_COMPRESSION_TYPE.to_string(), "zstd".to_string()),
+            (FORMAT_DELIMITER.to_string(), b'\t'.to_string()),
+            (FORMAT_HAS_HEADER.to_string(), "false".to_string()),
+        ]);
         let format = CsvFormat::try_from(&map).unwrap();
 
         assert_eq!(

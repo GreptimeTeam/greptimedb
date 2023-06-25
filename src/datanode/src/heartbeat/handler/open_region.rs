@@ -58,7 +58,7 @@ impl HeartbeatResponseHandler for OpenRegionHandler {
         let self_ref = Arc::new(self.clone());
 
         let region_alive_keepers = self.region_alive_keepers.clone();
-        common_runtime::spawn_bg(async move {
+        let _handle = common_runtime::spawn_bg(async move {
             let table_ident = &region_ident.table_ident;
             let request = OpenTableRequest {
                 catalog_name: table_ident.catalog.clone(),

@@ -298,7 +298,7 @@ pub fn column_def_to_schema(column_def: &ColumnDef, is_time_index: bool) -> Resu
             None
         }
     }) {
-        column_schema
+        let _ = column_schema
             .mut_metadata()
             .insert(COMMENT_KEY.to_string(), c.to_string());
     }

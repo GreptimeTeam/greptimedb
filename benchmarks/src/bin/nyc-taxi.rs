@@ -114,7 +114,7 @@ async fn write_data(
         };
 
         let now = Instant::now();
-        db.insert(requests).await.unwrap();
+        let _ = db.insert(requests).await.unwrap();
         let elapsed = now.elapsed();
         total_rpc_elapsed_ms += elapsed.as_millis();
         progress_bar.inc(row_count as _);
@@ -377,19 +377,16 @@ fn create_table_expr() -> CreateTableExpr {
 }
 
 fn query_set() -> HashMap<String, String> {
-    let mut ret = HashMap::new();
-
-    ret.insert(
-        "count_all".to_string(),
-        format!("SELECT COUNT(*) FROM {TABLE_NAME};"),
-    );
-
-    ret.insert(
-        "fare_amt_by_passenger".to_string(),
-        format!("SELECT passenger_count, MIN(fare_amount), MAX(fare_amount), SUM(fare_amount) FROM {TABLE_NAME} GROUP BY passenger_count")
-    );
-
-    ret
+    HashMap::from([
+        (
+            "count_all".to_string(), 
+            format!("SELECT COUNT(*) FROM {TABLE_NAME};"),
+        ),
+        (
+            "fare_amt_by_passenger".to_string(),
+            format!("SELECT passenger_count, MIN(fare_amount), MAX(fare_amount), SUM(fare_amount) FROM {TABLE_NAME} GROUP BY passenger_count"),
+        )
+    ])
 }
 
 async fn do_write(args: &Args, db: &Database) {
@@ -414,7 +411,8 @@ async fn do_write(args: &Args, db: &Database) {
             let db = db.clone();
             let mpb = multi_progress_bar.clone();
             let pb_style = progress_bar_style.clone();
-            write_jobs.spawn(async move { write_data(batch_size, &db, path, mpb, pb_style).await });
+            let _ = write_jobs
+                .spawn(async move { write_data(batch_size, &db, path, mpb, pb_style).await });
         }
     }
     while write_jobs.join_next().await.is_some() {
@@ -423,7 +421,8 @@ async fn do_write(args: &Args, db: &Database) {
             let db = db.clone();
             let mpb = multi_progress_bar.clone();
             let pb_style = progress_bar_style.clone();
-            write_jobs.spawn(async move { write_data(batch_size, &db, path, mpb, pb_style).await });
+            let _ = write_jobs
+                .spawn(async move { write_data(batch_size, &db, path, mpb, pb_style).await });
         }
     }
 }

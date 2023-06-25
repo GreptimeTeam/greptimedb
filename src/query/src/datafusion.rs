@@ -402,7 +402,7 @@ mod tests {
             table_id: NUMBERS_TABLE_ID,
             table: Arc::new(NumbersTable::default()),
         };
-        catalog_manager.register_table(req).await.unwrap();
+        assert!(catalog_manager.register_table(req).await.is_ok());
 
         QueryEngineFactory::new(catalog_manager, false).query_engine()
     }

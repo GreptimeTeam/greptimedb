@@ -78,7 +78,7 @@ where
     V: VisitMut,
 {
     let mut index = 1;
-    visit_expressions_mut(v, |expr| {
+    let _ = visit_expressions_mut(v, |expr| {
         if let Expr::Value(ValueExpr::Placeholder(s)) = expr {
             *s = format_placeholder(index);
             index += 1;

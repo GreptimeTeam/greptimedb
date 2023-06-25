@@ -229,7 +229,7 @@ impl AllocTracker {
 
     /// Tracks `bytes` memory is allocated.
     pub(crate) fn on_allocate(&self, bytes: usize) {
-        self.bytes_allocated.fetch_add(bytes, Ordering::Relaxed);
+        let _ = self.bytes_allocated.fetch_add(bytes, Ordering::Relaxed);
         increment_gauge!(WRITE_BUFFER_BYTES, bytes as f64);
         if let Some(flush_strategy) = &self.flush_strategy {
             flush_strategy.reserve_mem(bytes);

@@ -31,10 +31,10 @@ pub type Connection = HashMap<String, String>;
 // COPY tbl TO 'output.parquet';
 impl<'a> ParserContext<'a> {
     pub(crate) fn parse_copy(&mut self) -> Result<Statement> {
-        self.parser.next_token();
+        let _ = self.parser.next_token();
         let next = self.parser.peek_token();
         let copy = if let Word(word) = next.token && word.keyword == Keyword::DATABASE {
-            self.parser.next_token();
+            let _ = self.parser.next_token();
             let copy_database = self.parser_copy_database()?;
             crate::statements::copy::Copy::CopyDatabase(copy_database)
         } else {

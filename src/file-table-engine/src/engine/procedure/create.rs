@@ -118,7 +118,8 @@ impl CreateImmutableFileTable {
             return Ok(Status::Done);
         }
 
-        self.engine
+        let _ = self
+            .engine
             .create_table(&engine_ctx, self.data.request.clone())
             .await
             .map_err(Error::from_error_ext)?;

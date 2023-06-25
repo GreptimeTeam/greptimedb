@@ -198,7 +198,7 @@ impl ProcedureStore {
                     entry.1 = value;
                 }
             } else {
-                procedure_key_values.insert(curr_key.procedure_id, (curr_key, value));
+                let _ = procedure_key_values.insert(curr_key.procedure_id, (curr_key, value));
             }
         }
 
@@ -211,7 +211,7 @@ impl ProcedureStore {
                     // procedures are loaded.
                     continue;
                 };
-                messages.insert(procedure_id, message);
+                let _ = messages.insert(procedure_id, message);
             } else {
                 finished_ids.push(procedure_id);
             }
@@ -331,7 +331,7 @@ mod tests {
     fn procedure_store_for_test(dir: &TempDir) -> ProcedureStore {
         let store_dir = dir.path().to_str().unwrap();
         let mut builder = Builder::default();
-        builder.root(store_dir);
+        let _ = builder.root(store_dir);
         let object_store = ObjectStore::new(builder).unwrap().finish();
 
         ProcedureStore::from_object_store(object_store)

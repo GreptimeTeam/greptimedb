@@ -186,7 +186,7 @@ impl TableMeta {
             // No need to rebuild table meta when renaming tables.
             AlterKind::RenameTable { .. } => {
                 let mut meta_builder = TableMetaBuilder::default();
-                meta_builder
+                let _ = meta_builder
                     .schema(self.schema.clone())
                     .primary_key_indices(self.primary_key_indices.clone())
                     .engine(self.engine.clone())
@@ -225,7 +225,7 @@ impl TableMeta {
 
     fn new_meta_builder(&self) -> TableMetaBuilder {
         let mut builder = TableMetaBuilder::default();
-        builder
+        let _ = builder
             .engine(&self.engine)
             .engine_options(self.engine_options.clone())
             .options(self.options.clone())
@@ -301,7 +301,7 @@ impl TableMeta {
         })?;
 
         // value_indices would be generated automatically.
-        meta_builder
+        let _ = meta_builder
             .schema(Arc::new(new_schema))
             .primary_key_indices(primary_key_indices);
 
@@ -380,7 +380,7 @@ impl TableMeta {
             .map(|name| new_schema.column_index_by_name(name).unwrap())
             .collect();
 
-        meta_builder
+        let _ = meta_builder
             .schema(Arc::new(new_schema))
             .primary_key_indices(primary_key_indices);
 

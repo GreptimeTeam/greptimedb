@@ -38,7 +38,7 @@ impl SqlHandler {
                 .context(error::PrepareImmutableTableSnafu)?;
 
         let meta = ImmutableFileTableOptions { files };
-        options.insert(
+        let _ = options.insert(
             IMMUTABLE_TABLE_META_KEY.to_string(),
             serde_json::to_string(&meta).context(error::EncodeJsonSnafu)?,
         );

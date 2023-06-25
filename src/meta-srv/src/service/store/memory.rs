@@ -178,7 +178,7 @@ impl KvStore for MemStore {
                 .collect()
         } else {
             for kv in kvs.into_iter() {
-                memory.insert(kv.key, kv.value);
+                let _ = memory.insert(kv.key, kv.value);
             }
             vec![]
         };
@@ -208,7 +208,7 @@ impl KvStore for MemStore {
                 .collect()
         } else {
             for key in keys.into_iter() {
-                memory.remove(&key);
+                let _ = memory.remove(&key);
             }
             vec![]
         };
@@ -236,7 +236,7 @@ impl KvStore for MemStore {
             Entry::Vacant(e) => {
                 let success = expect.is_empty();
                 if success {
-                    e.insert(value);
+                    let _ = e.insert(value);
                 }
                 (success, None)
             }
@@ -245,7 +245,7 @@ impl KvStore for MemStore {
                 let prev_val = e.get().clone();
                 let success = prev_val == expect;
                 if success {
-                    e.insert(value);
+                    let _ = e.insert(value);
                 }
                 (success, Some((key, prev_val)))
             }
@@ -320,7 +320,7 @@ impl KvStore for MemStore {
 
         let kv = match memory.remove(&from_key) {
             Some(v) => {
-                memory.insert(to_key, v.clone());
+                let _ = memory.insert(to_key, v.clone());
                 Some((from_key, v))
             }
             None => memory.get(&to_key).map(|v| (to_key, v.clone())),
@@ -419,22 +419,22 @@ mod tests {
         let kv_store = MemStore::new();
         let kvs = mock_kvs();
 
-        kv_store
+        assert!(kv_store
             .batch_put(BatchPutRequest {
                 kvs,
                 ..Default::default()
             })
             .await
-            .unwrap();
+            .is_ok());
 
-        kv_store
+        assert!(kv_store
             .put(PutRequest {
                 key: b"key11".to_vec(),
                 value: b"val11".to_vec(),
                 ..Default::default()
             })
             .await
-            .unwrap();
+            .is_ok());
 
         kv_store
     }
@@ -614,7 +614,7 @@ mod tests {
                 };
                 let resp = kv_store_clone.compare_and_put(req).await.unwrap();
                 if resp.success {
-                    success_clone.fetch_add(1, Ordering::SeqCst);
+                    let _ = success_clone.fetch_add(1, Ordering::SeqCst);
                 }
             });
             joins.push(join);

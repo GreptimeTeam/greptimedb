@@ -30,17 +30,17 @@ pub(crate) async fn new_s3_object_store(s3_config: &S3Config) -> Result<ObjectSt
     );
 
     let mut builder = S3Builder::default();
-    builder
+    let _ = builder
         .root(&root)
         .bucket(&s3_config.bucket)
         .access_key_id(s3_config.access_key_id.expose_secret())
         .secret_access_key(s3_config.secret_access_key.expose_secret());
 
     if s3_config.endpoint.is_some() {
-        builder.endpoint(s3_config.endpoint.as_ref().unwrap());
+        let _ = builder.endpoint(s3_config.endpoint.as_ref().unwrap());
     }
     if s3_config.region.is_some() {
-        builder.region(s3_config.region.as_ref().unwrap());
+        let _ = builder.region(s3_config.region.as_ref().unwrap());
     }
 
     Ok(ObjectStore::new(builder)

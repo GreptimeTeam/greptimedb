@@ -176,7 +176,7 @@ impl MutableVector for NullVectorBuilder {
     }
 
     fn extend_slice_of(&mut self, vector: &dyn Vector, offset: usize, length: usize) -> Result<()> {
-        vector
+        let _ = vector
             .as_any()
             .downcast_ref::<NullVector>()
             .with_context(|| error::CastTypeSnafu {

@@ -100,7 +100,8 @@ impl<S: AsyncWrite + AsyncRead + Unpin> Connection<S> {
             .write_all(line.as_bytes())
             .await
             .context(error::InternalIoSnafu)?;
-        self.stream
+        let _ = self
+            .stream
             .write(b"\r\n")
             .await
             .context(error::InternalIoSnafu)?;

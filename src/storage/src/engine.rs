@@ -259,7 +259,7 @@ impl<S: LogStore> RegionMap<S> {
         }
 
         // No slot in map, we can insert the slot now.
-        regions.insert(name.to_string(), slot);
+        let _ = regions.insert(name.to_string(), slot);
 
         None
     }
@@ -281,7 +281,7 @@ impl<S: LogStore> RegionMap<S> {
     /// Remove region by name.
     fn remove(&self, name: &str) {
         let mut regions = self.0.write().unwrap();
-        regions.remove(name);
+        let _ = regions.remove(name);
     }
 
     /// Collects regions.
@@ -557,7 +557,7 @@ mod tests {
         let store_dir = tmp_dir.path().to_string_lossy();
 
         let mut builder = Fs::default();
-        builder.root(&store_dir);
+        let _ = builder.root(&store_dir);
         let object_store = ObjectStore::new(builder).unwrap().finish();
 
         let compaction_scheduler = Arc::new(NoopCompactionScheduler::default());
@@ -652,13 +652,13 @@ mod tests {
         let v1 = Arc::new(Float32Vector::from_slice([0.1, 0.2, 0.3])) as VectorRef;
         let tsv = Arc::new(TimestampMillisecondVector::from_slice([0, 0, 0])) as VectorRef;
 
-        let mut put_data = HashMap::with_capacity(4);
-        put_data.insert("k1".to_string(), k1);
-        put_data.insert("v1".to_string(), v1);
-        put_data.insert("ts".to_string(), tsv);
-
+        let put_data = HashMap::from([
+            ("k1".to_string(), k1),
+            ("v1".to_string(), v1),
+            ("ts".to_string(), tsv),
+        ]);
         wb.put(put_data).unwrap();
-        region.write(&WriteContext::default(), wb).await.unwrap();
+        assert!(region.write(&WriteContext::default(), wb).await.is_ok());
 
         // Flush memtable to sst.
         region.flush(&FlushContext::default()).await.unwrap();

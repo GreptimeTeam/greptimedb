@@ -39,7 +39,7 @@ pub struct MockKvCacheInvalidator {
 #[async_trait::async_trait]
 impl KvCacheInvalidator for MockKvCacheInvalidator {
     async fn invalidate_key(&self, key: &[u8]) {
-        self.inner.lock().unwrap().remove(key);
+        let _ = self.inner.lock().unwrap().remove(key);
     }
 }
 
@@ -50,7 +50,7 @@ pub struct MockTableRouteCacheInvalidator {
 #[async_trait::async_trait]
 impl TableRouteCacheInvalidator for MockTableRouteCacheInvalidator {
     async fn invalidate_table_route(&self, table: &TableName) {
-        self.inner.lock().unwrap().remove(&table.to_string());
+        let _ = self.inner.lock().unwrap().remove(&table.to_string());
     }
 }
 

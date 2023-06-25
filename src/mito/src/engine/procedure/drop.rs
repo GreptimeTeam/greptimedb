@@ -44,7 +44,8 @@ impl<S: StorageEngine> Procedure for DropMitoTable<S> {
         match self.data.state {
             DropTableState::Prepare => self.on_prepare(),
             DropTableState::EngineDropTable => {
-                self.engine_inner
+                let _ = self
+                    .engine_inner
                     .drop_table(self.data.request.clone())
                     .await
                     .map_err(Error::from_error_ext)?;

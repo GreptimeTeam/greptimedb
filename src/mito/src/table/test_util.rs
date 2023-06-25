@@ -102,7 +102,7 @@ pub async fn new_test_object_store(prefix: &str) -> (TempDir, ObjectStore) {
     let dir = create_temp_dir(prefix);
     let store_dir = dir.path().to_string_lossy();
     let mut builder = Builder::default();
-    builder.root(&store_dir);
+    let _ = builder.root(&store_dir);
     (dir, ObjectStore::new(builder).unwrap().finish())
 }
 
@@ -205,16 +205,17 @@ pub async fn setup_mock_engine_and_table(
 }
 
 pub async fn setup_table(table: Arc<dyn Table>) {
-    let mut columns_values: HashMap<String, VectorRef> = HashMap::with_capacity(4);
     let hosts: VectorRef = Arc::new(StringVector::from(vec!["host1", "host2", "host3", "host4"]));
     let cpus: VectorRef = Arc::new(Float64Vector::from_vec(vec![1.0, 2.0, 3.0, 4.0]));
     let memories: VectorRef = Arc::new(Float64Vector::from_vec(vec![1.0, 2.0, 3.0, 4.0]));
     let tss: VectorRef = Arc::new(TimestampMillisecondVector::from_vec(vec![1, 2, 2, 1]));
 
-    columns_values.insert("host".to_string(), hosts.clone());
-    columns_values.insert("cpu".to_string(), cpus.clone());
-    columns_values.insert("memory".to_string(), memories.clone());
-    columns_values.insert("ts".to_string(), tss.clone());
+    let columns_values = HashMap::from([
+        ("host".to_string(), hosts),
+        ("cpu".to_string(), cpus),
+        ("memory".to_string(), memories),
+        ("ts".to_string(), tss),
+    ]);
 
     let insert_req = new_insert_request("demo".to_string(), columns_values);
     assert_eq!(4, table.insert(insert_req).await.unwrap());

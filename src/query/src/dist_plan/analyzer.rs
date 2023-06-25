@@ -42,7 +42,7 @@ impl AnalyzerRule for DistPlannerAnalyzer {
 
         // (2) transform up merge scan
         let mut visitor = CommutativeVisitor::new();
-        plan.visit(&mut visitor)?;
+        let _ = plan.visit(&mut visitor)?;
         let state = ExpandState::new();
         let plan = plan.transform_down(&|plan| Self::expand(plan, &visitor, &state))?;
 

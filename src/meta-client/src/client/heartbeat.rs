@@ -292,7 +292,7 @@ mod test {
     async fn test_heartbeat_stream() {
         let (sender, mut receiver) = mpsc::channel::<HeartbeatRequest>(100);
         let sender = HeartbeatSender::new((8, 8), Role::Datanode, sender);
-        tokio::spawn(async move {
+        let _handle = tokio::spawn(async move {
             for _ in 0..10 {
                 sender.send(HeartbeatRequest::default()).await.unwrap();
             }

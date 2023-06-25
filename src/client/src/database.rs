@@ -173,7 +173,7 @@ impl Database {
         let mut client = self.client.make_database_client()?.inner;
         let (sender, receiver) = mpsc::channel::<GreptimeRequest>(65536);
         let receiver = ReceiverStream::new(receiver);
-        client.handle_requests(receiver).await?;
+        let _ = client.handle_requests(receiver).await?;
         Ok(sender)
     }
 

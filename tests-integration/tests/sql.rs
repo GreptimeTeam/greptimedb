@@ -63,18 +63,18 @@ pub async fn test_mysql_crud(store_type: StorageType) {
         .await
         .unwrap();
 
-    sqlx::query(
+    assert!(sqlx::query(
         "create table demo(i bigint, ts timestamp time index, d date, dt datetime, b blob)",
     )
     .execute(&pool)
     .await
-    .unwrap();
+    .is_ok());
     for i in 0..10 {
         let dt = DateTime::<Utc>::from_utc(NaiveDateTime::from_timestamp_opt(60, i).unwrap(), Utc);
         let d = NaiveDate::from_yo_opt(2015, 100).unwrap();
         let hello = format!("hello{i}");
         let bytes = hello.as_bytes();
-        sqlx::query("insert into demo values(?, ?, ?, ?, ?)")
+        assert!(sqlx::query("insert into demo values(?, ?, ?, ?, ?)")
             .bind(i)
             .bind(i)
             .bind(d)
@@ -82,7 +82,7 @@ pub async fn test_mysql_crud(store_type: StorageType) {
             .bind(bytes)
             .execute(&pool)
             .await
-            .unwrap();
+            .is_ok());
     }
 
     let rows = sqlx::query("select i, d, dt, b from demo")
@@ -122,10 +122,7 @@ pub async fn test_mysql_crud(store_type: StorageType) {
         assert_eq!(ret, 6);
     }
 
-    sqlx::query("delete from demo")
-        .execute(&pool)
-        .await
-        .unwrap();
+    assert!(sqlx::query("delete from demo").execute(&pool).await.is_ok());
     let rows = sqlx::query("select i from demo")
         .fetch_all(&pool)
         .await
@@ -145,17 +142,19 @@ pub async fn test_postgres_crud(store_type: StorageType) {
         .await
         .unwrap();
 
-    sqlx::query("create table demo(i bigint, ts timestamp time index)")
-        .execute(&pool)
-        .await
-        .unwrap();
+    assert!(
+        sqlx::query("create table demo(i bigint, ts timestamp time index)")
+            .execute(&pool)
+            .await
+            .is_ok()
+    );
     for i in 0..10 {
-        sqlx::query("insert into demo values($1, $2)")
+        assert!(sqlx::query("insert into demo values($1, $2)")
             .bind(i)
             .bind(i)
             .execute(&pool)
             .await
-            .unwrap();
+            .is_ok());
     }
 
     let rows = sqlx::query("select i from demo")
@@ -181,10 +180,7 @@ pub async fn test_postgres_crud(store_type: StorageType) {
         assert_eq!(ret, 6);
     }
 
-    sqlx::query("delete from demo")
-        .execute(&pool)
-        .await
-        .unwrap();
+    assert!(sqlx::query("delete from demo").execute(&pool).await.is_ok());
     let rows = sqlx::query("select i from demo")
         .fetch_all(&pool)
         .await

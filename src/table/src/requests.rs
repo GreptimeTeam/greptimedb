@@ -128,14 +128,14 @@ impl From<&TableOptions> for HashMap<String, String> {
     fn from(opts: &TableOptions) -> Self {
         let mut res = HashMap::with_capacity(2 + opts.extra_options.len());
         if let Some(write_buffer_size) = opts.write_buffer_size {
-            res.insert(
+            let _ = res.insert(
                 WRITE_BUFFER_SIZE_KEY.to_string(),
                 write_buffer_size.to_string(),
             );
         }
         if let Some(ttl) = opts.ttl {
             let ttl_str = humantime::format_duration(ttl).to_string();
-            res.insert(TTL_KEY.to_string(), ttl_str);
+            let _ = res.insert(TTL_KEY.to_string(), ttl_str);
         }
         res.extend(
             opts.extra_options

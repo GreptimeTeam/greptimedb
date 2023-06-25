@@ -289,7 +289,7 @@ where
     #[inline]
     async fn put_back_req(&self, key: R::Key, req: R) {
         let mut queue = self.req_queue.write().unwrap();
-        queue.push_front(key, req);
+        let _ = queue.push_front(key, req);
     }
 
     // Handles request, submit task to bg runtime.
@@ -375,11 +375,11 @@ mod tests {
         });
 
         let handler_cloned = handler.clone();
-        common_runtime::spawn_bg(async move { handler_cloned.run().await });
+        let _handle = common_runtime::spawn_bg(async move { handler_cloned.run().await });
 
-        queue.write().unwrap().push_back(1, MockRequest::default());
+        let _ = queue.write().unwrap().push_back(1, MockRequest::default());
         handler.task_notifier.notify_one();
-        queue.write().unwrap().push_back(2, MockRequest::default());
+        let _ = queue.write().unwrap().push_back(2, MockRequest::default());
         handler.task_notifier.notify_one();
 
         tokio::time::timeout(Duration::from_secs(1), latch.wait())
@@ -443,9 +443,8 @@ mod tests {
             handler,
         );
 
-        scheduler.schedule(MockRequest { region_id: 1 }).unwrap();
-
-        scheduler.schedule(MockRequest { region_id: 2 }).unwrap();
+        assert!(scheduler.schedule(MockRequest { region_id: 1 }).is_ok());
+        assert!(scheduler.schedule(MockRequest { region_id: 2 }).is_ok());
 
         tokio::time::timeout(Duration::from_secs(1), latch.wait())
             .await
@@ -472,11 +471,11 @@ mod tests {
         let scheduler = LocalScheduler::new(config, handler);
 
         for i in 0..task_size {
-            scheduler
+            assert!(scheduler
                 .schedule(MockRequest {
                     region_id: i as RegionId,
                 })
-                .unwrap();
+                .is_ok());
         }
 
         tokio::time::timeout(Duration::from_secs(3), latch.wait())
@@ -503,20 +502,20 @@ mod tests {
         let scheduler = LocalScheduler::new(config, handler);
 
         for i in 0..task_size / 2 {
-            scheduler
+            assert!(scheduler
                 .schedule(MockRequest {
                     region_id: i as RegionId,
                 })
-                .unwrap();
+                .is_ok());
         }
 
         tokio::time::sleep(Duration::from_millis(100)).await;
         for i in task_size / 2..task_size {
-            scheduler
+            assert!(scheduler
                 .schedule(MockRequest {
                     region_id: i as RegionId,
                 })
-                .unwrap();
+                .is_ok());
         }
 
         tokio::time::timeout(Duration::from_secs(6), latch.wait())
@@ -552,7 +551,7 @@ mod tests {
         let finished_clone = finished.clone();
         let handler = MockHandler {
             cb: move || {
-                finished_clone.fetch_add(1, Ordering::Relaxed);
+                let _ = finished_clone.fetch_add(1, Ordering::Relaxed);
             },
         };
 
@@ -572,7 +571,7 @@ mod tests {
                     region_id: i as RegionId,
                 }) {
                     if res {
-                        task_scheduled_cloned.fetch_add(1, Ordering::Relaxed);
+                        let _ = task_scheduled_cloned.fetch_add(1, Ordering::Relaxed);
                     }
                 }
 

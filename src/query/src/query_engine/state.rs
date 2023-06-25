@@ -139,7 +139,7 @@ impl QueryEngineState {
             }
         }
         if let Some(index) = index_to_move {
-            rules.remove(index);
+            let _ = rules.remove(index);
         }
     }
 

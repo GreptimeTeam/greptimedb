@@ -62,6 +62,6 @@ pub async fn flush(
         })),
     });
 
-    grpc_handler.do_query(request, QueryContext::arc()).await?;
+    let _ = grpc_handler.do_query(request, QueryContext::arc()).await?;
     Ok((StatusCode::NO_CONTENT, ()))
 }

@@ -287,7 +287,7 @@ mod tests {
         let wal = Wal::new(0, Arc::new(log_store));
         let header = WalHeader::with_last_manifest_version(111);
         let seq_num = 3;
-        wal.write_to_wal(seq_num, header, None).await?;
+        let _ = wal.write_to_wal(seq_num, header, None).await?;
 
         let mut stream = wal.read_from_wal(seq_num).await?;
         let mut data = vec![];

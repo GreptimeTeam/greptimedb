@@ -292,7 +292,7 @@ impl ManagerContext {
     fn remove_messages(&self, procedure_ids: &[ProcedureId]) {
         let mut messages = self.messages.lock().unwrap();
         for procedure_id in procedure_ids {
-            messages.remove(procedure_id);
+            let _ = messages.remove(procedure_id);
         }
     }
 
@@ -319,7 +319,7 @@ impl ManagerContext {
             while let Some((id, finish_time)) = finished_procedures.front() {
                 if finish_time.elapsed() > ttl {
                     ids_to_remove.push(*id);
-                    finished_procedures.pop_front();
+                    let _ = finished_procedures.pop_front();
                 } else {
                     // The rest procedures are finished later, so we can break
                     // the loop.
@@ -335,7 +335,7 @@ impl ManagerContext {
 
         let mut procedures = self.procedures.write().unwrap();
         for id in ids {
-            procedures.remove(&id);
+            let _ = procedures.remove(&id);
         }
     }
 }
@@ -419,7 +419,7 @@ impl LocalManager {
             DuplicateProcedureSnafu { procedure_id },
         );
 
-        common_runtime::spawn_bg(async move {
+        let _handle = common_runtime::spawn_bg(async move {
             // Run the root procedure.
             runner.run().await;
         });
@@ -434,7 +434,7 @@ impl ProcedureManager for LocalManager {
         let mut loaders = self.manager_ctx.loaders.lock().unwrap();
         ensure!(!loaders.contains_key(name), LoaderConflictSnafu { name });
 
-        loaders.insert(name.to_string(), loader);
+        let _ = loaders.insert(name.to_string(), loader);
 
         Ok(())
     }
@@ -559,7 +559,7 @@ mod test_util {
     pub(crate) fn new_object_store(dir: &TempDir) -> ObjectStore {
         let store_dir = dir.path().to_str().unwrap();
         let mut builder = Builder::default();
-        builder.root(store_dir);
+        let _ = builder.root(store_dir);
         ObjectStore::new(builder).unwrap().finish()
     }
 }
@@ -770,13 +770,13 @@ mod tests {
 
         let mut procedure = ProcedureToLoad::new("submit");
         procedure.lock_key = LockKey::single("test.submit");
-        manager
+        assert!(manager
             .submit(ProcedureWithId {
                 id: procedure_id,
                 procedure: Box::new(procedure),
             })
             .await
-            .unwrap();
+            .is_ok());
         assert!(manager
             .procedure_state(procedure_id)
             .await
@@ -877,13 +877,13 @@ mod tests {
         let mut procedure = ProcedureToLoad::new("submit");
         procedure.lock_key = LockKey::single("test.submit");
         let procedure_id = ProcedureId::random();
-        manager
+        assert!(manager
             .submit(ProcedureWithId {
                 id: procedure_id,
                 procedure: Box::new(procedure),
             })
             .await
-            .unwrap();
+            .is_ok());
         let mut watcher = manager.procedure_watcher(procedure_id).unwrap();
         watcher.changed().await.unwrap();
         manager.start().unwrap();
@@ -899,13 +899,13 @@ mod tests {
         let mut procedure = ProcedureToLoad::new("submit");
         procedure.lock_key = LockKey::single("test.submit");
         let procedure_id = ProcedureId::random();
-        manager
+        assert!(manager
             .submit(ProcedureWithId {
                 id: procedure_id,
                 procedure: Box::new(procedure),
             })
             .await
-            .unwrap();
+            .is_ok());
         let mut watcher = manager.procedure_watcher(procedure_id).unwrap();
         watcher.changed().await.unwrap();
         tokio::time::sleep(Duration::from_millis(10)).await;

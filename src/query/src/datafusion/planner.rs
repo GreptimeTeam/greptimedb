@@ -87,7 +87,7 @@ async fn resolve_tables(
             // because the table name may be a temporary name of CTE or view, they can't be found until plan
             // execution.
             if let Ok(table) = table_provider.resolve_table(table_name).await {
-                v.insert(table);
+                let _ = v.insert(table);
             }
         }
     }

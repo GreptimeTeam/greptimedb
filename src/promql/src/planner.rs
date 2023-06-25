@@ -487,7 +487,7 @@ impl PromPlanner {
                     .get_or_insert_default()
                     .push(matcher.clone());
             } else {
-                matchers.insert(matcher.clone());
+                let _ = matchers.insert(matcher.clone());
             }
         }
         Ok(Matchers { matchers })
@@ -538,7 +538,7 @@ impl PromPlanner {
                 match &matcher.op {
                     MatchOp::Equal => {
                         if col_set.contains(&matcher.value) {
-                            result_set.insert(matcher.value.clone());
+                            let _ = result_set.insert(matcher.value.clone());
                         } else {
                             return Err(ColumnNotFoundSnafu {
                                 col: matcher.value.clone(),
@@ -548,7 +548,7 @@ impl PromPlanner {
                     }
                     MatchOp::NotEqual => {
                         if col_set.contains(&matcher.value) {
-                            reverse_set.insert(matcher.value.clone());
+                            let _ = reverse_set.insert(matcher.value.clone());
                         } else {
                             return Err(ColumnNotFoundSnafu {
                                 col: matcher.value.clone(),
@@ -559,14 +559,14 @@ impl PromPlanner {
                     MatchOp::Re(regex) => {
                         for col in &self.ctx.field_columns {
                             if regex.is_match(col) {
-                                result_set.insert(col.clone());
+                                let _ = result_set.insert(col.clone());
                             }
                         }
                     }
                     MatchOp::NotRe(regex) => {
                         for col in &self.ctx.field_columns {
                             if regex.is_match(col) {
-                                reverse_set.insert(col.clone());
+                                let _ = reverse_set.insert(col.clone());
                             }
                         }
                     }
@@ -577,7 +577,7 @@ impl PromPlanner {
                 result_set = col_set.into_iter().cloned().collect();
             }
             for col in reverse_set {
-                result_set.remove(&col);
+                let _ = result_set.remove(&col);
             }
 
             self.ctx.field_columns = result_set.iter().cloned().collect();
@@ -670,15 +670,15 @@ impl PromPlanner {
                 // remove "without"-ed fields
                 // nonexistence label will be ignored
                 for label in labels {
-                    all_fields.remove(label);
+                    let _ = all_fields.remove(label);
                 }
 
                 // remove time index and value fields
                 if let Some(time_index) = &self.ctx.time_index_column {
-                    all_fields.remove(time_index);
+                    let _ = all_fields.remove(time_index);
                 }
                 for value in &self.ctx.field_columns {
-                    all_fields.remove(value);
+                    let _ = all_fields.remove(value);
                 }
 
                 // change the tag columns in context
@@ -927,7 +927,7 @@ impl PromPlanner {
                         args: other_input_exprs.clone(),
                     });
                     exprs.push(fn_expr);
-                    other_input_exprs.remove(field_column_pos);
+                    let _ = other_input_exprs.remove(field_column_pos);
                 }
                 ScalarFunc::Udf(fun) => {
                     let ts_range_expr = DfExpr::Column(Column::from_name(
@@ -942,8 +942,8 @@ impl PromPlanner {
                         args: other_input_exprs.clone(),
                     });
                     exprs.push(fn_expr);
-                    other_input_exprs.remove(field_column_pos + 1);
-                    other_input_exprs.remove(field_column_pos);
+                    let _ = other_input_exprs.remove(field_column_pos + 1);
+                    let _ = other_input_exprs.remove(field_column_pos);
                 }
                 ScalarFunc::ExtrapolateUdf(fun) => {
                     let ts_range_expr = DfExpr::Column(Column::from_name(
@@ -960,9 +960,9 @@ impl PromPlanner {
                         args: other_input_exprs.clone(),
                     });
                     exprs.push(fn_expr);
-                    other_input_exprs.remove(field_column_pos + 2);
-                    other_input_exprs.remove(field_column_pos + 1);
-                    other_input_exprs.remove(field_column_pos);
+                    let _ = other_input_exprs.remove(field_column_pos + 2);
+                    let _ = other_input_exprs.remove(field_column_pos + 1);
+                    let _ = other_input_exprs.remove(field_column_pos);
                 }
             }
         }
@@ -1338,7 +1338,7 @@ mod test {
             .unwrap();
         let table = Arc::new(EmptyTable::from_table_info(&table_info));
         let catalog_list = Arc::new(MemoryCatalogManager::default());
-        catalog_list
+        assert!(catalog_list
             .register_table(RegisterTableRequest {
                 catalog: DEFAULT_CATALOG_NAME.to_string(),
                 schema: DEFAULT_SCHEMA_NAME.to_string(),
@@ -1347,7 +1347,7 @@ mod test {
                 table,
             })
             .await
-            .unwrap();
+            .is_ok());
         DfTableSourceProvider::new(catalog_list, false, &QueryContext::new())
     }
 

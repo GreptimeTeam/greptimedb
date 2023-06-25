@@ -23,8 +23,9 @@ fn bench_memtable_read(c: &mut Criterion) {
     let ctx = BenchContext::new();
     kvs.iter().for_each(|kv| ctx.write(kv));
     let mut group = c.benchmark_group("memtable_read");
-    group.throughput(Throughput::Elements(10 * 10000));
-    group.bench_function("read", |b| b.iter(|| ctx.read(100)));
+    let _ = group
+        .throughput(Throughput::Elements(10 * 10000))
+        .bench_function("read", |b| b.iter(|| ctx.read(100)));
     group.finish();
 }
 

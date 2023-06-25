@@ -58,7 +58,7 @@ async fn run() {
     let (sender, mut receiver) = meta_client.heartbeat().await.unwrap();
 
     // send heartbeats
-    tokio::spawn(async move {
+    let _handle = tokio::spawn(async move {
         for _ in 0..5 {
             let req = HeartbeatRequest {
                 peer: Some(Peer {
@@ -72,7 +72,7 @@ async fn run() {
         tokio::time::sleep(Duration::from_secs(10)).await;
     });
 
-    tokio::spawn(async move {
+    let _handle = tokio::spawn(async move {
         while let Some(res) = receiver.message().await.unwrap() {
             event!(Level::TRACE, "heartbeat response: {:#?}", res);
         }

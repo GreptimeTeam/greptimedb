@@ -156,8 +156,8 @@ impl GreptimeDbClusterBuilder {
 
             let dn_instance = self.create_datanode(&opts, meta_srv.clone()).await;
 
-            instances.insert(datanode_id, dn_instance.0.clone());
-            heartbeat_tasks.insert(datanode_id, dn_instance.1);
+            let _ = instances.insert(datanode_id, dn_instance.0.clone());
+            let _ = heartbeat_tasks.insert(datanode_id, dn_instance.1);
         }
         (instances, heartbeat_tasks, storage_guards, wal_guards)
     }
@@ -266,7 +266,7 @@ async fn create_datanode_client(datanode_instance: Arc<DatanodeInstance>) -> (St
         None,
         runtime,
     );
-    tokio::spawn(async move {
+    let _handle = tokio::spawn(async move {
         Server::builder()
             .add_service(grpc_server.create_flight_service())
             .add_service(grpc_server.create_database_service())
@@ -280,7 +280,7 @@ async fn create_datanode_client(datanode_instance: Arc<DatanodeInstance>) -> (St
     // "127.0.0.1:3001" is just a placeholder, does not actually connect to it.
     let addr = "127.0.0.1:3001";
     let channel_manager = ChannelManager::new();
-    channel_manager
+    let _ = channel_manager
         .reset_with_connector(
             addr,
             service_fn(move |_| {

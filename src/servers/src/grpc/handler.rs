@@ -114,7 +114,7 @@ impl GreptimeRequestHandler {
             })
             .context(NotFoundAuthHeaderSnafu)?;
 
-        match auth_scheme {
+        let _ = match auth_scheme {
             AuthScheme::Basic(Basic { username, password }) => user_provider
                 .auth(
                     Identity::UserId(&username, None),

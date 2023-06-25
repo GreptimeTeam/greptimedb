@@ -46,7 +46,7 @@ pub fn set_panic_hook() {
     }));
 
     #[cfg(feature = "deadlock_detection")]
-    std::thread::spawn(move || loop {
+    let _ = std::thread::spawn(move || loop {
         std::thread::sleep(Duration::from_secs(5));
         let deadlocks = parking_lot::deadlock::check_deadlock();
         if deadlocks.is_empty() {

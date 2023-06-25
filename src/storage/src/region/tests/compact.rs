@@ -23,7 +23,7 @@ use common_test_util::temp_dir::create_temp_dir;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use object_store::services::{Fs, S3};
 use object_store::ObjectStore;
-use store_api::storage::{FlushContext, FlushReason, OpenOptions, Region, WriteResponse};
+use store_api::storage::{FlushContext, FlushReason, OpenOptions, Region};
 use tokio::sync::{Notify, RwLock};
 
 use crate::compaction::{CompactionHandler, SimplePicker};
@@ -47,7 +47,7 @@ fn new_object_store(store_dir: &str, s3_bucket: Option<String>) -> ObjectStore {
             let root = uuid::Uuid::new_v4().to_string();
 
             let mut builder = S3::default();
-            builder
+            let _ = builder
                 .root(&root)
                 .access_key_id(&env::var("GT_S3_ACCESS_KEY_ID").unwrap())
                 .secret_access_key(&env::var("GT_S3_ACCESS_KEY").unwrap())
@@ -61,7 +61,7 @@ fn new_object_store(store_dir: &str, s3_bucket: Option<String>) -> ObjectStore {
     logging::info!("Use local fs object store");
 
     let mut builder = Fs::default();
-    builder.root(store_dir);
+    let _ = builder.root(store_dir);
     ObjectStore::new(builder).unwrap().finish()
 }
 
@@ -144,7 +144,7 @@ impl Handler for MockFilePurgeHandler {
             .await
             .unwrap();
 
-        self.num_deleted.fetch_add(1, Ordering::Relaxed);
+        let _ = self.num_deleted.fetch_add(1, Ordering::Relaxed);
 
         Ok(())
     }
@@ -205,12 +205,12 @@ impl CompactionTester {
         self.base.as_mut().unwrap()
     }
 
-    async fn put(&self, data: &[(i64, Option<i64>)]) -> WriteResponse {
+    async fn put(&self, data: &[(i64, Option<i64>)]) {
         let data = data
             .iter()
             .map(|(ts, v0)| (*ts, v0.map(|v| v.to_string())))
             .collect::<Vec<_>>();
-        self.base().put(&data).await
+        let _ = self.base().put(&data).await;
     }
 
     async fn flush(&self, wait: Option<bool>) {
@@ -243,7 +243,7 @@ impl CompactionTester {
     async fn reopen(&mut self) -> Result<bool> {
         // Close the old region.
         if let Some(base) = self.base.take() {
-            futures::future::join_all(self.pending_tasks.write().await.drain(..)).await;
+            let _ = futures::future::join_all(self.pending_tasks.write().await.drain(..)).await;
             base.close().await;
         }
 

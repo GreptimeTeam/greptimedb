@@ -63,7 +63,8 @@ impl SqlHandler {
             catalog,
             schema: schema.clone(),
         };
-        self.catalog_manager
+        let _ = self
+            .catalog_manager
             .register_schema(reg_req)
             .await
             .context(RegisterSchemaSnafu)?;

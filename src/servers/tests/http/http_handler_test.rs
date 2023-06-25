@@ -270,7 +270,7 @@ def test(n, **params)  -> vector[i64]:
     insert_script(script.clone(), script_handler.clone(), sql_handler.clone()).await;
     // Run the script
     let mut exec = create_script_query();
-    exec.0.params.insert("a".to_string(), "42".to_string());
+    let _ = exec.0.params.insert("a".to_string(), "42".to_string());
     let Json(json) = script_handler::run_script(
         State(ApiState {
             sql_handler,

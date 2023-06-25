@@ -325,7 +325,7 @@ mod tests {
             let rb = RecordBatch::try_new(schema.clone(), vec![name_array, count_array]).unwrap();
             writer.write(&rb).unwrap();
         }
-        writer.close().unwrap();
+        assert!(writer.close().is_ok());
         (path, schema)
     }
 

@@ -92,7 +92,7 @@ impl RegionAliveKeepers {
         }
 
         let mut keepers = self.keepers.lock().await;
-        keepers.insert(table_ident.clone(), keeper.clone());
+        let _ = keepers.insert(table_ident.clone(), keeper.clone());
 
         if self.started.load(Ordering::Relaxed) {
             keeper.start().await;
@@ -237,7 +237,7 @@ impl RegionAliveKeeper {
         let countdown_task_handles = Arc::downgrade(&self.countdown_task_handles);
         let on_task_finished = async move {
             if let Some(x) = countdown_task_handles.upgrade() {
-                x.lock().await.remove(&region);
+                let _ = x.lock().await.remove(&region);
             } // Else the countdown task handles map could be dropped because the keeper is dropped.
         };
         let handle = Arc::new(CountdownTaskHandle::new(
@@ -248,7 +248,7 @@ impl RegionAliveKeeper {
         ));
 
         let mut handles = self.countdown_task_handles.lock().await;
-        handles.insert(region, handle.clone());
+        let _ = handles.insert(region, handle.clone());
 
         if self.started.load(Ordering::Relaxed) {
             handle.start(self.heartbeat_interval_millis).await;
@@ -772,7 +772,7 @@ mod test {
         };
 
         let table_engine = Arc::new(MockTableEngine::default());
-        table_engine.create_table(ctx, request).await.unwrap();
+        assert!(table_engine.create_table(ctx, request).await.is_ok());
 
         let table_ident = TableIdent {
             catalog: catalog.to_string(),
@@ -788,7 +788,7 @@ mod test {
             region: 1,
             rx,
         };
-        common_runtime::spawn_bg(async move {
+        let _handle = common_runtime::spawn_bg(async move {
             task.run().await;
         });
 

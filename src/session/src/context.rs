@@ -130,7 +130,7 @@ impl QueryContext {
 
     #[inline]
     pub fn set_time_zone(&self, tz: Option<TimeZone>) {
-        self.time_zone.swap(Arc::new(tz));
+        let _ = self.time_zone.swap(Arc::new(tz));
     }
 }
 

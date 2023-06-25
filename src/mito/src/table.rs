@@ -328,7 +328,8 @@ impl<R: Region> Table for MitoTable<R> {
             table_name,
             new_info
         );
-        self.manifest
+        let _ = self
+            .manifest
             .update(TableMetaActionList::with_action(TableMetaAction::Change(
                 Box::new(TableChange {
                     table_info: RawTableInfo::from(new_info.clone()),
@@ -371,7 +372,7 @@ impl<R: Region> Table for MitoTable<R> {
                 .delete(key_column_values)
                 .map_err(BoxedError::new)
                 .context(table_error::TableOperationSnafu)?;
-            region
+            let _ = region
                 .write(&WriteContext::default(), write_request)
                 .await
                 .map_err(BoxedError::new)
@@ -404,10 +405,12 @@ impl<R: Region> Table for MitoTable<R> {
                     .context(table_error::TableOperationSnafu)?;
             }
         } else {
-            futures::future::try_join_all(regions.values().map(|region| region.flush(&flush_ctx)))
-                .await
-                .map_err(BoxedError::new)
-                .context(table_error::TableOperationSnafu)?;
+            let _ = futures::future::try_join_all(
+                regions.values().map(|region| region.flush(&flush_ctx)),
+            )
+            .await
+            .map_err(BoxedError::new)
+            .context(TableOperationSnafu)?;
         }
 
         Ok(())
@@ -600,12 +603,12 @@ impl<R: Region> MitoTable<R> {
         region_numbers: &[RegionNumber],
     ) -> TableResult<HashMap<RegionNumber, R>> {
         let mut removed = HashMap::with_capacity(region_numbers.len());
-        self.regions.rcu(|regions| {
+        let _ = self.regions.rcu(|regions| {
             removed.clear();
             let mut regions = HashMap::clone(regions);
             for region_number in region_numbers {
                 if let Some(region) = regions.remove(region_number) {
-                    removed.insert(*region_number, region);
+                    let _ = removed.insert(*region_number, region);
                 }
             }
 
@@ -618,7 +621,7 @@ impl<R: Region> MitoTable<R> {
     pub async fn drop_regions(&self, region_number: &[RegionNumber]) -> TableResult<()> {
         let regions = self.remove_regions(region_number).await?;
 
-        futures::future::try_join_all(regions.values().map(|region| region.drop_region()))
+        let _ = futures::future::try_join_all(regions.values().map(|region| region.drop_region()))
             .await
             .map_err(BoxedError::new)
             .context(table_error::TableOperationSnafu)?;
@@ -638,7 +641,7 @@ impl<R: Region> MitoTable<R> {
     }
 
     pub fn set_table_info(&self, table_info: TableInfo) {
-        self.table_info.swap(Arc::new(table_info));
+        let _ = self.table_info.swap(Arc::new(table_info));
     }
 
     #[inline]
@@ -692,9 +695,9 @@ impl<R: Region> MitoTable<R> {
     pub async fn load_region(&self, region_number: RegionNumber, region: R) -> TableResult<()> {
         let info = self.table_info.load();
 
-        self.regions.rcu(|regions| {
+        let _ = self.regions.rcu(|regions| {
             let mut regions = HashMap::clone(regions);
-            regions
+            let _ = regions
                 .entry(region_number)
                 .or_insert_with(|| region.clone());
 

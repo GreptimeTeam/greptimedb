@@ -32,7 +32,7 @@ pub fn to_lowercase_options_map(opts: &[SqlOption]) -> HashMap<String, String> {
             Value::SingleQuotedString(s) | Value::DoubleQuotedString(s) => s.clone(),
             _ => value.to_string(),
         };
-        map.insert(name.value.to_lowercase().clone(), value_str);
+        let _ = map.insert(name.value.to_lowercase().clone(), value_str);
     }
     map
 }

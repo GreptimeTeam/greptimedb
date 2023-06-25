@@ -53,7 +53,7 @@ impl TestEnv {
     pub fn from_temp_dir(dir: TempDir) -> TestEnv {
         let store_dir = format!("{}/db", dir.path().to_string_lossy());
         let mut builder = Fs::default();
-        builder.root(&store_dir);
+        let _ = builder.root(&store_dir);
         let object_store = ObjectStore::new(builder).unwrap().finish();
 
         let compaction_scheduler = Arc::new(NoopCompactionScheduler::default());
@@ -72,7 +72,7 @@ impl TestEnv {
 
         let procedure_dir = format!("{}/procedure", dir.path().to_string_lossy());
         let mut builder = Fs::default();
-        builder.root(&procedure_dir);
+        let _ = builder.root(&procedure_dir);
         let object_store = ObjectStore::new(builder).unwrap().finish();
 
         let config = ManagerConfig {

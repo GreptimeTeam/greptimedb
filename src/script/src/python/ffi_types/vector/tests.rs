@@ -156,7 +156,7 @@ fn eval_pyo3(testcase: TestCase, locals: HashMap<String, PyVector>) {
 
 fn eval_rspy(testcase: TestCase, locals: HashMap<String, PyVector>) {
     vm::Interpreter::with_init(Default::default(), |vm| {
-        PyVector::make_class(&vm.ctx);
+        let _ = PyVector::make_class(&vm.ctx);
     })
     .enter(|vm| {
         let scope = vm.new_scope_with_builtins();

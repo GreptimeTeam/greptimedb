@@ -240,11 +240,12 @@ mod tests {
             ColumnSchema::new("a", ConcreteDataType::int32_datatype(), true),
         ]));
 
-        let mut builder = TableMetaBuilder::default();
-        builder.schema(schema);
-        builder.primary_key_indices(vec![]);
-        builder.next_column_id(1);
-        let table_meta = builder.build().unwrap();
+        let table_meta = TableMetaBuilder::default()
+            .schema(schema)
+            .primary_key_indices(vec![])
+            .next_column_id(1)
+            .build()
+            .unwrap();
 
         let table_info = TableInfoBuilder::new(table_name, table_meta)
             .build()

@@ -23,7 +23,7 @@ use crate::statements::statement::Statement;
 /// INSERT statement parser implementation
 impl<'a> ParserContext<'a> {
     pub(crate) fn parse_insert(&mut self) -> Result<Statement> {
-        self.parser.next_token();
+        let _ = self.parser.next_token();
         let spstatement = self
             .parser
             .parse_insert()

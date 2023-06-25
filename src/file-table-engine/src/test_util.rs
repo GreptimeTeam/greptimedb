@@ -36,7 +36,7 @@ pub fn new_test_object_store(prefix: &str) -> (TempDir, ObjectStore) {
     let dir = create_temp_dir(prefix);
     let store_dir = dir.path().to_string_lossy();
     let mut builder = Fs::default();
-    builder.root(&store_dir);
+    let _ = builder.root(&store_dir);
     (dir, ObjectStore::new(builder).unwrap().finish())
 }
 
@@ -97,15 +97,15 @@ pub struct TestEngineComponents {
 
 pub fn new_create_request(schema: SchemaRef) -> CreateTableRequest {
     let mut table_options = TableOptions::default();
-    table_options.extra_options.insert(
+    let _ = table_options.extra_options.insert(
         requests::IMMUTABLE_TABLE_LOCATION_KEY.to_string(),
         "mock_path".to_string(),
     );
-    table_options.extra_options.insert(
+    let _ = table_options.extra_options.insert(
         requests::IMMUTABLE_TABLE_META_KEY.to_string(),
         serde_json::to_string(&ImmutableFileTableOptions::default()).unwrap(),
     );
-    table_options.extra_options.insert(
+    let _ = table_options.extra_options.insert(
         requests::IMMUTABLE_TABLE_FORMAT_KEY.to_string(),
         "csv".to_string(),
     );
