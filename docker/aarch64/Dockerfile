@@ -8,6 +8,7 @@ RUN apt-get update && apt-get install -y \
     libssl-dev \
     protobuf-compiler \
     curl \
+    git \
     build-essential \
     pkg-config \
     wget
