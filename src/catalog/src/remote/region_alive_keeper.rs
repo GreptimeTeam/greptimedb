@@ -475,6 +475,7 @@ impl CountdownTask {
                 catalog_name: table_ident.catalog.clone(),
                 schema_name: table_ident.schema.clone(),
                 table_name: table_ident.table.clone(),
+                table_id: table_ident.table_id,
                 region_numbers: vec![region],
                 flush: true,
             };
@@ -499,7 +500,7 @@ mod test {
     use common_meta::heartbeat::mailbox::HeartbeatMailbox;
     use datatypes::schema::RawSchema;
     use table::engine::manager::MemoryTableEngineManager;
-    use table::engine::{TableEngine, TableReference};
+    use table::engine::TableEngine;
     use table::requests::{CreateTableRequest, TableOptions};
     use table::test_util::EmptyTable;
 
@@ -751,8 +752,9 @@ mod test {
         let catalog = "my_catalog";
         let schema = "my_schema";
         let table = "my_table";
+        let table_id = 1;
         let request = CreateTableRequest {
-            id: 1,
+            id: table_id,
             catalog_name: catalog.to_string(),
             schema_name: schema.to_string(),
             table_name: table.to_string(),
@@ -768,7 +770,6 @@ mod test {
             table_options: TableOptions::default(),
             engine: "mito".to_string(),
         };
-        let table_ref = TableReference::full(catalog, schema, table);
 
         let table_engine = Arc::new(MockTableEngine::default());
         table_engine.create_table(ctx, request).await.unwrap();
@@ -777,7 +778,7 @@ mod test {
             catalog: catalog.to_string(),
             schema: schema.to_string(),
             table: table.to_string(),
-            table_id: 1024,
+            table_id,
             engine: "mito".to_string(),
         };
         let (tx, rx) = mpsc::channel(10);
@@ -813,9 +814,9 @@ mod test {
         .unwrap();
 
         // assert the table is closed after deadline is reached
-        assert!(table_engine.table_exists(ctx, &table_ref));
+        assert!(table_engine.table_exists(ctx, table_id));
         // spare 500ms for the task to close the table
         tokio::time::sleep(Duration::from_millis(2000)).await;
-        assert!(!table_engine.table_exists(ctx, &table_ref));
+        assert!(!table_engine.table_exists(ctx, table_id));
     }
 }

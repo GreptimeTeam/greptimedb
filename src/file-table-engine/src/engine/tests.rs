@@ -16,7 +16,7 @@ use std::assert_matches::assert_matches;
 use std::sync::Arc;
 
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, IMMUTABLE_FILE_ENGINE};
-use table::engine::{EngineContext, TableEngine, TableEngineProcedure, TableReference};
+use table::engine::{EngineContext, TableEngine, TableEngineProcedure};
 use table::requests::{AlterKind, AlterTableRequest, DropTableRequest, OpenTableRequest};
 use table::{error as table_error, Table};
 
@@ -35,14 +35,9 @@ async fn test_get_table() {
         ..
     } = test_util::setup_test_engine_and_table("test_get_table").await;
     let table_info = table.table_info();
-    let table_ref = TableReference {
-        catalog: &table_info.catalog_name,
-        schema: &table_info.schema_name,
-        table: &table_info.name,
-    };
 
     let got = table_engine
-        .get_table(&EngineContext::default(), &table_ref)
+        .get_table(&EngineContext::default(), table_info.ident.table_id)
         .unwrap()
         .unwrap();
 
@@ -53,19 +48,15 @@ async fn test_get_table() {
 async fn test_open_table() {
     common_telemetry::init_default_ut_logging();
     let ctx = EngineContext::default();
+    // the test table id is 1
+    let table_id = 1;
     let open_req = OpenTableRequest {
         catalog_name: DEFAULT_CATALOG_NAME.to_string(),
         schema_name: DEFAULT_SCHEMA_NAME.to_string(),
         table_name: test_util::TEST_TABLE_NAME.to_string(),
         // the test table id is 1
-        table_id: 1,
+        table_id,
         region_numbers: vec![0],
-    };
-
-    let table_ref = TableReference {
-        catalog: DEFAULT_CATALOG_NAME,
-        schema: DEFAULT_SCHEMA_NAME,
-        table: test_util::TEST_TABLE_NAME,
     };
 
     let TestEngineComponents {
@@ -77,7 +68,7 @@ async fn test_open_table() {
 
     assert_eq!(IMMUTABLE_FILE_ENGINE, table_engine.name());
 
-    table_engine.close_table(&table_ref).await.unwrap();
+    table_engine.close_table(table_id).await.unwrap();
 
     let reopened = table_engine
         .open_table(&ctx, open_req.clone())
@@ -101,21 +92,17 @@ async fn test_open_table() {
 async fn test_close_all_table() {
     common_telemetry::init_default_ut_logging();
 
-    let table_ref = TableReference {
-        catalog: DEFAULT_CATALOG_NAME,
-        schema: DEFAULT_SCHEMA_NAME,
-        table: test_util::TEST_TABLE_NAME,
-    };
-
     let TestEngineComponents {
         table_engine,
         dir: _dir,
+        table_ref: table,
         ..
     } = test_util::setup_test_engine_and_table("test_close_all_table").await;
 
     table_engine.close().await.unwrap();
 
-    let exist = table_engine.table_exists(&EngineContext::default(), &table_ref);
+    let table_id = table.table_info().ident.table_id;
+    let exist = table_engine.table_exists(&EngineContext::default(), table_id);
 
     assert!(!exist);
 }
@@ -126,6 +113,7 @@ async fn test_alter_table() {
     let TestEngineComponents {
         table_engine,
         dir: _dir,
+        table_ref,
         ..
     } = test_util::setup_test_engine_and_table("test_alter_table").await;
 
@@ -133,6 +121,7 @@ async fn test_alter_table() {
         catalog_name: DEFAULT_CATALOG_NAME.to_string(),
         schema_name: DEFAULT_SCHEMA_NAME.to_string(),
         table_name: TEST_TABLE_NAME.to_string(),
+        table_id: table_ref.table_info().ident.table_id,
         alter_kind: AlterKind::RenameTable {
             new_table_name: "foo".to_string(),
         },
@@ -151,12 +140,6 @@ async fn test_alter_table() {
 async fn test_drop_table() {
     common_telemetry::init_default_ut_logging();
 
-    let drop_req = DropTableRequest {
-        catalog_name: DEFAULT_CATALOG_NAME.to_string(),
-        schema_name: DEFAULT_SCHEMA_NAME.to_string(),
-        table_name: TEST_TABLE_NAME.to_string(),
-    };
-
     let TestEngineComponents {
         table_engine,
         object_store,
@@ -167,12 +150,13 @@ async fn test_drop_table() {
     } = test_util::setup_test_engine_and_table("test_drop_table").await;
 
     let table_info = table.table_info();
-    let table_ref = TableReference {
-        catalog: &table_info.catalog_name,
-        schema: &table_info.schema_name,
-        table: &table_info.name,
-    };
 
+    let drop_req = DropTableRequest {
+        catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+        schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+        table_name: TEST_TABLE_NAME.to_string(),
+        table_id: table_info.ident.table_id,
+    };
     let dropped = table_engine
         .drop_table(&EngineContext::default(), drop_req)
         .await
@@ -180,7 +164,7 @@ async fn test_drop_table() {
 
     assert!(dropped);
 
-    let exist = table_engine.table_exists(&EngineContext::default(), &table_ref);
+    let exist = table_engine.table_exists(&EngineContext::default(), table_info.ident.table_id);
     assert!(!exist);
 
     // check table_dir manifest
@@ -203,13 +187,14 @@ async fn test_create_drop_table_procedure() {
     let engine_ctx = EngineContext::default();
     // Test create table by procedure.
     let create_request = test_util::new_create_request(schema);
+    let table_id = create_request.id;
     let mut procedure = table_engine
         .create_table_procedure(&engine_ctx, create_request.clone())
         .unwrap();
     common_procedure_test::execute_procedure_until_done(&mut procedure).await;
 
     assert!(table_engine
-        .get_table(&engine_ctx, &create_request.table_ref())
+        .get_table(&engine_ctx, table_id)
         .unwrap()
         .is_some());
 
@@ -218,6 +203,7 @@ async fn test_create_drop_table_procedure() {
         catalog_name: DEFAULT_CATALOG_NAME.to_string(),
         schema_name: DEFAULT_SCHEMA_NAME.to_string(),
         table_name: TEST_TABLE_NAME.to_string(),
+        table_id,
     };
     let mut procedure = table_engine
         .drop_table_procedure(&engine_ctx, drop_request)
@@ -225,7 +211,7 @@ async fn test_create_drop_table_procedure() {
     common_procedure_test::execute_procedure_until_done(&mut procedure).await;
 
     assert!(table_engine
-        .get_table(&engine_ctx, &create_request.table_ref())
+        .get_table(&engine_ctx, table_id)
         .unwrap()
         .is_none());
 }

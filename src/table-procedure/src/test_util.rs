@@ -32,6 +32,7 @@ use object_store::ObjectStore;
 use storage::compaction::noop::NoopCompactionScheduler;
 use storage::config::EngineConfig as StorageEngineConfig;
 use storage::EngineImpl;
+use table::metadata::TableId;
 use table::requests::CreateTableRequest;
 
 use crate::CreateTableProcedure;
@@ -92,8 +93,9 @@ impl TestEnv {
         }
     }
 
-    pub async fn create_table(&self, table_name: &str) {
+    pub async fn create_table(&self, table_name: &str) -> TableId {
         let request = new_create_request(table_name);
+        let table_id = request.id;
         let procedure = CreateTableProcedure::new(
             request,
             self.catalog_manager.clone(),
@@ -108,6 +110,8 @@ impl TestEnv {
             .await
             .unwrap();
         watcher.changed().await.unwrap();
+
+        table_id
     }
 }
 

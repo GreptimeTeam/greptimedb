@@ -68,6 +68,7 @@ impl StatementExecutor {
 
                 Ok(rows_copied)
             }
+            _ => error::UnsupportedFormatSnafu { format: *format }.fail(),
         }
     }
 

@@ -162,6 +162,7 @@ pub struct AlterTableRequest {
     pub catalog_name: String,
     pub schema_name: String,
     pub table_name: String,
+    pub table_id: TableId,
     pub alter_kind: AlterKind,
 }
 
@@ -200,6 +201,7 @@ pub struct DropTableRequest {
     pub catalog_name: String,
     pub schema_name: String,
     pub table_name: String,
+    pub table_id: TableId,
 }
 
 impl DropTableRequest {
@@ -218,6 +220,7 @@ pub struct CloseTableRequest {
     pub catalog_name: String,
     pub schema_name: String,
     pub table_name: String,
+    pub table_id: TableId,
     /// Do nothing if region_numbers is empty
     pub region_numbers: Vec<RegionNumber>,
     /// flush regions

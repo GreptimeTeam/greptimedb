@@ -201,6 +201,9 @@ impl TableRegionalKey {
 /// region ids allocated by metasrv.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TableRegionalValue {
+    // We can remove the `Option` from the table id once all regional values
+    // stored in meta have table ids.
+    pub table_id: Option<TableId>,
     pub version: TableVersion,
     pub regions_ids: Vec<u32>,
     pub engine_name: Option<String>,

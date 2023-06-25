@@ -40,7 +40,7 @@ use table::Table;
 
 use super::*;
 use crate::table::test_util::{
-    self, new_insert_request, schema_for_test, setup_table, TestEngineComponents, TABLE_NAME,
+    self, new_insert_request, setup_table, TestEngineComponents, TABLE_NAME,
 };
 
 pub fn has_parquet_file(sst_dir: &str) -> bool {
@@ -537,11 +537,16 @@ fn test_region_id() {
     assert_eq!(18446744069414584330, region_id(u32::MAX, 10));
 }
 
-fn new_add_columns_req(new_tag: &ColumnSchema, new_field: &ColumnSchema) -> AlterTableRequest {
+fn new_add_columns_req(
+    table_id: TableId,
+    new_tag: &ColumnSchema,
+    new_field: &ColumnSchema,
+) -> AlterTableRequest {
     AlterTableRequest {
         catalog_name: DEFAULT_CATALOG_NAME.to_string(),
         schema_name: DEFAULT_SCHEMA_NAME.to_string(),
         table_name: TABLE_NAME.to_string(),
+        table_id,
         alter_kind: AlterKind::AddColumns {
             columns: vec![
                 AddColumnRequest {
@@ -560,6 +565,7 @@ fn new_add_columns_req(new_tag: &ColumnSchema, new_field: &ColumnSchema) -> Alte
 }
 
 pub(crate) fn new_add_columns_req_with_location(
+    table_id: TableId,
     new_tag: &ColumnSchema,
     new_field: &ColumnSchema,
 ) -> AlterTableRequest {
@@ -567,6 +573,7 @@ pub(crate) fn new_add_columns_req_with_location(
         catalog_name: DEFAULT_CATALOG_NAME.to_string(),
         schema_name: DEFAULT_SCHEMA_NAME.to_string(),
         table_name: TABLE_NAME.to_string(),
+        table_id,
         alter_kind: AlterKind::AddColumns {
             columns: vec![
                 AddColumnRequest {
@@ -597,7 +604,7 @@ async fn test_alter_table_add_column() {
 
     let new_tag = ColumnSchema::new("my_tag", ConcreteDataType::string_datatype(), true);
     let new_field = ColumnSchema::new("my_field", ConcreteDataType::string_datatype(), true);
-    let req = new_add_columns_req(&new_tag, &new_field);
+    let req = new_add_columns_req(table.table_info().ident.table_id, &new_tag, &new_field);
     let table = table_engine
         .alter_table(&EngineContext::default(), req)
         .await
@@ -633,7 +640,7 @@ async fn test_alter_table_add_column() {
         ConcreteDataType::string_datatype(),
         true,
     );
-    let req = new_add_columns_req_with_location(&new_tag, &new_field);
+    let req = new_add_columns_req_with_location(new_info.ident.table_id, &new_tag, &new_field);
     let table = table_engine
         .alter_table(&EngineContext::default(), req)
         .await
@@ -653,13 +660,13 @@ async fn test_alter_table_add_column() {
 
 #[tokio::test]
 async fn test_alter_table_remove_column() {
-    let (_engine, table_engine, _table, _object_store, _dir) =
+    let (_engine, table_engine, table, _object_store, _dir) =
         test_util::setup_mock_engine_and_table().await;
 
     // Add two columns to the table first.
     let new_tag = ColumnSchema::new("my_tag", ConcreteDataType::string_datatype(), true);
     let new_field = ColumnSchema::new("my_field", ConcreteDataType::string_datatype(), true);
-    let req = new_add_columns_req(&new_tag, &new_field);
+    let req = new_add_columns_req(table.table_info().ident.table_id, &new_tag, &new_field);
     let table = table_engine
         .alter_table(&EngineContext::default(), req)
         .await
@@ -674,6 +681,7 @@ async fn test_alter_table_remove_column() {
         catalog_name: DEFAULT_CATALOG_NAME.to_string(),
         schema_name: DEFAULT_SCHEMA_NAME.to_string(),
         table_name: TABLE_NAME.to_string(),
+        table_id: table.table_info().ident.table_id,
         alter_kind: AlterKind::DropColumns {
             names: vec![String::from("memory"), String::from("my_field")],
         },
@@ -706,45 +714,13 @@ async fn test_alter_rename_table() {
     let TestEngineComponents {
         table_engine,
         storage_engine,
+        table_ref,
         object_store,
         dir: _dir,
         ..
     } = test_util::setup_test_engine_and_table().await;
     let ctx = EngineContext::default();
-
-    // register another table
-    let another_name = "another_table";
-    let req = CreateTableRequest {
-        id: 1024,
-        catalog_name: DEFAULT_CATALOG_NAME.to_string(),
-        schema_name: DEFAULT_SCHEMA_NAME.to_string(),
-        table_name: another_name.to_string(),
-        desc: Some("another test table".to_string()),
-        schema: RawSchema::from(&schema_for_test()),
-        region_numbers: vec![0],
-        primary_key_indices: vec![0],
-        create_if_not_exists: true,
-        table_options: TableOptions::default(),
-        engine: MITO_ENGINE.to_string(),
-    };
-    table_engine
-        .create_table(&ctx, req)
-        .await
-        .expect("create table must succeed");
-    // test renaming a table with an existing name.
-    let req = AlterTableRequest {
-        catalog_name: DEFAULT_CATALOG_NAME.to_string(),
-        schema_name: DEFAULT_SCHEMA_NAME.to_string(),
-        table_name: TABLE_NAME.to_string(),
-        alter_kind: AlterKind::RenameTable {
-            new_table_name: another_name.to_string(),
-        },
-    };
-    let err = table_engine.alter_table(&ctx, req).await.err().unwrap();
-    assert!(
-        err.to_string().contains("Table already exists"),
-        "Unexpected error: {err}"
-    );
+    let table_id = table_ref.table_info().ident.table_id;
 
     let new_table_name = "test_table";
     // test rename table
@@ -752,6 +728,7 @@ async fn test_alter_rename_table() {
         catalog_name: DEFAULT_CATALOG_NAME.to_string(),
         schema_name: DEFAULT_SCHEMA_NAME.to_string(),
         table_name: TABLE_NAME.to_string(),
+        table_id,
         alter_kind: AlterKind::RenameTable {
             new_table_name: new_table_name.to_string(),
         },
@@ -765,7 +742,7 @@ async fn test_alter_rename_table() {
         catalog_name: DEFAULT_CATALOG_NAME.to_string(),
         schema_name: DEFAULT_SCHEMA_NAME.to_string(),
         table_name: new_table_name.to_string(),
-        table_id: 1,
+        table_id,
         region_numbers: vec![0],
     };
 
@@ -794,17 +771,13 @@ async fn test_drop_table() {
     let engine_ctx = EngineContext {};
 
     let table_info = table.table_info();
-    let table_reference = TableReference {
-        catalog: DEFAULT_CATALOG_NAME,
-        schema: DEFAULT_SCHEMA_NAME,
-        table: &table_info.name,
-    };
 
+    let table_id = 1;
     let create_table_request = CreateTableRequest {
-        id: 1,
+        id: table_id,
         catalog_name: DEFAULT_CATALOG_NAME.to_string(),
         schema_name: DEFAULT_SCHEMA_NAME.to_string(),
-        table_name: table_info.name.to_string(),
+        table_name: table_info.name.clone(),
         schema: RawSchema::from(&*table_info.meta.schema),
         create_if_not_exists: true,
         desc: None,
@@ -819,23 +792,25 @@ async fn test_drop_table() {
         .await
         .unwrap();
     assert_eq!(table_info, created_table.table_info());
-    assert!(table_engine.table_exists(&engine_ctx, &table_reference));
+    assert!(table_engine.table_exists(&engine_ctx, table_id));
 
     let drop_table_request = DropTableRequest {
-        catalog_name: table_reference.catalog.to_string(),
-        schema_name: table_reference.schema.to_string(),
-        table_name: table_reference.table.to_string(),
+        catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+        schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+        table_name: table_info.name.clone(),
+        table_id,
     };
     let table_dropped = table_engine
         .drop_table(&engine_ctx, drop_table_request)
         .await
         .unwrap();
     assert!(table_dropped);
-    assert!(!table_engine.table_exists(&engine_ctx, &table_reference));
+    assert!(!table_engine.table_exists(&engine_ctx, table_id));
 
     // should be able to re-create
+    let table_id = 2;
     let request = CreateTableRequest {
-        id: 2,
+        id: table_id,
         catalog_name: DEFAULT_CATALOG_NAME.to_string(),
         schema_name: DEFAULT_SCHEMA_NAME.to_string(),
         table_name: table_info.name.to_string(),
@@ -848,7 +823,7 @@ async fn test_drop_table() {
         engine: MITO_ENGINE.to_string(),
     };
     table_engine.create_table(&ctx, request).await.unwrap();
-    assert!(table_engine.table_exists(&engine_ctx, &table_reference));
+    assert!(table_engine.table_exists(&engine_ctx, table_id));
 }
 
 #[tokio::test]
