@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use catalog::local::{MemoryCatalogManager, };
+use catalog::local::MemoryCatalogManager;
 use catalog::RegisterTableRequest;
 use common_base::Plugins;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, NUMBERS_TABLE_ID};
