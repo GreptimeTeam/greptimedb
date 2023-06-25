@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use arrow_schema::SchemaRef as ArrowSchemaRef;
 use common_catalog::consts::INFORMATION_SCHEMA_NAME;
@@ -26,21 +26,23 @@ use datafusion::physical_plan::SendableRecordBatchStream as DfSendableRecordBatc
 use datatypes::prelude::{ConcreteDataType, ScalarVectorBuilder, VectorRef};
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::vectors::{StringVectorBuilder, UInt32VectorBuilder};
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use table::metadata::TableType;
 
-use crate::error::{CreateRecordBatchSnafu, InternalSnafu, Result};
+use crate::error::{
+    CreateRecordBatchSnafu, InternalSnafu, Result, UpgradeWeakCatalogManagerRefSnafu,
+};
 use crate::information_schema::InformationStreamBuilder;
-use crate::CatalogManagerRef;
+use crate::CatalogManager;
 
 pub(super) struct InformationSchemaTables {
     schema: SchemaRef,
     catalog_name: String,
-    catalog_manager: CatalogManagerRef,
+    catalog_manager: Weak<dyn CatalogManager>,
 }
 
 impl InformationSchemaTables {
-    pub(super) fn new(catalog_name: String, catalog_manager: CatalogManagerRef) -> Self {
+    pub(super) fn new(catalog_name: String, catalog_manager: Weak<dyn CatalogManager>) -> Self {
         let schema = Arc::new(Schema::new(vec![
             ColumnSchema::new("table_catalog", ConcreteDataType::string_datatype(), false),
             ColumnSchema::new("table_schema", ConcreteDataType::string_datatype(), false),
@@ -97,7 +99,7 @@ impl InformationStreamBuilder for InformationSchemaTables {
 struct InformationSchemaTablesBuilder {
     schema: SchemaRef,
     catalog_name: String,
-    catalog_manager: CatalogManagerRef,
+    catalog_manager: Weak<dyn CatalogManager>,
 
     catalog_names: StringVectorBuilder,
     schema_names: StringVectorBuilder,
@@ -108,7 +110,11 @@ struct InformationSchemaTablesBuilder {
 }
 
 impl InformationSchemaTablesBuilder {
-    fn new(schema: SchemaRef, catalog_name: String, catalog_manager: CatalogManagerRef) -> Self {
+    fn new(
+        schema: SchemaRef,
+        catalog_name: String,
+        catalog_manager: Weak<dyn CatalogManager>,
+    ) -> Self {
         Self {
             schema,
             catalog_name,
@@ -125,25 +131,27 @@ impl InformationSchemaTablesBuilder {
     /// Construct the `information_schema.tables` virtual table
     async fn make_tables(&mut self) -> Result<RecordBatch> {
         let catalog_name = self.catalog_name.clone();
+        let catalog_manager = self
+            .catalog_manager
+            .upgrade()
+            .context(UpgradeWeakCatalogManagerRefSnafu)?;
 
-        for schema_name in self.catalog_manager.schema_names(&catalog_name).await? {
+        for schema_name in catalog_manager.schema_names(&catalog_name).await? {
             if schema_name == INFORMATION_SCHEMA_NAME {
                 continue;
             }
-            if !self
-                .catalog_manager
+            if !catalog_manager
                 .schema_exist(&catalog_name, &schema_name)
                 .await?
             {
                 continue;
             }
 
-            for table_name in self
-                .catalog_manager
+            for table_name in catalog_manager
                 .table_names(&catalog_name, &schema_name)
                 .await?
             {
-                let Some(table) = self.catalog_manager.table(&catalog_name, &schema_name, &table_name).await? else { continue };
+                let Some(table) = catalog_manager.table(&catalog_name, &schema_name, &table_name).await? else { continue };
                 let table_info = table.table_info();
                 self.add_table(
                     &catalog_name,

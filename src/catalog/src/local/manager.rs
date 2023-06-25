@@ -43,6 +43,7 @@ use crate::error::{
     SystemCatalogTypeMismatchSnafu, TableEngineNotFoundSnafu, TableExistsSnafu, TableNotExistSnafu,
     TableNotFoundSnafu,
 };
+use crate::information_schema::InformationSchemaProvider;
 use crate::local::memory::MemoryCatalogManager;
 use crate::system::{
     decode_system_catalog, Entry, SystemCatalogTable, TableEntry, ENTRY_TYPE_INDEX, KEY_INDEX,
@@ -50,8 +51,8 @@ use crate::system::{
 };
 use crate::tables::SystemCatalog;
 use crate::{
-    handle_system_table_request, CatalogManager, DeregisterTableRequest, RegisterSchemaRequest,
-    RegisterSystemTableRequest, RegisterTableRequest, RenameTableRequest,
+    handle_system_table_request, CatalogManager, CatalogManagerRef, DeregisterTableRequest,
+    RegisterSchemaRequest, RegisterSystemTableRequest, RegisterTableRequest, RenameTableRequest,
 };
 
 /// A `CatalogManager` consists of a system catalog and a bunch of user catalogs.
@@ -149,6 +150,7 @@ impl LocalCatalogManager {
             table_id: NUMBERS_TABLE_ID,
             table: numbers_table,
         };
+
         self.catalogs
             .register_table(register_number_table_req)
             .await?;
@@ -533,6 +535,13 @@ impl CatalogManager for LocalCatalogManager {
         schema_name: &str,
         table_name: &str,
     ) -> Result<Option<TableRef>> {
+        if schema_name == INFORMATION_SCHEMA_NAME {
+            let manager: CatalogManagerRef = self.catalogs.clone() as _;
+            let provider =
+                InformationSchemaProvider::new(catalog_name.to_string(), Arc::downgrade(&manager));
+            return provider.table(table_name);
+        }
+
         self.catalogs
             .table(catalog_name, schema_name, table_name)
             .await

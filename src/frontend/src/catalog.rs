@@ -25,13 +25,14 @@ use catalog::helper::{
     build_catalog_prefix, build_schema_prefix, build_table_global_prefix, CatalogKey, SchemaKey,
     TableGlobalKey, TableGlobalValue,
 };
+use catalog::information_schema::InformationSchemaProvider;
 use catalog::remote::{Kv, KvBackendRef, KvCacheInvalidatorRef};
 use catalog::{
     CatalogManager, DeregisterTableRequest, RegisterSchemaRequest, RegisterSystemTableRequest,
     RegisterTableRequest, RenameTableRequest,
 };
 use client::client_manager::DatanodeClients;
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME};
 use common_error::prelude::BoxedError;
 use common_meta::table_name::TableName;
 use common_telemetry::warn;
@@ -329,34 +330,6 @@ impl CatalogManager for FrontendCatalogManager {
             .is_some())
     }
 
-    // async fn catalog(&self, catalog: &str) -> CatalogResult<bool> {
-    //     let key = CatalogKey {
-    //         catalog_name: catalog.to_string(),
-    //     }
-    //     .to_string();
-
-    //     Ok(self.backend.get(key.as_bytes()).await?.map(|_| {
-    //         Arc::new(FrontendCatalogProvider {
-    //             catalog_name: catalog.to_string(),
-    //             catalog_manager: Arc::new(self.clone()),
-    //         }) as Arc<_>
-    //     }))
-    // }
-
-    // async fn schema(
-    //     &self,
-    //     catalog: &str,
-    //     schema: &str,
-    // ) -> catalog::error::Result<Option<SchemaProviderRef>> {
-    //     self.catalog(catalog)
-    //         .await?
-    //         .context(catalog::error::CatalogNotFoundSnafu {
-    //             catalog_name: catalog,
-    //         })?
-    //         .schema(schema)
-    //         .await
-    // }
-
     async fn table(
         &self,
         catalog: &str,
@@ -368,6 +341,20 @@ impl CatalogManager for FrontendCatalogManager {
             && table_name == "numbers"
         {
             return Ok(Some(Arc::new(NumbersTable::default())));
+        }
+
+        if schema == INFORMATION_SCHEMA_NAME {
+            // hack: use existing cyclin reference to get Arc<Self>.
+            // This can be remove by refactoring the struct into something like Arc<Inner>
+            let manager = if let Some(instance) = self.dist_instance.as_ref() {
+                instance.catalog_manager() as _
+            } else {
+                return Ok(None);
+            };
+
+            let provider =
+                InformationSchemaProvider::new(catalog.to_string(), Arc::downgrade(&manager));
+            return provider.table(table_name);
         }
 
         let table_global_key = TableGlobalKey {
@@ -396,131 +383,3 @@ impl CatalogManager for FrontendCatalogManager {
         self
     }
 }
-
-// pub struct FrontendCatalogProvider {
-//     catalog_name: String,
-//     catalog_manager: Arc<FrontendCatalogManager>,
-// }
-
-// #[async_trait::async_trait]
-// impl CatalogProvider for FrontendCatalogProvider {
-//     fn as_any(&self) -> &dyn Any {
-//         self
-//     }
-
-//     async fn schema_names(&self) -> catalog::error::Result<Vec<String>> {
-//         let key = build_schema_prefix(&self.catalog_name);
-//         let backend = self.catalog_manager.backend();
-//         let mut iter = backend.range(key.as_bytes());
-//         let mut res = HashSet::new();
-//         while let Some(r) = iter.next().await {
-//             let Kv(k, _) = r?;
-//             let key =
-//                 SchemaKey::parse(String::from_utf8_lossy(&k)).context(InvalidCatalogValueSnafu)?;
-//             res.insert(key.schema_name);
-//         }
-//         Ok(res.into_iter().collect())
-//     }
-
-//     async fn register_schema(
-//         &self,
-//         _name: String,
-//         _schema: SchemaProviderRef,
-//     ) -> catalog::error::Result<Option<SchemaProviderRef>> {
-//         unimplemented!("Frontend catalog provider does not support register schema")
-//     }
-
-//     async fn schema(&self, name: &str) -> catalog::error::Result<Option<SchemaProviderRef>> {
-//         let catalog = &self.catalog_name;
-
-//         let schema_key = SchemaKey {
-//             catalog_name: catalog.clone(),
-//             schema_name: name.to_string(),
-//         }
-//         .to_string();
-
-//         let val = self
-//             .catalog_manager
-//             .backend()
-//             .get(schema_key.as_bytes())
-//             .await?;
-
-//         let provider = val.map(|_| {
-//             Arc::new(FrontendSchemaProvider {
-//                 catalog_name: catalog.clone(),
-//                 schema_name: name.to_string(),
-//                 catalog_manager: self.catalog_manager.clone(),
-//             }) as Arc<dyn SchemaProvider>
-//         });
-
-//         Ok(provider)
-//     }
-// }
-
-// pub struct FrontendSchemaProvider {
-//     catalog_name: String,
-//     schema_name: String,
-//     catalog_manager: Arc<FrontendCatalogManager>,
-// }
-
-// #[async_trait]
-// impl SchemaProvider for FrontendSchemaProvider {
-//     fn as_any(&self) -> &dyn Any {
-//         self
-//     }
-
-//     async fn table_names(&self) -> catalog::error::Result<Vec<String>> {
-//         let mut tables = vec![];
-//         if self.catalog_name == DEFAULT_CATALOG_NAME && self.schema_name == DEFAULT_SCHEMA_NAME {
-//             tables.push("numbers".to_string());
-//         }
-//         let key = build_table_global_prefix(&self.catalog_name, &self.schema_name);
-//         let backend = self.catalog_manager.backend();
-//         let iter = backend.range(key.as_bytes());
-//         let result = iter
-//             .map(|r| {
-//                 let Kv(k, _) = r?;
-//                 let key = TableGlobalKey::parse(String::from_utf8_lossy(&k))
-//                     .context(InvalidCatalogValueSnafu)?;
-//                 Ok(key.table_name)
-//             })
-//             .try_collect::<Vec<_>>()
-//             .await?;
-//         tables.extend(result);
-//         Ok(tables)
-//     }
-
-//     async fn table(&self, name: &str) -> catalog::error::Result<Option<TableRef>> {
-//         if self.catalog_name == DEFAULT_CATALOG_NAME
-//             && self.schema_name == DEFAULT_SCHEMA_NAME
-//             && name == "numbers"
-//         {
-//             return Ok(Some(Arc::new(NumbersTable::default())));
-//         }
-
-//         let table_global_key = TableGlobalKey {
-//             catalog_name: self.catalog_name.clone(),
-//             schema_name: self.schema_name.clone(),
-//             table_name: name.to_string(),
-//         };
-//         let Some(kv) = self.catalog_manager.backend().get(table_global_key.to_string().as_bytes()).await? else {
-//             return Ok(None);
-//         };
-//         let v = TableGlobalValue::from_bytes(kv.1).context(InvalidCatalogValueSnafu)?;
-//         let table_info = Arc::new(
-//             v.table_info
-//                 .try_into()
-//                 .context(catalog_err::InvalidTableInfoInCatalogSnafu)?,
-//         );
-//         let table = Arc::new(DistTable::new(
-//             TableName::new(&self.catalog_name, &self.schema_name, name),
-//             table_info,
-//             self.catalog_manager.clone(),
-//         ));
-//         Ok(Some(table))
-//     }
-
-//     async fn table_exist(&self, name: &str) -> catalog::error::Result<bool> {
-//         Ok(self.table_names().await?.contains(&name.to_string()))
-//     }
-// }

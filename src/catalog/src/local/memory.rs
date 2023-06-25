@@ -435,16 +435,7 @@ mod tests {
     #[tokio::test]
     async fn test_new_memory_catalog_list() {
         let catalog_list = new_memory_catalog_manager().unwrap();
-        // let default_catalog = CatalogManager::catalog(&*catalog_list, DEFAULT_CATALOG_NAME)
-        //     .await
-        //     .unwrap()
-        //     .unwrap();
 
-        // let default_schema = default_catalog
-        //     .schema(DEFAULT_SCHEMA_NAME)
-        //     .await
-        //     .unwrap()
-        //     .unwrap();
         let register_request = RegisterTableRequest {
             catalog: DEFAULT_CATALOG_NAME.to_string(),
             schema: DEFAULT_SCHEMA_NAME.to_string(),

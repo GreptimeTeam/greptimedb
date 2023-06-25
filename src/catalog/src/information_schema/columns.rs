@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use arrow_schema::SchemaRef as ArrowSchemaRef;
 use common_catalog::consts::{
@@ -29,16 +29,18 @@ use datatypes::prelude::{ConcreteDataType, DataType};
 use datatypes::scalars::ScalarVectorBuilder;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::vectors::{StringVectorBuilder, VectorRef};
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 
 use super::InformationStreamBuilder;
-use crate::error::{CreateRecordBatchSnafu, InternalSnafu, Result};
-use crate::CatalogManagerRef;
+use crate::error::{
+    CreateRecordBatchSnafu, InternalSnafu, Result, UpgradeWeakCatalogManagerRefSnafu,
+};
+use crate::CatalogManager;
 
 pub(super) struct InformationSchemaColumns {
     schema: SchemaRef,
     catalog_name: String,
-    catalog_manager: CatalogManagerRef,
+    catalog_manager: Weak<dyn CatalogManager>,
 }
 
 const TABLE_CATALOG: &str = "table_catalog";
@@ -49,7 +51,7 @@ const DATA_TYPE: &str = "data_type";
 const SEMANTIC_TYPE: &str = "semantic_type";
 
 impl InformationSchemaColumns {
-    pub(super) fn new(catalog_name: String, catalog_manager: CatalogManagerRef) -> Self {
+    pub(super) fn new(catalog_name: String, catalog_manager: Weak<dyn CatalogManager>) -> Self {
         let schema = Arc::new(Schema::new(vec![
             ColumnSchema::new(TABLE_CATALOG, ConcreteDataType::string_datatype(), false),
             ColumnSchema::new(TABLE_SCHEMA, ConcreteDataType::string_datatype(), false),
@@ -103,7 +105,7 @@ impl InformationStreamBuilder for InformationSchemaColumns {
 struct InformationSchemaColumnsBuilder {
     schema: SchemaRef,
     catalog_name: String,
-    catalog_manager: CatalogManagerRef,
+    catalog_manager: Weak<dyn CatalogManager>,
 
     catalog_names: StringVectorBuilder,
     schema_names: StringVectorBuilder,
@@ -114,7 +116,11 @@ struct InformationSchemaColumnsBuilder {
 }
 
 impl InformationSchemaColumnsBuilder {
-    fn new(schema: SchemaRef, catalog_name: String, catalog_manager: CatalogManagerRef) -> Self {
+    fn new(
+        schema: SchemaRef,
+        catalog_name: String,
+        catalog_manager: Weak<dyn CatalogManager>,
+    ) -> Self {
         Self {
             schema,
             catalog_name,
@@ -131,21 +137,23 @@ impl InformationSchemaColumnsBuilder {
     /// Construct the `information_schema.tables` virtual table
     async fn make_tables(&mut self) -> Result<RecordBatch> {
         let catalog_name = self.catalog_name.clone();
+        let catalog_manager = self
+            .catalog_manager
+            .upgrade()
+            .context(UpgradeWeakCatalogManagerRefSnafu)?;
 
-        for schema_name in self.catalog_manager.schema_names(&catalog_name).await? {
-            if !self
-                .catalog_manager
+        for schema_name in catalog_manager.schema_names(&catalog_name).await? {
+            if !catalog_manager
                 .schema_exist(&catalog_name, &schema_name)
                 .await?
             {
                 continue;
             }
-            for table_name in self
-                .catalog_manager
+            for table_name in catalog_manager
                 .table_names(&catalog_name, &schema_name)
                 .await?
             {
-                let Some(table) = self.catalog_manager.table(&catalog_name, &schema_name, &table_name).await? else { continue };
+                let Some(table) = catalog_manager.table(&catalog_name, &schema_name, &table_name).await? else { continue };
                 let keys = &table.table_info().meta.primary_key_indices;
                 let schema = table.schema();
                 for (idx, column) in schema.column_schemas().iter().enumerate() {

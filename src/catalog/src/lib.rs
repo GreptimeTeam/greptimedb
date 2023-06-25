@@ -33,7 +33,7 @@ use crate::error::{CreateTableSnafu, Result};
 
 pub mod error;
 pub mod helper;
-// pub(crate) mod information_schema;
+pub mod information_schema;
 pub mod local;
 mod metrics;
 pub mod remote;
