@@ -163,13 +163,6 @@ impl Stream for RecordBatchStreamAdapter {
         match Pin::new(&mut self.stream).poll_next(cx) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Some(df_record_batch)) => {
-                let timer = self
-                    .metrics
-                    .as_ref()
-                    .map(|m| m.elapsed_compute().clone())
-                    .unwrap_or_default();
-                let _guard = timer.timer();
-
                 let df_record_batch = df_record_batch.context(error::PollStreamSnafu)?;
                 Poll::Ready(Some(RecordBatch::try_from_df_record_batch(
                     self.schema(),
