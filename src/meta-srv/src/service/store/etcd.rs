@@ -29,8 +29,10 @@ use etcd_client::{
 
 use crate::error;
 use crate::error::Result;
-use crate::metrics::METRIC_META_KV_REQUEST;
+use crate::metrics::{METRIC_META_KV_REQUEST, METRIC_META_TXN_REQUEST};
+use crate::service::store::etcd_util::KvPair;
 use crate::service::store::kv::{KvStore, KvStoreRef};
+use crate::service::store::txn::TxnService;
 
 // Maximum number of operations permitted in a transaction.
 // The etcd default configuration's `--max-txn-ops` is 128.
@@ -463,6 +465,28 @@ impl KvStore for EtcdStore {
     }
 }
 
+#[async_trait::async_trait]
+impl TxnService for EtcdStore {
+    async fn txn(
+        &self,
+        txn: crate::service::store::txn::Txn,
+    ) -> Result<crate::service::store::txn::TxnResponse> {
+        let _timer = timer!(
+            METRIC_META_TXN_REQUEST,
+            &[("target", "etcd".to_string()), ("op", "txn".to_string()),]
+        );
+
+        let etcd_txn: Txn = txn.into();
+        let txn_res = self
+            .client
+            .kv_client()
+            .txn(etcd_txn)
+            .await
+            .context(error::EtcdFailedSnafu)?;
+        Ok(txn_res.into())
+    }
+}
+
 struct Get {
     cluster_id: u64,
     key: Vec<u8>,
@@ -701,30 +725,6 @@ impl TryFrom<MoveValueRequest> for MoveValue {
             to_key,
             delete_options: Some(DeleteOptions::default().with_prev_key()),
         })
-    }
-}
-
-struct KvPair<'a>(&'a etcd_client::KeyValue);
-
-impl<'a> KvPair<'a> {
-    /// Creates a `KvPair` from etcd KeyValue
-    #[inline]
-    fn new(kv: &'a etcd_client::KeyValue) -> Self {
-        Self(kv)
-    }
-
-    #[inline]
-    fn from_etcd_kv(kv: &etcd_client::KeyValue) -> KeyValue {
-        KeyValue::from(KvPair::new(kv))
-    }
-}
-
-impl<'a> From<KvPair<'a>> for KeyValue {
-    fn from(kv: KvPair<'a>) -> Self {
-        Self {
-            key: kv.0.key().to_vec(),
-            value: kv.0.value().to_vec(),
-        }
     }
 }
 

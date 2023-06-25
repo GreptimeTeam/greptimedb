@@ -13,6 +13,7 @@
 // limitations under the License.
 
 pub mod etcd;
+pub(crate) mod etcd_util;
 pub mod ext;
 pub mod kv;
 pub mod memory;
