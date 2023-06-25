@@ -84,8 +84,7 @@ impl<S: StorageEngine> DropMitoTable<S> {
             state: DropTableState::Prepare,
             request,
         };
-        let table_ref = data.table_ref();
-        let table = engine_inner.get_mito_table(&table_ref);
+        let table = engine_inner.get_mito_table(data.request.table_id);
 
         Ok(DropMitoTable {
             data,
@@ -115,8 +114,7 @@ impl<S: StorageEngine> DropMitoTable<S> {
     /// Recover the procedure from json.
     fn from_json(json: &str, engine_inner: Arc<MitoEngineInner<S>>) -> Result<Self> {
         let data: DropTableData = serde_json::from_str(json).context(FromJsonSnafu)?;
-        let table_ref = data.table_ref();
-        let table = engine_inner.get_mito_table(&table_ref);
+        let table = engine_inner.get_mito_table(data.request.table_id);
 
         Ok(DropMitoTable {
             data,
@@ -182,6 +180,7 @@ mod tests {
         procedure_test_util::execute_procedure_until_done(&mut procedure).await;
 
         // Drop the table.
+        let table_id = request.id;
         let request = test_util::new_drop_request();
         let mut procedure = table_engine
             .drop_table_procedure(&engine_ctx, request.clone())
@@ -189,13 +188,8 @@ mod tests {
         procedure_test_util::execute_procedure_until_done(&mut procedure).await;
 
         // The table is dropped.
-        let table_ref = TableReference {
-            catalog: &request.catalog_name,
-            schema: &request.schema_name,
-            table: &request.table_name,
-        };
         assert!(table_engine
-            .get_table(&engine_ctx, &table_ref)
+            .get_table(&engine_ctx, table_id)
             .unwrap()
             .is_none());
     }

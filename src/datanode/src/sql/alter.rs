@@ -19,6 +19,7 @@ use snafu::prelude::*;
 use sql::statements::alter::{AlterTable, AlterTableOperation};
 use sql::statements::column_def_to_schema;
 use table::engine::TableReference;
+use table::metadata::TableId;
 use table::requests::{AddColumnRequest, AlterKind, AlterTableRequest};
 use table_procedure::AlterTableProcedure;
 
@@ -60,6 +61,7 @@ impl SqlHandler {
     pub(crate) fn alter_to_request(
         alter_table: AlterTable,
         table_ref: TableReference,
+        table_id: TableId,
     ) -> Result<AlterTableRequest> {
         let alter_kind = match &alter_table.alter_operation() {
             AlterTableOperation::AddConstraint(table_constraint) => {
@@ -91,6 +93,7 @@ impl SqlHandler {
             catalog_name: table_ref.catalog.to_string(),
             schema_name: table_ref.schema.to_string(),
             table_name: table_ref.table.to_string(),
+            table_id,
             alter_kind,
         })
     }
@@ -128,6 +131,7 @@ mod tests {
         let req = SqlHandler::alter_to_request(
             alter_table,
             TableReference::full("greptime", "public", "my_metric_1"),
+            1,
         )
         .unwrap();
         assert_eq!(req.catalog_name, "greptime");
@@ -154,6 +158,7 @@ mod tests {
         let req = SqlHandler::alter_to_request(
             alter_table,
             TableReference::full("greptime", "public", "test_table"),
+            1,
         )
         .unwrap();
         assert_eq!(req.catalog_name, "greptime");

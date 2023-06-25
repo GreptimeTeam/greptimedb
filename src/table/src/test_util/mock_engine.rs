@@ -19,7 +19,8 @@ use async_trait::async_trait;
 use common_procedure::BoxedProcedure;
 use tokio::sync::Mutex;
 
-use crate::engine::{EngineContext, TableEngine, TableEngineProcedure, TableReference};
+use crate::engine::{EngineContext, TableEngine, TableEngineProcedure};
+use crate::metadata::TableId;
 use crate::requests::{AlterTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest};
 use crate::test_util::EmptyTable;
 use crate::{Result, TableRef};
@@ -86,11 +87,11 @@ impl TableEngine for MockTableEngine {
         unimplemented!()
     }
 
-    fn get_table(&self, _ctx: &EngineContext, _ref: &TableReference) -> Result<Option<TableRef>> {
+    fn get_table(&self, _ctx: &EngineContext, _table_id: TableId) -> Result<Option<TableRef>> {
         unimplemented!()
     }
 
-    fn table_exists(&self, _ctx: &EngineContext, _name: &TableReference) -> bool {
+    fn table_exists(&self, _ctx: &EngineContext, _table_id: TableId) -> bool {
         unimplemented!()
     }
 

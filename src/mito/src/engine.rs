@@ -42,8 +42,7 @@ use table::engine::{
 };
 use table::metadata::{TableId, TableInfo, TableVersion};
 use table::requests::{
-    AlterKind, AlterTableRequest, CloseTableRequest, CreateTableRequest, DropTableRequest,
-    OpenTableRequest,
+    AlterTableRequest, CloseTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest,
 };
 use table::{error as table_error, Result as TableResult, Table, TableRef};
 
@@ -102,9 +101,8 @@ impl<S: StorageEngine> TableEngine for MitoEngine<S> {
             .map_err(BoxedError::new)
             .context(table_error::TableOperationSnafu)?;
 
-        let table_ref = request.table_ref();
-        let _lock = self.inner.table_mutex.lock(table_ref.to_string()).await;
-        if let Some(table) = self.inner.get_mito_table(&table_ref) {
+        let _lock = self.inner.table_mutex.lock(request.id).await;
+        if let Some(table) = self.inner.get_mito_table(request.id) {
             if request.create_if_not_exists {
                 return Ok(table);
             } else {
@@ -148,26 +146,10 @@ impl<S: StorageEngine> TableEngine for MitoEngine<S> {
     ) -> TableResult<TableRef> {
         let _timer = common_telemetry::timer!(metrics::MITO_ALTER_TABLE_ELAPSED);
 
-        if let AlterKind::RenameTable { new_table_name } = &req.alter_kind {
-            let mut table_ref = req.table_ref();
-            table_ref.table = new_table_name;
-            if self.inner.get_mito_table(&table_ref).is_some() {
-                return TableExistsSnafu {
-                    table_name: table_ref.to_string(),
-                }
-                .fail()
-                .map_err(BoxedError::new)
-                .context(table_error::TableOperationSnafu)?;
-            }
-        }
-
         let mut procedure = AlterMitoTable::new(req, self.inner.clone())
             .map_err(BoxedError::new)
             .context(table_error::TableOperationSnafu)?;
 
-        // TODO(yingwen): Rename has concurrent issue without the procedure runtime. But
-        // users can't use this method to alter a table so it is still safe. We should
-        // refactor the table engine to avoid using table name as key.
         procedure
             .engine_alter_table()
             .await
@@ -175,16 +157,12 @@ impl<S: StorageEngine> TableEngine for MitoEngine<S> {
             .context(table_error::TableOperationSnafu)
     }
 
-    fn get_table(
-        &self,
-        _ctx: &EngineContext,
-        table_ref: &TableReference,
-    ) -> TableResult<Option<TableRef>> {
-        Ok(self.inner.get_table(table_ref))
+    fn get_table(&self, _ctx: &EngineContext, table_id: TableId) -> TableResult<Option<TableRef>> {
+        Ok(self.inner.get_table(table_id))
     }
 
-    fn table_exists(&self, _ctx: &EngineContext, table_ref: &TableReference) -> bool {
-        self.inner.get_table(table_ref).is_some()
+    fn table_exists(&self, _ctx: &EngineContext, table_id: TableId) -> bool {
+        self.inner.get_table(table_id).is_some()
     }
 
     async fn drop_table(
@@ -254,16 +232,16 @@ impl<S: StorageEngine> TableEngineProcedure for MitoEngine<S> {
 }
 
 pub(crate) struct MitoEngineInner<S: StorageEngine> {
-    /// All tables opened by the engine. Map key is formatted [TableReference].
+    /// All tables opened by the engine.
     ///
     /// Writing to `tables` should also hold the `table_mutex`.
-    tables: DashMap<String, Arc<MitoTable<S::Region>>>,
+    tables: DashMap<TableId, Arc<MitoTable<S::Region>>>,
     object_store: ObjectStore,
     compress_type: CompressionType,
     storage_engine: S,
     /// Table mutex is used to protect the operations such as creating/opening/closing
     /// a table, to avoid things like opening the same table simultaneously.
-    table_mutex: Arc<KeyLock<String>>,
+    table_mutex: Arc<KeyLock<TableId>>,
 }
 
 fn build_row_key_desc(
@@ -429,11 +407,6 @@ impl<S: StorageEngine> MitoEngineInner<S> {
         let catalog_name = &request.catalog_name;
         let schema_name = &request.schema_name;
         let table_name = &request.table_name;
-        let table_ref = TableReference {
-            catalog: catalog_name,
-            schema: schema_name,
-            table: table_name,
-        };
 
         let table_id = request.table_id;
         let engine_ctx = StorageEngineContext::default();
@@ -463,6 +436,11 @@ impl<S: StorageEngine> MitoEngineInner<S> {
 
         let mut regions = HashMap::with_capacity(table_info.meta.region_numbers.len());
 
+        let table_ref = TableReference {
+            catalog: catalog_name,
+            schema: schema_name,
+            table: table_name,
+        };
         for region_number in &request.region_numbers {
             let region = self
                 .open_region(&engine_ctx, table_id, *region_number, &table_ref, &opts)
@@ -556,16 +534,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
         ctx: &EngineContext,
         request: OpenTableRequest,
     ) -> TableResult<Option<TableRef>> {
-        let catalog_name = &request.catalog_name;
-        let schema_name = &request.schema_name;
-        let table_name = &request.table_name;
-        let table_ref = TableReference {
-            catalog: catalog_name,
-            schema: schema_name,
-            table: table_name,
-        };
-
-        if let Some(table) = self.get_table(&table_ref) {
+        if let Some(table) = self.get_table(request.table_id) {
             if let Some(table) = self.check_regions(table, &request.region_numbers)? {
                 return Ok(Some(table));
             }
@@ -573,11 +542,10 @@ impl<S: StorageEngine> MitoEngineInner<S> {
 
         // Acquires the mutex before opening a new table.
         let table = {
-            let table_name_key = table_ref.to_string();
-            let _lock = self.table_mutex.lock(table_name_key.clone()).await;
+            let _lock = self.table_mutex.lock(request.table_id).await;
 
             // Checks again, read lock should be enough since we are guarded by the mutex.
-            if let Some(table) = self.get_mito_table(&table_ref) {
+            if let Some(table) = self.get_mito_table(request.table_id) {
                 // Contains all regions or target region
                 if let Some(table) = self.check_regions(table.clone(), &request.region_numbers)? {
                     Some(table)
@@ -593,7 +561,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
                 let table = self.recover_table(ctx, request.clone()).await?;
                 if let Some(table) = table {
                     // already locked
-                    self.tables.insert(table_ref.to_string(), table.clone());
+                    self.tables.insert(request.table_id, table.clone());
 
                     Some(table as _)
                 } else {
@@ -604,8 +572,8 @@ impl<S: StorageEngine> MitoEngineInner<S> {
 
         logging::info!(
             "Mito engine opened table: {} in schema: {}",
-            table_name,
-            schema_name
+            request.table_name,
+            request.schema_name
         );
 
         Ok(table)
@@ -613,10 +581,8 @@ impl<S: StorageEngine> MitoEngineInner<S> {
 
     async fn drop_table(&self, request: DropTableRequest) -> TableResult<bool> {
         // Remove the table from the engine to avoid further access from users.
-        let table_ref = request.table_ref();
-
-        let _lock = self.table_mutex.lock(table_ref.to_string()).await;
-        let removed_table = self.tables.remove(&table_ref.to_string());
+        let _lock = self.table_mutex.lock(request.table_id).await;
+        let removed_table = self.tables.remove(&request.table_id);
         // Close the table to close all regions. Closing a region is idempotent.
         if let Some((_, table)) = &removed_table {
             let regions = table.region_ids();
@@ -663,17 +629,13 @@ impl<S: StorageEngine> MitoEngineInner<S> {
         Ok(Some((manifest, table_info)))
     }
 
-    fn get_table(&self, table_ref: &TableReference) -> Option<TableRef> {
-        self.tables
-            .get(&table_ref.to_string())
-            .map(|en| en.value().clone() as _)
+    fn get_table(&self, table_id: TableId) -> Option<TableRef> {
+        self.tables.get(&table_id).map(|en| en.value().clone() as _)
     }
 
     /// Returns the [MitoTable].
-    fn get_mito_table(&self, table_ref: &TableReference) -> Option<Arc<MitoTable<S::Region>>> {
-        self.tables
-            .get(&table_ref.to_string())
-            .map(|en| en.value().clone())
+    fn get_mito_table(&self, table_id: TableId) -> Option<Arc<MitoTable<S::Region>>> {
+        self.tables.get(&table_id).map(|en| en.value().clone())
     }
 
     async fn close(&self) -> TableResult<()> {
@@ -696,8 +658,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
     }
 
     async fn close_table(&self, request: CloseTableRequest) -> TableResult<CloseTableResult> {
-        let table_ref = request.table_ref();
-        if let Some(table) = self.get_mito_table(&table_ref) {
+        if let Some(table) = self.get_mito_table(request.table_id) {
             return self
                 .close_table_inner(table, Some(&request.region_numbers), request.flush)
                 .await;
@@ -713,13 +674,8 @@ impl<S: StorageEngine> MitoEngineInner<S> {
         flush: bool,
     ) -> TableResult<CloseTableResult> {
         let info = table.table_info();
-        let table_ref = TableReference {
-            catalog: &info.catalog_name,
-            schema: &info.schema_name,
-            table: &info.name,
-        };
         let table_id = info.ident.table_id;
-        let _lock = self.table_mutex.lock(table_ref.to_string()).await;
+        let _lock = self.table_mutex.lock(table_id).await;
 
         let all_regions = table.region_ids();
         let regions = regions.unwrap_or(&all_regions);
@@ -738,12 +694,12 @@ impl<S: StorageEngine> MitoEngineInner<S> {
         }
 
         if table.is_releasable() {
-            self.tables.remove(&table_ref.to_string());
+            self.tables.remove(&table_id);
 
             logging::info!(
                 "Mito engine closed table: {} in schema: {}",
-                table_ref.table,
-                table_ref.schema,
+                info.name,
+                info.schema_name,
             );
             return Ok(CloseTableResult::Released(removed_regions));
         }

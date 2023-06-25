@@ -29,9 +29,7 @@ use table::requests::{AlterKind, AlterTableRequest};
 use table::{Table, TableRef};
 
 use crate::engine::MitoEngineInner;
-use crate::error::{
-    TableExistsSnafu, TableNotFoundSnafu, UpdateTableManifestSnafu, VersionChangedSnafu,
-};
+use crate::error::{TableNotFoundSnafu, UpdateTableManifestSnafu, VersionChangedSnafu};
 use crate::manifest::action::{TableChange, TableMetaAction, TableMetaActionList};
 use crate::metrics;
 use crate::table::MitoTable;
@@ -39,7 +37,6 @@ use crate::table::MitoTable;
 /// Procedure to alter a [MitoTable].
 pub(crate) struct AlterMitoTable<S: StorageEngine> {
     data: AlterTableData,
-    engine_inner: Arc<MitoEngineInner<S>>,
     table: Arc<MitoTable<S::Region>>,
     /// The table info after alteration.
     new_info: Option<TableInfo>,
@@ -107,18 +104,16 @@ impl<S: StorageEngine> AlterMitoTable<S> {
             table_version: 0,
         };
         let table_ref = data.table_ref();
-        let table =
-            engine_inner
-                .get_mito_table(&table_ref)
-                .with_context(|| TableNotFoundSnafu {
-                    table_name: table_ref.to_string(),
-                })?;
+        let table = engine_inner
+            .get_mito_table(data.request.table_id)
+            .with_context(|| TableNotFoundSnafu {
+                table_name: table_ref.to_string(),
+            })?;
         let info = table.table_info();
         data.table_version = info.ident.version;
 
         Ok(AlterMitoTable {
             data,
-            engine_inner,
             table,
             new_info: None,
             alter_op: None,
@@ -148,16 +143,14 @@ impl<S: StorageEngine> AlterMitoTable<S> {
     fn from_json(json: &str, engine_inner: Arc<MitoEngineInner<S>>) -> Result<Self> {
         let data: AlterTableData = serde_json::from_str(json).context(FromJsonSnafu)?;
         let table_ref = data.table_ref();
-        let table =
-            engine_inner
-                .get_mito_table(&table_ref)
-                .with_context(|| TableNotFoundSnafu {
-                    table_name: table_ref.to_string(),
-                })?;
+        let table = engine_inner
+            .get_mito_table(data.request.table_id)
+            .with_context(|| TableNotFoundSnafu {
+                table_name: table_ref.to_string(),
+            })?;
 
         Ok(AlterMitoTable {
             data,
-            engine_inner,
             table,
             new_info: None,
             alter_op: None,
@@ -176,17 +169,8 @@ impl<S: StorageEngine> AlterMitoTable<S> {
             }
         );
 
-        if let AlterKind::RenameTable { new_table_name } = &self.data.request.alter_kind {
-            let mut table_ref = self.data.table_ref();
-            table_ref.table = new_table_name;
-            ensure!(
-                self.engine_inner.get_mito_table(&table_ref).is_none(),
-                TableExistsSnafu {
-                    table_name: table_ref.to_string(),
-                }
-            );
-        }
-
+        // We don't check the table name in the table engine as it is the catalog
+        // manager's duty to ensure the table name is unused.
         self.data.state = AlterTableState::EngineAlterTable;
 
         Ok(Status::executing(true))
@@ -251,22 +235,6 @@ impl<S: StorageEngine> AlterMitoTable<S> {
 
         // Update in memory metadata of the table.
         self.table.set_table_info(new_info.clone());
-
-        // Rename key in tables map.
-        if let AlterKind::RenameTable { new_table_name } = &self.data.request.alter_kind {
-            let mut table_ref = self.data.table_ref();
-            let removed = {
-                let _lock = self.engine_inner.table_mutex.lock(table_ref.to_string());
-                self.engine_inner.tables.remove(&table_ref.to_string())
-            };
-            ensure!(removed.is_some(), TableNotFoundSnafu { table_name });
-
-            table_ref.table = new_table_name.as_str();
-            let _lock = self.engine_inner.table_mutex.lock(table_ref.to_string());
-            self.engine_inner
-                .tables
-                .insert(table_ref.to_string(), self.table.clone());
-        }
 
         Ok(self.table.clone())
     }
@@ -363,19 +331,15 @@ mod tests {
         procedure_test_util::execute_procedure_until_done(&mut procedure).await;
 
         // Get metadata of the created table.
-        let table_ref = TableReference {
-            catalog: &request.catalog_name,
-            schema: &request.schema_name,
-            table: &request.table_name,
-        };
         let table = table_engine
-            .get_table(&engine_ctx, &table_ref)
+            .get_table(&engine_ctx, request.id)
             .unwrap()
             .unwrap();
         let old_info = table.table_info();
         let old_meta = &old_info.meta;
 
         // Alter the table.
+        let table_id = request.id;
         let request = new_add_columns_req();
         let mut procedure = table_engine
             .alter_table_procedure(&engine_ctx, request.clone())
@@ -384,7 +348,7 @@ mod tests {
 
         // Validate.
         let table = table_engine
-            .get_table(&engine_ctx, &table_ref)
+            .get_table(&engine_ctx, table_id)
             .unwrap()
             .unwrap();
         let new_info = table.table_info();
@@ -405,7 +369,7 @@ mod tests {
             ConcreteDataType::string_datatype(),
             true,
         );
-        let request = new_add_columns_req_with_location(&new_tag, &new_field);
+        let request = new_add_columns_req_with_location(table_id, &new_tag, &new_field);
         let mut procedure = table_engine
             .alter_table_procedure(&engine_ctx, request.clone())
             .unwrap();
@@ -413,7 +377,7 @@ mod tests {
 
         // Validate.
         let table = table_engine
-            .get_table(&engine_ctx, &table_ref)
+            .get_table(&engine_ctx, table_id)
             .unwrap()
             .unwrap();
         let new_info = table.table_info();
@@ -456,6 +420,7 @@ mod tests {
         procedure_test_util::execute_procedure_until_done(&mut procedure).await;
 
         // Add columns.
+        let table_id = request.id;
         let request = new_add_columns_req();
         let mut procedure = table_engine
             .alter_table_procedure(&engine_ctx, request.clone())
@@ -463,13 +428,8 @@ mod tests {
         procedure_test_util::execute_procedure_until_done(&mut procedure).await;
 
         // Get metadata.
-        let table_ref = TableReference {
-            catalog: &request.catalog_name,
-            schema: &request.schema_name,
-            table: &request.table_name,
-        };
         let table = table_engine
-            .get_table(&engine_ctx, &table_ref)
+            .get_table(&engine_ctx, table_id)
             .unwrap()
             .unwrap();
         let old_info = table.table_info();
@@ -521,13 +481,8 @@ mod tests {
         procedure_test_util::execute_procedure_until_done(&mut procedure).await;
 
         // Get metadata of the created table.
-        let mut table_ref = TableReference {
-            catalog: &create_request.catalog_name,
-            schema: &create_request.schema_name,
-            table: &create_request.table_name,
-        };
         let table = table_engine
-            .get_table(&engine_ctx, &table_ref)
+            .get_table(&engine_ctx, create_request.id)
             .unwrap()
             .unwrap();
 
@@ -546,12 +501,7 @@ mod tests {
         let info = table.table_info();
         assert_eq!(new_name, info.name);
         assert!(table_engine
-            .get_table(&engine_ctx, &table_ref)
-            .unwrap()
-            .is_none());
-        table_ref.table = &new_name;
-        assert!(table_engine
-            .get_table(&engine_ctx, &table_ref)
+            .get_table(&engine_ctx, create_request.id)
             .unwrap()
             .is_some());
     }

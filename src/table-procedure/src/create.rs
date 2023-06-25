@@ -349,14 +349,9 @@ mod tests {
             table_engine.clone(),
         );
 
-        let table_ref = TableReference {
-            catalog: &request.catalog_name,
-            schema: &request.schema_name,
-            table: &request.table_name,
-        };
         let engine_ctx = EngineContext::default();
         assert!(table_engine
-            .get_table(&engine_ctx, &table_ref)
+            .get_table(&engine_ctx, request.id)
             .unwrap()
             .is_none());
 
@@ -365,7 +360,7 @@ mod tests {
         watcher.changed().await.unwrap();
 
         assert!(table_engine
-            .get_table(&engine_ctx, &table_ref)
+            .get_table(&engine_ctx, request.id)
             .unwrap()
             .is_some());
     }
@@ -390,14 +385,9 @@ mod tests {
             table_engine.clone(),
         );
 
-        let table_ref = TableReference {
-            catalog: &request.catalog_name,
-            schema: &request.schema_name,
-            table: &request.table_name,
-        };
         let engine_ctx = EngineContext::default();
         assert!(table_engine
-            .get_table(&engine_ctx, &table_ref)
+            .get_table(&engine_ctx, request.id)
             .unwrap()
             .is_none());
 
@@ -452,7 +442,7 @@ mod tests {
 
         // The table is created.
         assert!(table_engine
-            .get_table(&engine_ctx, &table_ref)
+            .get_table(&engine_ctx, request.id)
             .unwrap()
             .is_some());
     }
