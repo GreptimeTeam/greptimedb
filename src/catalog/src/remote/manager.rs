@@ -651,7 +651,7 @@ impl CatalogManager for RemoteCatalogManager {
         Ok(true)
     }
 
-    async fn deregister_table(&self, request: DeregisterTableRequest) -> Result<bool> {
+    async fn deregister_table(&self, request: DeregisterTableRequest) -> Result<()> {
         let catalog_name = request.catalog;
         let schema_name = request.schema;
         let table_name = request.table_name;
@@ -685,7 +685,7 @@ impl CatalogManager for RemoteCatalogManager {
                 .await;
         }
 
-        Ok(true)
+        Ok(())
     }
 
     async fn register_schema(&self, request: RegisterSchemaRequest) -> Result<bool> {

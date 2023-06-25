@@ -451,7 +451,7 @@ impl CatalogManager for LocalCatalogManager {
         self.catalogs.rename_table(request).await
     }
 
-    async fn deregister_table(&self, request: DeregisterTableRequest) -> Result<bool> {
+    async fn deregister_table(&self, request: DeregisterTableRequest) -> Result<()> {
         self.check_state().await?;
 
         {

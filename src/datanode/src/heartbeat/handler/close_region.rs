@@ -189,15 +189,13 @@ impl CloseRegionHandler {
                 })? {
                 CloseTableResult::NotFound | CloseTableResult::Released(_) => {
                     // Deregister table if The table released.
-                    let deregistered = self.deregister_table(table_ref).await?;
+                    self.deregister_table(table_ref).await?;
 
-                    if deregistered {
-                        self.region_alive_keepers
-                            .deregister_table(table_ident)
-                            .await;
-                    }
+                    self.region_alive_keepers
+                        .deregister_table(table_ident)
+                        .await;
 
-                    Ok(deregistered)
+                    Ok(true)
                 }
                 CloseTableResult::PartialClosed(regions) => {
                     // Requires caller to update the region_numbers
@@ -220,7 +218,7 @@ impl CloseRegionHandler {
         Ok(true)
     }
 
-    async fn deregister_table(&self, table_ref: &TableReference<'_>) -> Result<bool> {
+    async fn deregister_table(&self, table_ref: &TableReference<'_>) -> Result<()> {
         self.catalog_manager
             .deregister_table(DeregisterTableRequest {
                 catalog: table_ref.catalog.to_string(),

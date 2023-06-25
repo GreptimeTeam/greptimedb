@@ -137,13 +137,13 @@ impl CatalogManager for FrontendCatalogManager {
         Ok(true)
     }
 
-    async fn deregister_table(&self, request: DeregisterTableRequest) -> CatalogResult<bool> {
+    async fn deregister_table(&self, request: DeregisterTableRequest) -> CatalogResult<()> {
         let table_name = TableName::new(request.catalog, request.schema, request.table_name);
         self.partition_manager
             .table_routes()
             .invalidate_table_route(&table_name)
             .await;
-        Ok(true)
+        Ok(())
     }
 
     async fn register_schema(

@@ -67,9 +67,8 @@ pub trait CatalogManager: Send + Sync {
     /// This method will/should fail if catalog or schema not exist
     async fn register_table(&self, request: RegisterTableRequest) -> Result<bool>;
 
-    /// Deregisters a table within given catalog/schema to catalog manager,
-    /// returns whether the table deregistered.
-    async fn deregister_table(&self, request: DeregisterTableRequest) -> Result<bool>;
+    /// Deregisters a table within given catalog/schema to catalog manager
+    async fn deregister_table(&self, request: DeregisterTableRequest) -> Result<()>;
 
     /// Rename a table to [RenameTableRequest::new_table_name], returns whether the table is renamed.
     async fn rename_table(&self, request: RenameTableRequest) -> Result<bool>;

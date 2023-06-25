@@ -261,15 +261,10 @@ impl DistInstance {
             schema: table_name.schema_name.clone(),
             table_name: table_name.table_name.clone(),
         };
-        ensure!(
-            self.catalog_manager
-                .deregister_table(request)
-                .await
-                .context(CatalogSnafu)?,
-            error::TableNotFoundSnafu {
-                table_name: table_name.to_string()
-            }
-        );
+        self.catalog_manager
+            .deregister_table(request)
+            .await
+            .context(CatalogSnafu)?;
 
         let expr = DropTableExpr {
             catalog_name: table_name.catalog_name.clone(),

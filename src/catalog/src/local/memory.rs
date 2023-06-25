@@ -49,7 +49,7 @@ impl Default for MemoryCatalogManager {
             catalogs: Default::default(),
         };
 
-        let mut catalog = HashMap::new();
+        let mut catalog = HashMap::with_capacity(1);
         catalog.insert(DEFAULT_SCHEMA_NAME.to_string(), HashMap::new());
         manager
             .catalogs
@@ -120,7 +120,7 @@ impl CatalogManager for MemoryCatalogManager {
         Ok(true)
     }
 
-    async fn deregister_table(&self, request: DeregisterTableRequest) -> Result<bool> {
+    async fn deregister_table(&self, request: DeregisterTableRequest) -> Result<()> {
         let mut catalogs = self.catalogs.write().unwrap();
         let schema = catalogs
             .get_mut(&request.catalog)
@@ -140,7 +140,7 @@ impl CatalogManager for MemoryCatalogManager {
                 &[crate::metrics::db_label(&request.catalog, &request.schema)],
             );
         }
-        Ok(result.is_some())
+        Ok(())
     }
 
     async fn register_schema(&self, request: RegisterSchemaRequest) -> Result<bool> {
