@@ -196,9 +196,6 @@ pub enum Error {
         source: sql::error::Error,
     },
 
-    #[snafu(display("Missing insert body"))]
-    MissingInsertBody { location: Location },
-
     #[snafu(display("Failed to insert value to table: {}, source: {}", table_name, source))]
     Insert {
         table_name: String,
@@ -527,7 +524,6 @@ impl ErrorExt for Error {
             | ConstraintNotSupported { .. }
             | SchemaExists { .. }
             | ParseTimestamp { .. }
-            | MissingInsertBody { .. }
             | DatabaseNotFound { .. }
             | MissingNodeId { .. }
             | MissingMetasrvOpts { .. }

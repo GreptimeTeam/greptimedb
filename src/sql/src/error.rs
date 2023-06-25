@@ -74,8 +74,8 @@ pub enum Error {
     #[snafu(display("SQL data type not supported yet: {:?}", t))]
     SqlTypeNotSupported { t: crate::ast::DataType },
 
-    #[snafu(display("Failed to parse value: {}, location: {location}", msg))]
-    ParseSqlValue { msg: String, location: Location },
+    #[snafu(display("Failed to parse value: {}", msg))]
+    ParseSqlValue { msg: String },
 
     #[snafu(display(
         "Column {} expect type: {:?}, actual: {:?}",

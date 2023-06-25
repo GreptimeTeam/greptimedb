@@ -84,23 +84,19 @@ impl StatementExecutor {
                 self.plan_exec(QueryStatement::Sql(stmt), query_ctx).await
             }
 
-            // For performance consideration, only "insert with select" is executed by query engine.
+            // For performance consideration, only requests that can't extract values is executed by query engine.
             // Plain insert ("insert with values") is still executed directly in statement.
-            Statement::Insert(mut insert) => {
-                if insert.is_insert_select() {
+            Statement::Insert(insert) => {
+                if insert.can_extract_values() {
+                    // Ensure that values body is not none before calling stmt executor.
+                    self.sql_stmt_executor
+                        .execute_sql(Statement::Insert(insert), query_ctx)
+                        .await
+                        .context(ExecuteStatementSnafu)
+                } else {
+                    // Can't retrieve values body, let's execute it by query engine
                     self.plan_exec(QueryStatement::Sql(Statement::Insert(insert)), query_ctx)
                         .await
-                } else {
-                    let values_body = insert.values_body();
-                    if values_body.is_none() {
-                        self.plan_exec(QueryStatement::Sql(Statement::Insert(insert)), query_ctx)
-                            .await
-                    } else {
-                        self.sql_stmt_executor
-                            .execute_sql(Statement::Insert(insert), query_ctx)
-                            .await
-                            .context(ExecuteStatementSnafu)
-                    }
                 }
             }
 

@@ -223,9 +223,9 @@ impl Helper {
             ArrowDataType::Null => Arc::new(NullVector::try_from_arrow_array(array)?),
             ArrowDataType::Boolean => Arc::new(BooleanVector::try_from_arrow_array(array)?),
             ArrowDataType::LargeBinary => Arc::new(BinaryVector::try_from_arrow_array(array)?),
-            ArrowDataType::Binary => {
-                let array =
-                    arrow::compute::cast(array.as_ref(), &ArrowDataType::LargeBinary).unwrap();
+            ArrowDataType::FixedSizeBinary(_) | ArrowDataType::Binary => {
+                let array = arrow::compute::cast(array.as_ref(), &ArrowDataType::LargeBinary)
+                    .context(crate::error::ArrowComputeSnafu)?;
                 Arc::new(BinaryVector::try_from_arrow_array(array)?)
             }
             ArrowDataType::Int8 => Arc::new(Int8Vector::try_from_arrow_array(array)?),
@@ -239,6 +239,11 @@ impl Helper {
             ArrowDataType::Float32 => Arc::new(Float32Vector::try_from_arrow_array(array)?),
             ArrowDataType::Float64 => Arc::new(Float64Vector::try_from_arrow_array(array)?),
             ArrowDataType::Utf8 => Arc::new(StringVector::try_from_arrow_array(array)?),
+            ArrowDataType::LargeUtf8 => {
+                let array = arrow::compute::cast(array.as_ref(), &ArrowDataType::Utf8)
+                    .context(crate::error::ArrowComputeSnafu)?;
+                Arc::new(BinaryVector::try_from_arrow_array(array)?)
+            }
             ArrowDataType::Date32 => Arc::new(DateVector::try_from_arrow_array(array)?),
             ArrowDataType::Date64 => Arc::new(DateTimeVector::try_from_arrow_array(array)?),
             ArrowDataType::List(_) => Arc::new(ListVector::try_from_arrow_array(array)?),
@@ -261,8 +266,6 @@ impl Helper {
             | ArrowDataType::Time64(_)
             | ArrowDataType::Duration(_)
             | ArrowDataType::Interval(_)
-            | ArrowDataType::FixedSizeBinary(_)
-            | ArrowDataType::LargeUtf8
             | ArrowDataType::LargeList(_)
             | ArrowDataType::FixedSizeList(_, _)
             | ArrowDataType::Struct(_)

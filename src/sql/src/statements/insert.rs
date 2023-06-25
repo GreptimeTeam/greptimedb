@@ -22,17 +22,11 @@ use crate::statements::query::Query as GtQuery;
 pub struct Insert {
     // Can only be sqlparser::ast::Statement::Insert variant
     pub inner: Statement,
-    parsed_values: bool,
-    values: Option<Vec<Vec<Value>>>,
 }
 
 impl Insert {
     pub fn new(inner: Statement) -> Self {
-        Self {
-            inner,
-            parsed_values: false,
-            values: None,
-        }
+        Self { inner }
     }
 
     pub fn table_name(&self) -> &ObjectName {
@@ -49,12 +43,10 @@ impl Insert {
         }
     }
 
-    pub fn values_body(&mut self) -> &Option<Vec<Vec<Value>>> {
-        if self.parsed_values {
-            return &self.values;
-        }
-
-        let values = match &self.inner {
+    // Try to extract values for insertion.If the statement contains other expressons
+    // except literal values, return None.
+    pub fn values_body(&self) -> Option<Vec<Vec<Value>>> {
+        match &self.inner {
             Statement::Insert {
                 source:
                     box Query {
@@ -64,11 +56,39 @@ impl Insert {
                 ..
             } => sql_exprs_to_values(rows),
             _ => None,
-        };
-        self.values = values;
-        self.parsed_values = true;
+        }
+    }
 
-        &self.values
+    // Returns true when the insert statement can extract literal values.
+    // The rules is the same as function `values_body()`.
+    pub fn can_extract_values(&self) -> bool {
+        match &self.inner {
+            Statement::Insert {
+                source:
+                    box Query {
+                        body: box SetExpr::Values(Values { rows, .. }),
+                        ..
+                    },
+                ..
+            } => rows.iter().all(|es| {
+                es.iter().all(|expr| match expr {
+                    Expr::Value(_) => true,
+                    Expr::Identifier(ident) => {
+                        if ident.quote_style.is_none() {
+                            ident.value.to_lowercase() == "default"
+                        } else {
+                            true
+                        }
+                    }
+                    Expr::UnaryOp { op, expr } => {
+                        matches!(op, UnaryOperator::Minus | UnaryOperator::Plus)
+                            && matches!(&**expr, Expr::Value(Value::Number(_, _)))
+                    }
+                    _ => false,
+                })
+            }),
+            _ => false,
+        }
     }
 
     pub fn query_body(&self) -> Result<Option<GtQuery>> {
@@ -78,19 +98,6 @@ impl Insert {
             } => Some(query.clone().try_into()?),
             _ => None,
         })
-    }
-
-    pub fn is_insert_select(&self) -> bool {
-        matches!(
-            self.inner,
-            Statement::Insert {
-                source: box Query {
-                    body: box SetExpr::Select { .. },
-                    ..
-                },
-                ..
-            }
-        )
     }
 }
 
@@ -103,8 +110,14 @@ fn sql_exprs_to_values(exprs: &Vec<Vec<Expr>>) -> Option<Vec<Vec<Value>>> {
                 Expr::Value(v) => v.clone(),
                 Expr::Identifier(ident) => {
                     if ident.quote_style.is_none() {
-                        Value::Placeholder(ident.value.clone())
+                        // Special processing for `default` value
+                        if ident.value.to_lowercase() == "default" {
+                            Value::Placeholder(ident.value.clone())
+                        } else {
+                            return None;
+                        }
                     } else {
+                        // Identifier with double quotes, we treat it as string.
                         Value::SingleQuotedString(ident.value.clone())
                     }
                 }
@@ -118,12 +131,10 @@ fn sql_exprs_to_values(exprs: &Vec<Vec<Expr>>) -> Option<Vec<Vec<Value>>> {
                             _ => unreachable!(),
                         }
                     } else {
-                        // leave expr to query engine
                         return None;
                     }
                 }
                 _ => {
-                    // leave expr to query engine
                     return None;
                 }
             });
@@ -162,7 +173,7 @@ mod tests {
             .remove(0);
         match stmt {
             Statement::Insert(insert) => {
-                let values = insert.values_body().unwrap().unwrap();
+                let values = insert.values_body().unwrap();
                 assert_eq!(values, vec![vec![Value::Number("-1".to_string(), false)]]);
             }
             _ => unreachable!(),
@@ -175,7 +186,7 @@ mod tests {
             .remove(0);
         match stmt {
             Statement::Insert(insert) => {
-                let values = insert.values_body().unwrap().unwrap();
+                let values = insert.values_body().unwrap();
                 assert_eq!(values, vec![vec![Value::Number("1".to_string(), false)]]);
             }
             _ => unreachable!(),
@@ -191,7 +202,7 @@ mod tests {
             .remove(0);
         match stmt {
             Statement::Insert(insert) => {
-                let values = insert.values_body().unwrap().unwrap();
+                let values = insert.values_body().unwrap();
                 assert_eq!(values, vec![vec![Value::Placeholder("default".to_owned())]]);
             }
             _ => unreachable!(),
@@ -207,7 +218,7 @@ mod tests {
             .remove(0);
         match stmt {
             Statement::Insert(insert) => {
-                let values = insert.values_body().unwrap().unwrap();
+                let values = insert.values_body().unwrap();
                 assert_eq!(values, vec![vec![Value::Placeholder("DEFAULT".to_owned())]]);
             }
             _ => unreachable!(),
@@ -223,7 +234,7 @@ mod tests {
             .remove(0);
         match stmt {
             Statement::Insert(insert) => {
-                let values = insert.values_body().unwrap().unwrap();
+                let values = insert.values_body().unwrap();
                 assert_eq!(
                     values,
                     vec![vec![Value::SingleQuotedString("default".to_owned())]]
@@ -241,7 +252,6 @@ mod tests {
             .remove(0);
         match stmt {
             Statement::Insert(insert) => {
-                assert!(insert.is_insert_select());
                 let q = insert.query_body().unwrap().unwrap();
                 assert!(matches!(
                     q.inner,

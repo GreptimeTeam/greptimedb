@@ -41,10 +41,30 @@ impl Instance {
     async fn do_execute_sql(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Output> {
         match stmt {
             Statement::Insert(insert) => {
-                let request =
-                    SqlHandler::insert_to_request(self.catalog_manager.clone(), *insert, query_ctx)
-                        .await?;
-                self.sql_handler.insert(request).await
+                let request = SqlHandler::insert_to_request(
+                    self.catalog_manager.clone(),
+                    &insert,
+                    query_ctx.clone(),
+                )
+                .await?;
+                if let Some(request) = request {
+                    self.sql_handler.insert(request).await
+                } else {
+                    // Can't cast the stmt into request, let's execute it by query engine.
+                    let engine = self.query_engine();
+                    let plan = engine
+                        .planner()
+                        .plan(
+                            QueryStatement::Sql(Statement::Insert(insert)),
+                            query_ctx.clone(),
+                        )
+                        .await
+                        .context(PlanStatementSnafu)?;
+                    engine
+                        .execute(plan, query_ctx)
+                        .await
+                        .context(ExecuteStatementSnafu)
+                }
             }
             Statement::CreateDatabase(create_database) => {
                 let request = CreateDatabaseRequest {
