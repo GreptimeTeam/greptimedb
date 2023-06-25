@@ -131,7 +131,12 @@ impl<S: StorageEngine> CreateMitoTable<S> {
         let table_ref = self.creator.data.table_ref();
         logging::debug!("on prepare create table {}", table_ref);
 
-        if self.creator.engine_inner.get_table(&table_ref).is_some() {
+        if self
+            .creator
+            .engine_inner
+            .get_table(self.creator.data.request.id)
+            .is_some()
+        {
             // If the table already exists.
             ensure!(
                 self.creator.data.request.create_if_not_exists,
@@ -152,14 +157,14 @@ impl<S: StorageEngine> CreateMitoTable<S> {
     async fn on_engine_create_table(&mut self) -> Result<Status> {
         // In this state, we can ensure we are able to create a new table.
         let table_ref = self.creator.data.table_ref();
-        logging::debug!("on engine create table {}", table_ref);
+        let table_id = self.creator.data.request.id;
+        logging::debug!(
+            "on engine create table {}, table_id: {}",
+            table_ref,
+            table_id
+        );
 
-        let _lock = self
-            .creator
-            .engine_inner
-            .table_mutex
-            .lock(table_ref.to_string())
-            .await;
+        let _lock = self.creator.engine_inner.table_mutex.lock(table_id).await;
         self.creator.create_table().await?;
 
         Ok(Status::Done)
@@ -209,14 +214,13 @@ impl<S: StorageEngine> TableCreator<S> {
             self.data.request.id,
         );
 
-        let table_ref = self.data.table_ref();
         // It is possible that the procedure retries `CREATE TABLE` many times, so we
         // return the table if it exists.
-        if let Some(table) = self.engine_inner.get_table(&table_ref) {
+        if let Some(table) = self.engine_inner.get_table(self.data.request.id) {
             return Ok(table.clone());
         }
 
-        logging::debug!("Creator create table {}", table_ref);
+        logging::debug!("Creator create table {}", self.data.table_ref());
 
         self.create_regions(&table_dir).await?;
 
@@ -313,7 +317,6 @@ impl<S: StorageEngine> TableCreator<S> {
     /// Writes metadata to the table manifest.
     async fn write_table_manifest(&mut self, table_dir: &str) -> Result<TableRef> {
         // Try to open the table first, as the table manifest might already exist.
-        let table_ref = self.data.table_ref();
         if let Some((manifest, table_info)) = self
             .engine_inner
             .recover_table_manifest_and_info(&self.data.request.table_name, table_dir)
@@ -323,7 +326,7 @@ impl<S: StorageEngine> TableCreator<S> {
 
             self.engine_inner
                 .tables
-                .insert(table_ref.to_string(), table.clone());
+                .insert(self.data.request.id, table.clone());
             return Ok(table);
         }
 
@@ -333,7 +336,7 @@ impl<S: StorageEngine> TableCreator<S> {
 
         self.engine_inner
             .tables
-            .insert(table_ref.to_string(), table.clone());
+            .insert(self.data.request.id, table.clone());
 
         Ok(table)
     }
@@ -432,13 +435,8 @@ mod tests {
             .unwrap();
         procedure_test_util::execute_procedure_until_done(&mut procedure).await;
 
-        let table_ref = TableReference {
-            catalog: &request.catalog_name,
-            schema: &request.schema_name,
-            table: &request.table_name,
-        };
         assert!(table_engine
-            .get_table(&EngineContext::default(), &table_ref)
+            .get_table(&EngineContext::default(), request.id)
             .unwrap()
             .is_some());
     }

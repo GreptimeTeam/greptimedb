@@ -542,8 +542,11 @@ impl DistInstance {
                 table_name: format_full_table_name(catalog_name, schema_name, table_name),
             })?;
 
-        let request = common_grpc_expr::alter_expr_to_request(expr.clone())
-            .context(AlterExprToRequestSnafu)?;
+        let request = common_grpc_expr::alter_expr_to_request(
+            table.table_info().ident.table_id,
+            expr.clone(),
+        )
+        .context(AlterExprToRequestSnafu)?;
 
         let mut context = AlterContext::with_capacity(1);
 

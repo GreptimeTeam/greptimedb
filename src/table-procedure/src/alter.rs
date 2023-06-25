@@ -305,13 +305,14 @@ mod tests {
     async fn test_alter_table_procedure_rename() {
         let env = TestEnv::new("rename");
         let table_name = "test_old";
-        env.create_table(table_name).await;
+        let table_id = env.create_table(table_name).await;
 
         let new_table_name = "test_new";
         let request = AlterTableRequest {
             catalog_name: DEFAULT_CATALOG_NAME.to_string(),
             schema_name: DEFAULT_SCHEMA_NAME.to_string(),
             table_name: table_name.to_string(),
+            table_id,
             alter_kind: AlterKind::RenameTable {
                 new_table_name: new_table_name.to_string(),
             },

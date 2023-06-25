@@ -34,7 +34,7 @@ const LOCATION_TYPE_FIRST: i32 = LocationType::First as i32;
 const LOCATION_TYPE_AFTER: i32 = LocationType::After as i32;
 
 /// Convert an [`AlterExpr`] to an [`AlterTableRequest`]
-pub fn alter_expr_to_request(expr: AlterExpr) -> Result<AlterTableRequest> {
+pub fn alter_expr_to_request(table_id: TableId, expr: AlterExpr) -> Result<AlterTableRequest> {
     let catalog_name = expr.catalog_name;
     let schema_name = expr.schema_name;
     let kind = expr.kind.context(MissingFieldSnafu { field: "kind" })?;
@@ -69,6 +69,7 @@ pub fn alter_expr_to_request(expr: AlterExpr) -> Result<AlterTableRequest> {
                 catalog_name,
                 schema_name,
                 table_name: expr.table_name,
+                table_id,
                 alter_kind,
             };
             Ok(request)
@@ -82,6 +83,7 @@ pub fn alter_expr_to_request(expr: AlterExpr) -> Result<AlterTableRequest> {
                 catalog_name,
                 schema_name,
                 table_name: expr.table_name,
+                table_id,
                 alter_kind,
             };
             Ok(request)
@@ -92,6 +94,7 @@ pub fn alter_expr_to_request(expr: AlterExpr) -> Result<AlterTableRequest> {
                 catalog_name,
                 schema_name,
                 table_name: expr.table_name,
+                table_id,
                 alter_kind,
             };
             Ok(request)
@@ -239,7 +242,7 @@ mod tests {
             })),
         };
 
-        let alter_request = alter_expr_to_request(expr).unwrap();
+        let alter_request = alter_expr_to_request(1, expr).unwrap();
         assert_eq!(alter_request.catalog_name, "");
         assert_eq!(alter_request.schema_name, "");
         assert_eq!("monitor".to_string(), alter_request.table_name);
@@ -296,7 +299,7 @@ mod tests {
             })),
         };
 
-        let alter_request = alter_expr_to_request(expr).unwrap();
+        let alter_request = alter_expr_to_request(1, expr).unwrap();
         assert_eq!(alter_request.catalog_name, "");
         assert_eq!(alter_request.schema_name, "");
         assert_eq!("monitor".to_string(), alter_request.table_name);
@@ -344,7 +347,7 @@ mod tests {
             })),
         };
 
-        let alter_request = alter_expr_to_request(expr).unwrap();
+        let alter_request = alter_expr_to_request(1, expr).unwrap();
         assert_eq!(alter_request.catalog_name, "test_catalog");
         assert_eq!(alter_request.schema_name, "test_schema");
         assert_eq!("monitor".to_string(), alter_request.table_name);

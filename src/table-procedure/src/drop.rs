@@ -277,12 +277,13 @@ mod tests {
     async fn test_drop_table_procedure() {
         let env = TestEnv::new("drop");
         let table_name = "test_drop";
-        env.create_table(table_name).await;
+        let table_id = env.create_table(table_name).await;
 
         let request = DropTableRequest {
             catalog_name: DEFAULT_CATALOG_NAME.to_string(),
             schema_name: DEFAULT_SCHEMA_NAME.to_string(),
             table_name: table_name.to_string(),
+            table_id,
         };
         let TestEnv {
             dir: _dir,
@@ -303,13 +304,6 @@ mod tests {
             .unwrap());
 
         let ctx = EngineContext::default();
-        assert!(!table_engine.table_exists(
-            &ctx,
-            &TableReference {
-                catalog: DEFAULT_CATALOG_NAME,
-                schema: DEFAULT_SCHEMA_NAME,
-                table: table_name,
-            }
-        ));
+        assert!(!table_engine.table_exists(&ctx, table_id,));
     }
 }

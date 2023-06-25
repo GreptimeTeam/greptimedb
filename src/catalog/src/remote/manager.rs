@@ -303,6 +303,7 @@ impl RemoteCatalogManager {
         let table_info = table.table_info();
         let table_version = table_info.ident.version;
         let table_value = TableRegionalValue {
+            table_id: Some(table.table_info().ident.table_id),
             version: table_version,
             regions_ids: table.table_info().meta.region_numbers.clone(),
             engine_name: Some(table_info.meta.engine.clone()),
@@ -344,18 +345,21 @@ impl RemoteCatalogManager {
             .get(table_key.as_bytes())
             .await?
             .map(|Kv(_, v)| {
-                let TableRegionalValue { engine_name, .. } =
-                    TableRegionalValue::parse(String::from_utf8_lossy(&v))
-                        .context(InvalidCatalogValueSnafu)?;
-                Ok(engine_name)
+                let TableRegionalValue {
+                    table_id,
+                    engine_name,
+                    ..
+                } = TableRegionalValue::parse(String::from_utf8_lossy(&v))
+                    .context(InvalidCatalogValueSnafu)?;
+                Ok(engine_name.and_then(|name| table_id.map(|id| (name, id))))
             })
             .transpose()?
             .flatten();
 
-        let engine_name = engine_opt.as_deref().unwrap_or_else(|| {
-            warn!("Cannot find table engine name for {table_key}");
-            MITO_ENGINE
-        });
+        let Some((engine_name, table_id)) = engine_opt else {
+                warn!("Cannot find table id and engine name for {table_key}");
+                return Ok(None);
+            };
 
         self.backend.delete(table_key.as_bytes()).await?;
         debug!(
@@ -363,19 +367,21 @@ impl RemoteCatalogManager {
             table_key
         );
 
-        let reference = TableReference {
-            catalog: &catalog_name,
-            schema: &schema_name,
-            table: &table_name,
-        };
         // deregistering table does not necessarily mean dropping the table
         let table = self
             .engine_manager
-            .engine(engine_name)
+            .engine(&engine_name)
             .context(TableEngineNotFoundSnafu { engine_name })?
-            .get_table(&EngineContext {}, &reference)
-            .with_context(|_| OpenTableSnafu {
-                table_info: reference.to_string(),
+            .get_table(&EngineContext {}, table_id)
+            .with_context(|_| {
+                let reference = TableReference {
+                    catalog: &catalog_name,
+                    schema: &schema_name,
+                    table: &table_name,
+                };
+                OpenTableSnafu {
+                    table_info: reference.to_string(),
+                }
             })?;
         Ok(table)
     }
@@ -772,21 +778,29 @@ impl CatalogManager for RemoteCatalogManager {
             .get(key.as_bytes())
             .await?
             .map(|Kv(_, v)| {
-                let TableRegionalValue { engine_name, .. } =
-                    TableRegionalValue::parse(String::from_utf8_lossy(&v))
-                        .context(InvalidCatalogValueSnafu)?;
-                let reference = TableReference {
-                    catalog: catalog_name,
-                    schema: schema_name,
-                    table: table_name,
+                let TableRegionalValue {
+                    table_id,
+                    engine_name,
+                    ..
+                } = TableRegionalValue::parse(String::from_utf8_lossy(&v))
+                    .context(InvalidCatalogValueSnafu)?;
+
+                let Some(table_id) = table_id else {
+                    warn!("Cannot find table id for {key}, the value has an old format");
+                    return Ok(None);
                 };
                 let engine_name = engine_name.as_deref().unwrap_or(MITO_ENGINE);
                 let engine = self
                     .engine_manager
                     .engine(engine_name)
                     .context(TableEngineNotFoundSnafu { engine_name })?;
+                let reference = TableReference {
+                    catalog: catalog_name,
+                    schema: schema_name,
+                    table: table_name,
+                };
                 let table = engine
-                    .get_table(&EngineContext {}, &reference)
+                    .get_table(&EngineContext {}, table_id)
                     .with_context(|_| OpenTableSnafu {
                         table_info: reference.to_string(),
                     })?;
