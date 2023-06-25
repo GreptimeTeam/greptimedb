@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod btree;
+pub mod btree;
 mod inserter;
 #[cfg(test)]
 pub mod tests;
