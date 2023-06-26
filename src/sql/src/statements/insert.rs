@@ -44,7 +44,7 @@ impl Insert {
     }
 
     // Try to extract values for insertion.If the statement contains other expressons
-    // except literal values, return None.
+    // Extracts the literal insert statement body if any, and returns `None` if the body of insert statement contains non literal values.
     pub fn values_body(&self) -> Option<Vec<Vec<Value>>> {
         match &self.inner {
             Statement::Insert {
