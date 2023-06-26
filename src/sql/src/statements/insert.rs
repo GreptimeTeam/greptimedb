@@ -63,8 +63,8 @@ impl Insert {
         }
     }
 
-    // Returns true when the insert statement can extract literal values.
-    // The rules is the same as function `values_body()`.
+    /// Returns true when the insert statement can extract literal values.
+    /// The rules is the same as function `values_body()`.
     pub fn can_extract_values(&self) -> bool {
         match &self.inner {
             Statement::Insert {
