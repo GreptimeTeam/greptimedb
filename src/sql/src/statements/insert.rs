@@ -121,7 +121,7 @@ fn sql_exprs_to_values(exprs: &Vec<Vec<Expr>>) -> Result<Vec<Vec<Value>>> {
                             parse_fail!(expr);
                         }
                     } else {
-                        // Identifiers with double quotes, we treat it as strings.
+                        // Identifiers with double quotes, we treat them as strings.
                         if ident.quote_style == Some('"') {
                             Value::SingleQuotedString(ident.value.clone())
                         } else {
@@ -251,7 +251,7 @@ mod tests {
             _ => unreachable!(),
         }
 
-        // insert "default". Treating double-quoted identifers as strings.
+        // insert "default". Treating double-quoted identifiers as strings.
         let sql = "INSERT INTO my_table VALUES(\"default\")";
         let stmt = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {})
             .unwrap()
