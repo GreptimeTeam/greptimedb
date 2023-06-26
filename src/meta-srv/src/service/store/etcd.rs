@@ -483,7 +483,7 @@ impl TxnService for EtcdStore {
             .txn(etcd_txn)
             .await
             .context(error::EtcdFailedSnafu)?;
-        Ok(txn_res.into())
+        txn_res.try_into()
     }
 }
 

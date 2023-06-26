@@ -18,6 +18,7 @@ use etcd_client::{
     TxnOpResponse as EtcdTxnOpResponse, TxnResponse as EtcdTxnResponse,
 };
 
+use crate::error::{self, Result};
 use crate::service::store::etcd_util::KvPair;
 use crate::service::store::txn::{Compare, CompareOp, Txn, TxnOp, TxnOpResponse, TxnResponse};
 
@@ -81,8 +82,10 @@ impl From<TxnOp> for EtcdTxnOp {
     }
 }
 
-impl From<EtcdTxnOpResponse> for TxnOpResponse {
-    fn from(op_resp: EtcdTxnOpResponse) -> Self {
+impl TryFrom<EtcdTxnOpResponse> for TxnOpResponse {
+    type Error = error::Error;
+
+    fn try_from(op_resp: EtcdTxnOpResponse) -> Result<Self> {
         match op_resp {
             EtcdTxnOpResponse::Put(res) => {
                 let prev_kv = res.prev_key().map(KvPair::from_etcd_kv);
@@ -90,7 +93,7 @@ impl From<EtcdTxnOpResponse> for TxnOpResponse {
                     prev_kv,
                     ..Default::default()
                 };
-                TxnOpResponse::ResponsePut(put_res)
+                Ok(TxnOpResponse::ResponsePut(put_res))
             }
             EtcdTxnOpResponse::Get(res) => {
                 let kvs = res.kvs().iter().map(KvPair::from_etcd_kv).collect();
@@ -98,7 +101,7 @@ impl From<EtcdTxnOpResponse> for TxnOpResponse {
                     kvs,
                     ..Default::default()
                 };
-                TxnOpResponse::ResponseGet(range_res)
+                Ok(TxnOpResponse::ResponseGet(range_res))
             }
             EtcdTxnOpResponse::Delete(res) => {
                 let prev_kvs = res
@@ -111,24 +114,29 @@ impl From<EtcdTxnOpResponse> for TxnOpResponse {
                     deleted: res.deleted(),
                     ..Default::default()
                 };
-                TxnOpResponse::ResponseDelete(delete_res)
+                Ok(TxnOpResponse::ResponseDelete(delete_res))
             }
-            EtcdTxnOpResponse::Txn(_) => unimplemented!("nested txn is not supported"),
+            EtcdTxnOpResponse::Txn(_) => error::EtcdTxnOpResponseSnafu {
+                err_msg: "nested txn is not supported",
+            }
+            .fail(),
         }
     }
 }
 
-impl From<EtcdTxnResponse> for TxnResponse {
-    fn from(resp: EtcdTxnResponse) -> Self {
+impl TryFrom<EtcdTxnResponse> for TxnResponse {
+    type Error = error::Error;
+
+    fn try_from(resp: EtcdTxnResponse) -> Result<Self> {
         let succeeded = resp.succeeded();
         let responses = resp
             .op_responses()
             .into_iter()
-            .map(TxnOpResponse::from)
-            .collect::<Vec<_>>();
-        Self {
+            .map(TxnOpResponse::try_from)
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Self {
             succeeded,
             responses,
-        }
+        })
     }
 }

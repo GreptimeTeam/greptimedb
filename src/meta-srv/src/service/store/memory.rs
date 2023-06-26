@@ -350,7 +350,9 @@ impl TxnService for MemStore {
 
         let mut memory = self.inner.write();
 
-        let succeeded = compare.iter().all(|x| x.compare_with_value(memory.get(&x.key)));
+        let succeeded = compare
+            .iter()
+            .all(|x| x.compare_with_value(memory.get(&x.key)));
 
         let do_txn = |txn_op| match txn_op {
             TxnOp::Put(key, value) => {

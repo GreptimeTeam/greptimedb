@@ -98,6 +98,7 @@ pub struct TxnRequest {
     pub failure: Vec<TxnOp>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
 pub enum TxnOpResponse {
     ResponsePut(PutResponse),
     ResponseGet(RangeResponse),
@@ -168,7 +169,7 @@ impl From<Txn> for TxnRequest {
 
 #[cfg(test)]
 mod tests {
-    use api::v1::meta::PutRequest;
+    use api::v1::meta::{KeyValue, PutRequest};
 
     use super::*;
     use crate::service::store::ext::KvStoreExt;
@@ -353,9 +354,21 @@ mod tests {
                 vec![1],
             )])
             .and_then(vec![TxnOp::Put(key.clone(), vec![3])])
-            .or_else(vec![TxnOp::Put(key, vec![4])]);
-        let txn_response = kv_store.txn(txn).await.unwrap();
+            .or_else(vec![TxnOp::Get(key.clone())]);
+        let mut txn_response = kv_store.txn(txn).await.unwrap();
         assert!(!txn_response.succeeded);
+        let res = txn_response.responses.pop().unwrap();
+        assert_eq!(
+            res,
+            TxnOpResponse::ResponseGet(RangeResponse {
+                header: None,
+                kvs: vec![KeyValue {
+                    key,
+                    value: vec![1],
+                }],
+                more: false,
+            })
+        );
     }
 
     #[tokio::test]
@@ -384,9 +397,21 @@ mod tests {
                 vec![2],
             )])
             .and_then(vec![TxnOp::Put(key.clone(), vec![3])])
-            .or_else(vec![TxnOp::Put(key, vec![4])]);
-        let txn_response = kv_store.txn(txn).await.unwrap();
+            .or_else(vec![TxnOp::Get(key.clone())]);
+        let mut txn_response = kv_store.txn(txn).await.unwrap();
         assert!(!txn_response.succeeded);
+        let res = txn_response.responses.pop().unwrap();
+        assert_eq!(
+            res,
+            TxnOpResponse::ResponseGet(RangeResponse {
+                header: None,
+                kvs: vec![KeyValue {
+                    key,
+                    value: vec![2],
+                }],
+                more: false,
+            })
+        );
     }
 
     #[tokio::test]
@@ -415,13 +440,27 @@ mod tests {
                 vec![2],
             )])
             .and_then(vec![TxnOp::Put(key.clone(), vec![3])])
-            .or_else(vec![TxnOp::Put(key, vec![4])]);
-        let txn_response = kv_store.txn(txn).await.unwrap();
+            .or_else(vec![TxnOp::Get(key.clone())]);
+        let mut txn_response = kv_store.txn(txn).await.unwrap();
         assert!(!txn_response.succeeded);
+        let res = txn_response.responses.pop().unwrap();
+        assert_eq!(
+            res,
+            TxnOpResponse::ResponseGet(RangeResponse {
+                header: None,
+                kvs: vec![KeyValue {
+                    key,
+                    value: vec![1],
+                }],
+                more: false,
+            })
+        );
     }
 
     async fn create_kv_store() -> KvStoreRef {
         std::sync::Arc::new(crate::service::store::memory::MemStore::new())
+        // TODO(jiachun): Add a feature to test against etcd in github CI
+        //
         // The same test can be run against etcd by uncommenting the following line
         // crate::service::store::etcd::EtcdStore::with_endpoints(["127.0.0.1:2379"])
         //     .await
