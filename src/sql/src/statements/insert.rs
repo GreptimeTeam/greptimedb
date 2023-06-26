@@ -48,7 +48,7 @@ impl Insert {
         }
     }
 
-    // Extracts the literal insert statement body if any, and returns `None` if the body of insert statement contains non literal expressions.
+    /// Extracts the literal insert statement body if any, and returns `None` if the body of insert statement contains non literal expressions.
     pub fn values_body(&self) -> Result<Vec<Vec<Value>>> {
         match &self.inner {
             Statement::Insert {
