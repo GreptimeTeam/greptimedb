@@ -18,7 +18,7 @@ use std::sync::{Arc, RwLock};
 use api::v1::greptime_request::{Request as GreptimeRequest, Request};
 use api::v1::query_request::Query;
 use async_trait::async_trait;
-use catalog::local::{MemoryCatalogManager, MemoryCatalogProvider, MemorySchemaProvider};
+use catalog::local::MemoryCatalogManager;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::Output;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
@@ -200,24 +200,9 @@ impl GrpcQueryHandler for DummyInstance {
 }
 
 fn create_testing_instance(table: MemTable) -> DummyInstance {
-    let table_name = table.table_name().to_string();
     let table = Arc::new(table);
-
-    let schema_provider = Arc::new(MemorySchemaProvider::new());
-    let catalog_provider = Arc::new(MemoryCatalogProvider::new());
-    let catalog_list = Arc::new(MemoryCatalogManager::default());
-    schema_provider
-        .register_table_sync(table_name, table)
-        .unwrap();
-    catalog_provider
-        .register_schema_sync(DEFAULT_SCHEMA_NAME.to_string(), schema_provider)
-        .unwrap();
-    catalog_list
-        .register_catalog_sync(DEFAULT_CATALOG_NAME.to_string(), catalog_provider)
-        .unwrap();
-
-    let factory = QueryEngineFactory::new(catalog_list, false);
-    let query_engine = factory.query_engine();
+    let catalog_manager = Arc::new(MemoryCatalogManager::new_with_table(table));
+    let query_engine = QueryEngineFactory::new(catalog_manager, false).query_engine();
     DummyInstance::new(query_engine)
 }
 

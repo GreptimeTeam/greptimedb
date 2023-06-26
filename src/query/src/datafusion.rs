@@ -46,9 +46,8 @@ use table::TableRef;
 use crate::dataframe::DataFrame;
 pub use crate::datafusion::planner::DfContextProviderAdapter;
 use crate::error::{
-    CatalogNotFoundSnafu, CatalogSnafu, CreateRecordBatchSnafu, DataFusionSnafu,
-    MissingTimestampColumnSnafu, QueryExecutionSnafu, Result, SchemaNotFoundSnafu,
-    TableNotFoundSnafu, UnsupportedExprSnafu,
+    CatalogSnafu, CreateRecordBatchSnafu, DataFusionSnafu, MissingTimestampColumnSnafu,
+    QueryExecutionSnafu, Result, TableNotFoundSnafu, UnsupportedExprSnafu,
 };
 use crate::executor::QueryExecutor;
 use crate::logical_optimizer::LogicalOptimizer;
@@ -181,28 +180,12 @@ impl DatafusionQueryEngine {
         let schema_name = table_name.schema.as_ref();
         let table_name = table_name.table.as_ref();
 
-        let catalog = self
-            .state
+        self.state
             .catalog_manager()
-            .catalog(catalog_name)
+            .table(catalog_name, schema_name, table_name)
             .await
             .context(CatalogSnafu)?
-            .context(CatalogNotFoundSnafu {
-                catalog: catalog_name,
-            })?;
-        let schema = catalog
-            .schema(schema_name)
-            .await
-            .context(CatalogSnafu)?
-            .context(SchemaNotFoundSnafu {
-                schema: schema_name,
-            })?;
-        let table = schema
-            .table(table_name)
-            .await
-            .context(CatalogSnafu)?
-            .context(TableNotFoundSnafu { table: table_name })?;
-        Ok(table)
+            .with_context(|| TableNotFoundSnafu { table: table_name })
     }
 }
 
@@ -395,9 +378,8 @@ mod tests {
     use std::borrow::Cow::Borrowed;
     use std::sync::Arc;
 
-    use catalog::local::{MemoryCatalogProvider, MemorySchemaProvider};
-    use catalog::{CatalogProvider, SchemaProvider};
-    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+    use catalog::{CatalogManager, RegisterTableRequest};
+    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, NUMBERS_TABLE_ID};
     use common_query::Output;
     use common_recordbatch::util;
     use datafusion::prelude::{col, lit};
@@ -405,30 +387,24 @@ mod tests {
     use datatypes::schema::ColumnSchema;
     use datatypes::vectors::{Helper, UInt32Vector, UInt64Vector, VectorRef};
     use session::context::QueryContext;
-    use table::table::numbers::NumbersTable;
+    use table::table::numbers::{NumbersTable, NUMBERS_TABLE_NAME};
 
     use super::*;
     use crate::parser::QueryLanguageParser;
     use crate::query_engine::{QueryEngineFactory, QueryEngineRef};
 
     async fn create_test_engine() -> QueryEngineRef {
-        let catalog_list = catalog::local::new_memory_catalog_list().unwrap();
+        let catalog_manager = catalog::local::new_memory_catalog_manager().unwrap();
+        let req = RegisterTableRequest {
+            catalog: DEFAULT_CATALOG_NAME.to_string(),
+            schema: DEFAULT_SCHEMA_NAME.to_string(),
+            table_name: NUMBERS_TABLE_NAME.to_string(),
+            table_id: NUMBERS_TABLE_ID,
+            table: Arc::new(NumbersTable::default()),
+        };
+        catalog_manager.register_table(req).await.unwrap();
 
-        let default_schema = Arc::new(MemorySchemaProvider::new());
-        default_schema
-            .register_table("numbers".to_string(), Arc::new(NumbersTable::default()))
-            .await
-            .unwrap();
-        let default_catalog = Arc::new(MemoryCatalogProvider::new());
-        default_catalog
-            .register_schema(DEFAULT_SCHEMA_NAME.to_string(), default_schema)
-            .await
-            .unwrap();
-        catalog_list
-            .register_catalog_sync(DEFAULT_CATALOG_NAME.to_string(), default_catalog)
-            .unwrap();
-
-        QueryEngineFactory::new(catalog_list, false).query_engine()
+        QueryEngineFactory::new(catalog_manager, false).query_engine()
     }
 
     #[tokio::test]

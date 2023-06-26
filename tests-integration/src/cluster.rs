@@ -184,7 +184,7 @@ impl GreptimeDbClusterBuilder {
         instance.start().await.unwrap();
 
         // create another catalog and schema for testing
-        let _ = instance
+        instance
             .catalog_manager()
             .as_any()
             .downcast_ref::<RemoteCatalogManager>()

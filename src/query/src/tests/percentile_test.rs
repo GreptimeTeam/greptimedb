@@ -14,8 +14,6 @@
 
 use std::sync::Arc;
 
-use catalog::local::{MemoryCatalogManager, MemoryCatalogProvider, MemorySchemaProvider};
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_recordbatch::RecordBatch;
 use datatypes::for_all_primitive_types;
 use datatypes::prelude::*;
@@ -25,9 +23,10 @@ use function::{create_query_engine, get_numbers_from_table};
 use num_traits::AsPrimitive;
 use table::test_util::MemTable;
 
+use super::new_query_engine_with_table;
 use crate::error::Result;
 use crate::tests::{exec_selection, function};
-use crate::{QueryEngine, QueryEngineFactory};
+use crate::QueryEngine;
 
 #[tokio::test]
 async fn test_percentile_aggregator() -> Result<()> {
@@ -80,9 +79,6 @@ where
 
 fn create_correctness_engine() -> Arc<dyn QueryEngine> {
     // create engine
-    let schema_provider = Arc::new(MemorySchemaProvider::new());
-    let catalog_provider = Arc::new(MemoryCatalogProvider::new());
-    let catalog_list = Arc::new(MemoryCatalogManager::default());
 
     let mut column_schemas = vec![];
     let mut columns = vec![];
@@ -96,20 +92,6 @@ fn create_correctness_engine() -> Arc<dyn QueryEngine> {
     columns.push(column);
 
     let schema = Arc::new(Schema::new(column_schemas));
-    let number_table = Arc::new(MemTable::new(
-        "corr_numbers",
-        RecordBatch::new(schema, columns).unwrap(),
-    ));
-    schema_provider
-        .register_table_sync(number_table.table_name().to_string(), number_table)
-        .unwrap();
-
-    catalog_provider
-        .register_schema_sync(DEFAULT_SCHEMA_NAME.to_string(), schema_provider)
-        .unwrap();
-    catalog_list
-        .register_catalog_sync(DEFAULT_CATALOG_NAME.to_string(), catalog_provider)
-        .unwrap();
-
-    QueryEngineFactory::new(catalog_list, false).query_engine()
+    let number_table = MemTable::new("corr_numbers", RecordBatch::new(schema, columns).unwrap());
+    new_query_engine_with_table(number_table)
 }

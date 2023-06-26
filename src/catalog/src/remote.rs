@@ -20,7 +20,7 @@ use std::sync::Arc;
 pub use client::{CachedMetaKvBackend, MetaKvBackend};
 use futures::Stream;
 use futures_util::StreamExt;
-pub use manager::{RemoteCatalogManager, RemoteCatalogProvider, RemoteSchemaProvider};
+pub use manager::RemoteCatalogManager;
 
 use crate::error::Error;
 

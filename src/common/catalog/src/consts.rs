@@ -27,6 +27,8 @@ pub const MAX_SYS_TABLE_ID: u32 = MIN_USER_TABLE_ID - 1;
 pub const SYSTEM_CATALOG_TABLE_ID: u32 = 0;
 /// scripts table id
 pub const SCRIPTS_TABLE_ID: u32 = 1;
+/// numbers table id
+pub const NUMBERS_TABLE_ID: u32 = 2;
 
 pub const MITO_ENGINE: &str = "mito";
 pub const IMMUTABLE_FILE_ENGINE: &str = "file";

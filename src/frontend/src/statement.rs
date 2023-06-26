@@ -96,7 +96,7 @@ impl StatementExecutor {
 
             Statement::Use(db) => self.handle_use(db, query_ctx).await,
 
-            Statement::ShowDatabases(stmt) => self.show_databases(stmt).await,
+            Statement::ShowDatabases(stmt) => self.show_databases(stmt, query_ctx).await,
 
             Statement::ShowTables(stmt) => self.show_tables(stmt, query_ctx).await,
 
@@ -147,10 +147,9 @@ impl StatementExecutor {
         let catalog = &query_ctx.current_catalog();
         ensure!(
             self.catalog_manager
-                .schema(catalog, &db)
+                .schema_exist(catalog, &db)
                 .await
-                .context(CatalogSnafu)?
-                .is_some(),
+                .context(CatalogSnafu)?,
             SchemaNotFoundSnafu { schema_info: &db }
         );
 

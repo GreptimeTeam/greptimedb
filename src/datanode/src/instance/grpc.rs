@@ -42,9 +42,9 @@ use table::requests::CreateDatabaseRequest;
 use table::table::adapter::DfTableProviderAdapter;
 
 use crate::error::{
-    self, CatalogNotFoundSnafu, CatalogSnafu, DecodeLogicalPlanSnafu, DeleteExprToRequestSnafu,
-    DeleteSnafu, ExecuteLogicalPlanSnafu, ExecuteSqlSnafu, InsertDataSnafu, InsertSnafu,
-    JoinTaskSnafu, PlanStatementSnafu, Result, SchemaNotFoundSnafu, TableNotFoundSnafu,
+    self, CatalogSnafu, DecodeLogicalPlanSnafu, DeleteExprToRequestSnafu, DeleteSnafu,
+    ExecuteLogicalPlanSnafu, ExecuteSqlSnafu, InsertDataSnafu, InsertSnafu, JoinTaskSnafu,
+    PlanStatementSnafu, Result, TableNotFoundSnafu,
 };
 use crate::instance::Instance;
 
@@ -231,19 +231,10 @@ impl DummySchemaProvider {
         schema_name: String,
         catalog_manager: CatalogManagerRef,
     ) -> Result<Self> {
-        let catalog = catalog_manager
-            .catalog(&catalog_name)
+        let table_names = catalog_manager
+            .table_names(&catalog_name, &schema_name)
             .await
-            .context(CatalogSnafu)?
-            .context(CatalogNotFoundSnafu {
-                name: &catalog_name,
-            })?;
-        let schema = catalog
-            .schema(&schema_name)
-            .await
-            .context(CatalogSnafu)?
-            .context(SchemaNotFoundSnafu { name: &schema_name })?;
-        let table_names = schema.table_names().await.context(CatalogSnafu)?;
+            .unwrap();
         Ok(Self {
             catalog: catalog_name,
             schema: schema_name,

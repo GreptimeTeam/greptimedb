@@ -192,11 +192,18 @@ pub enum Error {
         source: BoxedError,
     },
 
+    #[snafu(display(
+        "Failed to upgrade weak catalog manager reference. location: {}",
+        location
+    ))]
+    UpgradeWeakCatalogManagerRef { location: Location },
+
     #[snafu(display("Failed to execute system catalog table scan, source: {}", source))]
     SystemCatalogTableScanExec {
         location: Location,
         source: common_query::error::Error,
     },
+
     #[snafu(display("Cannot parse catalog value, source: {}", source))]
     InvalidCatalogValue {
         location: Location,
@@ -256,7 +263,9 @@ impl ErrorExt for Error {
             | Error::EmptyValue { .. }
             | Error::ValueDeserialize { .. } => StatusCode::StorageUnavailable,
 
-            Error::Generic { .. } | Error::SystemCatalogTypeMismatch { .. } => StatusCode::Internal,
+            Error::Generic { .. }
+            | Error::SystemCatalogTypeMismatch { .. }
+            | Error::UpgradeWeakCatalogManagerRef { .. } => StatusCode::Internal,
 
             Error::ReadSystemCatalog { source, .. } | Error::CreateRecordBatch { source, .. } => {
                 source.status_code()

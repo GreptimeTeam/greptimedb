@@ -15,13 +15,11 @@
 use common_datasource::file_format::Format;
 use common_query::Output;
 use common_telemetry::info;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{ensure, ResultExt};
 use table::requests::{CopyDatabaseRequest, CopyDirection, CopyTableRequest};
 
 use crate::error;
-use crate::error::{
-    CatalogNotFoundSnafu, CatalogSnafu, InvalidCopyParameterSnafu, SchemaNotFoundSnafu,
-};
+use crate::error::{CatalogSnafu, InvalidCopyParameterSnafu};
 use crate::statement::StatementExecutor;
 
 pub(crate) const COPY_DATABASE_TIME_START_KEY: &str = "start_time";
@@ -42,26 +40,15 @@ impl StatementExecutor {
             "Copy database {}.{}, dir: {},. time: {:?}",
             req.catalog_name, req.schema_name, req.location, req.time_range
         );
-        let schema = self
+        let table_names = self
             .catalog_manager
-            .catalog(&req.catalog_name)
+            .table_names(&req.catalog_name, &req.schema_name)
             .await
-            .context(CatalogSnafu)?
-            .context(CatalogNotFoundSnafu {
-                catalog_name: &req.catalog_name,
-            })?
-            .schema(&req.schema_name)
-            .await
-            .context(CatalogSnafu)?
-            .context(SchemaNotFoundSnafu {
-                schema_info: &req.schema_name,
-            })?;
+            .context(CatalogSnafu)?;
 
         let suffix = Format::try_from(&req.with)
             .context(error::ParseFileFormatSnafu)?
             .suffix();
-
-        let table_names = schema.table_names().await.context(CatalogSnafu)?;
 
         let mut exported_rows = 0;
         for table_name in table_names {

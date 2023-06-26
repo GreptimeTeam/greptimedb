@@ -357,8 +357,7 @@ pub(crate) use tests::sample_script_engine;
 
 #[cfg(test)]
 mod tests {
-    use catalog::local::{MemoryCatalogProvider, MemorySchemaProvider};
-    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+    use catalog::local::MemoryCatalogManager;
     use common_recordbatch::util;
     use datatypes::prelude::ScalarVector;
     use datatypes::value::Value;
@@ -369,22 +368,10 @@ mod tests {
     use super::*;
 
     pub(crate) fn sample_script_engine() -> PyEngine {
-        let catalog_list = catalog::local::new_memory_catalog_list().unwrap();
-
-        let default_schema = Arc::new(MemorySchemaProvider::new());
-        default_schema
-            .register_table_sync("numbers".to_string(), Arc::new(NumbersTable::default()))
-            .unwrap();
-        let default_catalog = Arc::new(MemoryCatalogProvider::new());
-        default_catalog
-            .register_schema_sync(DEFAULT_SCHEMA_NAME.to_string(), default_schema)
-            .unwrap();
-        catalog_list
-            .register_catalog_sync(DEFAULT_CATALOG_NAME.to_string(), default_catalog)
-            .unwrap();
-
-        let factory = QueryEngineFactory::new(catalog_list, false);
-        let query_engine = factory.query_engine();
+        let catalog_manager = Arc::new(MemoryCatalogManager::new_with_table(Arc::new(
+            NumbersTable::default(),
+        )));
+        let query_engine = QueryEngineFactory::new(catalog_manager, false).query_engine();
 
         PyEngine::new(query_engine.clone())
     }
