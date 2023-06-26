@@ -1527,6 +1527,7 @@ dependencies = [
  "datafusion",
  "datanode",
  "datatypes",
+ "derive-new",
  "enum_dispatch",
  "futures-util",
  "moka 0.9.7",

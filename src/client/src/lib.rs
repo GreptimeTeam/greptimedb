@@ -18,6 +18,7 @@ mod database;
 mod error;
 pub mod load_balance;
 mod metrics;
+mod stream_insert;
 
 pub use api;
 pub use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
@@ -25,3 +26,4 @@ pub use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 pub use self::client::Client;
 pub use self::database::Database;
 pub use self::error::{Error, Result};
+pub use self::stream_insert::StreamInserter;
