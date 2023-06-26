@@ -268,7 +268,15 @@ mod tests {
         }
 
         let sql = "INSERT INTO my_table VALUES(`default`)";
-        assert!(ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).is_err());
+        let stmt = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {})
+            .unwrap()
+            .remove(0);
+        match stmt {
+            Statement::Insert(insert) => {
+                assert!(insert.values_body().is_err());
+            }
+            _ => unreachable!(),
+        }
     }
 
     #[test]
