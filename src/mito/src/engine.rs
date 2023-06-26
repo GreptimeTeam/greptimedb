@@ -586,16 +586,13 @@ impl<S: StorageEngine> MitoEngineInner<S> {
         // Remove the table from the engine to avoid further access from users.
         let _lock = self.table_mutex.lock(request.table_id).await;
         let removed_table = self.tables.remove(&request.table_id);
+
         // Close the table to close all regions. Closing a region is idempotent.
         if let Some((_, table)) = &removed_table {
-            let region_number = table.region_ids();
-            let table_id = table.table_info().ident.table_id;
-            let mut regions = table.remove_regions(&region_number).await?;
+            let mut regions = table.remove_regions(&table.region_ids()).await?;
 
             let ctx = StorageEngineContext::default();
-
-            let parent_dir = table_dir(catalog_name, schema_name, table_id);
-
+            let parent_dir = table_dir(catalog_name, schema_name, request.table_id);
             let opts = DropOptions { parent_dir };
 
             futures::future::try_join_all(
@@ -607,21 +604,6 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             .map_err(BoxedError::new)
             .context(table_error::TableOperationSnafu)?;
 
-            // table
-            //     .drop_regions(&regions)
-            //     .await
-            //     .map_err(BoxedError::new)
-            //     .context(table_error::TableOperationSnafu)?;
-            //
-            // Releases regions in storage engine
-            // for region_number in regions {
-            //     self.storage_engine
-            //         .close_region(&ctx, &region_name(table_id, region_number), &opts)
-            //         .await
-            //         .map_err(BoxedError::new)
-            //         .context(table_error::TableOperationSnafu)?;
-            // }
-            //
             Ok(true)
         } else {
             Ok(false)
