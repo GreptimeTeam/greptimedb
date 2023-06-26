@@ -12,10 +12,28 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub(crate) const METRIC_META_CREATE_CATALOG: &str = "meta.create_catalog";
-pub(crate) const METRIC_META_CREATE_SCHEMA: &str = "meta.create_schema";
-pub(crate) const METRIC_META_KV_REQUEST: &str = "meta.kv_request";
-pub(crate) const METRIC_META_TXN_REQUEST: &str = "meta.txn_request";
-pub(crate) const METRIC_META_ROUTE_REQUEST: &str = "meta.route_request";
-pub(crate) const METRIC_META_HEARTBEAT_CONNECTION_NUM: &str = "meta.heartbeat_connection_num";
-pub(crate) const METRIC_META_HANDLER_EXECUTE: &str = "meta.handler_execute";
+use api::v1::meta::KeyValue;
+
+pub struct KvPair<'a>(&'a etcd_client::KeyValue);
+
+impl<'a> KvPair<'a> {
+    /// Creates a `KvPair` from etcd KeyValue
+    #[inline]
+    pub fn new(kv: &'a etcd_client::KeyValue) -> Self {
+        Self(kv)
+    }
+
+    #[inline]
+    pub fn from_etcd_kv(kv: &etcd_client::KeyValue) -> KeyValue {
+        KeyValue::from(KvPair::new(kv))
+    }
+}
+
+impl<'a> From<KvPair<'a>> for KeyValue {
+    fn from(kv: KvPair<'a>) -> Self {
+        Self {
+            key: kv.0.key().to_vec(),
+            value: kv.0.value().to_vec(),
+        }
+    }
+}

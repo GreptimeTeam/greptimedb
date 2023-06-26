@@ -360,6 +360,9 @@ pub enum Error {
         source: common_meta::error::Error,
     },
 
+    #[snafu(display("Etcd txn got an error: {err_msg}"))]
+    EtcdTxnOpResponse { err_msg: String, location: Location },
+
     // this error is used for custom error mapping
     // please do not delete it
     #[snafu(display("Other error, source: {}", source))]
@@ -437,6 +440,7 @@ impl ErrorExt for Error {
             | Error::InvalidTxnResult { .. }
             | Error::InvalidUtf8Value { .. }
             | Error::UnexpectedInstructionReply { .. }
+            | Error::EtcdTxnOpResponse { .. }
             | Error::Unexpected { .. } => StatusCode::Unexpected,
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
             Error::InvalidCatalogValue { source, .. } => source.status_code(),
