@@ -599,6 +599,7 @@ impl HttpServer {
     fn route_influxdb<S>(&self, influxdb_handler: InfluxdbLineProtocolHandlerRef) -> Router<S> {
         Router::new()
             .route("/write", routing::post(influxdb_write))
+            .route("/api/v2/write", routing::post(influxdb_write))
             .route("/ping", routing::get(influxdb_ping))
             .route("/health", routing::get(influxdb_health))
             .with_state(influxdb_handler)

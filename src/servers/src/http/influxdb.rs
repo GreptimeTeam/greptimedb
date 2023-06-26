@@ -46,13 +46,17 @@ pub async fn influxdb_write(
     Query(mut params): Query<HashMap<String, String>>,
     lines: String,
 ) -> Result<impl IntoResponse> {
-    let db = params
-        .remove("db")
-        .unwrap_or_else(|| DEFAULT_SCHEMA_NAME.to_string());
+    let db = params.remove("db").unwrap_or_else(|| {
+        params
+            .remove("bucket")
+            .unwrap_or_else(|| DEFAULT_SCHEMA_NAME.to_string())
+    });
+
     let _timer = timer!(
         crate::metrics::METRIC_HTTP_INFLUXDB_WRITE_ELAPSED,
         &[(crate::metrics::METRIC_DB_LABEL, db.clone())]
     );
+
     let (catalog, schema) = parse_catalog_and_schema_from_client_database_name(&db);
     let ctx = Arc::new(QueryContext::with(catalog, schema));
 
@@ -60,16 +64,22 @@ pub async fn influxdb_write(
         .get("precision")
         .map(|val| parse_time_precision(val))
         .transpose()?;
+
     let request = InfluxdbRequest { precision, lines };
 
     handler.exec(&request, ctx).await?;
+
     Ok((StatusCode::NO_CONTENT, ()))
 }
 
 fn parse_time_precision(value: &str) -> Result<Precision> {
+    // Precision conversion needs to be compatible with influxdb v1 v2 api.
+    // For details, see the Influxdb documents.
+    // https://docs.influxdata.com/influxdb/v1.8/tools/api/#apiv2write-http-endpoint
+    // https://docs.influxdata.com/influxdb/v1.8/tools/api/#write-http-endpoint
     match value {
-        "n" => Ok(Precision::Nanosecond),
-        "u" => Ok(Precision::Microsecond),
+        "n" | "ns" => Ok(Precision::Nanosecond),
+        "u" | "us" => Ok(Precision::Microsecond),
         "ms" => Ok(Precision::Millisecond),
         "s" => Ok(Precision::Second),
         "m" => Ok(Precision::Minute),
@@ -90,7 +100,9 @@ mod tests {
     #[test]
     fn test_parse_time_precision() {
         assert_eq!(Precision::Nanosecond, parse_time_precision("n").unwrap());
+        assert_eq!(Precision::Nanosecond, parse_time_precision("ns").unwrap());
         assert_eq!(Precision::Microsecond, parse_time_precision("u").unwrap());
+        assert_eq!(Precision::Microsecond, parse_time_precision("us").unwrap());
         assert_eq!(Precision::Millisecond, parse_time_precision("ms").unwrap());
         assert_eq!(Precision::Second, parse_time_precision("s").unwrap());
         assert_eq!(Precision::Minute, parse_time_precision("m").unwrap());
