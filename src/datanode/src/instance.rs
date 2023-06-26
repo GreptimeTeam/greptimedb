@@ -48,7 +48,7 @@ use storage::config::EngineConfig as StorageEngineConfig;
 use storage::scheduler::{LocalScheduler, SchedulerConfig};
 use storage::EngineImpl;
 use store_api::logstore::LogStore;
-use table::engine::manager::MemoryTableEngineManager;
+use table::engine::manager::{MemoryTableEngineManager, TableEngineManagerRef};
 use table::engine::{TableEngine, TableEngineProcedureRef};
 use table::requests::FlushTableRequest;
 use table::table::numbers::NumbersTable;
@@ -78,14 +78,14 @@ pub struct Instance {
     pub(crate) sql_handler: SqlHandler,
     pub(crate) catalog_manager: CatalogManagerRef,
     pub(crate) table_id_provider: Option<TableIdProviderRef>,
-    pub(crate) heartbeat_task: Option<HeartbeatTask>,
+    // pub(crate) heartbeat_task: Option<HeartbeatTask>,
     procedure_manager: ProcedureManagerRef,
 }
 
 pub type InstanceRef = Arc<Instance>;
 
 impl Instance {
-    pub async fn with_opts(opts: &DatanodeOptions) -> Result<Self> {
+    pub async fn with_opts(opts: &DatanodeOptions) -> Result<(InstanceRef, Option<HeartbeatTask>)> {
         let meta_client = match opts.mode {
             Mode::Standalone => None,
             Mode::Distributed => {
@@ -105,11 +105,58 @@ impl Instance {
         Self::new(opts, meta_client, compaction_scheduler).await
     }
 
+    fn build_heartbeat_task(
+        _instance: Arc<Instance>,
+        opts: &DatanodeOptions,
+        meta_client: Option<Arc<MetaClient>>,
+        catalog_manager: CatalogManagerRef,
+        engine_manager: TableEngineManagerRef,
+        region_alive_keepers: Option<Arc<RegionAliveKeepers>>,
+    ) -> Result<Option<HeartbeatTask>> {
+        Ok(match opts.mode {
+            Mode::Standalone => None,
+            Mode::Distributed => {
+                let node_id = opts.node_id.context(MissingNodeIdSnafu)?;
+                let meta_client = meta_client.context(IncorrectInternalStateSnafu {
+                    state: "meta client is not provided when build heartbeat task",
+                })?;
+                let region_alive_keepers =
+                    region_alive_keepers.context(IncorrectInternalStateSnafu {
+                        state: "region_alive_keepers is not provided when build heartbeat task",
+                    })?;
+                let handlers_executor = HandlerGroupExecutor::new(vec![
+                    Arc::new(ParseMailboxMessageHandler::default()),
+                    Arc::new(OpenRegionHandler::new(
+                        catalog_manager.clone(),
+                        engine_manager.clone(),
+                        region_alive_keepers.clone(),
+                    )),
+                    Arc::new(CloseRegionHandler::new(
+                        catalog_manager.clone(),
+                        engine_manager,
+                        region_alive_keepers.clone(),
+                    )),
+                    region_alive_keepers.clone(),
+                ]);
+
+                Some(HeartbeatTask::new(
+                    node_id,
+                    opts,
+                    meta_client,
+                    catalog_manager,
+                    Arc::new(handlers_executor),
+                    opts.heartbeat_interval_millis,
+                    region_alive_keepers,
+                ))
+            }
+        })
+    }
+
     pub(crate) async fn new(
         opts: &DatanodeOptions,
         meta_client: Option<Arc<MetaClient>>,
         compaction_scheduler: CompactionSchedulerRef<RaftEngineLogStore>,
-    ) -> Result<Self> {
+    ) -> Result<(InstanceRef, Option<HeartbeatTask>)> {
         let object_store = store::new_object_store(&opts.storage.store).await?;
         let log_store = Arc::new(create_log_store(&opts.storage.store, &opts.wal).await?);
 
@@ -151,7 +198,7 @@ impl Instance {
         );
 
         // create remote catalog manager
-        let (catalog_manager, table_id_provider, heartbeat_task) = match opts.mode {
+        let (catalog_manager, table_id_provider, region_alive_keepers) = match opts.mode {
             Mode::Standalone => {
                 if opts.enable_memory_catalog {
                     let catalog = Arc::new(catalog::local::MemoryCatalogManager::default());
@@ -189,17 +236,15 @@ impl Instance {
             }
 
             Mode::Distributed => {
-                let meta_client = meta_client.context(IncorrectInternalStateSnafu {
+                let meta_client = meta_client.clone().context(IncorrectInternalStateSnafu {
                     state: "meta client is not provided when creating distributed Datanode",
                 })?;
 
-                let kv_backend = Arc::new(CachedMetaKvBackend::new(meta_client.clone()));
-
-                let heartbeat_interval_millis = 5000;
+                let kv_backend = Arc::new(CachedMetaKvBackend::new(meta_client));
 
                 let region_alive_keepers = Arc::new(RegionAliveKeepers::new(
                     engine_manager.clone(),
-                    heartbeat_interval_millis,
+                    opts.heartbeat_interval_millis,
                 ));
 
                 let catalog_manager = Arc::new(RemoteCatalogManager::new(
@@ -209,32 +254,11 @@ impl Instance {
                     region_alive_keepers.clone(),
                 ));
 
-                let handlers_executor = HandlerGroupExecutor::new(vec![
-                    Arc::new(ParseMailboxMessageHandler::default()),
-                    Arc::new(OpenRegionHandler::new(
-                        catalog_manager.clone(),
-                        engine_manager.clone(),
-                        region_alive_keepers.clone(),
-                    )),
-                    Arc::new(CloseRegionHandler::new(
-                        catalog_manager.clone(),
-                        engine_manager.clone(),
-                        region_alive_keepers.clone(),
-                    )),
-                    region_alive_keepers.clone(),
-                ]);
-
-                let heartbeat_task = Some(HeartbeatTask::new(
-                    opts.node_id.context(MissingNodeIdSnafu)?,
-                    opts,
-                    meta_client,
-                    catalog_manager.clone(),
-                    Arc::new(handlers_executor),
-                    heartbeat_interval_millis,
-                    region_alive_keepers,
-                ));
-
-                (catalog_manager as CatalogManagerRef, None, heartbeat_task)
+                (
+                    catalog_manager as CatalogManagerRef,
+                    None,
+                    Some(region_alive_keepers),
+                )
             }
         };
 
@@ -258,18 +282,28 @@ impl Instance {
             &*procedure_manager,
         );
 
-        Ok(Self {
+        let instance = Arc::new(Self {
             query_engine: query_engine.clone(),
             sql_handler: SqlHandler::new(
-                engine_manager,
+                engine_manager.clone(),
                 catalog_manager.clone(),
                 procedure_manager.clone(),
             ),
-            catalog_manager,
-            heartbeat_task,
+            catalog_manager: catalog_manager.clone(),
             table_id_provider,
             procedure_manager,
-        })
+        });
+
+        let heartbeat_task = Instance::build_heartbeat_task(
+            instance.clone(),
+            opts,
+            meta_client,
+            catalog_manager,
+            engine_manager,
+            region_alive_keepers,
+        )?;
+
+        Ok((instance, heartbeat_task))
     }
 
     pub async fn start(&self) -> Result<()> {
@@ -277,9 +311,6 @@ impl Instance {
             .start()
             .await
             .context(NewCatalogSnafu)?;
-        if let Some(task) = &self.heartbeat_task {
-            task.start().await?;
-        }
 
         // Recover procedures after the catalog manager is started, so we can
         // ensure we can access all tables from the catalog manager.
@@ -298,13 +329,6 @@ impl Instance {
             .stop()
             .await
             .context(StopProcedureManagerSnafu)?;
-        if let Some(heartbeat_task) = &self.heartbeat_task {
-            heartbeat_task
-                .close()
-                .await
-                .map_err(BoxedError::new)
-                .context(ShutdownInstanceSnafu)?;
-        }
 
         self.flush_tables().await?;
 

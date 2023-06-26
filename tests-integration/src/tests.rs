@@ -65,7 +65,7 @@ impl MockStandaloneInstance {
 
 pub(crate) async fn create_standalone_instance(test_name: &str) -> MockStandaloneInstance {
     let (opts, guard) = create_tmp_dir_and_datanode_opts(StorageType::File, test_name);
-    let dn_instance = Arc::new(DatanodeInstance::with_opts(&opts).await.unwrap());
+    let (dn_instance, heartbeat) = DatanodeInstance::with_opts(&opts).await.unwrap();
 
     let frontend_instance = Instance::try_new_standalone(dn_instance.clone())
         .await
@@ -87,6 +87,9 @@ pub(crate) async fn create_standalone_instance(test_name: &str) -> MockStandalon
         .unwrap();
 
     dn_instance.start().await.unwrap();
+    if let Some(heartbeat) = heartbeat {
+        heartbeat.start().await.unwrap();
+    };
     MockStandaloneInstance {
         instance: Arc::new(frontend_instance),
         _guard: guard,

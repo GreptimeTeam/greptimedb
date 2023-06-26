@@ -17,7 +17,7 @@
 
 pub mod datanode;
 pub mod error;
-mod heartbeat;
+pub mod heartbeat;
 pub mod instance;
 pub mod metrics;
 mod mock;
