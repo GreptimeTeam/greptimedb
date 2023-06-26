@@ -127,6 +127,7 @@ impl<S: LogStore> Region for RegionImpl<S> {
     }
 
     async fn drop_region(&self) -> Result<()> {
+        decrement_gauge!(crate::metrics::REGION_COUNT, 1.0);
         self.inner.drop_region().await
     }
 

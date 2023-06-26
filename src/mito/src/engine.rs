@@ -33,8 +33,8 @@ use snafu::{ensure, OptionExt, ResultExt};
 use storage::manifest::manifest_compress_type;
 use store_api::storage::{
     CloseOptions, ColumnDescriptorBuilder, ColumnFamilyDescriptor, ColumnFamilyDescriptorBuilder,
-    ColumnId, EngineContext as StorageEngineContext, OpenOptions, RegionNumber, RowKeyDescriptor,
-    RowKeyDescriptorBuilder, StorageEngine,
+    ColumnId, DropOptions, EngineContext as StorageEngineContext, OpenOptions, RegionNumber,
+    RowKeyDescriptor, RowKeyDescriptorBuilder, StorageEngine,
 };
 use table::engine::{
     region_name, table_dir, CloseTableResult, EngineContext, TableEngine, TableEngineProcedure,
@@ -580,32 +580,48 @@ impl<S: StorageEngine> MitoEngineInner<S> {
     }
 
     async fn drop_table(&self, request: DropTableRequest) -> TableResult<bool> {
+        let catalog_name = &request.catalog_name;
+        let schema_name = &request.schema_name;
+
         // Remove the table from the engine to avoid further access from users.
         let _lock = self.table_mutex.lock(request.table_id).await;
         let removed_table = self.tables.remove(&request.table_id);
         // Close the table to close all regions. Closing a region is idempotent.
         if let Some((_, table)) = &removed_table {
-            let regions = table.region_ids();
+            let region_number = table.region_ids();
             let table_id = table.table_info().ident.table_id;
-
-            table
-                .drop_regions(&regions)
-                .await
-                .map_err(BoxedError::new)
-                .context(table_error::TableOperationSnafu)?;
+            let mut regions = table.remove_regions(&region_number).await?;
 
             let ctx = StorageEngineContext::default();
 
-            let opts = CloseOptions::default();
-            // Releases regions in storage engine
-            for region_number in regions {
-                self.storage_engine
-                    .close_region(&ctx, &region_name(table_id, region_number), &opts)
-                    .await
-                    .map_err(BoxedError::new)
-                    .context(table_error::TableOperationSnafu)?;
-            }
+            let parent_dir = table_dir(catalog_name, schema_name, table_id);
 
+            let opts = DropOptions { parent_dir };
+
+            futures::future::try_join_all(
+                regions
+                    .drain()
+                    .map(|(_, region)| self.storage_engine.drop_region(&ctx, region, &opts)),
+            )
+            .await
+            .map_err(BoxedError::new)
+            .context(table_error::TableOperationSnafu)?;
+
+            // table
+            //     .drop_regions(&regions)
+            //     .await
+            //     .map_err(BoxedError::new)
+            //     .context(table_error::TableOperationSnafu)?;
+            //
+            // Releases regions in storage engine
+            // for region_number in regions {
+            //     self.storage_engine
+            //         .close_region(&ctx, &region_name(table_id, region_number), &opts)
+            //         .await
+            //         .map_err(BoxedError::new)
+            //         .context(table_error::TableOperationSnafu)?;
+            // }
+            //
             Ok(true)
         } else {
             Ok(false)
