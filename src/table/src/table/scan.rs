@@ -127,7 +127,7 @@ impl Stream for StreamWithMetricWrapper {
                 .columns()
                 .iter()
                 .map(|vec_ref| vec_ref.memory_size())
-                .fold(0, |acc, size| acc + size);
+                .sum::<usize>();
             this.metric.record_output(batch_mem_size);
         }
 
