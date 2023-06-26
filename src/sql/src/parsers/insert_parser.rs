@@ -30,7 +30,9 @@ impl<'a> ParserContext<'a> {
             .context(error::SyntaxSnafu { sql: self.sql })?;
 
         match spstatement {
-            SpStatement::Insert { .. } => Ok(Statement::Insert(Box::new(Insert::new(spstatement)))),
+            SpStatement::Insert { .. } => {
+                Ok(Statement::Insert(Box::new(Insert { inner: spstatement })))
+            }
             unexp => error::UnsupportedSnafu {
                 sql: self.sql.to_string(),
                 keyword: unexp.to_string(),

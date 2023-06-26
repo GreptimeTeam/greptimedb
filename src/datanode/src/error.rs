@@ -196,6 +196,12 @@ pub enum Error {
         source: sql::error::Error,
     },
 
+    #[snafu(display("Missing insert body, source: {source}"))]
+    MissingInsertBody {
+        source: sql::error::Error,
+        location: Location,
+    },
+
     #[snafu(display("Failed to insert value to table: {}, source: {}", table_name, source))]
     Insert {
         table_name: String,
@@ -551,6 +557,7 @@ impl ErrorExt for Error {
             | Catalog { .. }
             | MissingRequiredField { .. }
             | IncorrectInternalState { .. }
+            | MissingInsertBody { .. }
             | ShutdownInstance { .. }
             | CloseTableEngine { .. }
             | JoinTask { .. } => StatusCode::Internal,

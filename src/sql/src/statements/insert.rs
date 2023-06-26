@@ -24,11 +24,16 @@ pub struct Insert {
     pub inner: Statement,
 }
 
-impl Insert {
-    pub fn new(inner: Statement) -> Self {
-        Self { inner }
-    }
+macro_rules! parse_fail {
+    ($expr: expr) => {
+        return crate::error::ParseSqlValueSnafu {
+            msg: format!("{:?}", $expr),
+        }
+        .fail();
+    };
+}
 
+impl Insert {
     pub fn table_name(&self) -> &ObjectName {
         match &self.inner {
             Statement::Insert { table_name, .. } => table_name,
@@ -43,9 +48,8 @@ impl Insert {
         }
     }
 
-    // Try to extract values for insertion.If the statement contains other expressons
-    // Extracts the literal insert statement body if any, and returns `None` if the body of insert statement contains non literal values.
-    pub fn values_body(&self) -> Option<Vec<Vec<Value>>> {
+    // Extracts the literal insert statement body if any, and returns `None` if the body of insert statement contains non literal expressions.
+    pub fn values_body(&self) -> Result<Vec<Vec<Value>>> {
         match &self.inner {
             Statement::Insert {
                 source:
@@ -55,7 +59,7 @@ impl Insert {
                     },
                 ..
             } => sql_exprs_to_values(rows),
-            _ => None,
+            _ => unreachable!(),
         }
     }
 
@@ -77,7 +81,7 @@ impl Insert {
                         if ident.quote_style.is_none() {
                             ident.value.to_lowercase() == "default"
                         } else {
-                            true
+                            ident.quote_style == Some('"')
                         }
                     }
                     Expr::UnaryOp { op, expr } => {
@@ -101,7 +105,7 @@ impl Insert {
     }
 }
 
-fn sql_exprs_to_values(exprs: &Vec<Vec<Expr>>) -> Option<Vec<Vec<Value>>> {
+fn sql_exprs_to_values(exprs: &Vec<Vec<Expr>>) -> Result<Vec<Vec<Value>>> {
     let mut values = Vec::with_capacity(exprs.len());
     for es in exprs.iter() {
         let mut vs = Vec::with_capacity(es.len());
@@ -114,11 +118,15 @@ fn sql_exprs_to_values(exprs: &Vec<Vec<Expr>>) -> Option<Vec<Vec<Value>>> {
                         if ident.value.to_lowercase() == "default" {
                             Value::Placeholder(ident.value.clone())
                         } else {
-                            return None;
+                            parse_fail!(expr);
                         }
                     } else {
-                        // Identifier with double quotes, we treat it as string.
-                        Value::SingleQuotedString(ident.value.clone())
+                        // Identifiers with double quotes, we treat it as strings.
+                        if ident.quote_style == Some('"') {
+                            Value::SingleQuotedString(ident.value.clone())
+                        } else {
+                            parse_fail!(expr);
+                        }
                     }
                 }
                 Expr::UnaryOp { op, expr }
@@ -131,17 +139,17 @@ fn sql_exprs_to_values(exprs: &Vec<Vec<Expr>>) -> Option<Vec<Vec<Value>>> {
                             _ => unreachable!(),
                         }
                     } else {
-                        return None;
+                        parse_fail!(expr);
                     }
                 }
                 _ => {
-                    return None;
+                    parse_fail!(expr);
                 }
             });
         }
         values.push(vs);
     }
-    Some(values)
+    Ok(values)
 }
 
 impl TryFrom<Statement> for Insert {
@@ -149,7 +157,7 @@ impl TryFrom<Statement> for Insert {
 
     fn try_from(value: Statement) -> std::result::Result<Self, Self::Error> {
         match value {
-            Statement::Insert { .. } => Ok(Insert::new(value)),
+            Statement::Insert { .. } => Ok(Insert { inner: value }),
             unexp => Err(ParserError::ParserError(format!(
                 "Not expected to be {unexp}"
             ))),
@@ -227,7 +235,7 @@ mod tests {
 
     #[test]
     fn test_insert_value_with_quoted_string() {
-        // insert "'default'"
+        // insert 'default'
         let sql = "INSERT INTO my_table VALUES('default')";
         let stmt = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {})
             .unwrap()
@@ -242,6 +250,25 @@ mod tests {
             }
             _ => unreachable!(),
         }
+
+        // insert "default". Treating double-quoted identifers as strings.
+        let sql = "INSERT INTO my_table VALUES(\"default\")";
+        let stmt = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {})
+            .unwrap()
+            .remove(0);
+        match stmt {
+            Statement::Insert(insert) => {
+                let values = insert.values_body().unwrap();
+                assert_eq!(
+                    values,
+                    vec![vec![Value::SingleQuotedString("default".to_owned())]]
+                );
+            }
+            _ => unreachable!(),
+        }
+
+        let sql = "INSERT INTO my_table VALUES(`default`)";
+        assert!(ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).is_err());
     }
 
     #[test]

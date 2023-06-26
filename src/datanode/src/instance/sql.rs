@@ -47,24 +47,7 @@ impl Instance {
                     query_ctx.clone(),
                 )
                 .await?;
-                if let Some(request) = request {
-                    self.sql_handler.insert(request).await
-                } else {
-                    // Can't cast the stmt into request, let's execute it by query engine.
-                    let engine = self.query_engine();
-                    let plan = engine
-                        .planner()
-                        .plan(
-                            QueryStatement::Sql(Statement::Insert(insert)),
-                            query_ctx.clone(),
-                        )
-                        .await
-                        .context(PlanStatementSnafu)?;
-                    engine
-                        .execute(plan, query_ctx)
-                        .await
-                        .context(ExecuteStatementSnafu)
-                }
+                self.sql_handler.insert(request).await
             }
             Statement::CreateDatabase(create_database) => {
                 let request = CreateDatabaseRequest {

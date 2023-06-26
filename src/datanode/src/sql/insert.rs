@@ -29,7 +29,8 @@ use table::TableRef;
 
 use crate::error::{
     CatalogSnafu, ColumnDefaultValueSnafu, ColumnNoneDefaultValueSnafu, ColumnNotFoundSnafu,
-    ColumnValuesNumberMismatchSnafu, InsertSnafu, ParseSqlSnafu, Result, TableNotFoundSnafu,
+    ColumnValuesNumberMismatchSnafu, InsertSnafu, MissingInsertBodySnafu, ParseSqlSnafu, Result,
+    TableNotFoundSnafu,
 };
 use crate::sql::{table_idents_to_full_name, SqlHandler};
 
@@ -58,10 +59,8 @@ impl SqlHandler {
         table_ref: TableReference,
         table: &TableRef,
         stmt: &Insert,
-    ) -> Result<Option<InsertRequest>> {
-        let Some(values) = stmt.values_body() else {
-            return Ok(None);
-        };
+    ) -> Result<InsertRequest> {
+        let values = stmt.values_body().context(MissingInsertBodySnafu)?;
 
         let columns = stmt.columns();
         let schema = table.schema();
@@ -110,7 +109,7 @@ impl SqlHandler {
             }
         }
 
-        Ok(Some(InsertRequest {
+        Ok(InsertRequest {
             catalog_name: table_ref.catalog.to_string(),
             schema_name: table_ref.schema.to_string(),
             table_name: table_ref.table.to_string(),
@@ -119,14 +118,14 @@ impl SqlHandler {
                 .map(|(cs, mut b)| (cs.name.to_string(), b.to_vector()))
                 .collect(),
             region_number: 0,
-        }))
+        })
     }
 
     pub async fn insert_to_request(
         catalog_manager: CatalogManagerRef,
         stmt: &Insert,
         query_ctx: QueryContextRef,
-    ) -> Result<Option<InsertRequest>> {
+    ) -> Result<InsertRequest> {
         let (catalog_name, schema_name, table_name) =
             table_idents_to_full_name(stmt.table_name(), query_ctx.clone())?;
 

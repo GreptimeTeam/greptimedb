@@ -411,12 +411,10 @@ impl DistInstance {
                     .context(CatalogSnafu)?
                     .context(TableNotFoundSnafu { table_name: table })?;
 
-                // Safety: it's safe to unwrap here, ensure values body is not none at src/frontend/src/statement.rs
                 let insert_request =
                     SqlHandler::insert_to_request(self.catalog_manager.clone(), &insert, query_ctx)
                         .await
-                        .context(InvokeDatanodeSnafu)?
-                        .unwrap();
+                        .context(InvokeDatanodeSnafu)?;
 
                 Ok(Output::AffectedRows(
                     table.insert(insert_request).await.context(TableSnafu)?,
