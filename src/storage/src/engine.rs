@@ -700,7 +700,7 @@ mod tests {
                     &ctx,
                     region,
                     &DropOptions {
-                        parent_dir: normalize_dir(&dir.path().to_string_lossy().to_string()),
+                        parent_dir: normalize_dir(&dir.path().to_string_lossy()),
                     },
                 )
                 .await
