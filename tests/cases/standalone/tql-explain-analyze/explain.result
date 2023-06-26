@@ -19,8 +19,8 @@ TQL EXPLAIN (0, 10, '5s') test;
 |               |         TableScan: test projection=[i, j, k], partial_filters=[j >= TimestampMillisecond(-300000, None), j <= TimestampMillisecond(300000, None)] |
 | physical_plan | PromInstantManipulateExec: range=[0..0], lookback=[300000], interval=[300000], time index=[j]                                                     |
 |               |   PromSeriesNormalizeExec: offset=[0], time index=[j], filter NaN: [false]                                                                        |
-|               |     PromSeriesDivideExec: tags=["k"]                                                                                                              |
-|               |       RepartitionExec: partitioning=REDACTED
+|               |     RepartitionExec: partitioning=REDACTED
+|               |       PromSeriesDivideExec: tags=["k"]                                                                                                            |
 |               |         ExecutionPlan(PlaceHolder)                                                                                                                |
 |               |                                                                                                                                                   |
 +---------------+---------------------------------------------------------------------------------------------------------------------------------------------------+

@@ -27,8 +27,8 @@ use datafusion::logical_expr::{EmptyRelation, Expr, LogicalPlan, UserDefinedLogi
 use datafusion::physical_expr::PhysicalSortExpr;
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
-    DisplayFormatType, ExecutionPlan, Partitioning, RecordBatchStream, SendableRecordBatchStream,
-    Statistics,
+    DisplayFormatType, Distribution, ExecutionPlan, Partitioning, RecordBatchStream,
+    SendableRecordBatchStream, Statistics,
 };
 use datatypes::arrow::compute;
 use futures::{ready, Stream, StreamExt};
@@ -129,8 +129,14 @@ impl ExecutionPlan for SeriesDivideExec {
     }
 
     fn output_partitioning(&self) -> Partitioning {
-        self.input.output_partitioning()
+        Partitioning::UnknownPartitioning(1)
     }
+
+    fn required_input_distribution(&self) -> Vec<Distribution> {
+        vec![Distribution::SinglePartition]
+    }
+
+    // TODO(ruihang): specify required input ordering
 
     fn output_ordering(&self) -> Option<&[PhysicalSortExpr]> {
         self.input.output_ordering()
@@ -229,7 +235,7 @@ impl Stream for SeriesDivideStream {
         loop {
             if let Some(batch) = self.buffer.clone() {
                 let same_length = self.find_first_diff_row(&batch) + 1;
-                if same_length == batch.num_rows() {
+                if same_length >= batch.num_rows() {
                     let next_batch = match ready!(self.as_mut().fetch_next_batch(cx)) {
                         Some(Ok(batch)) => batch,
                         None => {
@@ -277,6 +283,10 @@ impl SeriesDivideStream {
     }
 
     fn find_first_diff_row(&self, batch: &RecordBatch) -> usize {
+        if self.tag_indices.is_empty() {
+            return batch.num_rows();
+        }
+
         let num_rows = batch.num_rows();
         let mut result = num_rows;
 
