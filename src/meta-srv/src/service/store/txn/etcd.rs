@@ -57,11 +57,16 @@ impl From<Txn> for EtcdTxn {
 
 impl From<Compare> for EtcdCompare {
     fn from(cmp: Compare) -> Self {
-        match cmp.cmp {
-            CompareOp::Equal => EtcdCompare::value(cmp.key, EtcdCompareOp::Equal, cmp.target),
-            CompareOp::Greater => EtcdCompare::value(cmp.key, EtcdCompareOp::Greater, cmp.target),
-            CompareOp::Less => EtcdCompare::value(cmp.key, EtcdCompareOp::Less, cmp.target),
-            CompareOp::NotEqual => EtcdCompare::value(cmp.key, EtcdCompareOp::NotEqual, cmp.target),
+        let etcd_cmp = match cmp.cmp {
+            CompareOp::Equal => EtcdCompareOp::Equal,
+            CompareOp::Greater => EtcdCompareOp::Greater,
+            CompareOp::Less => EtcdCompareOp::Less,
+            CompareOp::NotEqual => EtcdCompareOp::NotEqual,
+        };
+        match cmp.target {
+            Some(target) => EtcdCompare::value(cmp.key, etcd_cmp, target),
+            // create revision 0 means key was not exist
+            None => EtcdCompare::create_revision(cmp.key, etcd_cmp, 0),
         }
     }
 }

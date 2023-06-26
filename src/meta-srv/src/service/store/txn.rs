@@ -37,20 +37,49 @@ pub enum CompareOp {
 pub struct Compare {
     pub key: Vec<u8>,
     pub cmp: CompareOp,
-    pub target: Vec<u8>,
+    /// None means the key does not exist.
+    pub target: Option<Vec<u8>>,
 }
 
 impl Compare {
-    pub fn new(key: Vec<u8>, cmp: CompareOp, target: Vec<u8>) -> Self {
+    pub fn new(key: Vec<u8>, cmp: CompareOp, target: Option<Vec<u8>>) -> Self {
         Self { key, cmp, target }
     }
 
-    pub fn compare_with_value(&self, value: &Vec<u8>) -> bool {
-        match self.cmp {
-            CompareOp::Equal => *value == self.target,
-            CompareOp::Greater => *value > self.target,
-            CompareOp::Less => *value < self.target,
-            CompareOp::NotEqual => *value != self.target,
+    pub fn with_value(key: Vec<u8>, cmp: CompareOp, target: Vec<u8>) -> Self {
+        Self::new(key, cmp, Some(target))
+    }
+
+    pub fn with_not_exist_value(key: Vec<u8>, cmp: CompareOp) -> Self {
+        Self::new(key, cmp, None)
+    }
+
+    pub fn compare_with_value(&self, value: Option<&Vec<u8>>) -> bool {
+        match (value, &self.target) {
+            (Some(value), Some(target)) => match self.cmp {
+                CompareOp::Equal => *value == *target,
+                CompareOp::Greater => *value > *target,
+                CompareOp::Less => *value < *target,
+                CompareOp::NotEqual => *value != *target,
+            },
+            (Some(_), None) => match self.cmp {
+                CompareOp::Equal => false,
+                CompareOp::Greater => true,
+                CompareOp::Less => false,
+                CompareOp::NotEqual => true,
+            },
+            (None, Some(_)) => match self.cmp {
+                CompareOp::Equal => false,
+                CompareOp::Greater => false,
+                CompareOp::Less => true,
+                CompareOp::NotEqual => true,
+            },
+            (None, None) => match self.cmp {
+                CompareOp::Equal => true,
+                CompareOp::Greater => false,
+                CompareOp::Less => false,
+                CompareOp::NotEqual => false,
+            },
         }
     }
 }
@@ -139,40 +168,55 @@ impl From<Txn> for TxnRequest {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use api::v1::meta::PutRequest;
 
     use super::*;
+    use crate::service::store::ext::KvStoreExt;
     use crate::service::store::kv::KvStoreRef;
-    use crate::service::store::memory::MemStore;
 
     #[test]
     fn test_compare() {
-        let compare = Compare::new(vec![1], CompareOp::Equal, vec![1]);
-        assert!(compare.compare_with_value(&vec![1]));
-        assert!(!compare.compare_with_value(&vec![]));
+        // Equal
+        let compare = Compare::with_value(vec![1], CompareOp::Equal, vec![1]);
+        assert!(compare.compare_with_value(Some(&vec![1])));
+        assert!(!compare.compare_with_value(None));
+        let compare = Compare::with_not_exist_value(vec![1], CompareOp::Equal);
+        assert!(compare.compare_with_value(None));
 
-        let compare = Compare::new(vec![1], CompareOp::Equal, vec![]);
-        assert!(compare.compare_with_value(&vec![]));
+        // Greater
+        let compare = Compare::with_value(vec![1], CompareOp::Greater, vec![1]);
+        assert!(compare.compare_with_value(Some(&vec![2])));
+        assert!(!compare.compare_with_value(None));
+        let compare = Compare::with_not_exist_value(vec![1], CompareOp::Greater);
+        assert!(!compare.compare_with_value(None));
+        assert!(compare.compare_with_value(Some(&vec![1])));
 
-        let compare = Compare::new(vec![1], CompareOp::Greater, vec![1]);
-        assert!(compare.compare_with_value(&vec![2]));
-        assert!(!compare.compare_with_value(&vec![]));
+        // Less
+        let compare = Compare::with_value(vec![1], CompareOp::Less, vec![1]);
+        assert!(compare.compare_with_value(Some(&vec![0])));
+        assert!(compare.compare_with_value(None));
+        let compare = Compare::with_not_exist_value(vec![1], CompareOp::Less);
+        assert!(!compare.compare_with_value(None));
+        assert!(!compare.compare_with_value(Some(&vec![1])));
 
-        let compare = Compare::new(vec![1], CompareOp::Less, vec![1]);
-        assert!(compare.compare_with_value(&vec![0]));
-        assert!(compare.compare_with_value(&vec![]));
-
-        let compare = Compare::new(vec![1], CompareOp::NotEqual, vec![1]);
-        assert!(compare.compare_with_value(&vec![2]));
-        assert!(compare.compare_with_value(&vec![0]));
+        // NotEqual
+        let compare = Compare::with_value(vec![1], CompareOp::NotEqual, vec![1]);
+        assert!(!compare.compare_with_value(Some(&vec![1])));
+        assert!(compare.compare_with_value(Some(&vec![2])));
+        assert!(compare.compare_with_value(None));
+        let compare = Compare::with_not_exist_value(vec![1], CompareOp::NotEqual);
+        assert!(!compare.compare_with_value(None));
+        assert!(compare.compare_with_value(Some(&vec![1])));
     }
 
     #[test]
     fn test_txn() {
         let txn = Txn::new()
-            .when(vec![Compare::new(vec![1], CompareOp::Equal, vec![1])])
+            .when(vec![Compare::with_value(
+                vec![1],
+                CompareOp::Equal,
+                vec![1],
+            )])
             .and_then(vec![TxnOp::Put(vec![1], vec![1])])
             .or_else(vec![TxnOp::Put(vec![1], vec![2])]);
 
@@ -180,7 +224,7 @@ mod tests {
             txn,
             Txn {
                 req: TxnRequest {
-                    compare: vec![Compare::new(vec![1], CompareOp::Equal, vec![1])],
+                    compare: vec![Compare::with_value(vec![1], CompareOp::Equal, vec![1])],
                     success: vec![TxnOp::Put(vec![1], vec![1])],
                     failure: vec![TxnOp::Put(vec![1], vec![2])],
                 },
@@ -205,7 +249,11 @@ mod tests {
             .unwrap();
 
         let txn = Txn::new()
-            .when(vec![Compare::new(vec![11], CompareOp::Greater, vec![1])])
+            .when(vec![Compare::with_value(
+                vec![11],
+                CompareOp::Greater,
+                vec![1],
+            )])
             .and_then(vec![TxnOp::Put(vec![11], vec![1])])
             .or_else(vec![TxnOp::Put(vec![11], vec![2])]);
 
@@ -231,7 +279,7 @@ mod tests {
         }
 
         let when: Vec<_> = (1..3u8)
-            .map(|i| Compare::new(vec![i], CompareOp::Equal, vec![i]))
+            .map(|i| Compare::with_value(vec![i], CompareOp::Equal, vec![i]))
             .collect();
 
         let txn = Txn::new()
@@ -248,7 +296,135 @@ mod tests {
         assert_eq!(txn_response.responses.len(), 2);
     }
 
+    #[tokio::test]
+    async fn test_txn_compare_equal() {
+        let kv_store = create_kv_store().await;
+        let key = vec![101u8];
+        kv_store.delete(key.clone(), false).await.unwrap();
+
+        let txn = Txn::new()
+            .when(vec![Compare::with_not_exist_value(
+                key.clone(),
+                CompareOp::Equal,
+            )])
+            .and_then(vec![TxnOp::Put(key.clone(), vec![1])])
+            .or_else(vec![TxnOp::Put(key.clone(), vec![2])]);
+        let txn_response = kv_store.txn(txn.clone()).await.unwrap();
+        assert!(txn_response.succeeded);
+
+        let txn_response = kv_store.txn(txn).await.unwrap();
+        assert!(!txn_response.succeeded);
+
+        let txn = Txn::new()
+            .when(vec![Compare::with_value(
+                key.clone(),
+                CompareOp::Equal,
+                vec![2],
+            )])
+            .and_then(vec![TxnOp::Put(key.clone(), vec![3])])
+            .or_else(vec![TxnOp::Put(key, vec![4])]);
+        let txn_response = kv_store.txn(txn).await.unwrap();
+        assert!(txn_response.succeeded);
+    }
+
+    #[tokio::test]
+    async fn test_txn_compare_greater() {
+        let kv_store = create_kv_store().await;
+        let key = vec![102u8];
+        kv_store.delete(key.clone(), false).await.unwrap();
+
+        let txn = Txn::new()
+            .when(vec![Compare::with_not_exist_value(
+                key.clone(),
+                CompareOp::Greater,
+            )])
+            .and_then(vec![TxnOp::Put(key.clone(), vec![1])])
+            .or_else(vec![TxnOp::Put(key.clone(), vec![2])]);
+        let txn_response = kv_store.txn(txn.clone()).await.unwrap();
+        assert!(!txn_response.succeeded);
+
+        let txn_response = kv_store.txn(txn).await.unwrap();
+        assert!(txn_response.succeeded);
+
+        let txn = Txn::new()
+            .when(vec![Compare::with_value(
+                key.clone(),
+                CompareOp::Greater,
+                vec![1],
+            )])
+            .and_then(vec![TxnOp::Put(key.clone(), vec![3])])
+            .or_else(vec![TxnOp::Put(key, vec![4])]);
+        let txn_response = kv_store.txn(txn).await.unwrap();
+        assert!(!txn_response.succeeded);
+    }
+
+    #[tokio::test]
+    async fn test_txn_compare_less() {
+        let kv_store = create_kv_store().await;
+        let key = vec![103u8];
+        kv_store.delete(vec![3], false).await.unwrap();
+
+        let txn = Txn::new()
+            .when(vec![Compare::with_not_exist_value(
+                key.clone(),
+                CompareOp::Less,
+            )])
+            .and_then(vec![TxnOp::Put(key.clone(), vec![1])])
+            .or_else(vec![TxnOp::Put(key.clone(), vec![2])]);
+        let txn_response = kv_store.txn(txn.clone()).await.unwrap();
+        assert!(!txn_response.succeeded);
+
+        let txn_response = kv_store.txn(txn).await.unwrap();
+        assert!(!txn_response.succeeded);
+
+        let txn = Txn::new()
+            .when(vec![Compare::with_value(
+                key.clone(),
+                CompareOp::Less,
+                vec![2],
+            )])
+            .and_then(vec![TxnOp::Put(key.clone(), vec![3])])
+            .or_else(vec![TxnOp::Put(key, vec![4])]);
+        let txn_response = kv_store.txn(txn).await.unwrap();
+        assert!(!txn_response.succeeded);
+    }
+
+    #[tokio::test]
+    async fn test_txn_compare_not_equal() {
+        let kv_store = create_kv_store().await;
+        let key = vec![104u8];
+        kv_store.delete(key.clone(), false).await.unwrap();
+
+        let txn = Txn::new()
+            .when(vec![Compare::with_not_exist_value(
+                key.clone(),
+                CompareOp::NotEqual,
+            )])
+            .and_then(vec![TxnOp::Put(key.clone(), vec![1])])
+            .or_else(vec![TxnOp::Put(key.clone(), vec![2])]);
+        let txn_response = kv_store.txn(txn.clone()).await.unwrap();
+        assert!(!txn_response.succeeded);
+
+        let txn_response = kv_store.txn(txn).await.unwrap();
+        assert!(txn_response.succeeded);
+
+        let txn = Txn::new()
+            .when(vec![Compare::with_value(
+                key.clone(),
+                CompareOp::Equal,
+                vec![2],
+            )])
+            .and_then(vec![TxnOp::Put(key.clone(), vec![3])])
+            .or_else(vec![TxnOp::Put(key, vec![4])]);
+        let txn_response = kv_store.txn(txn).await.unwrap();
+        assert!(!txn_response.succeeded);
+    }
+
     async fn create_kv_store() -> KvStoreRef {
-        Arc::new(MemStore::new())
+        std::sync::Arc::new(crate::service::store::memory::MemStore::new())
+        // The same test can be run against etcd by uncommenting the following line
+        // crate::service::store::etcd::EtcdStore::with_endpoints(["127.0.0.1:2379"])
+        //     .await
+        //     .unwrap()
     }
 }
