@@ -117,5 +117,5 @@ pub struct CloseOptions {
 #[derive(Debug, Clone, Default)]
 pub struct DropOptions {
     /// Region parent directory
-    pub parent_dir: String
+    pub parent_dir: String,
 }
