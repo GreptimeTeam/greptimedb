@@ -51,9 +51,9 @@ use table::TableRef;
 use crate::dataframe::DataFrame;
 pub use crate::datafusion::planner::DfContextProviderAdapter;
 use crate::error::{
-    CatalogNotFoundSnafu, CatalogSnafu, CreateRecordBatchSnafu, CreateSchemaSnafu, DataFusionSnafu,
-    MissingTimestampColumnSnafu, QueryExecutionSnafu, Result, SchemaNotFoundSnafu,
-    TableNotFoundSnafu, UnsupportedExprSnafu,
+    CatalogSnafu, CreateRecordBatchSnafu, CreateSchemaSnafu, DataFusionSnafu,
+    MissingTimestampColumnSnafu, QueryExecutionSnafu, Result, TableNotFoundSnafu,
+    UnsupportedExprSnafu,
 };
 use crate::executor::QueryExecutor;
 use crate::logical_optimizer::LogicalOptimizer;
@@ -442,12 +442,11 @@ mod tests {
     use datatypes::types::StringType;
     use datatypes::vectors::{Helper, StringVectorBuilder, UInt32Vector, UInt64Vector, VectorRef};
     use session::context::QueryContext;
-    use table::table::numbers::{NumbersTable, NUMBERS_TABLE_NAME};
     use sql::dialect::GreptimeDbDialect;
     use sql::parser::ParserContext;
     use sql::statements::show::{ShowKind, ShowTables};
     use sql::statements::statement::Statement;
-    use table::table::numbers::NumbersTable;
+    use table::table::numbers::{NumbersTable, NUMBERS_TABLE_NAME};
 
     use super::*;
     use crate::parser::QueryLanguageParser;
@@ -593,7 +592,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_show_() {
+    async fn test_show_tables() {
         // No filter
         let column_schemas = vec![ColumnSchema::new(
             "tables",
