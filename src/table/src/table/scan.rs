@@ -23,11 +23,9 @@ use common_query::error::Result as QueryResult;
 use common_query::physical_plan::{Partitioning, PhysicalPlan, PhysicalPlanRef};
 use common_recordbatch::error::Result as RecordBatchResult;
 use common_recordbatch::{RecordBatch, RecordBatchStream, SendableRecordBatchStream};
-use common_telemetry::info;
 use datafusion::execution::context::TaskContext;
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion_physical_expr::PhysicalSortExpr;
-use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::SchemaRef;
 use futures::{Stream, StreamExt};
 use snafu::OptionExt;
@@ -125,12 +123,6 @@ impl Stream for StreamWithMetricWrapper {
         // let _timer = this.metric.elapsed_compute().timer();
         let poll = this.stream.poll_next_unpin(cx);
         if let Poll::Ready(Option::Some(Result::Ok(record_batch))) = &poll {
-            let types: Vec<ConcreteDataType> = record_batch
-                .columns()
-                .iter()
-                .map(|vec_ref| vec_ref.data_type())
-                .collect();
-            info!("[DEBUG]types: {:?}", types);
             this.metric.record_output(record_batch.num_rows());
         }
 
