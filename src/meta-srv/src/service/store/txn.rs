@@ -36,13 +36,17 @@ pub enum CompareOp {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Compare {
     pub key: Vec<u8>,
+    pub cmp: CompareOp,
     pub target: Vec<u8>,
-    pub op: CompareOp,
 }
 
 impl Compare {
-    pub fn cmp_with_value(&self, value: &Vec<u8>) -> bool {
-        match self.op {
+    pub fn new(key: Vec<u8>, cmp: CompareOp, target: Vec<u8>) -> Self {
+        Self { key, cmp, target }
+    }
+
+    pub fn compare_with_value(&self, value: &Vec<u8>) -> bool {
+        match self.cmp {
             CompareOp::Equal => *value == self.target,
             CompareOp::Greater => *value > self.target,
             CompareOp::Less => *value < self.target,
@@ -144,13 +148,31 @@ mod tests {
     use crate::service::store::memory::MemStore;
 
     #[test]
+    fn test_compare() {
+        let compare = Compare::new(vec![1], CompareOp::Equal, vec![1]);
+        assert!(compare.compare_with_value(&vec![1]));
+        assert!(!compare.compare_with_value(&vec![]));
+
+        let compare = Compare::new(vec![1], CompareOp::Equal, vec![]);
+        assert!(compare.compare_with_value(&vec![]));
+
+        let compare = Compare::new(vec![1], CompareOp::Greater, vec![1]);
+        assert!(compare.compare_with_value(&vec![2]));
+        assert!(!compare.compare_with_value(&vec![]));
+
+        let compare = Compare::new(vec![1], CompareOp::Less, vec![1]);
+        assert!(compare.compare_with_value(&vec![0]));
+        assert!(compare.compare_with_value(&vec![]));
+
+        let compare = Compare::new(vec![1], CompareOp::NotEqual, vec![1]);
+        assert!(compare.compare_with_value(&vec![2]));
+        assert!(compare.compare_with_value(&vec![0]));
+    }
+
+    #[test]
     fn test_txn() {
         let txn = Txn::new()
-            .when(vec![Compare {
-                key: vec![1],
-                target: vec![1],
-                op: CompareOp::Equal,
-            }])
+            .when(vec![Compare::new(vec![1], CompareOp::Equal, vec![1])])
             .and_then(vec![TxnOp::Put(vec![1], vec![1])])
             .or_else(vec![TxnOp::Put(vec![1], vec![2])]);
 
@@ -158,11 +180,7 @@ mod tests {
             txn,
             Txn {
                 req: TxnRequest {
-                    compare: vec![Compare {
-                        key: vec![1],
-                        target: vec![1],
-                        op: CompareOp::Equal,
-                    }],
+                    compare: vec![Compare::new(vec![1], CompareOp::Equal, vec![1])],
                     success: vec![TxnOp::Put(vec![1], vec![1])],
                     failure: vec![TxnOp::Put(vec![1], vec![2])],
                 },
@@ -179,7 +197,7 @@ mod tests {
 
         let _ = kv_store
             .put(PutRequest {
-                key: vec![1],
+                key: vec![11],
                 value: vec![3],
                 ..Default::default()
             })
@@ -187,13 +205,9 @@ mod tests {
             .unwrap();
 
         let txn = Txn::new()
-            .when(vec![Compare {
-                key: vec![1],
-                target: vec![1],
-                op: CompareOp::Greater,
-            }])
-            .and_then(vec![TxnOp::Put(vec![1], vec![1])])
-            .or_else(vec![TxnOp::Put(vec![1], vec![2])]);
+            .when(vec![Compare::new(vec![11], CompareOp::Greater, vec![1])])
+            .and_then(vec![TxnOp::Put(vec![11], vec![1])])
+            .or_else(vec![TxnOp::Put(vec![11], vec![2])]);
 
         let txn_response = kv_store.txn(txn).await.unwrap();
 
@@ -217,11 +231,7 @@ mod tests {
         }
 
         let when: Vec<_> = (1..3u8)
-            .map(|i| Compare {
-                key: vec![i],
-                target: vec![i],
-                op: CompareOp::Equal,
-            })
+            .map(|i| Compare::new(vec![i], CompareOp::Equal, vec![i]))
             .collect();
 
         let txn = Txn::new()

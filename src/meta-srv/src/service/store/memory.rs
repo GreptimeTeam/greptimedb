@@ -354,7 +354,7 @@ impl TxnService for MemStore {
         for cmp in compare {
             let empty = vec![];
             let value = memory.get(&cmp.key).unwrap_or(&empty);
-            if cmp.cmp_with_value(value) {
+            if cmp.compare_with_value(value) {
                 continue;
             }
             succeeded = false;

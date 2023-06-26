@@ -57,7 +57,7 @@ impl From<Txn> for EtcdTxn {
 
 impl From<Compare> for EtcdCompare {
     fn from(cmp: Compare) -> Self {
-        match cmp.op {
+        match cmp.cmp {
             CompareOp::Equal => EtcdCompare::value(cmp.key, EtcdCompareOp::Equal, cmp.target),
             CompareOp::Greater => EtcdCompare::value(cmp.key, EtcdCompareOp::Greater, cmp.target),
             CompareOp::Less => EtcdCompare::value(cmp.key, EtcdCompareOp::Less, cmp.target),
