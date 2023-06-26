@@ -147,26 +147,19 @@ pub async fn show_tables(
 
     // TODO(dennis): Specify the order of the results in schema provider API
     tables.sort();
-
+    let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+        TABLES_COLUMN,
+        ConcreteDataType::string_datatype(),
+        false,
+    )]));
     match stmt.kind {
         ShowKind::All => {
-            let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
-                TABLES_COLUMN,
-                ConcreteDataType::string_datatype(),
-                false,
-            )]));
-            let columns = vec![Arc::new(StringVector::from(tables)) as _];
-            let record_batch =
-                RecordBatch::new(schema, columns).context(error::CreateRecordBatchSnafu)?;
-            let result = execute_show_with_filter(record_batch, None, "tables".to_string()).await?;
-            Ok(result)
+            let tables = Arc::new(StringVector::from(tables)) as _;
+            let records = RecordBatches::try_from_columns(schema, vec![tables])
+                .context(error::CreateRecordBatchSnafu)?;
+            Ok(Output::RecordBatches(records))
         }
         ShowKind::Where(filter) => {
-            let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
-                TABLES_COLUMN,
-                ConcreteDataType::string_datatype(),
-                false,
-            )]));
             let columns = vec![Arc::new(StringVector::from(tables)) as _];
             let record_batch =
                 RecordBatch::new(schema, columns).context(error::CreateRecordBatchSnafu)?;
@@ -177,12 +170,6 @@ pub async fn show_tables(
         ShowKind::Like(ident) => {
             let tables =
                 Helper::like_utf8(tables, &ident.value).context(error::VectorComputationSnafu)?;
-
-            let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
-                TABLES_COLUMN,
-                ConcreteDataType::string_datatype(),
-                false,
-            )]));
             let records = RecordBatches::try_from_columns(schema, vec![tables])
                 .context(error::CreateRecordBatchSnafu)?;
             Ok(Output::RecordBatches(records))
