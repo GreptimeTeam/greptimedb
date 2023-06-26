@@ -63,24 +63,29 @@ pub async fn test_mysql_crud(store_type: StorageType) {
         .await
         .unwrap();
 
-    sqlx::query("create table demo(i bigint, ts timestamp time index, d date, dt datetime)")
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "create table demo(i bigint, ts timestamp time index, d date, dt datetime, b blob)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
     for i in 0..10 {
         let dt = DateTime::<Utc>::from_utc(NaiveDateTime::from_timestamp_opt(60, i).unwrap(), Utc);
         let d = NaiveDate::from_yo_opt(2015, 100).unwrap();
-        sqlx::query("insert into demo values(?, ?, ?, ?)")
+        let hello = format!("hello{i}");
+        let bytes = hello.as_bytes();
+        sqlx::query("insert into demo values(?, ?, ?, ?, ?)")
             .bind(i)
             .bind(i)
             .bind(d)
             .bind(dt)
+            .bind(bytes)
             .execute(&pool)
             .await
             .unwrap();
     }
 
-    let rows = sqlx::query("select i, d, dt from demo")
+    let rows = sqlx::query("select i, d, dt, b from demo")
         .fetch_all(&pool)
         .await
         .unwrap();
@@ -90,20 +95,19 @@ pub async fn test_mysql_crud(store_type: StorageType) {
         let ret: i64 = row.get(0);
         let d: NaiveDate = row.get(1);
         let dt: DateTime<Utc> = row.get(2);
+        let bytes: Vec<u8> = row.get(3);
         assert_eq!(ret, i as i64);
-
         let expected_d = NaiveDate::from_yo_opt(2015, 100).unwrap();
         assert_eq!(expected_d, d);
-
         let expected_dt = DateTime::<Utc>::from_utc(
             NaiveDateTime::from_timestamp_opt(60, i as u32).unwrap(),
             Utc,
         );
-
         assert_eq!(
             format!("{}", expected_dt.format("%Y-%m-%d %H:%M:%S")),
             format!("{}", dt.format("%Y-%m-%d %H:%M:%S"))
         );
+        assert_eq!(format!("hello{i}"), String::from_utf8_lossy(&bytes));
     }
 
     let rows = sqlx::query("select i from demo where i=?")

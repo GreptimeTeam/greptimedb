@@ -407,7 +407,7 @@ impl DistInstance {
                     .context(TableNotFoundSnafu { table_name: table })?;
 
                 let insert_request =
-                    SqlHandler::insert_to_request(self.catalog_manager.clone(), *insert, query_ctx)
+                    SqlHandler::insert_to_request(self.catalog_manager.clone(), &insert, query_ctx)
                         .await
                         .context(InvokeDatanodeSnafu)?;
 
