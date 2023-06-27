@@ -17,7 +17,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use common_query::logical_plan::Expr;
 use common_recordbatch::OrderOption;
-use common_telemetry::debug;
+use common_telemetry::{debug, logging};
 use common_time::range::TimestampRange;
 use snafu::ResultExt;
 use store_api::storage::{Chunk, ChunkReader, SchemaRef, SequenceNumber};
@@ -238,14 +238,32 @@ impl ChunkReaderBuilder {
             predicate,
             time_range: *time_range,
         };
+        logging::info!(
+            "build sst reader begin, time_range: {:?}, num_files: {}",
+            time_range,
+            self.files_to_read.len()
+        );
+        let mut num_read_files = Vec::new();
         for file in &self.files_to_read {
             if !Self::file_in_range(file, time_range) {
                 debug!("Skip file {:?}, predicate: {:?}", file, time_range);
+                logging::info!(
+                    "skip file {}, time_range: {:?}",
+                    file.file_id(),
+                    file.time_range()
+                );
                 continue;
             }
+            num_read_files.push(file.clone());
             let reader = self.sst_layer.read_sst(file.clone(), &read_opts).await?;
             reader_builder = reader_builder.push_batch_reader(reader);
         }
+        logging::info!(
+            "build sst reader done, time_range: {:?}, total_files:{}, num_read_files: {}",
+            time_range,
+            self.files_to_read.len(),
+            num_read_files.len()
+        );
 
         let reader = reader_builder.build();
         let reader = DedupReader::new(schema.clone(), reader);
