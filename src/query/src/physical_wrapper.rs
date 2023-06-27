@@ -17,7 +17,7 @@ use std::sync::Arc;
 use common_query::physical_plan::PhysicalPlan;
 use session::context::QueryContextRef;
 
-/// wrap physical plan with additional logic
+/// wrap physical plan with additional layer
 /// e.g: metrics retrieving layer upon physical plan
 pub trait PhysicalWrapper: Send + Sync + 'static {
     fn wrap(&self, origin: Arc<dyn PhysicalPlan>, ctx: QueryContextRef) -> Arc<dyn PhysicalPlan>;

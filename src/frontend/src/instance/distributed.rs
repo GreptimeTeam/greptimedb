@@ -16,7 +16,6 @@ pub(crate) mod inserter;
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
 
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::ddl_request::Expr as DdlExpr;
@@ -25,7 +24,6 @@ use api::v1::{
     column_def, AlterExpr, CreateDatabaseExpr, CreateTableExpr, DeleteRequest, DropTableExpr,
     FlushTableExpr, InsertRequests, TableId,
 };
-use async_recursion::async_recursion;
 use async_trait::async_trait;
 use catalog::helper::{SchemaKey, SchemaValue};
 use catalog::{CatalogManager, DeregisterTableRequest, RegisterTableRequest};
@@ -42,7 +40,7 @@ use common_meta::rpc::router::{
 use common_meta::rpc::store::CompareAndPutRequest;
 use common_meta::table_name::TableName;
 use common_query::Output;
-use common_telemetry::{debug, error, info, warn};
+use common_telemetry::{debug, info, warn};
 use datanode::instance::sql::table_idents_to_full_name;
 use datanode::sql::SqlHandler;
 use datatypes::prelude::ConcreteDataType;
@@ -65,10 +63,8 @@ use table::metadata::{RawTableInfo, RawTableMeta, TableIdent, TableType};
 use table::requests::TableOptions;
 use table::table::AlterContext;
 use table::TableRef;
-use tokio::time::sleep;
 
 use crate::catalog::FrontendCatalogManager;
-use crate::error::Error::RequestDatanode;
 use crate::error::{
     self, AlterExprToRequestSnafu, CatalogEntrySerdeSnafu, CatalogSnafu, ColumnDataTypeSnafu,
     DeserializePartitionSnafu, InvokeDatanodeSnafu, ParseSqlSnafu, PrimaryKeyNotFoundSnafu,
@@ -217,7 +213,10 @@ impl DistInstance {
             );
 
             let _timer = common_telemetry::timer!(crate::metrics::DIST_CREATE_TABLE_IN_DATANODE);
-            create_table_to_datanode(client, create_expr_for_region, 0).await?;
+            client
+                .create(create_expr_for_region)
+                .await
+                .context(RequestDatanodeSnafu)?;
         }
 
         // Since the table information created on meta does not go through KvBackend, so we
@@ -624,29 +623,6 @@ impl DistInstance {
 
     pub fn catalog_manager(&self) -> Arc<FrontendCatalogManager> {
         self.catalog_manager.clone()
-    }
-}
-
-#[async_recursion]
-async fn create_table_to_datanode(
-    client: Database,
-    req_expr: CreateTableExpr,
-    level: u8,
-) -> Result<()> {
-    match client.create(req_expr.clone()).await {
-        Ok(_) => Ok(()),
-        Err(e) => {
-            error!(
-                "fail to create table in database, current level: {:?}, err: {:?}",
-                level, e
-            );
-            if level < 3 {
-                sleep(Duration::from_secs(level as u64)).await;
-                create_table_to_datanode(client, req_expr, level + 1).await
-            } else {
-                Err(RequestDatanode { source: e })
-            }
-        }
     }
 }
 
