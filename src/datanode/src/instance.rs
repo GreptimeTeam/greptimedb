@@ -78,7 +78,6 @@ pub struct Instance {
     pub(crate) sql_handler: SqlHandler,
     pub(crate) catalog_manager: CatalogManagerRef,
     pub(crate) table_id_provider: Option<TableIdProviderRef>,
-    // pub(crate) heartbeat_task: Option<HeartbeatTask>,
     procedure_manager: ProcedureManagerRef,
 }
 
@@ -106,7 +105,6 @@ impl Instance {
     }
 
     fn build_heartbeat_task(
-        _instance: Arc<Instance>,
         opts: &DatanodeOptions,
         meta_client: Option<Arc<MetaClient>>,
         catalog_manager: CatalogManagerRef,
@@ -118,11 +116,11 @@ impl Instance {
             Mode::Distributed => {
                 let node_id = opts.node_id.context(MissingNodeIdSnafu)?;
                 let meta_client = meta_client.context(IncorrectInternalStateSnafu {
-                    state: "meta client is not provided when build heartbeat task",
+                    state: "meta client is not provided when building heartbeat task",
                 })?;
                 let region_alive_keepers =
                     region_alive_keepers.context(IncorrectInternalStateSnafu {
-                        state: "region_alive_keepers is not provided when build heartbeat task",
+                        state: "region_alive_keepers is not provided when building heartbeat task",
                     })?;
                 let handlers_executor = HandlerGroupExecutor::new(vec![
                     Arc::new(ParseMailboxMessageHandler::default()),
@@ -295,7 +293,6 @@ impl Instance {
         });
 
         let heartbeat_task = Instance::build_heartbeat_task(
-            instance.clone(),
             opts,
             meta_client,
             catalog_manager,
