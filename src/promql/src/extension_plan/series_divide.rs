@@ -283,6 +283,7 @@ impl SeriesDivideStream {
     }
 
     fn find_first_diff_row(&self, batch: &RecordBatch) -> usize {
+        // fast path: no tag columns means all data belongs to the same series.
         if self.tag_indices.is_empty() {
             return batch.num_rows();
         }
