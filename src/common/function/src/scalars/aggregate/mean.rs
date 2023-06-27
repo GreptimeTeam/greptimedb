@@ -188,19 +188,19 @@ mod test {
     fn test_update_batch() {
         // test update empty batch, expect not updating anything
         let mut mean = Mean::<i32>::default();
-        assert!(mean.update_batch(&[]).is_ok());
+        mean.update_batch(&[]).unwrap();
         assert_eq!(Value::Null, mean.evaluate().unwrap());
 
         // test update one not-null value
         let mut mean = Mean::<i32>::default();
         let v: Vec<VectorRef> = vec![Arc::new(Int32Vector::from(vec![Some(42)]))];
-        assert!(mean.update_batch(&v).is_ok());
+        mean.update_batch(&v).unwrap();
         assert_eq!(Value::from(42.0_f64), mean.evaluate().unwrap());
 
         // test update one null value
         let mut mean = Mean::<i32>::default();
         let v: Vec<VectorRef> = vec![Arc::new(Int32Vector::from(vec![Option::<i32>::None]))];
-        assert!(mean.update_batch(&v).is_ok());
+        mean.update_batch(&v).unwrap();
         assert_eq!(Value::Null, mean.evaluate().unwrap());
 
         // test update no null-value batch
@@ -210,7 +210,7 @@ mod test {
             Some(1),
             Some(2),
         ]))];
-        assert!(mean.update_batch(&v).is_ok());
+        mean.update_batch(&v).unwrap();
         assert_eq!(Value::from(0.6666666666666666), mean.evaluate().unwrap());
 
         // test update null-value batch
@@ -221,7 +221,7 @@ mod test {
             Some(3),
             Some(4),
         ]))];
-        assert!(mean.update_batch(&v).is_ok());
+        mean.update_batch(&v).unwrap();
         assert_eq!(Value::from(1.6666666666666667), mean.evaluate().unwrap());
 
         // test update with constant vector
@@ -230,7 +230,7 @@ mod test {
             Arc::new(Int32Vector::from_vec(vec![4])),
             10,
         ))];
-        assert!(mean.update_batch(&v).is_ok());
+        mean.update_batch(&v).unwrap();
         assert_eq!(Value::from(4.0), mean.evaluate().unwrap());
     }
 }

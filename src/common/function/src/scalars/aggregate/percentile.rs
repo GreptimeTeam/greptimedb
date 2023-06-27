@@ -299,7 +299,7 @@ mod test {
     fn test_update_batch() {
         // test update empty batch, expect not updating anything
         let mut percentile = Percentile::<i32>::default();
-        assert!(percentile.update_batch(&[]).is_ok());
+        percentile.update_batch(&[]).unwrap();
         assert!(percentile.not_greater.is_empty());
         assert!(percentile.greater.is_empty());
         assert_eq!(Value::Null, percentile.evaluate().unwrap());
@@ -310,7 +310,7 @@ mod test {
             Arc::new(Int32Vector::from(vec![Some(42)])),
             Arc::new(Float64Vector::from(vec![Some(100.0_f64)])),
         ];
-        assert!(percentile.update_batch(&v).is_ok());
+        percentile.update_batch(&v).unwrap();
         assert_eq!(Value::from(42.0_f64), percentile.evaluate().unwrap());
 
         // test update one null value
@@ -319,7 +319,7 @@ mod test {
             Arc::new(Int32Vector::from(vec![Option::<i32>::None])),
             Arc::new(Float64Vector::from(vec![Some(100.0_f64)])),
         ];
-        assert!(percentile.update_batch(&v).is_ok());
+        percentile.update_batch(&v).unwrap();
         assert_eq!(Value::Null, percentile.evaluate().unwrap());
 
         // test update no null-value batch
@@ -332,7 +332,7 @@ mod test {
                 Some(100.0_f64),
             ])),
         ];
-        assert!(percentile.update_batch(&v).is_ok());
+        percentile.update_batch(&v).unwrap();
         assert_eq!(Value::from(2_f64), percentile.evaluate().unwrap());
 
         // test update null-value batch
@@ -346,7 +346,7 @@ mod test {
                 Some(100.0_f64),
             ])),
         ];
-        assert!(percentile.update_batch(&v).is_ok());
+        percentile.update_batch(&v).unwrap();
         assert_eq!(Value::from(4_f64), percentile.evaluate().unwrap());
 
         // test update with constant vector
@@ -358,7 +358,7 @@ mod test {
             )),
             Arc::new(Float64Vector::from(vec![Some(100.0_f64), Some(100.0_f64)])),
         ];
-        assert!(percentile.update_batch(&v).is_ok());
+        percentile.update_batch(&v).unwrap();
         assert_eq!(Value::from(4_f64), percentile.evaluate().unwrap());
 
         // test left border
@@ -371,7 +371,7 @@ mod test {
                 Some(0.0_f64),
             ])),
         ];
-        assert!(percentile.update_batch(&v).is_ok());
+        percentile.update_batch(&v).unwrap();
         assert_eq!(Value::from(-1.0_f64), percentile.evaluate().unwrap());
 
         // test medium
@@ -384,7 +384,7 @@ mod test {
                 Some(50.0_f64),
             ])),
         ];
-        assert!(percentile.update_batch(&v).is_ok());
+        percentile.update_batch(&v).unwrap();
         assert_eq!(Value::from(1.0_f64), percentile.evaluate().unwrap());
 
         // test right border
@@ -397,7 +397,7 @@ mod test {
                 Some(100.0_f64),
             ])),
         ];
-        assert!(percentile.update_batch(&v).is_ok());
+        percentile.update_batch(&v).unwrap();
         assert_eq!(Value::from(2.0_f64), percentile.evaluate().unwrap());
 
         // the following is the result of numpy.percentile
@@ -414,7 +414,7 @@ mod test {
                 Some(40.0_f64),
             ])),
         ];
-        assert!(percentile.update_batch(&v).is_ok());
+        percentile.update_batch(&v).unwrap();
         assert_eq!(Value::from(6.400000000_f64), percentile.evaluate().unwrap());
 
         // the following is the result of numpy.percentile
@@ -430,7 +430,7 @@ mod test {
                 Some(95.0_f64),
             ])),
         ];
-        assert!(percentile.update_batch(&v).is_ok());
+        percentile.update_batch(&v).unwrap();
         assert_eq!(
             Value::from(9.700_000_000_000_001_f64),
             percentile.evaluate().unwrap()

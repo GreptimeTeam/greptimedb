@@ -112,7 +112,7 @@ pub async fn mock(
             }
         }),
     );
-    assert!(res.is_ok());
+    let _ = res.unwrap();
 
     MockInfo {
         server_addr,

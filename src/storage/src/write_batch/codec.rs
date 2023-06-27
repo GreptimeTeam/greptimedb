@@ -167,8 +167,7 @@ mod tests {
 
         let encoder = PayloadEncoder::new();
         let mut dst = vec![];
-        let result = encoder.encode(batch.payload(), &mut dst);
-        assert!(result.is_ok());
+        encoder.encode(batch.payload(), &mut dst).unwrap();
 
         let decoder = PayloadDecoder::new(&mutation_types);
         let result = decoder.decode(&dst);
@@ -201,8 +200,7 @@ mod tests {
 
         let encoder = PayloadEncoder::new();
         let mut dst = vec![];
-        let result = encoder.encode(batch.payload(), &mut dst);
-        assert!(result.is_ok());
+        encoder.encode(batch.payload(), &mut dst).unwrap();
 
         let decoder = PayloadDecoder::new(&mutation_types);
         let result = decoder.decode(&dst);

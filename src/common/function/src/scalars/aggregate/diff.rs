@@ -192,20 +192,20 @@ mod test {
     fn test_update_batch() {
         // test update empty batch, expect not updating anything
         let mut diff = Diff::<i32, i64>::default();
-        assert!(diff.update_batch(&[]).is_ok());
+        diff.update_batch(&[]).unwrap();
         assert!(diff.values.is_empty());
         assert_eq!(Value::Null, diff.evaluate().unwrap());
 
         // test update one not-null value
         let mut diff = Diff::<i32, i64>::default();
         let v: Vec<VectorRef> = vec![Arc::new(Int32Vector::from(vec![Some(42)]))];
-        assert!(diff.update_batch(&v).is_ok());
+        diff.update_batch(&v).unwrap();
         assert_eq!(Value::Null, diff.evaluate().unwrap());
 
         // test update one null value
         let mut diff = Diff::<i32, i64>::default();
         let v: Vec<VectorRef> = vec![Arc::new(Int32Vector::from(vec![Option::<i32>::None]))];
-        assert!(diff.update_batch(&v).is_ok());
+        diff.update_batch(&v).unwrap();
         assert_eq!(Value::Null, diff.evaluate().unwrap());
 
         // test update no null-value batch
@@ -216,7 +216,7 @@ mod test {
             Some(2),
         ]))];
         let values = vec![Value::from(2_i64), Value::from(1_i64)];
-        assert!(diff.update_batch(&v).is_ok());
+        diff.update_batch(&v).unwrap();
         assert_eq!(
             Value::List(ListValue::new(
                 Some(Box::new(values)),
@@ -234,7 +234,7 @@ mod test {
             Some(4),
         ]))];
         let values = vec![Value::from(5_i64), Value::from(1_i64)];
-        assert!(diff.update_batch(&v).is_ok());
+        diff.update_batch(&v).unwrap();
         assert_eq!(
             Value::List(ListValue::new(
                 Some(Box::new(values)),
@@ -250,7 +250,7 @@ mod test {
             4,
         ))];
         let values = vec![Value::from(0_i64), Value::from(0_i64), Value::from(0_i64)];
-        assert!(diff.update_batch(&v).is_ok());
+        diff.update_batch(&v).unwrap();
         assert_eq!(
             Value::List(ListValue::new(
                 Some(Box::new(values)),

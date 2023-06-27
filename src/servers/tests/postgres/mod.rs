@@ -73,7 +73,7 @@ pub async fn test_start_postgres_server() -> Result<()> {
     let pg_server = create_postgres_server(table, false, Default::default(), None)?;
     let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
     let result = pg_server.start(listening).await;
-    assert!(result.is_ok());
+    let _ = result.unwrap();
 
     let result = pg_server.start(listening).await;
     assert!(result
@@ -85,8 +85,8 @@ pub async fn test_start_postgres_server() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_shutdown_pg_server_range() -> Result<()> {
-    assert!(test_shutdown_pg_server(false).await.is_ok());
-    assert!(test_shutdown_pg_server(true).await.is_ok());
+    test_shutdown_pg_server(false).await.unwrap();
+    test_shutdown_pg_server(true).await.unwrap();
     Ok(())
 }
 
@@ -110,10 +110,8 @@ async fn test_schema_validating() -> Result<()> {
     })
     .await?;
 
-    let pass = create_plain_connection(server_port, true).await;
-    assert!(pass.is_ok());
-    let result = pg_server.shutdown().await;
-    assert!(result.is_ok());
+    let _ = create_plain_connection(server_port, true).await.unwrap();
+    pg_server.shutdown().await.unwrap();
 
     let (pg_server, server_port) = generate_server(DatabaseAuthInfo {
         catalog: DEFAULT_CATALOG_NAME,
@@ -124,8 +122,7 @@ async fn test_schema_validating() -> Result<()> {
 
     let fail = create_plain_connection(server_port, true).await;
     assert!(fail.is_err());
-    let result = pg_server.shutdown().await;
-    assert!(result.is_ok());
+    pg_server.shutdown().await.unwrap();
 
     Ok(())
 }
@@ -177,8 +174,7 @@ async fn test_shutdown_pg_server(with_pwd: bool) -> Result<()> {
     }
 
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let result = postgres_server.shutdown().await;
-    assert!(result.is_ok());
+    postgres_server.shutdown().await.unwrap();
 
     for handle in join_handles.iter_mut() {
         let result = handle.await.unwrap();
@@ -305,7 +301,7 @@ async fn test_using_db() -> Result<()> {
         .await
         .unwrap();
     let result = client.simple_query("SELECT uint32s FROM numbers").await;
-    assert!(result.is_ok());
+    let _ = result.unwrap();
 
     let client = create_connection_with_given_catalog_schema(
         server_port,
@@ -313,7 +309,7 @@ async fn test_using_db() -> Result<()> {
         DEFAULT_SCHEMA_NAME,
     )
     .await;
-    assert!(client.is_ok());
+    let _ = client.unwrap();
 
     let client =
         create_connection_with_given_catalog_schema(server_port, "notfound", DEFAULT_SCHEMA_NAME)
@@ -366,11 +362,11 @@ async fn do_simple_query(server_tls: TlsOption, client_tls: bool) -> Result<()> 
     if !client_tls {
         let client = create_plain_connection(server_port, false).await.unwrap();
         let result = client.simple_query("SELECT uint32s FROM numbers").await;
-        assert!(result.is_ok());
+        let _ = result.unwrap();
     } else {
         let client = create_secure_connection(server_port, false).await.unwrap();
         let result = client.simple_query("SELECT uint32s FROM numbers").await;
-        assert!(result.is_ok());
+        let _ = result.unwrap();
     }
 
     Ok(())

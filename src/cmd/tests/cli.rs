@@ -27,7 +27,7 @@ mod tests {
 
     impl Repl {
         fn send_line(&mut self, line: &str) {
-            assert!(self.repl.send_line(line).is_ok());
+            let _ = self.repl.send_line(line).unwrap();
 
             // read a line to consume the prompt
             let _ = self.read_line();
@@ -105,7 +105,7 @@ mod tests {
         test_select(repl);
 
         datanode.kill().unwrap();
-        assert!(datanode.wait().is_ok());
+        let _ = datanode.wait().unwrap();
     }
 
     fn test_create_database(repl: &mut Repl) {

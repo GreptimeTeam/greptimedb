@@ -57,8 +57,7 @@ mod tests {
     fn test_validate_catalog_and_schema() {
         let context = Arc::new(QueryContext::with("greptime", "public"));
 
-        let re = validate_catalog_and_schema("greptime", "public", &context);
-        assert!(re.is_ok());
+        validate_catalog_and_schema("greptime", "public", &context).unwrap();
         let re = validate_catalog_and_schema("greptime", "wrong_schema", &context);
         assert!(re.is_err());
         let re = validate_catalog_and_schema("wrong_catalog", "public", &context);
@@ -66,6 +65,6 @@ mod tests {
         let re = validate_catalog_and_schema("wrong_catalog", "wrong_schema", &context);
         assert!(re.is_err());
 
-        assert!(validate_catalog_and_schema("greptime", "information_schema", &context).is_ok());
+        validate_catalog_and_schema("greptime", "information_schema", &context).unwrap();
     }
 }

@@ -284,8 +284,7 @@ mod tests {
             error: None,
             ..Default::default()
         });
-        let result = check_resp_header(&header, mock_ctx());
-        assert!(result.is_ok());
+        check_resp_header(&header, mock_ctx()).unwrap();
 
         let result = check_resp_header(&None, mock_ctx());
         assert!(result.is_err());

@@ -318,9 +318,7 @@ mod tests {
             Arc::new(Int32Array::from(vec![2])),
             Arc::new(Int32Array::from(vec![3])),
         ];
-        let vectors = Helper::try_into_vectors(&arrays);
-        assert!(vectors.is_ok());
-        let vectors = vectors.unwrap();
+        let vectors = Helper::try_into_vectors(&arrays).unwrap();
         vectors.iter().for_each(|v| assert_eq!(1, v.len()));
         assert_eq!(Value::Int32(1), vectors[0].get(0));
         assert_eq!(Value::Int32(2), vectors[1].get(0));

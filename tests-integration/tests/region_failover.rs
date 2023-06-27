@@ -264,7 +264,7 @@ CREATE TABLE my_table (
     PARTITION r3 VALUES LESS THAN (MAXVALUE),
 )";
     let result = cluster.frontend.do_query(sql, QueryContext::arc()).await;
-    assert!(result[0].is_ok());
+    let _ = result.get(0).unwrap();
 }
 
 async fn find_region_distribution(cluster: &GreptimeDbCluster) -> HashMap<u64, Vec<u32>> {

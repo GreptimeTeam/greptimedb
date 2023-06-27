@@ -295,7 +295,6 @@ mod tests {
     fn test_insert_req_check() {
         let right = mock_insert_request();
         let ret = check_req(&right);
-        assert!(ret.is_ok());
         assert_eq!(ret.unwrap(), 3);
 
         let wrong = mock_wrong_insert_request();

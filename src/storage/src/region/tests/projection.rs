@@ -142,7 +142,7 @@ impl<S: LogStore> ProjectionTester<S> {
         let put_data = new_put_data(len, key_start, ts_start, initial_value);
         batch.put(put_data).unwrap();
 
-        assert!(self.region.write(&self.write_ctx, batch).await.is_ok());
+        let _ = self.region.write(&self.write_ctx, batch).await.unwrap();
     }
 
     async fn scan(&self, projection: Option<Vec<usize>>) -> Vec<Vec<i64>> {

@@ -421,7 +421,7 @@ mod tests {
                     .with_value(format!("{}-{}", "value", i).into_bytes())
                     .with_prev_kv();
                 let res = self.client.put(req).await;
-                assert!(res.is_ok());
+                let _ = res.unwrap();
             }
         }
 
@@ -429,7 +429,7 @@ mod tests {
             let req =
                 DeleteRangeRequest::new().with_prefix(format!("{}-{}", TEST_KEY_PREFIX, self.ns));
             let res = self.client.delete_range(req).await;
-            assert!(res.is_ok());
+            let _ = res.unwrap();
         }
     }
 
@@ -446,7 +446,7 @@ mod tests {
         let mut meta_client = MetaClientBuilder::new(0, 0, Role::Datanode)
             .enable_heartbeat()
             .build();
-        assert!(meta_client.heartbeat_client().is_ok());
+        let _ = meta_client.heartbeat_client().unwrap();
         assert!(meta_client.router_client().is_err());
         assert!(meta_client.store_client().is_err());
         meta_client.start(urls).await.unwrap();
@@ -456,7 +456,7 @@ mod tests {
             .enable_router()
             .build();
         assert!(meta_client.heartbeat_client().is_err());
-        assert!(meta_client.router_client().is_ok());
+        let _ = meta_client.router_client().unwrap();
         assert!(meta_client.store_client().is_err());
         meta_client.start(urls).await.unwrap();
         assert!(meta_client.router_client().unwrap().is_started().await);
@@ -466,7 +466,7 @@ mod tests {
             .build();
         assert!(meta_client.heartbeat_client().is_err());
         assert!(meta_client.router_client().is_err());
-        assert!(meta_client.store_client().is_ok());
+        let _ = meta_client.store_client().unwrap();
         meta_client.start(urls).await.unwrap();
         assert!(meta_client.store_client().unwrap().is_started().await);
 
@@ -477,9 +477,9 @@ mod tests {
             .build();
         assert_eq!(1, meta_client.id().0);
         assert_eq!(2, meta_client.id().1);
-        assert!(meta_client.heartbeat_client().is_ok());
-        assert!(meta_client.router_client().is_ok());
-        assert!(meta_client.store_client().is_ok());
+        let _ = meta_client.heartbeat_client().unwrap();
+        let _ = meta_client.router_client().unwrap();
+        let _ = meta_client.store_client().unwrap();
         meta_client.start(urls).await.unwrap();
         assert!(meta_client.heartbeat_client().unwrap().is_started().await);
         assert!(meta_client.router_client().unwrap().is_started().await);
@@ -568,8 +568,7 @@ mod tests {
     #[tokio::test]
     async fn test_ask_leader() {
         let tc = new_client("test_ask_leader").await;
-        let res = tc.client.ask_leader().await;
-        assert!(res.is_ok());
+        tc.client.ask_leader().await.unwrap();
     }
 
     #[tokio::test]
@@ -650,7 +649,7 @@ mod tests {
 
         let req = DeleteRequest::new(table_name.clone());
         let res = client.delete_route(req).await;
-        assert!(res.is_ok());
+        let _ = res.unwrap();
     }
 
     #[tokio::test]

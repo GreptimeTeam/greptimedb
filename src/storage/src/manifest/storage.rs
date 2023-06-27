@@ -610,7 +610,7 @@ mod tests {
         assert_eq!(3, v);
 
         //delete (,4) logs and keep checkpoint 3.
-        assert!(log_store.delete_until(4, true).await.is_ok());
+        let _ = log_store.delete_until(4, true).await.unwrap();
         assert!(log_store.load_checkpoint(3).await.unwrap().is_some());
         assert!(log_store.load_last_checkpoint().await.unwrap().is_some());
         let mut it = log_store.scan(0, 11).await.unwrap();
@@ -620,7 +620,7 @@ mod tests {
         assert!(it.next_log().await.unwrap().is_none());
 
         // delete all logs and checkpoints
-        assert!(log_store.delete_until(11, false).await.is_ok());
+        let _ = log_store.delete_until(11, false).await.unwrap();
         assert!(log_store.load_checkpoint(3).await.unwrap().is_none());
         assert!(log_store.load_last_checkpoint().await.unwrap().is_none());
         let mut it = log_store.scan(0, 11).await.unwrap();

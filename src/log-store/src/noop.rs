@@ -130,7 +130,7 @@ mod tests {
     async fn test_noop_logstore() {
         let store = NoopLogStore::default();
         let e = store.entry("".as_bytes(), 1, NamespaceImpl::default());
-        assert!(store.append(e.clone()).await.is_ok());
+        let _ = store.append(e.clone()).await.unwrap();
         assert!(store
             .append_batch(&NamespaceImpl::default(), vec![e])
             .await

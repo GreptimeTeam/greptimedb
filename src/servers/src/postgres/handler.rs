@@ -626,7 +626,7 @@ mod test {
         ];
         let mut builder = DataRowEncoder::new(Arc::new(schema));
         for i in values.iter() {
-            assert!(encode_value(i, &mut builder).is_ok());
+            encode_value(i, &mut builder).unwrap();
         }
 
         let err = encode_value(

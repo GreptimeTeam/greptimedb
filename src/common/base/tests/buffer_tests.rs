@@ -119,7 +119,7 @@ mod tests {
                     #[test]
                     fn [<test_read_write_ $num_ty _from_vec_buffer>]() {
                         let mut buf = vec![];
-                        assert!(buf.[<write_ $num_ty _le>]($num_ty::MAX).is_ok());
+                        let _ = buf.[<write_ $num_ty _le>]($num_ty::MAX).unwrap();
                         assert_eq!($num_ty::MAX, buf.as_slice().[<read_ $num_ty _le>]().unwrap());
                     }
                 }
@@ -132,7 +132,7 @@ mod tests {
     #[test]
     pub fn test_peek_write_from_vec_buffer() {
         let mut buf: Vec<u8> = vec![];
-        assert!(buf.write_from_slice("hello".as_bytes()).is_ok());
+        buf.write_from_slice("hello".as_bytes()).unwrap();
         let mut slice = buf.as_slice();
         assert_eq!(104, slice.peek_u8_le().unwrap());
         slice.advance_by(1);

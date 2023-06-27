@@ -345,6 +345,6 @@ def a(cpu, mem, **kwargs):
             &HashMap::from([("a".to_string(), "1".to_string())]),
         );
         dbg!(&ret);
-        assert!(ret.is_ok());
+        let _ = ret.unwrap();
     }
 }

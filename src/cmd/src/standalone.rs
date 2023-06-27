@@ -356,7 +356,6 @@ mod tests {
         };
 
         let plugins = load_frontend_plugins(&command.user_provider);
-        assert!(plugins.is_ok());
         let plugins = plugins.unwrap();
         let provider = plugins.get::<UserProviderRef>();
         assert!(provider.is_some());
@@ -367,7 +366,7 @@ mod tests {
                 Password::PlainText("test".to_string().into()),
             )
             .await;
-        assert!(result.is_ok());
+        let _ = result.unwrap();
     }
 
     #[test]

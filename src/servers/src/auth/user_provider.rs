@@ -244,16 +244,16 @@ pub mod test {
                 Password::PlainText(password.to_string().into()),
             )
             .await;
-        assert!(re.is_ok());
+        let _ = re.unwrap();
     }
 
     #[tokio::test]
     async fn test_authorize() {
         let provider = StaticUserProvider::try_from("cmd:root=123456,admin=654321").unwrap();
-        let re = provider
+        provider
             .authorize("catalog", "schema", &UserInfo::new("root"))
-            .await;
-        assert!(re.is_ok());
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -270,7 +270,6 @@ pub mod test {
         {
             // write a tmp file
             let file = File::create(&file_path);
-            assert!(file.is_ok());
             let file = file.unwrap();
             let mut lw = LineWriter::new(file);
             assert!(lw
@@ -279,7 +278,7 @@ pub mod test {
 admin=654321",
                 )
                 .is_ok());
-            assert!(lw.flush().is_ok());
+            lw.flush().unwrap();
         }
 
         let param = format!("file:{file_path}");

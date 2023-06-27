@@ -123,9 +123,9 @@ async fn test_auth_by_plain_text() {
             Identity::UserId("greptime", None),
             Password::PlainText("greptime".to_string().into()),
         )
-        .await;
-    assert!(auth_result.is_ok());
-    assert_eq!("greptime", auth_result.unwrap().username());
+        .await
+        .unwrap();
+    assert_eq!("greptime", auth_result.username());
 
     // auth failed, unsupported password type
     let auth_result = user_provider
@@ -193,6 +193,8 @@ async fn test_schema_validate() {
     let re = validator.authorize("greptime", "public", &wrong_user).await;
     assert!(re.is_err());
     // check ok
-    let re = validator.authorize("greptime", "public", &right_user).await;
-    assert!(re.is_ok());
+    validator
+        .authorize("greptime", "public", &right_user)
+        .await
+        .unwrap();
 }

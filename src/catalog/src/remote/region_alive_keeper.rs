@@ -720,7 +720,7 @@ mod test {
         let tx = handle.tx.clone();
 
         // assert countdown task is running
-        assert!(tx.send(CountdownCommand::Start(5000)).await.is_ok());
+        tx.send(CountdownCommand::Start(5000)).await.unwrap();
         assert!(!finished.load(Ordering::Relaxed));
 
         drop(handle);
@@ -772,7 +772,7 @@ mod test {
         };
 
         let table_engine = Arc::new(MockTableEngine::default());
-        assert!(table_engine.create_table(ctx, request).await.is_ok());
+        let _ = table_engine.create_table(ctx, request).await.unwrap();
 
         let table_ident = TableIdent {
             catalog: catalog.to_string(),

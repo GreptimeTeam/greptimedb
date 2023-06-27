@@ -34,14 +34,12 @@ rows |  protobuf    |    arrow       |
 
 fn encode_arrow(batch: &WriteBatch, dst: &mut Vec<u8>) {
     let encoder = codec::PayloadEncoder::new();
-    let result = encoder.encode(batch.payload(), dst);
-    assert!(result.is_ok());
+    encoder.encode(batch.payload(), dst).unwrap();
 }
 
 fn decode_arrow(dst: &[u8], mutation_types: &[i32]) {
     let decoder = codec::PayloadDecoder::new(mutation_types);
-    let result = decoder.decode(dst);
-    assert!(result.is_ok());
+    let _ = decoder.decode(dst).unwrap();
 }
 
 fn bench_wal_decode(c: &mut Criterion) {

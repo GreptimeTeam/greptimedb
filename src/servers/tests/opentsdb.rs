@@ -69,7 +69,7 @@ async fn test_start_opentsdb_server() -> Result<()> {
     let server = create_opentsdb_server(tx)?;
     let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
     let result = server.start(listening).await;
-    assert!(result.is_ok());
+    let _ = result.unwrap();
 
     let result = server.start(listening).await;
     assert!(result

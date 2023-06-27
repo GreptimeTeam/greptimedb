@@ -301,7 +301,7 @@ mod tests {
     async fn test_txn_compare_equal() {
         let kv_store = create_kv_store().await;
         let key = vec![101u8];
-        assert!(kv_store.delete(key.clone(), false).await.is_ok());
+        let _ = kv_store.delete(key.clone(), false).await.unwrap();
 
         let txn = Txn::new()
             .when(vec![Compare::with_not_exist_value(
@@ -332,7 +332,7 @@ mod tests {
     async fn test_txn_compare_greater() {
         let kv_store = create_kv_store().await;
         let key = vec![102u8];
-        assert!(kv_store.delete(key.clone(), false).await.is_ok());
+        let _ = kv_store.delete(key.clone(), false).await.unwrap();
 
         let txn = Txn::new()
             .when(vec![Compare::with_not_exist_value(
@@ -375,7 +375,7 @@ mod tests {
     async fn test_txn_compare_less() {
         let kv_store = create_kv_store().await;
         let key = vec![103u8];
-        assert!(kv_store.delete(vec![3], false).await.is_ok());
+        let _ = kv_store.delete(vec![3], false).await.unwrap();
 
         let txn = Txn::new()
             .when(vec![Compare::with_not_exist_value(
@@ -418,7 +418,7 @@ mod tests {
     async fn test_txn_compare_not_equal() {
         let kv_store = create_kv_store().await;
         let key = vec![104u8];
-        assert!(kv_store.delete(key.clone(), false).await.is_ok());
+        let _ = kv_store.delete(key.clone(), false).await.unwrap();
 
         let txn = Txn::new()
             .when(vec![Compare::with_not_exist_value(

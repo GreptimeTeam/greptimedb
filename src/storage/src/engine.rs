@@ -658,7 +658,7 @@ mod tests {
             ("ts".to_string(), tsv),
         ]);
         wb.put(put_data).unwrap();
-        assert!(region.write(&WriteContext::default(), wb).await.is_ok());
+        let _ = region.write(&WriteContext::default(), wb).await.unwrap();
 
         // Flush memtable to sst.
         region.flush(&FlushContext::default()).await.unwrap();

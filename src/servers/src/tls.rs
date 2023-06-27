@@ -157,7 +157,6 @@ mod tests {
         assert!(t.cert_path.is_empty());
 
         let setup = t.setup();
-        assert!(setup.is_ok());
         let setup = setup.unwrap();
         assert!(setup.is_none());
     }

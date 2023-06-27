@@ -232,7 +232,7 @@ mod test {
     fn test_update_batch() {
         // test update empty batch, expect not updating anything
         let mut scipy_stats_norm_pdf = ScipyStatsNormPdf::<i32>::default();
-        assert!(scipy_stats_norm_pdf.update_batch(&[]).is_ok());
+        scipy_stats_norm_pdf.update_batch(&[]).unwrap();
         assert!(scipy_stats_norm_pdf.values.is_empty());
         assert_eq!(Value::Null, scipy_stats_norm_pdf.evaluate().unwrap());
 
@@ -246,7 +246,7 @@ mod test {
                 Some(2.0_f64),
             ])),
         ];
-        assert!(scipy_stats_norm_pdf.update_batch(&v).is_ok());
+        scipy_stats_norm_pdf.update_batch(&v).unwrap();
         assert_eq!(
             Value::from(0.17843340219081558),
             scipy_stats_norm_pdf.evaluate().unwrap()
@@ -263,7 +263,7 @@ mod test {
                 Some(2.0_f64),
             ])),
         ];
-        assert!(scipy_stats_norm_pdf.update_batch(&v).is_ok());
+        scipy_stats_norm_pdf.update_batch(&v).unwrap();
         assert_eq!(
             Value::from(0.12343972049858312),
             scipy_stats_norm_pdf.evaluate().unwrap()

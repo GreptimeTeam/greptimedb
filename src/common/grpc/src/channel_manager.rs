@@ -577,7 +577,7 @@ mod tests {
 
         let res = mgr.build_endpoint("test_addr");
 
-        assert!(res.is_ok());
+        let _ = res.unwrap();
     }
 
     #[tokio::test]
@@ -586,7 +586,7 @@ mod tests {
 
         let addr = "test_addr";
         let res = mgr.get(addr);
-        assert!(res.is_ok());
+        let _ = res.unwrap();
 
         mgr.retain_channel(|addr, channel| {
             assert_eq!("test_addr", addr);
@@ -604,7 +604,7 @@ mod tests {
             }),
         );
 
-        assert!(res.is_ok());
+        let _ = res.unwrap();
 
         mgr.retain_channel(|addr, channel| {
             assert_eq!("test_addr", addr);
