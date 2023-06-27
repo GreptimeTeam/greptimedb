@@ -29,14 +29,11 @@ use common_telemetry::{logging, timer};
 use futures_util::{TryFutureExt, TryStreamExt};
 use prost::Message;
 use snafu::{ensure, ResultExt};
-use tokio::sync::mpsc::Sender;
-use tokio::sync::{mpsc, OnceCell};
-use tokio_stream::wrappers::ReceiverStream;
 
 use crate::error::{
     ConvertFlightDataSnafu, IllegalDatabaseResponseSnafu, IllegalFlightMessagesSnafu,
 };
-use crate::{error, metrics, Client, Result};
+use crate::{error, metrics, Client, Result, StreamInserter};
 
 #[derive(Clone, Debug, Default)]
 pub struct Database {
@@ -50,7 +47,6 @@ pub struct Database {
     dbname: String,
 
     client: Client,
-    streaming_client: OnceCell<Sender<GreptimeRequest>>,
     ctx: FlightContext,
 }
 
@@ -62,7 +58,6 @@ impl Database {
             schema: schema.into(),
             dbname: "".to_string(),
             client,
-            streaming_client: OnceCell::new(),
             ctx: FlightContext::default(),
         }
     }
@@ -80,7 +75,6 @@ impl Database {
             schema: "".to_string(),
             dbname: dbname.into(),
             client,
-            streaming_client: OnceCell::new(),
             ctx: FlightContext::default(),
         }
     }
@@ -120,20 +114,24 @@ impl Database {
         self.handle(Request::Inserts(requests)).await
     }
 
-    pub async fn insert_to_stream(&self, requests: InsertRequests) -> Result<()> {
-        let streaming_client = self
-            .streaming_client
-            .get_or_try_init(|| self.client_stream())
-            .await?;
+    pub fn streaming_inserter(&self) -> Result<StreamInserter> {
+        self.streaming_inserter_with_channel_size(65536)
+    }
 
-        let request = self.to_rpc_request(Request::Inserts(requests));
+    pub fn streaming_inserter_with_channel_size(
+        &self,
+        channel_size: usize,
+    ) -> Result<StreamInserter> {
+        let client = self.client.make_database_client()?.inner;
 
-        streaming_client.send(request).await.map_err(|e| {
-            error::ClientStreamingSnafu {
-                err_msg: e.to_string(),
-            }
-            .build()
-        })
+        let stream_inserter = StreamInserter::new(
+            client,
+            self.dbname().to_string(),
+            self.ctx.auth_header.clone(),
+            channel_size,
+        );
+
+        Ok(stream_inserter)
     }
 
     pub async fn delete(&self, request: DeleteRequest) -> Result<u32> {
@@ -167,14 +165,6 @@ impl Database {
             }),
             request: Some(request),
         }
-    }
-
-    async fn client_stream(&self) -> Result<Sender<GreptimeRequest>> {
-        let mut client = self.client.make_database_client()?.inner;
-        let (sender, receiver) = mpsc::channel::<GreptimeRequest>(65536);
-        let receiver = ReceiverStream::new(receiver);
-        let _ = client.handle_requests(receiver).await?;
-        Ok(sender)
     }
 
     pub async fn sql(&self, sql: &str) -> Result<Output> {
