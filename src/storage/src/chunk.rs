@@ -303,10 +303,9 @@ impl ChunkReaderBuilder {
         }
 
         logging::info!(
-            "build chain reader, time_range: {:?}, num_readers: {}, windows: {:?}",
+            "build chain reader, time_range: {:?}, num_readers: {}",
             time_range,
             readers.len(),
-            windows,
         );
 
         let chain_reader = ChainReader::new(schema.clone(), readers);
