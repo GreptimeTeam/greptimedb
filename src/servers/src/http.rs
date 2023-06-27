@@ -59,7 +59,7 @@ use tower_http::auth::AsyncRequireAuthorizationLayer;
 use tower_http::trace::TraceLayer;
 
 use self::authorize::HttpAuth;
-use self::influxdb::{influxdb_health, influxdb_ping, influxdb_write};
+use self::influxdb::{influxdb_health, influxdb_ping, influxdb_write_v1, influxdb_write_v2};
 use crate::auth::UserProviderRef;
 use crate::configurator::ConfiguratorRef;
 use crate::error::{AlreadyStartedSnafu, Result, StartHttpSnafu};
@@ -598,7 +598,8 @@ impl HttpServer {
 
     fn route_influxdb<S>(&self, influxdb_handler: InfluxdbLineProtocolHandlerRef) -> Router<S> {
         Router::new()
-            .route("/write", routing::post(influxdb_write))
+            .route("/write", routing::post(influxdb_write_v1))
+            .route("/api/v2/write", routing::post(influxdb_write_v2))
             .route("/ping", routing::get(influxdb_ping))
             .route("/health", routing::get(influxdb_health))
             .with_state(influxdb_handler)
