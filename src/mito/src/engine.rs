@@ -595,7 +595,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             let parent_dir = table_dir(catalog_name, schema_name, request.table_id);
             let opts = DropOptions { parent_dir };
 
-            futures::future::try_join_all(
+            let _ = futures::future::try_join_all(
                 regions
                     .drain()
                     .map(|(_, region)| self.storage_engine.drop_region(&ctx, region, &opts)),

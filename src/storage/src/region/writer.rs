@@ -337,7 +337,7 @@ impl RegionWriter {
             files
         );
 
-        drop_ctx
+        let _ = drop_ctx
             .manifest
             .manifest_store()
             .delete_until(MAX_VERSION, false)
