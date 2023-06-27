@@ -14,29 +14,28 @@
 
 use std::collections::HashMap;
 
-use api::v1::meta::RangeRequest;
 use common_time::util as time_util;
 
+use crate::cluster::MetaPeerClientRef;
 use crate::error::Result;
 use crate::keys::{LeaseKey, LeaseValue, DN_LEASE_PREFIX};
-use crate::service::store::kv::KvStoreRef;
 use crate::util;
 
 pub async fn alive_datanodes(
     cluster_id: u64,
-    kv_store: &KvStoreRef,
+    meta_peer_client: &MetaPeerClientRef,
     lease_secs: i64,
 ) -> Result<HashMap<LeaseKey, LeaseValue>> {
     let lease_filter = |_: &LeaseKey, v: &LeaseValue| {
         time_util::current_time_millis() - v.timestamp_millis < lease_secs * 1000
     };
 
-    filter_datanodes(cluster_id, kv_store, lease_filter).await
+    filter_datanodes(cluster_id, meta_peer_client, lease_filter).await
 }
 
 pub async fn filter_datanodes<P>(
     cluster_id: u64,
-    kv_store: &KvStoreRef,
+    meta_peer_client: &MetaPeerClientRef,
     predicate: P,
 ) -> Result<HashMap<LeaseKey, LeaseValue>>
 where
@@ -44,15 +43,8 @@ where
 {
     let key = get_lease_prefix(cluster_id);
     let range_end = util::get_prefix_end_key(&key);
-    let req = RangeRequest {
-        key,
-        range_end,
-        ..Default::default()
-    };
 
-    let res = kv_store.range(req).await?;
-
-    let kvs = res.kvs;
+    let kvs = meta_peer_client.range(key, range_end).await?;
     let mut lease_kvs = HashMap::new();
     for kv in kvs {
         let lease_key: LeaseKey = kv.key.try_into()?;

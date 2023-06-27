@@ -176,13 +176,12 @@ pub async fn build_meta_srv(opts: &MetaSrvOptions) -> Result<MetaSrv> {
         .election(election.clone())
         .in_memory(in_memory.clone())
         .build()
+        .map(Arc::new)
         // Safety: all required fields set at initialization
         .unwrap();
 
     let selector = match opts.selector {
-        SelectorType::LoadBased => Arc::new(LoadBasedSelector {
-            meta_peer_client: meta_peer_client.clone(),
-        }) as SelectorRef,
+        SelectorType::LoadBased => Arc::new(LoadBasedSelector) as SelectorRef,
         SelectorType::LeaseBased => Arc::new(LeaseBasedSelector) as SelectorRef,
     };
 

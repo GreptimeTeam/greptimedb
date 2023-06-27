@@ -12,46 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::meta::{BatchPutRequest, HeartbeatRequest, KeyValue, Role};
+use api::v1::meta::{HeartbeatRequest, PutRequest, Role};
 use common_telemetry::{trace, warn};
 use common_time::util as time_util;
-use tokio::sync::mpsc::{self, Sender};
 
 use crate::error::Result;
 use crate::handler::{HeartbeatAccumulator, HeartbeatHandler};
 use crate::keys::{LeaseKey, LeaseValue};
 use crate::metasrv::Context;
-use crate::service::store::kv::KvStoreRef;
 
-pub struct KeepLeaseHandler {
-    tx: Sender<KeyValue>,
-}
-
-impl KeepLeaseHandler {
-    pub fn new(kv_store: KvStoreRef) -> Self {
-        let (tx, mut rx) = mpsc::channel(1024);
-        let _handle = common_runtime::spawn_bg(async move {
-            while let Some(kv) = rx.recv().await {
-                let mut kvs = vec![kv];
-
-                while let Ok(kv) = rx.try_recv() {
-                    kvs.push(kv);
-                }
-
-                let batch_put = BatchPutRequest {
-                    kvs,
-                    ..Default::default()
-                };
-
-                if let Err(err) = kv_store.batch_put(batch_put).await {
-                    warn!("Failed to write lease KVs, {err}");
-                }
-            }
-        });
-
-        Self { tx }
-    }
-}
+#[derive(Default)]
+pub struct KeepLeaseHandler;
 
 #[async_trait::async_trait]
 impl HeartbeatHandler for KeepLeaseHandler {
@@ -62,28 +33,35 @@ impl HeartbeatHandler for KeepLeaseHandler {
     async fn handle(
         &self,
         req: &HeartbeatRequest,
-        _ctx: &mut Context,
+        ctx: &mut Context,
         _acc: &mut HeartbeatAccumulator,
     ) -> Result<()> {
         let HeartbeatRequest { header, peer, .. } = req;
-        if let Some(peer) = &peer {
-            let key = LeaseKey {
-                cluster_id: header.as_ref().map_or(0, |h| h.cluster_id),
-                node_id: peer.id,
-            };
-            let value = LeaseValue {
-                timestamp_millis: time_util::current_time_millis(),
-                node_addr: peer.addr.clone(),
-            };
+        let Some(peer) = &peer else { return Ok(()); };
 
-            trace!("Receive a heartbeat: {key:?}, {value:?}");
+        let key = LeaseKey {
+            cluster_id: header.as_ref().map_or(0, |h| h.cluster_id),
+            node_id: peer.id,
+        };
+        let value = LeaseValue {
+            timestamp_millis: time_util::current_time_millis(),
+            node_addr: peer.addr.clone(),
+        };
 
-            let key = key.try_into()?;
-            let value = value.try_into()?;
+        trace!("Receive a heartbeat: {key:?}, {value:?}");
 
-            if let Err(err) = self.tx.send(KeyValue { key, value }).await {
-                warn!("Failed to send lease KV to writer, peer: {peer:?}, {err}");
-            }
+        let key = key.try_into()?;
+        let value = value.try_into()?;
+        let put_req = PutRequest {
+            key,
+            value,
+            ..Default::default()
+        };
+
+        let res = ctx.in_memory.put(put_req).await;
+
+        if let Err(err) = res {
+            warn!("Failed to update lease KV, peer: {peer:?}, {err}");
         }
 
         Ok(())

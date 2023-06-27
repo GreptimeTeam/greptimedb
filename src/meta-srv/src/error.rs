@@ -221,9 +221,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("MetaSrv has no meta peer client"))]
-    NoMetaPeerClient { location: Location },
-
     #[snafu(display("Invalid http body, source: {}", source))]
     InvalidHttpBody {
         source: http::Error,
@@ -363,6 +360,9 @@ pub enum Error {
     #[snafu(display("Etcd txn got an error: {err_msg}"))]
     EtcdTxnOpResponse { err_msg: String, location: Location },
 
+    #[snafu(display("MetaPeerClient is required"))]
+    MetaPeerClientRequired { location: Location },
+
     // this error is used for custom error mapping
     // please do not delete it
     #[snafu(display("Other error, source: {}", source))]
@@ -399,7 +399,6 @@ impl ErrorExt for Error {
             | Error::Range { .. }
             | Error::ResponseHeaderNotFound { .. }
             | Error::IsNotLeader { .. }
-            | Error::NoMetaPeerClient { .. }
             | Error::InvalidHttpBody { .. }
             | Error::Lock { .. }
             | Error::Unlock { .. }
@@ -441,6 +440,7 @@ impl ErrorExt for Error {
             | Error::InvalidUtf8Value { .. }
             | Error::UnexpectedInstructionReply { .. }
             | Error::EtcdTxnOpResponse { .. }
+            | Error::MetaPeerClientRequired { .. }
             | Error::Unexpected { .. } => StatusCode::Unexpected,
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
             Error::InvalidCatalogValue { source, .. } => source.status_code(),

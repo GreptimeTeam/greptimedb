@@ -381,6 +381,7 @@ mod tests {
     use tokio::sync::mpsc::Receiver;
 
     use super::*;
+    use crate::cluster::MetaPeerClientBuilder;
     use crate::handler::{HeartbeatMailbox, Pusher, Pushers};
     use crate::lock::memory::MemLock;
     use crate::selector::{Namespace, Selector};
@@ -469,6 +470,12 @@ mod tests {
 
         pub async fn build(self) -> TestingEnv {
             let kv_store = Arc::new(MemStore::new()) as _;
+            let meta_peer_client = MetaPeerClientBuilder::default()
+                .in_memory(Arc::new(MemStore::new()))
+                .build()
+                // Safety: all required fields set at initialization
+                .unwrap();
+            let meta_peer_client = Arc::new(meta_peer_client);
 
             let table = "my_table";
             let (_, table_global_value) =
@@ -505,6 +512,7 @@ mod tests {
                 datanode_lease_secs: 10,
                 server_addr: "127.0.0.1:3002".to_string(),
                 kv_store,
+                meta_peer_client,
                 catalog: Some(DEFAULT_CATALOG_NAME.to_string()),
                 schema: Some(DEFAULT_SCHEMA_NAME.to_string()),
                 table: Some(table.to_string()),

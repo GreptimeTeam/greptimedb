@@ -15,16 +15,16 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
-use snafu::{OptionExt, ResultExt};
+use snafu::ResultExt;
 use tonic::codegen::http;
 
-use crate::cluster::MetaPeerClient;
+use crate::cluster::MetaPeerClientRef;
 use crate::error::{self, Result};
 use crate::keys::StatValue;
 use crate::service::admin::HttpHandler;
 
 pub struct HeartBeatHandler {
-    pub meta_peer_client: Option<MetaPeerClient>,
+    pub meta_peer_client: MetaPeerClientRef,
 }
 
 #[async_trait::async_trait]
@@ -34,12 +34,7 @@ impl HttpHandler for HeartBeatHandler {
         _: &str,
         params: &HashMap<String, String>,
     ) -> Result<http::Response<String>> {
-        let meta_peer_client = self
-            .meta_peer_client
-            .as_ref()
-            .context(error::NoMetaPeerClientSnafu)?;
-
-        let stat_kvs = meta_peer_client.get_all_dn_stat_kvs().await?;
+        let stat_kvs = self.meta_peer_client.get_all_dn_stat_kvs().await?;
         let mut stat_vals: Vec<StatValue> = stat_kvs.into_values().collect();
 
         if let Some(addr) = params.get("addr") {

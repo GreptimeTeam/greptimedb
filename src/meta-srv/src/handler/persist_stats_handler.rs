@@ -134,6 +134,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use crate::cluster::MetaPeerClientBuilder;
     use crate::handler::{HeartbeatMailbox, Pushers};
     use crate::keys::StatKey;
     use crate::sequence::Sequence;
@@ -146,10 +147,17 @@ mod tests {
         let kv_store = Arc::new(MemStore::new());
         let seq = Sequence::new("test_seq", 0, 10, kv_store.clone());
         let mailbox = HeartbeatMailbox::create(Pushers::default(), seq);
+        let meta_peer_client = MetaPeerClientBuilder::default()
+            .in_memory(in_memory.clone())
+            .build()
+            .map(Arc::new)
+            // Safety: all required fields set at initialization
+            .unwrap();
         let ctx = Context {
             server_addr: "127.0.0.1:0000".to_string(),
             in_memory,
             kv_store,
+            meta_peer_client,
             mailbox,
             election: None,
             skip_all: Arc::new(AtomicBool::new(false)),

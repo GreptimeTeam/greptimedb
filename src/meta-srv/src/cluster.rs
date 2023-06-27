@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::meta::cluster_client::ClusterClient;
@@ -30,7 +31,9 @@ use crate::metasrv::ElectionRef;
 use crate::service::store::kv::ResettableKvStoreRef;
 use crate::{error, util};
 
-#[derive(Builder, Clone)]
+pub type MetaPeerClientRef = Arc<MetaPeerClient>;
+
+#[derive(Builder)]
 pub struct MetaPeerClient {
     election: Option<ElectionRef>,
     in_memory: ResettableKvStoreRef,

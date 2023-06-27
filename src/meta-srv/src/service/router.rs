@@ -84,6 +84,7 @@ impl router_server::Router for MetaSrv {
             datanode_lease_secs: self.options().datanode_lease_secs,
             server_addr: self.options().server_addr.clone(),
             kv_store: self.kv_store(),
+            meta_peer_client: self.meta_peer_client(),
             catalog: Some(table_name.catalog_name.clone()),
             schema: Some(table_name.schema_name.clone()),
             table: Some(table_name.table_name.clone()),

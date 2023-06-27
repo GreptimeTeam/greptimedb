@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use common_procedure::local::{LocalManager, ManagerConfig};
 
+use crate::cluster::MetaPeerClientBuilder;
 use crate::handler::{HeartbeatMailbox, Pushers};
 use crate::lock::memory::MemLock;
 use crate::metasrv::SelectorContext;
@@ -35,11 +36,20 @@ pub(crate) fn create_region_failover_manager() -> Arc<RegionFailoverManager> {
     let state_store = Arc::new(MetaStateStore::new(kv_store.clone()));
     let procedure_manager = Arc::new(LocalManager::new(ManagerConfig::default(), state_store));
 
+    let in_memory = Arc::new(MemStore::new());
+    let meta_peer_client = MetaPeerClientBuilder::default()
+        .in_memory(in_memory)
+        .build()
+        .map(Arc::new)
+        // Safety: all required fields set at initialization
+        .unwrap();
+
     let selector = Arc::new(LeaseBasedSelector);
     let selector_ctx = SelectorContext {
         datanode_lease_secs: 10,
         server_addr: "127.0.0.1:3002".to_string(),
         kv_store,
+        meta_peer_client,
         catalog: None,
         schema: None,
         table: None,

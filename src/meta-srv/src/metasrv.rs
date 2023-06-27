@@ -27,7 +27,7 @@ use servers::http::HttpOptions;
 use snafu::ResultExt;
 use tokio::sync::broadcast::error::RecvError;
 
-use crate::cluster::MetaPeerClient;
+use crate::cluster::MetaPeerClientRef;
 use crate::election::{Election, LeaderChangeMessage};
 use crate::error::{RecoverProcedureSnafu, Result};
 use crate::handler::HeartbeatHandlerGroup;
@@ -75,6 +75,7 @@ pub struct Context {
     pub server_addr: String,
     pub in_memory: ResettableKvStoreRef,
     pub kv_store: KvStoreRef,
+    pub meta_peer_client: MetaPeerClientRef,
     pub mailbox: MailboxRef,
     pub election: Option<ElectionRef>,
     pub skip_all: Arc<AtomicBool>,
@@ -102,6 +103,7 @@ pub struct SelectorContext {
     pub datanode_lease_secs: i64,
     pub server_addr: String,
     pub kv_store: KvStoreRef,
+    pub meta_peer_client: MetaPeerClientRef,
     pub catalog: Option<String>,
     pub schema: Option<String>,
     pub table: Option<String>,
@@ -122,7 +124,7 @@ pub struct MetaSrv {
     selector: SelectorRef,
     handler_group: HeartbeatHandlerGroup,
     election: Option<ElectionRef>,
-    meta_peer_client: Option<MetaPeerClient>,
+    meta_peer_client: MetaPeerClientRef,
     lock: DistLockRef,
     procedure_manager: ProcedureManagerRef,
     metadata_service: MetadataServiceRef,
@@ -218,6 +220,11 @@ impl MetaSrv {
     }
 
     #[inline]
+    pub fn meta_peer_client(&self) -> MetaPeerClientRef {
+        self.meta_peer_client.clone()
+    }
+
+    #[inline]
     pub fn table_id_sequence(&self) -> SequenceRef {
         self.table_id_sequence.clone()
     }
@@ -235,11 +242,6 @@ impl MetaSrv {
     #[inline]
     pub fn election(&self) -> Option<ElectionRef> {
         self.election.clone()
-    }
-
-    #[inline]
-    pub fn meta_peer_client(&self) -> Option<MetaPeerClient> {
-        self.meta_peer_client.clone()
     }
 
     #[inline]
@@ -261,6 +263,7 @@ impl MetaSrv {
         let server_addr = self.options().server_addr.clone();
         let in_memory = self.in_memory();
         let kv_store = self.kv_store();
+        let meta_peer_client = self.meta_peer_client();
         let mailbox = self.mailbox();
         let election = self.election();
         let skip_all = Arc::new(AtomicBool::new(false));
@@ -268,6 +271,7 @@ impl MetaSrv {
             server_addr,
             in_memory,
             kv_store,
+            meta_peer_client,
             mailbox,
             election,
             skip_all,
