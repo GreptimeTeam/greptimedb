@@ -347,6 +347,7 @@ impl ChunkReaderBuilder {
                 prev = prev.or(&current);
             } else {
                 ranges.push(prev);
+                prev = current;
             }
         }
         ranges.push(prev);
