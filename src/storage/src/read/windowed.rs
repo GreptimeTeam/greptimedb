@@ -26,6 +26,37 @@ use crate::error::{self, Result};
 use crate::read::{Batch, BatchReader};
 use crate::schema::{ProjectedSchemaRef, StoreSchema};
 
+pub struct ChainReader<R> {
+    /// Schema to read
+    pub schema: ProjectedSchemaRef,
+    /// Each reader reads a slice of time window
+    pub readers: Vec<R>,
+}
+
+impl<R> ChainReader<R> {
+    pub fn new(schema: ProjectedSchemaRef, readers: Vec<R>) -> Self {
+        Self { schema, readers }
+    }
+}
+
+#[async_trait::async_trait]
+impl<R> BatchReader for ChainReader<R>
+where
+    R: BatchReader,
+{
+    async fn next_batch(&mut self) -> Result<Option<Batch>> {
+        let _window_scan_elapsed = timer!(crate::metrics::WINDOW_SCAN_ELAPSED);
+        while let Some(reader) = self.readers.first_mut() {
+            if let Some(batch) = reader.next_batch().await? {
+                return Ok(Some(batch));
+            } else {
+                self.readers.pop();
+            }
+        }
+        Ok(None)
+    }
+}
+
 /// [WindowedReader] provides a windowed record batch reader that scans all rows within a window
 /// at a time and sort these rows ordered in `[<timestamp>, <PK>]` order.
 pub struct WindowedReader<R> {

@@ -25,7 +25,7 @@ use table::predicate::{Predicate, TimeRangePredicateBuilder};
 
 use crate::error::{self, Error, Result};
 use crate::memtable::{IterContext, MemtableRef};
-use crate::read::windowed::WindowedReader;
+use crate::read::windowed::{ChainReader, WindowedReader};
 use crate::read::{Batch, BoxedBatchReader, DedupReader, MergeReaderBuilder};
 use crate::schema::{ProjectedSchema, ProjectedSchemaRef, RegionSchemaRef};
 use crate::sst::{AccessLayerRef, FileHandle, LevelMetas, ReadOptions};
@@ -247,11 +247,6 @@ impl ChunkReaderBuilder {
         for file in &self.files_to_read {
             if !Self::file_in_range(file, time_range) {
                 debug!("Skip file {:?}, predicate: {:?}", file, time_range);
-                logging::info!(
-                    "skip file {}, time_range: {:?}",
-                    file.file_id(),
-                    file.time_range()
-                );
                 continue;
             }
             read_files.push(file.meta());
@@ -259,17 +254,8 @@ impl ChunkReaderBuilder {
             reader_builder = reader_builder.push_batch_reader(reader);
         }
 
-        let window = PlainWindowInference {}.infer_window(&read_files, &[], true);
-
         logging::info!(
-            "build sst reader done, time_range: {:?}, read_files: {:?}, window: {:?}",
-            time_range,
-            read_files,
-            window,
-        );
-
-        logging::info!(
-            "build reader done, time_range: {:?}, total_files:{}, num_read_files: {}",
+            "build reader done, time_range: {:?}, total_files: {}, num_read_files: {}",
             time_range,
             self.files_to_read.len(),
             read_files.len()
@@ -295,10 +281,77 @@ impl ChunkReaderBuilder {
                 self.build_windowed(&schema, &time_range_predicate, windows, ordering)
                     .await?
         } else {
-            self.build_reader(&schema, &time_range_predicate).await?
+            self.build_chained(&schema, &time_range_predicate).await?
         };
 
         Ok(ChunkReaderImpl::new(schema, reader, output_ordering))
+    }
+
+    async fn build_chained(
+        &self,
+        schema: &ProjectedSchemaRef,
+        time_range: &TimestampRange,
+    ) -> Result<BoxedBatchReader> {
+        let windows = self.sst_windows(time_range);
+
+        let mut readers = Vec::with_capacity(windows.len());
+        for window in &windows {
+            let time_range = time_range.and(&window);
+            let reader = self.build_reader(schema, &time_range).await?;
+            readers.push(reader);
+        }
+
+        logging::info!(
+            "build chain reader, time_range: {:?}, num_readers: {}, windows: {:?}",
+            time_range,
+            readers.len(),
+            windows,
+        );
+
+        let chain_reader = ChainReader::new(schema.clone(), readers);
+        Ok(Box::new(chain_reader) as Box<_>)
+    }
+
+    fn sst_windows(&self, time_range: &TimestampRange) -> Vec<TimestampRange> {
+        let mut files_in_range = Vec::with_capacity(self.files_to_read.len());
+        for file in &self.files_to_read {
+            if !Self::file_in_range(file, time_range) || file.time_range().is_none() {
+                continue;
+            }
+            files_in_range.push(file.clone());
+        }
+
+        if files_in_range.is_empty() {
+            return Vec::new();
+        }
+
+        files_in_range.sort_unstable_by(|left, right| {
+            // Safety: We have ignore all files with none time range.
+            left.time_range()
+                .unwrap()
+                .0
+                .cmp(&right.time_range().unwrap().1)
+        });
+
+        let mut ranges = Vec::with_capacity(files_in_range.len());
+        let mut prev = TimestampRange::new_inclusive(
+            Some(files_in_range[0].time_range().unwrap().0),
+            Some(files_in_range[1].time_range().unwrap().1),
+        );
+        for file in &files_in_range[1..] {
+            let current = TimestampRange::new_inclusive(
+                Some(file.time_range().unwrap().0),
+                Some(file.time_range().unwrap().1),
+            );
+            if prev.intersects(&current) {
+                prev = prev.or(&current);
+            } else {
+                ranges.push(prev);
+            }
+        }
+        ranges.push(prev);
+
+        ranges
     }
 
     /// Build time range predicate from schema and filters.
