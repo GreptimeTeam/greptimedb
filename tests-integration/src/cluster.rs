@@ -27,6 +27,7 @@ use common_meta::DatanodeId;
 use common_runtime::Builder as RuntimeBuilder;
 use common_test_util::temp_dir::create_temp_dir;
 use datanode::datanode::{DatanodeOptions, ObjectStoreConfig};
+use datanode::heartbeat::HeartbeatTask;
 use datanode::instance::Instance as DatanodeInstance;
 use frontend::instance::{FrontendInstance, Instance as FeInstance};
 use meta_client::client::MetaClientBuilder;
@@ -49,6 +50,7 @@ pub struct GreptimeDbCluster {
     _wal_guards: Vec<WalGuard>,
 
     pub datanode_instances: HashMap<DatanodeId, Arc<DatanodeInstance>>,
+    pub datanode_heartbeat_tasks: HashMap<DatanodeId, Option<HeartbeatTask>>,
     pub kv_store: KvStoreRef,
     pub meta_srv: MetaSrv,
     pub frontend: Arc<FeInstance>,
@@ -86,7 +88,7 @@ impl GreptimeDbClusterBuilder {
 
         let meta_srv = self.build_metasrv().await;
 
-        let (datanode_instances, storage_guards, wal_guards) =
+        let (datanode_instances, heartbeat_tasks, storage_guards, wal_guards) =
             self.build_datanodes(meta_srv.clone(), datanodes).await;
 
         let datanode_clients = build_datanode_clients(&datanode_instances, datanodes).await;
@@ -103,6 +105,7 @@ impl GreptimeDbClusterBuilder {
             storage_guards,
             _wal_guards: wal_guards,
             datanode_instances,
+            datanode_heartbeat_tasks: heartbeat_tasks,
             kv_store: self.kv_store.clone(),
             meta_srv: meta_srv.meta_srv,
             frontend,
@@ -119,10 +122,12 @@ impl GreptimeDbClusterBuilder {
         datanodes: u32,
     ) -> (
         HashMap<DatanodeId, Arc<DatanodeInstance>>,
+        HashMap<DatanodeId, Option<HeartbeatTask>>,
         Vec<StorageGuard>,
         Vec<WalGuard>,
     ) {
         let mut instances = HashMap::with_capacity(datanodes as usize);
+        let mut heartbeat_tasks = HashMap::with_capacity(datanodes as usize);
         let mut storage_guards = Vec::with_capacity(datanodes as usize);
         let mut wal_guards = Vec::with_capacity(datanodes as usize);
 
@@ -151,9 +156,10 @@ impl GreptimeDbClusterBuilder {
 
             let dn_instance = self.create_datanode(&opts, meta_srv.clone()).await;
 
-            instances.insert(datanode_id, dn_instance.clone());
+            let _ = instances.insert(datanode_id, dn_instance.0.clone());
+            let _ = heartbeat_tasks.insert(datanode_id, dn_instance.1);
         }
-        (instances, storage_guards, wal_guards)
+        (instances, heartbeat_tasks, storage_guards, wal_guards)
     }
 
     async fn wait_datanodes_alive(&self, expected_datanodes: u32) {
@@ -175,14 +181,14 @@ impl GreptimeDbClusterBuilder {
         &self,
         opts: &DatanodeOptions,
         meta_srv: MockInfo,
-    ) -> Arc<DatanodeInstance> {
-        let instance = Arc::new(
-            DatanodeInstance::with_mock_meta_server(opts, meta_srv)
-                .await
-                .unwrap(),
-        );
+    ) -> (Arc<DatanodeInstance>, Option<HeartbeatTask>) {
+        let (instance, heartbeat) = DatanodeInstance::with_mock_meta_server(opts, meta_srv)
+            .await
+            .unwrap();
         instance.start().await.unwrap();
-
+        if let Some(heartbeat) = heartbeat.as_ref() {
+            heartbeat.start().await.unwrap();
+        }
         // create another catalog and schema for testing
         instance
             .catalog_manager()
@@ -192,7 +198,7 @@ impl GreptimeDbClusterBuilder {
             .create_catalog_and_schema("another_catalog", "another_schema")
             .await
             .unwrap();
-        instance
+        (instance, heartbeat)
     }
 
     async fn build_frontend(
@@ -260,7 +266,7 @@ async fn create_datanode_client(datanode_instance: Arc<DatanodeInstance>) -> (St
         None,
         runtime,
     );
-    tokio::spawn(async move {
+    let _handle = tokio::spawn(async move {
         Server::builder()
             .add_service(grpc_server.create_flight_service())
             .add_service(grpc_server.create_database_service())
@@ -274,7 +280,7 @@ async fn create_datanode_client(datanode_instance: Arc<DatanodeInstance>) -> (St
     // "127.0.0.1:3001" is just a placeholder, does not actually connect to it.
     let addr = "127.0.0.1:3001";
     let channel_manager = ChannelManager::new();
-    channel_manager
+    let _ = channel_manager
         .reset_with_connector(
             addr,
             service_fn(move |_| {

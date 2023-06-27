@@ -170,7 +170,7 @@ impl Router {
     pub fn route(mut self, path: &str, handler: impl HttpHandler + 'static) -> Self {
         check_path(path);
 
-        self.handlers.insert(path.to_owned(), Box::new(handler));
+        let _ = self.handlers.insert(path.to_owned(), Box::new(handler));
 
         self
     }

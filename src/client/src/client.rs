@@ -165,7 +165,7 @@ impl Client {
     pub async fn health_check(&self) -> Result<()> {
         let (_, channel) = self.find_channel()?;
         let mut client = HealthCheckClient::new(channel);
-        client.health_check(HealthCheckRequest {}).await?;
+        let _ = client.health_check(HealthCheckRequest {}).await?;
         Ok(())
     }
 }

@@ -86,7 +86,7 @@ impl PostgresServer {
                             Err(e) => warn!("Failed to get PostgreSQL client addr, err: {}", e),
                         }
 
-                        io_runtime.spawn(async move {
+                        let _handle = io_runtime.spawn(async move {
                             increment_gauge!(crate::metrics::METRIC_POSTGRES_CONNECTIONS, 1.0);
                             let handler = Arc::new(handler);
                             let r = process_socket(

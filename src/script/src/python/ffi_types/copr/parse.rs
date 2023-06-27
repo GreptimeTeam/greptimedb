@@ -292,7 +292,7 @@ fn parse_keywords(keywords: &Vec<ast::Keyword<()>>) -> Result<DecoratorArgs> {
                         Some(kw.location),
                     );
                 } else {
-                    visited_key.insert(s);
+                    let _ = visited_key.insert(s);
                 }
                 match s {
                     "args" => ret_args.arg_names = Some(pylist_to_vec(&kw.node.value)?),

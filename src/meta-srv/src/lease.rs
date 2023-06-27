@@ -60,7 +60,7 @@ where
         if !predicate(&lease_key, &lease_value) {
             continue;
         }
-        lease_kvs.insert(lease_key, lease_value);
+        let _ = lease_kvs.insert(lease_key, lease_value);
     }
 
     Ok(lease_kvs)

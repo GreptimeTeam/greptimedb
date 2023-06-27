@@ -180,7 +180,7 @@ pub(crate) async fn handle_system_table_request<'a, M: CatalogManager>(
                         table_name,
                     ),
                 })?;
-            manager
+            let _ = manager
                 .register_table(RegisterTableRequest {
                     catalog: catalog_name.clone(),
                     schema: schema_name.clone(),

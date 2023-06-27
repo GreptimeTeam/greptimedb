@@ -29,7 +29,8 @@ impl InfluxdbLineProtocolHandler for Instance {
         ctx: QueryContextRef,
     ) -> servers::error::Result<()> {
         let requests = request.try_into()?;
-        self.handle_inserts(requests, ctx)
+        let _ = self
+            .handle_inserts(requests, ctx)
             .await
             .map_err(BoxedError::new)
             .context(servers::error::ExecuteGrpcQuerySnafu)?;

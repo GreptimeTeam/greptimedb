@@ -82,7 +82,7 @@ mod tests {
         let mut res = HashSet::new();
         while let Some(r) = iter.next().await {
             let kv = r.unwrap();
-            res.insert(String::from_utf8_lossy(&kv.0).to_string());
+            let _ = res.insert(String::from_utf8_lossy(&kv.0).to_string());
         }
         assert_eq!(
             vec!["__c-greptime".to_string()],
@@ -305,11 +305,11 @@ mod tests {
         let schema_name = "nonexistent_schema".to_string();
 
         // register catalog to catalog manager
-        components
+        assert!(components
             .catalog_manager
             .register_catalog(catalog_name.clone())
             .await
-            .unwrap();
+            .is_ok());
         assert_eq!(
             HashSet::<String>::from_iter(
                 vec![DEFAULT_CATALOG_NAME.to_string(), catalog_name.clone()].into_iter()

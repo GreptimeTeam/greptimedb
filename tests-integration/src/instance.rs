@@ -253,7 +253,7 @@ mod tests {
                 query: &'a str,
                 _query_ctx: QueryContextRef,
             ) -> Result<Cow<'a, str>> {
-                self.c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let _ = self.c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 assert!(query.starts_with("CREATE TABLE demo"));
                 Ok(Cow::Borrowed(query))
             }
@@ -263,7 +263,7 @@ mod tests {
                 statements: Vec<Statement>,
                 _query_ctx: QueryContextRef,
             ) -> Result<Vec<Statement>> {
-                self.c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let _ = self.c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 assert!(matches!(statements[0], Statement::CreateTable(_)));
                 Ok(statements)
             }
@@ -274,7 +274,7 @@ mod tests {
                 _plan: Option<&query::plan::LogicalPlan>,
                 _query_ctx: QueryContextRef,
             ) -> Result<()> {
-                self.c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let _ = self.c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 Ok(())
             }
 
@@ -283,7 +283,7 @@ mod tests {
                 mut output: Output,
                 _query_ctx: QueryContextRef,
             ) -> Result<Output> {
-                self.c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let _ = self.c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 match &mut output {
                     Output::AffectedRows(rows) => {
                         assert_eq!(*rows, 0);

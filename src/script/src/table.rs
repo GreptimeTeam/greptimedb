@@ -183,38 +183,36 @@ impl ScriptsTable {
     }
 
     pub async fn insert(&self, schema: &str, name: &str, script: &str) -> Result<()> {
-        let mut columns_values: HashMap<String, VectorRef> = HashMap::with_capacity(8);
-        columns_values.insert(
-            "schema".to_string(),
-            Arc::new(StringVector::from(vec![schema])) as _,
-        );
-        columns_values.insert(
-            "name".to_string(),
-            Arc::new(StringVector::from(vec![name])) as _,
-        );
-        columns_values.insert(
-            "script".to_string(),
-            Arc::new(StringVector::from(vec![script])) as _,
-        );
-        // TODO(dennis): we only supports python right now.
-        columns_values.insert(
-            "engine".to_string(),
-            Arc::new(StringVector::from(vec!["python"])) as _,
-        );
-        // Timestamp in key part is intentionally left to 0
-        columns_values.insert(
-            "timestamp".to_string(),
-            Arc::new(TimestampMillisecondVector::from_slice([0])) as _,
-        );
         let now = util::current_time_millis();
-        columns_values.insert(
-            "gmt_created".to_string(),
-            Arc::new(TimestampMillisecondVector::from_slice([now])) as _,
-        );
-        columns_values.insert(
-            "gmt_modified".to_string(),
-            Arc::new(TimestampMillisecondVector::from_slice([now])) as _,
-        );
+        let columns_values: HashMap<String, VectorRef> = HashMap::from([
+            (
+                "schema".to_string(),
+                Arc::new(StringVector::from(vec![schema])) as VectorRef,
+            ),
+            ("name".to_string(), Arc::new(StringVector::from(vec![name]))),
+            (
+                "script".to_string(),
+                Arc::new(StringVector::from(vec![script])) as VectorRef,
+            ),
+            (
+                "engine".to_string(),
+                // TODO(dennis): we only supports python right now.
+                Arc::new(StringVector::from(vec!["python"])) as VectorRef,
+            ),
+            (
+                "timestamp".to_string(),
+                // Timestamp in key part is intentionally left to 0
+                Arc::new(TimestampMillisecondVector::from_slice([0])) as VectorRef,
+            ),
+            (
+                "gmt_created".to_string(),
+                Arc::new(TimestampMillisecondVector::from_slice([now])) as VectorRef,
+            ),
+            (
+                "gmt_modified".to_string(),
+                Arc::new(TimestampMillisecondVector::from_slice([now])) as VectorRef,
+            ),
+        ]);
         let table = self
             .catalog_manager
             .table(

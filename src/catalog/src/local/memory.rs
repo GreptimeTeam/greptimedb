@@ -49,9 +49,8 @@ impl Default for MemoryCatalogManager {
             catalogs: Default::default(),
         };
 
-        let mut catalog = HashMap::with_capacity(1);
-        catalog.insert(DEFAULT_SCHEMA_NAME.to_string(), HashMap::new());
-        manager
+        let catalog = HashMap::from([(DEFAULT_SCHEMA_NAME.to_string(), HashMap::new())]);
+        let _ = manager
             .catalogs
             .write()
             .unwrap()
@@ -115,7 +114,7 @@ impl CatalogManager for MemoryCatalogManager {
         }
 
         let table = schema.remove(&request.table_name).unwrap();
-        schema.insert(request.new_table_name, table);
+        let _ = schema.insert(request.new_table_name, table);
 
         Ok(true)
     }
@@ -144,9 +143,11 @@ impl CatalogManager for MemoryCatalogManager {
     }
 
     async fn register_schema(&self, request: RegisterSchemaRequest) -> Result<bool> {
-        self.register_schema_sync(request)?;
-        increment_gauge!(crate::metrics::METRIC_CATALOG_MANAGER_SCHEMA_COUNT, 1.0);
-        Ok(true)
+        let registered = self.register_schema_sync(request)?;
+        if registered {
+            increment_gauge!(crate::metrics::METRIC_CATALOG_MANAGER_SCHEMA_COUNT, 1.0);
+        }
+        Ok(registered)
     }
 
     async fn register_system_table(&self, _request: RegisterSystemTableRequest) -> Result<()> {
@@ -234,9 +235,11 @@ impl CatalogManager for MemoryCatalogManager {
     }
 
     async fn register_catalog(&self, name: String) -> Result<bool> {
-        self.register_catalog_sync(name)?;
-        increment_gauge!(crate::metrics::METRIC_CATALOG_MANAGER_CATALOG_COUNT, 1.0);
-        Ok(true)
+        let registered = self.register_catalog_sync(name)?;
+        if registered {
+            increment_gauge!(crate::metrics::METRIC_CATALOG_MANAGER_CATALOG_COUNT, 1.0);
+        }
+        Ok(registered)
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -252,7 +255,7 @@ impl MemoryCatalogManager {
         match entry {
             Entry::Occupied(_) => true,
             Entry::Vacant(v) => {
-                v.insert(HashMap::new());
+                let _ = v.insert(HashMap::new());
                 false
             }
         }
@@ -273,7 +276,7 @@ impl MemoryCatalogManager {
         if catalog.contains_key(&request.schema) {
             return Ok(false);
         }
-        catalog.insert(request.schema, HashMap::new());
+        let _ = catalog.insert(request.schema, HashMap::new());
         Ok(true)
     }
 
@@ -310,7 +313,7 @@ impl MemoryCatalogManager {
             table_id: table.table_info().ident.table_id,
             table,
         };
-        manager.register_table_sync(request).unwrap();
+        let _ = manager.register_table_sync(request).unwrap();
         manager
     }
 }
@@ -341,7 +344,7 @@ mod tests {
             table: Arc::new(NumbersTable::default()),
         };
 
-        catalog_list.register_table(register_request).await.unwrap();
+        assert!(catalog_list.register_table(register_request).await.is_ok());
         let table = catalog_list
             .table(
                 DEFAULT_CATALOG_NAME,
@@ -390,7 +393,7 @@ mod tests {
             new_table_name: new_table_name.to_string(),
             table_id,
         };
-        catalog.rename_table(rename_request).await.unwrap();
+        assert!(catalog.rename_table(rename_request).await.is_ok());
 
         // test old table name not exist
         assert!(!catalog
@@ -492,7 +495,7 @@ mod tests {
             table_id: 2333,
             table: Arc::new(NumbersTable::default()),
         };
-        catalog.register_table(register_table_req).await.unwrap();
+        assert!(catalog.register_table(register_table_req).await.is_ok());
         assert!(catalog
             .table(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, table_name)
             .await

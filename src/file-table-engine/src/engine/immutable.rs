@@ -275,7 +275,7 @@ impl EngineInner {
             table_id
         );
 
-        self.tables.write().unwrap().insert(table_id, table.clone());
+        let _ = self.tables.write().unwrap().insert(table_id, table.clone());
 
         Ok(table)
     }
@@ -339,7 +339,7 @@ impl EngineInner {
                     .context(table_error::TableOperationSnafu)?,
             );
 
-            self.tables.write().unwrap().insert(table_id, table.clone());
+            let _ = self.tables.write().unwrap().insert(table_id, table.clone());
             Some(table as _)
         };
 
@@ -375,7 +375,7 @@ impl EngineInner {
             .context(DropTableSnafu {
                 table_name: &table_full_name,
             })?;
-            self.tables.write().unwrap().remove(&req.table_id);
+            let _ = self.tables.write().unwrap().remove(&req.table_id);
 
             Ok(true)
         } else {
@@ -388,7 +388,7 @@ impl EngineInner {
 
         let tables = self.tables.read().unwrap().clone();
 
-        futures::future::try_join_all(tables.values().map(|t| t.close(&[])))
+        let _ = futures::future::try_join_all(tables.values().map(|t| t.close(&[])))
             .await
             .map_err(BoxedError::new)
             .context(table_error::TableOperationSnafu)?;
@@ -427,7 +427,7 @@ impl EngineInner {
                 .context(table_error::TableOperationSnafu)?;
         }
 
-        self.tables.write().unwrap().remove(&table_id);
+        let _ = self.tables.write().unwrap().remove(&table_id);
 
         Ok(())
     }

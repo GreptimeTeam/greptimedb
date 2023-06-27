@@ -67,7 +67,7 @@ pub fn get_case_dir() -> String {
     let mut runner_crate_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
 
     // change directory to cases' dir from runner's (should be runner/../cases)
-    runner_crate_path.pop();
+    let _ = runner_crate_path.pop();
     runner_crate_path.push("cases");
 
     runner_crate_path.into_os_string().into_string().unwrap()
@@ -79,8 +79,8 @@ pub fn get_workspace_root() -> String {
     let mut runner_crate_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
 
     // change directory to workspace's root (runner/../..)
-    runner_crate_path.pop();
-    runner_crate_path.pop();
+    let _ = runner_crate_path.pop();
+    let _ = runner_crate_path.pop();
 
     runner_crate_path.into_os_string().into_string().unwrap()
 }

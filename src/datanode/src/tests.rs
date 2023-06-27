@@ -71,7 +71,7 @@ async fn test_close_region_handler() {
         ),
     )]));
 
-    prepare_table(instance.inner()).await;
+    let _ = prepare_table(instance.inner()).await;
 
     // Closes demo table
     handle_instruction(

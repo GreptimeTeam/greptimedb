@@ -215,9 +215,9 @@ pub(crate) fn init_interpreter() -> Arc<Interpreter> {
                     // add this line for stdlib, so rustpython can found stdlib's python part in bytecode format
                     vm.add_frozen(rustpython_pylib::FROZEN_STDLIB);
                     // add our own custom datatype and module
-                    PyVector::make_class(&vm.ctx);
-                    PyQueryEngine::make_class(&vm.ctx);
-                    PyRecordBatch::make_class(&vm.ctx);
+                    let _ = PyVector::make_class(&vm.ctx);
+                    let _ = PyQueryEngine::make_class(&vm.ctx);
+                    let _ = PyRecordBatch::make_class(&vm.ctx);
                     init_greptime_builtins("greptime", vm);
                     init_data_frame("data_frame", vm);
                 }));

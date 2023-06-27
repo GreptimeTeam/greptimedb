@@ -81,7 +81,7 @@ impl Server for MockGrpcServer {
 
         let service = self.create_service();
         // Would block to serve requests.
-        tokio::spawn(async move {
+        let _handle = tokio::spawn(async move {
             tonic::transport::Server::builder()
                 .add_service(service)
                 .serve_with_incoming(TcpListenerStream::new(listener))

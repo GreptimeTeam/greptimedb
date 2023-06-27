@@ -130,7 +130,7 @@ impl LevelMetas {
         // we only update region's compaction time window iff region's window is not set and VersionEdit's
         // compaction time window is present.
         if let Some(window) = compaction_time_window {
-            merged.compaction_time_window.get_or_insert(window);
+            let _ = merged.compaction_time_window.get_or_insert(window);
         }
         merged
     }
@@ -178,7 +178,7 @@ impl LevelMeta {
     }
 
     fn add_file(&mut self, file: FileHandle) {
-        self.files.insert(file.file_id(), file);
+        let _ = self.files.insert(file.file_id(), file);
     }
 
     fn remove_file(&mut self, file_to_remove: FileId) -> Option<FileHandle> {

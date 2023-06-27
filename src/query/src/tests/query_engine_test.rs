@@ -112,7 +112,7 @@ fn catalog_manager() -> Result<Arc<MemoryCatalogManager>> {
         table_id: NUMBERS_TABLE_ID,
         table: Arc::new(NumbersTable::default()),
     };
-    catalog_manager.register_table_sync(req).unwrap();
+    assert!(catalog_manager.register_table_sync(req).is_ok());
 
     Ok(catalog_manager)
 }

@@ -163,11 +163,12 @@ mod tests {
     }
 
     fn put_batch(batch: &mut WriteBatch, data: &[(i64, Option<i64>)]) {
-        let mut put_data = HashMap::with_capacity(2);
         let ts = TimestampMillisecondVector::from_values(data.iter().map(|v| v.0));
-        put_data.insert("ts".to_string(), Arc::new(ts) as VectorRef);
         let value = Int64Vector::from(data.iter().map(|v| v.1).collect::<Vec<_>>());
-        put_data.insert("value".to_string(), Arc::new(value) as VectorRef);
+        let put_data = HashMap::from([
+            ("ts".to_string(), Arc::new(ts) as VectorRef),
+            ("value".to_string(), Arc::new(value) as VectorRef),
+        ]);
 
         batch.put(put_data).unwrap();
     }

@@ -202,7 +202,7 @@ impl SchemaBuilder {
     ///
     /// Old metadata with same key would be overwritten.
     pub fn add_metadata(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        self.metadata.insert(key.into(), value.into());
+        let _ = self.metadata.insert(key.into(), value.into());
         self
     }
 
@@ -211,7 +211,8 @@ impl SchemaBuilder {
             validate_timestamp_index(&self.column_schemas, timestamp_index)?;
         }
 
-        self.metadata
+        let _ = self
+            .metadata
             .insert(VERSION_KEY.to_string(), self.version.to_string());
 
         let arrow_schema = ArrowSchema::new(self.fields).with_metadata(self.metadata);
@@ -242,7 +243,7 @@ fn collect_fields(column_schemas: &[ColumnSchema]) -> Result<FieldsAndIndices> {
         }
         let field = Field::try_from(column_schema)?;
         fields.push(field);
-        name_to_index.insert(column_schema.name.clone(), index);
+        let _ = name_to_index.insert(column_schema.name.clone(), index);
     }
 
     Ok(FieldsAndIndices {
@@ -287,7 +288,7 @@ impl TryFrom<Arc<ArrowSchema>> for Schema {
         let mut name_to_index = HashMap::with_capacity(arrow_schema.fields.len());
         for field in &arrow_schema.fields {
             let column_schema = ColumnSchema::try_from(field.as_ref())?;
-            name_to_index.insert(field.name().to_string(), column_schemas.len());
+            let _ = name_to_index.insert(field.name().to_string(), column_schemas.len());
             column_schemas.push(column_schema);
         }
 

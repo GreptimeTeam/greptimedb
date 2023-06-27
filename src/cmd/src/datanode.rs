@@ -170,7 +170,9 @@ impl StartCommand {
         logging::info!("Datanode start command: {:#?}", self);
         logging::info!("Datanode options: {:#?}", opts);
 
-        let datanode = Datanode::new(opts).await.context(StartDatanodeSnafu)?;
+        let datanode = Datanode::new(opts, Default::default())
+            .await
+            .context(StartDatanodeSnafu)?;
 
         Ok(Instance { datanode })
     }
@@ -324,12 +326,12 @@ mod tests {
         .is_err());
 
         // Providing node_id but leave metasrv_addr absent is ok since metasrv_addr has default value
-        (StartCommand {
+        assert!((StartCommand {
             node_id: Some(42),
             ..Default::default()
         })
         .load_options(TopLevelOptions::default())
-        .unwrap();
+        .is_ok());
     }
 
     #[test]

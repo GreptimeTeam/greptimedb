@@ -240,7 +240,7 @@ impl KvBackend for MetaKvBackend {
 
     async fn move_value(&self, from_key: &[u8], to_key: &[u8]) -> Result<()> {
         let req = MoveValueRequest::new(from_key, to_key);
-        self.client.move_value(req).await.context(MetaSrvSnafu)?;
+        let _ = self.client.move_value(req).await.context(MetaSrvSnafu)?;
         Ok(())
     }
 

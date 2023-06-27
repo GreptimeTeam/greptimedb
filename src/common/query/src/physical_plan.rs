@@ -150,7 +150,7 @@ impl PhysicalPlan for PhysicalPlanAdapter {
     }
 
     fn metrics(&self) -> Option<MetricsSet> {
-        Some(self.metric.clone_inner())
+        self.df_plan.metrics()
     }
 }
 

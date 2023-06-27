@@ -326,7 +326,7 @@ impl ExecutionPlan for RangeManipulateExec {
             DisplayFormatType::Default => {
                 write!(
                     f,
-                    "PromInstantManipulateExec: req range=[{}..{}], interval=[{}], eval range=[{}], time index=[{}]",
+                    "PromRangeManipulateExec: req range=[{}..{}], interval=[{}], eval range=[{}], time index=[{}]",
                    self.start, self.end, self.interval, self.range, self.time_index_column
                 )
             }
@@ -415,7 +415,7 @@ impl RangeManipulateStream {
         // transform columns
         let mut new_columns = input.columns().to_vec();
         for index in self.field_columns.iter() {
-            other_columns.remove(index);
+            let _ = other_columns.remove(index);
             let column = input.column(*index);
             let new_column = Arc::new(
                 RangeArray::from_ranges(column.clone(), ranges.clone())

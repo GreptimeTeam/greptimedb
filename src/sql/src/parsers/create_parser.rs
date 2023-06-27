@@ -61,7 +61,7 @@ impl<'a> ParserContext<'a> {
     }
 
     fn parse_create_external_table(&mut self) -> Result<Statement> {
-        self.parser.next_token();
+        let _ = self.parser.next_token();
         self.parser
             .expect_keyword(Keyword::TABLE)
             .context(error::SyntaxSnafu { sql: self.sql })?;
@@ -103,7 +103,7 @@ impl<'a> ParserContext<'a> {
     }
 
     fn parse_create_database(&mut self) -> Result<Statement> {
-        self.parser.next_token();
+        let _ = self.parser.next_token();
 
         let if_not_exists =
             self.parser
@@ -125,7 +125,7 @@ impl<'a> ParserContext<'a> {
     }
 
     fn parse_create_table(&mut self) -> Result<Statement> {
-        self.parser.next_token();
+        let _ = self.parser.next_token();
         let if_not_exists =
             self.parser
                 .parse_keywords(&[Keyword::IF, Keyword::NOT, Keyword::EXISTS]);
@@ -377,7 +377,7 @@ impl<'a> ParserContext<'a> {
                 column.options.push(not_null_opt);
             }
 
-            column.options.remove(index);
+            let _ = column.options.remove(index);
         }
 
         columns.push(column);

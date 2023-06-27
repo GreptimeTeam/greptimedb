@@ -534,7 +534,7 @@ mod tests {
         common_telemetry::init_default_ut_logging();
         let tmp_dir = create_temp_dir("test_manifest_log_store");
         let mut builder = Fs::default();
-        builder.root(&tmp_dir.path().to_string_lossy());
+        let _ = builder.root(&tmp_dir.path().to_string_lossy());
         let object_store = ObjectStore::new(builder).unwrap().finish();
         ManifestObjectStore::new("/", object_store, CompressionType::Uncompressed)
     }
@@ -610,7 +610,7 @@ mod tests {
         assert_eq!(3, v);
 
         //delete (,4) logs and keep checkpoint 3.
-        log_store.delete_until(4, true).await.unwrap();
+        assert!(log_store.delete_until(4, true).await.is_ok());
         assert!(log_store.load_checkpoint(3).await.unwrap().is_some());
         assert!(log_store.load_last_checkpoint().await.unwrap().is_some());
         let mut it = log_store.scan(0, 11).await.unwrap();
@@ -620,7 +620,7 @@ mod tests {
         assert!(it.next_log().await.unwrap().is_none());
 
         // delete all logs and checkpoints
-        log_store.delete_until(11, false).await.unwrap();
+        assert!(log_store.delete_until(11, false).await.is_ok());
         assert!(log_store.load_checkpoint(3).await.unwrap().is_none());
         assert!(log_store.load_last_checkpoint().await.unwrap().is_none());
         let mut it = log_store.scan(0, 11).await.unwrap();

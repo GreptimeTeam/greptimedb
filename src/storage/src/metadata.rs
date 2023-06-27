@@ -425,11 +425,11 @@ impl ColumnMetadata {
     fn to_metadata(&self) -> Metadata {
         let mut metadata = Metadata::new();
         if self.cf_id != consts::DEFAULT_CF_ID {
-            metadata.insert(METADATA_CF_ID_KEY.to_string(), self.cf_id.to_string());
+            let _ = metadata.insert(METADATA_CF_ID_KEY.to_string(), self.cf_id.to_string());
         }
-        metadata.insert(METADATA_COLUMN_ID_KEY.to_string(), self.desc.id.to_string());
+        let _ = metadata.insert(METADATA_COLUMN_ID_KEY.to_string(), self.desc.id.to_string());
         if !self.desc.comment.is_empty() {
-            metadata.insert(COMMENT_KEY.to_string(), self.desc.comment.clone());
+            let _ = metadata.insert(COMMENT_KEY.to_string(), self.desc.comment.clone());
         }
 
         metadata
@@ -657,12 +657,12 @@ struct ColumnsMetadataBuilder {
 impl ColumnsMetadataBuilder {
     fn row_key(&mut self, key: RowKeyDescriptor) -> Result<&mut Self> {
         for col in key.columns {
-            self.push_row_key_column(col)?;
+            let _ = self.push_row_key_column(col)?;
         }
 
         // TODO(yingwen): Validate this is a timestamp column.
         self.timestamp_key_index = Some(self.columns.len());
-        self.push_row_key_column(key.timestamp)?;
+        let _ = self.push_row_key_column(key.timestamp)?;
         self.row_key_end = self.columns.len();
 
         Ok(self)
@@ -705,8 +705,8 @@ impl ColumnsMetadataBuilder {
 
         let column_index = self.columns.len();
         self.columns.push(meta);
-        self.name_to_col_index.insert(column_name, column_index);
-        self.column_ids.insert(column_id);
+        let _ = self.name_to_col_index.insert(column_name, column_index);
+        let _ = self.column_ids.insert(column_id);
 
         Ok(self)
     }
@@ -717,7 +717,7 @@ impl ColumnsMetadataBuilder {
         let user_column_end = self.columns.len();
         // Setup internal columns.
         for internal_desc in internal_column_descs() {
-            self.push_new_column(consts::DEFAULT_CF_ID, internal_desc)?;
+            let _ = self.push_new_column(consts::DEFAULT_CF_ID, internal_desc)?;
         }
 
         Ok(ColumnsMetadata {
@@ -748,8 +748,8 @@ impl ColumnFamiliesMetadataBuilder {
             CfNameExistsSnafu { name: &cf.name }
         );
 
-        self.cf_names.insert(cf.name.clone());
-        self.id_to_cfs.insert(cf.cf_id, cf);
+        let _ = self.cf_names.insert(cf.name.clone());
+        let _ = self.id_to_cfs.insert(cf.cf_id, cf);
 
         Ok(self)
     }
@@ -802,7 +802,7 @@ impl RegionMetadataBuilder {
     }
 
     fn row_key(mut self, key: RowKeyDescriptor) -> Result<Self> {
-        self.columns_meta_builder.row_key(key)?;
+        let _ = self.columns_meta_builder.row_key(key)?;
 
         Ok(self)
     }
@@ -817,10 +817,10 @@ impl RegionMetadataBuilder {
             column_index_end,
         };
 
-        self.cfs_meta_builder.add_column_family(cf_meta)?;
+        let _ = self.cfs_meta_builder.add_column_family(cf_meta)?;
 
         for col in cf.columns {
-            self.columns_meta_builder.push_field_column(cf.cf_id, col)?;
+            let _ = self.columns_meta_builder.push_field_column(cf.cf_id, col)?;
         }
 
         Ok(self)

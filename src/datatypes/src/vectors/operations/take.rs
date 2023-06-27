@@ -148,7 +148,7 @@ mod tests {
     fn test_take_out_of_index() {
         let v = Int32Vector::from_slice([1, 2, 3, 4, 5]);
         let indies = UInt32Vector::from_slice([1, 5, 6]);
-        v.take(&indies).unwrap();
+        let _ = v.take(&indies);
     }
 
     #[test]

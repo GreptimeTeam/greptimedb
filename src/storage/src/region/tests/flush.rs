@@ -23,9 +23,7 @@ use common_recordbatch::OrderOption;
 use common_test_util::temp_dir::create_temp_dir;
 use datafusion_common::Column;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
-use store_api::storage::{
-    FlushContext, FlushReason, OpenOptions, Region, ScanRequest, WriteResponse,
-};
+use store_api::storage::{FlushContext, FlushReason, OpenOptions, Region, ScanRequest};
 
 use crate::config::EngineConfig;
 use crate::engine::{self, RegionMap};
@@ -114,12 +112,12 @@ impl FlushTester {
         self.base.as_ref().unwrap()
     }
 
-    async fn put(&self, data: &[(i64, Option<i64>)]) -> WriteResponse {
+    async fn put(&self, data: &[(i64, Option<i64>)]) {
         let data = data
             .iter()
             .map(|(ts, v0)| (*ts, v0.map(|v| v.to_string())))
             .collect::<Vec<_>>();
-        self.base().put(&data).await
+        let _ = self.base().put(&data).await;
     }
 
     async fn full_scan(&self) -> Vec<(i64, Option<String>)> {
@@ -347,7 +345,7 @@ async fn test_schedule_engine_flush() {
     assert_eq!(0, tester.base().region.last_flush_millis());
 
     // Insert the region to the region map.
-    tester.regions.get_or_occupy_slot(
+    let _ = tester.regions.get_or_occupy_slot(
         REGION_NAME,
         engine::RegionSlot::Ready(tester.base().region.clone()),
     );

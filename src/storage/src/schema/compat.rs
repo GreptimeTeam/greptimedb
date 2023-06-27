@@ -516,7 +516,7 @@ mod tests {
         let batch = tests::new_batch_with_num_values(2);
         let mut columns = batch.columns().to_vec();
         // Remove v0.
-        columns.remove(2);
+        let _ = columns.remove(2);
         let batch = Batch::new(columns);
 
         let new_batch = call_batch_from_parts(&adapter, &batch, 1);

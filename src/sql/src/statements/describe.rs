@@ -93,6 +93,6 @@ mod tests {
     #[test]
     pub fn test_describe_missing_table_name() {
         let sql = "DESCRIBE TABLE";
-        ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap_err();
+        assert!(ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).is_err());
     }
 }

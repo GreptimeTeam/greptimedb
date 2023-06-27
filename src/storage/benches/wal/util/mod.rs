@@ -75,17 +75,18 @@ pub fn gen_new_batch_and_types(putdate_nums: usize) -> (WriteBatch, Vec<i32>) {
         let tsv = Arc::new(TimestampMillisecondVector::from_values(tsvs)) as VectorRef;
         let fvs = Arc::new(Float64Vector::from_slice(fvs)) as VectorRef;
         let svs = Arc::new(StringVector::from_slice(&svs)) as VectorRef;
-        let mut put_data = HashMap::with_capacity(11);
-        put_data.insert("k1".to_string(), intv.clone());
-        put_data.insert("v1".to_string(), boolv);
-        put_data.insert("ts".to_string(), tsv.clone());
-        put_data.insert("4".to_string(), fvs.clone());
-        put_data.insert("5".to_string(), fvs.clone());
-        put_data.insert("6".to_string(), fvs.clone());
-        put_data.insert("7".to_string(), fvs.clone());
-        put_data.insert("8".to_string(), fvs.clone());
-        put_data.insert("9".to_string(), fvs.clone());
-        put_data.insert("10".to_string(), svs.clone());
+        let put_data = HashMap::from([
+            ("k1".to_string(), intv.clone()),
+            ("v1".to_string(), boolv),
+            ("ts".to_string(), tsv.clone()),
+            ("4".to_string(), fvs.clone()),
+            ("5".to_string(), fvs.clone()),
+            ("6".to_string(), fvs.clone()),
+            ("7".to_string(), fvs.clone()),
+            ("8".to_string(), fvs.clone()),
+            ("9".to_string(), fvs),
+            ("10".to_string(), svs),
+        ]);
         batch.put(put_data).unwrap();
     }
     let types = proto::wal::gen_mutation_types(batch.payload());

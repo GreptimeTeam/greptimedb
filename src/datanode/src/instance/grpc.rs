@@ -281,11 +281,11 @@ async fn new_dummy_catalog_list(
     )
     .await?;
     let catalog_provider = MemoryCatalogProvider::new();
-    catalog_provider
+    assert!(catalog_provider
         .register_schema(schema_name, Arc::new(schema_provider) as Arc<_>)
-        .unwrap();
+        .is_ok());
     let catalog_list = MemoryCatalogList::new();
-    catalog_list.register_catalog(
+    let _ = catalog_list.register_catalog(
         catalog_name.to_string(),
         Arc::new(catalog_provider) as Arc<_>,
     );
@@ -438,9 +438,12 @@ mod test {
     async fn test_handle_insert() {
         let instance = MockInstance::new("test_handle_insert").await;
         let instance = instance.inner();
-        test_util::create_test_table(instance, ConcreteDataType::timestamp_millisecond_datatype())
-            .await
-            .unwrap();
+        assert!(test_util::create_test_table(
+            instance,
+            ConcreteDataType::timestamp_millisecond_datatype()
+        )
+        .await
+        .is_ok());
 
         let insert = InsertRequest {
             table_name: "demo".to_string(),
@@ -508,9 +511,12 @@ mod test {
     async fn test_handle_delete() {
         let instance = MockInstance::new("test_handle_delete").await;
         let instance = instance.inner();
-        test_util::create_test_table(instance, ConcreteDataType::timestamp_millisecond_datatype())
-            .await
-            .unwrap();
+        assert!(test_util::create_test_table(
+            instance,
+            ConcreteDataType::timestamp_millisecond_datatype()
+        )
+        .await
+        .is_ok());
 
         let query = GrpcRequest::Query(QueryRequest {
             query: Some(Query::Sql(
@@ -574,9 +580,12 @@ mod test {
     async fn test_handle_query() {
         let instance = MockInstance::new("test_handle_query").await;
         let instance = instance.inner();
-        test_util::create_test_table(instance, ConcreteDataType::timestamp_millisecond_datatype())
-            .await
-            .unwrap();
+        assert!(test_util::create_test_table(
+            instance,
+            ConcreteDataType::timestamp_millisecond_datatype()
+        )
+        .await
+        .is_ok());
 
         let query = GrpcRequest::Query(QueryRequest {
             query: Some(Query::Sql(

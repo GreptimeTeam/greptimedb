@@ -77,7 +77,7 @@ pub async fn mock(
 
     let (client, server) = tokio::io::duplex(1024);
     let service = meta_srv.clone();
-    tokio::spawn(async move {
+    let _handle = tokio::spawn(async move {
         tonic::transport::Server::builder()
             .add_service(HeartbeatServer::new(service.clone()))
             .add_service(RouterServer::new(service.clone()))

@@ -257,7 +257,7 @@ impl CatalogManager for FrontendCatalogManager {
             let Kv(k, _) = r?;
             let catalog_key = String::from_utf8_lossy(&k);
             if let Ok(key) = CatalogKey::parse(catalog_key.as_ref()) {
-                res.insert(key.catalog_name);
+                let _ = res.insert(key.catalog_name);
             } else {
                 warn!("invalid catalog key: {:?}", catalog_key);
             }
@@ -273,7 +273,7 @@ impl CatalogManager for FrontendCatalogManager {
             let Kv(k, _) = r?;
             let key =
                 SchemaKey::parse(String::from_utf8_lossy(&k)).context(InvalidCatalogValueSnafu)?;
-            res.insert(key.schema_name);
+            let _ = res.insert(key.schema_name);
         }
         Ok(res.into_iter().collect())
     }

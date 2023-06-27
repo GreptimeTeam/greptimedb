@@ -185,14 +185,14 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
-        tokio::spawn(async move {
+        let _handle = tokio::spawn(async move {
             loop {
                 let (stream, _) = listener.accept().await.unwrap();
 
                 let query_handler = query_handler.clone();
                 let connection = Connection::new(stream);
                 let shutdown = Shutdown::new(notify_shutdown.subscribe());
-                tokio::spawn(async move {
+                let _handle = tokio::spawn(async move {
                     Handler::new(query_handler, connection, shutdown)
                         .run()
                         .await

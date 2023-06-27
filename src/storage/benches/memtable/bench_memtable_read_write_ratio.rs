@@ -42,11 +42,11 @@ fn memtable_round(ctx: &BenchContext, input: &Input) {
         let now = Instant::now();
         let read_count = ctx.read(input.batch_size);
         let d = now.elapsed();
-        READ_SECS.fetch_add(
+        let _ = READ_SECS.fetch_add(
             d.as_secs() as f64 + d.subsec_nanos() as f64 * 1e-9,
             Ordering::Relaxed,
         );
-        READ_NUM.fetch_add(read_count, Ordering::Relaxed);
+        let _ = READ_NUM.fetch_add(read_count, Ordering::Relaxed);
     } else {
         generate_kvs(input.kv_size, input.batch_size, 20)
             .iter()
@@ -54,11 +54,11 @@ fn memtable_round(ctx: &BenchContext, input: &Input) {
                 let now = Instant::now();
                 ctx.write(kv);
                 let d = now.elapsed();
-                WRITE_SECS.fetch_add(
+                let _ = WRITE_SECS.fetch_add(
                     d.as_secs() as f64 + d.subsec_nanos() as f64 * 1e-9,
                     Ordering::Relaxed,
                 );
-                WRITE_NUM.fetch_add(kv.len(), Ordering::Relaxed);
+                let _ = WRITE_NUM.fetch_add(kv.len(), Ordering::Relaxed);
             });
     }
 }
@@ -111,16 +111,17 @@ fn bench_memtable_read_write_ratio(c: &mut Criterion) {
         READ_SECS.store(0.0, Ordering::Relaxed);
         WRITE_SECS.store(0.0, Ordering::Relaxed);
 
-        group.bench_with_input(
-            BenchmarkId::from_parameter(format!(
-                "read ratio: {:.2}% , write ratio: {:.2}%",
-                i as f64 / 10_f64 * 100.0,
-                (10 - i) as f64 / 10_f64 * 100.0,
-            )),
-            &i,
-            bench_read_write_ctx_frac,
-        );
-        group.throughput(Throughput::Elements(100 * 1000));
+        let _ = group
+            .bench_with_input(
+                BenchmarkId::from_parameter(format!(
+                    "read ratio: {:.2}% , write ratio: {:.2}%",
+                    i as f64 / 10_f64 * 100.0,
+                    (10 - i) as f64 / 10_f64 * 100.0,
+                )),
+                &i,
+                bench_read_write_ctx_frac,
+            )
+            .throughput(Throughput::Elements(100 * 1000));
 
         // the time is a little different the real time
         let read_num = READ_NUM.load(Ordering::Relaxed);

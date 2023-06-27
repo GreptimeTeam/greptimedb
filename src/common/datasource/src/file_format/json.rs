@@ -214,18 +214,18 @@ mod tests {
 
     #[test]
     fn test_try_from() {
-        let mut map = HashMap::new();
+        let map = HashMap::new();
         let format = JsonFormat::try_from(&map).unwrap();
 
         assert_eq!(format, JsonFormat::default());
 
-        map.insert(
-            FORMAT_SCHEMA_INFER_MAX_RECORD.to_string(),
-            "2000".to_string(),
-        );
-
-        map.insert(FORMAT_COMPRESSION_TYPE.to_string(), "zstd".to_string());
-
+        let map = HashMap::from([
+            (
+                FORMAT_SCHEMA_INFER_MAX_RECORD.to_string(),
+                "2000".to_string(),
+            ),
+            (FORMAT_COMPRESSION_TYPE.to_string(), "zstd".to_string()),
+        ]);
         let format = JsonFormat::try_from(&map).unwrap();
 
         assert_eq!(

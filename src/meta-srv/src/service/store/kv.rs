@@ -22,12 +22,13 @@ use api::v1::meta::{
 };
 
 use crate::error::Result;
+use crate::service::store::txn::TxnService;
 
 pub type KvStoreRef = Arc<dyn KvStore>;
 pub type ResettableKvStoreRef = Arc<dyn ResettableKvStore>;
 
 #[async_trait::async_trait]
-pub trait KvStore: Send + Sync {
+pub trait KvStore: TxnService {
     async fn range(&self, req: RangeRequest) -> Result<RangeResponse>;
 
     async fn put(&self, req: PutRequest) -> Result<PutResponse>;

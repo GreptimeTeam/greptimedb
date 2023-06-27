@@ -30,7 +30,7 @@ pub struct KeepLeaseHandler {
 impl KeepLeaseHandler {
     pub fn new(kv_store: KvStoreRef) -> Self {
         let (tx, mut rx) = mpsc::channel(1024);
-        common_runtime::spawn_bg(async move {
+        let _handle = common_runtime::spawn_bg(async move {
             while let Some(kv) = rx.recv().await {
                 let mut kvs = vec![kv];
 

@@ -218,11 +218,11 @@ mod tests {
             .unwrap();
         assert_eq!("A test column", desc.comment);
 
-        new_column_desc_builder()
+        assert!(new_column_desc_builder()
             .is_nullable(false)
             .default_constraint(Some(ColumnDefaultConstraint::Value(Value::Null)))
             .build()
-            .unwrap_err();
+            .is_err());
     }
 
     #[test]

@@ -42,7 +42,8 @@ impl Procedure for DropImmutableFileTable {
         let engine_ctx = EngineContext::default();
         // Currently, `drop_table()` of ImmutableFileTableEngine is idempotent so we just
         // invoke it.
-        self.engine
+        let _ = self
+            .engine
             .drop_table(&engine_ctx, self.data.request.clone())
             .await
             .map_err(Error::from_error_ext)?;

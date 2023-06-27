@@ -138,7 +138,7 @@ impl MysqlInstanceShim {
     fn save_plan(&self, plan: SqlPlan) -> u32 {
         let stmt_id = self.prepared_stmts_counter.fetch_add(1, Ordering::Relaxed);
         let mut prepared_stmts = self.prepared_stmts.write();
-        prepared_stmts.insert(stmt_id, plan);
+        let _ = prepared_stmts.insert(stmt_id, plan);
         stmt_id
     }
 
@@ -317,7 +317,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         W: 'async_trait,
     {
         let mut guard = self.prepared_stmts.write();
-        guard.remove(&stmt_id);
+        let _ = guard.remove(&stmt_id);
     }
 
     async fn on_query<'a>(

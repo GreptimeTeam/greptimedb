@@ -23,7 +23,7 @@ use log_store::raft_engine::log_store::RaftEngineLogStore;
 use store_api::storage::{
     AddColumn, AlterOperation, AlterRequest, Chunk, ChunkReader, ColumnDescriptor,
     ColumnDescriptorBuilder, ColumnId, FlushContext, FlushReason, Region, RegionMeta, ScanRequest,
-    SchemaRef, Snapshot, WriteRequest, WriteResponse,
+    SchemaRef, Snapshot, WriteRequest,
 };
 
 use crate::config::EngineConfig;
@@ -75,7 +75,6 @@ impl DataRow {
 }
 
 fn new_put_data(data: &[DataRow]) -> HashMap<String, VectorRef> {
-    let mut put_data = HashMap::with_capacity(4);
     let keys = Int64Vector::from(data.iter().map(|v| v.key).collect::<Vec<_>>());
     let timestamps = TimestampMillisecondVector::from(
         data.iter()
@@ -85,16 +84,15 @@ fn new_put_data(data: &[DataRow]) -> HashMap<String, VectorRef> {
     let values1 = StringVector::from(data.iter().map(|v| v.v0.clone()).collect::<Vec<_>>());
     let values2 = Int64Vector::from(data.iter().map(|kv| kv.v1).collect::<Vec<_>>());
 
-    put_data.insert("k0".to_string(), Arc::new(keys) as VectorRef);
-    put_data.insert(
-        test_util::TIMESTAMP_NAME.to_string(),
-        Arc::new(timestamps) as VectorRef,
-    );
-
-    put_data.insert("v0".to_string(), Arc::new(values1) as VectorRef);
-    put_data.insert("v1".to_string(), Arc::new(values2) as VectorRef);
-
-    put_data
+    HashMap::from([
+        ("k0".to_string(), Arc::new(keys) as VectorRef),
+        (
+            test_util::TIMESTAMP_NAME.to_string(),
+            Arc::new(timestamps) as VectorRef,
+        ),
+        ("v0".to_string(), Arc::new(values1) as VectorRef),
+        ("v1".to_string(), Arc::new(values2) as VectorRef),
+    ])
 }
 
 impl AlterTester {
@@ -151,16 +149,17 @@ impl AlterTester {
     }
 
     // Put with schema k0, ts, v0, v1
-    async fn put(&self, data: &[DataRow]) -> WriteResponse {
+    async fn put(&self, data: &[DataRow]) {
         let mut batch = self.base().region.write_request();
         let put_data = new_put_data(data);
         batch.put(put_data).unwrap();
 
-        self.base()
+        assert!(self
+            .base()
             .region
             .write(&self.base().write_ctx, batch)
             .await
-            .unwrap()
+            .is_ok());
     }
 
     /// Put data with initial schema.
@@ -170,7 +169,7 @@ impl AlterTester {
             .iter()
             .map(|(ts, v0)| (*ts, v0.map(|v| v.to_string())))
             .collect::<Vec<_>>();
-        self.base().put(&data).await;
+        let _ = self.base().put(&data).await;
     }
 
     /// Put data to inner writer with initial schema.
@@ -180,7 +179,7 @@ impl AlterTester {
             .map(|(ts, v0)| (*ts, v0.map(|v| v.to_string())))
             .collect::<Vec<_>>();
         // put of FileTesterBase always use initial schema version.
-        self.base().put_inner(&data).await;
+        let _ = self.base().put_inner(&data).await;
     }
 
     async fn alter(&self, mut req: AlterRequest) {
@@ -475,8 +474,6 @@ async fn test_replay_metadata_after_open() {
     let manifest_version = tester.base().region.current_manifest_version();
     let version = tester.version();
 
-    let mut recovered_metadata = BTreeMap::new();
-
     let desc = RegionDescBuilder::new(REGION_NAME)
         .push_key_column(("k1", LogicalTypeId::Int32, false))
         .push_field_column(("v0", LogicalTypeId::Float32, true))
@@ -484,7 +481,10 @@ async fn test_replay_metadata_after_open() {
     let metadata: &RegionMetadata = &desc.try_into().unwrap();
     let mut raw_metadata: RawRegionMetadata = metadata.into();
     raw_metadata.version = version + 1;
-    recovered_metadata.insert(committed_sequence, (manifest_version + 1, raw_metadata));
+
+    let recovered_metadata =
+        BTreeMap::from([(committed_sequence, (manifest_version + 1, raw_metadata))]);
+
     tester.base().replay_inner(recovered_metadata).await;
     let schema = tester.schema();
     check_schema_names(&schema, &["k1", "timestamp", "v0"]);

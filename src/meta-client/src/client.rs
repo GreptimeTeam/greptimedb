@@ -330,7 +330,7 @@ impl MetaClient {
     }
 
     pub async fn unlock(&self, req: UnlockRequest) -> Result<()> {
-        self.lock_client()?.unlock(req.into()).await?;
+        let _ = self.lock_client()?.unlock(req.into()).await?;
         Ok(())
     }
 
@@ -577,7 +577,7 @@ mod tests {
         let tc = new_client("test_heartbeat").await;
         let (sender, mut receiver) = tc.client.heartbeat().await.unwrap();
         // send heartbeats
-        tokio::spawn(async move {
+        let _handle = tokio::spawn(async move {
             for _ in 0..5 {
                 let req = HeartbeatRequest {
                     peer: Some(Peer {
@@ -590,7 +590,7 @@ mod tests {
             }
         });
 
-        tokio::spawn(async move {
+        let _handle = tokio::spawn(async move {
             while let Some(res) = receiver.message().await.unwrap() {
                 assert_eq!(1000, res.header.unwrap().cluster_id);
             }

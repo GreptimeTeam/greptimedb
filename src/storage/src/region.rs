@@ -477,7 +477,7 @@ impl<S: LogStore> RegionImpl<S> {
                         }
                     }
                     (RegionMetaAction::Change(c), Some(v)) => {
-                        recovered_metadata
+                        let _ = recovered_metadata
                             .insert(c.committed_sequence, (manifest_version, c.metadata));
                         version = Some(v);
                     }

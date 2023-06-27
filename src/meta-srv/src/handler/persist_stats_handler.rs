@@ -122,7 +122,7 @@ impl HeartbeatHandler for PersistStatsHandler {
             ..Default::default()
         };
 
-        ctx.in_memory.put(put).await?;
+        let _ = ctx.in_memory.put(put).await?;
 
         Ok(())
     }

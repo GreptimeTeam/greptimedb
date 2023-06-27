@@ -36,6 +36,7 @@ tonic.workspace = true
 
 [dev-dependencies]
 datanode = { path = "../datanode" }
+derive-new = "0.5"
 substrait = { path = "../common/substrait" }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

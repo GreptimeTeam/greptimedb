@@ -59,7 +59,7 @@ use tower_http::auth::AsyncRequireAuthorizationLayer;
 use tower_http::trace::TraceLayer;
 
 use self::authorize::HttpAuth;
-use self::influxdb::{influxdb_health, influxdb_ping, influxdb_write};
+use self::influxdb::{influxdb_health, influxdb_ping, influxdb_write_v1, influxdb_write_v2};
 use crate::auth::UserProviderRef;
 use crate::configurator::ConfiguratorRef;
 use crate::error::{AlreadyStartedSnafu, Result, StartHttpSnafu};
@@ -397,42 +397,42 @@ impl HttpServerBuilder {
     }
 
     pub fn with_sql_handler(&mut self, handler: ServerSqlQueryHandlerRef) -> &mut Self {
-        self.inner.sql_handler.get_or_insert(handler);
+        let _ = self.inner.sql_handler.get_or_insert(handler);
         self
     }
 
     pub fn with_grpc_handler(&mut self, handler: ServerGrpcQueryHandlerRef) -> &mut Self {
-        self.inner.grpc_handler.get_or_insert(handler);
+        let _ = self.inner.grpc_handler.get_or_insert(handler);
         self
     }
 
     pub fn with_opentsdb_handler(&mut self, handler: OpentsdbProtocolHandlerRef) -> &mut Self {
-        self.inner.opentsdb_handler.get_or_insert(handler);
+        let _ = self.inner.opentsdb_handler.get_or_insert(handler);
         self
     }
 
     pub fn with_script_handler(&mut self, handler: ScriptHandlerRef) -> &mut Self {
-        self.inner.script_handler.get_or_insert(handler);
+        let _ = self.inner.script_handler.get_or_insert(handler);
         self
     }
 
     pub fn with_influxdb_handler(&mut self, handler: InfluxdbLineProtocolHandlerRef) -> &mut Self {
-        self.inner.influxdb_handler.get_or_insert(handler);
+        let _ = self.inner.influxdb_handler.get_or_insert(handler);
         self
     }
 
     pub fn with_prom_handler(&mut self, handler: PrometheusProtocolHandlerRef) -> &mut Self {
-        self.inner.prom_handler.get_or_insert(handler);
+        let _ = self.inner.prom_handler.get_or_insert(handler);
         self
     }
 
     pub fn with_user_provider(&mut self, user_provider: UserProviderRef) -> &mut Self {
-        self.inner.user_provider.get_or_insert(user_provider);
+        let _ = self.inner.user_provider.get_or_insert(user_provider);
         self
     }
 
     pub fn with_metrics_handler(&mut self, handler: MetricsHandler) -> &mut Self {
-        self.inner.metrics_handler.get_or_insert(handler);
+        let _ = self.inner.metrics_handler.get_or_insert(handler);
         self
     }
 
@@ -598,7 +598,8 @@ impl HttpServer {
 
     fn route_influxdb<S>(&self, influxdb_handler: InfluxdbLineProtocolHandlerRef) -> Router<S> {
         Router::new()
-            .route("/write", routing::post(influxdb_write))
+            .route("/write", routing::post(influxdb_write_v1))
+            .route("/api/v2/write", routing::post(influxdb_write_v2))
             .route("/ping", routing::get(influxdb_ping))
             .route("/health", routing::get(influxdb_health))
             .with_state(influxdb_handler)

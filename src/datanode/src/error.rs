@@ -196,8 +196,11 @@ pub enum Error {
         source: sql::error::Error,
     },
 
-    #[snafu(display("Missing insert body"))]
-    MissingInsertBody { location: Location },
+    #[snafu(display("Missing insert body, source: {source}"))]
+    MissingInsertBody {
+        source: sql::error::Error,
+        location: Location,
+    },
 
     #[snafu(display("Failed to insert value to table: {}, source: {}", table_name, source))]
     Insert {
@@ -527,7 +530,6 @@ impl ErrorExt for Error {
             | ConstraintNotSupported { .. }
             | SchemaExists { .. }
             | ParseTimestamp { .. }
-            | MissingInsertBody { .. }
             | DatabaseNotFound { .. }
             | MissingNodeId { .. }
             | MissingMetasrvOpts { .. }
@@ -555,6 +557,7 @@ impl ErrorExt for Error {
             | Catalog { .. }
             | MissingRequiredField { .. }
             | IncorrectInternalState { .. }
+            | MissingInsertBody { .. }
             | ShutdownInstance { .. }
             | CloseTableEngine { .. }
             | JoinTask { .. } => StatusCode::Internal,

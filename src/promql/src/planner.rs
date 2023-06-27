@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
@@ -487,7 +487,7 @@ impl PromPlanner {
                     .get_or_insert_default()
                     .push(matcher.clone());
             } else {
-                matchers.insert(matcher.clone());
+                let _ = matchers.insert(matcher.clone());
             }
         }
         Ok(Matchers { matchers })
@@ -538,7 +538,7 @@ impl PromPlanner {
                 match &matcher.op {
                     MatchOp::Equal => {
                         if col_set.contains(&matcher.value) {
-                            result_set.insert(matcher.value.clone());
+                            let _ = result_set.insert(matcher.value.clone());
                         } else {
                             return Err(ColumnNotFoundSnafu {
                                 col: matcher.value.clone(),
@@ -548,7 +548,7 @@ impl PromPlanner {
                     }
                     MatchOp::NotEqual => {
                         if col_set.contains(&matcher.value) {
-                            reverse_set.insert(matcher.value.clone());
+                            let _ = reverse_set.insert(matcher.value.clone());
                         } else {
                             return Err(ColumnNotFoundSnafu {
                                 col: matcher.value.clone(),
@@ -559,14 +559,14 @@ impl PromPlanner {
                     MatchOp::Re(regex) => {
                         for col in &self.ctx.field_columns {
                             if regex.is_match(col) {
-                                result_set.insert(col.clone());
+                                let _ = result_set.insert(col.clone());
                             }
                         }
                     }
                     MatchOp::NotRe(regex) => {
                         for col in &self.ctx.field_columns {
                             if regex.is_match(col) {
-                                reverse_set.insert(col.clone());
+                                let _ = reverse_set.insert(col.clone());
                             }
                         }
                     }
@@ -577,7 +577,7 @@ impl PromPlanner {
                 result_set = col_set.into_iter().cloned().collect();
             }
             for col in reverse_set {
-                result_set.remove(&col);
+                let _ = result_set.remove(&col);
             }
 
             self.ctx.field_columns = result_set.iter().cloned().collect();
@@ -670,15 +670,15 @@ impl PromPlanner {
                 // remove "without"-ed fields
                 // nonexistence label will be ignored
                 for label in labels {
-                    all_fields.remove(label);
+                    let _ = all_fields.remove(label);
                 }
 
                 // remove time index and value fields
                 if let Some(time_index) = &self.ctx.time_index_column {
-                    all_fields.remove(time_index);
+                    let _ = all_fields.remove(time_index);
                 }
                 for value in &self.ctx.field_columns {
-                    all_fields.remove(value);
+                    let _ = all_fields.remove(value);
                 }
 
                 // change the tag columns in context
@@ -833,9 +833,10 @@ impl PromPlanner {
     fn create_function_expr(
         &mut self,
         func: &Function,
-        mut other_input_exprs: Vec<DfExpr>,
+        other_input_exprs: Vec<DfExpr>,
     ) -> Result<Vec<DfExpr>> {
         // TODO(ruihang): check function args list
+        let mut other_input_exprs: VecDeque<DfExpr> = other_input_exprs.into();
 
         // TODO(ruihang): set this according to in-param list
         let field_column_pos = 0;
@@ -865,8 +866,8 @@ impl PromPlanner {
             "stddev_over_time" => ScalarFunc::Udf(StddevOverTime::scalar_udf()),
             "stdvar_over_time" => ScalarFunc::Udf(StdvarOverTime::scalar_udf()),
             "quantile_over_time" => {
-                let quantile_expr = match other_input_exprs.get(0) {
-                    Some(DfExpr::Literal(ScalarValue::Float64(Some(quantile)))) => *quantile,
+                let quantile_expr = match other_input_exprs.pop_front() {
+                    Some(DfExpr::Literal(ScalarValue::Float64(Some(quantile)))) => quantile,
                     other => UnexpectedPlanExprSnafu {
                         desc: format!("expect f64 literal as quantile, but found {:?}", other),
                     }
@@ -875,8 +876,8 @@ impl PromPlanner {
                 ScalarFunc::Udf(QuantileOverTime::scalar_udf(quantile_expr))
             }
             "predict_linear" => {
-                let t_expr = match other_input_exprs.get(0) {
-                    Some(DfExpr::Literal(ScalarValue::Time64Microsecond(Some(t)))) => *t,
+                let t_expr = match other_input_exprs.pop_front() {
+                    Some(DfExpr::Literal(ScalarValue::Time64Microsecond(Some(t)))) => t,
                     other => UnexpectedPlanExprSnafu {
                         desc: format!("expect i64 literal as t, but found {:?}", other),
                     }
@@ -885,8 +886,8 @@ impl PromPlanner {
                 ScalarFunc::Udf(PredictLinear::scalar_udf(t_expr))
             }
             "holt_winters" => {
-                let sf_exp = match other_input_exprs.get(0) {
-                    Some(DfExpr::Literal(ScalarValue::Float64(Some(sf)))) => *sf,
+                let sf_exp = match other_input_exprs.pop_front() {
+                    Some(DfExpr::Literal(ScalarValue::Float64(Some(sf)))) => sf,
                     other => UnexpectedPlanExprSnafu {
                         desc: format!(
                             "expect f64 literal as smoothing factor, but found {:?}",
@@ -895,8 +896,8 @@ impl PromPlanner {
                     }
                     .fail()?,
                 };
-                let tf_exp = match other_input_exprs.get(1) {
-                    Some(DfExpr::Literal(ScalarValue::Float64(Some(tf)))) => *tf,
+                let tf_exp = match other_input_exprs.pop_front() {
+                    Some(DfExpr::Literal(ScalarValue::Float64(Some(tf)))) => tf,
                     other => UnexpectedPlanExprSnafu {
                         desc: format!("expect f64 literal as trend factor, but found {:?}", other),
                     }
@@ -924,10 +925,10 @@ impl PromPlanner {
                     other_input_exprs.insert(field_column_pos, col_expr);
                     let fn_expr = DfExpr::ScalarFunction(ScalarFunction {
                         fun,
-                        args: other_input_exprs.clone(),
+                        args: other_input_exprs.clone().into(),
                     });
                     exprs.push(fn_expr);
-                    other_input_exprs.remove(field_column_pos);
+                    let _ = other_input_exprs.remove(field_column_pos);
                 }
                 ScalarFunc::Udf(fun) => {
                     let ts_range_expr = DfExpr::Column(Column::from_name(
@@ -939,11 +940,11 @@ impl PromPlanner {
                     other_input_exprs.insert(field_column_pos + 1, col_expr);
                     let fn_expr = DfExpr::ScalarUDF(ScalarUDF {
                         fun: Arc::new(fun),
-                        args: other_input_exprs.clone(),
+                        args: other_input_exprs.clone().into(),
                     });
                     exprs.push(fn_expr);
-                    other_input_exprs.remove(field_column_pos + 1);
-                    other_input_exprs.remove(field_column_pos);
+                    let _ = other_input_exprs.remove(field_column_pos + 1);
+                    let _ = other_input_exprs.remove(field_column_pos);
                 }
                 ScalarFunc::ExtrapolateUdf(fun) => {
                     let ts_range_expr = DfExpr::Column(Column::from_name(
@@ -957,12 +958,12 @@ impl PromPlanner {
                         .insert(field_column_pos + 2, self.create_time_index_column_expr()?);
                     let fn_expr = DfExpr::ScalarUDF(ScalarUDF {
                         fun: Arc::new(fun),
-                        args: other_input_exprs.clone(),
+                        args: other_input_exprs.clone().into(),
                     });
                     exprs.push(fn_expr);
-                    other_input_exprs.remove(field_column_pos + 2);
-                    other_input_exprs.remove(field_column_pos + 1);
-                    other_input_exprs.remove(field_column_pos);
+                    let _ = other_input_exprs.remove(field_column_pos + 2);
+                    let _ = other_input_exprs.remove(field_column_pos + 1);
+                    let _ = other_input_exprs.remove(field_column_pos);
                 }
             }
         }
@@ -1358,7 +1359,7 @@ mod test {
             .unwrap();
         let table = Arc::new(EmptyTable::from_table_info(&table_info));
         let catalog_list = Arc::new(MemoryCatalogManager::default());
-        catalog_list
+        assert!(catalog_list
             .register_table(RegisterTableRequest {
                 catalog: DEFAULT_CATALOG_NAME.to_string(),
                 schema: DEFAULT_SCHEMA_NAME.to_string(),
@@ -1367,7 +1368,7 @@ mod test {
                 table,
             })
             .await
-            .unwrap();
+            .is_ok());
         DfTableSourceProvider::new(catalog_list, false, &QueryContext::new())
     }
 

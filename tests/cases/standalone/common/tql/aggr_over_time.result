@@ -1,0 +1,132 @@
+create table metric (ts timestamp(3) time index, val double);
+
+Affected Rows: 0
+
+insert into metric values
+    (0,0),
+    (10000,8),
+    (20000,8),
+    (30000,2),
+    (40000,3);
+
+Affected Rows: 5
+
+select * from metric;
+
++---------------------+-----+
+| ts                  | val |
++---------------------+-----+
+| 1970-01-01T00:00:00 | 0.0 |
+| 1970-01-01T00:00:10 | 8.0 |
+| 1970-01-01T00:00:20 | 8.0 |
+| 1970-01-01T00:00:30 | 2.0 |
+| 1970-01-01T00:00:40 | 3.0 |
++---------------------+-----+
+
+tql eval (60, 61, '10s') stdvar_over_time(metric[1m]);
+
++---------------------+-------------------------------------+
+| ts                  | prom_stdvar_over_time(ts_range,val) |
++---------------------+-------------------------------------+
+| 1970-01-01T00:01:00 | 10.559999999999999                  |
++---------------------+-------------------------------------+
+
+tql eval (60, 60, '1s') stddev_over_time(metric[1m]);
+
++---------------------+-------------------------------------+
+| ts                  | prom_stddev_over_time(ts_range,val) |
++---------------------+-------------------------------------+
+| 1970-01-01T00:01:00 | 3.249615361854384                   |
++---------------------+-------------------------------------+
+
+tql eval (60, 60, '1s') stddev_over_time((metric[1m]));
+
++---------------------+-------------------------------------+
+| ts                  | prom_stddev_over_time(ts_range,val) |
++---------------------+-------------------------------------+
+| 1970-01-01T00:01:00 | 3.249615361854384                   |
++---------------------+-------------------------------------+
+
+drop table metric;
+
+Affected Rows: 1
+
+create table metric (ts timestamp(3) time index, val double);
+
+Affected Rows: 0
+
+insert into metric values
+    (0,0),
+    (10000,1.5990505637277868),
+    (20000,1.5990505637277868),
+    (30000,1.5990505637277868);
+
+Affected Rows: 4
+
+tql eval (60, 60, '1s') stdvar_over_time(metric[1m]);
+
++---------------------+-------------------------------------+
+| ts                  | prom_stdvar_over_time(ts_range,val) |
++---------------------+-------------------------------------+
+| 1970-01-01T00:01:00 | 0.47943050725465364                 |
++---------------------+-------------------------------------+
+
+tql eval (60, 60, '1s') stddev_over_time(metric[1m]);
+
++---------------------+-------------------------------------+
+| ts                  | prom_stddev_over_time(ts_range,val) |
++---------------------+-------------------------------------+
+| 1970-01-01T00:01:00 | 0.6924092050620454                  |
++---------------------+-------------------------------------+
+
+drop table metric;
+
+Affected Rows: 1
+
+create table data (ts timestamp(3) time index, val double, test string primary key);
+
+Affected Rows: 0
+
+insert into data values
+    (0, 0, "two samples"),
+    (10000, 1, "two samples"),
+    (0, 0, "three samples"),
+    (10000, 1, "three samples"),
+    (20000, 2, "three samples"),
+    (0, 0, "uneven samples"),
+    (10000, 1, "uneven samples"),
+    (20000, 4, "uneven samples");
+
+Affected Rows: 8
+
+drop table data;
+
+Affected Rows: 1
+
+create table data (ts timestamp(3) time index, val double, ty string primary key);
+
+Affected Rows: 0
+
+insert into data values
+    (0, 2::double, 'numbers'),
+    (10000, 0::double, 'numbers'),
+    (20000, 3::double, 'numbers'),
+    (0, 2::double, 'some_nan'),
+    (10000, 0::double, 'some_nan'),
+    (20000, 'NaN'::double, 'some_nan'),
+    (0, 2::double, 'some_nan2'),
+    (10000, 'NaN'::double, 'some_nan2'),
+    (20000, 1::double, 'some_nan2'),
+    (0, 'NaN'::double, 'some_nan3'),
+    (10000, 0::double, 'some_nan3'),
+    (20000, 1::double, 'some_nan3'),
+    (0, 'NaN'::double, 'only_nan'),
+    (10000, 'NaN'::double, 'only_nan'),
+    (20000, 'NaN'::double, 'only_nan');
+
+Affected Rows: 15
+
+drop table data;
+
+Affected Rows: 1
+

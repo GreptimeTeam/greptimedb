@@ -213,7 +213,7 @@ impl DistInstance {
             );
 
             let _timer = common_telemetry::timer!(crate::metrics::DIST_CREATE_TABLE_IN_DATANODE);
-            client
+            let _ = client
                 .create(create_expr_for_region)
                 .await
                 .context(RequestDatanodeSnafu)?;
@@ -277,7 +277,7 @@ impl DistInstance {
 
                 let client = self.datanode_clients.get_client(&datanode).await;
                 let client = Database::new(&expr.catalog_name, &expr.schema_name, client);
-                client
+                let _ = client
                     .drop_table(expr.clone())
                     .await
                     .context(RequestDatanodeSnafu)?;
@@ -349,7 +349,7 @@ impl DistInstance {
 
                 let client = self.datanode_clients.get_client(&datanode).await;
                 let client = Database::new(&expr.catalog_name, &expr.schema_name, client);
-                client
+                let _ = client
                     .flush_table(expr.clone())
                     .await
                     .context(RequestDatanodeSnafu)?;
@@ -378,7 +378,7 @@ impl DistInstance {
             }
             Statement::CreateExternalTable(stmt) => {
                 let create_expr = &mut expr_factory::create_external_expr(stmt, query_ctx).await?;
-                self.create_table(create_expr, None).await?;
+                let _ = self.create_table(create_expr, None).await?;
                 Ok(Output::AffectedRows(0))
             }
             Statement::Alter(alter_table) => {
@@ -407,7 +407,7 @@ impl DistInstance {
                     .context(TableNotFoundSnafu { table_name: table })?;
 
                 let insert_request =
-                    SqlHandler::insert_to_request(self.catalog_manager.clone(), *insert, query_ctx)
+                    SqlHandler::insert_to_request(self.catalog_manager.clone(), &insert, query_ctx)
                         .await
                         .context(InvokeDatanodeSnafu)?;
 
@@ -545,7 +545,7 @@ impl DistInstance {
 
         let mut context = AlterContext::with_capacity(1);
 
-        context.insert(expr);
+        let _ = context.insert(expr);
 
         table.alter(context, &request).await.context(TableSnafu)?;
 
@@ -730,7 +730,7 @@ fn create_table_info(create_table: &CreateTableExpr) -> Result<RawTableInfo> {
         let schema = schema.with_time_index(column.name == create_table.time_index);
 
         column_schemas.push(schema);
-        column_name_to_index_map.insert(column.name.clone(), idx);
+        let _ = column_name_to_index_map.insert(column.name.clone(), idx);
     }
 
     let timestamp_index = column_name_to_index_map
