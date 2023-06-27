@@ -408,10 +408,10 @@ impl Datanode {
 
     /// Start only the internal component of datanode.
     pub async fn start_instance(&mut self) -> Result<()> {
+        let _ = self.instance.start().await;
         if let Some(task) = &self.heartbeat_task {
             task.start().await?;
         }
-        let _ = self.instance.start().await;
         Ok(())
     }
 
