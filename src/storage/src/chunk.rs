@@ -243,7 +243,7 @@ impl ChunkReaderBuilder {
             time_range,
             self.files_to_read.len()
         );
-        let mut num_read_files = Vec::new();
+        let mut read_files = Vec::new();
         for file in &self.files_to_read {
             if !Self::file_in_range(file, time_range) {
                 debug!("Skip file {:?}, predicate: {:?}", file, time_range);
@@ -254,15 +254,25 @@ impl ChunkReaderBuilder {
                 );
                 continue;
             }
-            num_read_files.push(file.clone());
+            read_files.push(file.meta());
             let reader = self.sst_layer.read_sst(file.clone(), &read_opts).await?;
             reader_builder = reader_builder.push_batch_reader(reader);
         }
+
+        let window = PlainWindowInference {}.infer_window(&read_files, &[], true);
+
         logging::info!(
-            "build sst reader done, time_range: {:?}, total_files:{}, num_read_files: {}",
+            "build sst reader done, time_range: {:?}, read_files: {:?}, window: {:?}",
+            time_range,
+            read_files,
+            window,
+        );
+
+        logging::info!(
+            "build reader done, time_range: {:?}, total_files:{}, num_read_files: {}",
             time_range,
             self.files_to_read.len(),
-            num_read_files.len()
+            read_files.len()
         );
 
         let reader = reader_builder.build();
