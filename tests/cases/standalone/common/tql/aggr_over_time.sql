@@ -118,4 +118,56 @@ insert into data values
 
 drop table data;
 
--- Some cases are not ported because insert NaN/Inf is not supported yet
+-- Port from functions.test L773 - L802, commit 001ee2620e094970e5657ce39275b2fccdbd1359
+-- Include max/min/last over time
+
+-- load 10s
+-- 	data{type="numbers"} 2 0 3
+-- 	data{type="some_nan"} 2 0 NaN
+-- 	data{type="some_nan2"} 2 NaN 1
+-- 	data{type="some_nan3"} NaN 0 1
+-- 	data{type="only_nan"} NaN NaN NaN
+create table data (ts timestamp(3) time index, val double, ty string primary key);
+
+insert into data values
+    (0, 2::double, 'numbers'),
+    (10000, 0::double, 'numbers'),
+    (20000, 3::double, 'numbers'),
+    (0, 2::double, 'some_nan'),
+    (10000, 0::double, 'some_nan'),
+    (20000, 'NaN'::double, 'some_nan'),
+    (0, 2::double, 'some_nan2'),
+    (10000, 'NaN'::double, 'some_nan2'),
+    (20000, 1::double, 'some_nan2'),
+    (0, 'NaN'::double, 'some_nan3'),
+    (10000, 0::double, 'some_nan3'),
+    (20000, 1::double, 'some_nan3'),
+    (0, 'NaN'::double, 'only_nan'),
+    (10000, 'NaN'::double, 'only_nan'),
+    (20000, 'NaN'::double, 'only_nan');
+
+-- eval instant at 1m min_over_time(data[1m])
+-- 	{type="numbers"} 0
+-- 	{type="some_nan"} 0
+-- 	{type="some_nan2"} 1
+-- 	{type="some_nan3"} 0
+-- 	{type="only_nan"} NaN
+-- tql eval (60, 60, '1s') min_over_time(data[1m]);
+
+-- eval instant at 1m max_over_time(data[1m])
+-- 	{type="numbers"} 3
+-- 	{type="some_nan"} 2
+-- 	{type="some_nan2"} 2
+-- 	{type="some_nan3"} 1
+-- 	{type="only_nan"} NaN
+-- tql eval (60, 60, '1s') max_over_time(data[1m]);
+
+-- eval instant at 1m last_over_time(data[1m])
+-- 	data{type="numbers"} 3
+-- 	data{type="some_nan"} NaN
+-- 	data{type="some_nan2"} 1
+-- 	data{type="some_nan3"} 1
+-- 	data{type="only_nan"} NaN
+-- tql eval (60, 60, '1s') last_over_time(data[1m]);
+
+drop table data;
