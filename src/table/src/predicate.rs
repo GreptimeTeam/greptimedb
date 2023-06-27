@@ -12,66 +12,84 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use common_query::logical_plan::{DfExpr, Expr};
 use common_telemetry::{error, warn};
 use common_time::range::TimestampRange;
+use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
 use datafusion::parquet::file::metadata::RowGroupMetaData;
 use datafusion::physical_optimizer::pruning::PruningPredicate;
 use datafusion_common::ToDFSchema;
 use datafusion_expr::expr::InList;
 use datafusion_expr::{Between, BinaryExpr, Operator};
-use datafusion_physical_expr::create_physical_expr;
 use datafusion_physical_expr::execution_props::ExecutionProps;
+use datafusion_physical_expr::{create_physical_expr, PhysicalExpr};
 use datatypes::schema::SchemaRef;
 use datatypes::value::scalar_value_to_timestamp;
+use snafu::ResultExt;
 
+use crate::error;
 use crate::predicate::stats::RowGroupPruningStatistics;
 
 mod stats;
 
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub struct Predicate {
-    exprs: Vec<Expr>,
+    schema: SchemaRef,
+    exprs: Vec<Arc<dyn PhysicalExpr>>,
 }
 
 impl Predicate {
-    pub fn new(exprs: Vec<Expr>) -> Self {
-        Self { exprs }
-    }
+    pub fn try_new(exprs: Vec<Expr>, schema: SchemaRef) -> error::Result<Self> {
+        let arrow_schema = schema.arrow_schema();
+        let df_schema = arrow_schema
+            .clone()
+            .to_dfschema_ref()
+            .context(error::DatafusionSnafu)?;
 
-    pub fn empty() -> Self {
-        Self { exprs: vec![] }
-    }
-
-    pub fn prune_row_groups(
-        &self,
-        schema: SchemaRef,
-        row_groups: &[RowGroupMetaData],
-    ) -> Vec<bool> {
-        let mut res = vec![true; row_groups.len()];
-        let arrow_schema = (*schema.arrow_schema()).clone();
-        let df_schema = arrow_schema.clone().to_dfschema_ref();
-        let df_schema = match df_schema {
-            Ok(x) => x,
-            Err(e) => {
-                warn!("Failed to create Datafusion schema when trying to prune row groups, error: {e}");
-                return res;
-            }
-        };
-
+        // `execution_props` provides variables required by evaluation.
         let execution_props = &ExecutionProps::new();
+
+        let physical_exprs = exprs
+            .iter()
+            .map(|expr| {
+                create_physical_expr(
+                    expr.df_expr(),
+                    df_schema.as_ref(),
+                    arrow_schema.as_ref(),
+                    execution_props,
+                )
+            })
+            .collect::<Result<_, _>>()
+            .context(error::DatafusionSnafu)?;
+
+        Ok(Self {
+            schema,
+            exprs: physical_exprs,
+        })
+    }
+
+    #[inline]
+    pub fn exprs(&self) -> &[Arc<dyn PhysicalExpr>] {
+        &self.exprs
+    }
+
+    pub fn empty(schema: SchemaRef) -> Self {
+        Self {
+            schema,
+            exprs: vec![],
+        }
+    }
+
+    pub fn prune_row_groups(&self, row_groups: &[RowGroupMetaData]) -> Vec<bool> {
+        let mut res = vec![true; row_groups.len()];
+        let arrow_schema = self.schema.arrow_schema();
         for expr in &self.exprs {
-            match create_physical_expr(
-                expr.df_expr(),
-                df_schema.as_ref(),
-                arrow_schema.as_ref(),
-                execution_props,
-            )
-            .and_then(|expr| PruningPredicate::try_new(expr, arrow_schema.clone()))
-            {
+            match PruningPredicate::try_new(expr.clone(), arrow_schema.clone()) {
                 Ok(p) => {
-                    let stat = RowGroupPruningStatistics::new(row_groups, &schema);
+                    let stat = RowGroupPruningStatistics::new(row_groups, &self.schema);
                     match p.prune(&stat) {
                         Ok(r) => {
                             for (curr_val, res) in r.into_iter().zip(res.iter_mut()) {
@@ -96,13 +114,15 @@ impl Predicate {
 // since it requires query engine to convert sql to filters.
 pub struct TimeRangePredicateBuilder<'a> {
     ts_col_name: &'a str,
+    ts_col_unit: TimeUnit,
     filters: &'a [Expr],
 }
 
 impl<'a> TimeRangePredicateBuilder<'a> {
-    pub fn new(ts_col_name: &'a str, filters: &'a [Expr]) -> Self {
+    pub fn new(ts_col_name: &'a str, ts_col_unit: TimeUnit, filters: &'a [Expr]) -> Self {
         Self {
             ts_col_name,
+            ts_col_unit,
             filters,
         }
     }
@@ -149,18 +169,23 @@ impl<'a> TimeRangePredicateBuilder<'a> {
         match op {
             Operator::Eq => self
                 .get_timestamp_filter(left, right)
+                .and_then(|ts| ts.convert_to(self.ts_col_unit))
                 .map(TimestampRange::single),
             Operator::Lt => self
                 .get_timestamp_filter(left, right)
+                .and_then(|ts| ts.convert_to_ceil(self.ts_col_unit))
                 .map(|ts| TimestampRange::until_end(ts, false)),
             Operator::LtEq => self
                 .get_timestamp_filter(left, right)
+                .and_then(|ts| ts.convert_to_ceil(self.ts_col_unit))
                 .map(|ts| TimestampRange::until_end(ts, true)),
             Operator::Gt => self
                 .get_timestamp_filter(left, right)
+                .and_then(|ts| ts.convert_to(self.ts_col_unit))
                 .map(TimestampRange::from_start),
             Operator::GtEq => self
                 .get_timestamp_filter(left, right)
+                .and_then(|ts| ts.convert_to(self.ts_col_unit))
                 .map(TimestampRange::from_start),
             Operator::And => {
                 // instead of return none when failed to extract time range from left/right, we unwrap the none into
@@ -231,8 +256,10 @@ impl<'a> TimeRangePredicateBuilder<'a> {
 
         match (low, high) {
             (DfExpr::Literal(low), DfExpr::Literal(high)) => {
-                let low_opt = scalar_value_to_timestamp(low);
-                let high_opt = scalar_value_to_timestamp(high);
+                let low_opt =
+                    scalar_value_to_timestamp(low).and_then(|ts| ts.convert_to(self.ts_col_unit));
+                let high_opt = scalar_value_to_timestamp(high)
+                    .and_then(|ts| ts.convert_to_ceil(self.ts_col_unit));
                 Some(TimestampRange::new_inclusive(low_opt, high_opt))
             }
             _ => None,
@@ -329,10 +356,15 @@ mod tests {
         (path, schema)
     }
 
-    async fn assert_prune(array_cnt: usize, predicate: Predicate, expect: Vec<bool>) {
+    async fn assert_prune(
+        array_cnt: usize,
+        filters: Vec<common_query::logical_plan::Expr>,
+        expect: Vec<bool>,
+    ) {
         let dir = create_temp_dir("prune_parquet");
         let (path, schema) = gen_test_parquet_file(&dir, array_cnt).await;
         let schema = Arc::new(datatypes::schema::Schema::try_from(schema).unwrap());
+        let arrow_predicate = Predicate::try_new(filters, schema.clone()).unwrap();
         let builder = ParquetRecordBatchStreamBuilder::new(
             tokio::fs::OpenOptions::new()
                 .read(true)
@@ -344,23 +376,23 @@ mod tests {
         .unwrap();
         let metadata = builder.metadata().clone();
         let row_groups = metadata.row_groups();
-        let res = predicate.prune_row_groups(schema, row_groups);
+        let res = arrow_predicate.prune_row_groups(row_groups);
         assert_eq!(expect, res);
     }
 
-    fn gen_predicate(max_val: i32, op: Operator) -> Predicate {
-        Predicate::new(vec![common_query::logical_plan::Expr::from(
-            Expr::BinaryExpr(BinaryExpr {
+    fn gen_predicate(max_val: i32, op: Operator) -> Vec<common_query::logical_plan::Expr> {
+        vec![common_query::logical_plan::Expr::from(Expr::BinaryExpr(
+            BinaryExpr {
                 left: Box::new(Expr::Column(Column::from_name("cnt"))),
                 op,
                 right: Box::new(Expr::Literal(ScalarValue::Int32(Some(max_val)))),
-            }),
-        )])
+            },
+        ))]
     }
 
     #[tokio::test]
     async fn test_prune_empty() {
-        assert_prune(3, Predicate::empty(), vec![true]).await;
+        assert_prune(3, vec![], vec![true]).await;
     }
 
     #[tokio::test]
@@ -424,7 +456,6 @@ mod tests {
         let e = Expr::Column(Column::from_name("cnt"))
             .gt(30.lit())
             .or(Expr::Column(Column::from_name("cnt")).lt(20.lit()));
-        let p = Predicate::new(vec![e.into()]);
-        assert_prune(40, p, vec![true, true, false, true]).await;
+        assert_prune(40, vec![e.into()], vec![true, true, false, true]).await;
     }
 }
