@@ -238,17 +238,18 @@ impl ChunkReaderBuilder {
             predicate,
             time_range: *time_range,
         };
-        logging::info!(
-            "build sst reader begin, time_range: {:?}, num_files: {}",
-            time_range,
-            self.files_to_read.len()
-        );
+
         let mut read_files = Vec::new();
         for file in &self.files_to_read {
             if !Self::file_in_range(file, time_range) {
                 debug!("Skip file {:?}, predicate: {:?}", file, time_range);
                 continue;
             }
+            logging::info!(
+                "build reader read file, time_range: {:?}, file: {}",
+                time_range,
+                file.file_id(),
+            );
             read_files.push(file.meta());
             let reader = self.sst_layer.read_sst(file.clone(), &read_opts).await?;
             reader_builder = reader_builder.push_batch_reader(reader);

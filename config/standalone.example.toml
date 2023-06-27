@@ -96,7 +96,8 @@ sync_write = false
 # Storage type.
 type = "File"
 # Data directory, "/tmp/greptimedb/data" by default.
-data_home = "/tmp/greptimedb/"
+# data_home = "/tmp/greptimedb/"
+data_home = "/Users/evenyag/Documents/test/bench/greptimedb-tsdb/greptimedb/"
 # TTL for all tables. Disabled by default.
 # global_ttl = "7d"
 

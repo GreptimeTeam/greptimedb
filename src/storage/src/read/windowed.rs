@@ -34,7 +34,9 @@ pub struct ChainReader<R> {
 }
 
 impl<R> ChainReader<R> {
-    pub fn new(schema: ProjectedSchemaRef, readers: Vec<R>) -> Self {
+    pub fn new(schema: ProjectedSchemaRef, mut readers: Vec<R>) -> Self {
+        // Reverse readers since we iter them backward.
+        readers.reverse();
         Self { schema, readers }
     }
 }
@@ -45,8 +47,7 @@ where
     R: BatchReader,
 {
     async fn next_batch(&mut self) -> Result<Option<Batch>> {
-        let _window_scan_elapsed = timer!(crate::metrics::WINDOW_SCAN_ELAPSED);
-        while let Some(reader) = self.readers.first_mut() {
+        while let Some(reader) = self.readers.last_mut() {
             if let Some(batch) = reader.next_batch().await? {
                 return Ok(Some(batch));
             } else {
