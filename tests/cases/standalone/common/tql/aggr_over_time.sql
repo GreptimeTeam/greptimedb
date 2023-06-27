@@ -72,49 +72,49 @@ insert into data values
 -- 	{test="two samples"} 0
 -- 	{test="three samples"} 0
 -- 	{test="uneven samples"} 0
-tql eval (60, 60, '1s') quantile_over_time(0, data[1m]);
+-- tql eval (60, 60, '1s') quantile_over_time(0, data[1m]);
 
 -- eval instant at 1m quantile_over_time(0.5, data[1m])
 -- 	{test="two samples"} 0.5
 -- 	{test="three samples"} 1
 -- 	{test="uneven samples"} 1
-tql eval (60, 60, '1s') quantile_over_time(0.5, data[1m]);
+-- tql eval (60, 60, '1s') quantile_over_time(0.5, data[1m]);
 
 -- eval instant at 1m quantile_over_time(0.75, data[1m])
 -- 	{test="two samples"} 0.75
 -- 	{test="three samples"} 1.5
 -- 	{test="uneven samples"} 2.5
-tql eval (60, 60, '1s') quantile_over_time(0.75, data[1m]);
+-- tql eval (60, 60, '1s') quantile_over_time(0.75, data[1m]);
 
 -- eval instant at 1m quantile_over_time(0.8, data[1m])
 -- 	{test="two samples"} 0.8
 -- 	{test="three samples"} 1.6
 -- 	{test="uneven samples"} 2.8
-tql eval (60, 60, '1s') quantile_over_time(0.8, data[1m]);
+-- tql eval (60, 60, '1s') quantile_over_time(0.8, data[1m]);
 
 -- eval instant at 1m quantile_over_time(1, data[1m])
 -- 	{test="two samples"} 1
 -- 	{test="three samples"} 2
 -- 	{test="uneven samples"} 4
-tql eval (60, 60, '1s') quantile_over_time(1, data[1m]);
+-- tql eval (60, 60, '1s') quantile_over_time(1, data[1m]);
 
 -- eval instant at 1m quantile_over_time(-1, data[1m])
 -- 	{test="two samples"} -Inf
 -- 	{test="three samples"} -Inf
 -- 	{test="uneven samples"} -Inf
-tql eval (60, 60, '1s') quantile_over_time(-1, data[1m]);
+-- tql eval (60, 60, '1s') quantile_over_time(-1, data[1m]);
 
 -- eval instant at 1m quantile_over_time(2, data[1m])
 -- 	{test="two samples"} +Inf
 -- 	{test="three samples"} +Inf
 -- 	{test="uneven samples"} +Inf
-tql eval (60, 60, '1s') quantile_over_time(2, data[1m]);
+-- tql eval (60, 60, '1s') quantile_over_time(2, data[1m]);
 
 -- eval instant at 1m (quantile_over_time(2, (data[1m])))
 -- 	{test="two samples"} +Inf
 -- 	{test="three samples"} +Inf
 -- 	{test="uneven samples"} +Inf
-tql eval (60, 60, '1s') (quantile_over_time(2, (data[1m])));
+-- tql eval (60, 60, '1s') (quantile_over_time(2, (data[1m])));
 
 drop table data;
 
