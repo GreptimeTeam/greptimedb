@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
@@ -833,9 +833,10 @@ impl PromPlanner {
     fn create_function_expr(
         &mut self,
         func: &Function,
-        mut other_input_exprs: Vec<DfExpr>,
+        other_input_exprs: Vec<DfExpr>,
     ) -> Result<Vec<DfExpr>> {
         // TODO(ruihang): check function args list
+        let mut other_input_exprs: VecDeque<DfExpr> = other_input_exprs.into();
 
         // TODO(ruihang): set this according to in-param list
         let field_column_pos = 0;
@@ -865,8 +866,8 @@ impl PromPlanner {
             "stddev_over_time" => ScalarFunc::Udf(StddevOverTime::scalar_udf()),
             "stdvar_over_time" => ScalarFunc::Udf(StdvarOverTime::scalar_udf()),
             "quantile_over_time" => {
-                let quantile_expr = match other_input_exprs.get(0) {
-                    Some(DfExpr::Literal(ScalarValue::Float64(Some(quantile)))) => *quantile,
+                let quantile_expr = match other_input_exprs.pop_front() {
+                    Some(DfExpr::Literal(ScalarValue::Float64(Some(quantile)))) => quantile,
                     other => UnexpectedPlanExprSnafu {
                         desc: format!("expect f64 literal as quantile, but found {:?}", other),
                     }
@@ -875,8 +876,8 @@ impl PromPlanner {
                 ScalarFunc::Udf(QuantileOverTime::scalar_udf(quantile_expr))
             }
             "predict_linear" => {
-                let t_expr = match other_input_exprs.get(0) {
-                    Some(DfExpr::Literal(ScalarValue::Time64Microsecond(Some(t)))) => *t,
+                let t_expr = match other_input_exprs.pop_front() {
+                    Some(DfExpr::Literal(ScalarValue::Time64Microsecond(Some(t)))) => t,
                     other => UnexpectedPlanExprSnafu {
                         desc: format!("expect i64 literal as t, but found {:?}", other),
                     }
@@ -885,8 +886,8 @@ impl PromPlanner {
                 ScalarFunc::Udf(PredictLinear::scalar_udf(t_expr))
             }
             "holt_winters" => {
-                let sf_exp = match other_input_exprs.get(0) {
-                    Some(DfExpr::Literal(ScalarValue::Float64(Some(sf)))) => *sf,
+                let sf_exp = match other_input_exprs.pop_front() {
+                    Some(DfExpr::Literal(ScalarValue::Float64(Some(sf)))) => sf,
                     other => UnexpectedPlanExprSnafu {
                         desc: format!(
                             "expect f64 literal as smoothing factor, but found {:?}",
@@ -895,8 +896,8 @@ impl PromPlanner {
                     }
                     .fail()?,
                 };
-                let tf_exp = match other_input_exprs.get(1) {
-                    Some(DfExpr::Literal(ScalarValue::Float64(Some(tf)))) => *tf,
+                let tf_exp = match other_input_exprs.pop_front() {
+                    Some(DfExpr::Literal(ScalarValue::Float64(Some(tf)))) => tf,
                     other => UnexpectedPlanExprSnafu {
                         desc: format!("expect f64 literal as trend factor, but found {:?}", other),
                     }
@@ -924,7 +925,7 @@ impl PromPlanner {
                     other_input_exprs.insert(field_column_pos, col_expr);
                     let fn_expr = DfExpr::ScalarFunction(ScalarFunction {
                         fun,
-                        args: other_input_exprs.clone(),
+                        args: other_input_exprs.clone().into(),
                     });
                     exprs.push(fn_expr);
                     other_input_exprs.remove(field_column_pos);
@@ -939,7 +940,7 @@ impl PromPlanner {
                     other_input_exprs.insert(field_column_pos + 1, col_expr);
                     let fn_expr = DfExpr::ScalarUDF(ScalarUDF {
                         fun: Arc::new(fun),
-                        args: other_input_exprs.clone(),
+                        args: other_input_exprs.clone().into(),
                     });
                     exprs.push(fn_expr);
                     other_input_exprs.remove(field_column_pos + 1);
@@ -957,7 +958,7 @@ impl PromPlanner {
                         .insert(field_column_pos + 2, self.create_time_index_column_expr()?);
                     let fn_expr = DfExpr::ScalarUDF(ScalarUDF {
                         fun: Arc::new(fun),
-                        args: other_input_exprs.clone(),
+                        args: other_input_exprs.clone().into(),
                     });
                     exprs.push(fn_expr);
                     other_input_exprs.remove(field_column_pos + 2);
