@@ -67,6 +67,7 @@ pub fn build_schema_prefix(catalog_name: impl AsRef<str>) -> String {
     format!("{SCHEMA_KEY_PREFIX}-{}-", catalog_name.as_ref())
 }
 
+/// Global table info has only one key across all datanodes so it does not have `node_id` field.
 pub fn build_table_global_prefix(
     catalog_name: impl AsRef<str>,
     schema_name: impl AsRef<str>,
@@ -78,6 +79,7 @@ pub fn build_table_global_prefix(
     )
 }
 
+/// Regional table info varies between datanode, so it contains a `node_id` field.
 pub fn build_table_regional_prefix(
     catalog_name: impl AsRef<str>,
     schema_name: impl AsRef<str>,

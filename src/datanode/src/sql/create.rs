@@ -48,10 +48,9 @@ impl SqlHandler {
         let schema = req.db_name;
         if self
             .catalog_manager
-            .schema(&catalog, &schema)
+            .schema_exist(&catalog, &schema)
             .await
             .context(CatalogSnafu)?
-            .is_some()
         {
             return if req.create_if_not_exists {
                 Ok(Output::AffectedRows(1))

@@ -1325,7 +1325,7 @@ async fn test_information_schema_dot_tables(instance: Arc<dyn MockInstance>) {
 +---------------+--------------+------------+------------+----------+-------------+
 | table_catalog | table_schema | table_name | table_type | table_id | engine      |
 +---------------+--------------+------------+------------+----------+-------------+
-| greptime      | public       | numbers    | BASE TABLE | 1        | test_engine |
+| greptime      | public       | numbers    | BASE TABLE | 2        | test_engine |
 | greptime      | public       | scripts    | BASE TABLE | 1024     | mito        |
 +---------------+--------------+------------+------------+----------+-------------+"
         }
@@ -1334,7 +1334,7 @@ async fn test_information_schema_dot_tables(instance: Arc<dyn MockInstance>) {
 +---------------+--------------+------------+------------+----------+-------------+
 | table_catalog | table_schema | table_name | table_type | table_id | engine      |
 +---------------+--------------+------------+------------+----------+-------------+
-| greptime      | public       | numbers    | BASE TABLE | 1        | test_engine |
+| greptime      | public       | numbers    | BASE TABLE | 2        | test_engine |
 | greptime      | public       | scripts    | BASE TABLE | 1        | mito        |
 +---------------+--------------+------------+------------+----------+-------------+"
         }

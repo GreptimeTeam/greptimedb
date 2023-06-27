@@ -29,8 +29,8 @@ use table::metadata::TableId;
 use table::requests::{AlterKind, AlterTableRequest};
 
 use crate::error::{
-    AccessCatalogSnafu, CatalogNotFoundSnafu, DeserializeProcedureSnafu, SchemaNotFoundSnafu,
-    SerializeProcedureSnafu, TableExistsSnafu, TableNotFoundSnafu,
+    AccessCatalogSnafu, DeserializeProcedureSnafu, SerializeProcedureSnafu, TableExistsSnafu,
+    TableNotFoundSnafu,
 };
 
 /// Procedure to alter a table.
@@ -134,26 +134,14 @@ impl AlterTableProcedure {
     }
 
     async fn on_prepare(&mut self) -> Result<Status> {
-        // Check whether catalog and schema exist.
         let request = &self.data.request;
-        let catalog = self
+        let table = self
             .catalog_manager
-            .catalog(&request.catalog_name)
-            .await
-            .context(AccessCatalogSnafu)?
-            .context(CatalogNotFoundSnafu {
-                name: &request.catalog_name,
-            })?;
-        let schema = catalog
-            .schema(&request.schema_name)
-            .await
-            .context(AccessCatalogSnafu)?
-            .context(SchemaNotFoundSnafu {
-                name: &request.schema_name,
-            })?;
-
-        let table = schema
-            .table(&request.table_name)
+            .table(
+                &request.catalog_name,
+                &request.schema_name,
+                &request.table_name,
+            )
             .await
             .context(AccessCatalogSnafu)?
             .with_context(|| TableNotFoundSnafu {
@@ -162,12 +150,14 @@ impl AlterTableProcedure {
                     request.catalog_name, request.schema_name, request.table_name
                 ),
             })?;
+
         if let AlterKind::RenameTable { new_table_name } = &self.data.request.alter_kind {
             ensure!(
-                !schema
-                    .table_exist(new_table_name)
+                self.catalog_manager
+                    .table(&request.catalog_name, &request.schema_name, new_table_name)
                     .await
-                    .context(AccessCatalogSnafu)?,
+                    .context(AccessCatalogSnafu)?
+                    .is_none(),
                 TableExistsSnafu {
                     name: format!(
                         "{}.{}.{}",
@@ -341,16 +331,17 @@ mod tests {
         let mut watcher = procedure_manager.submit(procedure_with_id).await.unwrap();
         watcher.changed().await.unwrap();
 
-        let catalog = catalog_manager
-            .catalog(DEFAULT_CATALOG_NAME)
+        let table = catalog_manager
+            .table(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, new_table_name)
             .await
             .unwrap()
             .unwrap();
-        let schema = catalog.schema(DEFAULT_SCHEMA_NAME).await.unwrap().unwrap();
-        let table = schema.table(new_table_name).await.unwrap().unwrap();
         let table_info = table.table_info();
         assert_eq!(new_table_name, table_info.name);
 
-        assert!(schema.table(table_name).await.unwrap().is_none());
+        assert!(!catalog_manager
+            .table_exist(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, table_name)
+            .await
+            .unwrap());
     }
 }

@@ -14,8 +14,6 @@
 
 use std::sync::Arc;
 
-use catalog::local::{MemoryCatalogManager, MemoryCatalogProvider, MemorySchemaProvider};
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_recordbatch::RecordBatch;
 use datatypes::for_all_primitive_types;
 use datatypes::prelude::*;
@@ -25,14 +23,10 @@ use datatypes::vectors::Helper;
 use rand::Rng;
 use table::test_util::MemTable;
 
-use crate::tests::exec_selection;
-use crate::{QueryEngine, QueryEngineFactory};
+use crate::tests::{exec_selection, new_query_engine_with_table};
+use crate::{QueryEngine, QueryEngineRef};
 
-pub fn create_query_engine() -> Arc<dyn QueryEngine> {
-    let schema_provider = Arc::new(MemorySchemaProvider::new());
-    let catalog_provider = Arc::new(MemoryCatalogProvider::new());
-    let catalog_list = Arc::new(MemoryCatalogManager::default());
-
+pub fn create_query_engine() -> QueryEngineRef {
     let mut column_schemas = vec![];
     let mut columns = vec![];
     macro_rules! create_number_table {
@@ -54,19 +48,8 @@ pub fn create_query_engine() -> Arc<dyn QueryEngine> {
 
     let schema = Arc::new(Schema::new(column_schemas.clone()));
     let recordbatch = RecordBatch::new(schema, columns).unwrap();
-    let number_table = Arc::new(MemTable::new("numbers", recordbatch));
-    schema_provider
-        .register_table_sync(number_table.table_name().to_string(), number_table)
-        .unwrap();
-
-    catalog_provider
-        .register_schema_sync(DEFAULT_SCHEMA_NAME.to_string(), schema_provider)
-        .unwrap();
-    catalog_list
-        .register_catalog_sync(DEFAULT_CATALOG_NAME.to_string(), catalog_provider)
-        .unwrap();
-
-    QueryEngineFactory::new(catalog_list, false).query_engine()
+    let number_table = MemTable::new("numbers", recordbatch);
+    new_query_engine_with_table(number_table)
 }
 
 pub async fn get_numbers_from_table<'s, T>(

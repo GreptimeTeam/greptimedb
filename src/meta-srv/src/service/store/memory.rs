@@ -27,8 +27,9 @@ use parking_lot::RwLock;
 
 use super::ext::KvStoreExt;
 use crate::error::Result;
-use crate::metrics::METRIC_META_KV_REQUEST;
+use crate::metrics::{METRIC_META_KV_REQUEST, METRIC_META_TXN_REQUEST};
 use crate::service::store::kv::{KvStore, ResettableKvStore};
+use crate::service::store::txn::{Txn, TxnOp, TxnOpResponse, TxnRequest, TxnResponse, TxnService};
 
 pub struct MemStore {
     inner: RwLock<BTreeMap<Vec<u8>, Vec<u8>>>,
@@ -119,6 +120,7 @@ impl KvStore for MemStore {
         } = req;
 
         let mut memory = self.inner.write();
+
         let prev_value = memory.insert(key.clone(), value);
         let prev_kv = if prev_kv {
             prev_value.map(|value| KeyValue { key, value })
@@ -164,6 +166,7 @@ impl KvStore for MemStore {
         } = req;
 
         let mut memory = self.inner.write();
+
         let prev_kvs = if prev_kv {
             kvs.into_iter()
                 .map(|kv| (kv.key.clone(), memory.insert(kv.key, kv.value)))
@@ -198,6 +201,7 @@ impl KvStore for MemStore {
         } = req;
 
         let mut memory = self.inner.write();
+
         let prev_kvs = if prev_kv {
             keys.into_iter()
                 .filter_map(|key| memory.remove(&key).map(|value| KeyValue { key, value }))
@@ -327,6 +331,72 @@ impl KvStore for MemStore {
         let cluster_id = header.map_or(0, |h| h.cluster_id);
         let header = Some(ResponseHeader::success(cluster_id));
         Ok(MoveValueResponse { header, kv })
+    }
+}
+
+#[async_trait::async_trait]
+impl TxnService for MemStore {
+    async fn txn(&self, txn: Txn) -> Result<TxnResponse> {
+        let _timer = timer!(
+            METRIC_META_TXN_REQUEST,
+            &[("target", "memory".to_string()), ("op", "txn".to_string()),]
+        );
+
+        let TxnRequest {
+            compare,
+            success,
+            failure,
+        } = txn.into();
+
+        let mut memory = self.inner.write();
+
+        let succeeded = compare
+            .iter()
+            .all(|x| x.compare_with_value(memory.get(&x.key)));
+
+        let do_txn = |txn_op| match txn_op {
+            TxnOp::Put(key, value) => {
+                let prev_value = memory.insert(key.clone(), value);
+                let prev_kv = prev_value.map(|value| KeyValue { key, value });
+                let put_res = PutResponse {
+                    prev_kv,
+                    ..Default::default()
+                };
+                TxnOpResponse::ResponsePut(put_res)
+            }
+            TxnOp::Get(key) => {
+                let value = memory.get(&key);
+                let kv = value.map(|value| KeyValue {
+                    key,
+                    value: value.clone(),
+                });
+                let get_res = RangeResponse {
+                    kvs: kv.map(|kv| vec![kv]).unwrap_or(vec![]),
+                    ..Default::default()
+                };
+                TxnOpResponse::ResponseGet(get_res)
+            }
+            TxnOp::Delete(key) => {
+                let prev_value = memory.remove(&key);
+                let prev_kv = prev_value.map(|value| KeyValue { key, value });
+                let delete_res = DeleteRangeResponse {
+                    prev_kvs: prev_kv.map(|kv| vec![kv]).unwrap_or(vec![]),
+                    ..Default::default()
+                };
+                TxnOpResponse::ResponseDelete(delete_res)
+            }
+        };
+
+        let responses: Vec<_> = if succeeded {
+            success.into_iter().map(do_txn).collect()
+        } else {
+            failure.into_iter().map(do_txn).collect()
+        };
+
+        Ok(TxnResponse {
+            succeeded,
+            responses,
+        })
     }
 }
 

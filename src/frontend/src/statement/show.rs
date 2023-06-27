@@ -21,8 +21,12 @@ use crate::error::{ExecuteStatementSnafu, Result};
 use crate::statement::StatementExecutor;
 
 impl StatementExecutor {
-    pub(super) async fn show_databases(&self, stmt: ShowDatabases) -> Result<Output> {
-        query::sql::show_databases(stmt, self.catalog_manager.clone())
+    pub(super) async fn show_databases(
+        &self,
+        stmt: ShowDatabases,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
+        query::sql::show_databases(stmt, self.catalog_manager.clone(), query_ctx)
             .await
             .context(ExecuteStatementSnafu)
     }

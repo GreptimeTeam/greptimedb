@@ -24,11 +24,8 @@ mod tests {
     use catalog::helper::{CatalogKey, CatalogValue, SchemaKey, SchemaValue};
     use catalog::remote::mock::{MockKvBackend, MockTableEngine};
     use catalog::remote::region_alive_keeper::RegionAliveKeepers;
-    use catalog::remote::{
-        CachedMetaKvBackend, KvBackend, KvBackendRef, RemoteCatalogManager, RemoteCatalogProvider,
-        RemoteSchemaProvider,
-    };
-    use catalog::{CatalogManager, RegisterTableRequest};
+    use catalog::remote::{CachedMetaKvBackend, KvBackend, KvBackendRef, RemoteCatalogManager};
+    use catalog::{CatalogManager, RegisterSchemaRequest, RegisterTableRequest};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO_ENGINE};
     use common_meta::ident::TableIdent;
     use datatypes::schema::RawSchema;
@@ -40,6 +37,7 @@ mod tests {
     use tokio::time::Instant;
 
     struct TestingComponents {
+        #[allow(dead_code)]
         kv_backend: KvBackendRef,
         catalog_manager: Arc<RemoteCatalogManager>,
         table_engine_manager: TableEngineManagerRef,
@@ -179,14 +177,12 @@ mod tests {
             catalog_manager.catalog_names().await.unwrap()
         );
 
-        let default_catalog = catalog_manager
-            .catalog(DEFAULT_CATALOG_NAME)
-            .await
-            .unwrap()
-            .unwrap();
         assert_eq!(
             vec![DEFAULT_SCHEMA_NAME.to_string()],
-            default_catalog.schema_names().await.unwrap()
+            catalog_manager
+                .schema_names(DEFAULT_CATALOG_NAME)
+                .await
+                .unwrap()
         );
     }
 
@@ -242,22 +238,14 @@ mod tests {
     async fn test_register_table() {
         let node_id = 42;
         let components = prepare_components(node_id).await;
-        let catalog_manager = &components.catalog_manager;
-        let default_catalog = catalog_manager
-            .catalog(DEFAULT_CATALOG_NAME)
-            .await
-            .unwrap()
-            .unwrap();
         assert_eq!(
             vec![DEFAULT_SCHEMA_NAME.to_string()],
-            default_catalog.schema_names().await.unwrap()
+            components
+                .catalog_manager
+                .schema_names(DEFAULT_CATALOG_NAME)
+                .await
+                .unwrap()
         );
-
-        let default_schema = default_catalog
-            .schema(DEFAULT_SCHEMA_NAME)
-            .await
-            .unwrap()
-            .unwrap();
 
         // register a new table with an nonexistent catalog
         let catalog_name = DEFAULT_CATALOG_NAME.to_string();
@@ -293,10 +281,18 @@ mod tests {
             table_id,
             table,
         };
-        assert!(catalog_manager.register_table(reg_req).await.unwrap());
+        assert!(components
+            .catalog_manager
+            .register_table(reg_req)
+            .await
+            .unwrap());
         assert_eq!(
             vec![table_name],
-            default_schema.table_names().await.unwrap()
+            components
+                .catalog_manager
+                .table_names(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME)
+                .await
+                .unwrap()
         );
     }
 
@@ -304,29 +300,28 @@ mod tests {
     async fn test_register_catalog_schema_table() {
         let node_id = 42;
         let components = prepare_components(node_id).await;
-        let backend = &components.kv_backend;
-        let catalog_manager = components.catalog_manager.clone();
-        let engine_manager = components.table_engine_manager.clone();
 
         let catalog_name = "test_catalog".to_string();
         let schema_name = "nonexistent_schema".to_string();
-        let catalog = Arc::new(RemoteCatalogProvider::new(
-            catalog_name.clone(),
-            backend.clone(),
-            engine_manager.clone(),
-            node_id,
-            components.region_alive_keepers.clone(),
-        ));
 
         // register catalog to catalog manager
-        CatalogManager::register_catalog(&*catalog_manager, catalog_name.clone(), catalog)
+        components
+            .catalog_manager
+            .register_catalog(catalog_name.clone())
             .await
             .unwrap();
         assert_eq!(
             HashSet::<String>::from_iter(
                 vec![DEFAULT_CATALOG_NAME.to_string(), catalog_name.clone()].into_iter()
             ),
-            HashSet::from_iter(catalog_manager.catalog_names().await.unwrap().into_iter())
+            HashSet::from_iter(
+                components
+                    .catalog_manager
+                    .catalog_names()
+                    .await
+                    .unwrap()
+                    .into_iter()
+            )
         );
 
         let table_to_register = components
@@ -359,38 +354,34 @@ mod tests {
         };
         // this register will fail since schema does not exist yet
         assert_matches!(
-            catalog_manager
+            components
+                .catalog_manager
                 .register_table(reg_req.clone())
                 .await
                 .unwrap_err(),
             catalog::error::Error::SchemaNotFound { .. }
         );
 
-        let new_catalog = catalog_manager
-            .catalog(&catalog_name)
+        let register_schema_request = RegisterSchemaRequest {
+            catalog: catalog_name.to_string(),
+            schema: schema_name.to_string(),
+        };
+        assert!(components
+            .catalog_manager
+            .register_schema(register_schema_request)
             .await
-            .unwrap()
-            .expect("catalog should exist since it's already registered");
-        let schema = Arc::new(RemoteSchemaProvider::new(
-            catalog_name.clone(),
-            schema_name.clone(),
-            node_id,
-            engine_manager,
-            backend.clone(),
-            components.region_alive_keepers.clone(),
-        ));
-
-        let prev = new_catalog
-            .register_schema(schema_name.clone(), schema.clone())
+            .expect("Register schema should not fail"));
+        assert!(components
+            .catalog_manager
+            .register_table(reg_req)
             .await
-            .expect("Register schema should not fail");
-        assert!(prev.is_none());
-        assert!(catalog_manager.register_table(reg_req).await.unwrap());
+            .unwrap());
 
         assert_eq!(
             HashSet::from([schema_name.clone()]),
-            new_catalog
-                .schema_names()
+            components
+                .catalog_manager
+                .schema_names(&catalog_name)
                 .await
                 .unwrap()
                 .into_iter()

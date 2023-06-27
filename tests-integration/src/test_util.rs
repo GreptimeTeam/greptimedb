@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
-use catalog::CatalogManagerRef;
+use catalog::{CatalogManagerRef, RegisterTableRequest};
 use common_catalog::consts::{
     DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID, MITO_ENGINE,
 };
@@ -308,19 +308,14 @@ pub async fn create_test_table(
         .await
         .context(CreateTableSnafu { table_name })?;
 
-    let schema_provider = catalog_manager
-        .catalog(DEFAULT_CATALOG_NAME)
-        .await
-        .unwrap()
-        .unwrap()
-        .schema(DEFAULT_SCHEMA_NAME)
-        .await
-        .unwrap()
-        .unwrap();
-    schema_provider
-        .register_table(table_name.to_string(), table)
-        .await
-        .unwrap();
+    let req = RegisterTableRequest {
+        catalog: DEFAULT_CATALOG_NAME.to_string(),
+        schema: DEFAULT_SCHEMA_NAME.to_string(),
+        table_name: table_name.to_string(),
+        table_id: table.table_info().ident.table_id,
+        table,
+    };
+    catalog_manager.register_table(req).await.unwrap();
     Ok(())
 }
 

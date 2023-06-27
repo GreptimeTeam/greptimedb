@@ -23,13 +23,12 @@ use common_procedure::{
 };
 use common_telemetry::logging;
 use serde::{Deserialize, Serialize};
-use snafu::{OptionExt, ResultExt};
+use snafu::ResultExt;
 use table::engine::{EngineContext, TableEngineProcedureRef, TableEngineRef, TableReference};
 use table::requests::{CreateTableRequest, OpenTableRequest};
 
 use crate::error::{
-    AccessCatalogSnafu, CatalogNotFoundSnafu, DeserializeProcedureSnafu, SchemaNotFoundSnafu,
-    SerializeProcedureSnafu,
+    AccessCatalogSnafu, DeserializeProcedureSnafu, SchemaNotFoundSnafu, SerializeProcedureSnafu,
 };
 
 /// Procedure to create a table.
@@ -133,34 +132,24 @@ impl CreateTableProcedure {
     }
 
     async fn on_prepare(&mut self) -> Result<Status> {
-        // Check whether catalog and schema exist.
-        let catalog = self
+        if !self
             .catalog_manager
-            .catalog(&self.data.request.catalog_name)
+            .schema_exist(
+                &self.data.request.catalog_name,
+                &self.data.request.schema_name,
+            )
             .await
             .context(AccessCatalogSnafu)?
-            .with_context(|| {
-                logging::error!(
-                    "Failed to create table {}, catalog not found",
-                    self.data.table_ref()
-                );
-                CatalogNotFoundSnafu {
-                    name: &self.data.request.catalog_name,
-                }
-            })?;
-        catalog
-            .schema(&self.data.request.schema_name)
-            .await
-            .context(AccessCatalogSnafu)?
-            .with_context(|| {
-                logging::error!(
-                    "Failed to create table {}, schema not found",
-                    self.data.table_ref(),
-                );
-                SchemaNotFoundSnafu {
-                    name: &self.data.request.schema_name,
-                }
-            })?;
+        {
+            logging::error!(
+                "Failed to create table {}, schema not found",
+                self.data.table_ref(),
+            );
+            return SchemaNotFoundSnafu {
+                name: &self.data.request.schema_name,
+            }
+            .fail()?;
+        }
 
         self.data.state = CreateTableState::EngineCreateTable;
         // Assign procedure id to the subprocedure.
@@ -224,28 +213,16 @@ impl CreateTableProcedure {
     }
 
     async fn on_register_catalog(&mut self) -> Result<Status> {
-        let catalog = self
+        if self
             .catalog_manager
-            .catalog(&self.data.request.catalog_name)
-            .await
-            .context(AccessCatalogSnafu)?
-            .context(CatalogNotFoundSnafu {
-                name: &self.data.request.catalog_name,
-            })?;
-        let schema = catalog
-            .schema(&self.data.request.schema_name)
-            .await
-            .context(AccessCatalogSnafu)?
-            .context(SchemaNotFoundSnafu {
-                name: &self.data.request.schema_name,
-            })?;
-        let table_exists = schema
-            .table(&self.data.request.table_name)
+            .table_exist(
+                &self.data.request.catalog_name,
+                &self.data.request.schema_name,
+                &self.data.request.table_name,
+            )
             .await
             .map_err(Error::from_error_ext)?
-            .is_some();
-        if table_exists {
-            // Table already exists.
+        {
             return Ok(Status::Done);
         }
 

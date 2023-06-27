@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use catalog::CatalogManagerRef;
 use common_catalog::consts::{
-    DEFAULT_CATALOG_NAME, SEMANTIC_TYPE_FIELD, SEMANTIC_TYPE_PRIMARY_KEY, SEMANTIC_TYPE_TIME_INDEX,
+    SEMANTIC_TYPE_FIELD, SEMANTIC_TYPE_PRIMARY_KEY, SEMANTIC_TYPE_TIME_INDEX,
 };
 use common_datasource::file_format::{infer_schemas, FileFormat, Format};
 use common_datasource::lister::{Lister, Source};
@@ -95,6 +95,7 @@ static SHOW_CREATE_TABLE_OUTPUT_SCHEMA: Lazy<Arc<Schema>> = Lazy::new(|| {
 pub async fn show_databases(
     stmt: ShowDatabases,
     catalog_manager: CatalogManagerRef,
+    query_ctx: QueryContextRef,
 ) -> Result<Output> {
     ensure!(
         matches!(stmt.kind, ShowKind::All | ShowKind::Like(_)),
@@ -103,14 +104,11 @@ pub async fn show_databases(
         }
     );
 
-    let catalog = catalog_manager
-        .catalog(DEFAULT_CATALOG_NAME)
+    let mut databases = catalog_manager
+        .schema_names(&query_ctx.current_catalog())
         .await
-        .context(error::CatalogSnafu)?
-        .context(error::CatalogNotFoundSnafu {
-            catalog: DEFAULT_CATALOG_NAME,
-        })?;
-    let mut databases = catalog.schema_names().await.context(error::CatalogSnafu)?;
+        .context(error::CatalogSnafu)?;
+
     // TODO(dennis): Specify the order of the results in catalog manager API
     databases.sort();
 
@@ -148,12 +146,11 @@ pub async fn show_tables(
         query_ctx.current_schema()
     };
     // TODO(sunng87): move this function into query_ctx
-    let schema = catalog_manager
-        .schema(&query_ctx.current_catalog(), &schema)
+    let mut tables = catalog_manager
+        .table_names(&query_ctx.current_catalog(), &schema)
         .await
-        .context(error::CatalogSnafu)?
-        .context(error::SchemaNotFoundSnafu { schema })?;
-    let mut tables = schema.table_names().await.context(error::CatalogSnafu)?;
+        .context(error::CatalogSnafu)?;
+
     // TODO(dennis): Specify the order of the results in schema provider API
     tables.sort();
 
