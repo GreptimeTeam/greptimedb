@@ -149,7 +149,7 @@ mod test {
             .unwrap();
 
         let context = OptimizerContext::default();
-        assert!(OrderHintRule.try_optimize(&plan, &context).is_ok());
+        let _ = OrderHintRule.try_optimize(&plan, &context).unwrap();
 
         // should read the first (with `.sort(true, false)`) sort option
         let scan_req = adapter.get_scan_req();

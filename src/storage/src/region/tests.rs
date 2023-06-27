@@ -90,7 +90,7 @@ impl<S: LogStore> TesterBase<S> {
     pub async fn checkpoint_manifest(&self) {
         let manifest = &self.region.inner.manifest;
         manifest.set_flushed_manifest_version(manifest.last_version() - 1);
-        assert!(manifest.do_checkpoint().await.unwrap().is_some());
+        let _ = manifest.do_checkpoint().await.unwrap().unwrap();
     }
 
     pub async fn close(&self) {

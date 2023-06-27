@@ -226,7 +226,7 @@ fn test_validate_create_table_request() {
         .contains("Invalid primary key: time index column can't be included in primary key"));
 
     request.primary_key_indices = vec![0];
-    assert!(validate_create_table_request(&request).is_ok());
+    validate_create_table_request(&request).unwrap();
 }
 
 #[tokio::test]
@@ -823,7 +823,7 @@ async fn test_drop_table() {
         region_numbers: vec![0],
         engine: MITO_ENGINE.to_string(),
     };
-    assert!(table_engine.create_table(&ctx, request).await.is_ok());
+    let _ = table_engine.create_table(&ctx, request).await.unwrap();
     assert!(table_engine.table_exists(&engine_ctx, table_id));
 }
 
@@ -854,7 +854,7 @@ async fn test_table_delete_rows() {
     let key_column_values =
         HashMap::from([("host".to_string(), del_hosts), ("ts".to_string(), del_tss)]);
     let del_req = DeleteRequest { key_column_values };
-    assert!(table.delete(del_req).await.is_ok());
+    let _ = table.delete(del_req).await.unwrap();
 
     let session_ctx = SessionContext::new();
     let stream = table.scan(None, &[], None).await.unwrap();

@@ -41,15 +41,15 @@ mod tests {
             engine: MITO_ENGINE.to_string(),
         };
 
-        let result = instance
+        instance
             .frontend()
             .catalog_manager()
             .register_system_table(RegisterSystemTableRequest {
                 create_table_request: request,
                 open_hook: None,
             })
-            .await;
-        assert!(result.is_ok());
+            .await
+            .unwrap();
 
         assert!(
             instance

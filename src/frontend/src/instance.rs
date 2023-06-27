@@ -711,7 +711,7 @@ mod tests {
             ..Default::default()
         };
         // If nullable is true, it doesn't matter whether the insert request has the column.
-        assert!(validate_insert_request(&schema, &request).is_ok());
+        validate_insert_request(&schema, &request).unwrap();
 
         let schema = Schema::new(vec![
             ColumnSchema::new("a", ConcreteDataType::int32_datatype(), false)
@@ -735,7 +735,7 @@ mod tests {
         };
         // If nullable is false, but the column is defined with default value,
         // it also doesn't matter whether the insert request has the column.
-        assert!(validate_insert_request(&schema, &request).is_ok());
+        validate_insert_request(&schema, &request).unwrap();
 
         let request = InsertRequest {
             columns: vec![Column {
@@ -772,7 +772,7 @@ mod tests {
         assert_eq!(stmts.len(), 4);
         for stmt in stmts {
             let re = check_permission(plugins.clone(), &stmt, &query_ctx);
-            assert!(re.is_ok());
+            re.unwrap();
         }
 
         let sql = r#"
@@ -783,13 +783,13 @@ mod tests {
         assert_eq!(stmts.len(), 2);
         for stmt in stmts {
             let re = check_permission(plugins.clone(), &stmt, &query_ctx);
-            assert!(re.is_ok());
+            re.unwrap();
         }
 
         let sql = "USE randomschema";
         let stmts = parse_stmt(sql, &GreptimeDbDialect {}).unwrap();
         let re = check_permission(plugins.clone(), &stmts[0], &query_ctx);
-        assert!(re.is_ok());
+        re.unwrap();
 
         fn replace_test(template_sql: &str, plugins: Arc<Plugins>, query_ctx: &QueryContextRef) {
             // test right
@@ -823,7 +823,7 @@ mod tests {
             let stmt = &parse_stmt(sql, &GreptimeDbDialect {}).unwrap()[0];
             let re = check_permission(plugins, stmt, query_ctx);
             if is_ok {
-                assert!(re.is_ok());
+                re.unwrap();
             } else {
                 assert!(re.is_err());
             }
@@ -849,8 +849,7 @@ mod tests {
         // test show tables
         let sql = "SHOW TABLES FROM public";
         let stmt = parse_stmt(sql, &GreptimeDbDialect {}).unwrap();
-        let re = check_permission(plugins.clone(), &stmt[0], &query_ctx);
-        assert!(re.is_ok());
+        check_permission(plugins.clone(), &stmt[0], &query_ctx).unwrap();
 
         let sql = "SHOW TABLES FROM wrongschema";
         let stmt = parse_stmt(sql, &GreptimeDbDialect {}).unwrap();

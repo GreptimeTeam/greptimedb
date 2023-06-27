@@ -358,8 +358,8 @@ mod tests {
 
         assert_eq!(&[0, 4], &new_meta.primary_key_indices[..]);
         assert_eq!(&[1, 2, 3, 5], &new_meta.value_indices[..]);
-        assert!(new_schema.column_schema_by_name("my_tag").is_some());
-        assert!(new_schema.column_schema_by_name("my_field").is_some());
+        let _ = new_schema.column_schema_by_name("my_tag").unwrap();
+        let _ = new_schema.column_schema_by_name("my_field").unwrap();
         assert_eq!(new_schema.version(), schema.version() + 1);
         assert_eq!(new_meta.next_column_id, old_meta.next_column_id + 2);
 
@@ -387,7 +387,7 @@ mod tests {
 
         assert_eq!(&[0, 1, 6], &new_meta.primary_key_indices[..]);
         assert_eq!(&[2, 3, 4, 5, 7], &new_meta.value_indices[..]);
-        assert!(new_schema.column_schema_by_name("my_tag_first").is_some());
+        let _ = new_schema.column_schema_by_name("my_tag_first").unwrap();
         assert!(new_schema
             .column_schema_by_name("my_field_after_ts")
             .is_some());

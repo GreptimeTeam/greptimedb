@@ -203,11 +203,10 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
 
     async fn on_prepare<'a>(
         &'a mut self,
-        query: &'a str,
+        raw_query: &'a str,
         w: StatementMetaWriter<'a, W>,
     ) -> Result<()> {
-        let raw_query = query.clone();
-        let (query, param_num) = replace_placeholders(query);
+        let (query, param_num) = replace_placeholders(raw_query);
 
         let statement = validate_query(raw_query).await?;
 

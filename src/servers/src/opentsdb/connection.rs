@@ -199,7 +199,8 @@ mod tests {
             .write(b"\r\n")
             .build();
         let mut conn = Connection::new(mock);
-        let result = conn.write_line("An OpenTSDB error.".to_string()).await;
-        assert!(result.is_ok());
+        conn.write_line("An OpenTSDB error.".to_string())
+            .await
+            .unwrap();
     }
 }

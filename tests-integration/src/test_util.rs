@@ -315,7 +315,7 @@ pub async fn create_test_table(
         table_id: table.table_info().ident.table_id,
         table,
     };
-    assert!(catalog_manager.register_table(req).await.is_ok());
+    let _ = catalog_manager.register_table(req).await.unwrap();
     Ok(())
 }
 

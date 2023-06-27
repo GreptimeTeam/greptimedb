@@ -388,6 +388,6 @@ mod tests {
             StatusCode::Unexpected,
         ))));
         assert!(state.is_failed());
-        assert!(state.error().is_some());
+        let _ = state.error().unwrap();
     }
 }

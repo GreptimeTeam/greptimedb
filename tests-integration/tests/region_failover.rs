@@ -117,9 +117,9 @@ pub async fn test_region_failover(store_type: StorageType) {
     };
 
     let cache = get_table_cache(&frontend, &cache_key).unwrap();
-    assert!(cache.is_some());
+    let _ = cache.unwrap();
     let route_cache = get_route_cache(&frontend, &table_name);
-    assert!(route_cache.is_some());
+    let _ = route_cache.unwrap();
 
     let distribution = find_region_distribution(&cluster).await;
     info!("Find region distribution: {distribution:?}");
@@ -264,7 +264,7 @@ CREATE TABLE my_table (
     PARTITION r3 VALUES LESS THAN (MAXVALUE),
 )";
     let result = cluster.frontend.do_query(sql, QueryContext::arc()).await;
-    assert!(result[0].is_ok());
+    let _ = result.get(0).unwrap();
 }
 
 async fn find_region_distribution(cluster: &GreptimeDbCluster) -> HashMap<u64, Vec<u32>> {

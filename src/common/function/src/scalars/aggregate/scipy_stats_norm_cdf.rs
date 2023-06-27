@@ -231,7 +231,7 @@ mod test {
     fn test_update_batch() {
         // test update empty batch, expect not updating anything
         let mut scipy_stats_norm_cdf = ScipyStatsNormCdf::<i32>::default();
-        assert!(scipy_stats_norm_cdf.update_batch(&[]).is_ok());
+        scipy_stats_norm_cdf.update_batch(&[]).unwrap();
         assert!(scipy_stats_norm_cdf.values.is_empty());
         assert_eq!(Value::Null, scipy_stats_norm_cdf.evaluate().unwrap());
 
@@ -245,7 +245,7 @@ mod test {
                 Some(2.0_f64),
             ])),
         ];
-        assert!(scipy_stats_norm_cdf.update_batch(&v).is_ok());
+        scipy_stats_norm_cdf.update_batch(&v).unwrap();
         assert_eq!(
             Value::from(0.8086334555398362),
             scipy_stats_norm_cdf.evaluate().unwrap()
@@ -262,7 +262,7 @@ mod test {
                 Some(2.0_f64),
             ])),
         ];
-        assert!(scipy_stats_norm_cdf.update_batch(&v).is_ok());
+        scipy_stats_norm_cdf.update_batch(&v).unwrap();
         assert_eq!(
             Value::from(0.5412943699039795),
             scipy_stats_norm_cdf.evaluate().unwrap()

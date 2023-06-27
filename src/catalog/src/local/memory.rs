@@ -344,7 +344,7 @@ mod tests {
             table: Arc::new(NumbersTable::default()),
         };
 
-        assert!(catalog_list.register_table(register_request).await.is_ok());
+        let _ = catalog_list.register_table(register_request).await.unwrap();
         let table = catalog_list
             .table(
                 DEFAULT_CATALOG_NAME,
@@ -353,7 +353,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(table.is_some());
+        let _ = table.unwrap();
         assert!(catalog_list
             .table(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "not_exists")
             .await
@@ -393,7 +393,7 @@ mod tests {
             new_table_name: new_table_name.to_string(),
             table_id,
         };
-        assert!(catalog.rename_table(rename_request).await.is_ok());
+        let _ = catalog.rename_table(rename_request).await.unwrap();
 
         // test old table name not exist
         assert!(!catalog
@@ -495,7 +495,7 @@ mod tests {
             table_id: 2333,
             table: Arc::new(NumbersTable::default()),
         };
-        assert!(catalog.register_table(register_table_req).await.is_ok());
+        let _ = catalog.register_table(register_table_req).await.unwrap();
         assert!(catalog
             .table(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, table_name)
             .await

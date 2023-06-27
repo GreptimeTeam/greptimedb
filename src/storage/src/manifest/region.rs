@@ -444,7 +444,7 @@ mod tests {
         ];
 
         for action in actions {
-            assert!(manifest.update(action).await.is_ok());
+            let _ = manifest.update(action).await.unwrap();
         }
         assert!(manifest.last_checkpoint().await.unwrap().is_none());
         assert_scan(manifest, 0, 3).await;
@@ -503,7 +503,7 @@ mod tests {
             ))]),
         ];
         for action in actions {
-            assert!(manifest.update(action).await.is_ok());
+            let _ = manifest.update(action).await.unwrap();
         }
 
         assert_scan(manifest, 3, 2).await;

@@ -94,7 +94,7 @@ fn run_ron_testcases() {
     let loc = loc.to_str().expect("Fail to parse path");
     let mut file = File::open(loc).expect("Fail to open file");
     let mut buf = String::new();
-    assert!(file.read_to_string(&mut buf).is_ok());
+    let _ = file.read_to_string(&mut buf).unwrap();
     let testcases: Vec<TestCase> = from_ron_string(&buf).expect("Fail to convert to testcases");
     info!("Read {} testcases from {}", testcases.len(), loc);
     for testcase in testcases {

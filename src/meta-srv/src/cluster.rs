@@ -267,7 +267,7 @@ mod tests {
 
         let kv_map = to_stat_kv_map(vec![kv]).unwrap();
         assert_eq!(1, kv_map.len());
-        assert!(kv_map.get(&stat_key).is_some());
+        let _ = kv_map.get(&stat_key).unwrap();
 
         let stat_val = kv_map.get(&stat_key).unwrap();
         let stat = stat_val.stats.get(0).unwrap();
@@ -284,8 +284,7 @@ mod tests {
             error: None,
             ..Default::default()
         });
-        let result = check_resp_header(&header, mock_ctx());
-        assert!(result.is_ok());
+        check_resp_header(&header, mock_ctx()).unwrap();
 
         let result = check_resp_header(&None, mock_ctx());
         assert!(result.is_err());

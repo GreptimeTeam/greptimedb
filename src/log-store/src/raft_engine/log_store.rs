@@ -537,7 +537,7 @@ mod tests {
         let namespace = Namespace::with_id(42);
         for id in 0..4096 {
             let entry = Entry::create(id, namespace.id(), [b'x'; 4096].to_vec());
-            assert!(logstore.append(entry).await.is_ok());
+            let _ = logstore.append(entry).await.unwrap();
         }
 
         let before_purge = wal_dir_usage(dir.path().to_str().unwrap()).await;
@@ -569,7 +569,7 @@ mod tests {
         let namespace = Namespace::with_id(42);
         for id in 0..1024 {
             let entry = Entry::create(id, namespace.id(), [b'x'; 4096].to_vec());
-            assert!(logstore.append(entry).await.is_ok());
+            let _ = logstore.append(entry).await.unwrap();
         }
 
         logstore.obsolete(namespace.clone(), 100).await.unwrap();

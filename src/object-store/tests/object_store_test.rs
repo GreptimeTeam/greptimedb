@@ -300,8 +300,8 @@ async fn test_object_store_cache_policy() -> Result<()> {
     let p3 = "test_file3";
     store.write(p3, "Hello, object3!").await.unwrap();
 
-    assert!(store.read(p3).await.is_ok());
-    assert!(store.range_read(p3, 0..5).await.is_ok());
+    let _ = store.read(p3).await.unwrap();
+    let _ = store.range_read(p3, 0..5).await.unwrap();
 
     assert_cache_files(
         &cache_store,

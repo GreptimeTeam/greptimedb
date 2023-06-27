@@ -443,8 +443,8 @@ mod tests {
             handler,
         );
 
-        assert!(scheduler.schedule(MockRequest { region_id: 1 }).is_ok());
-        assert!(scheduler.schedule(MockRequest { region_id: 2 }).is_ok());
+        let _ = scheduler.schedule(MockRequest { region_id: 1 }).unwrap();
+        let _ = scheduler.schedule(MockRequest { region_id: 2 }).unwrap();
 
         tokio::time::timeout(Duration::from_secs(1), latch.wait())
             .await

@@ -136,14 +136,14 @@ mod tests {
             table: Cow::Borrowed("table_name"),
         };
         let result = table_provider.resolve_table_ref(table_ref);
-        assert!(result.is_ok());
+        let _ = result.unwrap();
 
         let table_ref = TableReference::Partial {
             schema: Cow::Borrowed("public"),
             table: Cow::Borrowed("table_name"),
         };
         let result = table_provider.resolve_table_ref(table_ref);
-        assert!(result.is_ok());
+        let _ = result.unwrap();
 
         let table_ref = TableReference::Partial {
             schema: Cow::Borrowed("wrong_schema"),
@@ -158,7 +158,7 @@ mod tests {
             table: Cow::Borrowed("table_name"),
         };
         let result = table_provider.resolve_table_ref(table_ref);
-        assert!(result.is_ok());
+        let _ = result.unwrap();
 
         let table_ref = TableReference::Full {
             catalog: Cow::Borrowed("wrong_catalog"),
@@ -172,14 +172,14 @@ mod tests {
             schema: Cow::Borrowed("information_schema"),
             table: Cow::Borrowed("columns"),
         };
-        assert!(table_provider.resolve_table_ref(table_ref).is_ok());
+        let _ = table_provider.resolve_table_ref(table_ref).unwrap();
 
         let table_ref = TableReference::Full {
             catalog: Cow::Borrowed("greptime"),
             schema: Cow::Borrowed("information_schema"),
             table: Cow::Borrowed("columns"),
         };
-        assert!(table_provider.resolve_table_ref(table_ref).is_ok());
+        let _ = table_provider.resolve_table_ref(table_ref).unwrap();
 
         let table_ref = TableReference::Full {
             catalog: Cow::Borrowed("dummy"),

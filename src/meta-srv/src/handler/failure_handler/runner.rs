@@ -272,7 +272,7 @@ mod tests {
 
         {
             let mut iter = container.iter();
-            assert!(iter.next().is_some());
+            let _ = iter.next().unwrap();
             assert!(iter.next().is_none());
         }
 

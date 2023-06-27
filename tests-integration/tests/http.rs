@@ -75,7 +75,7 @@ pub async fn test_sql_api(store_type: StorageType) {
     let body = serde_json::from_str::<JsonResponse>(&res.text().await).unwrap();
     assert_eq!(body.code(), 1004);
     assert_eq!(body.error().unwrap(), "sql parameter is required.");
-    assert!(body.execution_time_ms().is_some());
+    let _ = body.execution_time_ms().unwrap();
 
     let res = client
         .get("/v1/sql?sql=select * from numbers limit 10")
@@ -85,7 +85,7 @@ pub async fn test_sql_api(store_type: StorageType) {
 
     let body = serde_json::from_str::<JsonResponse>(&res.text().await).unwrap();
     assert!(body.success());
-    assert!(body.execution_time_ms().is_some());
+    let _ = body.execution_time_ms().unwrap();
 
     let output = body.output().unwrap();
     assert_eq!(output.len(), 1);
@@ -112,7 +112,7 @@ pub async fn test_sql_api(store_type: StorageType) {
 
     let body = serde_json::from_str::<JsonResponse>(&res.text().await).unwrap();
     assert!(body.success());
-    assert!(body.execution_time_ms().is_some());
+    let _ = body.execution_time_ms().unwrap();
     let output = body.output().unwrap();
     assert_eq!(output.len(), 1);
 
@@ -132,7 +132,7 @@ pub async fn test_sql_api(store_type: StorageType) {
 
     let body = serde_json::from_str::<JsonResponse>(&res.text().await).unwrap();
     assert!(body.success());
-    assert!(body.execution_time_ms().is_some());
+    let _ = body.execution_time_ms().unwrap();
     let output = body.output().unwrap();
     assert_eq!(output.len(), 1);
 
@@ -152,7 +152,7 @@ pub async fn test_sql_api(store_type: StorageType) {
 
     let body = serde_json::from_str::<JsonResponse>(&res.text().await).unwrap();
     assert!(body.success());
-    assert!(body.execution_time_ms().is_some());
+    let _ = body.execution_time_ms().unwrap();
     let output = body.output().unwrap();
     assert_eq!(output.len(), 1);
     assert_eq!(
@@ -171,7 +171,7 @@ pub async fn test_sql_api(store_type: StorageType) {
 
     let body = serde_json::from_str::<JsonResponse>(&res.text().await).unwrap();
     assert!(body.success());
-    assert!(body.execution_time_ms().is_some());
+    let _ = body.execution_time_ms().unwrap();
     let outputs = body.output().unwrap();
     assert_eq!(outputs.len(), 2);
     assert_eq!(
@@ -197,7 +197,7 @@ pub async fn test_sql_api(store_type: StorageType) {
 
     let body = serde_json::from_str::<JsonResponse>(&res.text().await).unwrap();
     assert!(!body.success());
-    assert!(body.execution_time_ms().is_some());
+    let _ = body.execution_time_ms().unwrap();
     assert!(body.error().unwrap().contains("Table not found"));
 
     // test database given
@@ -209,7 +209,7 @@ pub async fn test_sql_api(store_type: StorageType) {
 
     let body = serde_json::from_str::<JsonResponse>(&res.text().await).unwrap();
     assert!(body.success());
-    assert!(body.execution_time_ms().is_some());
+    let _ = body.execution_time_ms().unwrap();
     let outputs = body.output().unwrap();
     assert_eq!(outputs.len(), 1);
     assert_eq!(
@@ -237,7 +237,7 @@ pub async fn test_sql_api(store_type: StorageType) {
 
     let body = serde_json::from_str::<JsonResponse>(&res.text().await).unwrap();
     assert!(body.success());
-    assert!(body.execution_time_ms().is_some());
+    let _ = body.execution_time_ms().unwrap();
     let outputs = body.output().unwrap();
     assert_eq!(outputs.len(), 1);
     assert_eq!(
@@ -281,7 +281,7 @@ pub async fn test_prometheus_promql_api(store_type: StorageType) {
 
     let body = serde_json::from_str::<JsonResponse>(&res.text().await).unwrap();
     assert!(body.success());
-    assert!(body.execution_time_ms().is_some());
+    let _ = body.execution_time_ms().unwrap();
 
     guard.remove_all().await;
 }
@@ -460,7 +460,7 @@ def test(n) -> vector[f64]:
     let body = serde_json::from_str::<JsonResponse>(&res.text().await).unwrap();
 
     assert_eq!(body.code(), 0);
-    assert!(body.execution_time_ms().is_some());
+    let _ = body.execution_time_ms().unwrap();
     let output = body.output().unwrap();
     assert_eq!(output.len(), 1);
     assert_eq!(

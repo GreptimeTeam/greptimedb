@@ -158,19 +158,19 @@ mod test {
     fn test_update_batch() {
         // test update empty batch, expect not updating anything
         let mut argmax = Argmax::<i32>::default();
-        assert!(argmax.update_batch(&[]).is_ok());
+        argmax.update_batch(&[]).unwrap();
         assert_eq!(Value::Null, argmax.evaluate().unwrap());
 
         // test update one not-null value
         let mut argmax = Argmax::<i32>::default();
         let v: Vec<VectorRef> = vec![Arc::new(Int32Vector::from(vec![Some(42)]))];
-        assert!(argmax.update_batch(&v).is_ok());
+        argmax.update_batch(&v).unwrap();
         assert_eq!(Value::from(0_u64), argmax.evaluate().unwrap());
 
         // test update one null value
         let mut argmax = Argmax::<i32>::default();
         let v: Vec<VectorRef> = vec![Arc::new(Int32Vector::from(vec![Option::<i32>::None]))];
-        assert!(argmax.update_batch(&v).is_ok());
+        argmax.update_batch(&v).unwrap();
         assert_eq!(Value::Null, argmax.evaluate().unwrap());
 
         // test update no null-value batch
@@ -180,7 +180,7 @@ mod test {
             Some(1),
             Some(3),
         ]))];
-        assert!(argmax.update_batch(&v).is_ok());
+        argmax.update_batch(&v).unwrap();
         assert_eq!(Value::from(2_u64), argmax.evaluate().unwrap());
 
         // test update null-value batch
@@ -190,7 +190,7 @@ mod test {
             None,
             Some(4),
         ]))];
-        assert!(argmax.update_batch(&v).is_ok());
+        argmax.update_batch(&v).unwrap();
         assert_eq!(Value::from(2_u64), argmax.evaluate().unwrap());
 
         // test update with constant vector
@@ -199,7 +199,7 @@ mod test {
             Arc::new(Int32Vector::from_vec(vec![4])),
             10,
         ))];
-        assert!(argmax.update_batch(&v).is_ok());
+        argmax.update_batch(&v).unwrap();
         assert_eq!(Value::from(0_u64), argmax.evaluate().unwrap());
     }
 }

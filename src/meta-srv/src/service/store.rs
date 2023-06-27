@@ -124,7 +124,7 @@ mod tests {
         let req = RangeRequest::default();
         let res = meta_srv.range(req.into_request()).await;
 
-        assert!(res.is_ok());
+        let _ = res.unwrap();
     }
 
     #[tokio::test]
@@ -134,7 +134,7 @@ mod tests {
         let req = PutRequest::default();
         let res = meta_srv.put(req.into_request()).await;
 
-        assert!(res.is_ok());
+        let _ = res.unwrap();
     }
 
     #[tokio::test]
@@ -144,7 +144,7 @@ mod tests {
         let req = BatchGetRequest::default();
         let res = meta_srv.batch_get(req.into_request()).await;
 
-        assert!(res.is_ok());
+        let _ = res.unwrap();
     }
 
     #[tokio::test]
@@ -154,7 +154,7 @@ mod tests {
         let req = BatchPutRequest::default();
         let res = meta_srv.batch_put(req.into_request()).await;
 
-        assert!(res.is_ok());
+        let _ = res.unwrap();
     }
 
     #[tokio::test]
@@ -164,7 +164,7 @@ mod tests {
         let req = BatchDeleteRequest::default();
         let res = meta_srv.batch_delete(req.into_request()).await;
 
-        assert!(res.is_ok());
+        let _ = res.unwrap();
     }
 
     #[tokio::test]
@@ -174,7 +174,7 @@ mod tests {
         let req = CompareAndPutRequest::default();
         let res = meta_srv.compare_and_put(req.into_request()).await;
 
-        assert!(res.is_ok());
+        let _ = res.unwrap();
     }
 
     #[tokio::test]
@@ -184,7 +184,7 @@ mod tests {
         let req = DeleteRangeRequest::default();
         let res = meta_srv.delete_range(req.into_request()).await;
 
-        assert!(res.is_ok());
+        let _ = res.unwrap();
     }
 
     #[tokio::test]
@@ -194,6 +194,6 @@ mod tests {
         let req = MoveValueRequest::default();
         let res = meta_srv.move_value(req.into_request()).await;
 
-        assert!(res.is_ok());
+        let _ = res.unwrap();
     }
 }

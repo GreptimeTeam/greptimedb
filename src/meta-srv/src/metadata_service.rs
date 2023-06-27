@@ -133,17 +133,19 @@ mod tests {
         let kv_store = Arc::new(MemStore::default());
         let service = DefaultMetadataService::new(kv_store.clone());
 
-        let result = service.create_schema("catalog", "public", false).await;
-
-        assert!(result.is_ok());
+        service
+            .create_schema("catalog", "public", false)
+            .await
+            .unwrap();
         verify_result(kv_store.clone()).await;
 
         let result = service.create_schema("catalog", "public", false).await;
         assert!(result.is_err());
 
-        let result = service.create_schema("catalog", "public", true).await;
-
-        assert!(result.is_ok());
+        service
+            .create_schema("catalog", "public", true)
+            .await
+            .unwrap();
         verify_result(kv_store.clone()).await;
     }
 
@@ -156,7 +158,6 @@ mod tests {
 
         let result = kv_store.get(key.clone()).await.unwrap();
 
-        assert!(result.is_some());
         let kv = result.unwrap();
 
         assert_eq!(key, kv.key);
@@ -170,7 +171,6 @@ mod tests {
 
         let result = kv_store.get(key.clone()).await.unwrap();
 
-        assert!(result.is_some());
         let kv = result.unwrap();
 
         assert_eq!(key, kv.key);

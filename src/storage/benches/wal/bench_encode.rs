@@ -35,8 +35,7 @@ rows |  protobuf    |    arrow       |
 fn encode_arrow(batch: &WriteBatch) {
     let encoder = codec::PayloadEncoder::new();
     let mut dst = vec![];
-    let result = encoder.encode(batch.payload(), &mut dst);
-    assert!(result.is_ok());
+    encoder.encode(batch.payload(), &mut dst).unwrap();
 }
 
 fn bench_wal_encode(c: &mut Criterion) {

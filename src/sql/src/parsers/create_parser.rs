@@ -931,7 +931,7 @@ PARTITION BY RANGE COLUMNS(b, a) (
 )
 ENGINE=mito";
         let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
-        assert!(result.is_ok());
+        let _ = result.unwrap();
 
         let sql = r"
 CREATE TABLE rcx ( a INT, b STRING, c INT )
@@ -1489,6 +1489,6 @@ ENGINE=mito";
             create table foo("user" string, i bigint time index)
         "#;
         let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
-        assert!(result.is_ok());
+        let _ = result.unwrap();
     }
 }

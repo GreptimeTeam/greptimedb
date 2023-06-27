@@ -212,7 +212,6 @@ mod tests {
             .worker_threads(2)
             .thread_name("test_spawn_join")
             .build();
-        assert!(runtime.is_ok());
         Arc::new(runtime.unwrap())
     }
 

@@ -183,7 +183,7 @@ mod tests {
         assert_eq!(schema_new, *batch.schema());
 
         let mutation = &batch.payload().mutations[0];
-        assert!(mutation.record_batch.column_by_name("v0").is_some());
+        let _ = mutation.record_batch.column_by_name("v0").unwrap();
     }
 
     #[test]

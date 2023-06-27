@@ -38,9 +38,8 @@ async fn test_mtls_config() {
         client_key_path: "tests/tls/corrupted".to_string(),
     });
 
-    let re = ChannelManager::with_tls_config(config);
-    assert!(re.is_ok());
-    let re = re.unwrap().get("127.0.0.1:0");
+    let re = ChannelManager::with_tls_config(config).unwrap();
+    let re = re.get("127.0.0.1:0");
     assert!(re.is_err());
 
     // success
@@ -50,8 +49,7 @@ async fn test_mtls_config() {
         client_key_path: "tests/tls/client.key.pem".to_string(),
     });
 
-    let re = ChannelManager::with_tls_config(config);
-    assert!(re.is_ok());
-    let re = re.unwrap().get("127.0.0.1:0");
-    assert!(re.is_ok());
+    let re = ChannelManager::with_tls_config(config).unwrap();
+    let re = re.get("127.0.0.1:0");
+    let _ = re.unwrap();
 }

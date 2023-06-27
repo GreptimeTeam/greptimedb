@@ -328,8 +328,7 @@ pub async fn test_health_check(store_type: StorageType) {
         setup_grpc_server(store_type, "auto_create_table").await;
 
     let grpc_client = Client::with_urls(vec![addr]);
-    let r = grpc_client.health_check().await;
-    assert!(r.is_ok());
+    grpc_client.health_check().await.unwrap();
 
     let _ = fe_grpc_server.shutdown().await;
     guard.remove_all().await;

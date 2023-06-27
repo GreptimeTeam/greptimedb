@@ -101,7 +101,7 @@ async fn test_whitelist_no_auth() {
     // try whitelist path
     let req = mock_http_request(None, Some("http://localhost/health")).unwrap();
     let req = http_auth.authorize(req).await;
-    assert!(req.is_ok());
+    let _ = req.unwrap();
 }
 
 // copy from http::authorize

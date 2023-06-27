@@ -76,7 +76,7 @@ async fn test_start_mysql_server() -> Result<()> {
     let mysql_server = create_mysql_server(table, Default::default())?;
     let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
     let result = mysql_server.start(listening).await;
-    assert!(result.is_ok());
+    let _ = result.unwrap();
 
     let result = mysql_server.start(listening).await;
     assert!(result
@@ -103,10 +103,10 @@ async fn test_reject_no_database() -> Result<()> {
 
     let fail = create_connection(server_port, None, false).await;
     assert!(fail.is_err());
-    let pass = create_connection(server_port, Some("public"), false).await;
-    assert!(pass.is_ok());
-    let result = mysql_server.shutdown().await;
-    assert!(result.is_ok());
+    let _ = create_connection(server_port, Some("public"), false)
+        .await
+        .unwrap();
+    mysql_server.shutdown().await.unwrap();
 
     Ok(())
 }
@@ -135,10 +135,10 @@ async fn test_schema_validation() -> Result<()> {
     })
     .await?;
 
-    let pass = create_connection_default_db_name(server_port, false).await;
-    assert!(pass.is_ok());
-    let result = mysql_server.shutdown().await;
-    assert!(result.is_ok());
+    let _ = create_connection_default_db_name(server_port, false)
+        .await
+        .unwrap();
+    mysql_server.shutdown().await.unwrap();
 
     // change to another username
     let (mysql_server, server_port) = generate_server(DatabaseAuthInfo {
@@ -150,8 +150,7 @@ async fn test_schema_validation() -> Result<()> {
 
     let fail = create_connection_default_db_name(server_port, false).await;
     assert!(fail.is_err());
-    let result = mysql_server.shutdown().await;
-    assert!(result.is_ok());
+    mysql_server.shutdown().await.unwrap();
 
     Ok(())
 }
@@ -195,8 +194,7 @@ async fn test_shutdown_mysql_server() -> Result<()> {
     }
 
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let result = mysql_server.shutdown().await;
-    assert!(result.is_ok());
+    mysql_server.shutdown().await.unwrap();
 
     for handle in join_handles.iter_mut() {
         let result = handle.await.unwrap();
@@ -349,7 +347,7 @@ async fn test_db_name() -> Result<()> {
 
     // None actually uses default database name
     let r = create_connection_default_db_name(server_addr.port(), client_tls).await;
-    assert!(r.is_ok());
+    let _ = r.unwrap();
 
     let r = create_connection(server_addr.port(), Some("tomcat"), client_tls).await;
     assert!(r.is_err());
@@ -514,8 +512,6 @@ async fn test_prepare_all_type(
 
             let output: std::result::Result<Vec<Row>, mysql_async::Error> =
                 connection.exec(statement.clone(), vec![v]).await;
-
-            assert!(output.is_ok());
 
             let rows = output.unwrap();
             assert!(!rows.is_empty());

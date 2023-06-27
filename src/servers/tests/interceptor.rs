@@ -83,6 +83,5 @@ fn test_grpc_interceptor() {
     assert!(fail.is_err());
 
     let req = Request::Inserts(InsertRequests::default());
-    let success = GrpcQueryInterceptor::pre_execute(&di, &req, ctx);
-    assert!(success.is_ok());
+    GrpcQueryInterceptor::pre_execute(&di, &req, ctx).unwrap();
 }

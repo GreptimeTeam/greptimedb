@@ -508,7 +508,7 @@ fn test_iter_after_none() {
         };
 
         let mut iter = ctx.memtable.iter(iter_ctx).unwrap();
-        assert!(iter.next().is_some());
+        let _ = iter.next().unwrap();
         assert!(iter.next().is_none());
         assert!(iter.next().is_none());
     });

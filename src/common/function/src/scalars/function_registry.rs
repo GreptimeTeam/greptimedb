@@ -94,7 +94,7 @@ mod tests {
         assert!(registry.get_function("test_and").is_none());
         assert!(registry.functions().is_empty());
         registry.register(func);
-        assert!(registry.get_function("test_and").is_some());
+        let _ = registry.get_function("test_and").unwrap();
         assert_eq!(1, registry.functions().len());
     }
 }

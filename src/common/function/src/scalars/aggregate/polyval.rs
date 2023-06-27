@@ -267,7 +267,7 @@ mod test {
     fn test_update_batch() {
         // test update empty batch, expect not updating anything
         let mut polyval = Polyval::<i32, i64>::default();
-        assert!(polyval.update_batch(&[]).is_ok());
+        polyval.update_batch(&[]).unwrap();
         assert!(polyval.values.is_empty());
         assert_eq!(Value::Null, polyval.evaluate().unwrap());
 
@@ -277,7 +277,7 @@ mod test {
             Arc::new(Int32Vector::from(vec![Some(3)])),
             Arc::new(Int64Vector::from(vec![Some(2_i64)])),
         ];
-        assert!(polyval.update_batch(&v).is_ok());
+        polyval.update_batch(&v).unwrap();
         assert_eq!(Value::Int64(3), polyval.evaluate().unwrap());
 
         // test update one null value
@@ -286,7 +286,7 @@ mod test {
             Arc::new(Int32Vector::from(vec![Option::<i32>::None])),
             Arc::new(Int64Vector::from(vec![Some(2_i64)])),
         ];
-        assert!(polyval.update_batch(&v).is_ok());
+        polyval.update_batch(&v).unwrap();
         assert_eq!(Value::Null, polyval.evaluate().unwrap());
 
         // test update no null-value batch
@@ -299,7 +299,7 @@ mod test {
                 Some(2_i64),
             ])),
         ];
-        assert!(polyval.update_batch(&v).is_ok());
+        polyval.update_batch(&v).unwrap();
         assert_eq!(Value::Int64(13), polyval.evaluate().unwrap());
 
         // test update null-value batch
@@ -313,7 +313,7 @@ mod test {
                 Some(2_i64),
             ])),
         ];
-        assert!(polyval.update_batch(&v).is_ok());
+        polyval.update_batch(&v).unwrap();
         assert_eq!(Value::Int64(13), polyval.evaluate().unwrap());
 
         // test update with constant vector
@@ -325,7 +325,7 @@ mod test {
             )),
             Arc::new(Int64Vector::from(vec![Some(5_i64), Some(5_i64)])),
         ];
-        assert!(polyval.update_batch(&v).is_ok());
+        polyval.update_batch(&v).unwrap();
         assert_eq!(Value::Int64(24), polyval.evaluate().unwrap());
     }
 }

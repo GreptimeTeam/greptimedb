@@ -122,7 +122,10 @@ pub async fn test_mysql_crud(store_type: StorageType) {
         assert_eq!(ret, 6);
     }
 
-    assert!(sqlx::query("delete from demo").execute(&pool).await.is_ok());
+    let _ = sqlx::query("delete from demo")
+        .execute(&pool)
+        .await
+        .unwrap();
     let rows = sqlx::query("select i from demo")
         .fetch_all(&pool)
         .await
@@ -180,7 +183,10 @@ pub async fn test_postgres_crud(store_type: StorageType) {
         assert_eq!(ret, 6);
     }
 
-    assert!(sqlx::query("delete from demo").execute(&pool).await.is_ok());
+    let _ = sqlx::query("delete from demo")
+        .execute(&pool)
+        .await
+        .unwrap();
     let rows = sqlx::query("select i from demo")
         .fetch_all(&pool)
         .await
