@@ -22,6 +22,7 @@ use catalog::remote::region_alive_keeper::RegionAliveKeepers;
 use catalog::remote::{CachedMetaKvBackend, RemoteCatalogManager};
 use catalog::{CatalogManager, CatalogManagerRef, RegisterTableRequest};
 use common_base::paths::{CLUSTER_DIR, WAL_DIR};
+use common_base::Plugins;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID};
 use common_error::prelude::BoxedError;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
@@ -84,7 +85,10 @@ pub struct Instance {
 pub type InstanceRef = Arc<Instance>;
 
 impl Instance {
-    pub async fn with_opts(opts: &DatanodeOptions) -> Result<(InstanceRef, Option<HeartbeatTask>)> {
+    pub async fn with_opts(
+        opts: &DatanodeOptions,
+        plugins: Arc<Plugins>,
+    ) -> Result<(InstanceRef, Option<HeartbeatTask>)> {
         let meta_client = match opts.mode {
             Mode::Standalone => None,
             Mode::Distributed => {
@@ -101,7 +105,7 @@ impl Instance {
 
         let compaction_scheduler = create_compaction_scheduler(opts);
 
-        Self::new(opts, meta_client, compaction_scheduler).await
+        Self::new(opts, meta_client, compaction_scheduler, plugins).await
     }
 
     fn build_heartbeat_task(
@@ -154,6 +158,7 @@ impl Instance {
         opts: &DatanodeOptions,
         meta_client: Option<Arc<MetaClient>>,
         compaction_scheduler: CompactionSchedulerRef<RaftEngineLogStore>,
+        plugins: Arc<Plugins>,
     ) -> Result<(InstanceRef, Option<HeartbeatTask>)> {
         let object_store = store::new_object_store(&opts.storage.store).await?;
         let log_store = Arc::new(create_log_store(&opts.storage.store, &opts.wal).await?);
@@ -261,7 +266,13 @@ impl Instance {
         };
 
         catalog_manager.start().await.context(CatalogSnafu)?;
-        let factory = QueryEngineFactory::new(catalog_manager.clone(), false);
+        let factory = QueryEngineFactory::new_with_plugins(
+            catalog_manager.clone(),
+            false,
+            None,
+            None,
+            plugins,
+        );
         let query_engine = factory.query_engine();
 
         let procedure_manager =

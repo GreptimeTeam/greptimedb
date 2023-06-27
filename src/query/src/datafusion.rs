@@ -22,6 +22,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use common_base::Plugins;
 use common_error::prelude::BoxedError;
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_function::scalars::udf::create_udf;
@@ -53,6 +54,7 @@ use crate::executor::QueryExecutor;
 use crate::logical_optimizer::LogicalOptimizer;
 use crate::physical_optimizer::PhysicalOptimizer;
 use crate::physical_planner::PhysicalPlanner;
+use crate::physical_wrapper::PhysicalPlanWrapperRef;
 use crate::plan::LogicalPlan;
 use crate::planner::{DfLogicalPlanner, LogicalPlanner};
 use crate::query_engine::{DescribeResult, QueryEngineContext, QueryEngineState};
@@ -60,19 +62,30 @@ use crate::{metrics, QueryEngine};
 
 pub struct DatafusionQueryEngine {
     state: Arc<QueryEngineState>,
+    plugins: Arc<Plugins>,
 }
 
 impl DatafusionQueryEngine {
-    pub fn new(state: Arc<QueryEngineState>) -> Self {
-        Self { state }
+    pub fn new(state: Arc<QueryEngineState>, plugins: Arc<Plugins>) -> Self {
+        Self { state, plugins }
     }
 
-    async fn exec_query_plan(&self, plan: LogicalPlan) -> Result<Output> {
+    async fn exec_query_plan(
+        &self,
+        plan: LogicalPlan,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
         let mut ctx = QueryEngineContext::new(self.state.session_state());
 
         // `create_physical_plan` will optimize logical plan internally
         let physical_plan = self.create_physical_plan(&mut ctx, &plan).await?;
         let physical_plan = self.optimize_physical_plan(&mut ctx, physical_plan)?;
+
+        let physical_plan = if let Some(wrapper) = self.plugins.get::<PhysicalPlanWrapperRef>() {
+            wrapper.wrap(physical_plan, query_ctx)
+        } else {
+            physical_plan
+        };
 
         Ok(Output::Stream(self.execute_stream(&ctx, &physical_plan)?))
     }
@@ -95,7 +108,7 @@ impl DatafusionQueryEngine {
         let table = self.find_table(&table_name).await?;
 
         let output = self
-            .exec_query_plan(LogicalPlan::DfPlan((*dml.input).clone()))
+            .exec_query_plan(LogicalPlan::DfPlan((*dml.input).clone()), query_ctx)
             .await?;
         let mut stream = match output {
             Output::RecordBatches(batches) => batches.as_stream(),
@@ -216,7 +229,7 @@ impl QueryEngine for DatafusionQueryEngine {
             LogicalPlan::DfPlan(DfLogicalPlan::Dml(dml)) => {
                 self.exec_dml_statement(dml, query_ctx).await
             }
-            _ => self.exec_query_plan(plan).await,
+            _ => self.exec_query_plan(plan, query_ctx).await,
         }
     }
 

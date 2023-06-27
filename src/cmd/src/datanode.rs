@@ -170,7 +170,9 @@ impl StartCommand {
         logging::info!("Datanode start command: {:#?}", self);
         logging::info!("Datanode options: {:#?}", opts);
 
-        let datanode = Datanode::new(opts).await.context(StartDatanodeSnafu)?;
+        let datanode = Datanode::new(opts, Default::default())
+            .await
+            .context(StartDatanodeSnafu)?;
 
         Ok(Instance { datanode })
     }

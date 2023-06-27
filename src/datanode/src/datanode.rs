@@ -14,9 +14,11 @@
 
 //! Datanode configurations
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use common_base::readable_size::ReadableSize;
+use common_base::Plugins;
 use common_error::prelude::BoxedError;
 use common_telemetry::info;
 use common_telemetry::logging::LoggingOptions;
@@ -386,8 +388,8 @@ pub struct Datanode {
 }
 
 impl Datanode {
-    pub async fn new(opts: DatanodeOptions) -> Result<Datanode> {
-        let (instance, heartbeat_task) = Instance::with_opts(&opts).await?;
+    pub async fn new(opts: DatanodeOptions, plugins: Arc<Plugins>) -> Result<Datanode> {
+        let (instance, heartbeat_task) = Instance::with_opts(&opts, plugins).await?;
         let services = match opts.mode {
             Mode::Distributed => Some(Services::try_new(instance.clone(), &opts).await?),
             Mode::Standalone => None,
