@@ -321,7 +321,7 @@ pub async fn create_test_table(
 
 pub async fn setup_test_http_app(store_type: StorageType, name: &str) -> (Router, TestGuard) {
     let (opts, guard) = create_tmp_dir_and_datanode_opts(store_type, name);
-    let instance = Arc::new(Instance::with_mock_meta_client(&opts).await.unwrap());
+    let (instance, heartbeat) = Instance::with_mock_meta_client(&opts).await.unwrap();
     create_test_table(
         instance.catalog_manager(),
         instance.sql_handler(),
@@ -334,6 +334,9 @@ pub async fn setup_test_http_app(store_type: StorageType, name: &str) -> (Router
         .await
         .unwrap();
     instance.start().await.unwrap();
+    if let Some(heartbeat) = heartbeat {
+        heartbeat.start().await.unwrap();
+    }
 
     let http_opts = HttpOptions {
         addr: format!("127.0.0.1:{}", ports::get_port()),
@@ -354,11 +357,14 @@ pub async fn setup_test_http_app_with_frontend(
     name: &str,
 ) -> (Router, TestGuard) {
     let (opts, guard) = create_tmp_dir_and_datanode_opts(store_type, name);
-    let instance = Arc::new(Instance::with_mock_meta_client(&opts).await.unwrap());
+    let (instance, heartbeat) = Instance::with_mock_meta_client(&opts).await.unwrap();
     let frontend = FeInstance::try_new_standalone(instance.clone())
         .await
         .unwrap();
     instance.start().await.unwrap();
+    if let Some(heartbeat) = heartbeat {
+        heartbeat.start().await.unwrap();
+    }
     create_test_table(
         frontend.catalog_manager(),
         instance.sql_handler(),
@@ -416,11 +422,14 @@ pub async fn setup_test_prom_app_with_frontend(
 ) -> (Router, TestGuard) {
     std::env::set_var("TZ", "UTC");
     let (opts, guard) = create_tmp_dir_and_datanode_opts(store_type, name);
-    let instance = Arc::new(Instance::with_mock_meta_client(&opts).await.unwrap());
+    let (instance, heartbeat) = Instance::with_mock_meta_client(&opts).await.unwrap();
     let frontend = FeInstance::try_new_standalone(instance.clone())
         .await
         .unwrap();
     instance.start().await.unwrap();
+    if let Some(heartbeat) = heartbeat {
+        heartbeat.start().await.unwrap();
+    }
 
     create_test_table(
         frontend.catalog_manager(),
@@ -470,7 +479,7 @@ pub async fn setup_grpc_server(
     common_telemetry::init_default_ut_logging();
 
     let (opts, guard) = create_tmp_dir_and_datanode_opts(store_type, name);
-    let instance = Arc::new(Instance::with_mock_meta_client(&opts).await.unwrap());
+    let (instance, heartbeat) = Instance::with_mock_meta_client(&opts).await.unwrap();
 
     let runtime = Arc::new(
         RuntimeBuilder::default()
@@ -484,6 +493,9 @@ pub async fn setup_grpc_server(
         .await
         .unwrap();
     instance.start().await.unwrap();
+    if let Some(heartbeat) = heartbeat {
+        heartbeat.start().await.unwrap();
+    }
     let fe_instance_ref = Arc::new(fe_instance);
     let fe_grpc_server = Arc::new(GrpcServer::new(
         ServerGrpcQueryHandlerAdaptor::arc(fe_instance_ref.clone()),
@@ -522,7 +534,7 @@ pub async fn setup_mysql_server(
     common_telemetry::init_default_ut_logging();
 
     let (opts, guard) = create_tmp_dir_and_datanode_opts(store_type, name);
-    let instance = Arc::new(Instance::with_mock_meta_client(&opts).await.unwrap());
+    let (instance, heartbeat) = Instance::with_mock_meta_client(&opts).await.unwrap();
 
     let runtime = Arc::new(
         RuntimeBuilder::default()
@@ -538,6 +550,9 @@ pub async fn setup_mysql_server(
         .await
         .unwrap();
     instance.start().await.unwrap();
+    if let Some(heartbeat) = heartbeat {
+        heartbeat.start().await.unwrap();
+    }
     let fe_instance_ref = Arc::new(fe_instance);
     let opts = MysqlOptions {
         addr: fe_mysql_addr.clone(),
@@ -575,7 +590,7 @@ pub async fn setup_pg_server(
     common_telemetry::init_default_ut_logging();
 
     let (opts, guard) = create_tmp_dir_and_datanode_opts(store_type, name);
-    let instance = Arc::new(Instance::with_mock_meta_client(&opts).await.unwrap());
+    let (instance, heartbeat) = Instance::with_mock_meta_client(&opts).await.unwrap();
 
     let runtime = Arc::new(
         RuntimeBuilder::default()
@@ -591,6 +606,9 @@ pub async fn setup_pg_server(
         .await
         .unwrap();
     instance.start().await.unwrap();
+    if let Some(heartbeat) = heartbeat {
+        heartbeat.start().await.unwrap();
+    }
     let fe_instance_ref = Arc::new(fe_instance);
     let opts = PostgresOptions {
         addr: fe_pg_addr.clone(),
