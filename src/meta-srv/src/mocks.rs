@@ -22,7 +22,6 @@ use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use tower::service_fn;
 
-use crate::cluster::MetaPeerClientBuilder;
 use crate::metadata_service::{DefaultMetadataService, MetadataService};
 use crate::metasrv::builder::MetaSrvBuilder;
 use crate::metasrv::{MetaSrv, MetaSrvOptions, SelectorRef};
@@ -66,17 +65,7 @@ pub async fn mock(
         .await
         .unwrap();
 
-    let meta_peer_client = MetaPeerClientBuilder::default()
-        .in_memory(Arc::new(MemStore::new()))
-        .build()
-        .map(Arc::new)
-        // Safety: all required fields set at initialization
-        .unwrap();
-
-    let builder = MetaSrvBuilder::new()
-        .options(opts)
-        .kv_store(kv_store)
-        .meta_peer_client(meta_peer_client);
+    let builder = MetaSrvBuilder::new().options(opts).kv_store(kv_store);
 
     let builder = match selector {
         Some(s) => builder.selector(s),

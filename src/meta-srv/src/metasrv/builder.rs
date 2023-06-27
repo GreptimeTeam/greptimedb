@@ -16,10 +16,8 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use common_procedure::local::{LocalManager, ManagerConfig};
-use snafu::OptionExt;
 
-use crate::cluster::MetaPeerClientRef;
-use crate::error;
+use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
 use crate::error::Result;
 use crate::handler::mailbox_handler::MailboxHandler;
 use crate::handler::region_lease_handler::RegionLeaseHandler;
@@ -133,7 +131,15 @@ impl MetaSrvBuilder {
 
         let kv_store = kv_store.unwrap_or_else(|| Arc::new(MemStore::default()));
         let in_memory = in_memory.unwrap_or_else(|| Arc::new(MemStore::default()));
-        let meta_peer_client = meta_peer_client.context(error::MetaPeerClientRequiredSnafu)?;
+        let meta_peer_client = meta_peer_client.unwrap_or_else(|| {
+            MetaPeerClientBuilder::default()
+                .election(election.clone())
+                .in_memory(in_memory.clone())
+                .build()
+                .map(Arc::new)
+                // Safety: all required fields set at initialization
+                .unwrap()
+        });
         let selector = selector.unwrap_or_else(|| Arc::new(LeaseBasedSelector));
         let pushers = Pushers::default();
         let mailbox_sequence = Sequence::new("heartbeat_mailbox", 1, 100, kv_store.clone());
@@ -206,11 +212,11 @@ impl MetaSrvBuilder {
             options,
             in_memory,
             kv_store,
+            meta_peer_client,
             table_id_sequence,
             selector,
             handler_group,
             election,
-            meta_peer_client,
             lock,
             procedure_manager,
             metadata_service,

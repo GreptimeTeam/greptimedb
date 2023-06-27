@@ -38,6 +38,7 @@ pub(crate) fn create_region_failover_manager() -> Arc<RegionFailoverManager> {
 
     let in_memory = Arc::new(MemStore::new());
     let meta_peer_client = MetaPeerClientBuilder::default()
+        .election(None)
         .in_memory(in_memory)
         .build()
         .map(Arc::new)

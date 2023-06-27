@@ -471,11 +471,12 @@ mod tests {
         pub async fn build(self) -> TestingEnv {
             let kv_store = Arc::new(MemStore::new()) as _;
             let meta_peer_client = MetaPeerClientBuilder::default()
+                .election(None)
                 .in_memory(Arc::new(MemStore::new()))
                 .build()
+                .map(Arc::new)
                 // Safety: all required fields set at initialization
                 .unwrap();
-            let meta_peer_client = Arc::new(meta_peer_client);
 
             let table = "my_table";
             let (_, table_global_value) =

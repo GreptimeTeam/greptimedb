@@ -65,6 +65,7 @@ mod tests {
         let seq = Sequence::new("test_seq", 0, 10, kv_store.clone());
         let mailbox = HeartbeatMailbox::create(Pushers::default(), seq);
         let meta_peer_client = MetaPeerClientBuilder::default()
+            .election(None)
             .in_memory(in_memory.clone())
             .build()
             .map(Arc::new)
