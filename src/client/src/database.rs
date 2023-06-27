@@ -115,7 +115,7 @@ impl Database {
     }
 
     pub fn streaming_inserter(&self) -> Result<StreamInserter> {
-        self.streaming_inserter_with_channel_size(1024)
+        self.streaming_inserter_with_channel_size(65536)
     }
 
     pub fn streaming_inserter_with_channel_size(
