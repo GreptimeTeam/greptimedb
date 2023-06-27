@@ -1102,15 +1102,35 @@ impl PromPlanner {
             PromExpr::Paren(ParenExpr { expr }) => Self::try_build_literal_expr(expr),
             // TODO(ruihang): support Unary operator
             PromExpr::Unary(UnaryExpr { expr, .. }) => Self::try_build_literal_expr(expr),
-            PromExpr::Binary(PromBinaryExpr { lhs, rhs, op, .. }) => {
+            PromExpr::Binary(PromBinaryExpr {
+                lhs,
+                rhs,
+                op,
+                modifier,
+            }) => {
                 let lhs = Self::try_build_literal_expr(lhs)?;
                 let rhs = Self::try_build_literal_expr(rhs)?;
+                let is_comparison_op = Self::is_token_a_comparison_op(*op);
                 let op = Self::prom_token_to_binary_op(*op).ok()?;
-                Some(DfExpr::BinaryExpr(BinaryExpr {
+
+                let should_return_bool = if let Some(m) = modifier {
+                    m.return_bool
+                } else {
+                    false
+                };
+                let expr = DfExpr::BinaryExpr(BinaryExpr {
                     left: Box::new(lhs),
                     op,
                     right: Box::new(rhs),
-                }))
+                });
+                if is_comparison_op && should_return_bool {
+                    Some(DfExpr::Cast(Cast {
+                        expr: Box::new(expr),
+                        data_type: ArrowDataType::Float64,
+                    }))
+                } else {
+                    Some(expr)
+                }
             }
         }
     }
