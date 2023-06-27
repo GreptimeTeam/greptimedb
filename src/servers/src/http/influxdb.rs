@@ -41,29 +41,54 @@ pub async fn influxdb_health() -> Result<impl IntoResponse> {
 }
 
 #[axum_macros::debug_handler]
-pub async fn influxdb_write(
+pub async fn influxdb_write_v1(
     State(handler): State<InfluxdbLineProtocolHandlerRef>,
     Query(mut params): Query<HashMap<String, String>>,
     lines: String,
 ) -> Result<impl IntoResponse> {
-    let db = params.remove("db").unwrap_or_else(|| {
-        params
-            .remove("bucket")
-            .unwrap_or_else(|| DEFAULT_SCHEMA_NAME.to_string())
-    });
-
-    let _timer = timer!(
-        crate::metrics::METRIC_HTTP_INFLUXDB_WRITE_ELAPSED,
-        &[(crate::metrics::METRIC_DB_LABEL, db.clone())]
-    );
-
-    let (catalog, schema) = parse_catalog_and_schema_from_client_database_name(&db);
-    let ctx = Arc::new(QueryContext::with(catalog, schema));
+    let db = params
+        .remove("db")
+        .unwrap_or_else(|| DEFAULT_SCHEMA_NAME.to_string());
 
     let precision = params
         .get("precision")
         .map(|val| parse_time_precision(val))
         .transpose()?;
+
+    influxdb_write(&db, precision, lines, handler).await
+}
+
+#[axum_macros::debug_handler]
+pub async fn influxdb_write_v2(
+    State(handler): State<InfluxdbLineProtocolHandlerRef>,
+    Query(mut params): Query<HashMap<String, String>>,
+    lines: String,
+) -> Result<impl IntoResponse> {
+    let db = params
+        .remove("bucket")
+        .unwrap_or_else(|| DEFAULT_SCHEMA_NAME.to_string());
+
+    let precision = params
+        .get("precision")
+        .map(|val| parse_time_precision(val))
+        .transpose()?;
+
+    influxdb_write(&db, precision, lines, handler).await
+}
+
+pub async fn influxdb_write(
+    db: &str,
+    precision: Option<Precision>,
+    lines: String,
+    handler: InfluxdbLineProtocolHandlerRef,
+) -> Result<impl IntoResponse> {
+    let _timer = timer!(
+        crate::metrics::METRIC_HTTP_INFLUXDB_WRITE_ELAPSED,
+        &[(crate::metrics::METRIC_DB_LABEL, db.to_string())]
+    );
+
+    let (catalog, schema) = parse_catalog_and_schema_from_client_database_name(db);
+    let ctx = Arc::new(QueryContext::with(catalog, schema));
 
     let request = InfluxdbRequest { precision, lines };
 
