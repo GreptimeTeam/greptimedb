@@ -445,7 +445,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             let region = self
                 .open_region(&engine_ctx, table_id, *region_number, &table_ref, &opts)
                 .await?;
-            regions.insert(*region_number, region);
+            let _ = regions.insert(*region_number, region);
         }
 
         let table = Arc::new(MitoTable::new(table_info, regions, manifest));
@@ -561,7 +561,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
                 let table = self.recover_table(ctx, request.clone()).await?;
                 if let Some(table) = table {
                     // already locked
-                    self.tables.insert(request.table_id, table.clone());
+                    let _ = self.tables.insert(request.table_id, table.clone());
 
                     Some(table as _)
                 } else {
@@ -639,7 +639,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
     }
 
     async fn close(&self) -> TableResult<()> {
-        futures::future::try_join_all(
+        let _ = futures::future::try_join_all(
             self.tables
                 .iter()
                 .map(|item| self.close_table_inner(item.value().clone(), None, false)),
@@ -694,7 +694,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
         }
 
         if table.is_releasable() {
-            self.tables.remove(&table_id);
+            let _ = self.tables.remove(&table_id);
 
             logging::info!(
                 "Mito engine closed table: {} in schema: {}",

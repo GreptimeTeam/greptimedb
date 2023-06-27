@@ -17,8 +17,8 @@ use rustpython_vm::{pymodule as rspymodule, VirtualMachine};
 
 use crate::python::rspython::builtins::greptime_builtin::PyDataFrame;
 pub(crate) fn init_data_frame(module_name: &str, vm: &mut VirtualMachine) {
-    PyDataFrame::make_class(&vm.ctx);
-    data_frame::PyExpr::make_class(&vm.ctx);
+    let _ = PyDataFrame::make_class(&vm.ctx);
+    let _ = data_frame::PyExpr::make_class(&vm.ctx);
     vm.add_native_module(module_name.to_owned(), Box::new(data_frame::make_module));
 }
 /// with `register_batch`, and then wrap DataFrame API in it

@@ -84,10 +84,18 @@ impl StatementExecutor {
                 self.plan_exec(QueryStatement::Sql(stmt), query_ctx).await
             }
 
-            // For performance consideration, only "insert with select" is executed by query engine.
-            // Plain insert ("insert with values") is still executed directly in statement.
-            Statement::Insert(ref insert) if insert.is_insert_select() => {
-                self.plan_exec(QueryStatement::Sql(stmt), query_ctx).await
+            // For performance consideration, only requests that can't extract values is executed by query engine.
+            // Plain insert ("insert with literal values") is still executed directly in statement.
+            Statement::Insert(insert) => {
+                if insert.can_extract_values() {
+                    self.sql_stmt_executor
+                        .execute_sql(Statement::Insert(insert), query_ctx)
+                        .await
+                        .context(ExecuteStatementSnafu)
+                } else {
+                    self.plan_exec(QueryStatement::Sql(Statement::Insert(insert)), query_ctx)
+                        .await
+                }
             }
 
             Statement::Tql(tql) => self.execute_tql(tql, query_ctx).await,
@@ -120,7 +128,6 @@ impl StatementExecutor {
             Statement::CreateDatabase(_)
             | Statement::CreateTable(_)
             | Statement::CreateExternalTable(_)
-            | Statement::Insert(_)
             | Statement::Alter(_)
             | Statement::DropTable(_)
             | Statement::ShowCreateTable(_) => self
@@ -213,7 +220,7 @@ fn to_copy_table_request(stmt: CopyTable, query_ctx: QueryContextRef) -> Result<
 }
 
 /// Converts [CopyDatabaseArgument] to [CopyDatabaseRequest].
-/// This function extracts the necessary info including catalog/database name, time range, etc.  
+/// This function extracts the necessary info including catalog/database name, time range, etc.
 fn to_copy_database_request(
     arg: CopyDatabaseArgument,
     query_ctx: &QueryContextRef,

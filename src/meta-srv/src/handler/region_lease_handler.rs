@@ -174,7 +174,7 @@ mod test {
             table_id: 1,
             engine: "mito".to_string(),
         };
-        region_failover_manager
+        let _ = region_failover_manager
             .running_procedures()
             .write()
             .unwrap()

@@ -43,7 +43,7 @@ impl OptimizerRule for OrderHintRule {
 impl OrderHintRule {
     fn optimize(plan: &LogicalPlan) -> DataFusionResult<LogicalPlan> {
         let mut visitor = OrderHintVisitor::default();
-        plan.visit(&mut visitor)?;
+        let _ = plan.visit(&mut visitor)?;
 
         if let Some(order_expr) = visitor.order_expr.take() {
             plan.clone()
@@ -149,7 +149,7 @@ mod test {
             .unwrap();
 
         let context = OptimizerContext::default();
-        OrderHintRule.try_optimize(&plan, &context).unwrap();
+        assert!(OrderHintRule.try_optimize(&plan, &context).is_ok());
 
         // should read the first (with `.sort(true, false)`) sort option
         let scan_req = adapter.get_scan_req();

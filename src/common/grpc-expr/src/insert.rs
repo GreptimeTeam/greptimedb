@@ -77,7 +77,7 @@ pub fn find_new_columns(schema: &SchemaRef, columns: &[Column]) -> Result<Option
                 is_key: *semantic_type == TAG_SEMANTIC_TYPE,
                 location: None,
             });
-            new_columns.insert(column_name.to_string());
+            let _ = new_columns.insert(column_name.to_string());
         }
     }
 
@@ -239,7 +239,7 @@ pub fn build_create_expr_from_insertion(
 
             let column_def = build_column_def(column_name, *datatype, is_nullable);
             column_defs.push(column_def);
-            new_columns.insert(column_name.to_string());
+            let _ = new_columns.insert(column_name.to_string());
         }
     }
 

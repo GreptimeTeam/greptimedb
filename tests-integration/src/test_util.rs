@@ -130,7 +130,7 @@ pub fn get_test_store_config(
             };
 
             let mut builder = Azblob::default();
-            builder
+            let _ = builder
                 .root(&azblob_config.root)
                 .endpoint(&azblob_config.endpoint)
                 .account_name(azblob_config.account_name.expose_secret())
@@ -138,7 +138,7 @@ pub fn get_test_store_config(
                 .container(&azblob_config.container);
 
             if let Ok(sas_token) = env::var("GT_AZBLOB_SAS_TOKEN") {
-                builder.sas_token(&sas_token);
+                let _ = builder.sas_token(&sas_token);
             }
 
             let config = ObjectStoreConfig::Azblob(azblob_config);
@@ -158,7 +158,7 @@ pub fn get_test_store_config(
             };
 
             let mut builder = Oss::default();
-            builder
+            let _ = builder
                 .root(&oss_config.root)
                 .endpoint(&oss_config.endpoint)
                 .access_key_id(oss_config.access_key_id.expose_secret())
@@ -179,17 +179,17 @@ pub fn get_test_store_config(
             }
 
             let mut builder = S3::default();
-            builder
+            let _ = builder
                 .root(&s3_config.root)
                 .access_key_id(s3_config.access_key_id.expose_secret())
                 .secret_access_key(s3_config.secret_access_key.expose_secret())
                 .bucket(&s3_config.bucket);
 
             if s3_config.endpoint.is_some() {
-                builder.endpoint(s3_config.endpoint.as_ref().unwrap());
+                let _ = builder.endpoint(s3_config.endpoint.as_ref().unwrap());
             }
             if s3_config.region.is_some() {
-                builder.region(s3_config.region.as_ref().unwrap());
+                let _ = builder.region(s3_config.region.as_ref().unwrap());
             }
 
             let config = ObjectStoreConfig::S3(s3_config);
@@ -315,13 +315,13 @@ pub async fn create_test_table(
         table_id: table.table_info().ident.table_id,
         table,
     };
-    catalog_manager.register_table(req).await.unwrap();
+    assert!(catalog_manager.register_table(req).await.is_ok());
     Ok(())
 }
 
 pub async fn setup_test_http_app(store_type: StorageType, name: &str) -> (Router, TestGuard) {
     let (opts, guard) = create_tmp_dir_and_datanode_opts(store_type, name);
-    let instance = Arc::new(Instance::with_mock_meta_client(&opts).await.unwrap());
+    let (instance, heartbeat) = Instance::with_mock_meta_client(&opts).await.unwrap();
     create_test_table(
         instance.catalog_manager(),
         instance.sql_handler(),
@@ -334,6 +334,9 @@ pub async fn setup_test_http_app(store_type: StorageType, name: &str) -> (Router
         .await
         .unwrap();
     instance.start().await.unwrap();
+    if let Some(heartbeat) = heartbeat {
+        heartbeat.start().await.unwrap();
+    }
 
     let http_opts = HttpOptions {
         addr: format!("127.0.0.1:{}", ports::get_port()),
@@ -354,11 +357,14 @@ pub async fn setup_test_http_app_with_frontend(
     name: &str,
 ) -> (Router, TestGuard) {
     let (opts, guard) = create_tmp_dir_and_datanode_opts(store_type, name);
-    let instance = Arc::new(Instance::with_mock_meta_client(&opts).await.unwrap());
+    let (instance, heartbeat) = Instance::with_mock_meta_client(&opts).await.unwrap();
     let frontend = FeInstance::try_new_standalone(instance.clone())
         .await
         .unwrap();
     instance.start().await.unwrap();
+    if let Some(heartbeat) = heartbeat {
+        heartbeat.start().await.unwrap();
+    }
     create_test_table(
         frontend.catalog_manager(),
         instance.sql_handler(),
@@ -384,22 +390,28 @@ pub async fn setup_test_http_app_with_frontend(
 }
 
 fn mock_insert_request(host: &str, cpu: f64, memory: f64, ts: i64) -> InsertRequest {
-    let mut columns_values = HashMap::with_capacity(4);
     let mut builder = StringVectorBuilder::with_capacity(1);
     builder.push(Some(host));
-    columns_values.insert("host".to_string(), builder.to_vector());
+    let host = builder.to_vector();
 
     let mut builder = Float64VectorBuilder::with_capacity(1);
     builder.push(Some(cpu));
-    columns_values.insert("cpu".to_string(), builder.to_vector());
+    let cpu = builder.to_vector();
 
     let mut builder = Float64VectorBuilder::with_capacity(1);
     builder.push(Some(memory));
-    columns_values.insert("memory".to_string(), builder.to_vector());
+    let memory = builder.to_vector();
 
     let mut builder = TimestampMillisecondVectorBuilder::with_capacity(1);
     builder.push(Some(ts.into()));
-    columns_values.insert("ts".to_string(), builder.to_vector());
+    let ts = builder.to_vector();
+
+    let columns_values = HashMap::from([
+        ("host".to_string(), host),
+        ("cpu".to_string(), cpu),
+        ("memory".to_string(), memory),
+        ("ts".to_string(), ts),
+    ]);
 
     InsertRequest {
         catalog_name: common_catalog::consts::DEFAULT_CATALOG_NAME.to_string(),
@@ -416,11 +428,14 @@ pub async fn setup_test_prom_app_with_frontend(
 ) -> (Router, TestGuard) {
     std::env::set_var("TZ", "UTC");
     let (opts, guard) = create_tmp_dir_and_datanode_opts(store_type, name);
-    let instance = Arc::new(Instance::with_mock_meta_client(&opts).await.unwrap());
+    let (instance, heartbeat) = Instance::with_mock_meta_client(&opts).await.unwrap();
     let frontend = FeInstance::try_new_standalone(instance.clone())
         .await
         .unwrap();
     instance.start().await.unwrap();
+    if let Some(heartbeat) = heartbeat {
+        heartbeat.start().await.unwrap();
+    }
 
     create_test_table(
         frontend.catalog_manager(),
@@ -470,7 +485,7 @@ pub async fn setup_grpc_server(
     common_telemetry::init_default_ut_logging();
 
     let (opts, guard) = create_tmp_dir_and_datanode_opts(store_type, name);
-    let instance = Arc::new(Instance::with_mock_meta_client(&opts).await.unwrap());
+    let (instance, heartbeat) = Instance::with_mock_meta_client(&opts).await.unwrap();
 
     let runtime = Arc::new(
         RuntimeBuilder::default()
@@ -484,6 +499,9 @@ pub async fn setup_grpc_server(
         .await
         .unwrap();
     instance.start().await.unwrap();
+    if let Some(heartbeat) = heartbeat {
+        heartbeat.start().await.unwrap();
+    }
     let fe_instance_ref = Arc::new(fe_instance);
     let fe_grpc_server = Arc::new(GrpcServer::new(
         ServerGrpcQueryHandlerAdaptor::arc(fe_instance_ref.clone()),
@@ -522,7 +540,7 @@ pub async fn setup_mysql_server(
     common_telemetry::init_default_ut_logging();
 
     let (opts, guard) = create_tmp_dir_and_datanode_opts(store_type, name);
-    let instance = Arc::new(Instance::with_mock_meta_client(&opts).await.unwrap());
+    let (instance, heartbeat) = Instance::with_mock_meta_client(&opts).await.unwrap();
 
     let runtime = Arc::new(
         RuntimeBuilder::default()
@@ -538,6 +556,9 @@ pub async fn setup_mysql_server(
         .await
         .unwrap();
     instance.start().await.unwrap();
+    if let Some(heartbeat) = heartbeat {
+        heartbeat.start().await.unwrap();
+    }
     let fe_instance_ref = Arc::new(fe_instance);
     let opts = MysqlOptions {
         addr: fe_mysql_addr.clone(),
@@ -558,7 +579,7 @@ pub async fn setup_mysql_server(
 
     let fe_mysql_addr_clone = fe_mysql_addr.clone();
     let fe_mysql_server_clone = fe_mysql_server.clone();
-    tokio::spawn(async move {
+    let _handle = tokio::spawn(async move {
         let addr = fe_mysql_addr_clone.parse::<SocketAddr>().unwrap();
         fe_mysql_server_clone.start(addr).await.unwrap()
     });
@@ -575,7 +596,7 @@ pub async fn setup_pg_server(
     common_telemetry::init_default_ut_logging();
 
     let (opts, guard) = create_tmp_dir_and_datanode_opts(store_type, name);
-    let instance = Arc::new(Instance::with_mock_meta_client(&opts).await.unwrap());
+    let (instance, heartbeat) = Instance::with_mock_meta_client(&opts).await.unwrap();
 
     let runtime = Arc::new(
         RuntimeBuilder::default()
@@ -591,6 +612,9 @@ pub async fn setup_pg_server(
         .await
         .unwrap();
     instance.start().await.unwrap();
+    if let Some(heartbeat) = heartbeat {
+        heartbeat.start().await.unwrap();
+    }
     let fe_instance_ref = Arc::new(fe_instance);
     let opts = PostgresOptions {
         addr: fe_pg_addr.clone(),
@@ -605,7 +629,7 @@ pub async fn setup_pg_server(
 
     let fe_pg_addr_clone = fe_pg_addr.clone();
     let fe_pg_server_clone = fe_pg_server.clone();
-    tokio::spawn(async move {
+    let _handle = tokio::spawn(async move {
         let addr = fe_pg_addr_clone.parse::<SocketAddr>().unwrap();
         fe_pg_server_clone.start(addr).await.unwrap()
     });

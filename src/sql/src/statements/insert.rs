@@ -15,13 +15,22 @@ use sqlparser::ast::{ObjectName, Query, SetExpr, Statement, UnaryOperator, Value
 use sqlparser::parser::ParserError;
 
 use crate::ast::{Expr, Value};
-use crate::error::{self, Result};
+use crate::error::Result;
 use crate::statements::query::Query as GtQuery;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Insert {
     // Can only be sqlparser::ast::Statement::Insert variant
     pub inner: Statement,
+}
+
+macro_rules! parse_fail {
+    ($expr: expr) => {
+        return crate::error::ParseSqlValueSnafu {
+            msg: format!("{:?}", $expr),
+        }
+        .fail();
+    };
 }
 
 impl Insert {
@@ -39,8 +48,9 @@ impl Insert {
         }
     }
 
-    pub fn values_body(&self) -> Result<Option<Vec<Vec<Value>>>> {
-        let values = match &self.inner {
+    /// Extracts the literal insert statement body if possible
+    pub fn values_body(&self) -> Result<Vec<Vec<Value>>> {
+        match &self.inner {
             Statement::Insert {
                 source:
                     box Query {
@@ -48,11 +58,41 @@ impl Insert {
                         ..
                     },
                 ..
-            } => Some(sql_exprs_to_values(rows)?),
-            _ => None,
-        };
+            } => sql_exprs_to_values(rows),
+            _ => unreachable!(),
+        }
+    }
 
-        Ok(values)
+    /// Returns true when the insert statement can extract literal values.
+    /// The rules is the same as function `values_body()`.
+    pub fn can_extract_values(&self) -> bool {
+        match &self.inner {
+            Statement::Insert {
+                source:
+                    box Query {
+                        body: box SetExpr::Values(Values { rows, .. }),
+                        ..
+                    },
+                ..
+            } => rows.iter().all(|es| {
+                es.iter().all(|expr| match expr {
+                    Expr::Value(_) => true,
+                    Expr::Identifier(ident) => {
+                        if ident.quote_style.is_none() {
+                            ident.value.to_lowercase() == "default"
+                        } else {
+                            ident.quote_style == Some('"')
+                        }
+                    }
+                    Expr::UnaryOp { op, expr } => {
+                        matches!(op, UnaryOperator::Minus | UnaryOperator::Plus)
+                            && matches!(&**expr, Expr::Value(Value::Number(_, _)))
+                    }
+                    _ => false,
+                })
+            }),
+            _ => false,
+        }
     }
 
     pub fn query_body(&self) -> Result<Option<GtQuery>> {
@@ -62,19 +102,6 @@ impl Insert {
             } => Some(query.clone().try_into()?),
             _ => None,
         })
-    }
-
-    pub fn is_insert_select(&self) -> bool {
-        matches!(
-            self.inner,
-            Statement::Insert {
-                source: box Query {
-                    body: box SetExpr::Select { .. },
-                    ..
-                },
-                ..
-            }
-        )
     }
 }
 
@@ -87,9 +114,19 @@ fn sql_exprs_to_values(exprs: &Vec<Vec<Expr>>) -> Result<Vec<Vec<Value>>> {
                 Expr::Value(v) => v.clone(),
                 Expr::Identifier(ident) => {
                     if ident.quote_style.is_none() {
-                        Value::Placeholder(ident.value.clone())
+                        // Special processing for `default` value
+                        if ident.value.to_lowercase() == "default" {
+                            Value::Placeholder(ident.value.clone())
+                        } else {
+                            parse_fail!(expr);
+                        }
                     } else {
-                        Value::SingleQuotedString(ident.value.clone())
+                        // Identifiers with double quotes, we treat them as strings.
+                        if ident.quote_style == Some('"') {
+                            Value::SingleQuotedString(ident.value.clone())
+                        } else {
+                            parse_fail!(expr);
+                        }
                     }
                 }
                 Expr::UnaryOp { op, expr }
@@ -102,17 +139,11 @@ fn sql_exprs_to_values(exprs: &Vec<Vec<Expr>>) -> Result<Vec<Vec<Value>>> {
                             _ => unreachable!(),
                         }
                     } else {
-                        return error::ParseSqlValueSnafu {
-                            msg: format!("{expr:?}"),
-                        }
-                        .fail();
+                        parse_fail!(expr);
                     }
                 }
                 _ => {
-                    return error::ParseSqlValueSnafu {
-                        msg: format!("{expr:?}"),
-                    }
-                    .fail()
+                    parse_fail!(expr);
                 }
             });
         }
@@ -150,7 +181,7 @@ mod tests {
             .remove(0);
         match stmt {
             Statement::Insert(insert) => {
-                let values = insert.values_body().unwrap().unwrap();
+                let values = insert.values_body().unwrap();
                 assert_eq!(values, vec![vec![Value::Number("-1".to_string(), false)]]);
             }
             _ => unreachable!(),
@@ -163,7 +194,7 @@ mod tests {
             .remove(0);
         match stmt {
             Statement::Insert(insert) => {
-                let values = insert.values_body().unwrap().unwrap();
+                let values = insert.values_body().unwrap();
                 assert_eq!(values, vec![vec![Value::Number("1".to_string(), false)]]);
             }
             _ => unreachable!(),
@@ -179,7 +210,7 @@ mod tests {
             .remove(0);
         match stmt {
             Statement::Insert(insert) => {
-                let values = insert.values_body().unwrap().unwrap();
+                let values = insert.values_body().unwrap();
                 assert_eq!(values, vec![vec![Value::Placeholder("default".to_owned())]]);
             }
             _ => unreachable!(),
@@ -195,7 +226,7 @@ mod tests {
             .remove(0);
         match stmt {
             Statement::Insert(insert) => {
-                let values = insert.values_body().unwrap().unwrap();
+                let values = insert.values_body().unwrap();
                 assert_eq!(values, vec![vec![Value::Placeholder("DEFAULT".to_owned())]]);
             }
             _ => unreachable!(),
@@ -204,18 +235,45 @@ mod tests {
 
     #[test]
     fn test_insert_value_with_quoted_string() {
-        // insert "'default'"
+        // insert 'default'
         let sql = "INSERT INTO my_table VALUES('default')";
         let stmt = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {})
             .unwrap()
             .remove(0);
         match stmt {
             Statement::Insert(insert) => {
-                let values = insert.values_body().unwrap().unwrap();
+                let values = insert.values_body().unwrap();
                 assert_eq!(
                     values,
                     vec![vec![Value::SingleQuotedString("default".to_owned())]]
                 );
+            }
+            _ => unreachable!(),
+        }
+
+        // insert "default". Treating double-quoted identifiers as strings.
+        let sql = "INSERT INTO my_table VALUES(\"default\")";
+        let stmt = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {})
+            .unwrap()
+            .remove(0);
+        match stmt {
+            Statement::Insert(insert) => {
+                let values = insert.values_body().unwrap();
+                assert_eq!(
+                    values,
+                    vec![vec![Value::SingleQuotedString("default".to_owned())]]
+                );
+            }
+            _ => unreachable!(),
+        }
+
+        let sql = "INSERT INTO my_table VALUES(`default`)";
+        let stmt = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {})
+            .unwrap()
+            .remove(0);
+        match stmt {
+            Statement::Insert(insert) => {
+                assert!(insert.values_body().is_err());
             }
             _ => unreachable!(),
         }
@@ -229,7 +287,6 @@ mod tests {
             .remove(0);
         match stmt {
             Statement::Insert(insert) => {
-                assert!(insert.is_insert_select());
                 let q = insert.query_body().unwrap().unwrap();
                 assert!(matches!(
                     q.inner,

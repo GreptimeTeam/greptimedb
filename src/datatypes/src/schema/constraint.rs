@@ -196,7 +196,7 @@ mod tests {
     fn test_validate_null_constraint() {
         let constraint = ColumnDefaultConstraint::null_value();
         let data_type = ConcreteDataType::int32_datatype();
-        constraint.validate(&data_type, false).unwrap_err();
+        assert!(constraint.validate(&data_type, false).is_err());
         constraint.validate(&data_type, true).unwrap();
     }
 
@@ -207,9 +207,9 @@ mod tests {
         constraint.validate(&data_type, false).unwrap();
         constraint.validate(&data_type, true).unwrap();
 
-        constraint
+        assert!(constraint
             .validate(&ConcreteDataType::uint32_datatype(), true)
-            .unwrap_err();
+            .is_err());
     }
 
     #[test]
@@ -218,23 +218,23 @@ mod tests {
         constraint
             .validate(&ConcreteDataType::timestamp_millisecond_datatype(), false)
             .unwrap();
-        constraint
+        assert!(constraint
             .validate(&ConcreteDataType::boolean_datatype(), false)
-            .unwrap_err();
+            .is_err());
 
         let constraint = ColumnDefaultConstraint::Function("hello()".to_string());
-        constraint
+        assert!(constraint
             .validate(&ConcreteDataType::timestamp_millisecond_datatype(), false)
-            .unwrap_err();
+            .is_err());
     }
 
     #[test]
     fn test_create_default_vector_by_null() {
         let constraint = ColumnDefaultConstraint::null_value();
         let data_type = ConcreteDataType::int32_datatype();
-        constraint
+        assert!(constraint
             .create_default_vector(&data_type, false, 10)
-            .unwrap_err();
+            .is_err());
 
         let constraint = ColumnDefaultConstraint::null_value();
         let v = constraint
@@ -286,9 +286,9 @@ mod tests {
 
         let constraint = ColumnDefaultConstraint::Function("no".to_string());
         let data_type = ConcreteDataType::timestamp_millisecond_datatype();
-        constraint
+        assert!(constraint
             .create_default_vector(&data_type, false, 4)
-            .unwrap_err();
+            .is_err());
     }
 
     #[test]

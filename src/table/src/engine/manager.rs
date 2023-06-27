@@ -54,8 +54,7 @@ impl MemoryTableEngineManager {
     /// Create a new [MemoryTableEngineManager] with single table `engine` and
     /// an alias `name` instead of the engine's name.
     pub fn alias(name: String, engine: TableEngineRef) -> Self {
-        let mut engines = HashMap::new();
-        engines.insert(name, engine);
+        let engines = HashMap::from([(name, engine)]);
         let engines = RwLock::new(engines);
 
         MemoryTableEngineManager {
@@ -104,7 +103,7 @@ impl TableEngineManager for MemoryTableEngineManager {
             EngineExistSnafu { engine: name }
         );
 
-        engines.insert(name.to_string(), engine);
+        let _ = engines.insert(name.to_string(), engine);
 
         Ok(())
     }
@@ -149,9 +148,9 @@ mod tests {
         let table_engine_manager = MemoryTableEngineManager::new(table_engine_ref.clone());
 
         // Attach engine procedures.
-        let mut engine_procedures = HashMap::new();
         let engine_procedure: TableEngineProcedureRef = table_engine_ref.clone();
-        engine_procedures.insert(table_engine_ref.name().to_string(), engine_procedure);
+        let engine_procedures =
+            HashMap::from([(table_engine_ref.name().to_string(), engine_procedure)]);
         let table_engine_manager = table_engine_manager.with_engine_procedures(engine_procedures);
 
         table_engine_manager

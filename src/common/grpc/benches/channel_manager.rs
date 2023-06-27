@@ -39,7 +39,7 @@ async fn do_bench_channel_manager() {
 }
 
 fn bench_channel_manager(c: &mut Criterion) {
-    c.bench_function("bench channel manager", |b| {
+    let _ = c.bench_function("bench channel manager", |b| {
         b.iter(do_bench_channel_manager);
     });
 }

@@ -88,7 +88,7 @@ impl LockMap {
                 // expect that a procedure should not wait for two lock simultaneously.
                 lock.waiters.push_back(meta.clone());
             } else {
-                locks.insert(key.to_string(), Lock::from_owner(meta));
+                let _ = locks.insert(key.to_string(), Lock::from_owner(meta));
 
                 return;
             }
@@ -111,7 +111,7 @@ impl LockMap {
 
             if !lock.switch_owner() {
                 // No body waits for this lock, we can remove the lock entry.
-                locks.remove(key);
+                let _ = locks.remove(key);
             }
         }
     }

@@ -980,7 +980,8 @@ pub(crate) mod test {
 
     impl Collect for MockCollector {
         fn on_write(&self, record: WriteRecord) {
-            self.write_sum
+            let _ = self
+                .write_sum
                 .fetch_add(record.byte_count, Ordering::Relaxed);
         }
 

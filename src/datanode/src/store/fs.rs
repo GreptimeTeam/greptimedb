@@ -33,7 +33,7 @@ pub(crate) async fn new_fs_object_store(file_config: &FileConfig) -> Result<Obje
     store::clean_temp_dir(&atomic_write_dir)?;
 
     let mut builder = FsBuilder::default();
-    builder.root(&data_home).atomic_write_dir(&atomic_write_dir);
+    let _ = builder.root(&data_home).atomic_write_dir(&atomic_write_dir);
 
     let object_store = ObjectStore::new(builder)
         .context(error::InitBackendSnafu)?

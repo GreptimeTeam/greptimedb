@@ -43,7 +43,7 @@ impl BenchContext {
         };
         let iter = self.memtable.iter(iter_ctx).unwrap();
         for batch in iter {
-            batch.unwrap();
+            let _ = batch.unwrap();
             read_count += batch_size;
         }
         read_count

@@ -324,7 +324,8 @@ impl Instance {
                     "Table {}.{}.{} does not exist, try create table",
                     catalog_name, schema_name, table_name,
                 );
-                self.create_table_by_columns(ctx, table_name, columns, MITO_ENGINE)
+                let _ = self
+                    .create_table_by_columns(ctx, table_name, columns, MITO_ENGINE)
                     .await?;
                 info!(
                     "Successfully created table on insertion: {}.{}.{}",
@@ -343,7 +344,8 @@ impl Instance {
                         "Find new columns {:?} on insertion, try to alter table: {}.{}.{}",
                         add_columns, catalog_name, schema_name, table_name
                     );
-                    self.add_new_columns_to_table(ctx, table_name, add_columns)
+                    let _ = self
+                        .add_new_columns_to_table(ctx, table_name, add_columns)
                         .await?;
                     info!(
                         "Successfully altered table on insertion: {}.{}.{}",
@@ -810,10 +812,10 @@ mod tests {
         }
 
         fn do_fmt(template: &str, catalog: &str, schema: &str) -> String {
-            let mut vars = HashMap::new();
-            vars.insert("catalog".to_string(), catalog);
-            vars.insert("schema".to_string(), schema);
-
+            let vars = HashMap::from([
+                ("catalog".to_string(), catalog),
+                ("schema".to_string(), schema),
+            ]);
             template.format(&vars).unwrap()
         }
 

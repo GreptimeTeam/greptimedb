@@ -561,7 +561,7 @@ pub async fn labels_query(
     let query_ctx = Arc::new(QueryContext::with(catalog, schema));
 
     let mut labels = HashSet::new();
-    labels.insert(METRIC_NAME.to_string());
+    let _ = labels.insert(METRIC_NAME.to_string());
 
     for query in queries {
         let prom_query = PromQuery {
@@ -585,8 +585,8 @@ pub async fn labels_query(
         }
     }
 
-    labels.remove(TIMESTAMP_COLUMN_NAME);
-    labels.remove(FIELD_COLUMN_NAME);
+    let _ = labels.remove(TIMESTAMP_COLUMN_NAME);
+    let _ = labels.remove(FIELD_COLUMN_NAME);
 
     let mut sorted_labels: Vec<String> = labels.into_iter().collect();
     sorted_labels.sort();
@@ -656,7 +656,7 @@ fn record_batches_to_series(
                     (column_name.to_string(), column.to_string())
                 })
                 .collect();
-            element.insert("__name__".to_string(), table_name.to_string());
+            let _ = element.insert("__name__".to_string(), table_name.to_string());
             series.push(element);
         }
     }
@@ -711,7 +711,7 @@ fn record_batches_to_labels_name(
 
             // if a field is not null, record the tag name and return
             names.iter().for_each(|name| {
-                labels.insert(name.to_string());
+                let _ = labels.insert(name.to_string());
             });
             return Ok(());
         }
@@ -858,7 +858,7 @@ async fn retrieve_label_values_from_record_batch(
             .unwrap();
         for row_index in 0..batch.num_rows() {
             if let Some(label_value) = label_column.get_data(row_index) {
-                labels_values.insert(label_value.to_string());
+                let _ = labels_values.insert(label_value.to_string());
             }
         }
     }

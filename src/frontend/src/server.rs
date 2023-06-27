@@ -153,36 +153,36 @@ impl Services {
             let http_addr = parse_addr(&http_options.addr)?;
 
             let mut http_server_builder = HttpServerBuilder::new(http_options.clone());
-            http_server_builder
+            let _ = http_server_builder
                 .with_sql_handler(ServerSqlQueryHandlerAdaptor::arc(instance.clone()))
                 .with_grpc_handler(ServerGrpcQueryHandlerAdaptor::arc(instance.clone()));
 
             if let Some(user_provider) = user_provider.clone() {
-                http_server_builder.with_user_provider(user_provider);
+                let _ = http_server_builder.with_user_provider(user_provider);
             }
 
             if set_opentsdb_handler {
-                http_server_builder.with_opentsdb_handler(instance.clone());
+                let _ = http_server_builder.with_opentsdb_handler(instance.clone());
             }
             if matches!(
                 opts.influxdb_options,
                 Some(InfluxdbOptions { enable: true })
             ) {
-                http_server_builder.with_influxdb_handler(instance.clone());
+                let _ = http_server_builder.with_influxdb_handler(instance.clone());
             }
 
             if matches!(
                 opts.prometheus_options,
                 Some(PrometheusOptions { enable: true })
             ) {
-                http_server_builder.with_prom_handler(instance.clone());
+                let _ = http_server_builder.with_prom_handler(instance.clone());
             }
-            http_server_builder.with_metrics_handler(MetricsHandler);
-            http_server_builder.with_script_handler(instance.clone());
 
-            http_server_builder.with_configurator(plugins.get::<ConfiguratorRef>());
-
-            let http_server = http_server_builder.build();
+            let http_server = http_server_builder
+                .with_metrics_handler(MetricsHandler)
+                .with_script_handler(instance.clone())
+                .with_configurator(plugins.get::<ConfiguratorRef>())
+                .build();
             result.push((Box::new(http_server), http_addr));
         }
 

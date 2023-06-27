@@ -122,7 +122,8 @@ impl DropTableProcedure {
     async fn on_prepare(&mut self) -> Result<Status> {
         let request = &self.data.request;
         // Ensure the table exists.
-        self.catalog_manager
+        let _ = self
+            .catalog_manager
             .table(
                 &request.catalog_name,
                 &request.schema_name,

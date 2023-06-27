@@ -89,7 +89,7 @@ impl HeartbeatTask {
         let client_id = meta_client.id();
 
         let (tx, mut rx) = meta_client.heartbeat().await.context(MetaClientInitSnafu)?;
-        common_runtime::spawn_bg(async move {
+        let _handle = common_runtime::spawn_bg(async move {
             while let Some(res) = match rx.message().await {
                 Ok(m) => m,
                 Err(e) => {
@@ -160,7 +160,7 @@ impl HeartbeatTask {
         .await?;
 
         let epoch = self.region_alive_keepers.epoch();
-        common_runtime::spawn_bg(async move {
+        let _handle = common_runtime::spawn_bg(async move {
             let sleep = tokio::time::sleep(Duration::from_millis(0));
             tokio::pin!(sleep);
 

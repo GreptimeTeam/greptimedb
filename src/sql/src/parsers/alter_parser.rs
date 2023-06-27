@@ -47,7 +47,7 @@ impl<'a> ParserContext<'a> {
                     Some(AddColumnLocation::First)
                 } else if let Token::Word(word) = parser.peek_token().token {
                     if word.value.to_ascii_uppercase() == "AFTER" {
-                        parser.next_token();
+                        let _ = parser.next_token();
                         let name = parser.parse_identifier()?;
                         Some(AddColumnLocation::After {
                             column_name: name.value,

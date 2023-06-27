@@ -124,7 +124,8 @@ impl ScriptHandler for DummyInstance {
             .await
             .unwrap();
         script.register_udf().await;
-        self.scripts
+        let _ = self
+            .scripts
             .write()
             .unwrap()
             .insert(format!("{schema}_{name}"), Arc::new(script));

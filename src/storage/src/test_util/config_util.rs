@@ -43,7 +43,7 @@ pub async fn new_store_config(
     engine_config: EngineConfig,
 ) -> StoreConfig<RaftEngineLogStore> {
     let mut builder = Fs::default();
-    builder.root(store_dir);
+    let _ = builder.root(store_dir);
     let object_store = ObjectStore::new(builder).unwrap().finish();
 
     new_store_config_with_object_store(region_name, store_dir, object_store, engine_config)
@@ -61,7 +61,7 @@ pub async fn new_store_config_and_region_map(
     Arc<RegionMap<RaftEngineLogStore>>,
 ) {
     let mut builder = Fs::default();
-    builder.root(store_dir);
+    let _ = builder.root(store_dir);
     let object_store = ObjectStore::new(builder).unwrap().finish();
 
     new_store_config_with_object_store(region_name, store_dir, object_store, engine_config).await

@@ -56,7 +56,7 @@ impl HeartbeatResponseHandler for CloseRegionHandler {
 
         let mailbox = ctx.mailbox.clone();
         let self_ref = Arc::new(self.clone());
-        common_runtime::spawn_bg(async move {
+        let _handle = common_runtime::spawn_bg(async move {
             let result = self_ref.close_region_inner(region_ident).await;
 
             if let Err(e) = mailbox
@@ -191,7 +191,8 @@ impl CloseRegionHandler {
                     // Deregister table if The table released.
                     self.deregister_table(table_ref).await?;
 
-                    self.region_alive_keepers
+                    let _ = self
+                        .region_alive_keepers
                         .deregister_table(table_ident)
                         .await;
 

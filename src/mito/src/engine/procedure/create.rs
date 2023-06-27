@@ -165,7 +165,7 @@ impl<S: StorageEngine> CreateMitoTable<S> {
         );
 
         let _lock = self.creator.engine_inner.table_mutex.lock(table_id).await;
-        self.creator.create_table().await?;
+        let _ = self.creator.create_table().await?;
 
         Ok(Status::Done)
     }
@@ -275,7 +275,7 @@ impl<S: StorageEngine> TableCreator<S> {
                 .map_err(Error::from_error_ext)?
             {
                 // Region already exists.
-                self.regions.insert(*number, region);
+                let _ = self.regions.insert(*number, region);
                 continue;
             }
 
@@ -308,7 +308,7 @@ impl<S: StorageEngine> TableCreator<S> {
                 region_id
             );
 
-            self.regions.insert(*number, region);
+            let _ = self.regions.insert(*number, region);
         }
 
         Ok(())
@@ -324,7 +324,8 @@ impl<S: StorageEngine> TableCreator<S> {
         {
             let table = Arc::new(MitoTable::new(table_info, self.regions.clone(), manifest));
 
-            self.engine_inner
+            let _ = self
+                .engine_inner
                 .tables
                 .insert(self.data.request.id, table.clone());
             return Ok(table);
@@ -334,7 +335,8 @@ impl<S: StorageEngine> TableCreator<S> {
         let table = self.write_manifest_and_create_table(table_dir).await?;
         let table = Arc::new(table);
 
-        self.engine_inner
+        let _ = self
+            .engine_inner
             .tables
             .insert(self.data.request.id, table.clone());
 

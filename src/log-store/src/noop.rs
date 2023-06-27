@@ -130,11 +130,11 @@ mod tests {
     async fn test_noop_logstore() {
         let store = NoopLogStore::default();
         let e = store.entry("".as_bytes(), 1, NamespaceImpl::default());
-        store.append(e.clone()).await.unwrap();
-        store
+        assert!(store.append(e.clone()).await.is_ok());
+        assert!(store
             .append_batch(&NamespaceImpl::default(), vec![e])
             .await
-            .unwrap();
+            .is_ok());
         store
             .create_namespace(&NamespaceImpl::default())
             .await

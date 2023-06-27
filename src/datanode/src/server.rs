@@ -72,7 +72,7 @@ impl Services {
         })?;
         let grpc = self.grpc_server.start(grpc_addr);
         let http = self.http_server.start(http_addr);
-        future::try_join_all(vec![grpc, http])
+        let _ = future::try_join_all(vec![grpc, http])
             .await
             .context(StartServerSnafu)?;
 

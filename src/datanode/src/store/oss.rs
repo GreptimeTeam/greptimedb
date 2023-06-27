@@ -29,7 +29,7 @@ pub(crate) async fn new_oss_object_store(oss_config: &OssConfig) -> Result<Objec
     );
 
     let mut builder = OSSBuilder::default();
-    builder
+    let _ = builder
         .root(&root)
         .bucket(&oss_config.bucket)
         .endpoint(&oss_config.endpoint)

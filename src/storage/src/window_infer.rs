@@ -126,11 +126,11 @@ fn align_time_spans_to_windows(durations: &[(i64, i64)], min_duration: i64) -> H
         while next <= *end {
             let next_aligned = next.align_by_bucket(min_duration).unwrap_or(i64::MIN);
             if let Some(next_end_aligned) = next_aligned.checked_add(min_duration) {
-                res.insert((next_aligned, next_end_aligned));
+                let _ = res.insert((next_aligned, next_end_aligned));
                 next = next_end_aligned;
             } else {
                 // arithmetic overflow, clamp to i64::MAX and break the loop.
-                res.insert((next_aligned, i64::MAX));
+                let _ = res.insert((next_aligned, i64::MAX));
                 break;
             }
         }

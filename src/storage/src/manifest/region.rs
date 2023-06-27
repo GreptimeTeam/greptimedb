@@ -228,7 +228,7 @@ mod tests {
     async fn new_fs_manifest(compress: bool, gc_duration: Option<Duration>) -> RegionManifest {
         let tmp_dir = create_temp_dir("test_region_manifest");
         let mut builder = Fs::default();
-        builder.root(&tmp_dir.path().to_string_lossy());
+        let _ = builder.root(&tmp_dir.path().to_string_lossy());
         let object_store = ObjectStore::new(builder).unwrap().finish();
 
         let manifest = RegionManifest::with_checkpointer(
@@ -248,14 +248,14 @@ mod tests {
     ) -> (RegionManifest, TempFolder) {
         let s3_config = s3_test_config().unwrap();
         let mut builder = S3::default();
-        builder
+        let _ = builder
             .root(&s3_config.root)
             .access_key_id(&s3_config.access_key_id)
             .secret_access_key(&s3_config.secret_access_key)
             .bucket(&s3_config.bucket);
 
         if s3_config.region.is_some() {
-            builder.region(s3_config.region.as_ref().unwrap());
+            let _ = builder.region(s3_config.region.as_ref().unwrap());
         }
         let store = ObjectStore::new(builder).unwrap().finish();
         let temp_folder = TempFolder::new(&store, "/");
@@ -287,7 +287,7 @@ mod tests {
                 .unwrap()
         );
 
-        manifest
+        assert!(manifest
             .update(RegionMetaActionList::with_action(RegionMetaAction::Change(
                 RegionChange {
                     metadata: region_meta.as_ref().into(),
@@ -295,7 +295,7 @@ mod tests {
                 },
             )))
             .await
-            .unwrap();
+            .is_ok());
 
         let mut iter = manifest.scan(0, MAX_VERSION).await.unwrap();
 
@@ -322,7 +322,7 @@ mod tests {
         }
 
         // Save some actions
-        manifest
+        assert!(manifest
             .update(RegionMetaActionList::new(vec![
                 RegionMetaAction::Edit(build_region_edit(1, &[FileId::random()], &[])),
                 RegionMetaAction::Edit(build_region_edit(
@@ -332,7 +332,7 @@ mod tests {
                 )),
             ]))
             .await
-            .unwrap();
+            .is_ok());
 
         let mut iter = manifest.scan(0, MAX_VERSION).await.unwrap();
         let (v, action_list) = iter.next_action().await.unwrap().unwrap();
@@ -444,7 +444,7 @@ mod tests {
         ];
 
         for action in actions {
-            manifest.update(action).await.unwrap();
+            assert!(manifest.update(action).await.is_ok());
         }
         assert!(manifest.last_checkpoint().await.unwrap().is_none());
         assert_scan(manifest, 0, 3).await;
@@ -503,7 +503,7 @@ mod tests {
             ))]),
         ];
         for action in actions {
-            manifest.update(action).await.unwrap();
+            assert!(manifest.update(action).await.is_ok());
         }
 
         assert_scan(manifest, 3, 2).await;

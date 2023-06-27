@@ -83,7 +83,7 @@ impl UpdateRegionMetadata {
             region_numbers.retain(|x| *x != failed_region.region_number);
 
             if !region_numbers.is_empty() {
-                value
+                let _ = value
                     .regions_id_map
                     .insert(failed_region.datanode_id, region_numbers);
             }
@@ -467,7 +467,7 @@ mod tests {
             let table_name = failed_region_1.table_ident.table.clone();
             let table_id = failed_region_1.table_ident.table_id as u64;
 
-            futures::future::join_all(vec![
+            let _ = futures::future::join_all(vec![
                 tokio::spawn(async move {
                     let state = UpdateRegionMetadata::new(Peer::new(2, ""));
                     state

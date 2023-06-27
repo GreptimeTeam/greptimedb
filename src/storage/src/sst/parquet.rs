@@ -133,7 +133,7 @@ impl<'a> ParquetWriter<'a> {
 
         if rows_written == 0 {
             debug!("No data written, try abort writer: {}", self.file_path);
-            buffered_writer.close().await?;
+            let _ = buffered_writer.close().await?;
             return Ok(None);
         }
 
@@ -564,7 +564,7 @@ mod tests {
 
     fn create_object_store(root: &str) -> ObjectStore {
         let mut builder = Fs::default();
-        builder.root(root);
+        let _ = builder.root(root);
         ObjectStore::new(builder).unwrap().finish()
     }
 
@@ -597,10 +597,10 @@ mod tests {
         let iter = memtable.iter(IterContext::default()).unwrap();
         let writer = ParquetWriter::new(sst_file_name, Source::Iter(iter), object_store.clone());
 
-        writer
+        assert!(writer
             .write_sst(&sst::WriteOptions::default())
             .await
-            .unwrap();
+            .is_ok());
 
         // verify parquet file
         let reader = BufReader::new(object_store.reader(sst_file_name).await.unwrap().compat());
@@ -1000,7 +1000,7 @@ mod tests {
         let dir = create_temp_dir("write-empty-file");
         let path = dir.path().to_str().unwrap();
         let mut builder = Fs::default();
-        builder.root(path);
+        let _ = builder.root(path);
         let object_store = ObjectStore::new(builder).unwrap().finish();
         let sst_file_name = "test-empty.parquet";
         let iter = memtable.iter(IterContext::default()).unwrap();

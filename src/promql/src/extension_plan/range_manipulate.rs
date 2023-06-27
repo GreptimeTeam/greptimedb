@@ -415,7 +415,7 @@ impl RangeManipulateStream {
         // transform columns
         let mut new_columns = input.columns().to_vec();
         for index in self.field_columns.iter() {
-            other_columns.remove(index);
+            let _ = other_columns.remove(index);
             let column = input.column(*index);
             let new_column = Arc::new(
                 RangeArray::from_ranges(column.clone(), ranges.clone())

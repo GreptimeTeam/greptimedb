@@ -139,11 +139,12 @@ mod tests {
             ColumnSchema::new("v", ConcreteDataType::string_datatype(), true),
         ]));
 
-        let mut builder = TableMetaBuilder::default();
-        builder.schema(schema);
-        builder.primary_key_indices(vec![1]);
-        builder.next_column_id(3);
-        let table_meta = builder.build().unwrap();
+        let table_meta = TableMetaBuilder::default()
+            .schema(schema)
+            .primary_key_indices(vec![1])
+            .next_column_id(3)
+            .build()
+            .unwrap();
 
         let column = vector_to_grpc_column(
             &table_meta,
@@ -198,12 +199,13 @@ mod tests {
             ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
         ]);
 
-        let mut builder = TableMetaBuilder::default();
-        builder.schema(Arc::new(schema));
-        builder.primary_key_indices(vec![]);
-        builder.next_column_id(3);
+        let table_meta = TableMetaBuilder::default()
+            .schema(Arc::new(schema))
+            .primary_key_indices(vec![])
+            .next_column_id(3)
+            .build()
+            .unwrap();
 
-        let table_meta = builder.build().unwrap();
         let insert_request = mock_insert_request();
         let request = to_grpc_insert_request(&table_meta, 12, insert_request).unwrap();
 
@@ -211,19 +213,19 @@ mod tests {
     }
 
     fn mock_insert_request() -> InsertRequest {
-        let mut columns_values = HashMap::with_capacity(4);
-
         let mut builder = StringVectorBuilder::with_capacity(3);
         builder.push(Some("host1"));
         builder.push(None);
         builder.push(Some("host3"));
-        columns_values.insert("host".to_string(), builder.to_vector());
+        let host = builder.to_vector();
 
         let mut builder = Int16VectorBuilder::with_capacity(3);
         builder.push(Some(1_i16));
         builder.push(Some(2_i16));
         builder.push(Some(3_i16));
-        columns_values.insert("id".to_string(), builder.to_vector());
+        let id = builder.to_vector();
+
+        let columns_values = HashMap::from([("host".to_string(), host), ("id".to_string(), id)]);
 
         InsertRequest {
             catalog_name: DEFAULT_CATALOG_NAME.to_string(),

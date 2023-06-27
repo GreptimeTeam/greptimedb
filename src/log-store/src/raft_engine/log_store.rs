@@ -157,7 +157,8 @@ impl LogStore for RaftEngineLogStore {
             );
         }
 
-        self.engine
+        let _ = self
+            .engine
             .write(&mut batch, self.config.sync_write)
             .context(RaftEngineSnafu)?;
         Ok(AppendResponse { entry_id })
@@ -203,7 +204,8 @@ impl LogStore for RaftEngineLogStore {
             );
         }
 
-        self.engine
+        let _ = self
+            .engine
             .write(&mut batch, self.config.sync_write)
             .context(RaftEngineSnafu)?;
         Ok(entry_ids)
@@ -231,7 +233,7 @@ impl LogStore for RaftEngineLogStore {
         let max_batch_size = self.config.read_batch_size;
         let (tx, mut rx) = tokio::sync::mpsc::channel(max_batch_size);
         let ns = ns.clone();
-        common_runtime::spawn_read(async move {
+        let _handle = common_runtime::spawn_read(async move {
             while start_index <= last_index {
                 let mut vec = Vec::with_capacity(max_batch_size);
                 match engine
@@ -284,7 +286,8 @@ impl LogStore for RaftEngineLogStore {
         batch
             .put_message::<Namespace>(SYSTEM_NAMESPACE, key, ns)
             .context(RaftEngineSnafu)?;
-        self.engine
+        let _ = self
+            .engine
             .write(&mut batch, true)
             .context(RaftEngineSnafu)?;
         Ok(())
@@ -299,7 +302,8 @@ impl LogStore for RaftEngineLogStore {
         let key = format!("{}{}", NAMESPACE_PREFIX, ns.id).as_bytes().to_vec();
         let mut batch = LogBatch::with_capacity(1);
         batch.delete(SYSTEM_NAMESPACE, key);
-        self.engine
+        let _ = self
+            .engine
             .write(&mut batch, true)
             .context(RaftEngineSnafu)?;
         Ok(())
@@ -471,10 +475,10 @@ mod tests {
             })
             .await
             .unwrap();
-            logstore
+            assert!(logstore
                 .append(Entry::create(1, 1, "1".as_bytes().to_vec()))
                 .await
-                .unwrap();
+                .is_ok());
             let entries = logstore
                 .read(&Namespace::with_id(1), 1)
                 .await
@@ -533,7 +537,7 @@ mod tests {
         let namespace = Namespace::with_id(42);
         for id in 0..4096 {
             let entry = Entry::create(id, namespace.id(), [b'x'; 4096].to_vec());
-            logstore.append(entry).await.unwrap();
+            assert!(logstore.append(entry).await.is_ok());
         }
 
         let before_purge = wal_dir_usage(dir.path().to_str().unwrap()).await;
@@ -565,7 +569,7 @@ mod tests {
         let namespace = Namespace::with_id(42);
         for id in 0..1024 {
             let entry = Entry::create(id, namespace.id(), [b'x'; 4096].to_vec());
-            logstore.append(entry).await.unwrap();
+            assert!(logstore.append(entry).await.is_ok());
         }
 
         logstore.obsolete(namespace.clone(), 100).await.unwrap();

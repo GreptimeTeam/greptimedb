@@ -145,7 +145,7 @@ impl MetaSrv {
         if let Some(election) = self.election() {
             let procedure_manager = self.procedure_manager.clone();
             let mut rx = election.subscribe_leader_change();
-            common_runtime::spawn_bg(async move {
+            let _handle = common_runtime::spawn_bg(async move {
                 loop {
                     match rx.recv().await {
                         Ok(msg) => match msg {
@@ -171,7 +171,7 @@ impl MetaSrv {
 
             let election = election.clone();
             let started = self.started.clone();
-            common_runtime::spawn_bg(async move {
+            let _handle = common_runtime::spawn_bg(async move {
                 while started.load(Ordering::Relaxed) {
                     let res = election.campaign().await;
                     if let Err(e) = res {

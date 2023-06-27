@@ -173,7 +173,7 @@ mod tests {
         let dir = create_temp_dir("state_store");
         let store_dir = dir.path().to_str().unwrap();
         let mut builder = Builder::default();
-        builder.root(store_dir);
+        let _ = builder.root(store_dir);
 
         let object_store = ObjectStore::new(builder).unwrap().finish();
         let state_store = ObjectStateStore::new(object_store);
@@ -244,7 +244,7 @@ mod tests {
         let dir = create_temp_dir("state_store_list");
         let store_dir = dir.path().to_str().unwrap();
         let mut builder = Builder::default();
-        builder.root(store_dir);
+        let _ = builder.root(store_dir);
 
         let object_store = ObjectStore::new(builder).unwrap().finish();
         let state_store = ObjectStateStore::new(object_store);

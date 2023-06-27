@@ -243,7 +243,7 @@ impl<S: LogStore> FlushScheduler<S> {
 
     /// Schedules a engine flush request.
     pub fn schedule_engine_flush(&self) -> Result<()> {
-        self.scheduler.schedule(FlushRequest::Engine)?;
+        let _ = self.scheduler.schedule(FlushRequest::Engine)?;
         Ok(())
     }
 
@@ -256,7 +256,7 @@ impl<S: LogStore> FlushScheduler<S> {
         self.scheduler.stop(true).await?;
 
         #[cfg(test)]
-        futures::future::join_all(self.pending_tasks.write().await.drain(..)).await;
+        let _ = futures::future::join_all(self.pending_tasks.write().await.drain(..)).await;
 
         Ok(())
     }
@@ -330,7 +330,7 @@ async fn execute_flush_region<S: LogStore>(
         let shared_data = req.shared.clone();
 
         // If flush is success, schedule a compaction request for this region.
-        region::schedule_compaction(
+        let _ = region::schedule_compaction(
             shared_data,
             compaction_scheduler,
             compaction_request,
@@ -354,7 +354,7 @@ impl<S: LogStore> TaskFunction<Error> for AutoFlushFunction<S> {
     async fn call(&mut self) -> Result<()> {
         // Get all regions.
         let regions = self.regions.list_regions();
-        self.picker.pick_by_interval(&regions).await;
+        let _ = self.picker.pick_by_interval(&regions).await;
 
         Ok(())
     }

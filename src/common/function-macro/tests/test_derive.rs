@@ -22,7 +22,7 @@ struct Foo {}
 #[test]
 #[allow(clippy::extra_unused_type_parameters)]
 fn test_derive() {
-    Foo::default();
+    let _ = Foo::default();
     assert_fields!(Foo: input_types);
     assert_impl_all!(Foo: std::fmt::Debug, Default, AggrFuncTypeStore);
 }

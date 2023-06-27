@@ -286,7 +286,7 @@ impl HeartbeatMailbox {
         let mailbox = Arc::new(Self::new(pushers, sequence));
 
         let timeout_checker = mailbox.clone();
-        common_runtime::spawn_bg(async move {
+        let _handle = common_runtime::spawn_bg(async move {
             timeout_checker.check_timeout_bg(10).await;
         });
 
@@ -307,7 +307,7 @@ impl HeartbeatMailbox {
         let mut interval = tokio::time::interval(Duration::from_millis(interval_millis));
 
         loop {
-            interval.tick().await;
+            let _ = interval.tick().await;
 
             if self.timeouts.is_empty() {
                 self.timeout_notify.notified().await;
@@ -363,10 +363,10 @@ impl Mailbox for HeartbeatMailbox {
         debug!("Sending mailbox message {msg:?} to {pusher_id}");
 
         let (tx, rx) = oneshot::channel();
-        self.senders.insert(message_id, tx);
+        let _ = self.senders.insert(message_id, tx);
         let deadline =
             Duration::from_millis(common_time::util::current_time_millis() as u64) + timeout;
-        self.timeouts.insert(message_id, deadline);
+        let _ = self.timeouts.insert(message_id, deadline);
         self.timeout_notify.notify_one();
 
         self.pushers.push(&pusher_id, msg).await?;
@@ -381,7 +381,7 @@ impl Mailbox for HeartbeatMailbox {
     async fn on_recv(&self, id: MessageId, maybe_msg: Result<MailboxMessage>) -> Result<()> {
         debug!("Received mailbox message {maybe_msg:?}");
 
-        self.timeouts.remove(&id);
+        let _ = self.timeouts.remove(&id);
 
         if let Some((_, tx)) = self.senders.remove(&id) {
             tx.send(maybe_msg)

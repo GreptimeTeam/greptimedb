@@ -366,9 +366,10 @@ mod tests {
 
         let vector1 = Arc::new(Int32Vector::from_slice([1, 2, 3, 4, 5])) as VectorRef;
 
-        let mut put_data = HashMap::with_capacity(3);
-        put_data.insert("k1".to_string(), vector1.clone());
-        put_data.insert("v1".to_string(), vector1);
+        let put_data = HashMap::from([
+            ("k1".to_string(), vector1.clone()),
+            ("v1".to_string(), vector1),
+        ]);
 
         let columns = NameToVector::new(put_data).unwrap();
         assert_eq!(5, columns.num_rows());
@@ -378,8 +379,7 @@ mod tests {
     #[test]
     fn test_name_to_vector_empty_vector() {
         let vector1 = Arc::new(Int32Vector::from_slice([])) as VectorRef;
-        let mut put_data = HashMap::new();
-        put_data.insert("k1".to_string(), vector1);
+        let put_data = HashMap::from([("k1".to_string(), vector1)]);
 
         let columns = NameToVector::new(put_data).unwrap();
         assert_eq!(0, columns.num_rows());
@@ -391,11 +391,11 @@ mod tests {
         let intv = Arc::new(UInt64Vector::from_slice([1, 2, 3])) as VectorRef;
         let boolv = Arc::new(BooleanVector::from(vec![true, false, true])) as VectorRef;
         let tsv = Arc::new(TimestampMillisecondVector::from_slice([0, 0, 0])) as VectorRef;
-
-        let mut put_data = HashMap::with_capacity(4);
-        put_data.insert("k1".to_string(), intv.clone());
-        put_data.insert("v1".to_string(), boolv);
-        put_data.insert("ts".to_string(), tsv);
+        let put_data = HashMap::from([
+            ("k1".to_string(), intv),
+            ("v1".to_string(), boolv),
+            ("ts".to_string(), tsv),
+        ]);
 
         let mut batch = new_test_batch();
         batch.put(put_data).unwrap();
@@ -418,9 +418,7 @@ mod tests {
         let boolv = Arc::new(BooleanVector::from_iterator(
             iter::repeat(true).take(MAX_BATCH_SIZE + 1),
         )) as VectorRef;
-
-        let mut put_data = HashMap::new();
-        put_data.insert("k1".to_string(), boolv);
+        let put_data = HashMap::from([("k1".to_string(), boolv)]);
 
         let mut batch =
             write_batch_util::new_write_batch(&[("k1", LogicalTypeId::Boolean, false)], None, 1);
@@ -433,11 +431,11 @@ mod tests {
         let intv = Arc::new(UInt64Vector::from_slice([1, 2, 3])) as VectorRef;
         let tsv = Arc::new(TimestampMillisecondVector::from_slice([0, 0])) as VectorRef;
         let boolv = Arc::new(BooleanVector::from(vec![true, false, true])) as VectorRef;
-
-        let mut put_data = HashMap::new();
-        put_data.insert("k1".to_string(), intv.clone());
-        put_data.insert("v1".to_string(), boolv.clone());
-        put_data.insert("ts".to_string(), tsv);
+        let put_data = HashMap::from([
+            ("k1".to_string(), intv),
+            ("v1".to_string(), boolv),
+            ("ts".to_string(), tsv),
+        ]);
 
         let mut batch = new_test_batch();
         let err = batch.put(put_data).unwrap_err();
@@ -448,10 +446,7 @@ mod tests {
     fn test_put_type_mismatch() {
         let boolv = Arc::new(BooleanVector::from(vec![true, false, true])) as VectorRef;
         let tsv = Arc::new(Int64Vector::from_slice([0, 0, 0])) as VectorRef;
-
-        let mut put_data = HashMap::new();
-        put_data.insert("k1".to_string(), boolv);
-        put_data.insert("ts".to_string(), tsv);
+        let put_data = HashMap::from([("k1".to_string(), boolv), ("ts".to_string(), tsv)]);
 
         let mut batch = new_test_batch();
         let err = batch.put(put_data).unwrap_err();
@@ -462,10 +457,7 @@ mod tests {
     fn test_put_type_has_null() {
         let intv = Arc::new(UInt64Vector::from(vec![Some(1), None, Some(3)])) as VectorRef;
         let tsv = Arc::new(Int64Vector::from_slice([0, 0, 0])) as VectorRef;
-
-        let mut put_data = HashMap::new();
-        put_data.insert("k1".to_string(), intv);
-        put_data.insert("ts".to_string(), tsv);
+        let put_data = HashMap::from([("k1".to_string(), intv), ("ts".to_string(), tsv)]);
 
         let mut batch = new_test_batch();
         let err = batch.put(put_data).unwrap_err();
@@ -476,10 +468,7 @@ mod tests {
     fn test_put_missing_column() {
         let boolv = Arc::new(BooleanVector::from(vec![true, false, true])) as VectorRef;
         let tsv = Arc::new(TimestampMillisecondVector::from_slice([0, 0, 0])) as VectorRef;
-
-        let mut put_data = HashMap::new();
-        put_data.insert("v1".to_string(), boolv);
-        put_data.insert("ts".to_string(), tsv);
+        let put_data = HashMap::from([("v1".to_string(), boolv), ("ts".to_string(), tsv)]);
 
         let mut batch = new_test_batch();
         let err = batch.put(put_data).unwrap_err();
@@ -491,12 +480,12 @@ mod tests {
         let intv = Arc::new(UInt64Vector::from_slice([1, 2, 3])) as VectorRef;
         let tsv = Arc::new(TimestampMillisecondVector::from_slice([0, 0, 0])) as VectorRef;
         let boolv = Arc::new(BooleanVector::from(vec![true, false, true])) as VectorRef;
-
-        let mut put_data = HashMap::new();
-        put_data.insert("k1".to_string(), intv.clone());
-        put_data.insert("v1".to_string(), boolv.clone());
-        put_data.insert("ts".to_string(), tsv);
-        put_data.insert("v2".to_string(), boolv);
+        let put_data = HashMap::from([
+            ("k1".to_string(), intv.clone()),
+            ("v1".to_string(), boolv.clone()),
+            ("ts".to_string(), tsv),
+            ("v2".to_string(), boolv),
+        ]);
 
         let mut batch = new_test_batch();
         let err = batch.put(put_data).unwrap_err();
@@ -521,10 +510,7 @@ mod tests {
     fn test_write_batch_delete() {
         let intv = Arc::new(UInt64Vector::from_slice([1, 2, 3])) as VectorRef;
         let tsv = Arc::new(TimestampMillisecondVector::from_slice([0, 0, 0])) as VectorRef;
-
-        let mut keys = HashMap::with_capacity(3);
-        keys.insert("k1".to_string(), intv.clone());
-        keys.insert("ts".to_string(), tsv);
+        let keys = HashMap::from([("k1".to_string(), intv), ("ts".to_string(), tsv)]);
 
         let mut batch = new_test_batch();
         batch.delete(keys).unwrap();
@@ -539,9 +525,7 @@ mod tests {
     #[test]
     fn test_delete_missing_column() {
         let intv = Arc::new(UInt64Vector::from_slice([1, 2, 3])) as VectorRef;
-
-        let mut keys = HashMap::with_capacity(3);
-        keys.insert("k1".to_string(), intv.clone());
+        let keys = HashMap::from([("k1".to_string(), intv)]);
 
         let mut batch = new_test_batch();
         let err = batch.delete(keys).unwrap_err();
@@ -552,11 +536,11 @@ mod tests {
     fn test_delete_columns_more_than_row_key() {
         let intv = Arc::new(UInt64Vector::from_slice([1, 2, 3])) as VectorRef;
         let tsv = Arc::new(TimestampMillisecondVector::from_slice([0, 0, 0])) as VectorRef;
-
-        let mut keys = HashMap::with_capacity(3);
-        keys.insert("k1".to_string(), intv.clone());
-        keys.insert("ts".to_string(), tsv);
-        keys.insert("v2".to_string(), intv);
+        let keys = HashMap::from([
+            ("k1".to_string(), intv.clone()),
+            ("ts".to_string(), tsv),
+            ("v2".to_string(), intv),
+        ]);
 
         let mut batch = new_test_batch();
         let err = batch.delete(keys).unwrap_err();
@@ -567,10 +551,7 @@ mod tests {
     fn test_delete_type_mismatch() {
         let intv = Arc::new(UInt64Vector::from_slice([1, 2, 3])) as VectorRef;
         let boolv = Arc::new(BooleanVector::from(vec![true, false, true])) as VectorRef;
-
-        let mut keys = HashMap::with_capacity(3);
-        keys.insert("k1".to_string(), intv.clone());
-        keys.insert("ts".to_string(), boolv);
+        let keys = HashMap::from([("k1".to_string(), intv.clone()), ("ts".to_string(), boolv)]);
 
         let mut batch = new_test_batch();
         let err = batch.delete(keys).unwrap_err();
@@ -581,10 +562,7 @@ mod tests {
     fn test_delete_non_null_value() {
         let intv = Arc::new(UInt64Vector::from_slice([1, 2, 3])) as VectorRef;
         let tsv = Arc::new(TimestampMillisecondVector::from_slice([0, 0, 0])) as VectorRef;
-
-        let mut keys = HashMap::with_capacity(2);
-        keys.insert("k1".to_string(), intv.clone());
-        keys.insert("ts".to_string(), tsv);
+        let keys = HashMap::from([("k1".to_string(), intv.clone()), ("ts".to_string(), tsv)]);
 
         let mut batch = write_batch_util::new_write_batch(
             &[

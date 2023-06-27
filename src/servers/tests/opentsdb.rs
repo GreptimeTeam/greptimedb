@@ -204,7 +204,7 @@ async fn test_opentsdb_connect_after_shutdown() -> Result<()> {
 
     server.shutdown().await.unwrap();
 
-    TcpStream::connect(addr).await.unwrap_err();
+    assert!(TcpStream::connect(addr).await.is_err());
 
     Ok(())
 }

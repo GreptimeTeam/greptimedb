@@ -449,11 +449,11 @@ impl From<Error> for tonic::Status {
         // (which is a very rare case), just ignore. Client will use Tonic status code and message.
         let status_code = err.status_code();
         if let Ok(code) = HeaderValue::from_bytes(status_code.to_string().as_bytes()) {
-            headers.insert(INNER_ERROR_CODE, code);
+            let _ = headers.insert(INNER_ERROR_CODE, code);
         }
         let root_error = err.iter_chain().last().unwrap();
         if let Ok(err_msg) = HeaderValue::from_bytes(root_error.to_string().as_bytes()) {
-            headers.insert(INNER_ERROR_MSG, err_msg);
+            let _ = headers.insert(INNER_ERROR_MSG, err_msg);
         }
 
         let metadata = MetadataMap::from_headers(headers);

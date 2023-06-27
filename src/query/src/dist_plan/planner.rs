@@ -115,7 +115,7 @@ impl DistExtensionPlanner {
     /// Extract table name from logical plan
     fn get_table_name(&self, plan: &LogicalPlan) -> Result<Option<TableName>> {
         let mut extractor = TableNameExtractor::default();
-        plan.visit(&mut extractor)?;
+        let _ = plan.visit(&mut extractor)?;
         Ok(extractor.table_name)
     }
 

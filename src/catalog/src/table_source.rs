@@ -111,7 +111,7 @@ impl DfTableSourceProvider {
 
         let provider = DfTableProviderAdapter::new(table);
         let source = provider_as_source(Arc::new(provider));
-        self.resolved_tables.insert(resolved_name, source.clone());
+        let _ = self.resolved_tables.insert(resolved_name, source.clone());
         Ok(source)
     }
 }

@@ -251,7 +251,8 @@ impl CreateTableProcedure {
             table_id: self.data.request.id,
             table,
         };
-        self.catalog_manager
+        let _ = self
+            .catalog_manager
             .register_table(register_req)
             .await
             .map_err(Error::from_error_ext)?;
@@ -383,10 +384,9 @@ mod tests {
         // Execute the subprocedure.
         let mut subprocedure = subprocedures.pop().unwrap();
         execute_procedure_until_done(&mut subprocedure.procedure).await;
-        let mut states = HashMap::new();
-        states.insert(subprocedure.id, ProcedureState::Done);
+        let states = HashMap::from([(subprocedure.id, ProcedureState::Done)]);
         // Execute the parent procedure once.
-        execute_procedure_once(
+        let _ = execute_procedure_once(
             procedure_id,
             MockContextProvider::new(states),
             &mut procedure,

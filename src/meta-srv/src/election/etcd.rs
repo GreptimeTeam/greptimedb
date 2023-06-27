@@ -59,7 +59,7 @@ impl EtcdElection {
 
         let leader_ident = leader_value.clone();
         let (tx, mut rx) = broadcast::channel(100);
-        common_runtime::spawn_bg(async move {
+        let _handle = common_runtime::spawn_bg(async move {
             loop {
                 match rx.recv().await {
                     Ok(msg) => match msg {
@@ -142,7 +142,7 @@ impl Election for EtcdElection {
             let mut keep_alive_interval =
                 tokio::time::interval(Duration::from_secs(KEEP_ALIVE_PERIOD_SECS));
             loop {
-                keep_alive_interval.tick().await;
+                let _ = keep_alive_interval.tick().await;
                 keeper.keep_alive().await.context(error::EtcdFailedSnafu)?;
 
                 if let Some(res) = receiver.message().await.context(error::EtcdFailedSnafu)? {

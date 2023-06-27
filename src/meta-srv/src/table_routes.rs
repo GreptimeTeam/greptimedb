@@ -54,12 +54,12 @@ pub(crate) async fn batch_get_table_global_value(
     for kv in kvs {
         let key = TableGlobalKey::try_from_raw_key(kv.key()).context(InvalidCatalogValueSnafu)?;
         let value = TableGlobalValue::from_bytes(kv.value()).context(InvalidCatalogValueSnafu)?;
-        result.insert(key, Some(value));
+        let _ = result.insert(key, Some(value));
     }
 
     for key in keys {
         if !result.contains_key(key) {
-            result.insert(key.clone(), None);
+            let _ = result.insert(key.clone(), None);
         }
     }
     Ok(result)

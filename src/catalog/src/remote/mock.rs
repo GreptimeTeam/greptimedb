@@ -45,7 +45,6 @@ pub struct MockKvBackend {
 
 impl Default for MockKvBackend {
     fn default() -> Self {
-        let mut map = BTreeMap::default();
         let catalog_value = CatalogValue {}.as_bytes().unwrap();
         let schema_value = SchemaValue {}.as_bytes().unwrap();
 
@@ -60,11 +59,11 @@ impl Default for MockKvBackend {
         }
         .to_string();
 
-        // create default catalog and schema
-        map.insert(default_catalog_key.into(), catalog_value);
-        map.insert(default_schema_key.into(), schema_value);
-
-        let map = RwLock::new(map);
+        let map = RwLock::new(BTreeMap::from([
+            // create default catalog and schema
+            (default_catalog_key.into(), catalog_value),
+            (default_schema_key.into(), schema_value),
+        ]));
         Self { map }
     }
 }
@@ -109,7 +108,7 @@ impl KvBackend for MockKvBackend {
 
     async fn set(&self, key: &[u8], val: &[u8]) -> Result<(), Error> {
         let mut map = self.map.write().await;
-        map.insert(key.to_vec(), val.to_vec());
+        let _ = map.insert(key.to_vec(), val.to_vec());
         Ok(())
     }
 
@@ -124,7 +123,7 @@ impl KvBackend for MockKvBackend {
         match existing {
             Entry::Vacant(e) => {
                 if expect.is_empty() {
-                    e.insert(val.to_vec());
+                    let _ = e.insert(val.to_vec());
                     Ok(Ok(()))
                 } else {
                     Ok(Err(None))
@@ -132,7 +131,7 @@ impl KvBackend for MockKvBackend {
             }
             Entry::Occupied(mut existing) => {
                 if existing.get() == expect {
-                    existing.insert(val.to_vec());
+                    let _ = existing.insert(val.to_vec());
                     Ok(Ok(()))
                 } else {
                     Ok(Err(Some(existing.get().clone())))
@@ -201,7 +200,7 @@ impl TableEngine for MockTableEngine {
         )) as Arc<_>;
 
         let mut tables = self.tables.write().unwrap();
-        tables.insert(table_id, table.clone() as TableRef);
+        let _ = tables.insert(table_id, table.clone() as TableRef);
         Ok(table)
     }
 

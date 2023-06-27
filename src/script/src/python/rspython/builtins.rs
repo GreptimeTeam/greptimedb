@@ -998,11 +998,7 @@ pub(crate) mod greptime_builtin {
         let windows = {
             slices
                 .iter()
-                .zip({
-                    let mut it = slices.iter();
-                    it.next();
-                    it
-                })
+                .zip(slices.iter().skip(1))
                 .map(|(first, second)| {
                     let left = comparison::gt_eq_scalar(ts, *first).map_err(arrow_error)?;
                     let right = comparison::lt_eq_scalar(ts, *second).map_err(arrow_error)?;

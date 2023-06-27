@@ -358,7 +358,7 @@ CREATE TABLE {table_name} (
                 table_id,
                 *region,
             );
-            has_parquet_file(&region_dir);
+            assert!(has_parquet_file(&region_dir));
         }
     }
 

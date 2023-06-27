@@ -39,7 +39,7 @@ impl<K: Eq + Hash + Clone, V> DedupDeque<K, V> {
     pub fn push_back(&mut self, key: K, value: V) -> bool {
         debug_assert_eq!(self.deque.len(), self.existing.len());
         if let Entry::Vacant(entry) = self.existing.entry(key.clone()) {
-            entry.insert(value);
+            let _ = entry.insert(value);
             self.deque.push_back(key);
             return true;
         }
@@ -51,7 +51,7 @@ impl<K: Eq + Hash + Clone, V> DedupDeque<K, V> {
     /// returns false.
     pub fn push_front(&mut self, key: K, value: V) -> bool {
         if let Entry::Vacant(entry) = self.existing.entry(key.clone()) {
-            entry.insert(value);
+            let _ = entry.insert(value);
             self.deque.push_front(key);
             return true;
         }

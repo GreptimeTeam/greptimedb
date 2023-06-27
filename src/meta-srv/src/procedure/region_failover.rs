@@ -84,7 +84,7 @@ struct FailoverProcedureGuard {
 
 impl Drop for FailoverProcedureGuard {
     fn drop(&mut self) {
-        self.running_procedures.write().unwrap().remove(&self.key);
+        let _ = self.running_procedures.write().unwrap().remove(&self.key);
     }
 }
 
@@ -177,7 +177,7 @@ impl RegionFailoverManager {
 
         let procedure_manager = self.procedure_manager.clone();
         let failed_region = failed_region.clone();
-        common_runtime::spawn_bg(async move {
+        let _handle = common_runtime::spawn_bg(async move {
             let _ = guard;
 
             let watcher = &mut match procedure_manager.submit(procedure_with_id).await {
@@ -474,7 +474,7 @@ mod tests {
             let (_, table_global_value) =
                 table_routes::tests::prepare_table_global_value(&kv_store, table).await;
 
-            table_routes::tests::prepare_table_route_value(&kv_store, table).await;
+            let _ = table_routes::tests::prepare_table_route_value(&kv_store, table).await;
 
             let pushers = Pushers::default();
             let mut heartbeat_receivers = HashMap::with_capacity(3);
@@ -485,7 +485,7 @@ mod tests {
                 let pusher = Pusher::new(tx, &RequestHeader::default());
                 let _ = pushers.insert(pusher_id, pusher).await;
 
-                heartbeat_receivers.insert(datanode_id, rx);
+                let _ = heartbeat_receivers.insert(datanode_id, rx);
             }
 
             let mailbox_sequence =
@@ -541,7 +541,7 @@ mod tests {
             .unwrap();
         let mailbox_clone = env.context.mailbox.clone();
         let failed_region_clone = failed_region.clone();
-        common_runtime::spawn_bg(async move {
+        let _handle = common_runtime::spawn_bg(async move {
             let resp = failed_datanode.recv().await.unwrap().unwrap();
             let received = &resp.mailbox_message.unwrap();
             assert_eq!(
@@ -580,7 +580,7 @@ mod tests {
             let mailbox_clone = env.context.mailbox.clone();
             let failed_region_clone = failed_region.clone();
             let candidate_tx = candidate_tx.clone();
-            common_runtime::spawn_bg(async move {
+            let _handle = common_runtime::spawn_bg(async move {
                 let resp = recv.recv().await.unwrap().unwrap();
                 let received = &resp.mailbox_message.unwrap();
                 assert_eq!(

@@ -20,7 +20,7 @@ use crate::error::{BuildBackendSnafu, Result};
 
 pub fn build_fs_backend(root: &str) -> Result<ObjectStore> {
     let mut builder = Fs::default();
-    builder.root(root);
+    let _ = builder.root(root);
     let object_store = ObjectStore::new(builder)
         .context(BuildBackendSnafu)?
         .finish();

@@ -144,14 +144,9 @@ mod tests {
     }
 
     fn new_put_data() -> HashMap<String, VectorRef> {
-        let mut put_data = HashMap::new();
         let k0 = Arc::new(Int32Vector::from_slice([1, 2, 3])) as VectorRef;
         let ts = Arc::new(TimestampMillisecondVector::from_values([11, 12, 13])) as VectorRef;
-
-        put_data.insert("k0".to_string(), k0);
-        put_data.insert("ts".to_string(), ts);
-
-        put_data
+        HashMap::from([("k0".to_string(), k0), ("ts".to_string(), ts)])
     }
 
     #[test]
@@ -188,7 +183,7 @@ mod tests {
         assert_eq!(schema_new, *batch.schema());
 
         let mutation = &batch.payload().mutations[0];
-        mutation.record_batch.column_by_name("v0").unwrap();
+        assert!(mutation.record_batch.column_by_name("v0").is_some());
     }
 
     #[test]
