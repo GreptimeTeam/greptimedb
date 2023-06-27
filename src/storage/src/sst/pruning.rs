@@ -41,7 +41,6 @@ pub(crate) fn build_row_filter(
     store_schema: &Arc<StoreSchema>,
     schema_desc: &SchemaDescriptor,
     projection_mask: ProjectionMask,
-    projection: Vec<usize>,
 ) -> Option<RowFilter> {
     let ts_col_idx = store_schema.timestamp_index();
     let ts_col = store_schema.columns().get(ts_col_idx)?;
@@ -82,8 +81,7 @@ pub(crate) fn build_row_filter(
         Box::new(PlainTimestampRowFilter::new(time_range, ts_col_projection)) as _
     };
     let mut predicates = vec![time_range_row_filter];
-    if let Ok(datafusion_filters) = predicate_to_row_filter(predicate, projection_mask, projection)
-    {
+    if let Ok(datafusion_filters) = predicate_to_row_filter(predicate, projection_mask) {
         predicates.extend(datafusion_filters);
     }
     let filter = RowFilter::new(predicates);
@@ -93,13 +91,11 @@ pub(crate) fn build_row_filter(
 fn predicate_to_row_filter(
     predicate: &Predicate,
     projection_mask: ProjectionMask,
-    projection: Vec<usize>,
 ) -> error::Result<Vec<Box<dyn ArrowPredicate>>> {
     let mut datafusion_predicates = Vec::with_capacity(predicate.exprs().len());
     for expr in predicate.exprs() {
         datafusion_predicates.push(Box::new(DatafusionArrowPredicate {
             projection_mask: projection_mask.clone(),
-            projection: projection.clone(),
             physical_expr: expr.clone(),
         }) as _);
     }
@@ -107,9 +103,9 @@ fn predicate_to_row_filter(
     Ok(datafusion_predicates)
 }
 
+#[derive(Debug)]
 struct DatafusionArrowPredicate {
     projection_mask: ProjectionMask,
-    projection: Vec<usize>,
     physical_expr: Arc<dyn PhysicalExpr>,
 }
 
@@ -119,21 +115,18 @@ impl ArrowPredicate for DatafusionArrowPredicate {
     }
 
     fn evaluate(&mut self, batch: RecordBatch) -> Result<BooleanArray, ArrowError> {
-        // 1. project according to projection
-        let projected_batch = batch.project(&self.projection)?;
-
-        // 2. evaluate the expr against the record batch
         match self
             .physical_expr
-            .evaluate(&projected_batch)
+            .evaluate(&batch)
             .map(|v| v.into_array(batch.num_rows()))
         {
             Ok(array) => {
-                // TODO(hl): remove this unwrap
                 let bool_arr = array
                     .as_any()
                     .downcast_ref::<BooleanArray>()
-                    .unwrap()
+                    .ok_or(ArrowError::CastError(
+                        "Physical expr evaluated res is not a boolean array".to_string(),
+                    ))?
                     .clone();
                 Ok(bool_arr)
             }
@@ -241,7 +234,7 @@ impl ArrowPredicate for PlainTimestampRowFilter {
         &self.projection
     }
 
-    fn evaluate(&mut self, batch: RecordBatch) -> std::result::Result<BooleanArray, ArrowError> {
+    fn evaluate(&mut self, batch: RecordBatch) -> Result<BooleanArray, ArrowError> {
         // the projection has only timestamp column, so we can safely take the first column in batch.
         let ts_col = batch.column(0);
 

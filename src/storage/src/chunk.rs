@@ -230,7 +230,7 @@ impl ChunkReaderBuilder {
             self.filters.clone(),
             self.schema.store_schema().schema().clone(),
         )
-        .context(error::BuildPredicateSnafu)?; // TODO(hl): check if the schema
+        .context(error::BuildPredicateSnafu)?;
 
         let read_opts = ReadOptions {
             batch_size: self.iter_ctx.batch_size,

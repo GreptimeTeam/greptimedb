@@ -37,11 +37,16 @@ mod stats;
 
 #[derive(Clone)]
 pub struct Predicate {
+    /// The schema of underlying storage.
     schema: SchemaRef,
+    /// Physical expressions of this predicate.
     exprs: Vec<Arc<dyn PhysicalExpr>>,
 }
 
 impl Predicate {
+    /// Creates a new `Predicate` by converting logical exprs to physical exprs that can be
+    /// evaluated against record batches.
+    /// Returns error when failed to converting exprs.
     pub fn try_new(exprs: Vec<Expr>, schema: SchemaRef) -> error::Result<Self> {
         let arrow_schema = schema.arrow_schema();
         let df_schema = arrow_schema
@@ -76,6 +81,7 @@ impl Predicate {
         &self.exprs
     }
 
+    /// Builds an empty predicate from given schema.
     pub fn empty(schema: SchemaRef) -> Self {
         Self {
             schema,
@@ -83,6 +89,8 @@ impl Predicate {
         }
     }
 
+    /// Evaluates the predicate against row group metadata.
+    /// Returns a vector of boolean values, among which `false` means the row group can be skipped.
     pub fn prune_row_groups(&self, row_groups: &[RowGroupMetaData]) -> Vec<bool> {
         let mut res = vec![true; row_groups.len()];
         let arrow_schema = self.schema.arrow_schema();
@@ -112,6 +120,8 @@ impl Predicate {
 
 // tests for `TimeRangePredicateBuilder` locates in src/query/tests/time_range_filter_test.rs
 // since it requires query engine to convert sql to filters.
+/// `TimeRangePredicateBuilder` extracts time range from logical exprs to facilitate fast
+/// time range pruning.
 pub struct TimeRangePredicateBuilder<'a> {
     ts_col_name: &'a str,
     ts_col_unit: TimeUnit,

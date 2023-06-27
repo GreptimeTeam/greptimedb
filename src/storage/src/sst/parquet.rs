@@ -289,7 +289,6 @@ impl ParquetReader {
             &store_schema,
             &parquet_schema_desc,
             projection_mask,
-            adapter.fields_to_read(),
         ) {
             builder = builder.with_row_filter(row_filter);
         }
