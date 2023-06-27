@@ -29,10 +29,12 @@ use crate::datanode::{
     DatanodeOptions, FileConfig, ObjectStoreConfig, ProcedureConfig, StorageConfig, WalConfig,
 };
 use crate::error::{CreateTableSnafu, Result};
-use crate::instance::Instance;
+use crate::heartbeat::HeartbeatTask;
+use crate::instance::{Instance, InstanceRef};
 
 pub(crate) struct MockInstance {
-    instance: Instance,
+    instance: InstanceRef,
+    _heartbeat: Option<HeartbeatTask>,
     _guard: TestGuard,
 }
 
@@ -40,10 +42,17 @@ impl MockInstance {
     pub(crate) async fn new(name: &str) -> Self {
         let (opts, _guard) = create_tmp_dir_and_datanode_opts(name);
 
-        let instance = Instance::with_mock_meta_client(&opts).await.unwrap();
+        let (instance, heartbeat) = Instance::with_mock_meta_client(&opts).await.unwrap();
         instance.start().await.unwrap();
+        if let Some(task) = heartbeat.as_ref() {
+            task.start().await.unwrap();
+        }
 
-        MockInstance { instance, _guard }
+        MockInstance {
+            instance,
+            _guard,
+            _heartbeat: heartbeat,
+        }
     }
 
     pub(crate) fn inner(&self) -> &Instance {
