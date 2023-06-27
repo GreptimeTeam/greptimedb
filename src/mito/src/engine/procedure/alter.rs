@@ -55,7 +55,7 @@ impl<S: StorageEngine> Procedure for AlterMitoTable<S> {
         match self.data.state {
             AlterTableState::Prepare => self.on_prepare(),
             AlterTableState::EngineAlterTable => {
-                self.engine_alter_table().await?;
+                let _ = self.engine_alter_table().await?;
                 Ok(Status::Done)
             }
         }
@@ -223,7 +223,8 @@ impl<S: StorageEngine> AlterMitoTable<S> {
 
         // It is possible that we write the manifest multiple times and bump the manifest
         // version, but it is still correct as we always write the new table info.
-        self.table
+        let _ = self
+            .table
             .manifest()
             .update(TableMetaActionList::with_action(TableMetaAction::Change(
                 Box::new(TableChange {

@@ -47,7 +47,7 @@ pub struct Dropper {
 impl Drop for Dropper {
     fn drop(&mut self) {
         // Send a signal to say i am dropping.
-        self.close.take().map(|v| v.send(()));
+        let _ = self.close.take().map(|v| v.send(()));
     }
 }
 
@@ -104,7 +104,7 @@ impl Builder {
     ///
     /// This can be any number above 0. The default value is the number of cores available to the system.
     pub fn worker_threads(&mut self, val: usize) -> &mut Self {
-        self.builder.worker_threads(val);
+        let _ = self.builder.worker_threads(val);
         self
     }
 
@@ -114,7 +114,7 @@ impl Builder {
     /// they are not always active and will exit if left idle for too long, You can change this timeout duration
     /// with thread_keep_alive. The default value is 512.
     pub fn max_blocking_threads(&mut self, val: usize) -> &mut Self {
-        self.builder.max_blocking_threads(val);
+        let _ = self.builder.max_blocking_threads(val);
         self
     }
 
@@ -122,7 +122,7 @@ impl Builder {
     ///
     /// By default, the timeout for a thread is set to 10 seconds.
     pub fn thread_keep_alive(&mut self, duration: Duration) -> &mut Self {
-        self.builder.thread_keep_alive(duration);
+        let _ = self.builder.thread_keep_alive(duration);
         self
     }
 
@@ -227,7 +227,7 @@ mod tests {
         // wait threads created
         thread::sleep(Duration::from_millis(50));
 
-        runtime.spawn(async {
+        let _handle = runtime.spawn(async {
             thread::sleep(Duration::from_millis(50));
         });
 
@@ -247,7 +247,7 @@ mod tests {
         let out = runtime.block_on(async {
             let (tx, rx) = oneshot::channel();
 
-            thread::spawn(move || {
+            let _ = thread::spawn(move || {
                 thread::sleep(Duration::from_millis(50));
                 tx.send("ZOMG").unwrap();
             });

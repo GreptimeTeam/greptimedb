@@ -34,28 +34,26 @@ pub fn build_s3_backend(
 ) -> Result<ObjectStore> {
     let mut builder = S3::default();
 
-    builder.root(path);
-
-    builder.bucket(host);
+    let _ = builder.root(path).bucket(host);
 
     if let Some(endpoint) = connection.get(ENDPOINT_URL) {
-        builder.endpoint(endpoint);
+        let _ = builder.endpoint(endpoint);
     }
 
     if let Some(region) = connection.get(REGION) {
-        builder.region(region);
+        let _ = builder.region(region);
     }
 
     if let Some(key_id) = connection.get(ACCESS_KEY_ID) {
-        builder.access_key_id(key_id);
+        let _ = builder.access_key_id(key_id);
     }
 
     if let Some(key) = connection.get(SECRET_ACCESS_KEY) {
-        builder.secret_access_key(key);
+        let _ = builder.secret_access_key(key);
     }
 
     if let Some(session_token) = connection.get(SESSION_TOKEN) {
-        builder.security_token(session_token);
+        let _ = builder.security_token(session_token);
     }
 
     if let Some(enable_str) = connection.get(ENABLE_VIRTUAL_HOST_STYLE) {
@@ -69,7 +67,7 @@ pub fn build_s3_backend(
             .build()
         })?;
         if enable {
-            builder.enable_virtual_host_style();
+            let _ = builder.enable_virtual_host_style();
         }
     }
 

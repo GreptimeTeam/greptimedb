@@ -68,8 +68,6 @@ fn new_put_data(
     ts_start: i64,
     initial_value: i64,
 ) -> HashMap<String, VectorRef> {
-    let mut put_data = HashMap::with_capacity(4);
-
     let k0 = Arc::new(Int64Vector::from_values(
         (0..len).map(|v| key_start + v as i64),
     )) as VectorRef;
@@ -83,12 +81,12 @@ fn new_put_data(
         (0..len).map(|v| initial_value + v as i64),
     )) as VectorRef;
 
-    put_data.insert("k0".to_string(), k0);
-    put_data.insert(test_util::TIMESTAMP_NAME.to_string(), ts);
-    put_data.insert("v0".to_string(), v0);
-    put_data.insert("v1".to_string(), v1);
-
-    put_data
+    HashMap::from([
+        ("k0".to_string(), k0),
+        (test_util::TIMESTAMP_NAME.to_string(), ts),
+        ("v0".to_string(), v0),
+        ("v1".to_string(), v1),
+    ])
 }
 
 fn append_chunk_to(chunk: &Chunk, dst: &mut Vec<Vec<i64>>) {
@@ -144,7 +142,7 @@ impl<S: LogStore> ProjectionTester<S> {
         let put_data = new_put_data(len, key_start, ts_start, initial_value);
         batch.put(put_data).unwrap();
 
-        self.region.write(&self.write_ctx, batch).await.unwrap();
+        assert!(self.region.write(&self.write_ctx, batch).await.is_ok());
     }
 
     async fn scan(&self, projection: Option<Vec<usize>>) -> Vec<Vec<i64>> {

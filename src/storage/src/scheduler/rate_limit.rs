@@ -65,7 +65,7 @@ impl<R> RateLimiter for MaxInflightTaskLimiter<R> {
 
     fn acquire_token(&self, _: &Self::Request) -> Result<BoxedRateLimitToken> {
         if self.inflight_tasks.fetch_add(1, Ordering::Relaxed) >= self.max_inflight_tasks {
-            self.inflight_tasks.fetch_sub(1, Ordering::Relaxed);
+            let _ = self.inflight_tasks.fetch_sub(1, Ordering::Relaxed);
             return RateLimitedSnafu {
                 msg: format!(
                     "Max inflight task num exceeds, current: {}, max: {}",
@@ -103,7 +103,7 @@ impl RateLimitToken for MaxInflightLimiterToken {
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_ok()
         {
-            self.counter.fetch_sub(1, Ordering::Relaxed);
+            let _ = self.counter.fetch_sub(1, Ordering::Relaxed);
         }
     }
 }

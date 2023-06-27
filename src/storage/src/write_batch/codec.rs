@@ -147,10 +147,11 @@ mod tests {
                 Arc::new(BooleanVector::from(vec![Some(true), Some(false), None])) as VectorRef;
             let tsv = Arc::new(TimestampMillisecondVector::from_vec(vec![i, i, i])) as VectorRef;
 
-            let mut put_data = HashMap::new();
-            put_data.insert("k1".to_string(), intv.clone());
-            put_data.insert("v1".to_string(), boolv);
-            put_data.insert("ts".to_string(), tsv);
+            let put_data = HashMap::from([
+                ("k1".to_string(), intv),
+                ("v1".to_string(), boolv),
+                ("ts".to_string(), tsv),
+            ]);
 
             batch.put(put_data).unwrap();
         }
@@ -183,9 +184,8 @@ mod tests {
             let intv = Arc::new(UInt64Vector::from_slice([1, 2, 3])) as VectorRef;
             let tsv = Arc::new(TimestampMillisecondVector::from_vec(vec![0, 0, 0])) as VectorRef;
 
-            let mut put_data = HashMap::with_capacity(3);
-            put_data.insert("k1".to_string(), intv.clone());
-            put_data.insert("ts".to_string(), tsv);
+            let put_data =
+                HashMap::from([("k1".to_string(), intv.clone()), ("ts".to_string(), tsv)]);
 
             batch.put(put_data).unwrap();
         }

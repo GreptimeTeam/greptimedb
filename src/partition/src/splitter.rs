@@ -68,7 +68,7 @@ impl WriteSplitter {
                 .context(MissingDefaultValueSnafu {
                     column: &column_schema.name,
                 })?;
-            insert
+            let _ = insert
                 .columns_values
                 .insert(column_schema.name.clone(), default_values);
         }
@@ -396,10 +396,7 @@ mod tests {
     #[test]
     fn test_partition_insert_request() {
         let insert = mock_insert_request();
-        let mut region_map: HashMap<RegionNumber, Vec<usize>> = HashMap::with_capacity(2);
-        region_map.insert(1, vec![2, 0]);
-        region_map.insert(2, vec![1]);
-
+        let region_map = HashMap::from([(1, vec![2, 0]), (2, vec![1])]);
         let dist_insert = split_insert_request(&insert, region_map);
 
         let r1_insert = dist_insert.get(&1_u32).unwrap();
@@ -511,19 +508,19 @@ mod tests {
         builder.push(Some(true));
         builder.push(Some(false));
         builder.push(Some(true));
-        columns_values.insert("enable_reboot".to_string(), builder.to_vector());
+        let _ = columns_values.insert("enable_reboot".to_string(), builder.to_vector());
 
         let mut builder = StringVectorBuilder::with_capacity(3);
         builder.push(Some("host1"));
         builder.push(None);
         builder.push(Some("host3"));
-        columns_values.insert("host".to_string(), builder.to_vector());
+        let _ = columns_values.insert("host".to_string(), builder.to_vector());
 
         let mut builder = Int16VectorBuilder::with_capacity(3);
         builder.push(Some(1_i16));
         builder.push(Some(2_i16));
         builder.push(Some(3_i16));
-        columns_values.insert("id".to_string(), builder.to_vector());
+        let _ = columns_values.insert("id".to_string(), builder.to_vector());
 
         InsertRequest {
             catalog_name: common_catalog::consts::DEFAULT_CATALOG_NAME.to_string(),
@@ -540,13 +537,13 @@ mod tests {
         builder.push(Some(true));
         builder.push(Some(false));
         builder.push(Some(true));
-        columns_values.insert("enable_reboot".to_string(), builder.to_vector());
+        let _ = columns_values.insert("enable_reboot".to_string(), builder.to_vector());
 
         let mut builder = StringVectorBuilder::with_capacity(3);
         builder.push(Some("host1"));
         builder.push(None);
         builder.push(Some("host3"));
-        columns_values.insert("host".to_string(), builder.to_vector());
+        let _ = columns_values.insert("host".to_string(), builder.to_vector());
 
         let insert_request = InsertRequest {
             catalog_name: common_catalog::consts::DEFAULT_CATALOG_NAME.to_string(),
@@ -579,18 +576,18 @@ mod tests {
         builder.push(Some(true));
         builder.push(Some(false));
         builder.push(Some(true));
-        columns_values.insert("enable_reboot".to_string(), builder.to_vector());
+        let _ = columns_values.insert("enable_reboot".to_string(), builder.to_vector());
 
         let mut builder = StringVectorBuilder::with_capacity(3);
         builder.push(Some("host1"));
         builder.push(None);
         builder.push(Some("host3"));
-        columns_values.insert("host".to_string(), builder.to_vector());
+        let _ = columns_values.insert("host".to_string(), builder.to_vector());
 
         let mut builder = Int16VectorBuilder::with_capacity(1);
         builder.push(Some(1_i16));
         // two values are missing
-        columns_values.insert("id".to_string(), builder.to_vector());
+        let _ = columns_values.insert("id".to_string(), builder.to_vector());
 
         InsertRequest {
             catalog_name: common_catalog::consts::DEFAULT_CATALOG_NAME.to_string(),

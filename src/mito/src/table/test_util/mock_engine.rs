@@ -208,10 +208,12 @@ impl Region for MockRegion {
 
 impl MockRegionInner {
     fn new(metadata: RegionMetadata) -> Self {
-        let mut memtable = HashMap::new();
-        for column in metadata.user_schema().column_schemas() {
-            memtable.insert(column.name.clone(), vec![]);
-        }
+        let memtable = metadata
+            .user_schema()
+            .column_schemas()
+            .iter()
+            .map(|x| (x.name.clone(), vec![]))
+            .collect();
         Self {
             name: metadata.name().to_string(),
             metadata: ArcSwap::new(Arc::new(metadata)),
@@ -226,12 +228,12 @@ impl MockRegionInner {
             // Now drop columns is not supported.
             let rows = memtable.values().last().unwrap().len();
             for column in metadata.user_schema().column_schemas() {
-                memtable
+                let _ = memtable
                     .entry(column.name.clone())
                     .or_insert_with(|| vec![Value::Null; rows]);
             }
         }
-        self.metadata.swap(Arc::new(metadata));
+        let _ = self.metadata.swap(Arc::new(metadata));
     }
 
     fn write(&self, request: WriteBatch) {
@@ -282,7 +284,7 @@ impl StorageEngine for MockEngine {
         }
 
         if let Some(region) = regions.closed_regions.remove(name) {
-            regions
+            let _ = regions
                 .opened_regions
                 .insert(name.to_string(), region.clone());
             return Ok(Some(region));
@@ -300,7 +302,7 @@ impl StorageEngine for MockEngine {
         let mut regions = self.regions.lock().unwrap();
 
         if let Some(region) = regions.opened_regions.remove(name) {
-            regions.closed_regions.insert(name.to_string(), region);
+            let _ = regions.closed_regions.insert(name.to_string(), region);
         }
 
         Ok(())
@@ -324,7 +326,7 @@ impl StorageEngine for MockEngine {
         let region = MockRegion {
             inner: Arc::new(MockRegionInner::new(metadata)),
         };
-        regions.opened_regions.insert(name, region.clone());
+        let _ = regions.opened_regions.insert(name, region.clone());
 
         Ok(region)
     }

@@ -112,7 +112,7 @@ impl AcceptTask {
                 err_msg: format!("{name} server has been started."),
             }
         );
-        self.join_handle.get_or_insert(join_handle);
+        let _handle = self.join_handle.get_or_insert(join_handle);
         Ok(())
     }
 }

@@ -214,7 +214,7 @@ mod tests {
                 &ts_seg,    // keys
                 &value_seg, // values
             );
-            seq.fetch_add(1, Ordering::Relaxed);
+            let _ = seq.fetch_add(1, Ordering::Relaxed);
         }
 
         let iter = memtable.iter(IterContext::default()).unwrap();
@@ -241,7 +241,7 @@ mod tests {
             Arc::new(crate::test_util::access_layer_util::MockAccessLayer {}),
             new_noop_file_purger(),
         );
-        seq.fetch_add(1, Ordering::Relaxed);
+        let _ = seq.fetch_add(1, Ordering::Relaxed);
         handle
     }
 
@@ -279,7 +279,7 @@ mod tests {
         let dir = create_temp_dir("write_parquet");
         let path = dir.path().to_str().unwrap();
         let mut builder = Fs::default();
-        builder.root(path);
+        let _ = builder.root(path);
 
         let object_store = ObjectStore::new(builder).unwrap().finish();
 
@@ -358,7 +358,7 @@ mod tests {
         let dir = create_temp_dir("write_parquet");
         let path = dir.path().to_str().unwrap();
         let mut builder = Fs::default();
-        builder.root(path);
+        let _ = builder.root(path);
         let object_store = ObjectStore::new(builder).unwrap().finish();
 
         let schema = schema_for_test();

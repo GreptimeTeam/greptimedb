@@ -399,7 +399,7 @@ async fn create_secure_connection(
     let tls = tokio_postgres_rustls::MakeRustlsConnect::new(config);
     let (client, conn) = tokio_postgres::connect(&url, tls).await.expect("connect");
 
-    tokio::spawn(conn);
+    let _handle = tokio::spawn(conn);
     Ok(client)
 }
 
@@ -415,7 +415,7 @@ async fn create_plain_connection(
         format!("host=127.0.0.1 port={port} connect_timeout=2 dbname={DEFAULT_SCHEMA_NAME}")
     };
     let (client, conn) = tokio_postgres::connect(&url, NoTls).await?;
-    tokio::spawn(conn);
+    let _handle = tokio::spawn(conn);
     Ok(client)
 }
 
@@ -425,7 +425,7 @@ async fn create_connection_with_given_db(
 ) -> std::result::Result<Client, PgError> {
     let url = format!("host=127.0.0.1 port={port} connect_timeout=2 dbname={db}");
     let (client, conn) = tokio_postgres::connect(&url, NoTls).await?;
-    tokio::spawn(conn);
+    let _handle = tokio::spawn(conn);
     Ok(client)
 }
 
@@ -436,14 +436,14 @@ async fn create_connection_with_given_catalog_schema(
 ) -> std::result::Result<Client, PgError> {
     let url = format!("host=127.0.0.1 port={port} connect_timeout=2 dbname={catalog}-{schema}");
     let (client, conn) = tokio_postgres::connect(&url, NoTls).await?;
-    tokio::spawn(conn);
+    let _handle = tokio::spawn(conn);
     Ok(client)
 }
 
 async fn create_connection_without_db(port: u16) -> std::result::Result<Client, PgError> {
     let url = format!("host=127.0.0.1 port={port} connect_timeout=2");
     let (client, conn) = tokio_postgres::connect(&url, NoTls).await?;
-    tokio::spawn(conn);
+    let _handle = tokio::spawn(conn);
     Ok(client)
 }
 

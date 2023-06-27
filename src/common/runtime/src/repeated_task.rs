@@ -172,8 +172,7 @@ mod tests {
         }
 
         async fn call(&mut self) -> Result<()> {
-            self.n.fetch_add(1, Ordering::Relaxed);
-
+            let _ = self.n.fetch_add(1, Ordering::Relaxed);
             Ok(())
         }
     }

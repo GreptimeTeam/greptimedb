@@ -202,13 +202,13 @@ impl TableRoute {
             .iter()
             .filter_map(|x| x.leader_peer.as_ref())
             .for_each(|p| {
-                peers.insert(p.clone());
+                let _ = peers.insert(p.clone());
             });
         self.region_routes
             .iter()
             .flat_map(|x| x.follower_peers.iter())
             .for_each(|p| {
-                peers.insert(p.clone());
+                let _ = peers.insert(p.clone());
             });
         let mut peers = peers.into_iter().map(Into::into).collect::<Vec<PbPeer>>();
         peers.sort_by_key(|x| x.id);

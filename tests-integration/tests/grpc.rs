@@ -347,12 +347,18 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
     let mut gateway_client = grpc_client.make_prometheus_gateway_client().unwrap();
 
     // create table and insert data
-    db.sql("CREATE TABLE test(i DOUBLE, j TIMESTAMP TIME INDEX, k STRING PRIMARY KEY);")
-        .await
-        .unwrap();
-    db.sql(r#"INSERT INTO test VALUES (1, 1, "a"), (1, 1, "b"), (2, 2, "a");"#)
-        .await
-        .unwrap();
+    assert!(matches!(
+        db.sql("CREATE TABLE test(i DOUBLE, j TIMESTAMP TIME INDEX, k STRING PRIMARY KEY);")
+            .await
+            .unwrap(),
+        Output::AffectedRows(0)
+    ));
+    assert!(matches!(
+        db.sql(r#"INSERT INTO test VALUES (1, 1, "a"), (1, 1, "b"), (2, 2, "a");"#)
+            .await
+            .unwrap(),
+        Output::AffectedRows(3)
+    ));
 
     // Instant query using prometheus gateway service
     let header = RequestHeader {

@@ -296,7 +296,7 @@ mod tests {
             datanode_id: 2,
             region_number: 1,
         };
-        container.get_failure_detector(ident.clone());
+        let _ = container.get_failure_detector(ident.clone());
 
         let region_failover_manager = create_region_failover_manager();
         let mut runner = FailureDetectRunner::new(None, region_failover_manager);

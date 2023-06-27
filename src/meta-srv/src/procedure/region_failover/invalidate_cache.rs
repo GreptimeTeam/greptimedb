@@ -105,7 +105,7 @@ mod tests {
             let pusher = Pusher::new(tx, &RequestHeader::default());
             let _ = pushers.insert(pusher_id, pusher).await;
 
-            heartbeat_receivers.insert(frontend_id, rx);
+            let _ = heartbeat_receivers.insert(frontend_id, rx);
         }
 
         let state = InvalidateCache;

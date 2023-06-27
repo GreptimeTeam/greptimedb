@@ -155,7 +155,7 @@ impl MysqlServer {
         spawn_config: Arc<MysqlSpawnConfig>,
     ) -> Result<()> {
         info!("MySQL connection coming from: {}", stream.peer_addr()?);
-        io_runtime.spawn(async move {
+        let _handle = io_runtime.spawn(async move {
             increment_gauge!(crate::metrics::METRIC_MYSQL_CONNECTIONS, 1.0);
             if let Err(e)  = Self::do_handle(stream, spawn_ref, spawn_config).await {
                 // TODO(LFC): Write this error to client as well, in MySQL text protocol.

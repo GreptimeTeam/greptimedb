@@ -177,21 +177,21 @@ impl Instance {
             object_store.clone(),
         ));
 
-        let mut engine_procedures = HashMap::with_capacity(2);
-        engine_procedures.insert(
-            mito_engine.name().to_string(),
-            mito_engine.clone() as TableEngineProcedureRef,
-        );
-
         let immutable_file_engine = Arc::new(ImmutableFileTableEngine::new(
             file_table_engine::config::EngineConfig::default(),
             object_store.clone(),
         ));
-        engine_procedures.insert(
-            immutable_file_engine.name().to_string(),
-            immutable_file_engine.clone() as TableEngineProcedureRef,
-        );
 
+        let engine_procedures = HashMap::from([
+            (
+                mito_engine.name().to_string(),
+                mito_engine.clone() as TableEngineProcedureRef,
+            ),
+            (
+                immutable_file_engine.name().to_string(),
+                immutable_file_engine.clone() as TableEngineProcedureRef,
+            ),
+        ]);
         let engine_manager = Arc::new(
             MemoryTableEngineManager::with(vec![
                 mito_engine.clone(),
@@ -207,7 +207,7 @@ impl Instance {
                     let catalog = Arc::new(catalog::local::MemoryCatalogManager::default());
                     let table = NumbersTable::new(MIN_USER_TABLE_ID);
 
-                    catalog
+                    let _ = catalog
                         .register_table(RegisterTableRequest {
                             table_id: MIN_USER_TABLE_ID,
                             table_name: table.table_info().name.to_string(),
@@ -376,7 +376,7 @@ impl Instance {
         .map_err(BoxedError::new)
         .context(ShutdownInstanceSnafu);
         info!("Flushed all tables result: {}", flush_result.is_ok());
-        flush_result?;
+        let _ = flush_result?;
 
         Ok(())
     }

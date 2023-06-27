@@ -217,7 +217,7 @@ impl LinesWriter {
                     datatype: datatype as i32,
                     null_mask: Vec::default(),
                 });
-                column_names.insert(column_name.to_string(), new_idx);
+                let _ = column_names.insert(column_name.to_string(), new_idx);
                 new_idx
             }
         };

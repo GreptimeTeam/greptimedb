@@ -30,7 +30,7 @@ pub(crate) async fn new_azblob_object_store(azblob_config: &AzblobConfig) -> Res
     );
 
     let mut builder = AzureBuilder::default();
-    builder
+    let _ = builder
         .root(&root)
         .container(&azblob_config.container)
         .endpoint(&azblob_config.endpoint)
@@ -38,7 +38,7 @@ pub(crate) async fn new_azblob_object_store(azblob_config: &AzblobConfig) -> Res
         .account_key(azblob_config.account_key.expose_secret());
 
     if let Some(token) = &azblob_config.sas_token {
-        builder.sas_token(token);
+        let _ = builder.sas_token(token);
     }
 
     Ok(ObjectStore::new(builder)

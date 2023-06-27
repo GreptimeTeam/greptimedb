@@ -38,14 +38,14 @@ impl DistLock for MemLock {
 
         let guard = mutex.lock_owned().await;
 
-        self.guards.insert(key.clone(), guard);
+        let _ = self.guards.insert(key.clone(), guard);
         Ok(key)
     }
 
     async fn unlock(&self, key: Vec<u8>) -> Result<()> {
         // drop the guard, so that the mutex can be unlocked,
         // effectively make the `mutex.lock_owned` in `lock` method to proceed
-        self.guards.remove(&key);
+        let _ = self.guards.remove(&key);
         Ok(())
     }
 }
@@ -85,10 +85,10 @@ mod tests {
                     // every key counter will be added by 1 for 10 times
                     for i in 0..100 {
                         let key = &keys[i % keys.len()];
-                        lock_clone
+                        assert!(lock_clone
                             .lock(key.clone(), Opts { expire_secs: None })
                             .await
-                            .unwrap();
+                            .is_ok());
 
                         // Intentionally create a critical section:
                         // if our MemLock is flawed, the resulting counter is wrong.
@@ -105,7 +105,7 @@ mod tests {
                 })
             })
             .collect::<Vec<_>>();
-        futures::future::join_all(tasks).await;
+        let _ = futures::future::join_all(tasks).await;
 
         assert!(counters.values().all(|x| x.load(Ordering::Relaxed) == 1000));
     }

@@ -1006,10 +1006,10 @@ mod tests {
         );
 
         let result: Result<Value> = ScalarValue::Decimal128(Some(1), 0, 0).try_into();
-        result
+        assert!(result
             .unwrap_err()
             .to_string()
-            .contains("Unsupported arrow data type, type: Decimal(0, 0)");
+            .contains("Unsupported arrow data type, type: Decimal128(0, 0)"));
     }
 
     #[test]

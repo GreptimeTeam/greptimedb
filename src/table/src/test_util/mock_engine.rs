@@ -53,7 +53,8 @@ impl TableEngine for MockTableEngine {
 
         let table_ref = Arc::new(EmptyTable::new(request));
 
-        self.tables
+        let _ = self
+            .tables
             .lock()
             .await
             .insert((catalog_name, schema_name, table_name), table_ref.clone());

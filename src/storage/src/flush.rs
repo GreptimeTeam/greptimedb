@@ -194,20 +194,20 @@ impl FlushStrategy for SizeBasedStrategy {
 
     fn reserve_mem(&self, mem: usize) {
         if self.is_global_limit_enabled() {
-            self.memory_used.fetch_add(mem, Ordering::Relaxed);
-            self.memory_active.fetch_add(mem, Ordering::Relaxed);
+            let _ = self.memory_used.fetch_add(mem, Ordering::Relaxed);
+            let _ = self.memory_active.fetch_add(mem, Ordering::Relaxed);
         }
     }
 
     fn schedule_free_mem(&self, mem: usize) {
         if self.is_global_limit_enabled() {
-            self.memory_active.fetch_sub(mem, Ordering::Relaxed);
+            let _ = self.memory_active.fetch_sub(mem, Ordering::Relaxed);
         }
     }
 
     fn free_mem(&self, mem: usize) {
         if self.is_global_limit_enabled() {
-            self.memory_used.fetch_sub(mem, Ordering::Relaxed);
+            let _ = self.memory_used.fetch_sub(mem, Ordering::Relaxed);
         }
     }
 }

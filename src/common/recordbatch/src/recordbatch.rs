@@ -164,7 +164,7 @@ impl RecordBatch {
                 vector.clone()
             };
 
-            vectors.insert(column_name.clone(), vector);
+            let _ = vectors.insert(column_name.clone(), vector);
         }
 
         Ok(vectors)

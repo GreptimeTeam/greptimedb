@@ -51,7 +51,7 @@ impl ScriptManager {
 
         {
             let mut compiled = self.compiled.write().unwrap();
-            compiled.insert(name.to_string(), script.clone());
+            let _ = compiled.insert(name.to_string(), script.clone());
         }
         logging::info!("Compiled and cached script: {}", name);
 

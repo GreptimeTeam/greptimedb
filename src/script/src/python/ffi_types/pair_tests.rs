@@ -96,7 +96,7 @@ async fn integrated_py_copr_test() {
             let mut actual_result = HashMap::new();
             for col_sch in rb.schema.column_schemas() {
                 let col = rb.column_by_name(&col_sch.name).unwrap();
-                actual_result.insert(col_sch.name.clone(), col.clone());
+                let _ = actual_result.insert(col_sch.name.clone(), col.clone());
             }
             for (name, col) in expect_result {
                 let actual_col = actual_result.get(&name).unwrap_or_else(|| {

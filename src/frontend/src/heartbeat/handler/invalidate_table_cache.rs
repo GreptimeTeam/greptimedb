@@ -55,7 +55,7 @@ impl HeartbeatResponseHandler for InvalidateTableCacheHandler {
             ..
         } = table_ident;
 
-        common_runtime::spawn_bg(async move {
+        let _handle = common_runtime::spawn_bg(async move {
             self_ref.invalidate_table(&catalog, &schema, &table).await;
 
             if let Err(e) = mailbox

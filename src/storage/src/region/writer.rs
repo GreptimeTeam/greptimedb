@@ -251,7 +251,7 @@ impl RegionWriter {
         version_control.set_committed_sequence(next_sequence);
 
         let header = WalHeader::with_last_manifest_version(manifest_version);
-        wal.write_to_wal(next_sequence, header, None).await?;
+        let _ = wal.write_to_wal(next_sequence, header, None).await?;
 
         Ok(())
     }
@@ -317,7 +317,7 @@ impl RegionWriter {
             action_list
         );
 
-        drop_ctx.manifest.update(action_list).await?;
+        let _ = drop_ctx.manifest.update(action_list).await?;
 
         // Mark all data obsolete and delete the namespace in the WAL
         drop_ctx.wal.obsolete(committed_sequence).await?;
@@ -505,7 +505,7 @@ impl WriterInner {
 
         let version = version_control.current();
         let wal_header = WalHeader::with_last_manifest_version(version.manifest_version());
-        writer_ctx
+        let _ = writer_ctx
             .wal
             .write_to_wal(next_sequence, wal_header, Some(request.payload()))
             .await?;
@@ -837,7 +837,7 @@ impl WriterInner {
                     .context(error::CompactTaskCancelSnafu { region_id })??;
             }
         } else {
-            schedule_compaction(
+            let _ = schedule_compaction(
                 shared_data,
                 compaction_scheduler,
                 compaction_request,

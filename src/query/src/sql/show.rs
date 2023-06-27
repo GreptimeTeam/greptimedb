@@ -276,15 +276,15 @@ WITH(
         let schema_name = "public".to_string();
         let catalog_name = "greptime".to_string();
         let mut options: TableOptions = Default::default();
-        options.extra_options.insert(
+        let _ = options.extra_options.insert(
             IMMUTABLE_TABLE_LOCATION_KEY.to_string(),
             "foo.csv".to_string(),
         );
-        options.extra_options.insert(
+        let _ = options.extra_options.insert(
             IMMUTABLE_TABLE_META_KEY.to_string(),
             "{{\"files\":[\"foo.csv\"]}}".to_string(),
         );
-        options
+        let _ = options
             .extra_options
             .insert(IMMUTABLE_TABLE_FORMAT_KEY.to_string(), "csv".to_string());
         let meta = TableMetaBuilder::default()

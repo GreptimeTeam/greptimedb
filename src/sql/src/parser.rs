@@ -82,24 +82,24 @@ impl<'a> ParserContext<'a> {
             Token::Word(w) => {
                 match w.keyword {
                     Keyword::CREATE => {
-                        self.parser.next_token();
+                        let _ = self.parser.next_token();
                         self.parse_create()
                     }
 
                     Keyword::EXPLAIN => {
-                        self.parser.next_token();
+                        let _ = self.parser.next_token();
                         self.parse_explain()
                     }
 
                     Keyword::SHOW => {
-                        self.parser.next_token();
+                        let _ = self.parser.next_token();
                         self.parse_show()
                     }
 
                     Keyword::DELETE => self.parse_delete(),
 
                     Keyword::DESCRIBE | Keyword::DESC => {
-                        self.parser.next_token();
+                        let _ = self.parser.next_token();
                         self.parse_describe()
                     }
 
@@ -112,7 +112,7 @@ impl<'a> ParserContext<'a> {
                     Keyword::DROP => self.parse_drop(),
 
                     Keyword::USE => {
-                        self.parser.next_token();
+                        let _ = self.parser.next_token();
 
                         let database_name =
                             self.parser
@@ -157,7 +157,7 @@ impl<'a> ParserContext<'a> {
         if self.consume_token("DATABASES") || self.consume_token("SCHEMAS") {
             self.parse_show_databases()
         } else if self.matches_keyword(Keyword::TABLES) {
-            self.parser.next_token();
+            let _ = self.parser.next_token();
             self.parse_show_tables()
         } else if self.consume_token("CREATE") {
             if self.consume_token("TABLE") {
@@ -201,7 +201,7 @@ impl<'a> ParserContext<'a> {
             // SHOW TABLES [in | FROM] [DATABASE]
             Token::Word(w) => match w.keyword {
                 Keyword::IN | Keyword::FROM => {
-                    self.parser.next_token();
+                    let _ = self.parser.next_token();
                     let db_name = self.parser.parse_object_name().with_context(|_| {
                         error::UnexpectedSnafu {
                             sql: self.sql,
@@ -230,7 +230,7 @@ impl<'a> ParserContext<'a> {
             // SHOW TABLES [WHERE | LIKE] [EXPR]
             Token::Word(w) => match w.keyword {
                 Keyword::LIKE => {
-                    self.parser.next_token();
+                    let _ = self.parser.next_token();
                     ShowKind::Like(self.parser.parse_identifier().with_context(|_| {
                         error::UnexpectedSnafu {
                             sql: self.sql,
@@ -240,7 +240,7 @@ impl<'a> ParserContext<'a> {
                     })?)
                 }
                 Keyword::WHERE => {
-                    self.parser.next_token();
+                    let _ = self.parser.next_token();
                     ShowKind::Where(self.parser.parse_expr().with_context(|_| {
                         error::UnexpectedSnafu {
                             sql: self.sql,
@@ -260,7 +260,7 @@ impl<'a> ParserContext<'a> {
     /// Parses DESCRIBE statements
     fn parse_describe(&mut self) -> Result<Statement> {
         if self.matches_keyword(Keyword::TABLE) {
-            self.parser.next_token();
+            let _ = self.parser.next_token();
             self.parse_describe_table()
         } else {
             self.unsupported(self.peek_token_as_string())
@@ -299,11 +299,11 @@ impl<'a> ParserContext<'a> {
     }
 
     fn parse_drop(&mut self) -> Result<Statement> {
-        self.parser.next_token();
+        let _ = self.parser.next_token();
         if !self.matches_keyword(Keyword::TABLE) {
             return self.unsupported(self.peek_token_as_string());
         }
-        self.parser.next_token();
+        let _ = self.parser.next_token();
 
         let table_ident =
             self.parser
@@ -340,7 +340,7 @@ impl<'a> ParserContext<'a> {
 
     pub fn consume_token(&mut self, expected: &str) -> bool {
         if self.peek_token_as_string().to_uppercase() == *expected.to_uppercase() {
-            self.parser.next_token();
+            let _ = self.parser.next_token();
             true
         } else {
             false

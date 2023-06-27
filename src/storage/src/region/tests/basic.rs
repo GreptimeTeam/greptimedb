@@ -17,7 +17,7 @@
 use common_telemetry::info;
 use common_test_util::temp_dir::create_temp_dir;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
-use store_api::storage::{OpenOptions, SequenceNumber, WriteResponse};
+use store_api::storage::{OpenOptions, SequenceNumber};
 
 use crate::config::EngineConfig;
 use crate::error::Result;
@@ -65,7 +65,7 @@ impl Tester {
     }
 
     async fn reopen(&mut self) {
-        self.try_reopen().await.unwrap();
+        let _ = self.try_reopen().await.unwrap();
     }
 
     async fn try_reopen(&mut self) -> Result<bool> {
@@ -105,8 +105,8 @@ impl Tester {
         self.base.as_mut().unwrap().read_ctx.batch_size = batch_size;
     }
 
-    async fn put(&self, data: &[(i64, Option<String>)]) -> WriteResponse {
-        self.base().put(data).await
+    async fn put(&self, data: &[(i64, Option<String>)]) {
+        let _ = self.base().put(data).await;
     }
 
     async fn full_scan(&self) -> Vec<(i64, Option<String>)> {
@@ -117,8 +117,8 @@ impl Tester {
         self.base().committed_sequence()
     }
 
-    async fn delete(&self, keys: &[i64]) -> WriteResponse {
-        self.base().delete(keys).await
+    async fn delete(&self, keys: &[i64]) {
+        let _ = self.base().delete(keys).await;
     }
 }
 
@@ -247,7 +247,7 @@ async fn test_put_delete_scan() {
     assert_eq!(expect, output);
 
     // Deletion is also persistent.
-    tester.try_reopen().await.unwrap();
+    let _ = tester.try_reopen().await.unwrap();
     let output = tester.full_scan().await;
     assert_eq!(expect, output);
 }
@@ -282,7 +282,7 @@ async fn test_put_delete_absent_key() {
     assert_eq!(expect, output);
 
     // Deletion is also persistent.
-    tester.try_reopen().await.unwrap();
+    let _ = tester.try_reopen().await.unwrap();
     let output = tester.full_scan().await;
     assert_eq!(expect, output);
 }

@@ -24,7 +24,7 @@ mod test {
     use common_meta::table_name::TableName;
     use common_query::logical_plan::Expr;
     use common_query::physical_plan::DfPhysicalPlanAdapter;
-    use common_query::DfPhysicalPlan;
+    use common_query::{DfPhysicalPlan, Output};
     use common_recordbatch::adapter::RecordBatchStreamAdapter;
     use common_recordbatch::RecordBatches;
     use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
@@ -254,7 +254,7 @@ mod test {
         for region_route in table_route.region_routes.iter() {
             let region_id = region_route.region.id as u32;
             let datanode_id = region_route.leader_peer.as_ref().unwrap().id;
-            region_to_datanode_mapping.insert(region_id, datanode_id);
+            let _ = region_to_datanode_mapping.insert(region_id, datanode_id);
         }
 
         let mut global_start_ts = 1;
@@ -346,9 +346,10 @@ mod test {
         let requests = InsertRequests {
             inserts: vec![request],
         };
-        dn_instance
+        let Output::AffectedRows(x) = dn_instance
             .handle_inserts(requests, &QueryContext::arc())
             .await
-            .unwrap();
+            .unwrap() else { unreachable!() };
+        assert_eq!(x as u32, row_count);
     }
 }

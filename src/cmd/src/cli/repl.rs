@@ -108,7 +108,7 @@ impl Repl {
             Ok(ref line) => {
                 let request = line.trim();
 
-                self.rl.add_history_entry(request.to_string());
+                let _ = self.rl.add_history_entry(request.to_string());
 
                 request.try_into()
             }
@@ -137,7 +137,7 @@ impl Repl {
                     }
                 }
                 ReplCommand::Sql { sql } => {
-                    self.execute_sql(sql).await;
+                    let _ = self.execute_sql(sql).await;
                 }
                 ReplCommand::Exit => {
                     return Ok(());

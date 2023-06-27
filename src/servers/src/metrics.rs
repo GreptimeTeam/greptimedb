@@ -112,7 +112,7 @@ impl JemallocCollector {
     }
 
     pub(crate) fn update(&self) -> error::Result<()> {
-        self.epoch.advance().context(UpdateJemallocMetricsSnafu)?;
+        let _ = self.epoch.advance().context(UpdateJemallocMetricsSnafu)?;
         let allocated = self.allocated.read().context(UpdateJemallocMetricsSnafu)?;
         let resident = self.resident.read().context(UpdateJemallocMetricsSnafu)?;
         gauge!(METRIC_JEMALLOC_ALLOCATED, allocated as f64);

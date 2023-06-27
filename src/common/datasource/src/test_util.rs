@@ -55,7 +55,7 @@ pub fn format_schema(schema: Schema) -> Vec<String> {
 
 pub fn test_store(root: &str) -> ObjectStore {
     let mut builder = Fs::default();
-    builder.root(root);
+    let _ = builder.root(root);
 
     ObjectStore::new(builder).unwrap().finish()
 }
@@ -64,7 +64,7 @@ pub fn test_tmp_store(root: &str) -> (ObjectStore, TempDir) {
     let dir = create_temp_dir(root);
 
     let mut builder = Fs::default();
-    builder.root("/");
+    let _ = builder.root("/");
 
     (ObjectStore::new(builder).unwrap().finish(), dir)
 }
@@ -113,14 +113,14 @@ pub async fn setup_stream_to_json_test(origin_path: &str, threshold: impl Fn(usi
 
     let output_path = format!("{}/{}", dir.path().display(), "output");
 
-    stream_to_json(
+    assert!(stream_to_json(
         Box::pin(stream),
         tmp_store.clone(),
         &output_path,
         threshold(size),
     )
     .await
-    .unwrap();
+    .is_ok());
 
     let written = tmp_store.read(&output_path).await.unwrap();
     let origin = store.read(origin_path).await.unwrap();
@@ -155,14 +155,14 @@ pub async fn setup_stream_to_csv_test(origin_path: &str, threshold: impl Fn(usiz
 
     let output_path = format!("{}/{}", dir.path().display(), "output");
 
-    stream_to_csv(
+    assert!(stream_to_csv(
         Box::pin(stream),
         tmp_store.clone(),
         &output_path,
         threshold(size),
     )
     .await
-    .unwrap();
+    .is_ok());
 
     let written = tmp_store.read(&output_path).await.unwrap();
     let origin = store.read(origin_path).await.unwrap();

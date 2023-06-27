@@ -41,7 +41,7 @@ impl Plugins {
     }
 
     pub fn insert<T: 'static + Send + Sync>(&self, value: T) {
-        self.lock().insert(value);
+        let _ = self.lock().insert(value);
     }
 
     pub fn get<T: 'static + Send + Sync + Clone>(&self) -> Option<T> {

@@ -60,7 +60,7 @@ mod tests {
         let random = Random;
         for _ in 0..100 {
             let peer = random.get_peer(&peers).unwrap();
-            all.contains(peer);
+            assert!(all.contains(peer));
         }
     }
 }

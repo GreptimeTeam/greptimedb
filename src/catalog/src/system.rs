@@ -228,21 +228,21 @@ pub(crate) fn build_table_deletion_request(
 }
 
 fn build_primary_key_columns(entry_type: EntryType, key: &[u8]) -> HashMap<String, VectorRef> {
-    let mut m = HashMap::with_capacity(3);
-    m.insert(
-        "entry_type".to_string(),
-        Arc::new(UInt8Vector::from_slice([entry_type as u8])) as _,
-    );
-    m.insert(
-        "key".to_string(),
-        Arc::new(BinaryVector::from_slice(&[key])) as _,
-    );
-    // Timestamp in key part is intentionally left to 0
-    m.insert(
-        "timestamp".to_string(),
-        Arc::new(TimestampMillisecondVector::from_slice([0])) as _,
-    );
-    m
+    HashMap::from([
+        (
+            "entry_type".to_string(),
+            Arc::new(UInt8Vector::from_slice([entry_type as u8])) as VectorRef,
+        ),
+        (
+            "key".to_string(),
+            Arc::new(BinaryVector::from_slice(&[key])) as VectorRef,
+        ),
+        (
+            "timestamp".to_string(),
+            // Timestamp in key part is intentionally left to 0
+            Arc::new(TimestampMillisecondVector::from_slice([0])) as VectorRef,
+        ),
+    ])
 }
 
 pub fn build_schema_insert_request(catalog_name: String, schema_name: String) -> InsertRequest {
@@ -262,18 +262,18 @@ pub fn build_insert_request(entry_type: EntryType, key: &[u8], value: &[u8]) -> 
     let mut columns_values = HashMap::with_capacity(6);
     columns_values.extend(primary_key_columns.into_iter());
 
-    columns_values.insert(
+    let _ = columns_values.insert(
         "value".to_string(),
         Arc::new(BinaryVector::from_slice(&[value])) as _,
     );
 
     let now = util::current_time_millis();
-    columns_values.insert(
+    let _ = columns_values.insert(
         "gmt_created".to_string(),
         Arc::new(TimestampMillisecondVector::from_slice([now])) as _,
     );
 
-    columns_values.insert(
+    let _ = columns_values.insert(
         "gmt_modified".to_string(),
         Arc::new(TimestampMillisecondVector::from_slice([now])) as _,
     );
@@ -482,14 +482,13 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
     pub fn test_decode_mismatch() {
-        decode_system_catalog(
+        assert!(decode_system_catalog(
             Some(EntryType::Table as u8),
             Some("some_catalog.some_schema.42".as_bytes()),
             None,
         )
-        .unwrap();
+        .is_err());
     }
 
     #[test]
@@ -504,7 +503,7 @@ mod tests {
         let dir = create_temp_dir("system-table-test");
         let store_dir = dir.path().to_string_lossy();
         let mut builder = object_store::services::Fs::default();
-        builder.root(&store_dir);
+        let _ = builder.root(&store_dir);
         let object_store = ObjectStore::new(builder).unwrap().finish();
         let noop_compaction_scheduler = Arc::new(NoopCompactionScheduler::default());
         let table_engine = Arc::new(MitoEngine::new(

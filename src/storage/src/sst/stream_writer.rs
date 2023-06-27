@@ -100,7 +100,8 @@ impl BufferedWriter {
             .write(&arrow_batch)
             .await
             .context(error::WriteBufferSnafu)?;
-        self.inner
+        let _ = self
+            .inner
             .try_flush(false)
             .await
             .context(error::WriteBufferSnafu)?;

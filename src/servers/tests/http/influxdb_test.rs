@@ -108,9 +108,6 @@ fn make_test_app(tx: Arc<mpsc::Sender<(String, String)>>, db_name: Option<&str>)
     };
 
     let instance = Arc::new(DummyInstance { tx });
-    let mut server_builder = HttpServerBuilder::new(http_opts);
-    server_builder.with_sql_handler(instance.clone());
-    server_builder.with_grpc_handler(instance.clone());
     let mut user_provider = MockUserProvider::default();
     if let Some(name) = db_name {
         user_provider.set_authorization_info(DatabaseAuthInfo {
@@ -119,10 +116,12 @@ fn make_test_app(tx: Arc<mpsc::Sender<(String, String)>>, db_name: Option<&str>)
             username: "greptime",
         })
     }
-    server_builder.with_user_provider(Arc::new(user_provider));
-
-    server_builder.with_influxdb_handler(instance);
-    let server = server_builder.build();
+    let server = HttpServerBuilder::new(http_opts)
+        .with_sql_handler(instance.clone())
+        .with_grpc_handler(instance.clone())
+        .with_user_provider(Arc::new(user_provider))
+        .with_influxdb_handler(instance)
+        .build();
     server.build(server.make_app())
 }
 

@@ -85,12 +85,13 @@ mod tests {
             ColumnSchema::new("id", ConcreteDataType::int32_datatype(), false),
         ]);
 
-        let mut builder = TableMetaBuilder::default();
-        builder.schema(Arc::new(schema));
-        builder.primary_key_indices(vec![]);
-        builder.next_column_id(2);
+        let table_meta = TableMetaBuilder::default()
+            .schema(Arc::new(schema))
+            .primary_key_indices(vec![])
+            .next_column_id(2)
+            .build()
+            .unwrap();
 
-        let table_meta = builder.build().unwrap();
         let table_name = TableName {
             catalog_name: "greptime".to_string(),
             schema_name: "public".to_string(),

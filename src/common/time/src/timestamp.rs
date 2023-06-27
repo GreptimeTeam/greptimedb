@@ -879,14 +879,14 @@ mod tests {
 
     #[test]
     fn test_split_overflow() {
-        Timestamp::new(i64::MAX, TimeUnit::Second).split();
-        Timestamp::new(i64::MIN, TimeUnit::Second).split();
-        Timestamp::new(i64::MAX, TimeUnit::Millisecond).split();
-        Timestamp::new(i64::MIN, TimeUnit::Millisecond).split();
-        Timestamp::new(i64::MAX, TimeUnit::Microsecond).split();
-        Timestamp::new(i64::MIN, TimeUnit::Microsecond).split();
-        Timestamp::new(i64::MAX, TimeUnit::Nanosecond).split();
-        Timestamp::new(i64::MIN, TimeUnit::Nanosecond).split();
+        let _ = Timestamp::new(i64::MAX, TimeUnit::Second).split();
+        let _ = Timestamp::new(i64::MIN, TimeUnit::Second).split();
+        let _ = Timestamp::new(i64::MAX, TimeUnit::Millisecond).split();
+        let _ = Timestamp::new(i64::MIN, TimeUnit::Millisecond).split();
+        let _ = Timestamp::new(i64::MAX, TimeUnit::Microsecond).split();
+        let _ = Timestamp::new(i64::MIN, TimeUnit::Microsecond).split();
+        let _ = Timestamp::new(i64::MAX, TimeUnit::Nanosecond).split();
+        let _ = Timestamp::new(i64::MIN, TimeUnit::Nanosecond).split();
         let (sec, nsec) = Timestamp::new(i64::MIN, TimeUnit::Nanosecond).split();
         let time = NaiveDateTime::from_timestamp_opt(sec, nsec).unwrap();
         assert_eq!(sec, time.timestamp());

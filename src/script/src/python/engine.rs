@@ -419,9 +419,10 @@ def test(**params) -> vector[i64]:
             .compile(script, CompileContext::default())
             .await
             .unwrap();
-        let mut params = HashMap::new();
-        params.insert("a".to_string(), "30".to_string());
-        params.insert("b".to_string(), "12".to_string());
+        let params = HashMap::from([
+            ("a".to_string(), "30".to_string()),
+            ("b".to_string(), "12".to_string()),
+        ]);
         let _output = script
             .execute(params, EvalContext::default())
             .await

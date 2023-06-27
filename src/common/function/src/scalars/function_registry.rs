@@ -32,14 +32,16 @@ pub struct FunctionRegistry {
 
 impl FunctionRegistry {
     pub fn register(&self, func: FunctionRef) {
-        self.functions
+        let _ = self
+            .functions
             .write()
             .unwrap()
             .insert(func.name().to_string(), func);
     }
 
     pub fn register_aggregate_function(&self, func: AggregateFunctionMetaRef) {
-        self.aggregate_functions
+        let _ = self
+            .aggregate_functions
             .write()
             .unwrap()
             .insert(func.name(), func);

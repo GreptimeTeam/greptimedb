@@ -66,7 +66,7 @@ impl ChannelManager {
         }
 
         let pool = self.pool.clone();
-        common_runtime::spawn_bg(async {
+        let _handle = common_runtime::spawn_bg(async {
             recycle_channel_in_loop(pool, RECYCLE_CHANNEL_INTERVAL_SECS).await;
         });
         info!("Channel recycle is started, running in the background!");
@@ -398,7 +398,7 @@ impl Channel {
 
     #[inline]
     pub fn increase_access(&self) {
-        self.access.fetch_add(1, Ordering::Relaxed);
+        let _ = self.access.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -427,7 +427,7 @@ impl Pool {
     }
 
     fn put(&self, addr: &str, channel: Channel) {
-        self.channels.insert(addr.to_string(), channel);
+        let _ = self.channels.insert(addr.to_string(), channel);
     }
 
     fn retain_channel<F>(&self, f: F)
@@ -442,7 +442,7 @@ async fn recycle_channel_in_loop(pool: Arc<Pool>, interval_secs: u64) {
     let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
 
     loop {
-        interval.tick().await;
+        let _ = interval.tick().await;
         pool.retain_channel(|_, c| c.access.swap(0, Ordering::Relaxed) != 0)
     }
 }

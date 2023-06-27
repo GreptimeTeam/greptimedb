@@ -367,7 +367,7 @@ impl GreptimeDBContext {
     }
 
     fn incr_datanode_id(&self) {
-        self.datanode_id.fetch_add(1, Ordering::Relaxed);
+        let _ = self.datanode_id.fetch_add(1, Ordering::Relaxed);
     }
 
     fn datanode_id(&self) -> u32 {

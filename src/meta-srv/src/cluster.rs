@@ -201,7 +201,7 @@ impl MetaPeerClient {
 fn to_stat_kv_map(kvs: Vec<KeyValue>) -> Result<HashMap<StatKey, StatValue>> {
     let mut map = HashMap::with_capacity(kvs.len());
     for kv in kvs {
-        map.insert(kv.key.try_into()?, kv.value.try_into()?);
+        let _ = map.insert(kv.key.try_into()?, kv.value.try_into()?);
     }
     Ok(map)
 }

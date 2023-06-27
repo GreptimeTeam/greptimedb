@@ -157,22 +157,22 @@ mod tests {
     }
 
     async fn put_stats_to_store(store: &mut KvStoreRef) {
-        store
+        assert!(store
             .put(PutRequest {
                 key: "test_key1".as_bytes().to_vec(),
                 value: "test_val1".as_bytes().to_vec(),
                 ..Default::default()
             })
             .await
-            .unwrap();
+            .is_ok());
 
-        store
+        assert!(store
             .put(PutRequest {
                 key: "test_key2".as_bytes().to_vec(),
                 value: "test_val2".as_bytes().to_vec(),
                 ..Default::default()
             })
             .await
-            .unwrap();
+            .is_ok());
     }
 }

@@ -230,11 +230,14 @@ async fn test_execute_insert(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
 
     // create table
-    execute_sql(
-        &instance,
-        "create table demo(host string, cpu double, memory double, ts timestamp time index);",
-    )
-    .await;
+    assert!(matches!(
+        execute_sql(
+            &instance,
+            "create table demo(host string, cpu double, memory double, ts timestamp time index);",
+        )
+        .await,
+        Output::AffectedRows(0)
+    ));
 
     let output = execute_sql(
         &instance,
@@ -252,16 +255,22 @@ async fn test_execute_insert_by_select(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
 
     // create table
-    execute_sql(
-        &instance,
-        "create table demo1(host string, cpu double, memory double, ts timestamp time index);",
-    )
-    .await;
-    execute_sql(
-        &instance,
-        "create table demo2(host string, cpu double, memory double, ts timestamp time index);",
-    )
-    .await;
+    assert!(matches!(
+        execute_sql(
+            &instance,
+            "create table demo1(host string, cpu double, memory double, ts timestamp time index);",
+        )
+        .await,
+        Output::AffectedRows(0)
+    ));
+    assert!(matches!(
+        execute_sql(
+            &instance,
+            "create table demo2(host string, cpu double, memory double, ts timestamp time index);",
+        )
+        .await,
+        Output::AffectedRows(0)
+    ));
 
     let output = execute_sql(
         &instance,
@@ -311,10 +320,10 @@ async fn test_execute_insert_by_select(instance: Arc<dyn MockInstance>) {
 async fn test_execute_insert_query_with_i64_timestamp(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
 
-    execute_sql(
+    assert!(matches!(execute_sql(
         &instance,
         "create table demo(host string, cpu double, memory double, ts bigint time index, primary key (host));",
-    ).await;
+    ).await, Output::AffectedRows(0)));
 
     let output = execute_sql(
         &instance,
@@ -419,10 +428,10 @@ async fn test_execute_show_databases_tables(instance: Arc<dyn MockInstance>) {
     let output = execute_sql(&instance, "show tables").await;
     check_unordered_output_stream(output, expected).await;
 
-    execute_sql(
+    assert!(matches!(execute_sql(
         &instance,
         "create table demo(host string, cpu double, memory double, ts timestamp time index, primary key (host));",
-    ).await;
+    ).await, Output::AffectedRows(0)));
 
     let output = execute_sql(&instance, "show tables").await;
     let expected = "\
@@ -806,9 +815,11 @@ async fn test_rename_table(instance: Arc<dyn MockInstance>) {
 +-------+-----+--------+---------------------+";
     check_output_stream(output, expected).await;
 
-    try_execute_sql_with(&instance, "select * from demo", query_ctx)
-        .await
-        .expect_err("no table found in expect");
+    assert!(
+        try_execute_sql_with(&instance, "select * from demo", query_ctx)
+            .await
+            .is_err()
+    );
 }
 
 // should apply to both instances. tracked in #723
@@ -867,18 +878,24 @@ async fn test_alter_table(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
 
     // create table
-    execute_sql(
-        &instance,
-        "create table demo(host string, cpu double, memory double, ts timestamp time index);",
-    )
-    .await;
+    assert!(matches!(
+        execute_sql(
+            &instance,
+            "create table demo(host string, cpu double, memory double, ts timestamp time index);",
+        )
+        .await,
+        Output::AffectedRows(0)
+    ));
 
     // make sure table insertion is ok before altering table
-    execute_sql(
-        &instance,
-        "insert into demo(host, cpu, memory, ts) values ('host1', 1.1, 100, 1000)",
-    )
-    .await;
+    assert!(matches!(
+        execute_sql(
+            &instance,
+            "insert into demo(host, cpu, memory, ts) values ('host1', 1.1, 100, 1000)",
+        )
+        .await,
+        Output::AffectedRows(0)
+    ));
 
     // Add column
     let output = execute_sql(&instance, "alter table demo add my_tag string null").await;
@@ -1100,11 +1117,11 @@ async fn test_execute_copy_to_s3(instance: Arc<dyn MockInstance>) {
             let instance = instance.frontend();
 
             // setups
-            execute_sql(
+            assert!(matches!(execute_sql(
                 &instance,
                 "create table demo(host string, cpu double, memory double, ts timestamp time index);",
             )
-            .await;
+            .await, Output::AffectedRows(0)));
 
             let output = execute_sql(
                 &instance,
@@ -1138,11 +1155,11 @@ async fn test_execute_copy_from_s3(instance: Arc<dyn MockInstance>) {
             let instance = instance.frontend();
 
             // setups
-            execute_sql(
+            assert!(matches!(execute_sql(
                 &instance,
                 "create table demo(host string, cpu double, memory double, ts timestamp time index);",
             )
-            .await;
+            .await, Output::AffectedRows(0)));
 
             let output = execute_sql(
                 &instance,
@@ -1192,14 +1209,17 @@ async fn test_execute_copy_from_s3(instance: Arc<dyn MockInstance>) {
 
             for test in tests {
                 // import
-                execute_sql(
-                    &instance,
-                    &format!(
+                assert!(matches!(
+                    execute_sql(
+                        &instance,
+                        &format!(
                 "create table {}(host string, cpu double, memory double, ts timestamp time index);",
                 test.table_name
             ),
-                )
-                .await;
+                    )
+                    .await,
+                    Output::AffectedRows(0)
+                ));
                 let sql = format!(
                     "{} CONNECTION (ACCESS_KEY_ID='{}',SECRET_ACCESS_KEY='{}',REGION='{}')",
                     test.sql, key_id, key, region,
@@ -1233,11 +1253,11 @@ async fn test_execute_copy_from_orc(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
 
     // setups
-    execute_sql(
+    assert!(matches!(execute_sql(
         &instance,
         "create table demo(double_a double, a float, b boolean, str_direct string, d string, e string, f string, int_short_repeated int, int_neg_short_repeated int, int_delta int, int_neg_delta int, int_direct int, int_neg_direct int, bigint_direct bigint, bigint_neg_direct bigint, bigint_other bigint, utf8_increase string, utf8_decrease string, timestamp_simple timestamp(9) time index, date_simple date);",
     )
-    .await;
+    .await, Output::AffectedRows(0)));
 
     let filepath = get_data_dir("../src/common/datasource/tests/orc/test.orc")
         .canonicalize()
@@ -1271,11 +1291,11 @@ async fn test_cast_type_issue_1594(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
 
     // setups
-    execute_sql(
+    assert!(matches!(execute_sql(
         &instance,
         "create table tsbs_cpu(hostname STRING, environment STRING, usage_user DOUBLE, usage_system DOUBLE, usage_idle DOUBLE, usage_nice DOUBLE, usage_iowait DOUBLE, usage_irq DOUBLE, usage_softirq DOUBLE, usage_steal DOUBLE, usage_guest DOUBLE, usage_guest_nice DOUBLE, ts TIMESTAMP TIME INDEX, PRIMARY KEY(hostname));",
     )
-    .await;
+    .await, Output::AffectedRows(0)));
     let filepath = get_data_dir("../src/common/datasource/tests/csv/type_cast.csv")
         .canonicalize()
         .unwrap()

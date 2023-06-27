@@ -37,8 +37,8 @@ async fn create_insert_query_assert(
     lookback: Duration,
     expected: &str,
 ) {
-    instance.do_query(create, QueryContext::arc()).await;
-    instance.do_query(insert, QueryContext::arc()).await;
+    let _ = instance.do_query(create, QueryContext::arc()).await;
+    let _ = instance.do_query(insert, QueryContext::arc()).await;
 
     let query = PromQuery {
         query: promql.to_string(),
@@ -66,8 +66,8 @@ async fn create_insert_tql_assert(
     tql: &str,
     expected: &str,
 ) {
-    instance.do_query(create, QueryContext::arc()).await;
-    instance.do_query(insert, QueryContext::arc()).await;
+    let _ = instance.do_query(create, QueryContext::arc()).await;
+    let _ = instance.do_query(insert, QueryContext::arc()).await;
 
     let query_output = instance
         .do_query(tql, QueryContext::arc())

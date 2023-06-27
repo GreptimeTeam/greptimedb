@@ -34,7 +34,7 @@ use sqlparser::parser::Parser;
 /// - TQL ANALYZE <query>
 impl<'a> ParserContext<'a> {
     pub(crate) fn parse_tql(&mut self) -> Result<Statement> {
-        self.parser.next_token();
+        let _ = self.parser.next_token();
 
         match self.parser.peek_token().token {
             Token::Word(w) => {
@@ -44,18 +44,18 @@ impl<'a> ParserContext<'a> {
                         if (uppercase == EVAL || uppercase == EVALUATE)
                             && w.quote_style.is_none() =>
                     {
-                        self.parser.next_token();
+                        let _ = self.parser.next_token();
                         self.parse_tql_eval()
                             .context(error::SyntaxSnafu { sql: self.sql })
                     }
 
                     Keyword::EXPLAIN => {
-                        self.parser.next_token();
+                        let _ = self.parser.next_token();
                         self.parse_tql_explain()
                     }
 
                     Keyword::ANALYZE => {
-                        self.parser.next_token();
+                        let _ = self.parser.next_token();
                         self.parse_tql_analyze()
                             .context(error::SyntaxSnafu { sql: self.sql })
                     }

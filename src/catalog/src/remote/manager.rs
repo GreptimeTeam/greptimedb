@@ -112,7 +112,7 @@ impl RemoteCatalogManager {
             joins.push(self.initiate_schemas(node_id, backend, engine_manager, catalog_name));
         }
 
-        futures::future::try_join_all(joins).await?;
+        let _ = futures::future::try_join_all(joins).await?;
 
         Ok(())
     }
@@ -623,13 +623,14 @@ impl CatalogManager for RemoteCatalogManager {
         self.check_catalog_schema_exist(&catalog_name, &schema_name)
             .await?;
 
-        self.register_table(
-            catalog_name.clone(),
-            schema_name.clone(),
-            request.table_name,
-            request.table.clone(),
-        )
-        .await?;
+        let _ = self
+            .register_table(
+                catalog_name.clone(),
+                schema_name.clone(),
+                request.table_name,
+                request.table.clone(),
+            )
+            .await?;
 
         let table_info = request.table.table_info();
         let table_ident = TableIdent {
@@ -680,7 +681,8 @@ impl CatalogManager for RemoteCatalogManager {
                 table_id: table_info.ident.table_id,
                 engine: table_info.meta.engine.clone(),
             };
-            self.region_alive_keepers
+            let _ = self
+                .region_alive_keepers
                 .deregister_table(&table_ident)
                 .await;
         }
@@ -846,7 +848,7 @@ impl CatalogManager for RemoteCatalogManager {
                 let catalog_key = String::from_utf8_lossy(&catalog.0);
 
                 if let Ok(key) = CatalogKey::parse(&catalog_key) {
-                    catalogs.insert(key.catalog_name);
+                    let _ = catalogs.insert(key.catalog_name);
                 }
             }
         }
@@ -865,7 +867,7 @@ impl CatalogManager for RemoteCatalogManager {
                 let schema_key = String::from_utf8_lossy(&schema.0);
 
                 if let Ok(key) = SchemaKey::parse(&schema_key) {
-                    schemas.insert(key.schema_name);
+                    let _ = schemas.insert(key.schema_name);
                 }
             }
         }
@@ -886,7 +888,7 @@ impl CatalogManager for RemoteCatalogManager {
                 let table_key = String::from_utf8_lossy(&table.0);
 
                 if let Ok(key) = TableRegionalKey::parse(&table_key) {
-                    tables.insert(key.table_name);
+                    let _ = tables.insert(key.table_name);
                 }
             }
         }

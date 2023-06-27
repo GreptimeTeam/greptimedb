@@ -132,7 +132,7 @@ pub async fn bootstrap_meta_srv_with_router(
 
     router
         .serve_with_incoming_shutdown(listener, async {
-            signal.recv().await;
+            let _ = signal.recv().await;
         })
         .await
         .context(error::StartGrpcSnafu)?;

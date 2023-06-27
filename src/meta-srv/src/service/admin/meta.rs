@@ -180,27 +180,27 @@ mod tests {
         let catalog = CatalogKey {
             catalog_name: catalog_name.to_string(),
         };
-        in_mem
+        assert!(in_mem
             .put(PutRequest {
                 key: catalog.to_string().as_bytes().to_vec(),
                 value: "".as_bytes().to_vec(),
                 ..Default::default()
             })
             .await
-            .unwrap();
+            .is_ok());
 
         let schema = SchemaKey {
             catalog_name: catalog_name.to_string(),
             schema_name: schema_name.to_string(),
         };
-        in_mem
+        assert!(in_mem
             .put(PutRequest {
                 key: schema.to_string().as_bytes().to_vec(),
                 value: "".as_bytes().to_vec(),
                 ..Default::default()
             })
             .await
-            .unwrap();
+            .is_ok());
 
         let table1 = TableGlobalKey {
             catalog_name: catalog_name.to_string(),
@@ -212,22 +212,22 @@ mod tests {
             schema_name: schema_name.to_string(),
             table_name: "test_table1".to_string(),
         };
-        in_mem
+        assert!(in_mem
             .put(PutRequest {
                 key: table1.to_string().as_bytes().to_vec(),
                 value: "".as_bytes().to_vec(),
                 ..Default::default()
             })
             .await
-            .unwrap();
-        in_mem
+            .is_ok());
+        assert!(in_mem
             .put(PutRequest {
                 key: table2.to_string().as_bytes().to_vec(),
                 value: "".as_bytes().to_vec(),
                 ..Default::default()
             })
             .await
-            .unwrap();
+            .is_ok());
 
         let catalog_key = get_keys_by_prefix(build_catalog_prefix(), &in_mem)
             .await

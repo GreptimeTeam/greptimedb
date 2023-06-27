@@ -45,7 +45,7 @@ impl heartbeat_server::Heartbeat for MetaSrv {
         let (tx, rx) = mpsc::channel(128);
         let handler_group = self.handler_group();
         let ctx = self.new_ctx();
-        common_runtime::spawn_bg(async move {
+        let _handle = common_runtime::spawn_bg(async move {
             let mut pusher_key = None;
             while let Some(msg) = in_stream.next().await {
                 let mut is_not_leader = false;

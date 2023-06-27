@@ -29,7 +29,8 @@ impl OpentsdbProtocolHandler for Instance {
         let requests = InsertRequests {
             inserts: vec![data_point.as_grpc_insert()],
         };
-        self.handle_inserts(requests, ctx)
+        let _ = self
+            .handle_inserts(requests, ctx)
             .await
             .map_err(BoxedError::new)
             .with_context(|_| server_error::ExecuteQuerySnafu {
