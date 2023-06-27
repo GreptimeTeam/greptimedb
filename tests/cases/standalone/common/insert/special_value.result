@@ -1,0 +1,31 @@
+create table data (ts timestamp(3) time index, val double);
+
+Affected Rows: 0
+
+insert into data values
+    (0, 'infinity'::double),
+    (1, '-infinity'::double),
+    (2, 'nan'::double),
+    (3, 'NaN'::double);
+
+Affected Rows: 4
+
+select * from data;
+
++-------------------------+------+
+| ts                      | val  |
++-------------------------+------+
+| 1970-01-01T00:00:00     | inf  |
+| 1970-01-01T00:00:00.001 | -inf |
+| 1970-01-01T00:00:00.002 | NaN  |
+| 1970-01-01T00:00:00.003 | NaN  |
++-------------------------+------+
+
+insert into data values (4, 'infinityyyy'::double);
+
+Error: 3001(EngineExecuteQuery), Cast error: Cannot cast string 'infinityyyy' to value of Float64 type
+
+drop table data;
+
+Affected Rows: 1
+

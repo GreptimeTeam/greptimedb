@@ -21,8 +21,8 @@ TQL EXPLAIN (0, 10, '5s') test;
 |               |           TableScan: test projection=[i, j, k], partial_filters=[j >= TimestampMillisecond(-300000, None), j <= TimestampMillisecond(300000, None)] |
 | physical_plan | PromInstantManipulateExec: range=[0..0], lookback=[300000], interval=[300000], time index=[j]                                                       |
 |               |   PromSeriesNormalizeExec: offset=[0], time index=[j], filter NaN: [false]                                                                          |
-|               |     PromSeriesDivideExec: tags=["k"]                                                                                                                |
-|               |       RepartitionExec: partitioning=REDACTED
+|               |     RepartitionExec: partitioning=REDACTED
+|               |       PromSeriesDivideExec: tags=["k"]                                                                                                              |
 |               |         MergeScanExec: peers=[REDACTED
 |               |                                                                                                                                                     |
 +---------------+-----------------------------------------------------------------------------------------------------------------------------------------------------+
@@ -58,8 +58,8 @@ TQL EXPLAIN host_load1{__field__="val"};
 |               |             TableScan: host_load1 projection=[ts, collector, host, val], partial_filters=[ts >= TimestampMillisecond(-300000, None), ts <= TimestampMillisecond(300000, None)] |
 | physical_plan | PromInstantManipulateExec: range=[0..0], lookback=[300000], interval=[300000], time index=[ts]                                                                                 |
 |               |   PromSeriesNormalizeExec: offset=[0], time index=[ts], filter NaN: [false]                                                                                                    |
-|               |     PromSeriesDivideExec: tags=["collector", "host"]                                                                                                                           |
-|               |       RepartitionExec: partitioning=REDACTED
+|               |     RepartitionExec: partitioning=REDACTED
+|               |       PromSeriesDivideExec: tags=["collector", "host"]                                                                                                                         |
 |               |         ProjectionExec: expr=[val@3 as val, collector@1 as collector, host@2 as host, ts@0 as ts]                                                                              |
 |               |           MergeScanExec: peers=[REDACTED
 |               |                                                                                                                                                                                |

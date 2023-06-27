@@ -65,8 +65,7 @@ impl QuantileOverTime {
 
     fn calc(&self, input: &[ColumnarValue]) -> Result<ColumnarValue, DataFusionError> {
         // construct matrix from input.
-        // The third one is quantile param, which is included in fields.
-        assert_eq!(input.len(), 3);
+        assert_eq!(input.len(), 2);
         let ts_array = extract_array(&input[0])?;
         let value_array = extract_array(&input[1])?;
 

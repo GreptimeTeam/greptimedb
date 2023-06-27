@@ -326,7 +326,7 @@ impl ExecutionPlan for RangeManipulateExec {
             DisplayFormatType::Default => {
                 write!(
                     f,
-                    "PromInstantManipulateExec: req range=[{}..{}], interval=[{}], eval range=[{}], time index=[{}]",
+                    "PromRangeManipulateExec: req range=[{}..{}], interval=[{}], eval range=[{}], time index=[{}]",
                    self.start, self.end, self.interval, self.range, self.time_index_column
                 )
             }
