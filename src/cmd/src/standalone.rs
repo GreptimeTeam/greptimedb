@@ -357,9 +357,7 @@ mod tests {
 
         let plugins = load_frontend_plugins(&command.user_provider);
         let plugins = plugins.unwrap();
-        let provider = plugins.get::<UserProviderRef>();
-        assert!(provider.is_some());
-        let provider = provider.unwrap();
+        let provider = plugins.get::<UserProviderRef>().unwrap();
         let result = provider
             .authenticate(
                 Identity::UserId("test", None),

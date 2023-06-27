@@ -611,8 +611,8 @@ mod tests {
 
         //delete (,4) logs and keep checkpoint 3.
         let _ = log_store.delete_until(4, true).await.unwrap();
-        assert!(log_store.load_checkpoint(3).await.unwrap().is_some());
-        assert!(log_store.load_last_checkpoint().await.unwrap().is_some());
+        let _ = log_store.load_checkpoint(3).await.unwrap().unwrap();
+        let _ = log_store.load_last_checkpoint().await.unwrap().unwrap();
         let mut it = log_store.scan(0, 11).await.unwrap();
         let (version, bytes) = it.next_log().await.unwrap().unwrap();
         assert_eq!(4, version);

@@ -158,7 +158,6 @@ mod tests {
 
         let result = kv_store.get(key.clone()).await.unwrap();
 
-        assert!(result.is_some());
         let kv = result.unwrap();
 
         assert_eq!(key, kv.key);
@@ -172,7 +171,6 @@ mod tests {
 
         let result = kv_store.get(key.clone()).await.unwrap();
 
-        assert!(result.is_some());
         let kv = result.unwrap();
 
         assert_eq!(key, kv.key);

@@ -288,7 +288,7 @@ fn check_schema_names(schema: &SchemaRef, names: &[&str]) {
 
     for (idx, name) in names.iter().enumerate() {
         assert_eq!(*name, schema.column_name_by_index(idx));
-        assert!(schema.column_schema_by_name(name).is_some());
+        let _ = schema.column_schema_by_name(name).unwrap();
     }
 }
 

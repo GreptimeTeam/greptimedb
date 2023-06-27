@@ -677,7 +677,7 @@ mod test {
         let region = 1;
         assert!(keeper.find_handle(&region).await.is_none());
         keeper.register_region(region).await;
-        assert!(keeper.find_handle(&region).await.is_some());
+        let _ = keeper.find_handle(&region).await.unwrap();
 
         let ten_seconds_later = || Instant::now() + Duration::from_secs(10);
 

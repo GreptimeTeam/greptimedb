@@ -117,9 +117,9 @@ pub async fn test_region_failover(store_type: StorageType) {
     };
 
     let cache = get_table_cache(&frontend, &cache_key).unwrap();
-    assert!(cache.is_some());
+    let _ = cache.unwrap();
     let route_cache = get_route_cache(&frontend, &table_name);
-    assert!(route_cache.is_some());
+    let _ = route_cache.unwrap();
 
     let distribution = find_region_distribution(&cluster).await;
     info!("Find region distribution: {distribution:?}");

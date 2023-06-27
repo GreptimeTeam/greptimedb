@@ -164,7 +164,6 @@ mod tests {
             node_id: 101,
         };
         let res = ctx.in_memory.get(key.try_into().unwrap()).await.unwrap();
-        assert!(res.is_some());
         let kv = res.unwrap();
         let key: StatKey = kv.key.clone().try_into().unwrap();
         assert_eq!(3, key.cluster_id);
@@ -176,7 +175,6 @@ mod tests {
 
         handle_request_many_times(ctx.clone(), &handler, 10).await;
         let res = ctx.in_memory.get(key.try_into().unwrap()).await.unwrap();
-        assert!(res.is_some());
         let kv = res.unwrap();
         let val: StatValue = kv.value.try_into().unwrap();
         // refresh every 10 stats

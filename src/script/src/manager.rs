@@ -201,11 +201,11 @@ def test(n):
 
         // try to find and compile
         let script = mgr.try_find_script_and_compile(schema, name).await.unwrap();
-        assert!(script.is_some());
+        let _ = script.unwrap();
 
         {
             let cached = mgr.compiled.read().unwrap();
-            assert!(cached.get(name).is_some());
+            let _ = cached.get(name).unwrap();
         }
     }
 }

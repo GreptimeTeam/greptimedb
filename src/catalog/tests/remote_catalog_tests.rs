@@ -109,7 +109,7 @@ mod tests {
             .unwrap();
 
         let ret = backend.get(b"__c-greptime").await.unwrap();
-        assert!(ret.is_some());
+        let _ = ret.unwrap();
 
         let _ = backend
             .compare_and_set(
@@ -121,13 +121,11 @@ mod tests {
             .unwrap();
 
         let ret = backend.get(b"__c-greptime").await.unwrap();
-        assert!(ret.is_some());
         assert_eq!(&b"123"[..], &(ret.as_ref().unwrap().1));
 
         let _ = backend.set(b"__c-greptime", b"1234").await;
 
         let ret = backend.get(b"__c-greptime").await.unwrap();
-        assert!(ret.is_some());
         assert_eq!(&b"1234"[..], &(ret.as_ref().unwrap().1));
 
         backend.delete(b"__c-greptime").await.unwrap();

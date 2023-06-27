@@ -152,7 +152,6 @@ mod tests {
             .delete("test_key1".as_bytes().to_vec(), true)
             .await
             .unwrap();
-        assert!(prev_kv.is_some());
         assert_eq!("test_key1".as_bytes(), prev_kv.unwrap().key);
     }
 

@@ -742,7 +742,7 @@ mod tests {
         manager.recover().await.unwrap();
 
         // The manager should submit the root procedure.
-        assert!(manager.procedure_state(root_id).await.unwrap().is_some());
+        let _ = manager.procedure_state(root_id).await.unwrap().unwrap();
         // Since the mocked root procedure actually doesn't submit subprocedures, so there is no
         // related state.
         assert!(manager.procedure_state(child_id).await.unwrap().is_none());

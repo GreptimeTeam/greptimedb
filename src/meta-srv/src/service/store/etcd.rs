@@ -745,7 +745,7 @@ mod tests {
         let get: Get = req.try_into().unwrap();
 
         assert_eq!(b"test_key".to_vec(), get.key);
-        assert!(get.options.is_some());
+        let _ = get.options.unwrap();
     }
 
     #[test]
@@ -761,7 +761,7 @@ mod tests {
 
         assert_eq!(b"test_key".to_vec(), put.key);
         assert_eq!(b"test_value".to_vec(), put.value);
-        assert!(put.options.is_some());
+        let _ = put.options.unwrap();
     }
 
     #[test]
@@ -794,7 +794,7 @@ mod tests {
 
         assert_eq!(b"test_key".to_vec(), batch_put.kvs.get(0).unwrap().key);
         assert_eq!(b"test_value".to_vec(), batch_put.kvs.get(0).unwrap().value);
-        assert!(batch_put.options.is_some());
+        let _ = batch_put.options.unwrap();
     }
 
     #[test]
@@ -811,7 +811,7 @@ mod tests {
         assert_eq!(b"k1".to_vec(), batch_delete.keys.get(0).unwrap().clone());
         assert_eq!(b"k2".to_vec(), batch_delete.keys.get(1).unwrap().clone());
         assert_eq!(b"k3".to_vec(), batch_delete.keys.get(2).unwrap().clone());
-        assert!(batch_delete.options.is_some());
+        let _ = batch_delete.options.unwrap();
     }
 
     #[test]
@@ -828,7 +828,7 @@ mod tests {
         assert_eq!(b"test_key".to_vec(), compare_and_put.key);
         assert_eq!(b"test_expect".to_vec(), compare_and_put.expect);
         assert_eq!(b"test_value".to_vec(), compare_and_put.value);
-        assert!(compare_and_put.put_options.is_some());
+        let _ = compare_and_put.put_options.unwrap();
     }
 
     #[test]
@@ -843,7 +843,7 @@ mod tests {
         let delete: Delete = req.try_into().unwrap();
 
         assert_eq!(b"test_key".to_vec(), delete.key);
-        assert!(delete.options.is_some());
+        let _ = delete.options.unwrap();
     }
 
     #[test]
@@ -858,6 +858,6 @@ mod tests {
 
         assert_eq!(b"test_from_key".to_vec(), move_value.from_key);
         assert_eq!(b"test_to_key".to_vec(), move_value.to_key);
-        assert!(move_value.delete_options.is_some());
+        let _ = move_value.delete_options.unwrap();
     }
 }

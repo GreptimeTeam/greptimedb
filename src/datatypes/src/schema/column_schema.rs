@@ -280,7 +280,7 @@ mod tests {
 
         let field = Field::try_from(&column_schema).unwrap();
         assert_eq!("v1", field.metadata().get("k1").unwrap());
-        assert!(field.metadata().get(DEFAULT_CONSTRAINT_KEY).is_some());
+        let _ = field.metadata().get(DEFAULT_CONSTRAINT_KEY).unwrap();
 
         let new_column_schema = ColumnSchema::try_from(&field).unwrap();
         assert_eq!(column_schema, new_column_schema);

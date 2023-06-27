@@ -512,6 +512,6 @@ def test(a, b, c, **params):
         assert_eq!(copr.return_types, vec![None]);
         assert_eq!(copr.kwarg, Some("params".to_string()));
         assert_eq!(copr.script, script);
-        assert!(copr.code_obj.is_some());
+        let _ = copr.code_obj.unwrap();
     }
 }

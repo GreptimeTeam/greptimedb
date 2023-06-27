@@ -385,7 +385,7 @@ mod tests {
         fd.heartbeat(0);
         fd.heartbeat(1000);
         fd.heartbeat(1100);
-        assert!(fd.last_heartbeat_millis.is_some());
+        let _ = fd.last_heartbeat_millis.unwrap();
         assert!(fd.is_available(1200));
     }
 

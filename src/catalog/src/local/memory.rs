@@ -353,7 +353,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(table.is_some());
+        let _ = table.unwrap();
         assert!(catalog_list
             .table(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "not_exists")
             .await

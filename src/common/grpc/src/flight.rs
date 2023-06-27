@@ -265,7 +265,7 @@ mod test {
         let FlightMessage::Schema(decoded_schema) = message else { unreachable!() };
         assert_eq!(decoded_schema, schema);
 
-        assert!(decoder.schema.is_some());
+        let _ = decoder.schema.as_ref().unwrap();
 
         let message = decoder.try_decode(d2.clone()).unwrap();
         assert!(matches!(message, FlightMessage::Recordbatch(_)));

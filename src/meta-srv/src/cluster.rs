@@ -267,7 +267,7 @@ mod tests {
 
         let kv_map = to_stat_kv_map(vec![kv]).unwrap();
         assert_eq!(1, kv_map.len());
-        assert!(kv_map.get(&stat_key).is_some());
+        let _ = kv_map.get(&stat_key).unwrap();
 
         let stat_val = kv_map.get(&stat_key).unwrap();
         let stat = stat_val.stats.get(0).unwrap();
