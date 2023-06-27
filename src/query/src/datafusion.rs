@@ -54,7 +54,7 @@ use crate::executor::QueryExecutor;
 use crate::logical_optimizer::LogicalOptimizer;
 use crate::physical_optimizer::PhysicalOptimizer;
 use crate::physical_planner::PhysicalPlanner;
-use crate::physical_wrapper::PhysicalWrapperRef;
+use crate::physical_wrapper::PhysicalPlanWrapperRef;
 use crate::plan::LogicalPlan;
 use crate::planner::{DfLogicalPlanner, LogicalPlanner};
 use crate::query_engine::{DescribeResult, QueryEngineContext, QueryEngineState};
@@ -81,7 +81,7 @@ impl DatafusionQueryEngine {
         let physical_plan = self.create_physical_plan(&mut ctx, &plan).await?;
         let physical_plan = self.optimize_physical_plan(&mut ctx, physical_plan)?;
 
-        let physical_plan = if let Some(wrapper) = self.plugins.get::<PhysicalWrapperRef>() {
+        let physical_plan = if let Some(wrapper) = self.plugins.get::<PhysicalPlanWrapperRef>() {
             wrapper.wrap(physical_plan, query_ctx)
         } else {
             physical_plan

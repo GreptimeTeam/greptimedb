@@ -19,8 +19,8 @@ use session::context::QueryContextRef;
 
 /// wrap physical plan with additional layer
 /// e.g: metrics retrieving layer upon physical plan
-pub trait PhysicalWrapper: Send + Sync + 'static {
+pub trait PhysicalPlanWrapper: Send + Sync + 'static {
     fn wrap(&self, origin: Arc<dyn PhysicalPlan>, ctx: QueryContextRef) -> Arc<dyn PhysicalPlan>;
 }
 
-pub type PhysicalWrapperRef = Arc<dyn PhysicalWrapper>;
+pub type PhysicalPlanWrapperRef = Arc<dyn PhysicalPlanWrapper>;
