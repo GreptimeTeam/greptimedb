@@ -336,7 +336,7 @@ impl ChunkReaderBuilder {
         let mut ranges = Vec::with_capacity(files_in_range.len());
         let mut prev = TimestampRange::new_inclusive(
             Some(files_in_range[0].time_range().unwrap().0),
-            Some(files_in_range[1].time_range().unwrap().1),
+            Some(files_in_range[0].time_range().unwrap().1),
         );
         for file in &files_in_range[1..] {
             let current = TimestampRange::new_inclusive(
