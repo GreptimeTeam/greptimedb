@@ -117,3 +117,5 @@ tql eval (60, 60, '1s') quantile_over_time(2, data[1m]);
 tql eval (60, 60, '1s') (quantile_over_time(2, (data[1m])));
 
 drop table data;
+
+-- Some cases are not ported because insert NaN/Inf is not supported yet
