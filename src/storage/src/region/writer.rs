@@ -21,7 +21,7 @@ use futures::TryStreamExt;
 use metrics::increment_counter;
 use snafu::{ensure, ResultExt};
 use store_api::logstore::LogStore;
-use store_api::manifest::{Manifest, ManifestLogStorage, ManifestVersion, MetaAction, MAX_VERSION};
+use store_api::manifest::{Manifest, ManifestLogStorage, ManifestVersion, MetaAction};
 use store_api::storage::{
     AlterRequest, FlushContext, FlushReason, SequenceNumber, WriteContext, WriteResponse,
 };
@@ -337,11 +337,7 @@ impl RegionWriter {
             files
         );
 
-        let _ = drop_ctx
-            .manifest
-            .manifest_store()
-            .delete_until(MAX_VERSION, false)
-            .await?;
+        drop_ctx.manifest.manifest_store().delete_all().await?;
         Ok(())
     }
 

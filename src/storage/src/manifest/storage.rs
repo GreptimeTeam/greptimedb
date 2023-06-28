@@ -321,6 +321,40 @@ impl ManifestLogStorage for ManifestObjectStore {
         Ok(ret)
     }
 
+    async fn delete_all(&self) -> Result<()> {
+        let mut entries: Vec<(ManifestVersion, Entry)> = self
+            .get_paths(|entry| {
+                let file_name = entry.name();
+                if is_delta_file(file_name) {
+                    let version = file_version(file_name);
+                    return Some((version, entry));
+                }
+                None
+            })
+            .await?;
+
+        entries.sort_unstable_by(|(v1, _), (v2, _)| v1.cmp(v2));
+        let paths: Vec<_> = entries.iter().map(|e| e.1.path().to_string()).collect();
+
+        // Delelte logs in order of verseion.
+        self.object_store
+            .remove(paths)
+            .await
+            .with_context(|_| DeleteObjectSnafu {
+                path: self.path.clone(),
+            })?;
+
+        // Delete checkpoints and the manifest directory.
+        let _ = self
+            .object_store
+            .remove_all(&self.path)
+            .await
+            .with_context(|_| DeleteObjectSnafu {
+                path: self.path.clone(),
+            });
+        Ok(())
+    }
+
     async fn save(&self, version: ManifestVersion, bytes: &[u8]) -> Result<()> {
         let path = self.delta_file_path(version);
         logging::debug!("Save log to manifest storage, version: {}", version);

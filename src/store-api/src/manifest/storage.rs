@@ -46,6 +46,9 @@ pub trait ManifestLogStorage {
         keep_last_checkpoint: bool,
     ) -> Result<usize, Self::Error>;
 
+    /// Delete all logs and checkpoints, and remove the manifest directory.
+    async fn delete_all(&self) -> Result<(), Self::Error>;
+
     /// Save a log
     async fn save(&self, version: ManifestVersion, bytes: &[u8]) -> Result<(), Self::Error>;
 

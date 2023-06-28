@@ -23,7 +23,7 @@ use snafu::ResultExt;
 use store_api::logstore::LogStore;
 use store_api::manifest::Manifest;
 use store_api::storage::{
-    CloseContext, CloseOptions, CreateOptions, DropOptions, EngineContext, OpenOptions, Region,
+    CloseContext, CloseOptions, CreateOptions, EngineContext, OpenOptions, Region,
     RegionDescriptor, StorageEngine,
 };
 
@@ -87,14 +87,10 @@ impl<S: LogStore> StorageEngine for EngineImpl<S> {
         self.inner.create_region(descriptor, opts).await
     }
 
-    async fn drop_region(
-        &self,
-        _ctx: &EngineContext,
-        region: Self::Region,
-        opts: &DropOptions,
-    ) -> Result<()> {
+    async fn drop_region(&self, _ctx: &EngineContext, region: Self::Region) -> Result<()> {
         region.drop_region().await?;
-        self.inner.drop_region(region.name(), opts).await
+        self.inner.remove_region(region.name());
+        Ok(())
     }
 
     fn get_region(&self, _ctx: &EngineContext, name: &str) -> Result<Option<Self::Region>> {
@@ -460,17 +456,6 @@ impl<S: LogStore> EngineInner<S> {
         Ok(region)
     }
 
-    async fn drop_region(&self, name: &str, opts: &DropOptions) -> Result<()> {
-        let manifest_dir = region_manifest_dir(&opts.parent_dir, name);
-        self.object_store
-            .delete(&manifest_dir)
-            .await
-            .context(error::DeleteObjectSnafu { path: manifest_dir })?;
-
-        self.remove_region(name);
-        Ok(())
-    }
-
     fn get_region(&self, name: &str) -> Option<RegionImpl<S>> {
         self.regions.get_region(name)
     }
@@ -550,7 +535,6 @@ mod tests {
     use log_store::raft_engine::log_store::RaftEngineLogStore;
     use log_store::test_util::log_store_util;
     use object_store::services::Fs;
-    use object_store::util::normalize_dir;
     use store_api::storage::{FlushContext, Region, WriteContext, WriteRequest};
 
     use super::*;
@@ -695,16 +679,7 @@ mod tests {
                 .unwrap()
                 .unwrap();
 
-            engine
-                .drop_region(
-                    &ctx,
-                    region,
-                    &DropOptions {
-                        parent_dir: normalize_dir(&dir.path().to_string_lossy()),
-                    },
-                )
-                .await
-                .unwrap();
+            engine.drop_region(&ctx, region).await.unwrap();
 
             assert!(engine.get_region(&ctx, region_name).unwrap().is_none());
             assert!(!engine

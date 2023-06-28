@@ -33,8 +33,8 @@ use snafu::{ensure, OptionExt, ResultExt};
 use storage::manifest::manifest_compress_type;
 use store_api::storage::{
     CloseOptions, ColumnDescriptorBuilder, ColumnFamilyDescriptor, ColumnFamilyDescriptorBuilder,
-    ColumnId, DropOptions, EngineContext as StorageEngineContext, OpenOptions, RegionNumber,
-    RowKeyDescriptor, RowKeyDescriptorBuilder, StorageEngine,
+    ColumnId, EngineContext as StorageEngineContext, OpenOptions, RegionNumber, RowKeyDescriptor,
+    RowKeyDescriptorBuilder, StorageEngine,
 };
 use table::engine::{
     region_name, table_dir, CloseTableResult, EngineContext, TableEngine, TableEngineProcedure,
@@ -580,9 +580,6 @@ impl<S: StorageEngine> MitoEngineInner<S> {
     }
 
     async fn drop_table(&self, request: DropTableRequest) -> TableResult<bool> {
-        let catalog_name = &request.catalog_name;
-        let schema_name = &request.schema_name;
-
         // Remove the table from the engine to avoid further access from users.
         let _lock = self.table_mutex.lock(request.table_id).await;
         let removed_table = self.tables.remove(&request.table_id);
@@ -592,13 +589,11 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             let mut regions = table.remove_regions(&table.region_ids()).await?;
 
             let ctx = StorageEngineContext::default();
-            let parent_dir = table_dir(catalog_name, schema_name, request.table_id);
-            let opts = DropOptions { parent_dir };
 
             let _ = futures::future::try_join_all(
                 regions
                     .drain()
-                    .map(|(_, region)| self.storage_engine.drop_region(&ctx, region, &opts)),
+                    .map(|(_, region)| self.storage_engine.drop_region(&ctx, region)),
             )
             .await
             .map_err(BoxedError::new)

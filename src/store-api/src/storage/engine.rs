@@ -66,7 +66,6 @@ pub trait StorageEngine: Send + Sync + Clone + 'static {
         &self,
         ctx: &EngineContext,
         region: Self::Region,
-        opts: &DropOptions,
     ) -> Result<(), Self::Error>;
 
     /// Returns the opened region with given name.
@@ -111,11 +110,4 @@ pub struct OpenOptions {
 pub struct CloseOptions {
     /// Flush region
     pub flush: bool,
-}
-
-/// Options to drop a region.
-#[derive(Debug, Clone, Default)]
-pub struct DropOptions {
-    /// Region parent directory
-    pub parent_dir: String,
 }
