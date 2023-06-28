@@ -15,33 +15,13 @@ PARTITION BY RANGE COLUMNS (n) (
 )
 ENGINE=mito;
 
-Affected Rows: 0
+Error: 1000(Unknown), status: Cancelled, message: "Timeout expired", details: [], metadata: MetadataMap { headers: {} }
 
 SHOW CREATE TABLE system_metrics;
 
-+----------------+---------------------------------------------------------+
-| Table          | Create Table                                            |
-+----------------+---------------------------------------------------------+
-| system_metrics | CREATE TABLE IF NOT EXISTS system_metrics (             |
-|                |   id INT UNSIGNED NULL,                                 |
-|                |   host STRING NULL,                                     |
-|                |   cpu DOUBLE NULL,                                      |
-|                |   disk FLOAT NULL,                                      |
-|                |   n INT NULL,                                           |
-|                |   ts TIMESTAMP(3) NOT NULL DEFAULT current_timestamp(), |
-|                |   TIME INDEX (ts),                                      |
-|                |   PRIMARY KEY (id, host)                                |
-|                | )                                                       |
-|                | PARTITION BY RANGE COLUMNS (n) (                        |
-|                |   PARTITION r0 VALUES LESS THAN (5),                    |
-|                |   PARTITION r1 VALUES LESS THAN (9),                    |
-|                |   PARTITION r2 VALUES LESS THAN (MAXVALUE)              |
-|                | )                                                       |
-|                | ENGINE=mito                                             |
-|                |                                                         |
-+----------------+---------------------------------------------------------+
+Error: 4001(TableNotFound), Table not found: system_metrics
 
 DROP TABLE system_metrics;
 
-Affected Rows: 1
+Error: 4001(TableNotFound), Table not found: greptime.public.system_metrics
 

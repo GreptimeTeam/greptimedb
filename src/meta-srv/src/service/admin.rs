@@ -16,6 +16,7 @@ mod health;
 mod heartbeat;
 mod leader;
 mod meta;
+mod node_lease;
 mod route;
 
 use std::collections::HashMap;
@@ -31,6 +32,13 @@ use crate::metasrv::MetaSrv;
 
 pub fn make_admin_service(meta_srv: MetaSrv) -> Admin {
     let router = Router::new().route("/health", health::HealthHandler);
+
+    let router = router.route(
+        "/node-lease",
+        node_lease::NodeLeaseHandler {
+            meta_peer_client: meta_srv.meta_peer_client(),
+        },
+    );
 
     let router = router.route(
         "/heartbeat",
@@ -119,7 +127,7 @@ impl<T> Service<http::Request<T>> for Admin
 where
     T: Send,
 {
-    type Response = http::Response<tonic::body::BoxBody>;
+    type Response = http::Response<BoxBody>;
     type Error = Infallible;
     type Future = BoxFuture<Self::Response, Self::Error>;
 
