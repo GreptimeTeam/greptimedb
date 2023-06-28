@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use common_procedure::local::{LocalManager, ManagerConfig};
 
-use crate::cluster::MetaPeerClient;
+use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
 use crate::error::Result;
 use crate::handler::mailbox_handler::MailboxHandler;
 use crate::handler::region_lease_handler::RegionLeaseHandler;
@@ -47,7 +47,7 @@ pub struct MetaSrvBuilder {
     selector: Option<SelectorRef>,
     handler_group: Option<HeartbeatHandlerGroup>,
     election: Option<ElectionRef>,
-    meta_peer_client: Option<MetaPeerClient>,
+    meta_peer_client: Option<MetaPeerClientRef>,
     lock: Option<DistLockRef>,
     metadata_service: Option<MetadataServiceRef>,
 }
@@ -92,7 +92,7 @@ impl MetaSrvBuilder {
         self
     }
 
-    pub fn meta_peer_client(mut self, meta_peer_client: MetaPeerClient) -> Self {
+    pub fn meta_peer_client(mut self, meta_peer_client: MetaPeerClientRef) -> Self {
         self.meta_peer_client = Some(meta_peer_client);
         self
     }
@@ -130,18 +130,22 @@ impl MetaSrvBuilder {
         let options = options.unwrap_or_default();
 
         let kv_store = kv_store.unwrap_or_else(|| Arc::new(MemStore::default()));
-
         let in_memory = in_memory.unwrap_or_else(|| Arc::new(MemStore::default()));
-
+        let meta_peer_client = meta_peer_client.unwrap_or_else(|| {
+            MetaPeerClientBuilder::default()
+                .election(election.clone())
+                .in_memory(in_memory.clone())
+                .build()
+                .map(Arc::new)
+                // Safety: all required fields set at initialization
+                .unwrap()
+        });
         let selector = selector.unwrap_or_else(|| Arc::new(LeaseBasedSelector));
-
         let pushers = Pushers::default();
         let mailbox_sequence = Sequence::new("heartbeat_mailbox", 1, 100, kv_store.clone());
         let mailbox = HeartbeatMailbox::create(pushers.clone(), mailbox_sequence);
-
         let state_store = Arc::new(MetaStateStore::new(kv_store.clone()));
         let procedure_manager = Arc::new(LocalManager::new(ManagerConfig::default(), state_store));
-
         let lock = lock.unwrap_or_else(|| Arc::new(MemLock::default()));
 
         let handler_group = match handler_group {
@@ -158,6 +162,7 @@ impl MetaSrvBuilder {
                             server_addr: options.server_addr.clone(),
                             datanode_lease_secs: options.datanode_lease_secs,
                             kv_store: kv_store.clone(),
+                            meta_peer_client: meta_peer_client.clone(),
                             catalog: None,
                             schema: None,
                             table: None,
@@ -179,12 +184,11 @@ impl MetaSrvBuilder {
                 );
 
                 let group = HeartbeatHandlerGroup::new(pushers);
-                let keep_lease_handler = KeepLeaseHandler::new(kv_store.clone());
                 group.add_handler(ResponseHeaderHandler::default()).await;
                 // `KeepLeaseHandler` should preferably be in front of `CheckLeaderHandler`,
                 // because even if the current meta-server node is no longer the leader it can
                 // still help the datanode to keep lease.
-                group.add_handler(keep_lease_handler).await;
+                group.add_handler(KeepLeaseHandler::default()).await;
                 group.add_handler(CheckLeaderHandler::default()).await;
                 group.add_handler(OnLeaderStartHandler::default()).await;
                 group.add_handler(CollectStatsHandler::default()).await;
@@ -208,11 +212,11 @@ impl MetaSrvBuilder {
             options,
             in_memory,
             kv_store,
+            meta_peer_client,
             table_id_sequence,
             selector,
             handler_group,
             election,
-            meta_peer_client,
             lock,
             procedure_manager,
             metadata_service,

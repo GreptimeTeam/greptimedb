@@ -221,9 +221,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("MetaSrv has no meta peer client"))]
-    NoMetaPeerClient { location: Location },
-
     #[snafu(display("Invalid http body, source: {}", source))]
     InvalidHttpBody {
         source: http::Error,
@@ -399,7 +396,6 @@ impl ErrorExt for Error {
             | Error::Range { .. }
             | Error::ResponseHeaderNotFound { .. }
             | Error::IsNotLeader { .. }
-            | Error::NoMetaPeerClient { .. }
             | Error::InvalidHttpBody { .. }
             | Error::Lock { .. }
             | Error::Unlock { .. }

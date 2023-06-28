@@ -31,6 +31,7 @@ use datanode::heartbeat::HeartbeatTask;
 use datanode::instance::Instance as DatanodeInstance;
 use frontend::instance::{FrontendInstance, Instance as FeInstance};
 use meta_client::client::MetaClientBuilder;
+use meta_srv::cluster::MetaPeerClientRef;
 use meta_srv::metasrv::{MetaSrv, MetaSrvOptions};
 use meta_srv::mocks::MockInfo;
 use meta_srv::service::store::kv::KvStoreRef;
@@ -93,7 +94,8 @@ impl GreptimeDbClusterBuilder {
 
         let datanode_clients = build_datanode_clients(&datanode_instances, datanodes).await;
 
-        self.wait_datanodes_alive(datanodes).await;
+        self.wait_datanodes_alive(&meta_srv.meta_srv.meta_peer_client(), datanodes)
+            .await;
 
         let frontend = self
             .build_frontend(meta_srv.clone(), datanode_clients)
@@ -162,13 +164,17 @@ impl GreptimeDbClusterBuilder {
         (instances, heartbeat_tasks, storage_guards, wal_guards)
     }
 
-    async fn wait_datanodes_alive(&self, expected_datanodes: u32) {
-        let kv_store = self.kv_store();
+    async fn wait_datanodes_alive(
+        &self,
+        meta_peer_client: &MetaPeerClientRef,
+        expected_datanodes: u32,
+    ) {
         for _ in 0..10 {
-            let alive_datanodes = meta_srv::lease::filter_datanodes(1000, &kv_store, |_, _| true)
-                .await
-                .unwrap()
-                .len() as u32;
+            let alive_datanodes =
+                meta_srv::lease::filter_datanodes(1000, meta_peer_client, |_, _| true)
+                    .await
+                    .unwrap()
+                    .len() as u32;
             if alive_datanodes == expected_datanodes {
                 return;
             }
@@ -224,10 +230,6 @@ impl GreptimeDbClusterBuilder {
             .await
             .unwrap(),
         )
-    }
-
-    fn kv_store(&self) -> KvStoreRef {
-        self.kv_store.clone()
     }
 }
 

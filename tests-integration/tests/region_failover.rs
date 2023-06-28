@@ -337,6 +337,7 @@ async fn run_region_failover_procedure(
                 datanode_lease_secs: meta_srv.options().datanode_lease_secs,
                 server_addr: meta_srv.options().server_addr.clone(),
                 kv_store: meta_srv.kv_store(),
+                meta_peer_client: meta_srv.meta_peer_client(),
                 catalog: None,
                 schema: None,
                 table: None,

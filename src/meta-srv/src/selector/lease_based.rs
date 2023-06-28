@@ -29,7 +29,7 @@ impl Selector for LeaseBasedSelector {
     async fn select(&self, ns: Namespace, ctx: &Self::Context) -> Result<Self::Output> {
         // filter out the nodes out lease
         let mut lease_kvs: Vec<_> =
-            lease::alive_datanodes(ns, &ctx.kv_store, ctx.datanode_lease_secs)
+            lease::alive_datanodes(ns, &ctx.meta_peer_client, ctx.datanode_lease_secs)
                 .await?
                 .into_iter()
                 .collect();

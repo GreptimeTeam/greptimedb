@@ -15,7 +15,6 @@
 use api::v1::meta::Peer;
 use common_telemetry::warn;
 
-use crate::cluster::MetaPeerClient;
 use crate::error::Result;
 use crate::handler::node_stat::RegionStat;
 use crate::keys::{LeaseKey, LeaseValue, StatKey, StatValue};
@@ -25,9 +24,7 @@ use crate::selector::{Namespace, Selector};
 
 const MAX_REGION_NUMBER: u64 = u64::MAX;
 
-pub struct LoadBasedSelector {
-    pub meta_peer_client: MetaPeerClient,
-}
+pub struct LoadBasedSelector;
 
 #[async_trait::async_trait]
 impl Selector for LoadBasedSelector {
@@ -36,13 +33,14 @@ impl Selector for LoadBasedSelector {
 
     async fn select(&self, ns: Namespace, ctx: &Self::Context) -> Result<Self::Output> {
         // get alive datanodes
-        let lease_kvs = lease::alive_datanodes(ns, &ctx.kv_store, ctx.datanode_lease_secs).await?;
+        let lease_kvs =
+            lease::alive_datanodes(ns, &ctx.meta_peer_client, ctx.datanode_lease_secs).await?;
         if lease_kvs.is_empty() {
             return Ok(vec![]);
         }
 
         let stat_keys: Vec<StatKey> = lease_kvs.keys().map(|k| k.into()).collect();
-        let stat_kvs = self.meta_peer_client.get_dn_stat_kvs(stat_keys).await?;
+        let stat_kvs = ctx.meta_peer_client.get_dn_stat_kvs(stat_keys).await?;
 
         let mut tuples: Vec<(LeaseKey, LeaseValue, u64)> = lease_kvs
             .into_iter()

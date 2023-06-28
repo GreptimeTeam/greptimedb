@@ -12,7 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::cmp::Ordering;
+
 use api::v1::meta::{HeartbeatRequest, PutRequest, Role};
+use common_telemetry::warn;
 use dashmap::DashMap;
 
 use crate::error::Result;
@@ -90,13 +93,18 @@ impl HeartbeatHandler for PersistStatsHandler {
         let epoch_stats = entry.value_mut();
 
         let refresh = if let Some(epoch) = epoch_stats.epoch() {
-            // This node may have been redeployed.
-            if current_stat.node_epoch > epoch {
-                epoch_stats.set_epoch(current_stat.node_epoch);
-                epoch_stats.clear();
-                true
-            } else {
-                false
+            match current_stat.node_epoch.cmp(&epoch) {
+                Ordering::Greater => {
+                    // This node may have been redeployed.
+                    epoch_stats.set_epoch(current_stat.node_epoch);
+                    epoch_stats.clear();
+                    true
+                }
+                Ordering::Less => {
+                    warn!("Ignore stale heartbeat: {:?}", current_stat);
+                    false
+                }
+                Ordering::Equal => false,
             }
         } else {
             epoch_stats.set_epoch(current_stat.node_epoch);
@@ -134,6 +142,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use crate::cluster::MetaPeerClientBuilder;
     use crate::handler::{HeartbeatMailbox, Pushers};
     use crate::keys::StatKey;
     use crate::sequence::Sequence;
@@ -146,10 +155,18 @@ mod tests {
         let kv_store = Arc::new(MemStore::new());
         let seq = Sequence::new("test_seq", 0, 10, kv_store.clone());
         let mailbox = HeartbeatMailbox::create(Pushers::default(), seq);
+        let meta_peer_client = MetaPeerClientBuilder::default()
+            .election(None)
+            .in_memory(in_memory.clone())
+            .build()
+            .map(Arc::new)
+            // Safety: all required fields set at initialization
+            .unwrap();
         let ctx = Context {
             server_addr: "127.0.0.1:0000".to_string(),
             in_memory,
             kv_store,
+            meta_peer_client,
             mailbox,
             election: None,
             skip_all: Arc::new(AtomicBool::new(false)),

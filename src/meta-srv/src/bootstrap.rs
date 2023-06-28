@@ -30,7 +30,6 @@ use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::server::Router;
 
-use crate::cluster::MetaPeerClientBuilder;
 use crate::election::etcd::EtcdElection;
 use crate::lock::etcd::EtcdLock;
 use crate::lock::memory::MemLock;
@@ -172,17 +171,8 @@ pub async fn build_meta_srv(opts: &MetaSrvOptions) -> Result<MetaSrv> {
 
     let in_memory = Arc::new(MemStore::default()) as ResettableKvStoreRef;
 
-    let meta_peer_client = MetaPeerClientBuilder::default()
-        .election(election.clone())
-        .in_memory(in_memory.clone())
-        .build()
-        // Safety: all required fields set at initialization
-        .unwrap();
-
     let selector = match opts.selector {
-        SelectorType::LoadBased => Arc::new(LoadBasedSelector {
-            meta_peer_client: meta_peer_client.clone(),
-        }) as SelectorRef,
+        SelectorType::LoadBased => Arc::new(LoadBasedSelector) as SelectorRef,
         SelectorType::LeaseBased => Arc::new(LeaseBasedSelector) as SelectorRef,
     };
 
@@ -192,7 +182,6 @@ pub async fn build_meta_srv(opts: &MetaSrvOptions) -> Result<MetaSrv> {
         .in_memory(in_memory)
         .selector(selector)
         .election(election)
-        .meta_peer_client(meta_peer_client)
         .lock(lock)
         .build()
         .await
