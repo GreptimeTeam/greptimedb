@@ -522,6 +522,12 @@ pub enum Error {
         source: ArrowError,
         location: Location,
     },
+
+    #[snafu(display("Failed to build scan predicate, source: {}", source))]
+    BuildPredicate {
+        source: table::error::Error,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -621,6 +627,7 @@ impl ErrorExt for Error {
 
             TtlCalculation { source, .. } => source.status_code(),
             ConvertColumnsToRows { .. } | SortArrays { .. } => StatusCode::Unexpected,
+            BuildPredicate { source, .. } => source.status_code(),
         }
     }
 

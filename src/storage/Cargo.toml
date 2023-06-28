@@ -23,6 +23,8 @@ common-time = { path = "../common/time" }
 datatypes = { path = "../datatypes" }
 datafusion-common.workspace = true
 datafusion-expr.workspace = true
+datafusion-physical-expr.workspace = true
+datafusion.workspace = true
 futures.workspace = true
 futures-util.workspace = true
 itertools.workspace = true

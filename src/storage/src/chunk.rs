@@ -226,10 +226,16 @@ impl ChunkReaderBuilder {
             reader_builder = reader_builder.push_batch_iter(iter);
         }
 
+        let predicate = Predicate::try_new(
+            self.filters.clone(),
+            self.schema.store_schema().schema().clone(),
+        )
+        .context(error::BuildPredicateSnafu)?;
+
         let read_opts = ReadOptions {
             batch_size: self.iter_ctx.batch_size,
             projected_schema: schema.clone(),
-            predicate: Predicate::new(self.filters.clone()),
+            predicate,
             time_range: *time_range,
         };
         for file in &self.files_to_read {
@@ -270,7 +276,12 @@ impl ChunkReaderBuilder {
     /// Build time range predicate from schema and filters.
     pub fn build_time_range_predicate(&self) -> TimestampRange {
         let Some(ts_col) = self.schema.user_schema().timestamp_column() else { return TimestampRange::min_to_max() };
-        TimeRangePredicateBuilder::new(&ts_col.name, &self.filters).build()
+        let unit = ts_col
+            .data_type
+            .as_timestamp()
+            .expect("Timestamp column must have timestamp-compatible type")
+            .unit();
+        TimeRangePredicateBuilder::new(&ts_col.name, unit, &self.filters).build()
     }
 
     /// Check if SST file's time range matches predicate.

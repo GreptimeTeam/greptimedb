@@ -21,7 +21,9 @@ use arrow::compute::SortOptions;
 use common_query::prelude::Expr;
 use common_recordbatch::OrderOption;
 use common_test_util::temp_dir::create_temp_dir;
+use common_time::timestamp::TimeUnit;
 use datafusion_common::Column;
+use datatypes::value::timestamp_to_scalar_value;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use store_api::storage::{FlushContext, FlushReason, OpenOptions, Region, ScanRequest};
 
@@ -404,7 +406,10 @@ async fn test_flush_and_query_empty() {
         filters: vec![Expr::from(datafusion_expr::binary_expr(
             DfExpr::Column(Column::from("timestamp")),
             datafusion_expr::Operator::GtEq,
-            datafusion_expr::lit(20000),
+            datafusion_expr::lit(timestamp_to_scalar_value(
+                TimeUnit::Millisecond,
+                Some(20000),
+            )),
         ))],
         output_ordering: Some(vec![OrderOption {
             name: "timestamp".to_string(),

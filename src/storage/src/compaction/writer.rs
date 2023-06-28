@@ -13,8 +13,9 @@
 // limitations under the License.
 
 use common_query::logical_plan::{DfExpr, Expr};
-use datafusion_common::ScalarValue;
-use datafusion_expr::{BinaryExpr, Operator};
+use common_time::timestamp::TimeUnit;
+use datafusion_expr::Operator;
+use datatypes::value::timestamp_to_scalar_value;
 
 use crate::chunk::{ChunkReaderBuilder, ChunkReaderImpl};
 use crate::error;
@@ -31,53 +32,84 @@ pub(crate) async fn build_sst_reader(
 ) -> error::Result<ChunkReaderImpl> {
     // TODO(hl): Schemas in different SSTs may differ, thus we should infer
     // timestamp column name from Parquet metadata.
-    let ts_col_name = schema
-        .user_schema()
-        .timestamp_column()
-        .unwrap()
-        .name
-        .clone();
+
+    // safety: Region schema's timestamp column must present
+    let ts_col = schema.user_schema().timestamp_column().unwrap();
+    let ts_col_unit = ts_col.data_type.as_timestamp().unwrap().unit();
+    let ts_col_name = ts_col.name.clone();
 
     ChunkReaderBuilder::new(schema, sst_layer)
         .pick_ssts(files)
-        .filters(vec![build_time_range_filter(
-            lower_sec_inclusive,
-            upper_sec_exclusive,
-            &ts_col_name,
-        )])
+        .filters(
+            build_time_range_filter(
+                lower_sec_inclusive,
+                upper_sec_exclusive,
+                &ts_col_name,
+                ts_col_unit,
+            )
+            .into_iter()
+            .collect(),
+        )
         .build()
         .await
 }
 
-fn build_time_range_filter(low_sec: i64, high_sec: i64, ts_col_name: &str) -> Expr {
-    let ts_col = Box::new(DfExpr::Column(datafusion_common::Column::from_name(
-        ts_col_name,
-    )));
-    let lower_bound_expr = Box::new(DfExpr::Literal(ScalarValue::TimestampSecond(
-        Some(low_sec),
-        None,
-    )));
+/// Build time range filter expr from lower (inclusive) and upper bound(exclusive).
+/// Returns `None` if time range overflows.
+fn build_time_range_filter(
+    low_sec: i64,
+    high_sec: i64,
+    ts_col_name: &str,
+    ts_col_unit: TimeUnit,
+) -> Option<Expr> {
+    debug_assert!(low_sec <= high_sec);
+    let ts_col = DfExpr::Column(datafusion_common::Column::from_name(ts_col_name));
 
-    let upper_bound_expr = Box::new(DfExpr::Literal(ScalarValue::TimestampSecond(
-        Some(high_sec),
-        None,
-    )));
+    // Converting seconds to whatever unit won't lose precision.
+    // Here only handles overflow.
+    let low_ts = common_time::Timestamp::new_second(low_sec)
+        .convert_to(ts_col_unit)
+        .map(|ts| ts.value());
+    let high_ts = common_time::Timestamp::new_second(high_sec)
+        .convert_to(ts_col_unit)
+        .map(|ts| ts.value());
 
-    let expr = DfExpr::BinaryExpr(BinaryExpr {
-        left: Box::new(DfExpr::BinaryExpr(BinaryExpr {
-            left: ts_col.clone(),
-            op: Operator::GtEq,
-            right: lower_bound_expr,
-        })),
-        op: Operator::And,
-        right: Box::new(DfExpr::BinaryExpr(BinaryExpr {
-            left: ts_col,
-            op: Operator::Lt,
-            right: upper_bound_expr,
-        })),
-    });
+    let expr = match (low_ts, high_ts) {
+        (Some(low), Some(high)) => {
+            let lower_bound_expr =
+                DfExpr::Literal(timestamp_to_scalar_value(ts_col_unit, Some(low)));
+            let upper_bound_expr =
+                DfExpr::Literal(timestamp_to_scalar_value(ts_col_unit, Some(high)));
+            Some(datafusion_expr::and(
+                datafusion_expr::binary_expr(ts_col.clone(), Operator::GtEq, lower_bound_expr),
+                datafusion_expr::binary_expr(ts_col, Operator::Lt, upper_bound_expr),
+            ))
+        }
 
-    Expr::from(expr)
+        (Some(low), None) => {
+            let lower_bound_expr =
+                datafusion_expr::lit(timestamp_to_scalar_value(ts_col_unit, Some(low)));
+            Some(datafusion_expr::binary_expr(
+                ts_col,
+                Operator::GtEq,
+                lower_bound_expr,
+            ))
+        }
+
+        (None, Some(high)) => {
+            let upper_bound_expr =
+                datafusion_expr::lit(timestamp_to_scalar_value(ts_col_unit, Some(high)));
+            Some(datafusion_expr::binary_expr(
+                ts_col,
+                Operator::Lt,
+                upper_bound_expr,
+            ))
+        }
+
+        (None, None) => None,
+    };
+
+    expr.map(Expr::from)
 }
 
 #[cfg(test)]
@@ -489,5 +521,36 @@ mod tests {
             read_file(&output_files, schema.clone(), sst_layer.clone()).await;
 
         assert_eq!(timestamps_in_outputs, timestamps_in_inputs);
+    }
+
+    #[test]
+    fn test_build_time_range_filter() {
+        assert!(build_time_range_filter(i64::MIN, i64::MAX, "ts", TimeUnit::Nanosecond).is_none());
+
+        assert_eq!(
+            Expr::from(datafusion_expr::binary_expr(
+                datafusion_expr::col("ts"),
+                Operator::Lt,
+                datafusion_expr::lit(timestamp_to_scalar_value(
+                    TimeUnit::Nanosecond,
+                    Some(TimeUnit::Second.factor() as i64 / TimeUnit::Nanosecond.factor() as i64)
+                ))
+            )),
+            build_time_range_filter(i64::MIN, 1, "ts", TimeUnit::Nanosecond).unwrap()
+        );
+
+        assert_eq!(
+            Expr::from(datafusion_expr::binary_expr(
+                datafusion_expr::col("ts"),
+                Operator::GtEq,
+                datafusion_expr::lit(timestamp_to_scalar_value(
+                    TimeUnit::Nanosecond,
+                    Some(
+                        2 * TimeUnit::Second.factor() as i64 / TimeUnit::Nanosecond.factor() as i64
+                    )
+                ))
+            )),
+            build_time_range_filter(2, i64::MAX, "ts", TimeUnit::Nanosecond).unwrap()
+        );
     }
 }

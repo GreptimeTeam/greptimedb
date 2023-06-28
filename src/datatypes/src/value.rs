@@ -294,7 +294,7 @@ fn new_item_field(data_type: ArrowDataType) -> Field {
     Field::new("item", data_type, false)
 }
 
-fn timestamp_to_scalar_value(unit: TimeUnit, val: Option<i64>) -> ScalarValue {
+pub fn timestamp_to_scalar_value(unit: TimeUnit, val: Option<i64>) -> ScalarValue {
     match unit {
         TimeUnit::Second => ScalarValue::TimestampSecond(val, None),
         TimeUnit::Millisecond => ScalarValue::TimestampMillisecond(val, None),

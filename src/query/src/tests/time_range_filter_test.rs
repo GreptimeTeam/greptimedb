@@ -140,7 +140,7 @@ impl TimeRangeTester {
         let _ = exec_selection(self.engine.clone(), sql).await;
         let filters = self.table.get_filters().await;
 
-        let range = TimeRangePredicateBuilder::new("ts", &filters).build();
+        let range = TimeRangePredicateBuilder::new("ts", TimeUnit::Millisecond, &filters).build();
         assert_eq!(expect, range);
     }
 }

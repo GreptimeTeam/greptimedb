@@ -18,12 +18,6 @@ use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use arrow::datatypes::DataType;
-use arrow_array::types::Int64Type;
-use arrow_array::{
-    Array, PrimitiveArray, TimestampMicrosecondArray, TimestampMillisecondArray,
-    TimestampNanosecondArray, TimestampSecondArray,
-};
 use async_compat::CompatExt;
 use async_stream::try_stream;
 use async_trait::async_trait;
@@ -31,19 +25,16 @@ use common_telemetry::{debug, error};
 use common_time::range::TimestampRange;
 use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
-use datatypes::arrow::array::BooleanArray;
-use datatypes::arrow::error::ArrowError;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::prelude::ConcreteDataType;
 use futures_util::{Stream, StreamExt, TryStreamExt};
 use object_store::ObjectStore;
-use parquet::arrow::arrow_reader::{ArrowPredicate, RowFilter};
 use parquet::arrow::{ParquetRecordBatchStreamBuilder, ProjectionMask};
 use parquet::basic::{Compression, Encoding, ZstdLevel};
 use parquet::file::metadata::KeyValue;
 use parquet::file::properties::WriterProperties;
 use parquet::format::FileMetaData;
-use parquet::schema::types::{ColumnPath, SchemaDescriptor};
+use parquet::schema::types::ColumnPath;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::consts::SEQUENCE_COLUMN_NAME;
 use table::predicate::Predicate;
@@ -54,6 +45,7 @@ use crate::read::{Batch, BatchReader};
 use crate::schema::compat::ReadAdapter;
 use crate::schema::{ProjectedSchemaRef, StoreSchema};
 use crate::sst;
+use crate::sst::pruning::build_row_filter;
 use crate::sst::stream_writer::BufferedWriter;
 use crate::sst::{FileHandle, Source, SstInfo};
 
@@ -277,10 +269,7 @@ impl ParquetReader {
 
         let pruned_row_groups = self
             .predicate
-            .prune_row_groups(
-                store_schema.schema().clone(),
-                builder.metadata().row_groups(),
-            )
+            .prune_row_groups(builder.metadata().row_groups())
             .into_iter()
             .enumerate()
             .filter_map(|(idx, valid)| if valid { Some(idx) } else { None })
@@ -288,15 +277,18 @@ impl ParquetReader {
 
         let parquet_schema_desc = builder.metadata().file_metadata().schema_descr_ptr();
 
-        let projection = ProjectionMask::roots(&parquet_schema_desc, adapter.fields_to_read());
+        let projection_mask = ProjectionMask::roots(&parquet_schema_desc, adapter.fields_to_read());
         let mut builder = builder
-            .with_projection(projection)
+            .with_projection(projection_mask.clone())
             .with_row_groups(pruned_row_groups);
 
-        // if time range row filter is present, we can push down the filter to reduce rows to scan.
-        if let Some(row_filter) =
-            build_time_range_row_filter(self.time_range, &store_schema, &parquet_schema_desc)
-        {
+        if let Some(row_filter) = build_row_filter(
+            self.time_range,
+            &self.predicate,
+            &store_schema,
+            &parquet_schema_desc,
+            projection_mask,
+        ) {
             builder = builder.with_row_filter(row_filter);
         }
 
@@ -311,198 +303,6 @@ impl ParquetReader {
         });
 
         ChunkStream::new(self.file_handle.clone(), adapter, Box::pin(chunk_stream))
-    }
-}
-
-/// Builds time range row filter.
-fn build_time_range_row_filter(
-    time_range: TimestampRange,
-    store_schema: &Arc<StoreSchema>,
-    schema_desc: &SchemaDescriptor,
-) -> Option<RowFilter> {
-    let ts_col_idx = store_schema.timestamp_index();
-
-    let ts_col = store_schema.columns().get(ts_col_idx)?;
-
-    let ts_col_unit = match &ts_col.desc.data_type {
-        ConcreteDataType::Int64(_) => TimeUnit::Millisecond,
-        ConcreteDataType::Timestamp(ts_type) => ts_type.unit(),
-        _ => unreachable!(),
-    };
-
-    let projection = ProjectionMask::roots(schema_desc, vec![ts_col_idx]);
-
-    // checks if converting time range unit into ts col unit will result into rounding error.
-    if time_unit_lossy(&time_range, ts_col_unit) {
-        let filter = RowFilter::new(vec![Box::new(PlainTimestampRowFilter::new(
-            time_range, projection,
-        ))]);
-        return Some(filter);
-    }
-
-    // If any of the conversion overflows, we cannot use arrow's computation method, instead
-    // we resort to plain filter that compares timestamp with given range, less efficient,
-    // but simpler.
-    // TODO(hl): If the range is gt_eq/lt, we also use PlainTimestampRowFilter, but these cases
-    // can also use arrow's gt_eq_scalar/lt_scalar methods.
-    let row_filter = if let (Some(lower), Some(upper)) = (
-        time_range
-            .start()
-            .and_then(|s| s.convert_to(ts_col_unit))
-            .map(|t| t.value()),
-        time_range
-            .end()
-            .and_then(|s| s.convert_to(ts_col_unit))
-            .map(|t| t.value()),
-    ) {
-        Box::new(FastTimestampRowFilter::new(projection, lower, upper)) as _
-    } else {
-        Box::new(PlainTimestampRowFilter::new(time_range, projection)) as _
-    };
-    let filter = RowFilter::new(vec![row_filter]);
-    Some(filter)
-}
-
-fn time_unit_lossy(range: &TimestampRange, ts_col_unit: TimeUnit) -> bool {
-    range
-        .start()
-        .map(|start| start.unit().factor() < ts_col_unit.factor())
-        .unwrap_or(false)
-        || range
-            .end()
-            .map(|end| end.unit().factor() < ts_col_unit.factor())
-            .unwrap_or(false)
-}
-
-/// `FastTimestampRowFilter` is used to filter rows within given timestamp range when reading
-/// row groups from parquet files, while avoids fetching all columns from SSTs file.
-struct FastTimestampRowFilter {
-    lower_bound: i64,
-    upper_bound: i64,
-    projection: ProjectionMask,
-}
-
-impl FastTimestampRowFilter {
-    fn new(projection: ProjectionMask, lower_bound: i64, upper_bound: i64) -> Self {
-        Self {
-            lower_bound,
-            upper_bound,
-            projection,
-        }
-    }
-}
-
-impl ArrowPredicate for FastTimestampRowFilter {
-    fn projection(&self) -> &ProjectionMask {
-        &self.projection
-    }
-
-    /// Selects the rows matching given time range.
-    fn evaluate(&mut self, batch: RecordBatch) -> std::result::Result<BooleanArray, ArrowError> {
-        // the projection has only timestamp column, so we can safely take the first column in batch.
-        let ts_col = batch.column(0);
-
-        macro_rules! downcast_and_compute {
-            ($typ: ty) => {
-                {
-                    let ts_col = ts_col
-                        .as_any()
-                        .downcast_ref::<$typ>()
-                        .unwrap(); // safety: we've checked the data type of timestamp column.
-                    let left = arrow::compute::gt_eq_scalar(ts_col, self.lower_bound)?;
-                    let right = arrow::compute::lt_scalar(ts_col, self.upper_bound)?;
-                    arrow::compute::and(&left, &right)
-                }
-            };
-        }
-
-        match ts_col.data_type() {
-            DataType::Timestamp(unit, _) => match unit {
-                arrow::datatypes::TimeUnit::Second => {
-                    downcast_and_compute!(TimestampSecondArray)
-                }
-                arrow::datatypes::TimeUnit::Millisecond => {
-                    downcast_and_compute!(TimestampMillisecondArray)
-                }
-                arrow::datatypes::TimeUnit::Microsecond => {
-                    downcast_and_compute!(TimestampMicrosecondArray)
-                }
-                arrow::datatypes::TimeUnit::Nanosecond => {
-                    downcast_and_compute!(TimestampNanosecondArray)
-                }
-            },
-            DataType::Int64 => downcast_and_compute!(PrimitiveArray<Int64Type>),
-            _ => {
-                unreachable!()
-            }
-        }
-    }
-}
-
-/// [PlainTimestampRowFilter] iterates each element in timestamp column, build a [Timestamp] struct
-/// and checks if given time range contains the timestamp.
-struct PlainTimestampRowFilter {
-    time_range: TimestampRange,
-    projection: ProjectionMask,
-}
-
-impl PlainTimestampRowFilter {
-    fn new(time_range: TimestampRange, projection: ProjectionMask) -> Self {
-        Self {
-            time_range,
-            projection,
-        }
-    }
-}
-
-impl ArrowPredicate for PlainTimestampRowFilter {
-    fn projection(&self) -> &ProjectionMask {
-        &self.projection
-    }
-
-    fn evaluate(&mut self, batch: RecordBatch) -> std::result::Result<BooleanArray, ArrowError> {
-        // the projection has only timestamp column, so we can safely take the first column in batch.
-        let ts_col = batch.column(0);
-
-        macro_rules! downcast_and_compute {
-            ($array_ty: ty, $unit: ident) => {{
-                    let ts_col = ts_col
-                    .as_any()
-                    .downcast_ref::<$array_ty>()
-                    .unwrap(); // safety: we've checked the data type of timestamp column.
-                    Ok(BooleanArray::from_iter(ts_col.iter().map(|ts| {
-                        ts.map(|val| {
-                            Timestamp::new(val, TimeUnit::$unit)
-                        }).map(|ts| {
-                            self.time_range.contains(&ts)
-                        })
-                    })))
-
-            }};
-        }
-
-        match ts_col.data_type() {
-            DataType::Timestamp(unit, _) => match unit {
-                arrow::datatypes::TimeUnit::Second => {
-                    downcast_and_compute!(TimestampSecondArray, Second)
-                }
-                arrow::datatypes::TimeUnit::Millisecond => {
-                    downcast_and_compute!(TimestampMillisecondArray, Millisecond)
-                }
-                arrow::datatypes::TimeUnit::Microsecond => {
-                    downcast_and_compute!(TimestampMicrosecondArray, Microsecond)
-                }
-                arrow::datatypes::TimeUnit::Nanosecond => {
-                    downcast_and_compute!(TimestampNanosecondArray, Nanosecond)
-                }
-            },
-            DataType::Int64 => {
-                downcast_and_compute!(PrimitiveArray<Int64Type>, Millisecond)
-            }
-            _ => {
-                unreachable!()
-            }
-        }
     }
 }
 
@@ -740,11 +540,12 @@ mod tests {
         let operator = create_object_store(dir.path().to_str().unwrap());
 
         let projected_schema = Arc::new(ProjectedSchema::new(schema, Some(vec![1])).unwrap());
+        let user_schema = projected_schema.projected_user_schema().clone();
         let reader = ParquetReader::new(
             sst_file_handle,
             operator,
             projected_schema,
-            Predicate::empty(),
+            Predicate::empty(user_schema),
             TimestampRange::min_to_max(),
         );
 
@@ -826,11 +627,12 @@ mod tests {
         let operator = create_object_store(dir.path().to_str().unwrap());
 
         let projected_schema = Arc::new(ProjectedSchema::new(schema, Some(vec![1])).unwrap());
+        let user_schema = projected_schema.projected_user_schema().clone();
         let reader = ParquetReader::new(
             file_handle,
             operator,
             projected_schema,
-            Predicate::empty(),
+            Predicate::empty(user_schema),
             TimestampRange::min_to_max(),
         );
 
@@ -854,8 +656,14 @@ mod tests {
         range: TimestampRange,
         expect: Vec<i64>,
     ) {
-        let reader =
-            ParquetReader::new(file_handle, object_store, schema, Predicate::empty(), range);
+        let store_schema = schema.schema_to_read().clone();
+        let reader = ParquetReader::new(
+            file_handle,
+            object_store,
+            schema,
+            Predicate::empty(store_schema.schema().clone()),
+            range,
+        );
         let mut stream = reader.chunk_stream().await.unwrap();
         let result = stream.next_batch().await;
 
@@ -981,16 +789,6 @@ mod tests {
         .await;
     }
 
-    fn check_unit_lossy(range_unit: TimeUnit, col_unit: TimeUnit, expect: bool) {
-        assert_eq!(
-            expect,
-            time_unit_lossy(
-                &TimestampRange::with_unit(0, 1, range_unit).unwrap(),
-                col_unit
-            )
-        )
-    }
-
     #[tokio::test]
     async fn test_write_empty_file() {
         common_telemetry::init_default_ut_logging();
@@ -1013,29 +811,5 @@ mod tests {
         assert!(sst_info_opt.is_none());
         // The file should not exist when no row has been written.
         assert!(!object_store.is_exist(sst_file_name).await.unwrap());
-    }
-
-    #[test]
-    fn test_time_unit_lossy() {
-        // converting a range with unit second to millisecond will not cause rounding error
-        check_unit_lossy(TimeUnit::Second, TimeUnit::Second, false);
-        check_unit_lossy(TimeUnit::Second, TimeUnit::Millisecond, false);
-        check_unit_lossy(TimeUnit::Second, TimeUnit::Microsecond, false);
-        check_unit_lossy(TimeUnit::Second, TimeUnit::Nanosecond, false);
-
-        check_unit_lossy(TimeUnit::Millisecond, TimeUnit::Second, true);
-        check_unit_lossy(TimeUnit::Millisecond, TimeUnit::Millisecond, false);
-        check_unit_lossy(TimeUnit::Millisecond, TimeUnit::Microsecond, false);
-        check_unit_lossy(TimeUnit::Millisecond, TimeUnit::Nanosecond, false);
-
-        check_unit_lossy(TimeUnit::Microsecond, TimeUnit::Second, true);
-        check_unit_lossy(TimeUnit::Microsecond, TimeUnit::Millisecond, true);
-        check_unit_lossy(TimeUnit::Microsecond, TimeUnit::Microsecond, false);
-        check_unit_lossy(TimeUnit::Microsecond, TimeUnit::Nanosecond, false);
-
-        check_unit_lossy(TimeUnit::Nanosecond, TimeUnit::Second, true);
-        check_unit_lossy(TimeUnit::Nanosecond, TimeUnit::Millisecond, true);
-        check_unit_lossy(TimeUnit::Nanosecond, TimeUnit::Microsecond, true);
-        check_unit_lossy(TimeUnit::Nanosecond, TimeUnit::Nanosecond, false);
     }
 }
