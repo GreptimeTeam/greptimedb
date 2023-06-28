@@ -34,7 +34,7 @@ use table::predicate::Predicate;
 use crate::error;
 use crate::schema::StoreSchema;
 
-/// Builds time range row filter.
+/// Builds row filters according to predicates.
 pub(crate) fn build_row_filter(
     time_range: TimestampRange,
     predicate: &Predicate,

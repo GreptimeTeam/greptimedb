@@ -282,7 +282,6 @@ impl ParquetReader {
             .with_projection(projection_mask.clone())
             .with_row_groups(pruned_row_groups);
 
-        // if time range row filter is present, we can push down the filter to reduce rows to scan.
         if let Some(row_filter) = build_row_filter(
             self.time_range,
             &self.predicate,

@@ -46,7 +46,7 @@ pub struct Predicate {
 impl Predicate {
     /// Creates a new `Predicate` by converting logical exprs to physical exprs that can be
     /// evaluated against record batches.
-    /// Returns error when failed to converting exprs.
+    /// Returns error when failed to convert exprs.
     pub fn try_new(exprs: Vec<Expr>, schema: SchemaRef) -> error::Result<Self> {
         let arrow_schema = schema.arrow_schema();
         let df_schema = arrow_schema
@@ -54,7 +54,9 @@ impl Predicate {
             .to_dfschema_ref()
             .context(error::DatafusionSnafu)?;
 
-        // `execution_props` provides variables required by evaluation.
+        // TODO(hl): `execution_props` provides variables required by evaluation.
+        // we may reuse the `execution_props` from `SessionState` once we support
+        // registering variables.
         let execution_props = &ExecutionProps::new();
 
         let physical_exprs = exprs

@@ -62,8 +62,11 @@ fn build_time_range_filter(
     ts_col_name: &str,
     ts_col_unit: TimeUnit,
 ) -> Option<Expr> {
+    debug_assert!(low_sec <= high_sec);
     let ts_col = DfExpr::Column(datafusion_common::Column::from_name(ts_col_name));
 
+    // Converting seconds to whatever unit won't lose precision.
+    // Here only handles overflow.
     let low_ts = common_time::Timestamp::new_second(low_sec)
         .convert_to(ts_col_unit)
         .map(|ts| ts.value());
@@ -523,7 +526,6 @@ mod tests {
     #[test]
     fn test_build_time_range_filter() {
         assert!(build_time_range_filter(i64::MIN, i64::MAX, "ts", TimeUnit::Nanosecond).is_none());
-        let expr = build_time_range_filter(i64::MIN, 1, "ts", TimeUnit::Nanosecond).unwrap();
 
         assert_eq!(
             Expr::from(datafusion_expr::binary_expr(
@@ -534,7 +536,21 @@ mod tests {
                     Some(TimeUnit::Second.factor() as i64 / TimeUnit::Nanosecond.factor() as i64)
                 ))
             )),
-            expr
+            build_time_range_filter(i64::MIN, 1, "ts", TimeUnit::Nanosecond).unwrap()
+        );
+
+        assert_eq!(
+            Expr::from(datafusion_expr::binary_expr(
+                datafusion_expr::col("ts"),
+                Operator::GtEq,
+                datafusion_expr::lit(timestamp_to_scalar_value(
+                    TimeUnit::Nanosecond,
+                    Some(
+                        2 * TimeUnit::Second.factor() as i64 / TimeUnit::Nanosecond.factor() as i64
+                    )
+                ))
+            )),
+            build_time_range_filter(2, i64::MAX, "ts", TimeUnit::Nanosecond).unwrap()
         );
     }
 }
