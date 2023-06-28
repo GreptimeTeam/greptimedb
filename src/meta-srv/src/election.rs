@@ -23,7 +23,7 @@ use crate::error::Result;
 
 pub const LEASE_SECS: i64 = 5;
 // In a lease, there are two opportunities for renewal.
-pub const KEEP_ALIVE_PERIOD_SECS: u64 = LEASE_SECS as u64 * 2 / 5;
+pub const KEEP_ALIVE_PERIOD_SECS: u64 = LEASE_SECS as u64 / 2;
 pub const ELECTION_KEY: &str = "__meta_srv_election";
 
 #[derive(Clone)]
