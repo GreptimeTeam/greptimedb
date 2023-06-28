@@ -28,7 +28,9 @@ use common_time::util;
 use metrics::{decrement_gauge, increment_gauge};
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
-use store_api::manifest::{self, Manifest, ManifestVersion, MetaActionIterator};
+use store_api::manifest::{
+    self, Manifest, ManifestLogStorage, ManifestVersion, MetaActionIterator,
+};
 use store_api::storage::{
     AlterRequest, CloseContext, FlushContext, FlushReason, OpenOptions, ReadContext, Region,
     RegionId, SequenceNumber, WriteContext, WriteResponse,
@@ -481,6 +483,11 @@ impl<S: LogStore> RegionImpl<S> {
                         let _ = recovered_metadata
                             .insert(c.committed_sequence, (manifest_version, c.metadata));
                         version = Some(v);
+                    }
+                    (RegionMetaAction::Remove(_r), Some(v)) => {
+                        let _ = v.ssts().mark_all_files_deleted();
+                        manifest.manifest_store().delete_all().await?;
+                        return Ok((None, recovered_metadata));
                     }
                     (action, None) => {
                         actions.push((manifest_version, action));

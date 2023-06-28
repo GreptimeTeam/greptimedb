@@ -194,7 +194,7 @@ impl Region for MockRegion {
     }
 
     async fn drop_region(&self) -> Result<()> {
-        Ok(())
+        unimplemented!()
     }
 
     fn disk_usage_bytes(&self) -> u64 {

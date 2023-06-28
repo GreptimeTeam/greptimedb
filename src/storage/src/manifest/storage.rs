@@ -322,21 +322,35 @@ impl ManifestLogStorage for ManifestObjectStore {
     }
 
     async fn delete_all(&self) -> Result<()> {
-        let mut entries: Vec<(ManifestVersion, Entry)> = self
-            .get_paths(|entry| {
-                let file_name = entry.name();
-                if is_delta_file(file_name) {
-                    let version = file_version(file_name);
-                    return Some((version, entry));
+        let entries: Vec<Entry> = self.get_paths(Some).await?;
+
+        // Before invoking `delete_all()`, it is crucial to ensure that there exists at least one delta file that contains a `RemoveAction`.
+        let largest_id = entries
+            .iter()
+            .filter_map(|e| {
+                let name = e.name();
+                if is_delta_file(name) {
+                    return Some(file_version(name));
                 }
                 None
             })
-            .await?;
+            .max()
+            .unwrap();
 
-        entries.sort_unstable_by(|(v1, _), (v2, _)| v1.cmp(v2));
-        let paths: Vec<_> = entries.iter().map(|e| e.1.path().to_string()).collect();
+        // Filter out the latest delta file.
+        let paths = entries
+            .iter()
+            .filter(|e| {
+                let name = e.name();
+                if is_delta_file(name) && file_version(name) == largest_id {
+                    return false;
+                }
+                true
+            })
+            .map(|e| e.path().to_string())
+            .collect();
 
-        // Delelte logs in order of verseion.
+        // Delete all files except the latest delta file.
         self.object_store
             .remove(paths)
             .await
@@ -344,14 +358,13 @@ impl ManifestLogStorage for ManifestObjectStore {
                 path: self.path.clone(),
             })?;
 
-        // Delete checkpoints and the manifest directory.
-        let _ = self
-            .object_store
+        // Delete the latest delta file and the manifest directory.
+        self.object_store
             .remove_all(&self.path)
             .await
             .with_context(|_| DeleteObjectSnafu {
                 path: self.path.clone(),
-            });
+            })?;
         Ok(())
     }
 
