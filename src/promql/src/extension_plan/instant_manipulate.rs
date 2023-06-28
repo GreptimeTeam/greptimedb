@@ -398,14 +398,12 @@ impl InstantManipulateStream {
                 } else {
                     take_indices.push(None);
                 }
+            } else if let Some(field_column) = &field_column && field_column.value(cursor).is_nan() {
+                // if the newest value is NaN, it means the value is stale, so we should not use it
+                take_indices.push(None);
             } else {
-                if let Some(field_column) = &field_column && field_column.value(cursor).is_nan() {
-                    // if the newest value is NaN, it means the value is stale, so we should not use it
-                    take_indices.push(None);
-                } else {
-                    // use this point
-                    take_indices.push(Some(cursor as u64));
-                }
+                // use this point
+                take_indices.push(Some(cursor as u64));
             }
         }
 
