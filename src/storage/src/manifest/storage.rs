@@ -321,28 +321,15 @@ impl ManifestLogStorage for ManifestObjectStore {
         Ok(ret)
     }
 
-    async fn delete_all(&self) -> Result<()> {
+    async fn delete_all(&self, remove_action_manifest: ManifestVersion) -> Result<()> {
         let entries: Vec<Entry> = self.get_paths(Some).await?;
-
-        // Before invoking `delete_all()`, it is crucial to ensure that there exists at least one delta file that contains a `RemoveAction`.
-        let largest_id = entries
-            .iter()
-            .filter_map(|e| {
-                let name = e.name();
-                if is_delta_file(name) {
-                    return Some(file_version(name));
-                }
-                None
-            })
-            .max()
-            .unwrap();
 
         // Filter out the latest delta file.
         let paths: Vec<_> = entries
             .iter()
             .filter(|e| {
                 let name = e.name();
-                if is_delta_file(name) && file_version(name) == largest_id {
+                if is_delta_file(name) && file_version(name) == remove_action_manifest {
                     return false;
                 }
                 true

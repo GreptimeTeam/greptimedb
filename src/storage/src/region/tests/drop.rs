@@ -16,13 +16,12 @@
 
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
 
 use common_telemetry::info;
 use common_test_util::temp_dir::create_temp_dir;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use store_api::manifest::{Manifest, MetaAction};
-use store_api::storage::{FlushContext, Region, OpenOptions};
+use store_api::storage::{FlushContext, OpenOptions, Region};
 
 use crate::config::EngineConfig;
 use crate::engine;
@@ -113,32 +112,27 @@ async fn test_drop_basic() {
         store_dir,
         engine::region_manifest_dir("", REGION_NAME)
     );
-    {
-        let flush_switch = Arc::new(FlushSwitch::default());
-        let mut tester = DropTester::new(store_dir, flush_switch.clone()).await;
+    let flush_switch = Arc::new(FlushSwitch::default());
+    let mut tester = DropTester::new(store_dir, flush_switch.clone()).await;
 
-        let data = [(1000, Some(100))];
+    let data = [(1000, Some(100))];
 
-        // Put one element so we have content to flush.
-        tester.put(&data).await;
+    // Put one element so we have content to flush.
+    tester.put(&data).await;
 
-        // Manually trigger flush.
-        tester.flush().await;
+    // Manually trigger flush.
+    tester.flush().await;
 
-        assert!(has_parquet_file(&sst_dir));
+    assert!(has_parquet_file(&sst_dir));
 
-        tester.base().checkpoint_manifest().await;
-        let manifest_files = get_all_files(&manifest_dir);
-        info!("manifest_files: {:?}", manifest_files);
+    tester.base().checkpoint_manifest().await;
+    let manifest_files = get_all_files(&manifest_dir);
+    info!("manifest_files: {:?}", manifest_files);
 
-        tester.base().region.drop_region().await.unwrap();
-        tester.close().await;
-    }
+    tester.base().region.drop_region().await.unwrap();
+    tester.close().await;
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(!Path::new(&manifest_dir).exists());
-
-    info!("sst_dir = {:?}, has_parquet_file = {:?}", get_all_files(&sst_dir), has_parquet_file(&sst_dir));
 }
 
 #[tokio::test]
@@ -181,15 +175,18 @@ async fn test_drop_reopen() {
     // Reopen the region.
     let store_config = config_util::new_store_config(
         REGION_NAME,
-        &store_dir,
+        store_dir,
         EngineConfig {
             max_files_in_l0: usize::MAX,
             ..Default::default()
         },
     )
     .await;
+
     let opts = OpenOptions::default();
-    let region = RegionImpl::open(REGION_NAME.to_string(), store_config, &opts).await.unwrap();
+    let region = RegionImpl::open(REGION_NAME.to_string(), store_config, &opts)
+        .await
+        .unwrap();
     assert!(region.is_none());
     assert!(!Path::new(&manifest_dir).exists());
 }

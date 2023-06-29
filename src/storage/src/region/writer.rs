@@ -318,7 +318,7 @@ impl RegionWriter {
             action_list
         );
 
-        let _ = drop_ctx.manifest.update(action_list).await?;
+        let remove_action_version = drop_ctx.manifest.update(action_list).await?;
 
         // Mark all data obsolete and delete the namespace in the WAL
         drop_ctx.wal.obsolete(committed_sequence).await?;
@@ -337,7 +337,11 @@ impl RegionWriter {
             files
         );
 
-        drop_ctx.manifest.manifest_store().delete_all().await?;
+        drop_ctx
+            .manifest
+            .manifest_store()
+            .delete_all(remove_action_version)
+            .await?;
         Ok(())
     }
 

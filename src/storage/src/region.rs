@@ -484,9 +484,20 @@ impl<S: LogStore> RegionImpl<S> {
                             .insert(c.committed_sequence, (manifest_version, c.metadata));
                         version = Some(v);
                     }
-                    (RegionMetaAction::Remove(_r), Some(v)) => {
-                        let _ = v.ssts().mark_all_files_deleted();
-                        manifest.manifest_store().delete_all().await?;
+                    (RegionMetaAction::Remove(r), Some(v)) => {
+                        manifest.stop().await?;
+
+                        let files = v.ssts().mark_all_files_deleted();
+                        logging::info!(
+                            "Try to remove all SSTs, region: {}, files: {:?}",
+                            r.region_id,
+                            files
+                        );
+
+                        manifest
+                            .manifest_store()
+                            .delete_all(v.manifest_version())
+                            .await?;
                         return Ok((None, recovered_metadata));
                     }
                     (action, None) => {
