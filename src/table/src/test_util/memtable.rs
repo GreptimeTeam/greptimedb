@@ -18,8 +18,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use common_error::prelude::BoxedError;
-use common_query::physical_plan::PhysicalPlanRef;
-use common_query::prelude::Expr;
 use common_recordbatch::error::Result as RecordBatchResult;
 use common_recordbatch::{RecordBatch, RecordBatchStream, SendableRecordBatchStream};
 use datatypes::prelude::*;
@@ -34,7 +32,6 @@ use crate::error::{Result, SchemaConversionSnafu, TableProjectionSnafu, TablesRe
 use crate::metadata::{
     TableId, TableInfoBuilder, TableInfoRef, TableMetaBuilder, TableType, TableVersion,
 };
-use crate::table::scan::StreamScanAdapter;
 use crate::{ColumnStatistics, Table, TableStatistics};
 
 #[derive(Debug, Clone)]
@@ -219,7 +216,6 @@ impl Stream for MemtableStream {
 #[cfg(test)]
 mod test {
     use common_recordbatch::util;
-    use datafusion::prelude::SessionContext;
     use datatypes::prelude::*;
     use datatypes::schema::ColumnSchema;
     use datatypes::vectors::{Helper, Int32Vector, StringVector};
@@ -228,7 +224,6 @@ mod test {
 
     #[tokio::test]
     async fn test_scan_with_projection() {
-        let ctx = SessionContext::new();
         let table = build_testing_table();
 
         let scan_req = ScanRequest {
@@ -252,7 +247,6 @@ mod test {
 
     #[tokio::test]
     async fn test_scan_with_limit() {
-        let ctx = SessionContext::new();
         let table = build_testing_table();
 
         let scan_req = ScanRequest {

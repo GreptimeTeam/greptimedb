@@ -17,7 +17,6 @@ use common_datasource::file_format::csv::stream_to_csv;
 use common_datasource::file_format::json::stream_to_json;
 use common_datasource::file_format::Format;
 use common_datasource::object_store::{build_backend, parse_url};
-use common_query::physical_plan::SessionContext;
 use common_recordbatch::adapter::DfRecordBatchStreamAdapter;
 use common_recordbatch::SendableRecordBatchStream;
 use object_store::ObjectStore;

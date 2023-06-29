@@ -20,8 +20,6 @@ use std::sync::{Arc, Weak};
 
 use async_trait::async_trait;
 use common_error::prelude::BoxedError;
-use common_query::physical_plan::PhysicalPlanRef;
-use common_query::prelude::Expr;
 use common_recordbatch::{RecordBatchStreamAdaptor, SendableRecordBatchStream};
 use datatypes::schema::SchemaRef;
 use futures_util::StreamExt;

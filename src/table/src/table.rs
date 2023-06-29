@@ -21,7 +21,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use common_query::logical_plan::Expr;
-use common_query::physical_plan::PhysicalPlanRef;
 use common_recordbatch::SendableRecordBatchStream;
 use datatypes::schema::SchemaRef;
 use store_api::storage::{RegionNumber, ScanRequest};

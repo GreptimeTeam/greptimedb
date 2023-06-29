@@ -19,8 +19,6 @@ use async_trait::async_trait;
 use common_datasource::file_format::Format;
 use common_datasource::object_store::build_backend;
 use common_error::prelude::BoxedError;
-use common_query::physical_plan::PhysicalPlanRef;
-use common_query::prelude::Expr;
 use common_recordbatch::SendableRecordBatchStream;
 use datatypes::schema::SchemaRef;
 use object_store::ObjectStore;
@@ -37,7 +35,7 @@ use crate::manifest::immutable::{
     read_table_manifest, write_table_manifest, ImmutableMetadata, INIT_META_VERSION,
 };
 use crate::manifest::table_manifest_dir;
-use crate::table::format::{create_physical_plan, CreateScanPlanContext, ScanPlanConfig};
+use crate::table::format::{CreateScanPlanContext, ScanPlanConfig};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]

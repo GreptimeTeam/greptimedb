@@ -20,8 +20,6 @@ use common_catalog::consts::{
     DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME, MITO_ENGINE,
     SYSTEM_CATALOG_NAME, SYSTEM_CATALOG_TABLE_ID, SYSTEM_CATALOG_TABLE_NAME,
 };
-use common_query::logical_plan::Expr;
-use common_query::physical_plan::{PhysicalPlanRef, SessionContext};
 use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::debug;
 use common_time::util;

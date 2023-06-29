@@ -24,7 +24,6 @@ use async_trait::async_trait;
 use common_datasource::compression::CompressionType;
 use common_error::ext::BoxedError;
 use common_query::logical_plan::Expr;
-use common_query::physical_plan::PhysicalPlanRef;
 use common_recordbatch::error::ExternalSnafu;
 use common_recordbatch::{RecordBatch, RecordBatchStreamAdaptor, SendableRecordBatchStream};
 use common_telemetry::{info, logging};
@@ -46,7 +45,6 @@ use table::metadata::{
 use table::requests::{
     AddColumnRequest, AlterKind, AlterTableRequest, DeleteRequest, InsertRequest,
 };
-use table::table::scan::StreamScanAdapter;
 use table::table::{AlterContext, Table};
 use table::{error as table_error, RegionStat};
 use tokio::sync::Mutex;

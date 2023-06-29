@@ -18,7 +18,6 @@ use std::sync::Arc;
 use catalog::local::new_memory_catalog_manager;
 use catalog::RegisterTableRequest;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-use common_query::physical_plan::PhysicalPlanRef;
 use common_query::prelude::Expr;
 use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
 use common_time::range::TimestampRange;

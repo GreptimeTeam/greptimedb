@@ -15,7 +15,6 @@
 //! Tests for mito table engine.
 
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-use common_query::physical_plan::SessionContext;
 use common_recordbatch::util;
 use common_test_util::temp_dir::TempDir;
 use datatypes::prelude::ConcreteDataType;
@@ -125,7 +124,6 @@ async fn test_column_default_constraint() {
     let insert_req = new_insert_request(table_name.to_string(), columns_values);
     assert_eq!(2, table.insert(insert_req).await.unwrap());
 
-    let session_ctx = SessionContext::new();
     let stream = table.scan_to_stream(ScanRequest::default()).await.unwrap();
     let batches = util::collect(stream).await.unwrap();
     assert_eq!(1, batches.len());
@@ -156,7 +154,6 @@ async fn test_insert_with_column_default_constraint() {
     let insert_req = new_insert_request(table_name.to_string(), columns_values);
     assert_eq!(2, table.insert(insert_req).await.unwrap());
 
-    let session_ctx = SessionContext::new();
     let stream = table.scan_to_stream(ScanRequest::default()).await.unwrap();
     let batches = util::collect(stream).await.unwrap();
     assert_eq!(1, batches.len());
@@ -255,7 +252,6 @@ async fn test_create_table_insert_scan() {
     let insert_req = new_insert_request("demo".to_string(), columns_values);
     assert_eq!(2, table.insert(insert_req).await.unwrap());
 
-    let session_ctx = SessionContext::new();
     let stream = table.scan_to_stream(ScanRequest::default()).await.unwrap();
     let batches = util::collect(stream).await.unwrap();
     assert_eq!(1, batches.len());
@@ -347,7 +343,6 @@ async fn test_create_table_scan_batches() {
     let insert_req = new_insert_request("demo".to_string(), columns_values);
     assert_eq!(test_batch_size, table.insert(insert_req).await.unwrap());
 
-    let session_ctx = SessionContext::new();
     let stream = table.scan_to_stream(ScanRequest::default()).await.unwrap();
     let batches = util::collect(stream).await.unwrap();
     let mut total = 0;
@@ -858,7 +853,6 @@ async fn test_table_delete_rows() {
     let del_req = DeleteRequest { key_column_values };
     let _ = table.delete(del_req).await.unwrap();
 
-    let session_ctx = SessionContext::new();
     let stream = table.scan_to_stream(ScanRequest::default()).await.unwrap();
     let batches = util::collect_batches(stream).await.unwrap();
 
