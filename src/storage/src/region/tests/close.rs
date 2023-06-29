@@ -38,7 +38,7 @@ struct CloseTester {
     base: Option<FileTesterBase>,
 }
 
-/// Create a new region for flush test
+/// Create a new region for close test
 async fn create_region_for_close(
     store_dir: &str,
     flush_strategy: FlushStrategyRef,

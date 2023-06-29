@@ -338,7 +338,7 @@ impl ManifestLogStorage for ManifestObjectStore {
             .unwrap();
 
         // Filter out the latest delta file.
-        let paths = entries
+        let paths: Vec<_> = entries
             .iter()
             .filter(|e| {
                 let name = e.name();
@@ -349,6 +349,13 @@ impl ManifestLogStorage for ManifestObjectStore {
             })
             .map(|e| e.path().to_string())
             .collect();
+
+        logging::debug!(
+            "Deleting {} from manifest storage path {} paths: {:?}",
+            paths.len(),
+            self.path,
+            paths,
+        );
 
         // Delete all files except the latest delta file.
         self.object_store

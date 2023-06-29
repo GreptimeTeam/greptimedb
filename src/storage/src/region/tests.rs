@@ -60,12 +60,14 @@ mod alter;
 mod basic;
 mod close;
 mod compact;
+mod drop;
 mod flush;
 mod projection;
 
 /// Create metadata of a region with schema: (timestamp, v0).
 pub fn new_metadata(region_name: &str) -> RegionMetadata {
     let desc = RegionDescBuilder::new(region_name)
+        .id(123)
         .push_field_column(("v0", LogicalTypeId::String, true))
         .build();
     desc.try_into().unwrap()
