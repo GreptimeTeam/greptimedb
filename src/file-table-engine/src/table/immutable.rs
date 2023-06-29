@@ -76,28 +76,6 @@ impl Table for ImmutableFileTable {
         self.table_info().table_type
     }
 
-    async fn scan(
-        &self,
-        projection: Option<&Vec<usize>>,
-        filters: &[Expr],
-        limit: Option<usize>,
-    ) -> TableResult<PhysicalPlanRef> {
-        create_physical_plan(
-            &self.format,
-            &CreateScanPlanContext::default(),
-            &ScanPlanConfig {
-                file_schema: self.schema(),
-                files: &self.files,
-                projection,
-                filters,
-                limit,
-                store: self.object_store.clone(),
-            },
-        )
-        .map_err(BoxedError::new)
-        .context(table_error::TableOperationSnafu)
-    }
-
     async fn scan_to_stream(&self, request: ScanRequest) -> TableResult<SendableRecordBatchStream> {
         create_stream(
             &self.format,

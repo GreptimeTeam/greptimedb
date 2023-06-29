@@ -17,14 +17,10 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, NUMBERS_TABLE_ID};
-use common_query::physical_plan::PhysicalPlanRef;
 use common_recordbatch::error::Result as RecordBatchResult;
 use common_recordbatch::{RecordBatch, RecordBatchStream, SendableRecordBatchStream};
-use datafusion::arrow::compute::SortOptions;
 use datafusion::arrow::record_batch::RecordBatch as DfRecordBatch;
 use datafusion_common::from_slice::FromSlice;
-use datafusion_physical_expr::expressions::Column;
-use datafusion_physical_expr::PhysicalSortRequirement;
 use datatypes::arrow::array::UInt32Array;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
@@ -34,8 +30,7 @@ use store_api::storage::{RegionNumber, ScanRequest};
 
 use crate::error::Result;
 use crate::metadata::{TableId, TableInfoBuilder, TableInfoRef, TableMetaBuilder, TableType};
-use crate::table::scan::StreamScanAdapter;
-use crate::table::{Expr, Table};
+use crate::table::Table;
 
 const NUMBER_COLUMN: &str = "number";
 
@@ -113,30 +108,6 @@ impl Table for NumbersTable {
                 .build()
                 .unwrap(),
         )
-    }
-
-    async fn scan(
-        &self,
-        _projection: Option<&Vec<usize>>,
-        _filters: &[Expr],
-        limit: Option<usize>,
-    ) -> Result<PhysicalPlanRef> {
-        let stream = Box::pin(NumbersStream {
-            limit: limit.unwrap_or(100) as u32,
-            schema: self.schema.clone(),
-            already_run: false,
-        });
-        let output_ordering = vec![PhysicalSortRequirement::new(
-            Arc::new(Column::new(NUMBER_COLUMN, 0)),
-            Some(SortOptions {
-                descending: false,
-                nulls_first: false,
-            }),
-        )
-        .into()];
-        Ok(Arc::new(
-            StreamScanAdapter::new(stream).with_output_ordering(output_ordering),
-        ))
     }
 
     async fn scan_to_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream> {

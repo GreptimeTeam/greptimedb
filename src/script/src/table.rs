@@ -27,7 +27,6 @@ use common_query::Output;
 use common_recordbatch::{util as record_util, RecordBatch};
 use common_telemetry::logging;
 use common_time::util;
-use datafusion::prelude::SessionContext;
 use datatypes::prelude::{ConcreteDataType, ScalarVector};
 use datatypes::schema::{ColumnSchema, RawSchema};
 use datatypes::vectors::{StringVector, TimestampMillisecondVector, Vector, VectorRef};
@@ -35,6 +34,7 @@ use query::parser::QueryLanguageParser;
 use query::QueryEngineRef;
 use session::context::QueryContext;
 use snafu::{ensure, OptionExt, ResultExt};
+use store_api::storage::ScanRequest;
 use table::requests::{CreateTableRequest, InsertRequest, TableOptions};
 use table::TableRef;
 
@@ -78,14 +78,9 @@ impl ScriptsTable {
         table: TableRef,
         query_engine: QueryEngineRef,
     ) -> catalog::error::Result<()> {
-        let scan_stream = table
-            .scan(None, &[], None)
+        let rbs = table
+            .scan_to_stream(ScanRequest::default())
             .await
-            .map_err(BoxedError::new)
-            .context(CompileScriptInternalSnafu)?;
-        let ctx = SessionContext::new();
-        let rbs = scan_stream
-            .execute(0, ctx.task_ctx())
             .map_err(BoxedError::new)
             .context(CompileScriptInternalSnafu)?;
         let records = record_util::collect(rbs)

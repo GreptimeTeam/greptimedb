@@ -27,6 +27,7 @@ mod test {
     use common_query::{DfPhysicalPlan, Output};
     use common_recordbatch::adapter::RecordBatchStreamAdapter;
     use common_recordbatch::RecordBatches;
+    use datafusion::datasource::TableProvider;
     use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
     use datafusion::physical_plan::expressions::{col as physical_col, PhysicalSortExpr};
     use datafusion::physical_plan::sorts::sort::SortExec;
@@ -42,168 +43,10 @@ mod test {
     use itertools::Itertools;
     use servers::query_handler::sql::SqlQueryHandler;
     use session::context::QueryContext;
-    use store_api::storage::RegionNumber;
+    use store_api::storage::{RegionNumber, ScanRequest};
     use table::metadata::{TableInfoBuilder, TableMetaBuilder};
+    use table::table::adapter::DfTableProviderAdapter;
     use table::TableRef;
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_dist_table_scan() {
-        let table = Arc::new(new_dist_table("test_dist_table_scan").await);
-        // should scan all regions
-        // select a, row_id from numbers
-        let projection = Some(vec![1, 2]);
-        let filters = vec![];
-        let expected_output = vec![
-            "+-----+--------+",
-            "| a   | row_id |",
-            "+-----+--------+",
-            "| 0   | 1      |",
-            "| 1   | 2      |",
-            "| 2   | 3      |",
-            "| 3   | 4      |",
-            "| 4   | 5      |",
-            "| 10  | 1      |",
-            "| 11  | 2      |",
-            "| 12  | 3      |",
-            "| 13  | 4      |",
-            "| 14  | 5      |",
-            "| 30  | 1      |",
-            "| 31  | 2      |",
-            "| 32  | 3      |",
-            "| 33  | 4      |",
-            "| 34  | 5      |",
-            "| 100 | 1      |",
-            "| 101 | 2      |",
-            "| 102 | 3      |",
-            "| 103 | 4      |",
-            "| 104 | 5      |",
-            "+-----+--------+",
-        ];
-        exec_table_scan(table.clone(), projection, filters, 4, expected_output).await;
-
-        // should scan only region 1
-        // select a, row_id from numbers where a < 10
-        let projection = Some(vec![1, 2]);
-        let filters = vec![binary_expr(col("a"), Operator::Lt, lit(10)).into()];
-        let expected_output = vec![
-            "+---+--------+",
-            "| a | row_id |",
-            "+---+--------+",
-            "| 0 | 1      |",
-            "| 1 | 2      |",
-            "| 2 | 3      |",
-            "| 3 | 4      |",
-            "| 4 | 5      |",
-            "+---+--------+",
-        ];
-        exec_table_scan(table.clone(), projection, filters, 1, expected_output).await;
-
-        // should scan region 1 and 2
-        // select a, row_id from numbers where a < 15
-        let projection = Some(vec![1, 2]);
-        let filters = vec![binary_expr(col("a"), Operator::Lt, lit(15)).into()];
-        let expected_output = vec![
-            "+----+--------+",
-            "| a  | row_id |",
-            "+----+--------+",
-            "| 0  | 1      |",
-            "| 1  | 2      |",
-            "| 2  | 3      |",
-            "| 3  | 4      |",
-            "| 4  | 5      |",
-            "| 10 | 1      |",
-            "| 11 | 2      |",
-            "| 12 | 3      |",
-            "| 13 | 4      |",
-            "| 14 | 5      |",
-            "+----+--------+",
-        ];
-        exec_table_scan(table.clone(), projection, filters, 2, expected_output).await;
-
-        // should scan region 2 and 3
-        // select a, row_id from numbers where a < 40 and a >= 10
-        let projection = Some(vec![1, 2]);
-        let filters = vec![and(
-            binary_expr(col("a"), Operator::Lt, lit(40)),
-            binary_expr(col("a"), Operator::GtEq, lit(10)),
-        )
-        .into()];
-        let expected_output = vec![
-            "+----+--------+",
-            "| a  | row_id |",
-            "+----+--------+",
-            "| 10 | 1      |",
-            "| 11 | 2      |",
-            "| 12 | 3      |",
-            "| 13 | 4      |",
-            "| 14 | 5      |",
-            "| 30 | 1      |",
-            "| 31 | 2      |",
-            "| 32 | 3      |",
-            "| 33 | 4      |",
-            "| 34 | 5      |",
-            "+----+--------+",
-        ];
-        exec_table_scan(table.clone(), projection, filters, 2, expected_output).await;
-
-        // should scan all regions
-        // select a, row_id from numbers where a < 1000 and row_id == 1
-        let projection = Some(vec![1, 2]);
-        let filters = vec![and(
-            binary_expr(col("a"), Operator::Lt, lit(1000)),
-            binary_expr(col("row_id"), Operator::Eq, lit(1)),
-        )
-        .into()];
-        let expected_output = vec![
-            "+-----+--------+",
-            "| a   | row_id |",
-            "+-----+--------+",
-            "| 0   | 1      |",
-            "| 10  | 1      |",
-            "| 30  | 1      |",
-            "| 100 | 1      |",
-            "+-----+--------+",
-        ];
-        exec_table_scan(table.clone(), projection, filters, 4, expected_output).await;
-    }
-
-    async fn exec_table_scan(
-        table: TableRef,
-        projection: Option<Vec<usize>>,
-        filters: Vec<Expr>,
-        expected_partitions: usize,
-        expected_output: Vec<&str>,
-    ) {
-        let expected_output = expected_output.into_iter().join("\n");
-        let table_scan = table
-            .scan(projection.as_ref(), filters.as_slice(), None)
-            .await
-            .unwrap();
-        assert_eq!(
-            table_scan.output_partitioning().partition_count(),
-            expected_partitions
-        );
-
-        let merge =
-            CoalescePartitionsExec::new(Arc::new(DfPhysicalPlanAdapter(table_scan.clone())));
-
-        let sort = SortExec::new(
-            vec![PhysicalSortExpr {
-                expr: physical_col("a", table_scan.schema().arrow_schema()).unwrap(),
-                options: SortOptions::default(),
-            }],
-            Arc::new(merge),
-        )
-        .with_fetch(None);
-        assert_eq!(sort.output_partitioning().partition_count(), 1);
-
-        let session_ctx = SessionContext::new();
-        let stream = sort.execute(0, session_ctx.task_ctx()).unwrap();
-        let stream = Box::pin(RecordBatchStreamAdapter::try_new(stream).unwrap());
-
-        let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
-        assert_eq!(recordbatches.pretty_print().unwrap(), expected_output);
-    }
 
     async fn new_dist_table(test_name: &str) -> DistTable {
         let column_schemas = vec![

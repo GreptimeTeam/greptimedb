@@ -62,18 +62,6 @@ pub trait Table: Send + Sync {
         .fail()?
     }
 
-    /// Scan the table and returns a SendableRecordBatchStream.
-    async fn scan(
-        &self,
-        projection: Option<&Vec<usize>>,
-        filters: &[Expr],
-        // limit can be used to reduce the amount scanned
-        // from the datasource as a performance optimization.
-        // If set, it contains the amount of rows needed by the `LogicalPlan`,
-        // The datasource should return *at least* this number of rows if available.
-        limit: Option<usize>,
-    ) -> Result<PhysicalPlanRef>;
-
     async fn scan_to_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream>;
 
     /// Tests whether the table provider can make use of any or all filter expressions

@@ -138,41 +138,6 @@ impl Table for MemTable {
         self.info.clone()
     }
 
-    async fn scan(
-        &self,
-        projection: Option<&Vec<usize>>,
-        _filters: &[Expr],
-        limit: Option<usize>,
-    ) -> Result<PhysicalPlanRef> {
-        let df_recordbatch = if let Some(indices) = projection {
-            self.recordbatch
-                .df_record_batch()
-                .project(indices)
-                .context(TableProjectionSnafu)?
-        } else {
-            self.recordbatch.df_record_batch().clone()
-        };
-
-        let rows = df_recordbatch.num_rows();
-        let limit = if let Some(limit) = limit {
-            limit.min(rows)
-        } else {
-            rows
-        };
-        let df_recordbatch = df_recordbatch.slice(0, limit);
-
-        let recordbatch = RecordBatch::try_from_df_record_batch(
-            Arc::new(Schema::try_from(df_recordbatch.schema()).context(SchemaConversionSnafu)?),
-            df_recordbatch,
-        )
-        .map_err(BoxedError::new)
-        .context(TablesRecordBatchSnafu)?;
-        Ok(Arc::new(StreamScanAdapter::new(Box::pin(MemtableStream {
-            schema: recordbatch.schema.clone(),
-            recordbatch: Some(recordbatch),
-        }))))
-    }
-
     async fn scan_to_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream> {
         let df_recordbatch = if let Some(indices) = request.projection {
             self.recordbatch
@@ -266,9 +231,12 @@ mod test {
         let ctx = SessionContext::new();
         let table = build_testing_table();
 
-        let scan_stream = table.scan(Some(&vec![1]), &[], None).await.unwrap();
-        let scan_stream = scan_stream.execute(0, ctx.task_ctx()).unwrap();
-        let recordbatch = util::collect(scan_stream).await.unwrap();
+        let scan_req = ScanRequest {
+            projection: Some(vec![1]),
+            ..Default::default()
+        };
+        let stream = table.scan_to_stream(scan_req).await.unwrap();
+        let recordbatch = util::collect(stream).await.unwrap();
         assert_eq!(1, recordbatch.len());
         let columns = recordbatch[0].df_record_batch().columns();
         assert_eq!(1, columns.len());
@@ -287,9 +255,12 @@ mod test {
         let ctx = SessionContext::new();
         let table = build_testing_table();
 
-        let scan_stream = table.scan(None, &[], Some(2)).await.unwrap();
-        let scan_stream = scan_stream.execute(0, ctx.task_ctx()).unwrap();
-        let recordbatch = util::collect(scan_stream).await.unwrap();
+        let scan_req = ScanRequest {
+            limit: Some(2),
+            ..Default::default()
+        };
+        let stream = table.scan_to_stream(scan_req).await.unwrap();
+        let recordbatch = util::collect(stream).await.unwrap();
         assert_eq!(1, recordbatch.len());
         let columns = recordbatch[0].df_record_batch().columns();
         assert_eq!(2, columns.len());

@@ -30,7 +30,7 @@ use storage::config::EngineConfig as StorageEngineConfig;
 use storage::region::RegionImpl;
 use storage::EngineImpl;
 use store_api::manifest::Manifest;
-use store_api::storage::ReadContext;
+use store_api::storage::{ReadContext, ScanRequest};
 use table::engine::region_id;
 use table::metadata::TableType;
 use table::requests::{
@@ -126,8 +126,7 @@ async fn test_column_default_constraint() {
     assert_eq!(2, table.insert(insert_req).await.unwrap());
 
     let session_ctx = SessionContext::new();
-    let stream = table.scan(None, &[], None).await.unwrap();
-    let stream = stream.execute(0, session_ctx.task_ctx()).unwrap();
+    let stream = table.scan_to_stream(ScanRequest::default()).await.unwrap();
     let batches = util::collect(stream).await.unwrap();
     assert_eq!(1, batches.len());
 
@@ -158,8 +157,7 @@ async fn test_insert_with_column_default_constraint() {
     assert_eq!(2, table.insert(insert_req).await.unwrap());
 
     let session_ctx = SessionContext::new();
-    let stream = table.scan(None, &[], None).await.unwrap();
-    let stream = stream.execute(0, session_ctx.task_ctx()).unwrap();
+    let stream = table.scan_to_stream(ScanRequest::default()).await.unwrap();
     let batches = util::collect(stream).await.unwrap();
     assert_eq!(1, batches.len());
 
@@ -258,8 +256,7 @@ async fn test_create_table_insert_scan() {
     assert_eq!(2, table.insert(insert_req).await.unwrap());
 
     let session_ctx = SessionContext::new();
-    let stream = table.scan(None, &[], None).await.unwrap();
-    let stream = stream.execute(0, session_ctx.task_ctx()).unwrap();
+    let stream = table.scan_to_stream(ScanRequest::default()).await.unwrap();
     let batches = util::collect(stream).await.unwrap();
     assert_eq!(1, batches.len());
     assert_eq!(batches[0].num_columns(), 4);
@@ -279,8 +276,11 @@ async fn test_create_table_insert_scan() {
     assert_eq!(tss, *batch.column(3));
 
     // Scan with projections: cpu and memory
-    let stream = table.scan(Some(&vec![1, 2]), &[], None).await.unwrap();
-    let stream = stream.execute(0, session_ctx.task_ctx()).unwrap();
+    let scan_req = ScanRequest {
+        projection: Some(vec![1, 2]),
+        ..Default::default()
+    };
+    let stream = table.scan_to_stream(scan_req).await.unwrap();
     let batches = util::collect(stream).await.unwrap();
     assert_eq!(1, batches.len());
     assert_eq!(batches[0].num_columns(), 2);
@@ -297,8 +297,11 @@ async fn test_create_table_insert_scan() {
     assert_eq!(memories, *batch.column(1));
 
     // Scan with projections: only ts
-    let stream = table.scan(Some(&vec![3]), &[], None).await.unwrap();
-    let stream = stream.execute(0, session_ctx.task_ctx()).unwrap();
+    let scan_req = ScanRequest {
+        projection: Some(vec![3]),
+        ..Default::default()
+    };
+    let stream = table.scan_to_stream(scan_req).await.unwrap();
     let batches = util::collect(stream).await.unwrap();
     assert_eq!(1, batches.len());
     assert_eq!(batches[0].num_columns(), 1);
@@ -345,8 +348,7 @@ async fn test_create_table_scan_batches() {
     assert_eq!(test_batch_size, table.insert(insert_req).await.unwrap());
 
     let session_ctx = SessionContext::new();
-    let stream = table.scan(None, &[], None).await.unwrap();
-    let stream = stream.execute(0, session_ctx.task_ctx()).unwrap();
+    let stream = table.scan_to_stream(ScanRequest::default()).await.unwrap();
     let batches = util::collect(stream).await.unwrap();
     let mut total = 0;
     for batch in batches {
@@ -857,8 +859,7 @@ async fn test_table_delete_rows() {
     let _ = table.delete(del_req).await.unwrap();
 
     let session_ctx = SessionContext::new();
-    let stream = table.scan(None, &[], None).await.unwrap();
-    let stream = stream.execute(0, session_ctx.task_ctx()).unwrap();
+    let stream = table.scan_to_stream(ScanRequest::default()).await.unwrap();
     let batches = util::collect_batches(stream).await.unwrap();
 
     assert_eq!(

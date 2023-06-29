@@ -104,20 +104,6 @@ impl Table for InformationTable {
         unreachable!("Should not call table_info() of InformationTable directly")
     }
 
-    /// Scan the table and returns a SendableRecordBatchStream.
-    async fn scan(
-        &self,
-        _projection: Option<&Vec<usize>>,
-        _filters: &[Expr],
-        // limit can be used to reduce the amount scanned
-        // from the datasource as a performance optimization.
-        // If set, it contains the amount of rows needed by the `LogicalPlan`,
-        // The datasource should return *at least* this number of rows if available.
-        _limit: Option<usize>,
-    ) -> TableResult<PhysicalPlanRef> {
-        unimplemented!()
-    }
-
     async fn scan_to_stream(&self, request: ScanRequest) -> TableResult<SendableRecordBatchStream> {
         let projection = request.projection;
         let projected_schema = if let Some(projection) = &projection {

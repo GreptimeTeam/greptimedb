@@ -62,16 +62,6 @@ impl Table for MemTableWrapper {
         self.inner.table_info()
     }
 
-    async fn scan(
-        &self,
-        projection: Option<&Vec<usize>>,
-        filters: &[Expr],
-        limit: Option<usize>,
-    ) -> table::Result<PhysicalPlanRef> {
-        *self.filter.write().await = filters.to_vec();
-        self.inner.scan(projection, filters, limit).await
-    }
-
     async fn scan_to_stream(
         &self,
         request: ScanRequest,

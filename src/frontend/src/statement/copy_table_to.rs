@@ -24,6 +24,7 @@ use object_store::ObjectStore;
 use snafu::ResultExt;
 use storage::sst::SstInfo;
 use storage::{ParquetWriter, Source};
+use store_api::storage::ScanRequest;
 use table::engine::TableReference;
 use table::requests::CopyTableRequest;
 
@@ -94,17 +95,17 @@ impl StatementExecutor {
             .into_iter()
             .collect::<Vec<_>>();
 
+        let scan_req = ScanRequest {
+            filters,
+            ..Default::default()
+        };
         let stream =
             table
-                .scan(None, &filters, None)
+                .scan_to_stream(scan_req)
                 .await
                 .with_context(|_| error::CopyTableSnafu {
                     table_name: table_ref.to_string(),
                 })?;
-
-        let stream = stream
-            .execute(0, SessionContext::default().task_ctx())
-            .context(error::TableScanExecSnafu)?;
 
         let (_schema, _host, path) = parse_url(&req.location).context(error::ParseUrlSnafu)?;
         let object_store =
