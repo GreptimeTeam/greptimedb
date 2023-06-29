@@ -18,8 +18,8 @@ use std::sync::Arc;
 use common_telemetry::{debug, warn};
 use common_time::timestamp::TimeUnit;
 use common_time::timestamp_millis::BucketAligned;
-use common_time::Timestamp;
 
+use crate::compaction::infer_time_bucket;
 use crate::compaction::picker::PickerContext;
 use crate::compaction::task::CompactionOutput;
 use crate::sst::{FileHandle, LevelMeta};
@@ -48,7 +48,7 @@ impl Strategy for SimpleTimeWindowStrategy {
             return (None, vec![]);
         }
         let time_window = ctx.compaction_time_window().unwrap_or_else(|| {
-            let inferred = infer_time_bucket(&files);
+            let inferred = infer_time_bucket(files.iter());
             debug!(
                 "Compaction window is not present, inferring from files: {:?}",
                 inferred
@@ -123,64 +123,14 @@ fn file_time_bucket_span(start_sec: i64, end_sec: i64, bucket_sec: i64) -> Vec<i
     res
 }
 
-/// Infers the suitable time bucket duration.
-/// Now it simply find the max and min timestamp across all SSTs in level and fit the time span
-/// into time bucket.
-fn infer_time_bucket(files: &[FileHandle]) -> i64 {
-    let mut max_ts = &Timestamp::new(i64::MIN, TimeUnit::Second);
-    let mut min_ts = &Timestamp::new(i64::MAX, TimeUnit::Second);
-
-    for f in files {
-        if let Some((start, end)) = f.time_range() {
-            min_ts = min_ts.min(start);
-            max_ts = max_ts.max(end);
-        } else {
-            // we don't expect an SST file without time range,
-            // it's either a bug or data corruption.
-            warn!("Found SST file without time range metadata: {f:?}");
-        }
-    }
-
-    // safety: Convert whatever timestamp into seconds will not cause overflow.
-    let min_sec = min_ts.convert_to(TimeUnit::Second).unwrap().value();
-    let max_sec = max_ts.convert_to(TimeUnit::Second).unwrap().value();
-
-    max_sec
-        .checked_sub(min_sec)
-        .map(fit_time_bucket) // return the max bucket on subtraction overflow.
-        .unwrap_or_else(|| *TIME_BUCKETS.last().unwrap()) // safety: TIME_BUCKETS cannot be empty.
-}
-
-/// A set of predefined time buckets.
-const TIME_BUCKETS: [i64; 7] = [
-    60 * 60,                 // one hour
-    2 * 60 * 60,             // two hours
-    12 * 60 * 60,            // twelve hours
-    24 * 60 * 60,            // one day
-    7 * 24 * 60 * 60,        // one week
-    365 * 24 * 60 * 60,      // one year
-    10 * 365 * 24 * 60 * 60, // ten years
-];
-
-/// Fits a given time span into time bucket by find the minimum bucket that can cover the span.
-/// Returns the max bucket if no such bucket can be found.
-fn fit_time_bucket(span_sec: i64) -> i64 {
-    assert!(span_sec >= 0);
-    for b in TIME_BUCKETS {
-        if b >= span_sec {
-            return b;
-        }
-    }
-    *TIME_BUCKETS.last().unwrap()
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::{HashMap, HashSet};
 
     use super::*;
-    use crate::file_purger::noop::new_noop_file_purger;
-    use crate::sst::{FileId, FileMeta};
+    use crate::compaction::tests::new_file_handle;
+    use crate::compaction::TIME_BUCKETS;
+    use crate::sst::FileId;
 
     #[test]
     fn test_time_bucket_span() {
@@ -213,48 +163,6 @@ mod tests {
                 file_time_bucket_span(i64::MIN, i64::MIN + bucket, bucket)
             );
         }
-    }
-
-    #[test]
-    fn test_time_bucket() {
-        assert_eq!(TIME_BUCKETS[0], fit_time_bucket(1));
-        assert_eq!(TIME_BUCKETS[0], fit_time_bucket(60 * 60));
-        assert_eq!(TIME_BUCKETS[1], fit_time_bucket(60 * 60 + 1));
-
-        assert_eq!(TIME_BUCKETS[2], fit_time_bucket(TIME_BUCKETS[2] - 1));
-        assert_eq!(TIME_BUCKETS[2], fit_time_bucket(TIME_BUCKETS[2]));
-        assert_eq!(TIME_BUCKETS[3], fit_time_bucket(TIME_BUCKETS[3] - 1));
-        assert_eq!(TIME_BUCKETS[6], fit_time_bucket(i64::MAX));
-    }
-
-    #[test]
-    fn test_infer_time_buckets() {
-        assert_eq!(
-            TIME_BUCKETS[0],
-            infer_time_bucket(&[
-                new_file_handle(FileId::random(), 0, TIME_BUCKETS[0] * 1000 - 1),
-                new_file_handle(FileId::random(), 1, 10_000)
-            ])
-        );
-    }
-
-    fn new_file_handle(file_id: FileId, start_ts_millis: i64, end_ts_millis: i64) -> FileHandle {
-        let file_purger = new_noop_file_purger();
-        let layer = Arc::new(crate::test_util::access_layer_util::MockAccessLayer {});
-        FileHandle::new(
-            FileMeta {
-                region_id: 0,
-                file_id,
-                time_range: Some((
-                    Timestamp::new_millisecond(start_ts_millis),
-                    Timestamp::new_millisecond(end_ts_millis),
-                )),
-                level: 0,
-                file_size: 0,
-            },
-            layer,
-            file_purger,
-        )
     }
 
     fn new_file_handles(input: &[(FileId, i64, i64)]) -> Vec<FileHandle> {
@@ -315,12 +223,12 @@ mod tests {
 
         // file with an large time range
         let file_id_array = &[file_id_a];
-        let expected = (0..(TIME_BUCKETS[4] / TIME_BUCKETS[0]))
-            .map(|b| (b * TIME_BUCKETS[0], file_id_array as _))
+        let expected = (0..(TIME_BUCKETS.get(4) / TIME_BUCKETS.get(0)))
+            .map(|b| (b * TIME_BUCKETS.get(0), file_id_array as _))
             .collect::<Vec<_>>();
         check_bucket_calculation(
-            TIME_BUCKETS[0],
-            new_file_handles(&[(file_id_a, 0, TIME_BUCKETS[4] * 1000)]),
+            TIME_BUCKETS.get(0),
+            new_file_handles(&[(file_id_a, 0, TIME_BUCKETS.get(4) * 1000)]),
             &expected,
         );
     }

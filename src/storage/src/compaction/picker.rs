@@ -36,6 +36,24 @@ pub trait Picker: Send + 'static {
     type Task: CompactionTask;
 
     fn pick(&self, req: &Self::Request) -> crate::error::Result<Option<Self::Task>>;
+
+    fn get_expired_ssts(
+        &self,
+        levels: &LevelMetasRef,
+        ttl: Option<Duration>,
+    ) -> crate::error::Result<Vec<FileHandle>> {
+        let Some(ttl) = ttl else { return Ok(vec![]); };
+
+        let expire_time = Timestamp::current_millis()
+            .sub_duration(ttl)
+            .context(TtlCalculationSnafu)?;
+
+        let mut expired_ssts = vec![];
+        for level in 0..levels.level_num() {
+            expired_ssts.extend(levels.level(level as Level).get_expired_files(&expire_time));
+        }
+        Ok(expired_ssts)
+    }
 }
 
 pub struct PickerContext {
@@ -72,24 +90,6 @@ impl<S> SimplePicker<S> {
             strategy,
             _phantom_data: Default::default(),
         }
-    }
-
-    fn get_expired_ssts(
-        &self,
-        levels: &LevelMetasRef,
-        ttl: Option<Duration>,
-    ) -> crate::error::Result<Vec<FileHandle>> {
-        let Some(ttl) = ttl else { return Ok(vec![]); };
-
-        let expire_time = Timestamp::current_millis()
-            .sub_duration(ttl)
-            .context(TtlCalculationSnafu)?;
-
-        let mut expired_ssts = vec![];
-        for level in 0..levels.level_num() {
-            expired_ssts.extend(levels.level(level as Level).get_expired_files(&expire_time));
-        }
-        Ok(expired_ssts)
     }
 }
 
