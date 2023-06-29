@@ -331,6 +331,7 @@ impl Stream for InstantManipulateStream {
 
 impl InstantManipulateStream {
     // refer to Go version: https://github.com/prometheus/prometheus/blob/e934d0f01158a1d55fa0ebb035346b195fcc1260/promql/engine.go#L1571
+    // and the function `vectorSelectorSingle`
     pub fn manipulate(&self, input: RecordBatch) -> DataFusionResult<RecordBatch> {
         let mut take_indices = Vec::with_capacity(input.num_rows());
         // TODO(ruihang): maybe the input is not timestamp millisecond array
@@ -373,28 +374,36 @@ impl InstantManipulateStream {
             if cursor == ts_column.len() {
                 cursor -= 1;
             }
-            // then, search backward to lookback
-            loop {
-                let curr = ts_column.value(cursor);
-                if let Some(field_column) = &field_column && field_column.value(cursor).is_nan() {
-                    // if the newest value is NaN, it means the value is stale, so we should not use it
+
+            // then examine the value
+            let curr_ts = ts_column.value(cursor);
+            if curr_ts + self.lookback_delta < expected_ts {
+                take_indices.push(None);
+                continue;
+            }
+            if curr_ts > expected_ts {
+                // exceeds current expected timestamp, examine the previous value
+                if let Some(prev_cursor) = cursor.checked_sub(1) {
+                    let prev_ts = ts_column.value(prev_cursor);
+                    if prev_ts + self.lookback_delta < expected_ts {
+                        // not found in lookback, leave this field blank.
+                        take_indices.push(None);
+                    } else if let Some(field_column) = &field_column && field_column.value(prev_cursor).is_nan() {
+                        // if the newest value is NaN, it means the value is stale, so we should not use it
+                        take_indices.push(None);
+                    } else {
+                        // use this point
+                        take_indices.push(Some(prev_cursor as u64));
+                    }
+                } else {
                     take_indices.push(None);
-                    break;
                 }
-                if curr + self.lookback_delta < expected_ts {
-                    // not found in lookback, leave this field blank.
-                    take_indices.push(None);
-                    break;
-                } else if curr < expected_ts && curr + self.lookback_delta >= expected_ts {
-                    // find the expected value, push and break
-                    take_indices.push(Some(cursor as u64));
-                    break;
-                } else if cursor == 0 {
-                    // reach the first value and not found in lookback, leave this field blank
-                    take_indices.push(None);
-                    break;
-                }
-                cursor -= 1;
+            } else if let Some(field_column) = &field_column && field_column.value(cursor).is_nan() {
+                // if the newest value is NaN, it means the value is stale, so we should not use it
+                take_indices.push(None);
+            } else {
+                // use this point
+                take_indices.push(Some(cursor as u64));
             }
         }
 
@@ -478,15 +487,20 @@ mod test {
         lookback_delta: Millisecond,
         interval: Millisecond,
         expected: String,
+        contains_nan: bool,
     ) {
-        let memory_exec = Arc::new(prepare_test_data());
+        let memory_exec = if contains_nan {
+            Arc::new(prepare_test_data_with_nan())
+        } else {
+            Arc::new(prepare_test_data())
+        };
         let normalize_exec = Arc::new(InstantManipulateExec {
             start,
             end,
             lookback_delta,
             interval,
             time_index_column: TIME_INDEX_COLUMN.to_string(),
-            field_column: None,
+            field_column: Some("value".to_string()),
             input: memory_exec,
             metric: ExecutionPlanMetricsSet::new(),
         });
@@ -517,7 +531,7 @@ mod test {
             \n| 1970-01-01T00:05:00 | 1.0   | foo  |\
             \n+---------------------+-------+------+",
         );
-        do_normalize_test(0, 310_000, 10_000, 30_000, expected).await;
+        do_normalize_test(0, 310_000, 10_000, 30_000, expected, false).await;
     }
 
     #[tokio::test]
@@ -544,7 +558,7 @@ mod test {
             \n| 1970-01-01T00:05:00 | 1.0   | foo  |\
             \n+---------------------+-------+------+",
         );
-        do_normalize_test(0, 300_000, 10_000, 10_000, expected).await;
+        do_normalize_test(0, 300_000, 10_000, 10_000, expected, false).await;
     }
 
     #[tokio::test]
@@ -566,7 +580,7 @@ mod test {
             \n| 1970-01-01T00:05:00 | 1.0   | foo  |\
             \n+---------------------+-------+------+",
         );
-        do_normalize_test(0, 300_000, 30_000, 30_000, expected).await;
+        do_normalize_test(0, 300_000, 30_000, 30_000, expected, false).await;
     }
 
     #[tokio::test]
@@ -604,7 +618,7 @@ mod test {
             \n| 1970-01-01T00:05:00 | 1.0   | foo  |\
             \n+---------------------+-------+------+",
         );
-        do_normalize_test(0, 300_000, 30_000, 10_000, expected).await;
+        do_normalize_test(0, 300_000, 30_000, 10_000, expected, false).await;
     }
 
     #[tokio::test]
@@ -646,7 +660,7 @@ mod test {
             \n| 1970-01-01T00:05:00 | 1.0   | foo  |\
             \n+---------------------+-------+------+",
         );
-        do_normalize_test(0, 300_000, 60_000, 10_000, expected).await;
+        do_normalize_test(0, 300_000, 60_000, 10_000, expected, false).await;
     }
 
     #[tokio::test]
@@ -668,7 +682,7 @@ mod test {
             \n| 1970-01-01T00:05:00 | 1.0   | foo  |\
             \n+---------------------+-------+------+",
         );
-        do_normalize_test(0, 300_000, 60_000, 30_000, expected).await;
+        do_normalize_test(0, 300_000, 60_000, 30_000, expected, false).await;
     }
 
     #[tokio::test]
@@ -681,7 +695,7 @@ mod test {
             \n| 1970-01-01T00:04:01 | 1.0   | foo  |\
             \n+---------------------+-------+------+",
         );
-        do_normalize_test(230_000, 245_000, 0, 1_000, expected).await;
+        do_normalize_test(230_000, 245_000, 0, 1_000, expected, false).await;
     }
 
     #[tokio::test]
@@ -695,7 +709,7 @@ mod test {
             \n| 1970-01-01T00:00:30 | 1.0   | foo  |\
             \n+---------------------+-------+------+",
         );
-        do_normalize_test(0, 30_000, 10_000, 10_000, expected).await;
+        do_normalize_test(0, 30_000, 10_000, 10_000, expected, false).await;
     }
 
     #[tokio::test]
@@ -712,7 +726,7 @@ mod test {
             \n| 1970-01-01T00:05:00 | 1.0   | foo  |\
             \n+---------------------+-------+------+",
         );
-        do_normalize_test(-900_000, 900_000, 30_000, 60_000, expected).await;
+        do_normalize_test(-900_000, 900_000, 30_000, 60_000, expected, false).await;
     }
 
     #[tokio::test]
@@ -733,6 +747,58 @@ mod test {
             \n| 1970-01-01T00:05:00 | 1.0   | foo  |\
             \n+---------------------+-------+------+",
         );
-        do_normalize_test(190_000, 300_000, 30_000, 10_000, expected).await;
+        do_normalize_test(190_000, 300_000, 30_000, 10_000, expected, false).await;
+    }
+
+    fn prepare_test_data_with_nan() -> MemoryExec {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(TIME_INDEX_COLUMN, TimestampMillisecondType::DATA_TYPE, true),
+            Field::new("value", DataType::Float64, true),
+        ]));
+        let timestamp_column = Arc::new(TimestampMillisecondArray::from_slice([
+            0, 30_000, 60_000, 90_000, 120_000, // every 30s
+        ])) as _;
+        let field_column = Arc::new(Float64Array::from_slice([
+            0.0,
+            f64::NAN,
+            6.0,
+            f64::NAN,
+            12.0,
+        ])) as _;
+        let data =
+            RecordBatch::try_new(schema.clone(), vec![timestamp_column, field_column]).unwrap();
+
+        MemoryExec::try_new(&[vec![data]], schema, None).unwrap()
+    }
+
+    #[tokio::test]
+    async fn lookback_10s_interval_10s_with_nan() {
+        let expected = String::from(
+            "+---------------------+-------+\
+            \n| timestamp           | value |\
+            \n+---------------------+-------+\
+            \n| 1970-01-01T00:00:00 | 0.0   |\
+            \n| 1970-01-01T00:00:10 | 0.0   |\
+            \n| 1970-01-01T00:01:00 | 6.0   |\
+            \n| 1970-01-01T00:01:10 | 6.0   |\
+            \n| 1970-01-01T00:02:00 | 12.0  |\
+            \n| 1970-01-01T00:02:10 | 12.0  |\
+            \n+---------------------+-------+",
+        );
+        do_normalize_test(0, 300_000, 10_000, 10_000, expected, true).await;
+    }
+
+    #[tokio::test]
+    async fn lookback_10s_interval_10s_with_nan_unaligned() {
+        let expected = String::from(
+            "+-------------------------+-------+\
+            \n| timestamp               | value |\
+            \n+-------------------------+-------+\
+            \n| 1970-01-01T00:00:00.001 | 0.0   |\
+            \n| 1970-01-01T00:01:00.001 | 6.0   |\
+            \n| 1970-01-01T00:02:00.001 | 12.0  |\
+            \n+-------------------------+-------+",
+        );
+        do_normalize_test(1, 300_001, 10_000, 10_000, expected, true).await;
     }
 }
