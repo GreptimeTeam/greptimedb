@@ -44,6 +44,7 @@ use common_error::status_code::StatusCode;
 use common_query::Output;
 use common_recordbatch::{util, RecordBatch};
 use common_telemetry::logging::{self, info};
+use common_base::readable_size::ReadableSize;
 use datatypes::data_type::DataType;
 use futures::FutureExt;
 use schemars::JsonSchema;
@@ -57,6 +58,10 @@ use tower::timeout::TimeoutLayer;
 use tower::ServiceBuilder;
 use tower_http::auth::AsyncRequireAuthorizationLayer;
 use tower_http::trace::TraceLayer;
+
+use warp::Filter;
+use warp::filters::body::BodyDeserializeError;
+use warp::http::StatusCode;
 
 use self::authorize::HttpAuth;
 use self::influxdb::{influxdb_health, influxdb_ping, influxdb_write_v1, influxdb_write_v2};
@@ -133,7 +138,11 @@ pub struct HttpOptions {
 
     #[serde(skip)]
     pub disable_dashboard: bool,
+
+    pub http_body_maximum_size_size: ReadableSize,
 }
+
+const DEFAULT_BODY_LIMIT: u64 = 1024 * 1024 * 1024 * 6; // 6 gigabytes
 
 impl Default for HttpOptions {
     fn default() -> Self {
@@ -141,6 +150,7 @@ impl Default for HttpOptions {
             addr: "127.0.0.1:4000".to_string(),
             timeout: Duration::from_secs(30),
             disable_dashboard: false,
+            http_body_maximum_size_size: ReadableSize::DEFAULT_BODY_LIMIT,
         }
     }
 }
@@ -531,7 +541,9 @@ impl HttpServer {
         }
 
         // Add a layer to collect HTTP metrics for axum.
-        router = router.route_layer(middleware::from_fn(track_metrics));
+        router = router.route_layer(middleware::from_fn(track_metrics))
+                .and(warp::filters::body::content_length_limit(DEFAULT_BODY_LIMIT)
+                .recover(handle_body_deserialize_error));
 
         router
     }
@@ -705,6 +717,19 @@ async fn handle_error(err: BoxError) -> Json<JsonResponse> {
         format!("Unhandled internal error: {err}"),
         StatusCode::Unexpected,
     ))
+}
+
+// Handle the body deserialization error
+async fn handle_body_deserialize_error(err: warp::Rejection) -> Result<impl warp::Reply, warp::Rejection> {
+    if let Some(e) = err.find::<BodyDeserializeError>() {
+        eprintln!("Failed to deserialize request body: {}", e);
+        return Ok(warp::reply::with_status(
+            "Invalid request body",
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+
+    Err(err)
 }
 
 #[cfg(test)]
