@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 
-use api::v1::meta::{PutRequest, TableRouteValue};
+use api::v1::meta::{MoveValueRequest, PutRequest, TableRouteValue};
 use catalog::helper::{TableGlobalKey, TableGlobalValue};
 use common_meta::key::TableRouteKey;
 use common_meta::rpc::store::{BatchGetRequest, BatchGetResponse};
@@ -22,7 +22,7 @@ use snafu::{OptionExt, ResultExt};
 
 use crate::error::{
     ConvertProtoDataSnafu, DecodeTableRouteSnafu, InvalidCatalogValueSnafu, Result,
-    TableRouteNotFoundSnafu,
+    TableNotFoundSnafu, TableRouteNotFoundSnafu,
 };
 use crate::service::store::ext::KvStoreExt;
 use crate::service::store::kv::KvStoreRef;
@@ -80,6 +80,20 @@ pub(crate) async fn put_table_global_value(
     Ok(())
 }
 
+pub(crate) async fn remove_table_global_value(
+    kv_store: &KvStoreRef,
+    key: &TableGlobalKey,
+) -> Result<(Vec<u8>, TableGlobalValue)> {
+    let key = key.to_string();
+    let removed_key = crate::keys::to_removed_key(&key);
+    let kv = move_value(kv_store, key.as_bytes(), removed_key)
+        .await?
+        .context(TableNotFoundSnafu { name: key })?;
+    let value: TableGlobalValue =
+        TableGlobalValue::from_bytes(&kv.1).context(InvalidCatalogValueSnafu)?;
+    Ok((kv.0, value))
+}
+
 pub(crate) async fn get_table_route_value(
     kv_store: &KvStoreRef,
     key: &TableRouteKey<'_>,
@@ -107,6 +121,37 @@ pub(crate) async fn put_table_route_value(
     };
     let _ = kv_store.put(req).await?;
     Ok(())
+}
+
+pub(crate) async fn remove_table_route_value(
+    kv_store: &KvStoreRef,
+    key: &TableRouteKey<'_>,
+) -> Result<(Vec<u8>, TableRouteValue)> {
+    let from_key = key.key().into_bytes();
+    let to_key = key.removed_key().into_bytes();
+    let v = move_value(kv_store, from_key, to_key)
+        .await?
+        .context(TableRouteNotFoundSnafu { key: key.key() })?;
+    let trv: TableRouteValue = v.1.as_slice().try_into().context(DecodeTableRouteSnafu)?;
+
+    Ok((v.0, trv))
+}
+
+async fn move_value(
+    kv_store: &KvStoreRef,
+    from_key: impl Into<Vec<u8>>,
+    to_key: impl Into<Vec<u8>>,
+) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+    let from_key = from_key.into();
+    let to_key = to_key.into();
+    let move_req = MoveValueRequest {
+        from_key,
+        to_key,
+        ..Default::default()
+    };
+    let res = kv_store.move_value(move_req).await?;
+
+    Ok(res.kv.map(|kv| (kv.key, kv.value)))
 }
 
 #[cfg(test)]
