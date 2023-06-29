@@ -36,7 +36,8 @@ lazy_static! {
     static ref DATANODE_STAT_KEY_PATTERN: Regex =
         Regex::new(&format!("^{DN_STAT_PREFIX}-([0-9]+)-([0-9]+)$")).unwrap();
 }
-#[derive(Debug, Clone, Eq, Hash, PartialEq)]
+
+#[derive(Debug, Clone, Eq, Hash, PartialEq, Serialize, Deserialize)]
 pub struct LeaseKey {
     pub cluster_id: u64,
     pub node_id: u64,
