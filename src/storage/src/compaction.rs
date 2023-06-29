@@ -25,7 +25,7 @@ use std::sync::Arc;
 use common_telemetry::tracing::log::warn;
 use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
-pub use picker::{Picker, PickerContext, SimplePicker};
+pub use picker::{LeveledPicker, Picker, PickerContext};
 pub use scheduler::{CompactionHandler, CompactionRequestImpl};
 pub use task::{CompactionTask, CompactionTaskImpl};
 

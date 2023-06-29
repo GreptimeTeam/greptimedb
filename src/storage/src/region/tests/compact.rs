@@ -26,7 +26,7 @@ use object_store::ObjectStore;
 use store_api::storage::{FlushContext, FlushReason, OpenOptions, Region};
 use tokio::sync::{Notify, RwLock};
 
-use crate::compaction::{CompactionHandler, SimplePicker};
+use crate::compaction::{CompactionHandler, LeveledPicker};
 use crate::config::EngineConfig;
 use crate::error::Result;
 use crate::file_purger::{FilePurgeHandler, FilePurgeRequest};
@@ -93,7 +93,7 @@ async fn create_region_for_compaction<
     store_config.engine_config = Arc::new(engine_config);
     store_config.flush_strategy = flush_strategy;
 
-    let picker = SimplePicker::default();
+    let picker = LeveledPicker::default();
     let pending_compaction_tasks = Arc::new(RwLock::new(vec![]));
     let handler = CompactionHandler {
         picker,
@@ -262,7 +262,7 @@ impl CompactionTester {
         store_config.engine_config = Arc::new(self.engine_config.clone());
         store_config.flush_strategy = self.flush_strategy.clone();
 
-        let picker = SimplePicker::default();
+        let picker = LeveledPicker::default();
         let handler = CompactionHandler {
             picker,
             #[cfg(test)]

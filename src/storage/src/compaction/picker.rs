@@ -73,18 +73,18 @@ impl PickerContext {
 }
 
 /// L0 -> L1 compaction based on time windows.
-pub struct SimplePicker<S> {
+pub struct LeveledPicker<S> {
     strategy: StrategyRef,
     _phantom_data: PhantomData<S>,
 }
 
-impl<S> Default for SimplePicker<S> {
+impl<S> Default for LeveledPicker<S> {
     fn default() -> Self {
         Self::new(Arc::new(SimpleTimeWindowStrategy {}))
     }
 }
 
-impl<S> SimplePicker<S> {
+impl<S> LeveledPicker<S> {
     pub fn new(strategy: StrategyRef) -> Self {
         Self {
             strategy,
@@ -93,7 +93,7 @@ impl<S> SimplePicker<S> {
     }
 }
 
-impl<S: LogStore> Picker for SimplePicker<S> {
+impl<S: LogStore> Picker for LeveledPicker<S> {
     type Request = CompactionRequestImpl<S>;
     type Task = CompactionTaskImpl<S>;
 
