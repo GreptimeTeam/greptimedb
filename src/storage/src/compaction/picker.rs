@@ -29,8 +29,7 @@ use crate::compaction::scheduler::CompactionRequestImpl;
 use crate::compaction::task::{CompactionOutput, CompactionTask, CompactionTaskImpl};
 use crate::error::TtlCalculationSnafu;
 use crate::scheduler::Request;
-use crate::sst::{FileHandle, Level, LevelMeta};
-use crate::version::LevelMetasRef;
+use crate::sst::{FileHandle, LevelMeta};
 
 /// Picker picks input SST files and builds the compaction task.
 /// Different compaction strategy may implement different pickers.
@@ -39,24 +38,22 @@ pub trait Picker: Send + 'static {
     type Task: CompactionTask;
 
     fn pick(&self, req: &Self::Request) -> crate::error::Result<Option<Self::Task>>;
+}
 
-    fn get_expired_ssts(
-        &self,
-        levels: &LevelMetasRef,
-        ttl: Option<Duration>,
-    ) -> crate::error::Result<Vec<FileHandle>> {
-        let Some(ttl) = ttl else { return Ok(vec![]); };
+pub(crate) fn get_expired_ssts(
+    levels: &[LevelMeta],
+    ttl: Option<Duration>,
+    now: Timestamp,
+) -> crate::error::Result<Vec<FileHandle>> {
+    let Some(ttl) = ttl else { return Ok(vec![]); };
 
-        let expire_time = Timestamp::current_millis()
-            .sub_duration(ttl)
-            .context(TtlCalculationSnafu)?;
+    let expire_time = now.sub_duration(ttl).context(TtlCalculationSnafu)?;
 
-        let mut expired_ssts = vec![];
-        for level in 0..levels.level_num() {
-            expired_ssts.extend(levels.level(level as Level).get_expired_files(&expire_time));
-        }
-        Ok(expired_ssts)
-    }
+    let expired_ssts = levels
+        .iter()
+        .flat_map(|l| l.get_expired_files(&expire_time).into_iter())
+        .collect();
+    Ok(expired_ssts)
 }
 
 pub struct PickerContext {
@@ -105,8 +102,7 @@ impl<S: LogStore> Picker for LeveledTimeWindowPicker<S> {
         req: &CompactionRequestImpl<S>,
     ) -> crate::error::Result<Option<CompactionTaskImpl<S>>> {
         let levels = &req.levels();
-        let expired_ssts = self
-            .get_expired_ssts(levels, req.ttl)
+        let expired_ssts = get_expired_ssts(levels.levels(), req.ttl, Timestamp::current_millis())
             .map_err(|e| {
                 error!(e;"Failed to get region expired SST files, region: {}, ttl: {:?}", req.region_id, req.ttl);
                 e
@@ -127,7 +123,7 @@ impl<S: LogStore> Picker for LeveledTimeWindowPicker<S> {
         let mut outputs = vec![];
         for level_num in 0..levels.level_num() {
             let level = levels.level(level_num as u8);
-            let compaction_time_window = Self::pick(ctx, level, &mut outputs);
+            let compaction_time_window = Self::pick_level(ctx, level, &mut outputs);
 
             if outputs.is_empty() {
                 debug!("No SST file can be compacted at level {}", level_num);
@@ -157,7 +153,7 @@ impl<S: LogStore> Picker for LeveledTimeWindowPicker<S> {
 }
 
 impl<S> LeveledTimeWindowPicker<S> {
-    fn pick(
+    fn pick_level(
         ctx: &PickerContext,
         level: &LevelMeta,
         results: &mut Vec<CompactionOutput>,
@@ -249,11 +245,13 @@ fn file_time_bucket_span(start_sec: i64, end_sec: i64, bucket_sec: i64) -> Vec<i
 #[cfg(test)]
 mod tests {
     use std::collections::{HashMap, HashSet};
+    use std::sync::Arc;
 
     use super::*;
     use crate::compaction::tests::new_file_handle;
     use crate::compaction::TIME_BUCKETS;
-    use crate::sst::FileId;
+    use crate::file_purger::noop::new_noop_file_purger;
+    use crate::sst::{FileId, Level, LevelMetas};
 
     #[test]
     fn test_time_bucket_span() {
@@ -291,7 +289,7 @@ mod tests {
     fn new_file_handles(input: &[(FileId, i64, i64)]) -> Vec<FileHandle> {
         input
             .iter()
-            .map(|(file_id, start, end)| new_file_handle(*file_id, *start, *end))
+            .map(|(file_id, start, end)| new_file_handle(*file_id, *start, *end, 0))
             .collect()
     }
 
@@ -354,5 +352,71 @@ mod tests {
             new_file_handles(&[(file_id_a, 0, TIME_BUCKETS.get(4) * 1000)]),
             &expected,
         );
+    }
+
+    struct TtlTester {
+        files: Vec<(FileId, i64, i64, Level)>,
+        ttl: Option<Duration>,
+        expired: Vec<usize>,
+        now: Timestamp,
+    }
+
+    impl TtlTester {
+        fn check(&self) {
+            let expected_expired = self
+                .expired
+                .iter()
+                .map(|idx| self.files[*idx].0.clone())
+                .collect::<HashSet<_>>();
+            let file_purger = new_noop_file_purger();
+            let layer = Arc::new(crate::test_util::access_layer_util::MockAccessLayer {});
+            let file_handles = self
+                .files
+                .iter()
+                .map(|(file_id, start_ts, end_ts, level)| {
+                    new_file_handle(*file_id, *start_ts, *end_ts, *level).meta()
+                })
+                .collect::<Vec<_>>();
+            let levels = LevelMetas::new(layer, file_purger).merge(
+                file_handles.into_iter(),
+                vec![].into_iter(),
+                None,
+            );
+            let expired = get_expired_ssts(levels.levels(), self.ttl, self.now)
+                .unwrap()
+                .into_iter()
+                .map(|f| f.file_id())
+                .collect::<HashSet<_>>();
+            assert_eq!(expected_expired, expired);
+        }
+    }
+
+    #[test]
+    fn test_find_expired_ssts() {
+        TtlTester {
+            files: vec![
+                (FileId::random(), 8000, 9000, 0),
+                (FileId::random(), 10000, 11000, 0),
+                (FileId::random(), 8000, 11000, 1),
+                (FileId::random(), 2000, 3000, 1),
+            ],
+            ttl: Some(Duration::from_secs(1)),
+            expired: vec![3],
+            now: Timestamp::new_second(10),
+        }
+        .check();
+
+        TtlTester {
+            files: vec![
+                (FileId::random(), 8000, 8999, 0),
+                (FileId::random(), 10000, 11000, 0),
+                (FileId::random(), 8000, 11000, 1),
+                (FileId::random(), 2000, 3000, 1),
+            ],
+            ttl: Some(Duration::from_secs(1)),
+            expired: vec![0, 3],
+            now: Timestamp::new_second(10),
+        }
+        .check();
     }
 }

@@ -111,13 +111,14 @@ mod tests {
 
     use super::*;
     use crate::file_purger::noop::new_noop_file_purger;
-    use crate::sst::{FileHandle, FileId, FileMeta};
+    use crate::sst::{FileHandle, FileId, FileMeta, Level};
 
     /// Test util to create file handles.
     pub fn new_file_handle(
         file_id: FileId,
         start_ts_millis: i64,
         end_ts_millis: i64,
+        level: Level,
     ) -> FileHandle {
         let file_purger = new_noop_file_purger();
         let layer = Arc::new(crate::test_util::access_layer_util::MockAccessLayer {});
@@ -129,7 +130,7 @@ mod tests {
                     Timestamp::new_millisecond(start_ts_millis),
                     Timestamp::new_millisecond(end_ts_millis),
                 )),
-                level: 0,
+                level,
                 file_size: 0,
             },
             layer,
@@ -167,8 +168,8 @@ mod tests {
             TIME_BUCKETS.get(0),
             infer_time_bucket(
                 [
-                    new_file_handle(FileId::random(), 0, TIME_BUCKETS.get(0) * 1000 - 1),
-                    new_file_handle(FileId::random(), 1, 10_000)
+                    new_file_handle(FileId::random(), 0, TIME_BUCKETS.get(0) * 1000 - 1, 0),
+                    new_file_handle(FileId::random(), 1, 10_000, 0)
                 ]
                 .iter()
             )

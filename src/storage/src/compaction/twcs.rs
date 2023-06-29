@@ -20,8 +20,10 @@ use common_telemetry::tracing::warn;
 use common_telemetry::{debug, info};
 use common_time::timestamp::TimeUnit;
 use common_time::timestamp_millis::BucketAligned;
+use common_time::Timestamp;
 use store_api::logstore::LogStore;
 
+use crate::compaction::picker::get_expired_ssts;
 use crate::compaction::task::CompactionOutput;
 use crate::compaction::{CompactionRequestImpl, CompactionTaskImpl, Picker};
 use crate::sst::{FileHandle, LevelMeta};
@@ -106,7 +108,7 @@ impl<S: LogStore> Picker for TwcsPicker<S> {
 
     fn pick(&self, req: &Self::Request) -> crate::error::Result<Option<Self::Task>> {
         let levels = req.levels();
-        let expired_ssts = self.get_expired_ssts(&levels, req.ttl)?;
+        let expired_ssts = get_expired_ssts(levels.levels(), req.ttl, Timestamp::current_millis())?;
         if !expired_ssts.is_empty() {
             info!(
                 "Expired SSTs in region {}: {:?}",
@@ -199,17 +201,20 @@ mod tests {
     fn test_get_latest_window_in_seconds() {
         assert_eq!(
             Some(1),
-            find_latest_window_in_seconds([new_file_handle(FileId::random(), 0, 999)].iter(), 1)
+            find_latest_window_in_seconds([new_file_handle(FileId::random(), 0, 999, 0)].iter(), 1)
         );
         assert_eq!(
             Some(1),
-            find_latest_window_in_seconds([new_file_handle(FileId::random(), 0, 1000)].iter(), 1)
+            find_latest_window_in_seconds(
+                [new_file_handle(FileId::random(), 0, 1000, 0)].iter(),
+                1
+            )
         );
 
         assert_eq!(
             Some(-9223372036857600),
             find_latest_window_in_seconds(
-                [new_file_handle(FileId::random(), i64::MIN, i64::MIN + 1)].iter(),
+                [new_file_handle(FileId::random(), i64::MIN, i64::MIN + 1, 0)].iter(),
                 3600,
             )
         );
@@ -217,7 +222,7 @@ mod tests {
         assert_eq!(
             i64::MAX / 10000000 * 10000,
             find_latest_window_in_seconds(
-                [new_file_handle(FileId::random(), i64::MIN, i64::MAX)].iter(),
+                [new_file_handle(FileId::random(), i64::MIN, i64::MAX, 0)].iter(),
                 10000,
             )
             .unwrap()
@@ -228,11 +233,11 @@ mod tests {
     fn test_assign_to_windows() {
         let windows = assign_to_windows(
             [
-                new_file_handle(FileId::random(), 0, 999),
-                new_file_handle(FileId::random(), 0, 999),
-                new_file_handle(FileId::random(), 0, 999),
-                new_file_handle(FileId::random(), 0, 999),
-                new_file_handle(FileId::random(), 0, 999),
+                new_file_handle(FileId::random(), 0, 999, 0),
+                new_file_handle(FileId::random(), 0, 999, 0),
+                new_file_handle(FileId::random(), 0, 999, 0),
+                new_file_handle(FileId::random(), 0, 999, 0),
+                new_file_handle(FileId::random(), 0, 999, 0),
             ]
             .iter(),
             3,
@@ -242,9 +247,9 @@ mod tests {
         let files = [FileId::random(); 5];
         let windows = assign_to_windows(
             [
-                new_file_handle(files[0], -2000, -3),
-                new_file_handle(files[1], 0, 2999),
-                new_file_handle(files[2], 50, 10001),
+                new_file_handle(files[0], -2000, -3, 0),
+                new_file_handle(files[1], 0, 2999, 0),
+                new_file_handle(files[2], 50, 10001, 0),
             ]
             .iter(),
             3,
