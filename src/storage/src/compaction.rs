@@ -15,7 +15,6 @@
 pub mod noop;
 mod picker;
 mod scheduler;
-mod strategy;
 mod task;
 mod twcs;
 mod writer;
@@ -25,12 +24,15 @@ use std::sync::Arc;
 use common_telemetry::tracing::log::warn;
 use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
-pub use picker::{LeveledPicker, Picker, PickerContext};
+pub use picker::{LeveledTimeWindowPicker, Picker, PickerContext};
 pub use scheduler::{CompactionHandler, CompactionRequestImpl};
 pub use task::{CompactionTask, CompactionTaskImpl};
 
 use crate::scheduler::Scheduler;
 use crate::sst::FileHandle;
+
+pub type CompactionPickerRef<S> =
+    Arc<dyn Picker<Request = CompactionRequestImpl<S>, Task = CompactionTaskImpl<S>>>;
 
 pub type CompactionSchedulerRef<S> =
     Arc<dyn Scheduler<Request = CompactionRequestImpl<S>> + Send + Sync>;

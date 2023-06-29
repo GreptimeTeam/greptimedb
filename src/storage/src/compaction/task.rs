@@ -176,6 +176,8 @@ pub struct CompactionOutput {
     pub(crate) time_window_sec: i64,
     /// Compaction input files.
     pub(crate) inputs: Vec<FileHandle>,
+    /// If the compaction output is strictly windowed.
+    pub(crate) strict_window: bool,
 }
 
 impl CompactionOutput {
@@ -186,13 +188,21 @@ impl CompactionOutput {
         sst_layer: AccessLayerRef,
         sst_write_buffer_size: ReadableSize,
     ) -> Result<Option<FileMeta>> {
+        let time_range = if self.strict_window {
+            (
+                Some(self.time_window_bound),
+                Some(self.time_window_bound + self.time_window_sec),
+            )
+        } else {
+            (None, None)
+        };
+
         let reader = build_sst_reader(
             region_id,
             schema,
             sst_layer.clone(),
             &self.inputs,
-            self.time_window_bound,
-            self.time_window_bound + self.time_window_sec,
+            time_range,
         )
         .await?;
 

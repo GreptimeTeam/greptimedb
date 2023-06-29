@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::BTreeMap;
+use std::fmt::{Debug, Formatter};
 use std::marker::PhantomData;
 
 use common_telemetry::tracing::warn;
@@ -26,7 +27,77 @@ use crate::compaction::{CompactionRequestImpl, CompactionTaskImpl, Picker};
 use crate::sst::{FileHandle, LevelMeta};
 
 pub struct TwcsPicker<S> {
+    max_files_in_active_window: usize,
+    max_files_in_non_active_window: usize,
     _phantom_data: PhantomData<S>,
+}
+
+impl<S> Debug for TwcsPicker<S> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TwcsPicker")
+            .field(
+                "max_files_in_active_window",
+                &self.max_files_in_active_window,
+            )
+            .field(
+                "max_files_in_non_active_window",
+                &self.max_files_in_non_active_window,
+            )
+            .finish()
+    }
+}
+
+impl<S> Default for TwcsPicker<S> {
+    fn default() -> Self {
+        Self {
+            max_files_in_active_window: 4,
+            max_files_in_non_active_window: 1,
+            _phantom_data: Default::default(),
+        }
+    }
+}
+
+impl<S> TwcsPicker<S> {
+    /// Builds compaction output from files.
+    /// For active writing window, we allow for at most `max_files_in_active_window` files to alleviate
+    /// fragmentation. For other windows, we allow at most 1 file at each window.
+    fn build_output(
+        &self,
+        time_windows: &BTreeMap<i64, Vec<FileHandle>>,
+        active_window: Option<i64>,
+        window_size: i64,
+    ) -> Vec<CompactionOutput> {
+        let mut output = vec![];
+        for (window, files) in time_windows {
+            if let Some(active_window) = active_window && *window == active_window {
+                if files.len() > self.max_files_in_active_window {
+                    output.push(CompactionOutput {
+                        output_level: 1, // we only have two levels and always compact to l1 
+                        time_window_bound: *window,
+                        time_window_sec: window_size,
+                        inputs: files.clone(),
+                        // Strict window is not needed since we always compact many files to one 
+                        // single file in TWCS.
+                        strict_window: false,
+                    });
+                } else {
+                    debug!("Active window not present or no enough files in active window {:?}", active_window);
+                }
+            } else {
+                // not active writing window
+                if files.len() > self.max_files_in_non_active_window {
+                    output.push(CompactionOutput {
+                        output_level: 1,
+                        time_window_bound: *window,
+                        time_window_sec: window_size,
+                        inputs: files.clone(),
+                        strict_window: false,
+                    });
+                }
+            }
+        }
+        output
+    }
 }
 
 impl<S: LogStore> Picker for TwcsPicker<S> {
@@ -57,7 +128,7 @@ impl<S: LogStore> Picker for TwcsPicker<S> {
             time_window_size,
         );
 
-        let outputs = build_output(&windows, active_window, time_window_size);
+        let outputs = self.build_output(&windows, active_window, time_window_size);
         let task = CompactionTaskImpl {
             schema: req.schema(),
             sst_layer: req.sst_layer.clone(),
@@ -116,45 +187,6 @@ fn find_latest_window_in_seconds<'a>(
     latest_timestamp
         .and_then(|ts| ts.convert_to_ceil(TimeUnit::Second))
         .and_then(|ts| ts.value().align_by_bucket(time_window_size))
-}
-
-/// Builds compaction output from files.
-/// For active writing window, we allow for at most `max_files_in_active_window` files to alleviate
-/// fragmentation. For other windows, we allow at most 1 file at each window.
-fn build_output(
-    time_windows: &BTreeMap<i64, Vec<FileHandle>>,
-    active_window: Option<i64>,
-    window_size: i64,
-) -> Vec<CompactionOutput> {
-    // TODO(hl): make these configurable
-    let max_files_in_active_window = 4;
-    let max_files_in_non_active_window = 1;
-    let mut output = vec![];
-    for (window, files) in time_windows {
-        if let Some(active_window) = active_window && *window == active_window {
-            if files.len() > max_files_in_active_window {
-                output.push(CompactionOutput {
-                    output_level: 1, // we only have two levels and always compact to l1 
-                    time_window_bound: *window,
-                    time_window_sec: window_size,
-                    inputs: files.clone(),
-                });
-            } else {
-                debug!("Active window not present or no enough files in active window {:?}", active_window);
-            }
-        } else {
-            // not active writing window
-            if files.len() > max_files_in_non_active_window {
-                output.push(CompactionOutput {
-                    output_level: 1,
-                    time_window_bound: *window,
-                    time_window_sec: window_size,
-                    inputs: files.clone(),
-                });
-            }
-        }
-    }
-    output
 }
 
 #[cfg(test)]
