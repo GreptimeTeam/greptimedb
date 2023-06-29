@@ -34,17 +34,18 @@ use common_recordbatch::{
     EmptyRecordBatchStream, RecordBatch, RecordBatches, SendableRecordBatchStream,
 };
 use common_telemetry::timer;
+use datafusion::common::Column;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::prelude::SessionContext;
-use datafusion_common::ResolvedTableReference;
-use datafusion_expr::{DmlStatement, LogicalPlan as DfLogicalPlan, WriteOp};
+use datafusion_common::{ResolvedTableReference, ScalarValue};
+use datafusion_expr::{DmlStatement, Expr as DfExpr, LogicalPlan as DfLogicalPlan, WriteOp};
 use datatypes::prelude::VectorRef;
 use datatypes::schema::Schema;
 use futures_util::StreamExt;
 use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
-use sql::ast::Expr;
+use sql::ast::{BinaryOperator, Expr, Value};
 use table::requests::{DeleteRequest, InsertRequest};
 use table::TableRef;
 
@@ -53,7 +54,7 @@ pub use crate::datafusion::planner::DfContextProviderAdapter;
 use crate::error::{
     CatalogSnafu, CreateRecordBatchSnafu, CreateSchemaSnafu, DataFusionSnafu,
     MissingTimestampColumnSnafu, QueryExecutionSnafu, Result, TableNotFoundSnafu,
-    UnsupportedExprSnafu,
+    UnimplementedSnafu, UnsupportedExprSnafu,
 };
 use crate::executor::QueryExecutor;
 use crate::logical_optimizer::LogicalOptimizer;
@@ -379,35 +380,67 @@ impl QueryExecutor for DatafusionQueryEngine {
     }
 }
 
+fn convert_filter_to_df_filter(filter: Expr) -> Result<DfExpr> {
+    match filter {
+        Expr::BinaryOp { left, op, right } => {
+            let left = convert_filter_to_df_filter(*left)?;
+            let right = convert_filter_to_df_filter(*right)?;
+            match op {
+                BinaryOperator::Eq => Ok(left.eq(right)),
+                _ => UnimplementedSnafu {
+                    operation: format!("convert BinaryOperator into datafusion Expr, op: {op}"),
+                }
+                .fail(),
+            }
+        }
+        Expr::Value(value) => match value {
+            Value::SingleQuotedString(v) => Ok(DfExpr::Literal(ScalarValue::Utf8(Some(v)))),
+            _ => UnimplementedSnafu {
+                operation: format!("convert Expr::Value into datafusion Expr, value: {value}"),
+            }
+            .fail(),
+        },
+        Expr::Identifier(ident) => Ok(DfExpr::Column(Column::from_name(ident.value))),
+        _ => UnimplementedSnafu {
+            operation: format!("convert Expr into datafusion Expr, Expr: {filter}"),
+        }
+        .fail(),
+    }
+}
+
 /// Creates a table in memory and executes a show statement on the table.
 pub async fn execute_show_with_filter(
     record_batch: RecordBatch,
     filter: Option<Expr>,
-    table_name: String,
 ) -> Result<Output> {
-    let sql = if let Some(filter) = filter {
-        format!("SELECT * FROM {table_name} WHERE {}", filter)
-    } else {
-        format!("SELECT * FROM {table_name}")
-    };
+    let table_name = "table_name";
     let column_schemas = record_batch.schema.column_schemas().to_vec();
     let context = SessionContext::new();
     context
-        .register_batch(&table_name, record_batch.into_df_record_batch())
+        .register_batch(table_name, record_batch.into_df_record_batch())
         .context(error::DatafusionSnafu {
             msg: "Fail to register a record batch as a table",
         })
         .map_err(BoxedError::new)
         .context(QueryExecutionSnafu)?;
-    let dataframe = context
-        .sql(&sql)
+    let mut dataframe = context
+        .sql(&format!("SELECT * FROM {table_name}"))
         .await
         .context(error::DatafusionSnafu {
             msg: "Fail to execute a sql",
         })
         .map_err(BoxedError::new)
         .context(QueryExecutionSnafu)?;
-
+    if let Some(filter) = filter {
+        let filter = convert_filter_to_df_filter(filter)?;
+        dataframe = dataframe
+            .filter(filter)
+            .context(error::DatafusionSnafu {
+                msg: "Fail to filter",
+            })
+            .map_err(BoxedError::new)
+            .context(QueryExecutionSnafu)?
+    }
     let df_batches = dataframe
         .collect()
         .await
@@ -595,7 +628,7 @@ mod tests {
     async fn test_show_tables() {
         // No filter
         let column_schemas = vec![ColumnSchema::new(
-            "tables",
+            "Tables",
             ConcreteDataType::String(StringType),
             false,
         )];
@@ -605,13 +638,11 @@ mod tests {
         builder.push(Some("system_metrics"));
         let columns = vec![builder.to_vector()];
         let record_batch = RecordBatch::new(schema, columns).unwrap();
-        let output = execute_show_with_filter(record_batch, None, "tables".to_string())
-            .await
-            .unwrap();
+        let output = execute_show_with_filter(record_batch, None).await.unwrap();
         let Output::RecordBatches(record_batches) = output else {unreachable!()};
         let expected = "\
 +----------------+
-| tables         |
+| Tables         |
 +----------------+
 | monitor        |
 | system_metrics |
@@ -620,7 +651,7 @@ mod tests {
 
         // Filter
         let column_schemas = vec![ColumnSchema::new(
-            "tables",
+            "Tables",
             ConcreteDataType::String(StringType),
             false,
         )];
@@ -631,20 +662,20 @@ mod tests {
         let columns = vec![builder.to_vector()];
         let record_batch = RecordBatch::new(schema, columns).unwrap();
         let statement = ParserContext::create_with_dialect(
-            "SHOW TABLES WHERE tables='monitor'",
+            "SHOW TABLES WHERE \"Tables\"='monitor'",
             &GreptimeDbDialect {},
         )
         .unwrap()[0]
             .clone();
         let Statement::ShowTables(ShowTables { kind, .. }) = statement else {unreachable!()};
         let ShowKind::Where(filter) = kind else {unreachable!()};
-        let output = execute_show_with_filter(record_batch, Some(filter), "tables".to_string())
+        let output = execute_show_with_filter(record_batch, Some(filter))
             .await
             .unwrap();
         let Output::RecordBatches(record_batches) = output else {unreachable!()};
         let expected = "\
 +---------+
-| tables  |
+| Tables  |
 +---------+
 | monitor |
 +---------+";

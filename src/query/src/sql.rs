@@ -46,7 +46,7 @@ use crate::datafusion::execute_show_with_filter;
 use crate::error::{self, Result};
 
 const SCHEMAS_COLUMN: &str = "Schemas";
-const TABLES_COLUMN: &str = "tables";
+const TABLES_COLUMN: &str = "Tables";
 const COLUMN_NAME_COLUMN: &str = "Field";
 const COLUMN_TYPE_COLUMN: &str = "Type";
 const COLUMN_NULLABLE_COLUMN: &str = "Null";
@@ -163,8 +163,7 @@ pub async fn show_tables(
             let columns = vec![Arc::new(StringVector::from(tables)) as _];
             let record_batch =
                 RecordBatch::new(schema, columns).context(error::CreateRecordBatchSnafu)?;
-            let result =
-                execute_show_with_filter(record_batch, Some(filter), "tables".to_string()).await?;
+            let result = execute_show_with_filter(record_batch, Some(filter)).await?;
             Ok(result)
         }
         ShowKind::Like(ident) => {

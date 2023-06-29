@@ -32,7 +32,7 @@ SHOW TABLES FROM test_public_schema;
 
 SHOW TABLES FROM public;
 
-SHOW TABLES FROM public WHERE tables='numbers';
+SHOW TABLES FROM public WHERE Tables='numbers';
 
 DROP SCHEMA test_public_schema;
 
