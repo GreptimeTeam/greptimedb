@@ -170,10 +170,10 @@ impl<S: LogStore> CompactionTask for CompactionTaskImpl<S> {
 pub struct CompactionOutput {
     /// Compaction output file level.
     pub(crate) output_level: Level,
-    /// The left bound of time bucket.
-    pub(crate) bucket_bound: i64,
-    /// Bucket duration in seconds.
-    pub(crate) bucket: i64,
+    /// The left bound of time window.
+    pub(crate) time_window_bound: i64,
+    /// Time window size in seconds.
+    pub(crate) time_window_sec: i64,
     /// Compaction input files.
     pub(crate) inputs: Vec<FileHandle>,
 }
@@ -191,8 +191,8 @@ impl CompactionOutput {
             schema,
             sst_layer.clone(),
             &self.inputs,
-            self.bucket_bound,
-            self.bucket_bound + self.bucket,
+            self.time_window_bound,
+            self.time_window_bound + self.time_window_sec,
         )
         .await?;
 

@@ -26,7 +26,12 @@ use crate::sst::{FileHandle, LevelMeta};
 
 /// Compaction strategy that defines which SSTs need to be compacted at given level.
 pub trait Strategy {
-    fn pick(&self, ctx: &PickerContext, level: &LevelMeta) -> (Option<i64>, Vec<CompactionOutput>);
+    fn pick(
+        &self,
+        ctx: &PickerContext,
+        level: &LevelMeta,
+        results: &mut Vec<CompactionOutput>,
+    ) -> Option<i64>;
 }
 
 pub type StrategyRef = Arc<dyn Strategy + Send + Sync>;
@@ -37,15 +42,20 @@ pub type StrategyRef = Arc<dyn Strategy + Send + Sync>;
 pub struct SimpleTimeWindowStrategy {}
 
 impl Strategy for SimpleTimeWindowStrategy {
-    fn pick(&self, ctx: &PickerContext, level: &LevelMeta) -> (Option<i64>, Vec<CompactionOutput>) {
+    fn pick(
+        &self,
+        ctx: &PickerContext,
+        level: &LevelMeta,
+        results: &mut Vec<CompactionOutput>,
+    ) -> Option<i64> {
         // SimpleTimeWindowStrategy only handles level 0 to level 1 compaction.
         if level.level() != 0 {
-            return (None, vec![]);
+            return None;
         }
         let files = find_compactable_files(level);
         debug!("Compactable files found: {:?}", files);
         if files.is_empty() {
-            return (None, vec![]);
+            return None;
         }
         let time_window = ctx.compaction_time_window().unwrap_or_else(|| {
             let inferred = infer_time_bucket(files.iter());
@@ -57,18 +67,14 @@ impl Strategy for SimpleTimeWindowStrategy {
         });
         let buckets = calculate_time_buckets(time_window, &files);
         debug!("File bucket:{}, file groups: {:?}", time_window, buckets);
-        (
-            Some(time_window),
-            buckets
-                .into_iter()
-                .map(|(bound, files)| CompactionOutput {
-                    output_level: 1,
-                    bucket_bound: bound,
-                    bucket: time_window,
-                    inputs: files,
-                })
-                .collect(),
-        )
+
+        results.extend(buckets.into_iter().map(|(bound, files)| CompactionOutput {
+            output_level: 1,
+            time_window_bound: bound,
+            time_window_sec: time_window,
+            inputs: files,
+        }));
+        Some(time_window)
     }
 }
 

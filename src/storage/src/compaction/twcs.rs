@@ -135,8 +135,8 @@ fn build_output(
             if files.len() > max_files_in_active_window {
                 output.push(CompactionOutput {
                     output_level: 1, // we only have two levels and always compact to l1 
-                    bucket_bound: *window,
-                    bucket: window_size,
+                    time_window_bound: *window,
+                    time_window_sec: window_size,
                     inputs: files.clone(),
                 });
             } else {
@@ -147,8 +147,8 @@ fn build_output(
             if files.len() > max_files_in_non_active_window {
                 output.push(CompactionOutput {
                     output_level: 1,
-                    bucket_bound: *window,
-                    bucket: window_size,
+                    time_window_bound: *window,
+                    time_window_sec: window_size,
                     inputs: files.clone(),
                 });
             }

@@ -121,9 +121,10 @@ impl<S: LogStore> Picker for LeveledPicker<S> {
 
         let ctx = &PickerContext::with(req.compaction_time_window);
 
+        let mut outputs = vec![];
         for level_num in 0..levels.level_num() {
             let level = levels.level(level_num as u8);
-            let (compaction_time_window, outputs) = self.strategy.pick(ctx, level);
+            let compaction_time_window = self.strategy.pick(ctx, level, &mut outputs);
 
             if outputs.is_empty() {
                 debug!("No SST file can be compacted at level {}", level_num);
