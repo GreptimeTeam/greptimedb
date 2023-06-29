@@ -32,7 +32,7 @@ use crate::scheduler::Scheduler;
 use crate::sst::FileHandle;
 
 pub type CompactionPickerRef<S> =
-    Arc<dyn Picker<Request = CompactionRequestImpl<S>, Task = CompactionTaskImpl<S>>>;
+    Arc<dyn Picker<Request = CompactionRequestImpl<S>, Task = CompactionTaskImpl<S>> + Send + Sync>;
 
 pub type CompactionSchedulerRef<S> =
     Arc<dyn Scheduler<Request = CompactionRequestImpl<S>> + Send + Sync>;

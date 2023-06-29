@@ -93,7 +93,7 @@ async fn create_region_for_compaction<
     store_config.engine_config = Arc::new(engine_config);
     store_config.flush_strategy = flush_strategy;
 
-    let picker = LeveledTimeWindowPicker::default();
+    let picker = Arc::new(LeveledTimeWindowPicker::default()) as Arc<_>;
     let pending_compaction_tasks = Arc::new(RwLock::new(vec![]));
     let handler = CompactionHandler {
         picker,
@@ -262,7 +262,7 @@ impl CompactionTester {
         store_config.engine_config = Arc::new(self.engine_config.clone());
         store_config.flush_strategy = self.flush_strategy.clone();
 
-        let picker = LeveledTimeWindowPicker::default();
+        let picker = Arc::new(LeveledTimeWindowPicker::default()) as Arc<_>;
         let handler = CompactionHandler {
             picker,
             #[cfg(test)]

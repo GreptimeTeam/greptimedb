@@ -22,8 +22,8 @@ use store_api::storage::RegionId;
 use tokio::sync::oneshot::Sender;
 use tokio::sync::Notify;
 
-use crate::compaction::picker::Picker;
 use crate::compaction::task::CompactionTask;
+use crate::compaction::CompactionPickerRef;
 use crate::error::Result;
 use crate::manifest::region::RegionManifest;
 use crate::region::{RegionWriterRef, SharedDataRef};
@@ -79,18 +79,18 @@ impl<S: LogStore> CompactionRequestImpl<S> {
     }
 }
 
-pub struct CompactionHandler<P> {
-    pub picker: P,
+pub struct CompactionHandler<S: LogStore> {
+    pub picker: CompactionPickerRef<S>,
     #[cfg(test)]
     pub pending_tasks: Arc<tokio::sync::RwLock<Vec<tokio::task::JoinHandle<()>>>>,
 }
 
 #[async_trait::async_trait]
-impl<P> Handler for CompactionHandler<P>
+impl<S> Handler for CompactionHandler<S>
 where
-    P: Picker + Send + Sync,
+    S: LogStore,
 {
-    type Request = P::Request;
+    type Request = CompactionRequestImpl<S>;
 
     async fn handle_request(
         &self,

@@ -395,7 +395,7 @@ impl Instance {
 }
 
 fn create_compaction_scheduler<S: LogStore>(opts: &DatanodeOptions) -> CompactionSchedulerRef<S> {
-    let picker = LeveledTimeWindowPicker::default();
+    let picker = Arc::new(LeveledTimeWindowPicker::default()) as _;
     let config = SchedulerConfig::from(opts);
     let handler = CompactionHandler { picker };
     let scheduler = LocalScheduler::new(config, handler);
