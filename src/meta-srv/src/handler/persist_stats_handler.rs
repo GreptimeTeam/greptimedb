@@ -146,6 +146,7 @@ mod tests {
     use crate::handler::{HeartbeatMailbox, Pushers};
     use crate::keys::StatKey;
     use crate::sequence::Sequence;
+    use crate::service::store::cached_kv::LeaderCachedKvStore;
     use crate::service::store::ext::KvStoreExt;
     use crate::service::store::memory::MemStore;
 
@@ -153,6 +154,10 @@ mod tests {
     async fn test_handle_datanode_stats() {
         let in_memory = Arc::new(MemStore::new());
         let kv_store = Arc::new(MemStore::new());
+        let leader_cached_kv_store = Arc::new(LeaderCachedKvStore::with_always_leader(
+            kv_store.clone(),
+            in_memory.clone(),
+        ));
         let seq = Sequence::new("test_seq", 0, 10, kv_store.clone());
         let mailbox = HeartbeatMailbox::create(Pushers::default(), seq);
         let meta_peer_client = MetaPeerClientBuilder::default()
@@ -166,6 +171,7 @@ mod tests {
             server_addr: "127.0.0.1:0000".to_string(),
             in_memory,
             kv_store,
+            leader_cached_kv_store,
             meta_peer_client,
             mailbox,
             election: None,

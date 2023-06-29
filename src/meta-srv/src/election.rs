@@ -26,7 +26,7 @@ pub const LEASE_SECS: i64 = 5;
 pub const KEEP_ALIVE_PERIOD_SECS: u64 = LEASE_SECS as u64 / 2;
 pub const ELECTION_KEY: &str = "__meta_srv_election";
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub enum LeaderChangeMessage {
     Elected(Arc<LeaderKey>),
     StepDown(Arc<LeaderKey>),

@@ -37,6 +37,7 @@ impl HeartbeatHandler for OnLeaderStartHandler {
             if election.in_infancy() {
                 ctx.is_infancy = true;
                 ctx.reset_in_memory();
+                ctx.reset_leader_cached_kv_store();
             }
         }
         Ok(())
