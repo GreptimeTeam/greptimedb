@@ -26,7 +26,7 @@ use object_store::ObjectStore;
 use store_api::storage::{FlushContext, FlushReason, OpenOptions, Region};
 use tokio::sync::{Notify, RwLock};
 
-use crate::compaction::{CompactionHandler, LeveledTimeWindowPicker};
+use crate::compaction::CompactionHandler;
 use crate::config::EngineConfig;
 use crate::error::Result;
 use crate::file_purger::{FilePurgeHandler, FilePurgeRequest};
@@ -93,13 +93,8 @@ async fn create_region_for_compaction<
     store_config.engine_config = Arc::new(engine_config);
     store_config.flush_strategy = flush_strategy;
 
-    let picker = Arc::new(LeveledTimeWindowPicker::default()) as Arc<_>;
     let pending_compaction_tasks = Arc::new(RwLock::new(vec![]));
-    let handler = CompactionHandler {
-        picker,
-        #[cfg(test)]
-        pending_tasks: pending_compaction_tasks.clone(),
-    };
+    let handler = CompactionHandler::new_with_pending_tasks(pending_compaction_tasks.clone());
     let config = SchedulerConfig::default();
     // Overwrite test compaction scheduler and file purger.
     store_config.compaction_scheduler = Arc::new(LocalScheduler::new(config, handler));
@@ -262,12 +257,7 @@ impl CompactionTester {
         store_config.engine_config = Arc::new(self.engine_config.clone());
         store_config.flush_strategy = self.flush_strategy.clone();
 
-        let picker = Arc::new(LeveledTimeWindowPicker::default()) as Arc<_>;
-        let handler = CompactionHandler {
-            picker,
-            #[cfg(test)]
-            pending_tasks: Arc::new(Default::default()),
-        };
+        let handler = CompactionHandler::new_with_pending_tasks(Arc::new(Default::default()));
         let config = SchedulerConfig::default();
         // Overwrite test compaction scheduler and file purger.
         store_config.compaction_scheduler = Arc::new(LocalScheduler::new(config, handler));

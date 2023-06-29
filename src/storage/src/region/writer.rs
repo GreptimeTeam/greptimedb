@@ -27,7 +27,7 @@ use store_api::storage::{
 };
 use tokio::sync::{oneshot, Mutex};
 
-use crate::compaction::{CompactionRequestImpl, CompactionSchedulerRef};
+use crate::compaction::{CompactionPickerRef, CompactionRequestImpl, CompactionSchedulerRef};
 use crate::config::EngineConfig;
 use crate::error::{self, Result};
 use crate::flush::{
@@ -412,6 +412,7 @@ pub struct WriterContext<'a, S: LogStore> {
     pub wal: &'a Wal<S>,
     pub writer: &'a RegionWriterRef,
     pub manifest: &'a RegionManifest,
+    pub compaction_picker: CompactionPickerRef<S>,
 }
 
 impl<'a, S: LogStore> WriterContext<'a, S> {
@@ -779,6 +780,7 @@ impl WriterInner {
             engine_config: self.engine_config.clone(),
             ttl: self.ttl,
             compaction_time_window: current_version.ssts().compaction_time_window(),
+            compaction_picker: ctx.compaction_picker.clone(),
         };
 
         let flush_handle = ctx
@@ -816,6 +818,7 @@ impl WriterInner {
             ttl: self.ttl,
             compaction_time_window,
             sender: None,
+            picker: writer_ctx.compaction_picker.clone(),
             sst_write_buffer_size,
         };
 

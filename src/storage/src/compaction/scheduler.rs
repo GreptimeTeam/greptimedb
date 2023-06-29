@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -63,7 +64,7 @@ pub struct CompactionRequestImpl<S: LogStore> {
     pub compaction_time_window: Option<i64>,
     /// Compaction result sender.
     pub sender: Option<Sender<Result<()>>>,
-
+    pub picker: CompactionPickerRef<S>,
     pub sst_write_buffer_size: ReadableSize,
 }
 
@@ -80,9 +81,31 @@ impl<S: LogStore> CompactionRequestImpl<S> {
 }
 
 pub struct CompactionHandler<S: LogStore> {
-    pub picker: CompactionPickerRef<S>,
+    _phantom_data: PhantomData<S>,
     #[cfg(test)]
     pub pending_tasks: Arc<tokio::sync::RwLock<Vec<tokio::task::JoinHandle<()>>>>,
+}
+
+impl<S: LogStore> Default for CompactionHandler<S> {
+    fn default() -> Self {
+        Self {
+            _phantom_data: Default::default(),
+            #[cfg(test)]
+            pending_tasks: Arc::new(Default::default()),
+        }
+    }
+}
+
+impl<S: LogStore> CompactionHandler<S> {
+    #[cfg(test)]
+    pub fn new_with_pending_tasks(
+        tasks: Arc<tokio::sync::RwLock<Vec<tokio::task::JoinHandle<()>>>>,
+    ) -> Self {
+        Self {
+            _phantom_data: Default::default(),
+            pending_tasks: tasks,
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -99,7 +122,7 @@ where
         finish_notifier: Arc<Notify>,
     ) -> Result<()> {
         let region_id = req.key();
-        let Some(task) = self.picker.pick(&req)? else {
+        let Some(task) = req.picker.pick(&req)? else {
             info!("No file needs compaction in region: {:?}", region_id);
             req.complete(Ok(()));
             return Ok(());

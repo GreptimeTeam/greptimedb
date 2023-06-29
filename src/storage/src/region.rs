@@ -36,7 +36,7 @@ use store_api::storage::{
     RegionId, SequenceNumber, WriteContext, WriteResponse,
 };
 
-use crate::compaction::CompactionSchedulerRef;
+use crate::compaction::{CompactionPickerRef, CompactionSchedulerRef, LeveledTimeWindowPicker};
 use crate::config::EngineConfig;
 use crate::error::{self, Error, Result};
 use crate::file_purger::FilePurgerRef;
@@ -252,6 +252,7 @@ impl<S: LogStore> RegionImpl<S> {
             flush_strategy: store_config.flush_strategy,
             flush_scheduler: store_config.flush_scheduler,
             compaction_scheduler: store_config.compaction_scheduler,
+            compaction_picker: Arc::new(LeveledTimeWindowPicker::default()),
             sst_layer: store_config.sst_layer,
             manifest: store_config.manifest,
         });
@@ -345,6 +346,7 @@ impl<S: LogStore> RegionImpl<S> {
             wal: &wal,
             writer: &writer,
             manifest: &store_config.manifest,
+            compaction_picker: Arc::new(LeveledTimeWindowPicker::default()),
         };
         // Replay all unflushed data.
         writer
@@ -364,6 +366,7 @@ impl<S: LogStore> RegionImpl<S> {
             flush_strategy: store_config.flush_strategy,
             flush_scheduler: store_config.flush_scheduler,
             compaction_scheduler: store_config.compaction_scheduler,
+            compaction_picker: Arc::new(LeveledTimeWindowPicker::default()),
             sst_layer: store_config.sst_layer,
             manifest: store_config.manifest,
         });
@@ -586,6 +589,7 @@ impl<S: LogStore> RegionImpl<S> {
             wal: &inner.wal,
             writer: &inner.writer,
             manifest: &inner.manifest,
+            compaction_picker: inner.compaction_picker.clone(),
         };
 
         inner.writer.replay(recovered_metadata, writer_ctx).await
@@ -642,6 +646,7 @@ struct RegionInner<S: LogStore> {
     flush_strategy: FlushStrategyRef,
     flush_scheduler: FlushSchedulerRef<S>,
     compaction_scheduler: CompactionSchedulerRef<S>,
+    compaction_picker: CompactionPickerRef<S>,
     sst_layer: AccessLayerRef,
     manifest: RegionManifest,
 }
@@ -685,6 +690,7 @@ impl<S: LogStore> RegionInner<S> {
             wal: &self.wal,
             writer: &self.writer,
             manifest: &self.manifest,
+            compaction_picker: Arc::new(LeveledTimeWindowPicker::default()),
         };
         // The writer would also try to compat the schema of write batch if it finds out the
         // schema version of request is less than current schema version.
@@ -746,6 +752,7 @@ impl<S: LogStore> RegionInner<S> {
             wal: &self.wal,
             writer: &self.writer,
             manifest: &self.manifest,
+            compaction_picker: self.compaction_picker.clone(),
         };
         self.writer.flush(writer_ctx, ctx).await
     }
@@ -761,6 +768,7 @@ impl<S: LogStore> RegionInner<S> {
             wal: &self.wal,
             writer: &self.writer,
             manifest: &self.manifest,
+            compaction_picker: self.compaction_picker.clone(),
         };
         self.writer.compact(writer_ctx, ctx).await
     }
