@@ -337,7 +337,7 @@ impl ManifestLogStorage for ManifestObjectStore {
             .map(|e| e.path().to_string())
             .collect();
 
-        logging::debug!(
+        logging::info!(
             "Deleting {} from manifest storage path {} paths: {:?}",
             paths.len(),
             self.path,
@@ -359,6 +359,8 @@ impl ManifestLogStorage for ManifestObjectStore {
             .with_context(|_| DeleteObjectSnafu {
                 path: self.path.clone(),
             })?;
+        logging::info!("Deleted manifest storage path {}", self.path);
+
         Ok(())
     }
 
