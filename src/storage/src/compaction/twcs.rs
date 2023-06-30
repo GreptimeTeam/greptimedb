@@ -25,7 +25,7 @@ use store_api::logstore::LogStore;
 
 use crate::compaction::picker::get_expired_ssts;
 use crate::compaction::task::CompactionOutput;
-use crate::compaction::{CompactionRequestImpl, CompactionTaskImpl, Picker};
+use crate::compaction::{infer_time_bucket, CompactionRequestImpl, CompactionTaskImpl, Picker};
 use crate::sst::{FileHandle, LevelMeta};
 
 pub struct TwcsPicker<S> {
@@ -118,8 +118,14 @@ impl<S: LogStore> Picker for TwcsPicker<S> {
             expired_ssts.iter().for_each(|f| f.mark_compacting(true));
         }
 
-        // infer if not present
-        let time_window_size = req.compaction_time_window.unwrap();
+        let time_window_size = req.compaction_time_window.unwrap_or_else(|| {
+            let inferred = infer_time_bucket(req.levels().level(0).files());
+            debug!(
+                "Compaction window is not present, inferring from files: {:?}",
+                inferred
+            );
+            inferred
+        });
 
         // Find active window from files in level 0.
         let active_window =
@@ -141,7 +147,7 @@ impl<S: LogStore> Picker for TwcsPicker<S> {
             manifest: req.manifest.clone(),
             expired_ssts,
             sst_write_buffer_size: req.sst_write_buffer_size,
-            compaction_time_window: None,
+            compaction_time_window: Some(time_window_size),
         };
         Ok(Some(task))
     }
@@ -188,14 +194,18 @@ fn find_latest_window_in_seconds<'a>(
     }
     latest_timestamp
         .and_then(|ts| ts.convert_to_ceil(TimeUnit::Second))
-        .and_then(|ts| ts.value().align_by_bucket(time_window_size))
+        .and_then(|ts| ts.value().align_to_ceil_by_bucket(time_window_size))
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
+    use log_store::NoopLogStore;
+
     use super::*;
     use crate::compaction::tests::new_file_handle;
-    use crate::sst::FileId;
+    use crate::sst::{FileId, Level};
 
     #[test]
     fn test_get_latest_window_in_seconds() {
@@ -212,7 +222,7 @@ mod tests {
         );
 
         assert_eq!(
-            Some(-9223372036857600),
+            Some(-9223372036854000),
             find_latest_window_in_seconds(
                 [new_file_handle(FileId::random(), i64::MIN, i64::MIN + 1, 0)].iter(),
                 3600,
@@ -220,7 +230,7 @@ mod tests {
         );
 
         assert_eq!(
-            i64::MAX / 10000000 * 10000,
+            (i64::MAX / 10000000 + 1) * 10000,
             find_latest_window_in_seconds(
                 [new_file_handle(FileId::random(), i64::MIN, i64::MAX, 0)].iter(),
                 10000,
@@ -244,7 +254,7 @@ mod tests {
         );
         assert_eq!(5, windows.get(&0).unwrap().len());
 
-        let files = [FileId::random(); 5];
+        let files = [FileId::random(); 3];
         let windows = assign_to_windows(
             [
                 new_file_handle(files[0], -2000, -3, 0),
@@ -260,5 +270,122 @@ mod tests {
             files[2],
             windows.get(&12).unwrap().get(0).unwrap().file_id()
         );
+    }
+
+    struct CompactionPickerTestCase {
+        window_size: i64,
+        input_files: Vec<FileHandle>,
+        expected_outputs: Vec<ExpectedOutput>,
+    }
+
+    impl CompactionPickerTestCase {
+        fn check(&self) {
+            let windows = assign_to_windows(self.input_files.iter(), self.window_size);
+            let active_window =
+                find_latest_window_in_seconds(self.input_files.iter(), self.window_size);
+            let output = TwcsPicker::<NoopLogStore>::default().build_output(
+                &windows,
+                active_window,
+                self.window_size,
+            );
+
+            let output = output
+                .iter()
+                .map(|o| {
+                    let input_file_ids =
+                        o.inputs.iter().map(|f| f.file_id()).collect::<HashSet<_>>();
+                    (
+                        input_file_ids,
+                        o.output_level,
+                        o.time_window_sec,
+                        o.time_window_bound,
+                        o.strict_window,
+                    )
+                })
+                .collect::<Vec<_>>();
+
+            let expected = self
+                .expected_outputs
+                .iter()
+                .map(|o| {
+                    let input_file_ids = o
+                        .input_files
+                        .iter()
+                        .map(|idx| self.input_files[*idx].file_id())
+                        .collect::<HashSet<_>>();
+                    (
+                        input_file_ids,
+                        o.output_level,
+                        o.time_window_sec,
+                        o.time_window_bound,
+                        o.strict_window,
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(expected, output);
+        }
+    }
+
+    struct ExpectedOutput {
+        input_files: Vec<usize>,
+        output_level: Level,
+        time_window_sec: i64,
+        time_window_bound: i64,
+        strict_window: bool,
+    }
+
+    #[test]
+    fn test_build_twcs_output() {
+        let file_ids = (0..4).map(|_| FileId::random()).collect::<Vec<_>>();
+
+        CompactionPickerTestCase {
+            window_size: 3,
+            input_files: [
+                new_file_handle(file_ids[0], -2000, -3, 0),
+                new_file_handle(file_ids[1], -3000, -100, 0),
+                new_file_handle(file_ids[2], 0, 2999, 0), //active windows
+                new_file_handle(file_ids[3], 50, 2998, 0), //active windows
+            ]
+            .to_vec(),
+            expected_outputs: vec![ExpectedOutput {
+                input_files: vec![0, 1],
+                output_level: 1,
+                time_window_sec: 3,
+                time_window_bound: 0,
+                strict_window: false,
+            }],
+        }
+        .check();
+
+        let file_ids = (0..6).map(|_| FileId::random()).collect::<Vec<_>>();
+        CompactionPickerTestCase {
+            window_size: 3,
+            input_files: [
+                new_file_handle(file_ids[0], -2000, -3, 0),
+                new_file_handle(file_ids[1], -3000, -100, 0),
+                new_file_handle(file_ids[2], 0, 2999, 0),
+                new_file_handle(file_ids[3], 50, 2998, 0),
+                new_file_handle(file_ids[4], 11, 2990, 0),
+                new_file_handle(file_ids[5], 50, 4998, 0),
+            ]
+            .to_vec(),
+            expected_outputs: vec![
+                ExpectedOutput {
+                    input_files: vec![0, 1],
+                    output_level: 1,
+                    time_window_sec: 3,
+                    time_window_bound: 0,
+                    strict_window: false,
+                },
+                ExpectedOutput {
+                    input_files: vec![2, 3, 4],
+                    output_level: 1,
+                    time_window_sec: 3,
+                    time_window_bound: 3,
+                    strict_window: false,
+                },
+            ],
+        }
+        .check();
     }
 }

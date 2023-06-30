@@ -169,15 +169,15 @@ impl<S: LogStore> CompactionTask for CompactionTaskImpl<S> {
 #[derive(Debug)]
 pub struct CompactionOutput {
     /// Compaction output file level.
-    pub(crate) output_level: Level,
+    pub output_level: Level,
     /// The left bound of time window.
-    pub(crate) time_window_bound: i64,
+    pub time_window_bound: i64,
     /// Time window size in seconds.
-    pub(crate) time_window_sec: i64,
+    pub time_window_sec: i64,
     /// Compaction input files.
-    pub(crate) inputs: Vec<FileHandle>,
+    pub inputs: Vec<FileHandle>,
     /// If the compaction output is strictly windowed.
-    pub(crate) strict_window: bool,
+    pub strict_window: bool,
 }
 
 impl CompactionOutput {

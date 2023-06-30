@@ -72,7 +72,7 @@ impl PickerContext {
     }
 }
 
-/// SimpleTimeWindowStrategy only handles level 0 to level 1 compaction in a time-window tiered
+/// `LeveledTimeWindowPicker` only handles level 0 to level 1 compaction in a time-window tiered
 /// manner. It picks all SSTs in level 0 and writes rows in these SSTs to a new file partitioned
 /// by a inferred time bucket in level 1.
 pub struct LeveledTimeWindowPicker<S> {
@@ -366,7 +366,7 @@ mod tests {
             let expected_expired = self
                 .expired
                 .iter()
-                .map(|idx| self.files[*idx].0.clone())
+                .map(|idx| self.files[*idx].0)
                 .collect::<HashSet<_>>();
             let file_purger = new_noop_file_purger();
             let layer = Arc::new(crate::test_util::access_layer_util::MockAccessLayer {});
