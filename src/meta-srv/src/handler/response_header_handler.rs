@@ -63,10 +63,8 @@ mod tests {
     async fn test_handle_heartbeat_resp_header() {
         let in_memory = Arc::new(MemStore::new());
         let kv_store = Arc::new(MemStore::new());
-        let leader_cached_kv_store = Arc::new(LeaderCachedKvStore::with_always_leader(
-            kv_store.clone(),
-            in_memory.clone(),
-        ));
+        let leader_cached_kv_store =
+            Arc::new(LeaderCachedKvStore::with_always_leader(kv_store.clone()));
         let seq = Sequence::new("test_seq", 0, 10, kv_store.clone());
         let mailbox = HeartbeatMailbox::create(Pushers::default(), seq);
         let meta_peer_client = MetaPeerClientBuilder::default()

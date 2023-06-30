@@ -25,6 +25,7 @@ use api::v1::meta::{
 use crate::error::Result;
 use crate::service::store::ext::KvStoreExt;
 use crate::service::store::kv::{KvStore, KvStoreRef, ResettableKvStore, ResettableKvStoreRef};
+use crate::service::store::memory::MemStore;
 use crate::service::store::txn::{Txn, TxnOp, TxnRequest, TxnResponse, TxnService};
 
 pub type CheckLeaderRef = Arc<dyn CheckLeader>;
@@ -57,22 +58,18 @@ pub struct LeaderCachedKvStore {
 }
 
 impl LeaderCachedKvStore {
-    pub fn new(
-        check_leader: CheckLeaderRef,
-        store: KvStoreRef,
-        cache: ResettableKvStoreRef,
-    ) -> Self {
+    pub fn new(check_leader: CheckLeaderRef, store: KvStoreRef) -> Self {
         Self {
             check_leader,
             store,
-            cache,
+            cache: Arc::new(MemStore::new()),
         }
     }
 
     /// With a leader checker which always returns true when checking,
     /// mainly used in test scenarios.
-    pub fn with_always_leader(store: KvStoreRef, cache: ResettableKvStoreRef) -> Self {
-        Self::new(Arc::new(AlwaysLeader), store, cache)
+    pub fn with_always_leader(store: KvStoreRef) -> Self {
+        Self::new(Arc::new(AlwaysLeader), store)
     }
 
     #[inline]
@@ -98,14 +95,13 @@ impl KvStore for LeaderCachedKvStore {
 
             let res = self.store.range(req.clone()).await?;
             if !res.kvs.is_empty() {
-                let _ = self
-                    .cache
-                    .put(PutRequest {
-                        key: req.key,
-                        value: res.kvs[0].value.clone(),
-                        ..Default::default()
-                    })
-                    .await?;
+                let kv = res.kvs[0].clone();
+                let put_req = PutRequest {
+                    key: kv.key,
+                    value: kv.value,
+                    ..Default::default()
+                };
+                let _ = self.cache.put(put_req).await?;
             }
             return Ok(res);
         }
@@ -275,8 +271,7 @@ mod tests {
 
     fn create_leader_cached_kv_store() -> LeaderCachedKvStore {
         let store = Arc::new(MemStore::new());
-        let cache = Arc::new(MemStore::new());
-        LeaderCachedKvStore::with_always_leader(store, cache)
+        LeaderCachedKvStore::with_always_leader(store)
     }
 
     #[tokio::test]

@@ -135,7 +135,6 @@ impl MetaSrvBuilder {
         let leader_cached_kv_store = Arc::new(LeaderCachedKvStore::new(
             Arc::new(CheckLeaderByElection(election.clone())),
             kv_store.clone(),
-            Arc::new(MemStore::new()),
         ));
         let meta_peer_client = meta_peer_client.unwrap_or_else(|| {
             MetaPeerClientBuilder::default()
