@@ -25,8 +25,9 @@ use table::predicate::{Predicate, TimeRangePredicateBuilder};
 
 use crate::error::{self, Error, Result};
 use crate::memtable::{IterContext, MemtableRef};
-use crate::read::windowed::{ChainReader, WindowedReader};
-use crate::read::{Batch, BoxedBatchReader, DedupReader, MergeReaderBuilder};
+use crate::read::{
+    Batch, BoxedBatchReader, ChainReader, DedupReader, MergeReaderBuilder, WindowedReader,
+};
 use crate::schema::{ProjectedSchema, ProjectedSchemaRef, RegionSchemaRef};
 use crate::sst::{AccessLayerRef, FileHandle, LevelMetas, ReadOptions};
 use crate::window_infer::{PlainWindowInference, WindowInfer};
@@ -293,7 +294,7 @@ impl ChunkReaderBuilder {
         schema: &ProjectedSchemaRef,
         time_range: &TimestampRange,
     ) -> Result<BoxedBatchReader> {
-        let windows = self.sst_windows(time_range);
+        let windows = self.infer_window_for_chain_reader(time_range);
 
         let mut readers = Vec::with_capacity(windows.len());
         for window in &windows {
@@ -312,51 +313,8 @@ impl ChunkReaderBuilder {
         Ok(Box::new(chain_reader) as Box<_>)
     }
 
-    fn sst_windows(&self, time_range: &TimestampRange) -> Vec<TimestampRange> {
-        let mut files_in_range = Vec::with_capacity(self.files_to_read.len());
-        for file in &self.files_to_read {
-            if !Self::file_in_range(file, time_range) || file.time_range().is_none() {
-                continue;
-            }
-            files_in_range.push(file.clone());
-        }
-
-        if files_in_range.is_empty() {
-            return Vec::new();
-        }
-
-        files_in_range.sort_unstable_by(|left, right| {
-            // Safety: We have ignore all files with none time range.
-            left.time_range()
-                .unwrap()
-                .0
-                .cmp(&right.time_range().unwrap().1)
-        });
-
-        let mut ranges = Vec::with_capacity(files_in_range.len());
-        let mut prev = TimestampRange::new_inclusive(
-            Some(files_in_range[0].time_range().unwrap().0),
-            Some(files_in_range[0].time_range().unwrap().1),
-        );
-        for file in &files_in_range[1..] {
-            let current = TimestampRange::new_inclusive(
-                Some(file.time_range().unwrap().0),
-                Some(file.time_range().unwrap().1),
-            );
-            if prev.intersects(&current) {
-                prev = prev.or(&current);
-            } else {
-                ranges.push(prev);
-                prev = current;
-            }
-        }
-        ranges.push(prev);
-
-        ranges
-    }
-
     /// Build time range predicate from schema and filters.
-    pub fn build_time_range_predicate(&self) -> TimestampRange {
+    fn build_time_range_predicate(&self) -> TimestampRange {
         let Some(ts_col) = self.schema.user_schema().timestamp_column() else { return TimestampRange::min_to_max() };
         let unit = ts_col
             .data_type
@@ -375,5 +333,60 @@ impl ChunkReaderBuilder {
         let Some((start, end)) = *file.time_range() else { return true; };
         let file_ts_range = TimestampRange::new_inclusive(Some(start), Some(end));
         file_ts_range.intersects(predicate)
+    }
+
+    /// Returns the time range of memtables to read.
+    fn compute_memtable_range(&self) -> Option<TimestampRange> {
+        let memtable_stats = self.memtables.iter().map(|m| m.stats()).collect::<Vec<_>>();
+        let min_timestamp = memtable_stats.iter().map(|stat| stat.min_timestamp).min()?;
+        let max_timestamp = memtable_stats.iter().map(|stat| stat.max_timestamp).max()?;
+
+        Some(TimestampRange::new_inclusive(
+            Some(min_timestamp),
+            Some(max_timestamp),
+        ))
+    }
+
+    /// Infer time window for chain reader according to the time range of memtables and files.
+    fn infer_window_for_chain_reader(&self, time_range: &TimestampRange) -> Vec<TimestampRange> {
+        let mut file_and_ranges = Vec::with_capacity(self.files_to_read.len());
+        for file in &self.files_to_read {
+            if !Self::file_in_range(file, time_range) || file.time_range().is_none() {
+                continue;
+            }
+            // Safety: we have skip files whose range is `None`.
+            file_and_ranges.push((file.clone(), file.time_range().unwrap()));
+        }
+
+        let memtable_range = self.compute_memtable_range();
+        let mut time_ranges = memtable_range.map(|range| vec![range]).unwrap_or_default();
+        if file_and_ranges.is_empty() {
+            return time_ranges;
+        }
+
+        // Sort by start times.
+        file_and_ranges.sort_unstable_by(|left, right| left.1 .0.cmp(&right.1 .0));
+
+        time_ranges.reserve(file_and_ranges.len());
+        let mut prev = time_ranges.first().copied().unwrap_or_else(|| {
+            // Safety: file_and_ranges is not empty.
+            TimestampRange::new_inclusive(
+                Some(file_and_ranges[0].1 .0),
+                Some(file_and_ranges[0].1 .1),
+            )
+        });
+        for file_and_range in &file_and_ranges {
+            let current =
+                TimestampRange::new_inclusive(Some(file_and_range.1 .0), Some(file_and_range.1 .1));
+            if prev.intersects(&current) {
+                prev = prev.or(&current);
+            } else {
+                time_ranges.push(prev);
+                prev = current;
+            }
+        }
+        time_ranges.push(prev);
+
+        time_ranges
     }
 }

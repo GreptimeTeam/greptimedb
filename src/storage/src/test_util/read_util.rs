@@ -92,6 +92,8 @@ pub async fn collect_kv_batch(reader: &mut dyn BatchReader) -> Vec<(i64, Option<
     result
 }
 
+pub type Batches<'a> = &'a [&'a [(i64, Option<i64>)]];
+
 /// A reader for test that pop batch from Vec.
 pub struct VecBatchReader {
     schema: ProjectedSchemaRef,
