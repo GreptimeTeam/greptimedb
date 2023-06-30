@@ -18,7 +18,6 @@ use std::sync::Arc;
 use catalog::local::new_memory_catalog_manager;
 use catalog::RegisterTableRequest;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-use common_query::physical_plan::PhysicalPlanRef;
 use common_query::prelude::Expr;
 use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
 use common_time::range::TimestampRange;
@@ -60,16 +59,6 @@ impl Table for MemTableWrapper {
 
     fn table_info(&self) -> TableInfoRef {
         self.inner.table_info()
-    }
-
-    async fn scan(
-        &self,
-        projection: Option<&Vec<usize>>,
-        filters: &[Expr],
-        limit: Option<usize>,
-    ) -> table::Result<PhysicalPlanRef> {
-        *self.filter.write().await = filters.to_vec();
-        self.inner.scan(projection, filters, limit).await
     }
 
     async fn scan_to_stream(

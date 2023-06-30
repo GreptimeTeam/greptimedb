@@ -20,8 +20,6 @@ use common_catalog::consts::{
     DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME, MITO_ENGINE,
     SYSTEM_CATALOG_NAME, SYSTEM_CATALOG_TABLE_ID, SYSTEM_CATALOG_TABLE_NAME,
 };
-use common_query::logical_plan::Expr;
-use common_query::physical_plan::{PhysicalPlanRef, SessionContext};
 use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::debug;
 use common_time::util;
@@ -58,15 +56,6 @@ impl Table for SystemCatalogTable {
 
     fn schema(&self) -> SchemaRef {
         self.0.schema()
-    }
-
-    async fn scan(
-        &self,
-        projection: Option<&Vec<usize>>,
-        filters: &[Expr],
-        limit: Option<usize>,
-    ) -> table::Result<PhysicalPlanRef> {
-        self.0.scan(projection, filters, limit).await
     }
 
     async fn scan_to_stream(&self, request: ScanRequest) -> TableResult<SendableRecordBatchStream> {
@@ -136,14 +125,17 @@ impl SystemCatalogTable {
     /// Create a stream of all entries inside system catalog table
     pub async fn records(&self) -> Result<SendableRecordBatchStream> {
         let full_projection = None;
-        let ctx = SessionContext::new();
-        let scan = self
-            .scan(full_projection, &[], None)
+        let scan_req = ScanRequest {
+            sequence: None,
+            projection: full_projection,
+            filters: vec![],
+            output_ordering: None,
+            limit: None,
+        };
+        let stream = self
+            .scan_to_stream(scan_req)
             .await
             .context(error::SystemCatalogTableScanSnafu)?;
-        let stream = scan
-            .execute(0, ctx.task_ctx())
-            .context(error::SystemCatalogTableScanExecSnafu)?;
         Ok(stream)
     }
 }

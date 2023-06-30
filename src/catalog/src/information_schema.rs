@@ -20,8 +20,6 @@ use std::sync::{Arc, Weak};
 
 use async_trait::async_trait;
 use common_error::prelude::BoxedError;
-use common_query::physical_plan::PhysicalPlanRef;
-use common_query::prelude::Expr;
 use common_recordbatch::{RecordBatchStreamAdaptor, SendableRecordBatchStream};
 use datatypes::schema::SchemaRef;
 use futures_util::StreamExt;
@@ -102,20 +100,6 @@ impl Table for InformationTable {
 
     fn table_info(&self) -> table::metadata::TableInfoRef {
         unreachable!("Should not call table_info() of InformationTable directly")
-    }
-
-    /// Scan the table and returns a SendableRecordBatchStream.
-    async fn scan(
-        &self,
-        _projection: Option<&Vec<usize>>,
-        _filters: &[Expr],
-        // limit can be used to reduce the amount scanned
-        // from the datasource as a performance optimization.
-        // If set, it contains the amount of rows needed by the `LogicalPlan`,
-        // The datasource should return *at least* this number of rows if available.
-        _limit: Option<usize>,
-    ) -> TableResult<PhysicalPlanRef> {
-        unimplemented!()
     }
 
     async fn scan_to_stream(&self, request: ScanRequest) -> TableResult<SendableRecordBatchStream> {

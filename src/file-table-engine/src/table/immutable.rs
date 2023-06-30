@@ -19,8 +19,6 @@ use async_trait::async_trait;
 use common_datasource::file_format::Format;
 use common_datasource::object_store::build_backend;
 use common_error::prelude::BoxedError;
-use common_query::physical_plan::PhysicalPlanRef;
-use common_query::prelude::Expr;
 use common_recordbatch::SendableRecordBatchStream;
 use datatypes::schema::SchemaRef;
 use object_store::ObjectStore;
@@ -37,7 +35,7 @@ use crate::manifest::immutable::{
     read_table_manifest, write_table_manifest, ImmutableMetadata, INIT_META_VERSION,
 };
 use crate::manifest::table_manifest_dir;
-use crate::table::format::{create_physical_plan, CreateScanPlanContext, ScanPlanConfig};
+use crate::table::format::{CreateScanPlanContext, ScanPlanConfig};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
@@ -74,28 +72,6 @@ impl Table for ImmutableFileTable {
 
     fn table_type(&self) -> TableType {
         self.table_info().table_type
-    }
-
-    async fn scan(
-        &self,
-        projection: Option<&Vec<usize>>,
-        filters: &[Expr],
-        limit: Option<usize>,
-    ) -> TableResult<PhysicalPlanRef> {
-        create_physical_plan(
-            &self.format,
-            &CreateScanPlanContext::default(),
-            &ScanPlanConfig {
-                file_schema: self.schema(),
-                files: &self.files,
-                projection,
-                filters,
-                limit,
-                store: self.object_store.clone(),
-            },
-        )
-        .map_err(BoxedError::new)
-        .context(table_error::TableOperationSnafu)
     }
 
     async fn scan_to_stream(&self, request: ScanRequest) -> TableResult<SendableRecordBatchStream> {

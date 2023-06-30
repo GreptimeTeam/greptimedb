@@ -99,55 +99,6 @@ impl Table for DistTable {
         Ok(affected_rows as usize)
     }
 
-    async fn scan(
-        &self,
-        projection: Option<&Vec<usize>>,
-        filters: &[Expr],
-        limit: Option<usize>,
-    ) -> table::Result<PhysicalPlanRef> {
-        let partition_manager = self.catalog_manager.partition_manager();
-        let datanode_clients = self.catalog_manager.datanode_clients();
-
-        let partition_rule = partition_manager
-            .find_table_partition_rule(&self.table_name)
-            .await
-            .map_err(BoxedError::new)
-            .context(TableOperationSnafu)?;
-
-        let regions = partition_manager
-            .find_regions_by_filters(partition_rule, filters)
-            .map_err(BoxedError::new)
-            .context(TableOperationSnafu)?;
-        let datanodes = partition_manager
-            .find_region_datanodes(&self.table_name, regions)
-            .await
-            .map_err(BoxedError::new)
-            .context(TableOperationSnafu)?;
-
-        let table_name = &self.table_name;
-        let mut partition_execs = Vec::with_capacity(datanodes.len());
-        for (datanode, _regions) in datanodes.iter() {
-            let client = datanode_clients.get_client(datanode).await;
-            let db = Database::new(&table_name.catalog_name, &table_name.schema_name, client);
-            let datanode_instance = DatanodeInstance::new(Arc::new(self.clone()) as _, db);
-
-            partition_execs.push(Arc::new(PartitionExec {
-                table_name: table_name.clone(),
-                datanode_instance,
-                projection: projection.cloned(),
-                filters: filters.to_vec(),
-                limit,
-                batches: Arc::new(RwLock::new(None)),
-            }));
-        }
-
-        let dist_scan = DistTableScan {
-            schema: project_schema(self.schema(), projection),
-            partition_execs,
-        };
-        Ok(Arc::new(dist_scan))
-    }
-
     // TODO(ruihang): DistTable should not call this method directly
     async fn scan_to_stream(
         &self,

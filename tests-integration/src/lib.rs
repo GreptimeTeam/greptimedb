@@ -19,7 +19,6 @@ mod influxdb;
 mod instance;
 mod opentsdb;
 mod prometheus;
-mod table;
 pub mod test_util;
 
 // TODO(LFC): Refactor: move instance structs out of mod "tests", like the `GreptimeDbCluster`.

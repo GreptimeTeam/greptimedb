@@ -21,7 +21,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use common_query::logical_plan::Expr;
-use common_query::physical_plan::PhysicalPlanRef;
 use common_recordbatch::SendableRecordBatchStream;
 use datatypes::schema::SchemaRef;
 use store_api::storage::{RegionNumber, ScanRequest};
@@ -61,18 +60,6 @@ pub trait Table: Send + Sync {
         }
         .fail()?
     }
-
-    /// Scan the table and returns a SendableRecordBatchStream.
-    async fn scan(
-        &self,
-        projection: Option<&Vec<usize>>,
-        filters: &[Expr],
-        // limit can be used to reduce the amount scanned
-        // from the datasource as a performance optimization.
-        // If set, it contains the amount of rows needed by the `LogicalPlan`,
-        // The datasource should return *at least* this number of rows if available.
-        limit: Option<usize>,
-    ) -> Result<PhysicalPlanRef>;
 
     async fn scan_to_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream>;
 
