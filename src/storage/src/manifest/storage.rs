@@ -321,6 +321,49 @@ impl ManifestLogStorage for ManifestObjectStore {
         Ok(ret)
     }
 
+    async fn delete_all(&self, remove_action_manifest: ManifestVersion) -> Result<()> {
+        let entries: Vec<Entry> = self.get_paths(Some).await?;
+
+        // Filter out the latest delta file.
+        let paths: Vec<_> = entries
+            .iter()
+            .filter(|e| {
+                let name = e.name();
+                if is_delta_file(name) && file_version(name) == remove_action_manifest {
+                    return false;
+                }
+                true
+            })
+            .map(|e| e.path().to_string())
+            .collect();
+
+        logging::info!(
+            "Deleting {} from manifest storage path {} paths: {:?}",
+            paths.len(),
+            self.path,
+            paths,
+        );
+
+        // Delete all files except the latest delta file.
+        self.object_store
+            .remove(paths)
+            .await
+            .with_context(|_| DeleteObjectSnafu {
+                path: self.path.clone(),
+            })?;
+
+        // Delete the latest delta file and the manifest directory.
+        self.object_store
+            .remove_all(&self.path)
+            .await
+            .with_context(|_| DeleteObjectSnafu {
+                path: self.path.clone(),
+            })?;
+        logging::info!("Deleted manifest storage path {}", self.path);
+
+        Ok(())
+    }
+
     async fn save(&self, version: ManifestVersion, bytes: &[u8]) -> Result<()> {
         let path = self.delta_file_path(version);
         logging::debug!("Save log to manifest storage, version: {}", version);

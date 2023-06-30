@@ -680,7 +680,14 @@ mod tests {
                 .unwrap();
 
             engine.drop_region(&ctx, region).await.unwrap();
+
             assert!(engine.get_region(&ctx, region_name).unwrap().is_none());
+            assert!(!engine
+                .inner
+                .object_store
+                .is_exist(dir_path.join("manifest").to_str().unwrap())
+                .await
+                .unwrap());
         }
 
         // Wait for gc

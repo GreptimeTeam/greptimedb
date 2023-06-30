@@ -332,7 +332,7 @@ impl StorageEngine for MockEngine {
     }
 
     async fn drop_region(&self, _ctx: &EngineContext, _region: Self::Region) -> Result<()> {
-        unimplemented!()
+        Ok(())
     }
 
     fn get_region(&self, _ctx: &EngineContext, name: &str) -> Result<Option<MockRegion>> {

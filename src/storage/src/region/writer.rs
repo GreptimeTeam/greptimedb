@@ -21,7 +21,7 @@ use futures::TryStreamExt;
 use metrics::increment_counter;
 use snafu::{ensure, ResultExt};
 use store_api::logstore::LogStore;
-use store_api::manifest::{Manifest, ManifestVersion, MetaAction};
+use store_api::manifest::{Manifest, ManifestLogStorage, ManifestVersion, MetaAction};
 use store_api::storage::{
     AlterRequest, FlushContext, FlushReason, SequenceNumber, WriteContext, WriteResponse,
 };
@@ -289,6 +289,7 @@ impl RegionWriter {
         // 5. Mark all data obsolete in the WAL.
         // 6. Delete the namespace of the region from the WAL.
         // 7. Mark all SSTs deleted.
+        // 8. Remove all manifests.
         let mut inner = self.inner.lock().await;
         inner.mark_closed();
 
@@ -317,7 +318,7 @@ impl RegionWriter {
             action_list
         );
 
-        let _ = drop_ctx.manifest.update(action_list).await?;
+        let remove_action_version = drop_ctx.manifest.update(action_list).await?;
 
         // Mark all data obsolete and delete the namespace in the WAL
         drop_ctx.wal.obsolete(committed_sequence).await?;
@@ -336,6 +337,11 @@ impl RegionWriter {
             files
         );
 
+        drop_ctx
+            .manifest
+            .manifest_store()
+            .delete_all(remove_action_version)
+            .await?;
         Ok(())
     }
 

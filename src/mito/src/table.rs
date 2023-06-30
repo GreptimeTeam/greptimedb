@@ -534,16 +534,6 @@ impl<R: Region> MitoTable<R> {
         Ok(removed)
     }
 
-    pub async fn drop_regions(&self, region_number: &[RegionNumber]) -> TableResult<()> {
-        let regions = self.remove_regions(region_number).await?;
-
-        let _ = futures::future::try_join_all(regions.values().map(|region| region.drop_region()))
-            .await
-            .map_err(BoxedError::new)
-            .context(table_error::TableOperationSnafu)?;
-        Ok(())
-    }
-
     pub fn is_releasable(&self) -> bool {
         let regions = self.regions.load();
 
