@@ -53,13 +53,6 @@ pub struct MemtableStats {
 }
 
 impl MemtableStats {
-    /// Returns true if the timestamps in the stats indicate an empty range.
-    pub fn is_time_range_empty(&self) -> bool {
-        self.min_timestamp > self.max_timestamp
-    }
-}
-
-impl MemtableStats {
     pub fn bytes_allocated(&self) -> usize {
         self.estimated_bytes
     }

@@ -268,11 +268,12 @@ impl ChunkReaderBuilder {
             reader_builder = reader_builder.push_batch_reader(reader);
         }
 
-        logging::info!(
-            "build reader done, time_range: {:?}, total_files: {}, num_read_files: {}",
+        logging::debug!(
+            "build reader done, time_range: {:?}, total_files: {}, num_read_files: {}, read_files: {:?}",
             time_range,
             self.files_to_read.len(),
-            read_files.len()
+            read_files.len(),
+            read_files,
         );
 
         let reader = reader_builder.build();
@@ -310,12 +311,11 @@ impl ChunkReaderBuilder {
     ) -> Result<BoxedBatchReader> {
         let windows = self.infer_window_for_chain_reader(time_range);
 
-        logging::info!(
-            "Infer window for chain reader, memtables: {}, files: {}, num_windows: {}, windows: {:?}",
+        logging::debug!(
+            "Infer window for chain reader, memtables: {}, files: {}, num_windows: {}",
             self.memtables.len(),
             self.files_to_read.len(),
             windows.len(),
-            windows
         );
 
         let mut readers = Vec::with_capacity(windows.len());
@@ -325,7 +325,7 @@ impl ChunkReaderBuilder {
             readers.push(reader);
         }
 
-        logging::info!(
+        logging::debug!(
             "Build chain reader, time_range: {:?}, num_readers: {}",
             time_range,
             readers.len(),
@@ -368,8 +368,8 @@ impl ChunkReaderBuilder {
         let min_timestamp = memtable_stats.iter().map(|stat| stat.min_timestamp).min()?;
         let max_timestamp = memtable_stats.iter().map(|stat| stat.max_timestamp).max()?;
 
-        logging::info!(
-            "compute memtable range, min: {:?}, max: {:?}, stats: {:?}",
+        logging::debug!(
+            "Compute memtable range, min: {:?}, max: {:?}, stats: {:?}",
             min_timestamp,
             max_timestamp,
             memtable_stats
