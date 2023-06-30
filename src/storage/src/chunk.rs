@@ -383,34 +383,45 @@ impl ChunkReaderBuilder {
 
     /// Infer time window for chain reader according to the time range of memtables and files.
     fn infer_window_for_chain_reader(&self, time_range: &TimestampRange) -> Vec<TimestampRange> {
+        let mut memtable_range = self.compute_memtable_range();
+        // file and ranges: (file, start, end)
         let mut file_and_ranges = Vec::with_capacity(self.files_to_read.len());
         for file in &self.files_to_read {
             if !Self::file_in_range(file, time_range) || file.time_range().is_none() {
                 continue;
             }
             // Safety: we have skip files whose range is `None`.
-            file_and_ranges.push((file.clone(), file.time_range().unwrap()));
+            let range = file.time_range().unwrap();
+
+            // Filter by memtable's time range.
+            if let Some(mem_range) = &mut memtable_range {
+                let file_range = TimestampRange::new_inclusive(Some(range.0), Some(range.1));
+                if mem_range.intersects(&file_range) {
+                    // If the range of the SST intersects with the range of the
+                    // memtable, we merge it into the memtable's range.
+                    *mem_range = mem_range.or(&file_range);
+                    continue;
+                }
+            }
+
+            file_and_ranges.push((file.clone(), range.0, range.1));
         }
 
-        let memtable_range = self.compute_memtable_range();
         if file_and_ranges.is_empty() {
             return memtable_range.map(|range| vec![range]).unwrap_or_default();
         }
 
         // Sort by start times.
-        file_and_ranges.sort_unstable_by(|left, right| left.1 .0.cmp(&right.1 .0));
+        file_and_ranges.sort_unstable_by(|left, right| left.1.cmp(&right.1));
 
+        // Compute ranges for all SSTs.
         let mut time_ranges = Vec::with_capacity(file_and_ranges.len() + 1);
-        let mut prev = memtable_range.unwrap_or_else(|| {
-            // Safety: file_and_ranges is not empty.
-            TimestampRange::new_inclusive(
-                Some(file_and_ranges[0].1 .0),
-                Some(file_and_ranges[0].1 .1),
-            )
-        });
-        for file_and_range in &file_and_ranges {
+        // Safety: file_and_ranges is not empty.
+        let mut prev =
+            TimestampRange::new_inclusive(Some(file_and_ranges[0].1), Some(file_and_ranges[0].2));
+        for file_and_range in &file_and_ranges[1..] {
             let current =
-                TimestampRange::new_inclusive(Some(file_and_range.1 .0), Some(file_and_range.1 .1));
+                TimestampRange::new_inclusive(Some(file_and_range.1), Some(file_and_range.2));
             if prev.intersects(&current) {
                 prev = prev.or(&current);
             } else {
@@ -419,6 +430,12 @@ impl ChunkReaderBuilder {
             }
         }
         time_ranges.push(prev);
+
+        if let Some(mem_range) = memtable_range {
+            time_ranges.push(mem_range);
+            // We have pushed the memtable range, resort the array.
+            time_ranges.sort_unstable_by(|left, right| left.start().cmp(right.start()));
+        }
 
         time_ranges
     }
