@@ -3,8 +3,7 @@ database my_db;
 
 Affected Rows: 1
 
-use
-my_db;
+use my_db;
 
 ++
 ++
@@ -51,8 +50,7 @@ order by table_schema, table_name;
 | greptime      | my_db        | foo        | ts          | Int64     | TIME INDEX    |
 +---------------+--------------+------------+-------------+-----------+---------------+
 
-use
-public;
+use public;
 
 ++
 ++
