@@ -195,7 +195,12 @@ impl ChunkReaderBuilder {
         if name != self.schema.timestamp_column_name() {
             return None;
         }
-        let memtable_stats = self.memtables.iter().map(|m| m.stats()).collect::<Vec<_>>();
+        let memtable_stats = self
+            .memtables
+            .iter()
+            .filter(|m| m.num_rows() > 0) // Skip empty memtables.
+            .map(|m| m.stats())
+            .collect::<Vec<_>>();
         let files = self
             .files_to_read
             .iter()
@@ -354,7 +359,12 @@ impl ChunkReaderBuilder {
 
     /// Returns the time range of memtables to read.
     fn compute_memtable_range(&self) -> Option<TimestampRange> {
-        let memtable_stats = self.memtables.iter().map(|m| m.stats()).collect::<Vec<_>>();
+        let memtable_stats = self
+            .memtables
+            .iter()
+            .filter(|m| m.num_rows() > 0) // Skip empty memtables.
+            .map(|m| m.stats())
+            .collect::<Vec<_>>();
         let min_timestamp = memtable_stats.iter().map(|stat| stat.min_timestamp).min()?;
         let max_timestamp = memtable_stats.iter().map(|stat| stat.max_timestamp).max()?;
 

@@ -53,6 +53,13 @@ pub struct MemtableStats {
 }
 
 impl MemtableStats {
+    /// Returns true if the timestamps in the stats indicate an empty range.
+    pub fn is_time_range_empty(&self) -> bool {
+        self.min_timestamp > self.max_timestamp
+    }
+}
+
+impl MemtableStats {
     pub fn bytes_allocated(&self) -> usize {
         self.estimated_bytes
     }
@@ -75,9 +82,7 @@ pub trait Memtable: Send + Sync + fmt::Debug {
     /// Iterates the memtable.
     fn iter(&self, ctx: IterContext) -> Result<BoxedBatchIterator>;
 
-    /// Returns the estimated bytes allocated by this memtable from heap. Result
-    /// of this method may be larger than the estimated based on [`num_rows`] because
-    /// of the implementor's pre-alloc behavior.
+    /// Returns the number of rows in the memtable.
     fn num_rows(&self) -> usize;
 
     /// Returns stats of this memtable.
