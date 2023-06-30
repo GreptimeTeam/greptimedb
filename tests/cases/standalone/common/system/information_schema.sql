@@ -1,8 +1,7 @@
 create
 database my_db;
 
-use
-my_db;
+use my_db;
 
 create table foo
 (
@@ -26,5 +25,4 @@ where table_catalog = 'greptime'
   and table_schema != 'public'
 order by table_schema, table_name;
 
-use
-public;
+use public;
