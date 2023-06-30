@@ -99,6 +99,7 @@ pub struct ChunkReaderBuilder {
     memtables: Vec<MemtableRef>,
     files_to_read: Vec<FileHandle>,
     output_ordering: Option<Vec<OrderOption>>,
+    use_chain_reader: bool,
 }
 
 impl ChunkReaderBuilder {
@@ -112,6 +113,7 @@ impl ChunkReaderBuilder {
             memtables: Vec::new(),
             files_to_read: Vec::new(),
             output_ordering: None,
+            use_chain_reader: false,
         }
     }
 
@@ -148,6 +150,15 @@ impl ChunkReaderBuilder {
 
     pub fn pick_memtables(mut self, memtables: MemtableRef) -> Self {
         self.memtables.push(memtables);
+        self
+    }
+
+    /// Partition files and memtables according to their time windows and scan time windows
+    /// one by one.
+    ///
+    /// Note that compaction should not enable this.
+    pub fn use_chain_reader(mut self, use_chain_reader: bool) -> Self {
+        self.use_chain_reader = use_chain_reader;
         self
     }
 
@@ -278,9 +289,10 @@ impl ChunkReaderBuilder {
                 output_ordering = Some(ordering.clone());
                 self.build_windowed(&schema, &time_range_predicate, windows, ordering)
                     .await?
-        } else {
-            // FIXME(yingwen): compaction needs non chain reader.
+        } else if self.use_chain_reader {
             self.build_chained(&schema, &time_range_predicate).await?
+        } else {
+            self.build_reader(&schema, &time_range_predicate).await?
         };
 
         Ok(ChunkReaderImpl::new(schema, reader, output_ordering))
@@ -345,6 +357,13 @@ impl ChunkReaderBuilder {
         let memtable_stats = self.memtables.iter().map(|m| m.stats()).collect::<Vec<_>>();
         let min_timestamp = memtable_stats.iter().map(|stat| stat.min_timestamp).min()?;
         let max_timestamp = memtable_stats.iter().map(|stat| stat.max_timestamp).max()?;
+
+        logging::info!(
+            "compute memtable range, min: {:?}, max: {:?}, stats: {:?}",
+            min_timestamp,
+            max_timestamp,
+            memtable_stats
+        );
 
         Some(TimestampRange::new_inclusive(
             Some(min_timestamp),
