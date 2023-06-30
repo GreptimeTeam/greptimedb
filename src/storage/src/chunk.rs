@@ -246,11 +246,7 @@ impl ChunkReaderBuilder {
                 debug!("Skip file {:?}, predicate: {:?}", file, time_range);
                 continue;
             }
-            logging::info!(
-                "build reader read file, time_range: {:?}, file: {}",
-                time_range,
-                file.file_id(),
-            );
+
             read_files.push(file.meta());
             let reader = self.sst_layer.read_sst(file.clone(), &read_opts).await?;
             reader_builder = reader_builder.push_batch_reader(reader);
@@ -283,6 +279,7 @@ impl ChunkReaderBuilder {
                 self.build_windowed(&schema, &time_range_predicate, windows, ordering)
                     .await?
         } else {
+            // FIXME(yingwen): compaction needs non chain reader.
             self.build_chained(&schema, &time_range_predicate).await?
         };
 
@@ -296,6 +293,14 @@ impl ChunkReaderBuilder {
     ) -> Result<BoxedBatchReader> {
         let windows = self.infer_window_for_chain_reader(time_range);
 
+        logging::info!(
+            "Infer window for chain reader, memtables: {}, files: {}, num_windows: {}, windows: {:?}",
+            self.memtables.len(),
+            self.files_to_read.len(),
+            windows.len(),
+            windows
+        );
+
         let mut readers = Vec::with_capacity(windows.len());
         for window in &windows {
             let time_range = time_range.and(&window);
@@ -304,7 +309,7 @@ impl ChunkReaderBuilder {
         }
 
         logging::info!(
-            "build chain reader, time_range: {:?}, num_readers: {}",
+            "Build chain reader, time_range: {:?}, num_readers: {}",
             time_range,
             readers.len(),
         );
@@ -359,16 +364,15 @@ impl ChunkReaderBuilder {
         }
 
         let memtable_range = self.compute_memtable_range();
-        let mut time_ranges = memtable_range.map(|range| vec![range]).unwrap_or_default();
         if file_and_ranges.is_empty() {
-            return time_ranges;
+            return memtable_range.map(|range| vec![range]).unwrap_or_default();
         }
 
         // Sort by start times.
         file_and_ranges.sort_unstable_by(|left, right| left.1 .0.cmp(&right.1 .0));
 
-        time_ranges.reserve(file_and_ranges.len());
-        let mut prev = time_ranges.first().copied().unwrap_or_else(|| {
+        let mut time_ranges = Vec::with_capacity(file_and_ranges.len() + 1);
+        let mut prev = memtable_range.unwrap_or_else(|| {
             // Safety: file_and_ranges is not empty.
             TimestampRange::new_inclusive(
                 Some(file_and_ranges[0].1 .0),
