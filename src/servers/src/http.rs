@@ -26,6 +26,7 @@ pub mod script;
 mod dashboard;
 
 use std::net::SocketAddr;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -34,11 +35,12 @@ use aide::openapi::{Info, OpenApi, Server as OpenAPIServer};
 use async_trait::async_trait;
 use axum::body::BoxBody;
 use axum::error_handling::HandleErrorLayer;
-use axum::extract::MatchedPath;
+use axum::extract::{DefaultBodyLimit, MatchedPath};
 use axum::http::Request;
 use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Json};
 use axum::{routing, BoxError, Extension, Router};
+use common_base::readable_size::ReadableSize;
 use common_error::prelude::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_query::Output;
@@ -133,6 +135,8 @@ pub struct HttpOptions {
 
     #[serde(skip)]
     pub disable_dashboard: bool,
+
+    pub http_body_maximum_size: ReadableSize,
 }
 
 impl Default for HttpOptions {
@@ -141,6 +145,7 @@ impl Default for HttpOptions {
             addr: "127.0.0.1:4000".to_string(),
             timeout: Duration::from_secs(30),
             disable_dashboard: false,
+            http_body_maximum_size: ReadableSize::from_str("6G").unwrap(),
         }
     }
 }
@@ -544,6 +549,9 @@ impl HttpServer {
                     .layer(HandleErrorLayer::new(handle_error))
                     .layer(TraceLayer::new_for_http())
                     .layer(TimeoutLayer::new(self.options.timeout))
+                    .layer(DefaultBodyLimit::max(
+                        self.options.http_body_maximum_size.0.try_into().unwrap(),
+                    ))
                     // custom layer
                     .layer(AsyncRequireAuthorizationLayer::new(
                         HttpAuth::<BoxBody>::new(self.user_provider.clone()),
