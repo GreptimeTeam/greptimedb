@@ -15,12 +15,13 @@
 use std::collections::HashMap;
 
 use api::v1::meta::{
-    router_server, BatchPutRequest, CreateRequest, DeleteRequest, Error, KeyValue, Peer, PeerDict,
-    Region, RegionRoute, ResponseHeader, RouteRequest, RouteResponse, Table, TableRoute,
+    router_server, BatchPutRequest, CreateRequest, DeleteRequest, Error, KeyValue, Partition, Peer,
+    PeerDict, Region, RegionRoute, ResponseHeader, RouteRequest, RouteResponse, Table, TableRoute,
     TableRouteValue,
 };
 use catalog::helper::{TableGlobalKey, TableGlobalValue};
 use common_meta::key::TableRouteKey;
+use common_meta::rpc::router;
 use common_meta::table_name::TableName;
 use common_telemetry::{timer, warn};
 use snafu::{ensure, OptionExt, ResultExt};
@@ -258,7 +259,118 @@ async fn handle_create(
     })
 }
 
-fn create_table_global_value(
+// TODO(weny): modified from `handle_create`, removes the `handle_create` in following PRs.
+pub async fn handle_create_table_metadata(
+    cluster_id: u64,
+    table_name: TableName,
+    partitions: Vec<Partition>,
+    table_info: Vec<u8>,
+    ctx: SelectorContext,
+    selector: SelectorRef,
+    table_id_sequence: SequenceRef,
+) -> Result<router::TableRoute> {
+    let mut table_info: RawTableInfo =
+        serde_json::from_slice(&table_info).with_context(|_| error::DeserializeFromJsonSnafu {
+            input: format!(
+                "Corrupted table info: {}",
+                String::from_utf8_lossy(&table_info)
+            ),
+        })?;
+
+    let mut peers = selector.select(cluster_id, &ctx).await?;
+
+    if peers.len() < partitions.len() {
+        warn!("Create table failed due to no enough available datanodes, table: {table_name:?}, partition number: {}, datanode number: {}", partitions.len(), peers.len());
+        return error::NoEnoughAvailableDatanodeSnafu {
+            expected: partitions.len(),
+            available: peers.len(),
+        }
+        .fail();
+    }
+
+    // We don't need to keep all peers, just truncate it to the number of partitions.
+    // If the peers are not enough, some peers will be used for multiple partitions.
+    peers.truncate(partitions.len());
+
+    let id = table_id_sequence.next().await?;
+    table_info.ident.table_id = id as u32;
+    let table_name = table_name.into();
+    let table_route_key = TableRouteKey::with_table_name(id, &table_name)
+        .key()
+        .into_bytes();
+
+    let table = Table {
+        id,
+        table_name: Some(table_name.clone()),
+        ..Default::default()
+    };
+    let mut region_routes = Vec::with_capacity(partitions.len());
+    for (i, partition) in partitions.into_iter().enumerate() {
+        let region = Region {
+            id: i as u64,
+            partition: Some(partition),
+            ..Default::default()
+        };
+        let region_route = RegionRoute {
+            region: Some(region),
+            leader_peer_index: (i % peers.len()) as u64,
+            follower_peer_indexes: vec![], // follower_peers is not supported at the moment
+        };
+        region_routes.push(region_route);
+    }
+    let table_route = TableRoute {
+        table: Some(table),
+        region_routes,
+    };
+
+    // save table route data into meta store
+    let table_route_value = TableRouteValue {
+        peers: peers.clone(),
+        table_route: Some(table_route.clone()),
+    };
+
+    let table_global_key = TableGlobalKey {
+        catalog_name: table_name.catalog_name.clone(),
+        schema_name: table_name.schema_name.clone(),
+        table_name: table_name.table_name.clone(),
+    }
+    .to_string()
+    .into_bytes();
+
+    let table_global_value = create_table_global_value(&table_route_value, table_info)?
+        .as_bytes()
+        .context(error::InvalidCatalogValueSnafu)?;
+
+    let req = BatchPutRequest {
+        kvs: vec![
+            KeyValue {
+                key: table_global_key,
+                value: table_global_value,
+            },
+            KeyValue {
+                key: table_route_key,
+                value: table_route_value.into(),
+            },
+        ],
+        prev_kv: true,
+        ..Default::default()
+    };
+
+    let resp = ctx.kv_store.batch_put(req).await?;
+    if !resp.prev_kvs.is_empty() {
+        warn!(
+            "Caution: table meta values are replaced! \
+            Maybe last creation procedure for table {table_name:?} was aborted?"
+        );
+    }
+
+    let table_route = router::TableRoute::try_from_raw(&peers, table_route)
+        .context(error::TableRouteConversionSnafu)?;
+
+    Ok(table_route)
+}
+
+pub(crate) fn create_table_global_value(
     table_route_value: &TableRouteValue,
     table_info: RawTableInfo,
 ) -> Result<TableGlobalValue> {
@@ -349,7 +461,7 @@ async fn handle_delete(req: DeleteRequest, ctx: Context) -> Result<RouteResponse
     })
 }
 
-fn fill_table_routes(
+pub(crate) fn fill_table_routes(
     tables: Vec<(TableGlobalValue, TableRouteValue)>,
 ) -> Result<(Vec<Peer>, Vec<TableRoute>)> {
     let mut peer_dict = PeerDict::default();
@@ -407,7 +519,7 @@ async fn fetch_tables(
     Ok(tables)
 }
 
-fn table_route_key(table_id: u64, t: &TableGlobalKey) -> TableRouteKey<'_> {
+pub(crate) fn table_route_key(table_id: u64, t: &TableGlobalKey) -> TableRouteKey<'_> {
     TableRouteKey {
         table_id,
         catalog_name: &t.catalog_name,

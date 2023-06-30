@@ -28,6 +28,7 @@ use snafu::ResultExt;
 use tokio::sync::broadcast::error::RecvError;
 
 use crate::cluster::MetaPeerClientRef;
+use crate::ddl::DdlManagerRef;
 use crate::election::{Election, LeaderChangeMessage};
 use crate::error::{RecoverProcedureSnafu, Result};
 use crate::handler::HeartbeatHandlerGroup;
@@ -109,6 +110,20 @@ pub struct SelectorContext {
     pub table: Option<String>,
 }
 
+impl SelectorContext {
+    pub fn from_ctx(catalog: String, schema: String, table: String, ctx: SelectorContext) -> Self {
+        SelectorContext {
+            datanode_lease_secs: ctx.datanode_lease_secs,
+            server_addr: ctx.server_addr,
+            kv_store: ctx.kv_store,
+            meta_peer_client: ctx.meta_peer_client,
+            catalog: Some(catalog),
+            schema: Some(schema),
+            table: Some(table),
+        }
+    }
+}
+
 pub type SelectorRef = Arc<dyn Selector<Context = SelectorContext, Output = Vec<Peer>>>;
 pub type ElectionRef = Arc<dyn Election<Leader = LeaderValue>>;
 
@@ -129,6 +144,7 @@ pub struct MetaSrv {
     procedure_manager: ProcedureManagerRef,
     metadata_service: MetadataServiceRef,
     mailbox: MailboxRef,
+    ddl_manager: DdlManagerRef,
 }
 
 impl MetaSrv {
@@ -252,6 +268,11 @@ impl MetaSrv {
     #[inline]
     pub fn mailbox(&self) -> MailboxRef {
         self.mailbox.clone()
+    }
+
+    #[inline]
+    pub fn ddl_manager(&self) -> DdlManagerRef {
+        self.ddl_manager.clone()
     }
 
     pub fn procedure_manager(&self) -> &ProcedureManagerRef {

@@ -12,6 +12,7 @@ common-error = { path = "../error" }
 common-runtime = { path = "../runtime" }
 common-telemetry = { path = "../telemetry" }
 common-time = { path = "../time" }
+prost.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 snafu.workspace = true

@@ -13,6 +13,7 @@ api = { path = "../api" }
 async-stream.workspace = true
 async-trait = "0.1"
 catalog = { path = "../catalog" }
+client = { path = "../client" }
 common-base = { path = "../common/base" }
 common-catalog = { path = "../common/catalog" }
 common-error = { path = "../common/error" }

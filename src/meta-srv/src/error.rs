@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use common_error::prelude::*;
+use common_meta::peer::Peer;
 use snafu::Location;
 use tokio::sync::mpsc::error::SendError;
 use tonic::codegen::http;
@@ -21,6 +22,24 @@ use tonic::Code;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
+    #[snafu(display(
+        "Failed to request Datanode, expected: {}, but only {} available",
+        expected,
+        available
+    ))]
+    NoEnoughAvailableDatanode {
+        location: Location,
+        expected: usize,
+        available: usize,
+    },
+
+    #[snafu(display("Failed to request Datanode {}, source: {}", peer, source))]
+    RequestDatanode {
+        location: Location,
+        peer: Peer,
+        source: client::Error,
+    },
+
     #[snafu(display("Failed to send shutdown signal"))]
     SendShutdownSignal { source: SendError<()> },
 
@@ -274,6 +293,18 @@ pub enum Error {
         source: common_procedure::Error,
     },
 
+    #[snafu(display("Failed to recover procedure, source: {source}"))]
+    WaitProcedure {
+        location: Location,
+        source: common_procedure::Error,
+    },
+
+    #[snafu(display("Failed to submit procedure, source: {source}"))]
+    SubmitProcedure {
+        location: Location,
+        source: common_procedure::Error,
+    },
+
     #[snafu(display("Schema already exists, name: {schema_name}"))]
     SchemaAlreadyExists {
         schema_name: String,
@@ -413,7 +444,8 @@ impl ErrorExt for Error {
             | Error::MailboxReceiver { .. }
             | Error::RetryLater { .. }
             | Error::StartGrpc { .. }
-            | Error::Combine { .. } => StatusCode::Internal,
+            | Error::Combine { .. }
+            | Error::NoEnoughAvailableDatanode { .. } => StatusCode::Internal,
             Error::EmptyKey { .. }
             | Error::MissingRequiredParameter { .. }
             | Error::MissingRequestHeader { .. }
@@ -439,8 +471,11 @@ impl ErrorExt for Error {
             | Error::EtcdTxnOpResponse { .. }
             | Error::Unexpected { .. } => StatusCode::Unexpected,
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
+            Error::RequestDatanode { source, .. } => source.status_code(),
             Error::InvalidCatalogValue { source, .. } => source.status_code(),
-            Error::RecoverProcedure { source, .. } => source.status_code(),
+            Error::RecoverProcedure { source, .. }
+            | Error::SubmitProcedure { source, .. }
+            | Error::WaitProcedure { source, .. } => source.status_code(),
             Error::ShutdownServer { source, .. } | Error::StartHttp { source, .. } => {
                 source.status_code()
             }

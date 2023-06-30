@@ -15,9 +15,11 @@
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
+use client::client_manager::DatanodeClients;
 use common_procedure::local::{LocalManager, ManagerConfig};
 
 use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
+use crate::ddl::DdlManager;
 use crate::error::Result;
 use crate::handler::mailbox_handler::MailboxHandler;
 use crate::handler::region_lease_handler::RegionLeaseHandler;
@@ -207,6 +209,28 @@ impl MetaSrvBuilder {
         let metadata_service = metadata_service
             .unwrap_or_else(|| Arc::new(DefaultMetadataService::new(kv_store.clone())));
 
+        // TODO(weny): considers to modify the default config of procedure manager
+        let ddl_manager = Arc::new(DdlManager::new(
+            procedure_manager.clone(),
+            selector.clone(),
+            SelectorContext {
+                server_addr: options.server_addr.clone(),
+                datanode_lease_secs: options.datanode_lease_secs,
+                kv_store: kv_store.clone(),
+                meta_peer_client: meta_peer_client.clone(),
+                catalog: None,
+                schema: None,
+                table: None,
+            },
+            lock.clone(),
+            table_id_sequence.clone(),
+            kv_store.clone(),
+            Arc::new(DatanodeClients::default()),
+        ));
+
+        let _ = ddl_manager.try_start();
+        // TODO(weny): recovers procedures.
+
         Ok(MetaSrv {
             started,
             options,
@@ -221,6 +245,7 @@ impl MetaSrvBuilder {
             procedure_manager,
             metadata_service,
             mailbox,
+            ddl_manager,
         })
     }
 }
