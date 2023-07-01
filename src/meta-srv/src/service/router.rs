@@ -264,19 +264,11 @@ pub async fn handle_create_table_metadata(
     cluster_id: u64,
     table_name: TableName,
     partitions: Vec<Partition>,
-    table_info: Vec<u8>,
+    mut table_info: RawTableInfo,
     ctx: SelectorContext,
     selector: SelectorRef,
     table_id_sequence: SequenceRef,
 ) -> Result<router::TableRoute> {
-    let mut table_info: RawTableInfo =
-        serde_json::from_slice(&table_info).with_context(|_| error::DeserializeFromJsonSnafu {
-            input: format!(
-                "Corrupted table info: {}",
-                String::from_utf8_lossy(&table_info)
-            ),
-        })?;
-
     let mut peers = selector.select(cluster_id, &ctx).await?;
 
     if peers.len() < partitions.len() {

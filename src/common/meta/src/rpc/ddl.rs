@@ -59,7 +59,6 @@ impl DdlTask {
         partitions: Vec<Partition>,
         table_info: RawTableInfo,
     ) -> Result<Self> {
-        let table_info = serde_json::to_vec(&table_info).context(error::SerdeJsonSnafu)?;
         Ok(DdlTask::CreateTable(CreateTableTask::new(
             expr, partitions, table_info,
         )))
@@ -77,19 +76,25 @@ impl TryFrom<Task> for DdlTask {
     }
 }
 
-impl From<DdlTask> for PbSubmitDdlTaskRequest {
-    fn from(task: DdlTask) -> Self {
-        let task = match task {
+pub struct SubmitDdlTaskRequest {
+    pub task: DdlTask,
+}
+
+impl TryFrom<SubmitDdlTaskRequest> for PbSubmitDdlTaskRequest {
+    type Error = error::Error;
+
+    fn try_from(request: SubmitDdlTaskRequest) -> Result<Self> {
+        let task = match request.task {
             DdlTask::CreateTable(task) => Task::CreateTableTask(PbCreateTableTask {
-                table_info: task.table_info,
+                table_info: serde_json::to_vec(&task.table_info).context(error::SerdeJsonSnafu)?,
                 create_table: Some(task.create_table),
                 partitions: task.partitions,
             }),
         };
-        Self {
+        Ok(Self {
             header: None,
             task: Some(task),
-        }
+        })
     }
 }
 
@@ -107,18 +112,20 @@ impl From<PbSubmitDdlTaskResponse> for SubmitDdlTaskResponse {
 pub struct CreateTableTask {
     pub create_table: CreateTableExpr,
     pub partitions: Vec<Partition>,
-    pub table_info: Vec<u8>,
+    pub table_info: RawTableInfo,
 }
 
 impl TryFrom<PbCreateTableTask> for CreateTableTask {
     type Error = error::Error;
     fn try_from(pb: PbCreateTableTask) -> Result<Self> {
+        let table_info = serde_json::from_slice(&pb.table_info).context(error::SerdeJsonSnafu)?;
+
         Ok(CreateTableTask::new(
             pb.create_table.context(error::InfoCorruptedSnafu {
                 err_msg: "expected create table",
             })?,
             pb.partitions,
-            pb.table_info,
+            table_info,
         ))
     }
 }
@@ -127,7 +134,7 @@ impl CreateTableTask {
     pub fn new(
         expr: CreateTableExpr,
         partitions: Vec<Partition>,
-        table_info: Vec<u8>,
+        table_info: RawTableInfo,
     ) -> CreateTableTask {
         CreateTableTask {
             create_table: expr,
@@ -162,10 +169,13 @@ impl Serialize for CreateTableTask {
     where
         S: serde::Serializer,
     {
+        let table_info = serde_json::to_vec(&self.table_info)
+            .map_err(|err| serde::ser::Error::custom(err.to_string()))?;
+
         let pb = PbCreateTableTask {
             create_table: Some(self.create_table.clone()),
             partitions: self.partitions.clone(),
-            table_info: self.table_info.clone(),
+            table_info,
         };
         let buf = pb.encode_to_vec();
         serializer.serialize_bytes(&buf)
