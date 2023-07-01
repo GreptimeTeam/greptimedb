@@ -20,7 +20,7 @@ use common_meta::rpc::router::TableRoute;
 use common_meta::table_name::TableName;
 use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu};
 use common_procedure::{Context as ProcedureContext, LockKey, Procedure, ProcedureId, Status};
-use futures::future::try_join_all;
+use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
 use table::engine::TableReference;
@@ -183,22 +183,28 @@ impl CreateTableProcedure {
             create_expr_for_region.create_if_not_exists = true;
 
             joins.push(common_runtime::spawn_bg(async move {
-                let _ = client
+                client
                     .create(create_expr_for_region)
                     .await
-                    .context(error::RequestDatanodeSnafu { peer: datanode });
+                    .context(error::RequestDatanodeSnafu { peer: datanode })
             }));
         }
 
-        let _ = try_join_all(joins).await.map_err(|err| {
-            error::RetryLaterSnafu {
-                reason: format!(
-                    "Failed to execute create table on datanode, source: {}",
-                    err
-                ),
-            }
-            .build()
-        })?;
+        let _ = join_all(joins)
+            .await
+            .into_iter()
+            .map(|result| {
+                result.map_err(|err| {
+                    error::RetryLaterSnafu {
+                        reason: format!(
+                            "Failed to execute create table on datanode, source: {}",
+                            err
+                        ),
+                    }
+                    .build()
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
 
         let mut status = self.context.procedure_status.write().unwrap();
         status.insert(
