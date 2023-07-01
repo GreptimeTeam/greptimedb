@@ -162,6 +162,12 @@ pub struct ProcedureWithId {
 
 impl ProcedureWithId {
     /// Returns a new [ProcedureWithId] that holds specific `procedure`
+    /// and the `id` as [ProcedureId].
+    pub fn new(id: ProcedureId, procedure: BoxedProcedure) -> ProcedureWithId {
+        ProcedureWithId { id, procedure }
+    }
+
+    /// Returns a new [ProcedureWithId] that holds specific `procedure`
     /// and a random [ProcedureId].
     pub fn with_random_id(procedure: BoxedProcedure) -> ProcedureWithId {
         ProcedureWithId {

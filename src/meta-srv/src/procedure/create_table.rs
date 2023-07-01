@@ -19,13 +19,14 @@ use common_meta::rpc::ddl::CreateTableTask;
 use common_meta::rpc::router::TableRoute;
 use common_meta::table_name::TableName;
 use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu};
-use common_procedure::{Context as ProcedureContext, LockKey, Procedure, Status};
+use common_procedure::{Context as ProcedureContext, LockKey, Procedure, ProcedureId, Status};
 use futures::future::try_join_all;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
 use table::engine::TableReference;
+use table::metadata::TableId;
 
-use crate::ddl::DdlContext;
+use crate::ddl::{DdlContext, ProcedureStatus};
 use crate::error::{self, Result};
 use crate::metasrv::SelectorContext;
 use crate::service::router::{fill_table_routes, handle_create_table_metadata, table_route_key};
@@ -38,15 +39,31 @@ pub struct CreateTableProcedure {
     creator: TableCreator,
 }
 
+#[derive(Clone)]
+pub struct CreateTableProcedureStatus {
+    pub table_id: TableId,
+}
+
+impl CreateTableProcedureStatus {
+    pub fn with_table_id(table_id: TableId) -> Self {
+        Self { table_id }
+    }
+}
+
 // TODO(weny): removes in following PRs.
 #[allow(dead_code)]
 impl CreateTableProcedure {
     pub(crate) const TYPE_NAME: &'static str = "metasrv-procedure::CreateTable";
 
-    pub(crate) fn new(cluster_id: u64, task: CreateTableTask, context: DdlContext) -> Self {
+    pub(crate) fn new(
+        id: ProcedureId,
+        cluster_id: u64,
+        task: CreateTableTask,
+        context: DdlContext,
+    ) -> Self {
         Self {
             context,
-            creator: TableCreator::new(cluster_id, task),
+            creator: TableCreator::new(id, cluster_id, task),
         }
     }
 
@@ -183,6 +200,14 @@ impl CreateTableProcedure {
             .build()
         })?;
 
+        let mut status = self.context.procedure_status.write().unwrap();
+        status.insert(
+            self.creator.data.id,
+            ProcedureStatus::CreateTable(CreateTableProcedureStatus::with_table_id(
+                table_route.table.id as u32,
+            )),
+        );
+
         Ok(Status::Done)
     }
 }
@@ -218,9 +243,10 @@ pub struct TableCreator {
 }
 
 impl TableCreator {
-    pub fn new(cluster_id: u64, task: CreateTableTask) -> Self {
+    pub fn new(id: ProcedureId, cluster_id: u64, task: CreateTableTask) -> Self {
         Self {
             data: CreateTableData {
+                id,
                 state: CreateTableState::Prepare,
                 cluster_id,
                 task,
@@ -241,6 +267,7 @@ enum CreateTableState {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CreateTableData {
+    id: ProcedureId,
     state: CreateTableState,
     task: CreateTableTask,
     cluster_id: u64,

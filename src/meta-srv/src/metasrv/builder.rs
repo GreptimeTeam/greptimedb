@@ -222,7 +222,6 @@ impl MetaSrvBuilder {
                 schema: None,
                 table: None,
             },
-            lock.clone(),
             table_id_sequence.clone(),
             kv_store.clone(),
             Arc::new(DatanodeClients::default()),

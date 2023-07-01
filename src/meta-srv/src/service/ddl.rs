@@ -13,10 +13,12 @@
 // limitations under the License.
 
 use api::v1::meta::{ddl_task_server, SubmitDdlTaskRequest, SubmitDdlTaskResponse};
+use api::v1::TableId;
 use snafu::{OptionExt, ResultExt};
 use tonic::{Request, Response};
 
 use super::GrpcResult;
+use crate::ddl::ProcedureStatus;
 use crate::error;
 use crate::metasrv::MetaSrv;
 
@@ -33,15 +35,21 @@ impl ddl_task_server::DdlTask for MetaSrv {
             .context(error::MissingRequiredParameterSnafu { param: "task" })?
             .try_into()
             .context(error::ConvertProtoDataSnafu)?;
-        let id = self
+        let (id, status) = self
             .ddl_manager()
             .execute_procedure_task(header.cluster_id, task)
             .await?;
 
-        let resp = SubmitDdlTaskResponse {
+        let mut resp = SubmitDdlTaskResponse {
             key: id.to_string().into(),
             ..Default::default()
         };
+
+        if let Some(ProcedureStatus::CreateTable(status)) = status {
+            resp.table_id = Some(TableId {
+                id: status.table_id,
+            })
+        }
 
         Ok(Response::new(resp))
     }

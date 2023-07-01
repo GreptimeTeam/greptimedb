@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 
 use client::client_manager::DatanodeClients;
 use common_meta::rpc::ddl::DdlTask;
@@ -20,9 +21,8 @@ use common_procedure::{watcher, ProcedureId, ProcedureManagerRef, ProcedureWithI
 use snafu::ResultExt;
 
 use crate::error::{self, Result};
-use crate::lock::DistLockRef;
 use crate::metasrv::{SelectorContext, SelectorRef};
-use crate::procedure::create_table::CreateTableProcedure;
+use crate::procedure::create_table::{CreateTableProcedure, CreateTableProcedureStatus};
 use crate::sequence::SequenceRef;
 use crate::service::store::kv::KvStoreRef;
 
@@ -32,10 +32,10 @@ pub struct DdlManager {
     procedure_manager: ProcedureManagerRef,
     selector: SelectorRef,
     selector_ctx: SelectorContext,
-    dist_lock: DistLockRef,
     table_id_sequence: SequenceRef,
     kv_store: KvStoreRef,
     datanode_clients: Arc<DatanodeClients>,
+    procedure_status: Arc<RwLock<HashMap<ProcedureId, ProcedureStatus>>>,
 }
 
 #[derive(Clone)]
@@ -44,10 +44,15 @@ pub struct DdlManager {
 pub(crate) struct DdlContext {
     pub(crate) selector: SelectorRef,
     pub(crate) selector_ctx: SelectorContext,
-    pub(crate) dist_lock: DistLockRef,
     pub(crate) table_id_sequence: SequenceRef,
     pub(crate) kv_store: KvStoreRef,
     pub(crate) datanode_clients: Arc<DatanodeClients>,
+    pub(crate) procedure_status: Arc<RwLock<HashMap<ProcedureId, ProcedureStatus>>>,
+}
+
+#[derive(Clone)]
+pub enum ProcedureStatus {
+    CreateTable(CreateTableProcedureStatus),
 }
 
 impl DdlManager {
@@ -55,7 +60,6 @@ impl DdlManager {
         procedure_manager: ProcedureManagerRef,
         selector: SelectorRef,
         selector_ctx: SelectorContext,
-        dist_lock: DistLockRef,
         table_id_sequence: SequenceRef,
         kv_store: KvStoreRef,
         datanode_clients: Arc<DatanodeClients>,
@@ -64,10 +68,10 @@ impl DdlManager {
             procedure_manager,
             selector,
             selector_ctx,
-            dist_lock,
             table_id_sequence,
             kv_store,
             datanode_clients,
+            procedure_status: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -75,10 +79,10 @@ impl DdlManager {
         DdlContext {
             selector: self.selector.clone(),
             selector_ctx: self.selector_ctx.clone(),
-            dist_lock: self.dist_lock.clone(),
             table_id_sequence: self.table_id_sequence.clone(),
             kv_store: self.kv_store.clone(),
             datanode_clients: self.datanode_clients.clone(),
+            procedure_status: self.procedure_status.clone(),
         }
     }
 
@@ -102,13 +106,14 @@ impl DdlManager {
         &self,
         cluster_id: u64,
         task: DdlTask,
-    ) -> Result<ProcedureId> {
+    ) -> Result<(ProcedureId, Option<ProcedureStatus>)> {
         let procedure_with_id = match task {
             DdlTask::CreateTable(create_table_task) => {
                 let context = self.create_context();
-
-                let procedure = CreateTableProcedure::new(cluster_id, create_table_task, context);
-                ProcedureWithId::with_random_id(Box::new(procedure))
+                let id = ProcedureId::random();
+                let procedure =
+                    CreateTableProcedure::new(id, cluster_id, create_table_task, context);
+                ProcedureWithId::new(id, Box::new(procedure))
             }
         };
 
@@ -124,6 +129,13 @@ impl DdlManager {
             .await
             .context(error::WaitProcedureSnafu)?;
 
-        Ok(procedure_id)
+        let status = self
+            .procedure_status
+            .read()
+            .unwrap()
+            .get(&procedure_id)
+            .cloned();
+
+        Ok((procedure_id, status))
     }
 }

@@ -26,7 +26,7 @@ use serde::de::Visitor;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use table::engine::TableReference;
-use table::metadata::RawTableInfo;
+use table::metadata::{RawTableInfo, TableId};
 
 use crate::error::{self, Result};
 use crate::table_name::TableName;
@@ -58,10 +58,8 @@ impl DdlTask {
         expr: CreateTableExpr,
         partitions: Vec<Partition>,
         table_info: RawTableInfo,
-    ) -> Result<Self> {
-        Ok(DdlTask::CreateTable(CreateTableTask::new(
-            expr, partitions, table_info,
-        )))
+    ) -> Self {
+        DdlTask::CreateTable(CreateTableTask::new(expr, partitions, table_info))
     }
 }
 
@@ -100,11 +98,19 @@ impl TryFrom<SubmitDdlTaskRequest> for PbSubmitDdlTaskRequest {
 
 pub struct SubmitDdlTaskResponse {
     pub key: Vec<u8>,
+    pub table_id: TableId,
 }
 
-impl From<PbSubmitDdlTaskResponse> for SubmitDdlTaskResponse {
-    fn from(resp: PbSubmitDdlTaskResponse) -> Self {
-        Self { key: resp.key }
+impl TryFrom<PbSubmitDdlTaskResponse> for SubmitDdlTaskResponse {
+    type Error = error::Error;
+    fn try_from(resp: PbSubmitDdlTaskResponse) -> Result<Self> {
+        let table_id = resp.table_id.context(error::InfoCorruptedSnafu {
+            err_msg: "expected table_id",
+        })?;
+        Ok(Self {
+            key: resp.key,
+            table_id: table_id.id,
+        })
     }
 }
 
