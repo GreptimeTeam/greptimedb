@@ -280,7 +280,7 @@ impl TableCreator {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 enum CreateTableState {
     /// Prepares to create the table
     Prepare,

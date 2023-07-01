@@ -33,6 +33,7 @@ use client::Database;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::format_full_table_name;
 use common_error::prelude::BoxedError;
+use common_meta::rpc::ddl::{DdlTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse};
 use common_meta::rpc::router::{
     CreateRequest as MetaCreateRequest, DeleteRequest as MetaDeleteRequest,
     Partition as MetaPartition, RouteRequest, RouteResponse,
@@ -40,7 +41,7 @@ use common_meta::rpc::router::{
 use common_meta::rpc::store::CompareAndPutRequest;
 use common_meta::table_name::TableName;
 use common_query::Output;
-use common_telemetry::{debug, info, warn};
+use common_telemetry::debug;
 use datanode::instance::sql::table_idents_to_full_name;
 use datanode::sql::SqlHandler;
 use datatypes::prelude::ConcreteDataType;
@@ -121,56 +122,13 @@ impl DistInstance {
             &create_table.table_name,
         );
 
-        if let Some(table) = self.find_table(&table_name).await? {
-            return if create_table.create_if_not_exists {
-                Ok(table)
-            } else {
-                TableAlreadyExistSnafu {
-                    table: table_name.to_string(),
-                }
-                .fail()
-            };
-        }
-
         let mut table_info = create_table_info(create_table)?;
 
-        let response = self
-            .create_table_in_meta(create_table, partitions, &table_info)
-            .await;
-        let response = match response {
-            Ok(response) => response,
-            Err(e) => {
-                return if let Some(table) = self.find_table(&table_name).await? {
-                    warn!("Table '{table_name}' is created concurrently by other Frontend nodes!");
-                    Ok(table)
-                } else {
-                    Err(e)
-                }
-            }
-        };
+        let resp = self
+            .create_table_procedure(create_table, partitions, table_info.clone())
+            .await?;
 
-        let table_routes = response.table_routes;
-        ensure!(
-            table_routes.len() == 1,
-            error::CreateTableRouteSnafu {
-                table_name: create_table.table_name.to_string()
-            }
-        );
-        let table_route = table_routes.first().unwrap();
-        info!(
-            "Creating distributed table {table_name} with table routes: {}",
-            serde_json::to_string_pretty(table_route)
-                .unwrap_or_else(|_| format!("{table_route:#?}"))
-        );
-        let region_routes = &table_route.region_routes;
-        ensure!(
-            !region_routes.is_empty(),
-            error::FindRegionRouteSnafu {
-                table_name: create_table.table_name.to_string()
-            }
-        );
-
-        let table_id = table_route.table.id as u32;
+        let table_id = resp.table_id;
         table_info.ident.table_id = table_id;
         let table_info = Arc::new(table_info.try_into().context(error::CreateTableInfoSnafu)?);
 
@@ -198,26 +156,6 @@ impl DistInstance {
                 table: table_name.to_string()
             }
         );
-
-        for datanode in table_route.find_leaders() {
-            let client = self.datanode_clients.get_client(&datanode).await;
-            let client = Database::new(&table_name.catalog_name, &table_name.schema_name, client);
-
-            let regions = table_route.find_leader_regions(&datanode);
-            let mut create_expr_for_region = create_table.clone();
-            create_expr_for_region.region_numbers = regions;
-
-            debug!(
-                "Creating table {:?} on Datanode {:?} with regions {:?}",
-                create_table, datanode, create_expr_for_region.region_numbers,
-            );
-
-            let _timer = common_telemetry::timer!(crate::metrics::DIST_CREATE_TABLE_IN_DATANODE);
-            let _ = client
-                .create(create_expr_for_region)
-                .await
-                .context(RequestDatanodeSnafu)?;
-        }
 
         // Since the table information created on meta does not go through KvBackend, so we
         // manually invalidate the cache here.
@@ -552,6 +490,25 @@ impl DistInstance {
         table.alter(context, &request).await.context(TableSnafu)?;
 
         Ok(Output::AffectedRows(0))
+    }
+
+    async fn create_table_procedure(
+        &self,
+        create_table: &CreateTableExpr,
+        partitions: Option<Partitions>,
+        table_info: RawTableInfo,
+    ) -> Result<SubmitDdlTaskResponse> {
+        let partitions = parse_partitions(create_table, partitions)?;
+        let partitions = partitions.into_iter().map(Into::into).collect();
+
+        let request = SubmitDdlTaskRequest {
+            task: DdlTask::new_create_table(create_table.clone(), partitions, table_info),
+        };
+
+        self.meta_client
+            .submit_ddl_task(request)
+            .await
+            .context(RequestMetaSnafu)
     }
 
     async fn create_table_in_meta(

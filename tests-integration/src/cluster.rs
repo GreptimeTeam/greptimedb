@@ -88,12 +88,14 @@ impl GreptimeDbClusterBuilder {
     pub async fn build(self) -> GreptimeDbCluster {
         let datanodes = self.datanodes.unwrap_or(4);
 
-        let meta_srv = self.build_metasrv().await;
+        let datanode_clients = Arc::new(DatanodeClients::default());
+
+        let meta_srv = self.build_metasrv(datanode_clients.clone()).await;
 
         let (datanode_instances, heartbeat_tasks, storage_guards, wal_guards) =
             self.build_datanodes(meta_srv.clone(), datanodes).await;
 
-        let datanode_clients = build_datanode_clients(&datanode_instances, datanodes).await;
+        build_datanode_clients(datanode_clients.clone(), &datanode_instances, datanodes).await;
 
         self.wait_datanodes_alive(&meta_srv.meta_srv.meta_peer_client(), datanodes)
             .await;
@@ -115,8 +117,14 @@ impl GreptimeDbClusterBuilder {
         }
     }
 
-    async fn build_metasrv(&self) -> MockInfo {
-        meta_srv::mocks::mock(MetaSrvOptions::default(), self.kv_store.clone(), None).await
+    async fn build_metasrv(&self, datanode_clients: Arc<DatanodeClients>) -> MockInfo {
+        meta_srv::mocks::mock(
+            MetaSrvOptions::default(),
+            self.kv_store.clone(),
+            None,
+            Some(datanode_clients),
+        )
+        .await
     }
 
     async fn build_datanodes(
@@ -238,10 +246,10 @@ impl GreptimeDbClusterBuilder {
 }
 
 async fn build_datanode_clients(
+    clients: Arc<DatanodeClients>,
     instances: &HashMap<DatanodeId, Arc<DatanodeInstance>>,
     datanodes: u32,
-) -> Arc<DatanodeClients> {
-    let clients = Arc::new(DatanodeClients::default());
+) {
     for i in 0..datanodes {
         let datanode_id = i as u64 + 1;
         let instance = instances.get(&datanode_id).cloned().unwrap();
@@ -250,7 +258,6 @@ async fn build_datanode_clients(
             .insert_client(Peer::new(datanode_id, addr), client)
             .await;
     }
-    clients
 }
 
 async fn create_datanode_client(datanode_instance: Arc<DatanodeInstance>) -> (String, Client) {

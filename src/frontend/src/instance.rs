@@ -237,6 +237,7 @@ impl Instance {
             .enable_router()
             .enable_store()
             .enable_heartbeat()
+            .enable_ddl()
             .channel_manager(channel_manager)
             .build();
         meta_client
