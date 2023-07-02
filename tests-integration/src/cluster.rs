@@ -30,6 +30,7 @@ use datanode::datanode::{DatanodeOptions, ObjectStoreConfig};
 use datanode::heartbeat::HeartbeatTask;
 use datanode::instance::Instance as DatanodeInstance;
 use frontend::instance::{FrontendInstance, Instance as FeInstance};
+use frontend::frontend::FrontendOptions;
 use meta_client::client::MetaClientBuilder;
 use meta_srv::cluster::MetaPeerClientRef;
 use meta_srv::metasrv::{MetaSrv, MetaSrvOptions};
@@ -221,11 +222,14 @@ impl GreptimeDbClusterBuilder {
         meta_client.start(&[&meta_srv.server_addr]).await.unwrap();
         let meta_client = Arc::new(meta_client);
 
+        let frontend_opts = FrontendOptions::default();
+
         Arc::new(
             FeInstance::try_new_distributed_with(
                 meta_client,
                 datanode_clients,
                 Arc::new(Plugins::default()),
+                &frontend_opts,
             )
             .await
             .unwrap(),
