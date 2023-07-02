@@ -19,7 +19,8 @@ use common_meta::rpc::ddl::CreateTableTask;
 use common_meta::rpc::router::TableRoute;
 use common_meta::table_name::TableName;
 use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu};
-use common_procedure::{Context as ProcedureContext, LockKey, Procedure, ProcedureId, Status};
+use common_procedure::{Context as ProcedureContext, LockKey, Procedure, Status};
+use common_telemetry::warn;
 use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
@@ -39,7 +40,7 @@ pub struct CreateTableProcedure {
     creator: TableCreator,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct CreateTableProcedureStatus {
     pub table_id: TableId,
 }
@@ -55,15 +56,10 @@ impl CreateTableProcedureStatus {
 impl CreateTableProcedure {
     pub(crate) const TYPE_NAME: &'static str = "metasrv-procedure::CreateTable";
 
-    pub(crate) fn new(
-        id: ProcedureId,
-        cluster_id: u64,
-        task: CreateTableTask,
-        context: DdlContext,
-    ) -> Self {
+    pub(crate) fn new(cluster_id: u64, task: CreateTableTask, context: DdlContext) -> Self {
         Self {
             context,
-            creator: TableCreator::new(id, cluster_id, task),
+            creator: TableCreator::new(cluster_id, task),
         }
     }
 
@@ -177,7 +173,6 @@ impl CreateTableProcedure {
             let client = Database::new(&table_name.catalog_name, &table_name.schema_name, client);
 
             let regions = table_route.find_leader_regions(&datanode);
-            // Safety: checked checked
             let mut create_expr_for_region = self.creator.data.task.create_table.clone();
             create_expr_for_region.region_numbers = regions;
             create_expr_for_region.create_if_not_exists = true;
@@ -206,13 +201,13 @@ impl CreateTableProcedure {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        let mut status = self.context.procedure_status.write().unwrap();
-        status.insert(
-            self.creator.data.id,
-            ProcedureStatus::CreateTable(CreateTableProcedureStatus::with_table_id(
-                table_route.table.id as u32,
-            )),
-        );
+        if let Some(notifier) = self.context.notifier.take() {
+            if let Err(status) = notifier.send(ProcedureStatus::CreateTable(
+                CreateTableProcedureStatus::with_table_id(table_route.table.id as u32),
+            )) {
+                warn!("Failed to notify upper: {:?}", status);
+            }
+        }
 
         Ok(Status::Done)
     }
@@ -249,10 +244,9 @@ pub struct TableCreator {
 }
 
 impl TableCreator {
-    pub fn new(id: ProcedureId, cluster_id: u64, task: CreateTableTask) -> Self {
+    pub fn new(cluster_id: u64, task: CreateTableTask) -> Self {
         Self {
             data: CreateTableData {
-                id,
                 state: CreateTableState::Prepare,
                 cluster_id,
                 task,
@@ -273,7 +267,6 @@ enum CreateTableState {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CreateTableData {
-    id: ProcedureId,
     state: CreateTableState,
     task: CreateTableTask,
     cluster_id: u64,

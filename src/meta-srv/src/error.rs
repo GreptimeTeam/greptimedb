@@ -16,12 +16,19 @@ use common_error::prelude::*;
 use common_meta::peer::Peer;
 use snafu::Location;
 use tokio::sync::mpsc::error::SendError;
+use tokio::sync::oneshot::error::TryRecvError;
 use tonic::codegen::http;
 use tonic::Code;
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
+    #[snafu(display("Failed to receive status, source: {}", source,))]
+    TryReceiveStatus {
+        location: Location,
+        source: TryRecvError,
+    },
+
     #[snafu(display(
         "Failed to request Datanode, expected: {}, but only {} available",
         expected,
@@ -445,7 +452,8 @@ impl ErrorExt for Error {
             | Error::RetryLater { .. }
             | Error::StartGrpc { .. }
             | Error::Combine { .. }
-            | Error::NoEnoughAvailableDatanode { .. } => StatusCode::Internal,
+            | Error::NoEnoughAvailableDatanode { .. }
+            | Error::TryReceiveStatus { .. } => StatusCode::Internal,
             Error::EmptyKey { .. }
             | Error::MissingRequiredParameter { .. }
             | Error::MissingRequestHeader { .. }

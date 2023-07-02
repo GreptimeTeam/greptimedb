@@ -45,11 +45,10 @@ impl ddl_task_server::DdlTask for MetaSrv {
             ..Default::default()
         };
 
-        if let Some(ProcedureStatus::CreateTable(status)) = status {
-            resp.table_id = Some(TableId {
-                id: status.table_id,
-            })
-        }
+        let ProcedureStatus::CreateTable(status) = status;
+        resp.table_id = Some(TableId {
+            id: status.table_id,
+        });
 
         Ok(Response::new(resp))
     }
