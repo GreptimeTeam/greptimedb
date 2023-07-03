@@ -320,7 +320,7 @@ impl ChunkReaderBuilder {
 
         let mut readers = Vec::with_capacity(windows.len());
         for window in &windows {
-            let time_range = time_range.and(&window);
+            let time_range = time_range.and(window);
             let reader = self.build_reader(schema, &time_range).await?;
             readers.push(reader);
         }
