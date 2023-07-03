@@ -190,7 +190,7 @@ fn get_table_cache(instance: &Arc<Instance>, key: &str) -> Option<Option<Kv>> {
         .unwrap();
     let cache = kvbackend.cache();
 
-    cache.get(key.as_bytes())
+    Some(cache.get(key.as_bytes()))
 }
 
 fn get_route_cache(instance: &Arc<Instance>, table_name: &TableName) -> Option<Arc<TableRoute>> {

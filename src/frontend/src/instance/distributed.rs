@@ -658,7 +658,7 @@ impl GrpcQueryHandler for DistInstance {
                 match expr {
                     DdlExpr::CreateDatabase(expr) => self.handle_create_database(expr, ctx).await,
                     DdlExpr::CreateTable(mut expr) => {
-                        let _ = self.create_table(&mut expr, None).await;
+                        let _ = self.create_table(&mut expr, None).await?;
                         Ok(Output::AffectedRows(0))
                     }
                     DdlExpr::Alter(expr) => self.handle_alter_table(expr).await,

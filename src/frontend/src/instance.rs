@@ -47,7 +47,6 @@ use datanode::instance::sql::table_idents_to_full_name;
 use datanode::instance::InstanceRef as DnInstanceRef;
 use datatypes::schema::Schema;
 use distributed::DistInstance;
-use futures::future;
 use meta_client::client::{MetaClient, MetaClientBuilder};
 use meta_client::MetaClientOptions;
 use partition::manager::PartitionRuleManager;
@@ -289,13 +288,10 @@ impl Instance {
         requests: InsertRequests,
         ctx: QueryContextRef,
     ) -> Result<Output> {
-        let _ = future::join_all(
-            requests
-                .inserts
-                .iter()
-                .map(|x| self.create_or_alter_table_on_demand(ctx.clone(), x)),
-        )
-        .await;
+        for req in requests.inserts.iter() {
+            self.create_or_alter_table_on_demand(ctx.clone(), req)
+                .await?;
+        }
 
         let query = Request::Inserts(requests);
         GrpcQueryHandler::do_query(&*self.grpc_query_handler, query, ctx).await
