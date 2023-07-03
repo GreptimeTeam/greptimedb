@@ -22,12 +22,14 @@ mod tests {
     use std::time::Duration;
 
     use catalog::helper::{CatalogKey, CatalogValue, SchemaKey, SchemaValue};
-    use catalog::remote::mock::{MockKvBackend, MockTableEngine};
+    use catalog::remote::mock::MockTableEngine;
     use catalog::remote::region_alive_keeper::RegionAliveKeepers;
-    use catalog::remote::{CachedMetaKvBackend, KvBackend, KvBackendRef, RemoteCatalogManager};
+    use catalog::remote::{CachedMetaKvBackend, RemoteCatalogManager};
     use catalog::{CatalogManager, RegisterSchemaRequest, RegisterTableRequest};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO_ENGINE};
     use common_meta::ident::TableIdent;
+    use common_meta::kv_backend::memory::MemoryKvBackend;
+    use common_meta::kv_backend::KvBackend;
     use datatypes::schema::RawSchema;
     use futures_util::StreamExt;
     use table::engine::manager::{MemoryTableEngineManager, TableEngineManagerRef};
@@ -37,8 +39,6 @@ mod tests {
     use tokio::time::Instant;
 
     struct TestingComponents {
-        #[allow(dead_code)]
-        kv_backend: KvBackendRef,
         catalog_manager: Arc<RemoteCatalogManager>,
         table_engine_manager: TableEngineManagerRef,
         region_alive_keepers: Arc<RegionAliveKeepers>,
@@ -53,7 +53,7 @@ mod tests {
     #[tokio::test]
     async fn test_backend() {
         common_telemetry::init_default_ut_logging();
-        let backend = MockKvBackend::default();
+        let backend = MemoryKvBackend::default();
 
         let default_catalog_key = CatalogKey {
             catalog_name: DEFAULT_CATALOG_NAME.to_string(),
@@ -92,8 +92,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_cached_backend() {
-        common_telemetry::init_default_ut_logging();
-        let backend = CachedMetaKvBackend::wrap(Arc::new(MockKvBackend::default()));
+        let backend = CachedMetaKvBackend::wrap(Arc::new(MemoryKvBackend::default()));
 
         let default_catalog_key = CatalogKey {
             catalog_name: DEFAULT_CATALOG_NAME.to_string(),
@@ -135,9 +134,11 @@ mod tests {
     }
 
     async fn prepare_components(node_id: u64) -> TestingComponents {
-        let cached_backend = Arc::new(CachedMetaKvBackend::wrap(
-            Arc::new(MockKvBackend::default()),
-        ));
+        let backend = Arc::new(MemoryKvBackend::default());
+        backend.set(b"__c-greptime", b"").await.unwrap();
+        backend.set(b"__s-greptime-public", b"").await.unwrap();
+
+        let cached_backend = Arc::new(CachedMetaKvBackend::wrap(backend));
 
         let table_engine = Arc::new(MockTableEngine::default());
         let engine_manager = Arc::new(MemoryTableEngineManager::alias(
@@ -156,7 +157,6 @@ mod tests {
         catalog_manager.start().await.unwrap();
 
         TestingComponents {
-            kv_backend: cached_backend,
             catalog_manager: Arc::new(catalog_manager),
             table_engine_manager: engine_manager,
             region_alive_keepers,

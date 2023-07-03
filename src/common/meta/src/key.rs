@@ -84,23 +84,23 @@ impl TableMetadataManager {
 
 macro_rules! impl_table_meta_value {
     ( $($val_ty: ty), *) => {
-            $(
-                impl $val_ty {
-                    pub fn try_from_raw_value(raw_value: Vec<u8>) -> Result<Self> {
-                        let raw_value = String::from_utf8(raw_value).map_err(|e| {
-                            InvalidTableMetadataSnafu { err_msg: e.to_string() }.build()
-                        })?;
-                        serde_json::from_str(&raw_value).context(SerdeJsonSnafu)
-                    }
-
-                    pub fn try_as_raw_value(&self) -> Result<Vec<u8>> {
-                        serde_json::to_string(self)
-                            .map(|x| x.into_bytes())
-                            .context(SerdeJsonSnafu)
-                    }
+        $(
+            impl $val_ty {
+                pub fn try_from_raw_value(raw_value: Vec<u8>) -> Result<Self> {
+                    let raw_value = String::from_utf8(raw_value).map_err(|e| {
+                        InvalidTableMetadataSnafu { err_msg: e.to_string() }.build()
+                    })?;
+                    serde_json::from_str(&raw_value).context(SerdeJsonSnafu)
                 }
-            )*
-        }
+
+                pub fn try_as_raw_value(&self) -> Result<Vec<u8>> {
+                    serde_json::to_string(self)
+                        .map(|x| x.into_bytes())
+                        .context(SerdeJsonSnafu)
+                }
+            }
+        )*
+    }
 }
 
 impl_table_meta_value! {

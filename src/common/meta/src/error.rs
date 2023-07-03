@@ -58,6 +58,15 @@ pub enum Error {
 
     #[snafu(display("Invalid table metadata, err: {}", err_msg))]
     InvalidTableMetadata { err_msg: String, location: Location },
+
+    #[snafu(display("Failed to get kv cache, err: {}", err_msg))]
+    GetKvCache { err_msg: String, location: Location },
+
+    #[snafu(display("Failed to request MetaSrv, source: {}", source))]
+    MetaSrv {
+        source: BoxedError,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -73,11 +82,13 @@ impl ErrorExt for Error {
             | InvalidProtoMsg { .. }
             | InvalidTableMetadata { .. } => StatusCode::Unexpected,
 
-            SendMessage { .. } => StatusCode::Internal,
+            SendMessage { .. } | GetKvCache { .. } => StatusCode::Internal,
 
             EncodeJson { .. } | DecodeJson { .. } | PayloadNotExist { .. } => {
                 StatusCode::Unexpected
             }
+
+            MetaSrv { source, .. } => source.status_code(),
         }
     }
 

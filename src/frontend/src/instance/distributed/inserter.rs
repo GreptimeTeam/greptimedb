@@ -179,10 +179,10 @@ mod tests {
     use catalog::helper::{
         CatalogKey, CatalogValue, SchemaKey, SchemaValue, TableGlobalKey, TableGlobalValue,
     };
-    use catalog::remote::mock::MockKvBackend;
-    use catalog::remote::{KvBackend, KvBackendRef};
     use client::client_manager::DatanodeClients;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+    use common_meta::kv_backend::memory::MemoryKvBackend;
+    use common_meta::kv_backend::{KvBackend, KvBackendRef};
     use datatypes::prelude::{ConcreteDataType, VectorRef};
     use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, Schema};
     use datatypes::vectors::Int32Vector;
@@ -193,7 +193,7 @@ mod tests {
     use crate::table::test::create_partition_rule_manager;
 
     async fn prepare_mocked_backend() -> KvBackendRef {
-        let backend = Arc::new(MockKvBackend::default());
+        let backend = Arc::new(MemoryKvBackend::default());
 
         let default_catalog = CatalogKey {
             catalog_name: DEFAULT_CATALOG_NAME.to_string(),

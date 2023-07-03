@@ -55,7 +55,9 @@ use table::Table;
 use tokio::sync::RwLock;
 
 use crate::catalog::FrontendCatalogManager;
-use crate::error::{self, FindDatanodeSnafu, FindTableRouteSnafu, Result};
+use crate::error::{
+    self, FindDatanodeSnafu, FindTableRouteSnafu, Result, TableMetadataManagerSnafu,
+};
 use crate::instance::distributed::inserter::DistInserter;
 use crate::table::delete::to_grpc_delete_request;
 use crate::table::scan::{DatanodeInstance, TableScanPlan};
@@ -256,7 +258,7 @@ impl DistTable {
             .backend()
             .get(key.to_string().as_bytes())
             .await
-            .context(error::CatalogSnafu)?;
+            .context(TableMetadataManagerSnafu)?;
         Ok(if let Some(raw) = raw {
             Some(TableGlobalValue::from_bytes(raw.1).context(error::CatalogEntrySerdeSnafu)?)
         } else {
@@ -274,7 +276,7 @@ impl DistTable {
             .backend()
             .set(key.to_string().as_bytes(), &value)
             .await
-            .context(error::CatalogSnafu)
+            .context(TableMetadataManagerSnafu)
     }
 
     async fn delete_table_global_value(&self, key: TableGlobalKey) -> Result<()> {
@@ -282,7 +284,7 @@ impl DistTable {
             .backend()
             .delete(key.to_string().as_bytes())
             .await
-            .context(error::CatalogSnafu)
+            .context(TableMetadataManagerSnafu)
     }
 
     async fn move_table_route_value(
@@ -313,7 +315,7 @@ impl DistTable {
             .backend()
             .move_value(old_key.as_bytes(), new_key.as_bytes())
             .await
-            .context(error::CatalogSnafu)?;
+            .context(TableMetadataManagerSnafu)?;
 
         self.catalog_manager
             .partition_manager()

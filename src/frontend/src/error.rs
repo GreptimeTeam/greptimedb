@@ -565,6 +565,12 @@ pub enum Error {
         value: String,
         location: Location,
     },
+
+    #[snafu(display("Table metadata manager error: {}", source))]
+    TableMetadataManager {
+        source: common_meta::error::Error,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -688,6 +694,7 @@ impl ErrorExt for Error {
 
             Error::WriteParquet { source, .. } => source.status_code(),
             Error::InvalidCopyParameter { .. } => StatusCode::InvalidArguments,
+            Error::TableMetadataManager { source, .. } => source.status_code(),
         }
     }
 

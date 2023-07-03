@@ -21,6 +21,7 @@ use async_stream::stream;
 use async_trait::async_trait;
 use common_catalog::consts::{MAX_SYS_TABLE_ID, MITO_ENGINE};
 use common_meta::ident::TableIdent;
+use common_meta::kv_backend::{Kv, KvBackendRef};
 use common_telemetry::{debug, error, info, warn};
 use futures::Stream;
 use futures_util::{StreamExt, TryStreamExt};
@@ -35,6 +36,7 @@ use tokio::sync::Mutex;
 use crate::error::{
     CatalogNotFoundSnafu, CreateTableSnafu, InvalidCatalogValueSnafu, OpenTableSnafu,
     ParallelOpenTableSnafu, Result, SchemaNotFoundSnafu, TableEngineNotFoundSnafu,
+    TableMetadataManagerSnafu,
 };
 use crate::helper::{
     build_catalog_prefix, build_schema_prefix, build_table_global_prefix,
@@ -42,7 +44,6 @@ use crate::helper::{
     TableGlobalValue, TableRegionalKey, TableRegionalValue, CATALOG_KEY_PREFIX,
 };
 use crate::remote::region_alive_keeper::RegionAliveKeepers;
-use crate::remote::{Kv, KvBackendRef};
 use crate::{
     handle_system_table_request, CatalogManager, DeregisterTableRequest, RegisterSchemaRequest,
     RegisterSystemTableRequest, RegisterTableRequest, RenameTableRequest,
@@ -80,7 +81,7 @@ impl RemoteCatalogManager {
         let mut catalogs = self.backend.range(catalog_range_prefix.as_bytes());
         Box::pin(stream!({
             while let Some(r) = catalogs.next().await {
-                let Kv(k, _) = r?;
+                let Kv(k, _) = r.context(TableMetadataManagerSnafu)?;
                 if !k.starts_with(catalog_range_prefix.as_bytes()) {
                     debug!("Ignoring non-catalog key: {}", String::from_utf8_lossy(&k));
                     continue;
@@ -134,7 +135,8 @@ impl RemoteCatalogManager {
                     .as_bytes()
                     .context(InvalidCatalogValueSnafu)?,
             )
-            .await?;
+            .await
+            .context(TableMetadataManagerSnafu)?;
         info!("Created schema '{schema_key}'");
 
         let catalog_key = CatalogKey {
@@ -148,7 +150,8 @@ impl RemoteCatalogManager {
                     .as_bytes()
                     .context(InvalidCatalogValueSnafu)?,
             )
-            .await?;
+            .await
+            .context(TableMetadataManagerSnafu)?;
         info!("Created catalog '{catalog_key}");
         Ok(())
     }
@@ -316,7 +319,8 @@ impl RemoteCatalogManager {
                 table_key.as_bytes(),
                 &table_value.as_bytes().context(InvalidCatalogValueSnafu)?,
             )
-            .await?;
+            .await
+            .context(TableMetadataManagerSnafu)?;
         debug!(
             "Successfully set catalog table entry, key: {}, table value: {:?}",
             table_key, table_value
@@ -343,7 +347,8 @@ impl RemoteCatalogManager {
         let engine_opt = self
             .backend
             .get(table_key.as_bytes())
-            .await?
+            .await
+            .context(TableMetadataManagerSnafu)?
             .map(|Kv(_, v)| {
                 let TableRegionalValue {
                     table_id,
@@ -361,7 +366,10 @@ impl RemoteCatalogManager {
                 return Ok(None);
             };
 
-        self.backend.delete(table_key.as_bytes()).await?;
+        self.backend
+            .delete(table_key.as_bytes())
+            .await
+            .context(TableMetadataManagerSnafu)?;
         debug!(
             "Successfully deleted catalog table entry, key: {}",
             table_key
@@ -428,7 +436,7 @@ async fn iter_remote_schemas<'a>(
 
     Box::pin(stream!({
         while let Some(r) = schemas.next().await {
-            let Kv(k, _) = r?;
+            let Kv(k, _) = r.context(TableMetadataManagerSnafu)?;
             if !k.starts_with(schema_prefix.as_bytes()) {
                 debug!("Ignoring non-schema key: {}", String::from_utf8_lossy(&k));
                 continue;
@@ -452,7 +460,7 @@ async fn iter_remote_tables<'a>(
     let mut tables = backend.range(table_prefix.as_bytes());
     Box::pin(stream!({
         while let Some(r) = tables.next().await {
-            let Kv(k, v) = r?;
+            let Kv(k, v) = r.context(TableMetadataManagerSnafu)?;
             if !k.starts_with(table_prefix.as_bytes()) {
                 debug!("Ignoring non-table prefix: {}", String::from_utf8_lossy(&k));
                 continue;
@@ -701,7 +709,8 @@ impl CatalogManager for RemoteCatalogManager {
                     .as_bytes()
                     .context(InvalidCatalogValueSnafu)?,
             )
-            .await?;
+            .await
+            .context(TableMetadataManagerSnafu)?;
 
         increment_gauge!(crate::metrics::METRIC_CATALOG_MANAGER_SCHEMA_COUNT, 1.0);
         Ok(true)
@@ -720,7 +729,7 @@ impl CatalogManager for RemoteCatalogManager {
             node_id: self.node_id,
         }
         .to_string();
-        let Some(Kv(_, value_bytes)) = self.backend.get(old_table_key.as_bytes()).await? else {
+        let Some(Kv(_, value_bytes)) = self.backend.get(old_table_key.as_bytes()).await.context(TableMetadataManagerSnafu)? else {
             return Ok(false)
         };
         let new_table_key = TableRegionalKey {
@@ -731,10 +740,12 @@ impl CatalogManager for RemoteCatalogManager {
         };
         self.backend
             .set(new_table_key.to_string().as_bytes(), &value_bytes)
-            .await?;
+            .await
+            .context(TableMetadataManagerSnafu)?;
         self.backend
             .delete(old_table_key.to_string().as_bytes())
-            .await?;
+            .await
+            .context(TableMetadataManagerSnafu)?;
         Ok(true)
     }
 
@@ -756,7 +767,12 @@ impl CatalogManager for RemoteCatalogManager {
         let key = self
             .build_schema_key(catalog.to_string(), schema.to_string())
             .to_string();
-        Ok(self.backend.get(key.as_bytes()).await?.is_some())
+        Ok(self
+            .backend
+            .get(key.as_bytes())
+            .await
+            .context(TableMetadataManagerSnafu)?
+            .is_some())
     }
 
     async fn table(
@@ -778,7 +794,8 @@ impl CatalogManager for RemoteCatalogManager {
         let table_opt = self
             .backend
             .get(key.as_bytes())
-            .await?
+            .await
+            .context(TableMetadataManagerSnafu)?
             .map(|Kv(_, v)| {
                 let TableRegionalValue {
                     table_id,
@@ -821,7 +838,8 @@ impl CatalogManager for RemoteCatalogManager {
         Ok(self
             .backend
             .get(key.to_string().as_bytes())
-            .await?
+            .await
+            .context(TableMetadataManagerSnafu)?
             .is_some())
     }
 
@@ -836,7 +854,12 @@ impl CatalogManager for RemoteCatalogManager {
         }
         .to_string();
 
-        Ok(self.backend.get(key.as_bytes()).await?.is_some())
+        Ok(self
+            .backend
+            .get(key.as_bytes())
+            .await
+            .context(TableMetadataManagerSnafu)?
+            .is_some())
     }
 
     async fn catalog_names(&self) -> Result<Vec<String>> {
@@ -905,7 +928,8 @@ impl CatalogManager for RemoteCatalogManager {
                     .as_bytes()
                     .context(InvalidCatalogValueSnafu)?,
             )
-            .await?;
+            .await
+            .context(TableMetadataManagerSnafu)?;
         increment_gauge!(crate::metrics::METRIC_CATALOG_MANAGER_CATALOG_COUNT, 1.0);
         Ok(false)
     }

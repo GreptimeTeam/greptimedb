@@ -12,20 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::any::Any;
-use std::collections::btree_map::Entry;
-use std::collections::{BTreeMap, HashMap};
-use std::fmt::{Display, Formatter};
+use std::collections::HashMap;
 use std::sync::{Arc, RwLock as StdRwLock};
 
-use async_stream::stream;
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_recordbatch::RecordBatch;
-use common_telemetry::logging::info;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::vectors::StringVector;
-use serde::Serializer;
 use table::engine::{CloseTableResult, EngineContext, TableEngine};
 use table::metadata::TableId;
 use table::requests::{
@@ -33,135 +26,6 @@ use table::requests::{
 };
 use table::test_util::MemTable;
 use table::TableRef;
-use tokio::sync::RwLock;
-
-use crate::error::Error;
-use crate::helper::{CatalogKey, CatalogValue, SchemaKey, SchemaValue};
-use crate::remote::{Kv, KvBackend, ValueIter};
-
-pub struct MockKvBackend {
-    map: RwLock<BTreeMap<Vec<u8>, Vec<u8>>>,
-}
-
-impl Default for MockKvBackend {
-    fn default() -> Self {
-        let catalog_value = CatalogValue {}.as_bytes().unwrap();
-        let schema_value = SchemaValue {}.as_bytes().unwrap();
-
-        let default_catalog_key = CatalogKey {
-            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
-        }
-        .to_string();
-
-        let default_schema_key = SchemaKey {
-            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
-            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
-        }
-        .to_string();
-
-        let map = RwLock::new(BTreeMap::from([
-            // create default catalog and schema
-            (default_catalog_key.into(), catalog_value),
-            (default_schema_key.into(), schema_value),
-        ]));
-        Self { map }
-    }
-}
-
-impl Display for MockKvBackend {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        futures::executor::block_on(async {
-            let map = self.map.read().await;
-            for (k, v) in map.iter() {
-                f.serialize_str(&String::from_utf8_lossy(k))?;
-                f.serialize_str(" -> ")?;
-                f.serialize_str(&String::from_utf8_lossy(v))?;
-                f.serialize_str("\n")?;
-            }
-            Ok(())
-        })
-    }
-}
-
-#[async_trait::async_trait]
-impl KvBackend for MockKvBackend {
-    fn range<'a, 'b>(&'a self, key: &[u8]) -> ValueIter<'b, Error>
-    where
-        'a: 'b,
-    {
-        let prefix = key.to_vec();
-        let prefix_string = String::from_utf8_lossy(&prefix).to_string();
-        Box::pin(stream!({
-            let maps = self.map.read().await.clone();
-            for (k, v) in maps.range(prefix.clone()..) {
-                let key_string = String::from_utf8_lossy(k).to_string();
-                let matches = key_string.starts_with(&prefix_string);
-                if matches {
-                    yield Ok(Kv(k.clone(), v.clone()))
-                } else {
-                    info!("Stream finished");
-                    return;
-                }
-            }
-        }))
-    }
-
-    async fn set(&self, key: &[u8], val: &[u8]) -> Result<(), Error> {
-        let mut map = self.map.write().await;
-        let _ = map.insert(key.to_vec(), val.to_vec());
-        Ok(())
-    }
-
-    async fn compare_and_set(
-        &self,
-        key: &[u8],
-        expect: &[u8],
-        val: &[u8],
-    ) -> Result<Result<(), Option<Vec<u8>>>, Error> {
-        let mut map = self.map.write().await;
-        let existing = map.entry(key.to_vec());
-        match existing {
-            Entry::Vacant(e) => {
-                if expect.is_empty() {
-                    let _ = e.insert(val.to_vec());
-                    Ok(Ok(()))
-                } else {
-                    Ok(Err(None))
-                }
-            }
-            Entry::Occupied(mut existing) => {
-                if existing.get() == expect {
-                    let _ = existing.insert(val.to_vec());
-                    Ok(Ok(()))
-                } else {
-                    Ok(Err(Some(existing.get().clone())))
-                }
-            }
-        }
-    }
-
-    async fn delete_range(&self, key: &[u8], end: &[u8]) -> Result<(), Error> {
-        let mut map = self.map.write().await;
-        if end.is_empty() {
-            let _ = map.remove(key);
-        } else {
-            let start = key.to_vec();
-            let end = end.to_vec();
-            let range = start..end;
-
-            map.retain(|k, _| !range.contains(k));
-        }
-        Ok(())
-    }
-
-    async fn move_value(&self, _from_key: &[u8], _to_key: &[u8]) -> Result<(), Error> {
-        unimplemented!()
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-}
 
 #[derive(Default)]
 pub struct MockTableEngine {

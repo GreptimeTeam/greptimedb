@@ -18,6 +18,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_stream::stream;
+use common_error::prelude::BoxedError;
+use common_meta::error::{Error, GetKvCacheSnafu, MetaSrvSnafu, Result};
+use common_meta::kv_backend::{Kv, KvBackend, KvBackendRef, ValueIter};
 use common_meta::rpc::store::{
     CompareAndPutRequest, DeleteRangeRequest, MoveValueRequest, PutRequest, RangeRequest,
 };
@@ -27,9 +30,7 @@ use moka::future::{Cache, CacheBuilder};
 use snafu::ResultExt;
 
 use super::KvCacheInvalidator;
-use crate::error::{Error, GenericSnafu, MetaSrvSnafu, Result};
 use crate::metrics::{METRIC_CATALOG_KV_GET, METRIC_CATALOG_KV_REMOTE_GET};
-use crate::remote::{Kv, KvBackend, KvBackendRef, ValueIter};
 
 const CACHE_MAX_CAPACITY: u64 = 10000;
 const CACHE_TTL_SECOND: u64 = 10 * 60;
@@ -43,6 +44,8 @@ pub struct CachedMetaKvBackend {
 
 #[async_trait::async_trait]
 impl KvBackend for CachedMetaKvBackend {
+    type Error = Error;
+
     fn range<'a, 'b>(&'a self, key: &[u8]) -> ValueIter<'b, Error>
     where
         'a: 'b,
@@ -59,8 +62,15 @@ impl KvBackend for CachedMetaKvBackend {
             self.kv_backend.get(key).await
         };
 
-        let schema_provider = self.cache.try_get_with_by_ref(key, init).await;
-        schema_provider.map_err(|e| GenericSnafu { msg: e.to_string() }.build())
+        self.cache
+            .try_get_with_by_ref(key, init)
+            .await
+            .map_err(|e| {
+                GetKvCacheSnafu {
+                    err_msg: e.to_string(),
+                }
+                .build()
+            })
     }
 
     async fn set(&self, key: &[u8], val: &[u8]) -> Result<()> {
@@ -165,6 +175,8 @@ pub struct MetaKvBackend {
 /// comparing to `Accessor`'s list and get method.
 #[async_trait::async_trait]
 impl KvBackend for MetaKvBackend {
+    type Error = Error;
+
     fn range<'a, 'b>(&'a self, key: &[u8]) -> ValueIter<'b, Error>
     where
         'a: 'b,
@@ -175,6 +187,7 @@ impl KvBackend for MetaKvBackend {
                 .client
                 .range(RangeRequest::new().with_prefix(key))
                 .await
+                .map_err(BoxedError::new)
                 .context(MetaSrvSnafu)?;
             let kvs = resp.take_kvs();
             for mut kv in kvs.into_iter() {
@@ -188,6 +201,7 @@ impl KvBackend for MetaKvBackend {
             .client
             .range(RangeRequest::new().with_key(key))
             .await
+            .map_err(BoxedError::new)
             .context(MetaSrvSnafu)?;
         Ok(response
             .take_kvs()
@@ -199,13 +213,23 @@ impl KvBackend for MetaKvBackend {
         let req = PutRequest::new()
             .with_key(key.to_vec())
             .with_value(val.to_vec());
-        let _ = self.client.put(req).await.context(MetaSrvSnafu)?;
+        let _ = self
+            .client
+            .put(req)
+            .await
+            .map_err(BoxedError::new)
+            .context(MetaSrvSnafu)?;
         Ok(())
     }
 
     async fn delete_range(&self, key: &[u8], end: &[u8]) -> Result<()> {
         let req = DeleteRangeRequest::new().with_range(key.to_vec(), end.to_vec());
-        let resp = self.client.delete_range(req).await.context(MetaSrvSnafu)?;
+        let resp = self
+            .client
+            .delete_range(req)
+            .await
+            .map_err(BoxedError::new)
+            .context(MetaSrvSnafu)?;
         info!(
             "Delete range, key: {}, end: {}, deleted: {}",
             String::from_utf8_lossy(key),
@@ -230,6 +254,7 @@ impl KvBackend for MetaKvBackend {
             .client
             .compare_and_put(request)
             .await
+            .map_err(BoxedError::new)
             .context(MetaSrvSnafu)?;
         if response.is_success() {
             Ok(Ok(()))
@@ -240,7 +265,12 @@ impl KvBackend for MetaKvBackend {
 
     async fn move_value(&self, from_key: &[u8], to_key: &[u8]) -> Result<()> {
         let req = MoveValueRequest::new(from_key, to_key);
-        let _ = self.client.move_value(req).await.context(MetaSrvSnafu)?;
+        let _ = self
+            .client
+            .move_value(req)
+            .await
+            .map_err(BoxedError::new)
+            .context(MetaSrvSnafu)?;
         Ok(())
     }
 
