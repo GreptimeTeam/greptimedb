@@ -355,11 +355,6 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
                 .map_err(|e| e.into());
         }
 
-        ensure!(
-            self.query_handler.is_valid_schema(catalog, schema).await?,
-            error::DatabaseNotFoundSnafu { catalog, schema }
-        );
-
         let user_info = &self.session.user_info();
 
         if let Some(schema_validator) = &self.user_provider {
