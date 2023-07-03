@@ -256,24 +256,23 @@ impl ChunkReaderBuilder {
             time_range: *time_range,
         };
 
-        let mut read_files = Vec::new();
+        let mut num_read_files = 0;
         for file in &self.files_to_read {
             if !Self::file_in_range(file, time_range) {
                 debug!("Skip file {:?}, predicate: {:?}", file, time_range);
                 continue;
             }
 
-            read_files.push(file.meta());
             let reader = self.sst_layer.read_sst(file.clone(), &read_opts).await?;
             reader_builder = reader_builder.push_batch_reader(reader);
+            num_read_files += 1;
         }
 
         logging::debug!(
-            "build reader done, time_range: {:?}, total_files: {}, num_read_files: {}, read_files: {:?}",
+            "build reader done, time_range: {:?}, total_files: {}, num_read_files: {}",
             time_range,
             self.files_to_read.len(),
-            read_files.len(),
-            read_files,
+            num_read_files,
         );
 
         let reader = reader_builder.build();
@@ -359,20 +358,20 @@ impl ChunkReaderBuilder {
 
     /// Returns the time range of memtables to read.
     fn compute_memtable_range(&self) -> Option<TimestampRange> {
-        let memtable_stats = self
+        let (min_timestamp, max_timestamp) = self
             .memtables
             .iter()
             .filter(|m| m.num_rows() > 0) // Skip empty memtables.
-            .map(|m| m.stats())
-            .collect::<Vec<_>>();
-        let min_timestamp = memtable_stats.iter().map(|stat| stat.min_timestamp).min()?;
-        let max_timestamp = memtable_stats.iter().map(|stat| stat.max_timestamp).max()?;
+            .map(|m| {
+                let stats = m.stats();
+                (stats.min_timestamp, stats.max_timestamp)
+            })
+            .reduce(|acc, e| (acc.0.min(e.0), acc.1.max(e.1)))?;
 
         logging::debug!(
-            "Compute memtable range, min: {:?}, max: {:?}, stats: {:?}",
+            "Compute memtable range, min: {:?}, max: {:?}",
             min_timestamp,
             max_timestamp,
-            memtable_stats
         );
 
         Some(TimestampRange::new_inclusive(
@@ -384,8 +383,8 @@ impl ChunkReaderBuilder {
     /// Infer time window for chain reader according to the time range of memtables and files.
     fn infer_window_for_chain_reader(&self, time_range: &TimestampRange) -> Vec<TimestampRange> {
         let mut memtable_range = self.compute_memtable_range();
-        // file and ranges: (file, start, end)
-        let mut file_and_ranges = Vec::with_capacity(self.files_to_read.len());
+        // file ranges: (start, end)
+        let mut file_ranges = Vec::with_capacity(self.files_to_read.len());
         for file in &self.files_to_read {
             if !Self::file_in_range(file, time_range) || file.time_range().is_none() {
                 continue;
@@ -404,24 +403,23 @@ impl ChunkReaderBuilder {
                 }
             }
 
-            file_and_ranges.push((file.clone(), range.0, range.1));
+            file_ranges.push((range.0, range.1));
         }
 
-        if file_and_ranges.is_empty() {
+        if file_ranges.is_empty() {
             return memtable_range.map(|range| vec![range]).unwrap_or_default();
         }
 
         // Sort by start times.
-        file_and_ranges.sort_unstable_by(|left, right| left.1.cmp(&right.1));
+        file_ranges.sort_unstable_by(|left, right| left.0.cmp(&right.0));
 
         // Compute ranges for all SSTs.
-        let mut time_ranges = Vec::with_capacity(file_and_ranges.len() + 1);
-        // Safety: file_and_ranges is not empty.
+        let mut time_ranges = Vec::with_capacity(file_ranges.len() + 1);
+        // Safety: file_ranges is not empty.
         let mut prev =
-            TimestampRange::new_inclusive(Some(file_and_ranges[0].1), Some(file_and_ranges[0].2));
-        for file_and_range in &file_and_ranges[1..] {
-            let current =
-                TimestampRange::new_inclusive(Some(file_and_range.1), Some(file_and_range.2));
+            TimestampRange::new_inclusive(Some(file_ranges[0].0), Some(file_ranges[0].1));
+        for file_range in &file_ranges[1..] {
+            let current = TimestampRange::new_inclusive(Some(file_range.0), Some(file_range.1));
             if prev.intersects(&current) {
                 prev = prev.or(&current);
             } else {
