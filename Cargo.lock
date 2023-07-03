@@ -1803,6 +1803,7 @@ name = "common-meta"
 version = "0.4.0"
 dependencies = [
  "api",
+ "async-stream",
  "async-trait",
  "chrono",
  "common-catalog",
@@ -1811,6 +1812,7 @@ dependencies = [
  "common-telemetry",
  "common-time",
  "datatypes",
+ "futures",
  "prost",
  "serde",
  "serde_json",
