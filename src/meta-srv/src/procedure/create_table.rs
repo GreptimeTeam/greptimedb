@@ -171,8 +171,11 @@ impl CreateTableProcedure {
                 // The metasrv crashed after metadata was created immediately.
                 // Recovers table_route from kv.
                 let table_id = table_global_value.table_id() as u64;
-                // If altering table operation (or other operations) doesn't hold the old table name as key-lock.
+
                 let expected = self.creator.data.table_route.table.id;
+                // If there is something like:
+                // Create table A, Create table A(from another Fe, Somehow, Failed), Renames table A to B, Create table A(Recovered).
+                // We must ensure the table_id isn't changed.
                 ensure!(
                     table_id == expected,
                     error::TableIdChangedSnafu {
