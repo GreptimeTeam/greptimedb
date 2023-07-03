@@ -61,15 +61,15 @@ pub trait TableMetaKey {
 pub type TableMetadataManagerRef = Arc<TableMetadataManager>;
 
 pub struct TableMetadataManager {
-    table_info_manager: Box<TableInfoManager>,
-    table_region_manager: Box<TableRegionManager>,
+    table_info_manager: TableInfoManager,
+    table_region_manager: TableRegionManager,
 }
 
 impl TableMetadataManager {
     pub fn new(kv_backend: KvBackendRef) -> Self {
         TableMetadataManager {
-            table_info_manager: Box::new(TableInfoManager::new(kv_backend.clone())),
-            table_region_manager: Box::new(TableRegionManager::new(kv_backend.clone())),
+            table_info_manager: TableInfoManager::new(kv_backend.clone()),
+            table_region_manager: TableRegionManager::new(kv_backend),
         }
     }
 
