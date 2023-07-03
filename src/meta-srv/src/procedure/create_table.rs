@@ -193,7 +193,6 @@ impl CreateTableProcedure {
     }
 
     async fn on_datanode_create_table(&mut self) -> Result<Status> {
-        //FIXME: if datanode returns `Not Leader` error.
         let table_route = &self.creator.data.table_route;
 
         let table_name = self.table_name();
@@ -201,7 +200,7 @@ impl CreateTableProcedure {
         let leaders = table_route.find_leaders();
         let mut joins = Vec::with_capacity(leaders.len());
 
-        for datanode in table_route.find_leaders() {
+        for datanode in leaders {
             let client = clients.get_client(&datanode).await;
             let client = Database::new(&table_name.catalog_name, &table_name.schema_name, client);
 

@@ -217,7 +217,6 @@ impl MetaSrvBuilder {
         ));
 
         let _ = ddl_manager.try_start();
-        // TODO(weny): recovers procedures.
 
         Ok(MetaSrv {
             started,
