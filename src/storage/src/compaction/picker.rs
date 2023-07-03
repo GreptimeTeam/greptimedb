@@ -27,7 +27,7 @@ use store_api::logstore::LogStore;
 use crate::compaction::infer_time_bucket;
 use crate::compaction::scheduler::CompactionRequestImpl;
 use crate::compaction::task::{CompactionOutput, CompactionTask, CompactionTaskImpl};
-use crate::error::TtlCalculationSnafu;
+use crate::error::{Result, TtlCalculationSnafu};
 use crate::scheduler::Request;
 use crate::sst::{FileHandle, LevelMeta};
 
@@ -37,14 +37,14 @@ pub trait Picker: Send + 'static {
     type Request: Request;
     type Task: CompactionTask;
 
-    fn pick(&self, req: &Self::Request) -> crate::error::Result<Option<Self::Task>>;
+    fn pick(&self, req: &Self::Request) -> Result<Option<Self::Task>>;
 }
 
 pub(crate) fn get_expired_ssts(
     levels: &[LevelMeta],
     ttl: Option<Duration>,
     now: Timestamp,
-) -> crate::error::Result<Vec<FileHandle>> {
+) -> Result<Vec<FileHandle>> {
     let Some(ttl) = ttl else { return Ok(vec![]); };
 
     let expire_time = now.sub_duration(ttl).context(TtlCalculationSnafu)?;
@@ -97,10 +97,7 @@ impl<S: LogStore> Picker for LeveledTimeWindowPicker<S> {
     type Request = CompactionRequestImpl<S>;
     type Task = CompactionTaskImpl<S>;
 
-    fn pick(
-        &self,
-        req: &CompactionRequestImpl<S>,
-    ) -> crate::error::Result<Option<CompactionTaskImpl<S>>> {
+    fn pick(&self, req: &CompactionRequestImpl<S>) -> Result<Option<CompactionTaskImpl<S>>> {
         let levels = &req.levels();
         let expired_ssts = get_expired_ssts(levels.levels(), req.ttl, Timestamp::current_millis())
             .map_err(|e| {
@@ -126,7 +123,10 @@ impl<S: LogStore> Picker for LeveledTimeWindowPicker<S> {
             let compaction_time_window = Self::pick_level(ctx, level, &mut outputs);
 
             if outputs.is_empty() {
-                debug!("No SST file can be compacted at level {}", level_num);
+                debug!(
+                    "No SST file can be compacted at level {}, path: {:?}",
+                    level_num, req.sst_layer
+                );
                 continue;
             }
 

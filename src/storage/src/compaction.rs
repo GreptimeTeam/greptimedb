@@ -41,13 +41,13 @@ pub type CompactionSchedulerRef<S> =
 /// Now it simply find the max and min timestamp across all SSTs in level and fit the time span
 /// into time bucket.
 pub(crate) fn infer_time_bucket<'a>(files: impl Iterator<Item = &'a FileHandle>) -> i64 {
-    let mut max_ts = &Timestamp::new(i64::MIN, TimeUnit::Second);
-    let mut min_ts = &Timestamp::new(i64::MAX, TimeUnit::Second);
+    let mut max_ts = Timestamp::new(i64::MIN, TimeUnit::Second);
+    let mut min_ts = Timestamp::new(i64::MAX, TimeUnit::Second);
 
     for f in files {
         if let Some((start, end)) = f.time_range() {
-            min_ts = min_ts.min(start);
-            max_ts = max_ts.max(end);
+            min_ts = min_ts.min(*start);
+            max_ts = max_ts.max(*end);
         } else {
             // we don't expect an SST file without time range,
             // it's either a bug or data corruption.

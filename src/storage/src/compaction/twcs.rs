@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Time-window compaction strategy
+
 use std::collections::BTreeMap;
 use std::fmt::{Debug, Formatter};
 use std::marker::PhantomData;
@@ -28,6 +30,8 @@ use crate::compaction::task::CompactionOutput;
 use crate::compaction::{infer_time_bucket, CompactionRequestImpl, CompactionTaskImpl, Picker};
 use crate::sst::{FileHandle, LevelMeta};
 
+/// `TwcsPicker` picks files of which the max timestamp are in the same time window as compaction
+/// candidates.
 pub struct TwcsPicker<S> {
     max_files_in_active_window: usize,
     max_files_in_non_active_window: usize,
@@ -177,7 +181,7 @@ fn assign_to_windows<'a>(
 }
 
 /// Finds the latest active writing window among all files.
-/// Returns `None`
+/// Returns `None` when there are no files or all files are corrupted.
 fn find_latest_window_in_seconds<'a>(
     files: impl Iterator<Item = &'a FileHandle>,
     time_window_size: i64,
@@ -185,11 +189,13 @@ fn find_latest_window_in_seconds<'a>(
     let mut latest_timestamp = None;
     for f in files {
         if let Some((_, end)) = f.time_range() {
-            if let Some(latest) = latest_timestamp && end > latest{
+            if let Some(latest) = latest_timestamp && end > latest {
                 latest_timestamp = Some(end);
             } else {
                 latest_timestamp = Some(end);
             }
+        } else {
+            warn!("Cannot find timestamp range of file: {}", f.file_id());
         }
     }
     latest_timestamp

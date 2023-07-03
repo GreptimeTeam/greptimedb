@@ -221,5 +221,10 @@ mod tests {
         assert_eq!(Some(3), 1i64.align_to_ceil_by_bucket(3));
         assert_eq!(Some(3), 3i64.align_to_ceil_by_bucket(3));
         assert_eq!(Some(6), 4i64.align_to_ceil_by_bucket(3));
+        assert_eq!(Some(0), 0i64.align_to_ceil_by_bucket(3));
+        assert_eq!(Some(0), (-1i64).align_to_ceil_by_bucket(3));
+        assert_eq!(Some(0), (-2i64).align_to_ceil_by_bucket(3));
+        assert_eq!(Some(-3), (-3i64).align_to_ceil_by_bucket(3));
+        assert_eq!(Some(-3), (-4i64).align_to_ceil_by_bucket(3));
     }
 }
