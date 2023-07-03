@@ -43,14 +43,14 @@ pub struct HeartbeatTask {
 impl HeartbeatTask {
     pub fn new(
         meta_client: Arc<MetaClient>,
-        report_interval: u64,
-        retry_interval: u64,
+        heartbeat_interval_millis: u64,
+        retry_interval_millis: u64,
         resp_handler_executor: HeartbeatResponseHandlerExecutorRef,
     ) -> Self {
         HeartbeatTask {
             meta_client,
-            report_interval,
-            retry_interval,
+            report_interval: heartbeat_interval_millis,
+            retry_interval: retry_interval_millis,
             resp_handler_executor,
         }
     }
@@ -92,7 +92,7 @@ impl HeartbeatTask {
                     Err(e) => {
                         error!(e; "Occur error while reading heartbeat response");
                         capture_self
-                            .start_with_retry(Duration::from_secs(retry_interval))
+                            .start_with_retry(Duration::from_millis(retry_interval))
                             .await;
 
                         break;
@@ -136,7 +136,7 @@ impl HeartbeatTask {
                         }
                     }
                     _ = &mut sleep => {
-                        sleep.as_mut().reset(Instant::now() + Duration::from_secs(report_interval));
+                        sleep.as_mut().reset(Instant::now() + Duration::from_millis(report_interval));
                         Some(HeartbeatRequest::default())
                     }
                 };

@@ -136,13 +136,14 @@ impl Instance {
 
         let datanode_clients = Arc::new(DatanodeClients::default());
 
-        Self::try_new_distributed_with(meta_client, datanode_clients, plugins).await
+        Self::try_new_distributed_with(meta_client, datanode_clients, plugins, opts).await
     }
 
     pub async fn try_new_distributed_with(
         meta_client: Arc<MetaClient>,
         datanode_clients: Arc<DatanodeClients>,
         plugins: Arc<Plugins>,
+        opts: &FrontendOptions,
     ) -> Result<Self> {
         let meta_backend = Arc::new(CachedMetaKvBackend::new(meta_client.clone()));
         let table_routes = Arc::new(TableRoutes::new(meta_client.clone()));
@@ -195,8 +196,8 @@ impl Instance {
 
         let heartbeat_task = Some(HeartbeatTask::new(
             meta_client,
-            5,
-            5,
+            opts.heartbeat_interval_millis,
+            opts.retry_interval_millis,
             Arc::new(handlers_executor),
         ));
 
