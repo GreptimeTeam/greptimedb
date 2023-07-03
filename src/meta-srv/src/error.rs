@@ -23,6 +23,20 @@ use tonic::Code;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
+    #[snafu(display("Failed to execute transaction: {}", msg))]
+    Txn { location: Location, msg: String },
+
+    #[snafu(display(
+        "Unexpected table_id changed, expected: {}, found: {}",
+        expected,
+        found,
+    ))]
+    TableIdChanged {
+        location: Location,
+        expected: u64,
+        found: u64,
+    },
+
     #[snafu(display("Failed to receive status, source: {}", source,))]
     TryReceiveStatus {
         location: Location,
@@ -477,7 +491,9 @@ impl ErrorExt for Error {
             | Error::InvalidUtf8Value { .. }
             | Error::UnexpectedInstructionReply { .. }
             | Error::EtcdTxnOpResponse { .. }
-            | Error::Unexpected { .. } => StatusCode::Unexpected,
+            | Error::Unexpected { .. }
+            | Error::Txn { .. }
+            | Error::TableIdChanged { .. } => StatusCode::Unexpected,
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
             Error::RequestDatanode { source, .. } => source.status_code(),
             Error::InvalidCatalogValue { source, .. } => source.status_code(),

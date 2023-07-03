@@ -12,27 +12,30 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use api::v1::meta::TableRouteValue;
 use async_trait::async_trait;
 use catalog::helper::TableGlobalKey;
 use client::Database;
+use common_error::ext::ErrorExt;
+use common_error::status_code::StatusCode;
+use common_meta::key::TableRouteKey;
 use common_meta::rpc::ddl::CreateTableTask;
 use common_meta::rpc::router::TableRoute;
 use common_meta::table_name::TableName;
 use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu};
-use common_procedure::{Context as ProcedureContext, LockKey, Procedure, Status};
-use common_telemetry::warn;
+use common_procedure::{
+    Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure, Status,
+};
 use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
 use table::engine::TableReference;
-use table::metadata::TableId;
 
-use crate::ddl::{DdlContext, ProcedureStatus};
+use crate::ddl::DdlContext;
 use crate::error::{self, Result};
-use crate::metasrv::SelectorContext;
-use crate::service::router::{fill_table_routes, handle_create_table_metadata, table_route_key};
-use crate::table_routes::{get_table_global_value, get_table_route_value};
-
+use crate::service::router::create_table_global_value;
+use crate::service::store::txn::{Compare, CompareOp, Txn, TxnOp};
+use crate::table_routes::get_table_global_value;
 // TODO(weny): removes in following PRs.
 #[allow(unused)]
 pub struct CreateTableProcedure {
@@ -40,26 +43,20 @@ pub struct CreateTableProcedure {
     creator: TableCreator,
 }
 
-#[derive(Debug, Clone)]
-pub struct CreateTableProcedureStatus {
-    pub table_id: TableId,
-}
-
-impl CreateTableProcedureStatus {
-    pub fn with_table_id(table_id: TableId) -> Self {
-        Self { table_id }
-    }
-}
-
 // TODO(weny): removes in following PRs.
 #[allow(dead_code)]
 impl CreateTableProcedure {
     pub(crate) const TYPE_NAME: &'static str = "metasrv-procedure::CreateTable";
 
-    pub(crate) fn new(cluster_id: u64, task: CreateTableTask, context: DdlContext) -> Self {
+    pub(crate) fn new(
+        cluster_id: u64,
+        task: CreateTableTask,
+        table_route: TableRoute,
+        context: DdlContext,
+    ) -> Self {
         Self {
             context,
-            creator: TableCreator::new(cluster_id, task),
+            creator: TableCreator::new(cluster_id, task, table_route),
         }
     }
 
@@ -75,7 +72,7 @@ impl CreateTableProcedure {
         let table_ref = self.creator.data.table_ref();
 
         TableGlobalKey {
-            catalog_name: table_ref.catalog.to_uppercase(),
+            catalog_name: table_ref.catalog.to_string(),
             schema_name: table_ref.schema.to_string(),
             table_name: table_ref.table.to_string(),
         }
@@ -105,63 +102,99 @@ impl CreateTableProcedure {
         Ok(Status::executing(true))
     }
 
+    /// registers the `TableRouteValue`,`TableGlobalValue`
+    async fn register_metadata(&self) -> Result<()> {
+        let table_name = self.table_name();
+
+        let table_id = self.creator.data.table_route.table.id;
+
+        let table_route_key = TableRouteKey::with_table_name(table_id, &table_name.clone().into())
+            .key()
+            .into_bytes();
+
+        let table_global_key = TableGlobalKey {
+            catalog_name: table_name.catalog_name.clone(),
+            schema_name: table_name.schema_name.clone(),
+            table_name: table_name.table_name.clone(),
+        }
+        .to_string()
+        .into_bytes();
+
+        let (peers, table_route) = self
+            .creator
+            .data
+            .table_route
+            .clone()
+            .try_into_raw()
+            .context(error::ConvertProtoDataSnafu)?;
+
+        let table_route_value = TableRouteValue {
+            peers,
+            table_route: Some(table_route),
+        };
+
+        let table_global_value = create_table_global_value(
+            &table_route_value,
+            self.creator.data.task.table_info.clone(),
+        )?
+        .as_bytes()
+        .context(error::InvalidCatalogValueSnafu)?;
+
+        let txn = Txn::new()
+            .when(vec![
+                Compare::with_not_exist_value(table_route_key.clone(), CompareOp::Equal),
+                Compare::with_not_exist_value(table_global_key.clone(), CompareOp::Equal),
+            ])
+            .and_then(vec![
+                TxnOp::Put(table_route_key, table_route_value.into()),
+                TxnOp::Put(table_global_key, table_global_value),
+            ]);
+
+        let resp = self.context.kv_store.txn(txn).await?;
+
+        ensure!(
+            resp.succeeded,
+            error::TxnSnafu {
+                msg: "table_route_key or table_global_key exists"
+            }
+        );
+
+        Ok(())
+    }
+
     async fn on_create_metadata(&mut self) -> Result<Status> {
         let kv_store = &self.context.kv_store;
         let key = &self.global_table_key();
 
-        match get_table_global_value(kv_store, key).await {
-            Ok(Some(table_global_value)) => {
+        match get_table_global_value(kv_store, key).await? {
+            Some(table_global_value) => {
                 // The metasrv crashed after metadata was created immediately.
                 // Recovers table_route from kv.
                 let table_id = table_global_value.table_id() as u64;
-                let table_route_value =
-                    get_table_route_value(kv_store, &table_route_key(table_id, key)).await?;
-
-                let (peers, mut table_routes) =
-                    fill_table_routes(vec![(table_global_value, table_route_value)])?;
-                // TODO: assert table_routes.len()==0
-                let table_route = TableRoute::try_from_raw(&peers, table_routes.pop().unwrap())
-                    .context(error::ConvertProtoDataSnafu)?;
-
-                self.creator.data.state = CreateTableState::DatanodeCreateTable(table_route);
-            }
-            Ok(None) => {
-                let full_table_name = self.table_name();
-
-                let TableName {
-                    catalog_name,
-                    schema_name,
-                    table_name,
-                } = full_table_name.clone();
-
-                let ctx = SelectorContext::from_ctx(
-                    catalog_name,
-                    schema_name,
-                    table_name,
-                    self.context.selector_ctx.clone(),
+                // If altering table operation (or other operations) doesn't hold the old table name as key-lock.
+                let expected = self.creator.data.table_route.table.id;
+                ensure!(
+                    table_id == expected,
+                    error::TableIdChangedSnafu {
+                        expected,
+                        found: table_id
+                    }
                 );
-
-                let table_route = handle_create_table_metadata(
-                    self.creator.data.cluster_id,
-                    full_table_name.clone(),
-                    self.creator.data.task.partitions.clone(),
-                    self.creator.data.task.table_info.clone(),
-                    ctx,
-                    self.context.selector.clone(),
-                    self.context.table_id_sequence.clone(),
-                )
-                .await?;
-
-                self.creator.data.state = CreateTableState::DatanodeCreateTable(table_route);
             }
-            Err(err) => return Err(err),
+            None => {
+                // registers metadata
+                self.register_metadata().await?;
+            }
         }
+
+        self.creator.data.state = CreateTableState::DatanodeCreateTable;
 
         Ok(Status::executing(true))
     }
 
-    async fn on_datanode_create_table(&mut self, table_route: TableRoute) -> Result<Status> {
+    async fn on_datanode_create_table(&mut self) -> Result<Status> {
         //FIXME: if datanode returns `Not Leader` error.
+        let table_route = &self.creator.data.table_route;
 
         let table_name = self.table_name();
         let clients = self.context.datanode_clients.clone();
@@ -175,13 +208,19 @@ impl CreateTableProcedure {
             let regions = table_route.find_leader_regions(&datanode);
             let mut create_expr_for_region = self.creator.data.task.create_table.clone();
             create_expr_for_region.region_numbers = regions;
-            create_expr_for_region.create_if_not_exists = true;
 
             joins.push(common_runtime::spawn_bg(async move {
-                client
+                if let Err(err) = client
                     .create(create_expr_for_region)
                     .await
                     .context(error::RequestDatanodeSnafu { peer: datanode })
+                {
+                    // TODO(weny): add tests for `TableAlreadyExists`
+                    if err.status_code() != StatusCode::TableAlreadyExists {
+                        return Err(err);
+                    }
+                }
+                Ok(())
             }));
         }
 
@@ -201,14 +240,6 @@ impl CreateTableProcedure {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        if let Some(notifier) = self.context.notifier.take() {
-            if let Err(status) = notifier.send(ProcedureStatus::CreateTable(
-                CreateTableProcedureStatus::with_table_id(table_route.table.id as u32),
-            )) {
-                warn!("Failed to notify upper: {:?}", status);
-            }
-        }
-
         Ok(Status::Done)
     }
 }
@@ -220,7 +251,22 @@ impl Procedure for CreateTableProcedure {
     }
 
     async fn execute(&mut self, _ctx: &ProcedureContext) -> ProcedureResult<Status> {
-        todo!()
+        let error_handler = |e| {
+            if matches!(e, error::Error::RetryLater { .. }) {
+                ProcedureError::retry_later(e)
+            } else {
+                ProcedureError::external(e)
+            }
+        };
+        match self.creator.data.state {
+            CreateTableState::Prepare => self.on_prepare().await.map_err(error_handler),
+            CreateTableState::CreateMetadata => {
+                self.on_create_metadata().await.map_err(error_handler)
+            }
+            CreateTableState::DatanodeCreateTable => {
+                self.on_datanode_create_table().await.map_err(error_handler)
+            }
+        }
     }
 
     fn dump(&self) -> ProcedureResult<String> {
@@ -244,12 +290,13 @@ pub struct TableCreator {
 }
 
 impl TableCreator {
-    pub fn new(cluster_id: u64, task: CreateTableTask) -> Self {
+    pub fn new(cluster_id: u64, task: CreateTableTask, table_route: TableRoute) -> Self {
         Self {
             data: CreateTableData {
                 state: CreateTableState::Prepare,
                 cluster_id,
                 task,
+                table_route,
             },
         }
     }
@@ -262,13 +309,14 @@ enum CreateTableState {
     /// Creates metadata
     CreateMetadata,
     /// Datanode creates the table
-    DatanodeCreateTable(TableRoute),
+    DatanodeCreateTable,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CreateTableData {
     state: CreateTableState,
     task: CreateTableTask,
+    table_route: TableRoute,
     cluster_id: u64,
 }
 

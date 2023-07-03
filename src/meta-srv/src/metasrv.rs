@@ -110,20 +110,6 @@ pub struct SelectorContext {
     pub table: Option<String>,
 }
 
-impl SelectorContext {
-    pub fn from_ctx(catalog: String, schema: String, table: String, ctx: SelectorContext) -> Self {
-        SelectorContext {
-            datanode_lease_secs: ctx.datanode_lease_secs,
-            server_addr: ctx.server_addr,
-            kv_store: ctx.kv_store,
-            meta_peer_client: ctx.meta_peer_client,
-            catalog: Some(catalog),
-            schema: Some(schema),
-            table: Some(table),
-        }
-    }
-}
-
 pub type SelectorRef = Arc<dyn Selector<Context = SelectorContext, Output = Vec<Peer>>>;
 pub type ElectionRef = Arc<dyn Election<Leader = LeaderValue>>;
 
@@ -271,8 +257,8 @@ impl MetaSrv {
     }
 
     #[inline]
-    pub fn ddl_manager(&self) -> DdlManagerRef {
-        self.ddl_manager.clone()
+    pub fn ddl_manager(&self) -> &DdlManagerRef {
+        &self.ddl_manager
     }
 
     pub fn procedure_manager(&self) -> &ProcedureManagerRef {

@@ -22,7 +22,6 @@ use api::v1::meta::{
 };
 use api::v1::CreateTableExpr;
 use prost::Message;
-use serde::de::Visitor;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use table::engine::TableReference;
@@ -30,23 +29,6 @@ use table::metadata::{RawTableInfo, TableId};
 
 use crate::error::{self, Result};
 use crate::table_name::TableName;
-
-struct BytesVisitor;
-
-impl<'de> Visitor<'de> for BytesVisitor {
-    type Value = Vec<u8>;
-
-    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-        formatter.write_str("owned bytes")
-    }
-
-    fn visit_byte_buf<E>(self, v: Vec<u8>) -> result::Result<Self::Value, E>
-    where
-        E: serde::de::Error,
-    {
-        Ok(v)
-    }
-}
 
 #[derive(Debug)]
 pub enum DdlTask {
@@ -104,7 +86,7 @@ pub struct SubmitDdlTaskResponse {
 impl TryFrom<PbSubmitDdlTaskResponse> for SubmitDdlTaskResponse {
     type Error = error::Error;
     fn try_from(resp: PbSubmitDdlTaskResponse) -> Result<Self> {
-        let table_id = resp.table_id.context(error::InfoCorruptedSnafu {
+        let table_id = resp.table_id.context(error::InvalidProtoMsgSnafu {
             err_msg: "expected table_id",
         })?;
         Ok(Self {
@@ -114,7 +96,7 @@ impl TryFrom<PbSubmitDdlTaskResponse> for SubmitDdlTaskResponse {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct CreateTableTask {
     pub create_table: CreateTableExpr,
     pub partitions: Vec<Partition>,
@@ -127,7 +109,7 @@ impl TryFrom<PbCreateTableTask> for CreateTableTask {
         let table_info = serde_json::from_slice(&pb.table_info).context(error::SerdeJsonSnafu)?;
 
         Ok(CreateTableTask::new(
-            pb.create_table.context(error::InfoCorruptedSnafu {
+            pb.create_table.context(error::InvalidProtoMsgSnafu {
                 err_msg: "expected create table",
             })?,
             pb.partitions,
@@ -193,7 +175,7 @@ impl<'de> Deserialize<'de> for CreateTableTask {
     where
         D: serde::Deserializer<'de>,
     {
-        let buf = deserializer.deserialize_byte_buf(BytesVisitor)?;
+        let buf = Vec::<u8>::deserialize(deserializer)?;
         let expr: PbCreateTableTask = PbCreateTableTask::decode(&*buf)
             .map_err(|err| serde::de::Error::custom(err.to_string()))?;
 
@@ -201,5 +183,33 @@ impl<'de> Deserialize<'de> for CreateTableTask {
             .map_err(|err| serde::de::Error::custom(err.to_string()))?;
 
         Ok(expr)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use api::v1::CreateTableExpr;
+    use datatypes::schema::SchemaBuilder;
+    use table::metadata::RawTableInfo;
+    use table::test_util::table_info::test_table_info;
+
+    use super::CreateTableTask;
+
+    #[test]
+    fn test_basic_ser_de_create_table_task() {
+        let schema = SchemaBuilder::default().build().unwrap();
+        let table_info = test_table_info(1025, "foo", "bar", "baz", Arc::new(schema));
+        let task = CreateTableTask::new(
+            CreateTableExpr::default(),
+            Vec::new(),
+            RawTableInfo::from(table_info),
+        );
+
+        let output = serde_json::to_vec(&task).unwrap();
+
+        let de = serde_json::from_slice(&output).unwrap();
+        assert_eq!(task, de);
     }
 }

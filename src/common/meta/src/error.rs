@@ -43,9 +43,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Corrupted data, err: {}", err_msg))]
-    InfoCorrupted { err_msg: String, location: Location },
-
     #[snafu(display("Corrupted table route data, err: {}", err_msg))]
     RouteInfoCorrupted { err_msg: String, location: Location },
 
@@ -68,10 +65,9 @@ impl ErrorExt for Error {
         match self {
             IllegalServerState { .. } => StatusCode::Internal,
 
-            SerdeJson { .. }
-            | RouteInfoCorrupted { .. }
-            | InfoCorrupted { .. }
-            | InvalidProtoMsg { .. } => StatusCode::Unexpected,
+            SerdeJson { .. } | RouteInfoCorrupted { .. } | InvalidProtoMsg { .. } => {
+                StatusCode::Unexpected
+            }
 
             SendMessage { .. } => StatusCode::Internal,
 

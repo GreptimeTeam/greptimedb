@@ -212,17 +212,6 @@ impl MetaSrvBuilder {
         // TODO(weny): considers to modify the default config of procedure manager
         let ddl_manager = Arc::new(DdlManager::new(
             procedure_manager.clone(),
-            selector.clone(),
-            SelectorContext {
-                server_addr: options.server_addr.clone(),
-                datanode_lease_secs: options.datanode_lease_secs,
-                kv_store: kv_store.clone(),
-                meta_peer_client: meta_peer_client.clone(),
-                catalog: None,
-                schema: None,
-                table: None,
-            },
-            table_id_sequence.clone(),
             kv_store.clone(),
             Arc::new(DatanodeClients::default()),
         ));
