@@ -18,7 +18,6 @@ use std::time::Instant;
 use common_telemetry::error;
 use hyper::Body;
 use metrics::gauge;
-use metrics_process::Collector;
 use once_cell::sync::Lazy;
 use snafu::ResultExt;
 use tikv_jemalloc_ctl::stats::{allocated_mib, resident_mib};
@@ -71,8 +70,9 @@ pub(crate) const METRIC_JEMALLOC_RESIDENT: &str = "sys.jemalloc.resident";
 pub(crate) const METRIC_JEMALLOC_ALLOCATED: &str = "sys.jemalloc.allocated";
 
 /// Prometheus style process metrics collector.
-pub(crate) static PROCESS_COLLECTOR: Lazy<Collector> = Lazy::new(|| {
-    let collector = Collector::default();
+#[cfg(feature = "metrics-process")]
+pub(crate) static PROCESS_COLLECTOR: Lazy<metrics_process::Collector> = Lazy::new(|| {
+    let collector = metrics_process::Collector::default();
     // Describe collector.
     collector.describe();
     collector
