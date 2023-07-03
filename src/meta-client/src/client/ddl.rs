@@ -12,20 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use api::v1::meta::ddl_task_client::DdlTaskClient;
-use api::v1::meta::heartbeat_client::HeartbeatClient;
-use api::v1::meta::{
-    AskLeaderRequest, ErrorCode, RequestHeader, Role, SubmitDdlTaskRequest, SubmitDdlTaskResponse,
-};
+use api::v1::meta::{ErrorCode, Role, SubmitDdlTaskRequest, SubmitDdlTaskResponse};
 use common_grpc::channel_manager::ChannelManager;
-use common_telemetry::debug;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{ensure, ResultExt};
 use tokio::sync::RwLock;
 use tonic::transport::Channel;
 
+use crate::client::heartbeat::Inner as HeartbeatInner;
 use crate::client::Id;
 use crate::error;
 use crate::error::Result;
@@ -44,9 +40,8 @@ impl Client {
         let inner = Arc::new(RwLock::new(Inner {
             id,
             role,
-            channel_manager,
-            peers: vec![],
-            leader: None,
+            channel_manager: channel_manager.clone(),
+            heartbeat_inner: HeartbeatInner::new(id, role, channel_manager),
         }));
 
         Self { inner }
@@ -82,8 +77,7 @@ struct Inner {
     id: Id,
     role: Role,
     channel_manager: ChannelManager,
-    peers: Vec<String>,
-    leader: Option<String>,
+    heartbeat_inner: HeartbeatInner,
 }
 
 impl Inner {
@@ -99,46 +93,7 @@ impl Inner {
             }
         );
 
-        self.peers = urls
-            .as_ref()
-            .iter()
-            .map(|url| url.as_ref().to_string())
-            .collect::<HashSet<_>>()
-            .drain()
-            .collect::<Vec<_>>();
-
-        Ok(())
-    }
-
-    // TODO(weny): considers refactoring `ask_leader` into a common client.
-    async fn ask_leader(&mut self) -> Result<()> {
-        ensure!(
-            self.is_started(),
-            error::IllegalGrpcClientStateSnafu {
-                err_msg: "Heartbeat client not start"
-            }
-        );
-
-        let header = RequestHeader::new(self.id, self.role);
-        let mut leader = None;
-        for addr in &self.peers {
-            let req = AskLeaderRequest {
-                header: Some(header.clone()),
-            };
-            let mut client = self.make_heartbeat_client(addr)?;
-            match client.ask_leader(req).await {
-                Ok(res) => {
-                    if let Some(endpoint) = res.into_inner().leader {
-                        leader = Some(endpoint.addr);
-                        break;
-                    }
-                }
-                Err(status) => {
-                    debug!("Failed to ask leader from: {}, {}", addr, status);
-                }
-            }
-        }
-        self.leader = Some(leader.context(error::AskLeaderSnafu)?);
+        self.heartbeat_inner.start(urls).await?;
         Ok(())
     }
 
@@ -151,18 +106,9 @@ impl Inner {
         Ok(DdlTaskClient::new(channel))
     }
 
-    fn make_heartbeat_client(&self, addr: impl AsRef<str>) -> Result<HeartbeatClient<Channel>> {
-        let channel = self
-            .channel_manager
-            .get(addr)
-            .context(error::CreateChannelSnafu)?;
-
-        Ok(HeartbeatClient::new(channel))
-    }
-
     #[inline]
     fn is_started(&self) -> bool {
-        !self.peers.is_empty()
+        self.heartbeat_inner.is_started()
     }
 
     pub async fn submit_ddl_task(
@@ -172,7 +118,7 @@ impl Inner {
         req.set_header(self.id, self.role);
 
         loop {
-            if let Some(leader) = &self.leader {
+            if let Some(leader) = &self.heartbeat_inner.get_leader() {
                 let mut client = self.make_client(leader)?;
                 let res = client
                     .submit_ddl_task(req.clone())
@@ -184,14 +130,14 @@ impl Inner {
                 if let Some(header) = res.header.as_ref() {
                     if let Some(err) = header.error.as_ref() {
                         if err.code == ErrorCode::NotLeader as i32 {
-                            self.leader = None;
+                            self.heartbeat_inner.reset_leader();
                             continue;
                         }
                     }
                 }
 
                 return Ok(res);
-            } else if let Err(err) = self.ask_leader().await {
+            } else if let Err(err) = self.heartbeat_inner.ask_leader().await {
                 return Err(err);
             }
         }
