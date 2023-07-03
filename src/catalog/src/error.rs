@@ -243,6 +243,12 @@ pub enum Error {
 
     #[snafu(display("A generic error has occurred, msg: {}", msg))]
     Generic { msg: String, location: Location },
+
+    #[snafu(display("Table metadata manager error: {}", source))]
+    TableMetadataManager {
+        source: common_meta::error::Error,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -298,6 +304,7 @@ impl ErrorExt for Error {
             Error::Unimplemented { .. } | Error::NotSupported { .. } => StatusCode::Unsupported,
             Error::QueryAccessDenied { .. } => StatusCode::AccessDenied,
             Error::Datafusion { .. } => StatusCode::EngineExecuteQuery,
+            Error::TableMetadataManager { source, .. } => source.status_code(),
         }
     }
 

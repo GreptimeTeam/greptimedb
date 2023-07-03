@@ -17,6 +17,7 @@ pub mod heartbeat;
 pub mod ident;
 pub mod instruction;
 pub mod key;
+pub mod kv_backend;
 pub mod peer;
 pub mod rpc;
 pub mod table_name;

@@ -6,12 +6,14 @@ license.workspace = true
 
 [dependencies]
 api = { path = "../../api" }
+async-stream.workspace = true
 async-trait.workspace = true
 common-catalog = { path = "../catalog" }
 common-error = { path = "../error" }
 common-runtime = { path = "../runtime" }
 common-telemetry = { path = "../telemetry" }
 common-time = { path = "../time" }
+futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 snafu.workspace = true
