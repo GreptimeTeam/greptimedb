@@ -193,7 +193,7 @@ impl Instance {
                 partition_manager,
             )),
         ]);
-        
+
         let heartbeat_task = Some(HeartbeatTask::new(
             meta_client,
             opts.heartbeat_interval_millis,
