@@ -152,7 +152,7 @@ pub async fn test_region_failover(store_type: StorageType) {
     time::sleep(Duration::from_millis(100)).await;
 
     let cache = get_table_cache(&frontend, &cache_key);
-    assert!(cache.is_none());
+    assert!(cache.unwrap().is_none());
     let route_cache = get_route_cache(&frontend, &table_name);
     assert!(route_cache.is_none());
 
