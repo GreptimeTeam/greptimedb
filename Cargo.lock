@@ -5390,6 +5390,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "mito2"
+version = "0.4.0"
+
+[[package]]
 name = "moka"
 version = "0.9.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
