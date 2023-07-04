@@ -98,7 +98,7 @@ impl CreateTableProcedure {
             return Ok(Status::Done);
         }
 
-        self.creator.data.state = CreateTableState::CreateMetadata;
+        self.creator.data.state = CreateTableState::DatanodeCreateTable;
 
         Ok(Status::executing(true))
     }
@@ -191,9 +191,7 @@ impl CreateTableProcedure {
             }
         }
 
-        self.creator.data.state = CreateTableState::DatanodeCreateTable;
-
-        Ok(Status::executing(true))
+        Ok(Status::Done)
     }
 
     async fn on_datanode_create_table(&mut self) -> Result<Status> {
@@ -243,7 +241,9 @@ impl CreateTableProcedure {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        Ok(Status::Done)
+        self.creator.data.state = CreateTableState::CreateMetadata;
+
+        Ok(Status::executing(true))
     }
 }
 
@@ -263,11 +263,11 @@ impl Procedure for CreateTableProcedure {
         };
         match self.creator.data.state {
             CreateTableState::Prepare => self.on_prepare().await.map_err(error_handler),
-            CreateTableState::CreateMetadata => {
-                self.on_create_metadata().await.map_err(error_handler)
-            }
             CreateTableState::DatanodeCreateTable => {
                 self.on_datanode_create_table().await.map_err(error_handler)
+            }
+            CreateTableState::CreateMetadata => {
+                self.on_create_metadata().await.map_err(error_handler)
             }
         }
     }
@@ -309,10 +309,10 @@ impl TableCreator {
 enum CreateTableState {
     /// Prepares to create the table
     Prepare,
-    /// Creates metadata
-    CreateMetadata,
     /// Datanode creates the table
     DatanodeCreateTable,
+    /// Creates metadata
+    CreateMetadata,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
