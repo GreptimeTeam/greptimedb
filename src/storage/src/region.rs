@@ -51,7 +51,9 @@ use crate::memtable::MemtableBuilderRef;
 use crate::metadata::{RegionMetaImpl, RegionMetadata, RegionMetadataRef};
 pub(crate) use crate::region::writer::schedule_compaction;
 use crate::region::writer::DropContext;
-pub use crate::region::writer::{AlterContext, RegionWriter, RegionWriterRef, WriterContext};
+pub use crate::region::writer::{
+    AlterContext, RegionWriter, RegionWriterRef, WriterCompactRequest, WriterContext,
+};
 use crate::schema::compat::CompatWrite;
 use crate::snapshot::SnapshotImpl;
 use crate::sst::AccessLayerRef;
@@ -768,16 +770,16 @@ impl<S: LogStore> RegionInner<S> {
     }
 
     /// Compact the region manually.
-    async fn compact(&self, ctx: CompactContext) -> Result<()> {
+    async fn compact(&self, compact_ctx: CompactContext) -> Result<()> {
         self.writer
-            .compact(
-                self.shared.clone(),
-                self.sst_layer.clone(),
-                self.manifest.clone(),
-                self.wal.clone(),
-                self.writer.clone(),
-                ctx,
-            )
+            .compact(WriterCompactRequest {
+                shared_data: self.shared.clone(),
+                sst_layer: self.sst_layer.clone(),
+                manifest: self.manifest.clone(),
+                wal: self.wal.clone(),
+                region_writer: self.writer.clone(),
+                compact_ctx,
+            })
             .await
     }
 }
