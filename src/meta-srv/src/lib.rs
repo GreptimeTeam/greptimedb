@@ -17,6 +17,7 @@
 
 pub mod bootstrap;
 pub mod cluster;
+pub mod ddl;
 pub mod election;
 pub mod error;
 mod failure_detector;

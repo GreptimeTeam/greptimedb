@@ -16,6 +16,7 @@ use std::fmt::{Display, Formatter};
 
 use api::v1::meta::TableName as PbTableName;
 use serde::{Deserialize, Serialize};
+use table::engine::TableReference;
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq, Deserialize, Serialize)]
 pub struct TableName {
@@ -44,6 +45,14 @@ impl TableName {
             catalog_name: catalog_name.into(),
             schema_name: schema_name.into(),
             table_name: table_name.into(),
+        }
+    }
+
+    pub fn table_ref(&self) -> TableReference<'_> {
+        TableReference {
+            catalog: &self.catalog_name,
+            schema: &self.schema_name,
+            table: &self.table_name,
         }
     }
 }

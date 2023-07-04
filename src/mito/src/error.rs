@@ -183,13 +183,14 @@ impl ErrorExt for Error {
             | BuildTableMeta { .. }
             | BuildTableInfo { .. }
             | BuildRegionDescriptor { .. }
-            | TableExists { .. }
             | ProjectedColumnNotFound { .. }
             | InvalidPrimaryKey { .. }
             | MissingTimestampIndex { .. }
             | TableNotFound { .. }
             | InvalidRawSchema { .. }
             | VersionChanged { .. } => StatusCode::InvalidArguments,
+
+            TableExists { .. } => StatusCode::TableAlreadyExists,
 
             ConvertRaw { .. } => StatusCode::Unexpected,
 

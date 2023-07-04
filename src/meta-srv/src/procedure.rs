@@ -12,5 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod create_table;
 pub mod region_failover;
 pub(crate) mod state_store;

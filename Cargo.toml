@@ -73,7 +73,7 @@ datafusion-sql = { git = "https://github.com/waynexia/arrow-datafusion.git", rev
 datafusion-substrait = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "63e52dde9e44cac4b1f6c6e6b6bf6368ba3bd323" }
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/WenyXu/greptime-proto.git", rev = "aab7d9a35900f995f9328c8588781e4d75253cba" }
+greptime-proto = { git = "https://github.com/WenyXu/greptime-proto.git", rev = "1eda4691a5d2c8ffc463d48ca2317905ba7e4b2d" }
 itertools = "0.10"
 parquet = "40.0"
 paste = "1.0"

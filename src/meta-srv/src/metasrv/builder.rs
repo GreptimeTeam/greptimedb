@@ -15,9 +15,11 @@
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
+use client::client_manager::DatanodeClients;
 use common_procedure::local::{LocalManager, ManagerConfig};
 
 use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
+use crate::ddl::DdlManager;
 use crate::error::Result;
 use crate::handler::mailbox_handler::MailboxHandler;
 use crate::handler::region_lease_handler::RegionLeaseHandler;
@@ -210,6 +212,15 @@ impl MetaSrvBuilder {
             }
         };
 
+        // TODO(weny): considers to modify the default config of procedure manager
+        let ddl_manager = Arc::new(DdlManager::new(
+            procedure_manager.clone(),
+            kv_store.clone(),
+            Arc::new(DatanodeClients::default()),
+        ));
+
+        let _ = ddl_manager.try_start();
+
         Ok(MetaSrv {
             started,
             options,
@@ -225,6 +236,7 @@ impl MetaSrvBuilder {
             procedure_manager,
             metadata_service,
             mailbox,
+            ddl_manager,
         })
     }
 }

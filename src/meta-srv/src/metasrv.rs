@@ -28,6 +28,7 @@ use snafu::ResultExt;
 use tokio::sync::broadcast::error::RecvError;
 
 use crate::cluster::MetaPeerClientRef;
+use crate::ddl::DdlManagerRef;
 use crate::election::{Election, LeaderChangeMessage};
 use crate::error::{RecoverProcedureSnafu, Result};
 use crate::handler::HeartbeatHandlerGroup;
@@ -135,6 +136,7 @@ pub struct MetaSrv {
     procedure_manager: ProcedureManagerRef,
     metadata_service: MetadataServiceRef,
     mailbox: MailboxRef,
+    ddl_manager: DdlManagerRef,
 }
 
 impl MetaSrv {
@@ -276,6 +278,10 @@ impl MetaSrv {
     }
 
     #[inline]
+    pub fn ddl_manager(&self) -> &DdlManagerRef {
+        &self.ddl_manager
+    }
+
     pub fn procedure_manager(&self) -> &ProcedureManagerRef {
         &self.procedure_manager
     }

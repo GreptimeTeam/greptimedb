@@ -258,7 +258,7 @@ async fn handle_create(
     })
 }
 
-fn create_table_global_value(
+pub(crate) fn create_table_global_value(
     table_route_value: &TableRouteValue,
     table_info: RawTableInfo,
 ) -> Result<TableGlobalValue> {
@@ -349,7 +349,7 @@ async fn handle_delete(req: DeleteRequest, ctx: Context) -> Result<RouteResponse
     })
 }
 
-fn fill_table_routes(
+pub(crate) fn fill_table_routes(
     tables: Vec<(TableGlobalValue, TableRouteValue)>,
 ) -> Result<(Vec<Peer>, Vec<TableRoute>)> {
     let mut peer_dict = PeerDict::default();
@@ -407,7 +407,7 @@ async fn fetch_tables(
     Ok(tables)
 }
 
-fn table_route_key(table_id: u64, t: &TableGlobalKey) -> TableRouteKey<'_> {
+pub(crate) fn table_route_key(table_id: u64, t: &TableGlobalKey) -> TableRouteKey<'_> {
     TableRouteKey {
         table_id,
         catalog_name: &t.catalog_name,
