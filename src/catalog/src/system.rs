@@ -203,20 +203,32 @@ pub fn build_table_insert_request(
     build_insert_request(
         EntryType::Table,
         entry_key.as_bytes(),
-        serde_json::to_string(&TableEntryValue { table_name, engine })
-            .unwrap()
-            .as_bytes(),
+        serde_json::to_string(&TableEntryValue {
+            table_name,
+            engine,
+            is_deleted: false,
+        })
+        .unwrap()
+        .as_bytes(),
     )
 }
 
 pub(crate) fn build_table_deletion_request(
     request: &DeregisterTableRequest,
     table_id: TableId,
-) -> DeleteRequest {
-    let table_key = format_table_entry_key(&request.catalog, &request.schema, table_id);
-    DeleteRequest {
-        key_column_values: build_primary_key_columns(EntryType::Table, table_key.as_bytes()),
-    }
+) -> InsertRequest {
+    let entry_key = format_table_entry_key(&request.catalog, &request.schema, table_id);
+    build_insert_request(
+        EntryType::Table,
+        entry_key.as_bytes(),
+        serde_json::to_string(&TableEntryValue {
+            table_name: "".to_string(),
+            engine: "".to_string(),
+            is_deleted: true,
+        })
+        .unwrap()
+        .as_bytes(),
+    )
 }
 
 fn build_primary_key_columns(entry_type: EntryType, key: &[u8]) -> HashMap<String, VectorRef> {
@@ -335,6 +347,7 @@ pub fn decode_system_catalog(
                 table_name: table_meta.table_name,
                 table_id,
                 engine: table_meta.engine,
+                is_deleted: table_meta.is_deleted,
             }))
         }
     }
@@ -391,6 +404,7 @@ pub struct TableEntry {
     pub table_name: String,
     pub table_id: TableId,
     pub engine: String,
+    pub is_deleted: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -399,10 +413,17 @@ pub struct TableEntryValue {
 
     #[serde(default = "mito_engine")]
     pub engine: String,
+
+    #[serde(default = "present")]
+    pub is_deleted: bool,
 }
 
 fn mito_engine() -> String {
     MITO_ENGINE.to_string()
+}
+
+fn present() -> bool {
+    true
 }
 
 #[cfg(test)]
@@ -563,6 +584,7 @@ mod tests {
             table_name: "my_table".to_string(),
             table_id: 1,
             engine: MITO_ENGINE.to_string(),
+            is_deleted: false,
         });
         assert_eq!(entry, expected);
 
@@ -574,11 +596,11 @@ mod tests {
             },
             1,
         );
-        let result = catalog_table.delete(table_deletion).await.unwrap();
+        let result = catalog_table.insert(table_deletion).await.unwrap();
         assert_eq!(result, 1);
 
         let records = catalog_table.records().await.unwrap();
         let batches = RecordBatches::try_collect(records).await.unwrap().take();
-        assert_eq!(batches.len(), 0);
+        assert_eq!(batches.len(), 1);
     }
 }
