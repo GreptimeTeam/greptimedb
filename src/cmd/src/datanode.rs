@@ -12,20 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::str::FromStr;
 use std::time::Duration;
 
 use clap::Parser;
-use common_base::readable_size::ReadableSize;
 use common_telemetry::logging;
 use datanode::datanode::{Datanode, DatanodeOptions, FileConfig, ObjectStoreConfig};
 use meta_client::MetaClientOptions;
 use servers::Mode;
 use snafu::ResultExt;
 
-use crate::error::{
-    IllegalConfigSnafu, MissingConfigSnafu, Result, ShutdownDatanodeSnafu, StartDatanodeSnafu,
-};
+use crate::error::{MissingConfigSnafu, Result, ShutdownDatanodeSnafu, StartDatanodeSnafu};
 use crate::options::{Options, TopLevelOptions};
 
 pub struct Instance {
@@ -100,8 +96,6 @@ struct StartCommand {
     http_addr: Option<String>,
     #[clap(long)]
     http_timeout: Option<u64>,
-    #[clap(long)]
-    http_body_maximum_size: Option<String>,
     #[clap(long, default_value = "GREPTIMEDB_DATANODE")]
     env_prefix: String,
 }
@@ -166,19 +160,6 @@ impl StartCommand {
             opts.http_opts.timeout = Duration::from_secs(http_timeout)
         }
 
-        if let Some(http_body_maximum_size) = &self.http_body_maximum_size {
-            match ReadableSize::from_str(http_body_maximum_size.as_str()) {
-                Ok(size) => {
-                    opts.http_opts.http_body_maximum_size = size;
-                },
-                Err(e) => {
-                    return IllegalConfigSnafu {
-                        msg: format!("Incorrect settings for http_body_maximum_size {http_body_maximum_size}, err: {e}")
-                    }
-                    .fail()
-                }
-            };
-        }
         // Disable dashboard in datanode.
         opts.http_opts.disable_dashboard = true;
 

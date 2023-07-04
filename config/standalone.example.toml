@@ -9,6 +9,9 @@ enable_memory_catalog = false
 addr = "127.0.0.1:4000"
 # HTTP request timeout, 30s by default.
 timeout = "30s"
+# HTTP request body limit, 64Mb by default.
+# the following units are supported: B, KB, KiB, MB, MiB, GB, GiB, TB, TiB, PB, PiB
+body_limit = "64Mb"
 
 # gRPC server options.
 [grpc_options]

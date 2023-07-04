@@ -136,7 +136,7 @@ pub struct HttpOptions {
     #[serde(skip)]
     pub disable_dashboard: bool,
 
-    pub http_body_maximum_size: ReadableSize,
+    pub body_limit: ReadableSize,
 }
 
 impl Default for HttpOptions {
@@ -145,7 +145,7 @@ impl Default for HttpOptions {
             addr: "127.0.0.1:4000".to_string(),
             timeout: Duration::from_secs(30),
             disable_dashboard: false,
-            http_body_maximum_size: ReadableSize::from_str("6G").unwrap(),
+            body_limit: ReadableSize::from_str("64M").unwrap(),
         }
     }
 }
@@ -550,7 +550,7 @@ impl HttpServer {
                     .layer(TraceLayer::new_for_http())
                     .layer(TimeoutLayer::new(self.options.timeout))
                     .layer(DefaultBodyLimit::max(
-                        self.options.http_body_maximum_size.0.try_into().unwrap(),
+                        self.options.body_limit.0.try_into().unwrap(),
                     ))
                     // custom layer
                     .layer(AsyncRequireAuthorizationLayer::new(

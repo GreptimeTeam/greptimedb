@@ -5,6 +5,7 @@ mode = "distributed"
 [http_options]
 addr = "127.0.0.1:4000"
 timeout = "30s"
+body_limit = "64Mb"
 
 # gRPC server options, see `standalone.example.toml`.
 [grpc_options]

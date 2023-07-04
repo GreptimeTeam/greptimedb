@@ -262,8 +262,8 @@ mod tests {
 
         assert_eq!(opts.http_options.as_ref().unwrap().addr, "127.0.0.1:1234");
         assert_eq!(
-            ReadableSize::gb(6),
-            opts.http_options.as_ref().unwrap().http_body_maximum_size
+            ReadableSize::mb(64),
+            opts.http_options.as_ref().unwrap().body_limit
         );
         assert_eq!(opts.mysql_options.as_ref().unwrap().addr, "127.0.0.1:5678");
         assert_eq!(
@@ -334,11 +334,7 @@ mod tests {
 
         assert_eq!(
             ReadableSize::gb(2),
-            fe_opts
-                .http_options
-                .as_ref()
-                .unwrap()
-                .http_body_maximum_size
+            fe_opts.http_options.as_ref().unwrap().body_limit
         );
 
         assert_eq!("debug", fe_opts.logging.level.as_ref().unwrap());
