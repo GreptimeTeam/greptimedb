@@ -25,6 +25,7 @@ SELECT * from t;
 |   | 4 |
 +---+---+
 
+-- TODO(LFC): Port test cases from standalone env when distribute rename table is implemented (#723).
 ALTER TABLE t RENAME new_table;
 
 Affected Rows: 0
@@ -33,6 +34,7 @@ DROP TABLE t;
 
 Error: 4001(TableNotFound), Table not found: greptime.public.t
 
+-- TODO: this clause should success
 -- SQLNESS REPLACE details.*
 DROP TABLE new_table;
 

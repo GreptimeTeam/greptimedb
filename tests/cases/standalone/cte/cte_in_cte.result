@@ -50,14 +50,19 @@ with cte1 as (Select i as j from a) select * from (with cte2 as (select max(j) a
 | 42 |
 +----+
 
+-- Refer to CTE in subquery expression,
+-- this feature is not implemented in datafusion
 with cte1 as (Select i as j from a) select * from cte1 where j = (with cte2 as (select max(j) as j from cte1) select j from cte2);
 
 Error: 3001(EngineExecuteQuery), This feature is not implemented: Physical plan does not support logical expression (<subquery>)
 
+-- Refer to same-named CTE in a subquery expression
+-- this feature is not implemented in datafusion
 with cte as (Select i as j from a) select * from cte where j = (with cte as (select max(j) as j from cte) select j from cte);
 
 Error: 3000(PlanQuery), sql parser error: WITH query name "cte" specified more than once
 
+-- self-refer to non-existent cte-
 with cte as (select * from cte) select * from cte;
 
 Error: 3000(PlanQuery), Error during planning: Table not found: greptime.public.cte

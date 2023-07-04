@@ -15,6 +15,14 @@ SELECT DISTINCT i%2 FROM integers ORDER BY 1;
 | 1                     |
 +-----------------------+
 
+-- TODO(LFC): Failed to run under new DataFusion
+-- expected:
+--  +-----------------------+
+--  | integers.i % Int64(2) |
+--  +-----------------------+
+--  | 1                     |
+--  | 0                     |
+--  +-----------------------+
 SELECT DISTINCT i % 2 FROM integers WHERE i<3 ORDER BY i;
 
 Error: 3000(PlanQuery), Error during planning: For SELECT DISTINCT, ORDER BY expressions i must appear in select list

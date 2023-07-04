@@ -2,6 +2,7 @@ CREATE TABLE blobs (b BYTEA, t timestamp time index);
 
 Affected Rows: 0
 
+--Insert valid hex strings--
 INSERT INTO blobs VALUES('\xaa\xff\xaa'::BYTEA, 1), ('\xAA\xFF\xAA\xAA\xFF\xAA'::BYTEA, 2), ('\xAA\xFF\xAA\xAA\xFF\xAA\xAA\xFF\xAA'::BYTEA, 3);
 
 Affected Rows: 3
@@ -16,6 +17,7 @@ SELECT * FROM blobs;
 | 5c7841415c7846465c7841415c7841415c7846465c7841415c7841415c7846465c784141 | 1970-01-01T00:00:00.003 |
 +--------------------------------------------------------------------------+-------------------------+
 
+--Insert valid hex strings, lower case--
 DELETE FROM blobs;
 
 Affected Rows: 3
@@ -34,6 +36,7 @@ SELECT * FROM blobs;
 | 5c7861615c7866665c7861615c7861615c7866665c7861615c7861615c7866665c786161 | 1970-01-01T00:00:00.003 |
 +--------------------------------------------------------------------------+-------------------------+
 
+--Insert valid hex strings with number and letters--
 DELETE FROM blobs;
 
 Affected Rows: 3
@@ -52,10 +55,12 @@ SELECT * FROM blobs;
 | 5c78616131313939616131313939616131313939 | 1970-01-01T00:00:00.003 |
 +------------------------------------------+-------------------------+
 
+--Insert invalid hex strings (invalid hex chars: G, H, I)--
 INSERT INTO blobs VALUES('\xGA\xFF\xAA'::BYTEA, 4);
 
 Affected Rows: 1
 
+--Insert invalid hex strings (odd # of chars)--
 INSERT INTO blobs VALUES('\xA'::BYTEA, 4);
 
 Affected Rows: 1
