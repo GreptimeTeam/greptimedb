@@ -127,6 +127,21 @@ jobs:
           name: ${{ matrix.file }}.sha256sum
           path: target/${{ matrix.arch }}/${{ env.CARGO_PROFILE }}/${{ matrix.file }}.sha256sum
 
+      - name: Configure tag
+        shell: bash
+        if: github.event_name == 'push'
+        run: |
+          VERSION=${{ github.ref_name }}
+          echo "TAG=${VERSION:1}" >> $GITHUB_ENV
+
+      - name: Upload to S3
+        run: |
+          aws s3 sync target/${{ matrix.arch }}/${{ env.CARGO_PROFILE }} s3://${{ secrets.GREPTIMEDB_RELEASE_BUCKET_NAME }}/releases/${TAG}
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_CN_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_CN_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ secrets.AWS_CN_REGION }}
+
   build-linux:
     name: Build linux binary
     strategy:
@@ -287,6 +302,21 @@ jobs:
         with:
           name: ${{ matrix.file }}.sha256sum
           path: target/${{ matrix.arch }}/${{ env.CARGO_PROFILE }}/${{ matrix.file }}.sha256sum
+
+      - name: Configure tag
+        shell: bash
+        if: github.event_name == 'push'
+        run: |
+          VERSION=${{ github.ref_name }}
+          echo "TAG=${VERSION:1}" >> $GITHUB_ENV
+
+      - name: Upload to S3
+        run: |
+          aws s3 sync target/${{ matrix.arch }}/${{ env.CARGO_PROFILE }} s3://${{ secrets.GREPTIMEDB_RELEASE_BUCKET_NAME }}/releases/${TAG}
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_CN_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_CN_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ secrets.AWS_CN_REGION }}
 
   docker:
     name: Build docker image
