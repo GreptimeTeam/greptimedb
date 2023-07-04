@@ -133,7 +133,7 @@ impl Client {
 }
 
 #[derive(Debug)]
-struct Inner {
+pub(crate) struct Inner {
     id: Id,
     role: Role,
     channel_manager: ChannelManager,
@@ -142,7 +142,16 @@ struct Inner {
 }
 
 impl Inner {
-    async fn start<U, A>(&mut self, urls: A) -> Result<()>
+    pub(crate) fn new(id: Id, role: Role, channel_manager: ChannelManager) -> Self {
+        Self {
+            id,
+            role,
+            channel_manager,
+            peers: HashSet::new(),
+            leader: None,
+        }
+    }
+    pub(crate) async fn start<U, A>(&mut self, urls: A) -> Result<()>
     where
         U: AsRef<str>,
         A: AsRef<[U]>,
@@ -163,7 +172,11 @@ impl Inner {
         Ok(())
     }
 
-    async fn ask_leader(&mut self) -> Result<()> {
+    pub(crate) fn get_leader(&self) -> Option<String> {
+        self.leader.clone()
+    }
+
+    pub(crate) async fn ask_leader(&mut self) -> Result<()> {
         ensure!(
             self.is_started(),
             error::IllegalGrpcClientStateSnafu {
@@ -242,7 +255,7 @@ impl Inner {
     }
 
     #[inline]
-    fn is_started(&self) -> bool {
+    pub(crate) fn is_started(&self) -> bool {
         !self.peers.is_empty()
     }
 }
