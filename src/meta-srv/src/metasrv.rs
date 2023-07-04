@@ -75,6 +75,7 @@ pub struct Context {
     pub server_addr: String,
     pub in_memory: ResettableKvStoreRef,
     pub kv_store: KvStoreRef,
+    pub leader_cached_kv_store: ResettableKvStoreRef,
     pub meta_peer_client: MetaPeerClientRef,
     pub mailbox: MailboxRef,
     pub election: Option<ElectionRef>,
@@ -93,6 +94,10 @@ impl Context {
 
     pub fn reset_in_memory(&self) {
         self.in_memory.reset();
+    }
+
+    pub fn reset_leader_cached_kv_store(&self) {
+        self.leader_cached_kv_store.reset();
     }
 }
 
@@ -120,6 +125,7 @@ pub struct MetaSrv {
     // store some data that will not be persisted.
     in_memory: ResettableKvStoreRef,
     kv_store: KvStoreRef,
+    leader_cached_kv_store: ResettableKvStoreRef,
     table_id_sequence: SequenceRef,
     meta_peer_client: MetaPeerClientRef,
     selector: SelectorRef,
@@ -146,20 +152,30 @@ impl MetaSrv {
 
         if let Some(election) = self.election() {
             let procedure_manager = self.procedure_manager.clone();
+            let in_memory = self.in_memory.clone();
+            let leader_cached_kv_store = self.leader_cached_kv_store.clone();
             let mut rx = election.subscribe_leader_change();
             let _handle = common_runtime::spawn_bg(async move {
                 loop {
                     match rx.recv().await {
-                        Ok(msg) => match msg {
-                            LeaderChangeMessage::Elected(_) => {
-                                if let Err(e) = procedure_manager.recover().await {
-                                    error!("Failed to recover procedures, error: {e}");
+                        Ok(msg) => {
+                            in_memory.reset();
+                            leader_cached_kv_store.reset();
+                            info!(
+                                "Leader's cache has bean cleared on leader change: {:?}",
+                                msg
+                            );
+                            match msg {
+                                LeaderChangeMessage::Elected(_) => {
+                                    if let Err(e) = procedure_manager.recover().await {
+                                        error!("Failed to recover procedures, error: {e}");
+                                    }
+                                }
+                                LeaderChangeMessage::StepDown(leader) => {
+                                    error!("Leader :{:?} step down", leader);
                                 }
                             }
-                            LeaderChangeMessage::StepDown(leader) => {
-                                error!("Leader :{:?} step down", leader);
-                            }
-                        },
+                        }
                         Err(RecvError::Closed) => {
                             error!("Not expected, is leader election loop still running?");
                             break;
@@ -220,6 +236,11 @@ impl MetaSrv {
     }
 
     #[inline]
+    pub fn leader_cached_kv_store(&self) -> ResettableKvStoreRef {
+        self.leader_cached_kv_store.clone()
+    }
+
+    #[inline]
     pub fn meta_peer_client(&self) -> MetaPeerClientRef {
         self.meta_peer_client.clone()
     }
@@ -254,6 +275,7 @@ impl MetaSrv {
         self.mailbox.clone()
     }
 
+    #[inline]
     pub fn procedure_manager(&self) -> &ProcedureManagerRef {
         &self.procedure_manager
     }
@@ -263,6 +285,7 @@ impl MetaSrv {
         let server_addr = self.options().server_addr.clone();
         let in_memory = self.in_memory();
         let kv_store = self.kv_store();
+        let leader_cached_kv_store = self.leader_cached_kv_store();
         let meta_peer_client = self.meta_peer_client();
         let mailbox = self.mailbox();
         let election = self.election();
@@ -271,6 +294,7 @@ impl MetaSrv {
             server_addr,
             in_memory,
             kv_store,
+            leader_cached_kv_store,
             meta_peer_client,
             mailbox,
             election,
