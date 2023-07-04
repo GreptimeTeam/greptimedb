@@ -19,7 +19,8 @@ use std::time::Duration;
 
 use async_stream::stream;
 use common_error::prelude::BoxedError;
-use common_meta::error::{Error, GetKvCacheSnafu, MetaSrvSnafu, Result};
+use common_meta::error::Error::{CacheNotGet, GetKvCache};
+use common_meta::error::{CacheNotGetSnafu, Error, MetaSrvSnafu, Result};
 use common_meta::kv_backend::{Kv, KvBackend, KvBackendRef, ValueIter};
 use common_meta::rpc::store::{
     CompareAndPutRequest, DeleteRangeRequest, MoveValueRequest, PutRequest, RangeRequest,
@@ -27,7 +28,7 @@ use common_meta::rpc::store::{
 use common_telemetry::{info, timer};
 use meta_client::client::MetaClient;
 use moka::future::{Cache, CacheBuilder};
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 
 use super::KvCacheInvalidator;
 use crate::metrics::{METRIC_CATALOG_KV_GET, METRIC_CATALOG_KV_REMOTE_GET};
@@ -36,7 +37,7 @@ const CACHE_MAX_CAPACITY: u64 = 10000;
 const CACHE_TTL_SECOND: u64 = 10 * 60;
 const CACHE_TTI_SECOND: u64 = 5 * 60;
 
-pub type CacheBackendRef = Arc<Cache<Vec<u8>, Option<Kv>>>;
+pub type CacheBackendRef = Arc<Cache<Vec<u8>, Kv>>;
 pub struct CachedMetaKvBackend {
     kv_backend: KvBackendRef,
     cache: CacheBackendRef,
@@ -58,19 +59,26 @@ impl KvBackend for CachedMetaKvBackend {
 
         let init = async {
             let _timer = timer!(METRIC_CATALOG_KV_REMOTE_GET);
-
-            self.kv_backend.get(key).await
+            self.kv_backend.get(key).await.map(|val| {
+                val.with_context(|| CacheNotGetSnafu {
+                    key: String::from_utf8_lossy(key),
+                })
+            })?
         };
 
-        self.cache
-            .try_get_with_by_ref(key, init)
-            .await
-            .map_err(|e| {
-                GetKvCacheSnafu {
-                    err_msg: e.to_string(),
-                }
-                .build()
-            })
+        // currently moka doesn't have `optionally_try_get_with_by_ref`
+        // TODO(fys): change to moka method when available
+        // https://github.com/moka-rs/moka/issues/254
+        match self.cache.try_get_with_by_ref(key, init).await {
+            Ok(val) => Ok(Some(val)),
+            Err(e) => match e.as_ref() {
+                CacheNotGet { .. } => Ok(None),
+                _ => Err(e),
+            },
+        }
+        .map_err(|e| GetKvCache {
+            err_msg: e.to_string(),
+        })
     }
 
     async fn set(&self, key: &[u8], val: &[u8]) -> Result<()> {
