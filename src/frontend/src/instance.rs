@@ -401,6 +401,7 @@ impl Instance {
             schema_name: ctx.current_schema(),
             table_name: table_name.to_string(),
             kind: Some(Kind::AddColumns(add_columns)),
+            ..Default::default()
         };
 
         self.grpc_query_handler

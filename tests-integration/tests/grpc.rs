@@ -209,6 +209,7 @@ pub async fn test_insert_and_select(store_type: StorageType) {
         schema_name: DEFAULT_SCHEMA_NAME.to_string(),
         table_name: "demo".to_string(),
         kind: Some(kind),
+        ..Default::default()
     };
     let result = db.alter(expr).await.unwrap();
     assert!(matches!(result, Output::AffectedRows(0)));

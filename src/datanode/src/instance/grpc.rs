@@ -408,6 +408,7 @@ mod test {
                         },
                     ],
                 })),
+                ..Default::default()
             })),
         });
         let output = instance.do_query(query, QueryContext::arc()).await.unwrap();

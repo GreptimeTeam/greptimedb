@@ -240,6 +240,7 @@ mod tests {
                     location: None,
                 }],
             })),
+            ..Default::default()
         };
 
         let alter_request = alter_expr_to_request(1, expr).unwrap();
@@ -297,6 +298,7 @@ mod tests {
                     },
                 ],
             })),
+            ..Default::default()
         };
 
         let alter_request = alter_expr_to_request(1, expr).unwrap();
@@ -345,6 +347,7 @@ mod tests {
                     name: "mem_usage".to_string(),
                 }],
             })),
+            ..Default::default()
         };
 
         let alter_request = alter_expr_to_request(1, expr).unwrap();
