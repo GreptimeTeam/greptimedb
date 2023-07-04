@@ -24,6 +24,7 @@ use common_meta::key::TableRouteKey;
 use common_meta::table_name::TableName;
 use common_telemetry::{timer, warn};
 use snafu::{ensure, OptionExt, ResultExt};
+use table::engine::TableReference;
 use table::metadata::RawTableInfo;
 use tonic::{Request, Response};
 
@@ -381,6 +382,28 @@ pub(crate) fn fill_table_routes(
     }
 
     Ok((peer_dict.into_peers(), table_routes))
+}
+
+pub(crate) async fn fetch_table(
+    kv_store: &KvStoreRef,
+    table_ref: &TableReference<'_>,
+) -> Result<Option<(TableGlobalValue, TableRouteValue)>> {
+    let tgk = TableGlobalKey {
+        catalog_name: table_ref.catalog.to_string(),
+        schema_name: table_ref.schema.to_string(),
+        table_name: table_ref.table.to_string(),
+    };
+
+    let tgv = get_table_global_value(kv_store, &tgk).await?;
+
+    if let Some(tgv) = tgv {
+        let trk = table_route_key(tgv.table_id() as u64, &tgk);
+        let trv = get_table_route_value(kv_store, &trk).await?;
+
+        return Ok(Some((tgv, trv)));
+    }
+
+    Ok(None)
 }
 
 async fn fetch_tables(

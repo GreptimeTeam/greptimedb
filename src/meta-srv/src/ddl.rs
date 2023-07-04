@@ -15,13 +15,16 @@
 use std::sync::Arc;
 
 use client::client_manager::DatanodeClients;
-use common_meta::rpc::ddl::CreateTableTask;
+use common_meta::rpc::ddl::{CreateTableTask, DropTableTask};
 use common_meta::rpc::router::TableRoute;
 use common_procedure::{watcher, ProcedureId, ProcedureManagerRef, ProcedureWithId};
 use snafu::ResultExt;
+use table::metadata::RawTableInfo;
 
 use crate::error::{self, Result};
 use crate::procedure::create_table::CreateTableProcedure;
+use crate::procedure::drop_table::DropTableProcedure;
+use crate::service::mailbox::MailboxRef;
 use crate::service::store::kv::KvStoreRef;
 
 pub type DdlManagerRef = Arc<DdlManager>;
@@ -30,6 +33,8 @@ pub struct DdlManager {
     procedure_manager: ProcedureManagerRef,
     kv_store: KvStoreRef,
     datanode_clients: Arc<DatanodeClients>,
+    mailbox: MailboxRef,
+    server_addr: String,
 }
 
 // TODO(weny): removes in following PRs.
@@ -38,6 +43,8 @@ pub struct DdlManager {
 pub(crate) struct DdlContext {
     pub(crate) kv_store: KvStoreRef,
     pub(crate) datanode_clients: Arc<DatanodeClients>,
+    pub(crate) mailbox: MailboxRef,
+    pub(crate) server_addr: String,
 }
 
 impl DdlManager {
@@ -45,11 +52,15 @@ impl DdlManager {
         procedure_manager: ProcedureManagerRef,
         kv_store: KvStoreRef,
         datanode_clients: Arc<DatanodeClients>,
+        mailbox: MailboxRef,
+        server_addr: String,
     ) -> Self {
         Self {
             procedure_manager,
             kv_store,
             datanode_clients,
+            mailbox,
+            server_addr,
         }
     }
 
@@ -57,6 +68,8 @@ impl DdlManager {
         DdlContext {
             kv_store: self.kv_store.clone(),
             datanode_clients: self.datanode_clients.clone(),
+            mailbox: self.mailbox.clone(),
+            server_addr: self.server_addr.clone(),
         }
     }
 
@@ -86,6 +99,28 @@ impl DdlManager {
 
         let procedure =
             CreateTableProcedure::new(cluster_id, create_table_task, table_route, context);
+
+        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+
+        self.submit_procedure(procedure_with_id).await
+    }
+
+    pub async fn submit_drop_table_task(
+        &self,
+        cluster_id: u64,
+        drop_table_task: DropTableTask,
+        table_route: TableRoute,
+        table_info: RawTableInfo,
+    ) -> Result<ProcedureId> {
+        let context = self.create_context();
+
+        let procedure = DropTableProcedure::new(
+            cluster_id,
+            drop_table_task,
+            table_route,
+            table_info,
+            context,
+        );
 
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 

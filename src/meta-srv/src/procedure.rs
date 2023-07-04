@@ -13,5 +13,7 @@
 // limitations under the License.
 
 pub mod create_table;
+pub mod drop_table;
 pub mod region_failover;
 pub(crate) mod state_store;
+mod utils;

@@ -217,6 +217,8 @@ impl MetaSrvBuilder {
             procedure_manager.clone(),
             kv_store.clone(),
             Arc::new(DatanodeClients::default()),
+            mailbox.clone(),
+            options.server_addr.clone(),
         ));
 
         let _ = ddl_manager.try_start();
