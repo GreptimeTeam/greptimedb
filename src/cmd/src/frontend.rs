@@ -306,7 +306,7 @@ mod tests {
             [http_options]
             addr = "127.0.0.1:4000"
             timeout = "30s"
-            http_body_maximum_size = "2G"
+            body_limit = "2GB"
 
             [logging]
             level = "debug"
