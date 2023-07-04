@@ -28,7 +28,7 @@ use common_meta::rpc::store::{
 use common_telemetry::{info, timer};
 use meta_client::client::MetaClient;
 use moka::future::{Cache, CacheBuilder};
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 
 use super::KvCacheInvalidator;
 use crate::metrics::{METRIC_CATALOG_KV_GET, METRIC_CATALOG_KV_REMOTE_GET};
@@ -59,17 +59,11 @@ impl KvBackend for CachedMetaKvBackend {
 
         let init = async {
             let _timer = timer!(METRIC_CATALOG_KV_REMOTE_GET);
-
-            match self.kv_backend.get(key).await {
-                Ok(val) => match val {
-                    Some(val) => Ok(val),
-                    None => CacheNotGetSnafu {
-                        key: String::from_utf8(key.to_vec()).unwrap(),
-                    }
-                    .fail(),
-                },
-                Err(e) => Err(e),
-            }
+            self.kv_backend.get(key).await.map(|val| {
+                val.with_context(|| CacheNotGetSnafu {
+                    key: String::from_utf8_lossy(key),
+                })
+            })?
         };
 
         // currently moka doesn't have `optionally_try_get_with_by_ref`
