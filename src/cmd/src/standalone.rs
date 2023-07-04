@@ -342,6 +342,7 @@ mod tests {
     use std::io::Write;
     use std::time::Duration;
 
+    use common_base::readable_size::ReadableSize;
     use common_test_util::temp_dir::create_named_temp_file;
     use servers::auth::{Identity, Password, UserProviderRef};
     use servers::Mode;
@@ -409,6 +410,7 @@ mod tests {
             [http_options]
             addr = "127.0.0.1:4000"
             timeout = "30s"
+            body_limit = "128MB"
 
             [logging]
             level = "debug"
@@ -433,6 +435,10 @@ mod tests {
         assert_eq!(
             Duration::from_secs(30),
             fe_opts.http_options.as_ref().unwrap().timeout
+        );
+        assert_eq!(
+            ReadableSize::mb(128),
+            fe_opts.http_options.as_ref().unwrap().body_limit
         );
         assert_eq!(
             "127.0.0.1:4001".to_string(),
@@ -559,6 +565,10 @@ mod tests {
                 assert_eq!(
                     opts.fe_opts.http_options.as_ref().unwrap().addr,
                     "127.0.0.1:14000"
+                );
+                assert_eq!(
+                    ReadableSize::mb(64),
+                    opts.fe_opts.http_options.as_ref().unwrap().body_limit
                 );
 
                 // Should be default value.
