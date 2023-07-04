@@ -72,6 +72,9 @@ impl KvBackend for CachedMetaKvBackend {
             }
         };
 
+        // currently moka doesn't have `optionally_try_get_with_by_ref`
+        // TODO(fys): change to moka method when available
+        // https://github.com/moka-rs/moka/issues/254
         match self.cache.try_get_with_by_ref(key, init).await {
             Ok(val) => Ok(Some(val)),
             Err(e) => match e.as_ref() {
