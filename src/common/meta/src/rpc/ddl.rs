@@ -85,6 +85,7 @@ pub struct SubmitDdlTaskResponse {
 
 impl TryFrom<PbSubmitDdlTaskResponse> for SubmitDdlTaskResponse {
     type Error = error::Error;
+
     fn try_from(resp: PbSubmitDdlTaskResponse) -> Result<Self> {
         let table_id = resp.table_id.context(error::InvalidProtoMsgSnafu {
             err_msg: "expected table_id",
@@ -105,6 +106,7 @@ pub struct CreateTableTask {
 
 impl TryFrom<PbCreateTableTask> for CreateTableTask {
     type Error = error::Error;
+    
     fn try_from(pb: PbCreateTableTask) -> Result<Self> {
         let table_info = serde_json::from_slice(&pb.table_info).context(error::SerdeJsonSnafu)?;
 

@@ -100,7 +100,7 @@ async fn handle_create_table_task(
         .map(Into::into)
         .collect();
 
-    let table_route = handle_create_table_task_table_route(
+    let table_route = handle_create_table_route(
         cluster_id,
         table_name,
         partitions,
@@ -128,7 +128,7 @@ async fn handle_create_table_task(
 }
 
 /// pre-calculates create table task's metadata.
-async fn handle_create_table_task_table_route(
+async fn handle_create_table_route(
     cluster_id: u64,
     table_name: TableName,
     partitions: Vec<Partition>,
