@@ -69,8 +69,9 @@ impl ErrorExt for Error {
             }
             InvalidRawSchema { source, .. } => source.status_code(),
             AccessCatalog { source, .. } => source.status_code(),
-            CatalogNotFound { .. } | TableExists { .. } => StatusCode::InvalidArguments,
+            CatalogNotFound { .. } => StatusCode::InvalidArguments,
             TableNotFound { .. } => StatusCode::TableNotFound,
+            TableExists { .. } => StatusCode::TableAlreadyExists,
         }
     }
 

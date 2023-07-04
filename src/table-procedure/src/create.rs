@@ -141,13 +141,15 @@ impl CreateTableProcedure {
             )
             .await
             .context(AccessCatalogSnafu)?;
-        if table_exists && !self.data.request.create_if_not_exists {
-            return TableExistsSnafu {
-                name: &self.data.request.table_name,
-            }
-            .fail()?;
-        } else if table_exists {
-            return Ok(Status::Done);
+        if table_exists {
+            return if self.data.request.create_if_not_exists {
+                Ok(Status::Done)
+            } else {
+                TableExistsSnafu {
+                    name: &self.data.request.table_name,
+                }
+                .fail()?
+            };
         }
 
         self.data.state = CreateTableState::EngineCreateTable;
