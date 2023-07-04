@@ -50,13 +50,13 @@ use crate::version::{VersionControl, VersionControlRef, VersionEdit};
 use crate::wal::Wal;
 use crate::write_batch::WriteBatch;
 
-pub type RegionWriterRef = Arc<RegionWriter>;
+pub type RegionWriterRef<S> = Arc<RegionWriter<S>>;
 
 // TODO(yingwen): Add benches for write and support group commit to improve write throughput.
 
 /// Region writer manages all write operations to the region.
 #[derive(Debug)]
-pub struct RegionWriter {
+pub struct RegionWriter<S: LogStore> {
     // To avoid dead lock, we need to ensure the lock order is: inner -> version_mutex.
     /// Inner writer guarded by write lock, the write lock is used to ensure
     /// all write operations are serialized.
@@ -65,15 +65,23 @@ pub struct RegionWriter {
     ///
     /// Increasing committed sequence should be guarded by this lock.
     version_mutex: Mutex<()>,
+
+    compaction_scheduler: CompactionSchedulerRef<S>,
+    compaction_picker: CompactionPickerRef<S>,
 }
 
-impl RegionWriter {
+impl<S> RegionWriter<S>
+where
+    S: LogStore,
+{
     pub fn new(
         memtable_builder: MemtableBuilderRef,
         config: Arc<EngineConfig>,
         ttl: Option<Duration>,
         write_buffer_size: usize,
-    ) -> RegionWriter {
+        compaction_scheduler: CompactionSchedulerRef<S>,
+        compaction_picker: CompactionPickerRef<S>,
+    ) -> RegionWriter<S> {
         RegionWriter {
             inner: Mutex::new(WriterInner::new(
                 memtable_builder,
@@ -82,11 +90,13 @@ impl RegionWriter {
                 write_buffer_size,
             )),
             version_mutex: Mutex::new(()),
+            compaction_scheduler,
+            compaction_picker,
         }
     }
 
     /// Write to region in the write lock.
-    pub async fn write<S: LogStore>(
+    pub async fn write(
         &self,
         ctx: &WriteContext,
         request: WriteBatch,
@@ -102,7 +112,7 @@ impl RegionWriter {
     }
 
     /// Replay data to memtables.
-    pub async fn replay<S: LogStore>(
+    pub async fn replay(
         &self,
         recovered_metadata: RecoveredMetadataMap,
         writer_ctx: WriterContext<'_, S>,
@@ -114,7 +124,7 @@ impl RegionWriter {
     }
 
     /// Write and apply the region edit.
-    pub(crate) async fn write_edit_and_apply<S: LogStore>(
+    pub(crate) async fn write_edit_and_apply(
         &self,
         wal: &Wal<S>,
         shared: &SharedDataRef,
@@ -172,11 +182,7 @@ impl RegionWriter {
     }
 
     /// Alter schema of the region.
-    pub async fn alter<S: LogStore>(
-        &self,
-        alter_ctx: AlterContext<'_, S>,
-        request: AlterRequest,
-    ) -> Result<()> {
+    pub async fn alter(&self, alter_ctx: AlterContext<'_, S>, request: AlterRequest) -> Result<()> {
         // To alter the schema, we need to acquire the write lock first, so we could
         // avoid other writers write to the region and switch the memtable safely.
         // Another potential benefit is that the write lock also protect against concurrent
@@ -239,7 +245,7 @@ impl RegionWriter {
     /// Allocate a sequence and persist the manifest version using that sequence to the wal.
     ///
     /// This method should be protected by the `version_mutex`.
-    async fn persist_manifest_version<S: LogStore>(
+    async fn persist_manifest_version(
         &self,
         wal: &Wal<S>,
         version_control: &VersionControlRef,
@@ -279,7 +285,7 @@ impl RegionWriter {
         Ok(())
     }
 
-    pub async fn on_drop<S: LogStore>(&self, drop_ctx: DropContext<'_, S>) -> Result<()> {
+    pub async fn on_drop(&self, drop_ctx: DropContext<'_, S>) -> Result<()> {
         // 1. Acquires the write lock.
         // 2. Close writer reject any potential writing.
         // 3. Waits or cancels the flush job.
@@ -346,11 +352,7 @@ impl RegionWriter {
     }
 
     /// Flush task manually
-    pub async fn flush<S: LogStore>(
-        &self,
-        writer_ctx: WriterContext<'_, S>,
-        ctx: &FlushContext,
-    ) -> Result<()> {
+    pub async fn flush(&self, writer_ctx: WriterContext<'_, S>, ctx: &FlushContext) -> Result<()> {
         let mut inner = self.inner.lock().await;
 
         if !ctx.force {
@@ -369,17 +371,32 @@ impl RegionWriter {
     }
 
     /// Compact manually.
-    pub async fn compact<S: LogStore>(
+    pub async fn compact(
         &self,
-        writer_ctx: WriterContext<'_, S>,
-        ctx: CompactContext,
+        shared_data: SharedDataRef,
+        sst_layer: AccessLayerRef,
+        manifest: RegionManifest,
+        wal: Wal<S>,
+        region_writer: RegionWriterRef<S>,
+        compact_ctx: CompactContext,
     ) -> Result<()> {
         let mut inner = self.inner.lock().await;
 
         ensure!(!inner.is_closed(), error::ClosedRegionSnafu);
         let sst_write_buffer_size = inner.engine_config.sst_write_buffer_size;
+
         inner
-            .manual_compact(writer_ctx, ctx, sst_write_buffer_size)
+            .manual_compact(
+                shared_data,
+                sst_layer,
+                manifest,
+                wal,
+                self.compaction_picker.clone(),
+                self.compaction_scheduler.clone(),
+                region_writer,
+                compact_ctx,
+                sst_write_buffer_size,
+            )
             .await
     }
 
@@ -397,7 +414,10 @@ impl RegionWriter {
 
 // Methods for tests.
 #[cfg(test)]
-impl RegionWriter {
+impl<S> RegionWriter<S>
+where
+    S: LogStore,
+{
     pub(crate) async fn write_buffer_size(&self) -> usize {
         self.inner.lock().await.write_buffer_size
     }
@@ -410,7 +430,7 @@ pub struct WriterContext<'a, S: LogStore> {
     pub compaction_scheduler: &'a CompactionSchedulerRef<S>,
     pub sst_layer: &'a AccessLayerRef,
     pub wal: &'a Wal<S>,
-    pub writer: &'a RegionWriterRef,
+    pub writer: &'a RegionWriterRef<S>,
     pub manifest: &'a RegionManifest,
     pub compaction_picker: CompactionPickerRef<S>,
 }
@@ -797,34 +817,37 @@ impl WriterInner {
 
     async fn manual_compact<S: LogStore>(
         &mut self,
-        writer_ctx: WriterContext<'_, S>,
+        shared_data: SharedDataRef,
+        sst_layer: AccessLayerRef,
+        manifest: RegionManifest,
+        wal: Wal<S>,
+        compaction_picker: CompactionPickerRef<S>,
+        compaction_scheduler: CompactionSchedulerRef<S>,
+        region_writer: RegionWriterRef<S>,
         compact_ctx: CompactContext,
         sst_write_buffer_size: ReadableSize,
     ) -> Result<()> {
-        let region_id = writer_ctx.shared.id();
-        let compaction_time_window = writer_ctx
-            .shared
+        let region_id = shared_data.id();
+        let compaction_time_window = shared_data
             .version_control
             .current()
             .ssts()
             .compaction_time_window();
         let mut compaction_request = CompactionRequestImpl {
             region_id,
-            sst_layer: writer_ctx.sst_layer.clone(),
-            writer: writer_ctx.writer.clone(),
-            shared: writer_ctx.shared.clone(),
-            manifest: writer_ctx.manifest.clone(),
-            wal: writer_ctx.wal.clone(),
+            sst_layer,
+            writer: region_writer,
+            shared: shared_data.clone(),
+            manifest,
+            wal,
             ttl: self.ttl,
             compaction_time_window,
             sender: None,
-            picker: writer_ctx.compaction_picker.clone(),
+            picker: compaction_picker,
             sst_write_buffer_size,
         };
 
-        let compaction_scheduler = writer_ctx.compaction_scheduler.clone();
-        let shared_data = writer_ctx.shared.clone();
-
+        let compaction_scheduler = compaction_scheduler.clone();
         logging::info!(
             "Manual compact, region_id: {}, compact_ctx: {:?}",
             region_id,

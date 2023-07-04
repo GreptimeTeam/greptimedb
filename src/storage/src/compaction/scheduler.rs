@@ -56,7 +56,7 @@ impl<S: LogStore> Request for CompactionRequestImpl<S> {
 pub struct CompactionRequestImpl<S: LogStore> {
     pub region_id: RegionId,
     pub sst_layer: AccessLayerRef,
-    pub writer: RegionWriterRef,
+    pub writer: RegionWriterRef<S>,
     pub shared: SharedDataRef,
     pub manifest: RegionManifest,
     pub wal: Wal<S>,

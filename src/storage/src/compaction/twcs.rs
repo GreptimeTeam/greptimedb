@@ -97,6 +97,8 @@ impl<S> TwcsPicker<S> {
                         inputs: files.clone(),
                         strict_window: false,
                     });
+                } else {
+                    info!("No enough files, current: {}, max_inactive_window_files: {}", files.len(), self.max_inactive_window_files)
                 }
             }
         }
@@ -142,6 +144,10 @@ impl<S: LogStore> Picker for TwcsPicker<S> {
         );
 
         let outputs = self.build_output(&windows, active_window, time_window_size);
+        info!(
+            "TWCS windows: {:?}, output: {:?}, active window: {:?}",
+            windows, outputs, active_window
+        );
         let task = CompactionTaskImpl {
             schema: req.schema(),
             sst_layer: req.sst_layer.clone(),

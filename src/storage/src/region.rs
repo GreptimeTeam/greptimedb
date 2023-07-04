@@ -238,6 +238,7 @@ impl<S: LogStore> RegionImpl<S> {
         let version_control = VersionControl::with_version(version);
         let wal = Wal::new(id, store_config.log_store);
 
+        let compaction_picker = compaction_strategy_to_picker(&store_config.compaction_strategy);
         let inner = Arc::new(RegionInner {
             shared: Arc::new(SharedData {
                 id,
@@ -250,12 +251,14 @@ impl<S: LogStore> RegionImpl<S> {
                 store_config.engine_config.clone(),
                 store_config.ttl,
                 store_config.write_buffer_size,
+                store_config.compaction_scheduler.clone(),
+                compaction_picker.clone(),
             )),
             wal,
             flush_strategy: store_config.flush_strategy,
             flush_scheduler: store_config.flush_scheduler,
             compaction_scheduler: store_config.compaction_scheduler,
-            compaction_picker: compaction_strategy_to_picker(&store_config.compaction_strategy),
+            compaction_picker,
             sst_layer: store_config.sst_layer,
             manifest: store_config.manifest,
         });
@@ -334,14 +337,16 @@ impl<S: LogStore> RegionImpl<S> {
             last_flush_millis: AtomicI64::new(0),
         });
 
+        let compaction_picker = compaction_strategy_to_picker(&store_config.compaction_strategy);
         let writer = Arc::new(RegionWriter::new(
             store_config.memtable_builder,
             store_config.engine_config.clone(),
             store_config.ttl,
             store_config.write_buffer_size,
+            store_config.compaction_scheduler.clone(),
+            compaction_picker.clone(),
         ));
 
-        let compaction_picker = compaction_strategy_to_picker(&store_config.compaction_strategy);
         let writer_ctx = WriterContext {
             shared: &shared,
             flush_strategy: &store_config.flush_strategy,
@@ -646,7 +651,7 @@ pub type SharedDataRef = Arc<SharedData>;
 
 struct RegionInner<S: LogStore> {
     shared: SharedDataRef,
-    writer: RegionWriterRef,
+    writer: RegionWriterRef<S>,
     wal: Wal<S>,
     flush_strategy: FlushStrategyRef,
     flush_scheduler: FlushSchedulerRef<S>,
@@ -764,17 +769,15 @@ impl<S: LogStore> RegionInner<S> {
 
     /// Compact the region manually.
     async fn compact(&self, ctx: CompactContext) -> Result<()> {
-        let writer_ctx = WriterContext {
-            shared: &self.shared,
-            flush_strategy: &self.flush_strategy,
-            flush_scheduler: &self.flush_scheduler,
-            compaction_scheduler: &self.compaction_scheduler,
-            sst_layer: &self.sst_layer,
-            wal: &self.wal,
-            writer: &self.writer,
-            manifest: &self.manifest,
-            compaction_picker: self.compaction_picker.clone(),
-        };
-        self.writer.compact(writer_ctx, ctx).await
+        self.writer
+            .compact(
+                self.shared.clone(),
+                self.sst_layer.clone(),
+                self.manifest.clone(),
+                self.wal.clone(),
+                self.writer.clone(),
+                ctx,
+            )
+            .await
     }
 }

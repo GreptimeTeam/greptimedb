@@ -24,7 +24,7 @@ use crate::compaction::writer::build_sst_reader;
 use crate::error::Result;
 use crate::manifest::action::RegionEdit;
 use crate::manifest::region::RegionManifest;
-use crate::region::{RegionWriterRef, SharedDataRef};
+use crate::region::{CompactContext, RegionWriterRef, SharedDataRef};
 use crate::schema::RegionSchemaRef;
 use crate::sst::{
     AccessLayerRef, FileHandle, FileId, FileMeta, Level, Source, SstInfo, WriteOptions,
@@ -42,7 +42,7 @@ pub struct CompactionTaskImpl<S: LogStore> {
     pub schema: RegionSchemaRef,
     pub sst_layer: AccessLayerRef,
     pub outputs: Vec<CompactionOutput>,
-    pub writer: RegionWriterRef,
+    pub writer: RegionWriterRef<S>,
     pub shared_data: SharedDataRef,
     pub wal: Wal<S>,
     pub manifest: RegionManifest,
@@ -122,9 +122,35 @@ impl<S: LogStore> CompactionTaskImpl<S> {
             version.metadata().name(),
             edit
         );
-        self.writer
+        let result = self
+            .writer
             .write_edit_and_apply(&self.wal, &self.shared_data, &self.manifest, edit, None)
+            .await;
+
+        if let Err(e) = self
+            .writer
+            .compact(
+                self.shared_data.clone(),
+                self.sst_layer.clone(),
+                self.manifest.clone(),
+                self.wal.clone(),
+                self.writer.clone(),
+                CompactContext {
+                    wait: false,
+                    max_files_in_l0: 8,
+                },
+            )
             .await
+        {
+            error!(e; "Failed to schedule a compaction after compaction, region id: {}", self.shared_data.id());
+        } else {
+            info!(
+                "Immediately schedule another compaction for region: {}",
+                self.shared_data.id()
+            );
+        }
+
+        result
     }
 
     /// Mark files are under compaction.
