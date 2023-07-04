@@ -56,9 +56,6 @@ pub struct LeaderCachedKvStore {
     check_leader: CheckLeaderRef,
     store: KvStoreRef,
     cache: ResettableKvStoreRef,
-    // To avoid cache corruption, a version number is assigned each time the cache is updated.
-    // If the version number does not match, the related cache will be considered invalid until
-    // it is reloaded.
     version: AtomicUsize,
 }
 
@@ -97,6 +94,11 @@ impl LeaderCachedKvStore {
     }
 
     #[inline]
+    fn get_version(&self) -> usize {
+        self.version.load(Ordering::Relaxed)
+    }
+
+    #[inline]
     fn create_new_version(&self) -> usize {
         self.version.fetch_add(1, Ordering::Relaxed) + 1
     }
@@ -125,10 +127,10 @@ impl KvStore for LeaderCachedKvStore {
             return Ok(res);
         }
 
+        let ver = self.get_version();
+
         let res = self.store.range(req.clone()).await?;
         if !res.kvs.is_empty() {
-            let ver = self.create_new_version();
-
             let KeyValue { key, value } = res.kvs[0].clone();
             let put_req = PutRequest {
                 key: key.clone(),
@@ -188,10 +190,10 @@ impl KvStore for LeaderCachedKvStore {
             keys: missed_keys,
             ..Default::default()
         };
+
+        let ver = self.get_version();
+
         let remote_res = self.store.batch_get(remote_req).await?;
-
-        let ver = self.create_new_version();
-
         let put_req = BatchPutRequest {
             kvs: remote_res.kvs.clone(),
             ..Default::default()
