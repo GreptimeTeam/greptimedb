@@ -28,9 +28,10 @@ use crate::storage::descriptors::RegionDescriptor;
 use crate::storage::region::Region;
 
 const COMPACTION_STRATEGY_KEY: &str = "compaction";
-const COMPACTION_STRATEGY_LEVELED_TIME_WINDOW_VALUE: &str = "LeveledTimeWindow";
+const COMPACTION_STRATEGY_LEVELED_TIME_WINDOW_VALUE: &str = "LTW";
 const COMPACTION_STRATEGY_TWCS_VALUE: &str = "TWCS";
 const TWCS_MAX_ACTIVE_WINDOW_FILES_KEY: &str = "compaction.twcs.max_active_window_files";
+const TWCS_TIME_WINDOW_SECONDS_KEY: &str = "compaction.twcs.time_window_seconds";
 const TWCS_MAX_INACTIVE_WINDOW_FILES_KEY: &str = "compaction.twcs.max_inactive_window_files";
 
 /// Storage engine provides primitive operations to store and access data.
@@ -138,6 +139,7 @@ pub enum CompactionStrategy {
 pub struct TwcsOptions {
     pub max_active_window_files: usize,
     pub max_inactive_window_files: usize,
+    pub time_window_seconds: Option<i64>,
 }
 
 impl Default for TwcsOptions {
@@ -145,6 +147,7 @@ impl Default for TwcsOptions {
         Self {
             max_active_window_files: 4,
             max_inactive_window_files: 1,
+            time_window_seconds: None,
         }
     }
 }
@@ -170,6 +173,14 @@ impl From<&HashMap<String, String>> for CompactionStrategy {
             {
                 twcs_opts.max_inactive_window_files = max_inactive_window_files;
             }
+
+            if let Some(time_window) = opts
+                .get(TWCS_TIME_WINDOW_SECONDS_KEY)
+                .and_then(|num| num.parse::<i64>().ok()) && time_window > 0
+            {
+                twcs_opts.time_window_seconds = Some(time_window);
+            }
+
             CompactionStrategy::Twcs(twcs_opts)
         } else {
             // unrecognized compaction strategy

@@ -233,10 +233,6 @@ impl<S: StorageEngine> TableCreator<S> {
         let write_buffer_size = table_options.write_buffer_size.map(|size| size.0 as usize);
         let ttl = table_options.ttl;
         let compaction_strategy = CompactionStrategy::from(&table_options.extra_options);
-        println!(
-            "=== create_regions, compaction_strategy: {:?}",
-            compaction_strategy
-        );
         let open_opts = OpenOptions {
             parent_dir: table_dir.to_string(),
             write_buffer_size,

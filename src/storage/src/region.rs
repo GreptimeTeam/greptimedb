@@ -376,10 +376,6 @@ impl<S: LogStore> RegionImpl<S> {
             manifest: store_config.manifest,
         });
 
-        println!(
-            "Open region, compaction picker: {:?}",
-            inner.compaction_picker
-        );
         increment_gauge!(crate::metrics::REGION_COUNT, 1.0);
         Ok(Some(RegionImpl { inner }))
     }

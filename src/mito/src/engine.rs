@@ -418,10 +418,6 @@ impl<S: StorageEngine> MitoEngineInner<S> {
                             .context(table_error::TableOperationSnafu)? else { return Ok(None) };
 
         let compaction_strategy = CompactionStrategy::from(&table_info.meta.options.extra_options);
-        println!(
-            "=== recover_table, compaction_strategy: {:?}",
-            compaction_strategy
-        );
         let opts = OpenOptions {
             parent_dir: table_dir.to_string(),
             write_buffer_size: table_info

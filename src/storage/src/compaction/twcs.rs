@@ -35,6 +35,7 @@ use crate::sst::{FileHandle, LevelMeta};
 pub struct TwcsPicker<S> {
     max_active_window_files: usize,
     max_inactive_window_files: usize,
+    time_window_seconds: Option<i64>,
     _phantom_data: PhantomData<S>,
 }
 
@@ -48,13 +49,19 @@ impl<S> Debug for TwcsPicker<S> {
 }
 
 impl<S> TwcsPicker<S> {
-    pub fn new(max_active_window_files: usize, max_inactive_window_files: usize) -> Self {
+    pub fn new(
+        max_active_window_files: usize,
+        max_inactive_window_files: usize,
+        time_window_seconds: Option<i64>,
+    ) -> Self {
         Self {
             max_inactive_window_files,
             max_active_window_files,
             _phantom_data: Default::default(),
+            time_window_seconds,
         }
     }
+
     /// Builds compaction output from files.
     /// For active writing window, we allow for at most `max_active_window_files` files to alleviate
     /// fragmentation. For other windows, we allow at most 1 file at each window.
@@ -113,14 +120,17 @@ impl<S: LogStore> Picker for TwcsPicker<S> {
             expired_ssts.iter().for_each(|f| f.mark_compacting(true));
         }
 
-        let time_window_size = req.compaction_time_window.unwrap_or_else(|| {
-            let inferred = infer_time_bucket(req.levels().level(0).files());
-            debug!(
-                "Compaction window is not present, inferring from files: {:?}",
+        let time_window_size = req
+            .compaction_time_window
+            .or(self.time_window_seconds)
+            .unwrap_or_else(|| {
+                let inferred = infer_time_bucket(req.levels().level(0).files());
+                info!(
+                    "Compaction window for region {} is not present, inferring from files: {:?}",
+                    req.region_id, inferred
+                );
                 inferred
-            );
-            inferred
-        });
+            });
 
         // Find active window from files in level 0.
         let active_window =
@@ -280,7 +290,7 @@ mod tests {
             let windows = assign_to_windows(self.input_files.iter(), self.window_size);
             let active_window =
                 find_latest_window_in_seconds(self.input_files.iter(), self.window_size);
-            let output = TwcsPicker::<NoopLogStore>::new(4, 1).build_output(
+            let output = TwcsPicker::<NoopLogStore>::new(4, 1, None).build_output(
                 &windows,
                 active_window,
                 self.window_size,
