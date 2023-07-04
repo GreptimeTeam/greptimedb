@@ -26,7 +26,10 @@ use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
 pub use picker::{LeveledTimeWindowPicker, Picker, PickerContext};
 pub use scheduler::{CompactionHandler, CompactionRequestImpl};
+use store_api::logstore::LogStore;
+use store_api::storage::CompactionStrategy;
 pub use task::{CompactionTask, CompactionTaskImpl};
+pub use twcs::TwcsPicker;
 
 use crate::scheduler::Scheduler;
 use crate::sst::FileHandle;
@@ -104,6 +107,20 @@ pub(crate) const TIME_BUCKETS: TimeBuckets = TimeBuckets([
     365 * 24 * 60 * 60,      // one year
     10 * 365 * 24 * 60 * 60, // ten years
 ]);
+
+pub fn compaction_strategy_to_picker<S: LogStore>(
+    strategy: &CompactionStrategy,
+) -> CompactionPickerRef<S> {
+    match strategy {
+        CompactionStrategy::LeveledTimeWindow => {
+            Arc::new(LeveledTimeWindowPicker::default()) as Arc<_>
+        }
+        CompactionStrategy::Twcs(twcs_opts) => Arc::new(TwcsPicker::new(
+            twcs_opts.max_active_window_files,
+            twcs_opts.max_inactive_window_files,
+        )) as Arc<_>,
+    }
+}
 
 #[cfg(test)]
 mod tests {

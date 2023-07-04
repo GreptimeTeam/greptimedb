@@ -33,8 +33,8 @@ use snafu::{ensure, OptionExt, ResultExt};
 use storage::manifest::manifest_compress_type;
 use store_api::storage::{
     CloseOptions, ColumnDescriptorBuilder, ColumnFamilyDescriptor, ColumnFamilyDescriptorBuilder,
-    ColumnId, EngineContext as StorageEngineContext, OpenOptions, RegionNumber, RowKeyDescriptor,
-    RowKeyDescriptorBuilder, StorageEngine,
+    ColumnId, CompactionStrategy, EngineContext as StorageEngineContext, OpenOptions, RegionNumber,
+    RowKeyDescriptor, RowKeyDescriptorBuilder, StorageEngine,
 };
 use table::engine::{
     region_name, table_dir, CloseTableResult, EngineContext, TableEngine, TableEngineProcedure,
@@ -417,6 +417,11 @@ impl<S: StorageEngine> MitoEngineInner<S> {
                             .await.map_err(BoxedError::new)
                             .context(table_error::TableOperationSnafu)? else { return Ok(None) };
 
+        let compaction_strategy = CompactionStrategy::from(&table_info.meta.options.extra_options);
+        println!(
+            "=== recover_table, compaction_strategy: {:?}",
+            compaction_strategy
+        );
         let opts = OpenOptions {
             parent_dir: table_dir.to_string(),
             write_buffer_size: table_info
@@ -425,6 +430,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
                 .write_buffer_size
                 .map(|s| s.0 as usize),
             ttl: table_info.meta.options.ttl,
+            compaction_strategy,
         };
 
         debug!(
@@ -501,6 +507,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             table: name,
         };
 
+        let compaction_strategy = CompactionStrategy::from(&table_info.meta.options.extra_options);
         let opts = OpenOptions {
             parent_dir: table_dir.to_string(),
             write_buffer_size: table_info
@@ -509,6 +516,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
                 .write_buffer_size
                 .map(|s| s.0 as usize),
             ttl: table_info.meta.options.ttl,
+            compaction_strategy,
         };
 
         // TODO(weny): Returns an error earlier if the target region does not exist in the meta.

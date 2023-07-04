@@ -18,6 +18,7 @@
 //! a [`StorageEngine`] instance manages a bunch of storage unit called [`Region`], which holds
 //! chunks of rows, support operations like PUT/DELETE/SCAN.
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -25,6 +26,12 @@ use common_error::ext::ErrorExt;
 
 use crate::storage::descriptors::RegionDescriptor;
 use crate::storage::region::Region;
+
+const COMPACTION_STRATEGY_KEY: &str = "compaction";
+const COMPACTION_STRATEGY_LEVELED_TIME_WINDOW_VALUE: &str = "LeveledTimeWindow";
+const COMPACTION_STRATEGY_TWCS_VALUE: &str = "TWCS";
+const TWCS_MAX_ACTIVE_WINDOW_FILES_KEY: &str = "compaction.twcs.max_active_window_files";
+const TWCS_MAX_INACTIVE_WINDOW_FILES_KEY: &str = "compaction.twcs.max_inactive_window_files";
 
 /// Storage engine provides primitive operations to store and access data.
 #[async_trait]
@@ -92,6 +99,8 @@ pub struct CreateOptions {
     pub write_buffer_size: Option<usize>,
     /// Region SST files TTL
     pub ttl: Option<Duration>,
+    /// Compaction strategy
+    pub compaction_strategy: CompactionStrategy,
 }
 
 /// Options to open a region.
@@ -103,6 +112,8 @@ pub struct OpenOptions {
     pub write_buffer_size: Option<usize>,
     /// Region SST files TTL
     pub ttl: Option<Duration>,
+    /// Compaction strategy
+    pub compaction_strategy: CompactionStrategy,
 }
 
 /// Options to close a region.
@@ -110,4 +121,59 @@ pub struct OpenOptions {
 pub struct CloseOptions {
     /// Flush region
     pub flush: bool,
+}
+
+/// Options for compactions
+#[derive(Debug, Clone, Default)]
+pub enum CompactionStrategy {
+    /// Leveled time window compaction strategy
+    #[default]
+    LeveledTimeWindow,
+    /// TWCS
+    Twcs(TwcsOptions),
+}
+
+/// TWCS compaction options.
+#[derive(Debug, Clone)]
+pub struct TwcsOptions {
+    pub max_active_window_files: usize,
+    pub max_inactive_window_files: usize,
+}
+
+impl Default for TwcsOptions {
+    fn default() -> Self {
+        Self {
+            max_active_window_files: 4,
+            max_inactive_window_files: 1,
+        }
+    }
+}
+
+impl From<&HashMap<String, String>> for CompactionStrategy {
+    fn from(opts: &HashMap<String, String>) -> Self {
+        let Some(strategy_name) = opts.get(COMPACTION_STRATEGY_KEY) else { return CompactionStrategy::default() };
+        return if strategy_name.eq_ignore_ascii_case(COMPACTION_STRATEGY_LEVELED_TIME_WINDOW_VALUE)
+        {
+            CompactionStrategy::LeveledTimeWindow
+        } else if strategy_name.eq_ignore_ascii_case(COMPACTION_STRATEGY_TWCS_VALUE) {
+            let mut twcs_opts = TwcsOptions::default();
+            if let Some(max_active_window_files) = opts
+                .get(TWCS_MAX_ACTIVE_WINDOW_FILES_KEY)
+                .and_then(|num| num.parse::<usize>().ok())
+            {
+                twcs_opts.max_active_window_files = max_active_window_files;
+            }
+
+            if let Some(max_inactive_window_files) = opts
+                .get(TWCS_MAX_INACTIVE_WINDOW_FILES_KEY)
+                .and_then(|num| num.parse::<usize>().ok())
+            {
+                twcs_opts.max_inactive_window_files = max_inactive_window_files;
+            }
+            CompactionStrategy::Twcs(twcs_opts)
+        } else {
+            // unrecognized compaction strategy
+            CompactionStrategy::default()
+        };
+    }
 }

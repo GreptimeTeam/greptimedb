@@ -33,39 +33,30 @@ use crate::sst::{FileHandle, LevelMeta};
 /// `TwcsPicker` picks files of which the max timestamp are in the same time window as compaction
 /// candidates.
 pub struct TwcsPicker<S> {
-    max_files_in_active_window: usize,
-    max_files_in_non_active_window: usize,
+    max_active_window_files: usize,
+    max_inactive_window_files: usize,
     _phantom_data: PhantomData<S>,
 }
 
 impl<S> Debug for TwcsPicker<S> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TwcsPicker")
-            .field(
-                "max_files_in_active_window",
-                &self.max_files_in_active_window,
-            )
-            .field(
-                "max_files_in_non_active_window",
-                &self.max_files_in_non_active_window,
-            )
+            .field("max_active_window_files", &self.max_active_window_files)
+            .field("max_inactive_window_files", &self.max_inactive_window_files)
             .finish()
     }
 }
 
-impl<S> Default for TwcsPicker<S> {
-    fn default() -> Self {
+impl<S> TwcsPicker<S> {
+    pub fn new(max_active_window_files: usize, max_inactive_window_files: usize) -> Self {
         Self {
-            max_files_in_active_window: 4,
-            max_files_in_non_active_window: 1,
+            max_inactive_window_files,
+            max_active_window_files,
             _phantom_data: Default::default(),
         }
     }
-}
-
-impl<S> TwcsPicker<S> {
     /// Builds compaction output from files.
-    /// For active writing window, we allow for at most `max_files_in_active_window` files to alleviate
+    /// For active writing window, we allow for at most `max_active_window_files` files to alleviate
     /// fragmentation. For other windows, we allow at most 1 file at each window.
     fn build_output(
         &self,
@@ -76,7 +67,7 @@ impl<S> TwcsPicker<S> {
         let mut output = vec![];
         for (window, files) in time_windows {
             if let Some(active_window) = active_window && *window == active_window {
-                if files.len() > self.max_files_in_active_window {
+                if files.len() > self.max_active_window_files {
                     output.push(CompactionOutput {
                         output_level: 1, // we only have two levels and always compact to l1 
                         time_window_bound: *window,
@@ -91,7 +82,7 @@ impl<S> TwcsPicker<S> {
                 }
             } else {
                 // not active writing window
-                if files.len() > self.max_files_in_non_active_window {
+                if files.len() > self.max_inactive_window_files {
                     output.push(CompactionOutput {
                         output_level: 1,
                         time_window_bound: *window,
@@ -289,7 +280,7 @@ mod tests {
             let windows = assign_to_windows(self.input_files.iter(), self.window_size);
             let active_window =
                 find_latest_window_in_seconds(self.input_files.iter(), self.window_size);
-            let output = TwcsPicker::<NoopLogStore>::default().build_output(
+            let output = TwcsPicker::<NoopLogStore>::new(4, 1).build_output(
                 &windows,
                 active_window,
                 self.window_size,

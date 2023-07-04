@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::fmt::{Debug, Formatter};
 use std::marker::PhantomData;
 use std::time::Duration;
 
@@ -33,7 +34,7 @@ use crate::sst::{FileHandle, LevelMeta};
 
 /// Picker picks input SST files and builds the compaction task.
 /// Different compaction strategy may implement different pickers.
-pub trait Picker: Send + 'static {
+pub trait Picker: Debug + Send + 'static {
     type Request: Request;
     type Task: CompactionTask;
 
@@ -77,6 +78,12 @@ impl PickerContext {
 /// by a inferred time bucket in level 1.
 pub struct LeveledTimeWindowPicker<S> {
     _phantom_data: PhantomData<S>,
+}
+
+impl<S> Debug for LeveledTimeWindowPicker<S> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "LeveledTimeWindowPicker{{..}}")
+    }
 }
 
 impl<S> Default for LeveledTimeWindowPicker<S> {
