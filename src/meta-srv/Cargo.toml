@@ -18,12 +18,14 @@ common-base = { path = "../common/base" }
 common-catalog = { path = "../common/catalog" }
 common-error = { path = "../common/error" }
 common-grpc = { path = "../common/grpc" }
+common-grpc-expr = { path = "../common/grpc-expr" }
 common-meta = { path = "../common/meta" }
 common-procedure = { path = "../common/procedure" }
 common-runtime = { path = "../common/runtime" }
 common-telemetry = { path = "../common/telemetry" }
 common-time = { path = "../common/time" }
 dashmap = "5.4"
+datatypes = { path = "../datatypes" }
 derive_builder = "0.12"
 etcd-client.workspace = true
 futures.workspace = true
@@ -53,6 +55,5 @@ servers = { path = "../servers" }
 [dev-dependencies]
 chrono.workspace = true
 common-procedure-test = { path = "../common/procedure-test" }
-datatypes = { path = "../datatypes" }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

@@ -16,11 +16,11 @@ use std::result;
 
 use api::v1::meta::submit_ddl_task_request::Task;
 use api::v1::meta::{
-    CreateTableTask as PbCreateTableTask, DropTableTask as PbDropTableTask, Partition,
-    SubmitDdlTaskRequest as PbSubmitDdlTaskRequest,
+    AlterTableTask as PbAlterTableTask, CreateTableTask as PbCreateTableTask,
+    DropTableTask as PbDropTableTask, Partition, SubmitDdlTaskRequest as PbSubmitDdlTaskRequest,
     SubmitDdlTaskResponse as PbSubmitDdlTaskResponse,
 };
-use api::v1::{CreateTableExpr, DropTableExpr};
+use api::v1::{AlterExpr, CreateTableExpr, DropTableExpr};
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
@@ -34,6 +34,7 @@ use crate::table_name::TableName;
 pub enum DdlTask {
     CreateTable(CreateTableTask),
     DropTable(DropTableTask),
+    AlterTable(AlterTableTask),
 }
 
 impl DdlTask {
@@ -68,7 +69,7 @@ impl TryFrom<Task> for DdlTask {
                 Ok(DdlTask::CreateTable(create_table.try_into()?))
             }
             Task::DropTableTask(drop_table) => Ok(DdlTask::DropTable(drop_table.try_into()?)),
-            _ => todo!(),
+            Task::AlterTableTask(alter_table) => Ok(DdlTask::AlterTable(alter_table.try_into()?)),
         }
     }
 }
@@ -87,7 +88,6 @@ impl TryFrom<SubmitDdlTaskRequest> for PbSubmitDdlTaskRequest {
                 create_table: Some(task.create_table),
                 partitions: task.partitions,
             }),
-
             DdlTask::DropTable(task) => Task::DropTableTask(PbDropTableTask {
                 drop_table: Some(DropTableExpr {
                     catalog_name: task.catalog,
@@ -96,7 +96,11 @@ impl TryFrom<SubmitDdlTaskRequest> for PbSubmitDdlTaskRequest {
                     table_id: Some(api::v1::TableId { id: task.table_id }),
                 }),
             }),
+            DdlTask::AlterTable(task) => Task::AlterTableTask(PbAlterTableTask {
+                alter_table: Some(task.alter_table),
+            }),
         };
+
         Ok(Self {
             header: None,
             task: Some(task),
@@ -254,6 +258,72 @@ impl<'de> Deserialize<'de> for CreateTableTask {
             .map_err(|err| serde::de::Error::custom(err.to_string()))?;
 
         let expr = CreateTableTask::try_from(expr)
+            .map_err(|err| serde::de::Error::custom(err.to_string()))?;
+
+        Ok(expr)
+    }
+}
+
+#[derive(Debug, PartialEq)]
+pub struct AlterTableTask {
+    pub alter_table: AlterExpr,
+}
+
+impl AlterTableTask {
+    pub fn table_ref(&self) -> TableReference {
+        TableReference {
+            catalog: &self.alter_table.catalog_name,
+            schema: &self.alter_table.schema_name,
+            table: &self.alter_table.table_name,
+        }
+    }
+
+    pub fn table_name(&self) -> TableName {
+        let table = &self.alter_table;
+
+        TableName {
+            catalog_name: table.catalog_name.to_string(),
+            schema_name: table.schema_name.to_string(),
+            table_name: table.table_name.to_string(),
+        }
+    }
+}
+
+impl TryFrom<PbAlterTableTask> for AlterTableTask {
+    type Error = error::Error;
+
+    fn try_from(pb: PbAlterTableTask) -> Result<Self> {
+        let alter_table = pb.alter_table.context(error::InvalidProtoMsgSnafu {
+            err_msg: "expected alter_table",
+        })?;
+
+        Ok(AlterTableTask { alter_table })
+    }
+}
+
+impl Serialize for AlterTableTask {
+    fn serialize<S>(&self, serializer: S) -> result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let pb = PbAlterTableTask {
+            alter_table: Some(self.alter_table.clone()),
+        };
+        let buf = pb.encode_to_vec();
+        serializer.serialize_bytes(&buf)
+    }
+}
+
+impl<'de> Deserialize<'de> for AlterTableTask {
+    fn deserialize<D>(deserializer: D) -> result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let buf = Vec::<u8>::deserialize(deserializer)?;
+        let expr: PbAlterTableTask = PbAlterTableTask::decode(&*buf)
+            .map_err(|err| serde::de::Error::custom(err.to_string()))?;
+
+        let expr = AlterTableTask::try_from(expr)
             .map_err(|err| serde::de::Error::custom(err.to_string()))?;
 
         Ok(expr)

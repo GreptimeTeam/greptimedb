@@ -5235,6 +5235,7 @@ dependencies = [
  "common-catalog",
  "common-error",
  "common-grpc",
+ "common-grpc-expr",
  "common-meta",
  "common-procedure",
  "common-procedure-test",

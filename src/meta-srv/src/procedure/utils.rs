@@ -13,16 +13,24 @@
 // limitations under the License.
 
 use api::v1::meta::TableRouteValue;
-use catalog::helper::TableGlobalKey;
+use catalog::helper::{TableGlobalKey, TableGlobalValue};
 use common_meta::key::TableRouteKey;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::TableRoute;
 use common_procedure::error::Error as ProcedureError;
 use snafu::{location, Location, ResultExt};
 use table::engine::TableReference;
-use table::metadata::TableId;
+use table::metadata::{RawTableInfo, TableId};
 
 use crate::error::{self, Error, Result};
+use crate::service::router::create_table_global_value;
+
+pub struct TableMetadata<'a> {
+    pub table_global_key: TableGlobalKey,
+    pub table_global_value: TableGlobalValue,
+    pub table_route_key: TableRouteKey<'a>,
+    pub table_route_value: TableRouteValue,
+}
 
 pub fn build_table_route_value(table_route: TableRoute) -> Result<TableRouteValue> {
     let (peers, table_route) = table_route
@@ -53,6 +61,34 @@ pub fn build_table_metadata_key(
     };
 
     (table_global_key, table_route_key)
+}
+
+pub fn build_table_metadata(
+    table_ref: TableReference<'_>,
+    table_route: TableRoute,
+    table_info: RawTableInfo,
+) -> Result<TableMetadata> {
+    let table_id = table_info.ident.table_id;
+
+    let (table_global_key, table_route_key) = build_table_metadata_key(table_ref, table_id);
+
+    let (peers, table_route) = table_route
+        .try_into_raw()
+        .context(error::ConvertProtoDataSnafu)?;
+
+    let table_route_value = TableRouteValue {
+        peers,
+        table_route: Some(table_route),
+    };
+
+    let table_global_value = create_table_global_value(&table_route_value, table_info)?;
+
+    Ok(TableMetadata {
+        table_global_key,
+        table_global_value,
+        table_route_key,
+        table_route_value,
+    })
 }
 
 pub fn handle_request_datanode_error(datanode: Peer) -> impl FnOnce(client::error::Error) -> Error {
