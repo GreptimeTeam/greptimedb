@@ -121,7 +121,7 @@ impl UpdateRegionMetadata {
         let table_route = value
             .table_route
             .with_context(|| CorruptedTableRouteSnafu {
-                key: key.key(),
+                key: key.to_string(),
                 reason: "'table_route' is empty",
             })?;
         let mut table_route = TableRoute::try_from_raw(&value.peers, table_route)
@@ -177,7 +177,7 @@ fn pretty_log_table_route_change(
     info!(
         "Updating region routes in table route value (key = '{}') to [{}]. \
         Failed region {} was on Datanode {}.",
-        key.key(),
+        key.to_string(),
         region_routes.join(", "),
         failed_region.region_number,
         failed_region.datanode_id,

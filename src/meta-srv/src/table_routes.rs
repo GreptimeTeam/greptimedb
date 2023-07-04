@@ -99,9 +99,11 @@ pub(crate) async fn get_table_route_value(
     key: &TableRouteKey<'_>,
 ) -> Result<TableRouteValue> {
     let kv = kv_store
-        .get(key.key().into_bytes())
+        .get(key.to_string().into_bytes())
         .await?
-        .with_context(|| TableRouteNotFoundSnafu { key: key.key() })?;
+        .with_context(|| TableRouteNotFoundSnafu {
+            key: key.to_string(),
+        })?;
     kv.value
         .as_slice()
         .try_into()
@@ -115,7 +117,7 @@ pub(crate) async fn put_table_route_value(
 ) -> Result<()> {
     let req = PutRequest {
         header: None,
-        key: key.key().into_bytes(),
+        key: key.to_string().into_bytes(),
         value: value.into(),
         prev_kv: false,
     };
@@ -127,11 +129,13 @@ pub(crate) async fn remove_table_route_value(
     kv_store: &KvStoreRef,
     key: &TableRouteKey<'_>,
 ) -> Result<(Vec<u8>, TableRouteValue)> {
-    let from_key = key.key().into_bytes();
+    let from_key = key.to_string().into_bytes();
     let to_key = key.removed_key().into_bytes();
     let v = move_value(kv_store, from_key, to_key)
         .await?
-        .context(TableRouteNotFoundSnafu { key: key.key() })?;
+        .context(TableRouteNotFoundSnafu {
+            key: key.to_string(),
+        })?;
     let trv: TableRouteValue = v.1.as_slice().try_into().context(DecodeTableRouteSnafu)?;
 
     Ok((v.0, trv))

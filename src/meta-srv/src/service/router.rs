@@ -182,7 +182,7 @@ async fn handle_create(
     table_info.ident.table_id = id as u32;
 
     let table_route_key = TableRouteKey::with_table_name(id, &table_name)
-        .key()
+        .to_string()
         .into_bytes();
 
     let table = Table {

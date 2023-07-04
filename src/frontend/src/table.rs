@@ -301,7 +301,7 @@ impl DistTable {
             schema_name,
             table_name: old_table_name,
         }
-        .key();
+        .to_string();
 
         let new_key = TableRouteKey {
             table_id: table_id.into(),
@@ -309,7 +309,7 @@ impl DistTable {
             schema_name,
             table_name: new_table_name,
         }
-        .key();
+        .to_string();
 
         self.catalog_manager
             .backend()
