@@ -17,10 +17,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use common_query::logical_plan::Expr;
 use common_recordbatch::OrderOption;
-use common_telemetry::{debug, logging};
+use common_telemetry::logging;
 use common_time::range::TimestampRange;
 use snafu::ResultExt;
-use store_api::storage::{Chunk, ChunkReader, SchemaRef, SequenceNumber};
+use store_api::storage::{Chunk, ChunkReader, RegionId, SchemaRef, SequenceNumber};
 use table::predicate::{Predicate, TimeRangePredicateBuilder};
 
 use crate::error::{self, Error, Result};
@@ -91,6 +91,7 @@ impl ChunkReaderImpl {
 
 /// Builder to create a new [ChunkReaderImpl] from scan request.
 pub struct ChunkReaderBuilder {
+    region_id: RegionId,
     schema: RegionSchemaRef,
     projection: Option<Vec<usize>>,
     filters: Vec<Expr>,
@@ -103,8 +104,9 @@ pub struct ChunkReaderBuilder {
 }
 
 impl ChunkReaderBuilder {
-    pub fn new(schema: RegionSchemaRef, sst_layer: AccessLayerRef) -> Self {
+    pub fn new(region_id: RegionId, schema: RegionSchemaRef, sst_layer: AccessLayerRef) -> Self {
         ChunkReaderBuilder {
+            region_id,
             schema,
             projection: None,
             filters: vec![],
@@ -259,7 +261,12 @@ impl ChunkReaderBuilder {
         let mut num_read_files = 0;
         for file in &self.files_to_read {
             if !Self::file_in_range(file, time_range) {
-                debug!("Skip file {:?}, predicate: {:?}", file, time_range);
+                logging::debug!(
+                    "Skip region {} file {:?}, predicate: {:?}",
+                    self.region_id,
+                    file,
+                    time_range
+                );
                 continue;
             }
 
@@ -269,7 +276,8 @@ impl ChunkReaderBuilder {
         }
 
         logging::debug!(
-            "build reader done, time_range: {:?}, total_files: {}, num_read_files: {}",
+            "build reader done, region_id: {}, time_range: {:?}, total_files: {}, num_read_files: {}",
+            self.region_id,
             time_range,
             self.files_to_read.len(),
             num_read_files,
@@ -311,7 +319,8 @@ impl ChunkReaderBuilder {
         let windows = self.infer_window_for_chain_reader(time_range);
 
         logging::debug!(
-            "Infer window for chain reader, memtables: {}, files: {}, num_windows: {}",
+            "Infer window for chain reader, region_id: {}, memtables: {}, files: {}, num_windows: {}",
+            self.region_id,
             self.memtables.len(),
             self.files_to_read.len(),
             windows.len(),
@@ -325,7 +334,8 @@ impl ChunkReaderBuilder {
         }
 
         logging::debug!(
-            "Build chain reader, time_range: {:?}, num_readers: {}",
+            "Build chain reader, region_id: {}, time_range: {:?}, num_readers: {}",
+            self.region_id,
             time_range,
             readers.len(),
         );
@@ -369,7 +379,8 @@ impl ChunkReaderBuilder {
             .reduce(|acc, e| (acc.0.min(e.0), acc.1.max(e.1)))?;
 
         logging::debug!(
-            "Compute memtable range, min: {:?}, max: {:?}",
+            "Compute memtable range, region_id: {}, min: {:?}, max: {:?}",
+            self.region_id,
             min_timestamp,
             max_timestamp,
         );

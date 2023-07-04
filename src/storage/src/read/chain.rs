@@ -16,6 +16,7 @@ use crate::error::Result;
 use crate::read::{Batch, BatchReader};
 use crate::schema::ProjectedSchemaRef;
 
+/// A reader that simply chain the outputs of input readers.
 pub struct ChainReader<R> {
     /// Schema to read
     pub schema: ProjectedSchemaRef,
@@ -24,6 +25,7 @@ pub struct ChainReader<R> {
 }
 
 impl<R> ChainReader<R> {
+    /// Returns a new [ChainReader] with specific input `readers`.
     pub fn new(schema: ProjectedSchemaRef, mut readers: Vec<R>) -> Self {
         // Reverse readers since we iter them backward.
         readers.reverse();
@@ -42,7 +44,7 @@ where
                 return Ok(Some(batch));
             } else {
                 // Remove the exhausted reader.
-                let _ = self.readers.pop();
+                self.readers.pop();
             }
         }
         Ok(None)
@@ -64,6 +66,23 @@ mod tests {
         ChainReader::new(schema, readers)
     }
 
+    async fn check_chain_reader_result(
+        mut reader: ChainReader<VecBatchReader>,
+        input: &[Batches<'_>],
+    ) {
+        let expect: Vec<_> = input
+            .iter()
+            .flat_map(|v| v.iter())
+            .flat_map(|v| v.iter().copied())
+            .collect();
+
+        let result = read_util::collect_kv_batch(&mut reader).await;
+        assert_eq!(expect, result);
+
+        // Call next_batch() again is allowed.
+        assert!(reader.next_batch().await.unwrap().is_none());
+    }
+
     #[tokio::test]
     async fn test_chain_empty() {
         let mut reader = build_chain_reader(&[]);
@@ -71,5 +90,35 @@ mod tests {
         assert!(reader.next_batch().await.unwrap().is_none());
         // Call next_batch() again is allowed.
         assert!(reader.next_batch().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_chain_one() {
+        let input: &[Batches] = &[&[
+            &[(1, Some(1)), (2, Some(2))],
+            &[(3, Some(3)), (4, Some(4))],
+            &[(5, Some(5))],
+        ]];
+
+        let reader = build_chain_reader(input);
+
+        check_chain_reader_result(reader, input).await;
+    }
+
+    #[tokio::test]
+    async fn test_chain_multi() {
+        let input: &[Batches] = &[
+            &[
+                &[(1, Some(1)), (2, Some(2))],
+                &[(3, Some(3)), (4, Some(4))],
+                &[(5, Some(5))],
+            ],
+            &[&[(6, Some(3)), (7, Some(4)), (8, Some(8))], &[(9, Some(9))]],
+            &[&[(10, Some(10)), (11, Some(11))], &[(12, Some(12))]],
+        ];
+
+        let reader = build_chain_reader(input);
+
+        check_chain_reader_result(reader, input).await;
     }
 }
