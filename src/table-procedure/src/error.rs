@@ -44,9 +44,6 @@ pub enum Error {
         source: catalog::error::Error,
     },
 
-    #[snafu(display("Catalog {} not found", name))]
-    CatalogNotFound { name: String },
-
     #[snafu(display("Table {} not found", name))]
     TableNotFound { name: String },
 
@@ -69,7 +66,6 @@ impl ErrorExt for Error {
             }
             InvalidRawSchema { source, .. } => source.status_code(),
             AccessCatalog { source, .. } => source.status_code(),
-            CatalogNotFound { .. } => StatusCode::InvalidArguments,
             TableNotFound { .. } => StatusCode::TableNotFound,
             TableExists { .. } => StatusCode::TableAlreadyExists,
         }
