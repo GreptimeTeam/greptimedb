@@ -33,6 +33,7 @@ members = [
     "src/meta-client",
     "src/meta-srv",
     "src/mito",
+    "src/mito2",
     "src/object-store",
     "src/partition",
     "src/promql",
