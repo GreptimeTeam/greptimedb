@@ -2,10 +2,12 @@ CREATE TABLE test(i DOUBLE, j TIMESTAMP TIME INDEX, k STRING PRIMARY KEY);
 
 Affected Rows: 0
 
+-- insert two points at 1ms and one point at 2ms
 INSERT INTO test VALUES (1, 1, "a"), (1, 1, "b"), (2, 2, "a");
 
 Affected Rows: 3
 
+-- analyze at 0s, 5s and 10s. No point at 0s.
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 -- SQLNESS REPLACE (-+) -
