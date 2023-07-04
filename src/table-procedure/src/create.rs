@@ -28,7 +28,7 @@ use table::engine::{EngineContext, TableEngineProcedureRef, TableEngineRef, Tabl
 use table::requests::{CreateTableRequest, OpenTableRequest};
 
 use crate::error::{
-    AccessCatalogSnafu, DeserializeProcedureSnafu, SerializeProcedureSnafu, TableNotFoundSnafu,
+    AccessCatalogSnafu, DeserializeProcedureSnafu, SerializeProcedureSnafu, TableExistsSnafu,
 };
 
 /// Procedure to create a table.
@@ -142,7 +142,7 @@ impl CreateTableProcedure {
             .await
             .context(AccessCatalogSnafu)?;
         if table_exists && !self.data.request.create_if_not_exists {
-            return TableNotFoundSnafu {
+            return TableExistsSnafu {
                 name: &self.data.request.table_name,
             }
             .fail()?;
