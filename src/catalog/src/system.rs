@@ -414,7 +414,7 @@ pub struct TableEntryValue {
     #[serde(default = "mito_engine")]
     pub engine: String,
 
-    #[serde(default = "present")]
+    #[serde(default = "not_deleted")]
     pub is_deleted: bool,
 }
 
@@ -422,8 +422,8 @@ fn mito_engine() -> String {
     MITO_ENGINE.to_string()
 }
 
-fn present() -> bool {
-    true
+fn not_deleted() -> bool {
+    false
 }
 
 #[cfg(test)]
