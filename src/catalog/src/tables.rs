@@ -69,7 +69,7 @@ impl SystemCatalog {
     ) -> CatalogResult<()> {
         self.information_schema
             .system
-            .delete(build_table_deletion_request(request, table_id))
+            .insert(build_table_deletion_request(request, table_id))
             .await
             .map(|x| {
                 if x != 1 {

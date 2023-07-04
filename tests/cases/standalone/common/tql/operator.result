@@ -51,3 +51,15 @@ tql eval (300, 300, '1s') 10 atan2 NaN;
 | 1970-01-01T00:05:00 | NaN   |
 +---------------------+-------+
 
+drop table trigx;
+
+Affected Rows: 1
+
+drop table trigy;
+
+Affected Rows: 1
+
+drop table trignan;
+
+Affected Rows: 1
+
