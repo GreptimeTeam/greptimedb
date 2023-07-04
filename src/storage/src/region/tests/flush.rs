@@ -252,7 +252,7 @@ async fn test_flush_empty() {
 }
 
 #[tokio::test]
-async fn test_read_after_flush() {
+async fn test_read_after_flush_across_window() {
     common_telemetry::init_default_ut_logging();
 
     let dir = create_temp_dir("read-flush");
@@ -275,6 +275,44 @@ async fn test_read_after_flush() {
         (1000, Some(100.to_string())),
         (2000, Some(200.to_string())),
         (3000, Some(300.to_string())),
+    ];
+
+    let output = tester.full_scan().await;
+    assert_eq!(expect, output);
+
+    // Reopen
+    let mut tester = tester;
+    tester.reopen().await;
+
+    // Scan after reopen.
+    let output = tester.full_scan().await;
+    assert_eq!(expect, output);
+}
+
+#[tokio::test]
+async fn test_read_after_flush_same_window() {
+    common_telemetry::init_default_ut_logging();
+
+    let dir = create_temp_dir("read-flush");
+    let store_dir = dir.path().to_str().unwrap();
+
+    let flush_switch = Arc::new(FlushSwitch::default());
+    let tester = FlushTester::new(store_dir, flush_switch.clone()).await;
+
+    // Put elements so we have content to flush.
+    tester.put(&[(1000, Some(100))]).await;
+    tester.put(&[(2000, Some(200))]).await;
+
+    // Flush.
+    tester.flush(None).await;
+
+    // Put element again.
+    tester.put(&[(1003, Some(300))]).await;
+
+    let expect = vec![
+        (1000, Some(100.to_string())),
+        (1003, Some(300.to_string())),
+        (2000, Some(200.to_string())),
     ];
 
     let output = tester.full_scan().await;

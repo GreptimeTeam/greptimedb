@@ -243,9 +243,12 @@ impl LocalCatalogManager {
                     info!("Registered schema: {:?}", s);
                 }
                 Entry::Table(t) => {
+                    max_table_id = max_table_id.max(t.table_id);
+                    if t.is_deleted {
+                        continue;
+                    }
                     self.open_and_register_table(&t).await?;
                     info!("Registered table: {:?}", t);
-                    max_table_id = max_table_id.max(t.table_id);
                 }
             }
         }
@@ -602,6 +605,7 @@ mod tests {
                 table_name: "T1".to_string(),
                 table_id: 1,
                 engine: MITO_ENGINE.to_string(),
+                is_deleted: false,
             }),
             Entry::Catalog(CatalogEntry {
                 catalog_name: "C2".to_string(),
@@ -623,6 +627,7 @@ mod tests {
                 table_name: "T2".to_string(),
                 table_id: 2,
                 engine: MITO_ENGINE.to_string(),
+                is_deleted: false,
             }),
         ];
         let res = LocalCatalogManager::sort_entries(vec);

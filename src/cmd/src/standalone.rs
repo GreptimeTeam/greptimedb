@@ -132,6 +132,7 @@ impl StandaloneOptions {
             prom_options: self.prom_options,
             meta_client_options: None,
             logging: self.logging,
+            ..Default::default()
         }
     }
 

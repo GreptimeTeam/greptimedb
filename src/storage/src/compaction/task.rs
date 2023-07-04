@@ -169,13 +169,15 @@ impl<S: LogStore> CompactionTask for CompactionTaskImpl<S> {
 #[derive(Debug)]
 pub struct CompactionOutput {
     /// Compaction output file level.
-    pub(crate) output_level: Level,
-    /// The left bound of time bucket.
-    pub(crate) bucket_bound: i64,
-    /// Bucket duration in seconds.
-    pub(crate) bucket: i64,
+    pub output_level: Level,
+    /// The left bound of time window.
+    pub time_window_bound: i64,
+    /// Time window size in seconds.
+    pub time_window_sec: i64,
     /// Compaction input files.
-    pub(crate) inputs: Vec<FileHandle>,
+    pub inputs: Vec<FileHandle>,
+    /// If the compaction output is strictly windowed.
+    pub strict_window: bool,
 }
 
 impl CompactionOutput {
@@ -186,12 +188,21 @@ impl CompactionOutput {
         sst_layer: AccessLayerRef,
         sst_write_buffer_size: ReadableSize,
     ) -> Result<Option<FileMeta>> {
+        let time_range = if self.strict_window {
+            (
+                Some(self.time_window_bound),
+                Some(self.time_window_bound + self.time_window_sec),
+            )
+        } else {
+            (None, None)
+        };
+
         let reader = build_sst_reader(
+            region_id,
             schema,
             sst_layer.clone(),
             &self.inputs,
-            self.bucket_bound,
-            self.bucket_bound + self.bucket,
+            time_range,
         )
         .await?;
 

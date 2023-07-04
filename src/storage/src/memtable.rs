@@ -75,9 +75,7 @@ pub trait Memtable: Send + Sync + fmt::Debug {
     /// Iterates the memtable.
     fn iter(&self, ctx: IterContext) -> Result<BoxedBatchIterator>;
 
-    /// Returns the estimated bytes allocated by this memtable from heap. Result
-    /// of this method may be larger than the estimated based on [`num_rows`] because
-    /// of the implementor's pre-alloc behavior.
+    /// Returns the number of rows in the memtable.
     fn num_rows(&self) -> usize;
 
     /// Returns stats of this memtable.

@@ -106,6 +106,8 @@ pub(crate) async fn query_context_from_db(
 
 pub const HTTP_API_VERSION: &str = "v1";
 pub const HTTP_API_PREFIX: &str = "/v1/";
+/// Default http body limit (64M).
+const DEFAULT_BODY_LIMIT: usize = 64 * 1024 * 1024;
 
 // TODO(fys): This is a temporary workaround, it will be improved later
 pub static PUBLIC_APIS: [&str; 2] = ["/v1/influxdb/ping", "/v1/influxdb/health"];
