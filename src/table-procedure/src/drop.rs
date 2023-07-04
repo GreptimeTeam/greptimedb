@@ -23,7 +23,7 @@ use common_procedure::{
 };
 use common_telemetry::logging;
 use serde::{Deserialize, Serialize};
-use snafu::{OptionExt, ResultExt};
+use snafu::ResultExt;
 use table::engine::{EngineContext, TableEngineProcedureRef, TableReference};
 use table::requests::DropTableRequest;
 
@@ -122,18 +122,21 @@ impl DropTableProcedure {
     async fn on_prepare(&mut self) -> Result<Status> {
         let request = &self.data.request;
         // Ensure the table exists.
-        let _ = self
+        let table_exists = self
             .catalog_manager
-            .table(
+            .table_exist(
                 &request.catalog_name,
                 &request.schema_name,
                 &request.table_name,
             )
             .await
-            .context(AccessCatalogSnafu)?
-            .context(TableNotFoundSnafu {
+            .context(AccessCatalogSnafu)?;
+        if !table_exists {
+            return TableNotFoundSnafu {
                 name: &request.table_name,
-            })?;
+            }
+            .fail()?;
+        }
 
         self.data.state = DropTableState::RemoveFromCatalog;
 

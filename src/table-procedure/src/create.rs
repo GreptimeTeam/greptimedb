@@ -28,7 +28,7 @@ use table::engine::{EngineContext, TableEngineProcedureRef, TableEngineRef, Tabl
 use table::requests::{CreateTableRequest, OpenTableRequest};
 
 use crate::error::{
-    AccessCatalogSnafu, DeserializeProcedureSnafu, SchemaNotFoundSnafu, SerializeProcedureSnafu,
+    AccessCatalogSnafu, DeserializeProcedureSnafu, SerializeProcedureSnafu, TableNotFoundSnafu,
 };
 
 /// Procedure to create a table.
@@ -132,23 +132,22 @@ impl CreateTableProcedure {
     }
 
     async fn on_prepare(&mut self) -> Result<Status> {
-        if !self
+        let table_exists = self
             .catalog_manager
-            .schema_exist(
+            .table_exist(
                 &self.data.request.catalog_name,
                 &self.data.request.schema_name,
+                &self.data.request.table_name,
             )
             .await
-            .context(AccessCatalogSnafu)?
-        {
-            logging::error!(
-                "Failed to create table {}, schema not found",
-                self.data.table_ref(),
-            );
-            return SchemaNotFoundSnafu {
-                name: &self.data.request.schema_name,
+            .context(AccessCatalogSnafu)?;
+        if table_exists && !self.data.request.create_if_not_exists {
+            return TableNotFoundSnafu {
+                name: &self.data.request.table_name,
             }
             .fail()?;
+        } else if table_exists {
+            return Ok(Status::Done);
         }
 
         self.data.state = CreateTableState::EngineCreateTable;
@@ -168,8 +167,9 @@ impl CreateTableProcedure {
             // do this check as we might not submitted the subprocedure yet when the manager
             // recover this procedure from procedure store.
             logging::info!(
-                "On engine create table {}, subprocedure not found, sub_id: {}",
+                "On engine create table {}, table_id: {}, subprocedure not found, sub_id: {}",
                 self.data.request.table_name,
+                self.data.request.id,
                 sub_id
             );
 
@@ -195,8 +195,9 @@ impl CreateTableProcedure {
             }),
             ProcedureState::Done => {
                 logging::info!(
-                    "On engine create table {}, done, sub_id: {}",
+                    "On engine create table {}, table_id: {}, done, sub_id: {}",
                     self.data.request.table_name,
+                    self.data.request.id,
                     sub_id
                 );
                 // The sub procedure is done, we can execute next step.
