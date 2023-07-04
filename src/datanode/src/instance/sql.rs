@@ -143,6 +143,21 @@ impl Instance {
 
                 query::sql::show_create_table(table, None).context(ExecuteStatementSnafu)
             }
+            Statement::TruncateTable(truncate_table) => {
+                let (catalog_name, schema_name, table_name) =
+                    table_idents_to_full_name(truncate_table.table_name(), query_ctx.clone())?;
+                let table_ref = TableReference::full(&catalog_name, &schema_name, &table_name);
+                let table = self.sql_handler.get_table(&table_ref).await?;
+                let req = DropTableRequest {
+                    catalog_name,
+                    schema_name,
+                    table_name,
+                    table_id: table.table_info().ident.table_id,
+                };
+                self.sql_handler
+                    .execute(SqlRequest::TruncateTable(req), query_ctx)
+                    .await
+            }
             _ => NotSupportSqlSnafu {
                 msg: format!("not supported to execute {stmt:?}"),
             }

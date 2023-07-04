@@ -72,12 +72,14 @@ impl DropTableProcedure {
         request: DropTableRequest,
         catalog_manager: CatalogManagerRef,
         engine_procedure: TableEngineProcedureRef,
+        is_truncate: bool,
     ) -> DropTableProcedure {
         DropTableProcedure {
             data: DropTableData {
                 state: DropTableState::Prepare,
                 request,
                 subprocedure_id: None,
+                is_truncate,
             },
             catalog_manager,
             engine_procedure,
@@ -155,7 +157,7 @@ impl DropTableProcedure {
             .await
             .context(AccessCatalogSnafu)?
             .is_some();
-        if has_table {
+        if has_table && !self.data.is_truncate {
             // The table is still in the catalog.
             let deregister_table_req = DeregisterTableRequest {
                 catalog: self.data.request.catalog_name.clone(),
@@ -189,6 +191,11 @@ impl DropTableProcedure {
 
             // If the subprocedure is not found, we create a new subprocedure with the same id.
             let engine_ctx = EngineContext::default();
+
+            if self.data.is_truncate {
+                return Ok(Status::Done);
+            }
+
             let procedure = self
                 .engine_procedure
                 .drop_table_procedure(&engine_ctx, self.data.request.clone())
@@ -249,6 +256,8 @@ struct DropTableData {
     /// This id is `Some` while the procedure is in [DropTableState::EngineDropTable]
     /// state.
     subprocedure_id: Option<ProcedureId>,
+
+    is_truncate: bool,
 }
 
 impl DropTableData {
@@ -287,8 +296,12 @@ mod tests {
             procedure_manager,
             catalog_manager,
         } = env;
-        let procedure =
-            DropTableProcedure::new(request, catalog_manager.clone(), table_engine.clone());
+        let procedure = DropTableProcedure::new(
+            request,
+            catalog_manager.clone(),
+            table_engine.clone(),
+            false,
+        );
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
         let mut watcher = procedure_manager.submit(procedure_with_id).await.unwrap();

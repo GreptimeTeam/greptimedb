@@ -24,7 +24,7 @@ use crate::error::{self, Result};
 use crate::sql::SqlHandler;
 
 impl SqlHandler {
-    pub(crate) async fn drop_table(&self, req: DropTableRequest) -> Result<Output> {
+    pub(crate) async fn truncate_table(&self, req: DropTableRequest) -> Result<Output> {
         let table_name = req.table_name.clone();
         let table_ref = TableReference {
             catalog: &req.catalog_name,
@@ -36,12 +36,15 @@ impl SqlHandler {
         let engine_procedure = self.engine_procedure(table)?;
 
         let procedure =
-            DropTableProcedure::new(req, self.catalog_manager.clone(), engine_procedure, false);
+            DropTableProcedure::new(req, self.catalog_manager.clone(), engine_procedure, true);
 
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
         let procedure_id = procedure_with_id.id;
 
-        info!("Drop table {} by procedure {}", table_name, procedure_id);
+        info!(
+            "Truncate table {} by procedure {}",
+            table_name, procedure_id
+        );
 
         let mut watcher = self
             .procedure_manager
@@ -67,11 +70,11 @@ mod tests {
     use crate::tests::test_util::MockInstance;
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_drop_table_by_procedure() {
-        let instance = MockInstance::new("drop_table_by_procedure").await;
+    async fn test_truncate_table_by_procedure() {
+        let instance = MockInstance::new("truncate_table_by_procedure").await;
 
         // Create table first.
-        let sql = r#"create table test_drop(
+        let sql = r#"create table test_truncate(
                             host string,
                             ts timestamp,
                             cpu double default 0,
@@ -90,7 +93,7 @@ mod tests {
         assert!(matches!(output, Output::AffectedRows(0)));
 
         // Drop table.
-        let sql = r#"drop table test_drop"#;
+        let sql = r#"truncate table test_truncate"#;
         let stmt = match QueryLanguageParser::parse_sql(sql).unwrap() {
             QueryStatement::Sql(sql) => sql,
             _ => unreachable!(),

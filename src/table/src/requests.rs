@@ -216,7 +216,7 @@ impl DropTableRequest {
     }
 }
 
-/// Drop table request
+/// Close table request
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CloseTableRequest {
     pub catalog_name: String,
