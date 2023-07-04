@@ -371,15 +371,7 @@ where
     }
 
     /// Compact manually.
-    pub async fn compact(
-        &self,
-        shared_data: SharedDataRef,
-        sst_layer: AccessLayerRef,
-        manifest: RegionManifest,
-        wal: Wal<S>,
-        region_writer: RegionWriterRef<S>,
-        compact_ctx: CompactContext,
-    ) -> Result<()> {
+    pub async fn compact(&self, request: WriterCompactRequest<S>) -> Result<()> {
         let mut inner = self.inner.lock().await;
 
         ensure!(!inner.is_closed(), error::ClosedRegionSnafu);
@@ -387,14 +379,9 @@ where
 
         inner
             .manual_compact(
-                shared_data,
-                sst_layer,
-                manifest,
-                wal,
+                request,
                 self.compaction_picker.clone(),
                 self.compaction_scheduler.clone(),
-                region_writer,
-                compact_ctx,
                 sst_write_buffer_size,
             )
             .await
@@ -421,6 +408,16 @@ where
     pub(crate) async fn write_buffer_size(&self) -> usize {
         self.inner.lock().await.write_buffer_size
     }
+}
+
+/// Structs needed by triggering a compaction.
+pub struct WriterCompactRequest<S: LogStore> {
+    pub shared_data: SharedDataRef,
+    pub sst_layer: AccessLayerRef,
+    pub manifest: RegionManifest,
+    pub wal: Wal<S>,
+    pub region_writer: RegionWriterRef<S>,
+    pub compact_ctx: CompactContext,
 }
 
 pub struct WriterContext<'a, S: LogStore> {
@@ -817,29 +814,25 @@ impl WriterInner {
 
     async fn manual_compact<S: LogStore>(
         &mut self,
-        shared_data: SharedDataRef,
-        sst_layer: AccessLayerRef,
-        manifest: RegionManifest,
-        wal: Wal<S>,
+        request: WriterCompactRequest<S>,
         compaction_picker: CompactionPickerRef<S>,
         compaction_scheduler: CompactionSchedulerRef<S>,
-        region_writer: RegionWriterRef<S>,
-        compact_ctx: CompactContext,
         sst_write_buffer_size: ReadableSize,
     ) -> Result<()> {
-        let region_id = shared_data.id();
-        let compaction_time_window = shared_data
+        let region_id = request.shared_data.id();
+        let compaction_time_window = request
+            .shared_data
             .version_control
             .current()
             .ssts()
             .compaction_time_window();
         let mut compaction_request = CompactionRequestImpl {
             region_id,
-            sst_layer,
-            writer: region_writer,
-            shared: shared_data.clone(),
-            manifest,
-            wal,
+            sst_layer: request.sst_layer,
+            writer: request.region_writer,
+            shared: request.shared_data.clone(),
+            manifest: request.manifest,
+            wal: request.wal,
             ttl: self.ttl,
             compaction_time_window,
             sender: None,
@@ -851,18 +844,18 @@ impl WriterInner {
         logging::info!(
             "Manual compact, region_id: {}, compact_ctx: {:?}",
             region_id,
-            compact_ctx
+            request.compact_ctx
         );
 
-        if compact_ctx.wait {
+        if request.compact_ctx.wait {
             let (sender, receiver) = oneshot::channel();
             compaction_request.sender = Some(sender);
 
             if schedule_compaction(
-                shared_data,
+                request.shared_data,
                 compaction_scheduler,
                 compaction_request,
-                compact_ctx.max_files_in_l0,
+                request.compact_ctx.max_files_in_l0,
             ) {
                 receiver
                     .await
@@ -870,10 +863,10 @@ impl WriterInner {
             }
         } else {
             let _ = schedule_compaction(
-                shared_data,
+                request.shared_data,
                 compaction_scheduler,
                 compaction_request,
-                compact_ctx.max_files_in_l0,
+                request.compact_ctx.max_files_in_l0,
             );
         }
 

@@ -24,7 +24,7 @@ use crate::compaction::writer::build_sst_reader;
 use crate::error::Result;
 use crate::manifest::action::RegionEdit;
 use crate::manifest::region::RegionManifest;
-use crate::region::{CompactContext, RegionWriterRef, SharedDataRef};
+use crate::region::{CompactContext, RegionWriterRef, SharedDataRef, WriterCompactRequest};
 use crate::schema::RegionSchemaRef;
 use crate::sst::{
     AccessLayerRef, FileHandle, FileId, FileMeta, Level, Source, SstInfo, WriteOptions,
@@ -129,17 +129,17 @@ impl<S: LogStore> CompactionTaskImpl<S> {
 
         if let Err(e) = self
             .writer
-            .compact(
-                self.shared_data.clone(),
-                self.sst_layer.clone(),
-                self.manifest.clone(),
-                self.wal.clone(),
-                self.writer.clone(),
-                CompactContext {
+            .compact(WriterCompactRequest {
+                shared_data: self.shared_data.clone(),
+                sst_layer: self.sst_layer.clone(),
+                manifest: self.manifest.clone(),
+                wal: self.wal.clone(),
+                region_writer: self.writer.clone(),
+                compact_ctx: CompactContext {
                     wait: false,
                     max_files_in_l0: 8,
                 },
-            )
+            })
             .await
         {
             error!(e; "Failed to schedule a compaction after compaction, region id: {}", self.shared_data.id());
