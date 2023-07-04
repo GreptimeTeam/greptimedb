@@ -137,8 +137,11 @@ pub enum CompactionStrategy {
 /// TWCS compaction options.
 #[derive(Debug, Clone)]
 pub struct TwcsOptions {
+    /// Max num of files that can be kept in active writing time window.
     pub max_active_window_files: usize,
+    /// Max num of files that can be kept in inactive time window.
     pub max_inactive_window_files: usize,
+    /// Compaction time window defined when creating tables.
     pub time_window_seconds: Option<i64>,
 }
 
@@ -155,8 +158,7 @@ impl Default for TwcsOptions {
 impl From<&HashMap<String, String>> for CompactionStrategy {
     fn from(opts: &HashMap<String, String>) -> Self {
         let Some(strategy_name) = opts.get(COMPACTION_STRATEGY_KEY) else { return CompactionStrategy::default() };
-        return if strategy_name.eq_ignore_ascii_case(COMPACTION_STRATEGY_LEVELED_TIME_WINDOW_VALUE)
-        {
+        if strategy_name.eq_ignore_ascii_case(COMPACTION_STRATEGY_LEVELED_TIME_WINDOW_VALUE) {
             CompactionStrategy::LeveledTimeWindow
         } else if strategy_name.eq_ignore_ascii_case(COMPACTION_STRATEGY_TWCS_VALUE) {
             let mut twcs_opts = TwcsOptions::default();
@@ -185,6 +187,6 @@ impl From<&HashMap<String, String>> for CompactionStrategy {
         } else {
             // unrecognized compaction strategy
             CompactionStrategy::default()
-        };
+        }
     }
 }
