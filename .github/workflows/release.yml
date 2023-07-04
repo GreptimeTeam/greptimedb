@@ -136,7 +136,7 @@ jobs:
 
       - name: Upload to S3
         run: |
-          aws s3 sync target/${{ matrix.arch }}/${{ env.CARGO_PROFILE }} s3://${{ secrets.GREPTIMEDB_RELEASE_BUCKET_NAME }}/releases/${TAG}
+          aws s3 cp target/${{ matrix.arch }}/${{ env.CARGO_PROFILE }} s3://${{ secrets.GREPTIMEDB_RELEASE_BUCKET_NAME }}/releases/${TAG} --recursive --exclude "*" --include "*.tgz"
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_CN_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_CN_SECRET_ACCESS_KEY }}
@@ -312,7 +312,7 @@ jobs:
 
       - name: Upload to S3
         run: |
-          aws s3 sync target/${{ matrix.arch }}/${{ env.CARGO_PROFILE }} s3://${{ secrets.GREPTIMEDB_RELEASE_BUCKET_NAME }}/releases/${TAG}
+          aws s3 cp target/${{ matrix.arch }}/${{ env.CARGO_PROFILE }} s3://${{ secrets.GREPTIMEDB_RELEASE_BUCKET_NAME }}/releases/${TAG} --recursive --exclude "*" --include "*.tgz"
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_CN_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_CN_SECRET_ACCESS_KEY }}
