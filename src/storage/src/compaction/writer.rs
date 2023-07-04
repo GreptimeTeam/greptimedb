@@ -16,6 +16,7 @@ use common_query::logical_plan::{DfExpr, Expr};
 use common_time::timestamp::TimeUnit;
 use datafusion_expr::Operator;
 use datatypes::value::timestamp_to_scalar_value;
+use store_api::storage::RegionId;
 
 use crate::chunk::{ChunkReaderBuilder, ChunkReaderImpl};
 use crate::error;
@@ -24,6 +25,7 @@ use crate::sst::{AccessLayerRef, FileHandle};
 
 /// Builds an SST reader that only reads rows within given time range.
 pub(crate) async fn build_sst_reader(
+    region_id: RegionId,
     schema: RegionSchemaRef,
     sst_layer: AccessLayerRef,
     files: &[FileHandle],
@@ -38,7 +40,7 @@ pub(crate) async fn build_sst_reader(
     let ts_col_unit = ts_col.data_type.as_timestamp().unwrap().unit();
     let ts_col_name = ts_col.name.clone();
 
-    ChunkReaderBuilder::new(schema, sst_layer)
+    ChunkReaderBuilder::new(region_id, schema, sst_layer)
         .pick_ssts(files)
         .filters(
             build_time_range_filter(
@@ -138,6 +140,8 @@ mod tests {
     use crate::sst::parquet::ParquetWriter;
     use crate::sst::{self, FileId, FileMeta, FsAccessLayer, Source, SstInfo, WriteOptions};
     use crate::test_util::descriptor_util::RegionDescBuilder;
+
+    const REGION_ID: RegionId = 1;
 
     fn schema_for_test() -> RegionSchemaRef {
         // Just build a region desc and use its columns metadata.
@@ -277,7 +281,9 @@ mod tests {
         handle
     }
 
+    // The region id is only used to build the reader, we don't check its content.
     async fn check_reads(
+        region_id: RegionId,
         schema: RegionSchemaRef,
         sst_layer: AccessLayerRef,
         files: &[FileHandle],
@@ -286,6 +292,7 @@ mod tests {
         expect: &[i64],
     ) {
         let mut reader = build_sst_reader(
+            region_id,
             schema,
             sst_layer,
             files,
@@ -352,6 +359,7 @@ mod tests {
         let files = vec![file1, file2];
         // read from two sst files with time range filter,
         check_reads(
+            REGION_ID,
             schema.clone(),
             sst_layer.clone(),
             &files,
@@ -361,7 +369,7 @@ mod tests {
         )
         .await;
 
-        check_reads(schema, sst_layer, &files, 1, 2, &[1000]).await;
+        check_reads(REGION_ID, schema, sst_layer, &files, 1, 2, &[1000]).await;
     }
 
     async fn read_file(
@@ -370,7 +378,7 @@ mod tests {
         sst_layer: AccessLayerRef,
     ) -> Vec<i64> {
         let mut timestamps = vec![];
-        let mut reader = build_sst_reader(schema, sst_layer, files, i64::MIN, i64::MAX)
+        let mut reader = build_sst_reader(REGION_ID, schema, sst_layer, files, i64::MIN, i64::MAX)
             .await
             .unwrap();
         while let Some(chunk) = reader.next_chunk().await.unwrap() {
@@ -434,15 +442,36 @@ mod tests {
         let sst_layer = Arc::new(FsAccessLayer::new("./", object_store.clone()));
         let input_files = vec![file2, file1];
 
-        let reader1 = build_sst_reader(schema.clone(), sst_layer.clone(), &input_files, 0, 3)
-            .await
-            .unwrap();
-        let reader2 = build_sst_reader(schema.clone(), sst_layer.clone(), &input_files, 3, 6)
-            .await
-            .unwrap();
-        let reader3 = build_sst_reader(schema.clone(), sst_layer.clone(), &input_files, 6, 10)
-            .await
-            .unwrap();
+        let reader1 = build_sst_reader(
+            REGION_ID,
+            schema.clone(),
+            sst_layer.clone(),
+            &input_files,
+            0,
+            3,
+        )
+        .await
+        .unwrap();
+        let reader2 = build_sst_reader(
+            REGION_ID,
+            schema.clone(),
+            sst_layer.clone(),
+            &input_files,
+            3,
+            6,
+        )
+        .await
+        .unwrap();
+        let reader3 = build_sst_reader(
+            REGION_ID,
+            schema.clone(),
+            sst_layer.clone(),
+            &input_files,
+            6,
+            10,
+        )
+        .await
+        .unwrap();
 
         let opts = WriteOptions {
             sst_write_buffer_size: ReadableSize::mb(8),

@@ -187,6 +187,7 @@ impl CompactionOutput {
         sst_write_buffer_size: ReadableSize,
     ) -> Result<Option<FileMeta>> {
         let reader = build_sst_reader(
+            region_id,
             schema,
             sst_layer.clone(),
             &self.inputs,

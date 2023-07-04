@@ -14,9 +14,10 @@
 
 //! Common structs and utilities for read.
 
+mod chain;
 mod dedup;
 mod merge;
-pub(crate) mod windowed;
+mod windowed;
 
 use std::cmp::Ordering;
 
@@ -25,11 +26,13 @@ use common_base::BitVec;
 use datatypes::data_type::DataType;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::vectors::{BooleanVector, MutableVector, VectorRef};
-pub use dedup::DedupReader;
-pub use merge::{MergeReader, MergeReaderBuilder};
 use snafu::{ensure, ResultExt};
 
 use crate::error::{self, Result};
+pub use crate::read::chain::ChainReader;
+pub use crate::read::dedup::DedupReader;
+pub use crate::read::merge::{MergeReader, MergeReaderBuilder};
+pub use crate::read::windowed::WindowedReader;
 
 /// Storage internal representation of a batch of rows.
 // Now the structure of `Batch` is still unstable, all pub fields may be changed.

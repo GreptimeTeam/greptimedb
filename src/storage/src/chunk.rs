@@ -17,16 +17,17 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use common_query::logical_plan::Expr;
 use common_recordbatch::OrderOption;
-use common_telemetry::debug;
+use common_telemetry::logging;
 use common_time::range::TimestampRange;
 use snafu::ResultExt;
-use store_api::storage::{Chunk, ChunkReader, SchemaRef, SequenceNumber};
+use store_api::storage::{Chunk, ChunkReader, RegionId, SchemaRef, SequenceNumber};
 use table::predicate::{Predicate, TimeRangePredicateBuilder};
 
 use crate::error::{self, Error, Result};
 use crate::memtable::{IterContext, MemtableRef};
-use crate::read::windowed::WindowedReader;
-use crate::read::{Batch, BoxedBatchReader, DedupReader, MergeReaderBuilder};
+use crate::read::{
+    Batch, BoxedBatchReader, ChainReader, DedupReader, MergeReaderBuilder, WindowedReader,
+};
 use crate::schema::{ProjectedSchema, ProjectedSchemaRef, RegionSchemaRef};
 use crate::sst::{AccessLayerRef, FileHandle, LevelMetas, ReadOptions};
 use crate::window_infer::{PlainWindowInference, WindowInfer};
@@ -90,6 +91,7 @@ impl ChunkReaderImpl {
 
 /// Builder to create a new [ChunkReaderImpl] from scan request.
 pub struct ChunkReaderBuilder {
+    region_id: RegionId,
     schema: RegionSchemaRef,
     projection: Option<Vec<usize>>,
     filters: Vec<Expr>,
@@ -98,11 +100,13 @@ pub struct ChunkReaderBuilder {
     memtables: Vec<MemtableRef>,
     files_to_read: Vec<FileHandle>,
     output_ordering: Option<Vec<OrderOption>>,
+    use_chain_reader: bool,
 }
 
 impl ChunkReaderBuilder {
-    pub fn new(schema: RegionSchemaRef, sst_layer: AccessLayerRef) -> Self {
+    pub fn new(region_id: RegionId, schema: RegionSchemaRef, sst_layer: AccessLayerRef) -> Self {
         ChunkReaderBuilder {
+            region_id,
             schema,
             projection: None,
             filters: vec![],
@@ -111,6 +115,7 @@ impl ChunkReaderBuilder {
             memtables: Vec::new(),
             files_to_read: Vec::new(),
             output_ordering: None,
+            use_chain_reader: false,
         }
     }
 
@@ -150,6 +155,15 @@ impl ChunkReaderBuilder {
         self
     }
 
+    /// Partition files and memtables according to their time windows and scan time windows
+    /// one by one.
+    ///
+    /// Note that compaction should not enable this.
+    pub fn use_chain_reader(mut self, use_chain_reader: bool) -> Self {
+        self.use_chain_reader = use_chain_reader;
+        self
+    }
+
     /// Picks all SSTs in all levels
     pub fn pick_all_ssts(mut self, ssts: &LevelMetas) -> Result<Self> {
         let files = ssts.levels().iter().flat_map(|level| level.files());
@@ -183,7 +197,12 @@ impl ChunkReaderBuilder {
         if name != self.schema.timestamp_column_name() {
             return None;
         }
-        let memtable_stats = self.memtables.iter().map(|m| m.stats()).collect::<Vec<_>>();
+        let memtable_stats = self
+            .memtables
+            .iter()
+            .filter(|m| m.num_rows() > 0) // Skip empty memtables.
+            .map(|m| m.stats())
+            .collect::<Vec<_>>();
         let files = self
             .files_to_read
             .iter()
@@ -238,14 +257,31 @@ impl ChunkReaderBuilder {
             predicate,
             time_range: *time_range,
         };
+
+        let mut num_read_files = 0;
         for file in &self.files_to_read {
             if !Self::file_in_range(file, time_range) {
-                debug!("Skip file {:?}, predicate: {:?}", file, time_range);
+                logging::debug!(
+                    "Skip region {} file {:?}, predicate: {:?}",
+                    self.region_id,
+                    file,
+                    time_range
+                );
                 continue;
             }
+
             let reader = self.sst_layer.read_sst(file.clone(), &read_opts).await?;
             reader_builder = reader_builder.push_batch_reader(reader);
+            num_read_files += 1;
         }
+
+        logging::debug!(
+            "build reader done, region_id: {}, time_range: {:?}, total_files: {}, num_read_files: {}",
+            self.region_id,
+            time_range,
+            self.files_to_read.len(),
+            num_read_files,
+        );
 
         let reader = reader_builder.build();
         let reader = DedupReader::new(schema.clone(), reader);
@@ -266,6 +302,8 @@ impl ChunkReaderBuilder {
                 output_ordering = Some(ordering.clone());
                 self.build_windowed(&schema, &time_range_predicate, windows, ordering)
                     .await?
+        } else if self.use_chain_reader {
+            self.build_chained(&schema, &time_range_predicate).await?
         } else {
             self.build_reader(&schema, &time_range_predicate).await?
         };
@@ -273,8 +311,41 @@ impl ChunkReaderBuilder {
         Ok(ChunkReaderImpl::new(schema, reader, output_ordering))
     }
 
+    async fn build_chained(
+        &self,
+        schema: &ProjectedSchemaRef,
+        time_range: &TimestampRange,
+    ) -> Result<BoxedBatchReader> {
+        let windows = self.infer_window_for_chain_reader(time_range);
+
+        logging::debug!(
+            "Infer window for chain reader, region_id: {}, memtables: {}, files: {}, num_windows: {}",
+            self.region_id,
+            self.memtables.len(),
+            self.files_to_read.len(),
+            windows.len(),
+        );
+
+        let mut readers = Vec::with_capacity(windows.len());
+        for window in &windows {
+            let time_range = time_range.and(window);
+            let reader = self.build_reader(schema, &time_range).await?;
+            readers.push(reader);
+        }
+
+        logging::debug!(
+            "Build chain reader, region_id: {}, time_range: {:?}, num_readers: {}",
+            self.region_id,
+            time_range,
+            readers.len(),
+        );
+
+        let chain_reader = ChainReader::new(schema.clone(), readers);
+        Ok(Box::new(chain_reader) as Box<_>)
+    }
+
     /// Build time range predicate from schema and filters.
-    pub fn build_time_range_predicate(&self) -> TimestampRange {
+    fn build_time_range_predicate(&self) -> TimestampRange {
         let Some(ts_col) = self.schema.user_schema().timestamp_column() else { return TimestampRange::min_to_max() };
         let unit = ts_col
             .data_type
@@ -293,5 +364,88 @@ impl ChunkReaderBuilder {
         let Some((start, end)) = *file.time_range() else { return true; };
         let file_ts_range = TimestampRange::new_inclusive(Some(start), Some(end));
         file_ts_range.intersects(predicate)
+    }
+
+    /// Returns the time range of memtables to read.
+    fn compute_memtable_range(&self) -> Option<TimestampRange> {
+        let (min_timestamp, max_timestamp) = self
+            .memtables
+            .iter()
+            .filter(|m| m.num_rows() > 0) // Skip empty memtables.
+            .map(|m| {
+                let stats = m.stats();
+                (stats.min_timestamp, stats.max_timestamp)
+            })
+            .reduce(|acc, e| (acc.0.min(e.0), acc.1.max(e.1)))?;
+
+        logging::debug!(
+            "Compute memtable range, region_id: {}, min: {:?}, max: {:?}",
+            self.region_id,
+            min_timestamp,
+            max_timestamp,
+        );
+
+        Some(TimestampRange::new_inclusive(
+            Some(min_timestamp),
+            Some(max_timestamp),
+        ))
+    }
+
+    /// Infer time window for chain reader according to the time range of memtables and files.
+    fn infer_window_for_chain_reader(&self, time_range: &TimestampRange) -> Vec<TimestampRange> {
+        let mut memtable_range = self.compute_memtable_range();
+        // file ranges: (start, end)
+        let mut file_ranges = Vec::with_capacity(self.files_to_read.len());
+        for file in &self.files_to_read {
+            if !Self::file_in_range(file, time_range) || file.time_range().is_none() {
+                continue;
+            }
+            // Safety: we have skip files whose range is `None`.
+            let range = file.time_range().unwrap();
+
+            // Filter by memtable's time range.
+            if let Some(mem_range) = &mut memtable_range {
+                let file_range = TimestampRange::new_inclusive(Some(range.0), Some(range.1));
+                if mem_range.intersects(&file_range) {
+                    // If the range of the SST intersects with the range of the
+                    // memtable, we merge it into the memtable's range.
+                    *mem_range = mem_range.or(&file_range);
+                    continue;
+                }
+            }
+
+            file_ranges.push((range.0, range.1));
+        }
+
+        if file_ranges.is_empty() {
+            return memtable_range.map(|range| vec![range]).unwrap_or_default();
+        }
+
+        // Sort by start times.
+        file_ranges.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+
+        // Compute ranges for all SSTs.
+        let mut time_ranges = Vec::with_capacity(file_ranges.len() + 1);
+        // Safety: file_ranges is not empty.
+        let mut prev =
+            TimestampRange::new_inclusive(Some(file_ranges[0].0), Some(file_ranges[0].1));
+        for file_range in &file_ranges[1..] {
+            let current = TimestampRange::new_inclusive(Some(file_range.0), Some(file_range.1));
+            if prev.intersects(&current) {
+                prev = prev.or(&current);
+            } else {
+                time_ranges.push(prev);
+                prev = current;
+            }
+        }
+        time_ranges.push(prev);
+
+        if let Some(mem_range) = memtable_range {
+            time_ranges.push(mem_range);
+            // We have pushed the memtable range, resort the array.
+            time_ranges.sort_unstable_by(|left, right| left.start().cmp(right.start()));
+        }
+
+        time_ranges
     }
 }
