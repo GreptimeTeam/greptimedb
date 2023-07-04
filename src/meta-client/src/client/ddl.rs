@@ -130,7 +130,7 @@ impl Inner {
                 if let Some(header) = res.header.as_ref() {
                     if let Some(err) = header.error.as_ref() {
                         if err.code == ErrorCode::NotLeader as i32 {
-                            self.heartbeat_inner.reset_leader();
+                            self.heartbeat_inner.ask_leader().await?;
                             continue;
                         }
                     }

@@ -176,10 +176,6 @@ impl Inner {
         self.leader.clone()
     }
 
-    pub(crate) fn reset_leader(&mut self) {
-        self.leader = None;
-    }
-
     pub(crate) async fn ask_leader(&mut self) -> Result<()> {
         ensure!(
             self.is_started(),
