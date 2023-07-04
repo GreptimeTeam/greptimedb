@@ -32,11 +32,13 @@ use store_api::manifest::{
     self, Manifest, ManifestLogStorage, ManifestVersion, MetaActionIterator,
 };
 use store_api::storage::{
-    AlterRequest, CloseContext, FlushContext, FlushReason, OpenOptions, ReadContext, Region,
-    RegionId, SequenceNumber, WriteContext, WriteResponse,
+    AlterRequest, CloseContext, CompactionStrategy, FlushContext, FlushReason, OpenOptions,
+    ReadContext, Region, RegionId, SequenceNumber, WriteContext, WriteResponse,
 };
 
-use crate::compaction::CompactionSchedulerRef;
+use crate::compaction::{
+    compaction_strategy_to_picker, CompactionPickerRef, CompactionSchedulerRef,
+};
 use crate::config::EngineConfig;
 use crate::error::{self, Error, Result};
 use crate::file_purger::FilePurgerRef;
@@ -164,6 +166,7 @@ pub struct StoreConfig<S: LogStore> {
     pub file_purger: FilePurgerRef,
     pub ttl: Option<Duration>,
     pub write_buffer_size: usize,
+    pub compaction_strategy: CompactionStrategy,
 }
 
 pub type RecoveredMetadata = (SequenceNumber, (ManifestVersion, RawRegionMetadata));
@@ -252,6 +255,7 @@ impl<S: LogStore> RegionImpl<S> {
             flush_strategy: store_config.flush_strategy,
             flush_scheduler: store_config.flush_scheduler,
             compaction_scheduler: store_config.compaction_scheduler,
+            compaction_picker: compaction_strategy_to_picker(&store_config.compaction_strategy),
             sst_layer: store_config.sst_layer,
             manifest: store_config.manifest,
         });
@@ -336,6 +340,8 @@ impl<S: LogStore> RegionImpl<S> {
             store_config.ttl,
             store_config.write_buffer_size,
         ));
+
+        let compaction_picker = compaction_strategy_to_picker(&store_config.compaction_strategy);
         let writer_ctx = WriterContext {
             shared: &shared,
             flush_strategy: &store_config.flush_strategy,
@@ -345,6 +351,7 @@ impl<S: LogStore> RegionImpl<S> {
             wal: &wal,
             writer: &writer,
             manifest: &store_config.manifest,
+            compaction_picker: compaction_picker.clone(),
         };
         // Replay all unflushed data.
         writer
@@ -364,6 +371,7 @@ impl<S: LogStore> RegionImpl<S> {
             flush_strategy: store_config.flush_strategy,
             flush_scheduler: store_config.flush_scheduler,
             compaction_scheduler: store_config.compaction_scheduler,
+            compaction_picker,
             sst_layer: store_config.sst_layer,
             manifest: store_config.manifest,
         });
@@ -586,6 +594,7 @@ impl<S: LogStore> RegionImpl<S> {
             wal: &inner.wal,
             writer: &inner.writer,
             manifest: &inner.manifest,
+            compaction_picker: inner.compaction_picker.clone(),
         };
 
         inner.writer.replay(recovered_metadata, writer_ctx).await
@@ -642,6 +651,7 @@ struct RegionInner<S: LogStore> {
     flush_strategy: FlushStrategyRef,
     flush_scheduler: FlushSchedulerRef<S>,
     compaction_scheduler: CompactionSchedulerRef<S>,
+    compaction_picker: CompactionPickerRef<S>,
     sst_layer: AccessLayerRef,
     manifest: RegionManifest,
 }
@@ -685,6 +695,7 @@ impl<S: LogStore> RegionInner<S> {
             wal: &self.wal,
             writer: &self.writer,
             manifest: &self.manifest,
+            compaction_picker: self.compaction_picker.clone(),
         };
         // The writer would also try to compat the schema of write batch if it finds out the
         // schema version of request is less than current schema version.
@@ -746,6 +757,7 @@ impl<S: LogStore> RegionInner<S> {
             wal: &self.wal,
             writer: &self.writer,
             manifest: &self.manifest,
+            compaction_picker: self.compaction_picker.clone(),
         };
         self.writer.flush(writer_ctx, ctx).await
     }
@@ -761,6 +773,7 @@ impl<S: LogStore> RegionInner<S> {
             wal: &self.wal,
             writer: &self.writer,
             manifest: &self.manifest,
+            compaction_picker: self.compaction_picker.clone(),
         };
         self.writer.compact(writer_ctx, ctx).await
     }

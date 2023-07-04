@@ -25,7 +25,7 @@ use store_api::storage::{RegionId, SequenceNumber};
 use tokio::sync::oneshot::{Receiver, Sender};
 use tokio::sync::{oneshot, Notify};
 
-use crate::compaction::{CompactionRequestImpl, CompactionSchedulerRef};
+use crate::compaction::{CompactionPickerRef, CompactionRequestImpl, CompactionSchedulerRef};
 use crate::config::EngineConfig;
 use crate::engine::RegionMap;
 use crate::error::{
@@ -109,6 +109,7 @@ pub struct FlushRegionRequest<S: LogStore> {
     pub ttl: Option<Duration>,
     /// Time window for compaction.
     pub compaction_time_window: Option<i64>,
+    pub compaction_picker: CompactionPickerRef<S>,
 }
 
 impl<S: LogStore> FlushRegionRequest<S> {
@@ -146,6 +147,7 @@ impl<S: LogStore> From<&FlushRegionRequest<S>> for CompactionRequestImpl<S> {
             ttl: req.ttl,
             compaction_time_window: req.compaction_time_window,
             sender: None,
+            picker: req.compaction_picker.clone(),
             sst_write_buffer_size: req.engine_config.sst_write_buffer_size,
         }
     }

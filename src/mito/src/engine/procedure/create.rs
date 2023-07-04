@@ -24,8 +24,8 @@ use datatypes::schema::{Schema, SchemaRef};
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
 use store_api::storage::{
-    ColumnId, CreateOptions, EngineContext, OpenOptions, RegionDescriptorBuilder, RegionNumber,
-    StorageEngine,
+    ColumnId, CompactionStrategy, CreateOptions, EngineContext, OpenOptions,
+    RegionDescriptorBuilder, RegionNumber, StorageEngine,
 };
 use table::engine::{region_id, table_dir};
 use table::metadata::{TableInfoBuilder, TableMetaBuilder, TableType};
@@ -232,15 +232,18 @@ impl<S: StorageEngine> TableCreator<S> {
         let table_options = &self.data.request.table_options;
         let write_buffer_size = table_options.write_buffer_size.map(|size| size.0 as usize);
         let ttl = table_options.ttl;
+        let compaction_strategy = CompactionStrategy::from(&table_options.extra_options);
         let open_opts = OpenOptions {
             parent_dir: table_dir.to_string(),
             write_buffer_size,
             ttl,
+            compaction_strategy: compaction_strategy.clone(),
         };
         let create_opts = CreateOptions {
             parent_dir: table_dir.to_string(),
             write_buffer_size,
             ttl,
+            compaction_strategy,
         };
 
         let primary_key_indices = &self.data.request.primary_key_indices;

@@ -23,8 +23,8 @@ use snafu::ResultExt;
 use store_api::logstore::LogStore;
 use store_api::manifest::Manifest;
 use store_api::storage::{
-    CloseContext, CloseOptions, CreateOptions, EngineContext, OpenOptions, Region,
-    RegionDescriptor, StorageEngine,
+    CloseContext, CloseOptions, CompactionStrategy, CreateOptions, EngineContext, OpenOptions,
+    Region, RegionDescriptor, StorageEngine,
 };
 
 use crate::compaction::CompactionSchedulerRef;
@@ -395,6 +395,7 @@ impl<S: LogStore> EngineInner<S> {
                 name,
                 &self.config,
                 opts.ttl,
+                opts.compaction_strategy.clone(),
             )
             .await?;
 
@@ -440,6 +441,7 @@ impl<S: LogStore> EngineInner<S> {
                 &region_name,
                 &self.config,
                 opts.ttl,
+                opts.compaction_strategy.clone(),
             )
             .await?;
 
@@ -471,6 +473,7 @@ impl<S: LogStore> EngineInner<S> {
         region_name: &str,
         config: &EngineConfig,
         region_ttl: Option<Duration>,
+        compaction_strategy: CompactionStrategy,
     ) -> Result<StoreConfig<S>> {
         let parent_dir = util::normalize_dir(parent_dir);
 
@@ -503,6 +506,7 @@ impl<S: LogStore> EngineInner<S> {
             ttl,
             write_buffer_size: write_buffer_size
                 .unwrap_or(self.config.region_write_buffer_size.as_bytes() as usize),
+            compaction_strategy,
         })
     }
 

@@ -125,6 +125,7 @@ pub async fn new_store_config_with_object_store(
             file_purger,
             ttl: None,
             write_buffer_size: DEFAULT_REGION_WRITE_BUFFER_SIZE.as_bytes() as usize,
+            compaction_strategy: Default::default(),
         },
         regions,
     )
