@@ -34,11 +34,12 @@ use aide::openapi::{Info, OpenApi, Server as OpenAPIServer};
 use async_trait::async_trait;
 use axum::body::BoxBody;
 use axum::error_handling::HandleErrorLayer;
-use axum::extract::MatchedPath;
+use axum::extract::{DefaultBodyLimit, MatchedPath};
 use axum::http::Request;
 use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Json};
 use axum::{routing, BoxError, Extension, Router};
+use common_base::readable_size::ReadableSize;
 use common_error::prelude::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_query::Output;
@@ -104,6 +105,8 @@ pub(crate) async fn query_context_from_db(
 
 pub const HTTP_API_VERSION: &str = "v1";
 pub const HTTP_API_PREFIX: &str = "/v1/";
+/// Default http body limit (64M).
+const DEFAULT_BODY_LIMIT: ReadableSize = ReadableSize::mb(64);
 
 // TODO(fys): This is a temporary workaround, it will be improved later
 pub static PUBLIC_APIS: [&str; 2] = ["/v1/influxdb/ping", "/v1/influxdb/health"];
@@ -133,6 +136,8 @@ pub struct HttpOptions {
 
     #[serde(skip)]
     pub disable_dashboard: bool,
+
+    pub body_limit: ReadableSize,
 }
 
 impl Default for HttpOptions {
@@ -141,6 +146,7 @@ impl Default for HttpOptions {
             addr: "127.0.0.1:4000".to_string(),
             timeout: Duration::from_secs(30),
             disable_dashboard: false,
+            body_limit: DEFAULT_BODY_LIMIT,
         }
     }
 }
@@ -544,6 +550,13 @@ impl HttpServer {
                     .layer(HandleErrorLayer::new(handle_error))
                     .layer(TraceLayer::new_for_http())
                     .layer(TimeoutLayer::new(self.options.timeout))
+                    .layer(DefaultBodyLimit::max(
+                        self.options
+                            .body_limit
+                            .0
+                            .try_into()
+                            .unwrap_or_else(|_| DEFAULT_BODY_LIMIT.as_bytes() as usize),
+                    ))
                     // custom layer
                     .layer(AsyncRequireAuthorizationLayer::new(
                         HttpAuth::<BoxBody>::new(self.user_provider.clone()),

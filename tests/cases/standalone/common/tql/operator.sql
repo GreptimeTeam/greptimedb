@@ -33,3 +33,9 @@ tql eval (300, 300, '1s') 10 atan2 20;
 -- eval instant at 5m 10 atan2 NaN
 --     NaN
 tql eval (300, 300, '1s') 10 atan2 NaN;
+
+drop table trigx;
+
+drop table trigy;
+
+drop table trignan;

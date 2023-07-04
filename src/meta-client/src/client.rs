@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod ddl;
 mod heartbeat;
 mod load_balance;
 mod lock;
@@ -29,6 +30,7 @@ use common_meta::rpc::store::{
     RangeRequest, RangeResponse,
 };
 use common_telemetry::info;
+use ddl::Client as DdlClient;
 use heartbeat::Client as HeartbeatClient;
 use lock::Client as LockClient;
 use router::Client as RouterClient;
@@ -49,6 +51,7 @@ pub struct MetaClientBuilder {
     enable_router: bool,
     enable_store: bool,
     enable_lock: bool,
+    enable_ddl: bool,
     channel_manager: Option<ChannelManager>,
 }
 
@@ -89,6 +92,13 @@ impl MetaClientBuilder {
         }
     }
 
+    pub fn enable_ddl(self) -> Self {
+        Self {
+            enable_ddl: true,
+            ..self
+        }
+    }
+
     pub fn channel_manager(self, channel_manager: ChannelManager) -> Self {
         Self {
             channel_manager: Some(channel_manager),
@@ -119,7 +129,10 @@ impl MetaClientBuilder {
             client.store = Some(StoreClient::new(self.id, self.role, mgr.clone()));
         }
         if self.enable_lock {
-            client.lock = Some(LockClient::new(self.id, self.role, mgr));
+            client.lock = Some(LockClient::new(self.id, self.role, mgr.clone()));
+        }
+        if self.enable_ddl {
+            client.ddl = Some(DdlClient::new(self.id, self.role, mgr));
         }
 
         client
@@ -134,6 +147,7 @@ pub struct MetaClient {
     router: Option<RouterClient>,
     store: Option<StoreClient>,
     lock: Option<LockClient>,
+    ddl: Option<DdlClient>,
 }
 
 impl MetaClient {

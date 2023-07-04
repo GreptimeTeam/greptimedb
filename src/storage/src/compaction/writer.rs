@@ -16,6 +16,7 @@ use common_query::logical_plan::{DfExpr, Expr};
 use common_time::timestamp::TimeUnit;
 use datafusion_expr::Operator;
 use datatypes::value::timestamp_to_scalar_value;
+use store_api::storage::RegionId;
 
 use crate::chunk::{ChunkReaderBuilder, ChunkReaderImpl};
 use crate::error;
@@ -24,11 +25,11 @@ use crate::sst::{AccessLayerRef, FileHandle};
 
 /// Builds an SST reader that only reads rows within given time range.
 pub(crate) async fn build_sst_reader(
+    region_id: RegionId,
     schema: RegionSchemaRef,
     sst_layer: AccessLayerRef,
     files: &[FileHandle],
-    lower_sec_inclusive: i64,
-    upper_sec_exclusive: i64,
+    time_range: (Option<i64>, Option<i64>),
 ) -> error::Result<ChunkReaderImpl> {
     // TODO(hl): Schemas in different SSTs may differ, thus we should infer
     // timestamp column name from Parquet metadata.
@@ -38,17 +39,12 @@ pub(crate) async fn build_sst_reader(
     let ts_col_unit = ts_col.data_type.as_timestamp().unwrap().unit();
     let ts_col_name = ts_col.name.clone();
 
-    ChunkReaderBuilder::new(schema, sst_layer)
+    ChunkReaderBuilder::new(region_id, schema, sst_layer)
         .pick_ssts(files)
         .filters(
-            build_time_range_filter(
-                lower_sec_inclusive,
-                upper_sec_exclusive,
-                &ts_col_name,
-                ts_col_unit,
-            )
-            .into_iter()
-            .collect(),
+            build_time_range_filter(time_range, &ts_col_name, ts_col_unit)
+                .into_iter()
+                .collect(),
         )
         .build()
         .await
@@ -57,21 +53,22 @@ pub(crate) async fn build_sst_reader(
 /// Build time range filter expr from lower (inclusive) and upper bound(exclusive).
 /// Returns `None` if time range overflows.
 fn build_time_range_filter(
-    low_sec: i64,
-    high_sec: i64,
+    time_range: (Option<i64>, Option<i64>),
     ts_col_name: &str,
     ts_col_unit: TimeUnit,
 ) -> Option<Expr> {
-    debug_assert!(low_sec <= high_sec);
+    let (low_ts_inclusive, high_ts_exclusive) = time_range;
     let ts_col = DfExpr::Column(datafusion_common::Column::from_name(ts_col_name));
 
     // Converting seconds to whatever unit won't lose precision.
     // Here only handles overflow.
-    let low_ts = common_time::Timestamp::new_second(low_sec)
-        .convert_to(ts_col_unit)
+    let low_ts = low_ts_inclusive
+        .map(common_time::Timestamp::new_second)
+        .and_then(|ts| ts.convert_to(ts_col_unit))
         .map(|ts| ts.value());
-    let high_ts = common_time::Timestamp::new_second(high_sec)
-        .convert_to(ts_col_unit)
+    let high_ts = high_ts_exclusive
+        .map(common_time::Timestamp::new_second)
+        .and_then(|ts| ts.convert_to(ts_col_unit))
         .map(|ts| ts.value());
 
     let expr = match (low_ts, high_ts) {
@@ -138,6 +135,8 @@ mod tests {
     use crate::sst::parquet::ParquetWriter;
     use crate::sst::{self, FileId, FileMeta, FsAccessLayer, Source, SstInfo, WriteOptions};
     use crate::test_util::descriptor_util::RegionDescBuilder;
+
+    const REGION_ID: RegionId = 1;
 
     fn schema_for_test() -> RegionSchemaRef {
         // Just build a region desc and use its columns metadata.
@@ -277,7 +276,9 @@ mod tests {
         handle
     }
 
+    // The region id is only used to build the reader, we don't check its content.
     async fn check_reads(
+        region_id: RegionId,
         schema: RegionSchemaRef,
         sst_layer: AccessLayerRef,
         files: &[FileHandle],
@@ -286,11 +287,11 @@ mod tests {
         expect: &[i64],
     ) {
         let mut reader = build_sst_reader(
+            region_id,
             schema,
             sst_layer,
             files,
-            lower_sec_inclusive,
-            upper_sec_exclusive,
+            (Some(lower_sec_inclusive), Some(upper_sec_exclusive)),
         )
         .await
         .unwrap();
@@ -352,6 +353,7 @@ mod tests {
         let files = vec![file1, file2];
         // read from two sst files with time range filter,
         check_reads(
+            REGION_ID,
             schema.clone(),
             sst_layer.clone(),
             &files,
@@ -361,7 +363,7 @@ mod tests {
         )
         .await;
 
-        check_reads(schema, sst_layer, &files, 1, 2, &[1000]).await;
+        check_reads(REGION_ID, schema, sst_layer, &files, 1, 2, &[1000]).await;
     }
 
     async fn read_file(
@@ -370,9 +372,15 @@ mod tests {
         sst_layer: AccessLayerRef,
     ) -> Vec<i64> {
         let mut timestamps = vec![];
-        let mut reader = build_sst_reader(schema, sst_layer, files, i64::MIN, i64::MAX)
-            .await
-            .unwrap();
+        let mut reader = build_sst_reader(
+            REGION_ID,
+            schema,
+            sst_layer,
+            files,
+            (Some(i64::MIN), Some(i64::MAX)),
+        )
+        .await
+        .unwrap();
         while let Some(chunk) = reader.next_chunk().await.unwrap() {
             let ts = chunk.columns[0]
                 .as_any()
@@ -434,15 +442,33 @@ mod tests {
         let sst_layer = Arc::new(FsAccessLayer::new("./", object_store.clone()));
         let input_files = vec![file2, file1];
 
-        let reader1 = build_sst_reader(schema.clone(), sst_layer.clone(), &input_files, 0, 3)
-            .await
-            .unwrap();
-        let reader2 = build_sst_reader(schema.clone(), sst_layer.clone(), &input_files, 3, 6)
-            .await
-            .unwrap();
-        let reader3 = build_sst_reader(schema.clone(), sst_layer.clone(), &input_files, 6, 10)
-            .await
-            .unwrap();
+        let reader1 = build_sst_reader(
+            REGION_ID,
+            schema.clone(),
+            sst_layer.clone(),
+            &input_files,
+            (Some(0), Some(3)),
+        )
+        .await
+        .unwrap();
+        let reader2 = build_sst_reader(
+            REGION_ID,
+            schema.clone(),
+            sst_layer.clone(),
+            &input_files,
+            (Some(3), Some(6)),
+        )
+        .await
+        .unwrap();
+        let reader3 = build_sst_reader(
+            REGION_ID,
+            schema.clone(),
+            sst_layer.clone(),
+            &input_files,
+            (Some(6), Some(10)),
+        )
+        .await
+        .unwrap();
 
         let opts = WriteOptions {
             sst_write_buffer_size: ReadableSize::mb(8),
@@ -525,7 +551,12 @@ mod tests {
 
     #[test]
     fn test_build_time_range_filter() {
-        assert!(build_time_range_filter(i64::MIN, i64::MAX, "ts", TimeUnit::Nanosecond).is_none());
+        assert!(build_time_range_filter(
+            (Some(i64::MIN), Some(i64::MAX)),
+            "ts",
+            TimeUnit::Nanosecond
+        )
+        .is_none());
 
         assert_eq!(
             Expr::from(datafusion_expr::binary_expr(
@@ -533,10 +564,10 @@ mod tests {
                 Operator::Lt,
                 datafusion_expr::lit(timestamp_to_scalar_value(
                     TimeUnit::Nanosecond,
-                    Some(TimeUnit::Second.factor() as i64 / TimeUnit::Nanosecond.factor() as i64)
-                ))
+                    Some(TimeUnit::Second.factor() as i64 / TimeUnit::Nanosecond.factor() as i64),
+                )),
             )),
-            build_time_range_filter(i64::MIN, 1, "ts", TimeUnit::Nanosecond).unwrap()
+            build_time_range_filter((Some(i64::MIN), Some(1)), "ts", TimeUnit::Nanosecond).unwrap()
         );
 
         assert_eq!(
@@ -547,10 +578,10 @@ mod tests {
                     TimeUnit::Nanosecond,
                     Some(
                         2 * TimeUnit::Second.factor() as i64 / TimeUnit::Nanosecond.factor() as i64
-                    )
-                ))
+                    ),
+                )),
             )),
-            build_time_range_filter(2, i64::MAX, "ts", TimeUnit::Nanosecond).unwrap()
+            build_time_range_filter((Some(2), Some(i64::MAX)), "ts", TimeUnit::Nanosecond).unwrap()
         );
     }
 }

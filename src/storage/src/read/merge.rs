@@ -608,7 +608,7 @@ mod tests {
     use datatypes::vectors::{Int64Vector, TimestampMillisecondVector};
 
     use super::*;
-    use crate::test_util::read_util;
+    use crate::test_util::read_util::{self, Batches};
 
     #[tokio::test]
     async fn test_merge_reader_empty() {
@@ -652,8 +652,6 @@ mod tests {
         let output = format!("{:?}", left.first_row());
         assert!(output.contains("pos: 1"));
     }
-
-    type Batches<'a> = &'a [&'a [(i64, Option<i64>)]];
 
     fn build_merge_reader(sources: &[Batches], num_iter: usize, batch_size: usize) -> MergeReader {
         let schema = read_util::new_projected_schema();

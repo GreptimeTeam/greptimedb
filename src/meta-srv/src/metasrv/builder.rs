@@ -38,6 +38,7 @@ use crate::procedure::region_failover::RegionFailoverManager;
 use crate::procedure::state_store::MetaStateStore;
 use crate::selector::lease_based::LeaseBasedSelector;
 use crate::sequence::Sequence;
+use crate::service::store::cached_kv::{CheckLeader, LeaderCachedKvStore};
 use crate::service::store::kv::{KvStoreRef, ResettableKvStoreRef};
 use crate::service::store::memory::MemStore;
 
@@ -133,6 +134,10 @@ impl MetaSrvBuilder {
 
         let kv_store = kv_store.unwrap_or_else(|| Arc::new(MemStore::default()));
         let in_memory = in_memory.unwrap_or_else(|| Arc::new(MemStore::default()));
+        let leader_cached_kv_store = Arc::new(LeaderCachedKvStore::new(
+            Arc::new(CheckLeaderByElection(election.clone())),
+            kv_store.clone(),
+        ));
         let meta_peer_client = meta_peer_client.unwrap_or_else(|| {
             MetaPeerClientBuilder::default()
                 .election(election.clone())
@@ -148,6 +153,9 @@ impl MetaSrvBuilder {
         let mailbox = HeartbeatMailbox::create(pushers.clone(), mailbox_sequence);
         let state_store = Arc::new(MetaStateStore::new(kv_store.clone()));
         let procedure_manager = Arc::new(LocalManager::new(ManagerConfig::default(), state_store));
+        let table_id_sequence = Arc::new(Sequence::new(TABLE_ID_SEQ, 1024, 10, kv_store.clone()));
+        let metadata_service = metadata_service
+            .unwrap_or_else(|| Arc::new(DefaultMetadataService::new(kv_store.clone())));
         let lock = lock.unwrap_or_else(|| Arc::new(MemLock::default()));
 
         let handler_group = match handler_group {
@@ -204,11 +212,6 @@ impl MetaSrvBuilder {
             }
         };
 
-        let table_id_sequence = Arc::new(Sequence::new(TABLE_ID_SEQ, 1024, 10, kv_store.clone()));
-
-        let metadata_service = metadata_service
-            .unwrap_or_else(|| Arc::new(DefaultMetadataService::new(kv_store.clone())));
-
         // TODO(weny): considers to modify the default config of procedure manager
         let ddl_manager = Arc::new(DdlManager::new(
             procedure_manager.clone(),
@@ -223,6 +226,7 @@ impl MetaSrvBuilder {
             options,
             in_memory,
             kv_store,
+            leader_cached_kv_store,
             meta_peer_client,
             table_id_sequence,
             selector,
@@ -240,5 +244,15 @@ impl MetaSrvBuilder {
 impl Default for MetaSrvBuilder {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+struct CheckLeaderByElection(Option<ElectionRef>);
+
+impl CheckLeader for CheckLeaderByElection {
+    fn check(&self) -> bool {
+        self.0
+            .as_ref()
+            .map_or(false, |election| election.is_leader())
     }
 }

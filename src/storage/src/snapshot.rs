@@ -53,15 +53,19 @@ impl Snapshot for SnapshotImpl {
         let mutables = memtable_version.mutable_memtable();
         let immutables = memtable_version.immutable_memtables();
 
-        let mut builder =
-            ChunkReaderBuilder::new(self.version.schema().clone(), self.sst_layer.clone())
-                .reserve_num_memtables(memtable_version.num_memtables())
-                .projection(request.projection)
-                .filters(request.filters)
-                .batch_size(ctx.batch_size)
-                .output_ordering(request.output_ordering)
-                .visible_sequence(visible_sequence)
-                .pick_memtables(mutables.clone());
+        let mut builder = ChunkReaderBuilder::new(
+            self.version.metadata().id(),
+            self.version.schema().clone(),
+            self.sst_layer.clone(),
+        )
+        .reserve_num_memtables(memtable_version.num_memtables())
+        .projection(request.projection)
+        .filters(request.filters)
+        .batch_size(ctx.batch_size)
+        .output_ordering(request.output_ordering)
+        .visible_sequence(visible_sequence)
+        .pick_memtables(mutables.clone())
+        .use_chain_reader(true);
 
         for memtable in immutables {
             builder = builder.pick_memtables(memtable.clone());

@@ -1,4 +1,3 @@
-#![feature(let_chains)]
 // Copyright 2023 Greptime Team
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Storage related APIs
-
-pub mod logstore;
-pub mod manifest;
-pub mod storage;
+/// Region engine implementation for timeseries data.
+#[derive(Clone)]
+pub struct MitoEngine {}

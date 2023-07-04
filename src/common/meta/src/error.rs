@@ -60,7 +60,10 @@ pub enum Error {
     InvalidTableMetadata { err_msg: String, location: Location },
 
     #[snafu(display("Failed to get kv cache, err: {}", err_msg))]
-    GetKvCache { err_msg: String, location: Location },
+    GetKvCache { err_msg: String },
+
+    #[snafu(display("Get null from cache, key: {}", key))]
+    CacheNotGet { key: String, location: Location },
 
     #[snafu(display("Failed to request MetaSrv, source: {}", source))]
     MetaSrv {
@@ -82,7 +85,7 @@ impl ErrorExt for Error {
             | InvalidProtoMsg { .. }
             | InvalidTableMetadata { .. } => StatusCode::Unexpected,
 
-            SendMessage { .. } | GetKvCache { .. } => StatusCode::Internal,
+            SendMessage { .. } | GetKvCache { .. } | CacheNotGet { .. } => StatusCode::Internal,
 
             EncodeJson { .. } | DecodeJson { .. } | PayloadNotExist { .. } => {
                 StatusCode::Unexpected
