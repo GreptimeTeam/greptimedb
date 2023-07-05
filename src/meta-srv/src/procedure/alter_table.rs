@@ -38,6 +38,7 @@ use table::requests::{AlterKind, AlterTableRequest};
 use super::utils::{build_table_metadata, build_table_metadata_key, TableMetadata};
 use crate::ddl::DdlContext;
 use crate::error::{self, Result};
+use crate::procedure::utils::handle_request_datanode_error;
 use crate::service::mailbox::BroadcastChannel;
 use crate::service::store::txn::{Compare, CompareOp, Txn, TxnOp};
 use crate::table_routes::get_table_global_value;
@@ -99,7 +100,7 @@ impl AlterTableProcedure {
                 client
                     .alter(expr)
                     .await
-                    .context(error::RequestDatanodeSnafu { peer: datanode })
+                    .map_err(handle_request_datanode_error(datanode))
             }));
         }
 
@@ -107,13 +108,7 @@ impl AlterTableProcedure {
             .await
             .into_iter()
             .map(|e| e.context(error::JoinSnafu).flatten())
-            .collect::<Result<Vec<_>>>()
-            .map_err(|err| {
-                error::RetryLaterSnafu {
-                    reason: format!("Failed to execute drop table on datanode, source: {}", err),
-                }
-                .build()
-            })?;
+            .collect::<Result<Vec<_>>>()?;
 
         self.data.state = AlterTableState::UpdateMetadata;
 
