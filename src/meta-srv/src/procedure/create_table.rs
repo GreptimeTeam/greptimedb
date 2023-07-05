@@ -110,7 +110,7 @@ impl CreateTableProcedure {
         let table_id = self.creator.data.table_route.table.id;
 
         let table_route_key = TableRouteKey::with_table_name(table_id, &table_name.clone().into())
-            .key()
+            .to_string()
             .into_bytes();
 
         let table_global_key = TableGlobalKey {
