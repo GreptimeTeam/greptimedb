@@ -25,8 +25,7 @@ use common_meta::rpc::router::TableRoute;
 use common_meta::table_name::TableName;
 use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{
-    Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure,
-    Result as ProcedureResult, Status,
+    Context as ProcedureContext, LockKey, Procedure, Result as ProcedureResult, Status,
 };
 use common_telemetry::debug;
 use futures::future::join_all;
@@ -35,10 +34,11 @@ use snafu::{ensure, ResultExt};
 use table::engine::TableReference;
 use table::metadata::RawTableInfo;
 
+use super::utils::handle_retry_error;
 use crate::ddl::DdlContext;
 use crate::error;
 use crate::error::Result;
-use crate::procedure::utils::{build_table_metadata, TableMetadata};
+use crate::procedure::utils::{build_table_metadata, handle_request_datanode_error, TableMetadata};
 use crate::service::mailbox::BroadcastChannel;
 use crate::service::router::fetch_table;
 use crate::service::store::txn::{Compare, CompareOp, Txn, TxnOp};
@@ -191,14 +191,10 @@ impl DropTableProcedure {
             let client = Database::new(table_ref.catalog, table_ref.schema, client);
             let expr = expr.clone();
             joins.push(common_runtime::spawn_bg(async move {
-                if let Err(err) = client
-                    .drop_table(expr)
-                    .await
-                    .context(error::RequestDatanodeSnafu { peer: datanode })
-                {
+                if let Err(err) = client.drop_table(expr).await {
                     // TODO(weny): add tests for `TableNotFound`
                     if err.status_code() != StatusCode::TableNotFound {
-                        return Err(err);
+                        return Err(handle_request_datanode_error(datanode)(err));
                     }
                 }
                 Ok(())
@@ -209,13 +205,7 @@ impl DropTableProcedure {
             .await
             .into_iter()
             .map(|e| e.context(error::JoinSnafu).flatten())
-            .collect::<Result<Vec<_>>>()
-            .map_err(|err| {
-                error::RetryLaterSnafu {
-                    reason: format!("Failed to execute drop table on datanode, source: {}", err),
-                }
-                .build()
-            })?;
+            .collect::<Result<Vec<_>>>()?;
 
         Ok(Status::Done)
     }
@@ -228,24 +218,12 @@ impl Procedure for DropTableProcedure {
     }
 
     async fn execute(&mut self, _ctx: &ProcedureContext) -> ProcedureResult<Status> {
-        let error_handler = |e| {
-            if matches!(e, error::Error::RetryLater { .. }) {
-                ProcedureError::retry_later(e)
-            } else {
-                ProcedureError::external(e)
-            }
-        };
         match self.data.state {
-            DropTableState::RemoveMetadata => {
-                self.on_remove_metadata().await.map_err(error_handler)
-            }
-            DropTableState::InvalidateTableCache => {
-                self.on_broadcast().await.map_err(error_handler)
-            }
-            DropTableState::DatanodeDropTable => {
-                self.on_datanode_drop_table().await.map_err(error_handler)
-            }
+            DropTableState::RemoveMetadata => self.on_remove_metadata().await,
+            DropTableState::InvalidateTableCache => self.on_broadcast().await,
+            DropTableState::DatanodeDropTable => self.on_datanode_drop_table().await,
         }
+        .map_err(handle_retry_error)
     }
 
     fn dump(&self) -> ProcedureResult<String> {

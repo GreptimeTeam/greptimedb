@@ -15,7 +15,7 @@
 mod client;
 pub mod client_manager;
 mod database;
-mod error;
+pub mod error;
 pub mod load_balance;
 mod metrics;
 mod stream_insert;

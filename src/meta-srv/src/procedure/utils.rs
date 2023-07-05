@@ -15,12 +15,14 @@
 use api::v1::meta::TableRouteValue;
 use catalog::helper::{TableGlobalKey, TableGlobalValue};
 use common_meta::key::TableRouteKey;
+use common_meta::peer::Peer;
 use common_meta::rpc::router::TableRoute;
-use snafu::ResultExt;
+use common_procedure::error::Error as ProcedureError;
+use snafu::{location, Location, ResultExt};
 use table::engine::TableReference;
 use table::metadata::{RawTableInfo, TableId};
 
-use crate::error::{self, Result};
+use crate::error::{self, Error, Result};
 use crate::service::router::create_table_global_value;
 
 pub struct TableMetadata<'a> {
@@ -76,4 +78,29 @@ pub fn build_table_metadata(
         table_route_key,
         table_route_value,
     })
+}
+
+pub fn handle_request_datanode_error(datanode: Peer) -> impl FnOnce(client::error::Error) -> Error {
+    move |err| {
+        if matches!(err, client::error::Error::FlightGet { .. }) {
+            error::RetryLaterSnafu {
+                reason: format!("Failed to execute operation on datanode, source: {}", err),
+            }
+            .build()
+        } else {
+            error::Error::RequestDatanode {
+                location: location!(),
+                peer: datanode,
+                source: err,
+            }
+        }
+    }
+}
+
+pub fn handle_retry_error(e: Error) -> ProcedureError {
+    if matches!(e, error::Error::RetryLater { .. }) {
+        ProcedureError::retry_later(e)
+    } else {
+        ProcedureError::external(e)
+    }
 }

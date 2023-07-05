@@ -16,22 +16,19 @@ use api::v1::meta::TableRouteValue;
 use async_trait::async_trait;
 use catalog::helper::TableGlobalKey;
 use client::Database;
-use common_error::ext::ErrorExt;
-use common_error::status_code::StatusCode;
 use common_meta::key::TableRouteKey;
 use common_meta::rpc::ddl::CreateTableTask;
 use common_meta::rpc::router::TableRoute;
 use common_meta::table_name::TableName;
 use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu};
-use common_procedure::{
-    Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure, Status,
-};
+use common_procedure::{Context as ProcedureContext, LockKey, Procedure, Status};
 use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
 use table::engine::TableReference;
 use table::metadata::TableId;
 
+use super::utils::{handle_request_datanode_error, handle_retry_error};
 use crate::ddl::DdlContext;
 use crate::error::{self, Result};
 use crate::service::router::create_table_global_value;
@@ -212,31 +209,18 @@ impl CreateTableProcedure {
             create_expr_for_region.region_numbers = regions;
 
             joins.push(common_runtime::spawn_bg(async move {
-                if let Err(err) = client
+                client
                     .create(create_expr_for_region)
                     .await
-                    .context(error::RequestDatanodeSnafu { peer: datanode })
-                {
-                    // TODO(weny): add tests for `TableAlreadyExists`
-                    if err.status_code() != StatusCode::TableAlreadyExists {
-                        return Err(err);
-                    }
-                }
-                Ok(())
+                    .map_err(handle_request_datanode_error(datanode))
             }));
         }
 
         let _ = join_all(joins)
             .await
             .into_iter()
-            .map(|e| e.context(error::JoinSnafu).flatten())
-            .collect::<Result<Vec<_>>>()
-            .map_err(|err| {
-                error::RetryLaterSnafu {
-                    reason: format!("Failed to execute drop table on datanode, source: {}", err),
-                }
-                .build()
-            })?;
+            .map(|e| e.context(error::JoinSnafu))
+            .collect::<Result<Vec<_>>>()?;
 
         self.creator.data.state = CreateTableState::CreateMetadata;
 
@@ -251,22 +235,12 @@ impl Procedure for CreateTableProcedure {
     }
 
     async fn execute(&mut self, _ctx: &ProcedureContext) -> ProcedureResult<Status> {
-        let error_handler = |e| {
-            if matches!(e, error::Error::RetryLater { .. }) {
-                ProcedureError::retry_later(e)
-            } else {
-                ProcedureError::external(e)
-            }
-        };
         match self.creator.data.state {
-            CreateTableState::Prepare => self.on_prepare().await.map_err(error_handler),
-            CreateTableState::DatanodeCreateTable => {
-                self.on_datanode_create_table().await.map_err(error_handler)
-            }
-            CreateTableState::CreateMetadata => {
-                self.on_create_metadata().await.map_err(error_handler)
-            }
+            CreateTableState::Prepare => self.on_prepare().await,
+            CreateTableState::DatanodeCreateTable => self.on_datanode_create_table().await,
+            CreateTableState::CreateMetadata => self.on_create_metadata().await,
         }
+        .map_err(handle_retry_error)
     }
 
     fn dump(&self) -> ProcedureResult<String> {
