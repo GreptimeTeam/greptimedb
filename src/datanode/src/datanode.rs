@@ -52,6 +52,7 @@ pub enum ObjectStoreConfig {
     S3(S3Config),
     Oss(OssConfig),
     Azblob(AzblobConfig),
+    Gcs(GcsConfig),
 }
 
 /// Storage engine config
@@ -122,6 +123,19 @@ pub struct AzblobConfig {
     pub cache_capacity: Option<ReadableSize>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GcsConfig {
+    pub root: String,
+    pub bucket: String,
+    pub scope: String,
+    #[serde(skip_serializing)]
+    pub credential_path: SecretString,
+    pub endpoint: String,
+    pub cache_path: Option<String>,
+    pub cache_capacity: Option<ReadableSize>,
+}
+
 impl Default for S3Config {
     fn default() -> Self {
         Self {
@@ -162,6 +176,20 @@ impl Default for AzblobConfig {
             cache_path: Option::default(),
             cache_capacity: Option::default(),
             sas_token: Option::default(),
+        }
+    }
+}
+
+impl Default for GcsConfig {
+    fn default() -> Self {
+        Self {
+            root: String::default(),
+            bucket: String::default(),
+            scope: String::default(),
+            credential_path: SecretString::from(String::default()),
+            endpoint: String::default(),
+            cache_path: Option::default(),
+            cache_capacity: Option::default(),
         }
     }
 }
