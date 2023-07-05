@@ -23,6 +23,7 @@ use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_meta::peer::Peer;
 use common_meta::table_name::TableName;
 use datafusion::common::Result;
+use datafusion::datasource::DefaultTableSource;
 use datafusion::execution::context::SessionState;
 use datafusion::physical_plan::planner::ExtensionPlanner;
 use datafusion::physical_plan::{ExecutionPlan, PhysicalPlanner};
@@ -32,6 +33,7 @@ use datafusion_expr::{LogicalPlan, UserDefinedLogicalNode};
 use partition::manager::PartitionRuleManager;
 use snafu::ResultExt;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
+use table::table::adapter::DfTableProviderAdapter;
 
 use crate::dist_plan::merge_scan::{MergeScanExec, MergeScanLogicalPlan};
 use crate::error;
@@ -74,7 +76,9 @@ impl ExtensionPlanner for DistExtensionPlanner {
             } else {
                 // TODO(ruihang): generate different execution plans for different variant merge operation
                 let input_plan = merge_scan.input();
+                println!("input: {:?}", input_plan);
                 let Some(table_name) = self.get_table_name(input_plan)? else {
+                    println!("table name not found, ignore this merge scan");
                     // no relation found in input plan, going to execute them locally 
                     return planner
                         .create_physical_plan(input_plan, session_state)
@@ -142,6 +146,23 @@ impl TreeNodeVisitor for TableNameExtractor {
     fn pre_visit(&mut self, node: &Self::N) -> Result<VisitRecursion> {
         match node {
             LogicalPlan::TableScan(scan) => {
+                if let Some(source) = scan.source.as_any().downcast_ref::<DefaultTableSource>() {
+                    if let Some(provider) = source
+                        .table_provider
+                        .as_any()
+                        .downcast_ref::<DfTableProviderAdapter>()
+                    {
+                        let info = provider.table().table_info();
+                        self.table_name = Some(TableName::new(
+                            info.catalog_name.clone(),
+                            info.schema_name.clone(),
+                            info.name.clone(),
+                        ));
+                        println!("retrieved table name: {:?}", self.table_name);
+                        return Ok(VisitRecursion::Stop);
+                    }
+                }
+                println!("downcast failed");
                 match &scan.table_name {
                     TableReference::Full {
                         catalog,

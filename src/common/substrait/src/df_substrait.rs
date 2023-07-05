@@ -43,13 +43,15 @@ impl SubstraitPlan for DFLogicalSubstraitConvertor {
         &self,
         message: B,
         catalog_list: Arc<dyn CatalogList>,
+        catalog: &str,
+        schema: &str,
     ) -> Result<Self::Plan, Self::Error> {
-        let state_config = SessionConfig::new()
-            .with_default_catalog_and_schema(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
+        let state_config = SessionConfig::new().with_default_catalog_and_schema(catalog, schema);
         let state = SessionState::with_config_rt(state_config, Arc::new(RuntimeEnv::default()));
         let mut context = SessionContext::with_state(state);
         context.register_catalog_list(catalog_list);
         let plan = Plan::decode(message).context(DecodeRelSnafu)?;
+        println!("plan: {:?}", plan);
         let df_plan = from_substrait_plan(&mut context, &plan)
             .await
             .context(DecodeDfPlanSnafu)?;
