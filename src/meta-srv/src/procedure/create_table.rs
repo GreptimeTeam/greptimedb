@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use api::v1::meta::TableRouteValue;
+use api::v1::TableId;
 use async_trait::async_trait;
 use catalog::helper::TableGlobalKey;
 use client::Database;
@@ -196,7 +197,6 @@ impl CreateTableProcedure {
 
     async fn on_datanode_create_table(&mut self) -> Result<Status> {
         let table_route = &self.creator.data.table_route;
-
         let table_name = self.table_name();
         let clients = self.context.datanode_clients.clone();
         let leaders = table_route.find_leaders();
@@ -209,6 +209,9 @@ impl CreateTableProcedure {
             let regions = table_route.find_leader_regions(&datanode);
             let mut create_expr_for_region = self.creator.data.task.create_table.clone();
             create_expr_for_region.region_numbers = regions;
+            create_expr_for_region.table_id = Some(TableId {
+                id: table_route.table.id as u32,
+            });
 
             joins.push(common_runtime::spawn_bg(async move {
                 if let Err(err) = client.create(create_expr_for_region).await {

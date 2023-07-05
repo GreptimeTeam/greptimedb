@@ -59,7 +59,6 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_distributed_exec_sql() {
-        common_telemetry::init_default_ut_logging();
         let distributed = tests::create_distributed_instance("test_distributed_exec_sql").await;
         let frontend = distributed.frontend();
         let instance = frontend.as_ref();
