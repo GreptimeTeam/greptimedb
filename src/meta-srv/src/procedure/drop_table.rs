@@ -41,7 +41,7 @@ use crate::error::Result;
 use crate::procedure::utils::{build_table_metadata, handle_request_datanode_error, TableMetadata};
 use crate::service::mailbox::BroadcastChannel;
 use crate::service::router::fetch_table;
-use crate::service::store::txn::{Compare, CompareOp, Txn, TxnOp};
+use crate::service::store::txn::{Txn, TxnOp};
 pub struct DropTableProcedure {
     context: DdlContext,
     data: DropTableData,
@@ -98,26 +98,10 @@ impl DropTableProcedure {
             self.data.table_info.clone(),
         )?;
 
-        let txn = Txn::new()
-            .when(vec![
-                Compare::with_value(
-                    table_route_key.to_string().into_bytes(),
-                    CompareOp::Equal,
-                    table_route_value.clone().into(),
-                ),
-                Compare::with_value(
-                    table_global_key.to_string().into_bytes(),
-                    CompareOp::Equal,
-                    table_global_value
-                        .clone()
-                        .as_bytes()
-                        .context(error::InvalidCatalogValueSnafu)?,
-                ),
-            ])
-            .and_then(vec![
-                TxnOp::Delete(table_route_key.to_string().into_bytes()),
-                TxnOp::Delete(table_global_key.to_string().into_bytes()),
-            ]);
+        let txn = Txn::new().and_then(vec![
+            TxnOp::Delete(table_route_key.to_string().into_bytes()),
+            TxnOp::Delete(table_global_key.to_string().into_bytes()),
+        ]);
         let resp = self.context.kv_store.txn(txn).await?;
 
         ensure!(
