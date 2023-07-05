@@ -208,18 +208,14 @@ impl DropTableProcedure {
         let _ = join_all(joins)
             .await
             .into_iter()
-            .map(|result| {
-                result.map_err(|err| {
-                    error::RetryLaterSnafu {
-                        reason: format!(
-                            "Failed to execute drop table on datanode, source: {}",
-                            err
-                        ),
-                    }
-                    .build()
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
+            .map(|e| e.context(error::JoinSnafu).flatten())
+            .collect::<Result<Vec<_>>>()
+            .map_err(|err| {
+                error::RetryLaterSnafu {
+                    reason: format!("Failed to execute drop table on datanode, source: {}", err),
+                }
+                .build()
+            })?;
 
         Ok(Status::Done)
     }
