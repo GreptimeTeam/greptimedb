@@ -20,8 +20,6 @@ pub(crate) const METRIC_RUN_SCRIPT_ELAPSED: &str = "frontend.run_script_elapsed"
 /// frontend metrics
 /// Metrics for creating table in dist mode.
 pub const DIST_CREATE_TABLE: &str = "frontend.dist.create_table";
-pub const DIST_CREATE_TABLE_IN_META: &str = "frontend.dist.create_table.update_meta";
-pub const DIST_CREATE_TABLE_IN_DATANODE: &str = "frontend.dist.create_table.invoke_datanode";
 pub const DIST_INGEST_ROW_COUNT: &str = "frontend.dist.ingest_rows";
 
 /// The samples count of Prometheus remote write.

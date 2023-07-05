@@ -35,8 +35,7 @@ use common_catalog::format_full_table_name;
 use common_error::prelude::BoxedError;
 use common_meta::rpc::ddl::{DdlTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse};
 use common_meta::rpc::router::{
-    CreateRequest as MetaCreateRequest, DeleteRequest as MetaDeleteRequest,
-    Partition as MetaPartition, RouteRequest, RouteResponse,
+    DeleteRequest as MetaDeleteRequest, Partition as MetaPartition, RouteRequest,
 };
 use common_meta::rpc::store::CompareAndPutRequest;
 use common_meta::table_name::TableName;
@@ -97,17 +96,6 @@ impl DistInstance {
             catalog_manager,
             datanode_clients,
         }
-    }
-
-    async fn find_table(&self, table_name: &TableName) -> Result<Option<TableRef>> {
-        self.catalog_manager
-            .table(
-                &table_name.catalog_name,
-                &table_name.schema_name,
-                &table_name.table_name,
-            )
-            .await
-            .context(CatalogSnafu)
     }
 
     pub async fn create_table(
@@ -507,35 +495,6 @@ impl DistInstance {
 
         self.meta_client
             .submit_ddl_task(request)
-            .await
-            .context(RequestMetaSnafu)
-    }
-
-    async fn create_table_in_meta(
-        &self,
-        create_table: &CreateTableExpr,
-        partitions: Option<Partitions>,
-        table_info: &RawTableInfo,
-    ) -> Result<RouteResponse> {
-        let _timer = common_telemetry::timer!(crate::metrics::DIST_CREATE_TABLE_IN_META);
-        let mut catalog_name = create_table.catalog_name.clone();
-        if catalog_name.is_empty() {
-            catalog_name = DEFAULT_CATALOG_NAME.to_string();
-        }
-        let mut schema_name = create_table.schema_name.clone();
-        if schema_name.is_empty() {
-            schema_name = DEFAULT_SCHEMA_NAME.to_string();
-        }
-        let table_name = TableName::new(catalog_name, schema_name, create_table.table_name.clone());
-
-        let partitions = parse_partitions(create_table, partitions)?;
-        let request = MetaCreateRequest {
-            table_name,
-            partitions,
-            table_info,
-        };
-        self.meta_client
-            .create_route(request)
             .await
             .context(RequestMetaSnafu)
     }
