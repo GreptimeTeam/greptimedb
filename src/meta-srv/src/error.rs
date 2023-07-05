@@ -505,8 +505,8 @@ impl ErrorExt for Error {
             | Error::StartGrpc { .. }
             | Error::Combine { .. }
             | Error::NoEnoughAvailableDatanode { .. }
-            | Error::Join { .. }
-            | Error::ConvertGrpcExpr { .. } => StatusCode::Internal,
+            | Error::ConvertGrpcExpr { .. }
+            | Error::Join { .. } => StatusCode::Internal,
             Error::EmptyKey { .. }
             | Error::MissingRequiredParameter { .. }
             | Error::MissingRequestHeader { .. }
