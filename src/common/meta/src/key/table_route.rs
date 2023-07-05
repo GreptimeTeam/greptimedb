@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt::Display;
+
 use api::v1::meta::TableName;
 
 use crate::key::to_removed_key;
@@ -42,12 +44,14 @@ impl<'a> TableRouteKey<'a> {
         )
     }
 
-    pub fn key(&self) -> String {
-        format!("{}-{}", self.prefix(), self.table_id)
-    }
-
     pub fn removed_key(&self) -> String {
-        to_removed_key(&self.key())
+        to_removed_key(&self.to_string())
+    }
+}
+
+impl<'a> Display for TableRouteKey<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}-{}", self.prefix(), self.table_id)
     }
 }
 
@@ -69,7 +73,7 @@ mod tests {
         let prefix = key.prefix();
         assert_eq!("__meta_table_route-greptime-public-demo", prefix);
 
-        let key_string = key.key();
+        let key_string = key.to_string();
         assert_eq!("__meta_table_route-greptime-public-demo-123", key_string);
 
         let removed = key.removed_key();
