@@ -459,7 +459,8 @@ jobs:
           name: "${{ github.ref_name }}"
           prerelease: ${{ env.prerelease }}
           makeLatest: ${{ env.makeLatest }}
-          generateReleaseNotes: true
+          generateReleaseNotes: false
+          allowUpdates: true
           artifacts: |
             **/greptime-*
 
