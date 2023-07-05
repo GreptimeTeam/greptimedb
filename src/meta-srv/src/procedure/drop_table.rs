@@ -40,8 +40,8 @@ use crate::error;
 use crate::error::Result;
 use crate::procedure::utils::{build_table_metadata, handle_request_datanode_error, TableMetadata};
 use crate::service::mailbox::BroadcastChannel;
-use crate::service::router::fetch_table;
 use crate::service::store::txn::{Txn, TxnOp};
+use crate::table_routes::fetch_table;
 pub struct DropTableProcedure {
     context: DdlContext,
     data: DropTableData,
@@ -75,7 +75,7 @@ impl DropTableProcedure {
         let table_ref = self.data.table_ref();
 
         // If metadata not exists (might have already been removed).
-        if fetch_table(&self.context.kv_store, &table_ref)
+        if fetch_table(&self.context.kv_store, table_ref)
             .await?
             .is_none()
         {

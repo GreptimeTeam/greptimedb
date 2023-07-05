@@ -24,7 +24,6 @@ use common_meta::key::TableRouteKey;
 use common_meta::table_name::TableName;
 use common_telemetry::{timer, warn};
 use snafu::{ensure, OptionExt, ResultExt};
-use table::engine::TableReference;
 use table::metadata::RawTableInfo;
 use tonic::{Request, Response};
 
@@ -35,11 +34,10 @@ use crate::metasrv::{Context, MetaSrv, SelectorContext, SelectorRef};
 use crate::metrics::METRIC_META_ROUTE_REQUEST;
 use crate::sequence::SequenceRef;
 use crate::service::store::ext::KvStoreExt;
-use crate::service::store::kv::KvStoreRef;
 use crate::service::GrpcResult;
 use crate::table_routes::{
-    get_table_global_value, get_table_route_value, remove_table_global_value,
-    remove_table_route_value,
+    fetch_tables, get_table_global_value, remove_table_global_value, remove_table_route_value,
+    table_route_key,
 };
 
 #[async_trait::async_trait]
@@ -382,59 +380,4 @@ pub(crate) fn fill_table_routes(
     }
 
     Ok((peer_dict.into_peers(), table_routes))
-}
-
-pub(crate) async fn fetch_table(
-    kv_store: &KvStoreRef,
-    table_ref: &TableReference<'_>,
-) -> Result<Option<(TableGlobalValue, TableRouteValue)>> {
-    let tgk = TableGlobalKey {
-        catalog_name: table_ref.catalog.to_string(),
-        schema_name: table_ref.schema.to_string(),
-        table_name: table_ref.table.to_string(),
-    };
-
-    let tgv = get_table_global_value(kv_store, &tgk).await?;
-
-    if let Some(tgv) = tgv {
-        let trk = table_route_key(tgv.table_id() as u64, &tgk);
-        let trv = get_table_route_value(kv_store, &trk).await?;
-
-        return Ok(Some((tgv, trv)));
-    }
-
-    Ok(None)
-}
-
-async fn fetch_tables(
-    kv_store: &KvStoreRef,
-    keys: impl Iterator<Item = TableGlobalKey>,
-) -> Result<Vec<(TableGlobalValue, TableRouteValue)>> {
-    let mut tables = vec![];
-    // Maybe we can optimize the for loop in the future, but in general,
-    // there won't be many keys, in fact, there is usually just one.
-    for tgk in keys {
-        let tgv = get_table_global_value(kv_store, &tgk).await?;
-        if tgv.is_none() {
-            warn!("Table global value is absent: {}", tgk);
-            continue;
-        }
-        let tgv = tgv.unwrap();
-
-        let trk = table_route_key(tgv.table_id() as u64, &tgk);
-        let trv = get_table_route_value(kv_store, &trk).await?;
-
-        tables.push((tgv, trv));
-    }
-
-    Ok(tables)
-}
-
-pub(crate) fn table_route_key(table_id: u64, t: &TableGlobalKey) -> TableRouteKey<'_> {
-    TableRouteKey {
-        table_id: table_id as _,
-        catalog_name: &t.catalog_name,
-        schema_name: &t.schema_name,
-        table_name: &t.table_name,
-    }
 }

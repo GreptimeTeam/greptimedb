@@ -31,7 +31,7 @@ use crate::ddl::DdlManagerRef;
 use crate::error::{self, Result};
 use crate::metasrv::{MetaSrv, SelectorContext, SelectorRef};
 use crate::sequence::SequenceRef;
-use crate::service::router::fetch_table;
+use crate::table_routes::fetch_table;
 
 #[async_trait::async_trait]
 impl ddl_task_server::DdlTask for MetaSrv {
@@ -206,7 +206,7 @@ async fn handle_drop_table_task(
     let table_id = drop_table_task.table_id;
 
     let (table_global_value, table_route_value) =
-        fetch_table(&kv_store, &drop_table_task.table_ref())
+        fetch_table(&kv_store, drop_table_task.table_ref())
             .await?
             .with_context(|| error::TableNotFoundSnafu {
                 name: drop_table_task.table_ref().to_string(),
