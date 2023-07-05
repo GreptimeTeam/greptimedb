@@ -192,6 +192,7 @@ pub(crate) async fn fetch_tables(
         let tgv = tgv.unwrap();
 
         let trk = table_route_key(tgv.table_id(), &tgk);
+
         let trv = get_table_route_value(kv_store, &trk).await?;
 
         tables.push((tgv, trv));
