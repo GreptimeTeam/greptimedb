@@ -13,68 +13,133 @@
 // limitations under the License.
 
 pub mod memory;
+pub mod txn;
 
 use std::any::Any;
-use std::pin::Pin;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use common_error::ext::ErrorExt;
-use futures::{Stream, StreamExt};
+pub use txn::TxnService;
 
 use crate::error::Error;
+use crate::rpc::store::{
+    BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
+    BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse, DeleteRangeRequest,
+    DeleteRangeResponse, MoveValueRequest, MoveValueResponse, PutRequest, PutResponse,
+    RangeRequest, RangeResponse,
+};
+use crate::rpc::KeyValue;
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct Kv(pub Vec<u8>, pub Vec<u8>);
-
-pub type ValueIter<'a, E> = Pin<Box<dyn Stream<Item = Result<Kv, E>> + Send + 'a>>;
-
-pub type KvBackendRef = Arc<dyn KvBackend<Error = Error>>;
+pub type KvBackendRef = Arc<dyn KvBackend<Error = Error> + Send + Sync>;
 
 #[async_trait]
-pub trait KvBackend: Send + Sync {
-    type Error: ErrorExt;
+pub trait KvBackend: TxnService
+where
+    Self::Error: ErrorExt + Send + Sync,
+{
+    fn name(&self) -> &'static str;
 
-    fn range<'a, 'b>(&'a self, key: &[u8]) -> ValueIter<'b, Self::Error>
-    where
-        'a: 'b;
+    async fn range(&self, req: RangeRequest) -> Result<RangeResponse, Self::Error>;
 
-    async fn set(&self, key: &[u8], val: &[u8]) -> Result<(), Self::Error>;
+    async fn put(&self, req: PutRequest) -> Result<PutResponse, Self::Error>;
 
-    /// Compare and set value of key. `expect` is the expected value, if backend's current value associated
-    /// with key is the same as `expect`, the value will be updated to `val`.
-    ///
-    /// - If the compare-and-set operation successfully updated value, this method will return an `Ok(Ok())`
-    /// - If associated value is not the same as `expect`, no value will be updated and an `Ok(Err(Vec<u8>))`
-    /// will be returned, the `Err(Vec<u8>)` indicates the current associated value of key.
-    /// - If any error happens during operation, an `Err(Error)` will be returned.
-    async fn compare_and_set(
+    /// Default "batch_put" is backed by iterating all kvs on "put".
+    async fn batch_put(&self, req: BatchPutRequest) -> Result<BatchPutResponse, Self::Error> {
+        let prev_kv = req.prev_kv;
+
+        let mut prev_kvs = if prev_kv {
+            Vec::with_capacity(req.kvs.len())
+        } else {
+            vec![]
+        };
+
+        for kv in req.kvs {
+            let mut req = PutRequest::new().with_key(kv.key).with_value(kv.value);
+            if prev_kv {
+                req = req.with_prev_kv();
+            }
+
+            let resp = self.put(req).await?;
+
+            if let Some(prev_kv) = resp.prev_kv {
+                prev_kvs.push(prev_kv);
+            }
+        }
+        Ok(BatchPutResponse { prev_kvs })
+    }
+
+    async fn compare_and_put(
         &self,
-        key: &[u8],
-        expect: &[u8],
-        val: &[u8],
-    ) -> Result<Result<(), Option<Vec<u8>>>, Self::Error>;
+        req: CompareAndPutRequest,
+    ) -> Result<CompareAndPutResponse, Self::Error>;
 
-    async fn delete_range(&self, key: &[u8], end: &[u8]) -> Result<(), Self::Error>;
+    async fn delete_range(
+        &self,
+        req: DeleteRangeRequest,
+    ) -> Result<DeleteRangeResponse, Self::Error>;
 
-    async fn delete(&self, key: &[u8]) -> Result<(), Self::Error> {
-        self.delete_range(key, &[]).await
+    async fn delete(&self, key: &[u8], prev_kv: bool) -> Result<Option<KeyValue>, Self::Error> {
+        let mut req = DeleteRangeRequest::new().with_key(key.to_vec());
+        if prev_kv {
+            req = req.with_prev_kv();
+        }
+
+        let resp = self.delete_range(req).await?;
+
+        if prev_kv {
+            Ok(resp.prev_kvs.into_iter().next())
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Default "batch_delete" is backed by iterating all keys on "delete".
+    async fn batch_delete(
+        &self,
+        req: BatchDeleteRequest,
+    ) -> Result<BatchDeleteResponse, Self::Error> {
+        let prev_kv = req.prev_kv;
+
+        let mut prev_kvs = if prev_kv {
+            Vec::with_capacity(req.keys.len())
+        } else {
+            vec![]
+        };
+
+        for key in req.keys {
+            let resp = self.delete(&key, prev_kv).await?;
+            if let Some(kv) = resp {
+                prev_kvs.push(kv)
+            }
+        }
+        Ok(BatchDeleteResponse { prev_kvs })
     }
 
     /// Default get is implemented based on `range` method.
-    async fn get(&self, key: &[u8]) -> Result<Option<Kv>, Self::Error> {
-        let mut iter = self.range(key);
-        while let Some(r) = iter.next().await {
-            let kv = r?;
-            if kv.0 == key {
-                return Ok(Some(kv));
+    async fn get(&self, key: &[u8]) -> Result<Option<KeyValue>, Self::Error> {
+        let req = RangeRequest::new().with_key(key.to_vec());
+        let mut resp = self.range(req).await?;
+        Ok(if resp.kvs.is_empty() {
+            None
+        } else {
+            Some(resp.kvs.remove(0))
+        })
+    }
+
+    /// Default "batch_get" is backed by iterating all keys on "get".
+    async fn batch_get(&self, req: BatchGetRequest) -> Result<BatchGetResponse, Self::Error> {
+        let mut kvs = Vec::with_capacity(req.keys.len());
+        for key in req.keys.iter() {
+            if let Some(kv) = self.get(key).await? {
+                kvs.push(kv);
             }
         }
-        return Ok(None);
+        Ok(BatchGetResponse { kvs })
     }
 
     /// MoveValue atomically renames the key to the given updated key.
-    async fn move_value(&self, from_key: &[u8], to_key: &[u8]) -> Result<(), Self::Error>;
+    async fn move_value(&self, req: MoveValueRequest) -> Result<MoveValueResponse, Self::Error>;
 
     fn as_any(&self) -> &dyn Any;
 }

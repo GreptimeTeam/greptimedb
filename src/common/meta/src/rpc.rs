@@ -18,17 +18,14 @@ pub mod router;
 pub mod store;
 pub mod util;
 
+use std::fmt::{Display, Formatter};
+
 use api::v1::meta::{KeyValue as PbKeyValue, ResponseHeader as PbResponseHeader};
 
 #[derive(Debug, Clone)]
 pub struct ResponseHeader(PbResponseHeader);
 
 impl ResponseHeader {
-    #[inline]
-    pub(crate) fn new(header: PbResponseHeader) -> Self {
-        Self(header)
-    }
-
     #[inline]
     pub fn protocol_version(&self) -> u64 {
         self.0.protocol_version
@@ -56,33 +53,83 @@ impl ResponseHeader {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct KeyValue(PbKeyValue);
+#[derive(Debug, Clone, PartialEq)]
+pub struct KeyValue {
+    pub key: Vec<u8>,
+    pub value: Vec<u8>,
+}
+
+impl From<KeyValue> for PbKeyValue {
+    fn from(kv: KeyValue) -> Self {
+        Self {
+            key: kv.key,
+            value: kv.value,
+        }
+    }
+}
+
+impl From<etcd_client::KeyValue> for KeyValue {
+    fn from(kv: etcd_client::KeyValue) -> Self {
+        Self {
+            key: kv.key().to_vec(),
+            value: kv.value().to_vec(),
+        }
+    }
+}
+
+impl From<KeyValue> for (Vec<u8>, Vec<u8>) {
+    fn from(kv: KeyValue) -> Self {
+        (kv.key, kv.value)
+    }
+}
+
+impl From<(Vec<u8>, Vec<u8>)> for KeyValue {
+    fn from(kv: (Vec<u8>, Vec<u8>)) -> Self {
+        Self {
+            key: kv.0,
+            value: kv.1,
+        }
+    }
+}
+
+impl Display for KeyValue {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "({}, {})",
+            String::from_utf8_lossy(&self.key),
+            String::from_utf8_lossy(&self.value)
+        )
+    }
+}
 
 impl KeyValue {
     #[inline]
-    pub(crate) fn new(kv: PbKeyValue) -> Self {
-        Self(kv)
+    pub fn new(kv: PbKeyValue) -> Self {
+        Self {
+            key: kv.key,
+            value: kv.value,
+        }
     }
 
     #[inline]
     pub fn key(&self) -> &[u8] {
-        &self.0.key
+        &self.key
     }
 
     #[inline]
     pub fn take_key(&mut self) -> Vec<u8> {
-        std::mem::take(&mut self.0.key)
+        std::mem::take(&mut self.key)
     }
 
     #[inline]
     pub fn value(&self) -> &[u8] {
-        &self.0.value
+        &self.value
     }
 
     #[inline]
     pub fn take_value(&mut self) -> Vec<u8> {
-        std::mem::take(&mut self.0.value)
+        std::mem::take(&mut self.value)
     }
 }
 
@@ -103,7 +150,7 @@ mod tests {
             }),
         };
 
-        let header = ResponseHeader::new(pb_header);
+        let header = ResponseHeader(pb_header);
         assert_eq!(101, header.protocol_version());
         assert_eq!(1, header.cluster_id());
         assert_eq!(100, header.error_code());

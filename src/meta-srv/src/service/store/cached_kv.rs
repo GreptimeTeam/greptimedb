@@ -12,22 +12,24 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::any::Any;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use api::v1::meta::{
+use common_meta::kv_backend::txn::{Txn, TxnOp, TxnRequest, TxnResponse};
+use common_meta::kv_backend::{KvBackend, TxnService};
+use common_meta::rpc::store::{
     BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
     BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse, DeleteRangeRequest,
-    DeleteRangeResponse, KeyValue, MoveValueRequest, MoveValueResponse, PutRequest, PutResponse,
+    DeleteRangeResponse, MoveValueRequest, MoveValueResponse, PutRequest, PutResponse,
     RangeRequest, RangeResponse,
 };
+use common_meta::rpc::KeyValue;
 
-use crate::error::Result;
-use crate::service::store::ext::KvStoreExt;
-use crate::service::store::kv::{KvStore, KvStoreRef, ResettableKvStore, ResettableKvStoreRef};
+use crate::error::{Error, Result};
+use crate::service::store::kv::{KvStoreRef, ResettableKvStore, ResettableKvStoreRef};
 use crate::service::store::memory::MemStore;
-use crate::service::store::txn::{Txn, TxnOp, TxnRequest, TxnResponse, TxnService};
 
 pub type CheckLeaderRef = Arc<dyn CheckLeader>;
 
@@ -57,15 +59,18 @@ pub struct LeaderCachedKvStore {
     store: KvStoreRef,
     cache: ResettableKvStoreRef,
     version: AtomicUsize,
+    name: &'static str,
 }
 
 impl LeaderCachedKvStore {
     pub fn new(check_leader: CheckLeaderRef, store: KvStoreRef) -> Self {
+        let name = Box::leak(format!("LeaderCached({})", store.name()).into_boxed_str());
         Self {
             check_leader,
             store,
             cache: Arc::new(MemStore::new()),
             version: AtomicUsize::new(0),
+            name,
         }
     }
 
@@ -82,7 +87,7 @@ impl LeaderCachedKvStore {
 
     #[inline]
     async fn invalid_key(&self, key: Vec<u8>) -> Result<()> {
-        let _ = self.cache.delete(key, false).await?;
+        let _ = self.cache.delete(&key, false).await?;
         Ok(())
     }
 
@@ -110,7 +115,11 @@ impl LeaderCachedKvStore {
 }
 
 #[async_trait::async_trait]
-impl KvStore for LeaderCachedKvStore {
+impl KvBackend for LeaderCachedKvStore {
+    fn name(&self) -> &'static str {
+        self.name
+    }
+
     async fn range(&self, req: RangeRequest) -> Result<RangeResponse> {
         if !self.is_leader() {
             return self.store.range(req).await;
@@ -186,16 +195,13 @@ impl KvStore for LeaderCachedKvStore {
             .filter(|key| !hit_keys.contains(*key))
             .cloned()
             .collect::<Vec<_>>();
-        let remote_req = BatchGetRequest {
-            keys: missed_keys,
-            ..Default::default()
-        };
+        let remote_req = BatchGetRequest { keys: missed_keys };
 
         let ver = self.get_version();
 
         let remote_res = self.store.batch_get(remote_req).await?;
         let put_req = BatchPutRequest {
-            kvs: remote_res.kvs.clone(),
+            kvs: remote_res.kvs.clone().into_iter().map(Into::into).collect(),
             ..Default::default()
         };
         let _ = self.cache.batch_put(put_req).await?;
@@ -204,7 +210,7 @@ impl KvStore for LeaderCachedKvStore {
             let keys = remote_res
                 .kvs
                 .iter()
-                .map(|kv| kv.key.clone())
+                .map(|kv| kv.key().to_vec())
                 .collect::<Vec<_>>();
             self.invalid_keys(keys).await?;
         }
@@ -291,10 +297,16 @@ impl KvStore for LeaderCachedKvStore {
         self.invalid_keys(vec![from_key, to_key]).await?;
         Ok(res)
     }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 }
 
 #[async_trait::async_trait]
 impl TxnService for LeaderCachedKvStore {
+    type Error = Error;
+
     async fn txn(&self, txn: Txn) -> Result<TxnResponse> {
         if !self.is_leader() {
             return self.store.txn(txn).await;
@@ -338,7 +350,7 @@ impl ResettableKvStore for LeaderCachedKvStore {
 
 #[cfg(test)]
 mod tests {
-    use api::v1::meta::KeyValue;
+    use common_meta::rpc::KeyValue;
 
     use super::*;
     use crate::service::store::memory::MemStore;
@@ -364,23 +376,19 @@ mod tests {
         };
         let _ = inner_store.put(put_req).await.unwrap();
 
-        let cached_value = inner_cache.get(key.clone()).await.unwrap();
+        let cached_value = inner_cache.get(&key).await.unwrap();
         assert!(cached_value.is_none());
 
-        let cached_value = cached_store.get(key.clone()).await.unwrap().unwrap();
-        assert_eq!(cached_value.value, value);
+        let cached_value = cached_store.get(&key).await.unwrap().unwrap();
+        assert_eq!(cached_value.value(), value);
 
-        let cached_value = inner_cache.get(key.clone()).await.unwrap().unwrap();
-        assert_eq!(cached_value.value, value);
+        let cached_value = inner_cache.get(&key).await.unwrap().unwrap();
+        assert_eq!(cached_value.value(), value);
 
-        let res = cached_store
-            .delete(key.clone(), true)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(res.value, value);
+        let res = cached_store.delete(&key, true).await.unwrap().unwrap();
+        assert_eq!(res.value(), value);
 
-        let cached_value = inner_cache.get(key.clone()).await.unwrap();
+        let cached_value = inner_cache.get(&key).await.unwrap();
         assert!(cached_value.is_none());
     }
 
@@ -409,10 +417,7 @@ mod tests {
             .map(|i| format!("test_key_{}", i).into_bytes())
             .collect::<Vec<_>>();
 
-        let batch_get_req = BatchGetRequest {
-            keys,
-            ..Default::default()
-        };
+        let batch_get_req = BatchGetRequest { keys };
 
         let cached_values = inner_cache.batch_get(batch_get_req.clone()).await.unwrap();
         assert!(cached_values.kvs.is_empty());
@@ -451,10 +456,7 @@ mod tests {
         let keys = (1..5)
             .map(|i| format!("test_key_{}", i).into_bytes())
             .collect::<Vec<_>>();
-        let batch_get_req = BatchGetRequest {
-            keys,
-            ..Default::default()
-        };
+        let batch_get_req = BatchGetRequest { keys };
         let cached_values = inner_cache.batch_get(batch_get_req.clone()).await.unwrap();
         assert_eq!(cached_values.kvs.len(), 4);
 

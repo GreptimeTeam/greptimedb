@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use api::v1::meta::{
-    cluster_server, BatchGetRequest, BatchGetResponse, Error, RangeRequest, RangeResponse,
-    ResponseHeader,
+    cluster_server, BatchGetRequest as PbBatchGetRequest, BatchGetResponse as PbBatchGetResponse,
+    Error, RangeRequest as PbRangeRequest, RangeResponse as PbRangeResponse, ResponseHeader,
 };
 use common_telemetry::warn;
 use tonic::{Request, Response};
@@ -24,10 +24,10 @@ use crate::service::GrpcResult;
 
 #[async_trait::async_trait]
 impl cluster_server::Cluster for MetaSrv {
-    async fn batch_get(&self, req: Request<BatchGetRequest>) -> GrpcResult<BatchGetResponse> {
+    async fn batch_get(&self, req: Request<PbBatchGetRequest>) -> GrpcResult<PbBatchGetResponse> {
         if !self.is_leader() {
             let is_not_leader = ResponseHeader::failed(0, Error::is_not_leader());
-            let resp = BatchGetResponse {
+            let resp = PbBatchGetResponse {
                 header: Some(is_not_leader),
                 ..Default::default()
             };
@@ -36,22 +36,17 @@ impl cluster_server::Cluster for MetaSrv {
             return Ok(Response::new(resp));
         }
 
-        let kvs = self.in_memory().batch_get(req.into_inner()).await?.kvs;
+        let req = req.into_inner().into();
+        let resp = self.in_memory().batch_get(req).await?;
 
-        let success = ResponseHeader::success(0);
-
-        let get_resp = BatchGetResponse {
-            kvs,
-            header: Some(success),
-        };
-
-        Ok(Response::new(get_resp))
+        let resp = resp.to_proto_resp(ResponseHeader::success(0));
+        Ok(Response::new(resp))
     }
 
-    async fn range(&self, req: Request<RangeRequest>) -> GrpcResult<RangeResponse> {
+    async fn range(&self, req: Request<PbRangeRequest>) -> GrpcResult<PbRangeResponse> {
         if !self.is_leader() {
             let is_not_leader = ResponseHeader::failed(0, Error::is_not_leader());
-            let resp = RangeResponse {
+            let resp = PbRangeResponse {
                 header: Some(is_not_leader),
                 ..Default::default()
             };
@@ -60,10 +55,11 @@ impl cluster_server::Cluster for MetaSrv {
             return Ok(Response::new(resp));
         }
 
-        let req = req.into_inner();
+        let req = req.into_inner().into();
         let res = self.in_memory().range(req).await?;
 
-        Ok(Response::new(res))
+        let resp = res.to_proto_resp(ResponseHeader::success(0));
+        Ok(Response::new(resp))
     }
 }
 

@@ -12,21 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt::{Display, Formatter};
+
 use api::v1::meta::{
     BatchDeleteRequest as PbBatchDeleteRequest, BatchDeleteResponse as PbBatchDeleteResponse,
     BatchGetRequest as PbBatchGetRequest, BatchGetResponse as PbBatchGetResponse,
     BatchPutRequest as PbBatchPutRequest, BatchPutResponse as PbBatchPutResponse,
     CompareAndPutRequest as PbCompareAndPutRequest,
     CompareAndPutResponse as PbCompareAndPutResponse, DeleteRangeRequest as PbDeleteRangeRequest,
-    DeleteRangeResponse as PbDeleteRangeResponse, KeyValue as PbKeyValue,
-    MoveValueRequest as PbMoveValueRequest, MoveValueResponse as PbMoveValueResponse,
-    PutRequest as PbPutRequest, PutResponse as PbPutResponse, RangeRequest as PbRangeRequest,
-    RangeResponse as PbRangeResponse,
+    DeleteRangeResponse as PbDeleteRangeResponse, MoveValueRequest as PbMoveValueRequest,
+    MoveValueResponse as PbMoveValueResponse, PutRequest as PbPutRequest,
+    PutResponse as PbPutResponse, RangeRequest as PbRangeRequest, RangeResponse as PbRangeResponse,
+    ResponseHeader as PbResponseHeader,
 };
 
 use crate::error;
 use crate::error::Result;
-use crate::rpc::{util, KeyValue, ResponseHeader};
+use crate::rpc::{util, KeyValue};
 
 #[derive(Debug, Clone, Default)]
 pub struct RangeRequest {
@@ -56,6 +58,30 @@ impl From<RangeRequest> for PbRangeRequest {
             limit: req.limit,
             keys_only: req.keys_only,
         }
+    }
+}
+
+impl From<PbRangeRequest> for RangeRequest {
+    fn from(value: PbRangeRequest) -> Self {
+        Self {
+            key: value.key,
+            range_end: value.range_end,
+            limit: value.limit,
+            keys_only: value.keys_only,
+        }
+    }
+}
+
+impl Display for RangeRequest {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "RangeRequest{{key: '{}', range_end: '{}', limit: {}, keys_only: {}}}",
+            String::from_utf8_lossy(&self.key),
+            String::from_utf8_lossy(&self.range_end),
+            self.limit,
+            self.keys_only
+        )
     }
 }
 
@@ -119,8 +145,26 @@ impl RangeRequest {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct RangeResponse(PbRangeResponse);
+#[derive(Debug, Clone, PartialEq)]
+pub struct RangeResponse {
+    pub kvs: Vec<KeyValue>,
+    pub more: bool,
+}
+
+impl Display for RangeResponse {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "RangeResponse{{kvs: [{}], more: {}}}",
+            self.kvs
+                .iter()
+                .map(|kv| kv.to_string())
+                .collect::<Vec<_>>()
+                .join(", "),
+            self.more
+        )
+    }
+}
 
 impl TryFrom<PbRangeResponse> for RangeResponse {
     type Error = error::Error;
@@ -128,29 +172,25 @@ impl TryFrom<PbRangeResponse> for RangeResponse {
     fn try_from(pb: PbRangeResponse) -> Result<Self> {
         util::check_response_header(pb.header.as_ref())?;
 
-        Ok(Self::new(pb))
+        Ok(Self {
+            kvs: pb.kvs.into_iter().map(KeyValue::new).collect(),
+            more: pb.more,
+        })
     }
 }
 
 impl RangeResponse {
-    #[inline]
-    pub fn new(res: PbRangeResponse) -> Self {
-        Self(res)
-    }
-
-    #[inline]
-    pub fn take_header(&mut self) -> Option<ResponseHeader> {
-        self.0.header.take().map(ResponseHeader::new)
+    pub fn to_proto_resp(self, header: PbResponseHeader) -> PbRangeResponse {
+        PbRangeResponse {
+            header: Some(header),
+            kvs: self.kvs.into_iter().map(Into::into).collect(),
+            more: self.more,
+        }
     }
 
     #[inline]
     pub fn take_kvs(&mut self) -> Vec<KeyValue> {
-        self.0.kvs.drain(..).map(KeyValue::new).collect()
-    }
-
-    #[inline]
-    pub fn more(&self) -> bool {
-        self.0.more
+        self.kvs.drain(..).collect()
     }
 }
 
@@ -173,6 +213,16 @@ impl From<PutRequest> for PbPutRequest {
             key: req.key,
             value: req.value,
             prev_kv: req.prev_kv,
+        }
+    }
+}
+
+impl From<PbPutRequest> for PutRequest {
+    fn from(value: PbPutRequest) -> Self {
+        Self {
+            key: value.key,
+            value: value.value,
+            prev_kv: value.prev_kv,
         }
     }
 }
@@ -211,8 +261,10 @@ impl PutRequest {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct PutResponse(PbPutResponse);
+#[derive(Debug, Clone, PartialEq)]
+pub struct PutResponse {
+    pub prev_kv: Option<KeyValue>,
+}
 
 impl TryFrom<PbPutResponse> for PutResponse {
     type Error = error::Error;
@@ -220,27 +272,22 @@ impl TryFrom<PbPutResponse> for PutResponse {
     fn try_from(pb: PbPutResponse) -> Result<Self> {
         util::check_response_header(pb.header.as_ref())?;
 
-        Ok(Self::new(pb))
+        Ok(Self {
+            prev_kv: pb.prev_kv.map(KeyValue::new),
+        })
     }
 }
 
 impl PutResponse {
-    #[inline]
-    pub fn new(res: PbPutResponse) -> Self {
-        Self(res)
-    }
-
-    #[inline]
-    pub fn take_header(&mut self) -> Option<ResponseHeader> {
-        self.0.header.take().map(ResponseHeader::new)
-    }
-
-    #[inline]
-    pub fn take_prev_kv(&mut self) -> Option<KeyValue> {
-        self.0.prev_kv.take().map(KeyValue::new)
+    pub fn to_proto_resp(self, header: PbResponseHeader) -> PbPutResponse {
+        PbPutResponse {
+            header: Some(header),
+            prev_kv: self.prev_kv.map(Into::into),
+        }
     }
 }
 
+#[derive(Clone)]
 pub struct BatchGetRequest {
     pub keys: Vec<Vec<u8>>,
 }
@@ -251,6 +298,12 @@ impl From<BatchGetRequest> for PbBatchGetRequest {
             header: None,
             keys: req.keys,
         }
+    }
+}
+
+impl From<PbBatchGetRequest> for BatchGetRequest {
+    fn from(value: PbBatchGetRequest) -> Self {
+        Self { keys: value.keys }
     }
 }
 
@@ -274,7 +327,23 @@ impl BatchGetRequest {
 }
 
 #[derive(Debug, Clone)]
-pub struct BatchGetResponse(PbBatchGetResponse);
+pub struct BatchGetResponse {
+    pub kvs: Vec<KeyValue>,
+}
+
+impl Display for BatchGetResponse {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "[{}]",
+            self.kvs
+                .iter()
+                .map(|kv| kv.to_string())
+                .collect::<Vec<_>>()
+                .join(", "),
+        )
+    }
+}
 
 impl TryFrom<PbBatchGetResponse> for BatchGetResponse {
     type Error = error::Error;
@@ -282,30 +351,24 @@ impl TryFrom<PbBatchGetResponse> for BatchGetResponse {
     fn try_from(pb: PbBatchGetResponse) -> Result<Self> {
         util::check_response_header(pb.header.as_ref())?;
 
-        Ok(Self(pb))
+        Ok(Self {
+            kvs: pb.kvs.into_iter().map(KeyValue::new).collect(),
+        })
     }
 }
 
 impl BatchGetResponse {
-    #[inline]
-    pub fn new(res: PbBatchGetResponse) -> Self {
-        Self(res)
-    }
-
-    #[inline]
-    pub fn take_header(&mut self) -> Option<ResponseHeader> {
-        self.0.header.take().map(ResponseHeader::new)
-    }
-
-    #[inline]
-    pub fn take_kvs(&mut self) -> Vec<KeyValue> {
-        self.0.kvs.drain(..).map(KeyValue::new).collect()
+    pub fn to_proto_resp(self, header: PbResponseHeader) -> PbBatchGetResponse {
+        PbBatchGetResponse {
+            header: Some(header),
+            kvs: self.kvs.into_iter().map(Into::into).collect(),
+        }
     }
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct BatchPutRequest {
-    pub kvs: Vec<PbKeyValue>,
+    pub kvs: Vec<KeyValue>,
     /// If prev_kv is set, gets the previous key-value pairs before changing it.
     /// The previous key-value pairs will be returned in the batch put response.
     pub prev_kv: bool,
@@ -315,8 +378,17 @@ impl From<BatchPutRequest> for PbBatchPutRequest {
     fn from(req: BatchPutRequest) -> Self {
         Self {
             header: None,
-            kvs: req.kvs,
+            kvs: req.kvs.into_iter().map(Into::into).collect(),
             prev_kv: req.prev_kv,
+        }
+    }
+}
+
+impl From<PbBatchPutRequest> for BatchPutRequest {
+    fn from(value: PbBatchPutRequest) -> Self {
+        Self {
+            kvs: value.kvs.into_iter().map(KeyValue::new).collect(),
+            prev_kv: value.prev_kv,
         }
     }
 }
@@ -332,7 +404,7 @@ impl BatchPutRequest {
 
     #[inline]
     pub fn add_kv(mut self, key: impl Into<Vec<u8>>, value: impl Into<Vec<u8>>) -> Self {
-        self.kvs.push(PbKeyValue {
+        self.kvs.push(KeyValue {
             key: key.into(),
             value: value.into(),
         });
@@ -349,7 +421,9 @@ impl BatchPutRequest {
 }
 
 #[derive(Debug, Clone)]
-pub struct BatchPutResponse(PbBatchPutResponse);
+pub struct BatchPutResponse {
+    pub prev_kvs: Vec<KeyValue>,
+}
 
 impl TryFrom<PbBatchPutResponse> for BatchPutResponse {
     type Error = error::Error;
@@ -357,24 +431,23 @@ impl TryFrom<PbBatchPutResponse> for BatchPutResponse {
     fn try_from(pb: PbBatchPutResponse) -> Result<Self> {
         util::check_response_header(pb.header.as_ref())?;
 
-        Ok(Self::new(pb))
+        Ok(Self {
+            prev_kvs: pb.prev_kvs.into_iter().map(KeyValue::new).collect(),
+        })
     }
 }
 
 impl BatchPutResponse {
-    #[inline]
-    pub fn new(res: PbBatchPutResponse) -> Self {
-        Self(res)
-    }
-
-    #[inline]
-    pub fn take_header(&mut self) -> Option<ResponseHeader> {
-        self.0.header.take().map(ResponseHeader::new)
+    pub fn to_proto_resp(self, header: PbResponseHeader) -> PbBatchPutResponse {
+        PbBatchPutResponse {
+            header: Some(header),
+            prev_kvs: self.prev_kvs.into_iter().map(Into::into).collect(),
+        }
     }
 
     #[inline]
     pub fn take_prev_kvs(&mut self) -> Vec<KeyValue> {
-        self.0.prev_kvs.drain(..).map(KeyValue::new).collect()
+        self.prev_kvs.drain(..).collect()
     }
 }
 
@@ -392,6 +465,15 @@ impl From<BatchDeleteRequest> for PbBatchDeleteRequest {
             header: None,
             keys: req.keys,
             prev_kv: req.prev_kv,
+        }
+    }
+}
+
+impl From<PbBatchDeleteRequest> for BatchDeleteRequest {
+    fn from(value: PbBatchDeleteRequest) -> Self {
+        Self {
+            keys: value.keys,
+            prev_kv: value.prev_kv,
         }
     }
 }
@@ -421,7 +503,9 @@ impl BatchDeleteRequest {
 }
 
 #[derive(Debug, Clone)]
-pub struct BatchDeleteResponse(PbBatchDeleteResponse);
+pub struct BatchDeleteResponse {
+    pub prev_kvs: Vec<KeyValue>,
+}
 
 impl TryFrom<PbBatchDeleteResponse> for BatchDeleteResponse {
     type Error = error::Error;
@@ -429,24 +513,18 @@ impl TryFrom<PbBatchDeleteResponse> for BatchDeleteResponse {
     fn try_from(pb: PbBatchDeleteResponse) -> Result<Self> {
         util::check_response_header(pb.header.as_ref())?;
 
-        Ok(Self::new(pb))
+        Ok(Self {
+            prev_kvs: pb.prev_kvs.into_iter().map(KeyValue::new).collect(),
+        })
     }
 }
 
 impl BatchDeleteResponse {
-    #[inline]
-    pub fn new(res: PbBatchDeleteResponse) -> Self {
-        Self(res)
-    }
-
-    #[inline]
-    pub fn take_header(&mut self) -> Option<ResponseHeader> {
-        self.0.header.take().map(ResponseHeader::new)
-    }
-
-    #[inline]
-    pub fn take_prev_kvs(&mut self) -> Vec<KeyValue> {
-        self.0.prev_kvs.drain(..).map(KeyValue::new).collect()
+    pub fn to_proto_resp(self, header: PbResponseHeader) -> PbBatchDeleteResponse {
+        PbBatchDeleteResponse {
+            header: Some(header),
+            prev_kvs: self.prev_kvs.into_iter().map(Into::into).collect(),
+        }
     }
 }
 
@@ -467,6 +545,16 @@ impl From<CompareAndPutRequest> for PbCompareAndPutRequest {
             key: req.key,
             expect: req.expect,
             value: req.value,
+        }
+    }
+}
+
+impl From<PbCompareAndPutRequest> for CompareAndPutRequest {
+    fn from(value: PbCompareAndPutRequest) -> Self {
+        Self {
+            key: value.key,
+            expect: value.expect,
+            value: value.value,
         }
     }
 }
@@ -504,8 +592,11 @@ impl CompareAndPutRequest {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct CompareAndPutResponse(PbCompareAndPutResponse);
+#[derive(Debug, Clone, Default)]
+pub struct CompareAndPutResponse {
+    pub success: bool,
+    pub prev_kv: Option<KeyValue>,
+}
 
 impl TryFrom<PbCompareAndPutResponse> for CompareAndPutResponse {
     type Error = error::Error;
@@ -513,29 +604,30 @@ impl TryFrom<PbCompareAndPutResponse> for CompareAndPutResponse {
     fn try_from(pb: PbCompareAndPutResponse) -> Result<Self> {
         util::check_response_header(pb.header.as_ref())?;
 
-        Ok(Self::new(pb))
+        Ok(Self {
+            success: pb.success,
+            prev_kv: pb.prev_kv.map(KeyValue::new),
+        })
     }
 }
 
 impl CompareAndPutResponse {
-    #[inline]
-    pub fn new(res: PbCompareAndPutResponse) -> Self {
-        Self(res)
-    }
-
-    #[inline]
-    pub fn take_header(&mut self) -> Option<ResponseHeader> {
-        self.0.header.take().map(ResponseHeader::new)
+    pub fn to_proto_resp(self, header: PbResponseHeader) -> PbCompareAndPutResponse {
+        PbCompareAndPutResponse {
+            header: Some(header),
+            success: self.success,
+            prev_kv: self.prev_kv.map(Into::into),
+        }
     }
 
     #[inline]
     pub fn is_success(&self) -> bool {
-        self.0.success
+        self.success
     }
 
     #[inline]
     pub fn take_prev_kv(&mut self) -> Option<KeyValue> {
-        self.0.prev_kv.take().map(KeyValue::new)
+        self.prev_kv.take()
     }
 }
 
@@ -567,6 +659,16 @@ impl From<DeleteRangeRequest> for PbDeleteRangeRequest {
             key: req.key,
             range_end: req.range_end,
             prev_kv: req.prev_kv,
+        }
+    }
+}
+
+impl From<PbDeleteRangeRequest> for DeleteRangeRequest {
+    fn from(value: PbDeleteRangeRequest) -> Self {
+        Self {
+            key: value.key,
+            range_end: value.range_end,
+            prev_kv: value.prev_kv,
         }
     }
 }
@@ -624,8 +726,11 @@ impl DeleteRangeRequest {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct DeleteRangeResponse(PbDeleteRangeResponse);
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeleteRangeResponse {
+    pub deleted: i64,
+    pub prev_kvs: Vec<KeyValue>,
+}
 
 impl TryFrom<PbDeleteRangeResponse> for DeleteRangeResponse {
     type Error = error::Error;
@@ -633,29 +738,30 @@ impl TryFrom<PbDeleteRangeResponse> for DeleteRangeResponse {
     fn try_from(pb: PbDeleteRangeResponse) -> Result<Self> {
         util::check_response_header(pb.header.as_ref())?;
 
-        Ok(Self::new(pb))
+        Ok(Self {
+            deleted: pb.deleted,
+            prev_kvs: pb.prev_kvs.into_iter().map(KeyValue::new).collect(),
+        })
     }
 }
 
 impl DeleteRangeResponse {
-    #[inline]
-    pub fn new(res: PbDeleteRangeResponse) -> Self {
-        Self(res)
-    }
-
-    #[inline]
-    pub fn take_header(&mut self) -> Option<ResponseHeader> {
-        self.0.header.take().map(ResponseHeader::new)
+    pub fn to_proto_resp(self, header: PbResponseHeader) -> PbDeleteRangeResponse {
+        PbDeleteRangeResponse {
+            header: Some(header),
+            deleted: self.deleted,
+            prev_kvs: self.prev_kvs.into_iter().map(Into::into).collect(),
+        }
     }
 
     #[inline]
     pub fn deleted(&self) -> i64 {
-        self.0.deleted
+        self.deleted
     }
 
     #[inline]
     pub fn take_prev_kvs(&mut self) -> Vec<KeyValue> {
-        self.0.prev_kvs.drain(..).map(KeyValue::new).collect()
+        self.prev_kvs.drain(..).collect()
     }
 }
 
@@ -678,6 +784,15 @@ impl From<MoveValueRequest> for PbMoveValueRequest {
     }
 }
 
+impl From<PbMoveValueRequest> for MoveValueRequest {
+    fn from(value: PbMoveValueRequest) -> Self {
+        Self {
+            from_key: value.from_key,
+            to_key: value.to_key,
+        }
+    }
+}
+
 impl MoveValueRequest {
     #[inline]
     pub fn new(from_key: impl Into<Vec<u8>>, to_key: impl Into<Vec<u8>>) -> Self {
@@ -689,7 +804,7 @@ impl MoveValueRequest {
 }
 
 #[derive(Debug, Clone)]
-pub struct MoveValueResponse(PbMoveValueResponse);
+pub struct MoveValueResponse(pub Option<KeyValue>);
 
 impl TryFrom<PbMoveValueResponse> for MoveValueResponse {
     type Error = error::Error;
@@ -697,24 +812,21 @@ impl TryFrom<PbMoveValueResponse> for MoveValueResponse {
     fn try_from(pb: PbMoveValueResponse) -> Result<Self> {
         util::check_response_header(pb.header.as_ref())?;
 
-        Ok(Self::new(pb))
+        Ok(Self(pb.kv.map(KeyValue::new)))
     }
 }
 
 impl MoveValueResponse {
-    #[inline]
-    pub fn new(res: PbMoveValueResponse) -> Self {
-        Self(res)
-    }
-
-    #[inline]
-    pub fn take_header(&mut self) -> Option<ResponseHeader> {
-        self.0.header.take().map(ResponseHeader::new)
+    pub fn to_proto_resp(self, header: PbResponseHeader) -> PbMoveValueResponse {
+        PbMoveValueResponse {
+            header: Some(header),
+            kv: self.0.map(Into::into),
+        }
     }
 
     #[inline]
     pub fn take_kv(&mut self) -> Option<KeyValue> {
-        self.0.kv.take().map(KeyValue::new)
+        self.0.take()
     }
 }
 
@@ -784,9 +896,8 @@ mod tests {
             more: true,
         };
 
-        let mut res = RangeResponse::new(pb_res);
-        assert!(res.take_header().is_none());
-        assert!(res.more());
+        let mut res: RangeResponse = pb_res.try_into().unwrap();
+        assert!(res.more);
         let mut kvs = res.take_kvs();
         let kv0 = kvs.get_mut(0).unwrap();
         assert_eq!(b"k1".to_vec(), kv0.key().to_vec());
@@ -826,9 +937,8 @@ mod tests {
             }),
         };
 
-        let mut res = PutResponse::new(pb_res);
-        assert!(res.take_header().is_none());
-        let mut kv = res.take_prev_kv().unwrap();
+        let res: PutResponse = pb_res.try_into().unwrap();
+        let mut kv = res.prev_kv.unwrap();
         assert_eq!(b"k1".to_vec(), kv.key().to_vec());
         assert_eq!(b"k1".to_vec(), kv.take_key());
         assert_eq!(b"v1".to_vec(), kv.value().to_vec());
@@ -859,12 +969,8 @@ mod tests {
                 value: b"test_value1".to_vec(),
             }],
         };
-        let mut res = BatchGetResponse::new(pb_res);
-
-        assert!(res.take_header().is_none());
-
-        let kvs = res.take_kvs();
-
+        let res: BatchGetResponse = pb_res.try_into().unwrap();
+        let kvs = res.kvs;
         assert_eq!(b"test_key1".as_slice(), kvs[0].key());
         assert_eq!(b"test_value1".as_slice(), kvs[0].value());
     }
@@ -898,8 +1004,7 @@ mod tests {
             }],
         };
 
-        let mut res = BatchPutResponse::new(pb_res);
-        assert!(res.take_header().is_none());
+        let mut res: BatchPutResponse = pb_res.try_into().unwrap();
         let kvs = res.take_prev_kvs();
         assert_eq!(b"k1".to_vec(), kvs[0].key().to_vec());
         assert_eq!(b"v1".to_vec(), kvs[0].value().to_vec());
@@ -931,9 +1036,8 @@ mod tests {
             }],
         };
 
-        let mut res = BatchDeleteResponse::new(pb_res);
-        assert!(res.take_header().is_none());
-        let kvs = res.take_prev_kvs();
+        let res: BatchDeleteResponse = pb_res.try_into().unwrap();
+        let kvs = res.prev_kvs;
         assert_eq!(b"k1".to_vec(), kvs[0].key().to_vec());
         assert_eq!(b"v1".to_vec(), kvs[0].value().to_vec());
     }
@@ -969,8 +1073,7 @@ mod tests {
             }),
         };
 
-        let mut res = CompareAndPutResponse::new(pb_res);
-        assert!(res.take_header().is_none());
+        let mut res: CompareAndPutResponse = pb_res.try_into().unwrap();
         let mut kv = res.take_prev_kv().unwrap();
         assert_eq!(b"k1".to_vec(), kv.key().to_vec());
         assert_eq!(b"k1".to_vec(), kv.take_key());
@@ -1026,7 +1129,6 @@ mod tests {
         };
 
         let mut res: DeleteRangeResponse = pb_res.try_into().unwrap();
-        assert!(res.take_header().is_none());
         assert_eq!(2, res.deleted());
         let mut kvs = res.take_prev_kvs();
         let kv0 = kvs.get_mut(0).unwrap();
@@ -1064,8 +1166,7 @@ mod tests {
             }),
         };
 
-        let mut res = MoveValueResponse::new(pb_res);
-        assert!(res.take_header().is_none());
+        let mut res: MoveValueResponse = pb_res.try_into().unwrap();
         let mut kv = res.take_kv().unwrap();
         assert_eq!(b"k1".to_vec(), kv.key().to_vec());
         assert_eq!(b"k1".to_vec(), kv.take_key());

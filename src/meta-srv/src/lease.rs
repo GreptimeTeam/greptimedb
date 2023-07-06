@@ -14,12 +14,12 @@
 
 use std::collections::HashMap;
 
+use common_meta::util;
 use common_time::util as time_util;
 
 use crate::cluster::MetaPeerClientRef;
 use crate::error::Result;
 use crate::keys::{LeaseKey, LeaseValue, DN_LEASE_PREFIX};
-use crate::util;
 
 pub async fn alive_datanodes(
     cluster_id: u64,

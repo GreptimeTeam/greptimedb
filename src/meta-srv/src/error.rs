@@ -409,8 +409,11 @@ pub enum Error {
         source: common_meta::error::Error,
     },
 
-    #[snafu(display("Etcd txn got an error: {err_msg}"))]
-    EtcdTxnOpResponse { err_msg: String, location: Location },
+    #[snafu(display("Failed to convert Etcd txn object: {source}"))]
+    ConvertEtcdTxnObject {
+        source: common_meta::error::Error,
+        location: Location,
+    },
 
     // this error is used for custom error mapping
     // please do not delete it
@@ -490,7 +493,6 @@ impl ErrorExt for Error {
             | Error::InvalidTxnResult { .. }
             | Error::InvalidUtf8Value { .. }
             | Error::UnexpectedInstructionReply { .. }
-            | Error::EtcdTxnOpResponse { .. }
             | Error::Unexpected { .. }
             | Error::Txn { .. }
             | Error::TableIdChanged { .. } => StatusCode::Unexpected,
@@ -507,9 +509,11 @@ impl ErrorExt for Error {
             Error::RegionFailoverCandidatesNotFound { .. } => StatusCode::RuntimeResourcesExhausted,
 
             Error::RegisterProcedureLoader { source, .. } => source.status_code(),
-            Error::TableRouteConversion { source, .. } | Error::ConvertProtoData { source, .. } => {
-                source.status_code()
-            }
+
+            Error::TableRouteConversion { source, .. }
+            | Error::ConvertProtoData { source, .. }
+            | Error::ConvertEtcdTxnObject { source, .. } => source.status_code(),
+
             Error::Other { source, .. } => source.status_code(),
         }
     }

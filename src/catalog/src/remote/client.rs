@@ -17,15 +17,16 @@ use std::fmt::Debug;
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_stream::stream;
 use common_error::prelude::BoxedError;
 use common_meta::error::Error::{CacheNotGet, GetKvCache};
 use common_meta::error::{CacheNotGetSnafu, Error, MetaSrvSnafu, Result};
-use common_meta::kv_backend::{Kv, KvBackend, KvBackendRef, ValueIter};
+use common_meta::kv_backend::{KvBackend, KvBackendRef, TxnService};
 use common_meta::rpc::store::{
-    CompareAndPutRequest, DeleteRangeRequest, MoveValueRequest, PutRequest, RangeRequest,
+    CompareAndPutRequest, CompareAndPutResponse, DeleteRangeRequest, DeleteRangeResponse,
+    MoveValueRequest, MoveValueResponse, PutRequest, PutResponse, RangeRequest, RangeResponse,
 };
-use common_telemetry::{info, timer};
+use common_meta::rpc::KeyValue;
+use common_telemetry::timer;
 use meta_client::client::MetaClient;
 use moka::future::{Cache, CacheBuilder};
 use snafu::{OptionExt, ResultExt};
@@ -37,24 +38,29 @@ const CACHE_MAX_CAPACITY: u64 = 10000;
 const CACHE_TTL_SECOND: u64 = 10 * 60;
 const CACHE_TTI_SECOND: u64 = 5 * 60;
 
-pub type CacheBackendRef = Arc<Cache<Vec<u8>, Kv>>;
+pub type CacheBackendRef = Arc<Cache<Vec<u8>, KeyValue>>;
+
 pub struct CachedMetaKvBackend {
     kv_backend: KvBackendRef,
     cache: CacheBackendRef,
+    name: &'static str,
+}
+
+impl TxnService for CachedMetaKvBackend {
+    type Error = Error;
 }
 
 #[async_trait::async_trait]
 impl KvBackend for CachedMetaKvBackend {
-    type Error = Error;
-
-    fn range<'a, 'b>(&'a self, key: &[u8]) -> ValueIter<'b, Error>
-    where
-        'a: 'b,
-    {
-        self.kv_backend.range(key)
+    fn name(&self) -> &'static str {
+        self.name
     }
 
-    async fn get(&self, key: &[u8]) -> Result<Option<Kv>> {
+    async fn range(&self, req: RangeRequest) -> Result<RangeResponse> {
+        self.kv_backend.range(req).await
+    }
+
+    async fn get(&self, key: &[u8]) -> Result<Option<KeyValue>> {
         let _timer = timer!(METRIC_CATALOG_KV_GET);
 
         let init = async {
@@ -81,8 +87,10 @@ impl KvBackend for CachedMetaKvBackend {
         })
     }
 
-    async fn set(&self, key: &[u8], val: &[u8]) -> Result<()> {
-        let ret = self.kv_backend.set(key, val).await;
+    async fn put(&self, req: PutRequest) -> Result<PutResponse> {
+        let key = &req.key.clone();
+
+        let ret = self.kv_backend.put(req).await;
 
         if ret.is_ok() {
             self.invalidate_key(key).await;
@@ -91,8 +99,30 @@ impl KvBackend for CachedMetaKvBackend {
         ret
     }
 
-    async fn delete(&self, key: &[u8]) -> Result<()> {
-        let ret = self.kv_backend.delete_range(key, &[]).await;
+    async fn delete_range(&self, mut req: DeleteRangeRequest) -> Result<DeleteRangeResponse> {
+        let prev_kv = req.prev_kv;
+
+        req.prev_kv = true;
+        let resp = self.kv_backend.delete_range(req).await;
+        match resp {
+            Ok(mut resp) => {
+                for prev_kv in resp.prev_kvs.iter() {
+                    self.invalidate_key(prev_kv.key()).await;
+                }
+
+                if !prev_kv {
+                    resp.prev_kvs = vec![];
+                }
+                Ok(resp)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn compare_and_put(&self, req: CompareAndPutRequest) -> Result<CompareAndPutResponse> {
+        let key = &req.key.clone();
+
+        let ret = self.kv_backend.compare_and_put(req).await;
 
         if ret.is_ok() {
             self.invalidate_key(key).await;
@@ -101,28 +131,11 @@ impl KvBackend for CachedMetaKvBackend {
         ret
     }
 
-    async fn delete_range(&self, _key: &[u8], _end: &[u8]) -> Result<()> {
-        // TODO(fys): implement it
-        unimplemented!()
-    }
+    async fn move_value(&self, req: MoveValueRequest) -> Result<MoveValueResponse> {
+        let from_key = &req.from_key.clone();
+        let to_key = &req.to_key.clone();
 
-    async fn compare_and_set(
-        &self,
-        key: &[u8],
-        expect: &[u8],
-        val: &[u8],
-    ) -> Result<std::result::Result<(), Option<Vec<u8>>>> {
-        let ret = self.kv_backend.compare_and_set(key, expect, val).await;
-
-        if ret.is_ok() {
-            self.invalidate_key(key).await;
-        }
-
-        ret
-    }
-
-    async fn move_value(&self, from_key: &[u8], to_key: &[u8]) -> Result<()> {
-        let ret = self.kv_backend.move_value(from_key, to_key).await;
+        let ret = self.kv_backend.move_value(req).await;
 
         if ret.is_ok() {
             self.invalidate_key(from_key).await;
@@ -146,15 +159,8 @@ impl KvCacheInvalidator for CachedMetaKvBackend {
 
 impl CachedMetaKvBackend {
     pub fn new(client: Arc<MetaClient>) -> Self {
-        let cache = Arc::new(
-            CacheBuilder::new(CACHE_MAX_CAPACITY)
-                .time_to_live(Duration::from_secs(CACHE_TTL_SECOND))
-                .time_to_idle(Duration::from_secs(CACHE_TTI_SECOND))
-                .build(),
-        );
         let kv_backend = Arc::new(MetaKvBackend { client });
-
-        Self { kv_backend, cache }
+        Self::wrap(kv_backend)
     }
 
     pub fn wrap(kv_backend: KvBackendRef) -> Self {
@@ -165,7 +171,12 @@ impl CachedMetaKvBackend {
                 .build(),
         );
 
-        Self { kv_backend, cache }
+        let name = Box::leak(format!("CachedKvBackend({})", kv_backend.name()).into_boxed_str());
+        Self {
+            kv_backend,
+            cache,
+            name,
+        }
     }
 
     pub fn cache(&self) -> &CacheBackendRef {
@@ -178,108 +189,73 @@ pub struct MetaKvBackend {
     pub client: Arc<MetaClient>,
 }
 
+impl TxnService for MetaKvBackend {
+    type Error = Error;
+}
+
 /// Implement `KvBackend` trait for `MetaKvBackend` instead of opendal's `Accessor` since
 /// `MetaClient`'s range method can return both keys and values, which can reduce IO overhead
 /// comparing to `Accessor`'s list and get method.
 #[async_trait::async_trait]
 impl KvBackend for MetaKvBackend {
-    type Error = Error;
-
-    fn range<'a, 'b>(&'a self, key: &[u8]) -> ValueIter<'b, Error>
-    where
-        'a: 'b,
-    {
-        let key = key.to_vec();
-        Box::pin(stream!({
-            let mut resp = self
-                .client
-                .range(RangeRequest::new().with_prefix(key))
-                .await
-                .map_err(BoxedError::new)
-                .context(MetaSrvSnafu)?;
-            let kvs = resp.take_kvs();
-            for mut kv in kvs.into_iter() {
-                yield Ok(Kv(kv.take_key(), kv.take_value()))
-            }
-        }))
+    fn name(&self) -> &'static str {
+        "MetaKvBackend"
     }
 
-    async fn get(&self, key: &[u8]) -> Result<Option<Kv>> {
+    async fn range(&self, req: RangeRequest) -> Result<RangeResponse> {
+        self.client
+            .range(req)
+            .await
+            .map_err(BoxedError::new)
+            .context(MetaSrvSnafu)
+    }
+
+    async fn get(&self, key: &[u8]) -> Result<Option<KeyValue>> {
         let mut response = self
             .client
             .range(RangeRequest::new().with_key(key))
             .await
             .map_err(BoxedError::new)
             .context(MetaSrvSnafu)?;
-        Ok(response
-            .take_kvs()
-            .get_mut(0)
-            .map(|kv| Kv(kv.take_key(), kv.take_value())))
+        Ok(response.take_kvs().get_mut(0).map(|kv| KeyValue {
+            key: kv.take_key(),
+            value: kv.take_value(),
+        }))
     }
 
-    async fn set(&self, key: &[u8], val: &[u8]) -> Result<()> {
-        let req = PutRequest::new()
-            .with_key(key.to_vec())
-            .with_value(val.to_vec());
-        let _ = self
-            .client
+    async fn put(&self, req: PutRequest) -> Result<PutResponse> {
+        self.client
             .put(req)
             .await
             .map_err(BoxedError::new)
-            .context(MetaSrvSnafu)?;
-        Ok(())
+            .context(MetaSrvSnafu)
     }
 
-    async fn delete_range(&self, key: &[u8], end: &[u8]) -> Result<()> {
-        let req = DeleteRangeRequest::new().with_range(key.to_vec(), end.to_vec());
-        let resp = self
-            .client
+    async fn delete_range(&self, req: DeleteRangeRequest) -> Result<DeleteRangeResponse> {
+        self.client
             .delete_range(req)
             .await
             .map_err(BoxedError::new)
-            .context(MetaSrvSnafu)?;
-        info!(
-            "Delete range, key: {}, end: {}, deleted: {}",
-            String::from_utf8_lossy(key),
-            String::from_utf8_lossy(end),
-            resp.deleted()
-        );
-
-        Ok(())
+            .context(MetaSrvSnafu)
     }
 
-    async fn compare_and_set(
+    async fn compare_and_put(
         &self,
-        key: &[u8],
-        expect: &[u8],
-        val: &[u8],
-    ) -> Result<std::result::Result<(), Option<Vec<u8>>>> {
-        let request = CompareAndPutRequest::new()
-            .with_key(key.to_vec())
-            .with_expect(expect.to_vec())
-            .with_value(val.to_vec());
-        let mut response = self
-            .client
+        request: CompareAndPutRequest,
+    ) -> Result<CompareAndPutResponse> {
+        self.client
             .compare_and_put(request)
             .await
             .map_err(BoxedError::new)
-            .context(MetaSrvSnafu)?;
-        if response.is_success() {
-            Ok(Ok(()))
-        } else {
-            Ok(Err(response.take_prev_kv().map(|v| v.value().to_vec())))
-        }
+            .context(MetaSrvSnafu)
     }
 
-    async fn move_value(&self, from_key: &[u8], to_key: &[u8]) -> Result<()> {
-        let req = MoveValueRequest::new(from_key, to_key);
-        let _ = self
-            .client
+    async fn move_value(&self, req: MoveValueRequest) -> Result<MoveValueResponse> {
+        self.client
             .move_value(req)
             .await
             .map_err(BoxedError::new)
-            .context(MetaSrvSnafu)?;
-        Ok(())
+            .context(MetaSrvSnafu)
     }
 
     fn as_any(&self) -> &dyn Any {

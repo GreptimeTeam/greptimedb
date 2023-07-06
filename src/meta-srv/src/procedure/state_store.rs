@@ -12,10 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::meta::{BatchDeleteRequest, PutRequest, RangeRequest};
 use async_stream::try_stream;
 use async_trait::async_trait;
 use common_error::prelude::BoxedError;
+use common_meta::rpc::store::{BatchDeleteRequest, PutRequest, RangeRequest};
+use common_meta::util;
 use common_procedure::error::{
     CorruptedDataSnafu, DeleteStatesSnafu, ListStateSnafu, PutStateSnafu,
 };
@@ -24,7 +25,6 @@ use common_procedure::Result;
 use snafu::ResultExt;
 
 use crate::service::store::kv::KvStoreRef;
-use crate::util;
 
 const PROCEDURE_PREFIX: &str = "/__procedure__/";
 

@@ -1812,6 +1812,7 @@ dependencies = [
  "common-telemetry",
  "common-time",
  "datatypes",
+ "etcd-client",
  "futures",
  "lazy_static",
  "prost",

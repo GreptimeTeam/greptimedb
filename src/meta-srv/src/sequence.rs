@@ -15,7 +15,7 @@
 use std::ops::Range;
 use std::sync::Arc;
 
-use api::v1::meta::CompareAndPutRequest;
+use common_meta::rpc::store::CompareAndPutRequest;
 use snafu::{ensure, OptionExt};
 use tokio::sync::Mutex;
 
@@ -120,7 +120,6 @@ impl Inner {
                 key: key.to_vec(),
                 expect,
                 value: value.to_vec(),
-                ..Default::default()
             };
 
             let res = self.generator.compare_and_put(req).await?;
@@ -156,16 +155,20 @@ impl Inner {
 
 #[cfg(test)]
 mod tests {
+    use std::any::Any;
     use std::sync::Arc;
 
-    use api::v1::meta::{
+    use common_meta::kv_backend::{KvBackend, TxnService};
+    use common_meta::rpc::store::{
         BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse,
+        BatchPutRequest, BatchPutResponse, CompareAndPutResponse, DeleteRangeRequest,
+        DeleteRangeResponse, MoveValueRequest, MoveValueResponse, PutRequest, PutResponse,
+        RangeRequest, RangeResponse,
     };
 
     use super::*;
-    use crate::service::store::kv::KvStore;
+    use crate::error::Error;
     use crate::service::store::memory::MemStore;
-    use crate::service::store::txn::TxnService;
 
     #[tokio::test]
     async fn test_sequence() {
@@ -200,28 +203,25 @@ mod tests {
     async fn test_sequence_force_quit() {
         struct Noop;
 
-        impl TxnService for Noop {}
+        impl TxnService for Noop {
+            type Error = Error;
+        }
 
         #[async_trait::async_trait]
-        impl KvStore for Noop {
-            async fn range(
-                &self,
-                _: api::v1::meta::RangeRequest,
-            ) -> Result<api::v1::meta::RangeResponse> {
+        impl KvBackend for Noop {
+            fn name(&self) -> &'static str {
+                "Noop"
+            }
+
+            async fn range(&self, _: RangeRequest) -> Result<RangeResponse> {
                 unreachable!()
             }
 
-            async fn put(
-                &self,
-                _: api::v1::meta::PutRequest,
-            ) -> Result<api::v1::meta::PutResponse> {
+            async fn put(&self, _: PutRequest) -> Result<PutResponse> {
                 unreachable!()
             }
 
-            async fn batch_put(
-                &self,
-                _: api::v1::meta::BatchPutRequest,
-            ) -> Result<api::v1::meta::BatchPutResponse> {
+            async fn batch_put(&self, _: BatchPutRequest) -> Result<BatchPutResponse> {
                 unreachable!()
             }
 
@@ -232,26 +232,24 @@ mod tests {
             async fn compare_and_put(
                 &self,
                 _: CompareAndPutRequest,
-            ) -> Result<api::v1::meta::CompareAndPutResponse> {
-                Ok(api::v1::meta::CompareAndPutResponse::default())
+            ) -> Result<CompareAndPutResponse> {
+                Ok(CompareAndPutResponse::default())
             }
 
-            async fn delete_range(
-                &self,
-                _: api::v1::meta::DeleteRangeRequest,
-            ) -> Result<api::v1::meta::DeleteRangeResponse> {
+            async fn delete_range(&self, _: DeleteRangeRequest) -> Result<DeleteRangeResponse> {
                 unreachable!()
             }
 
-            async fn move_value(
-                &self,
-                _: api::v1::meta::MoveValueRequest,
-            ) -> Result<api::v1::meta::MoveValueResponse> {
+            async fn move_value(&self, _: MoveValueRequest) -> Result<MoveValueResponse> {
                 unreachable!()
             }
 
             async fn batch_delete(&self, _: BatchDeleteRequest) -> Result<BatchDeleteResponse> {
                 unreachable!()
+            }
+
+            fn as_any(&self) -> &dyn Any {
+                self
             }
         }
 

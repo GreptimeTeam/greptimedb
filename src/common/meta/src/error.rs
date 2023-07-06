@@ -73,6 +73,9 @@ pub enum Error {
         source: BoxedError,
         location: Location,
     },
+
+    #[snafu(display("Etcd txn error: {err_msg}"))]
+    EtcdTxnOpResponse { err_msg: String, location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -81,7 +84,7 @@ impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         use Error::*;
         match self {
-            IllegalServerState { .. } => StatusCode::Internal,
+            IllegalServerState { .. } | EtcdTxnOpResponse { .. } => StatusCode::Internal,
 
             SerdeJson { .. }
             | RouteInfoCorrupted { .. }

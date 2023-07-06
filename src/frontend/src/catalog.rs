@@ -34,11 +34,11 @@ use catalog::{
 use client::client_manager::DatanodeClients;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME};
 use common_error::prelude::BoxedError;
-use common_meta::kv_backend::{Kv, KvBackendRef};
+use common_meta::kv_backend::KvBackendRef;
+use common_meta::rpc::store::RangeRequest;
+use common_meta::rpc::KeyValue;
 use common_meta::table_name::TableName;
 use common_telemetry::warn;
-use futures::StreamExt;
-use futures_util::TryStreamExt;
 use partition::manager::PartitionRuleManagerRef;
 use snafu::prelude::*;
 use table::table::numbers::NumbersTable;
@@ -252,10 +252,17 @@ impl CatalogManager for FrontendCatalogManager {
 
     async fn catalog_names(&self) -> CatalogResult<Vec<String>> {
         let key = build_catalog_prefix();
-        let mut iter = self.backend.range(key.as_bytes());
+        let req = RangeRequest::new().with_prefix(key.as_bytes());
+
+        let kvs = self
+            .backend
+            .range(req)
+            .await
+            .context(TableMetadataManagerSnafu)?
+            .kvs;
+
         let mut res = HashSet::new();
-        while let Some(r) = iter.next().await {
-            let Kv(k, _) = r.context(TableMetadataManagerSnafu)?;
+        for KeyValue { key: k, value: _ } in kvs {
             let catalog_key = String::from_utf8_lossy(&k);
             if let Ok(key) = CatalogKey::parse(catalog_key.as_ref()) {
                 let _ = res.insert(key.catalog_name);
@@ -268,10 +275,17 @@ impl CatalogManager for FrontendCatalogManager {
 
     async fn schema_names(&self, catalog: &str) -> CatalogResult<Vec<String>> {
         let key = build_schema_prefix(catalog);
-        let mut iter = self.backend.range(key.as_bytes());
+        let req = RangeRequest::new().with_prefix(key.as_bytes());
+
+        let kvs = self
+            .backend
+            .range(req)
+            .await
+            .context(TableMetadataManagerSnafu)?
+            .kvs;
+
         let mut res = HashSet::new();
-        while let Some(r) = iter.next().await {
-            let Kv(k, _) = r.context(TableMetadataManagerSnafu)?;
+        for KeyValue { key: k, value: _ } in kvs {
             let key =
                 SchemaKey::parse(String::from_utf8_lossy(&k)).context(InvalidCatalogValueSnafu)?;
             let _ = res.insert(key.schema_name);
@@ -285,16 +299,23 @@ impl CatalogManager for FrontendCatalogManager {
             tables.push("numbers".to_string());
         }
         let key = build_table_global_prefix(catalog, schema);
-        let iter = self.backend.range(key.as_bytes());
+        let req = RangeRequest::new().with_prefix(key.as_bytes());
+
+        let iter = self
+            .backend
+            .range(req)
+            .await
+            .context(TableMetadataManagerSnafu)?
+            .kvs
+            .into_iter();
+
         let result = iter
-            .map(|r| {
-                let Kv(k, _) = r.context(TableMetadataManagerSnafu)?;
+            .map(|KeyValue { key: k, value: _ }| {
                 let key = TableGlobalKey::parse(String::from_utf8_lossy(&k))
                     .context(InvalidCatalogValueSnafu)?;
                 Ok(key.table_name)
             })
-            .try_collect::<Vec<_>>()
-            .await?;
+            .collect::<CatalogResult<Vec<_>>>()?;
         tables.extend(result);
         Ok(tables)
     }
@@ -377,7 +398,7 @@ impl CatalogManager for FrontendCatalogManager {
         let Some(kv) = self.backend().get(table_global_key.to_string().as_bytes()).await.context(TableMetadataManagerSnafu)? else {
             return Ok(None);
         };
-        let v = TableGlobalValue::from_bytes(kv.1).context(InvalidCatalogValueSnafu)?;
+        let v = TableGlobalValue::from_bytes(kv.value).context(InvalidCatalogValueSnafu)?;
         let table_info = Arc::new(
             v.table_info
                 .try_into()

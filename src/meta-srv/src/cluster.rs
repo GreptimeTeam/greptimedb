@@ -18,18 +18,22 @@ use std::time::Duration;
 
 use api::v1::meta::cluster_client::ClusterClient;
 use api::v1::meta::{
-    BatchGetRequest, BatchGetResponse, KeyValue, RangeRequest, RangeResponse, ResponseHeader,
+    BatchGetRequest as PbBatchGetRequest, BatchGetResponse as PbBatchGetResponse,
+    RangeRequest as PbRangeRequest, RangeResponse as PbRangeResponse, ResponseHeader,
 };
 use common_grpc::channel_manager::ChannelManager;
+use common_meta::rpc::store::{BatchGetRequest, RangeRequest};
+use common_meta::rpc::KeyValue;
+use common_meta::util;
 use common_telemetry::warn;
 use derive_builder::Builder;
 use snafu::{ensure, OptionExt, ResultExt};
 
+use crate::error;
 use crate::error::{match_for_io_error, Result};
 use crate::keys::{StatKey, StatValue, DN_STAT_PREFIX};
 use crate::metasrv::ElectionRef;
 use crate::service::store::kv::ResettableKvStoreRef;
-use crate::{error, util};
 
 pub type MetaPeerClientRef = Arc<MetaPeerClient>;
 
@@ -112,13 +116,13 @@ impl MetaPeerClient {
             .get(&leader_addr)
             .context(error::CreateChannelSnafu)?;
 
-        let request = tonic::Request::new(RangeRequest {
+        let request = tonic::Request::new(PbRangeRequest {
             key,
             range_end,
             ..Default::default()
         });
 
-        let response: RangeResponse = ClusterClient::new(channel)
+        let response: PbRangeResponse = ClusterClient::new(channel)
             .range(request)
             .await
             .context(error::RangeSnafu)?
@@ -126,16 +130,13 @@ impl MetaPeerClient {
 
         check_resp_header(&response.header, Context { addr: &leader_addr })?;
 
-        Ok(response.kvs)
+        Ok(response.kvs.into_iter().map(KeyValue::new).collect())
     }
 
     // Get kv information from the leader's in_mem kv store
     pub async fn batch_get(&self, keys: Vec<Vec<u8>>) -> Result<Vec<KeyValue>> {
         if self.is_leader() {
-            let request = BatchGetRequest {
-                keys,
-                ..Default::default()
-            };
+            let request = BatchGetRequest { keys };
 
             return self.in_memory.batch_get(request).await.map(|resp| resp.kvs);
         }
@@ -175,12 +176,12 @@ impl MetaPeerClient {
             .get(&leader_addr)
             .context(error::CreateChannelSnafu)?;
 
-        let request = tonic::Request::new(BatchGetRequest {
+        let request = tonic::Request::new(PbBatchGetRequest {
             keys,
             ..Default::default()
         });
 
-        let response: BatchGetResponse = ClusterClient::new(channel)
+        let response: PbBatchGetResponse = ClusterClient::new(channel)
             .batch_get(request)
             .await
             .context(error::BatchGetSnafu)?
@@ -188,7 +189,7 @@ impl MetaPeerClient {
 
         check_resp_header(&response.header, Context { addr: &leader_addr })?;
 
-        Ok(response.kvs)
+        Ok(response.kvs.into_iter().map(KeyValue::new).collect())
     }
 
     // Check if the meta node is a leader node.
@@ -240,7 +241,8 @@ fn need_retry(error: &error::Error) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use api::v1::meta::{Error, ErrorCode, KeyValue, ResponseHeader};
+    use api::v1::meta::{Error, ErrorCode, ResponseHeader};
+    use common_meta::rpc::KeyValue;
 
     use super::{check_resp_header, to_stat_kv_map, Context};
     use crate::error;

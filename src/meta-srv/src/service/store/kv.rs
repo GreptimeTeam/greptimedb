@@ -14,38 +14,13 @@
 
 use std::sync::Arc;
 
-use api::v1::meta::{
-    BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
-    BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse, DeleteRangeRequest,
-    DeleteRangeResponse, MoveValueRequest, MoveValueResponse, PutRequest, PutResponse,
-    RangeRequest, RangeResponse,
-};
+use common_meta::kv_backend::KvBackend;
 
-use crate::error::Result;
-use crate::service::store::txn::TxnService;
+use crate::error::Error;
 
-pub type KvStoreRef = Arc<dyn KvStore>;
+pub type KvStoreRef = Arc<dyn KvBackend<Error = Error>>;
 pub type ResettableKvStoreRef = Arc<dyn ResettableKvStore>;
 
-#[async_trait::async_trait]
-pub trait KvStore: TxnService {
-    async fn range(&self, req: RangeRequest) -> Result<RangeResponse>;
-
-    async fn put(&self, req: PutRequest) -> Result<PutResponse>;
-
-    async fn batch_get(&self, req: BatchGetRequest) -> Result<BatchGetResponse>;
-
-    async fn batch_put(&self, req: BatchPutRequest) -> Result<BatchPutResponse>;
-
-    async fn batch_delete(&self, req: BatchDeleteRequest) -> Result<BatchDeleteResponse>;
-
-    async fn compare_and_put(&self, req: CompareAndPutRequest) -> Result<CompareAndPutResponse>;
-
-    async fn delete_range(&self, req: DeleteRangeRequest) -> Result<DeleteRangeResponse>;
-
-    async fn move_value(&self, req: MoveValueRequest) -> Result<MoveValueResponse>;
-}
-
-pub trait ResettableKvStore: KvStore {
+pub trait ResettableKvStore: KvBackend<Error = Error> {
     fn reset(&self);
 }

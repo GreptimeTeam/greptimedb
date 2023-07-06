@@ -16,20 +16,30 @@ use std::any::Any;
 use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
+use std::marker::PhantomData;
+use std::ops::Range;
 use std::sync::RwLock;
 
-use async_stream::stream;
 use async_trait::async_trait;
+use common_error::prelude::ErrorExt;
+use common_telemetry::timer;
 use serde::Serializer;
 
-use crate::error::Error;
-use crate::kv_backend::{Kv, KvBackend, ValueIter};
+use crate::kv_backend::txn::{Txn, TxnOp, TxnOpResponse, TxnRequest, TxnResponse};
+use crate::kv_backend::{KvBackend, TxnService};
+use crate::metrics::METRIC_META_TXN_REQUEST;
+use crate::rpc::store::{
+    CompareAndPutRequest, CompareAndPutResponse, DeleteRangeRequest, DeleteRangeResponse,
+    MoveValueRequest, MoveValueResponse, PutRequest, PutResponse, RangeRequest, RangeResponse,
+};
+use crate::rpc::KeyValue;
 
-pub struct MemoryKvBackend {
+pub struct MemoryKvBackend<T> {
     kvs: RwLock<BTreeMap<Vec<u8>, Vec<u8>>>,
+    _phantom: PhantomData<T>,
 }
 
-impl Display for MemoryKvBackend {
+impl<T> Display for MemoryKvBackend<T> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let kvs = self.kvs.read().unwrap();
         for (k, v) in kvs.iter() {
@@ -42,93 +52,175 @@ impl Display for MemoryKvBackend {
     }
 }
 
-impl Default for MemoryKvBackend {
+impl<T> Default for MemoryKvBackend<T> {
     fn default() -> Self {
         Self {
             kvs: RwLock::new(BTreeMap::new()),
+            _phantom: PhantomData,
         }
     }
 }
 
+impl<T> MemoryKvBackend<T> {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn clear(&self) {
+        let mut kvs = self.kvs.write().unwrap();
+        kvs.clear();
+    }
+}
+
 #[async_trait]
-impl KvBackend for MemoryKvBackend {
-    type Error = Error;
+impl<T: ErrorExt + Send + Sync + 'static> KvBackend for MemoryKvBackend<T> {
+    fn name(&self) -> &'static str {
+        "Memory"
+    }
 
-    fn range<'a, 'b>(&'a self, prefix: &[u8]) -> ValueIter<'b, Error>
-    where
-        'a: 'b,
-    {
+    async fn range(&self, req: RangeRequest) -> Result<RangeResponse, Self::Error> {
+        let RangeRequest {
+            key,
+            range_end,
+            limit,
+            keys_only,
+        } = req;
+
         let kvs = self.kvs.read().unwrap();
-        let kvs = kvs.clone();
 
-        let prefix = prefix.to_vec();
-        Box::pin(stream!({
-            for (k, v) in kvs.range(prefix.clone()..) {
-                if !k.starts_with(&prefix) {
-                    break;
-                }
-                yield Ok(Kv(k.clone(), v.clone()));
-            }
-        }))
+        let iter: Box<dyn Iterator<Item = (&Vec<u8>, &Vec<u8>)>> = if range_end.is_empty() {
+            Box::new(kvs.get_key_value(&key).into_iter())
+        } else {
+            Box::new(kvs.range(key..range_end))
+        };
+        let mut kvs = iter
+            .map(|(k, v)| {
+                let key = k.clone();
+                let value = if keys_only { vec![] } else { v.clone() };
+                KeyValue { key, value }
+            })
+            .collect::<Vec<_>>();
+
+        let more = if limit > 0 && kvs.len() > limit as usize {
+            kvs.truncate(limit as usize);
+            true
+        } else {
+            false
+        };
+
+        Ok(RangeResponse { kvs, more })
     }
 
-    async fn set(&self, key: &[u8], val: &[u8]) -> Result<(), Error> {
+    async fn put(&self, req: PutRequest) -> Result<PutResponse, Self::Error> {
+        let PutRequest {
+            key,
+            value,
+            prev_kv,
+        } = req;
+
         let mut kvs = self.kvs.write().unwrap();
-        let _ = kvs.insert(key.to_vec(), val.to_vec());
-        Ok(())
+
+        let prev_kv = if prev_kv {
+            kvs.insert(key.clone(), value)
+                .map(|value| KeyValue { key, value })
+        } else {
+            kvs.insert(key, value);
+            None
+        };
+
+        Ok(PutResponse { prev_kv })
     }
 
-    async fn compare_and_set(
+    async fn compare_and_put(
         &self,
-        key: &[u8],
-        expect: &[u8],
-        val: &[u8],
-    ) -> Result<Result<(), Option<Vec<u8>>>, Error> {
-        let key = key.to_vec();
-        let val = val.to_vec();
+        req: CompareAndPutRequest,
+    ) -> Result<CompareAndPutResponse, Self::Error> {
+        let CompareAndPutRequest { key, expect, value } = req;
 
         let mut kvs = self.kvs.write().unwrap();
+
         let existed = kvs.entry(key);
-        Ok(match existed {
+        let (success, prev_kv) = match existed {
             Entry::Vacant(e) => {
-                if expect.is_empty() {
-                    let _ = e.insert(val);
-                    Ok(())
-                } else {
-                    Err(None)
+                let expected = expect.is_empty();
+                if expected {
+                    let _ = e.insert(value);
                 }
+                (expected, None)
             }
             Entry::Occupied(mut existed) => {
-                if existed.get() == expect {
-                    let _ = existed.insert(val);
-                    Ok(())
+                let expected = existed.get() == &expect;
+                let prev_kv = if expected {
+                    let _ = existed.insert(value);
+                    None
                 } else {
-                    Err(Some(existed.get().clone()))
-                }
+                    Some(KeyValue {
+                        key: existed.key().clone(),
+                        value: existed.get().clone(),
+                    })
+                };
+                (expected, prev_kv)
             }
+        };
+
+        Ok(CompareAndPutResponse { success, prev_kv })
+    }
+
+    async fn delete_range(
+        &self,
+        req: DeleteRangeRequest,
+    ) -> Result<DeleteRangeResponse, Self::Error> {
+        let DeleteRangeRequest {
+            key,
+            range_end,
+            prev_kv,
+        } = req;
+
+        let mut kvs = self.kvs.write().unwrap();
+
+        let prev_kvs = if range_end.is_empty() {
+            kvs.remove(&key)
+                .into_iter()
+                .map(|value| KeyValue {
+                    key: key.clone(),
+                    value,
+                })
+                .collect::<Vec<_>>()
+        } else {
+            let range = Range {
+                start: key,
+                end: range_end,
+            };
+            kvs.drain_filter(|key, _| range.contains(key))
+                .map(Into::into)
+                .collect::<Vec<_>>()
+        };
+
+        Ok(DeleteRangeResponse {
+            deleted: prev_kvs.len() as i64,
+            prev_kvs: if prev_kv { prev_kvs } else { vec![] },
         })
     }
 
-    async fn delete_range(&self, key: &[u8], end: &[u8]) -> Result<(), Error> {
+    async fn move_value(&self, req: MoveValueRequest) -> Result<MoveValueResponse, Self::Error> {
+        let MoveValueRequest { from_key, to_key } = req;
+
         let mut kvs = self.kvs.write().unwrap();
-        if end.is_empty() {
-            let _ = kvs.remove(key);
+
+        let kv = if let Some(v) = kvs.remove(&from_key) {
+            kvs.insert(to_key, v.clone());
+            Some(KeyValue {
+                key: from_key,
+                value: v,
+            })
         } else {
-            let start = key.to_vec();
-            let end = end.to_vec();
-            let range = start..end;
+            kvs.get(&to_key).map(|v| KeyValue {
+                key: to_key,
+                value: v.clone(),
+            })
+        };
 
-            kvs.retain(|k, _| !range.contains(k));
-        }
-        Ok(())
-    }
-
-    async fn move_value(&self, from_key: &[u8], to_key: &[u8]) -> Result<(), Error> {
-        let mut kvs = self.kvs.write().unwrap();
-        if let Some(v) = kvs.remove(from_key) {
-            let _ = kvs.insert(to_key.to_vec(), v);
-        }
-        Ok(())
+        Ok(MoveValueResponse(kv))
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -136,62 +228,347 @@ impl KvBackend for MemoryKvBackend {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use futures::TryStreamExt;
+#[async_trait]
+impl<T: ErrorExt + Send + Sync> TxnService for MemoryKvBackend<T> {
+    type Error = T;
 
-    use super::*;
-
-    #[tokio::test]
-    async fn test_memory_kv_backend() {
-        let backend = MemoryKvBackend::default();
-
-        for i in 1..10 {
-            let key = format!("key{}", i);
-            let val = format!("val{}", i);
-            assert!(backend.set(key.as_bytes(), val.as_bytes()).await.is_ok());
-        }
-
-        let result = backend
-            .compare_and_set(b"hello", b"what", b"world")
-            .await
-            .unwrap();
-        assert!(result.unwrap_err().is_none());
-
-        let result = backend
-            .compare_and_set(b"hello", b"", b"world")
-            .await
-            .unwrap();
-        assert!(result.is_ok());
-
-        let result = backend
-            .compare_and_set(b"hello", b"world", b"greptime")
-            .await
-            .unwrap();
-        assert!(result.is_ok());
-
-        let result = backend
-            .compare_and_set(b"hello", b"world", b"what")
-            .await
-            .unwrap();
-        assert_eq!(result.unwrap_err().unwrap(), b"greptime");
-
-        assert!(backend.delete_range(b"key1", &[]).await.is_ok());
-        assert!(backend.delete_range(b"key3", b"key9").await.is_ok());
-
-        assert!(backend.move_value(b"key9", b"key10").await.is_ok());
-
-        assert_eq!(
-            backend.to_string(),
-            r#"hello -> greptime
-key10 -> val9
-key2 -> val2
-"#
+    async fn txn(&self, txn: Txn) -> Result<TxnResponse, Self::Error> {
+        let _timer = timer!(
+            METRIC_META_TXN_REQUEST,
+            &[("target", "memory"), ("op", "txn")]
         );
 
-        let range = backend.range(b"key").try_collect::<Vec<_>>().await.unwrap();
-        assert_eq!(range.len(), 2);
-        assert_eq!(range[0], Kv(b"key10".to_vec(), b"val9".to_vec()));
-        assert_eq!(range[1], Kv(b"key2".to_vec(), b"val2".to_vec()));
+        let TxnRequest {
+            compare,
+            success,
+            failure,
+        } = txn.into();
+
+        let mut kvs = self.kvs.write().unwrap();
+
+        let succeeded = compare
+            .iter()
+            .all(|x| x.compare_with_value(kvs.get(&x.key)));
+
+        let do_txn = |txn_op| match txn_op {
+            TxnOp::Put(key, value) => {
+                let prev_value = kvs.insert(key.clone(), value);
+                let prev_kv = prev_value.map(|value| KeyValue { key, value });
+                TxnOpResponse::ResponsePut(PutResponse { prev_kv })
+            }
+
+            TxnOp::Get(key) => {
+                let value = kvs.get(&key);
+                let kvs = value
+                    .into_iter()
+                    .map(|value| KeyValue {
+                        key: key.clone(),
+                        value: value.clone(),
+                    })
+                    .collect();
+                TxnOpResponse::ResponseGet(RangeResponse { kvs, more: false })
+            }
+
+            TxnOp::Delete(key) => {
+                let prev_value = kvs.remove(&key);
+                let deleted = prev_value.as_ref().map(|x| x.len()).unwrap_or(0) as i64;
+
+                let prev_kvs = prev_value
+                    .into_iter()
+                    .map(|value| KeyValue {
+                        key: key.clone(),
+                        value,
+                    })
+                    .collect();
+                TxnOpResponse::ResponseDelete(DeleteRangeResponse { deleted, prev_kvs })
+            }
+        };
+
+        let responses: Vec<_> = if succeeded { success } else { failure }
+            .into_iter()
+            .map(do_txn)
+            .collect();
+
+        Ok(TxnResponse {
+            succeeded,
+            responses,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicU8, Ordering};
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::error::Error;
+    use crate::kv_backend::KvBackend;
+    use crate::rpc::store::{BatchGetRequest, BatchPutRequest};
+    use crate::rpc::KeyValue;
+    use crate::util;
+
+    async fn mock_mem_store_with_data() -> MemoryKvBackend<Error> {
+        let kv_store = MemoryKvBackend::<Error>::new();
+        let kvs = mock_kvs();
+
+        assert!(kv_store
+            .batch_put(BatchPutRequest {
+                kvs,
+                ..Default::default()
+            })
+            .await
+            .is_ok());
+
+        assert!(kv_store
+            .put(PutRequest {
+                key: b"key11".to_vec(),
+                value: b"val11".to_vec(),
+                ..Default::default()
+            })
+            .await
+            .is_ok());
+
+        kv_store
+    }
+
+    fn mock_kvs() -> Vec<KeyValue> {
+        vec![
+            KeyValue {
+                key: b"key1".to_vec(),
+                value: b"val1".to_vec(),
+            },
+            KeyValue {
+                key: b"key2".to_vec(),
+                value: b"val2".to_vec(),
+            },
+            KeyValue {
+                key: b"key3".to_vec(),
+                value: b"val3".to_vec(),
+            },
+        ]
+    }
+
+    #[tokio::test]
+    async fn test_put() {
+        let kv_store = mock_mem_store_with_data().await;
+
+        let resp = kv_store
+            .put(PutRequest {
+                key: b"key11".to_vec(),
+                value: b"val12".to_vec(),
+                prev_kv: false,
+            })
+            .await
+            .unwrap();
+        assert!(resp.prev_kv.is_none());
+
+        let resp = kv_store
+            .put(PutRequest {
+                key: b"key11".to_vec(),
+                value: b"val13".to_vec(),
+                prev_kv: true,
+            })
+            .await
+            .unwrap();
+        let prev_kv = resp.prev_kv.unwrap();
+        assert_eq!(b"key11", prev_kv.key());
+        assert_eq!(b"val12", prev_kv.value());
+    }
+
+    #[tokio::test]
+    async fn test_range() {
+        let kv_store = mock_mem_store_with_data().await;
+
+        let key = b"key1".to_vec();
+        let range_end = util::get_prefix_end_key(b"key1");
+
+        let resp = kv_store
+            .range(RangeRequest {
+                key: key.clone(),
+                range_end: range_end.clone(),
+                limit: 0,
+                keys_only: false,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(2, resp.kvs.len());
+        assert_eq!(b"key1", resp.kvs[0].key());
+        assert_eq!(b"val1", resp.kvs[0].value());
+        assert_eq!(b"key11", resp.kvs[1].key());
+        assert_eq!(b"val11", resp.kvs[1].value());
+
+        let resp = kv_store
+            .range(RangeRequest {
+                key: key.clone(),
+                range_end: range_end.clone(),
+                limit: 0,
+                keys_only: true,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(2, resp.kvs.len());
+        assert_eq!(b"key1", resp.kvs[0].key());
+        assert_eq!(b"", resp.kvs[0].value());
+        assert_eq!(b"key11", resp.kvs[1].key());
+        assert_eq!(b"", resp.kvs[1].value());
+
+        let resp = kv_store
+            .range(RangeRequest {
+                key: key.clone(),
+                limit: 0,
+                keys_only: false,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(1, resp.kvs.len());
+        assert_eq!(b"key1", resp.kvs[0].key());
+        assert_eq!(b"val1", resp.kvs[0].value());
+
+        let resp = kv_store
+            .range(RangeRequest {
+                key,
+                range_end,
+                limit: 1,
+                keys_only: false,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(1, resp.kvs.len());
+        assert_eq!(b"key1", resp.kvs[0].key());
+        assert_eq!(b"val1", resp.kvs[0].value());
+    }
+
+    #[tokio::test]
+    async fn test_batch_get() {
+        let kv_store = mock_mem_store_with_data().await;
+
+        let keys = vec![];
+        let resp = kv_store.batch_get(BatchGetRequest { keys }).await.unwrap();
+
+        assert!(resp.kvs.is_empty());
+
+        let keys = vec![b"key10".to_vec()];
+        let resp = kv_store.batch_get(BatchGetRequest { keys }).await.unwrap();
+
+        assert!(resp.kvs.is_empty());
+
+        let keys = vec![b"key1".to_vec(), b"key3".to_vec(), b"key4".to_vec()];
+        let resp = kv_store.batch_get(BatchGetRequest { keys }).await.unwrap();
+
+        assert_eq!(2, resp.kvs.len());
+        assert_eq!(b"key1", resp.kvs[0].key());
+        assert_eq!(b"val1", resp.kvs[0].value());
+        assert_eq!(b"key3", resp.kvs[1].key());
+        assert_eq!(b"val3", resp.kvs[1].value());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_compare_and_put() {
+        let kv_store = Arc::new(MemoryKvBackend::<Error>::new());
+        let success = Arc::new(AtomicU8::new(0));
+
+        let mut joins = vec![];
+        for _ in 0..20 {
+            let kv_store_clone = kv_store.clone();
+            let success_clone = success.clone();
+            let join = tokio::spawn(async move {
+                let req = CompareAndPutRequest {
+                    key: b"key".to_vec(),
+                    expect: vec![],
+                    value: b"val_new".to_vec(),
+                };
+                let resp = kv_store_clone.compare_and_put(req).await.unwrap();
+                if resp.success {
+                    success_clone.fetch_add(1, Ordering::SeqCst);
+                }
+            });
+            joins.push(join);
+        }
+
+        for join in joins {
+            join.await.unwrap();
+        }
+
+        assert_eq!(1, success.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn test_delete_range() {
+        let kv_store = mock_mem_store_with_data().await;
+
+        let req = DeleteRangeRequest {
+            key: b"key3".to_vec(),
+            range_end: vec![],
+            prev_kv: true,
+        };
+
+        let resp = kv_store.delete_range(req).await.unwrap();
+        assert_eq!(1, resp.prev_kvs.len());
+        assert_eq!(b"key3", resp.prev_kvs[0].key());
+        assert_eq!(b"val3", resp.prev_kvs[0].value());
+
+        let resp = kv_store.get(b"key3").await.unwrap();
+        assert!(resp.is_none());
+
+        let req = DeleteRangeRequest {
+            key: b"key2".to_vec(),
+            range_end: vec![],
+            prev_kv: false,
+        };
+
+        let resp = kv_store.delete_range(req).await.unwrap();
+        assert!(resp.prev_kvs.is_empty());
+
+        let resp = kv_store.get(b"key2").await.unwrap();
+        assert!(resp.is_none());
+
+        let key = b"key1".to_vec();
+        let range_end = util::get_prefix_end_key(b"key1");
+
+        let req = DeleteRangeRequest {
+            key: key.clone(),
+            range_end: range_end.clone(),
+            prev_kv: true,
+        };
+        let resp = kv_store.delete_range(req).await.unwrap();
+        assert_eq!(2, resp.prev_kvs.len());
+
+        let req = RangeRequest {
+            key,
+            range_end,
+            ..Default::default()
+        };
+        let resp = kv_store.range(req).await.unwrap();
+        assert!(resp.kvs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_move_value() {
+        let kv_store = mock_mem_store_with_data().await;
+
+        let req = MoveValueRequest {
+            from_key: b"key1".to_vec(),
+            to_key: b"key111".to_vec(),
+        };
+
+        let resp = kv_store.move_value(req).await.unwrap();
+        assert_eq!(b"key1", resp.0.as_ref().unwrap().key());
+        assert_eq!(b"val1", resp.0.as_ref().unwrap().value());
+
+        let kv_store = mock_mem_store_with_data().await;
+
+        let req = MoveValueRequest {
+            from_key: b"notexistkey".to_vec(),
+            to_key: b"key222".to_vec(),
+        };
+
+        let resp = kv_store.move_value(req).await.unwrap();
+        assert!(resp.0.is_none());
     }
 }

@@ -19,6 +19,7 @@ use super::TABLE_INFO_KEY_PREFIX;
 use crate::error::Result;
 use crate::key::{to_removed_key, TableMetaKey};
 use crate::kv_backend::KvBackendRef;
+use crate::rpc::store::{CompareAndPutRequest, MoveValueRequest};
 
 pub struct TableInfoKey {
     table_id: TableId,
@@ -57,11 +58,18 @@ impl TableInfoManager {
         self.kv_backend
             .get(&raw_key)
             .await?
-            .map(|x| TableInfoValue::try_from_raw_value(x.1))
+            .map(|x| TableInfoValue::try_from_raw_value(x.value))
             .transpose()
     }
 
-    pub async fn compare_and_set(
+    /// Compare and put value of key. `expect` is the expected value, if backend's current value associated
+    /// with key is the same as `expect`, the value will be updated to `val`.
+    ///
+    /// - If the compare-and-set operation successfully updated value, this method will return an `Ok(Ok())`
+    /// - If associated value is not the same as `expect`, no value will be updated and an `Ok(Err(Vec<u8>))`
+    /// will be returned, the `Err(Vec<u8>)` indicates the current associated value of key.
+    /// - If any error happens during operation, an `Err(Error)` will be returned.
+    pub async fn compare_and_put(
         &self,
         table_id: TableId,
         expect: Option<TableInfoValue>,
@@ -82,17 +90,24 @@ impl TableInfoManager {
         };
         let raw_value = value.try_as_raw_value()?;
 
-        self.kv_backend
-            .compare_and_set(&raw_key, &expect, &raw_value)
-            .await
+        let req = CompareAndPutRequest::new()
+            .with_key(raw_key)
+            .with_expect(expect)
+            .with_value(raw_value);
+        let resp = self.kv_backend.compare_and_put(req).await?;
+        Ok(if resp.success {
+            Ok(())
+        } else {
+            Err(resp.prev_kv.map(|x| x.value))
+        })
     }
 
     pub async fn remove(&self, table_id: TableId) -> Result<()> {
-        let key = TableInfoKey::new(table_id);
-        let removed_key = to_removed_key(&String::from_utf8_lossy(key.as_raw_key().as_slice()));
-        self.kv_backend
-            .move_value(&key.as_raw_key(), removed_key.as_bytes())
-            .await
+        let key = TableInfoKey::new(table_id).as_raw_key();
+        let removed_key = to_removed_key(&String::from_utf8_lossy(&key));
+        let req = MoveValueRequest::new(key, removed_key.as_bytes());
+        self.kv_backend.move_value(req).await?;
+        Ok(())
     }
 }
 
@@ -107,6 +122,7 @@ mod tests {
     use super::*;
     use crate::kv_backend::memory::MemoryKvBackend;
     use crate::kv_backend::KvBackend;
+    use crate::rpc::store::PutRequest;
 
     #[tokio::test]
     async fn test_table_info_manager() {
@@ -120,7 +136,8 @@ mod tests {
             }
             .try_as_raw_value()
             .unwrap();
-            backend.set(&key, &val).await.unwrap();
+            let req = PutRequest::new().with_key(key).with_value(val);
+            backend.put(req).await.unwrap();
         }
 
         let manager = TableInfoManager::new(backend.clone());
@@ -137,7 +154,7 @@ mod tests {
 
         let table_info = new_table_info(4);
         let result = manager
-            .compare_and_set(4, None, table_info.clone())
+            .compare_and_put(4, None, table_info.clone())
             .await
             .unwrap();
         assert!(result.is_ok());
@@ -145,7 +162,7 @@ mod tests {
         // test cas failed, the new table info is not set
         let new_table_info = new_table_info(4);
         let result = manager
-            .compare_and_set(4, None, new_table_info.clone())
+            .compare_and_put(4, None, new_table_info.clone())
             .await
             .unwrap();
         let actual = TableInfoValue::try_from_raw_value(result.unwrap_err().unwrap()).unwrap();
@@ -159,7 +176,7 @@ mod tests {
 
         // test cas success
         let result = manager
-            .compare_and_set(4, Some(actual), new_table_info.clone())
+            .compare_and_put(4, Some(actual), new_table_info.clone())
             .await
             .unwrap();
         assert!(result.is_ok());
@@ -171,8 +188,8 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(b"__removed-__table_info/4", kv.0.as_slice());
-        let value = TableInfoValue::try_from_raw_value(kv.1).unwrap();
+        assert_eq!(b"__removed-__table_info/4", kv.key.as_slice());
+        let value = TableInfoValue::try_from_raw_value(kv.value).unwrap();
         assert_eq!(value.table_info, new_table_info);
         assert_eq!(value.version, 1);
     }

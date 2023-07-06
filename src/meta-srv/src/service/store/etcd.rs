@@ -12,15 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::any::Any;
 use std::sync::Arc;
 
-use api::v1::meta::{
+use common_error::prelude::*;
+use common_meta::kv_backend::txn::{Txn as KvTxn, TxnResponse as KvTxnResponse};
+use common_meta::kv_backend::{KvBackend, TxnService};
+use common_meta::metrics::METRIC_META_TXN_REQUEST;
+use common_meta::rpc::store::{
     BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
     BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse, DeleteRangeRequest,
-    DeleteRangeResponse, KeyValue, MoveValueRequest, MoveValueResponse, PutRequest, PutResponse,
-    RangeRequest, RangeResponse, ResponseHeader,
+    DeleteRangeResponse, MoveValueRequest, MoveValueResponse, PutRequest, PutResponse,
+    RangeRequest, RangeResponse,
 };
-use common_error::prelude::*;
+use common_meta::rpc::KeyValue;
 use common_telemetry::{timer, warn};
 use etcd_client::{
     Client, Compare, CompareOp, DeleteOptions, GetOptions, PutOptions, Txn, TxnOp, TxnOpResponse,
@@ -28,11 +33,9 @@ use etcd_client::{
 };
 
 use crate::error;
-use crate::error::Result;
-use crate::metrics::{METRIC_META_KV_REQUEST, METRIC_META_TXN_REQUEST};
+use crate::error::{ConvertEtcdTxnObjectSnafu, Error, Result};
 use crate::service::store::etcd_util::KvPair;
-use crate::service::store::kv::{KvStore, KvStoreRef};
-use crate::service::store::txn::TxnService;
+use crate::service::store::kv::KvStoreRef;
 
 // Maximum number of operations permitted in a transaction.
 // The etcd default configuration's `--max-txn-ops` is 128.
@@ -89,22 +92,13 @@ impl EtcdStore {
 }
 
 #[async_trait::async_trait]
-impl KvStore for EtcdStore {
-    async fn range(&self, req: RangeRequest) -> Result<RangeResponse> {
-        let Get {
-            cluster_id,
-            key,
-            options,
-        } = req.try_into()?;
+impl KvBackend for EtcdStore {
+    fn name(&self) -> &'static str {
+        "Etcd"
+    }
 
-        let _timer = timer!(
-            METRIC_META_KV_REQUEST,
-            &[
-                ("target", "etcd".to_string()),
-                ("op", "range".to_string()),
-                ("cluster_id", cluster_id.to_string())
-            ]
-        );
+    async fn range(&self, req: RangeRequest) -> Result<RangeResponse> {
+        let Get { key, options } = req.try_into()?;
 
         let res = self
             .client
@@ -119,9 +113,7 @@ impl KvStore for EtcdStore {
             .map(KvPair::from_etcd_kv)
             .collect::<Vec<_>>();
 
-        let header = Some(ResponseHeader::success(cluster_id));
         Ok(RangeResponse {
-            header,
             kvs,
             more: res.more(),
         })
@@ -129,20 +121,10 @@ impl KvStore for EtcdStore {
 
     async fn put(&self, req: PutRequest) -> Result<PutResponse> {
         let Put {
-            cluster_id,
             key,
             value,
             options,
         } = req.try_into()?;
-
-        let _timer = timer!(
-            METRIC_META_KV_REQUEST,
-            &[
-                ("target", "etcd".to_string()),
-                ("op", "put".to_string()),
-                ("cluster_id", cluster_id.to_string())
-            ]
-        );
 
         let res = self
             .client
@@ -152,26 +134,11 @@ impl KvStore for EtcdStore {
             .context(error::EtcdFailedSnafu)?;
 
         let prev_kv = res.prev_key().map(KvPair::from_etcd_kv);
-
-        let header = Some(ResponseHeader::success(cluster_id));
-        Ok(PutResponse { header, prev_kv })
+        Ok(PutResponse { prev_kv })
     }
 
     async fn batch_get(&self, req: BatchGetRequest) -> Result<BatchGetResponse> {
-        let BatchGet {
-            cluster_id,
-            keys,
-            options,
-        } = req.try_into()?;
-
-        let _timer = timer!(
-            METRIC_META_KV_REQUEST,
-            &[
-                ("target", "etcd".to_string()),
-                ("op", "batch_get".to_string()),
-                ("cluster_id", cluster_id.to_string())
-            ]
-        );
+        let BatchGet { keys, options } = req.try_into()?;
 
         let get_ops: Vec<_> = keys
             .into_iter()
@@ -192,25 +159,11 @@ impl KvStore for EtcdStore {
             }
         }
 
-        let header = Some(ResponseHeader::success(cluster_id));
-        Ok(BatchGetResponse { header, kvs })
+        Ok(BatchGetResponse { kvs })
     }
 
     async fn batch_put(&self, req: BatchPutRequest) -> Result<BatchPutResponse> {
-        let BatchPut {
-            cluster_id,
-            kvs,
-            options,
-        } = req.try_into()?;
-
-        let _timer = timer!(
-            METRIC_META_KV_REQUEST,
-            &[
-                ("target", "etcd".to_string()),
-                ("op", "batch_put".to_string()),
-                ("cluster_id", cluster_id.to_string())
-            ]
-        );
+        let BatchPut { kvs, options } = req.try_into()?;
 
         let put_ops = kvs
             .into_iter()
@@ -233,25 +186,11 @@ impl KvStore for EtcdStore {
             }
         }
 
-        let header = Some(ResponseHeader::success(cluster_id));
-        Ok(BatchPutResponse { header, prev_kvs })
+        Ok(BatchPutResponse { prev_kvs })
     }
 
     async fn batch_delete(&self, req: BatchDeleteRequest) -> Result<BatchDeleteResponse> {
-        let BatchDelete {
-            cluster_id,
-            keys,
-            options,
-        } = req.try_into()?;
-
-        let _timer = timer!(
-            METRIC_META_KV_REQUEST,
-            &[
-                ("target", "etcd".to_string()),
-                ("op", "batch_delete".to_string()),
-                ("cluster_id", cluster_id.to_string())
-            ]
-        );
+        let BatchDelete { keys, options } = req.try_into()?;
 
         let mut prev_kvs = Vec::with_capacity(keys.len());
 
@@ -275,27 +214,16 @@ impl KvStore for EtcdStore {
             }
         }
 
-        let header = Some(ResponseHeader::success(cluster_id));
-        Ok(BatchDeleteResponse { header, prev_kvs })
+        Ok(BatchDeleteResponse { prev_kvs })
     }
 
     async fn compare_and_put(&self, req: CompareAndPutRequest) -> Result<CompareAndPutResponse> {
         let CompareAndPut {
-            cluster_id,
             key,
             expect,
             value,
             put_options,
         } = req.try_into()?;
-
-        let _timer = timer!(
-            METRIC_META_KV_REQUEST,
-            &[
-                ("target", "etcd".to_string()),
-                ("op", "compare_and_put".to_string()),
-                ("cluster_id", cluster_id.to_string())
-            ]
-        );
 
         let compare = if expect.is_empty() {
             // create if absent
@@ -333,29 +261,11 @@ impl KvStore for EtcdStore {
             _ => unreachable!(),
         };
 
-        let header = Some(ResponseHeader::success(cluster_id));
-        Ok(CompareAndPutResponse {
-            header,
-            success,
-            prev_kv,
-        })
+        Ok(CompareAndPutResponse { success, prev_kv })
     }
 
     async fn delete_range(&self, req: DeleteRangeRequest) -> Result<DeleteRangeResponse> {
-        let Delete {
-            cluster_id,
-            key,
-            options,
-        } = req.try_into()?;
-
-        let _timer = timer!(
-            METRIC_META_KV_REQUEST,
-            &[
-                ("target", "etcd".to_string()),
-                ("op", "delete_range".to_string()),
-                ("cluster_id", cluster_id.to_string())
-            ]
-        );
+        let Delete { key, options } = req.try_into()?;
 
         let res = self
             .client
@@ -370,9 +280,7 @@ impl KvStore for EtcdStore {
             .map(KvPair::from_etcd_kv)
             .collect::<Vec<_>>();
 
-        let header = Some(ResponseHeader::success(cluster_id));
         Ok(DeleteRangeResponse {
-            header,
             deleted: res.deleted(),
             prev_kvs,
         })
@@ -380,24 +288,13 @@ impl KvStore for EtcdStore {
 
     async fn move_value(&self, req: MoveValueRequest) -> Result<MoveValueResponse> {
         let MoveValue {
-            cluster_id,
             from_key,
             to_key,
             delete_options,
         } = req.try_into()?;
 
-        let _timer = timer!(
-            METRIC_META_KV_REQUEST,
-            &[
-                ("target", "etcd".to_string()),
-                ("op", "move_value".to_string()),
-                ("cluster_id", cluster_id.to_string())
-            ]
-        );
-
         let mut client = self.client.kv_client();
 
-        let header = Some(ResponseHeader::success(cluster_id));
         // TODO(jiachun): Maybe it's better to let the users control it in the request
         const MAX_RETRIES: usize = 8;
         for _ in 0..MAX_RETRIES {
@@ -442,16 +339,14 @@ impl KvStore for EtcdStore {
             for op_res in txn_res.op_responses() {
                 match op_res {
                     TxnOpResponse::Get(res) => {
-                        return Ok(MoveValueResponse {
-                            header,
-                            kv: res.kvs().first().map(KvPair::from_etcd_kv),
-                        });
+                        return Ok(MoveValueResponse(
+                            res.kvs().first().map(KvPair::from_etcd_kv),
+                        ));
                     }
                     TxnOpResponse::Delete(res) => {
-                        return Ok(MoveValueResponse {
-                            header,
-                            kv: res.prev_kvs().first().map(KvPair::from_etcd_kv),
-                        });
+                        return Ok(MoveValueResponse(
+                            res.prev_kvs().first().map(KvPair::from_etcd_kv),
+                        ));
                     }
                     _ => {}
                 }
@@ -463,14 +358,17 @@ impl KvStore for EtcdStore {
         }
         .fail()
     }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 }
 
 #[async_trait::async_trait]
 impl TxnService for EtcdStore {
-    async fn txn(
-        &self,
-        txn: crate::service::store::txn::Txn,
-    ) -> Result<crate::service::store::txn::TxnResponse> {
+    type Error = Error;
+
+    async fn txn(&self, txn: KvTxn) -> Result<KvTxnResponse> {
         let _timer = timer!(
             METRIC_META_TXN_REQUEST,
             &[("target", "etcd".to_string()), ("op", "txn".to_string()),]
@@ -483,12 +381,11 @@ impl TxnService for EtcdStore {
             .txn(etcd_txn)
             .await
             .context(error::EtcdFailedSnafu)?;
-        txn_res.try_into()
+        txn_res.try_into().context(ConvertEtcdTxnObjectSnafu)
     }
 }
 
 struct Get {
-    cluster_id: u64,
     key: Vec<u8>,
     options: Option<GetOptions>,
 }
@@ -498,7 +395,6 @@ impl TryFrom<RangeRequest> for Get {
 
     fn try_from(req: RangeRequest) -> Result<Self> {
         let RangeRequest {
-            header,
             key,
             range_end,
             limit,
@@ -519,7 +415,6 @@ impl TryFrom<RangeRequest> for Get {
         }
 
         Ok(Get {
-            cluster_id: header.map_or(0, |h| h.cluster_id),
             key,
             options: Some(options),
         })
@@ -527,7 +422,6 @@ impl TryFrom<RangeRequest> for Get {
 }
 
 struct Put {
-    cluster_id: u64,
     key: Vec<u8>,
     value: Vec<u8>,
     options: Option<PutOptions>,
@@ -538,7 +432,6 @@ impl TryFrom<PutRequest> for Put {
 
     fn try_from(req: PutRequest) -> Result<Self> {
         let PutRequest {
-            header,
             key,
             value,
             prev_kv,
@@ -550,7 +443,6 @@ impl TryFrom<PutRequest> for Put {
         }
 
         Ok(Put {
-            cluster_id: header.map_or(0, |h| h.cluster_id),
             key,
             value,
             options: Some(options),
@@ -559,7 +451,6 @@ impl TryFrom<PutRequest> for Put {
 }
 
 struct BatchGet {
-    cluster_id: u64,
     keys: Vec<Vec<u8>>,
     options: Option<GetOptions>,
 }
@@ -568,12 +459,11 @@ impl TryFrom<BatchGetRequest> for BatchGet {
     type Error = error::Error;
 
     fn try_from(req: BatchGetRequest) -> Result<Self> {
-        let BatchGetRequest { header, keys } = req;
+        let BatchGetRequest { keys } = req;
 
         let options = GetOptions::default();
 
         Ok(BatchGet {
-            cluster_id: header.map_or(0, |h| h.cluster_id),
             keys,
             options: Some(options),
         })
@@ -581,7 +471,6 @@ impl TryFrom<BatchGetRequest> for BatchGet {
 }
 
 struct BatchPut {
-    cluster_id: u64,
     kvs: Vec<KeyValue>,
     options: Option<PutOptions>,
 }
@@ -590,11 +479,7 @@ impl TryFrom<BatchPutRequest> for BatchPut {
     type Error = error::Error;
 
     fn try_from(req: BatchPutRequest) -> Result<Self> {
-        let BatchPutRequest {
-            header,
-            kvs,
-            prev_kv,
-        } = req;
+        let BatchPutRequest { kvs, prev_kv } = req;
 
         let mut options = PutOptions::default();
         if prev_kv {
@@ -602,7 +487,6 @@ impl TryFrom<BatchPutRequest> for BatchPut {
         }
 
         Ok(BatchPut {
-            cluster_id: header.map_or(0, |h| h.cluster_id),
             kvs,
             options: Some(options),
         })
@@ -610,7 +494,6 @@ impl TryFrom<BatchPutRequest> for BatchPut {
 }
 
 struct BatchDelete {
-    cluster_id: u64,
     keys: Vec<Vec<u8>>,
     options: Option<DeleteOptions>,
 }
@@ -619,11 +502,7 @@ impl TryFrom<BatchDeleteRequest> for BatchDelete {
     type Error = error::Error;
 
     fn try_from(req: BatchDeleteRequest) -> Result<Self> {
-        let BatchDeleteRequest {
-            header,
-            keys,
-            prev_kv,
-        } = req;
+        let BatchDeleteRequest { keys, prev_kv } = req;
 
         let mut options = DeleteOptions::default();
         if prev_kv {
@@ -631,7 +510,6 @@ impl TryFrom<BatchDeleteRequest> for BatchDelete {
         }
 
         Ok(BatchDelete {
-            cluster_id: header.map_or(0, |h| h.cluster_id),
             keys,
             options: Some(options),
         })
@@ -639,7 +517,6 @@ impl TryFrom<BatchDeleteRequest> for BatchDelete {
 }
 
 struct CompareAndPut {
-    cluster_id: u64,
     key: Vec<u8>,
     expect: Vec<u8>,
     value: Vec<u8>,
@@ -650,15 +527,9 @@ impl TryFrom<CompareAndPutRequest> for CompareAndPut {
     type Error = error::Error;
 
     fn try_from(req: CompareAndPutRequest) -> Result<Self> {
-        let CompareAndPutRequest {
-            header,
-            key,
-            expect,
-            value,
-        } = req;
+        let CompareAndPutRequest { key, expect, value } = req;
 
         Ok(CompareAndPut {
-            cluster_id: header.map_or(0, |h| h.cluster_id),
             key,
             expect,
             value,
@@ -668,7 +539,6 @@ impl TryFrom<CompareAndPutRequest> for CompareAndPut {
 }
 
 struct Delete {
-    cluster_id: u64,
     key: Vec<u8>,
     options: Option<DeleteOptions>,
 }
@@ -678,7 +548,6 @@ impl TryFrom<DeleteRangeRequest> for Delete {
 
     fn try_from(req: DeleteRangeRequest) -> Result<Self> {
         let DeleteRangeRequest {
-            header,
             key,
             range_end,
             prev_kv,
@@ -695,7 +564,6 @@ impl TryFrom<DeleteRangeRequest> for Delete {
         }
 
         Ok(Delete {
-            cluster_id: header.map_or(0, |h| h.cluster_id),
             key,
             options: Some(options),
         })
@@ -703,7 +571,6 @@ impl TryFrom<DeleteRangeRequest> for Delete {
 }
 
 struct MoveValue {
-    cluster_id: u64,
     from_key: Vec<u8>,
     to_key: Vec<u8>,
     delete_options: Option<DeleteOptions>,
@@ -713,14 +580,9 @@ impl TryFrom<MoveValueRequest> for MoveValue {
     type Error = error::Error;
 
     fn try_from(req: MoveValueRequest) -> Result<Self> {
-        let MoveValueRequest {
-            header,
-            from_key,
-            to_key,
-        } = req;
+        let MoveValueRequest { from_key, to_key } = req;
 
         Ok(MoveValue {
-            cluster_id: header.map_or(0, |h| h.cluster_id),
             from_key,
             to_key,
             delete_options: Some(DeleteOptions::default().with_prev_key()),
@@ -739,7 +601,6 @@ mod tests {
             range_end: b"test_range_end".to_vec(),
             limit: 64,
             keys_only: true,
-            ..Default::default()
         };
 
         let get: Get = req.try_into().unwrap();
@@ -754,7 +615,6 @@ mod tests {
             key: b"test_key".to_vec(),
             value: b"test_value".to_vec(),
             prev_kv: true,
-            ..Default::default()
         };
 
         let put: Put = req.try_into().unwrap();
@@ -768,7 +628,6 @@ mod tests {
     fn test_parse_batch_get() {
         let req = BatchGetRequest {
             keys: vec![b"k1".to_vec(), b"k2".to_vec(), b"k3".to_vec()],
-            ..Default::default()
         };
 
         let batch_get: BatchGet = req.try_into().unwrap();
@@ -787,13 +646,13 @@ mod tests {
                 value: b"test_value".to_vec(),
             }],
             prev_kv: true,
-            ..Default::default()
         };
 
         let batch_put: BatchPut = req.try_into().unwrap();
 
-        assert_eq!(b"test_key".to_vec(), batch_put.kvs.get(0).unwrap().key);
-        assert_eq!(b"test_value".to_vec(), batch_put.kvs.get(0).unwrap().value);
+        let kv = batch_put.kvs.get(0).unwrap();
+        assert_eq!(b"test_key", kv.key());
+        assert_eq!(b"test_value", kv.value());
         let _ = batch_put.options.unwrap();
     }
 
@@ -802,7 +661,6 @@ mod tests {
         let req = BatchDeleteRequest {
             keys: vec![b"k1".to_vec(), b"k2".to_vec(), b"k3".to_vec()],
             prev_kv: true,
-            ..Default::default()
         };
 
         let batch_delete: BatchDelete = req.try_into().unwrap();
@@ -820,7 +678,6 @@ mod tests {
             key: b"test_key".to_vec(),
             expect: b"test_expect".to_vec(),
             value: b"test_value".to_vec(),
-            ..Default::default()
         };
 
         let compare_and_put: CompareAndPut = req.try_into().unwrap();
@@ -837,7 +694,6 @@ mod tests {
             key: b"test_key".to_vec(),
             range_end: b"test_range_end".to_vec(),
             prev_kv: true,
-            ..Default::default()
         };
 
         let delete: Delete = req.try_into().unwrap();
@@ -851,7 +707,6 @@ mod tests {
         let req = MoveValueRequest {
             from_key: b"test_from_key".to_vec(),
             to_key: b"test_to_key".to_vec(),
-            ..Default::default()
         };
 
         let move_value: MoveValue = req.try_into().unwrap();
