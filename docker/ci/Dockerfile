@@ -4,7 +4,8 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
     ca-certificates \
     python3.10 \
     python3.10-dev \
-    python3-pip
+    python3-pip \
+    curl
 
 COPY requirements.txt /etc/greptime/requirements.txt
 

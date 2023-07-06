@@ -49,7 +49,9 @@ RUN export PYO3_CROSS_LIB_DIR=$PY_INSTALL_PATH/lib && \
 # Exporting the binary to the clean image
 FROM ubuntu:22.04 as base
 
-RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get -y install ca-certificates
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get \
+    -y install ca-certificates \
+    curl
 
 WORKDIR /greptime
 COPY --from=builder /greptimedb/target/aarch64-unknown-linux-gnu/release/greptime /greptime/bin/
