@@ -85,15 +85,12 @@ impl ExtensionPlanner for DistExtensionPlanner {
                         .map(Some);
                 };
                 let input_schema = input_plan.schema().clone();
-                println!("input plan: {:?}", input_plan);
                 let input_plan = self.set_table_name(&table_name, input_plan.clone())?;
-                println!("resolved input plan: {:?}", input_plan);
                 let substrait_plan: Bytes = DFLogicalSubstraitConvertor
                     .encode(input_plan.clone())
                     .context(error::EncodeSubstraitLogicalPlanSnafu)?
                     .into();
                 let peers = self.get_peers(&table_name).await;
-                println!("peers: {:?}", peers);
                 match peers {
                     Ok(peers) => {
                         let exec = MergeScanExec::new(
@@ -129,7 +126,7 @@ impl DistExtensionPlanner {
     /// Set the fully resolved table name to TableScan plan
     fn set_table_name(&self, name: &TableName, plan: LogicalPlan) -> Result<LogicalPlan> {
         // let mut rewriter
-        plan.transform(&|plan| TableNameRewriter::rewrite_table_name(plan, &name))
+        plan.transform(&|plan| TableNameRewriter::rewrite_table_name(plan, name))
     }
 
     async fn get_peers(&self, table_name: &TableName) -> Result<Vec<Peer>> {
@@ -155,23 +152,19 @@ impl TreeNodeVisitor for TableNameExtractor {
     fn pre_visit(&mut self, node: &Self::N) -> Result<VisitRecursion> {
         match node {
             LogicalPlan::TableScan(scan) => {
-                println!("table name in scan: {:?}", scan.table_name);
                 if let Some(source) = scan.source.as_any().downcast_ref::<DefaultTableSource>() {
                     if let Some(provider) = source
                         .table_provider
                         .as_any()
                         .downcast_ref::<DfTableProviderAdapter>()
                     {
-                        println!("downcast success");
                         if provider.table().table_type() == TableType::Base {
-                            println!("is base table");
                             let info = provider.table().table_info();
                             self.table_name = Some(TableName::new(
                                 info.catalog_name.clone(),
                                 info.schema_name.clone(),
                                 info.name.clone(),
                             ));
-                            println!("table name: {:?}", self.table_name);
                             return Ok(VisitRecursion::Stop);
                         }
                     }

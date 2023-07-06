@@ -94,8 +94,6 @@ impl Instance {
                 table_name: format_full_table_name(catalog_name, schema_name, table_name),
             })?;
 
-        println!("table name: {:?}", table.table_info().name);
-
         let dataframe = self
             .query_engine
             .read_table(table)
@@ -128,13 +126,8 @@ impl Instance {
         let catalog_name = ctx.current_catalog();
         let schema_name = ctx.current_schema();
 
-        println!("catalog name: {catalog_name}, schema name: {schema_name}");
-        println!("queries: {:?}", queries);
-
         for query in queries {
             let table_name = prometheus::table_name(query)?;
-
-            println!("table name: {table_name}");
 
             let output = self
                 .handle_remote_query(&ctx, &catalog_name, &schema_name, &table_name, query)
