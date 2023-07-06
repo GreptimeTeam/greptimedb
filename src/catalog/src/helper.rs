@@ -30,7 +30,7 @@ pub const TABLE_GLOBAL_KEY_PREFIX: &str = "__tg";
 pub const TABLE_REGIONAL_KEY_PREFIX: &str = "__tr";
 
 const ALPHANUMERICS_NAME_PATTERN: &str = "[a-zA-Z_][a-zA-Z0-9_]*";
-const TABLE_NAME_PATTERN: &str = "[a-zA-Z_][a-zA-Z0-9_:()'\"]*";
+const TABLE_NAME_PATTERN: &str = "[a-zA-Z_][a-zA-Z0-9_:]*";
 
 lazy_static! {
     static ref CATALOG_KEY_PATTERN: Regex = Regex::new(&format!(
@@ -415,7 +415,5 @@ mod tests {
     #[test]
     fn test_table_name_pattern() {
         test_valid_table_patterns("cpu:metrics");
-        test_valid_table_patterns("cpu\"metrics");
-        test_valid_table_patterns("cpu'metrics");
     }
 }
