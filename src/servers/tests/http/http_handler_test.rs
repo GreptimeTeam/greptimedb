@@ -380,3 +380,8 @@ async fn test_status() {
     let Json(json) = http_handler::status().await;
     assert_eq!(json, expected_json);
 }
+
+async fn test_config() {
+    let Json(json) = http_handler::config().await;
+    // assert_eq!(json, expected_json);
+}

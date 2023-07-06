@@ -518,6 +518,8 @@ impl HttpServer {
             routing::get(handler::health).post(handler::health),
         );
 
+        router = router.route("/config", routing::get(handler::config));
+
         router = router.route("/status", routing::get(handler::status));
 
         #[cfg(feature = "dashboard")]

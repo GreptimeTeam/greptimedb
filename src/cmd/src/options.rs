@@ -25,12 +25,13 @@ use crate::error::{LoadLayeredConfigSnafu, Result};
 pub const ENV_VAR_SEP: &str = "__";
 pub const ENV_LIST_SEP: &str = ",";
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MixOptions {
     pub fe_opts: FrontendOptions,
     pub dn_opts: DatanodeOptions,
     pub logging: LoggingOptions,
 }
-
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Options {
     Datanode(Box<DatanodeOptions>),
     Frontend(Box<FrontendOptions>),

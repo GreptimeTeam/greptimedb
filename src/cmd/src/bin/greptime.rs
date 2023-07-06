@@ -196,6 +196,8 @@ async fn main() -> Result<()> {
     let app_name = &cmd.subcmd.to_string();
 
     let opts = cmd.load_options()?;
+    let opts_json = serde_json::to_string(&opts).unwrap();
+    let _write = std::fs::write("/tmp/greptimedb/conf/opts.json", opts_json).unwrap();
     let logging_opts = opts.logging_options();
     let tracing_opts = TracingOptions {
         #[cfg(feature = "tokio-console")]

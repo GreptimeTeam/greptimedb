@@ -513,3 +513,5 @@ pub async fn test_dashboard_path(store_type: StorageType) {
 
 #[cfg(not(feature = "dashboard"))]
 pub async fn test_dashboard_path(_: StorageType) {}
+
+// TODO add status and config endpoints

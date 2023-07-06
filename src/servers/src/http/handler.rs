@@ -184,3 +184,12 @@ pub async fn status() -> Json<StatusResponse<'static>> {
         version: env!("CARGO_PKG_VERSION"),
     })
 }
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct ConfigResponse {}
+
+/// Handler to expose configuration information info about runtime, build, etc.
+#[axum_macros::debug_handler]
+pub async fn config() -> Json<ConfigResponse> {
+    Json(ConfigResponse {})
+}
