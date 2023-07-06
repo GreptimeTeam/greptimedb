@@ -15,8 +15,8 @@
 use std::any::Any;
 
 use common_error::ext::ErrorExt;
-use common_error::prelude::{Snafu, StatusCode};
-use snafu::Location;
+use common_error::status_code::StatusCode;
+use snafu::{Location, Snafu};
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]

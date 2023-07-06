@@ -308,7 +308,7 @@ pub type ProcedureManagerRef = Arc<dyn ProcedureManager>;
 #[cfg(test)]
 mod tests {
     use common_error::mock::MockError;
-    use common_error::prelude::StatusCode;
+    use common_error::status_code::StatusCode;
 
     use super::*;
 

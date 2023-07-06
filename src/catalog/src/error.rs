@@ -16,10 +16,10 @@ use std::any::Any;
 use std::fmt::Debug;
 
 use common_error::ext::{BoxedError, ErrorExt};
-use common_error::prelude::{Snafu, StatusCode};
+use common_error::status_code::StatusCode;
 use datafusion::error::DataFusionError;
 use datatypes::prelude::ConcreteDataType;
-use snafu::Location;
+use snafu::{Location, Snafu};
 use tokio::task::JoinError;
 
 use crate::DeregisterTableRequest;

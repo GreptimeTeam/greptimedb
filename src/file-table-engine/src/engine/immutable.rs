@@ -17,7 +17,7 @@ use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use common_catalog::consts::IMMUTABLE_FILE_ENGINE;
-use common_error::prelude::BoxedError;
+use common_error::ext::BoxedError;
 use common_procedure::{BoxedProcedure, ProcedureManager};
 use common_telemetry::{debug, logging};
 use datatypes::schema::Schema;

@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use catalog::table_source::DfTableSourceProvider;
-use common_error::prelude::BoxedError;
+use common_error::ext::BoxedError;
 use datafusion::execution::context::SessionState;
 use datafusion_sql::planner::{ParserOptions, SqlToRel};
 use promql::planner::PromPlanner;

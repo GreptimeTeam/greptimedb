@@ -23,7 +23,7 @@ use std::collections::HashMap;
 use std::str::FromStr;
 
 use catalog::CatalogManagerRef;
-use common_error::prelude::BoxedError;
+use common_error::ext::BoxedError;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
 use common_time::range::TimestampRange;

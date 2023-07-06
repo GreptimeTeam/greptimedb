@@ -14,7 +14,8 @@
 
 use std::any::Any;
 
-use common_error::prelude::{BoxedError, ErrorExt, StatusCode};
+use common_error::ext::{BoxedError, ErrorExt};
+use common_error::status_code::StatusCode;
 use datafusion::error::DataFusionError;
 use datatypes::prelude::ConcreteDataType;
 use prost::{DecodeError, EncodeError};

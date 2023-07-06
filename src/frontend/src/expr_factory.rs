@@ -21,7 +21,7 @@ use api::v1::{
     AddColumn, AddColumns, AlterExpr, Column, ColumnDataType, CreateTableExpr, DropColumn,
     DropColumns, RenameTable,
 };
-use common_error::prelude::BoxedError;
+use common_error::ext::BoxedError;
 use datanode::instance::sql::table_idents_to_full_name;
 use datatypes::schema::ColumnSchema;
 use file_table_engine::table::immutable::ImmutableFileTableOptions;

@@ -21,7 +21,7 @@ use api::v1::AlterExpr;
 use async_trait::async_trait;
 use catalog::helper::{TableGlobalKey, TableGlobalValue};
 use client::Database;
-use common_error::prelude::BoxedError;
+use common_error::ext::BoxedError;
 use common_meta::key::TableRouteKey;
 use common_meta::rpc::store::{MoveValueRequest, PutRequest};
 use common_meta::table_name::TableName;

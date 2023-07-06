@@ -14,10 +14,11 @@
 
 use std::any::Any;
 
-use common_error::prelude::*;
+use common_error::ext::{BoxedError, ErrorExt};
+use common_error::status_code::StatusCode;
 use datafusion::error::DataFusionError;
 use datatypes::arrow::error::ArrowError;
-use snafu::Location;
+use snafu::{Location, Snafu};
 
 use crate::metadata::TableId;
 

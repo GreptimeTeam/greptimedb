@@ -22,13 +22,13 @@ use api::v1::{
     PromRangeQuery, QueryRequest, RequestHeader,
 };
 use arrow_flight::{FlightData, Ticket};
-use common_error::prelude::*;
+use common_error::ext::{BoxedError, ErrorExt};
 use common_grpc::flight::{flight_messages_to_recordbatches, FlightDecoder, FlightMessage};
 use common_query::Output;
 use common_telemetry::{logging, timer};
 use futures_util::{TryFutureExt, TryStreamExt};
 use prost::Message;
-use snafu::{ensure, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error::{
     ConvertFlightDataSnafu, IllegalDatabaseResponseSnafu, IllegalFlightMessagesSnafu,

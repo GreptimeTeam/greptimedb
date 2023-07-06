@@ -14,9 +14,10 @@
 
 use std::any::Any;
 
-use common_error::prelude::*;
+use common_error::ext::ErrorExt;
+use common_error::status_code::StatusCode;
 use datafusion::error::DataFusionError;
-use snafu::Location;
+use snafu::{Location, Snafu};
 
 /// Inner error of datafusion based query engine.
 #[derive(Debug, Snafu)]

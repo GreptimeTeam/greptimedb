@@ -355,7 +355,7 @@ pub fn new_memory_catalog_manager() -> Result<Arc<MemoryCatalogManager>> {
 mod tests {
     use common_catalog::consts::*;
     use common_error::ext::ErrorExt;
-    use common_error::prelude::StatusCode;
+    use common_error::status_code::StatusCode;
     use table::table::numbers::{NumbersTable, NUMBERS_TABLE_NAME};
 
     use super::*;

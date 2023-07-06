@@ -17,8 +17,8 @@ use std::sync::Arc;
 
 use async_stream::try_stream;
 use async_trait::async_trait;
-use common_error::ext::PlainError;
-use common_error::prelude::{BoxedError, StatusCode};
+use common_error::ext::{BoxedError, PlainError};
+use common_error::status_code::StatusCode;
 use futures::{Stream, StreamExt};
 use object_store::{EntryMode, Metakey, ObjectStore};
 use snafu::ResultExt;

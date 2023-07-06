@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_error::prelude::BoxedError;
+use common_error::ext::BoxedError;
 use common_query::Output;
 use datanode::instance::sql::table_idents_to_full_name;
 use session::context::QueryContextRef;

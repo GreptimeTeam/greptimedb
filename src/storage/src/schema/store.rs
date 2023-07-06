@@ -15,10 +15,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use common_error::prelude::*;
 use datatypes::arrow::datatypes::Schema as ArrowSchema;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::schema::{Schema, SchemaBuilder, SchemaRef};
+use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::consts;
 
 use crate::error::NewRecordBatchSnafu;

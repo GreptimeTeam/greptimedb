@@ -235,7 +235,7 @@ macro_rules! trace {
 #[cfg(test)]
 mod tests {
     use common_error::mock::MockError;
-    use common_error::prelude::*;
+    use common_error::status_code::StatusCode;
 
     use crate::logging::Level;
 

@@ -21,7 +21,7 @@ use api::v1::prometheus_gateway_server::PrometheusGateway;
 use api::v1::promql_request::Promql;
 use api::v1::{PromqlRequest, PromqlResponse, ResponseHeader};
 use async_trait::async_trait;
-use common_error::prelude::ErrorExt;
+use common_error::ext::ErrorExt;
 use common_telemetry::timer;
 use common_time::util::current_time_rfc3339;
 use promql_parser::parser::ValueType;

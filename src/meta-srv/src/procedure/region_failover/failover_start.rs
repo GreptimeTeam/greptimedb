@@ -13,7 +13,8 @@
 // limitations under the License.
 
 use async_trait::async_trait;
-use common_error::prelude::{ErrorExt, StatusCode};
+use common_error::ext::ErrorExt;
+use common_error::status_code::StatusCode;
 use common_meta::ident::TableIdent;
 use common_meta::peer::Peer;
 use common_meta::RegionIdent;

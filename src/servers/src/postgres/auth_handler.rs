@@ -15,7 +15,7 @@
 use std::fmt::Debug;
 
 use async_trait::async_trait;
-use common_error::prelude::ErrorExt;
+use common_error::ext::ErrorExt;
 use futures::{Sink, SinkExt};
 use metrics::increment_counter;
 use pgwire::api::auth::StartupHandler;

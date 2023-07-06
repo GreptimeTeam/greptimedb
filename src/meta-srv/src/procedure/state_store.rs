@@ -14,7 +14,7 @@
 
 use async_stream::try_stream;
 use async_trait::async_trait;
-use common_error::prelude::BoxedError;
+use common_error::ext::BoxedError;
 use common_meta::rpc::store::{BatchDeleteRequest, PutRequest, RangeRequest};
 use common_meta::util;
 use common_procedure::error::{

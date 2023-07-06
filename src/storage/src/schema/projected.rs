@@ -17,10 +17,10 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 use common_base::BitVec;
-use common_error::prelude::*;
 use datatypes::prelude::ScalarVector;
 use datatypes::schema::{SchemaBuilder, SchemaRef};
 use datatypes::vectors::{BooleanVector, UInt8Vector};
+use snafu::{ensure, ResultExt};
 use store_api::storage::{Chunk, ColumnId, OpType};
 
 use crate::error;

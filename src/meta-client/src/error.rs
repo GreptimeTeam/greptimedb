@@ -12,8 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_error::prelude::*;
-use snafu::Location;
+use common_error::ext::ErrorExt;
+use common_error::status_code::StatusCode;
+use snafu::{Location, Snafu};
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]

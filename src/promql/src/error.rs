@@ -14,10 +14,11 @@
 
 use std::any::Any;
 
-use common_error::prelude::*;
+use common_error::ext::ErrorExt;
+use common_error::status_code::StatusCode;
 use datafusion::error::DataFusionError;
 use promql_parser::parser::{Expr as PromExpr, TokenType};
-use snafu::Location;
+use snafu::{Location, Snafu};
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]

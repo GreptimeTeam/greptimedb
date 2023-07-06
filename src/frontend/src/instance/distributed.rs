@@ -33,7 +33,7 @@ use client::client_manager::DatanodeClients;
 use client::Database;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::format_full_table_name;
-use common_error::prelude::BoxedError;
+use common_error::ext::BoxedError;
 use common_meta::peer::Peer;
 use common_meta::rpc::ddl::{DdlTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse};
 use common_meta::rpc::router::{Partition as MetaPartition, RouteRequest};

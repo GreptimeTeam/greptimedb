@@ -15,10 +15,10 @@
 //! Error of record batch.
 use std::any::Any;
 
-use common_error::ext::BoxedError;
-use common_error::prelude::*;
+use common_error::ext::{BoxedError, ErrorExt};
+use common_error::status_code::StatusCode;
 use datatypes::prelude::ConcreteDataType;
-use snafu::Location;
+use snafu::{Location, Snafu};
 
 pub type Result<T> = std::result::Result<T, Error>;
 

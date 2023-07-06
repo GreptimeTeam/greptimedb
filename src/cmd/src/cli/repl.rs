@@ -20,7 +20,7 @@ use catalog::remote::CachedMetaKvBackend;
 use client::client_manager::DatanodeClients;
 use client::{Client, Database, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_base::Plugins;
-use common_error::prelude::ErrorExt;
+use common_error::ext::ErrorExt;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
 use common_telemetry::logging;

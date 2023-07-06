@@ -16,7 +16,7 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 use api::v1::greptime_request::Request;
-use common_error::prelude::ErrorExt;
+use common_error::ext::ErrorExt;
 use common_query::Output;
 use query::parser::PromQuery;
 use query::plan::LogicalPlan;

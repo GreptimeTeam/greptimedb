@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_error::prelude::ErrorExt;
+use common_error::ext::ErrorExt;
 
 pub trait Encoder {
     /// The type that is decoded.

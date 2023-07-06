@@ -17,7 +17,7 @@ use std::num::{ParseIntError, TryFromIntError};
 
 use chrono::ParseError;
 use common_error::ext::ErrorExt;
-use common_error::prelude::StatusCode;
+use common_error::status_code::StatusCode;
 use snafu::{Location, Snafu};
 
 #[derive(Debug, Snafu)]

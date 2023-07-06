@@ -18,7 +18,7 @@ use arrow_schema::SchemaRef as ArrowSchemaRef;
 use common_catalog::consts::{
     SEMANTIC_TYPE_FIELD, SEMANTIC_TYPE_PRIMARY_KEY, SEMANTIC_TYPE_TIME_INDEX,
 };
-use common_error::prelude::BoxedError;
+use common_error::ext::BoxedError;
 use common_query::physical_plan::TaskContext;
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::{RecordBatch, SendableRecordBatchStream};

@@ -16,9 +16,10 @@ use std::sync::Arc;
 
 use api::v1::greptime_request::Request;
 use async_trait::async_trait;
-use common_error::prelude::*;
+use common_error::ext::{BoxedError, ErrorExt};
 use common_query::Output;
 use session::context::QueryContextRef;
+use snafu::ResultExt;
 
 use crate::error::{self, Result};
 

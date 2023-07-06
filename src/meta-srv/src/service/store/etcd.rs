@@ -31,6 +31,7 @@ use etcd_client::{
     Client, Compare, CompareOp, DeleteOptions, GetOptions, PutOptions, Txn, TxnOp, TxnOpResponse,
     TxnResponse,
 };
+use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error;
 use crate::error::{ConvertEtcdTxnObjectSnafu, Error, Result};

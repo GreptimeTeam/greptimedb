@@ -56,7 +56,7 @@ mod dummy {
 
 #[cfg(feature = "python")]
 mod python {
-    use common_error::prelude::BoxedError;
+    use common_error::ext::BoxedError;
     use common_telemetry::logging::error;
     use script::manager::ScriptManager;
     use snafu::ResultExt;

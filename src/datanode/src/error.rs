@@ -14,10 +14,11 @@
 
 use std::any::Any;
 
-use common_error::prelude::*;
+use common_error::ext::{BoxedError, ErrorExt};
+use common_error::status_code::StatusCode;
 use common_procedure::ProcedureId;
 use serde_json::error::Error as JsonError;
-use snafu::Location;
+use snafu::{Location, Snafu};
 use store_api::storage::RegionNumber;
 use table::error::Error as TableError;
 
@@ -591,6 +592,8 @@ impl From<Error> for tonic::Status {
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;
+
+    use snafu::ResultExt;
 
     use super::*;
 

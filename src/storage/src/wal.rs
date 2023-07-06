@@ -15,7 +15,7 @@
 use std::pin::Pin;
 use std::sync::Arc;
 
-use common_error::prelude::BoxedError;
+use common_error::ext::BoxedError;
 use common_telemetry::timer;
 use futures::{stream, Stream, TryStreamExt};
 use prost::Message;

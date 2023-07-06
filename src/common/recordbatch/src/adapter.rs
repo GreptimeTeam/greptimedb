@@ -245,8 +245,9 @@ impl Stream for AsyncRecordBatchStreamAdapter {
 
 #[cfg(test)]
 mod test {
+    use common_error::ext::BoxedError;
     use common_error::mock::MockError;
-    use common_error::prelude::{BoxedError, StatusCode};
+    use common_error::status_code::StatusCode;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
     use datatypes::vectors::Int32Vector;
