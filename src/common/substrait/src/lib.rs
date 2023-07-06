@@ -36,6 +36,8 @@ pub trait SubstraitPlan {
         &self,
         message: B,
         catalog_list: Arc<dyn CatalogList>,
+        catalog: &str,
+        schema: &str,
     ) -> Result<Self::Plan, Self::Error>;
 
     fn encode(&self, plan: Self::Plan) -> Result<Bytes, Self::Error>;

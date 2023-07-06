@@ -1,0 +1,39 @@
+create database upper_case_table_name;
+
+Affected Rows: 1
+
+use upper_case_table_name;
+
+++
+++
+
+create table system_Metric(ts timestamp time index);
+
+Affected Rows: 0
+
+insert into system_Metric values (0), (1);
+
+Affected Rows: 2
+
+select * from system_Metric;
+
+Error: 3000(PlanQuery), Error during planning: Table not found: greptime.upper_case_table_name.system_metric
+
+select * from "system_Metric";
+
++-------------------------+
+| ts                      |
++-------------------------+
+| 1970-01-01T00:00:00     |
+| 1970-01-01T00:00:00.001 |
++-------------------------+
+
+drop table system_Metric;
+
+Affected Rows: 1
+
+use public;
+
+++
+++
+

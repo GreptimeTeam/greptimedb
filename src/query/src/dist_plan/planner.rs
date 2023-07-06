@@ -23,15 +23,18 @@ use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_meta::peer::Peer;
 use common_meta::table_name::TableName;
 use datafusion::common::Result;
+use datafusion::datasource::DefaultTableSource;
 use datafusion::execution::context::SessionState;
 use datafusion::physical_plan::planner::ExtensionPlanner;
 use datafusion::physical_plan::{ExecutionPlan, PhysicalPlanner};
-use datafusion_common::tree_node::{TreeNode, TreeNodeVisitor, VisitRecursion};
+use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeVisitor, VisitRecursion};
 use datafusion_common::{DataFusionError, TableReference};
 use datafusion_expr::{LogicalPlan, UserDefinedLogicalNode};
 use partition::manager::PartitionRuleManager;
 use snafu::ResultExt;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
+pub use table::metadata::TableType;
+use table::table::adapter::DfTableProviderAdapter;
 
 use crate::dist_plan::merge_scan::{MergeScanExec, MergeScanLogicalPlan};
 use crate::error;
@@ -82,6 +85,7 @@ impl ExtensionPlanner for DistExtensionPlanner {
                         .map(Some);
                 };
                 let input_schema = input_plan.schema().clone();
+                let input_plan = self.set_table_name(&table_name, input_plan.clone())?;
                 let substrait_plan: Bytes = DFLogicalSubstraitConvertor
                     .encode(input_plan.clone())
                     .context(error::EncodeSubstraitLogicalPlanSnafu)?
@@ -100,7 +104,7 @@ impl ExtensionPlanner for DistExtensionPlanner {
                         Ok(Some(Arc::new(exec) as _))
                     }
                     Err(_) => planner
-                        .create_physical_plan(input_plan, session_state)
+                        .create_physical_plan(&input_plan, session_state)
                         .await
                         .map(Some),
                 }
@@ -117,6 +121,12 @@ impl DistExtensionPlanner {
         let mut extractor = TableNameExtractor::default();
         let _ = plan.visit(&mut extractor)?;
         Ok(extractor.table_name)
+    }
+
+    /// Set the fully resolved table name to TableScan plan
+    fn set_table_name(&self, name: &TableName, plan: LogicalPlan) -> Result<LogicalPlan> {
+        // let mut rewriter
+        plan.transform(&|plan| TableNameRewriter::rewrite_table_name(plan, name))
     }
 
     async fn get_peers(&self, table_name: &TableName) -> Result<Vec<Peer>> {
@@ -142,6 +152,23 @@ impl TreeNodeVisitor for TableNameExtractor {
     fn pre_visit(&mut self, node: &Self::N) -> Result<VisitRecursion> {
         match node {
             LogicalPlan::TableScan(scan) => {
+                if let Some(source) = scan.source.as_any().downcast_ref::<DefaultTableSource>() {
+                    if let Some(provider) = source
+                        .table_provider
+                        .as_any()
+                        .downcast_ref::<DfTableProviderAdapter>()
+                    {
+                        if provider.table().table_type() == TableType::Base {
+                            let info = provider.table().table_info();
+                            self.table_name = Some(TableName::new(
+                                info.catalog_name.clone(),
+                                info.schema_name.clone(),
+                                info.name.clone(),
+                            ));
+                            return Ok(VisitRecursion::Stop);
+                        }
+                    }
+                }
                 match &scan.table_name {
                     TableReference::Full {
                         catalog,
@@ -176,5 +203,26 @@ impl TreeNodeVisitor for TableNameExtractor {
             }
             _ => Ok(VisitRecursion::Continue),
         }
+    }
+}
+
+struct TableNameRewriter;
+
+impl TableNameRewriter {
+    fn rewrite_table_name(
+        plan: LogicalPlan,
+        name: &TableName,
+    ) -> datafusion_common::Result<Transformed<LogicalPlan>> {
+        Ok(match plan {
+            LogicalPlan::TableScan(mut table_scan) => {
+                table_scan.table_name = TableReference::full(
+                    name.catalog_name.clone(),
+                    name.schema_name.clone(),
+                    name.table_name.clone(),
+                );
+                Transformed::Yes(LogicalPlan::TableScan(table_scan))
+            }
+            _ => Transformed::No(plan),
+        })
     }
 }

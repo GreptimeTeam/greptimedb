@@ -74,7 +74,12 @@ impl Instance {
         .await?;
 
         let logical_plan = DFLogicalSubstraitConvertor
-            .decode(plan_bytes.as_slice(), Arc::new(catalog_list) as Arc<_>)
+            .decode(
+                plan_bytes.as_slice(),
+                Arc::new(catalog_list) as Arc<_>,
+                &ctx.current_catalog(),
+                &ctx.current_schema(),
+            )
             .await
             .context(DecodeLogicalPlanSnafu)?;
 

@@ -26,6 +26,7 @@ use futures_util::StreamExt;
 use snafu::ResultExt;
 use store_api::storage::ScanRequest;
 use table::error::{SchemaConversionSnafu, TablesRecordBatchSnafu};
+use table::metadata::TableType;
 use table::{Result as TableResult, Table, TableRef};
 
 use self::columns::InformationSchemaColumns;
@@ -100,6 +101,10 @@ impl Table for InformationTable {
 
     fn table_info(&self) -> table::metadata::TableInfoRef {
         unreachable!("Should not call table_info() of InformationTable directly")
+    }
+
+    fn table_type(&self) -> table::metadata::TableType {
+        TableType::View
     }
 
     async fn scan_to_stream(&self, request: ScanRequest) -> TableResult<SendableRecordBatchStream> {
