@@ -183,6 +183,13 @@ impl Env {
             _ => panic!("Unexpected subcommand: {subcommand}"),
         };
 
+        if util::check_port(check_ip_addr.parse().unwrap(), Duration::from_secs(1)).await {
+            panic!(
+                "Port {check_ip_addr} is already in use, please check and retry.",
+                check_ip_addr = check_ip_addr
+            );
+        }
+
         let mut process = Command::new("./greptime")
             .current_dir(util::get_binary_dir("debug"))
             .args(args)
