@@ -76,9 +76,7 @@ impl ExtensionPlanner for DistExtensionPlanner {
             } else {
                 // TODO(ruihang): generate different execution plans for different variant merge operation
                 let input_plan = merge_scan.input();
-                println!("input: {:?}", input_plan);
                 let Some(table_name) = self.get_table_name(input_plan)? else {
-                    println!("table name not found, ignore this merge scan");
                     // no relation found in input plan, going to execute them locally 
                     return planner
                         .create_physical_plan(input_plan, session_state)
@@ -158,11 +156,9 @@ impl TreeNodeVisitor for TableNameExtractor {
                             info.schema_name.clone(),
                             info.name.clone(),
                         ));
-                        println!("retrieved table name: {:?}", self.table_name);
                         return Ok(VisitRecursion::Stop);
                     }
                 }
-                println!("downcast failed");
                 match &scan.table_name {
                     TableReference::Full {
                         catalog,
