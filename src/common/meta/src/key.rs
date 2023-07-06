@@ -63,7 +63,7 @@ use crate::kv_backend::KvBackendRef;
 
 pub const REMOVED_PREFIX: &str = "__removed";
 
-const ALPHANUMERICS_NAME_PATTERN: &str = "[a-zA-Z_][a-zA-Z0-9_]*";
+const TABLE_NAME_PATTERN: &str = "[a-zA-Z_:][a-zA-Z0-9_:]*";
 
 const DATANODE_TABLE_KEY_PREFIX: &str = "__dn_table";
 const TABLE_INFO_KEY_PREFIX: &str = "__table_info";
@@ -77,7 +77,7 @@ lazy_static! {
 
 lazy_static! {
     static ref TABLE_NAME_KEY_PATTERN: Regex = Regex::new(&format!(
-        "^{TABLE_NAME_KEY_PREFIX}/({ALPHANUMERICS_NAME_PATTERN})/({ALPHANUMERICS_NAME_PATTERN})/({ALPHANUMERICS_NAME_PATTERN})$"
+        "^{TABLE_NAME_KEY_PREFIX}/({TABLE_NAME_PATTERN})/({TABLE_NAME_PATTERN})/({TABLE_NAME_PATTERN})$"
     ))
     .unwrap();
 }
