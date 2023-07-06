@@ -33,6 +33,7 @@ use datafusion_expr::{LogicalPlan, UserDefinedLogicalNode};
 use partition::manager::PartitionRuleManager;
 use snafu::ResultExt;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
+pub use table::metadata::TableType;
 use table::table::adapter::DfTableProviderAdapter;
 
 use crate::dist_plan::merge_scan::{MergeScanExec, MergeScanLogicalPlan};
@@ -150,13 +151,15 @@ impl TreeNodeVisitor for TableNameExtractor {
                         .as_any()
                         .downcast_ref::<DfTableProviderAdapter>()
                     {
-                        let info = provider.table().table_info();
-                        self.table_name = Some(TableName::new(
-                            info.catalog_name.clone(),
-                            info.schema_name.clone(),
-                            info.name.clone(),
-                        ));
-                        return Ok(VisitRecursion::Stop);
+                        if provider.table().table_type() == TableType::Base {
+                            let info = provider.table().table_info();
+                            self.table_name = Some(TableName::new(
+                                info.catalog_name.clone(),
+                                info.schema_name.clone(),
+                                info.name.clone(),
+                            ));
+                            return Ok(VisitRecursion::Stop);
+                        }
                     }
                 }
                 match &scan.table_name {
