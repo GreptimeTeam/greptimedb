@@ -383,6 +383,6 @@ async fn test_status() {
 
 #[tokio::test]
 async fn test_config() {
-    let Json(json) = http_handler::config().await;
+    let _rs = http_handler::config().await;
     // assert_eq!(json, expected_json);
 }

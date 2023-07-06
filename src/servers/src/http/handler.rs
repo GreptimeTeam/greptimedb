@@ -18,6 +18,7 @@ use std::{env, fs};
 
 use aide::transform::TransformOperation;
 use axum::extract::{Json, Query, State};
+use axum::response::{IntoResponse, Response};
 use axum::{Extension, Form};
 use common_error::status_code::StatusCode;
 use common_telemetry::{error, timer};
@@ -186,12 +187,9 @@ pub async fn status() -> Json<StatusResponse<'static>> {
 }
 
 /// Handler to expose configuration information info about runtime, build, etc.
-pub async fn config() -> String {
+pub async fn config() -> Response {
     match fs::read_to_string("/tmp/greptimedb/conf/opts.toml") {
-        Ok(contents) => contents,
-        Err(e) => {
-            error!(e; "Failed to retrieve config");
-            "Failed to retrieve config".to_string()
-        }
+        Ok(contents) => (axum::http::StatusCode::OK, contents).into_response(),
+        Err(e) => (axum::http::StatusCode::NOT_FOUND, e.to_string()).into_response(),
     }
 }

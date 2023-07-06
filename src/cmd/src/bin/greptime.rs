@@ -17,7 +17,7 @@
 use std::{fmt, fs};
 
 use clap::Parser;
-use cmd::error::{MissingConfigSnafu, Result};
+use cmd::error::Result;
 use cmd::options::{Options, TopLevelOptions};
 use cmd::{cli, datanode, frontend, metasrv, standalone};
 use common_telemetry::logging::{error, info, warn, TracingOptions};
@@ -245,7 +245,10 @@ fn write_opts_into_tmp_dir(opts: &Options) {
     if let Some(parent_dir) = std::path::Path::new(DEFAULT_OPTIONS_PATH).parent() {
         if !parent_dir.exists() {
             if let Err(err) = fs::create_dir_all(parent_dir) {
-                println!("Failed to create directory: {}", err);
+                warn!(
+                    "Failed to create directory '{}'. Error: {}",
+                    DEFAULT_OPTIONS_PATH, err
+                );
                 return;
             }
         }
