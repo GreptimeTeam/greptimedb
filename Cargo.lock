@@ -6001,8 +6001,9 @@ checksum = "978aa494585d3ca4ad74929863093e87cac9790d81fe7aba2b3dc2890643a0fc"
 
 [[package]]
 name = "orc-rust"
-version = "0.2.3"
-source = "git+https://github.com/WenyXu/orc-rs.git?rev=0319acd32456e403c20f135cc012441a76852605#0319acd32456e403c20f135cc012441a76852605"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "01773d11a950f7418e691899bd2917e393972188b961d381ee3ce1880ad02e32"
 dependencies = [
  "arrow",
  "bytes",
