@@ -14,13 +14,13 @@
 
 #![doc = include_str!("../../../../README.md")]
 
-use std::fmt;
+use std::{fmt, fs};
 
 use clap::Parser;
-use cmd::error::Result;
+use cmd::error::{MissingConfigSnafu, Result};
 use cmd::options::{Options, TopLevelOptions};
 use cmd::{cli, datanode, frontend, metasrv, standalone};
-use common_telemetry::logging::{error, info, TracingOptions};
+use common_telemetry::logging::{error, info, warn, TracingOptions};
 use metrics::gauge;
 
 #[derive(Parser)]
@@ -196,8 +196,6 @@ async fn main() -> Result<()> {
     let app_name = &cmd.subcmd.to_string();
 
     let opts = cmd.load_options()?;
-    let opts_json = serde_json::to_string(&opts).unwrap();
-    let _write = std::fs::write("/tmp/greptimedb/conf/opts.json", opts_json).unwrap();
     let logging_opts = opts.logging_options();
     let tracing_opts = TracingOptions {
         #[cfg(feature = "tokio-console")]
@@ -218,7 +216,7 @@ async fn main() -> Result<()> {
         full_version()
     );
     log_env_flags();
-
+    write_opts_into_tmp_dir(&opts);
     let mut app = cmd.build(opts).await?;
 
     tokio::select! {
@@ -236,4 +234,30 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Default path to store configuration
+const DEFAULT_OPTIONS_PATH: &str = "/tmp/greptimedb/conf/opts.toml";
+
+fn write_opts_into_tmp_dir(opts: &Options) {
+    let opts_toml = toml::to_string(&opts).unwrap();
+
+    if let Some(parent_dir) = std::path::Path::new(DEFAULT_OPTIONS_PATH).parent() {
+        if !parent_dir.exists() {
+            if let Err(err) = fs::create_dir_all(parent_dir) {
+                println!("Failed to create directory: {}", err);
+                return;
+            }
+        }
+    }
+    match fs::write(DEFAULT_OPTIONS_PATH, opts_toml) {
+        Ok(_) => info!(
+            "Configuration options were successfully written at '{}'",
+            DEFAULT_OPTIONS_PATH
+        ),
+        Err(err) => warn!(
+            "Failed to write configuration options at '{}'. Error: {}",
+            DEFAULT_OPTIONS_PATH, err
+        ),
+    }
 }

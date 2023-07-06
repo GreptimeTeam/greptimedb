@@ -381,6 +381,7 @@ async fn test_status() {
     assert_eq!(json, expected_json);
 }
 
+#[tokio::test]
 async fn test_config() {
     let Json(json) = http_handler::config().await;
     // assert_eq!(json, expected_json);

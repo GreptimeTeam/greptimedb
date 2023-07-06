@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use std::env;
 use std::time::Instant;
+use std::{env, fs};
 
 use aide::transform::TransformOperation;
 use axum::extract::{Json, Query, State};
@@ -185,11 +185,13 @@ pub async fn status() -> Json<StatusResponse<'static>> {
     })
 }
 
-#[derive(Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-pub struct ConfigResponse {}
-
 /// Handler to expose configuration information info about runtime, build, etc.
-#[axum_macros::debug_handler]
-pub async fn config() -> Json<ConfigResponse> {
-    Json(ConfigResponse {})
+pub async fn config() -> String {
+    match fs::read_to_string("/tmp/greptimedb/conf/opts.toml") {
+        Ok(contents) => contents,
+        Err(e) => {
+            error!(e; "Failed to retrieve config");
+            "Failed to retrieve config".to_string()
+        }
+    }
 }
