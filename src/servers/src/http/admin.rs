@@ -59,6 +59,7 @@ pub async fn flush(
             schema_name: schema_name.clone(),
             table_name: table_name.clone(),
             region_number,
+            ..Default::default()
         })),
     });
 

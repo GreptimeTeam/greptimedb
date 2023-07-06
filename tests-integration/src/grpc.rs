@@ -119,6 +119,7 @@ mod test {
                         location: None,
                     }],
                 })),
+                ..Default::default()
             })),
         });
         let output = query(instance, request).await;
@@ -152,6 +153,7 @@ mod test {
                 catalog_name: "greptime".to_string(),
                 schema_name: "database_created_through_grpc".to_string(),
                 table_name: "table_created_through_grpc".to_string(),
+                ..Default::default()
             })),
         });
         let output = query(instance, request).await;
@@ -416,6 +418,7 @@ CREATE TABLE {table_name} (
                 schema_name: schema_name.to_string(),
                 table_name: table_name.to_string(),
                 region_number,
+                ..Default::default()
             })),
         });
 

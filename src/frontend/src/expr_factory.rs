@@ -320,6 +320,7 @@ pub(crate) fn to_alter_expr(
         schema_name,
         table_name,
         kind: Some(kind),
+        ..Default::default()
     })
 }
 

@@ -270,6 +270,7 @@ impl DistInstance {
             catalog_name: table_name.catalog_name.clone(),
             schema_name: table_name.schema_name.clone(),
             table_name: table_name.table_name.clone(),
+            ..Default::default()
         };
         for table_route in route_response.table_routes.iter() {
             for datanode in table_route.find_leaders() {
@@ -330,6 +331,7 @@ impl DistInstance {
             schema_name: table_name.schema_name.clone(),
             table_name: table_name.table_name.clone(),
             region_number,
+            ..Default::default()
         };
 
         for table_route in &route_response.table_routes {
