@@ -209,8 +209,8 @@ mod tests {
 
         #[async_trait::async_trait]
         impl KvBackend for Noop {
-            fn name(&self) -> &'static str {
-                "Noop"
+            fn name(&self) -> String {
+                "Noop".to_string()
             }
 
             async fn range(&self, _: RangeRequest) -> Result<RangeResponse> {

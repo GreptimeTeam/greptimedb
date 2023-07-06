@@ -36,38 +36,15 @@ pub type KvBackendRef = Arc<dyn KvBackend<Error = Error> + Send + Sync>;
 #[async_trait]
 pub trait KvBackend: TxnService
 where
-    Self::Error: ErrorExt + Send + Sync,
+    Self::Error: ErrorExt,
 {
-    fn name(&self) -> &'static str;
+    fn name(&self) -> String;
 
     async fn range(&self, req: RangeRequest) -> Result<RangeResponse, Self::Error>;
 
     async fn put(&self, req: PutRequest) -> Result<PutResponse, Self::Error>;
 
-    /// Default "batch_put" is backed by iterating all kvs on "put".
-    async fn batch_put(&self, req: BatchPutRequest) -> Result<BatchPutResponse, Self::Error> {
-        let prev_kv = req.prev_kv;
-
-        let mut prev_kvs = if prev_kv {
-            Vec::with_capacity(req.kvs.len())
-        } else {
-            vec![]
-        };
-
-        for kv in req.kvs {
-            let mut req = PutRequest::new().with_key(kv.key).with_value(kv.value);
-            if prev_kv {
-                req = req.with_prev_kv();
-            }
-
-            let resp = self.put(req).await?;
-
-            if let Some(prev_kv) = resp.prev_kv {
-                prev_kvs.push(prev_kv);
-            }
-        }
-        Ok(BatchPutResponse { prev_kvs })
-    }
+    async fn batch_put(&self, req: BatchPutRequest) -> Result<BatchPutResponse, Self::Error>;
 
     async fn compare_and_put(
         &self,

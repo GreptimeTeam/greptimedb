@@ -93,8 +93,8 @@ impl EtcdStore {
 
 #[async_trait::async_trait]
 impl KvBackend for EtcdStore {
-    fn name(&self) -> &'static str {
-        "Etcd"
+    fn name(&self) -> String {
+        "Etcd".to_string()
     }
 
     async fn range(&self, req: RangeRequest) -> Result<RangeResponse> {

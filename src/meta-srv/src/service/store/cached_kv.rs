@@ -59,12 +59,12 @@ pub struct LeaderCachedKvStore {
     store: KvStoreRef,
     cache: ResettableKvStoreRef,
     version: AtomicUsize,
-    name: &'static str,
+    name: String,
 }
 
 impl LeaderCachedKvStore {
     pub fn new(check_leader: CheckLeaderRef, store: KvStoreRef) -> Self {
-        let name = Box::leak(format!("LeaderCached({})", store.name()).into_boxed_str());
+        let name = format!("LeaderCached({})", store.name());
         Self {
             check_leader,
             store,
@@ -116,8 +116,8 @@ impl LeaderCachedKvStore {
 
 #[async_trait::async_trait]
 impl KvBackend for LeaderCachedKvStore {
-    fn name(&self) -> &'static str {
-        self.name
+    fn name(&self) -> String {
+        self.name.clone()
     }
 
     async fn range(&self, req: RangeRequest) -> Result<RangeResponse> {

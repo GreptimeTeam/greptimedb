@@ -22,8 +22,9 @@ use common_meta::error::Error::{CacheNotGet, GetKvCache};
 use common_meta::error::{CacheNotGetSnafu, Error, MetaSrvSnafu, Result};
 use common_meta::kv_backend::{KvBackend, KvBackendRef, TxnService};
 use common_meta::rpc::store::{
-    CompareAndPutRequest, CompareAndPutResponse, DeleteRangeRequest, DeleteRangeResponse,
-    MoveValueRequest, MoveValueResponse, PutRequest, PutResponse, RangeRequest, RangeResponse,
+    BatchPutRequest, BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse,
+    DeleteRangeRequest, DeleteRangeResponse, MoveValueRequest, MoveValueResponse, PutRequest,
+    PutResponse, RangeRequest, RangeResponse,
 };
 use common_meta::rpc::KeyValue;
 use common_telemetry::timer;
@@ -43,7 +44,7 @@ pub type CacheBackendRef = Arc<Cache<Vec<u8>, KeyValue>>;
 pub struct CachedMetaKvBackend {
     kv_backend: KvBackendRef,
     cache: CacheBackendRef,
-    name: &'static str,
+    name: String,
 }
 
 impl TxnService for CachedMetaKvBackend {
@@ -52,8 +53,8 @@ impl TxnService for CachedMetaKvBackend {
 
 #[async_trait::async_trait]
 impl KvBackend for CachedMetaKvBackend {
-    fn name(&self) -> &'static str {
-        self.name
+    fn name(&self) -> String {
+        self.name.clone()
     }
 
     async fn range(&self, req: RangeRequest) -> Result<RangeResponse> {
@@ -97,6 +98,24 @@ impl KvBackend for CachedMetaKvBackend {
         }
 
         ret
+    }
+
+    async fn batch_put(&self, req: BatchPutRequest) -> Result<BatchPutResponse> {
+        let keys = req
+            .kvs
+            .iter()
+            .map(|kv| kv.key().to_vec())
+            .collect::<Vec<_>>();
+
+        let resp = self.kv_backend.batch_put(req).await;
+
+        if resp.is_ok() {
+            for key in keys {
+                self.invalidate_key(&key).await;
+            }
+        }
+
+        resp
     }
 
     async fn delete_range(&self, mut req: DeleteRangeRequest) -> Result<DeleteRangeResponse> {
@@ -171,7 +190,7 @@ impl CachedMetaKvBackend {
                 .build(),
         );
 
-        let name = Box::leak(format!("CachedKvBackend({})", kv_backend.name()).into_boxed_str());
+        let name = format!("CachedKvBackend({})", kv_backend.name());
         Self {
             kv_backend,
             cache,
@@ -198,8 +217,8 @@ impl TxnService for MetaKvBackend {
 /// comparing to `Accessor`'s list and get method.
 #[async_trait::async_trait]
 impl KvBackend for MetaKvBackend {
-    fn name(&self) -> &'static str {
-        "MetaKvBackend"
+    fn name(&self) -> String {
+        "MetaKvBackend".to_string()
     }
 
     async fn range(&self, req: RangeRequest) -> Result<RangeResponse> {
@@ -221,6 +240,14 @@ impl KvBackend for MetaKvBackend {
             key: kv.take_key(),
             value: kv.take_value(),
         }))
+    }
+
+    async fn batch_put(&self, req: BatchPutRequest) -> Result<BatchPutResponse> {
+        self.client
+            .batch_put(req)
+            .await
+            .map_err(BoxedError::new)
+            .context(MetaSrvSnafu)
     }
 
     async fn put(&self, req: PutRequest) -> Result<PutResponse> {

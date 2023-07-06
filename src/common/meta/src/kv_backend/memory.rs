@@ -29,8 +29,9 @@ use crate::kv_backend::txn::{Txn, TxnOp, TxnOpResponse, TxnRequest, TxnResponse}
 use crate::kv_backend::{KvBackend, TxnService};
 use crate::metrics::METRIC_META_TXN_REQUEST;
 use crate::rpc::store::{
-    CompareAndPutRequest, CompareAndPutResponse, DeleteRangeRequest, DeleteRangeResponse,
-    MoveValueRequest, MoveValueResponse, PutRequest, PutResponse, RangeRequest, RangeResponse,
+    BatchPutRequest, BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse,
+    DeleteRangeRequest, DeleteRangeResponse, MoveValueRequest, MoveValueResponse, PutRequest,
+    PutResponse, RangeRequest, RangeResponse,
 };
 use crate::rpc::KeyValue;
 
@@ -74,8 +75,8 @@ impl<T> MemoryKvBackend<T> {
 
 #[async_trait]
 impl<T: ErrorExt + Send + Sync + 'static> KvBackend for MemoryKvBackend<T> {
-    fn name(&self) -> &'static str {
-        "Memory"
+    fn name(&self) -> String {
+        "Memory".to_string()
     }
 
     async fn range(&self, req: RangeRequest) -> Result<RangeResponse, Self::Error> {
@@ -129,6 +130,28 @@ impl<T: ErrorExt + Send + Sync + 'static> KvBackend for MemoryKvBackend<T> {
         };
 
         Ok(PutResponse { prev_kv })
+    }
+
+    async fn batch_put(&self, req: BatchPutRequest) -> Result<BatchPutResponse, Self::Error> {
+        let mut kvs = self.kvs.write().unwrap();
+
+        let mut prev_kvs = if req.prev_kv {
+            Vec::with_capacity(req.kvs.len())
+        } else {
+            vec![]
+        };
+
+        for kv in req.kvs {
+            if req.prev_kv {
+                if let Some(value) = kvs.insert(kv.key.clone(), kv.value) {
+                    prev_kvs.push(KeyValue { key: kv.key, value });
+                }
+            } else {
+                kvs.insert(kv.key, kv.value);
+            }
+        }
+
+        Ok(BatchPutResponse { prev_kvs })
     }
 
     async fn compare_and_put(

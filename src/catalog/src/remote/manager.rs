@@ -91,7 +91,7 @@ impl RemoteCatalogManager {
                 match CatalogKey::parse(&catalog_key) {
                     Ok(x) => Some(x),
                     Err(e) => {
-                        error!("Ignore invalid catalog key {:?}: {e}", catalog_key);
+                        error!(e; "Ignore invalid catalog key {:?}", catalog_key);
                         None
                     }
                 }
