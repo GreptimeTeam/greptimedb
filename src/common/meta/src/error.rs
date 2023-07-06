@@ -88,7 +88,10 @@ impl ErrorExt for Error {
             | InvalidProtoMsg { .. }
             | InvalidTableMetadata { .. } => StatusCode::Unexpected,
 
-            SendMessage { .. } | GetKvCache { .. } | CacheNotGet { .. } | ConcurrentModifyRegionsPlacement { .. } => StatusCode::Internal,
+            SendMessage { .. }
+            | GetKvCache { .. }
+            | CacheNotGet { .. }
+            | ConcurrentModifyRegionsPlacement { .. } => StatusCode::Internal,
 
             EncodeJson { .. } | DecodeJson { .. } | PayloadNotExist { .. } => {
                 StatusCode::Unexpected
