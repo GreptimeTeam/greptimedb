@@ -75,8 +75,8 @@ impl<T> MemoryKvBackend<T> {
 
 #[async_trait]
 impl<T: ErrorExt + Send + Sync + 'static> KvBackend for MemoryKvBackend<T> {
-    fn name(&self) -> String {
-        "Memory".to_string()
+    fn name(&self) -> &str {
+        "Memory"
     }
 
     async fn range(&self, req: RangeRequest) -> Result<RangeResponse, Self::Error> {

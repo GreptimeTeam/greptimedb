@@ -53,8 +53,8 @@ impl TxnService for CachedMetaKvBackend {
 
 #[async_trait::async_trait]
 impl KvBackend for CachedMetaKvBackend {
-    fn name(&self) -> String {
-        self.name.clone()
+    fn name(&self) -> &str {
+        &self.name
     }
 
     async fn range(&self, req: RangeRequest) -> Result<RangeResponse> {
@@ -217,8 +217,8 @@ impl TxnService for MetaKvBackend {
 /// comparing to `Accessor`'s list and get method.
 #[async_trait::async_trait]
 impl KvBackend for MetaKvBackend {
-    fn name(&self) -> String {
-        "MetaKvBackend".to_string()
+    fn name(&self) -> &str {
+        "MetaKvBackend"
     }
 
     async fn range(&self, req: RangeRequest) -> Result<RangeResponse> {

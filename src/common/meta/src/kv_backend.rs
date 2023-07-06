@@ -38,7 +38,7 @@ pub trait KvBackend: TxnService
 where
     Self::Error: ErrorExt,
 {
-    fn name(&self) -> String;
+    fn name(&self) -> &str;
 
     async fn range(&self, req: RangeRequest) -> Result<RangeResponse, Self::Error>;
 

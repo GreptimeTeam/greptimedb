@@ -56,7 +56,7 @@ impl store_server::Store for MetaSrv {
         let _timer = timer!(
             METRIC_META_KV_REQUEST,
             &[
-                ("target", self.kv_store().name()),
+                ("target", self.kv_store().name().to_string()),
                 ("op", "range".to_string()),
                 ("cluster_id", cluster_id.to_string()),
             ]
@@ -82,7 +82,7 @@ impl store_server::Store for MetaSrv {
         let _timer = timer!(
             METRIC_META_KV_REQUEST,
             &[
-                ("target", self.kv_store().name()),
+                ("target", self.kv_store().name().to_string()),
                 ("op", "put".to_string()),
                 ("cluster_id", cluster_id.to_string()),
             ]
@@ -108,7 +108,7 @@ impl store_server::Store for MetaSrv {
         let _timer = timer!(
             METRIC_META_KV_REQUEST,
             &[
-                ("target", self.kv_store().name()),
+                ("target", self.kv_store().name().to_string()),
                 ("op", "batch_get".to_string()),
                 ("cluster_id", cluster_id.to_string()),
             ]
@@ -134,7 +134,7 @@ impl store_server::Store for MetaSrv {
         let _timer = timer!(
             METRIC_META_KV_REQUEST,
             &[
-                ("target", self.kv_store().name()),
+                ("target", self.kv_store().name().to_string()),
                 ("op", "batch_pub".to_string()),
                 ("cluster_id", cluster_id.to_string()),
             ]
@@ -163,7 +163,7 @@ impl store_server::Store for MetaSrv {
         let _timer = timer!(
             METRIC_META_KV_REQUEST,
             &[
-                ("target", self.kv_store().name()),
+                ("target", self.kv_store().name().to_string()),
                 ("op", "batch_delete".to_string()),
                 ("cluster_id", cluster_id.to_string()),
             ]
@@ -192,7 +192,7 @@ impl store_server::Store for MetaSrv {
         let _timer = timer!(
             METRIC_META_KV_REQUEST,
             &[
-                ("target", self.kv_store().name()),
+                ("target", self.kv_store().name().to_string()),
                 ("op", "compare_and_put".to_string()),
                 ("cluster_id", cluster_id.to_string()),
             ]
@@ -221,7 +221,7 @@ impl store_server::Store for MetaSrv {
         let _timer = timer!(
             METRIC_META_KV_REQUEST,
             &[
-                ("target", self.kv_store().name()),
+                ("target", self.kv_store().name().to_string()),
                 ("op", "delete_range".to_string()),
                 ("cluster_id", cluster_id.to_string()),
             ]
@@ -250,7 +250,7 @@ impl store_server::Store for MetaSrv {
         let _timer = timer!(
             METRIC_META_KV_REQUEST,
             &[
-                ("target", self.kv_store().name()),
+                ("target", self.kv_store().name().to_string()),
                 ("op", "move_value".to_string()),
                 ("cluster_id", cluster_id.to_string()),
             ]

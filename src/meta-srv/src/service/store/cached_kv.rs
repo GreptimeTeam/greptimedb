@@ -116,8 +116,8 @@ impl LeaderCachedKvStore {
 
 #[async_trait::async_trait]
 impl KvBackend for LeaderCachedKvStore {
-    fn name(&self) -> String {
-        self.name.clone()
+    fn name(&self) -> &str {
+        &self.name
     }
 
     async fn range(&self, req: RangeRequest) -> Result<RangeResponse> {
