@@ -54,6 +54,7 @@ impl TryFrom<Task> for DdlTask {
                 Ok(DdlTask::CreateTable(create_table.try_into()?))
             }
             Task::DropTableTask(drop_table) => Ok(DdlTask::DropTable(drop_table.try_into()?)),
+            _ => todo!(),
         }
     }
 }
