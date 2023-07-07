@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::env;
 use std::time::Instant;
-use std::{env, fs};
 
 use aide::transform::TransformOperation;
 use axum::extract::{Json, Query, State};
@@ -27,7 +27,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use session::context::UserInfo;
 
-use crate::http::{ApiState, JsonResponse};
+use crate::http::{ApiState, GreptimeOptionsConfigState, JsonResponse};
 use crate::metrics::JEMALLOC_COLLECTOR;
 use crate::metrics_handler::MetricsHandler;
 
@@ -187,9 +187,7 @@ pub async fn status() -> Json<StatusResponse<'static>> {
 }
 
 /// Handler to expose configuration information info about runtime, build, etc.
-pub async fn config() -> Response {
-    match fs::read_to_string("/tmp/greptimedb/conf/opts.toml") {
-        Ok(contents) => (axum::http::StatusCode::OK, contents).into_response(),
-        Err(e) => (axum::http::StatusCode::NOT_FOUND, e.to_string()).into_response(),
-    }
+#[axum_macros::debug_handler]
+pub async fn config(State(state): State<GreptimeOptionsConfigState>) -> Response {
+    (axum::http::StatusCode::OK, state.greptime_config_options).into_response()
 }

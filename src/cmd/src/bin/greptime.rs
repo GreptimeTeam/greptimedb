@@ -14,13 +14,13 @@
 
 #![doc = include_str!("../../../../README.md")]
 
-use std::{fmt, fs};
+use std::fmt;
 
 use clap::Parser;
 use cmd::error::Result;
 use cmd::options::{Options, TopLevelOptions};
 use cmd::{cli, datanode, frontend, metasrv, standalone};
-use common_telemetry::logging::{error, info, warn, TracingOptions};
+use common_telemetry::logging::{error, info, TracingOptions};
 use metrics::gauge;
 
 #[derive(Parser)]
@@ -216,7 +216,6 @@ async fn main() -> Result<()> {
         full_version()
     );
     log_env_flags();
-    write_opts_into_tmp_dir(&opts);
     let mut app = cmd.build(opts).await?;
 
     tokio::select! {
@@ -234,33 +233,4 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
-}
-
-/// Default path to store configuration
-const DEFAULT_OPTIONS_PATH: &str = "/tmp/greptimedb/conf/opts.toml";
-
-fn write_opts_into_tmp_dir(opts: &Options) {
-    let opts_toml = toml::to_string(&opts).unwrap();
-
-    if let Some(parent_dir) = std::path::Path::new(DEFAULT_OPTIONS_PATH).parent() {
-        if !parent_dir.exists() {
-            if let Err(err) = fs::create_dir_all(parent_dir) {
-                warn!(
-                    "Failed to create directory '{}'. Error: {}",
-                    DEFAULT_OPTIONS_PATH, err
-                );
-                return;
-            }
-        }
-    }
-    match fs::write(DEFAULT_OPTIONS_PATH, opts_toml) {
-        Ok(_) => info!(
-            "Configuration options were successfully written at '{}'",
-            DEFAULT_OPTIONS_PATH
-        ),
-        Err(err) => warn!(
-            "Failed to write configuration options at '{}'. Error: {}",
-            DEFAULT_OPTIONS_PATH, err
-        ),
-    }
 }
