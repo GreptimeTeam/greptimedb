@@ -207,7 +207,7 @@ async fn handle_drop_table_task(
     let table_id = drop_table_task.table_id;
 
     let table_route_key = TableRouteKey {
-        table_id: table_id as u64,
+        table_id,
         catalog_name: &drop_table_task.catalog,
         schema_name: &drop_table_task.schema,
         table_name: &drop_table_task.table,

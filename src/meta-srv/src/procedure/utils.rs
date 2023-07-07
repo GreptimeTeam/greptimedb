@@ -27,7 +27,7 @@ pub fn build_table_metadata_key(
     table_id: TableId,
 ) -> (TableGlobalKey, TableRouteKey) {
     let table_route_key = TableRouteKey {
-        table_id: table_id as u64,
+        table_id,
         catalog_name: table_ref.catalog,
         schema_name: table_ref.schema,
         table_name: table_ref.schema,

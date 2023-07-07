@@ -160,7 +160,7 @@ async fn move_value(
     Ok(res.kv.map(|kv| (kv.key, kv.value)))
 }
 
-pub(crate) fn table_route_key(table_id: u64, t: &TableGlobalKey) -> TableRouteKey<'_> {
+pub(crate) fn table_route_key(table_id: u32, t: &TableGlobalKey) -> TableRouteKey<'_> {
     TableRouteKey {
         table_id,
         catalog_name: &t.catalog_name,
@@ -182,7 +182,7 @@ pub(crate) async fn fetch_table(
     let tgv = get_table_global_value(kv_store, &tgk).await?;
 
     if let Some(tgv) = tgv {
-        let trk = table_route_key(tgv.table_id() as u64, &tgk);
+        let trk = table_route_key(tgv.table_id(), &tgk);
         let trv = get_table_route_value(kv_store, &trk).await?;
 
         return Ok(Some((tgv, trv)));
@@ -206,7 +206,7 @@ pub(crate) async fn fetch_tables(
         }
         let tgv = tgv.unwrap();
 
-        let trk = table_route_key(tgv.table_id() as u64, &tgk);
+        let trk = table_route_key(tgv.table_id(), &tgk);
         let trv = get_table_route_value(kv_store, &trk).await?;
 
         tables.push((tgv, trv));

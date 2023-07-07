@@ -336,7 +336,7 @@ async fn handle_delete(req: DeleteRequest, ctx: Context) -> Result<RouteResponse
 
     let _ = remove_table_global_value(&ctx.kv_store, &tgk).await?;
 
-    let trk = table_route_key(tgv.table_id() as u64, &tgk);
+    let trk = table_route_key(tgv.table_id(), &tgk);
     let (_, trv) = remove_table_route_value(&ctx.kv_store, &trk).await?;
     let (peers, table_routes) = fill_table_routes(vec![(tgv, trv)])?;
 
