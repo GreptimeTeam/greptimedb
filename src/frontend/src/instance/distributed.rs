@@ -696,7 +696,7 @@ fn create_partitions_stmt(partitions: Vec<PartitionInfo>) -> Result<Option<Parti
         .into_iter()
         .map(|info| {
             // Generated the partition name from id
-            let name = &format!("r{}", info.id);
+            let name = &format!("r{}", info.id.as_u64());
             let bounds = info.partition.partition_bounds();
             let value_list = bounds
                 .iter()
