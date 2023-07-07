@@ -23,11 +23,11 @@ use api::v1::ddl_request::{Expr as DdlExpr, Expr};
 use api::v1::greptime_request::Request;
 use api::v1::{
     column_def, AlterExpr, CompactTableExpr, CreateDatabaseExpr, CreateTableExpr, DeleteRequest,
-    DropTableExpr, FlushTableExpr, InsertRequests, TableId,
+    FlushTableExpr, InsertRequests,
 };
 use async_trait::async_trait;
 use catalog::helper::{SchemaKey, SchemaValue};
-use catalog::{CatalogManager, DeregisterTableRequest, RegisterTableRequest};
+use catalog::{CatalogManager, RegisterTableRequest};
 use chrono::DateTime;
 use client::client_manager::DatanodeClients;
 use client::Database;
@@ -36,9 +36,7 @@ use common_catalog::format_full_table_name;
 use common_error::prelude::BoxedError;
 use common_meta::peer::Peer;
 use common_meta::rpc::ddl::{DdlTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse};
-use common_meta::rpc::router::{
-    DeleteRequest as MetaDeleteRequest, Partition as MetaPartition, RouteRequest,
-};
+use common_meta::rpc::router::{Partition as MetaPartition, RouteRequest};
 use common_meta::rpc::store::CompareAndPutRequest;
 use common_meta::table_name::TableName;
 use common_query::Output;
@@ -61,7 +59,7 @@ use sql::statements::statement::Statement;
 use sql::statements::{self, sql_value_to_value};
 use store_api::storage::RegionNumber;
 use table::engine::TableReference;
-use table::metadata::{RawTableInfo, RawTableMeta, TableIdent, TableType};
+use table::metadata::{RawTableInfo, RawTableMeta, TableId, TableIdent, TableType};
 use table::requests::TableOptions;
 use table::table::AlterContext;
 use table::TableRef;
@@ -119,12 +117,15 @@ impl DistInstance {
             .create_table_procedure(create_table, partitions, table_info.clone())
             .await?;
 
-        let table_id = resp.table_id;
+        let table_id = resp.table_id.context(error::UnexpectedSnafu {
+            violated: "expected table_id",
+        })?;
         info!("Successfully created distributed table '{table_name}' with table id {table_id}");
+
         table_info.ident.table_id = table_id;
         let table_info = Arc::new(table_info.try_into().context(error::CreateTableInfoSnafu)?);
 
-        create_table.table_id = Some(TableId { id: table_id });
+        create_table.table_id = Some(api::v1::TableId { id: table_id });
 
         let table = Arc::new(DistTable::new(
             table_name.clone(),
@@ -165,7 +166,7 @@ impl DistInstance {
     }
 
     async fn drop_table(&self, table_name: TableName) -> Result<Output> {
-        let _ = self
+        let table = self
             .catalog_manager
             .table(
                 &table_name.catalog_name,
@@ -178,42 +179,9 @@ impl DistInstance {
                 table_name: table_name.to_string(),
             })?;
 
-        let route_response = self
-            .meta_client
-            .delete_route(MetaDeleteRequest {
-                table_name: table_name.clone(),
-            })
-            .await
-            .context(RequestMetaSnafu)?;
+        let table_id = table.table_info().ident.table_id;
 
-        let request = DeregisterTableRequest {
-            catalog: table_name.catalog_name.clone(),
-            schema: table_name.schema_name.clone(),
-            table_name: table_name.table_name.clone(),
-        };
-        self.catalog_manager
-            .deregister_table(request)
-            .await
-            .context(CatalogSnafu)?;
-
-        let expr = DropTableExpr {
-            catalog_name: table_name.catalog_name.clone(),
-            schema_name: table_name.schema_name.clone(),
-            table_name: table_name.table_name.clone(),
-            ..Default::default()
-        };
-        for table_route in route_response.table_routes.iter() {
-            for datanode in table_route.find_leaders() {
-                debug!("Dropping table {table_name} on Datanode {datanode:?}");
-
-                let client = self.datanode_clients.get_client(&datanode).await;
-                let client = Database::new(&expr.catalog_name, &expr.schema_name, client);
-                let _ = client
-                    .drop_table(expr.clone())
-                    .await
-                    .context(RequestDatanodeSnafu)?;
-            }
-        }
+        self.drop_table_procedure(&table_name, table_id).await?;
 
         // Since the table information dropped on meta does not go through KvBackend, so we
         // manually invalidate the cache here.
@@ -535,6 +503,30 @@ impl DistInstance {
 
         let request = SubmitDdlTaskRequest {
             task: DdlTask::new_create_table(create_table.clone(), partitions, table_info),
+        };
+
+        timeout(
+            // TODO(weny): makes timeout configurable.
+            Duration::from_secs(10),
+            self.meta_client.submit_ddl_task(request),
+        )
+        .await
+        .context(error::TimeoutSnafu)?
+        .context(error::RequestMetaSnafu)
+    }
+
+    async fn drop_table_procedure(
+        &self,
+        table_name: &TableName,
+        table_id: TableId,
+    ) -> Result<SubmitDdlTaskResponse> {
+        let request = SubmitDdlTaskRequest {
+            task: DdlTask::new_drop_table(
+                table_name.catalog_name.to_string(),
+                table_name.schema_name.to_string(),
+                table_name.table_name.to_string(),
+                table_id,
+            ),
         };
 
         timeout(

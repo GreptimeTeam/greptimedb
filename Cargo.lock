@@ -5239,6 +5239,7 @@ dependencies = [
  "table",
  "tokio",
  "tokio-stream",
+ "toml",
  "tonic",
  "tower",
  "tracing",
