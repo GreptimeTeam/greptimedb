@@ -67,8 +67,7 @@ impl Client {
 }
 
 #[derive(Debug)]
-// TODO(weny): removes this in following PRs.
-#[allow(unused)]
+
 struct Inner {
     id: Id,
     role: Role,

@@ -47,8 +47,7 @@ pub struct DropTableProcedure {
     data: DropTableData,
 }
 
-// TODO(weny): removes in following PRs.
-#[allow(unused)]
+
 impl DropTableProcedure {
     pub(crate) const TYPE_NAME: &'static str = "metasrv-procedure::DropTable";
 
