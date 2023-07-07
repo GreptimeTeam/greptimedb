@@ -56,6 +56,9 @@ pub enum Error {
     #[snafu(display("Invalid protobuf message, err: {}", err_msg))]
     InvalidProtoMsg { err_msg: String, location: Location },
 
+    #[snafu(display("Concurrent modify regions placement: {err_msg}"))]
+    ConcurrentModifyRegionsPlacement { err_msg: String, location: Location },
+
     #[snafu(display("Invalid table metadata, err: {}", err_msg))]
     InvalidTableMetadata { err_msg: String, location: Location },
 
@@ -85,7 +88,10 @@ impl ErrorExt for Error {
             | InvalidProtoMsg { .. }
             | InvalidTableMetadata { .. } => StatusCode::Unexpected,
 
-            SendMessage { .. } | GetKvCache { .. } | CacheNotGet { .. } => StatusCode::Internal,
+            SendMessage { .. }
+            | GetKvCache { .. }
+            | CacheNotGet { .. }
+            | ConcurrentModifyRegionsPlacement { .. } => StatusCode::Internal,
 
             EncodeJson { .. } | DecodeJson { .. } | PayloadNotExist { .. } => {
                 StatusCode::Unexpected

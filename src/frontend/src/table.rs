@@ -296,7 +296,7 @@ impl DistTable {
         new_table_name: &str,
     ) -> Result<()> {
         let old_key = TableRouteKey {
-            table_id: table_id.into(),
+            table_id,
             catalog_name,
             schema_name,
             table_name: old_table_name,
@@ -304,7 +304,7 @@ impl DistTable {
         .to_string();
 
         let new_key = TableRouteKey {
-            table_id: table_id.into(),
+            table_id,
             catalog_name,
             schema_name,
             table_name: new_table_name,

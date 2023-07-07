@@ -181,7 +181,7 @@ async fn handle_create(
     let id = table_id_sequence.next().await?;
     table_info.ident.table_id = id as u32;
 
-    let table_route_key = TableRouteKey::with_table_name(id, &table_name)
+    let table_route_key = TableRouteKey::with_table_name(id as _, &table_name)
         .to_string()
         .into_bytes();
 
@@ -409,7 +409,7 @@ async fn fetch_tables(
 
 pub(crate) fn table_route_key(table_id: u64, t: &TableGlobalKey) -> TableRouteKey<'_> {
     TableRouteKey {
-        table_id,
+        table_id: table_id as _,
         catalog_name: &t.catalog_name,
         schema_name: &t.schema_name,
         table_name: &t.table_name,

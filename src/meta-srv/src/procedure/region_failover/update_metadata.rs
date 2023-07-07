@@ -329,7 +329,7 @@ mod tests {
                 .unwrap();
 
             let key = TableRouteKey {
-                table_id: failed_region.table_ident.table_id as u64,
+                table_id: failed_region.table_ident.table_id,
                 catalog_name: &failed_region.table_ident.catalog,
                 schema_name: &failed_region.table_ident.schema,
                 table_name: &failed_region.table_ident.table,
@@ -465,7 +465,7 @@ mod tests {
             let catalog_name = failed_region_1.table_ident.catalog.clone();
             let schema_name = failed_region_1.table_ident.schema.clone();
             let table_name = failed_region_1.table_ident.table.clone();
-            let table_id = failed_region_1.table_ident.table_id as u64;
+            let table_id = failed_region_1.table_ident.table_id;
 
             let _ = futures::future::join_all(vec![
                 tokio::spawn(async move {

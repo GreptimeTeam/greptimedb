@@ -15,20 +15,21 @@
 use std::fmt::Display;
 
 use api::v1::meta::TableName;
+use table::metadata::TableId;
 
 use crate::key::to_removed_key;
 
 pub const TABLE_ROUTE_PREFIX: &str = "__meta_table_route";
 
 pub struct TableRouteKey<'a> {
-    pub table_id: u64,
+    pub table_id: TableId,
     pub catalog_name: &'a str,
     pub schema_name: &'a str,
     pub table_name: &'a str,
 }
 
 impl<'a> TableRouteKey<'a> {
-    pub fn with_table_name(table_id: u64, t: &'a TableName) -> Self {
+    pub fn with_table_name(table_id: TableId, t: &'a TableName) -> Self {
         Self {
             table_id,
             catalog_name: &t.catalog_name,

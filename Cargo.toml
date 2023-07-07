@@ -75,10 +75,12 @@ futures = "0.3"
 futures-util = "0.3"
 greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "917ead6274b4dccbaf33c59a7360646ba2f285a9" }
 itertools = "0.10"
+lazy_static = "1.4"
 parquet = "40.0"
 paste = "1.0"
 prost = "0.11"
 rand = "0.8"
+regex = "1.8"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 snafu = { version = "0.7", features = ["backtraces"] }

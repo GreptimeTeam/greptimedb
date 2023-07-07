@@ -30,6 +30,7 @@ use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
 use table::engine::TableReference;
+use table::metadata::TableId;
 
 use crate::ddl::DdlContext;
 use crate::error::{self, Result};
@@ -107,7 +108,7 @@ impl CreateTableProcedure {
     async fn register_metadata(&self) -> Result<()> {
         let table_name = self.table_name();
 
-        let table_id = self.creator.data.table_route.table.id;
+        let table_id = self.creator.data.table_route.table.id as TableId;
 
         let table_route_key = TableRouteKey::with_table_name(table_id, &table_name.clone().into())
             .to_string()
