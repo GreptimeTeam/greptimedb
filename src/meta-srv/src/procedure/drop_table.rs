@@ -124,7 +124,7 @@ impl DropTableProcedure {
             schema: table_name.schema_name,
             table: table_name.table_name,
             table_id: self.data.task.table_id,
-            //TODO(weny): retrieves the engine from the upper.
+            // TODO(weny): retrieves the engine from the upper.
             engine: MITO_ENGINE.to_string(),
         };
         let instruction = Instruction::InvalidateTableCache(table_ident);
