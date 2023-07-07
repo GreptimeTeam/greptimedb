@@ -131,7 +131,7 @@ region3-->RegionManifest3
 This RFC proposes to refactor table engines into region engines as a first step to make the `Datanode` acts like a `RegionServer`.
 
 
-# Detials
+# Details
 ## Overview
 
 We plan to refactor the `TableEngine` trait into `RegionEngine` gradually. This RFC focuses on the `mito` engine as it is the default table engine and the most complicated engine.
