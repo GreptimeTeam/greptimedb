@@ -142,7 +142,7 @@ mod tests {
         let layer = Arc::new(crate::test_util::access_layer_util::MockAccessLayer {});
         FileHandle::new(
             FileMeta {
-                region_id: 0,
+                region_id: 0.into(),
                 file_id,
                 time_range: Some((
                     Timestamp::new_millisecond(start_ts_millis),

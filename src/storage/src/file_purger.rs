@@ -155,7 +155,7 @@ mod tests {
         (
             FileHandle::new(
                 FileMeta {
-                    region_id: 0,
+                    region_id: 0.into(),
                     file_id: sst_file_id,
                     time_range: None,
                     level: 0,
@@ -185,7 +185,7 @@ mod tests {
         let (_file, path, layer) =
             create_sst_file(object_store.clone(), sst_file_id, noop_file_purger).await;
         let request = FilePurgeRequest {
-            region_id: 0,
+            region_id: 0.into(),
             file_id: sst_file_id,
             sst_layer: layer,
         };

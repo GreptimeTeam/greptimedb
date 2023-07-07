@@ -20,7 +20,7 @@ use async_trait::async_trait;
 use catalog::helper::TableGlobalKey;
 use common_meta::ident::TableIdent;
 use common_meta::ClusterId;
-use store_api::storage::RegionNumber;
+use store_api::storage::{RegionId, RegionNumber};
 
 use crate::error::Result;
 use crate::handler::{HeartbeatAccumulator, HeartbeatHandler};
@@ -102,7 +102,7 @@ impl HeartbeatHandler for RegionLeaseHandler {
             datanode_regions
                 .entry(key)
                 .or_insert_with(Vec::new)
-                .push(table::engine::region_number(x.id));
+                .push(RegionId::from(x.id).region_number());
         });
 
         // TODO(LFC): Retrieve table global values from some cache here.

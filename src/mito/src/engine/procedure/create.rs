@@ -25,9 +25,9 @@ use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
 use store_api::storage::{
     ColumnId, CompactionStrategy, CreateOptions, EngineContext, OpenOptions,
-    RegionDescriptorBuilder, RegionNumber, StorageEngine,
+    RegionDescriptorBuilder, RegionId, RegionNumber, StorageEngine,
 };
-use table::engine::{region_id, table_dir};
+use table::engine::table_dir;
 use table::metadata::{TableInfoBuilder, TableMetaBuilder, TableType};
 use table::requests::CreateTableRequest;
 use table::TableRef;
@@ -283,7 +283,7 @@ impl<S: StorageEngine> TableCreator<S> {
             }
 
             // We need to create that region.
-            let region_id = region_id(self.data.request.id, *number);
+            let region_id = RegionId::new(self.data.request.id, *number);
             let region_desc = RegionDescriptorBuilder::default()
                 .id(region_id)
                 .name(region_name.clone())

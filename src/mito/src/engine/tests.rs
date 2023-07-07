@@ -30,7 +30,6 @@ use storage::region::RegionImpl;
 use storage::EngineImpl;
 use store_api::manifest::Manifest;
 use store_api::storage::{ReadContext, ScanRequest};
-use table::engine::region_id;
 use table::metadata::TableType;
 use table::requests::{
     AddColumnRequest, AlterKind, DeleteRequest, FlushTableRequest, TableOptions,
@@ -523,16 +522,6 @@ async fn test_open_table() {
     let right = reopened.table_info();
     assert_eq!(left, right);
     assert_eq!(reopened.manifest().last_version(), 1);
-}
-
-#[test]
-fn test_region_id() {
-    assert_eq!(1, region_id(0, 1));
-    assert_eq!(4294967296, region_id(1, 0));
-    assert_eq!(4294967297, region_id(1, 1));
-    assert_eq!(4294967396, region_id(1, 100));
-    assert_eq!(8589934602, region_id(2, 10));
-    assert_eq!(18446744069414584330, region_id(u32::MAX, 10));
 }
 
 fn new_add_columns_req(

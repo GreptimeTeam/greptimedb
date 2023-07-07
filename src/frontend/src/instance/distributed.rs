@@ -58,7 +58,7 @@ use sql::statements::create::{PartitionEntry, Partitions};
 use sql::statements::statement::Statement;
 use sql::statements::{self, sql_value_to_value};
 use store_api::storage::RegionNumber;
-use table::engine::{self, TableReference};
+use table::engine::TableReference;
 use table::metadata::{RawTableInfo, RawTableMeta, TableIdent, TableType};
 use table::requests::TableOptions;
 use table::table::AlterContext;
@@ -337,7 +337,7 @@ impl DistInstance {
         for table_route in &route_response.table_routes {
             let should_send_rpc = table_route.region_routes.iter().any(|route| {
                 if let Some(n) = region_number {
-                    n == engine::region_number(route.region.id)
+                    n == route.region.id.region_number()
                 } else {
                     true
                 }
@@ -696,7 +696,7 @@ fn create_partitions_stmt(partitions: Vec<PartitionInfo>) -> Result<Option<Parti
         .into_iter()
         .map(|info| {
             // Generated the partition name from id
-            let name = &format!("r{}", info.id);
+            let name = &format!("r{}", info.id.as_u64());
             let bounds = info.partition.partition_bounds();
             let value_list = bounds
                 .iter()

@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use common_base::paths::DATA_DIR;
 use common_procedure::BoxedProcedure;
-use store_api::storage::{RegionId, RegionNumber};
+use store_api::storage::RegionNumber;
 
 use crate::error::{self, Result};
 use crate::metadata::TableId;
@@ -172,24 +172,6 @@ pub fn region_name(table_id: TableId, region_number: RegionNumber) -> String {
     format!("{table_id}_{region_number:010}")
 }
 
-/// Construct a [RegionId] from specific `table_id` and `region_number`.
-#[inline]
-pub fn region_id(table_id: TableId, region_number: RegionNumber) -> RegionId {
-    (u64::from(table_id) << 32) | u64::from(region_number)
-}
-
-/// Retrieve the table id from specific `region_id`.
-#[inline]
-pub fn table_id(region_id: RegionId) -> TableId {
-    (region_id >> 32) as TableId
-}
-
-/// Retrieve the region_number from specific `region_id`.
-#[inline]
-pub fn region_number(region_id: RegionId) -> RegionNumber {
-    region_id as RegionNumber
-}
-
 #[inline]
 pub fn table_dir(catalog_name: &str, schema_name: &str, table_id: TableId) -> String {
     format!("{DATA_DIR}{catalog_name}/{schema_name}/{table_id}/")
@@ -208,12 +190,5 @@ mod tests {
         };
 
         assert_eq!("greptime.public.test", table_ref.to_string());
-    }
-
-    #[test]
-    fn test_table_id() {
-        let region_id = region_id(u32::MAX, 1);
-        let table_id = table_id(region_id);
-        assert_eq!(u32::MAX, table_id);
     }
 }

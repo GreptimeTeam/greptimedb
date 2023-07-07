@@ -711,7 +711,7 @@ mod tests {
 
     fn create_file_meta(file_id: FileId, level: Level) -> FileMeta {
         FileMeta {
-            region_id: 0,
+            region_id: 0.into(),
             file_id,
             time_range: None,
             level,

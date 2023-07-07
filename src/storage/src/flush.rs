@@ -355,13 +355,13 @@ mod tests {
         assert_eq!(0, strategy.memory_active.load(Ordering::Relaxed));
 
         let status = RegionStatus {
-            region_id: 1,
+            region_id: 1.into(),
             bytes_mutable: 400,
             write_buffer_size: 300,
         };
         assert_eq!(Some(FlushType::Region), strategy.should_flush(status));
         let status = RegionStatus {
-            region_id: 1,
+            region_id: 1.into(),
             bytes_mutable: 100,
             write_buffer_size: 300,
         };
@@ -373,7 +373,7 @@ mod tests {
         let strategy = SizeBasedStrategy::new(Some(1000));
         strategy.reserve_mem(500);
         let status = RegionStatus {
-            region_id: 1,
+            region_id: 1.into(),
             bytes_mutable: 300,
             write_buffer_size: 500,
         };
@@ -382,7 +382,7 @@ mod tests {
 
         // Flush region.
         let status = RegionStatus {
-            region_id: 1,
+            region_id: 1.into(),
             bytes_mutable: 400,
             write_buffer_size: 300,
         };
@@ -390,7 +390,7 @@ mod tests {
 
         // More than mutable limitation, Flush global.
         let status = RegionStatus {
-            region_id: 1,
+            region_id: 1.into(),
             bytes_mutable: 100,
             write_buffer_size: 300,
         };
@@ -415,7 +415,7 @@ mod tests {
         strategy.schedule_free_mem(200);
         // More than global limit.
         let status = RegionStatus {
-            region_id: 1,
+            region_id: 1.into(),
             bytes_mutable: 100,
             write_buffer_size: 300,
         };
@@ -424,7 +424,7 @@ mod tests {
         // More than global limit, but mutable not enough (< 500).
         strategy.schedule_free_mem(450);
         let status = RegionStatus {
-            region_id: 1,
+            region_id: 1.into(),
             bytes_mutable: 100,
             write_buffer_size: 300,
         };

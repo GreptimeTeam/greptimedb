@@ -56,7 +56,7 @@ impl<S: LogStore> Clone for Wal<S> {
 
 impl<S: LogStore> Wal<S> {
     pub fn new(region_id: RegionId, store: Arc<S>) -> Self {
-        let namespace = store.namespace(region_id);
+        let namespace = store.namespace(region_id.into());
         Self {
             region_id,
             namespace,
@@ -268,7 +268,7 @@ mod tests {
         let log_file_dir_path = log_file_dir.path().to_str().unwrap();
         let log_store =
             test_util::log_store_util::create_tmp_local_file_log_store(log_file_dir_path).await;
-        let wal = Wal::new(0, Arc::new(log_store));
+        let wal = Wal::new(RegionId::from(0), Arc::new(log_store));
 
         let res = wal.write(0, b"test1").await.unwrap();
 
@@ -284,7 +284,7 @@ mod tests {
         let log_file_dir_path = log_file_dir.path().to_str().unwrap();
         let log_store =
             test_util::log_store_util::create_tmp_local_file_log_store(log_file_dir_path).await;
-        let wal = Wal::new(0, Arc::new(log_store));
+        let wal = Wal::new(RegionId::from(0), Arc::new(log_store));
         let header = WalHeader::with_last_manifest_version(111);
         let seq_num = 3;
         let _ = wal.write_to_wal(seq_num, header, None).await?;

@@ -778,7 +778,7 @@ impl Default for RegionMetadataBuilder {
 impl RegionMetadataBuilder {
     fn new() -> RegionMetadataBuilder {
         RegionMetadataBuilder {
-            id: 0,
+            id: 0.into(),
             name: String::new(),
             columns_meta_builder: ColumnsMetadataBuilder::default(),
             cfs_meta_builder: ColumnFamiliesMetadataBuilder::default(),

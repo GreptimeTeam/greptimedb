@@ -148,7 +148,7 @@ impl TableRoute {
     pub fn new(table: Table, region_routes: Vec<RegionRoute>) -> Self {
         let region_leaders = region_routes
             .iter()
-            .map(|x| (x.region.id as RegionNumber, x.leader_peer.clone()))
+            .map(|x| (x.region.id.region_number(), x.leader_peer.clone()))
             .collect::<HashMap<_, _>>();
 
         Self {
@@ -265,13 +265,13 @@ impl TableRoute {
             .collect()
     }
 
-    pub fn find_leader_regions(&self, datanode: &Peer) -> Vec<u32> {
+    pub fn find_leader_regions(&self, datanode: &Peer) -> Vec<RegionNumber> {
         self.region_routes
             .iter()
             .filter_map(|x| {
                 if let Some(peer) = &x.leader_peer {
                     if peer == datanode {
-                        return Some(x.region.id as u32);
+                        return Some(x.region.id.region_number());
                     }
                 }
                 None
@@ -340,7 +340,7 @@ pub struct Region {
 impl From<PbRegion> for Region {
     fn from(r: PbRegion) -> Self {
         Self {
-            id: r.id,
+            id: r.id.into(),
             name: r.name,
             partition: r.partition.map(Into::into),
             attrs: r.attrs,
@@ -351,7 +351,7 @@ impl From<PbRegion> for Region {
 impl From<Region> for PbRegion {
     fn from(region: Region) -> Self {
         Self {
-            id: region.id,
+            id: region.id.into(),
             name: region.name,
             partition: region.partition.map(Into::into),
             attrs: region.attrs,
@@ -668,7 +668,7 @@ mod tests {
             region_routes: vec![
                 RegionRoute {
                     region: Region {
-                        id: 1,
+                        id: 1.into(),
                         name: "r1".to_string(),
                         partition: None,
                         attrs: HashMap::new(),
@@ -678,7 +678,7 @@ mod tests {
                 },
                 RegionRoute {
                     region: Region {
-                        id: 2,
+                        id: 2.into(),
                         name: "r2".to_string(),
                         partition: None,
                         attrs: HashMap::new(),
