@@ -20,7 +20,7 @@ use snafu::ResultExt;
 
 use crate::error::{self, Result};
 
-const ENDPOINT_URL: &str = "endpoint_url";
+const ENDPOINT: &str = "endpoint";
 const ACCESS_KEY_ID: &str = "access_key_id";
 const SECRET_ACCESS_KEY: &str = "secret_access_key";
 const SESSION_TOKEN: &str = "session_token";
@@ -36,7 +36,7 @@ pub fn build_s3_backend(
 
     let _ = builder.root(path).bucket(host);
 
-    if let Some(endpoint) = connection.get(ENDPOINT_URL) {
+    if let Some(endpoint) = connection.get(ENDPOINT) {
         let _ = builder.endpoint(endpoint);
     }
 
