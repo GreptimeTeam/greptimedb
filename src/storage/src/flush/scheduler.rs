@@ -337,6 +337,7 @@ async fn execute_flush_region<S: LogStore>(
             compaction_scheduler,
             compaction_request,
             max_files_in_l0,
+            false,
         );
 
         // Complete the request.

@@ -28,7 +28,7 @@ use store_api::logstore::LogStore;
 use crate::compaction::picker::get_expired_ssts;
 use crate::compaction::task::CompactionOutput;
 use crate::compaction::{infer_time_bucket, CompactionRequestImpl, CompactionTaskImpl, Picker};
-use crate::sst::{FileHandle, LevelMeta};
+use crate::sst::{FileHandle, FileId, LevelMeta};
 
 /// `TwcsPicker` picks files of which the max timestamp are in the same time window as compaction
 /// candidates.
@@ -76,6 +76,7 @@ impl<S> TwcsPicker<S> {
             if let Some(active_window) = active_window && *window == active_window {
                 if files.len() > self.max_active_window_files {
                     output.push(CompactionOutput {
+                        output_file_id: FileId::random(),
                         output_level: 1, // we only have two levels and always compact to l1 
                         time_window_bound: *window,
                         time_window_sec: window_size,
@@ -85,12 +86,13 @@ impl<S> TwcsPicker<S> {
                         strict_window: false,
                     });
                 } else {
-                    debug!("Active window not present or no enough files in active window {:?}", active_window);
+                    debug!("Active window not present or no enough files in active window {:?}, window: {}", active_window, *window);
                 }
             } else {
                 // not active writing window
                 if files.len() > self.max_inactive_window_files {
                     output.push(CompactionOutput {
+                        output_file_id: FileId::random(),
                         output_level: 1,
                         time_window_bound: *window,
                         time_window_sec: window_size,
@@ -98,7 +100,7 @@ impl<S> TwcsPicker<S> {
                         strict_window: false,
                     });
                 } else {
-                    info!("No enough files, current: {}, max_inactive_window_files: {}", files.len(), self.max_inactive_window_files)
+                    debug!("No enough files, current: {}, max_inactive_window_files: {}", files.len(), self.max_inactive_window_files)
                 }
             }
         }
@@ -144,10 +146,7 @@ impl<S: LogStore> Picker for TwcsPicker<S> {
         );
 
         let outputs = self.build_output(&windows, active_window, time_window_size);
-        info!(
-            "TWCS windows: {:?}, output: {:?}, active window: {:?}",
-            windows, outputs, active_window
-        );
+
         let task = CompactionTaskImpl {
             schema: req.schema(),
             sst_layer: req.sst_layer.clone(),

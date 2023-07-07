@@ -17,10 +17,13 @@ use std::fmt::{Debug, Formatter};
 
 use common_base::readable_size::ReadableSize;
 use common_telemetry::{debug, error, info, timer};
+use itertools::Itertools;
+use snafu::ResultExt;
 use store_api::logstore::LogStore;
 use store_api::storage::RegionId;
 
 use crate::compaction::writer::build_sst_reader;
+use crate::error;
 use crate::error::Result;
 use crate::manifest::action::RegionEdit;
 use crate::manifest::region::RegionManifest;
@@ -77,6 +80,16 @@ impl<S: LogStore> CompactionTaskImpl<S> {
             let sst_write_buffer_size = self.sst_write_buffer_size;
             compacted_inputs.extend(output.inputs.iter().map(FileHandle::meta));
 
+            info!(
+                "Compaction output [{}]-> {}",
+                output
+                    .inputs
+                    .iter()
+                    .map(|f| f.file_id().to_string())
+                    .join(","),
+                output.output_file_id
+            );
+
             // TODO(hl): Maybe spawn to runtime to exploit in-job parallelism.
             futs.push(async move {
                 output
@@ -90,10 +103,14 @@ impl<S: LogStore> CompactionTaskImpl<S> {
             let mut task_chunk = Vec::with_capacity(MAX_PARALLEL_COMPACTION);
             for _ in 0..MAX_PARALLEL_COMPACTION {
                 if let Some(task) = futs.pop() {
-                    task_chunk.push(task);
+                    task_chunk.push(common_runtime::spawn_bg(task));
                 }
             }
-            let metas = futures::future::try_join_all(task_chunk).await?;
+            let metas = futures::future::try_join_all(task_chunk)
+                .await
+                .context(error::JoinSnafu)?
+                .into_iter()
+                .collect::<Result<Vec<_>>>()?;
             outputs.extend(metas.into_iter().flatten());
         }
 
@@ -194,6 +211,7 @@ impl<S: LogStore> CompactionTask for CompactionTaskImpl<S> {
 /// and a many-to-one compaction from level n+1 to level n+1.
 #[derive(Debug)]
 pub struct CompactionOutput {
+    pub output_file_id: FileId,
     /// Compaction output file level.
     pub output_level: Level,
     /// The left bound of time window.
@@ -232,13 +250,12 @@ impl CompactionOutput {
         )
         .await?;
 
-        let output_file_id = FileId::random();
         let opts = WriteOptions {
             sst_write_buffer_size,
         };
-
-        Ok(sst_layer
-            .write_sst(output_file_id, Source::Reader(reader), &opts)
+        let _timer = timer!(crate::metrics::MERGE_ELAPSED);
+        let meta = sst_layer
+            .write_sst(self.output_file_id, Source::Reader(reader), &opts)
             .await?
             .map(
                 |SstInfo {
@@ -247,12 +264,13 @@ impl CompactionOutput {
                      ..
                  }| FileMeta {
                     region_id,
-                    file_id: output_file_id,
+                    file_id: self.output_file_id,
                     time_range,
                     level: self.output_level,
                     file_size,
                 },
-            ))
+            );
+        Ok(meta)
     }
 }
 

@@ -32,6 +32,8 @@ pub const REGION_COUNT: &str = "storage.region_count";
 pub const LOG_STORE_WRITE_ELAPSED: &str = "storage.logstore.write.elapsed";
 /// Elapsed time of a compact job.
 pub const COMPACT_ELAPSED: &str = "storage.compact.elapsed";
+/// Elapsed time for merging SST files.
+pub const MERGE_ELAPSED: &str = "storage.compaction.merge.elapsed";
 /// Global write buffer size in bytes.
 pub const WRITE_BUFFER_BYTES: &str = "storage.write_buffer_bytes";
 /// Elapsed time of inserting memtable.
