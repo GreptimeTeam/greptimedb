@@ -38,9 +38,9 @@ use super::utils::{build_table_metadata_key, handle_retry_error};
 use crate::ddl::DdlContext;
 use crate::error;
 use crate::error::Result;
-use crate::procedure::utils::handle_request_datanode_error;
+use crate::procedure::utils::{build_table_route_value, handle_request_datanode_error};
 use crate::service::mailbox::BroadcastChannel;
-use crate::service::store::txn::{Txn, TxnOp};
+use crate::service::store::txn::{Compare, CompareOp, Txn, TxnOp};
 use crate::table_routes::fetch_table;
 pub struct DropTableProcedure {
     context: DdlContext,
@@ -87,11 +87,20 @@ impl DropTableProcedure {
         let table_id = self.data.task.table_id;
 
         let (table_global_key, table_route_key) = build_table_metadata_key(table_ref, table_id);
+        let table_route_value = build_table_route_value(self.data.table_route.clone())?;
 
-        let txn = Txn::new().and_then(vec![
-            TxnOp::Delete(table_route_key.to_string().into_bytes()),
-            TxnOp::Delete(table_global_key.to_string().into_bytes()),
-        ]);
+        // To protect the potential resource leak issues.
+        // We must compare the table route value, before deleting.
+        let txn = Txn::new()
+            .when(vec![Compare::with_value(
+                table_route_key.to_string().into_bytes(),
+                CompareOp::Equal,
+                table_route_value.into(),
+            )])
+            .and_then(vec![
+                TxnOp::Delete(table_route_key.to_string().into_bytes()),
+                TxnOp::Delete(table_global_key.to_string().into_bytes()),
+            ]);
         let resp = self.context.kv_store.txn(txn).await?;
 
         ensure!(
