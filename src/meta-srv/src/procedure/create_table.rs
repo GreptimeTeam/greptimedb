@@ -38,15 +38,11 @@ use crate::service::router::create_table_global_value;
 use crate::service::store::txn::{Compare, CompareOp, Txn, TxnOp};
 use crate::table_routes::get_table_global_value;
 
-// TODO(weny): removes in following PRs.
-#[allow(unused)]
 pub struct CreateTableProcedure {
     context: DdlContext,
     creator: TableCreator,
 }
 
-// TODO(weny): removes in following PRs.
-#[allow(dead_code)]
 impl CreateTableProcedure {
     pub(crate) const TYPE_NAME: &'static str = "metasrv-procedure::CreateTable";
 
