@@ -16,6 +16,8 @@ use api::v1::meta::TableRouteValue;
 use async_trait::async_trait;
 use catalog::helper::TableGlobalKey;
 use client::Database;
+use common_error::ext::ErrorExt;
+use common_error::status_code::StatusCode;
 use common_meta::key::TableRouteKey;
 use common_meta::rpc::ddl::CreateTableTask;
 use common_meta::rpc::router::TableRoute;
@@ -209,10 +211,12 @@ impl CreateTableProcedure {
             create_expr_for_region.region_numbers = regions;
 
             joins.push(common_runtime::spawn_bg(async move {
-                client
-                    .create(create_expr_for_region)
-                    .await
-                    .map_err(handle_request_datanode_error(datanode))
+                if let Err(err) = client.create(create_expr_for_region).await {
+                    if err.status_code() != StatusCode::TableAlreadyExists {
+                        return Err(handle_request_datanode_error(datanode)(err));
+                    }
+                }
+                Ok(())
             }));
         }
 
