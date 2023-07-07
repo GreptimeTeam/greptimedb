@@ -99,6 +99,14 @@ SHOW TABLES FROM public;
 | scripts |
 +---------+
 
+SHOW TABLES FROM public WHERE Tables='numbers';
+
++---------+
+| Tables  |
++---------+
+| numbers |
++---------+
+
 DROP SCHEMA test_public_schema;
 
 Error: 1001(Unsupported), SQL statement is not supported: DROP SCHEMA test_public_schema;, keyword: SCHEMA

@@ -32,6 +32,8 @@ SHOW TABLES FROM test_public_schema;
 
 SHOW TABLES FROM public;
 
+SHOW TABLES FROM public WHERE Tables='numbers';
+
 DROP SCHEMA test_public_schema;
 
 SELECT * FROM test_public_schema.hello;

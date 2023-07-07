@@ -60,6 +60,12 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to create Schema, source: {}", source))]
+    CreateSchema {
+        source: datatypes::error::Error,
+        location: Location,
+    },
+
     #[snafu(display("Failure during query execution, source: {}", source))]
     QueryExecution {
         source: BoxedError,
@@ -258,6 +264,7 @@ impl ErrorExt for Error {
             ConvertSqlType { source, .. } | ConvertSqlValue { source, .. } => source.status_code(),
             RemoteRequest { source, .. } => source.status_code(),
             UnexpectedOutputKind { .. } => StatusCode::Unexpected,
+            CreateSchema { source, .. } => source.status_code(),
         }
     }
 
