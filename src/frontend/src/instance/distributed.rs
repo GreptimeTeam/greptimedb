@@ -41,7 +41,7 @@ use common_meta::rpc::router::{
 use common_meta::rpc::store::CompareAndPutRequest;
 use common_meta::table_name::TableName;
 use common_query::Output;
-use common_telemetry::debug;
+use common_telemetry::{debug, info};
 use datanode::instance::sql::table_idents_to_full_name;
 use datanode::sql::SqlHandler;
 use datatypes::prelude::ConcreteDataType;
@@ -119,6 +119,7 @@ impl DistInstance {
             .await?;
 
         let table_id = resp.table_id;
+        info!("Successfully created distributed table '{table_name}' with table id {table_id}");
         table_info.ident.table_id = table_id;
         let table_info = Arc::new(table_info.try_into().context(error::CreateTableInfoSnafu)?);
 

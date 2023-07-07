@@ -102,6 +102,9 @@ impl CreateTableProcedure {
 
     /// registers the `TableRouteValue`,`TableGlobalValue`
     async fn register_metadata(&self) -> Result<()> {
+        let _timer = common_telemetry::timer!(
+            crate::metrics::METRIC_META_CREATE_TABLE_PROCEDURE_CREATE_META
+        );
         let table_name = self.table_name();
 
         let table_id = self.creator.data.table_route.table.id as TableId;
@@ -192,6 +195,9 @@ impl CreateTableProcedure {
     }
 
     async fn on_datanode_create_table(&mut self) -> Result<Status> {
+        let _timer = common_telemetry::timer!(
+            crate::metrics::METRIC_META_CREATE_TABLE_PROCEDURE_CREATE_TABLE
+        );
         let table_route = &self.creator.data.table_route;
         let table_name = self.table_name();
         let clients = self.context.datanode_clients.clone();
