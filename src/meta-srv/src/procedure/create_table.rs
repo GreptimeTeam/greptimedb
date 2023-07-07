@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use api::v1::meta::TableRouteValue;
-use api::v1::TableId;
 use async_trait::async_trait;
 use catalog::helper::TableGlobalKey;
 use client::Database;
@@ -211,7 +210,7 @@ impl CreateTableProcedure {
             let regions = table_route.find_leader_regions(&datanode);
             let mut create_expr_for_region = self.creator.data.task.create_table.clone();
             create_expr_for_region.region_numbers = regions;
-            create_expr_for_region.table_id = Some(TableId {
+            create_expr_for_region.table_id = Some(api::v1::TableId {
                 id: table_route.table.id as u32,
             });
 
