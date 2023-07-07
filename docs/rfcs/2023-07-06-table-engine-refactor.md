@@ -15,56 +15,7 @@ Refactor table engines to address several historical tech debts.
 Both `Frontend` and `Datanode` have to deal with multiple regions in a table. This results in code duplication and additional burden to the `Datanode`.
 
 Before:
-```mermaid
-graph TB
 
-subgraph Frontend["Frontend"]
-    direction LR
-    subgraph MyTable
-        A("region 0, 2 -> Datanode0")
-        B("region 1, 3 -> Datanode1")
-    end
-end
-
-MyTable --> MetaSrv
-MetaSrv --> ETCD
-
-MyTable-->RegionEngine
-MyTable-->RegionEngine1
-
-subgraph Datanode0
-    RegionEngine("region engine")
-    region0
-    region2
-    RegionEngine-->region0
-    RegionEngine-->region2
-end
-
-
-subgraph Datanode1
-    RegionEngine1("region engine")
-    region1
-    region3
-    RegionEngine1-->region1
-    RegionEngine1-->region3
-end
-
-RegionManifest0("region manifest 0")
-RegionManifest1("region manifest 1")
-RegionManifest2("region manifest 2")
-RegionManifest3("region manifest 3")
-region0-->RegionManifest0
-region1-->RegionManifest1
-region2-->RegionManifest2
-region3-->RegionManifest3
-
-```
-
-`Datanodes` can update the same manifest file for a table as regions are assigned to different nodes in the cluster. We also have to run procedures on `Datanode` to ensure the table manifest is consistent with region manifests. "Table" in a `Datanode` is a subset of the table's regions. The `Datanode` is much closer to `RegionServer` in `HBase` which only deals with regions.
-
-In cluster mode, we store table metadata in etcd and table manifest. The table manifest becomes redundant. We can remove the table manifest if we refactor the table engines to region engines that only care about regions. What's more, we don't need to run those procedures on `Datanode`.
-
-After:
 
 ```mermaid
 graph TB
@@ -128,6 +79,54 @@ region2-->RegionManifest2
 region3-->RegionManifest3
 ```
 
+`Datanodes` can update the same manifest file for a table as regions are assigned to different nodes in the cluster. We also have to run procedures on `Datanode` to ensure the table manifest is consistent with region manifests. "Table" in a `Datanode` is a subset of the table's regions. The `Datanode` is much closer to `RegionServer` in `HBase` which only deals with regions.
+
+In cluster mode, we store table metadata in etcd and table manifest. The table manifest becomes redundant. We can remove the table manifest if we refactor the table engines to region engines that only care about regions. What's more, we don't need to run those procedures on `Datanode`.
+
+After:
+```mermaid
+graph TB
+
+subgraph Frontend["Frontend"]
+    direction LR
+    subgraph MyTable
+        A("region 0, 2 -> Datanode0")
+        B("region 1, 3 -> Datanode1")
+    end
+end
+
+MyTable --> MetaSrv
+MetaSrv --> ETCD
+
+MyTable-->RegionEngine
+MyTable-->RegionEngine1
+
+subgraph Datanode0
+    RegionEngine("region engine")
+    region0
+    region2
+    RegionEngine-->region0
+    RegionEngine-->region2
+end
+
+
+subgraph Datanode1
+    RegionEngine1("region engine")
+    region1
+    region3
+    RegionEngine1-->region1
+    RegionEngine1-->region3
+end
+
+RegionManifest0("region manifest 0")
+RegionManifest1("region manifest 1")
+RegionManifest2("region manifest 2")
+RegionManifest3("region manifest 3")
+region0-->RegionManifest0
+region1-->RegionManifest1
+region2-->RegionManifest2
+region3-->RegionManifest3
+```
 This RFC proposes to refactor table engines into region engines as a first step to make the `Datanode` acts like a `RegionServer`.
 
 
