@@ -30,7 +30,9 @@ RUN cargo build --release
 # TODO(zyy17): Maybe should use the more secure container image.
 FROM ubuntu:22.04 as base
 
-RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get -y install ca-certificates
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get \
+    -y install ca-certificates \
+    curl
 
 WORKDIR /greptime
 COPY --from=builder /greptimedb/target/release/greptime /greptime/bin/
