@@ -66,6 +66,8 @@ pub struct CompactionRequestImpl<S: LogStore> {
     pub sender: Option<Sender<Result<()>>>,
     pub picker: CompactionPickerRef<S>,
     pub sst_write_buffer_size: ReadableSize,
+    /// Whether to immediately reschedule another compaction when finished.
+    pub reschedule_on_finish: bool,
 }
 
 impl<S: LogStore> CompactionRequestImpl<S> {

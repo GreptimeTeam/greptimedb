@@ -838,6 +838,8 @@ impl WriterInner {
             sender: None,
             picker: compaction_picker,
             sst_write_buffer_size,
+            // manual compaction does not reschedule itself.
+            reschedule_on_finish: false,
         };
 
         let compaction_scheduler = compaction_scheduler.clone();

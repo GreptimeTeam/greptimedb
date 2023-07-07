@@ -149,6 +149,8 @@ impl<S: LogStore> From<&FlushRegionRequest<S>> for CompactionRequestImpl<S> {
             sender: None,
             picker: req.compaction_picker.clone(),
             sst_write_buffer_size: req.engine_config.sst_write_buffer_size,
+            // compaction triggered by flush always reschedules
+            reschedule_on_finish: true,
         }
     }
 }

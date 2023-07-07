@@ -152,6 +152,7 @@ impl<S: LogStore> Picker for LeveledTimeWindowPicker<S> {
                 expired_ssts,
                 sst_write_buffer_size: req.sst_write_buffer_size,
                 compaction_time_window,
+                reschedule_on_finish: req.reschedule_on_finish,
             }));
         }
 

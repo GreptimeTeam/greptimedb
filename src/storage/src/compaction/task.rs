@@ -52,6 +52,7 @@ pub struct CompactionTaskImpl<S: LogStore> {
     pub expired_ssts: Vec<FileHandle>,
     pub sst_write_buffer_size: ReadableSize,
     pub compaction_time_window: Option<i64>,
+    pub reschedule_on_finish: bool,
 }
 
 impl<S: LogStore> Debug for CompactionTaskImpl<S> {
@@ -139,35 +140,9 @@ impl<S: LogStore> CompactionTaskImpl<S> {
             version.metadata().name(),
             edit
         );
-        let result = self
-            .writer
+        self.writer
             .write_edit_and_apply(&self.wal, &self.shared_data, &self.manifest, edit, None)
-            .await;
-
-        if let Err(e) = self
-            .writer
-            .compact(WriterCompactRequest {
-                shared_data: self.shared_data.clone(),
-                sst_layer: self.sst_layer.clone(),
-                manifest: self.manifest.clone(),
-                wal: self.wal.clone(),
-                region_writer: self.writer.clone(),
-                compact_ctx: CompactContext {
-                    wait: false,
-                    max_files_in_l0: 8,
-                },
-            })
             .await
-        {
-            error!(e; "Failed to schedule a compaction after compaction, region id: {}", self.shared_data.id());
-        } else {
-            info!(
-                "Immediately schedule another compaction for region: {}",
-                self.shared_data.id()
-            );
-        }
-
-        result
     }
 
     /// Mark files are under compaction.
@@ -198,12 +173,43 @@ impl<S: LogStore> CompactionTask for CompactionTaskImpl<S> {
             "Compacting SST files, input: {:?}, output: {:?}, window: {:?}",
             input_ids, output_ids, self.compaction_time_window
         );
-        self.write_manifest_and_apply(output, compacted)
+
+        let no_output = output.is_empty();
+        let write_result = self
+            .write_manifest_and_apply(output, compacted)
             .await
             .map_err(|e| {
                 error!(e; "Failed to update region manifest: {}", self.shared_data.name());
                 e
-            })
+            });
+
+        if !no_output && self.reschedule_on_finish {
+            // only reschedule another compaction if current compaction has output and it's
+            // triggered by flush.
+            if let Err(e) = self
+                .writer
+                .compact(WriterCompactRequest {
+                    shared_data: self.shared_data.clone(),
+                    sst_layer: self.sst_layer.clone(),
+                    manifest: self.manifest.clone(),
+                    wal: self.wal.clone(),
+                    region_writer: self.writer.clone(),
+                    compact_ctx: CompactContext {
+                        wait: false,
+                        max_files_in_l0: 8,
+                    },
+                })
+                .await
+            {
+                error!(e; "Failed to schedule a compaction after compaction, region id: {}", self.shared_data.id());
+            } else {
+                info!(
+                    "Immediately schedule another compaction for region: {}",
+                    self.shared_data.id()
+                );
+            }
+        }
+        write_result
     }
 }
 

@@ -147,6 +147,9 @@ impl<S: LogStore> Picker for TwcsPicker<S> {
 
         let outputs = self.build_output(&windows, active_window, time_window_size);
 
+        if outputs.is_empty() && expired_ssts.is_empty() {
+            return Ok(None);
+        }
         let task = CompactionTaskImpl {
             schema: req.schema(),
             sst_layer: req.sst_layer.clone(),
@@ -158,6 +161,7 @@ impl<S: LogStore> Picker for TwcsPicker<S> {
             expired_ssts,
             sst_write_buffer_size: req.sst_write_buffer_size,
             compaction_time_window: Some(time_window_size),
+            reschedule_on_finish: req.reschedule_on_finish,
         };
         Ok(Some(task))
     }
