@@ -14,11 +14,16 @@ Refactor table engines to address several historical tech debts.
 # Motivation
 Both `Frontend` and `Datanode` have to deal with multiple regions in a table. This results in code duplication and additional burden to the `Datanode`.
 
+![before](refactor-engine-before.svg)
+
 `Datanodes` can update the same manifest file for a table as regions are assigned to different nodes in the cluster. We also have to run procedures on `Datanode` to ensure the table manifest is consistent with region manifests. "Table" in a `Datanode` is a subset of the table's regions. The `Datanode` is much closer to `RegionServer` in `HBase` which only deals with regions.
 
 In cluster mode, we store table metadata in etcd and table manifest. The table manifest becomes redundant. We can remove the table manifest if we refactor the table engines to region engines that only care about regions. What's more, we don't need to run those procedures on `Datanode`.
 
+![after](refactor-engine-after.svg)
+
 This RFC proposes to refactor table engines into region engines as a first step to make the `Datanode` acts like a `RegionServer`.
+
 
 # Detials
 ## Overview
