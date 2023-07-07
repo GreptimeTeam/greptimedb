@@ -483,7 +483,7 @@ jobs:
       - name: Login to alibaba cloud container registry
         uses: docker/login-action@v2
         with:
-          registry: registry.cn-hangzhou.aliyuncs.com
+          registry: greptime-registry.cn-hangzhou.cr.aliyuncs.com
           username: ${{ secrets.ALICLOUD_USERNAME }}
           password: ${{ secrets.ALICLOUD_PASSWORD }}
 
@@ -505,6 +505,6 @@ jobs:
       - name: Push image to alibaba cloud container registry # Use 'docker buildx imagetools create' to create a new image base on source image.
         run: |
           docker buildx imagetools create \
-            --tag registry.cn-hangzhou.aliyuncs.com/greptime/greptimedb:latest \
-            --tag registry.cn-hangzhou.aliyuncs.com/greptime/greptimedb:${{ env.IMAGE_TAG }} \
+            --tag greptime-registry.cn-hangzhou.cr.aliyuncs.com/greptime/greptimedb:latest \
+            --tag greptime-registry.cn-hangzhou.cr.aliyuncs.com/greptime/greptimedb:${{ env.IMAGE_TAG }} \
             greptime/greptimedb:${{ env.IMAGE_TAG }}
