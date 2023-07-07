@@ -158,6 +158,17 @@ impl MetaSrvBuilder {
             .unwrap_or_else(|| Arc::new(DefaultMetadataService::new(kv_store.clone())));
         let lock = lock.unwrap_or_else(|| Arc::new(MemLock::default()));
 
+        // TODO(weny): considers to modify the default config of procedure manager
+        let ddl_manager = Arc::new(DdlManager::new(
+            procedure_manager.clone(),
+            kv_store.clone(),
+            Arc::new(DatanodeClients::default()),
+            mailbox.clone(),
+            options.server_addr.clone(),
+        ));
+
+        let _ = ddl_manager.try_start();
+
         let handler_group = match handler_group {
             Some(handler_group) => handler_group,
             None => {
@@ -211,15 +222,6 @@ impl MetaSrvBuilder {
                 group
             }
         };
-
-        // TODO(weny): considers to modify the default config of procedure manager
-        let ddl_manager = Arc::new(DdlManager::new(
-            procedure_manager.clone(),
-            kv_store.clone(),
-            Arc::new(DatanodeClients::default()),
-        ));
-
-        let _ = ddl_manager.try_start();
 
         Ok(MetaSrv {
             started,

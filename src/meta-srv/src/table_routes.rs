@@ -18,7 +18,9 @@ use api::v1::meta::{MoveValueRequest, PutRequest, TableRouteValue};
 use catalog::helper::{TableGlobalKey, TableGlobalValue};
 use common_meta::key::TableRouteKey;
 use common_meta::rpc::store::{BatchGetRequest, BatchGetResponse};
+use common_telemetry::warn;
 use snafu::{OptionExt, ResultExt};
+use table::engine::TableReference;
 
 use crate::error::{
     ConvertProtoDataSnafu, DecodeTableRouteSnafu, InvalidCatalogValueSnafu, Result,
@@ -156,6 +158,61 @@ async fn move_value(
     let res = kv_store.move_value(move_req).await?;
 
     Ok(res.kv.map(|kv| (kv.key, kv.value)))
+}
+
+pub(crate) fn table_route_key(table_id: u32, t: &TableGlobalKey) -> TableRouteKey<'_> {
+    TableRouteKey {
+        table_id,
+        catalog_name: &t.catalog_name,
+        schema_name: &t.schema_name,
+        table_name: &t.table_name,
+    }
+}
+
+pub(crate) async fn fetch_table(
+    kv_store: &KvStoreRef,
+    table_ref: TableReference<'_>,
+) -> Result<Option<(TableGlobalValue, TableRouteValue)>> {
+    let tgk = TableGlobalKey {
+        catalog_name: table_ref.catalog.to_string(),
+        schema_name: table_ref.schema.to_string(),
+        table_name: table_ref.table.to_string(),
+    };
+
+    let tgv = get_table_global_value(kv_store, &tgk).await?;
+
+    if let Some(tgv) = tgv {
+        let trk = table_route_key(tgv.table_id(), &tgk);
+        let trv = get_table_route_value(kv_store, &trk).await?;
+
+        return Ok(Some((tgv, trv)));
+    }
+
+    Ok(None)
+}
+
+pub(crate) async fn fetch_tables(
+    kv_store: &KvStoreRef,
+    keys: impl Iterator<Item = TableGlobalKey>,
+) -> Result<Vec<(TableGlobalValue, TableRouteValue)>> {
+    let mut tables = vec![];
+    // Maybe we can optimize the for loop in the future, but in general,
+    // there won't be many keys, in fact, there is usually just one.
+    for tgk in keys {
+        let tgv = get_table_global_value(kv_store, &tgk).await?;
+        if tgv.is_none() {
+            warn!("Table global value is absent: {}", tgk);
+            continue;
+        }
+        let tgv = tgv.unwrap();
+
+        let trk = table_route_key(tgv.table_id(), &tgk);
+        let trv = get_table_route_value(kv_store, &trk).await?;
+
+        tables.push((tgv, trv));
+    }
+
+    Ok(tables)
 }
 
 #[cfg(test)]

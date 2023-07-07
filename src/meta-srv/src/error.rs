@@ -14,15 +14,21 @@
 
 use common_error::prelude::*;
 use common_meta::peer::Peer;
+use common_runtime::JoinError;
 use snafu::Location;
 use tokio::sync::mpsc::error::SendError;
-use tokio::sync::oneshot::error::TryRecvError;
 use tonic::codegen::http;
 use tonic::Code;
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
+    #[snafu(display("Failed to join a future: {}", source))]
+    Join {
+        location: Location,
+        source: JoinError,
+    },
+
     #[snafu(display("Failed to execute transaction: {}", msg))]
     Txn { location: Location, msg: String },
 
@@ -35,12 +41,6 @@ pub enum Error {
         location: Location,
         expected: u64,
         found: u64,
-    },
-
-    #[snafu(display("Failed to receive status, source: {}", source,))]
-    TryReceiveStatus {
-        location: Location,
-        source: TryRecvError,
     },
 
     #[snafu(display(
@@ -467,7 +467,7 @@ impl ErrorExt for Error {
             | Error::StartGrpc { .. }
             | Error::Combine { .. }
             | Error::NoEnoughAvailableDatanode { .. }
-            | Error::TryReceiveStatus { .. } => StatusCode::Internal,
+            | Error::Join { .. } => StatusCode::Internal,
             Error::EmptyKey { .. }
             | Error::MissingRequiredParameter { .. }
             | Error::MissingRequestHeader { .. }

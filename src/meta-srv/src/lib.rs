@@ -14,6 +14,7 @@
 
 #![feature(async_closure)]
 #![feature(btree_drain_filter)]
+#![feature(result_flattening)]
 
 pub mod bootstrap;
 pub mod cluster;

@@ -17,7 +17,8 @@ use api::v1::meta::{
     Table, TableRoute,
 };
 use api::v1::TableId;
-use common_meta::rpc::ddl::{CreateTableTask, DdlTask};
+use common_meta::key::TableRouteKey;
+use common_meta::rpc::ddl::{CreateTableTask, DdlTask, DropTableTask};
 use common_meta::rpc::router;
 use common_meta::table_name::TableName;
 use common_telemetry::{info, warn};
@@ -25,11 +26,13 @@ use snafu::{OptionExt, ResultExt};
 use table::metadata::RawTableInfo;
 use tonic::{Request, Response};
 
+use super::store::kv::KvStoreRef;
 use super::GrpcResult;
 use crate::ddl::DdlManagerRef;
 use crate::error::{self, Result};
 use crate::metasrv::{MetaSrv, SelectorContext, SelectorRef};
 use crate::sequence::SequenceRef;
+use crate::table_routes::get_table_route_value;
 
 #[async_trait::async_trait]
 impl ddl_task_server::DdlTask for MetaSrv {
@@ -63,6 +66,15 @@ impl ddl_task_server::DdlTask for MetaSrv {
                     ctx,
                     self.selector().clone(),
                     self.table_id_sequence().clone(),
+                    self.ddl_manager().clone(),
+                )
+                .await?
+            }
+            DdlTask::DropTable(drop_table_task) => {
+                handle_drop_table_task(
+                    header.cluster_id,
+                    drop_table_task,
+                    self.kv_store().clone(),
                     self.ddl_manager().clone(),
                 )
                 .await?
@@ -116,7 +128,7 @@ async fn handle_create_table_task(
         .submit_create_table_task(cluster_id, create_table_task, table_route)
         .await?;
 
-    info!("Table: {table_id} created via procedure_id {id:?}");
+    info!("Table: {table_id} is dropped via procedure_id {id:?}");
 
     Ok(SubmitDdlTaskResponse {
         key: id.to_string().into(),
@@ -184,4 +196,43 @@ async fn handle_create_table_route(
     };
 
     router::TableRoute::try_from_raw(&peers, table_route).context(error::TableRouteConversionSnafu)
+}
+
+async fn handle_drop_table_task(
+    cluster_id: u64,
+    drop_table_task: DropTableTask,
+    kv_store: KvStoreRef,
+    ddl_manager: DdlManagerRef,
+) -> Result<SubmitDdlTaskResponse> {
+    let table_id = drop_table_task.table_id;
+
+    let table_route_key = TableRouteKey {
+        table_id,
+        catalog_name: &drop_table_task.catalog,
+        schema_name: &drop_table_task.schema,
+        table_name: &drop_table_task.table,
+    };
+
+    let table_route_value = get_table_route_value(&kv_store, &table_route_key).await?;
+
+    let table_route = router::TableRoute::try_from_raw(
+        &table_route_value.peers,
+        table_route_value
+            .table_route
+            .context(error::UnexpectedSnafu {
+                violated: "expected table_route",
+            })?,
+    )
+    .context(error::TableRouteConversionSnafu)?;
+
+    let id = ddl_manager
+        .submit_drop_table_task(cluster_id, drop_table_task, table_route)
+        .await?;
+
+    info!("Table: {table_id} created via procedure_id {id:?}");
+
+    Ok(SubmitDdlTaskResponse {
+        key: id.to_string().into(),
+        ..Default::default()
+    })
 }

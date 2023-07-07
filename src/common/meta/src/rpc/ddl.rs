@@ -16,11 +16,11 @@ use std::result;
 
 use api::v1::meta::submit_ddl_task_request::Task;
 use api::v1::meta::{
-    CreateTableTask as PbCreateTableTask, Partition,
+    CreateTableTask as PbCreateTableTask, DropTableTask as PbDropTableTask, Partition,
     SubmitDdlTaskRequest as PbSubmitDdlTaskRequest,
     SubmitDdlTaskResponse as PbSubmitDdlTaskResponse,
 };
-use api::v1::CreateTableExpr;
+use api::v1::{CreateTableExpr, DropTableExpr};
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
@@ -33,6 +33,7 @@ use crate::table_name::TableName;
 #[derive(Debug)]
 pub enum DdlTask {
     CreateTable(CreateTableTask),
+    DropTable(DropTableTask),
 }
 
 impl DdlTask {
@@ -52,6 +53,7 @@ impl TryFrom<Task> for DdlTask {
             Task::CreateTableTask(create_table) => {
                 Ok(DdlTask::CreateTable(create_table.try_into()?))
             }
+            Task::DropTableTask(drop_table) => Ok(DdlTask::DropTable(drop_table.try_into()?)),
             _ => todo!(),
         }
     }
@@ -70,6 +72,15 @@ impl TryFrom<SubmitDdlTaskRequest> for PbSubmitDdlTaskRequest {
                 table_info: serde_json::to_vec(&task.table_info).context(error::SerdeJsonSnafu)?,
                 create_table: Some(task.create_table),
                 partitions: task.partitions,
+            }),
+
+            DdlTask::DropTable(task) => Task::DropTableTask(PbDropTableTask {
+                drop_table: Some(DropTableExpr {
+                    catalog_name: task.catalog,
+                    schema_name: task.schema,
+                    table_name: task.table,
+                    table_id: Some(api::v1::TableId { id: task.table_id }),
+                }),
             }),
         };
         Ok(Self {
@@ -94,6 +105,54 @@ impl TryFrom<PbSubmitDdlTaskResponse> for SubmitDdlTaskResponse {
         Ok(Self {
             key: resp.key,
             table_id: table_id.id,
+        })
+    }
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+pub struct DropTableTask {
+    pub catalog: String,
+    pub schema: String,
+    pub table: String,
+    pub table_id: TableId,
+}
+
+impl DropTableTask {
+    pub fn table_ref(&self) -> TableReference {
+        TableReference {
+            catalog: &self.catalog,
+            schema: &self.schema,
+            table: &self.table,
+        }
+    }
+
+    pub fn table_name(&self) -> TableName {
+        TableName {
+            catalog_name: self.catalog.to_string(),
+            schema_name: self.schema.to_string(),
+            table_name: self.table.to_string(),
+        }
+    }
+}
+
+impl TryFrom<PbDropTableTask> for DropTableTask {
+    type Error = error::Error;
+
+    fn try_from(pb: PbDropTableTask) -> Result<Self> {
+        let drop_table = pb.drop_table.context(error::InvalidProtoMsgSnafu {
+            err_msg: "expected drop table",
+        })?;
+
+        Ok(Self {
+            catalog: drop_table.catalog_name,
+            schema: drop_table.schema_name,
+            table: drop_table.table_name,
+            table_id: drop_table
+                .table_id
+                .context(error::InvalidProtoMsgSnafu {
+                    err_msg: "expected table_id",
+                })?
+                .id,
         })
     }
 }

@@ -34,11 +34,10 @@ use crate::metasrv::{Context, MetaSrv, SelectorContext, SelectorRef};
 use crate::metrics::METRIC_META_ROUTE_REQUEST;
 use crate::sequence::SequenceRef;
 use crate::service::store::ext::KvStoreExt;
-use crate::service::store::kv::KvStoreRef;
 use crate::service::GrpcResult;
 use crate::table_routes::{
-    get_table_global_value, get_table_route_value, remove_table_global_value,
-    remove_table_route_value,
+    fetch_tables, get_table_global_value, remove_table_global_value, remove_table_route_value,
+    table_route_key,
 };
 
 #[async_trait::async_trait]
@@ -337,7 +336,7 @@ async fn handle_delete(req: DeleteRequest, ctx: Context) -> Result<RouteResponse
 
     let _ = remove_table_global_value(&ctx.kv_store, &tgk).await?;
 
-    let trk = table_route_key(tgv.table_id() as u64, &tgk);
+    let trk = table_route_key(tgv.table_id(), &tgk);
     let (_, trv) = remove_table_route_value(&ctx.kv_store, &trk).await?;
     let (peers, table_routes) = fill_table_routes(vec![(tgv, trv)])?;
 
@@ -381,37 +380,4 @@ pub(crate) fn fill_table_routes(
     }
 
     Ok((peer_dict.into_peers(), table_routes))
-}
-
-async fn fetch_tables(
-    kv_store: &KvStoreRef,
-    keys: impl Iterator<Item = TableGlobalKey>,
-) -> Result<Vec<(TableGlobalValue, TableRouteValue)>> {
-    let mut tables = vec![];
-    // Maybe we can optimize the for loop in the future, but in general,
-    // there won't be many keys, in fact, there is usually just one.
-    for tgk in keys {
-        let tgv = get_table_global_value(kv_store, &tgk).await?;
-        if tgv.is_none() {
-            warn!("Table global value is absent: {}", tgk);
-            continue;
-        }
-        let tgv = tgv.unwrap();
-
-        let trk = table_route_key(tgv.table_id() as u64, &tgk);
-        let trv = get_table_route_value(kv_store, &trk).await?;
-
-        tables.push((tgv, trv));
-    }
-
-    Ok(tables)
-}
-
-pub(crate) fn table_route_key(table_id: u64, t: &TableGlobalKey) -> TableRouteKey<'_> {
-    TableRouteKey {
-        table_id: table_id as _,
-        catalog_name: &t.catalog_name,
-        schema_name: &t.schema_name,
-        table_name: &t.table_name,
-    }
 }
