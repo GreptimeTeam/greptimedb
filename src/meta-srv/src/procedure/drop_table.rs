@@ -16,6 +16,7 @@ use api::v1::meta::MailboxMessage;
 use api::v1::{DropTableExpr, TableId};
 use async_trait::async_trait;
 use client::Database;
+use common_catalog::consts::MITO_ENGINE;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_meta::ident::TableIdent;
@@ -32,13 +33,12 @@ use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
 use table::engine::TableReference;
-use table::metadata::RawTableInfo;
 
-use super::utils::handle_retry_error;
+use super::utils::{build_table_metadata_key, handle_retry_error};
 use crate::ddl::DdlContext;
 use crate::error;
 use crate::error::Result;
-use crate::procedure::utils::{build_table_metadata, handle_request_datanode_error, TableMetadata};
+use crate::procedure::utils::handle_request_datanode_error;
 use crate::service::mailbox::BroadcastChannel;
 use crate::service::store::txn::{Txn, TxnOp};
 use crate::table_routes::fetch_table;
@@ -56,12 +56,11 @@ impl DropTableProcedure {
         cluster_id: u64,
         task: DropTableTask,
         table_route: TableRoute,
-        table_info: RawTableInfo,
         context: DdlContext,
     ) -> Self {
         Self {
             context,
-            data: DropTableData::new(cluster_id, task, table_route, table_info),
+            data: DropTableData::new(cluster_id, task, table_route),
         }
     }
 
@@ -87,16 +86,7 @@ impl DropTableProcedure {
         let table_ref = self.data.table_ref();
         let table_id = self.data.task.table_id;
 
-        let TableMetadata {
-            table_global_key,
-            table_global_value,
-            table_route_key,
-            table_route_value,
-        } = build_table_metadata(
-            table_ref,
-            self.data.table_route.clone(),
-            self.data.table_info.clone(),
-        )?;
+        let (table_global_key, table_route_key) = build_table_metadata_key(table_ref, table_id);
 
         let txn = Txn::new().and_then(vec![
             TxnOp::Delete(table_route_key.to_string().into_bytes()),
@@ -125,12 +115,13 @@ impl DropTableProcedure {
             schema: table_name.schema_name,
             table: table_name.table_name,
             table_id: self.data.task.table_id,
-            engine: self.data.table_info.meta.engine.to_string(),
+            //TODO(weny): retrieves the engine from the upper.
+            engine: MITO_ENGINE.to_string(),
         };
         let instruction = Instruction::InvalidateTableCache(table_ident);
 
         let msg = &MailboxMessage::json_message(
-            "Invalidate Table Cache",
+            "Invalidate Table Cache by dropping table procedure",
             &format!("Metasrv@{}", self.context.server_addr),
             "Frontend broadcast",
             common_time::util::current_time_millis(),
@@ -232,22 +223,15 @@ pub struct DropTableData {
     cluster_id: u64,
     task: DropTableTask,
     table_route: TableRoute,
-    table_info: RawTableInfo,
 }
 
 impl DropTableData {
-    pub fn new(
-        cluster_id: u64,
-        task: DropTableTask,
-        table_route: TableRoute,
-        table_info: RawTableInfo,
-    ) -> Self {
+    pub fn new(cluster_id: u64, task: DropTableTask, table_route: TableRoute) -> Self {
         Self {
             state: DropTableState::RemoveMetadata,
             cluster_id,
             task,
             table_route,
-            table_info,
         }
     }
 

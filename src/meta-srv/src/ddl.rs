@@ -19,7 +19,6 @@ use common_meta::rpc::ddl::{CreateTableTask, DropTableTask};
 use common_meta::rpc::router::TableRoute;
 use common_procedure::{watcher, ProcedureId, ProcedureManagerRef, ProcedureWithId};
 use snafu::ResultExt;
-use table::metadata::RawTableInfo;
 
 use crate::error::{self, Result};
 use crate::procedure::create_table::CreateTableProcedure;
@@ -110,17 +109,10 @@ impl DdlManager {
         cluster_id: u64,
         drop_table_task: DropTableTask,
         table_route: TableRoute,
-        table_info: RawTableInfo,
     ) -> Result<ProcedureId> {
         let context = self.create_context();
 
-        let procedure = DropTableProcedure::new(
-            cluster_id,
-            drop_table_task,
-            table_route,
-            table_info,
-            context,
-        );
+        let procedure = DropTableProcedure::new(cluster_id, drop_table_task, table_route, context);
 
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 

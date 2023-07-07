@@ -17,6 +17,7 @@ use api::v1::meta::{
     Table, TableRoute,
 };
 use api::v1::TableId;
+use common_meta::key::TableRouteKey;
 use common_meta::rpc::ddl::{CreateTableTask, DdlTask, DropTableTask};
 use common_meta::rpc::router;
 use common_meta::table_name::TableName;
@@ -31,7 +32,7 @@ use crate::ddl::DdlManagerRef;
 use crate::error::{self, Result};
 use crate::metasrv::{MetaSrv, SelectorContext, SelectorRef};
 use crate::sequence::SequenceRef;
-use crate::table_routes::fetch_table;
+use crate::table_routes::get_table_route_value;
 
 #[async_trait::async_trait]
 impl ddl_task_server::DdlTask for MetaSrv {
@@ -127,7 +128,7 @@ async fn handle_create_table_task(
         .submit_create_table_task(cluster_id, create_table_task, table_route)
         .await?;
 
-    info!("Table: {table_id} created via procedure_id {id:?}");
+    info!("Table: {table_id} is dropped via procedure_id {id:?}");
 
     Ok(SubmitDdlTaskResponse {
         key: id.to_string().into(),
@@ -205,12 +206,14 @@ async fn handle_drop_table_task(
 ) -> Result<SubmitDdlTaskResponse> {
     let table_id = drop_table_task.table_id;
 
-    let (table_global_value, table_route_value) =
-        fetch_table(&kv_store, drop_table_task.table_ref())
-            .await?
-            .with_context(|| error::TableNotFoundSnafu {
-                name: drop_table_task.table_ref().to_string(),
-            })?;
+    let table_route_key = TableRouteKey {
+        table_id: table_id as u64,
+        catalog_name: &drop_table_task.catalog,
+        schema_name: &drop_table_task.schema,
+        table_name: &drop_table_task.table,
+    };
+
+    let table_route_value = get_table_route_value(&kv_store, &table_route_key).await?;
 
     let table_route = router::TableRoute::try_from_raw(
         &table_route_value.peers,
@@ -222,10 +225,8 @@ async fn handle_drop_table_task(
     )
     .context(error::TableRouteConversionSnafu)?;
 
-    let table_info = table_global_value.table_info;
-
     let id = ddl_manager
-        .submit_drop_table_task(cluster_id, drop_table_task, table_route, table_info)
+        .submit_drop_table_task(cluster_id, drop_table_task, table_route)
         .await?;
 
     info!("Table: {table_id} created via procedure_id {id:?}");
