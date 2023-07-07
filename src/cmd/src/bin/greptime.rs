@@ -216,6 +216,7 @@ async fn main() -> Result<()> {
         full_version()
     );
     log_env_flags();
+
     let mut app = cmd.build(opts).await?;
 
     tokio::select! {
