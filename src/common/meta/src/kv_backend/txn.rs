@@ -12,15 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::meta::{DeleteRangeResponse, PutResponse, RangeResponse};
-
-use crate::error::Result;
-
 mod etcd;
+
+use common_error::prelude::ErrorExt;
+
+use crate::rpc::store::{DeleteRangeResponse, PutResponse, RangeResponse};
 
 #[async_trait::async_trait]
 pub trait TxnService: Sync + Send {
-    async fn txn(&self, _txn: Txn) -> Result<TxnResponse> {
+    type Error: ErrorExt;
+
+    async fn txn(&self, _txn: Txn) -> Result<TxnResponse, Self::Error> {
         unimplemented!("txn is not implemented")
     }
 }
@@ -169,11 +171,14 @@ impl From<Txn> for TxnRequest {
 
 #[cfg(test)]
 mod tests {
-    use api::v1::meta::{KeyValue, PutRequest};
+    use std::sync::Arc;
 
     use super::*;
-    use crate::service::store::ext::KvStoreExt;
-    use crate::service::store::kv::KvStoreRef;
+    use crate::error::Error;
+    use crate::kv_backend::memory::MemoryKvBackend;
+    use crate::kv_backend::KvBackendRef;
+    use crate::rpc::store::PutRequest;
+    use crate::rpc::KeyValue;
 
     #[test]
     fn test_compare() {
@@ -301,7 +306,7 @@ mod tests {
     async fn test_txn_compare_equal() {
         let kv_store = create_kv_store().await;
         let key = vec![101u8];
-        let _ = kv_store.delete(key.clone(), false).await.unwrap();
+        kv_store.delete(&key, false).await.unwrap();
 
         let txn = Txn::new()
             .when(vec![Compare::with_not_exist_value(
@@ -332,7 +337,7 @@ mod tests {
     async fn test_txn_compare_greater() {
         let kv_store = create_kv_store().await;
         let key = vec![102u8];
-        let _ = kv_store.delete(key.clone(), false).await.unwrap();
+        kv_store.delete(&key, false).await.unwrap();
 
         let txn = Txn::new()
             .when(vec![Compare::with_not_exist_value(
@@ -361,10 +366,9 @@ mod tests {
         assert_eq!(
             res,
             TxnOpResponse::ResponseGet(RangeResponse {
-                header: None,
                 kvs: vec![KeyValue {
                     key,
-                    value: vec![1],
+                    value: vec![1]
                 }],
                 more: false,
             })
@@ -375,7 +379,7 @@ mod tests {
     async fn test_txn_compare_less() {
         let kv_store = create_kv_store().await;
         let key = vec![103u8];
-        let _ = kv_store.delete(vec![3], false).await.unwrap();
+        kv_store.delete(&[3], false).await.unwrap();
 
         let txn = Txn::new()
             .when(vec![Compare::with_not_exist_value(
@@ -404,10 +408,9 @@ mod tests {
         assert_eq!(
             res,
             TxnOpResponse::ResponseGet(RangeResponse {
-                header: None,
                 kvs: vec![KeyValue {
                     key,
-                    value: vec![2],
+                    value: vec![2]
                 }],
                 more: false,
             })
@@ -418,7 +421,7 @@ mod tests {
     async fn test_txn_compare_not_equal() {
         let kv_store = create_kv_store().await;
         let key = vec![104u8];
-        let _ = kv_store.delete(key.clone(), false).await.unwrap();
+        kv_store.delete(&key, false).await.unwrap();
 
         let txn = Txn::new()
             .when(vec![Compare::with_not_exist_value(
@@ -447,18 +450,17 @@ mod tests {
         assert_eq!(
             res,
             TxnOpResponse::ResponseGet(RangeResponse {
-                header: None,
                 kvs: vec![KeyValue {
                     key,
-                    value: vec![1],
+                    value: vec![1]
                 }],
                 more: false,
             })
         );
     }
 
-    async fn create_kv_store() -> KvStoreRef {
-        std::sync::Arc::new(crate::service::store::memory::MemStore::new())
+    async fn create_kv_store() -> KvBackendRef {
+        Arc::new(MemoryKvBackend::<Error>::new())
         // TODO(jiachun): Add a feature to test against etcd in github CI
         //
         // The same test can be run against etcd by uncommenting the following line

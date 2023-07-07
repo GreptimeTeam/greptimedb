@@ -15,6 +15,8 @@
 use common_error::prelude::*;
 use serde_json::error::Error as JsonError;
 use snafu::Location;
+use store_api::storage::RegionNumber;
+use table::metadata::TableId;
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
@@ -73,6 +75,22 @@ pub enum Error {
         source: BoxedError,
         location: Location,
     },
+
+    #[snafu(display("Etcd txn error: {err_msg}"))]
+    EtcdTxnOpResponse { err_msg: String, location: Location },
+
+    #[snafu(display(
+        "Failed to move region {} in table {}, err: {}",
+        region,
+        table_id,
+        err_msg
+    ))]
+    MoveRegion {
+        table_id: TableId,
+        region: RegionNumber,
+        err_msg: String,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -81,12 +99,13 @@ impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         use Error::*;
         match self {
-            IllegalServerState { .. } => StatusCode::Internal,
+            IllegalServerState { .. } | EtcdTxnOpResponse { .. } => StatusCode::Internal,
 
             SerdeJson { .. }
             | RouteInfoCorrupted { .. }
             | InvalidProtoMsg { .. }
-            | InvalidTableMetadata { .. } => StatusCode::Unexpected,
+            | InvalidTableMetadata { .. }
+            | MoveRegion { .. } => StatusCode::Unexpected,
 
             SendMessage { .. }
             | GetKvCache { .. }

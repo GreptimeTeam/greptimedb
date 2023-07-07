@@ -23,6 +23,7 @@ use catalog::helper::{TableGlobalKey, TableGlobalValue};
 use client::Database;
 use common_error::prelude::BoxedError;
 use common_meta::key::TableRouteKey;
+use common_meta::rpc::store::{MoveValueRequest, PutRequest};
 use common_meta::table_name::TableName;
 use common_query::error::Result as QueryResult;
 use common_query::logical_plan::Expr;
@@ -260,7 +261,7 @@ impl DistTable {
             .await
             .context(TableMetadataManagerSnafu)?;
         Ok(if let Some(raw) = raw {
-            Some(TableGlobalValue::from_bytes(raw.1).context(error::CatalogEntrySerdeSnafu)?)
+            Some(TableGlobalValue::from_bytes(raw.value).context(error::CatalogEntrySerdeSnafu)?)
         } else {
             None
         })
@@ -272,19 +273,26 @@ impl DistTable {
         value: TableGlobalValue,
     ) -> Result<()> {
         let value = value.as_bytes().context(error::CatalogEntrySerdeSnafu)?;
-        self.catalog_manager
+        let req = PutRequest::new()
+            .with_key(key.to_string().as_bytes())
+            .with_value(value);
+        let _ = self
+            .catalog_manager
             .backend()
-            .set(key.to_string().as_bytes(), &value)
+            .put(req)
             .await
-            .context(TableMetadataManagerSnafu)
+            .context(TableMetadataManagerSnafu)?;
+        Ok(())
     }
 
     async fn delete_table_global_value(&self, key: TableGlobalKey) -> Result<()> {
-        self.catalog_manager
+        let _ = self
+            .catalog_manager
             .backend()
-            .delete(key.to_string().as_bytes())
+            .delete(key.to_string().as_bytes(), false)
             .await
-            .context(TableMetadataManagerSnafu)
+            .context(TableMetadataManagerSnafu)?;
+        Ok(())
     }
 
     async fn move_table_route_value(
@@ -311,9 +319,10 @@ impl DistTable {
         }
         .to_string();
 
+        let req = MoveValueRequest::new(old_key.as_bytes(), new_key.as_bytes());
         self.catalog_manager
             .backend()
-            .move_value(old_key.as_bytes(), new_key.as_bytes())
+            .move_value(req)
             .await
             .context(TableMetadataManagerSnafu)?;
 

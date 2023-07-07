@@ -21,6 +21,7 @@ use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_meta::ident::TableIdent;
 use common_meta::instruction::Instruction;
+use common_meta::kv_backend::txn::{Compare, CompareOp, Txn, TxnOp};
 use common_meta::rpc::ddl::DropTableTask;
 use common_meta::rpc::router::TableRoute;
 use common_meta::table_name::TableName;
@@ -40,7 +41,6 @@ use crate::error;
 use crate::error::Result;
 use crate::procedure::utils::{build_table_route_value, handle_request_datanode_error};
 use crate::service::mailbox::BroadcastChannel;
-use crate::service::store::txn::{Compare, CompareOp, Txn, TxnOp};
 use crate::table_routes::fetch_table;
 pub struct DropTableProcedure {
     context: DdlContext,

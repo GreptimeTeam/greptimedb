@@ -45,7 +45,6 @@ use crate::error::{Error, RegisterProcedureLoaderSnafu, Result};
 use crate::lock::DistLockRef;
 use crate::metasrv::{SelectorContext, SelectorRef};
 use crate::service::mailbox::MailboxRef;
-use crate::service::store::ext::KvStoreExt;
 
 const OPEN_REGION_MESSAGE_TIMEOUT: Duration = Duration::from_secs(30);
 const CLOSE_REGION_MESSAGE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -208,7 +207,7 @@ impl RegionFailoverManager {
         let table_global_value = self
             .selector_ctx
             .kv_store
-            .get(table_global_key.to_raw_key())
+            .get(&table_global_key.to_raw_key())
             .await?;
         Ok(table_global_value.is_some())
     }

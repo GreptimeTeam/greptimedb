@@ -15,12 +15,13 @@
 use std::collections::HashMap;
 
 use api::v1::meta::{
-    router_server, BatchPutRequest, CreateRequest, DeleteRequest, Error, KeyValue, Peer, PeerDict,
-    Region, RegionRoute, ResponseHeader, RouteRequest, RouteResponse, Table, TableRoute,
-    TableRouteValue,
+    router_server, CreateRequest, DeleteRequest, Error, Peer, PeerDict, Region, RegionRoute,
+    ResponseHeader, RouteRequest, RouteResponse, Table, TableRoute, TableRouteValue,
 };
 use catalog::helper::{TableGlobalKey, TableGlobalValue};
 use common_meta::key::TableRouteKey;
+use common_meta::rpc::store::BatchPutRequest;
+use common_meta::rpc::KeyValue;
 use common_meta::table_name::TableName;
 use common_telemetry::{timer, warn};
 use snafu::{ensure, OptionExt, ResultExt};
@@ -33,7 +34,6 @@ use crate::lock::{keys, DistLockGuard};
 use crate::metasrv::{Context, MetaSrv, SelectorContext, SelectorRef};
 use crate::metrics::METRIC_META_ROUTE_REQUEST;
 use crate::sequence::SequenceRef;
-use crate::service::store::ext::KvStoreExt;
 use crate::service::GrpcResult;
 use crate::table_routes::{
     fetch_tables, get_table_global_value, remove_table_global_value, remove_table_route_value,
@@ -66,7 +66,7 @@ impl router_server::Router for MetaSrv {
         .to_string()
         .into_bytes();
         ensure!(
-            self.kv_store().get(table_global_key).await?.is_none(),
+            self.kv_store().get(&table_global_key).await?.is_none(),
             error::TableAlreadyExistsSnafu {
                 table_name: table_name.to_string(),
             }
@@ -238,7 +238,6 @@ async fn handle_create(
             },
         ],
         prev_kv: true,
-        ..Default::default()
     };
 
     let resp = ctx.kv_store.batch_put(req).await?;

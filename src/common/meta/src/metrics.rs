@@ -12,15 +12,4 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_meta::kv_backend::memory::MemoryKvBackend;
-
-use crate::error::Error;
-use crate::service::store::kv::ResettableKvStore;
-
-pub type MemStore = MemoryKvBackend<Error>;
-
-impl ResettableKvStore for MemStore {
-    fn reset(&self) {
-        self.clear();
-    }
-}
+pub const METRIC_META_TXN_REQUEST: &str = "meta.txn_request";

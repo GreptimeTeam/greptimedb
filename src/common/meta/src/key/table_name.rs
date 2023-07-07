@@ -14,7 +14,6 @@
 
 use std::sync::Arc;
 
-use futures::{StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
 use table::metadata::TableId;
@@ -24,6 +23,7 @@ use crate::error::{InvalidTableMetadataSnafu, Result};
 use crate::key::{to_removed_key, TableMetaKey};
 use crate::kv_backend::memory::MemoryKvBackend;
 use crate::kv_backend::KvBackendRef;
+use crate::rpc::store::{CompareAndPutRequest, MoveValueRequest, RangeRequest};
 
 #[derive(Debug)]
 pub struct TableNameKey<'a> {
@@ -111,11 +111,11 @@ impl TableNameManager {
         let raw_key = key.as_raw_key();
         let value = TableNameValue::new(table_id);
         let raw_value = value.try_as_raw_value()?;
-        let result = self
-            .kv_backend
-            .compare_and_set(&raw_key, &[], &raw_value)
-            .await?;
-        Ok(matches!(result, Ok(())))
+        let req = CompareAndPutRequest::new()
+            .with_key(raw_key)
+            .with_value(raw_value);
+        let result = self.kv_backend.compare_and_put(req).await?;
+        Ok(result.success)
     }
 
     pub async fn get(&self, key: &TableNameKey<'_>) -> Result<Option<TableNameValue>> {
@@ -123,19 +123,18 @@ impl TableNameManager {
         self.kv_backend
             .get(&raw_key)
             .await?
-            .map(|x| TableNameValue::try_from_raw_value(x.1))
+            .map(|x| TableNameValue::try_from_raw_value(x.value))
             .transpose()
     }
 
     pub async fn tables(&self, catalog: &str, schema: &str) -> Result<Vec<String>> {
         let key = TableNameKey::prefix_to_table(catalog, schema).into_bytes();
-        let table_names = self
-            .kv_backend
-            .range(&key)
-            .map(|x| x.map(|kv| TableNameKey::strip_table_name(&kv.0)))
-            .try_collect::<Vec<_>>()
-            .await?
+        let req = RangeRequest::new().with_prefix(key);
+        let resp = self.kv_backend.range(req).await?;
+        let table_names = resp
+            .kvs
             .into_iter()
+            .map(|kv| TableNameKey::strip_table_name(kv.key()))
             .collect::<Result<Vec<_>>>()?;
         Ok(table_names)
     }
@@ -143,9 +142,9 @@ impl TableNameManager {
     pub async fn remove(&self, key: &TableNameKey<'_>) -> Result<()> {
         let raw_key = key.as_raw_key();
         let removed_key = to_removed_key(&String::from_utf8_lossy(&raw_key));
-        self.kv_backend
-            .move_value(&raw_key, removed_key.as_bytes())
-            .await
+        let req = MoveValueRequest::new(raw_key, removed_key.as_bytes());
+        let _ = self.kv_backend.move_value(req).await?;
+        Ok(())
     }
 }
 
@@ -183,7 +182,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let value = TableNameValue::try_from_raw_value(kv.1).unwrap();
+        let value = TableNameValue::try_from_raw_value(kv.value).unwrap();
         assert_eq!(value.table_id(), 99);
 
         let tables = manager.tables("my_catalog", "my_schema").await.unwrap();

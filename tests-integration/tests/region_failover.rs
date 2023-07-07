@@ -21,8 +21,8 @@ use catalog::helper::TableGlobalKey;
 use catalog::remote::CachedMetaKvBackend;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO_ENGINE};
 use common_meta::ident::TableIdent;
-use common_meta::kv_backend::Kv;
 use common_meta::rpc::router::TableRoute;
+use common_meta::rpc::KeyValue;
 use common_meta::table_name::TableName;
 use common_meta::RegionIdent;
 use common_procedure::{watcher, ProcedureWithId};
@@ -175,7 +175,7 @@ pub async fn test_region_failover(store_type: StorageType) {
     assert!(success)
 }
 
-fn get_table_cache(instance: &Arc<Instance>, key: &str) -> Option<Option<Kv>> {
+fn get_table_cache(instance: &Arc<Instance>, key: &str) -> Option<Option<KeyValue>> {
     let catalog_manager = instance
         .catalog_manager()
         .as_any()

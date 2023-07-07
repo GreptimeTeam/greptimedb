@@ -19,6 +19,7 @@ use client::Database;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_meta::key::TableRouteKey;
+use common_meta::kv_backend::txn::{Compare, CompareOp, Txn, TxnOp};
 use common_meta::rpc::ddl::CreateTableTask;
 use common_meta::rpc::router::TableRoute;
 use common_meta::table_name::TableName;
@@ -34,7 +35,6 @@ use super::utils::{handle_request_datanode_error, handle_retry_error};
 use crate::ddl::DdlContext;
 use crate::error::{self, Result};
 use crate::service::router::create_table_global_value;
-use crate::service::store::txn::{Compare, CompareOp, Txn, TxnOp};
 use crate::table_routes::get_table_global_value;
 
 // TODO(weny): removes in following PRs.

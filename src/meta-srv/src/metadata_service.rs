@@ -14,9 +14,9 @@
 
 use std::sync::Arc;
 
-use api::v1::meta::CompareAndPutRequest;
 use async_trait::async_trait;
 use catalog::helper::{CatalogKey, CatalogValue, SchemaKey, SchemaValue};
+use common_meta::rpc::store::CompareAndPutRequest;
 use common_telemetry::{info, timer};
 use metrics::increment_counter;
 use snafu::{ensure, ResultExt};
@@ -80,7 +80,6 @@ impl MetadataService for DefaultMetadataService {
             value: CatalogValue {}
                 .as_bytes()
                 .context(error::InvalidCatalogValueSnafu)?,
-            ..Default::default()
         };
 
         let resp = kv_store.compare_and_put(req).await?;
@@ -96,7 +95,6 @@ impl MetadataService for DefaultMetadataService {
             value: SchemaValue {}
                 .as_bytes()
                 .context(error::InvalidCatalogValueSnafu)?,
-            ..Default::default()
         };
         let resp = kv_store.compare_and_put(req).await?;
 
@@ -124,7 +122,6 @@ mod tests {
     use catalog::helper::{CatalogKey, SchemaKey};
 
     use super::{DefaultMetadataService, MetadataService};
-    use crate::service::store::ext::KvStoreExt;
     use crate::service::store::kv::KvStoreRef;
     use crate::service::store::memory::MemStore;
 
@@ -156,11 +153,9 @@ mod tests {
         .to_string()
         .into();
 
-        let result = kv_store.get(key.clone()).await.unwrap();
-
+        let result = kv_store.get(&key).await.unwrap();
         let kv = result.unwrap();
-
-        assert_eq!(key, kv.key);
+        assert_eq!(key, kv.key());
 
         let key: Vec<u8> = SchemaKey {
             catalog_name: "catalog".to_string(),
@@ -169,10 +164,8 @@ mod tests {
         .to_string()
         .into();
 
-        let result = kv_store.get(key.clone()).await.unwrap();
-
+        let result = kv_store.get(&key).await.unwrap();
         let kv = result.unwrap();
-
-        assert_eq!(key, kv.key);
+        assert_eq!(key, kv.key());
     }
 }

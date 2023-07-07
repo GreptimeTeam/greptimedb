@@ -14,26 +14,25 @@
 
 use std::collections::HashMap;
 
-use api::v1::meta::{MoveValueRequest, PutRequest, TableRouteValue};
+use api::v1::meta::TableRouteValue;
 use catalog::helper::{TableGlobalKey, TableGlobalValue};
 use common_meta::key::TableRouteKey;
-use common_meta::rpc::store::{BatchGetRequest, BatchGetResponse};
+use common_meta::rpc::store::{BatchGetRequest, MoveValueRequest, PutRequest};
 use common_telemetry::warn;
 use snafu::{OptionExt, ResultExt};
 use table::engine::TableReference;
 
 use crate::error::{
-    ConvertProtoDataSnafu, DecodeTableRouteSnafu, InvalidCatalogValueSnafu, Result,
-    TableNotFoundSnafu, TableRouteNotFoundSnafu,
+    DecodeTableRouteSnafu, InvalidCatalogValueSnafu, Result, TableNotFoundSnafu,
+    TableRouteNotFoundSnafu,
 };
-use crate::service::store::ext::KvStoreExt;
 use crate::service::store::kv::KvStoreRef;
 
 pub async fn get_table_global_value(
     kv_store: &KvStoreRef,
     key: &TableGlobalKey,
 ) -> Result<Option<TableGlobalValue>> {
-    let kv = kv_store.get(key.to_raw_key()).await?;
+    let kv = kv_store.get(&key.to_raw_key()).await?;
     kv.map(|kv| TableGlobalValue::from_bytes(kv.value).context(InvalidCatalogValueSnafu))
         .transpose()
 }
@@ -45,13 +44,8 @@ pub(crate) async fn batch_get_table_global_value(
     let req = BatchGetRequest {
         keys: keys.iter().map(|x| x.to_raw_key()).collect::<Vec<_>>(),
     };
-    let mut resp: BatchGetResponse = kv_store
-        .batch_get(req.into())
-        .await?
-        .try_into()
-        .context(ConvertProtoDataSnafu)?;
+    let kvs = kv_store.batch_get(req).await?.kvs;
 
-    let kvs = resp.take_kvs();
     let mut result = HashMap::with_capacity(kvs.len());
     for kv in kvs {
         let key = TableGlobalKey::try_from_raw_key(kv.key()).context(InvalidCatalogValueSnafu)?;
@@ -73,7 +67,6 @@ pub(crate) async fn put_table_global_value(
     value: &TableGlobalValue,
 ) -> Result<()> {
     let req = PutRequest {
-        header: None,
         key: key.to_raw_key(),
         value: value.as_bytes().context(InvalidCatalogValueSnafu)?,
         prev_kv: false,
@@ -101,15 +94,12 @@ pub(crate) async fn get_table_route_value(
     key: &TableRouteKey<'_>,
 ) -> Result<TableRouteValue> {
     let kv = kv_store
-        .get(key.to_string().into_bytes())
+        .get(key.to_string().as_bytes())
         .await?
         .with_context(|| TableRouteNotFoundSnafu {
             key: key.to_string(),
         })?;
-    kv.value
-        .as_slice()
-        .try_into()
-        .context(DecodeTableRouteSnafu)
+    kv.value().try_into().context(DecodeTableRouteSnafu)
 }
 
 pub(crate) async fn put_table_route_value(
@@ -118,7 +108,6 @@ pub(crate) async fn put_table_route_value(
     value: TableRouteValue,
 ) -> Result<()> {
     let req = PutRequest {
-        header: None,
         key: key.to_string().into_bytes(),
         value: value.into(),
         prev_kv: false,
@@ -150,14 +139,10 @@ async fn move_value(
 ) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
     let from_key = from_key.into();
     let to_key = to_key.into();
-    let move_req = MoveValueRequest {
-        from_key,
-        to_key,
-        ..Default::default()
-    };
+    let move_req = MoveValueRequest { from_key, to_key };
     let res = kv_store.move_value(move_req).await?;
 
-    Ok(res.kv.map(|kv| (kv.key, kv.value)))
+    Ok(res.0.map(Into::into))
 }
 
 pub(crate) fn table_route_key(table_id: u32, t: &TableGlobalKey) -> TableRouteKey<'_> {

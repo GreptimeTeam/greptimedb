@@ -14,18 +14,18 @@
 
 use std::collections::HashMap;
 
-use api::v1::meta::{RangeRequest, RangeResponse};
 use catalog::helper::{
     build_catalog_prefix, build_schema_prefix, build_table_global_prefix, TABLE_GLOBAL_KEY_PREFIX,
 };
+use common_meta::rpc::store::{RangeRequest, RangeResponse};
+use common_meta::util;
 use snafu::{OptionExt, ResultExt};
 use tonic::codegen::http;
 
+use crate::error;
 use crate::error::Result;
 use crate::service::admin::HttpHandler;
-use crate::service::store::ext::KvStoreExt;
 use crate::service::store::kv::KvStoreRef;
-use crate::{error, util};
 
 pub struct CatalogsHandler {
     pub kv_store: KvStoreRef,
@@ -104,7 +104,7 @@ impl HttpHandler for TableHandler {
             })?;
         let table_key = format!("{TABLE_GLOBAL_KEY_PREFIX}-{table_name}");
 
-        let response = self.kv_store.get(table_key.into_bytes()).await?;
+        let response = self.kv_store.get(table_key.as_bytes()).await?;
         let mut value: String = "Not found result".to_string();
         if let Some(key_value) = response {
             value = String::from_utf8(key_value.value).context(error::InvalidUtf8ValueSnafu)?;
@@ -161,11 +161,11 @@ async fn get_keys_by_prefix(key_prefix: String, kv_store: &KvStoreRef) -> Result
 mod tests {
     use std::sync::Arc;
 
-    use api::v1::meta::PutRequest;
     use catalog::helper::{
         build_catalog_prefix, build_schema_prefix, build_table_global_prefix, CatalogKey,
         SchemaKey, TableGlobalKey,
     };
+    use common_meta::rpc::store::PutRequest;
 
     use crate::service::admin::meta::get_keys_by_prefix;
     use crate::service::store::kv::KvStoreRef;
@@ -184,7 +184,7 @@ mod tests {
             .put(PutRequest {
                 key: catalog.to_string().as_bytes().to_vec(),
                 value: "".as_bytes().to_vec(),
-                ..Default::default()
+                prev_kv: false,
             })
             .await
             .is_ok());
@@ -197,7 +197,7 @@ mod tests {
             .put(PutRequest {
                 key: schema.to_string().as_bytes().to_vec(),
                 value: "".as_bytes().to_vec(),
-                ..Default::default()
+                prev_kv: false,
             })
             .await
             .is_ok());
@@ -216,7 +216,7 @@ mod tests {
             .put(PutRequest {
                 key: table1.to_string().as_bytes().to_vec(),
                 value: "".as_bytes().to_vec(),
-                ..Default::default()
+                prev_kv: false,
             })
             .await
             .is_ok());
@@ -224,7 +224,7 @@ mod tests {
             .put(PutRequest {
                 key: table2.to_string().as_bytes().to_vec(),
                 value: "".as_bytes().to_vec(),
-                ..Default::default()
+                prev_kv: false,
             })
             .await
             .is_ok());

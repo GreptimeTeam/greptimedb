@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::meta::{HeartbeatRequest, PutRequest, Role};
+use api::v1::meta::{HeartbeatRequest, Role};
+use common_meta::rpc::store::PutRequest;
 use common_telemetry::{trace, warn};
 use common_time::util as time_util;
 

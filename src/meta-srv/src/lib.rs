@@ -40,6 +40,4 @@ pub mod table_routes;
 #[cfg(test)]
 mod test_util;
 
-pub mod util;
-
 pub use crate::error::Result;

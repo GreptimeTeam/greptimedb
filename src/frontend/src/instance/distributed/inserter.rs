@@ -183,6 +183,7 @@ mod tests {
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_meta::kv_backend::{KvBackend, KvBackendRef};
+    use common_meta::rpc::store::PutRequest;
     use datatypes::prelude::{ConcreteDataType, VectorRef};
     use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, Schema};
     use datatypes::vectors::Int32Vector;
@@ -199,26 +200,20 @@ mod tests {
             catalog_name: DEFAULT_CATALOG_NAME.to_string(),
         }
         .to_string();
-        backend
-            .set(
-                default_catalog.as_bytes(),
-                CatalogValue.as_bytes().unwrap().as_slice(),
-            )
-            .await
-            .unwrap();
+        let req = PutRequest::new()
+            .with_key(default_catalog.as_bytes())
+            .with_value(CatalogValue.as_bytes().unwrap());
+        backend.put(req).await.unwrap();
 
         let default_schema = SchemaKey {
             catalog_name: DEFAULT_CATALOG_NAME.to_string(),
             schema_name: DEFAULT_SCHEMA_NAME.to_string(),
         }
         .to_string();
-        backend
-            .set(
-                default_schema.as_bytes(),
-                SchemaValue.as_bytes().unwrap().as_slice(),
-            )
-            .await
-            .unwrap();
+        let req = PutRequest::new()
+            .with_key(default_schema.as_bytes())
+            .with_value(SchemaValue.as_bytes().unwrap());
+        backend.put(req).await.unwrap();
 
         backend
     }
@@ -257,13 +252,10 @@ mod tests {
             table_info: table_info.into(),
         };
 
-        backend
-            .set(
-                table_global_key.to_string().as_bytes(),
-                table_global_value.as_bytes().unwrap().as_slice(),
-            )
-            .await
-            .unwrap();
+        let req = PutRequest::new()
+            .with_key(table_global_key.to_string().as_bytes())
+            .with_value(table_global_value.as_bytes().unwrap());
+        backend.put(req).await.unwrap();
     }
 
     #[tokio::test]

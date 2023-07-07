@@ -739,7 +739,7 @@ mod tests {
             .with_key(tc.key("key"))
             .with_value(b"value".to_vec());
         let res = tc.client.put(req).await;
-        assert!(res.unwrap().take_prev_kv().is_none());
+        assert!(res.unwrap().prev_kv.is_none());
     }
 
     #[tokio::test]
@@ -752,14 +752,14 @@ mod tests {
             .with_value(b"value".to_vec())
             .with_prev_kv();
         let res = tc.client.put(req).await;
-        assert!(res.unwrap().take_prev_kv().is_none());
+        assert!(res.unwrap().prev_kv.is_none());
 
         let req = PutRequest::new()
             .with_key(key.as_slice())
             .with_value(b"value1".to_vec())
             .with_prev_kv();
         let res = tc.client.put(req).await;
-        let mut kv = res.unwrap().take_prev_kv().unwrap();
+        let mut kv = res.unwrap().prev_kv.unwrap();
         assert_eq!(key, kv.take_key());
         assert_eq!(b"value".to_vec(), kv.take_value());
     }
@@ -794,16 +794,14 @@ mod tests {
         for i in 0..256 {
             req = req.add_key(tc.key(&format!("key-{}", i)));
         }
-        let mut res = tc.client.batch_get(req).await.unwrap();
-
-        assert_eq!(10, res.take_kvs().len());
+        let res = tc.client.batch_get(req).await.unwrap();
+        assert_eq!(10, res.kvs.len());
 
         let req = BatchGetRequest::default()
             .add_key(tc.key("key-1"))
             .add_key(tc.key("key-999"));
-        let mut res = tc.client.batch_get(req).await.unwrap();
-
-        assert_eq!(1, res.take_kvs().len());
+        let res = tc.client.batch_get(req).await.unwrap();
+        assert_eq!(1, res.kvs.len());
     }
 
     #[tokio::test]
@@ -867,7 +865,9 @@ mod tests {
         let res = tc.client.compare_and_put(req).await;
         let mut res = res.unwrap();
         assert!(res.is_success());
-        assert_eq!(b"value".to_vec(), res.take_prev_kv().unwrap().take_value());
+
+        // If compare-and-put is success, previous value doesn't need to be returned.
+        assert!(res.take_prev_kv().is_none());
     }
 
     #[tokio::test]

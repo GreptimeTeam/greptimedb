@@ -14,16 +14,18 @@
 
 use std::collections::HashMap;
 
-use api::v1::meta::{RangeRequest, RangeResponse, TableRouteValue};
+use api::v1::meta::TableRouteValue;
 use common_meta::key::TABLE_ROUTE_PREFIX;
+use common_meta::rpc::store::{RangeRequest, RangeResponse};
+use common_meta::util;
 use prost::Message;
 use snafu::{OptionExt, ResultExt};
 use tonic::codegen::http;
 
 use super::HttpHandler;
+use crate::error;
 use crate::error::Result;
 use crate::service::store::kv::KvStoreRef;
-use crate::{error, util};
 
 pub struct RouteHandler {
     pub kv_store: KvStoreRef,

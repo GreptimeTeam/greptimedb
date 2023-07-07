@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::meta::KeyValue;
+use common_meta::rpc::KeyValue;
 
 pub struct KvPair<'a>(&'a etcd_client::KeyValue);
 

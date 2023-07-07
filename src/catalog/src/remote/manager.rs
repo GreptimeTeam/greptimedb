@@ -14,17 +14,15 @@
 
 use std::any::Any;
 use std::collections::HashSet;
-use std::pin::Pin;
 use std::sync::Arc;
 
-use async_stream::stream;
 use async_trait::async_trait;
 use common_catalog::consts::{MAX_SYS_TABLE_ID, MITO_ENGINE};
 use common_meta::ident::TableIdent;
-use common_meta::kv_backend::{Kv, KvBackendRef};
+use common_meta::kv_backend::KvBackendRef;
+use common_meta::rpc::store::{PutRequest, RangeRequest};
+use common_meta::rpc::KeyValue;
 use common_telemetry::{debug, error, info, warn};
-use futures::Stream;
-use futures_util::{StreamExt, TryStreamExt};
 use metrics::{decrement_gauge, increment_gauge};
 use snafu::ResultExt;
 use table::engine::manager::TableEngineManagerRef;
@@ -74,35 +72,39 @@ impl RemoteCatalogManager {
         }
     }
 
-    async fn iter_remote_catalogs(
-        &self,
-    ) -> Pin<Box<dyn Stream<Item = Result<CatalogKey>> + Send + '_>> {
+    async fn iter_remote_catalogs(&self) -> Result<Vec<CatalogKey>> {
         let catalog_range_prefix = build_catalog_prefix();
-        let mut catalogs = self.backend.range(catalog_range_prefix.as_bytes());
-        Box::pin(stream!({
-            while let Some(r) = catalogs.next().await {
-                let Kv(k, _) = r.context(TableMetadataManagerSnafu)?;
-                if !k.starts_with(catalog_range_prefix.as_bytes()) {
-                    debug!("Ignoring non-catalog key: {}", String::from_utf8_lossy(&k));
-                    continue;
-                }
+        let req = RangeRequest::new().with_prefix(catalog_range_prefix.as_bytes());
 
-                let catalog_key = String::from_utf8_lossy(&k);
-                if let Ok(key) = CatalogKey::parse(&catalog_key) {
-                    yield Ok(key)
-                } else {
-                    error!("Invalid catalog key: {:?}", catalog_key);
+        let kvs = self
+            .backend
+            .range(req)
+            .await
+            .context(TableMetadataManagerSnafu)?
+            .kvs;
+
+        let catalogs = kvs
+            .into_iter()
+            .filter_map(|kv| {
+                let catalog_key = String::from_utf8_lossy(kv.key());
+
+                match CatalogKey::parse(&catalog_key) {
+                    Ok(x) => Some(x),
+                    Err(e) => {
+                        error!(e; "Ignore invalid catalog key {:?}", catalog_key);
+                        None
+                    }
                 }
-            }
-        }))
+            })
+            .collect();
+        Ok(catalogs)
     }
 
     /// Fetch catalogs/schemas/tables from remote catalog manager along with max table id allocated.
     async fn initiate_catalogs(&self) -> Result<()> {
-        let mut catalogs = self.iter_remote_catalogs().await;
+        let catalogs = self.iter_remote_catalogs().await?;
         let mut joins = Vec::new();
-        while let Some(r) = catalogs.next().await {
-            let CatalogKey { catalog_name, .. } = r?;
+        for CatalogKey { catalog_name } in catalogs {
             info!("Fetch catalog from metasrv: {}", catalog_name);
 
             let node_id = self.node_id;
@@ -128,13 +130,11 @@ impl RemoteCatalogManager {
             schema_name: schema_name.to_string(),
         }
         .to_string();
+        let req = PutRequest::new()
+            .with_key(schema_key.as_bytes())
+            .with_value(SchemaValue.as_bytes().context(InvalidCatalogValueSnafu)?);
         self.backend
-            .set(
-                schema_key.as_bytes(),
-                &SchemaValue {}
-                    .as_bytes()
-                    .context(InvalidCatalogValueSnafu)?,
-            )
+            .put(req)
             .await
             .context(TableMetadataManagerSnafu)?;
         info!("Created schema '{schema_key}'");
@@ -143,13 +143,11 @@ impl RemoteCatalogManager {
             catalog_name: catalog_name.to_string(),
         }
         .to_string();
+        let req = PutRequest::new()
+            .with_key(catalog_key.as_bytes())
+            .with_value(CatalogValue.as_bytes().context(InvalidCatalogValueSnafu)?);
         self.backend
-            .set(
-                catalog_key.as_bytes(),
-                &CatalogValue {}
-                    .as_bytes()
-                    .context(InvalidCatalogValueSnafu)?,
-            )
+            .put(req)
             .await
             .context(TableMetadataManagerSnafu)?;
         info!("Created catalog '{catalog_key}");
@@ -174,9 +172,7 @@ impl RemoteCatalogManager {
         schema_name: String,
     ) -> Result<u32> {
         info!("initializing tables in {}.{}", catalog_name, schema_name);
-        let tables = iter_remote_tables(node_id, &backend, &catalog_name, &schema_name).await;
-
-        let kvs = tables.try_collect::<Vec<_>>().await?;
+        let kvs = iter_remote_tables(node_id, &backend, &catalog_name, &schema_name).await?;
         let table_num = kvs.len();
         let joins = kvs
             .into_iter()
@@ -253,15 +249,14 @@ impl RemoteCatalogManager {
         engine_manager: TableEngineManagerRef,
         catalog_name: String,
     ) -> Result<()> {
-        let mut schemas = iter_remote_schemas(&backend, &catalog_name).await;
-        let mut joins = Vec::new();
-        while let Some(r) = schemas.next().await {
-            let SchemaKey {
-                catalog_name,
-                schema_name,
-                ..
-            } = r?;
+        let schemas = iter_remote_schemas(&backend, &catalog_name).await?;
 
+        let mut joins = Vec::new();
+        for SchemaKey {
+            catalog_name,
+            schema_name,
+        } in schemas
+        {
             info!(
                 "Fetch schema from metasrv: {}.{}",
                 &catalog_name, &schema_name
@@ -314,11 +309,11 @@ impl RemoteCatalogManager {
         let table_key = self
             .build_regional_table_key(catalog_name, schema_name, table_name)
             .to_string();
+        let req = PutRequest::new()
+            .with_key(table_key.as_bytes())
+            .with_value(table_value.as_bytes().context(InvalidCatalogValueSnafu)?);
         self.backend
-            .set(
-                table_key.as_bytes(),
-                &table_value.as_bytes().context(InvalidCatalogValueSnafu)?,
-            )
+            .put(req)
             .await
             .context(TableMetadataManagerSnafu)?;
         debug!(
@@ -349,7 +344,7 @@ impl RemoteCatalogManager {
             .get(table_key.as_bytes())
             .await
             .context(TableMetadataManagerSnafu)?
-            .map(|Kv(_, v)| {
+            .map(|KeyValue { key: _, value: v }| {
                 let TableRegionalValue {
                     table_id,
                     engine_name,
@@ -367,7 +362,7 @@ impl RemoteCatalogManager {
             };
 
         self.backend
-            .delete(table_key.as_bytes())
+            .delete(table_key.as_bytes(), false)
             .await
             .context(TableMetadataManagerSnafu)?;
         debug!(
@@ -430,23 +425,30 @@ impl RemoteCatalogManager {
 async fn iter_remote_schemas<'a>(
     backend: &'a KvBackendRef,
     catalog_name: &'a str,
-) -> Pin<Box<dyn Stream<Item = Result<SchemaKey>> + Send + 'a>> {
+) -> Result<Vec<SchemaKey>> {
     let schema_prefix = build_schema_prefix(catalog_name);
-    let mut schemas = backend.range(schema_prefix.as_bytes());
+    let req = RangeRequest::new().with_prefix(schema_prefix.as_bytes());
 
-    Box::pin(stream!({
-        while let Some(r) = schemas.next().await {
-            let Kv(k, _) = r.context(TableMetadataManagerSnafu)?;
-            if !k.starts_with(schema_prefix.as_bytes()) {
-                debug!("Ignoring non-schema key: {}", String::from_utf8_lossy(&k));
-                continue;
+    let kvs = backend
+        .range(req)
+        .await
+        .context(TableMetadataManagerSnafu)?
+        .kvs;
+
+    let schemas = kvs
+        .into_iter()
+        .filter_map(|kv| {
+            let schema_key = String::from_utf8_lossy(kv.key());
+            match SchemaKey::parse(&schema_key) {
+                Ok(x) => Some(x),
+                Err(e) => {
+                    warn!("Ignore invalid schema key {:?}: {e}", schema_key);
+                    None
+                }
             }
-
-            let schema_key =
-                SchemaKey::parse(&String::from_utf8_lossy(&k)).context(InvalidCatalogValueSnafu)?;
-            yield Ok(schema_key)
-        }
-    }))
+        })
+        .collect();
+    Ok(schemas)
 }
 
 /// Iterate over all table entries on metasrv
@@ -455,35 +457,42 @@ async fn iter_remote_tables<'a>(
     backend: &'a KvBackendRef,
     catalog_name: &'a str,
     schema_name: &'a str,
-) -> Pin<Box<dyn Stream<Item = Result<(TableGlobalKey, TableGlobalValue)>> + Send + 'a>> {
+) -> Result<Vec<(TableGlobalKey, TableGlobalValue)>> {
     let table_prefix = build_table_global_prefix(catalog_name, schema_name);
-    let mut tables = backend.range(table_prefix.as_bytes());
-    Box::pin(stream!({
-        while let Some(r) = tables.next().await {
-            let Kv(k, v) = r.context(TableMetadataManagerSnafu)?;
-            if !k.starts_with(table_prefix.as_bytes()) {
-                debug!("Ignoring non-table prefix: {}", String::from_utf8_lossy(&k));
-                continue;
-            }
-            let table_key = TableGlobalKey::parse(&String::from_utf8_lossy(&k))
-                .context(InvalidCatalogValueSnafu)?;
-            let table_value = TableGlobalValue::from_bytes(&v).context(InvalidCatalogValueSnafu)?;
+    let req = RangeRequest::new().with_prefix(table_prefix.as_bytes());
 
-            info!(
-                "Found catalog table entry, key: {}, value: {:?}",
-                table_key, table_value
-            );
-            // metasrv has allocated region ids to current datanode
-            if table_value
-                .regions_id_map
-                .get(&node_id)
-                .map(|v| !v.is_empty())
-                .unwrap_or(false)
-            {
-                yield Ok((table_key, table_value))
-            }
+    let kvs = backend
+        .range(req)
+        .await
+        .context(TableMetadataManagerSnafu)?
+        .kvs;
+
+    let mut tables = Vec::with_capacity(kvs.len());
+    for kv in kvs {
+        let tgk = &String::from_utf8_lossy(kv.key());
+        let Ok(table_key) = TableGlobalKey::parse(tgk) else {
+            warn!("Ignore invalid table global key {:?}", tgk);
+            continue;
+        };
+
+        let Ok(table_value) = TableGlobalValue::from_bytes(kv.value()) else {
+            warn!("Ignore invalid table global value {:?}", String::from_utf8_lossy(kv.value()));
+            continue;
+        };
+
+        info!("Found catalog table entry, key: {table_key}, value: {table_value:?}");
+
+        // metasrv has allocated region ids to current datanode
+        if table_value
+            .regions_id_map
+            .get(&node_id)
+            .map(|v| !v.is_empty())
+            .unwrap_or(false)
+        {
+            tables.push((table_key, table_value))
         }
-    }))
+    }
+    Ok(tables)
 }
 
 async fn print_regional_key_debug_info(
@@ -500,7 +509,10 @@ async fn print_regional_key_debug_info(
     .to_string();
 
     match backend.get(regional_key.as_bytes()).await {
-        Ok(Some(Kv(_, values_bytes))) => {
+        Ok(Some(KeyValue {
+            key: _,
+            value: values_bytes,
+        })) => {
             debug!(
                 "Node id: {}, TableRegionalKey: {}, value: {},",
                 node_id,
@@ -702,13 +714,11 @@ impl CatalogManager for RemoteCatalogManager {
         let catalog_name = request.catalog;
         let schema_name = request.schema;
         let key = self.build_schema_key(catalog_name, schema_name).to_string();
+        let req = PutRequest::new()
+            .with_key(key.as_bytes())
+            .with_value(SchemaValue.as_bytes().context(InvalidCatalogValueSnafu)?);
         self.backend
-            .set(
-                key.as_bytes(),
-                &SchemaValue {}
-                    .as_bytes()
-                    .context(InvalidCatalogValueSnafu)?,
-            )
+            .put(req)
             .await
             .context(TableMetadataManagerSnafu)?;
 
@@ -729,21 +739,27 @@ impl CatalogManager for RemoteCatalogManager {
             node_id: self.node_id,
         }
         .to_string();
-        let Some(Kv(_, value_bytes)) = self.backend.get(old_table_key.as_bytes()).await.context(TableMetadataManagerSnafu)? else {
-            return Ok(false)
-        };
+        let Some(KeyValue{ key: _, value }) = self.backend
+            .get(old_table_key.as_bytes())
+            .await
+            .context(TableMetadataManagerSnafu)? else {
+                return Ok(false)
+            };
         let new_table_key = TableRegionalKey {
             catalog_name: request.catalog.clone(),
             schema_name: request.schema.clone(),
             table_name: request.new_table_name,
             node_id: self.node_id,
         };
+        let req = PutRequest::new()
+            .with_key(new_table_key.to_string().as_bytes())
+            .with_value(value);
         self.backend
-            .set(new_table_key.to_string().as_bytes(), &value_bytes)
+            .put(req)
             .await
             .context(TableMetadataManagerSnafu)?;
         self.backend
-            .delete(old_table_key.to_string().as_bytes())
+            .delete(old_table_key.to_string().as_bytes(), false)
             .await
             .context(TableMetadataManagerSnafu)?;
         Ok(true)
@@ -796,7 +812,7 @@ impl CatalogManager for RemoteCatalogManager {
             .get(key.as_bytes())
             .await
             .context(TableMetadataManagerSnafu)?
-            .map(|Kv(_, v)| {
+            .map(|KeyValue { key: _, value: v }| {
                 let TableRegionalValue {
                     table_id,
                     engine_name,
@@ -863,16 +879,19 @@ impl CatalogManager for RemoteCatalogManager {
     }
 
     async fn catalog_names(&self) -> Result<Vec<String>> {
-        let mut stream = self.backend.range(CATALOG_KEY_PREFIX.as_bytes());
+        let req = RangeRequest::new().with_prefix(CATALOG_KEY_PREFIX.as_bytes());
+        let kvs = self
+            .backend
+            .range(req)
+            .await
+            .context(TableMetadataManagerSnafu)?
+            .kvs;
         let mut catalogs = HashSet::new();
 
-        while let Some(catalog) = stream.next().await {
-            if let Ok(catalog) = catalog {
-                let catalog_key = String::from_utf8_lossy(&catalog.0);
-
-                if let Ok(key) = CatalogKey::parse(&catalog_key) {
-                    let _ = catalogs.insert(key.catalog_name);
-                }
+        for catalog in kvs {
+            let catalog_key = String::from_utf8_lossy(catalog.key());
+            if let Ok(key) = CatalogKey::parse(&catalog_key) {
+                let _ = catalogs.insert(key.catalog_name);
             }
         }
 
@@ -880,18 +899,19 @@ impl CatalogManager for RemoteCatalogManager {
     }
 
     async fn schema_names(&self, catalog_name: &str) -> Result<Vec<String>> {
-        let mut stream = self
+        let req = RangeRequest::new().with_prefix(build_schema_prefix(catalog_name).as_bytes());
+        let kvs = self
             .backend
-            .range(build_schema_prefix(catalog_name).as_bytes());
+            .range(req)
+            .await
+            .context(TableMetadataManagerSnafu)?
+            .kvs;
         let mut schemas = HashSet::new();
 
-        while let Some(schema) = stream.next().await {
-            if let Ok(schema) = schema {
-                let schema_key = String::from_utf8_lossy(&schema.0);
-
-                if let Ok(key) = SchemaKey::parse(&schema_key) {
-                    let _ = schemas.insert(key.schema_name);
-                }
+        for schema in kvs {
+            let schema_key = String::from_utf8_lossy(schema.key());
+            if let Ok(key) = SchemaKey::parse(&schema_key) {
+                let _ = schemas.insert(key.schema_name);
             }
         }
         Ok(schemas.into_iter().collect())
@@ -901,18 +921,20 @@ impl CatalogManager for RemoteCatalogManager {
         self.check_catalog_schema_exist(catalog_name, schema_name)
             .await?;
 
-        let mut stream = self
+        let req = RangeRequest::new()
+            .with_prefix(build_table_regional_prefix(catalog_name, schema_name).as_bytes());
+        let kvs = self
             .backend
-            .range(build_table_regional_prefix(catalog_name, schema_name).as_bytes());
+            .range(req)
+            .await
+            .context(TableMetadataManagerSnafu)?
+            .kvs;
         let mut tables = HashSet::new();
 
-        while let Some(table) = stream.next().await {
-            if let Ok(table) = table {
-                let table_key = String::from_utf8_lossy(&table.0);
-
-                if let Ok(key) = TableRegionalKey::parse(&table_key) {
-                    let _ = tables.insert(key.table_name);
-                }
+        for table in kvs {
+            let table_key = String::from_utf8_lossy(table.key());
+            if let Ok(key) = TableRegionalKey::parse(&table_key) {
+                let _ = tables.insert(key.table_name);
             }
         }
         Ok(tables.into_iter().collect())
@@ -921,13 +943,11 @@ impl CatalogManager for RemoteCatalogManager {
     async fn register_catalog(&self, name: String) -> Result<bool> {
         let key = CatalogKey { catalog_name: name }.to_string();
         // TODO(hl): use compare_and_swap to prevent concurrent update
+        let req = PutRequest::new()
+            .with_key(key.as_bytes())
+            .with_value(CatalogValue.as_bytes().context(InvalidCatalogValueSnafu)?);
         self.backend
-            .set(
-                key.as_bytes(),
-                &CatalogValue {}
-                    .as_bytes()
-                    .context(InvalidCatalogValueSnafu)?,
-            )
+            .put(req)
             .await
             .context(TableMetadataManagerSnafu)?;
         increment_gauge!(crate::metrics::METRIC_CATALOG_MANAGER_CATALOG_COUNT, 1.0);

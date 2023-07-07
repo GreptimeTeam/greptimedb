@@ -21,6 +21,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    use catalog::error::Error;
     use catalog::helper::{CatalogKey, CatalogValue, SchemaKey, SchemaValue};
     use catalog::remote::mock::MockTableEngine;
     use catalog::remote::region_alive_keeper::RegionAliveKeepers;
@@ -30,8 +31,8 @@ mod tests {
     use common_meta::ident::TableIdent;
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_meta::kv_backend::KvBackend;
+    use common_meta::rpc::store::{CompareAndPutRequest, PutRequest, RangeRequest};
     use datatypes::schema::RawSchema;
-    use futures_util::StreamExt;
     use table::engine::manager::{MemoryTableEngineManager, TableEngineManagerRef};
     use table::engine::{EngineContext, TableEngineRef};
     use table::requests::CreateTableRequest;
@@ -52,38 +53,35 @@ mod tests {
 
     #[tokio::test]
     async fn test_backend() {
-        common_telemetry::init_default_ut_logging();
-        let backend = MemoryKvBackend::default();
+        let backend = MemoryKvBackend::<Error>::default();
 
         let default_catalog_key = CatalogKey {
             catalog_name: DEFAULT_CATALOG_NAME.to_string(),
         }
         .to_string();
-
-        backend
-            .set(
-                default_catalog_key.as_bytes(),
-                &CatalogValue {}.as_bytes().unwrap(),
-            )
-            .await
-            .unwrap();
+        let req = PutRequest::new()
+            .with_key(default_catalog_key.as_bytes())
+            .with_value(CatalogValue.as_bytes().unwrap());
+        backend.put(req).await.unwrap();
 
         let schema_key = SchemaKey {
             catalog_name: DEFAULT_CATALOG_NAME.to_string(),
             schema_name: DEFAULT_SCHEMA_NAME.to_string(),
         }
         .to_string();
-        backend
-            .set(schema_key.as_bytes(), &SchemaValue {}.as_bytes().unwrap())
-            .await
-            .unwrap();
+        let req = PutRequest::new()
+            .with_key(schema_key.as_bytes())
+            .with_value(SchemaValue.as_bytes().unwrap());
+        backend.put(req).await.unwrap();
 
-        let mut iter = backend.range("__c-".as_bytes());
-        let mut res = HashSet::new();
-        while let Some(r) = iter.next().await {
-            let kv = r.unwrap();
-            let _ = res.insert(String::from_utf8_lossy(&kv.0).to_string());
-        }
+        let req = RangeRequest::new().with_prefix(b"__c-".to_vec());
+        let res = backend
+            .range(req)
+            .await
+            .unwrap()
+            .kvs
+            .into_iter()
+            .map(|kv| String::from_utf8_lossy(kv.key()).to_string());
         assert_eq!(
             vec!["__c-greptime".to_string()],
             res.into_iter().collect::<Vec<_>>()
@@ -98,36 +96,32 @@ mod tests {
             catalog_name: DEFAULT_CATALOG_NAME.to_string(),
         }
         .to_string();
-
-        backend
-            .set(
-                default_catalog_key.as_bytes(),
-                &CatalogValue {}.as_bytes().unwrap(),
-            )
-            .await
-            .unwrap();
+        let req = PutRequest::new()
+            .with_key(default_catalog_key.as_bytes())
+            .with_value(CatalogValue.as_bytes().unwrap());
+        backend.put(req).await.unwrap();
 
         let ret = backend.get(b"__c-greptime").await.unwrap();
         let _ = ret.unwrap();
 
-        let _ = backend
-            .compare_and_set(
-                b"__c-greptime",
-                &CatalogValue {}.as_bytes().unwrap(),
-                b"123",
-            )
-            .await
-            .unwrap();
+        let req = CompareAndPutRequest::new()
+            .with_key(b"__c-greptime".to_vec())
+            .with_expect(CatalogValue.as_bytes().unwrap())
+            .with_value(b"123".to_vec());
+        let _ = backend.compare_and_put(req).await.unwrap();
 
         let ret = backend.get(b"__c-greptime").await.unwrap();
-        assert_eq!(&b"123"[..], &(ret.as_ref().unwrap().1));
+        assert_eq!(b"123", ret.as_ref().unwrap().value.as_slice());
 
-        let _ = backend.set(b"__c-greptime", b"1234").await;
+        let req = PutRequest::new()
+            .with_key(b"__c-greptime".to_vec())
+            .with_value(b"1234".to_vec());
+        let _ = backend.put(req).await;
 
         let ret = backend.get(b"__c-greptime").await.unwrap();
-        assert_eq!(&b"1234"[..], &(ret.as_ref().unwrap().1));
+        assert_eq!(b"1234", ret.unwrap().value.as_slice());
 
-        backend.delete(b"__c-greptime").await.unwrap();
+        backend.delete(b"__c-greptime", false).await.unwrap();
 
         let ret = backend.get(b"__c-greptime").await.unwrap();
         assert!(ret.is_none());
@@ -135,8 +129,16 @@ mod tests {
 
     async fn prepare_components(node_id: u64) -> TestingComponents {
         let backend = Arc::new(MemoryKvBackend::default());
-        backend.set(b"__c-greptime", b"").await.unwrap();
-        backend.set(b"__s-greptime-public", b"").await.unwrap();
+
+        let req = PutRequest::new()
+            .with_key(b"__c-greptime".to_vec())
+            .with_value(b"".to_vec());
+        backend.put(req).await.unwrap();
+
+        let req = PutRequest::new()
+            .with_key(b"__s-greptime-public".to_vec())
+            .with_value(b"".to_vec());
+        backend.put(req).await.unwrap();
 
         let cached_backend = Arc::new(CachedMetaKvBackend::wrap(backend));
 

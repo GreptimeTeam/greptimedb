@@ -12,15 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::meta::{DeleteRangeResponse, PutResponse, RangeResponse};
 use etcd_client::{
     Compare as EtcdCompare, CompareOp as EtcdCompareOp, Txn as EtcdTxn, TxnOp as EtcdTxnOp,
     TxnOpResponse as EtcdTxnOpResponse, TxnResponse as EtcdTxnResponse,
 };
 
+use super::{Compare, CompareOp, Txn, TxnOp, TxnOpResponse, TxnResponse};
 use crate::error::{self, Result};
-use crate::service::store::etcd_util::KvPair;
-use crate::service::store::txn::{Compare, CompareOp, Txn, TxnOp, TxnOpResponse, TxnResponse};
+use crate::rpc::store::{DeleteRangeResponse, PutResponse, RangeResponse};
 
 impl From<Txn> for EtcdTxn {
     fn from(txn: Txn) -> Self {
@@ -88,31 +87,25 @@ impl TryFrom<EtcdTxnOpResponse> for TxnOpResponse {
     fn try_from(op_resp: EtcdTxnOpResponse) -> Result<Self> {
         match op_resp {
             EtcdTxnOpResponse::Put(res) => {
-                let prev_kv = res.prev_key().map(KvPair::from_etcd_kv);
-                let put_res = PutResponse {
-                    prev_kv,
-                    ..Default::default()
-                };
+                let prev_kv = res.prev_key().cloned().map(Into::into);
+                let put_res = PutResponse { prev_kv };
                 Ok(TxnOpResponse::ResponsePut(put_res))
             }
             EtcdTxnOpResponse::Get(res) => {
-                let kvs = res.kvs().iter().map(KvPair::from_etcd_kv).collect();
-                let range_res = RangeResponse {
-                    kvs,
-                    ..Default::default()
-                };
+                let kvs = res.kvs().iter().cloned().map(Into::into).collect();
+                let range_res = RangeResponse { kvs, more: false };
                 Ok(TxnOpResponse::ResponseGet(range_res))
             }
             EtcdTxnOpResponse::Delete(res) => {
                 let prev_kvs = res
                     .prev_kvs()
                     .iter()
-                    .map(KvPair::from_etcd_kv)
+                    .cloned()
+                    .map(Into::into)
                     .collect::<Vec<_>>();
                 let delete_res = DeleteRangeResponse {
                     prev_kvs,
                     deleted: res.deleted(),
-                    ..Default::default()
                 };
                 Ok(TxnOpResponse::ResponseDelete(delete_res))
             }

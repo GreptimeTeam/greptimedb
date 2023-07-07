@@ -14,7 +14,8 @@
 
 use std::cmp::Ordering;
 
-use api::v1::meta::{HeartbeatRequest, PutRequest, Role};
+use api::v1::meta::{HeartbeatRequest, Role};
+use common_meta::rpc::store::PutRequest;
 use common_telemetry::warn;
 use dashmap::DashMap;
 
@@ -147,7 +148,6 @@ mod tests {
     use crate::keys::StatKey;
     use crate::sequence::Sequence;
     use crate::service::store::cached_kv::LeaderCachedKvStore;
-    use crate::service::store::ext::KvStoreExt;
     use crate::service::store::memory::MemStore;
 
     #[tokio::test]
@@ -184,7 +184,8 @@ mod tests {
             cluster_id: 3,
             node_id: 101,
         };
-        let res = ctx.in_memory.get(key.try_into().unwrap()).await.unwrap();
+        let key: Vec<u8> = key.try_into().unwrap();
+        let res = ctx.in_memory.get(&key).await.unwrap();
         let kv = res.unwrap();
         let key: StatKey = kv.key.clone().try_into().unwrap();
         assert_eq!(3, key.cluster_id);
@@ -195,7 +196,9 @@ mod tests {
         assert_eq!(Some(1), val.stats[0].region_num);
 
         handle_request_many_times(ctx.clone(), &handler, 10).await;
-        let res = ctx.in_memory.get(key.try_into().unwrap()).await.unwrap();
+
+        let key: Vec<u8> = key.try_into().unwrap();
+        let res = ctx.in_memory.get(&key).await.unwrap();
         let kv = res.unwrap();
         let val: StatValue = kv.value.try_into().unwrap();
         // refresh every 10 stats

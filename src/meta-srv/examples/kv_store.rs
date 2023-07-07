@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::meta::{DeleteRangeRequest, PutRequest, RangeRequest};
+use common_meta::rpc::store::{DeleteRangeRequest, PutRequest, RangeRequest};
 use meta_srv::service::store::etcd::EtcdStore;
 use tracing::{event, subscriber, Level};
 use tracing_subscriber::FmtSubscriber;
@@ -31,7 +31,6 @@ async fn run() {
         key: b"key1".to_vec(),
         value: b"value1".to_vec(),
         prev_kv: true,
-        ..Default::default()
     };
     let res = kv_store.put(put_req).await;
     event!(Level::INFO, "put result: {:#?}", res);

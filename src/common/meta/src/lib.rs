@@ -12,15 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![feature(btree_drain_filter)]
+
 pub mod error;
 pub mod heartbeat;
 pub mod ident;
 pub mod instruction;
 pub mod key;
 pub mod kv_backend;
+pub mod metrics;
 pub mod peer;
 pub mod rpc;
 pub mod table_name;
+pub mod util;
 
 pub type ClusterId = u64;
 pub type DatanodeId = u64;

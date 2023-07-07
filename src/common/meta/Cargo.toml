@@ -13,6 +13,7 @@ common-error = { path = "../error" }
 common-runtime = { path = "../runtime" }
 common-telemetry = { path = "../telemetry" }
 common-time = { path = "../time" }
+etcd-client.workspace = true
 futures.workspace = true
 lazy_static.workspace = true
 prost.workspace = true
