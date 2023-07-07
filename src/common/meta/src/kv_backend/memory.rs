@@ -29,9 +29,10 @@ use crate::kv_backend::txn::{Txn, TxnOp, TxnOpResponse, TxnRequest, TxnResponse}
 use crate::kv_backend::{KvBackend, TxnService};
 use crate::metrics::METRIC_META_TXN_REQUEST;
 use crate::rpc::store::{
-    BatchPutRequest, BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse,
-    DeleteRangeRequest, DeleteRangeResponse, MoveValueRequest, MoveValueResponse, PutRequest,
-    PutResponse, RangeRequest, RangeResponse,
+    BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
+    BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse, DeleteRangeRequest,
+    DeleteRangeResponse, MoveValueRequest, MoveValueResponse, PutRequest, PutResponse,
+    RangeRequest, RangeResponse,
 };
 use crate::rpc::KeyValue;
 
@@ -223,6 +224,48 @@ impl<T: ErrorExt + Send + Sync + 'static> KvBackend for MemoryKvBackend<T> {
             deleted: prev_kvs.len() as i64,
             prev_kvs: if prev_kv { prev_kvs } else { vec![] },
         })
+    }
+
+    async fn batch_delete(
+        &self,
+        req: BatchDeleteRequest,
+    ) -> Result<BatchDeleteResponse, Self::Error> {
+        let mut kvs = self.kvs.write().unwrap();
+
+        let mut prev_kvs = if req.prev_kv {
+            Vec::with_capacity(req.keys.len())
+        } else {
+            vec![]
+        };
+
+        for key in req.keys {
+            if req.prev_kv {
+                if let Some(value) = kvs.remove(&key) {
+                    prev_kvs.push(KeyValue { key, value });
+                }
+            } else {
+                kvs.remove(&key);
+            }
+        }
+
+        Ok(BatchDeleteResponse { prev_kvs })
+    }
+
+    async fn batch_get(&self, req: BatchGetRequest) -> Result<BatchGetResponse, Self::Error> {
+        let kvs = self.kvs.read().unwrap();
+
+        let kvs = req
+            .keys
+            .into_iter()
+            .filter_map(|key| {
+                kvs.get_key_value(&key).map(|(k, v)| KeyValue {
+                    key: k.clone(),
+                    value: v.clone(),
+                })
+            })
+            .collect::<Vec<_>>();
+
+        Ok(BatchGetResponse { kvs })
     }
 
     async fn move_value(&self, req: MoveValueRequest) -> Result<MoveValueResponse, Self::Error> {
@@ -593,5 +636,41 @@ mod tests {
 
         let resp = kv_store.move_value(req).await.unwrap();
         assert!(resp.0.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_batch_delete() {
+        let kv_store = mock_mem_store_with_data().await;
+
+        assert!(kv_store.get(b"key1").await.unwrap().is_some());
+        assert!(kv_store.get(b"key100").await.unwrap().is_none());
+
+        let req = BatchDeleteRequest {
+            keys: vec![b"key1".to_vec(), b"key100".to_vec()],
+            prev_kv: true,
+        };
+        let resp = kv_store.batch_delete(req).await.unwrap();
+        assert_eq!(1, resp.prev_kvs.len());
+        assert_eq!(
+            vec![KeyValue {
+                key: b"key1".to_vec(),
+                value: b"val1".to_vec()
+            }],
+            resp.prev_kvs
+        );
+        assert!(kv_store.get(b"key1").await.unwrap().is_none());
+
+        assert!(kv_store.get(b"key2").await.unwrap().is_some());
+        assert!(kv_store.get(b"key3").await.unwrap().is_some());
+
+        let req = BatchDeleteRequest {
+            keys: vec![b"key2".to_vec(), b"key3".to_vec()],
+            prev_kv: false,
+        };
+        let resp = kv_store.batch_delete(req).await.unwrap();
+        assert!(resp.prev_kvs.is_empty());
+
+        assert!(kv_store.get(b"key2").await.unwrap().is_none());
+        assert!(kv_store.get(b"key3").await.unwrap().is_none());
     }
 }

@@ -22,9 +22,10 @@ use common_meta::error::Error::{CacheNotGet, GetKvCache};
 use common_meta::error::{CacheNotGetSnafu, Error, MetaSrvSnafu, Result};
 use common_meta::kv_backend::{KvBackend, KvBackendRef, TxnService};
 use common_meta::rpc::store::{
-    BatchPutRequest, BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse,
-    DeleteRangeRequest, DeleteRangeResponse, MoveValueRequest, MoveValueResponse, PutRequest,
-    PutResponse, RangeRequest, RangeResponse,
+    BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
+    BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse, DeleteRangeRequest,
+    DeleteRangeResponse, MoveValueRequest, MoveValueResponse, PutRequest, PutResponse,
+    RangeRequest, RangeResponse,
 };
 use common_meta::rpc::KeyValue;
 use common_telemetry::timer;
@@ -136,6 +137,30 @@ impl KvBackend for CachedMetaKvBackend {
             }
             Err(e) => Err(e),
         }
+    }
+
+    async fn batch_delete(&self, mut req: BatchDeleteRequest) -> Result<BatchDeleteResponse> {
+        let prev_kv = req.prev_kv;
+
+        req.prev_kv = true;
+        let resp = self.kv_backend.batch_delete(req).await;
+        match resp {
+            Ok(mut resp) => {
+                for prev_kv in resp.prev_kvs.iter() {
+                    self.invalidate_key(prev_kv.key()).await;
+                }
+
+                if !prev_kv {
+                    resp.prev_kvs = vec![];
+                }
+                Ok(resp)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn batch_get(&self, req: BatchGetRequest) -> Result<BatchGetResponse> {
+        self.kv_backend.batch_get(req).await
     }
 
     async fn compare_and_put(&self, req: CompareAndPutRequest) -> Result<CompareAndPutResponse> {
@@ -261,6 +286,22 @@ impl KvBackend for MetaKvBackend {
     async fn delete_range(&self, req: DeleteRangeRequest) -> Result<DeleteRangeResponse> {
         self.client
             .delete_range(req)
+            .await
+            .map_err(BoxedError::new)
+            .context(MetaSrvSnafu)
+    }
+
+    async fn batch_delete(&self, req: BatchDeleteRequest) -> Result<BatchDeleteResponse> {
+        self.client
+            .batch_delete(req)
+            .await
+            .map_err(BoxedError::new)
+            .context(MetaSrvSnafu)
+    }
+
+    async fn batch_get(&self, req: BatchGetRequest) -> Result<BatchGetResponse> {
+        self.client
+            .batch_get(req)
             .await
             .map_err(BoxedError::new)
             .context(MetaSrvSnafu)

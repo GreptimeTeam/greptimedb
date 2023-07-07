@@ -34,7 +34,6 @@ use crate::lock::{keys, DistLockGuard};
 use crate::metasrv::{Context, MetaSrv, SelectorContext, SelectorRef};
 use crate::metrics::METRIC_META_ROUTE_REQUEST;
 use crate::sequence::SequenceRef;
-use crate::service::store::kv::KvStoreRef;
 use crate::service::GrpcResult;
 use crate::table_routes::{
     fetch_tables, get_table_global_value, remove_table_global_value, remove_table_route_value,

@@ -71,27 +71,10 @@ where
         }
     }
 
-    /// Default "batch_delete" is backed by iterating all keys on "delete".
     async fn batch_delete(
         &self,
         req: BatchDeleteRequest,
-    ) -> Result<BatchDeleteResponse, Self::Error> {
-        let prev_kv = req.prev_kv;
-
-        let mut prev_kvs = if prev_kv {
-            Vec::with_capacity(req.keys.len())
-        } else {
-            vec![]
-        };
-
-        for key in req.keys {
-            let resp = self.delete(&key, prev_kv).await?;
-            if let Some(kv) = resp {
-                prev_kvs.push(kv)
-            }
-        }
-        Ok(BatchDeleteResponse { prev_kvs })
-    }
+    ) -> Result<BatchDeleteResponse, Self::Error>;
 
     /// Default get is implemented based on `range` method.
     async fn get(&self, key: &[u8]) -> Result<Option<KeyValue>, Self::Error> {
@@ -104,16 +87,7 @@ where
         })
     }
 
-    /// Default "batch_get" is backed by iterating all keys on "get".
-    async fn batch_get(&self, req: BatchGetRequest) -> Result<BatchGetResponse, Self::Error> {
-        let mut kvs = Vec::with_capacity(req.keys.len());
-        for key in req.keys.iter() {
-            if let Some(kv) = self.get(key).await? {
-                kvs.push(kv);
-            }
-        }
-        Ok(BatchGetResponse { kvs })
-    }
+    async fn batch_get(&self, req: BatchGetRequest) -> Result<BatchGetResponse, Self::Error>;
 
     /// MoveValue atomically renames the key to the given updated key.
     async fn move_value(&self, req: MoveValueRequest) -> Result<MoveValueResponse, Self::Error>;
