@@ -136,7 +136,7 @@ mod tests {
     use crate::sst::{self, FileId, FileMeta, FsAccessLayer, Source, SstInfo, WriteOptions};
     use crate::test_util::descriptor_util::RegionDescBuilder;
 
-    const REGION_ID: RegionId = 1;
+    const REGION_ID: RegionId = RegionId::from_u64(1);
 
     fn schema_for_test() -> RegionSchemaRef {
         // Just build a region desc and use its columns metadata.
@@ -263,7 +263,7 @@ mod tests {
             .unwrap();
         let handle = FileHandle::new(
             FileMeta {
-                region_id: 0,
+                region_id: 0.into(),
                 file_id: sst_file_id,
                 time_range,
                 level: 0,
@@ -530,7 +530,7 @@ mod tests {
             .map(|f| {
                 FileHandle::new(
                     FileMeta {
-                        region_id: 0,
+                        region_id: 0.into(),
                         file_id: f,
                         level: 1,
                         time_range: None,

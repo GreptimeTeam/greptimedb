@@ -120,7 +120,7 @@ pub trait FlushItem {
 #[async_trait]
 impl<S: LogStore> FlushItem for RegionImpl<S> {
     fn item_id(&self) -> u64 {
-        self.id()
+        self.id().as_u64()
     }
 
     fn last_flush_time(&self) -> i64 {

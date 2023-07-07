@@ -19,8 +19,8 @@ use store_api::storage::{
     RegionDescriptor, RegionId, RowKeyDescriptorBuilder,
 };
 
+use crate::test_util;
 use crate::test_util::schema_util::ColumnDef;
-use crate::test_util::{self};
 
 /// A RegionDescriptor builder for test.
 pub struct RegionDescBuilder {
@@ -46,7 +46,7 @@ impl RegionDescBuilder {
         );
 
         Self {
-            id: 0,
+            id: 0.into(),
             name: name.into(),
             last_column_id: 1,
             key_builder,
@@ -54,8 +54,8 @@ impl RegionDescBuilder {
         }
     }
 
-    pub fn id(mut self, id: RegionId) -> Self {
-        self.id = id;
+    pub fn id(mut self, id: impl Into<RegionId>) -> Self {
+        self.id = id.into();
         self
     }
 

@@ -352,7 +352,7 @@ mod tests {
 
     fn mock_file_meta() -> FileMeta {
         FileMeta {
-            region_id: 0,
+            region_id: 0.into(),
             file_id: FileId::random(),
             time_range: None,
             level: 0,

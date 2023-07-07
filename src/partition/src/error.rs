@@ -18,7 +18,7 @@ use common_error::prelude::*;
 use common_query::prelude::Expr;
 use datafusion_common::ScalarValue;
 use snafu::{Location, Snafu};
-use store_api::storage::RegionId;
+use store_api::storage::{RegionId, RegionNumber};
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
@@ -35,7 +35,7 @@ pub enum Error {
     #[snafu(display("Failed to find Datanode, table: {} region: {:?}", table, region))]
     FindDatanode {
         table: String,
-        region: RegionId,
+        region: RegionNumber,
         location: Location,
     },
 

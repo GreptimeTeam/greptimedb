@@ -68,7 +68,7 @@ impl Request for NoopCompactionRequest {
     type Key = RegionId;
 
     fn key(&self) -> Self::Key {
-        0
+        RegionId::from(0)
     }
 
     fn complete(self, _result: Result<()>) {}

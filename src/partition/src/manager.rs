@@ -126,14 +126,14 @@ impl PartitionRuleManager {
 
         let mut partitions = Vec::with_capacity(route.region_routes.len());
         for r in route.region_routes.iter() {
-            let partition = r
-                .region
-                .partition
-                .clone()
-                .context(error::FindRegionRoutesSnafu {
-                    region_id: r.region.id,
-                    table_name: table.to_string(),
-                })?;
+            let partition =
+                r.region
+                    .partition
+                    .clone()
+                    .with_context(|| error::FindRegionRoutesSnafu {
+                        region_id: r.region.id,
+                        table_name: table.to_string(),
+                    })?;
             let partition_def = PartitionDef::try_from(partition)?;
 
             partitions.push(PartitionInfo {
@@ -175,7 +175,7 @@ impl PartitionRuleManager {
 
         let regions = partitions
             .iter()
-            .map(|x| x.id as u32)
+            .map(|x| x.id.region_number())
             .collect::<Vec<RegionNumber>>();
 
         // TODO(LFC): Serializing and deserializing partition rule is ugly, must find a much more elegant way.

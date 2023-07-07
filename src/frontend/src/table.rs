@@ -622,7 +622,7 @@ pub(crate) mod test {
             vec![
                 RegionRoute {
                     region: Region {
-                        id: 3,
+                        id: 3.into(),
                         name: "r1".to_string(),
                         partition: Some(
                             PartitionDef::new(
@@ -639,7 +639,7 @@ pub(crate) mod test {
                 },
                 RegionRoute {
                     region: Region {
-                        id: 2,
+                        id: 2.into(),
                         name: "r2".to_string(),
                         partition: Some(
                             PartitionDef::new(
@@ -656,7 +656,7 @@ pub(crate) mod test {
                 },
                 RegionRoute {
                     region: Region {
-                        id: 1,
+                        id: 1.into(),
                         name: "r3".to_string(),
                         partition: Some(
                             PartitionDef::new(
@@ -691,7 +691,7 @@ pub(crate) mod test {
             vec![
                 RegionRoute {
                     region: Region {
-                        id: 1,
+                        id: 1.into(),
                         name: "r1".to_string(),
                         partition: Some(
                             PartitionDef::new(
@@ -711,7 +711,7 @@ pub(crate) mod test {
                 },
                 RegionRoute {
                     region: Region {
-                        id: 2,
+                        id: 2.into(),
                         name: "r2".to_string(),
                         partition: Some(
                             PartitionDef::new(
@@ -731,7 +731,7 @@ pub(crate) mod test {
                 },
                 RegionRoute {
                     region: Region {
-                        id: 3,
+                        id: 3.into(),
                         name: "r3".to_string(),
                         partition: Some(
                             PartitionDef::new(

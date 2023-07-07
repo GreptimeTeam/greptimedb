@@ -54,7 +54,7 @@ pub fn build_region_edit(
         files_to_add: files_to_add
             .iter()
             .map(|f| FileMeta {
-                region_id: 0,
+                region_id: 0.into(),
                 file_id: *f,
                 time_range: None,
                 level: 0,
@@ -64,7 +64,7 @@ pub fn build_region_edit(
         files_to_remove: files_to_remove
             .iter()
             .map(|f| FileMeta {
-                region_id: 0,
+                region_id: 0.into(),
                 file_id: *f,
                 time_range: None,
                 level: 0,

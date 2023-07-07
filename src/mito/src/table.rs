@@ -338,7 +338,7 @@ impl<R: Region> Table for MitoTable<R> {
         Ok(regions
             .values()
             .map(|region| RegionStat {
-                region_id: region.id(),
+                region_id: region.id().as_u64(),
                 disk_usage_bytes: region.disk_usage_bytes(),
             })
             .collect())

@@ -377,9 +377,15 @@ mod tests {
         let handler_cloned = handler.clone();
         let _handle = common_runtime::spawn_bg(async move { handler_cloned.run().await });
 
-        let _ = queue.write().unwrap().push_back(1, MockRequest::default());
+        let _ = queue
+            .write()
+            .unwrap()
+            .push_back(1.into(), MockRequest::default());
         handler.task_notifier.notify_one();
-        let _ = queue.write().unwrap().push_back(2, MockRequest::default());
+        let _ = queue
+            .write()
+            .unwrap()
+            .push_back(2.into(), MockRequest::default());
         handler.task_notifier.notify_one();
 
         tokio::time::timeout(Duration::from_secs(1), latch.wait())
@@ -443,8 +449,16 @@ mod tests {
             handler,
         );
 
-        let _ = scheduler.schedule(MockRequest { region_id: 1 }).unwrap();
-        let _ = scheduler.schedule(MockRequest { region_id: 2 }).unwrap();
+        let _ = scheduler
+            .schedule(MockRequest {
+                region_id: 1.into(),
+            })
+            .unwrap();
+        let _ = scheduler
+            .schedule(MockRequest {
+                region_id: 2.into(),
+            })
+            .unwrap();
 
         tokio::time::timeout(Duration::from_secs(1), latch.wait())
             .await
@@ -473,7 +487,7 @@ mod tests {
         for i in 0..task_size {
             assert!(scheduler
                 .schedule(MockRequest {
-                    region_id: i as RegionId,
+                    region_id: RegionId::from(i as u64),
                 })
                 .is_ok());
         }
@@ -504,7 +518,7 @@ mod tests {
         for i in 0..task_size / 2 {
             assert!(scheduler
                 .schedule(MockRequest {
-                    region_id: i as RegionId,
+                    region_id: RegionId::from(i as u64),
                 })
                 .is_ok());
         }
@@ -513,7 +527,7 @@ mod tests {
         for i in task_size / 2..task_size {
             assert!(scheduler
                 .schedule(MockRequest {
-                    region_id: i as RegionId,
+                    region_id: RegionId::from(i as u64),
                 })
                 .is_ok());
         }
@@ -534,7 +548,12 @@ mod tests {
 
         let mut scheduled_task = 0;
         for _ in 0..10 {
-            if scheduler.schedule(MockRequest { region_id: 1 }).unwrap() {
+            if scheduler
+                .schedule(MockRequest {
+                    region_id: 1.into(),
+                })
+                .unwrap()
+            {
                 scheduled_task += 1;
             }
         }
@@ -568,7 +587,7 @@ mod tests {
         let handle = common_runtime::spawn_write(async move {
             for i in 0..10000 {
                 if let Ok(res) = scheduler_cloned.schedule(MockRequest {
-                    region_id: i as RegionId,
+                    region_id: RegionId::from(i as u64),
                 }) {
                     if res {
                         let _ = task_scheduled_cloned.fetch_add(1, Ordering::Relaxed);
