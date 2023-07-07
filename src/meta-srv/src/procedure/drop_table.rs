@@ -47,7 +47,6 @@ pub struct DropTableProcedure {
     data: DropTableData,
 }
 
-
 impl DropTableProcedure {
     pub(crate) const TYPE_NAME: &'static str = "metasrv-procedure::DropTable";
 
