@@ -351,7 +351,7 @@ impl From<PbRegion> for Region {
 impl From<Region> for PbRegion {
     fn from(region: Region) -> Self {
         Self {
-            id: region.id.as_u64(),
+            id: region.id.into(),
             name: region.name,
             partition: region.partition.map(Into::into),
             attrs: region.attrs,

@@ -79,7 +79,7 @@ pub trait Region: Send + Sync + Clone + std::fmt::Debug + 'static {
 
     fn region_stat(&self) -> RegionStat {
         RegionStat {
-            region_id: self.id().as_u64(),
+            region_id: self.id().into(),
             disk_usage_bytes: self.disk_usage_bytes(),
         }
     }

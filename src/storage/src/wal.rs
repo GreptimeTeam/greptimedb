@@ -56,7 +56,7 @@ impl<S: LogStore> Clone for Wal<S> {
 
 impl<S: LogStore> Wal<S> {
     pub fn new(region_id: RegionId, store: Arc<S>) -> Self {
-        let namespace = store.namespace(region_id.as_u64());
+        let namespace = store.namespace(region_id.into());
         Self {
             region_id,
             namespace,
