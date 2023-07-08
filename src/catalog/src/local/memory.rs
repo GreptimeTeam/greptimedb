@@ -158,7 +158,7 @@ impl CatalogManager for MemoryCatalogManager {
                 catalog_name: &request.catalog,
             })?;
         let table_count = schemas
-            .get(&request.schema)
+            .remove(&request.schema)
             .with_context(|| SchemaNotFoundSnafu {
                 catalog: &request.catalog,
                 schema: &request.schema,
@@ -170,8 +170,6 @@ impl CatalogManager for MemoryCatalogManager {
             &[crate::metrics::db_label(&request.catalog, &request.schema)],
         );
 
-        // Safety: We've already checked whether the schema exists.
-        schemas.remove(&request.schema).unwrap();
         decrement_gauge!(
             crate::metrics::METRIC_CATALOG_MANAGER_SCHEMA_COUNT,
             1.0,
