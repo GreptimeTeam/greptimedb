@@ -158,7 +158,7 @@ impl CatalogManager for FrontendCatalogManager {
         &self,
         _request: DeregisterSchemaRequest,
     ) -> catalog_err::Result<bool> {
-        unimplemented!("FrontendCatalogManager does not support deregister schema")
+        unimplemented!("FrontendCatalogManager does not support deregistering schema")
     }
 
     async fn rename_table(&self, _request: RenameTableRequest) -> catalog_err::Result<bool> {
