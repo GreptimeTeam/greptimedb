@@ -29,8 +29,8 @@ use crate::error::{
     CatalogNotFoundSnafu, Result, SchemaNotFoundSnafu, TableExistsSnafu, TableNotFoundSnafu,
 };
 use crate::{
-    CatalogManager, DeregisterTableRequest, RegisterSchemaRequest, RegisterSystemTableRequest,
-    RegisterTableRequest, RenameTableRequest,
+    CatalogManager, DeregisterSchemaRequest, DeregisterTableRequest, RegisterSchemaRequest,
+    RegisterSystemTableRequest, RegisterTableRequest, RenameTableRequest,
 };
 
 type SchemaEntries = HashMap<String, HashMap<String, TableRef>>;
@@ -148,6 +148,36 @@ impl CatalogManager for MemoryCatalogManager {
             increment_gauge!(crate::metrics::METRIC_CATALOG_MANAGER_SCHEMA_COUNT, 1.0);
         }
         Ok(registered)
+    }
+
+    async fn deregister_schema(&self, request: DeregisterSchemaRequest) -> Result<bool> {
+        let mut catalogs = self.catalogs.write().unwrap();
+        let schemas = catalogs
+            .get_mut(&request.catalog)
+            .with_context(|| CatalogNotFoundSnafu {
+                catalog_name: &request.catalog,
+            })?;
+        let table_count = schemas
+            .get(&request.schema)
+            .with_context(|| SchemaNotFoundSnafu {
+                catalog: &request.catalog,
+                schema: &request.schema,
+            })?
+            .len();
+        decrement_gauge!(
+            crate::metrics::METRIC_CATALOG_MANAGER_TABLE_COUNT,
+            table_count as f64,
+            &[crate::metrics::db_label(&request.catalog, &request.schema)],
+        );
+
+        // Safety: We've already checked whether the schema exists.
+        schemas.remove(&request.schema).unwrap();
+        decrement_gauge!(
+            crate::metrics::METRIC_CATALOG_MANAGER_SCHEMA_COUNT,
+            1.0,
+            &[crate::metrics::db_label(&request.catalog, &request.schema)],
+        );
+        Ok(true)
     }
 
     async fn register_system_table(&self, _request: RegisterSystemTableRequest) -> Result<()> {
@@ -516,5 +546,43 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn test_catalog_deregister_schema() {
+        let catalog = MemoryCatalogManager::default();
+
+        // Registers a catalog, a schema, and a table.
+        let catalog_name = "foo_catalog".to_string();
+        let schema_name = "foo_schema".to_string();
+        let table_name = "foo_table".to_string();
+        let schema = RegisterSchemaRequest {
+            catalog: catalog_name.clone(),
+            schema: schema_name.clone(),
+        };
+        let table = RegisterTableRequest {
+            catalog: catalog_name.clone(),
+            schema: schema_name.clone(),
+            table_name,
+            table_id: 0,
+            table: Arc::new(NumbersTable::default()),
+        };
+        catalog
+            .register_catalog(catalog_name.clone())
+            .await
+            .unwrap();
+        catalog.register_schema(schema).await.unwrap();
+        catalog.register_table(table).await.unwrap();
+
+        let request = DeregisterSchemaRequest {
+            catalog: catalog_name.clone(),
+            schema: schema_name.clone(),
+        };
+
+        assert!(catalog.deregister_schema(request).await.unwrap());
+        assert!(!catalog
+            .schema_exist(&catalog_name, &schema_name)
+            .await
+            .unwrap());
     }
 }

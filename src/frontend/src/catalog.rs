@@ -28,8 +28,8 @@ use catalog::helper::{
 use catalog::information_schema::InformationSchemaProvider;
 use catalog::remote::KvCacheInvalidatorRef;
 use catalog::{
-    CatalogManager, DeregisterTableRequest, RegisterSchemaRequest, RegisterSystemTableRequest,
-    RegisterTableRequest, RenameTableRequest,
+    CatalogManager, DeregisterSchemaRequest, DeregisterTableRequest, RegisterSchemaRequest,
+    RegisterSystemTableRequest, RegisterTableRequest, RenameTableRequest,
 };
 use client::client_manager::DatanodeClients;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME};
@@ -152,6 +152,13 @@ impl CatalogManager for FrontendCatalogManager {
         _request: RegisterSchemaRequest,
     ) -> catalog::error::Result<bool> {
         unimplemented!("FrontendCatalogManager does not support register schema")
+    }
+
+    async fn deregister_schema(
+        &self,
+        _request: DeregisterSchemaRequest,
+    ) -> catalog_err::Result<bool> {
+        unimplemented!("FrontendCatalogManager does not support deregister schema")
     }
 
     async fn rename_table(&self, _request: RenameTableRequest) -> catalog_err::Result<bool> {

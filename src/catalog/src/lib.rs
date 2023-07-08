@@ -59,6 +59,9 @@ pub trait CatalogManager: Send + Sync {
     /// This method will/should fail if catalog not exist
     async fn register_schema(&self, request: RegisterSchemaRequest) -> Result<bool>;
 
+    /// Deregisters a database within given catalog/schema to catalog manager
+    async fn deregister_schema(&self, request: DeregisterSchemaRequest) -> Result<bool>;
+
     /// Registers a table within given catalog/schema to catalog manager,
     /// returns whether the table registered.
     ///
@@ -147,6 +150,12 @@ pub struct DeregisterTableRequest {
     pub catalog: String,
     pub schema: String,
     pub table_name: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct DeregisterSchemaRequest {
+    pub catalog: String,
+    pub schema: String,
 }
 
 #[derive(Debug, Clone)]
