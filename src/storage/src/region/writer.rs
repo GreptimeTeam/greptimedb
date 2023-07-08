@@ -857,8 +857,6 @@ impl WriterInner {
                 request.shared_data,
                 compaction_scheduler,
                 compaction_request,
-                request.compact_ctx.max_files_in_l0,
-                true,
             ) {
                 receiver
                     .await
@@ -869,8 +867,6 @@ impl WriterInner {
                 request.shared_data,
                 compaction_scheduler,
                 compaction_request,
-                request.compact_ctx.max_files_in_l0,
-                true,
             );
         }
 
@@ -902,24 +898,9 @@ pub(crate) fn schedule_compaction<S: LogStore>(
     shared_data: SharedDataRef,
     compaction_scheduler: CompactionSchedulerRef<S>,
     compaction_request: CompactionRequestImpl<S>,
-    max_files_in_l0: usize,
-    force: bool,
 ) -> bool {
     let region_id = shared_data.id();
-    let level0_file_num = shared_data
-        .version_control
-        .current()
-        .ssts()
-        .level(0)
-        .file_num();
 
-    if !force && level0_file_num <= max_files_in_l0 {
-        logging::debug!(
-            "No enough SST files in level 0 (threshold: {}), skip compaction",
-            max_files_in_l0
-        );
-        return false;
-    }
     match compaction_scheduler.schedule(compaction_request) {
         Ok(scheduled) => {
             logging::info!(

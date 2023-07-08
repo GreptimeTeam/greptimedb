@@ -194,10 +194,7 @@ impl<S: LogStore> CompactionTask for CompactionTaskImpl<S> {
                     manifest: self.manifest.clone(),
                     wal: self.wal.clone(),
                     region_writer: self.writer.clone(),
-                    compact_ctx: CompactContext {
-                        wait: false,
-                        max_files_in_l0: 8,
-                    },
+                    compact_ctx: CompactContext { wait: false },
                 })
                 .await
             {

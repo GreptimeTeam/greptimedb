@@ -178,16 +178,11 @@ pub type RecoveredMetadataMap = BTreeMap<SequenceNumber, (ManifestVersion, RawRe
 pub struct CompactContext {
     /// Whether to wait the compaction result.
     pub wait: bool,
-    /// Max file number in level 0.
-    pub max_files_in_l0: usize,
 }
 
 impl Default for CompactContext {
     fn default() -> CompactContext {
-        CompactContext {
-            wait: true,
-            max_files_in_l0: 1,
-        }
+        CompactContext { wait: true }
     }
 }
 

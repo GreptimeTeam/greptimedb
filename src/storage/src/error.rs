@@ -530,7 +530,7 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Failed to build scan predicate, source: {}, location: {}",
+        "Failed to join spawned tasks, source: {}, location: {}",
         source,
         location
     ))]
