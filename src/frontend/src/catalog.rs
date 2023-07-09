@@ -130,7 +130,7 @@ impl CatalogManager for FrontendCatalogManager {
     }
 
     async fn register_catalog(&self, _name: String) -> CatalogResult<bool> {
-        unimplemented!("FrontendCatalogManager does not support register catalog")
+        unimplemented!("FrontendCatalogManager does not support registering catalog")
     }
 
     // TODO(LFC): Handle the table caching in (de)register_table.
@@ -151,7 +151,7 @@ impl CatalogManager for FrontendCatalogManager {
         &self,
         _request: RegisterSchemaRequest,
     ) -> catalog::error::Result<bool> {
-        unimplemented!("FrontendCatalogManager does not support register schema")
+        unimplemented!("FrontendCatalogManager does not support registering schema")
     }
 
     async fn deregister_schema(
