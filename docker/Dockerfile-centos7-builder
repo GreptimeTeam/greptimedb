@@ -3,13 +3,8 @@ FROM centos:7
 ENV LANG en_US.utf8
 WORKDIR /greptimedb
 
-RUN sed -e 's|^mirrorlist=|#mirrorlist=|g' \
-             -e 's|^#baseurl=http://mirror.centos.org/centos|baseurl=http://mirrors.tuna.tsinghua.edu.cn/centos|g' \
-             -i.bak \
-             /etc/yum.repos.d/CentOS-*.repo
-
 # Install dependencies
-RUN RUN ulimit -n 1024000 && yum groupinstall -y 'Development Tools'
+RUN ulimit -n 1024000 && yum groupinstall -y 'Development Tools'
 RUN yum install -y epel-release  \
     openssl \
     openssl-devel  \
