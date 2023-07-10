@@ -224,10 +224,10 @@ impl CreateTableProcedure {
             }));
         }
 
-        let _ = join_all(joins)
+        let _r = join_all(joins)
             .await
             .into_iter()
-            .map(|e| e.context(error::JoinSnafu))
+            .map(|e| e.context(error::JoinSnafu).flatten())
             .collect::<Result<Vec<_>>>()?;
 
         self.creator.data.state = CreateTableState::CreateMetadata;
