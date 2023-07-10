@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::{AlterExpr, CreateTableExpr, DropTableExpr, FlushTableExpr};
+use api::v1::{AlterExpr, CompactTableExpr, CreateTableExpr, DropTableExpr, FlushTableExpr};
 use common_catalog::consts::IMMUTABLE_FILE_ENGINE;
 use common_catalog::format_full_table_name;
 use common_grpc_expr::{alter_expr_to_request, create_expr_to_request};
@@ -20,7 +20,7 @@ use common_query::Output;
 use common_telemetry::info;
 use session::context::QueryContext;
 use snafu::prelude::*;
-use table::requests::{DropTableRequest, FlushTableRequest};
+use table::requests::{CompactTableRequest, DropTableRequest, FlushTableRequest};
 
 use crate::error::{
     AlterExprToRequestSnafu, BumpTableIdSnafu, CatalogSnafu, CreateExprToRequestSnafu,
@@ -131,6 +131,25 @@ impl Instance {
         };
         self.sql_handler()
             .execute(SqlRequest::FlushTable(req), QueryContext::arc())
+            .await
+    }
+
+    pub(crate) async fn handle_compact_table(&self, expr: CompactTableExpr) -> Result<Output> {
+        let table_name = if expr.table_name.trim().is_empty() {
+            None
+        } else {
+            Some(expr.table_name)
+        };
+
+        let req = CompactTableRequest {
+            catalog_name: expr.catalog_name,
+            schema_name: expr.schema_name,
+            table_name,
+            region_number: expr.region_number,
+            wait: None,
+        };
+        self.sql_handler()
+            .execute(SqlRequest::CompactTable(req), QueryContext::arc())
             .await
     }
 }

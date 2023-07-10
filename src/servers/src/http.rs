@@ -64,7 +64,7 @@ use self::influxdb::{influxdb_health, influxdb_ping, influxdb_write_v1, influxdb
 use crate::auth::UserProviderRef;
 use crate::configurator::ConfiguratorRef;
 use crate::error::{AlreadyStartedSnafu, Result, StartHttpSnafu};
-use crate::http::admin::flush;
+use crate::http::admin::{compact, flush};
 use crate::metrics::{
     METRIC_HTTP_REQUESTS_ELAPSED, METRIC_HTTP_REQUESTS_TOTAL, METRIC_METHOD_LABEL,
     METRIC_PATH_LABEL, METRIC_STATUS_LABEL,
@@ -627,6 +627,7 @@ impl HttpServer {
     fn route_admin<S>(&self, grpc_handler: ServerGrpcQueryHandlerRef) -> Router<S> {
         Router::new()
             .route("/flush", routing::post(flush))
+            .route("/compact", routing::post(compact))
             .with_state(grpc_handler)
     }
 }

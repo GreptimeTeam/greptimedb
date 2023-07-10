@@ -20,14 +20,14 @@ use common_telemetry::{debug, error, info, timer};
 use itertools::Itertools;
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
-use store_api::storage::RegionId;
+use store_api::storage::{CompactContext, RegionId};
 
 use crate::compaction::writer::build_sst_reader;
 use crate::error;
 use crate::error::Result;
 use crate::manifest::action::RegionEdit;
 use crate::manifest::region::RegionManifest;
-use crate::region::{CompactContext, RegionWriterRef, SharedDataRef, WriterCompactRequest};
+use crate::region::{RegionWriterRef, SharedDataRef, WriterCompactRequest};
 use crate::schema::RegionSchemaRef;
 use crate::sst::{
     AccessLayerRef, FileHandle, FileId, FileMeta, Level, Source, SstInfo, WriteOptions,

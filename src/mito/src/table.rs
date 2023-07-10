@@ -33,8 +33,9 @@ use object_store::ObjectStore;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::manifest::{self, Manifest, ManifestVersion, MetaActionIterator};
 use store_api::storage::{
-    AddColumn, AlterOperation, AlterRequest, ChunkReader, FlushContext, FlushReason, ReadContext,
-    Region, RegionMeta, RegionNumber, ScanRequest, SchemaRef, Snapshot, WriteContext, WriteRequest,
+    AddColumn, AlterOperation, AlterRequest, ChunkReader, CompactContext, FlushContext,
+    FlushReason, ReadContext, Region, RegionMeta, RegionNumber, ScanRequest, SchemaRef, Snapshot,
+    WriteContext, WriteRequest,
 };
 use table::error::{
     InvalidTableSnafu, RegionSchemaMismatchSnafu, Result as TableResult, TableOperationSnafu,
@@ -329,6 +330,33 @@ impl<R: Region> Table for MitoTable<R> {
             .context(TableOperationSnafu)?;
         }
 
+        Ok(())
+    }
+
+    async fn compact(
+        &self,
+        region_number: Option<RegionNumber>,
+        wait: Option<bool>,
+    ) -> TableResult<()> {
+        let compact_ctx = wait.map(|wait| CompactContext { wait }).unwrap_or_default();
+        let regions = self.regions.load();
+
+        if let Some(region_number) = region_number {
+            if let Some(region) = regions.get(&region_number) {
+                region
+                    .compact(&compact_ctx)
+                    .await
+                    .map_err(BoxedError::new)
+                    .context(table_error::TableOperationSnafu)?;
+            }
+        } else {
+            let _ = futures::future::try_join_all(
+                regions.values().map(|region| region.compact(&compact_ctx)),
+            )
+            .await
+            .map_err(BoxedError::new)
+            .context(TableOperationSnafu)?;
+        }
         Ok(())
     }
 

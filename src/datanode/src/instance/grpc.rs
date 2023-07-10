@@ -198,9 +198,7 @@ impl Instance {
             DdlExpr::CreateDatabase(expr) => self.handle_create_database(expr, query_ctx).await,
             DdlExpr::DropTable(expr) => self.handle_drop_table(expr).await,
             DdlExpr::FlushTable(expr) => self.handle_flush_table(expr).await,
-            Expr::CompactTable(_) => {
-                unreachable!("https://github.com/GreptimeTeam/greptimedb/pull/1912")
-            }
+            Expr::CompactTable(expr) => self.handle_compact_table(expr).await,
         }
     }
 }

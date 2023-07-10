@@ -16,7 +16,7 @@ use std::collections::HashMap;
 
 use api::v1::ddl_request::Expr;
 use api::v1::greptime_request::Request;
-use api::v1::{DdlRequest, FlushTableExpr};
+use api::v1::{CompactTableExpr, DdlRequest, FlushTableExpr};
 use axum::extract::{Query, RawBody, State};
 use axum::http::StatusCode;
 use session::context::QueryContext;
@@ -60,6 +60,46 @@ pub async fn flush(
             table_name: table_name.clone(),
             region_number,
             ..Default::default()
+        })),
+    });
+
+    let _ = grpc_handler.do_query(request, QueryContext::arc()).await?;
+    Ok((StatusCode::NO_CONTENT, ()))
+}
+
+#[axum_macros::debug_handler]
+pub async fn compact(
+    State(grpc_handler): State<ServerGrpcQueryHandlerRef>,
+    Query(params): Query<HashMap<String, String>>,
+    RawBody(_): RawBody,
+) -> Result<(StatusCode, ())> {
+    let catalog_name = params
+        .get("catalog")
+        .cloned()
+        .unwrap_or("greptime".to_string());
+    let schema_name = params
+        .get("db")
+        .cloned()
+        .context(error::InvalidFlushArgumentSnafu {
+            err_msg: "db is not present",
+        })?;
+
+    // if table name is not present, flush all tables inside schema
+    let table_name = params.get("table").cloned().unwrap_or_default();
+
+    let region_number: Option<u32> = params
+        .get("region")
+        .map(|v| v.parse())
+        .transpose()
+        .ok()
+        .flatten();
+
+    let request = Request::Ddl(DdlRequest {
+        expr: Some(Expr::CompactTable(CompactTableExpr {
+            catalog_name: catalog_name.clone(),
+            schema_name: schema_name.clone(),
+            table_name: table_name.clone(),
+            region_number,
         })),
     });
 

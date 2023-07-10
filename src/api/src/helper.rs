@@ -256,6 +256,7 @@ fn ddl_request_type(request: &DdlRequest) -> &'static str {
         Some(Expr::Alter(_)) => "ddl.alter",
         Some(Expr::DropTable(_)) => "ddl.drop_table",
         Some(Expr::FlushTable(_)) => "ddl.flush_table",
+        Some(Expr::CompactTable(_)) => "ddl.compact_table",
         None => "ddl.empty",
         _ => unreachable!("https://github.com/GreptimeTeam/greptimedb/pull/1912"),
     }
