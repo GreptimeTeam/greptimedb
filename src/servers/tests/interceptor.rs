@@ -17,8 +17,10 @@ use std::sync::Arc;
 
 use api::v1::greptime_request::Request;
 use api::v1::{InsertRequest, InsertRequests};
-use servers::error::{self, NotSupportedSnafu, Result};
-use servers::interceptor::{GrpcQueryInterceptor, SqlQueryInterceptor};
+use common_query::Output;
+use query::parser::PromQuery;
+use servers::error::{self, InternalSnafu, NotSupportedSnafu, Result};
+use servers::interceptor::{GrpcQueryInterceptor, PromQueryInterceptor, SqlQueryInterceptor};
 use session::context::{QueryContext, QueryContextRef};
 use snafu::ensure;
 
@@ -84,4 +86,49 @@ fn test_grpc_interceptor() {
 
     let req = Request::Inserts(InsertRequests::default());
     GrpcQueryInterceptor::pre_execute(&di, &req, ctx).unwrap();
+}
+
+impl PromQueryInterceptor for NoopInterceptor {
+    type Error = error::Error;
+
+    fn pre_execute(
+        &self,
+        query: &PromQuery,
+        _query_ctx: QueryContextRef,
+    ) -> std::result::Result<(), Self::Error> {
+        match query.query.as_str() {
+            "up" => InternalSnafu { err_msg: "test" }.fail(),
+            _ => Ok(()),
+        }
+    }
+
+    fn post_execute(
+        &self,
+        output: Output,
+        _query_ctx: QueryContextRef,
+    ) -> std::result::Result<Output, Self::Error> {
+        match output {
+            Output::AffectedRows(1) => Ok(Output::AffectedRows(2)),
+            _ => Ok(output),
+        }
+    }
+}
+
+#[test]
+fn test_prom_interceptor() {
+    let di = NoopInterceptor;
+    let ctx = Arc::new(QueryContext::new());
+
+    let query = PromQuery {
+        query: "up".to_string(),
+        ..Default::default()
+    };
+
+    let fail = PromQueryInterceptor::pre_execute(&di, &query, ctx.clone());
+    assert!(fail.is_err());
+
+    let output = Output::AffectedRows(1);
+    let two = PromQueryInterceptor::post_execute(&di, output, ctx);
+    assert!(two.is_ok());
+    matches!(two.unwrap(), Output::AffectedRows(2));
 }
