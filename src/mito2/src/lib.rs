@@ -35,7 +35,7 @@ mod worker;
 ///
 /// ```mermaid
 /// classDiagram
-/// class MitoEngine~LogStore~ {
+/// class MitoEngine {
 ///     -WorkerGroup workers
 /// }
 /// class MitoRegion {
@@ -75,9 +75,9 @@ mod worker;
 /// }
 /// class MitoConfig
 ///
-/// MitoEngine~LogStore~ o-- MitoConfig
-/// MitoEngine~LogStore~ o-- MitoRegion
-/// MitoEngine~LogStore~ o-- WorkerGroup
+/// MitoEngine o-- MitoConfig
+/// MitoEngine o-- MitoRegion
+/// MitoEngine o-- WorkerGroup
 /// MitoRegion o-- VersionControl
 /// MitoRegion -- ChunkReaderImpl
 /// WorkerGroup o-- RegionWorker
