@@ -52,7 +52,7 @@ use servers::http::{HttpOptions, HttpServerBuilder};
 use servers::metrics_handler::MetricsHandler;
 use servers::mysql::server::{MysqlServer, MysqlSpawnConfig, MysqlSpawnRef};
 use servers::postgres::PostgresServer;
-use servers::prom::PromServer;
+use servers::prometheus::PrometheusServer;
 use servers::query_handler::grpc::ServerGrpcQueryHandlerAdaptor;
 use servers::query_handler::sql::ServerSqlQueryHandlerAdaptor;
 use servers::server::Server;
@@ -505,7 +505,7 @@ pub async fn setup_test_prom_app_with_frontend(
         .with_script_handler(frontend_ref.clone())
         .with_prom_handler(frontend_ref.clone())
         .build();
-    let prom_server = PromServer::create_server(frontend_ref);
+    let prom_server = PrometheusServer::create_server(frontend_ref);
     let app = http_server.build(http_server.make_app());
     let app = app.merge(prom_server.make_app());
     (app, guard)

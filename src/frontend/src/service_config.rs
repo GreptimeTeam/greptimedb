@@ -17,13 +17,13 @@ pub mod influxdb;
 pub mod mysql;
 pub mod opentsdb;
 pub mod postgres;
-pub mod prom;
 pub mod prometheus;
+pub mod prom_store;
 
 pub use grpc::GrpcOptions;
 pub use influxdb::InfluxdbOptions;
 pub use mysql::MysqlOptions;
 pub use opentsdb::OpentsdbOptions;
 pub use postgres::PostgresOptions;
-pub use prom::PromOptions;
 pub use prometheus::PrometheusOptions;
+pub use prom_store::PromStoreOptions;

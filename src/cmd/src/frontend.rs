@@ -19,7 +19,7 @@ use common_base::Plugins;
 use common_telemetry::logging;
 use frontend::frontend::FrontendOptions;
 use frontend::instance::{FrontendInstance, Instance as FeInstance};
-use frontend::service_config::{InfluxdbOptions, PromOptions};
+use frontend::service_config::{InfluxdbOptions, PrometheusOptions};
 use meta_client::MetaClientOptions;
 use servers::auth::UserProviderRef;
 use servers::tls::{TlsMode, TlsOption};
@@ -172,7 +172,7 @@ impl StartCommand {
         }
 
         if let Some(addr) = &self.prom_addr {
-            opts.prom_options = Some(PromOptions { addr: addr.clone() });
+            opts.prometheus_options = Some(PrometheusOptions { addr: addr.clone() });
         }
 
         if let Some(addr) = &self.postgres_addr {
@@ -274,7 +274,7 @@ mod tests {
             opts.opentsdb_options.as_ref().unwrap().addr,
             "127.0.0.1:4321"
         );
-        assert_eq!(opts.prom_options.as_ref().unwrap().addr, "127.0.0.1:4444");
+        assert_eq!(opts.prometheus_options.as_ref().unwrap().addr, "127.0.0.1:4444");
 
         let default_opts = FrontendOptions::default();
         assert_eq!(

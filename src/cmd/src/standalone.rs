@@ -23,8 +23,8 @@ use datanode::instance::InstanceRef;
 use frontend::frontend::FrontendOptions;
 use frontend::instance::{FrontendInstance, Instance as FeInstance};
 use frontend::service_config::{
-    GrpcOptions, InfluxdbOptions, MysqlOptions, OpentsdbOptions, PostgresOptions, PromOptions,
-    PrometheusOptions,
+    GrpcOptions, InfluxdbOptions, MysqlOptions, OpentsdbOptions, PostgresOptions, PrometheusOptions,
+    PromStoreOptions,
 };
 use serde::{Deserialize, Serialize};
 use servers::http::HttpOptions;
@@ -89,8 +89,8 @@ pub struct StandaloneOptions {
     pub postgres_options: Option<PostgresOptions>,
     pub opentsdb_options: Option<OpentsdbOptions>,
     pub influxdb_options: Option<InfluxdbOptions>,
+    pub prom_store_options: Option<PromStoreOptions>,
     pub prometheus_options: Option<PrometheusOptions>,
-    pub prom_options: Option<PromOptions>,
     pub wal: WalConfig,
     pub storage: StorageConfig,
     pub procedure: ProcedureConfig,
@@ -108,8 +108,8 @@ impl Default for StandaloneOptions {
             postgres_options: Some(PostgresOptions::default()),
             opentsdb_options: Some(OpentsdbOptions::default()),
             influxdb_options: Some(InfluxdbOptions::default()),
+            prom_store_options: Some(PromStoreOptions::default()),
             prometheus_options: Some(PrometheusOptions::default()),
-            prom_options: Some(PromOptions::default()),
             wal: WalConfig::default(),
             storage: StorageConfig::default(),
             procedure: ProcedureConfig::default(),
@@ -128,8 +128,8 @@ impl StandaloneOptions {
             postgres_options: self.postgres_options,
             opentsdb_options: self.opentsdb_options,
             influxdb_options: self.influxdb_options,
+            prom_store_options: self.prom_store_options,
             prometheus_options: self.prometheus_options,
-            prom_options: self.prom_options,
             meta_client_options: None,
             logging: self.logging,
             ..Default::default()
@@ -269,7 +269,7 @@ impl StartCommand {
         }
 
         if let Some(addr) = &self.prom_addr {
-            opts.prom_options = Some(PromOptions { addr: addr.clone() })
+            opts.prometheus_options = Some(PrometheusOptions { addr: addr.clone() })
         }
 
         if let Some(addr) = &self.postgres_addr {

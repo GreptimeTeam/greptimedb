@@ -16,39 +16,39 @@
 mod tests {
     use std::sync::Arc;
 
-    use api::prometheus::remote::label_matcher::Type as MatcherType;
-    use api::prometheus::remote::{
+    use api::prom_store::remote::label_matcher::Type as MatcherType;
+    use api::prom_store::remote::{
         Label, LabelMatcher, Query, ReadRequest, ReadResponse, Sample, WriteRequest,
     };
     use common_catalog::consts::DEFAULT_CATALOG_NAME;
     use frontend::instance::Instance;
     use prost::Message;
-    use servers::prometheus;
+    use servers::prom_store;
     use servers::query_handler::sql::SqlQueryHandler;
-    use servers::query_handler::PrometheusProtocolHandler;
+    use servers::query_handler::PromStoreProtocolHandler;
     use session::context::QueryContext;
 
     use crate::tests;
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_standalone_prometheus_remote_rw() {
+    async fn test_standalone_prom_store_remote_rw() {
         let standalone =
-            tests::create_standalone_instance("test_standalone_prometheus_remote_rw").await;
+            tests::create_standalone_instance("test_standalone_prom_store_remote_rw").await;
         let instance = &standalone.instance;
 
-        test_prometheus_remote_rw(instance).await;
+        test_prom_store_remote_rw(instance).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_distributed_prometheus_remote_rw() {
+    async fn test_distributed_prom_store_remote_rw() {
         let distributed =
-            tests::create_distributed_instance("test_distributed_prometheus_remote_rw").await;
-        test_prometheus_remote_rw(&distributed.frontend()).await;
+            tests::create_distributed_instance("test_distributed_prom_store_remote_rw").await;
+        test_prom_store_remote_rw(&distributed.frontend()).await;
     }
 
-    async fn test_prometheus_remote_rw(instance: &Arc<Instance>) {
+    async fn test_prom_store_remote_rw(instance: &Arc<Instance>) {
         let write_request = WriteRequest {
-            timeseries: prometheus::mock_timeseries(),
+            timeseries: prom_store::mock_timeseries(),
             ..Default::default()
         };
 
@@ -73,7 +73,7 @@ mod tests {
                     start_timestamp_ms: 1000,
                     end_timestamp_ms: 2000,
                     matchers: vec![LabelMatcher {
-                        name: prometheus::METRIC_NAME_LABEL.to_string(),
+                        name: prom_store::METRIC_NAME_LABEL.to_string(),
                         value: "metric1".to_string(),
                         r#type: 0,
                     }],
@@ -84,7 +84,7 @@ mod tests {
                     end_timestamp_ms: 3000,
                     matchers: vec![
                         LabelMatcher {
-                            name: prometheus::METRIC_NAME_LABEL.to_string(),
+                            name: prom_store::METRIC_NAME_LABEL.to_string(),
                             value: "metric3".to_string(),
                             r#type: 0,
                         },
@@ -103,7 +103,7 @@ mod tests {
         let resp = instance.read(read_request, ctx).await.unwrap();
         assert_eq!(resp.content_type, "application/x-protobuf");
         assert_eq!(resp.content_encoding, "snappy");
-        let body = prometheus::snappy_decompress(&resp.body).unwrap();
+        let body = prom_store::snappy_decompress(&resp.body).unwrap();
         let read_response = ReadResponse::decode(&body[..]).unwrap();
         let query_results = read_response.results;
         assert_eq!(2, query_results.len());
@@ -114,7 +114,7 @@ mod tests {
         assert_eq!(
             vec![
                 Label {
-                    name: prometheus::METRIC_NAME_LABEL.to_string(),
+                    name: prom_store::METRIC_NAME_LABEL.to_string(),
                     value: "metric1".to_string(),
                 },
                 Label {
@@ -145,7 +145,7 @@ mod tests {
         assert_eq!(
             vec![
                 Label {
-                    name: prometheus::METRIC_NAME_LABEL.to_string(),
+                    name: prom_store::METRIC_NAME_LABEL.to_string(),
                     value: "metric3".to_string(),
                 },
                 Label {

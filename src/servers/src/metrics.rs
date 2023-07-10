@@ -36,9 +36,9 @@ pub(crate) const METRIC_HTTP_SQL_ELAPSED: &str = "servers.http_sql_elapsed";
 pub(crate) const METRIC_HTTP_PROMQL_ELAPSED: &str = "servers.http_promql_elapsed";
 pub(crate) const METRIC_AUTH_FAILURE: &str = "servers.auth_failure_count";
 pub(crate) const METRIC_HTTP_INFLUXDB_WRITE_ELAPSED: &str = "servers.http_influxdb_write_elapsed";
-pub(crate) const METRIC_HTTP_PROMETHEUS_WRITE_ELAPSED: &str =
+pub(crate) const METRIC_HTTP_PROM_STORE_WRITE_ELAPSED: &str =
     "servers.http_prometheus_write_elapsed";
-pub(crate) const METRIC_HTTP_PROMETHEUS_READ_ELAPSED: &str = "servers.http_prometheus_read_elapsed";
+pub(crate) const METRIC_HTTP_PROM_STORE_READ_ELAPSED: &str = "servers.http_prometheus_read_elapsed";
 pub(crate) const METRIC_TCP_OPENTSDB_LINE_WRITE_ELAPSED: &str =
     "servers.opentsdb_line_write_elapsed";
 

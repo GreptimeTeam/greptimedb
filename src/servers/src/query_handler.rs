@@ -28,7 +28,7 @@ pub mod sql;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use api::prometheus::remote::{ReadRequest, WriteRequest};
+use api::prom_store::remote::{ReadRequest, WriteRequest};
 use async_trait::async_trait;
 use common_query::Output;
 use session::context::QueryContextRef;
@@ -36,11 +36,11 @@ use session::context::QueryContextRef;
 use crate::error::Result;
 use crate::influxdb::InfluxdbRequest;
 use crate::opentsdb::codec::DataPoint;
-use crate::prometheus::Metrics;
+use crate::prom_store::Metrics;
 
 pub type OpentsdbProtocolHandlerRef = Arc<dyn OpentsdbProtocolHandler + Send + Sync>;
 pub type InfluxdbLineProtocolHandlerRef = Arc<dyn InfluxdbLineProtocolHandler + Send + Sync>;
-pub type PrometheusProtocolHandlerRef = Arc<dyn PrometheusProtocolHandler + Send + Sync>;
+pub type PromStoreProtocolHandlerRef = Arc<dyn PromStoreProtocolHandler + Send + Sync>;
 pub type ScriptHandlerRef = Arc<dyn ScriptHandler + Send + Sync>;
 
 #[async_trait]
@@ -68,18 +68,18 @@ pub trait OpentsdbProtocolHandler {
     async fn exec(&self, data_point: &DataPoint, ctx: QueryContextRef) -> Result<()>;
 }
 
-pub struct PrometheusResponse {
+pub struct PromStoreResponse {
     pub content_type: String,
     pub content_encoding: String,
     pub body: Vec<u8>,
 }
 
 #[async_trait]
-pub trait PrometheusProtocolHandler {
+pub trait PromStoreProtocolHandler {
     /// Handling prometheus remote write requests
     async fn write(&self, request: WriteRequest, ctx: QueryContextRef) -> Result<()>;
     /// Handling prometheus remote read requests
-    async fn read(&self, request: ReadRequest, ctx: QueryContextRef) -> Result<PrometheusResponse>;
+    async fn read(&self, request: ReadRequest, ctx: QueryContextRef) -> Result<PromStoreResponse>;
     /// Handling push gateway requests
     async fn ingest_metrics(&self, metrics: Metrics) -> Result<()>;
 }

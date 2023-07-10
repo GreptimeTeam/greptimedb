@@ -48,11 +48,11 @@ runtime_size = 2
 enable = true
 
 # Prometheus protocol options, see `standalone.example.toml`.
-[prometheus_options]
+[prom_store_options]
 enable = true
 
 # Prometheus protocol options, see `standalone.example.toml`.
-[prom_options]
+[prometheus_options]
 addr = "127.0.0.1:4004"
 
 # Metasrv client options, see `datanode.example.toml`.
