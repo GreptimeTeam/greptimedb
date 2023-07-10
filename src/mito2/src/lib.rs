@@ -29,7 +29,7 @@ mod worker;
 #[cfg_attr(doc, aquamarine::aquamarine)]
 /// # Mito developer document
 ///
-/// # Engine
+/// ## Engine
 ///
 /// Engine hierarchy:
 ///
@@ -87,7 +87,7 @@ mod worker;
 /// RegionWorkerThread~LogStore~ o-- Wal~LogStore~
 /// ```
 ///
-/// # Metadata
+/// ## Metadata
 ///
 /// Metadata hierarchy:
 ///
