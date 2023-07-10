@@ -504,55 +504,54 @@ pub async fn test_config_api(store_type: StorageType) {
     let res_get = client.get("/config").send().await;
     assert_eq!(res_get.status(), StatusCode::OK);
     let expected_toml_str = r#"
-        mode = "standalone"
-        enable_memory_catalog = false
-        rpc_addr = "127.0.0.1:3001"
-        rpc_runtime_size = 8
-        heartbeat_interval_millis = 5000
-        
-        [http_opts]
-        addr = "127.0.0.1:4000"
-        timeout = "30s"
-        body_limit = "64MiB"
-        
-        [wal]
-        dir = "/tmp/gt_wal_config_api2rgVU2"
-        file_size = "256MiB"
-        purge_threshold = "4GiB"
-        purge_interval = "10m"
-        read_batch_size = 128
-        sync_write = false
-        
-        [storage]
-        type = "File"
-        data_home = "/tmp/gt_data_config_apiu6IUGl"
-        
-        [storage.compaction]
-        max_inflight_tasks = 4
-        max_files_in_level0 = 8
-        max_purge_tasks = 32
-        sst_write_buffer_size = "8MiB"
-        
-        [storage.manifest]
-        checkpoint_margin = 10
-        gc_duration = "10m"
-        checkpoint_on_startup = false
-        compress = false
-        
-        [storage.flush]
-        max_flush_tasks = 8
-        region_write_buffer_size = "32MiB"
-        picker_schedule_interval = "5m"
-        auto_flush_interval = "1h"
-        
-        [procedure]
-        max_retry_times = 3
-        retry_delay = "500ms"
-        
-        [logging]
-        dir = "/tmp/greptimedb/logs"
-        enable_jaeger_tracing = false
-    "#;
+    mode = "standalone"
+    enable_memory_catalog = false
+    rpc_addr = "127.0.0.1:3001"
+    rpc_runtime_size = 8
+    heartbeat_interval_millis = 5000
+
+    [http_opts]
+    addr = "127.0.0.1:4000"
+    timeout = "30s"
+    body_limit = "64MiB"
+
+    [wal]
+    dir = "/tmp/gt_wal_config_api2rgVU2"
+    file_size = "256MiB"
+    purge_threshold = "4GiB"
+    purge_interval = "10m"
+    read_batch_size = 128
+    sync_write = false
+
+    [storage]
+    type = "File"
+    data_home = "/tmp/gt_data_config_apiu6IUGl"
+
+    [storage.compaction]
+    max_inflight_tasks = 4
+    max_files_in_level0 = 8
+    max_purge_tasks = 32
+    sst_write_buffer_size = "8MiB"
+
+    [storage.manifest]
+    checkpoint_margin = 10
+    gc_duration = "10m"
+    checkpoint_on_startup = false
+    compress = false
+
+    [storage.flush]
+    max_flush_tasks = 8
+    region_write_buffer_size = "32MiB"
+    picker_schedule_interval = "5m"
+    auto_flush_interval = "1h"
+
+    [procedure]
+    max_retry_times = 3
+    retry_delay = "500ms"
+
+    [logging]
+    dir = "/tmp/greptimedb/logs"
+    enable_jaeger_tracing = false"#;
     let body_text = res_get.text().await;
     assert_eq!(body_text, expected_toml_str);
 }
