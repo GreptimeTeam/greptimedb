@@ -573,10 +573,9 @@ impl PromHandler for Instance {
         query: &PromQuery,
         query_ctx: QueryContextRef,
     ) -> server_error::Result<Output> {
-        let interceptor_ref = self
+        let interceptor = self
             .plugins
             .get::<PromQueryInterceptorRef<server_error::Error>>();
-        let interceptor = interceptor_ref.as_ref();
         interceptor.pre_execute(query, query_ctx.clone())?;
 
         let stmt = QueryLanguageParser::parse_promql(query).with_context(|_| ParsePromQLSnafu {

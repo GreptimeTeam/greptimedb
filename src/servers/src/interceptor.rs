@@ -216,7 +216,7 @@ pub trait PromQueryInterceptor {
 pub type PromQueryInterceptorRef<E> =
     Arc<dyn PromQueryInterceptor<Error = E> + Send + Sync + 'static>;
 
-impl<E> PromQueryInterceptor for Option<&PromQueryInterceptorRef<E>>
+impl<E> PromQueryInterceptor for Option<PromQueryInterceptorRef<E>>
 where
     E: ErrorExt,
 {
