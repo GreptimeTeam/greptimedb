@@ -18,6 +18,7 @@ mod stream_writer;
 
 use std::collections::HashMap;
 use std::fmt;
+use std::fmt::{Debug, Formatter};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -226,9 +227,23 @@ fn new_level_meta_vec() -> LevelMetaVec {
         .unwrap() // safety: LevelMetaVec is a fixed length array with length MAX_LEVEL
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct FileHandle {
     inner: Arc<FileHandleInner>,
+}
+
+impl Debug for FileHandle {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FileHandle")
+            .field("file_id", &self.inner.meta.file_id)
+            .field("region_id", &self.inner.meta.region_id)
+            .field("time_range", &self.inner.meta.time_range)
+            .field("size", &self.inner.meta.file_size)
+            .field("level", &self.inner.meta.level)
+            .field("compacting", &self.inner.compacting)
+            .field("deleted", &self.inner.deleted)
+            .finish()
+    }
 }
 
 impl FileHandle {

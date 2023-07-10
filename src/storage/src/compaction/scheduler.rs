@@ -56,7 +56,7 @@ impl<S: LogStore> Request for CompactionRequestImpl<S> {
 pub struct CompactionRequestImpl<S: LogStore> {
     pub region_id: RegionId,
     pub sst_layer: AccessLayerRef,
-    pub writer: RegionWriterRef,
+    pub writer: RegionWriterRef<S>,
     pub shared: SharedDataRef,
     pub manifest: RegionManifest,
     pub wal: Wal<S>,
@@ -66,6 +66,8 @@ pub struct CompactionRequestImpl<S: LogStore> {
     pub sender: Option<Sender<Result<()>>>,
     pub picker: CompactionPickerRef<S>,
     pub sst_write_buffer_size: ReadableSize,
+    /// Whether to immediately reschedule another compaction when finished.
+    pub reschedule_on_finish: bool,
 }
 
 impl<S: LogStore> CompactionRequestImpl<S> {

@@ -96,7 +96,7 @@ pub struct FlushRegionRequest<S: LogStore> {
     /// Sst access layer of the region.
     pub sst_layer: AccessLayerRef,
     /// Region writer, used to persist log entry that points to the latest manifest file.
-    pub writer: RegionWriterRef,
+    pub writer: RegionWriterRef<S>,
     /// Region write-ahead logging, used to write data/meta to the log file.
     pub wal: Wal<S>,
     /// Region manifest service, used to persist metadata.
@@ -149,6 +149,8 @@ impl<S: LogStore> From<&FlushRegionRequest<S>> for CompactionRequestImpl<S> {
             sender: None,
             picker: req.compaction_picker.clone(),
             sst_write_buffer_size: req.engine_config.sst_write_buffer_size,
+            // compaction triggered by flush always reschedules
+            reschedule_on_finish: true,
         }
     }
 }
@@ -331,13 +333,22 @@ async fn execute_flush_region<S: LogStore>(
         let max_files_in_l0 = req.engine_config.max_files_in_l0;
         let shared_data = req.shared.clone();
 
-        // If flush is success, schedule a compaction request for this region.
-        let _ = region::schedule_compaction(
-            shared_data,
-            compaction_scheduler,
-            compaction_request,
-            max_files_in_l0,
-        );
+        let level0_file_num = shared_data
+            .version_control
+            .current()
+            .ssts()
+            .level(0)
+            .file_num();
+        if level0_file_num <= max_files_in_l0 {
+            logging::debug!(
+                "No enough SST files in level 0 (threshold: {}), skip compaction",
+                max_files_in_l0
+            );
+        } else {
+            // If flush is success, schedule a compaction request for this region.
+            let _ =
+                region::schedule_compaction(shared_data, compaction_scheduler, compaction_request);
+        }
 
         // Complete the request.
         FlushRequest::Region { req, sender }.complete(Ok(()));

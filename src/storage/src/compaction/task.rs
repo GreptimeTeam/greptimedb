@@ -17,14 +17,17 @@ use std::fmt::{Debug, Formatter};
 
 use common_base::readable_size::ReadableSize;
 use common_telemetry::{debug, error, info, timer};
+use itertools::Itertools;
+use snafu::ResultExt;
 use store_api::logstore::LogStore;
 use store_api::storage::RegionId;
 
 use crate::compaction::writer::build_sst_reader;
+use crate::error;
 use crate::error::Result;
 use crate::manifest::action::RegionEdit;
 use crate::manifest::region::RegionManifest;
-use crate::region::{RegionWriterRef, SharedDataRef};
+use crate::region::{CompactContext, RegionWriterRef, SharedDataRef, WriterCompactRequest};
 use crate::schema::RegionSchemaRef;
 use crate::sst::{
     AccessLayerRef, FileHandle, FileId, FileMeta, Level, Source, SstInfo, WriteOptions,
@@ -42,13 +45,14 @@ pub struct CompactionTaskImpl<S: LogStore> {
     pub schema: RegionSchemaRef,
     pub sst_layer: AccessLayerRef,
     pub outputs: Vec<CompactionOutput>,
-    pub writer: RegionWriterRef,
+    pub writer: RegionWriterRef<S>,
     pub shared_data: SharedDataRef,
     pub wal: Wal<S>,
     pub manifest: RegionManifest,
     pub expired_ssts: Vec<FileHandle>,
     pub sst_write_buffer_size: ReadableSize,
     pub compaction_time_window: Option<i64>,
+    pub reschedule_on_finish: bool,
 }
 
 impl<S: LogStore> Debug for CompactionTaskImpl<S> {
@@ -77,6 +81,16 @@ impl<S: LogStore> CompactionTaskImpl<S> {
             let sst_write_buffer_size = self.sst_write_buffer_size;
             compacted_inputs.extend(output.inputs.iter().map(FileHandle::meta));
 
+            info!(
+                "Compaction output [{}]-> {}",
+                output
+                    .inputs
+                    .iter()
+                    .map(|f| f.file_id().to_string())
+                    .join(","),
+                output.output_file_id
+            );
+
             // TODO(hl): Maybe spawn to runtime to exploit in-job parallelism.
             futs.push(async move {
                 output
@@ -90,10 +104,14 @@ impl<S: LogStore> CompactionTaskImpl<S> {
             let mut task_chunk = Vec::with_capacity(MAX_PARALLEL_COMPACTION);
             for _ in 0..MAX_PARALLEL_COMPACTION {
                 if let Some(task) = futs.pop() {
-                    task_chunk.push(task);
+                    task_chunk.push(common_runtime::spawn_bg(task));
                 }
             }
-            let metas = futures::future::try_join_all(task_chunk).await?;
+            let metas = futures::future::try_join_all(task_chunk)
+                .await
+                .context(error::JoinSnafu)?
+                .into_iter()
+                .collect::<Result<Vec<_>>>()?;
             outputs.extend(metas.into_iter().flatten());
         }
 
@@ -155,12 +173,40 @@ impl<S: LogStore> CompactionTask for CompactionTaskImpl<S> {
             "Compacting SST files, input: {:?}, output: {:?}, window: {:?}",
             input_ids, output_ids, self.compaction_time_window
         );
-        self.write_manifest_and_apply(output, compacted)
+
+        let no_output = output.is_empty();
+        let write_result = self
+            .write_manifest_and_apply(output, compacted)
             .await
             .map_err(|e| {
                 error!(e; "Failed to update region manifest: {}", self.shared_data.name());
                 e
-            })
+            });
+
+        if !no_output && self.reschedule_on_finish {
+            // only reschedule another compaction if current compaction has output and it's
+            // triggered by flush.
+            if let Err(e) = self
+                .writer
+                .compact(WriterCompactRequest {
+                    shared_data: self.shared_data.clone(),
+                    sst_layer: self.sst_layer.clone(),
+                    manifest: self.manifest.clone(),
+                    wal: self.wal.clone(),
+                    region_writer: self.writer.clone(),
+                    compact_ctx: CompactContext { wait: false },
+                })
+                .await
+            {
+                error!(e; "Failed to schedule a compaction after compaction, region id: {}", self.shared_data.id());
+            } else {
+                info!(
+                    "Immediately schedule another compaction for region: {}",
+                    self.shared_data.id()
+                );
+            }
+        }
+        write_result
     }
 }
 
@@ -168,6 +214,7 @@ impl<S: LogStore> CompactionTask for CompactionTaskImpl<S> {
 /// and a many-to-one compaction from level n+1 to level n+1.
 #[derive(Debug)]
 pub struct CompactionOutput {
+    pub output_file_id: FileId,
     /// Compaction output file level.
     pub output_level: Level,
     /// The left bound of time window.
@@ -206,13 +253,12 @@ impl CompactionOutput {
         )
         .await?;
 
-        let output_file_id = FileId::random();
         let opts = WriteOptions {
             sst_write_buffer_size,
         };
-
-        Ok(sst_layer
-            .write_sst(output_file_id, Source::Reader(reader), &opts)
+        let _timer = timer!(crate::metrics::MERGE_ELAPSED);
+        let meta = sst_layer
+            .write_sst(self.output_file_id, Source::Reader(reader), &opts)
             .await?
             .map(
                 |SstInfo {
@@ -221,12 +267,13 @@ impl CompactionOutput {
                      ..
                  }| FileMeta {
                     region_id,
-                    file_id: output_file_id,
+                    file_id: self.output_file_id,
                     time_range,
                     level: self.output_level,
                     file_size,
                 },
-            ))
+            );
+        Ok(meta)
     }
 }
 

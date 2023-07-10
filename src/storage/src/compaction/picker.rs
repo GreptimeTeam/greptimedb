@@ -30,7 +30,7 @@ use crate::compaction::scheduler::CompactionRequestImpl;
 use crate::compaction::task::{CompactionOutput, CompactionTask, CompactionTaskImpl};
 use crate::error::{Result, TtlCalculationSnafu};
 use crate::scheduler::Request;
-use crate::sst::{FileHandle, LevelMeta};
+use crate::sst::{FileHandle, FileId, LevelMeta};
 
 /// Picker picks input SST files and builds the compaction task.
 /// Different compaction strategy may implement different pickers.
@@ -152,6 +152,7 @@ impl<S: LogStore> Picker for LeveledTimeWindowPicker<S> {
                 expired_ssts,
                 sst_write_buffer_size: req.sst_write_buffer_size,
                 compaction_time_window,
+                reschedule_on_finish: req.reschedule_on_finish,
             }));
         }
 
@@ -186,6 +187,7 @@ impl<S> LeveledTimeWindowPicker<S> {
         debug!("File bucket:{}, file groups: {:?}", time_window, buckets);
 
         results.extend(buckets.into_iter().map(|(bound, files)| CompactionOutput {
+            output_file_id: FileId::random(),
             output_level: 1,
             time_window_bound: bound,
             time_window_sec: time_window,

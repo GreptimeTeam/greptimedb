@@ -225,7 +225,7 @@ pub struct FlushJob<S: LogStore> {
     /// Sst access layer of the region.
     pub sst_layer: AccessLayerRef,
     /// Region writer, used to persist log entry that points to the latest manifest file.
-    pub writer: RegionWriterRef,
+    pub writer: RegionWriterRef<S>,
     /// Region write-ahead logging, used to write data/meta to the log file.
     pub wal: Wal<S>,
     /// Region manifest service, used to persist metadata.
