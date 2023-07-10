@@ -205,13 +205,6 @@ impl MetaSrvBuilder {
                     )
                 };
 
-                let region_lease_handler = RegionLeaseHandler::new(
-                    kv_store.clone(),
-                    region_failover_handler
-                        .as_ref()
-                        .map(|x| x.region_failover_manager().clone()),
-                );
-
                 let group = HeartbeatHandlerGroup::new(pushers);
                 group.add_handler(ResponseHeaderHandler::default()).await;
                 // `KeepLeaseHandler` should preferably be in front of `CheckLeaderHandler`,
@@ -225,7 +218,7 @@ impl MetaSrvBuilder {
                 if let Some(region_failover_handler) = region_failover_handler {
                     group.add_handler(region_failover_handler).await;
                 }
-                group.add_handler(region_lease_handler).await;
+                group.add_handler(RegionLeaseHandler::default()).await;
                 group.add_handler(PersistStatsHandler::default()).await;
                 group
             }

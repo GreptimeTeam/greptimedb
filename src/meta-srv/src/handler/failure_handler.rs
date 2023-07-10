@@ -36,7 +36,6 @@ pub(crate) struct DatanodeHeartbeat {
 
 pub struct RegionFailureHandler {
     failure_detect_runner: FailureDetectRunner,
-    region_failover_manager: Arc<RegionFailoverManager>,
 }
 
 impl RegionFailureHandler {
@@ -52,12 +51,7 @@ impl RegionFailureHandler {
 
         Ok(Self {
             failure_detect_runner,
-            region_failover_manager,
         })
-    }
-
-    pub(crate) fn region_failover_manager(&self) -> &Arc<RegionFailoverManager> {
-        &self.region_failover_manager
     }
 }
 

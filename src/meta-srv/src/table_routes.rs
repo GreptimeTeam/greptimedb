@@ -37,7 +37,7 @@ pub async fn get_table_global_value(
         .transpose()
 }
 
-pub(crate) async fn batch_get_table_global_value(
+pub async fn batch_get_table_global_value(
     kv_store: &KvStoreRef,
     keys: Vec<&TableGlobalKey>,
 ) -> Result<HashMap<TableGlobalKey, Option<TableGlobalValue>>> {
