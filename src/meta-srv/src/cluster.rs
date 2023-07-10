@@ -260,7 +260,6 @@ mod tests {
             cluster_id: 0,
             id: 100,
             addr: "127.0.0.1:3001".to_string(),
-            is_leader: true,
             ..Default::default()
         };
         let stat_val = StatValue { stats: vec![stat] }.try_into().unwrap();
@@ -280,7 +279,6 @@ mod tests {
         assert_eq!(0, stat.cluster_id);
         assert_eq!(100, stat.id);
         assert_eq!("127.0.0.1:3001", stat.addr);
-        assert!(stat.is_leader);
     }
 
     #[test]

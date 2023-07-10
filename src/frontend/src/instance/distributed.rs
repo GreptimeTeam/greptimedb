@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use api::helper::ColumnDataTypeWrapper;
-use api::v1::ddl_request::Expr as DdlExpr;
+use api::v1::ddl_request::{Expr as DdlExpr, Expr};
 use api::v1::greptime_request::Request;
 use api::v1::{
     column_def, AlterExpr, CreateDatabaseExpr, CreateTableExpr, DeleteRequest, DropTableExpr,
@@ -596,6 +596,9 @@ impl GrpcQueryHandler for DistInstance {
                         let table_name =
                             TableName::new(&expr.catalog_name, &expr.schema_name, &expr.table_name);
                         self.flush_table(table_name, expr.region_number).await
+                    }
+                    Expr::CompactTable(_) => {
+                        unreachable!("https://github.com/GreptimeTeam/greptimedb/pull/1912")
                     }
                 }
             }

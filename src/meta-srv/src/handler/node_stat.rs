@@ -24,8 +24,6 @@ pub struct Stat {
     pub cluster_id: u64,
     pub id: u64,
     pub addr: String,
-    /// Leader node
-    pub is_leader: bool,
     /// The read capacity units during this period
     pub rcus: i64,
     /// The write capacity units during this period
@@ -34,13 +32,6 @@ pub struct Stat {
     pub table_num: i64,
     /// How many regions on this node
     pub region_num: Option<u64>,
-    pub cpu_usage: f64,
-    pub load: f64,
-    /// Read disk IO on this node
-    pub read_io_rate: f64,
-    /// Write disk IO on this node
-    pub write_io_rate: f64,
-    /// Region stats on this node
     pub region_stats: Vec<RegionStat>,
     // The node epoch is used to check whether the node has restarted or redeployed.
     pub node_epoch: u64,
@@ -78,7 +69,6 @@ impl TryFrom<HeartbeatRequest> for Stat {
         let HeartbeatRequest {
             header,
             peer,
-            is_leader,
             node_stat,
             region_stats,
             node_epoch,
@@ -92,20 +82,16 @@ impl TryFrom<HeartbeatRequest> for Stat {
                 } else {
                     None
                 };
+
                 Ok(Self {
                     timestamp_millis: time_util::current_time_millis(),
                     cluster_id: header.cluster_id,
                     id: peer.id,
                     addr: peer.addr,
-                    is_leader,
                     rcus: node_stat.rcus,
                     wcus: node_stat.wcus,
                     table_num: node_stat.table_num,
                     region_num,
-                    cpu_usage: node_stat.cpu_usage,
-                    load: node_stat.load,
-                    read_io_rate: node_stat.read_io_rate,
-                    write_io_rate: node_stat.write_io_rate,
                     region_stats: region_stats.into_iter().map(RegionStat::from).collect(),
                     node_epoch,
                 })
@@ -117,7 +103,10 @@ impl TryFrom<HeartbeatRequest> for Stat {
 
 impl From<api::v1::meta::RegionStat> for RegionStat {
     fn from(value: api::v1::meta::RegionStat) -> Self {
-        let table = value.table_name.as_ref();
+        let table = value
+            .table_ident
+            .as_ref()
+            .and_then(|t| t.table_name.as_ref());
         Self {
             id: value.region_id,
             catalog: table.map_or("", |t| &t.catalog_name).to_string(),
