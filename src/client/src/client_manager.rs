@@ -23,6 +23,8 @@ use moka::future::{Cache, CacheBuilder};
 
 use crate::Client;
 
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
+
 pub struct DatanodeClients {
     channel_manager: ChannelManager,
     clients: Cache<Peer, Client>,
@@ -31,7 +33,9 @@ pub struct DatanodeClients {
 
 impl Default for DatanodeClients {
     fn default() -> Self {
-        let config = ChannelConfig::new().timeout(Duration::from_secs(8));
+        let config = ChannelConfig::new()
+            .timeout(DEFAULT_TIMEOUT)
+            .connect_timeout(DEFAULT_TIMEOUT);
 
         Self {
             channel_manager: ChannelManager::with_config(config),
