@@ -26,6 +26,7 @@ use crate::statements::insert::Insert;
 use crate::statements::query::Query;
 use crate::statements::show::{ShowCreateTable, ShowDatabases, ShowTables};
 use crate::statements::tql::Tql;
+use crate::statements::truncate::TruncateTable;
 
 /// Tokens parsed by `DFParser` are converted into these values.
 #[allow(clippy::large_enum_variant)]
@@ -61,6 +62,8 @@ pub enum Statement {
     // COPY
     Copy(crate::statements::copy::Copy),
     Tql(Tql),
+    // TRUNCATE TABLE
+    TruncateTable(TruncateTable),
 }
 
 /// Comment hints from SQL.

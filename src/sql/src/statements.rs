@@ -24,6 +24,7 @@ pub mod query;
 pub mod show;
 pub mod statement;
 pub mod tql;
+pub mod truncate;
 
 use std::str::FromStr;
 

@@ -12,11 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod alter_parser;
-pub(crate) mod copy_parser;
-pub(crate) mod create_parser;
-pub(crate) mod delete_parser;
-pub(crate) mod insert_parser;
-pub(crate) mod query_parser;
-pub(crate) mod tql_parser;
-pub(crate) mod truncate_parser;
+use sqlparser::ast::ObjectName;
+
+/// TRUNCATE TABLE statement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TruncateTable {
+    table_name: ObjectName,
+}
+
+impl TruncateTable {
+    /// Creates a statement for `TRUNCATE TABLE`
+    pub fn new(table_name: ObjectName) -> Self {
+        Self { table_name }
+    }
+
+    pub fn table_name(&self) -> &ObjectName {
+        &self.table_name
+    }
+}
