@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
-use api::v1::meta::{RegionStat, TableName};
+use api::v1::meta::{RegionStat, TableIdent, TableName};
 use common_telemetry::{info, warn};
 use snafu::ResultExt;
 use table::engine::{EngineContext, TableEngineRef};
@@ -226,19 +226,25 @@ pub async fn datanode_stat(catalog_manager: &CatalogManagerRef) -> (u64, Vec<Reg
             for table_name in table_names {
                 let Ok(Some(table)) = catalog_manager.table(&catalog_name, &schema_name, &table_name).await else { continue };
 
-                let region_numbers = &table.table_info().meta.region_numbers;
+                let table_info = table.table_info();
+                let region_numbers = &table_info.meta.region_numbers;
                 region_number += region_numbers.len() as u64;
 
-                let engine = &table.table_info().meta.engine;
+                let engine = &table_info.meta.engine;
+                let table_id = table_info.ident.table_id;
 
                 match table.region_stats() {
                     Ok(stats) => {
                         let stats = stats.into_iter().map(|stat| RegionStat {
                             region_id: stat.region_id,
-                            table_name: Some(TableName {
-                                catalog_name: catalog_name.clone(),
-                                schema_name: schema_name.clone(),
-                                table_name: table_name.clone(),
+                            table_ident: Some(TableIdent {
+                                table_id,
+                                table_name: Some(TableName {
+                                    catalog_name: catalog_name.clone(),
+                                    schema_name: schema_name.clone(),
+                                    table_name: table_name.clone(),
+                                }),
+                                engine: engine.clone(),
                             }),
                             approximate_bytes: stat.disk_usage_bytes as i64,
                             attrs: HashMap::from([("engine_name".to_owned(), engine.clone())]),

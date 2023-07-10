@@ -278,7 +278,6 @@ mod tests {
         let stat = Stat {
             cluster_id: 0,
             id: 101,
-            is_leader: false,
             region_num: Some(100),
             ..Default::default()
         };
@@ -294,7 +293,6 @@ mod tests {
         let stat = stats.get(0).unwrap();
         assert_eq!(0, stat.cluster_id);
         assert_eq!(101, stat.id);
-        assert!(!stat.is_leader);
         assert_eq!(Some(100), stat.region_num);
     }
 
