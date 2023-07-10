@@ -268,6 +268,12 @@ fn write_iter_memtable_case(ctx: &TestContext) {
 }
 
 #[test]
+fn test_iter_context_default() {
+    let ctx = IterContext::default();
+    assert_eq!(SequenceNumber::MAX, ctx.visible_sequence);
+}
+
+#[test]
 fn test_write_iter_memtable() {
     let tester = MemtableTester::default();
     tester.run_testcase(|ctx| {
@@ -435,7 +441,6 @@ fn test_sequence_visibility() {
             let iter_ctx = IterContext {
                 batch_size: 1,
                 visible_sequence: 9,
-                for_flush: false,
                 projected_schema: None,
                 time_range: None,
             };
@@ -454,7 +459,6 @@ fn test_sequence_visibility() {
             let iter_ctx = IterContext {
                 batch_size: 1,
                 visible_sequence: 10,
-                for_flush: false,
                 projected_schema: None,
                 time_range: None,
             };
@@ -473,7 +477,6 @@ fn test_sequence_visibility() {
             let iter_ctx = IterContext {
                 batch_size: 1,
                 visible_sequence: 11,
-                for_flush: false,
                 projected_schema: None,
                 time_range: None,
             };
