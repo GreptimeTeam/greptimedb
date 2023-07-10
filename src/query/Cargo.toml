@@ -52,6 +52,7 @@ tokio.workspace = true
 
 [dev-dependencies]
 approx_eq = "0.1"
+catalog = { path = "../catalog", features = ["testing"] }
 common-function-macro = { path = "../common/function-macro" }
 format_num = "0.1"
 num = "0.4"
