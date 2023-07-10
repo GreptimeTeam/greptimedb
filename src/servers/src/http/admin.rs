@@ -19,6 +19,7 @@ use api::v1::greptime_request::Request;
 use api::v1::{CompactTableExpr, DdlRequest, FlushTableExpr};
 use axum::extract::{Query, RawBody, State};
 use axum::http::StatusCode;
+use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use session::context::QueryContext;
 use snafu::OptionExt;
 
@@ -35,7 +36,7 @@ pub async fn flush(
     let catalog_name = params
         .get("catalog")
         .cloned()
-        .unwrap_or("greptime".to_string());
+        .unwrap_or(DEFAULT_CATALOG_NAME.to_string());
     let schema_name = params
         .get("db")
         .cloned()
@@ -63,7 +64,7 @@ pub async fn flush(
         })),
     });
 
-    let _ = grpc_handler.do_query(request, QueryContext::arc()).await?;
+    grpc_handler.do_query(request, QueryContext::arc()).await?;
     Ok((StatusCode::NO_CONTENT, ()))
 }
 
@@ -76,7 +77,7 @@ pub async fn compact(
     let catalog_name = params
         .get("catalog")
         .cloned()
-        .unwrap_or("greptime".to_string());
+        .unwrap_or(DEFAULT_CATALOG_NAME.to_string());
     let schema_name = params
         .get("db")
         .cloned()
@@ -103,6 +104,6 @@ pub async fn compact(
         })),
     });
 
-    let _ = grpc_handler.do_query(request, QueryContext::arc()).await?;
+    grpc_handler.do_query(request, QueryContext::arc()).await?;
     Ok((StatusCode::NO_CONTENT, ()))
 }

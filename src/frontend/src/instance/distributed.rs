@@ -252,7 +252,7 @@ impl DistInstance {
 
             let client = self.datanode_clients.get_client(&candidate).await;
             let client = Database::new(&expr.catalog_name, &expr.schema_name, client);
-            let _ = client
+            client
                 .flush_table(expr.clone())
                 .await
                 .context(RequestDatanodeSnafu)?;
@@ -282,7 +282,7 @@ impl DistInstance {
 
             let client = self.datanode_clients.get_client(&candidate).await;
             let client = Database::new(&expr.catalog_name, &expr.schema_name, client);
-            let _ = client
+            client
                 .compact_table(expr.clone())
                 .await
                 .context(RequestDatanodeSnafu)?;
