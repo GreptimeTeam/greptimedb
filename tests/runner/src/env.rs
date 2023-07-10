@@ -183,7 +183,7 @@ impl Env {
             _ => panic!("Unexpected subcommand: {subcommand}"),
         };
 
-        if util::check_port(check_ip_addr.parse().unwrap(), Duration::from_secs(10)).await {
+        if util::check_port(check_ip_addr.parse().unwrap(), Duration::from_secs(0.1)).await {
             panic!(
                 "Port {check_ip_addr} is already in use, please check and retry.",
                 check_ip_addr = check_ip_addr
