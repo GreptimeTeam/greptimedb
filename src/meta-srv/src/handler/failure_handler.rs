@@ -89,9 +89,9 @@ impl HeartbeatHandler for RegionFailureHandler {
                     cluster_id: stat.cluster_id,
                     datanode_id: stat.id,
                     table_ident: TableIdent {
-                        catalog: x.catalog.clone(),
-                        schema: x.schema.clone(),
-                        table: x.table.clone(),
+                        catalog: x.table_ident.catalog.clone(),
+                        schema: x.table_ident.schema.clone(),
+                        table: x.table_ident.table.clone(),
                         table_id: RegionId::from(x.id).table_id(),
                         // TODO(#1583): Use the actual table engine.
                         engine: MITO_ENGINE.to_string(),
@@ -132,9 +132,13 @@ mod tests {
         fn new_region_stat(region_id: u64) -> RegionStat {
             RegionStat {
                 id: region_id,
-                catalog: "a".to_string(),
-                schema: "b".to_string(),
-                table: "c".to_string(),
+                table_ident: TableIdent {
+                    catalog: "a".to_string(),
+                    schema: "b".to_string(),
+                    table: "c".to_string(),
+                    table_id: 0,
+                    engine: "d".to_string(),
+                },
                 rcus: 0,
                 wcus: 0,
                 approximate_bytes: 0,

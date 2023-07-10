@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use api::v1::meta::HeartbeatRequest;
+use common_meta::ident::TableIdent;
 use common_time::util as time_util;
 use serde::{Deserialize, Serialize};
 
@@ -40,9 +41,7 @@ pub struct Stat {
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct RegionStat {
     pub id: u64,
-    pub catalog: String,
-    pub schema: String,
-    pub table: String,
+    pub table_ident: TableIdent,
     /// The read capacity units during this period
     pub rcus: i64,
     /// The write capacity units during this period
@@ -82,6 +81,11 @@ impl TryFrom<HeartbeatRequest> for Stat {
                 } else {
                     None
                 };
+                let region_stats = region_stats
+                    .into_iter()
+                    .map(RegionStat::try_from)
+                    .collect::<Result<Vec<_>, ()>>();
+                let Ok(region_stats) = region_stats else { return Err(()) };
 
                 Ok(Self {
                     timestamp_millis: time_util::current_time_millis(),
@@ -92,7 +96,7 @@ impl TryFrom<HeartbeatRequest> for Stat {
                     wcus: node_stat.wcus,
                     table_num: node_stat.table_num,
                     region_num,
-                    region_stats: region_stats.into_iter().map(RegionStat::from).collect(),
+                    region_stats,
                     node_epoch,
                 })
             }
@@ -101,22 +105,24 @@ impl TryFrom<HeartbeatRequest> for Stat {
     }
 }
 
-impl From<api::v1::meta::RegionStat> for RegionStat {
-    fn from(value: api::v1::meta::RegionStat) -> Self {
-        let table = value
-            .table_ident
-            .as_ref()
-            .and_then(|t| t.table_name.as_ref());
-        Self {
+impl TryFrom<api::v1::meta::RegionStat> for RegionStat {
+    type Error = ();
+
+    fn try_from(value: api::v1::meta::RegionStat) -> Result<Self, Self::Error> {
+        let Some(table_ident) = value.table_ident else {
+            return Err(())
+        };
+        let Ok(table_ident) = TableIdent::try_from(table_ident) else {
+            return Err(())
+        };
+        Ok(Self {
             id: value.region_id,
-            catalog: table.map_or("", |t| &t.catalog_name).to_string(),
-            schema: table.map_or("", |t| &t.schema_name).to_string(),
-            table: table.map_or("", |t| &t.table_name).to_string(),
+            table_ident,
             rcus: value.rcus,
             wcus: value.wcus,
             approximate_bytes: value.approximate_bytes,
             approximate_rows: value.approximate_rows,
-        }
+        })
     }
 }
 

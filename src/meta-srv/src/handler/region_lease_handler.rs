@@ -95,9 +95,9 @@ impl HeartbeatHandler for RegionLeaseHandler {
         let mut datanode_regions = HashMap::new();
         stat.region_stats.iter().for_each(|x| {
             let key = TableGlobalKey {
-                catalog_name: x.catalog.to_string(),
-                schema_name: x.schema.to_string(),
-                table_name: x.table.to_string(),
+                catalog_name: x.table_ident.catalog.to_string(),
+                schema_name: x.table_ident.schema.to_string(),
+                table_name: x.table_ident.table.to_string(),
             };
             datanode_regions
                 .entry(key)
@@ -199,9 +199,12 @@ mod test {
         let new_region_stat = |region_id: u64| -> RegionStat {
             RegionStat {
                 id: region_id,
-                catalog: DEFAULT_CATALOG_NAME.to_string(),
-                schema: DEFAULT_SCHEMA_NAME.to_string(),
-                table: table_name.to_string(),
+                table_ident: TableIdent {
+                    catalog: DEFAULT_CATALOG_NAME.to_string(),
+                    schema: DEFAULT_SCHEMA_NAME.to_string(),
+                    table: table_name.to_string(),
+                    ..Default::default()
+                },
                 ..Default::default()
             }
         };
