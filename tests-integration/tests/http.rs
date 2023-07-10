@@ -559,14 +559,13 @@ pub async fn test_config_api(store_type: StorageType) {
 fn drop_lines_with_inconsistent_results(input: String) -> String {
     input
         .lines()
-        .into_iter()
         .filter(|line| !line.trim().starts_with("dir =") && !line.trim().starts_with("data_home ="))
         .collect::<Vec<&str>>()
         .join("\n")
 }
 
 fn normalize_str(s: &str) -> String {
-    s.replace(" ", "").replace("\n", "")
+    s.replace([' ', '\n'], "")
 }
 
 #[cfg(feature = "dashboard")]
