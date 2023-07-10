@@ -253,9 +253,9 @@ impl<S: LogStore> FlushJob<S> {
         let region_id = self.shared.id();
         let mut futures = Vec::with_capacity(self.memtables.len());
         let iter_ctx = IterContext {
-            for_flush: true,
             // TODO(ruihang): dynamic row group size based on content (#412)
             batch_size: WRITE_ROW_GROUP_SIZE,
+            // All sequences are visiable by default.
             ..Default::default()
         };
 

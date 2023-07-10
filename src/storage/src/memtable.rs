@@ -99,11 +99,6 @@ pub struct IterContext {
     /// Max visible sequence (inclusive).
     pub visible_sequence: SequenceNumber,
 
-    // TODO(yingwen): [flush] Maybe delay deduping and visiblility handling, just returns all rows
-    // in memtable.
-    /// Returns all rows, ignores sequence visibility and key duplication.
-    pub for_flush: bool,
-
     /// Schema the reader expect to read.
     ///
     /// Set to `None` to read all columns.
@@ -119,7 +114,6 @@ impl Default for IterContext {
             batch_size: consts::READ_BATCH_SIZE,
             // All data in memory is visible by default.
             visible_sequence: SequenceNumber::MAX,
-            for_flush: false,
             projected_schema: None,
             time_range: None,
         }
