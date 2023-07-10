@@ -314,4 +314,29 @@ mod test {
         );
         assert_eq!(expected, format!("{:?}", result));
     }
+
+    #[test]
+    fn transform_single_limit() {
+        let numbers_table = Arc::new(NumbersTable::new(0)) as _;
+        let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+            DfTableProviderAdapter::new(numbers_table),
+        )));
+
+        let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+            .unwrap()
+            .limit(0, Some(1))
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let config = ConfigOptions::default();
+        let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+        let expected = String::from(
+            "Limit: skip=0, fetch=1\
+            \n  MergeScan [is_placeholder=false]\
+            \n    Limit: skip=0, fetch=1\
+            \n      TableScan: t",
+        );
+        assert_eq!(expected, format!("{:?}", result));
+    }
 }
