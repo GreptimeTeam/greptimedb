@@ -103,13 +103,14 @@ impl DistInserter {
             let table_info = self.find_table_info(&request.table_name).await?;
             let table_meta = &table_info.meta;
 
+            let table_id = table_info.table_id();
             let split = partition_manager
-                .split_insert_request(&table_name, request, table_meta.schema.as_ref())
+                .split_insert_request(table_id, request, table_meta.schema.as_ref())
                 .await
                 .context(SplitInsertSnafu)?;
 
             let table_route = partition_manager
-                .find_table_route(&table_name)
+                .find_table_route(table_id)
                 .await
                 .with_context(|_| FindTableRouteSnafu {
                     table_name: table_name.to_string(),
@@ -252,23 +253,23 @@ mod tests {
             .table_name_manager()
             .create(&key, table_id)
             .await
-            .unwrap()
-            .is_none());
+            .is_ok());
 
         assert!(table_metadata_manager
             .table_info_manager()
-            .put_old(table_info)
+            .compare_and_put(table_id, None, table_info)
             .await
             .is_ok());
 
-        assert!(table_metadata_manager
+        let _ = table_metadata_manager
             .table_region_manager()
-            .put_old(
-                &key.into(),
+            .compare_and_put(
+                1,
+                None,
                 RegionDistribution::from([(1, vec![1]), (2, vec![2]), (3, vec![3])]),
             )
             .await
-            .is_ok());
+            .unwrap();
     }
 
     #[tokio::test]

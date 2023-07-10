@@ -88,7 +88,7 @@ impl HttpHandler for TablesHandler {
         let tables = self
             .table_metadata_manager
             .table_name_manager()
-            .tables_old(catalog, schema)
+            .tables(catalog, schema)
             .await
             .context(TableMetadataManagerSnafu)?;
 
@@ -120,16 +120,16 @@ impl HttpHandler for TableHandler {
         let table_id = self
             .table_metadata_manager
             .table_name_manager()
-            .get_old(&key)
+            .get(key)
             .await
             .context(TableMetadataManagerSnafu)?
             .map(|x| x.table_id());
 
-        if let Some(_table_id) = table_id {
+        if let Some(table_id) = table_id {
             let table_info_value = self
                 .table_metadata_manager
                 .table_info_manager()
-                .get_old(&key.into())
+                .get(table_id)
                 .await
                 .context(TableMetadataManagerSnafu)?
                 .map(|x| format!("{x:?}"))
@@ -137,11 +137,11 @@ impl HttpHandler for TableHandler {
             result.insert("table_info_value", table_info_value);
         }
 
-        if let Some(_table_id) = table_id {
+        if let Some(table_id) = table_id {
             let table_region_value = self
                 .table_metadata_manager
                 .table_region_manager()
-                .get_old(&key.into())
+                .get(table_id)
                 .await
                 .context(TableMetadataManagerSnafu)?
                 .map(|x| format!("{x:?}"))
@@ -206,10 +206,9 @@ async fn get_keys_by_prefix(key_prefix: String, kv_store: &KvStoreRef) -> Result
 mod tests {
     use std::sync::Arc;
 
-    use common_meta::helper::{
-        build_catalog_prefix, build_schema_prefix, build_table_global_prefix, CatalogKey,
-        SchemaKey, TableGlobalKey,
-    };
+    use common_meta::helper::{build_catalog_prefix, build_schema_prefix, CatalogKey, SchemaKey};
+    use common_meta::key::table_name::TableNameKey;
+    use common_meta::key::TableMetaKey;
     use common_meta::rpc::store::PutRequest;
 
     use crate::service::admin::meta::get_keys_by_prefix;
@@ -247,19 +246,11 @@ mod tests {
             .await
             .is_ok());
 
-        let table1 = TableGlobalKey {
-            catalog_name: catalog_name.to_string(),
-            schema_name: schema_name.to_string(),
-            table_name: table_name.to_string(),
-        };
-        let table2 = TableGlobalKey {
-            catalog_name: catalog_name.to_string(),
-            schema_name: schema_name.to_string(),
-            table_name: "test_table1".to_string(),
-        };
+        let table1 = TableNameKey::new(catalog_name, schema_name, table_name);
+        let table2 = TableNameKey::new(catalog_name, schema_name, "test_table1");
         assert!(in_mem
             .put(PutRequest {
-                key: table1.to_string().as_bytes().to_vec(),
+                key: table1.as_raw_key(),
                 value: "".as_bytes().to_vec(),
                 prev_kv: false,
             })
@@ -267,7 +258,7 @@ mod tests {
             .is_ok());
         assert!(in_mem
             .put(PutRequest {
-                key: table2.to_string().as_bytes().to_vec(),
+                key: table2.as_raw_key(),
                 value: "".as_bytes().to_vec(),
                 prev_kv: false,
             })
@@ -281,7 +272,10 @@ mod tests {
             .await
             .unwrap();
         let table_key = get_keys_by_prefix(
-            build_table_global_prefix(table1.catalog_name, table1.schema_name),
+            format!(
+                "{}/",
+                TableNameKey::prefix_to_table(table1.catalog, table1.schema)
+            ),
             &in_mem,
         )
         .await

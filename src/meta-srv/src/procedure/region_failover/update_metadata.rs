@@ -17,7 +17,6 @@ use async_trait::async_trait;
 use common_meta::key::TableRouteKey;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::TableRoute;
-use common_meta::table_name::TableName;
 use common_meta::RegionIdent;
 use common_telemetry::info;
 use serde::{Deserialize, Serialize};
@@ -27,7 +26,7 @@ use super::invalidate_cache::InvalidateCache;
 use super::{RegionFailoverContext, State};
 use crate::error::{
     CorruptedTableRouteSnafu, Result, RetryLaterSnafu, TableMetadataManagerSnafu,
-    TableNotFoundSnafu, TableRouteConversionSnafu,
+    TableNotFoundSnafu, TableRouteConversionSnafu, UpdateTableMetadataSnafu,
 };
 use crate::lock::keys::table_metadata_lock_key;
 use crate::lock::Opts;
@@ -54,6 +53,8 @@ impl UpdateRegionMetadata {
 
         self.update_table_region_value(ctx, failed_region).await?;
 
+        self.update_region_placement(ctx, failed_region).await?;
+
         self.update_table_route(ctx, failed_region).await?;
 
         ctx.dist_lock.unlock(key).await?;
@@ -65,19 +66,14 @@ impl UpdateRegionMetadata {
         ctx: &RegionFailoverContext,
         failed_region: &RegionIdent,
     ) -> Result<()> {
+        let table_region_manager = ctx.table_metadata_manager.table_region_manager();
+
         let table_ident = &failed_region.table_ident;
         let table_id = table_ident.table_id;
-        let table_name = TableName::new(
-            &table_ident.catalog,
-            &table_ident.schema,
-            &table_ident.table,
-        );
-        let value = ctx
-            .table_metadata_manager
-            .table_region_manager()
-            .get_old(&table_name)
+        let value = table_region_manager
+            .get(table_id)
             .await
-            .context(TableMetadataManagerSnafu)?
+            .context(TableRouteConversionSnafu)?
             .with_context(|| TableNotFoundSnafu {
                 name: table_ident.to_string(),
             })?;
@@ -96,17 +92,37 @@ impl UpdateRegionMetadata {
             .or_insert_with(Vec::new);
         region_numbers.push(failed_region.region_number);
 
-        ctx.table_metadata_manager
-            .table_region_manager()
-            .put_old(&table_name, region_distribution.clone())
+        table_region_manager
+            .compare_and_put(table_id, Some(value.clone()), region_distribution.clone())
             .await
-            .context(TableMetadataManagerSnafu)?;
+            .context(TableMetadataManagerSnafu)?
+            .map_err(|curr| UpdateTableMetadataSnafu {
+                err_msg: format!("region distribution is concurrently updating, expected '{value:?}' but actual: '{curr:?}'")
+            }.build())?;
 
         info!(
             "Region distribution of table (id = {table_id}) is updated to {:?}. \
             Failed region {} was on Datanode {}.",
             region_distribution, failed_region.region_number, failed_region.datanode_id,
         );
+        Ok(())
+    }
+
+    async fn update_region_placement(
+        &self,
+        ctx: &RegionFailoverContext,
+        failed_region: &RegionIdent,
+    ) -> Result<()> {
+        ctx.table_metadata_manager
+            .datanode_table_manager()
+            .move_region(
+                failed_region.datanode_id,
+                self.candidate.id,
+                failed_region.table_ident.table_id,
+                failed_region.region_number,
+            )
+            .await
+            .context(TableMetadataManagerSnafu)?;
         Ok(())
     }
 
@@ -240,7 +256,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_update_table_info_value() {
+    async fn test_update_table_region_value() {
         common_telemetry::init_default_ut_logging();
 
         async fn test(
@@ -256,15 +272,10 @@ mod tests {
                 .await
                 .unwrap();
 
-            let table_ident = failed_region.table_ident;
             env.context
                 .table_metadata_manager
                 .table_region_manager()
-                .get_old(&TableName::new(
-                    &table_ident.catalog,
-                    &table_ident.schema,
-                    &table_ident.table,
-                ))
+                .get(failed_region.table_ident.table_id)
                 .await
                 .unwrap()
                 .unwrap()
@@ -514,11 +525,10 @@ mod tests {
             assert_eq!(peers.len(), 2);
             assert_eq!(actual, expected);
 
-            let map = env
-                .context
-                .table_metadata_manager
+            let manager = &env.context.table_metadata_manager;
+            let map = manager
                 .table_region_manager()
-                .get_old(&TableName::new(&catalog_name, &schema_name, &table_name))
+                .get(table_id)
                 .await
                 .unwrap()
                 .unwrap()
@@ -526,6 +536,21 @@ mod tests {
             assert_eq!(map.len(), 2);
             assert_eq!(map.get(&2), Some(&vec![3, 1]));
             assert_eq!(map.get(&3), Some(&vec![4, 2]));
+
+            // test DatanodeTableValues matches the table region distribution
+            let datanode_table_manager = manager.datanode_table_manager();
+            let tables = datanode_table_manager.tables(1).await.unwrap();
+            assert!(tables.is_empty());
+
+            let tables = datanode_table_manager.tables(2).await.unwrap();
+            assert_eq!(tables.len(), 1);
+            assert_eq!(tables[0].table_id, 1);
+            assert_eq!(tables[0].regions, vec![3, 1]);
+
+            let tables = datanode_table_manager.tables(3).await.unwrap();
+            assert_eq!(tables.len(), 1);
+            assert_eq!(tables[0].table_id, 1);
+            assert_eq!(tables[0].regions, vec![4, 2]);
         }
     }
 }

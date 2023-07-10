@@ -21,6 +21,7 @@ use crate::key::to_removed_key;
 
 pub const TABLE_ROUTE_PREFIX: &str = "__meta_table_route";
 
+#[derive(Copy, Clone)]
 pub struct TableRouteKey<'a> {
     pub table_id: TableId,
     pub catalog_name: &'a str,

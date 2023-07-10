@@ -424,8 +424,8 @@ pub enum Error {
     #[snafu(display("Expected to retry later, reason: {}", reason))]
     RetryLater { reason: String, location: Location },
 
-    #[snafu(display("Combine error: {}", err_msg))]
-    Combine { err_msg: String, location: Location },
+    #[snafu(display("Failed to update table metadata, err_msg: {}", err_msg))]
+    UpdateTableMetadata { err_msg: String, location: Location },
 
     #[snafu(display("Failed to convert table route, source: {}", source))]
     TableRouteConversion {
@@ -504,7 +504,7 @@ impl ErrorExt for Error {
             | Error::MailboxReceiver { .. }
             | Error::RetryLater { .. }
             | Error::StartGrpc { .. }
-            | Error::Combine { .. }
+            | Error::UpdateTableMetadata { .. }
             | Error::NoEnoughAvailableDatanode { .. }
             | Error::ConvertGrpcExpr { .. }
             | Error::Join { .. } => StatusCode::Internal,

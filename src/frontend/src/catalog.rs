@@ -30,9 +30,7 @@ use catalog::{
 use client::client_manager::DatanodeClients;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME};
 use common_error::ext::BoxedError;
-use common_meta::helper::{
-    build_catalog_prefix, build_schema_prefix, CatalogKey, SchemaKey, TableGlobalKey,
-};
+use common_meta::helper::{build_catalog_prefix, build_schema_prefix, CatalogKey, SchemaKey};
 use common_meta::key::table_info::TableInfoKey;
 use common_meta::key::table_name::TableNameKey;
 use common_meta::key::table_region::TableRegionKey;
@@ -120,17 +118,6 @@ impl FrontendCatalogManager {
         table: &str,
         table_id: TableId,
     ) {
-        let tg_key = TableGlobalKey {
-            catalog_name: catalog.into(),
-            schema_name: schema.into(),
-            table_name: table.into(),
-        }
-        .to_string();
-
-        let tg_key = tg_key.as_bytes();
-
-        self.backend_cache_invalidator.invalidate_key(tg_key).await;
-
         let key = TableNameKey::new(catalog, schema, table);
         self.backend_cache_invalidator
             .invalidate_key(&key.as_raw_key())
@@ -160,7 +147,7 @@ impl FrontendCatalogManager {
 
         self.partition_manager
             .table_routes()
-            .invalidate_table_route(&TableName::new(catalog, schema, table))
+            .invalidate_table_route(table_id)
             .await;
     }
 }
@@ -343,10 +330,9 @@ impl CatalogManager for FrontendCatalogManager {
         let mut tables = self
             .table_metadata_manager
             .table_name_manager()
-            .tables_old(catalog, schema)
+            .tables(catalog, schema)
             .await
             .context(TableMetadataManagerSnafu)?;
-
         if catalog == DEFAULT_CATALOG_NAME && schema == DEFAULT_SCHEMA_NAME {
             tables.push("numbers".to_string());
         }
@@ -359,13 +345,11 @@ impl CatalogManager for FrontendCatalogManager {
             catalog_name: catalog.to_string(),
         }
         .to_string();
-
-        Ok(self
-            .backend
+        self.backend
             .get(key.as_bytes())
             .await
-            .context(TableMetadataManagerSnafu)?
-            .is_some())
+            .context(TableMetadataManagerSnafu)
+            .map(|x| x.is_some())
     }
 
     async fn schema_exist(&self, catalog: &str, schema: &str) -> CatalogResult<bool> {
@@ -374,7 +358,6 @@ impl CatalogManager for FrontendCatalogManager {
             schema_name: schema.to_string(),
         }
         .to_string();
-
         Ok(self
             .backend()
             .get(schema_key.as_bytes())
@@ -387,7 +370,7 @@ impl CatalogManager for FrontendCatalogManager {
         let key = TableNameKey::new(catalog, schema, table);
         self.table_metadata_manager
             .table_name_manager()
-            .get_old(&key)
+            .get(key)
             .await
             .context(TableMetadataManagerSnafu)
             .map(|x| x.is_some())
@@ -423,19 +406,19 @@ impl CatalogManager for FrontendCatalogManager {
         let key = TableNameKey::new(catalog, schema, table_name);
         let Some(table_name_value) = self.table_metadata_manager
             .table_name_manager()
-            .get_old(&key)
+            .get(key)
             .await
             .context(TableMetadataManagerSnafu)? else { return Ok(None) };
-        let _table_id = table_name_value.table_id();
+        let table_id = table_name_value.table_id();
 
-        let Some(v) = self.table_metadata_manager
+        let Some(table_info_value) = self.table_metadata_manager
             .table_info_manager()
-            .get_old(&key.into())
+            .get(table_id)
             .await
             .context(TableMetadataManagerSnafu)? else { return Ok(None) };
-
         let table_info = Arc::new(
-            v.table_info
+            table_info_value
+                .table_info
                 .try_into()
                 .context(catalog_err::InvalidTableInfoInCatalogSnafu)?,
         );

@@ -12,18 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
-
 use api::v1::meta::{
     router_server, Peer, PeerDict, ResponseHeader, RouteRequest, RouteResponse, TableRoute,
     TableRouteValue,
 };
-use common_meta::helper::TableGlobalValue;
 use common_meta::key::table_info::TableInfoValue;
-use common_meta::table_name::TableName;
+use common_meta::key::table_region::RegionDistribution;
 use common_telemetry::timer;
 use snafu::{OptionExt, ResultExt};
-use table::metadata::RawTableInfo;
 use tonic::{Request, Response};
 
 use crate::error;
@@ -54,10 +50,9 @@ impl router_server::Router for MetaSrv {
     }
 }
 
-pub(crate) fn create_table_global_value(
+pub(crate) fn create_region_distribution(
     table_route_value: &TableRouteValue,
-    table_info: RawTableInfo,
-) -> Result<TableGlobalValue> {
+) -> Result<RegionDistribution> {
     let peers = &table_route_value.peers;
     let region_routes = &table_route_value
         .table_route
@@ -67,9 +62,7 @@ pub(crate) fn create_table_global_value(
         })?
         .region_routes;
 
-    let node_id = peers[region_routes[0].leader_peer_index as usize].id;
-
-    let mut regions_id_map = HashMap::with_capacity(region_routes.len());
+    let mut regions_id_map = RegionDistribution::new();
     for route in region_routes.iter() {
         let node_id = peers[route.leader_peer_index as usize].id;
         let region_id = route
@@ -84,27 +77,15 @@ pub(crate) fn create_table_global_value(
             .or_insert_with(Vec::new)
             .push(region_id);
     }
-
-    Ok(TableGlobalValue {
-        node_id,
-        regions_id_map,
-        table_info,
-    })
+    Ok(regions_id_map)
 }
 
 async fn handle_route(req: RouteRequest, ctx: Context) -> Result<RouteResponse> {
-    let RouteRequest {
-        header,
-        table_names,
-        table_ids: _,
-    } = req;
+    let RouteRequest { header, table_ids } = req;
     let cluster_id = header.as_ref().map_or(0, |h| h.cluster_id);
 
-    let table_names = table_names
-        .into_iter()
-        .map(Into::into)
-        .collect::<Vec<TableName>>();
-    let tables = fetch_tables(&ctx, table_names).await?;
+    let table_ids = table_ids.iter().map(|x| x.id).collect::<Vec<_>>();
+    let tables = fetch_tables(&ctx, table_ids).await?;
 
     let (peers, table_routes) = fill_table_routes(tables)?;
 
