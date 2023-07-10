@@ -34,7 +34,7 @@ use tokio::sync::Mutex;
 use crate::error::{
     CatalogNotFoundSnafu, CreateTableSnafu, InvalidCatalogValueSnafu, OpenTableSnafu,
     ParallelOpenTableSnafu, Result, SchemaNotFoundSnafu, TableEngineNotFoundSnafu,
-    TableMetadataManagerSnafu,
+    TableMetadataManagerSnafu, UnimplementedSnafu,
 };
 use crate::helper::{
     build_catalog_prefix, build_schema_prefix, build_table_global_prefix,
@@ -43,8 +43,8 @@ use crate::helper::{
 };
 use crate::remote::region_alive_keeper::RegionAliveKeepers;
 use crate::{
-    handle_system_table_request, CatalogManager, DeregisterTableRequest, RegisterSchemaRequest,
-    RegisterSystemTableRequest, RegisterTableRequest, RenameTableRequest,
+    handle_system_table_request, CatalogManager, DeregisterSchemaRequest, DeregisterTableRequest,
+    RegisterSchemaRequest, RegisterSystemTableRequest, RegisterTableRequest, RenameTableRequest,
 };
 
 /// Catalog manager based on metasrv.
@@ -724,6 +724,13 @@ impl CatalogManager for RemoteCatalogManager {
 
         increment_gauge!(crate::metrics::METRIC_CATALOG_MANAGER_SCHEMA_COUNT, 1.0);
         Ok(true)
+    }
+
+    async fn deregister_schema(&self, _request: DeregisterSchemaRequest) -> Result<bool> {
+        UnimplementedSnafu {
+            operation: "deregister schema",
+        }
+        .fail()
     }
 
     async fn rename_table(&self, request: RenameTableRequest) -> Result<bool> {
