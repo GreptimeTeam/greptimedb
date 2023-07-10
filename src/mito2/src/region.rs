@@ -12,29 +12,30 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::any::Any;
+//! Mito region.
 
-use common_error::prelude::*;
-use snafu::Location;
-use store_api::storage::RegionNumber;
-use table::metadata::{TableInfoBuilderError, TableMetaBuilderError, TableVersion};
+mod metadata;
+mod version;
 
-#[derive(Debug, Snafu)]
-#[snafu(visibility(pub))]
-pub enum Error {}
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 
-pub type Result<T> = std::result::Result<T, Error>;
+use store_api::storage::RegionId;
 
-impl ErrorExt for Error {
-    fn status_code(&self) -> StatusCode {
-        use Error::*;
+use crate::region::version::VersionControlRef;
 
-        match self {}
-
-        todo!()
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
+/// Metadata and runtime status of a region.
+#[derive(Debug)]
+pub(crate) struct MitoRegion {
+    version_control: VersionControlRef,
 }
+
+pub(crate) type MitoRegionRef = Arc<MitoRegion>;
+
+/// Regions indexed by ids.
+#[derive(Debug, Default)]
+pub(crate) struct RegionMap {
+    regions: RwLock<HashMap<RegionId, MitoRegionRef>>,
+}
+
+pub(crate) type RegionMapRef = Arc<RegionMap>;

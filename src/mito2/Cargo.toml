@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+aquamarine = "0.3"
 anymap = "1.0.0-beta.2"
 arc-swap = "1.0"
 async-stream.workspace = true

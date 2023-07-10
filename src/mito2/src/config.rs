@@ -12,29 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::any::Any;
+//! Configurations.
 
-use common_error::prelude::*;
-use snafu::Location;
-use store_api::storage::RegionNumber;
-use table::metadata::{TableInfoBuilderError, TableMetaBuilderError, TableVersion};
-
-#[derive(Debug, Snafu)]
-#[snafu(visibility(pub))]
-pub enum Error {}
-
-pub type Result<T> = std::result::Result<T, Error>;
-
-impl ErrorExt for Error {
-    fn status_code(&self) -> StatusCode {
-        use Error::*;
-
-        match self {}
-
-        todo!()
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-}
+/// Configuration for [MitoEngine](crate::engine::MitoEngine).
+#[derive(Debug)]
+pub struct MitoConfig {}

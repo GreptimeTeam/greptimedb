@@ -12,29 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::any::Any;
+//! Structs and utilities for writing regions.
 
-use common_error::prelude::*;
-use snafu::Location;
-use store_api::storage::RegionNumber;
-use table::metadata::{TableInfoBuilderError, TableMetaBuilderError, TableVersion};
+use crate::region::RegionMapRef;
 
-#[derive(Debug, Snafu)]
-#[snafu(visibility(pub))]
-pub enum Error {}
+/// A fixed size group of [RegionWorker]s.
+///
+/// The group binds each region to a specific [RegionWorker].
+#[derive(Debug, Default)]
+pub(crate) struct WorkerGroup {
+    workers: Vec<RegionWorker>,
+}
 
-pub type Result<T> = std::result::Result<T, Error>;
-
-impl ErrorExt for Error {
-    fn status_code(&self) -> StatusCode {
-        use Error::*;
-
-        match self {}
-
-        todo!()
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
+/// Worker to write and alter regions bound to it.
+#[derive(Debug, Default)]
+struct RegionWorker {
+    regions: RegionMapRef,
 }

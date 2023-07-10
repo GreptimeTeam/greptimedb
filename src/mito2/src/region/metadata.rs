@@ -12,29 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::any::Any;
+//! Metadata of mito regions.
 
-use common_error::prelude::*;
-use snafu::Location;
-use store_api::storage::RegionNumber;
-use table::metadata::{TableInfoBuilderError, TableMetaBuilderError, TableVersion};
+use std::sync::Arc;
 
-#[derive(Debug, Snafu)]
-#[snafu(visibility(pub))]
-pub enum Error {}
+/// Static metadata of a region.
+#[derive(Debug)]
+pub(crate) struct RegionMetadata {}
 
-pub type Result<T> = std::result::Result<T, Error>;
-
-impl ErrorExt for Error {
-    fn status_code(&self) -> StatusCode {
-        use Error::*;
-
-        match self {}
-
-        todo!()
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-}
+pub(crate) type RegionMetadataRef = Arc<RegionMetadata>;
