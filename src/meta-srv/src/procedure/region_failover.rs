@@ -27,6 +27,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use catalog::helper::TableGlobalKey;
 use common_meta::ident::TableIdent;
+use common_meta::key::TableMetadataManagerRef;
 use common_meta::{ClusterId, RegionIdent};
 use common_procedure::error::{
     Error as ProcedureError, FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu,
@@ -74,6 +75,7 @@ pub(crate) struct RegionFailoverManager {
     selector_ctx: SelectorContext,
     dist_lock: DistLockRef,
     running_procedures: Arc<RwLock<HashSet<RegionFailoverKey>>>,
+    table_metadata_manager: TableMetadataManagerRef,
 }
 
 struct FailoverProcedureGuard {
@@ -94,6 +96,7 @@ impl RegionFailoverManager {
         selector: SelectorRef,
         selector_ctx: SelectorContext,
         dist_lock: DistLockRef,
+        table_metadata_manager: TableMetadataManagerRef,
     ) -> Self {
         Self {
             mailbox,
@@ -102,6 +105,7 @@ impl RegionFailoverManager {
             selector_ctx,
             dist_lock,
             running_procedures: Arc::new(RwLock::new(HashSet::new())),
+            table_metadata_manager,
         }
     }
 
@@ -111,6 +115,7 @@ impl RegionFailoverManager {
             selector: self.selector.clone(),
             selector_ctx: self.selector_ctx.clone(),
             dist_lock: self.dist_lock.clone(),
+            table_metadata_manager: self.table_metadata_manager.clone(),
         }
     }
 
@@ -228,6 +233,7 @@ pub struct RegionFailoverContext {
     pub selector: SelectorRef,
     pub selector_ctx: SelectorContext,
     pub dist_lock: DistLockRef,
+    pub table_metadata_manager: TableMetadataManagerRef,
 }
 
 /// The state machine of region failover procedure. Driven by the call to `next`.
@@ -374,6 +380,7 @@ mod tests {
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO_ENGINE};
     use common_meta::ident::TableIdent;
     use common_meta::instruction::{Instruction, InstructionReply, SimpleReply};
+    use common_meta::key::TableMetadataManager;
     use common_meta::DatanodeId;
     use common_procedure::BoxedProcedure;
     use rand::prelude::SliceRandom;
@@ -386,6 +393,7 @@ mod tests {
     use crate::selector::{Namespace, Selector};
     use crate::sequence::Sequence;
     use crate::service::mailbox::Channel;
+    use crate::service::store::kv::{KvBackendAdapter, KvStoreRef};
     use crate::service::store::memory::MemStore;
     use crate::table_routes;
 
@@ -468,7 +476,7 @@ mod tests {
         }
 
         pub async fn build(self) -> TestingEnv {
-            let kv_store = Arc::new(MemStore::new()) as _;
+            let kv_store: KvStoreRef = Arc::new(MemStore::new());
             let meta_peer_client = MetaPeerClientBuilder::default()
                 .election(None)
                 .in_memory(Arc::new(MemStore::new()))
@@ -478,6 +486,9 @@ mod tests {
                 .unwrap();
 
             let table = "my_table";
+            let table_metadata_manager = Arc::new(TableMetadataManager::new(
+                KvBackendAdapter::wrap(kv_store.clone()),
+            ));
             let (_, table_global_value) =
                 table_routes::tests::prepare_table_global_value(&kv_store, table).await;
 
@@ -524,6 +535,7 @@ mod tests {
                     selector,
                     selector_ctx,
                     dist_lock: Arc::new(MemLock::default()),
+                    table_metadata_manager,
                 },
                 pushers,
                 heartbeat_receivers,

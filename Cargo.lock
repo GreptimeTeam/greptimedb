@@ -1595,6 +1595,7 @@ dependencies = [
  "client",
  "common-base",
  "common-error",
+ "common-meta",
  "common-query",
  "common-recordbatch",
  "common-telemetry",

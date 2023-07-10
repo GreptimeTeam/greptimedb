@@ -15,6 +15,7 @@
 use std::sync::Arc;
 
 use client::client_manager::DatanodeClients;
+use common_meta::key::TableMetadataManagerRef;
 use common_meta::rpc::ddl::{CreateTableTask, DropTableTask};
 use common_meta::rpc::router::TableRoute;
 use common_procedure::{watcher, ProcedureId, ProcedureManagerRef, ProcedureWithId};
@@ -34,6 +35,7 @@ pub struct DdlManager {
     datanode_clients: Arc<DatanodeClients>,
     mailbox: MailboxRef,
     server_addr: String,
+    table_metadata_manager: TableMetadataManagerRef,
 }
 
 #[derive(Clone)]
@@ -42,6 +44,8 @@ pub(crate) struct DdlContext {
     pub(crate) datanode_clients: Arc<DatanodeClients>,
     pub(crate) mailbox: MailboxRef,
     pub(crate) server_addr: String,
+    #[allow(unused)]
+    pub(crate) table_metadata_manager: TableMetadataManagerRef,
 }
 
 impl DdlManager {
@@ -51,6 +55,7 @@ impl DdlManager {
         datanode_clients: Arc<DatanodeClients>,
         mailbox: MailboxRef,
         server_addr: String,
+        table_metadata_manager: TableMetadataManagerRef,
     ) -> Self {
         Self {
             procedure_manager,
@@ -58,6 +63,7 @@ impl DdlManager {
             datanode_clients,
             mailbox,
             server_addr,
+            table_metadata_manager,
         }
     }
 
@@ -67,6 +73,7 @@ impl DdlManager {
             datanode_clients: self.datanode_clients.clone(),
             mailbox: self.mailbox.clone(),
             server_addr: self.server_addr.clone(),
+            table_metadata_manager: self.table_metadata_manager.clone(),
         }
     }
 

@@ -344,6 +344,7 @@ async fn run_region_failover_procedure(
                 table: None,
             },
             dist_lock: meta_srv.lock().clone(),
+            table_metadata_manager: meta_srv.table_metadata_manager().clone(),
         },
     );
     let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));

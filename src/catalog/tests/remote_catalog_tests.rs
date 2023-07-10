@@ -29,6 +29,7 @@ mod tests {
     use catalog::{CatalogManager, RegisterSchemaRequest, RegisterTableRequest};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO_ENGINE};
     use common_meta::ident::TableIdent;
+    use common_meta::key::TableMetadataManager;
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_meta::kv_backend::KvBackend;
     use common_meta::rpc::store::{CompareAndPutRequest, PutRequest, RangeRequest};
@@ -155,6 +156,7 @@ mod tests {
             node_id,
             cached_backend.clone(),
             region_alive_keepers.clone(),
+            Arc::new(TableMetadataManager::new(cached_backend)),
         );
         catalog_manager.start().await.unwrap();
 

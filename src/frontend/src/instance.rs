@@ -39,6 +39,7 @@ use common_error::ext::BoxedError;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
 use common_meta::heartbeat::handler::HandlerGroupExecutor;
+use common_meta::key::TableMetadataManager;
 use common_query::Output;
 use common_telemetry::logging::{debug, info};
 use common_telemetry::timer;
@@ -149,17 +150,20 @@ impl Instance {
         let table_routes = Arc::new(TableRoutes::new(meta_client.clone()));
         let partition_manager = Arc::new(PartitionRuleManager::new(table_routes));
 
+        let table_metadata_manager = Arc::new(TableMetadataManager::new(meta_backend.clone()));
         let mut catalog_manager = FrontendCatalogManager::new(
             meta_backend.clone(),
             meta_backend.clone(),
             partition_manager.clone(),
             datanode_clients.clone(),
+            table_metadata_manager.clone(),
         );
 
         let dist_instance = DistInstance::new(
             meta_client.clone(),
             Arc::new(catalog_manager.clone()),
             datanode_clients.clone(),
+            table_metadata_manager.clone(),
         );
         let dist_instance = Arc::new(dist_instance);
 

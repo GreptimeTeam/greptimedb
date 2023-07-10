@@ -75,15 +75,7 @@ impl CatalogManager for MemoryCatalogManager {
     }
 
     async fn register_table(&self, request: RegisterTableRequest) -> Result<bool> {
-        let catalog = request.catalog.clone();
-        let schema = request.schema.clone();
-        let result = self.register_table_sync(request);
-        increment_gauge!(
-            crate::metrics::METRIC_CATALOG_MANAGER_TABLE_COUNT,
-            1.0,
-            &[crate::metrics::db_label(&catalog, &schema)],
-        );
-        result
+        self.register_table_sync(request)
     }
 
     async fn rename_table(&self, request: RenameTableRequest) -> Result<bool> {
@@ -143,11 +135,7 @@ impl CatalogManager for MemoryCatalogManager {
     }
 
     async fn register_schema(&self, request: RegisterSchemaRequest) -> Result<bool> {
-        let registered = self.register_schema_sync(request)?;
-        if registered {
-            increment_gauge!(crate::metrics::METRIC_CATALOG_MANAGER_SCHEMA_COUNT, 1.0);
-        }
-        Ok(registered)
+        self.register_schema_sync(request)
     }
 
     async fn deregister_schema(&self, request: DeregisterSchemaRequest) -> Result<bool> {
@@ -263,11 +251,7 @@ impl CatalogManager for MemoryCatalogManager {
     }
 
     async fn register_catalog(&self, name: String) -> Result<bool> {
-        let registered = self.register_catalog_sync(name)?;
-        if registered {
-            increment_gauge!(crate::metrics::METRIC_CATALOG_MANAGER_CATALOG_COUNT, 1.0);
-        }
-        Ok(registered)
+        self.register_catalog_sync(name)
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -291,7 +275,12 @@ impl MemoryCatalogManager {
 
     pub fn register_catalog_sync(&self, name: String) -> Result<bool> {
         let mut catalogs = self.catalogs.write().unwrap();
-        Ok(catalogs.insert(name, HashMap::new()).is_some())
+        if catalogs.contains_key(&name) {
+            return Ok(false);
+        }
+        catalogs.insert(name, HashMap::new());
+        increment_gauge!(crate::metrics::METRIC_CATALOG_MANAGER_CATALOG_COUNT, 1.0);
+        Ok(true)
     }
 
     pub fn register_schema_sync(&self, request: RegisterSchemaRequest) -> Result<bool> {
@@ -304,7 +293,8 @@ impl MemoryCatalogManager {
         if catalog.contains_key(&request.schema) {
             return Ok(false);
         }
-        let _ = catalog.insert(request.schema, HashMap::new());
+        catalog.insert(request.schema, HashMap::new());
+        increment_gauge!(crate::metrics::METRIC_CATALOG_MANAGER_SCHEMA_COUNT, 1.0);
         Ok(true)
     }
 
@@ -327,8 +317,13 @@ impl MemoryCatalogManager {
             }
             .fail();
         }
-
-        Ok(schema.insert(request.table_name, request.table).is_none())
+        schema.insert(request.table_name, request.table);
+        increment_gauge!(
+            crate::metrics::METRIC_CATALOG_MANAGER_TABLE_COUNT,
+            1.0,
+            &[crate::metrics::db_label(&request.catalog, &request.schema)],
+        );
+        Ok(true)
     }
 
     #[cfg(any(test, feature = "testing"))]

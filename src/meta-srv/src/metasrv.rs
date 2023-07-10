@@ -20,6 +20,7 @@ use std::sync::Arc;
 use api::v1::meta::Peer;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_procedure::options::ProcedureConfig;
+use common_meta::key::TableMetadataManagerRef;
 use common_procedure::ProcedureManagerRef;
 use common_telemetry::logging::LoggingOptions;
 use common_telemetry::{error, info, warn};
@@ -90,6 +91,7 @@ pub struct Context {
     pub election: Option<ElectionRef>,
     pub skip_all: Arc<AtomicBool>,
     pub is_infancy: bool,
+    pub table_metadata_manager: TableMetadataManagerRef,
 }
 
 impl Context {
@@ -145,6 +147,7 @@ pub struct MetaSrv {
     metadata_service: MetadataServiceRef,
     mailbox: MailboxRef,
     ddl_manager: DdlManagerRef,
+    table_metadata_manager: TableMetadataManagerRef,
 }
 
 impl MetaSrv {
@@ -294,6 +297,10 @@ impl MetaSrv {
         &self.procedure_manager
     }
 
+    pub fn table_metadata_manager(&self) -> &TableMetadataManagerRef {
+        &self.table_metadata_manager
+    }
+
     #[inline]
     pub fn new_ctx(&self) -> Context {
         let server_addr = self.options().server_addr.clone();
@@ -314,6 +321,7 @@ impl MetaSrv {
             election,
             skip_all,
             is_infancy: false,
+            table_metadata_manager: self.table_metadata_manager.clone(),
         }
     }
 }

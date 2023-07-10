@@ -22,7 +22,7 @@ use async_trait::async_trait;
 use catalog::helper::{TableGlobalKey, TableGlobalValue};
 use client::Database;
 use common_error::prelude::BoxedError;
-use common_meta::key::TableRouteKey;
+use common_meta::key::{TableMetadataManagerRef, TableRouteKey};
 use common_meta::rpc::store::{MoveValueRequest, PutRequest};
 use common_meta::table_name::TableName;
 use common_query::error::Result as QueryResult;
@@ -72,6 +72,8 @@ pub struct DistTable {
     table_name: TableName,
     table_info: TableInfoRef,
     catalog_manager: Arc<FrontendCatalogManager>,
+    #[allow(unused)]
+    table_metadata_manager: TableMetadataManagerRef,
 }
 
 #[async_trait]
@@ -242,11 +244,13 @@ impl DistTable {
         table_name: TableName,
         table_info: TableInfoRef,
         catalog_manager: Arc<FrontendCatalogManager>,
+        table_metadata_manager: TableMetadataManagerRef,
     ) -> Self {
         Self {
             table_name,
             table_info,
             catalog_manager,
+            table_metadata_manager,
         }
     }
 

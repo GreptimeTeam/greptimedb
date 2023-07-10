@@ -525,8 +525,6 @@ impl CatalogManager for LocalCatalogManager {
     }
 
     async fn register_system_table(&self, request: RegisterSystemTableRequest) -> Result<()> {
-        self.check_state().await?;
-
         let catalog_name = request.create_table_request.catalog_name.clone();
         let schema_name = request.create_table_request.schema_name.clone();
 
