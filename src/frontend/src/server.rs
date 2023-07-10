@@ -182,7 +182,7 @@ impl Services {
                 .with_metrics_handler(MetricsHandler)
                 .with_script_handler(instance.clone())
                 .with_configurator(plugins.get::<ConfiguratorRef>())
-                .with_greptime_config_options(parse_to_toml_string(opts))
+                .with_greptime_config_options(opts.to_toml_string())
                 .build();
             result.push((Box::new(http_server), http_addr));
         }
@@ -203,10 +203,6 @@ impl Services {
             .map(|(server, addr)| (server.name().to_string(), (server, addr)))
             .collect())
     }
-}
-
-fn parse_to_toml_string(opts: &FrontendOptions) -> String {
-    toml::to_string(&opts).unwrap()
 }
 
 fn parse_addr(addr: &str) -> Result<SocketAddr> {

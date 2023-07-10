@@ -405,6 +405,10 @@ impl DatanodeOptions {
     pub fn env_list_keys() -> Option<&'static [&'static str]> {
         Some(&["meta_client_options.metasrv_addrs"])
     }
+
+    pub fn to_toml_string(&self) -> String {
+        toml::to_string(&self).unwrap()
+    }
 }
 
 /// Datanode service.

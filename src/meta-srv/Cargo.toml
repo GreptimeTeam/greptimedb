@@ -43,6 +43,7 @@ store-api = { path = "../store-api" }
 table = { path = "../table" }
 tokio.workspace = true
 tokio-stream = { version = "0.1", features = ["net"] }
+toml = "0.5"
 tonic.workspace = true
 tower = "0.4"
 typetag = "0.2"

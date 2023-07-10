@@ -532,11 +532,14 @@ impl HttpServer {
 
         let config_router = self
             .route_config(GreptimeOptionsConfigState {
-                greptime_config_options: self.greptime_config_options.clone().unwrap(),
+                greptime_config_options: self
+                    .greptime_config_options
+                    .clone()
+                    .unwrap_or("".to_string()),
             })
             .finish_api(&mut api);
 
-        router = router.nest(&format!("/{HTTP_API_VERSION}"), config_router);
+        router = router.nest("", config_router);
 
         router = router.route("/status", routing::get(handler::status));
 

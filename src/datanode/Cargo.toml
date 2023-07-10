@@ -61,6 +61,7 @@ table = { path = "../table" }
 table-procedure = { path = "../table-procedure" }
 tokio.workspace = true
 tokio-stream = { version = "0.1", features = ["net"] }
+toml = "0.5"
 tonic.workspace = true
 tower = { version = "0.4", features = ["full"] }
 tower-http = { version = "0.3", features = ["full"] }
@@ -72,4 +73,3 @@ client = { path = "../client" }
 common-test-util = { path = "../common/test-util" }
 common-query = { path = "../common/query" }
 datafusion-common.workspace = true
-toml = "0.5"

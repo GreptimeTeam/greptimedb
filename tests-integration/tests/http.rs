@@ -59,6 +59,7 @@ macro_rules! http_tests {
                 test_metrics_api,
                 test_scripts_api,
                 test_health_api,
+                test_config_api,
                 test_dashboard_path,
             );
         )*
@@ -495,6 +496,18 @@ pub async fn test_health_api(store_type: StorageType) {
     assert_eq!(body, HealthResponse {});
 }
 
+pub async fn test_config_api(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, _guard) = setup_test_http_app_with_frontend(store_type, "config_api").await;
+    let client = TestClient::new(app);
+
+    let res_get = client.get("/config").send().await;
+    assert_eq!(res_get.status(), StatusCode::OK);
+
+    let body_text = res_get.text().await;
+    assert_eq!(body_text, "{}");
+}
+
 #[cfg(feature = "dashboard")]
 pub async fn test_dashboard_path(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
@@ -513,5 +526,3 @@ pub async fn test_dashboard_path(store_type: StorageType) {
 
 #[cfg(not(feature = "dashboard"))]
 pub async fn test_dashboard_path(_: StorageType) {}
-
-// TODO add status and config endpoints

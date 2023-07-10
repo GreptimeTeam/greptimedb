@@ -61,6 +61,7 @@ impl MetaSrvInstance {
         let http_srv = Arc::new(
             HttpServerBuilder::new(opts.http_opts.clone())
                 .with_metrics_handler(MetricsHandler)
+                .with_greptime_config_options(opts.to_toml_string())
                 .build(),
         );
         Ok(MetaSrvInstance {
