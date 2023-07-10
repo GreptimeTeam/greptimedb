@@ -12,6 +12,25 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Metadata of mito regions.
+//! Mito region.
 
-// TODO(yingwen): RegionMetadata.
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
+
+use store_api::storage::RegionId;
+
+/// Metadata and runtime status of a region.
+#[derive(Debug)]
+pub(crate) struct MitoRegion {
+    // TODO(yingwen): version control and other fields.
+}
+
+pub(crate) type MitoRegionRef = Arc<MitoRegion>;
+
+/// Regions indexed by ids.
+#[derive(Debug, Default)]
+pub(crate) struct RegionMap {
+    regions: RwLock<HashMap<RegionId, MitoRegionRef>>,
+}
+
+pub(crate) type RegionMapRef = Arc<RegionMap>;

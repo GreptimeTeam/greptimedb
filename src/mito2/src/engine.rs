@@ -12,6 +12,37 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
+use crate::config::MitoConfig;
+use crate::worker::WorkerGroup;
+
 /// Region engine implementation for timeseries data.
 #[derive(Clone)]
-pub struct MitoEngine {}
+pub struct MitoEngine {
+    inner: Arc<EngineInner>,
+}
+
+impl MitoEngine {
+    /// Returns a new [MitoEngine] with specific `config`.
+    pub fn new(config: MitoConfig) -> MitoEngine {
+        MitoEngine {
+            inner: Arc::new(EngineInner::new(config)),
+        }
+    }
+}
+
+/// Inner struct of [MitoEngine].
+struct EngineInner {
+    /// Region workers group.
+    workers: WorkerGroup,
+}
+
+impl EngineInner {
+    /// Returns a new [EngineInner] with specific `config`.
+    fn new(_config: MitoConfig) -> EngineInner {
+        EngineInner {
+            workers: WorkerGroup::default(),
+        }
+    }
+}

@@ -12,6 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Metadata of mito regions.
+//! Error of mito engine.
 
-// TODO(yingwen): RegionMetadata.
+use snafu::Snafu;
+
+#[derive(Debug, Snafu)]
+#[snafu(visibility(pub))]
+pub enum Error {}

@@ -6,3 +6,6 @@ license.workspace = true
 
 [dependencies]
 aquamarine = "0.3.2"
+common-error = { path = "../common/error" }
+snafu.workspace = true
+store-api = { path = "../store-api" }

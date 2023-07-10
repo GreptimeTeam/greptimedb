@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Metadata of mito regions.
+//! Configurations.
 
-// TODO(yingwen): RegionMetadata.
+/// Configuration for [MitoEngine](crate::engine::MitoEngine).
+#[derive(Debug)]
+pub struct MitoConfig {}

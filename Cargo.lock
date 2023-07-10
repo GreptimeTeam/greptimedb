@@ -5432,6 +5432,9 @@ name = "mito2"
 version = "0.3.2"
 dependencies = [
  "aquamarine",
+ "common-error",
+ "snafu",
+ "store-api",
 ]
 
 [[package]]

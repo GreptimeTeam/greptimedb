@@ -16,7 +16,15 @@
 //!
 //! Mito is the a region engine to store timeseries data.
 
+// TODO(yingwen): Remove all `allow(dead_code)` after finish refactoring mito.
+pub mod config;
+#[allow(dead_code)]
 pub mod engine;
+pub mod error;
+#[allow(dead_code)]
+mod region;
+#[allow(dead_code)]
+mod worker;
 
 #[cfg_attr(doc, aquamarine::aquamarine)]
 /// # Mito developer document

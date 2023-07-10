@@ -12,6 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Metadata of mito regions.
+//! Structs and utilities for writing regions.
 
-// TODO(yingwen): RegionMetadata.
+use crate::region::RegionMapRef;
+
+/// A fixed size group of [RegionWorker]s.
+///
+/// The group binds each region to a specific [RegionWorker].
+#[derive(Debug, Default)]
+pub(crate) struct WorkerGroup {
+    workers: Vec<RegionWorker>,
+}
+
+/// Worker to write and alter regions bound to it.
+#[derive(Debug, Default)]
+struct RegionWorker {
+    regions: RegionMapRef,
+}
