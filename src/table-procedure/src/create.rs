@@ -319,10 +319,11 @@ mod tests {
             table_engine,
             procedure_manager,
             catalog_manager,
+            ..
         } = TestEnv::new("create");
 
         let table_name = "test_create";
-        let request = test_util::new_create_request(table_name);
+        let request = test_util::new_create_request(table_name, 1);
         let procedure = CreateTableProcedure::new(
             request.clone(),
             catalog_manager,
@@ -355,10 +356,11 @@ mod tests {
             table_engine,
             procedure_manager: _,
             catalog_manager,
+            ..
         } = TestEnv::new("create");
 
         let table_name = "test_create";
-        let request = test_util::new_create_request(table_name);
+        let request = test_util::new_create_request(table_name, 1);
         let procedure = CreateTableProcedure::new(
             request.clone(),
             catalog_manager,
@@ -404,6 +406,7 @@ mod tests {
             table_engine,
             procedure_manager: _,
             catalog_manager,
+            ..
         } = TestEnv::from_temp_dir(dir);
 
         // Recover the procedure

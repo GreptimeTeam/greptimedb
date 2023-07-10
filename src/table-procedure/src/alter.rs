@@ -304,7 +304,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_alter_table_procedure_rename() {
-        let env = TestEnv::new("rename");
+        let mut env = TestEnv::new("rename");
         let table_name = "test_old";
         let table_id = env.create_table(table_name).await;
 
@@ -325,6 +325,7 @@ mod tests {
             table_engine,
             procedure_manager,
             catalog_manager,
+            ..
         } = env;
         let procedure =
             AlterTableProcedure::new(request, catalog_manager.clone(), table_engine.clone());

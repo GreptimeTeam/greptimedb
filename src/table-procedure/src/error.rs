@@ -53,6 +53,9 @@ pub enum Error {
 
     #[snafu(display("Failed to deregister table: {}", name))]
     DeregisterTable { name: String },
+
+    #[snafu(display("Schema {} not found", name))]
+    SchemaNotFound { name: String },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -68,6 +71,7 @@ impl ErrorExt for Error {
             InvalidRawSchema { source, .. } => source.status_code(),
             AccessCatalog { source, .. } => source.status_code(),
             TableNotFound { .. } => StatusCode::TableNotFound,
+            SchemaNotFound { .. } => StatusCode::DatabaseNotFound,
             TableExists { .. } => StatusCode::TableAlreadyExists,
         }
     }

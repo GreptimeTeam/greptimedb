@@ -17,6 +17,7 @@
 mod alter;
 mod create;
 mod drop;
+mod drop_database;
 pub mod error;
 mod truncate;
 

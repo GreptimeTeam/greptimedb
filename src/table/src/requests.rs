@@ -42,6 +42,13 @@ pub struct CreateDatabaseRequest {
     pub create_if_not_exists: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DropDatabaseRequest {
+    pub catalog_name: String,
+    pub schema_name: String,
+    pub table_names: Vec<(String, TableId)>,
+}
+
 /// Create table request
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateTableRequest {

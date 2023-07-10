@@ -42,6 +42,7 @@ pub struct TestEnv {
     pub table_engine: Arc<MitoEngine<EngineImpl<NoopLogStore>>>,
     pub procedure_manager: ProcedureManagerRef,
     pub catalog_manager: CatalogManagerRef,
+    table_id: TableId,
 }
 
 impl TestEnv {
@@ -90,12 +91,14 @@ impl TestEnv {
             table_engine,
             procedure_manager,
             catalog_manager,
+            table_id: 1,
         }
     }
 
-    pub async fn create_table(&self, table_name: &str) -> TableId {
-        let request = new_create_request(table_name);
-        let table_id = request.id;
+    pub async fn create_table(&mut self, table_name: &str) -> TableId {
+        let request = new_create_request(table_name, self.table_id);
+        let table_id = self.table_id;
+        self.table_id += 1;
         let procedure = CreateTableProcedure::new(
             request,
             self.catalog_manager.clone(),
@@ -134,9 +137,9 @@ pub fn schema_for_test() -> RawSchema {
     RawSchema::new(column_schemas)
 }
 
-pub fn new_create_request(table_name: &str) -> CreateTableRequest {
+pub fn new_create_request(table_name: &str, table_id: TableId) -> CreateTableRequest {
     CreateTableRequest {
-        id: 1,
+        id: table_id,
         catalog_name: DEFAULT_CATALOG_NAME.to_string(),
         schema_name: DEFAULT_SCHEMA_NAME.to_string(),
         table_name: table_name.to_string(),

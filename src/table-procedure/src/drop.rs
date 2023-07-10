@@ -272,7 +272,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_drop_table_procedure() {
-        let env = TestEnv::new("drop");
+        let mut env = TestEnv::new("drop");
         let table_name = "test_drop";
         let table_id = env.create_table(table_name).await;
 
@@ -287,6 +287,7 @@ mod tests {
             table_engine,
             procedure_manager,
             catalog_manager,
+            ..
         } = env;
         let procedure =
             DropTableProcedure::new(request, catalog_manager.clone(), table_engine.clone());
