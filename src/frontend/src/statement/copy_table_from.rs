@@ -224,7 +224,7 @@ impl StatementExecutor {
                 let stream = new_orc_stream_reader(reader)
                     .await
                     .context(error::ReadOrcSnafu)?;
-                let stream = OrcArrowStreamReaderAdapter::new(stream);
+                let stream = OrcArrowStreamReaderAdapter::new(schema, stream);
 
                 Ok(Box::pin(stream))
             }
