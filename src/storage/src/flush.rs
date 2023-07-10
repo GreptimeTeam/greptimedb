@@ -255,7 +255,7 @@ impl<S: LogStore> FlushJob<S> {
         let iter_ctx = IterContext {
             // TODO(ruihang): dynamic row group size based on content (#412)
             batch_size: WRITE_ROW_GROUP_SIZE,
-            // All sequences are visiable by default.
+            // All sequences are visible by default.
             ..Default::default()
         };
 
