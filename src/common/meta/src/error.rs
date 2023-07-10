@@ -14,7 +14,6 @@
 
 use common_error::prelude::*;
 use serde_json::error::Error as JsonError;
-use snafu::Location;
 use store_api::storage::RegionNumber;
 use table::metadata::TableId;
 

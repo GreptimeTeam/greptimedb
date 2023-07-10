@@ -17,7 +17,6 @@ use std::any::Any;
 use arrow_schema::ArrowError;
 use common_error::prelude::*;
 use datafusion::parquet::errors::ParquetError;
-use snafu::Location;
 use url::ParseError;
 
 #[derive(Debug, Snafu)]

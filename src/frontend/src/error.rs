@@ -19,7 +19,6 @@ use common_error::prelude::*;
 use datafusion::parquet;
 use datatypes::arrow::error::ArrowError;
 use datatypes::value::Value;
-use snafu::Location;
 use store_api::storage::RegionNumber;
 
 #[derive(Debug, Snafu)]

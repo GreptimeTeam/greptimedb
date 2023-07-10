@@ -22,7 +22,6 @@ use datatypes::arrow;
 use datatypes::arrow::datatypes::DataType as ArrowDatatype;
 use datatypes::error::Error as DataTypeError;
 use datatypes::prelude::ConcreteDataType;
-use snafu::Location;
 use statrs::StatsError;
 
 #[derive(Debug, Snafu)]

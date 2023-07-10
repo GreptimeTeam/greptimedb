@@ -19,7 +19,7 @@ pub mod status_code;
 
 pub mod prelude {
     pub use snafu::prelude::*;
-    pub use snafu::{Backtrace, ErrorCompat};
+    pub use snafu::{ErrorCompat, Location};
 
     pub use crate::ext::{BoxedError, ErrorExt};
     pub use crate::format::DebugFormat;

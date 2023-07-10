@@ -17,7 +17,6 @@ use std::any::Any;
 use common_error::prelude::*;
 use datafusion::error::DataFusionError;
 use promql_parser::parser::{Expr as PromExpr, TokenType};
-use snafu::Location;
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]

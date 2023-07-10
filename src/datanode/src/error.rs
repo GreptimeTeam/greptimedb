@@ -17,7 +17,6 @@ use std::any::Any;
 use common_error::prelude::*;
 use common_procedure::ProcedureId;
 use serde_json::error::Error as JsonError;
-use snafu::Location;
 use store_api::storage::RegionNumber;
 use table::error::Error as TableError;
 

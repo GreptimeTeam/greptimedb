@@ -19,7 +19,6 @@ use common_error::prelude::*;
 use datafusion::arrow::error::ArrowError;
 use datafusion::error::DataFusionError;
 use serde_json::error::Error as JsonError;
-use snafu::Location;
 use table::metadata::{TableInfoBuilderError, TableMetaBuilderError};
 
 #[derive(Debug, Snafu)]

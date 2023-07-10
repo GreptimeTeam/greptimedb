@@ -18,7 +18,6 @@ use common_error::prelude::*;
 use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
 use datatypes::prelude::{ConcreteDataType, Value};
-use snafu::Location;
 use sqlparser::parser::ParserError;
 
 use crate::ast::{Expr, Value as SqlValue};

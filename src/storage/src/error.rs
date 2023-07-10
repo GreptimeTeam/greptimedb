@@ -23,7 +23,6 @@ use datatypes::arrow::error::ArrowError;
 use datatypes::prelude::ConcreteDataType;
 use object_store::ErrorKind;
 use serde_json::error::Error as JsonError;
-use snafu::Location;
 use store_api::manifest::action::ProtocolVersion;
 use store_api::manifest::ManifestVersion;
 use store_api::storage::{RegionId, SequenceNumber};

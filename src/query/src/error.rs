@@ -19,7 +19,6 @@ use common_meta::table_name::TableName;
 use datafusion::error::DataFusionError;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::value::Value;
-use snafu::{Location, Snafu};
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]

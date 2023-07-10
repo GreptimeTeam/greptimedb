@@ -25,7 +25,6 @@ use common_telemetry::logging;
 use datatypes::prelude::ConcreteDataType;
 use query::parser::PromQuery;
 use serde_json::json;
-use snafu::Location;
 use tonic::codegen::http::{HeaderMap, HeaderValue};
 use tonic::metadata::MetadataMap;
 use tonic::Code;

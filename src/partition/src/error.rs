@@ -17,7 +17,6 @@ use std::any::Any;
 use common_error::prelude::*;
 use common_query::prelude::Expr;
 use datafusion_common::ScalarValue;
-use snafu::{Location, Snafu};
 use store_api::storage::{RegionId, RegionNumber};
 
 #[derive(Debug, Snafu)]

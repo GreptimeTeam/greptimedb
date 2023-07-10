@@ -15,7 +15,6 @@
 use common_error::prelude::*;
 use common_meta::peer::Peer;
 use common_runtime::JoinError;
-use snafu::Location;
 use tokio::sync::mpsc::error::SendError;
 use tonic::codegen::http;
 use tonic::Code;

@@ -16,7 +16,6 @@ use std::any::Any;
 use std::str::FromStr;
 
 use common_error::prelude::*;
-use snafu::Location;
 use tonic::{Code, Status};
 
 #[derive(Debug, Snafu)]

@@ -17,7 +17,6 @@ use std::any::Any;
 use common_error::prelude::*;
 use datafusion::error::DataFusionError;
 use datatypes::arrow::error::ArrowError;
-use snafu::Location;
 
 use crate::metadata::TableId;
 
