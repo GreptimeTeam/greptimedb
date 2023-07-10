@@ -66,6 +66,9 @@ pub enum StatusCode {
     // ====== Begin of server related status code =====
     /// Runtime resources exhausted, like creating threads failed.
     RuntimeResourcesExhausted = 6000,
+
+    /// Rate limit exceeded
+    RateLimited = 6001,
     // ====== End of server related status code =======
 
     // ====== Begin of auth related status code =====
@@ -111,6 +114,7 @@ impl StatusCode {
             | StatusCode::TableColumnNotFound
             | StatusCode::TableColumnExists
             | StatusCode::DatabaseNotFound
+            | StatusCode::RateLimited
             | StatusCode::UserNotFound
             | StatusCode::UnsupportedPasswordType
             | StatusCode::UserPasswordMismatch
@@ -141,6 +145,7 @@ impl StatusCode {
             | StatusCode::TableColumnNotFound
             | StatusCode::TableColumnExists
             | StatusCode::DatabaseNotFound
+            | StatusCode::RateLimited
             | StatusCode::UserNotFound
             | StatusCode::UnsupportedPasswordType
             | StatusCode::UserPasswordMismatch
