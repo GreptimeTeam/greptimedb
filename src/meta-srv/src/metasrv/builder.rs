@@ -53,6 +53,7 @@ pub struct MetaSrvBuilder {
     meta_peer_client: Option<MetaPeerClientRef>,
     lock: Option<DistLockRef>,
     metadata_service: Option<MetadataServiceRef>,
+    datanode_clients: Option<Arc<DatanodeClients>>,
 }
 
 impl MetaSrvBuilder {
@@ -67,6 +68,7 @@ impl MetaSrvBuilder {
             options: None,
             lock: None,
             metadata_service: None,
+            datanode_clients: None,
         }
     }
 
@@ -115,6 +117,11 @@ impl MetaSrvBuilder {
         self
     }
 
+    pub fn datanode_clients(mut self, clients: Arc<DatanodeClients>) -> Self {
+        self.datanode_clients = Some(clients);
+        self
+    }
+
     pub async fn build(self) -> Result<MetaSrv> {
         let started = Arc::new(AtomicBool::new(false));
 
@@ -128,6 +135,7 @@ impl MetaSrvBuilder {
             handler_group,
             lock,
             metadata_service,
+            datanode_clients,
         } = self;
 
         let options = options.unwrap_or_default();
@@ -162,7 +170,7 @@ impl MetaSrvBuilder {
         let ddl_manager = Arc::new(DdlManager::new(
             procedure_manager.clone(),
             kv_store.clone(),
-            Arc::new(DatanodeClients::default()),
+            datanode_clients.unwrap_or_else(|| Arc::new(DatanodeClients::default())),
             mailbox.clone(),
             options.server_addr.clone(),
         ));

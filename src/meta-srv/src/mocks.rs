@@ -15,9 +15,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use api::v1::meta::ddl_task_server::DdlTaskServer;
 use api::v1::meta::heartbeat_server::HeartbeatServer;
 use api::v1::meta::router_server::RouterServer;
 use api::v1::meta::store_server::StoreServer;
+use client::client_manager::DatanodeClients;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use tower::service_fn;
@@ -38,23 +40,24 @@ pub struct MockInfo {
 
 pub async fn mock_with_memstore() -> MockInfo {
     let kv_store = Arc::new(MemStore::default());
-    mock(Default::default(), kv_store, None).await
+    mock(Default::default(), kv_store, None, None).await
 }
 
 pub async fn mock_with_etcdstore(addr: &str) -> MockInfo {
     let kv_store = EtcdStore::with_endpoints([addr]).await.unwrap();
-    mock(Default::default(), kv_store, None).await
+    mock(Default::default(), kv_store, None, None).await
 }
 
 pub async fn mock_with_memstore_and_selector(selector: SelectorRef) -> MockInfo {
     let kv_store = Arc::new(MemStore::default());
-    mock(Default::default(), kv_store, Some(selector)).await
+    mock(Default::default(), kv_store, Some(selector), None).await
 }
 
 pub async fn mock(
     opts: MetaSrvOptions,
     kv_store: KvStoreRef,
     selector: Option<SelectorRef>,
+    datanode_clients: Option<Arc<DatanodeClients>>,
 ) -> MockInfo {
     let server_addr = opts.server_addr.clone();
 
@@ -72,6 +75,11 @@ pub async fn mock(
         None => builder,
     };
 
+    let builder = match datanode_clients {
+        Some(clients) => builder.datanode_clients(clients),
+        None => builder,
+    };
+
     let meta_srv = builder.build().await.unwrap();
     meta_srv.try_start().await.unwrap();
 
@@ -82,6 +90,7 @@ pub async fn mock(
             .add_service(HeartbeatServer::new(service.clone()))
             .add_service(RouterServer::new(service.clone()))
             .add_service(StoreServer::new(service.clone()))
+            .add_service(DdlTaskServer::new(service.clone()))
             .serve_with_incoming(futures::stream::iter(vec![Ok::<_, std::io::Error>(server)]))
             .await
     });

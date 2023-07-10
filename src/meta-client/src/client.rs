@@ -21,6 +21,7 @@ mod store;
 
 use api::v1::meta::Role;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
+use common_meta::rpc::ddl::{SubmitDdlTaskRequest, SubmitDdlTaskResponse};
 use common_meta::rpc::lock::{LockRequest, LockResponse, UnlockRequest};
 use common_meta::rpc::router::{CreateRequest, DeleteRequest, RouteRequest, RouteResponse};
 use common_meta::rpc::store::{
@@ -185,10 +186,13 @@ impl MetaClient {
             client.start(urls.clone()).await?;
             info!("Store client started");
         }
-
         if let Some(client) = &mut self.lock {
-            client.start(urls).await?;
+            client.start(urls.clone()).await?;
             info!("Lock client started");
+        }
+        if let Some(client) = &mut self.ddl {
+            client.start(urls).await?;
+            info!("Ddl client started");
         }
 
         Ok(())
@@ -348,6 +352,20 @@ impl MetaClient {
         Ok(())
     }
 
+    pub async fn submit_ddl_task(
+        &self,
+        req: SubmitDdlTaskRequest,
+    ) -> Result<SubmitDdlTaskResponse> {
+        let res = self
+            .ddl_client()?
+            .submit_ddl_task(req.try_into().context(error::ConvertMetaRequestSnafu)?)
+            .await?
+            .try_into()
+            .context(error::ConvertMetaResponseSnafu)?;
+
+        Ok(res)
+    }
+
     #[inline]
     pub fn heartbeat_client(&self) -> Result<HeartbeatClient> {
         self.heartbeat.clone().context(error::NotStartedSnafu {
@@ -374,6 +392,13 @@ impl MetaClient {
         self.lock.clone().context(error::NotStartedSnafu {
             name: "lock_client",
         })
+    }
+
+    #[inline]
+    pub fn ddl_client(&self) -> Result<DdlClient> {
+        self.ddl
+            .clone()
+            .context(error::NotStartedSnafu { name: "ddl_client" })
     }
 
     #[inline]

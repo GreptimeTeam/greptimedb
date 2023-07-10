@@ -36,8 +36,6 @@ pub struct DdlManager {
     server_addr: String,
 }
 
-// TODO(weny): removes in following PRs.
-#[allow(unused)]
 #[derive(Clone)]
 pub(crate) struct DdlContext {
     pub(crate) kv_store: KvStoreRef,

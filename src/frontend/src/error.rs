@@ -25,6 +25,12 @@ use store_api::storage::RegionNumber;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
+    #[snafu(display("Execute the operation timeout, source: {}", source))]
+    Timeout {
+        location: Location,
+        source: tokio::time::error::Elapsed,
+    },
+
     #[snafu(display("Failed to handle heartbeat response, source: {}", source))]
     HandleHeartbeatResponse {
         location: Location,
@@ -633,7 +639,8 @@ impl ErrorExt for Error {
             | Error::FindRegionRoute { .. }
             | Error::BuildDfLogicalPlan { .. }
             | Error::BuildTableMeta { .. }
-            | Error::VectorToGrpcColumn { .. } => StatusCode::Internal,
+            | Error::VectorToGrpcColumn { .. }
+            | Error::Timeout { .. } => StatusCode::Internal,
 
             Error::IncompleteGrpcResult { .. }
             | Error::ContextValueNotFound { .. }

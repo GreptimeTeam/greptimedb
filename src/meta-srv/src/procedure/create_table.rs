@@ -37,15 +37,11 @@ use crate::error::{self, Result};
 use crate::service::router::create_table_global_value;
 use crate::table_routes::get_table_global_value;
 
-// TODO(weny): removes in following PRs.
-#[allow(unused)]
 pub struct CreateTableProcedure {
     context: DdlContext,
     creator: TableCreator,
 }
 
-// TODO(weny): removes in following PRs.
-#[allow(dead_code)]
 impl CreateTableProcedure {
     pub(crate) const TYPE_NAME: &'static str = "metasrv-procedure::CreateTable";
 
@@ -105,6 +101,9 @@ impl CreateTableProcedure {
 
     /// registers the `TableRouteValue`,`TableGlobalValue`
     async fn register_metadata(&self) -> Result<()> {
+        let _timer = common_telemetry::timer!(
+            crate::metrics::METRIC_META_CREATE_TABLE_PROCEDURE_CREATE_META
+        );
         let table_name = self.table_name();
 
         let table_id = self.creator.data.table_route.table.id as TableId;
@@ -195,8 +194,10 @@ impl CreateTableProcedure {
     }
 
     async fn on_datanode_create_table(&mut self) -> Result<Status> {
+        let _timer = common_telemetry::timer!(
+            crate::metrics::METRIC_META_CREATE_TABLE_PROCEDURE_CREATE_TABLE
+        );
         let table_route = &self.creator.data.table_route;
-
         let table_name = self.table_name();
         let clients = self.context.datanode_clients.clone();
         let leaders = table_route.find_leaders();
@@ -209,6 +210,9 @@ impl CreateTableProcedure {
             let regions = table_route.find_leader_regions(&datanode);
             let mut create_expr_for_region = self.creator.data.task.create_table.clone();
             create_expr_for_region.region_numbers = regions;
+            create_expr_for_region.table_id = Some(api::v1::TableId {
+                id: table_route.table.id as u32,
+            });
 
             joins.push(common_runtime::spawn_bg(async move {
                 if let Err(err) = client.create(create_expr_for_region).await {
@@ -280,7 +284,7 @@ impl TableCreator {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 enum CreateTableState {
     /// Prepares to create the table
     Prepare,

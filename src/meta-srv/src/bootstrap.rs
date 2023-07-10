@@ -15,6 +15,7 @@
 use std::sync::Arc;
 
 use api::v1::meta::cluster_server::ClusterServer;
+use api::v1::meta::ddl_task_server::DdlTaskServer;
 use api::v1::meta::heartbeat_server::HeartbeatServer;
 use api::v1::meta::lock_server::LockServer;
 use api::v1::meta::router_server::RouterServer;
@@ -147,6 +148,7 @@ pub fn router(meta_srv: MetaSrv) -> Router {
         .add_service(StoreServer::new(meta_srv.clone()))
         .add_service(ClusterServer::new(meta_srv.clone()))
         .add_service(LockServer::new(meta_srv.clone()))
+        .add_service(DdlTaskServer::new(meta_srv.clone()))
         .add_service(admin::make_admin_service(meta_srv))
 }
 

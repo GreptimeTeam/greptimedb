@@ -27,14 +27,10 @@ use crate::error;
 use crate::error::Result;
 
 #[derive(Clone, Debug)]
-// TODO(weny): removes this in following PRs.
-#[allow(unused)]
 pub struct Client {
     inner: Arc<RwLock<Inner>>,
 }
 
-// TODO(weny): removes this in following PRs.
-#[allow(dead_code)]
 impl Client {
     pub fn new(id: Id, role: Role, channel_manager: ChannelManager) -> Self {
         let inner = Arc::new(RwLock::new(Inner {
