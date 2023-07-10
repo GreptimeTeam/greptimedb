@@ -5433,6 +5433,7 @@ version = "0.3.2"
 dependencies = [
  "aquamarine",
  "common-error",
+ "object-store",
  "snafu",
  "store-api",
 ]

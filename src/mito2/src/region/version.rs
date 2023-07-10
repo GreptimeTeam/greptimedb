@@ -12,30 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Mito region.
+//! Version control of mito engine.
+//!
+//! Version is an immutable snapshot of region's metadata.
+//!
+//! To read latest data from `VersionControl`, we should
+//! 1. Acquire `Version` from `VersionControl`.
+//! 2. Then acquire last sequence.
+//!
+//! Reason: data may be flushed/compacted and some data with old sequence may be removed
+//! and became invisible between step 1 and 2, so need to acquire version at first.
 
-mod metadata;
-mod version;
+use std::sync::Arc;
 
-use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
-
-use store_api::storage::RegionId;
-
-use crate::region::version::VersionControlRef;
-
-/// Metadata and runtime status of a region.
+/// Controls version of in memory metadata for a region.
 #[derive(Debug)]
-pub(crate) struct MitoRegion {
-    version_control: VersionControlRef,
-}
+pub(crate) struct VersionControl {}
 
-pub(crate) type MitoRegionRef = Arc<MitoRegion>;
-
-/// Regions indexed by ids.
-#[derive(Debug, Default)]
-pub(crate) struct RegionMap {
-    regions: RwLock<HashMap<RegionId, MitoRegionRef>>,
-}
-
-pub(crate) type RegionMapRef = Arc<RegionMap>;
+pub(crate) type VersionControlRef = Arc<VersionControl>;

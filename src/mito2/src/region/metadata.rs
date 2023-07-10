@@ -14,4 +14,10 @@
 
 //! Metadata of mito regions.
 
-// TODO(yingwen): RegionMetadata.
+use std::sync::Arc;
+
+/// Static metadata of a region.
+#[derive(Debug)]
+pub(crate) struct RegionMetadata {}
+
+pub(crate) type RegionMetadataRef = Arc<RegionMetadata>;

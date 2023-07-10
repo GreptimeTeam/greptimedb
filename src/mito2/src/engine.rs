@@ -14,6 +14,8 @@
 
 use std::sync::Arc;
 
+use object_store::ObjectStore;
+
 use crate::config::MitoConfig;
 use crate::worker::WorkerGroup;
 
@@ -24,10 +26,10 @@ pub struct MitoEngine {
 }
 
 impl MitoEngine {
-    /// Returns a new [MitoEngine] with specific `config`.
-    pub fn new(config: MitoConfig) -> MitoEngine {
+    /// Returns a new [MitoEngine] with specific `config`, `log_store` and `object_store`.
+    pub fn new<S>(config: MitoConfig, log_store: S, object_store: ObjectStore) -> MitoEngine {
         MitoEngine {
-            inner: Arc::new(EngineInner::new(config)),
+            inner: Arc::new(EngineInner::new(config, log_store, object_store)),
         }
     }
 }
@@ -39,8 +41,8 @@ struct EngineInner {
 }
 
 impl EngineInner {
-    /// Returns a new [EngineInner] with specific `config`.
-    fn new(_config: MitoConfig) -> EngineInner {
+    /// Returns a new [EngineInner] with specific `config`, `log_store` and `object_store`.
+    fn new<S>(_config: MitoConfig, _log_store: S, _object_store: ObjectStore) -> EngineInner {
         EngineInner {
             workers: WorkerGroup::default(),
         }
