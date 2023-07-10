@@ -5,3 +5,40 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+anymap = "1.0.0-beta.2"
+arc-swap = "1.0"
+async-stream.workspace = true
+async-trait = "0.1"
+chrono.workspace = true
+common-catalog = { path = "../common/catalog" }
+common-error = { path = "../common/error" }
+common-procedure = { path = "../common/procedure" }
+common-query = { path = "../common/query" }
+common-recordbatch = { path = "../common/recordbatch" }
+common-runtime = { path = "../common/runtime" }
+common-datasource = { path = "../common/datasource" }
+common-telemetry = { path = "../common/telemetry" }
+common-test-util = { path = "../common/test-util", optional = true }
+common-time = { path = "../common/time" }
+dashmap = "5.4"
+datafusion.workspace = true
+datafusion-common.workspace = true
+datatypes = { path = "../datatypes" }
+futures.workspace = true
+key-lock = "0.1"
+lazy_static = "1.4"
+log-store = { path = "../log-store" }
+metrics.workspace = true
+object-store = { path = "../object-store" }
+regex = "1.5"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+snafu.workspace = true
+storage = { path = "../storage" }
+store-api = { path = "../store-api" }
+table = { path = "../table" }
+tokio.workspace = true
+
+[dev-dependencies]
+common-test-util = { path = "../common/test-util" }
+common-procedure-test = { path = "../common/procedure-test" }

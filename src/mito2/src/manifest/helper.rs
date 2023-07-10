@@ -12,7 +12,28 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod engine;
-#[allow(dead_code)]
-#[allow(unused_variables)]
-pub mod manifest;
+use serde::Serialize;
+use store_api::manifest::action::ProtocolVersion;
+use store_api::manifest::ManifestVersion;
+
+use crate::manifest::action::RegionCheckpoint;
+
+pub const NEWLINE: &[u8] = b"\n";
+
+pub fn encode_actions<T: Serialize>(
+    prev_version: ManifestVersion,
+    actions: &[T],
+) -> Result<Vec<u8>, ()> {
+    todo!()
+}
+
+pub fn encode_checkpoint(snasphot: &RegionCheckpoint) -> Result<Vec<u8>, ()> {
+    todo!()
+}
+
+pub fn decode_checkpoint(
+    bs: &[u8],
+    reader_version: ProtocolVersion,
+) -> Result<RegionCheckpoint, ()> {
+    todo!()
+}

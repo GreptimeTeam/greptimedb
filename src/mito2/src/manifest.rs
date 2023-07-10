@@ -12,7 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod engine;
-#[allow(dead_code)]
+//! manifest storage
+
+mod action;
+mod gc_task;
+mod helper;
 #[allow(unused_variables)]
-pub mod manifest;
+mod impl_;

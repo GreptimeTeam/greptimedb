@@ -12,7 +12,27 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod engine;
-#[allow(dead_code)]
-#[allow(unused_variables)]
-pub mod manifest;
+use std::any::Any;
+
+use common_error::prelude::*;
+use snafu::Location;
+use store_api::storage::RegionNumber;
+use table::metadata::{TableInfoBuilderError, TableMetaBuilderError, TableVersion};
+
+#[derive(Debug, Snafu)]
+#[snafu(visibility(pub))]
+pub enum Error {}
+
+pub type Result<T> = std::result::Result<T, Error>;
+
+impl ErrorExt for Error {
+    fn status_code(&self) -> StatusCode {
+        use Error::*;
+
+        match self {}
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}

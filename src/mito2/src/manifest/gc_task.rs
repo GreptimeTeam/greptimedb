@@ -12,7 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod engine;
-#[allow(dead_code)]
-#[allow(unused_variables)]
-pub mod manifest;
+use common_runtime::TaskFunction;
+
+struct ManifestGcTask {}
+
+#[async_trait::async_trait]
+impl TaskFunction<()> for ManifestGcTask {
+    /// Invoke the task.
+    async fn call(&mut self) -> std::result::Result<(), ()> {
+        todo!()
+    }
+
+    /// Name of the task.
+    fn name(&self) -> &str {
+        todo!()
+    }
+}

@@ -5397,6 +5397,42 @@ dependencies = [
 [[package]]
 name = "mito2"
 version = "0.3.2"
+dependencies = [
+ "anymap",
+ "arc-swap",
+ "async-stream",
+ "async-trait",
+ "chrono",
+ "common-catalog",
+ "common-datasource",
+ "common-error",
+ "common-procedure",
+ "common-procedure-test",
+ "common-query",
+ "common-recordbatch",
+ "common-runtime",
+ "common-telemetry",
+ "common-test-util",
+ "common-time",
+ "dashmap",
+ "datafusion",
+ "datafusion-common",
+ "datatypes",
+ "futures",
+ "key-lock",
+ "lazy_static",
+ "log-store",
+ "metrics",
+ "object-store",
+ "regex",
+ "serde",
+ "serde_json",
+ "snafu",
+ "storage",
+ "store-api",
+ "table",
+ "tokio",
+]
 
 [[package]]
 name = "moka"
