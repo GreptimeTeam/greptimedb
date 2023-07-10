@@ -58,7 +58,9 @@ use query::query_engine::DescribeResult;
 use query::{QueryEngineFactory, QueryEngineRef};
 use servers::error as server_error;
 use servers::error::{ExecuteQuerySnafu, ParsePromQLSnafu};
-use servers::interceptor::{SqlQueryInterceptor, SqlQueryInterceptorRef};
+use servers::interceptor::{
+    PromQueryInterceptor, PromQueryInterceptorRef, SqlQueryInterceptor, SqlQueryInterceptorRef,
+};
 use servers::prom::PromHandler;
 use servers::query_handler::grpc::{GrpcQueryHandler, GrpcQueryHandlerRef};
 use servers::query_handler::sql::SqlQueryHandler;
@@ -571,17 +573,26 @@ impl PromHandler for Instance {
         query: &PromQuery,
         query_ctx: QueryContextRef,
     ) -> server_error::Result<Output> {
+        let interceptor_ref = self
+            .plugins
+            .get::<PromQueryInterceptorRef<server_error::Error>>();
+        let interceptor = interceptor_ref.as_ref();
+        interceptor.pre_execute(query, query_ctx.clone())?;
+
         let stmt = QueryLanguageParser::parse_promql(query).with_context(|_| ParsePromQLSnafu {
             query: query.clone(),
         })?;
 
-        self.statement_executor
-            .execute_stmt(stmt, query_ctx)
+        let output = self
+            .statement_executor
+            .execute_stmt(stmt, query_ctx.clone())
             .await
             .map_err(BoxedError::new)
             .with_context(|_| ExecuteQuerySnafu {
                 query: format!("{query:?}"),
-            })
+            })?;
+
+        Ok(interceptor.post_execute(output, query_ctx)?)
     }
 }
 

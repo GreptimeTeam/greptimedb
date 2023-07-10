@@ -18,6 +18,7 @@ use std::sync::Arc;
 use api::v1::greptime_request::Request;
 use common_error::prelude::ErrorExt;
 use common_query::Output;
+use query::parser::PromQuery;
 use query::plan::LogicalPlan;
 use session::context::QueryContextRef;
 use sql::statements::statement::Statement;
@@ -181,6 +182,65 @@ where
     ) -> Result<Output, Self::Error> {
         if let Some(this) = self {
             this.post_execute(output, _query_ctx)
+        } else {
+            Ok(output)
+        }
+    }
+}
+
+/// PromQueryInterceptor can track life cycle of a prometheus request and customize or
+/// abort its execution at given point.
+pub trait PromQueryInterceptor {
+    type Error: ErrorExt;
+
+    /// Called before request is actually executed.
+    fn pre_execute(
+        &self,
+        _query: &PromQuery,
+        _query_ctx: QueryContextRef,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    /// Called after execution finished. The implementation can modify the
+    /// output if needed.
+    fn post_execute(
+        &self,
+        output: Output,
+        _query_ctx: QueryContextRef,
+    ) -> Result<Output, Self::Error> {
+        Ok(output)
+    }
+}
+
+pub type PromQueryInterceptorRef<E> =
+    Arc<dyn PromQueryInterceptor<Error = E> + Send + Sync + 'static>;
+
+impl<E> PromQueryInterceptor for Option<&PromQueryInterceptorRef<E>>
+where
+    E: ErrorExt,
+{
+    type Error = E;
+
+    fn pre_execute(
+        &self,
+        query: &PromQuery,
+        query_ctx: QueryContextRef,
+    ) -> Result<(), Self::Error> {
+        if let Some(this) = self {
+            this.pre_execute(query, query_ctx)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn post_execute(
+        &self,
+        output: Output,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output, Self::Error> {
+        if let Some(this) = self {
+            this.post_execute(output, query_ctx)
         } else {
             Ok(output)
         }
