@@ -128,7 +128,7 @@ fn test_prom_interceptor() {
     assert!(fail.is_err());
 
     let output = Output::AffectedRows(1);
-    let two = PromQueryInterceptor::post_execute(&di, output, ctx.clone());
+    let two = PromQueryInterceptor::post_execute(&di, output, ctx);
     assert!(two.is_ok());
     matches!(two.unwrap(), Output::AffectedRows(2));
 }
