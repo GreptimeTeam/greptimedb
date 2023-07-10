@@ -224,7 +224,7 @@ pub(super) fn parameters_to_scalar_values(
     }
 
     for (idx, client_type) in client_param_types.iter().enumerate() {
-        if let Some(Some(server_type)) = param_types.get(&format!("${}", idx + 1)) {
+        let Some(Some(server_type)) = param_types.get(&format!("${}", idx + 1)) else { continue };
             let value = match client_type {
                 &Type::VARCHAR | &Type::TEXT => {
                     let data = portal.parameter::<String>(idx)?;
