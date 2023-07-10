@@ -48,7 +48,7 @@ pub enum Error {
 
     #[snafu(display("Table occurs error, source: {}", source))]
     Table {
-        #[snafu(backtrace)]
+        location: Location,
         source: table::error::Error,
     },
 
@@ -535,7 +535,7 @@ impl ErrorExt for Error {
             | Error::ConvertRawTableInfo { .. }
             | Error::BuildTableMeta { .. } => StatusCode::Unexpected,
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
-            Error::Table { source } => source.status_code(),
+            Error::Table { source, .. } => source.status_code(),
             Error::RequestDatanode { source, .. } => source.status_code(),
             Error::InvalidCatalogValue { source, .. } => source.status_code(),
             Error::RecoverProcedure { source, .. }

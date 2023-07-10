@@ -18,7 +18,7 @@ use api::v1::meta::{
     CreateRequest as PbCreateRequest, DeleteRequest as PbDeleteRequest, Partition as PbPartition,
     Peer as PbPeer, Region as PbRegion, RegionRoute as PbRegionRoute,
     RouteRequest as PbRouteRequest, RouteResponse as PbRouteResponse, Table as PbTable,
-    TableRoute as PbTableRoute,
+    TableRoute as PbTableRoute, TableRouteValue as PbTableRouteValue,
 };
 use serde::{Deserialize, Serialize, Serializer};
 use snafu::{OptionExt, ResultExt};
@@ -283,6 +283,18 @@ impl TableRoute {
         self.region_leaders
             .get(&region_number)
             .and_then(|x| x.as_ref())
+    }
+}
+
+impl TryFrom<PbTableRouteValue> for TableRoute {
+    type Error = error::Error;
+    fn try_from(pb: PbTableRouteValue) -> Result<Self> {
+        TableRoute::try_from_raw(
+            &pb.peers,
+            pb.table_route.context(error::InvalidProtoMsgSnafu {
+                err_msg: "expected table_route",
+            })?,
+        )
     }
 }
 

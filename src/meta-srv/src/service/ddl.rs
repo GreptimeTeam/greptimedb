@@ -17,6 +17,7 @@ use api::v1::meta::{
     Table, TableRoute,
 };
 use api::v1::TableId;
+use catalog::helper::TableGlobalKey;
 use common_grpc_expr::alter_expr_to_request;
 use common_meta::key::TableRouteKey;
 use common_meta::rpc::ddl::{AlterTableTask, CreateTableTask, DdlTask, DropTableTask};
@@ -33,7 +34,7 @@ use crate::ddl::DdlManagerRef;
 use crate::error::{self, Result};
 use crate::metasrv::{MetaSrv, SelectorContext, SelectorRef};
 use crate::sequence::SequenceRef;
-use crate::table_routes::{fetch_table, get_table_route_value};
+use crate::table_routes::{get_table_global_value, get_table_route_value};
 
 #[async_trait::async_trait]
 impl ddl_task_server::DdlTask for MetaSrv {
@@ -254,7 +255,7 @@ async fn handle_alter_table_task(
     let table_id = alter_table_task
         .alter_table
         .table_id
-        .clone()
+        .as_ref()
         .context(error::UnexpectedSnafu {
             violated: "expected table id ",
         })?
@@ -263,22 +264,19 @@ async fn handle_alter_table_task(
     let alter_table_request = alter_expr_to_request(table_id, alter_table_task.alter_table.clone())
         .context(error::ConvertGrpcExprSnafu)?;
 
-    let (table_global_value, table_route_value) =
-        fetch_table(&kv_store, alter_table_request.table_ref())
-            .await?
-            .with_context(|| error::TableNotFoundSnafu {
-                name: alter_table_request.table_ref().to_string(),
-            })?;
+    let table_ref = alter_table_task.table_ref();
 
-    let table_route = router::TableRoute::try_from_raw(
-        &table_route_value.peers,
-        table_route_value
-            .table_route
-            .context(error::UnexpectedSnafu {
-                violated: "expected table_route",
-            })?,
-    )
-    .context(error::TableRouteConversionSnafu)?;
+    let table_global_key = TableGlobalKey {
+        catalog_name: table_ref.catalog.to_string(),
+        schema_name: table_ref.schema.to_string(),
+        table_name: table_ref.table.to_string(),
+    };
+
+    let table_global_value = get_table_global_value(&kv_store, &table_global_key)
+        .await?
+        .with_context(|| error::TableNotFoundSnafu {
+            name: table_ref.to_string(),
+        })?;
 
     let table_info = table_global_value.table_info;
 
@@ -287,12 +285,11 @@ async fn handle_alter_table_task(
             cluster_id,
             alter_table_task,
             alter_table_request,
-            table_route,
             table_info,
         )
         .await?;
 
-    info!("Table: {table_id} created via procedure_id {id:?}");
+    info!("Table: {table_id} is altering via procedure_id {id:?}");
 
     Ok(SubmitDdlTaskResponse {
         key: id.to_string().into(),

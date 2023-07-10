@@ -115,7 +115,6 @@ impl DdlManager {
         cluster_id: u64,
         alter_table_task: AlterTableTask,
         alter_table_request: AlterTableRequest,
-        table_route: TableRoute,
         table_info: RawTableInfo,
     ) -> Result<ProcedureId> {
         let context = self.create_context();
@@ -124,7 +123,6 @@ impl DdlManager {
             cluster_id,
             alter_table_task,
             alter_table_request,
-            table_route,
             table_info,
             context,
         );
