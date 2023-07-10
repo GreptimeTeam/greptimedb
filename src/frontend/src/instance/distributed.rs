@@ -316,28 +316,17 @@ impl DistInstance {
             .await
             .context(RequestMetaSnafu)?;
 
-        let expr = FlushTableExpr {
-            catalog_name: table_name.catalog_name.clone(),
-            schema_name: table_name.schema_name.clone(),
-            table_name: table_name.table_name.clone(),
-            region_number,
-            ..Default::default()
-        };
-
-        let mut res = vec![];
-        for table_route in &route_response.table_routes {
-            let should_send_rpc = table_route.region_routes.iter().any(|route| {
-                if let Some(n) = region_number {
-                    n == route.region.id.region_number()
-                } else {
-                    true
-                }
-            });
-
-            if should_send_rpc {
-                res.extend(table_route.find_leaders().into_iter());
-            }
-        }
+        let res = route_response
+            .table_routes
+            .iter()
+            .filter(|route| {
+                route.region_routes.iter().any(|r| {
+                    let Some(n) = region_number else { return true; };
+                    n == r.region.id.region_number()
+                })
+            })
+            .flat_map(|route| route.find_leaders().into_iter())
+            .collect::<Vec<_>>();
         Ok(res)
     }
 
