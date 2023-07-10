@@ -5,3 +5,8 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+aquamarine = "0.3"
+common-error = { path = "../common/error" }
+object-store = { path = "../object-store" }
+snafu.workspace = true
+store-api = { path = "../store-api" }
