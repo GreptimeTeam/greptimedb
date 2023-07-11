@@ -38,7 +38,7 @@ pub fn alter_expr_to_request(table_id: TableId, expr: AlterExpr) -> Result<Alter
     let catalog_name = expr.catalog_name;
     let schema_name = expr.schema_name;
     let kind = expr.kind.context(MissingFieldSnafu { field: "kind" })?;
-    match kind {
+    let alter_kind = match kind {
         Kind::AddColumns(add_columns) => {
             let add_column_requests = add_columns
                 .add_columns
@@ -61,45 +61,27 @@ pub fn alter_expr_to_request(table_id: TableId, expr: AlterExpr) -> Result<Alter
                 })
                 .collect::<Result<Vec<_>>>()?;
 
-            let alter_kind = AlterKind::AddColumns {
+            AlterKind::AddColumns {
                 columns: add_column_requests,
-            };
-
-            let request = AlterTableRequest {
-                catalog_name,
-                schema_name,
-                table_name: expr.table_name,
-                table_id,
-                alter_kind,
-            };
-            Ok(request)
+            }
         }
-        Kind::DropColumns(DropColumns { drop_columns }) => {
-            let alter_kind = AlterKind::DropColumns {
-                names: drop_columns.into_iter().map(|c| c.name).collect(),
-            };
-
-            let request = AlterTableRequest {
-                catalog_name,
-                schema_name,
-                table_name: expr.table_name,
-                table_id,
-                alter_kind,
-            };
-            Ok(request)
-        }
+        Kind::DropColumns(DropColumns { drop_columns }) => AlterKind::DropColumns {
+            names: drop_columns.into_iter().map(|c| c.name).collect(),
+        },
         Kind::RenameTable(RenameTable { new_table_name }) => {
-            let alter_kind = AlterKind::RenameTable { new_table_name };
-            let request = AlterTableRequest {
-                catalog_name,
-                schema_name,
-                table_name: expr.table_name,
-                table_id,
-                alter_kind,
-            };
-            Ok(request)
+            AlterKind::RenameTable { new_table_name }
         }
-    }
+    };
+
+    let request = AlterTableRequest {
+        catalog_name,
+        schema_name,
+        table_name: expr.table_name,
+        table_id,
+        alter_kind,
+        table_version: Some(expr.table_version),
+    };
+    Ok(request)
 }
 
 pub fn create_table_schema(expr: &CreateTableExpr, require_time_index: bool) -> Result<RawSchema> {

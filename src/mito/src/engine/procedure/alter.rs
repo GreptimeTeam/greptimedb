@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::cmp::Ordering;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -20,7 +21,7 @@ use common_procedure::{Context, LockKey, Procedure, ProcedureManager, Result, St
 use common_telemetry::logging;
 use common_telemetry::metric::Timer;
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt};
 use store_api::manifest::Manifest;
 use store_api::storage::{AlterOperation, StorageEngine};
 use table::engine::TableReference;
@@ -29,7 +30,7 @@ use table::requests::{AlterKind, AlterTableRequest};
 use table::{Table, TableRef};
 
 use crate::engine::MitoEngineInner;
-use crate::error::{TableNotFoundSnafu, UpdateTableManifestSnafu, VersionChangedSnafu};
+use crate::error::{StaleVersionSnafu, TableNotFoundSnafu, UpdateTableManifestSnafu};
 use crate::manifest::action::{TableChange, TableMetaAction, TableMetaActionList};
 use crate::metrics;
 use crate::table::MitoTable;
@@ -110,7 +111,7 @@ impl<S: StorageEngine> AlterMitoTable<S> {
                 table_name: table_ref.to_string(),
             })?;
         let info = table.table_info();
-        data.table_version = info.ident.version;
+        data.table_version = data.request.table_version.unwrap_or(info.ident.version);
 
         Ok(AlterMitoTable {
             data,
@@ -161,19 +162,23 @@ impl<S: StorageEngine> AlterMitoTable<S> {
     /// Prepare table info.
     fn on_prepare(&mut self) -> Result<Status> {
         let current_info = self.table.table_info();
-        ensure!(
-            current_info.ident.version == self.data.table_version,
-            VersionChangedSnafu {
+
+        match current_info.ident.version.cmp(&self.data.table_version) {
+            Ordering::Greater => Ok(Status::Done),
+            Ordering::Less => Err(StaleVersionSnafu {
                 expect: self.data.table_version,
-                actual: current_info.ident.version,
+                current: current_info.ident.version,
             }
-        );
+            .build()
+            .into()),
+            Ordering::Equal => {
+                // We don't check the table name in the table engine as it is the catalog
+                // manager's duty to ensure the table name is unused.
+                self.data.state = AlterTableState::EngineAlterTable;
 
-        // We don't check the table name in the table engine as it is the catalog
-        // manager's duty to ensure the table name is unused.
-        self.data.state = AlterTableState::EngineAlterTable;
-
-        Ok(Status::executing(true))
+                Ok(Status::executing(true))
+            }
+        }
     }
 
     /// Engine alters the table.

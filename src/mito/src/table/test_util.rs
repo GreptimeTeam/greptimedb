@@ -129,6 +129,7 @@ pub fn new_alter_request(alter_kind: AlterKind) -> AlterTableRequest {
         table_name: TABLE_NAME.to_string(),
         table_id: TABLE_ID,
         alter_kind,
+        table_version: None,
     }
 }
 

@@ -29,7 +29,7 @@ use store_api::storage::RegionNumber;
 use crate::engine::TableReference;
 use crate::error;
 use crate::error::ParseTableOptionSnafu;
-use crate::metadata::TableId;
+use crate::metadata::{TableId, TableVersion};
 
 pub const IMMUTABLE_TABLE_META_KEY: &str = "__private.immutable_table_meta";
 pub const IMMUTABLE_TABLE_LOCATION_KEY: &str = "location";
@@ -164,6 +164,8 @@ pub struct AlterTableRequest {
     pub table_name: String,
     pub table_id: TableId,
     pub alter_kind: AlterKind,
+    // None in standalone.
+    pub table_version: Option<TableVersion>,
 }
 
 impl AlterTableRequest {

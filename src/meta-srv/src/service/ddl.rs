@@ -248,7 +248,7 @@ async fn handle_drop_table_task(
 
 async fn handle_alter_table_task(
     cluster_id: u64,
-    alter_table_task: AlterTableTask,
+    mut alter_table_task: AlterTableTask,
     kv_store: KvStoreRef,
     ddl_manager: DdlManagerRef,
 ) -> Result<SubmitDdlTaskResponse> {
@@ -261,8 +261,9 @@ async fn handle_alter_table_task(
         })?
         .id;
 
-    let alter_table_request = alter_expr_to_request(table_id, alter_table_task.alter_table.clone())
-        .context(error::ConvertGrpcExprSnafu)?;
+    let mut alter_table_request =
+        alter_expr_to_request(table_id, alter_table_task.alter_table.clone())
+            .context(error::ConvertGrpcExprSnafu)?;
 
     let table_ref = alter_table_task.table_ref();
 
@@ -279,6 +280,10 @@ async fn handle_alter_table_task(
         })?;
 
     let table_info = table_global_value.table_info;
+
+    // Sets alter_table's table_version
+    alter_table_task.alter_table.table_version = table_info.ident.version;
+    alter_table_request.table_version = Some(table_info.ident.version);
 
     let id = ddl_manager
         .submit_alter_table_task(

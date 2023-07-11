@@ -163,10 +163,10 @@ pub enum Error {
     #[snafu(display("Invalid schema, source: {}", source))]
     InvalidRawSchema { source: datatypes::error::Error },
 
-    #[snafu(display("Table version changed, expect: {}, actual: {}", expect, actual))]
-    VersionChanged {
+    #[snafu(display("Stale version found, expect: {}, current: {}", expect, current))]
+    StaleVersion {
         expect: TableVersion,
-        actual: TableVersion,
+        current: TableVersion,
     },
 }
 
@@ -188,7 +188,7 @@ impl ErrorExt for Error {
             | MissingTimestampIndex { .. }
             | TableNotFound { .. }
             | InvalidRawSchema { .. }
-            | VersionChanged { .. } => StatusCode::InvalidArguments,
+            | StaleVersion { .. } => StatusCode::InvalidArguments,
 
             TableExists { .. } => StatusCode::TableAlreadyExists,
 
