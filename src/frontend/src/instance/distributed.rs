@@ -278,7 +278,7 @@ impl DistInstance {
         };
 
         for candidate in candidates {
-            debug!("Flushing table {table_name} on Datanode {candidate:?}");
+            debug!("Compacting table {table_name} on Datanode {candidate:?}");
 
             let client = self.datanode_clients.get_client(&candidate).await;
             let client = Database::new(&expr.catalog_name, &expr.schema_name, client);

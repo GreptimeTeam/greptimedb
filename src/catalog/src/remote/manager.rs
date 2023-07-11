@@ -115,7 +115,7 @@ impl RemoteCatalogManager {
             joins.push(self.initiate_schemas(node_id, backend, engine_manager, catalog_name));
         }
 
-        let _ = futures::future::try_join_all(joins).await?;
+        futures::future::try_join_all(joins).await?;
 
         Ok(())
     }

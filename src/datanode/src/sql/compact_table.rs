@@ -68,7 +68,7 @@ impl SqlHandler {
         catalog_manager
             .table(catalog_name, schema_name, table_name)
             .await
-            .context(error::FindTableSnafu { table_name })?
+            .context(CatalogSnafu)?
             .context(error::TableNotFoundSnafu { table_name })?
             .compact(region, wait)
             .await
