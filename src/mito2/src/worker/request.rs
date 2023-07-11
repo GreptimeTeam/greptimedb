@@ -19,11 +19,25 @@ use std::sync::{Arc, Mutex};
 
 use tokio::sync::Notify;
 
-/// Request to write or alter a region.
+/// Request handled by workers.
 #[derive(Debug)]
-pub(crate) enum WorkerRequest {}
+pub(crate) enum WorkerRequest {
+    /// Write a region.
+    Write(WriteRequest),
 
-// [WorkerRequest] sender.
+    /// Control a region.
+    Control(ControlRequest),
+}
+
+/// Request to write a region.
+#[derive(Debug)]
+pub(crate) struct WriteRequest {}
+
+/// Request to control (alter) a region.
+#[derive(Debug)]
+pub(crate) struct ControlRequest {}
+
+// Region request sender.
 #[derive(Debug)]
 pub(crate) struct Sender {
     channel: Arc<RequestChan>,
@@ -42,7 +56,7 @@ impl Sender {
 }
 
 // Receivers **should not support Clone** since we can't wake up multiple receivers.
-/// [WorkerRequest] receiver.
+/// Region request receiver.
 #[derive(Debug)]
 pub(crate) struct Receiver {
     channel: Arc<RequestChan>,
@@ -52,7 +66,7 @@ impl Receiver {
     /// Receives all requests buffered in the channel in FIFO order.
     ///
     /// Waits for next request if the channel is empty.
-    pub(crate) async fn receive_all(&self, buffer: &mut Vec<WorkerRequest>) {
+    pub(crate) async fn receive_all(&self, buffer: &mut RequestQueue) {
         self.channel.notified().await;
         self.channel.take(buffer);
     }
@@ -71,11 +85,41 @@ pub(crate) fn request_channel() -> (Sender, Receiver) {
     (sender, receiver)
 }
 
-/// A multi-producer, single-consumer channel to batch [WorkerRequests](WorkerRequest).
+/// Request queue grouped by request type.
+#[derive(Debug, Default)]
+pub(crate) struct RequestQueue {
+    /// Queued write requests.
+    pub(crate) write_requests: Vec<WriteRequest>,
+    /// Queued control requests.
+    pub(crate) control_requests: Vec<ControlRequest>,
+}
+
+impl RequestQueue {
+    /// Clear the queue.
+    pub(crate) fn clear(&mut self) {
+        self.write_requests.clear();
+        self.control_requests.clear();
+    }
+
+    /// Push request to a specific queue.
+    fn push_back(&mut self, request: WorkerRequest) {
+        match request {
+            WorkerRequest::Write(req) => self.write_requests.push(req),
+            WorkerRequest::Control(req) => self.control_requests.push(req),
+        }
+    }
+
+    /// Returns true if the queue is empty.
+    fn is_empty(&self) -> bool {
+        self.write_requests.is_empty() && self.control_requests.is_empty()
+    }
+}
+
+/// A multi-producer, single-consumer channel to batch region requests.
 #[derive(Debug, Default)]
 struct RequestChan {
     /// Requests in FIFO order.
-    channel: Mutex<Vec<WorkerRequest>>,
+    channel: Mutex<RequestQueue>,
     /// Receiver notify.
     notify: Notify,
 }
@@ -85,7 +129,7 @@ impl RequestChan {
     fn push_back(&self, request: WorkerRequest) {
         let mut channel = self.channel.lock().unwrap();
         let wake = channel.is_empty();
-        channel.push(request);
+        channel.push_back(request);
         if wake {
             // Only notify waker when this is the first request
             // in the channel.
@@ -96,7 +140,7 @@ impl RequestChan {
     /// Take all requests from the channel to the `buffer`.
     ///
     /// Requests in the buffer have the same order as what they have in the channel.
-    fn take(&self, buffer: &mut Vec<WorkerRequest>) {
+    fn take(&self, buffer: &mut RequestQueue) {
         let mut channel = self.channel.lock().unwrap();
         mem::swap(&mut *channel, buffer);
     }

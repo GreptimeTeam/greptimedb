@@ -28,7 +28,7 @@ use tokio::sync::Mutex;
 
 use crate::error::{JoinSnafu, Result};
 use crate::region::{RegionMap, RegionMapRef};
-use crate::worker::request::{Receiver, Sender, WorkerRequest};
+use crate::worker::request::{Receiver, RequestQueue, Sender};
 
 /// A fixed size group of [RegionWorkers](RegionWorker).
 ///
@@ -135,7 +135,7 @@ impl<S> RegionWorkerThread<S> {
     /// Starts the worker loop.
     async fn run(&mut self) {
         // Buffer to retrieve requests from receiver.
-        let mut buffer = Vec::new();
+        let mut buffer = RequestQueue::default();
 
         while self.running.load(Ordering::Relaxed) {
             // Clear the buffer before handling next batch of requests.
@@ -150,10 +150,8 @@ impl<S> RegionWorkerThread<S> {
     /// Process requests.
     ///
     /// `buffer` should be empty.
-    async fn handle_requests(&mut self, buffer: &mut Vec<WorkerRequest>) -> Result<()> {
+    async fn handle_requests(&mut self, buffer: &mut RequestQueue) -> Result<()> {
         self.receiver.receive_all(buffer).await;
-
-        // let region_requests = expr;
 
         todo!()
     }
