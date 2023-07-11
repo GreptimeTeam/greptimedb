@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use api::v1::greptime_request::Request as GreptimeRequest;
+use api::v1::greptime_request::Request;
 use async_trait::async_trait;
 use common_query::Output;
 use datanode::error::Error as DatanodeError;
@@ -36,7 +36,7 @@ impl StandaloneGrpcQueryHandler {
 impl GrpcQueryHandler for StandaloneGrpcQueryHandler {
     type Error = error::Error;
 
-    async fn do_query(&self, query: GreptimeRequest, ctx: QueryContextRef) -> Result<Output> {
+    async fn do_query(&self, query: Request, ctx: QueryContextRef) -> Result<Output> {
         self.0
             .do_query(query, ctx)
             .await

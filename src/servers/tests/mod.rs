@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-use api::v1::greptime_request::{Request as GreptimeRequest, Request};
+use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
 use async_trait::async_trait;
 use catalog::local::MemoryCatalogManager;
@@ -156,7 +156,7 @@ impl GrpcQueryHandler for DummyInstance {
 
     async fn do_query(
         &self,
-        request: GreptimeRequest,
+        request: Request,
         ctx: QueryContextRef,
     ) -> std::result::Result<Output, Self::Error> {
         let output = match request {
