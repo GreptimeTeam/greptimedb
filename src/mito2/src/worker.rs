@@ -116,7 +116,7 @@ impl Drop for RegionWorker {
     }
 }
 
-/// Background worker thread to handle [WorkerRequest].
+/// Background worker thread to handle requests.
 struct RegionWorkerThread<S> {
     // Id of the worker.
     id: WorkerId,
@@ -134,9 +134,11 @@ struct RegionWorkerThread<S> {
 impl<S> RegionWorkerThread<S> {
     /// Starts the worker loop.
     async fn run(&mut self) {
+        // Buffer to retrieve requests from receiver.
         let mut buffer = Vec::new();
 
         while self.running.load(Ordering::Relaxed) {
+            // Clear the buffer before handling next batch of requests.
             buffer.clear();
 
             if let Err(e) = self.handle_requests(&mut buffer).await {
@@ -146,7 +148,13 @@ impl<S> RegionWorkerThread<S> {
     }
 
     /// Process requests.
-    async fn handle_requests(&mut self, _buffer: &mut Vec<WorkerRequest>) -> Result<()> {
+    ///
+    /// `buffer` should be empty.
+    async fn handle_requests(&mut self, buffer: &mut Vec<WorkerRequest>) -> Result<()> {
+        self.receiver.receive_all(buffer).await;
+
+        // let region_requests = expr;
+
         todo!()
     }
 }
