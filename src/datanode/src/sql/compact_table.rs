@@ -15,15 +15,16 @@
 use catalog::CatalogManagerRef;
 use common_query::Output;
 use snafu::{OptionExt, ResultExt};
-use table::requests::FlushTableRequest;
+use table::requests::CompactTableRequest;
 
-use crate::error::{self, CatalogSnafu, Result};
+use crate::error;
+use crate::error::{CatalogSnafu, Result};
 use crate::sql::SqlHandler;
 
 impl SqlHandler {
-    pub(crate) async fn flush_table(&self, req: FlushTableRequest) -> Result<Output> {
+    pub(crate) async fn compact_table(&self, req: CompactTableRequest) -> Result<Output> {
         if let Some(table) = &req.table_name {
-            self.flush_table_inner(
+            self.compact_table_inner(
                 &self.catalog_manager,
                 &req.catalog_name,
                 &req.schema_name,
@@ -39,7 +40,7 @@ impl SqlHandler {
                 .await
                 .context(CatalogSnafu)?;
             let _ = futures::future::join_all(all_table_names.iter().map(|table| {
-                self.flush_table_inner(
+                self.compact_table_inner(
                     &self.catalog_manager,
                     &req.catalog_name,
                     &req.schema_name,
@@ -55,7 +56,7 @@ impl SqlHandler {
         Ok(Output::AffectedRows(0))
     }
 
-    async fn flush_table_inner(
+    async fn compact_table_inner(
         &self,
         catalog_manager: &CatalogManagerRef,
         catalog_name: &str,
@@ -69,7 +70,7 @@ impl SqlHandler {
             .await
             .context(CatalogSnafu)?
             .context(error::TableNotFoundSnafu { table_name })?
-            .flush(region, wait)
+            .compact(region, wait)
             .await
             .context(error::FlushTableSnafu { table_name })
     }

@@ -31,6 +31,7 @@ use crate::error::{
 use crate::instance::sql::table_idents_to_full_name;
 
 mod alter;
+mod compact_table;
 mod create;
 mod create_external;
 mod drop_table;
@@ -44,6 +45,7 @@ pub enum SqlRequest {
     Alter(AlterTableRequest),
     DropTable(DropTableRequest),
     FlushTable(FlushTableRequest),
+    CompactTable(CompactTableRequest),
 }
 
 // Handler to execute SQL except query
@@ -74,6 +76,7 @@ impl SqlHandler {
             SqlRequest::Alter(req) => self.alter_table(req).await,
             SqlRequest::DropTable(req) => self.drop_table(req).await,
             SqlRequest::FlushTable(req) => self.flush_table(req).await,
+            SqlRequest::CompactTable(req) => self.compact_table(req).await,
         };
         if let Err(e) = &result {
             error!(e; "{query_ctx}");

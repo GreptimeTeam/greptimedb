@@ -223,7 +223,7 @@ impl CompactionTester {
         // Trigger compaction and wait until it is done.
         self.base()
             .region
-            .compact(CompactContext::default())
+            .compact(&CompactContext::default())
             .await
             .unwrap();
     }

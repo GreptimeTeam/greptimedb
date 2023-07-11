@@ -32,8 +32,8 @@ use store_api::manifest::{
     self, Manifest, ManifestLogStorage, ManifestVersion, MetaActionIterator,
 };
 use store_api::storage::{
-    AlterRequest, CloseContext, CompactionStrategy, FlushContext, FlushReason, OpenOptions,
-    ReadContext, Region, RegionId, SequenceNumber, WriteContext, WriteResponse,
+    AlterRequest, CloseContext, CompactContext, CompactionStrategy, FlushContext, FlushReason,
+    OpenOptions, ReadContext, Region, RegionId, SequenceNumber, WriteContext, WriteResponse,
 };
 
 use crate::compaction::{
@@ -150,6 +150,10 @@ impl<S: LogStore> Region for RegionImpl<S> {
     async fn flush(&self, ctx: &FlushContext) -> Result<()> {
         self.inner.flush(ctx).await
     }
+
+    async fn compact(&self, ctx: &CompactContext) -> std::result::Result<(), Self::Error> {
+        self.inner.compact(ctx).await
+    }
 }
 
 /// Storage related config for region.
@@ -173,18 +177,6 @@ pub struct StoreConfig<S: LogStore> {
 
 pub type RecoveredMetadata = (SequenceNumber, (ManifestVersion, RawRegionMetadata));
 pub type RecoveredMetadataMap = BTreeMap<SequenceNumber, (ManifestVersion, RawRegionMetadata)>;
-
-#[derive(Debug)]
-pub struct CompactContext {
-    /// Whether to wait the compaction result.
-    pub wait: bool,
-}
-
-impl Default for CompactContext {
-    fn default() -> CompactContext {
-        CompactContext { wait: true }
-    }
-}
 
 impl<S: LogStore> RegionImpl<S> {
     /// Create a new region and also persist the region metadata to manifest.
@@ -557,7 +549,7 @@ impl<S: LogStore> RegionImpl<S> {
     }
 
     /// Compact the region manually.
-    pub async fn compact(&self, ctx: CompactContext) -> Result<()> {
+    pub async fn compact(&self, ctx: &CompactContext) -> Result<()> {
         self.inner.compact(ctx).await
     }
 
@@ -765,7 +757,7 @@ impl<S: LogStore> RegionInner<S> {
     }
 
     /// Compact the region manually.
-    async fn compact(&self, compact_ctx: CompactContext) -> Result<()> {
+    async fn compact(&self, compact_ctx: &CompactContext) -> Result<()> {
         self.writer
             .compact(WriterCompactRequest {
                 shared_data: self.shared.clone(),
@@ -773,7 +765,7 @@ impl<S: LogStore> RegionInner<S> {
                 manifest: self.manifest.clone(),
                 wal: self.wal.clone(),
                 region_writer: self.writer.clone(),
-                compact_ctx,
+                compact_ctx: *compact_ctx,
             })
             .await
     }

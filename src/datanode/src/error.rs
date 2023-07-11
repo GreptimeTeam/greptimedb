@@ -346,13 +346,6 @@ pub enum Error {
         source: catalog::error::Error,
     },
 
-    #[snafu(display("Failed to find table {} from catalog, source: {}", table_name, source))]
-    FindTable {
-        table_name: String,
-        location: Location,
-        source: catalog::error::Error,
-    },
-
     #[snafu(display("Failed to initialize meta client, source: {}", source))]
     MetaClientInit {
         location: Location,
@@ -499,7 +492,6 @@ impl ErrorExt for Error {
 
             DecodeLogicalPlan { source, .. } => source.status_code(),
             NewCatalog { source, .. } | RegisterSchema { source, .. } => source.status_code(),
-            FindTable { source, .. } => source.status_code(),
             CreateTable { source, .. } => source.status_code(),
             DropTable { source, .. } => source.status_code(),
             FlushTable { source, .. } => source.status_code(),

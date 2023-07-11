@@ -22,8 +22,8 @@ use api::helper::ColumnDataTypeWrapper;
 use api::v1::ddl_request::{Expr as DdlExpr, Expr};
 use api::v1::greptime_request::Request;
 use api::v1::{
-    column_def, AlterExpr, CreateDatabaseExpr, CreateTableExpr, DeleteRequest, DropTableExpr,
-    FlushTableExpr, InsertRequests, TableId,
+    column_def, AlterExpr, CompactTableExpr, CreateDatabaseExpr, CreateTableExpr, DeleteRequest,
+    DropTableExpr, FlushTableExpr, InsertRequests, TableId,
 };
 use async_trait::async_trait;
 use catalog::helper::{SchemaKey, SchemaValue};
@@ -34,6 +34,7 @@ use client::Database;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::format_full_table_name;
 use common_error::prelude::BoxedError;
+use common_meta::peer::Peer;
 use common_meta::rpc::ddl::{DdlTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse};
 use common_meta::rpc::router::{
     DeleteRequest as MetaDeleteRequest, Partition as MetaPartition, RouteRequest,
@@ -234,6 +235,66 @@ impl DistInstance {
         table_name: TableName,
         region_number: Option<RegionNumber>,
     ) -> Result<Output> {
+        let candidates = self
+            .find_flush_or_compaction_candidates(&table_name, region_number)
+            .await?;
+
+        let expr = FlushTableExpr {
+            catalog_name: table_name.catalog_name.clone(),
+            schema_name: table_name.schema_name.clone(),
+            table_name: table_name.table_name.clone(),
+            region_number,
+            ..Default::default()
+        };
+
+        for candidate in candidates {
+            debug!("Flushing table {table_name} on Datanode {candidate:?}");
+
+            let client = self.datanode_clients.get_client(&candidate).await;
+            let client = Database::new(&expr.catalog_name, &expr.schema_name, client);
+            client
+                .flush_table(expr.clone())
+                .await
+                .context(RequestDatanodeSnafu)?;
+        }
+
+        Ok(Output::AffectedRows(0))
+    }
+
+    async fn compact_table(
+        &self,
+        table_name: TableName,
+        region_number: Option<RegionNumber>,
+    ) -> Result<Output> {
+        let candidates = self
+            .find_flush_or_compaction_candidates(&table_name, region_number)
+            .await?;
+
+        let expr = CompactTableExpr {
+            catalog_name: table_name.catalog_name.clone(),
+            schema_name: table_name.schema_name.clone(),
+            table_name: table_name.table_name.clone(),
+            region_number,
+        };
+
+        for candidate in candidates {
+            debug!("Compacting table {table_name} on Datanode {candidate:?}");
+
+            let client = self.datanode_clients.get_client(&candidate).await;
+            let client = Database::new(&expr.catalog_name, &expr.schema_name, client);
+            client
+                .compact_table(expr.clone())
+                .await
+                .context(RequestDatanodeSnafu)?;
+        }
+        Ok(Output::AffectedRows(0))
+    }
+
+    async fn find_flush_or_compaction_candidates(
+        &self,
+        table_name: &TableName,
+        region_number: Option<RegionNumber>,
+    ) -> Result<Vec<Peer>> {
         let _ = self
             .catalog_manager
             .table(
@@ -255,38 +316,18 @@ impl DistInstance {
             .await
             .context(RequestMetaSnafu)?;
 
-        let expr = FlushTableExpr {
-            catalog_name: table_name.catalog_name.clone(),
-            schema_name: table_name.schema_name.clone(),
-            table_name: table_name.table_name.clone(),
-            region_number,
-            ..Default::default()
-        };
-
-        for table_route in &route_response.table_routes {
-            let should_send_rpc = table_route.region_routes.iter().any(|route| {
-                if let Some(n) = region_number {
-                    n == route.region.id.region_number()
-                } else {
-                    true
-                }
-            });
-
-            if !should_send_rpc {
-                continue;
-            }
-            for datanode in table_route.find_leaders() {
-                debug!("Flushing table {table_name} on Datanode {datanode:?}");
-
-                let client = self.datanode_clients.get_client(&datanode).await;
-                let client = Database::new(&expr.catalog_name, &expr.schema_name, client);
-                let _ = client
-                    .flush_table(expr.clone())
-                    .await
-                    .context(RequestDatanodeSnafu)?;
-            }
-        }
-        Ok(Output::AffectedRows(0))
+        let res = route_response
+            .table_routes
+            .iter()
+            .filter(|route| {
+                route.region_routes.iter().any(|r| {
+                    let Some(n) = region_number else { return true; };
+                    n == r.region.id.region_number()
+                })
+            })
+            .flat_map(|route| route.find_leaders().into_iter())
+            .collect::<Vec<_>>();
+        Ok(res)
     }
 
     async fn handle_statement(
@@ -597,8 +638,10 @@ impl GrpcQueryHandler for DistInstance {
                             TableName::new(&expr.catalog_name, &expr.schema_name, &expr.table_name);
                         self.flush_table(table_name, expr.region_number).await
                     }
-                    Expr::CompactTable(_) => {
-                        unreachable!("https://github.com/GreptimeTeam/greptimedb/pull/1912")
+                    Expr::CompactTable(expr) => {
+                        let table_name =
+                            TableName::new(&expr.catalog_name, &expr.schema_name, &expr.table_name);
+                        self.compact_table(table_name, expr.region_number).await
                     }
                 }
             }

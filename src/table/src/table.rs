@@ -122,6 +122,14 @@ pub trait Table: Send + Sync {
     fn statistics(&self) -> Option<TableStatistics> {
         None
     }
+
+    async fn compact(&self, region_number: Option<RegionNumber>, wait: Option<bool>) -> Result<()> {
+        let _ = (region_number, wait);
+        UnsupportedSnafu {
+            operation: "COMPACTION",
+        }
+        .fail()?
+    }
 }
 
 pub type TableRef = Arc<dyn Table>;
