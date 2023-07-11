@@ -19,6 +19,7 @@ use std::hash::{Hash, Hasher};
 use std::str::FromStr;
 use std::time::Duration;
 
+use arrow::datatypes::TimeUnit as ArrowTimeUnit;
 use chrono::offset::Local;
 use chrono::{DateTime, LocalResult, NaiveDateTime, TimeZone as ChronoTimeZone, Utc};
 use serde::{Deserialize, Serialize};
@@ -308,6 +309,23 @@ pub enum TimeUnit {
     Nanosecond,
 }
 
+impl From<&ArrowTimeUnit> for TimeUnit {
+    fn from(unit: &ArrowTimeUnit) -> Self {
+        match unit {
+            ArrowTimeUnit::Second => Self::Second,
+            ArrowTimeUnit::Millisecond => Self::Millisecond,
+            ArrowTimeUnit::Microsecond => Self::Microsecond,
+            ArrowTimeUnit::Nanosecond => Self::Nanosecond,
+        }
+    }
+}
+
+impl From<ArrowTimeUnit> for TimeUnit {
+    fn from(unit: ArrowTimeUnit) -> Self {
+        (&unit).into()
+    }
+}
+
 impl Display for TimeUnit {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -343,6 +361,15 @@ impl TimeUnit {
             TimeUnit::Millisecond => "ms",
             TimeUnit::Microsecond => "us",
             TimeUnit::Nanosecond => "ns",
+        }
+    }
+
+    pub fn as_arrow_time_unit(&self) -> ArrowTimeUnit {
+        match self {
+            Self::Second => ArrowTimeUnit::Second,
+            Self::Millisecond => ArrowTimeUnit::Millisecond,
+            Self::Microsecond => ArrowTimeUnit::Microsecond,
+            Self::Nanosecond => ArrowTimeUnit::Nanosecond,
         }
     }
 }
@@ -1009,5 +1036,10 @@ mod tests {
             Timestamp::new(1, TimeUnit::Millisecond)
                 .to_timezone_aware_string(TimeZone::from_tz_string("Europe/Moscow").unwrap())
         );
+    }
+
+    #[test]
+    fn test_from_arrow_time_unit() {
+        todo!();
     }
 }
