@@ -276,7 +276,7 @@ mod test {
             having: None, \
             named_window: [], \
             qualify: None \
-            }), order_by: [], limit: None, offset: None, fetch: None, locks: [] }, param_types: [] }))");
+            }), order_by: [], limit: None, offset: None, fetch: None, locks: [] } }))");
 
         assert_eq!(format!("{stmt:?}"), expected);
     }

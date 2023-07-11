@@ -145,22 +145,26 @@ pub async fn test_postgres_crud(store_type: StorageType) {
         .await
         .unwrap();
 
-    assert!(
-        sqlx::query("create table demo(i bigint, ts timestamp time index)")
-            .execute(&pool)
-            .await
-            .is_ok()
-    );
+    sqlx::query("create table demo(i bigint, ts timestamp time index, d date, dt datetime)")
+        .execute(&pool)
+        .await
+        .unwrap();
+
     for i in 0..10 {
-        assert!(sqlx::query("insert into demo values($1, $2)")
+        let d = NaiveDate::from_yo_opt(2015, 100).unwrap();
+        let dt = d.and_hms_opt(0, 0, 0).unwrap().timestamp_millis();
+
+        sqlx::query("insert into demo values($1, $2, $3, $4)")
             .bind(i)
             .bind(i)
+            .bind(d)
+            .bind(dt)
             .execute(&pool)
             .await
-            .is_ok());
+            .unwrap();
     }
 
-    let rows = sqlx::query("select i from demo")
+    let rows = sqlx::query("select i,d,dt from demo")
         .fetch_all(&pool)
         .await
         .unwrap();
@@ -168,7 +172,18 @@ pub async fn test_postgres_crud(store_type: StorageType) {
 
     for (i, row) in rows.iter().enumerate() {
         let ret: i64 = row.get(0);
+        let d: NaiveDate = row.get(1);
+        let dt: NaiveDateTime = row.get(2);
+
         assert_eq!(ret, i as i64);
+
+        let expected_d = NaiveDate::from_yo_opt(2015, 100).unwrap();
+        assert_eq!(expected_d, d);
+
+        let expected_dt = NaiveDate::from_yo_opt(2015, 100)
+            .and_then(|d| d.and_hms_opt(0, 0, 0))
+            .unwrap();
+        assert_eq!(expected_dt, dt);
     }
 
     let rows = sqlx::query("select i from demo where i=$1")

@@ -48,13 +48,7 @@ use crate::mysql::helper::{
 use crate::mysql::writer;
 use crate::mysql::writer::create_mysql_column;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
-
-/// Cached SQL and logical plan
-#[derive(Clone)]
-struct SqlPlan {
-    query: String,
-    plan: Option<LogicalPlan>,
-}
+use crate::SqlPlan;
 
 // An intermediate shim for executing MySQL queries.
 pub struct MysqlInstanceShim {
@@ -214,10 +208,16 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         // in the form of "$i", it can't process "?" right now.
         let statement = transform_placeholders(statement);
 
-        let plan = self
-            .do_describe(statement.clone())
-            .await?
-            .map(|DescribeResult { logical_plan, .. }| logical_plan);
+        let describe_result = self.do_describe(statement.clone()).await?;
+        let (plan, schema) = if let Some(DescribeResult {
+            logical_plan,
+            schema,
+        }) = describe_result
+        {
+            (Some(logical_plan), Some(schema))
+        } else {
+            (None, None)
+        };
 
         let params = if let Some(plan) = &plan {
             prepared_params(
@@ -234,6 +234,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         let stmt_id = self.save_plan(SqlPlan {
             query: query.to_string(),
             plan,
+            schema,
         });
 
         w.reply(stmt_id, &params, &[]).await?;
