@@ -16,9 +16,10 @@ use std::ops::Deref;
 
 use common_query::Output;
 use common_recordbatch::{util, RecordBatch};
-use common_telemetry::error;
+use common_telemetry::warn;
 use datatypes::prelude::{ConcreteDataType, Value};
 use datatypes::schema::SchemaRef;
+use metrics::increment_counter;
 use opensrv_mysql::{
     Column, ColumnFlags, ColumnType, ErrorKind, OkResponse, QueryResultWriter, RowWriter,
 };
@@ -27,6 +28,7 @@ use snafu::prelude::*;
 use tokio::io::AsyncWrite;
 
 use crate::error::{self, Error, Result};
+use crate::metrics::*;
 
 /// Try to write multiple output to the writer if possible.
 pub async fn write_output<'a, W: AsyncWrite + Send + Sync + Unpin>(
@@ -200,7 +202,11 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
         error: Error,
         w: QueryResultWriter<'a, W>,
     ) -> Result<()> {
-        error!(error; "Failed to execute query '{}'", query);
+        warn!(error; "Failed to execute query '{}'", query);
+        increment_counter!(
+            METRIC_ERROR_COUNTER,
+            &[(METRIC_PROTOCOL_LABEL, METRIC_ERROR_COUNTER_LABEL_MYSQL)]
+        );
 
         let kind = ErrorKind::ER_INTERNAL_ERROR;
         w.error(kind, error.to_string().as_bytes()).await?;
