@@ -167,6 +167,7 @@ pub enum Error {
     StaleVersion {
         expect: TableVersion,
         current: TableVersion,
+        location: Location,
     },
 }
 

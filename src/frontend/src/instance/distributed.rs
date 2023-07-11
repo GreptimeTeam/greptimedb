@@ -521,14 +521,6 @@ impl DistInstance {
         .context(error::TimeoutSnafu)?
         .context(error::RequestMetaSnafu)?;
 
-        // Since the table information dropped on meta does not go through KvBackend, so we
-        // manually invalidate the cache here.
-        //
-        // TODO(fys): when the meta invalidation cache mechanism is established, remove it.
-        self.catalog_manager()
-            .invalidate_table(catalog_name, schema_name, table_name)
-            .await;
-
         Ok(Output::AffectedRows(0))
     }
 
