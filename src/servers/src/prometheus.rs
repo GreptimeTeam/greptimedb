@@ -105,10 +105,7 @@ impl PrometheusServer {
             .with_state(self.query_handler.clone());
 
         Router::new()
-            .nest(
-                &format!("/api/{PROMETHEUS_API_VERSION}"),
-                router,
-            )
+            .nest(&format!("/api/{PROMETHEUS_API_VERSION}"), router)
             // middlewares
             .layer(
                 ServiceBuilder::new()
