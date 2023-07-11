@@ -20,14 +20,11 @@ use crate::parser::ParserContext;
 use crate::statements::statement::Statement;
 use crate::statements::truncate::TruncateTable;
 
-/// TRUNCATE TABLE table_name;
+/// TRUNCATE [TABLE] table_name;
 impl<'a> ParserContext<'a> {
     pub(crate) fn parse_truncate(&mut self) -> Result<Statement> {
-        self.parser.next_token();
-        if !self.matches_keyword(Keyword::TABLE) {
-            return self.unsupported(self.peek_token_as_string());
-        }
         let _ = self.parser.next_token();
+        let _ = self.parser.parse_keyword(Keyword::TABLE);
 
         let table_ident =
             self.parser
@@ -58,6 +55,13 @@ mod tests {
 
     #[test]
     pub fn test_parse_truncate() {
+        let sql = "TRUNCATE foo";
+        let mut stmts = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap();
+        assert_eq!(
+            stmts.pop().unwrap(),
+            Statement::TruncateTable(TruncateTable::new(ObjectName(vec![Ident::new("foo")])))
+        );
+
         let sql = "TRUNCATE TABLE foo";
         let mut stmts = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap();
         assert_eq!(
@@ -74,6 +78,17 @@ mod tests {
                 Ident::new("foo")
             ])))
         );
+
+        let sql = "TRUNCATE my_schema.foo";
+        let mut stmts = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap();
+        assert_eq!(
+            stmts.pop().unwrap(),
+            Statement::TruncateTable(TruncateTable::new(ObjectName(vec![
+                Ident::new("my_schema"),
+                Ident::new("foo")
+            ])))
+        );
+
         let sql = "TRUNCATE TABLE my_catalog.my_schema.foo";
         let mut stmts = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap();
         assert_eq!(
@@ -84,11 +99,40 @@ mod tests {
                 Ident::new("foo")
             ])))
         );
+
+        let sql = "TRUNCATE drop";
+        let mut stmts = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap();
+        assert_eq!(
+            stmts.pop().unwrap(),
+            Statement::TruncateTable(TruncateTable::new(ObjectName(vec![Ident::new("drop")])))
+        );
+
+        let sql = "TRUNCATE `drop`";
+        let mut stmts = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap();
+        assert_eq!(
+            stmts.pop().unwrap(),
+            Statement::TruncateTable(TruncateTable::new(ObjectName(vec![Ident::with_quote(
+                '`', "drop"
+            ),])))
+        );
+
+        let sql = "TRUNCATE \"drop\"";
+        let mut stmts = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap();
+        assert_eq!(
+            stmts.pop().unwrap(),
+            Statement::TruncateTable(TruncateTable::new(ObjectName(vec![Ident::with_quote(
+                '"', "drop"
+            ),])))
+        );
     }
 
     #[test]
     pub fn test_parse_invalid_truncate() {
-        let sql = "TRUNCATE foo";
+        let sql = "TRUNCATE SCHEMA foo";
+        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
+        assert!(result.is_err(), "result is: {result:?}");
+
+        let sql = "TRUNCATE";
         let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
         assert!(result.is_err(), "result is: {result:?}");
     }
