@@ -63,6 +63,7 @@ store-api = { path = "../store-api" }
 substrait = { path = "../common/substrait" }
 table = { path = "../table" }
 tokio.workspace = true
+toml = "0.5"
 tonic.workspace = true
 
 [dev-dependencies]
@@ -72,6 +73,5 @@ datanode = { path = "../datanode" }
 futures = "0.3"
 meta-srv = { path = "../meta-srv", features = ["mock"] }
 strfmt = "0.2"
-toml = "0.5"
 tower = "0.4"
 uuid.workspace = true

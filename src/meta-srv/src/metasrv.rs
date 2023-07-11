@@ -71,6 +71,12 @@ impl Default for MetaSrvOptions {
     }
 }
 
+impl MetaSrvOptions {
+    pub fn to_toml_string(&self) -> String {
+        toml::to_string(&self).unwrap()
+    }
+}
+
 #[derive(Clone)]
 pub struct Context {
     pub server_addr: String,

@@ -381,6 +381,7 @@ pub async fn setup_test_http_app(store_type: StorageType, name: &str) -> (Router
         )))
         .with_grpc_handler(ServerGrpcQueryHandlerAdaptor::arc(instance.clone()))
         .with_metrics_handler(MetricsHandler)
+        .with_greptime_config_options(opts.to_toml_string())
         .build();
     (http_server.build(http_server.make_app()), guard)
 }
@@ -417,6 +418,7 @@ pub async fn setup_test_http_app_with_frontend(
         .with_sql_handler(ServerSqlQueryHandlerAdaptor::arc(frontend_ref.clone()))
         .with_grpc_handler(ServerGrpcQueryHandlerAdaptor::arc(frontend_ref.clone()))
         .with_script_handler(frontend_ref)
+        .with_greptime_config_options(opts.to_toml_string())
         .build();
     let app = http_server.build(http_server.make_app());
     (app, guard)
@@ -504,6 +506,7 @@ pub async fn setup_test_prom_app_with_frontend(
         .with_grpc_handler(ServerGrpcQueryHandlerAdaptor::arc(frontend_ref.clone()))
         .with_script_handler(frontend_ref.clone())
         .with_prom_handler(frontend_ref.clone())
+        .with_greptime_config_options(opts.to_toml_string())
         .build();
     let prom_server = PromServer::create_server(frontend_ref);
     let app = http_server.build(http_server.make_app());

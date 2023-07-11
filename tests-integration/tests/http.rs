@@ -59,6 +59,7 @@ macro_rules! http_tests {
                 test_metrics_api,
                 test_scripts_api,
                 test_health_api,
+                test_config_api,
                 test_dashboard_path,
             );
         )*
@@ -493,6 +494,78 @@ pub async fn test_health_api(store_type: StorageType) {
 
     let body = serde_json::from_str::<HealthResponse>(&body_text).unwrap();
     assert_eq!(body, HealthResponse {});
+}
+
+pub async fn test_config_api(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, _guard) = setup_test_http_app_with_frontend(store_type, "config_api").await;
+    let client = TestClient::new(app);
+
+    let res_get = client.get("/config").send().await;
+    assert_eq!(res_get.status(), StatusCode::OK);
+    let expected_toml_str = r#"
+        mode = "standalone"
+        enable_memory_catalog = false
+        rpc_addr = "127.0.0.1:3001"
+        rpc_runtime_size = 8
+        heartbeat_interval_millis = 5000
+
+        [http_opts]
+        addr = "127.0.0.1:4000"
+        timeout = "30s"
+        body_limit = "64MiB"
+
+        [wal]
+        file_size = "256MiB"
+        purge_threshold = "4GiB"
+        purge_interval = "10m"
+        read_batch_size = 128
+        sync_write = false
+
+        [storage]
+        type = "File"
+
+        [storage.compaction]
+        max_inflight_tasks = 4
+        max_files_in_level0 = 8
+        max_purge_tasks = 32
+        sst_write_buffer_size = "8MiB"
+
+        [storage.manifest]
+        checkpoint_margin = 10
+        gc_duration = "10m"
+        checkpoint_on_startup = false
+        compress = false
+
+        [storage.flush]
+        max_flush_tasks = 8
+        region_write_buffer_size = "32MiB"
+        picker_schedule_interval = "5m"
+        auto_flush_interval = "1h"
+
+        [procedure]
+        max_retry_times = 3
+        retry_delay = "500ms"
+
+        [logging]
+        enable_jaeger_tracing = false"#;
+    let body_text = drop_lines_with_inconsistent_results(res_get.text().await);
+    assert_eq!(
+        normalize_str(body_text.as_str()),
+        normalize_str(expected_toml_str)
+    );
+}
+
+fn drop_lines_with_inconsistent_results(input: String) -> String {
+    input
+        .lines()
+        .filter(|line| !line.trim().starts_with("dir =") && !line.trim().starts_with("data_home ="))
+        .collect::<Vec<&str>>()
+        .join("\n")
+}
+
+fn normalize_str(s: &str) -> String {
+    s.replace([' ', '\n'], "")
 }
 
 #[cfg(feature = "dashboard")]

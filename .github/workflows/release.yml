@@ -5,7 +5,7 @@ on:
   schedule:
     # At 00:00 on Monday.
     - cron: '0 0 * * 1'
-  # Mannually trigger only builds binaries.
+  # Manually trigger only builds binaries.
   workflow_dispatch:
     inputs:
       dry_run:
