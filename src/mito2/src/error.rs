@@ -75,15 +75,27 @@ pub enum Error {
         location: Location,
         source: std::str::Utf8Error,
     },
+
+    #[snafu(display("Failed to join handle, source: {}", source))]
+    Join {
+        source: common_runtime::JoinError,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
 
 impl ErrorExt for Error {
-    #[allow(clippy::match_single_binding)]
     fn status_code(&self) -> StatusCode {
+        use Error::*;
+
         match self {
-            _ => todo!(),
+            OpenDal { .. } => StatusCode::StorageUnavailable,
+            CompressObject { .. } | DecompressObject { .. } | SerdeJson { .. } | Utf8 { .. } => {
+                StatusCode::Unexpected
+            }
+            InvalidScanIndex { .. } => StatusCode::InvalidArguments,
+            Join { .. } => StatusCode::Internal,
         }
     }
 
