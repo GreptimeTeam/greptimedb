@@ -160,7 +160,14 @@ impl MetaSrvBuilder {
         let mailbox_sequence = Sequence::new("heartbeat_mailbox", 1, 100, kv_store.clone());
         let mailbox = HeartbeatMailbox::create(pushers.clone(), mailbox_sequence);
         let state_store = Arc::new(MetaStateStore::new(kv_store.clone()));
-        let procedure_manager = Arc::new(LocalManager::new(ManagerConfig::default(), state_store));
+
+        let manager_config = ManagerConfig {
+            max_retry_times: options.procedure.max_retry_times,
+            retry_delay: options.procedure.retry_delay,
+            ..Default::default()
+        };
+
+        let procedure_manager = Arc::new(LocalManager::new(manager_config, state_store));
         let table_id_sequence = Arc::new(Sequence::new(TABLE_ID_SEQ, 1024, 10, kv_store.clone()));
         let metadata_service = metadata_service
             .unwrap_or_else(|| Arc::new(DefaultMetadataService::new(kv_store.clone())));

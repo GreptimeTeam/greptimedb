@@ -18,3 +18,10 @@ use_memory_store = false
 # [logging]
 # dir = "/tmp/greptimedb/logs"
 # level = "info"
+
+# Procedure storage options.
+[procedure]
+# Procedure max retry time.
+max_retry_times = 3
+# Initial retry delay of procedures, increases exponentially
+retry_delay = "500ms"

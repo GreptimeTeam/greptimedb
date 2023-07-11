@@ -1863,6 +1863,7 @@ dependencies = [
  "common-test-util",
  "futures",
  "futures-util",
+ "humantime-serde",
  "object-store",
  "serde",
  "serde_json",
