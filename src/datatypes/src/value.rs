@@ -287,6 +287,9 @@ pub fn to_null_scalar_value(output_type: &ConcreteDataType) -> ScalarValue {
             Box::new(dict.key_type().as_arrow_type()),
             Box::new(to_null_scalar_value(dict.value_type())),
         ),
+        ConcreteDataType::Time(t) => time_to_scalar_value(*t.unit(), None),
+        // Datafusion doesn't support duration scalar value.
+        ConcreteDataType::Duration(_) => unreachable!(),
     }
 }
 
@@ -300,6 +303,16 @@ pub fn timestamp_to_scalar_value(unit: TimeUnit, val: Option<i64>) -> ScalarValu
         TimeUnit::Millisecond => ScalarValue::TimestampMillisecond(val, None),
         TimeUnit::Microsecond => ScalarValue::TimestampMicrosecond(val, None),
         TimeUnit::Nanosecond => ScalarValue::TimestampNanosecond(val, None),
+    }
+}
+
+/// Cast the 64-bit elapsed time into the arrow ScalarValue by time unit.
+pub fn time_to_scalar_value(unit: TimeUnit, val: Option<i64>) -> ScalarValue {
+    match unit {
+        TimeUnit::Second => ScalarValue::Time32Second(val.map(|i| i as i32)),
+        TimeUnit::Millisecond => ScalarValue::Time32Millisecond(val.map(|i| i as i32)),
+        TimeUnit::Microsecond => ScalarValue::Time64Microsecond(val),
+        TimeUnit::Nanosecond => ScalarValue::Time64Nanosecond(val),
     }
 }
 

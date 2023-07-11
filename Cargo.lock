@@ -1973,6 +1973,7 @@ dependencies = [
 name = "common-time"
 version = "0.3.2"
 dependencies = [
+ "arrow",
  "chrono",
  "chrono-tz 0.8.2",
  "common-error",

@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+arrow.workspace = true
 chrono.workspace = true
 chrono-tz = "0.8"
 common-error = { path = "../error" }

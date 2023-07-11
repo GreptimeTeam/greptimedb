@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_time::timestamp::TimeUnit;
 /// Unique identifier for logical data type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LogicalTypeId {
@@ -46,6 +47,10 @@ pub enum LogicalTypeId {
     TimestampMillisecond,
     TimestampMicrosecond,
     TimestampNanosecond,
+    /// A 64-bit time representing the elapsed time since midnight in the unit of `TimeUnit`.
+    Time,
+    /// Measure of elapsed time in the unit of `TimeUnit`.
+    Duration,
 
     List,
     Dictionary,
@@ -93,6 +98,8 @@ impl LogicalTypeId {
                 ConcreteDataType::null_datatype(),
                 ConcreteDataType::null_datatype(),
             ),
+            LogicalTypeId::Time => ConcreteDataType::time_datatype(TimeUnit::default()),
+            LogicalTypeId::Duration => ConcreteDataType::duration_datatype(TimeUnit::default()),
         }
     }
 }

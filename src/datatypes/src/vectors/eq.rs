@@ -106,6 +106,9 @@ fn equal(lhs: &dyn Vector, rhs: &dyn Vector) -> bool {
                 unreachable!("should not compare {} with {}", lhs.vector_type_name(), rhs.vector_type_name())
             })
         }
+
+        Time(_) => todo!(),
+        Duration(_) => todo!(),
     }
 }
 
