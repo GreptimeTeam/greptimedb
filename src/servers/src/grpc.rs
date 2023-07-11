@@ -179,8 +179,8 @@ impl Server for GrpcServer {
             .add_service(self.create_database_service())
             .add_service(self.create_healthcheck_service());
         if let Some(prometheus_handler) = &self.prometheus_handler {
-            builder =
-                builder.add_service(self.create_prom_query_gateway_service(prometheus_handler.clone()))
+            builder = builder
+                .add_service(self.create_prom_query_gateway_service(prometheus_handler.clone()))
         }
         let builder = builder.add_service(reflection_service);
 

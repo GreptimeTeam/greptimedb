@@ -19,8 +19,8 @@ use servers::http::HttpOptions;
 use servers::Mode;
 
 use crate::service_config::{
-    GrpcOptions, InfluxdbOptions, MysqlOptions, OpentsdbOptions, PostgresOptions, PrometheusOptions,
-    PromStoreOptions,
+    GrpcOptions, InfluxdbOptions, MysqlOptions, OpentsdbOptions, PostgresOptions, PromStoreOptions,
+    PrometheusOptions,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

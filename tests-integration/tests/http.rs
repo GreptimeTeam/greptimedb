@@ -332,8 +332,10 @@ pub async fn test_prom_http_api(store_type: StorageType) {
     assert_eq!(body.status, "success");
     assert_eq!(
         body.data,
-        serde_json::from_value::<PrometheusResponse>(json!(["__name__", "cpu", "host", "memory", "ts"]))
-            .unwrap()
+        serde_json::from_value::<PrometheusResponse>(json!([
+            "__name__", "cpu", "host", "memory", "ts"
+        ]))
+        .unwrap()
     );
 
     // labels query with multiple match[] params

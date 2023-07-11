@@ -33,7 +33,9 @@ use tonic::{Request, Response};
 use crate::error::InvalidQuerySnafu;
 use crate::grpc::handler::create_query_context;
 use crate::grpc::TonicResult;
-use crate::prometheus::{retrieve_metric_name_and_result_type, PrometheusHandlerRef, PrometheusJsonResponse};
+use crate::prometheus::{
+    retrieve_metric_name_and_result_type, PrometheusHandlerRef, PrometheusJsonResponse,
+};
 
 pub struct PrometheusGatewayService {
     handler: PrometheusHandlerRef,
@@ -106,8 +108,11 @@ impl PrometheusGatewayService {
             match retrieve_metric_name_and_result_type(&query.query) {
                 Ok((metric_name, result_type)) => (metric_name.unwrap_or_default(), result_type),
                 Err(err) => {
-                    return PrometheusJsonResponse::error(err.status_code().to_string(), err.to_string())
-                        .0
+                    return PrometheusJsonResponse::error(
+                        err.status_code().to_string(),
+                        err.to_string(),
+                    )
+                    .0
                 }
             };
         // range query only returns matrix

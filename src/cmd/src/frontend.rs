@@ -274,7 +274,10 @@ mod tests {
             opts.opentsdb_options.as_ref().unwrap().addr,
             "127.0.0.1:4321"
         );
-        assert_eq!(opts.prometheus_options.as_ref().unwrap().addr, "127.0.0.1:4444");
+        assert_eq!(
+            opts.prometheus_options.as_ref().unwrap().addr,
+            "127.0.0.1:4444"
+        );
 
         let default_opts = FrontendOptions::default();
         assert_eq!(

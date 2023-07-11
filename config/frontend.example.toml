@@ -47,7 +47,7 @@ runtime_size = 2
 [influxdb_options]
 enable = true
 
-# Prometheus protocol options, see `standalone.example.toml`.
+# Prometheus remote storage options, see `standalone.example.toml`.
 [prom_store_options]
 enable = true
 

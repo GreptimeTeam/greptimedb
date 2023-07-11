@@ -23,8 +23,8 @@ use datanode::instance::InstanceRef;
 use frontend::frontend::FrontendOptions;
 use frontend::instance::{FrontendInstance, Instance as FeInstance};
 use frontend::service_config::{
-    GrpcOptions, InfluxdbOptions, MysqlOptions, OpentsdbOptions, PostgresOptions, PrometheusOptions,
-    PromStoreOptions,
+    GrpcOptions, InfluxdbOptions, MysqlOptions, OpentsdbOptions, PostgresOptions, PromStoreOptions,
+    PrometheusOptions,
 };
 use serde::{Deserialize, Serialize};
 use servers::http::HttpOptions;

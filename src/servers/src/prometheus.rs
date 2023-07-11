@@ -105,7 +105,10 @@ impl PrometheusServer {
             .with_state(self.query_handler.clone());
 
         Router::new()
-            .nest(&format!("/api/{PROMETHEUS_API_VERSION_API_VERSION}"), router)
+            .nest(
+                &format!("/api/{PROMETHEUS_API_VERSION}"),
+                router,
+            )
             // middlewares
             .layer(
                 ServiceBuilder::new()
@@ -448,7 +451,9 @@ pub async fn instant_query(
     let result = handler.do_query(&prom_query, Arc::new(query_ctx)).await;
     let (metric_name, result_type) = match retrieve_metric_name_and_result_type(&prom_query.query) {
         Ok((metric_name, result_type)) => (metric_name.unwrap_or_default(), result_type),
-        Err(err) => return PrometheusJsonResponse::error(err.status_code().to_string(), err.to_string()),
+        Err(err) => {
+            return PrometheusJsonResponse::error(err.status_code().to_string(), err.to_string())
+        }
     };
     PrometheusJsonResponse::from_query_result(result, metric_name, result_type).await
 }
@@ -483,7 +488,9 @@ pub async fn range_query(
 
     let result = handler.do_query(&prom_query, Arc::new(query_ctx)).await;
     let metric_name = match retrieve_metric_name_and_result_type(&prom_query.query) {
-        Err(err) => return PrometheusJsonResponse::error(err.status_code().to_string(), err.to_string()),
+        Err(err) => {
+            return PrometheusJsonResponse::error(err.status_code().to_string(), err.to_string())
+        }
         Ok((metric_name, _)) => metric_name.unwrap_or_default(),
     };
     PrometheusJsonResponse::from_query_result(result, metric_name, ValueType::Matrix).await
@@ -580,7 +587,10 @@ pub async fn labels_query(
             if err.status_code() != StatusCode::TableNotFound
                 && err.status_code() != StatusCode::TableColumnNotFound
             {
-                return PrometheusJsonResponse::error(err.status_code().to_string(), err.to_string());
+                return PrometheusJsonResponse::error(
+                    err.status_code().to_string(),
+                    err.to_string(),
+                );
             }
         }
     }
@@ -799,7 +809,10 @@ pub async fn label_values_query(
             if err.status_code() != StatusCode::TableNotFound
                 && err.status_code() != StatusCode::TableColumnNotFound
             {
-                return PrometheusJsonResponse::error(err.status_code().to_string(), err.to_string());
+                return PrometheusJsonResponse::error(
+                    err.status_code().to_string(),
+                    err.to_string(),
+                );
             }
         }
     }

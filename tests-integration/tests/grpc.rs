@@ -23,7 +23,7 @@ use api::v1::{
 use client::{Client, Database, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::consts::{MIN_USER_TABLE_ID, MITO_ENGINE};
 use common_query::Output;
-use servers::prometheus::{PromData, PrometheusJsonResponse, PrometheusResponse, PromSeries};
+use servers::prometheus::{PromData, PromSeries, PrometheusJsonResponse, PrometheusResponse};
 use servers::server::Server;
 use tests_integration::test_util::{setup_grpc_server, StorageType};
 
@@ -379,7 +379,8 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
         .unwrap()
         .into_inner()
         .body;
-    let instant_query_result = serde_json::from_slice::<PrometheusJsonResponse>(&json_bytes).unwrap();
+    let instant_query_result =
+        serde_json::from_slice::<PrometheusJsonResponse>(&json_bytes).unwrap();
     let expected = PrometheusJsonResponse {
         status: "success".to_string(),
         data: PrometheusResponse::PromData(PromData {
