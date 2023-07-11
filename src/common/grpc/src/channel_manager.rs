@@ -28,7 +28,8 @@ use tower::make::MakeConnection;
 use crate::error::{CreateChannelSnafu, InvalidConfigFilePathSnafu, InvalidTlsConfigSnafu, Result};
 
 const RECYCLE_CHANNEL_INTERVAL_SECS: u64 = 60;
-const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 2;
+const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 10;
+const DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 10;
 
 #[derive(Clone, Debug)]
 pub struct ChannelManager {
@@ -238,7 +239,7 @@ impl Default for ChannelConfig {
     fn default() -> Self {
         Self {
             timeout: Some(Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS)),
-            connect_timeout: Some(Duration::from_secs(4)),
+            connect_timeout: Some(Duration::from_secs(DEFAULT_CONNECT_TIMEOUT_SECS)),
             concurrency_limit: None,
             rate_limit: None,
             initial_stream_window_size: None,
