@@ -500,7 +500,7 @@ mod tests {
         assert_eq!(
             ChannelConfig {
                 timeout: Some(Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS)),
-                connect_timeout: Some(Duration::from_secs(4)),
+                connect_timeout: Some(Duration::from_secs(DEFAULT_CONNECT_TIMEOUT_SECS)),
                 concurrency_limit: None,
                 rate_limit: None,
                 initial_stream_window_size: None,
