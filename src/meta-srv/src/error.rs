@@ -343,7 +343,7 @@ pub enum Error {
         source: common_procedure::Error,
     },
 
-    #[snafu(display("Failed to recover procedure, source: {source}"))]
+    #[snafu(display("Failed to wait procedure done, source: {source}"))]
     WaitProcedure {
         location: Location,
         source: common_procedure::Error,

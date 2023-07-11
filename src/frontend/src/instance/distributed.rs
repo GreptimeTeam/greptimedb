@@ -60,9 +60,8 @@ use sql::statements::statement::Statement;
 use sql::statements::{self, sql_value_to_value};
 use store_api::storage::RegionNumber;
 use table::engine::TableReference;
-use table::metadata::{RawTableInfo, RawTableMeta, TableId, TableIdent, TableType};
-use table::requests::TableOptions;
-use table::table::AlterContext;
+use table::metadata::{RawTableInfo, RawTableMeta, TableId, TableIdent, TableInfo, TableType};
+use table::requests::{AlterTableRequest, TableOptions};
 use table::TableRef;
 use tokio::time::timeout;
 
@@ -458,7 +457,29 @@ impl DistInstance {
         Ok(Output::AffectedRows(1))
     }
 
-    async fn handle_alter_table(&self, expr: AlterExpr) -> Result<Output> {
+    fn verify_alter(
+        &self,
+        table_id: TableId,
+        table_info: Arc<TableInfo>,
+        expr: AlterExpr,
+    ) -> Result<()> {
+        let request: table::requests::AlterTableRequest =
+            common_grpc_expr::alter_expr_to_request(table_id, expr)
+                .context(AlterExprToRequestSnafu)?;
+
+        let AlterTableRequest { table_name, .. } = &request;
+
+        let _ = table_info
+            .meta
+            .builder_with_alter_kind(table_name, &request.alter_kind)
+            .context(error::TableSnafu)?
+            .build()
+            .context(error::BuildTableMetaSnafu { table_name })?;
+
+        Ok(())
+    }
+
+    async fn handle_alter_table(&self, mut expr: AlterExpr) -> Result<Output> {
         let catalog_name = if expr.catalog_name.is_empty() {
             DEFAULT_CATALOG_NAME
         } else {
@@ -482,17 +503,31 @@ impl DistInstance {
                 table_name: format_full_table_name(catalog_name, schema_name, table_name),
             })?;
 
-        let request = common_grpc_expr::alter_expr_to_request(
-            table.table_info().ident.table_id,
-            expr.clone(),
+        let table_id = table.table_info().ident.table_id;
+        expr.table_id = Some(api::v1::TableId { id: table_id });
+
+        self.verify_alter(table_id, table.table_info(), expr.clone())?;
+
+        let req = SubmitDdlTaskRequest {
+            task: DdlTask::new_alter_table(expr.clone()),
+        };
+
+        timeout(
+            // TODO(weny): makes timeout configurable.
+            Duration::from_secs(10),
+            self.meta_client.submit_ddl_task(req),
         )
-        .context(AlterExprToRequestSnafu)?;
+        .await
+        .context(error::TimeoutSnafu)?
+        .context(error::RequestMetaSnafu)?;
 
-        let mut context = AlterContext::with_capacity(1);
-
-        let _ = context.insert(expr);
-
-        table.alter(context, &request).await.context(TableSnafu)?;
+        // Since the table information dropped on meta does not go through KvBackend, so we
+        // manually invalidate the cache here.
+        //
+        // TODO(fys): when the meta invalidation cache mechanism is established, remove it.
+        self.catalog_manager()
+            .invalidate_table(catalog_name, schema_name, table_name)
+            .await;
 
         Ok(Output::AffectedRows(0))
     }

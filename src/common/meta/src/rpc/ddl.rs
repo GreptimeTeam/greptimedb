@@ -59,6 +59,10 @@ impl DdlTask {
             table_id,
         })
     }
+
+    pub fn new_alter_table(alter_table: AlterExpr) -> Self {
+        DdlTask::AlterTable(AlterTableTask { alter_table })
+    }
 }
 
 impl TryFrom<Task> for DdlTask {

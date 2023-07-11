@@ -149,14 +149,14 @@ impl AlterTableProcedure {
                         CompareOp::Equal,
                         table_route_value.clone().into(),
                     ),
-                    Compare::with_value(
-                        table_global_key.to_string().into_bytes(),
-                        CompareOp::Equal,
-                        table_global_value
-                            .clone()
-                            .as_bytes()
-                            .context(error::InvalidCatalogValueSnafu)?,
-                    ),
+                    // Compare::with_value(
+                    //     table_global_key.to_string().into_bytes(),
+                    //     CompareOp::Equal,
+                    //     table_global_value
+                    //         .clone()
+                    //         .as_bytes()
+                    //         .context(error::InvalidCatalogValueSnafu)?,
+                    // ),
                 ])
                 .and_then(vec![
                     TxnOp::Delete(table_global_key.to_string().into_bytes()),
@@ -227,7 +227,7 @@ impl AlterTableProcedure {
         new_info.ident.version = table_info.ident.version + 1;
         new_info.meta = new_meta;
 
-        Ok(table_info)
+        Ok(new_info)
     }
 
     /// Update table metadata.
@@ -236,6 +236,11 @@ impl AlterTableProcedure {
         let table_id = self.data.table_info.ident.table_id;
         let table_ref = self.data.table_ref();
         let new_info = self.build_new_table_info()?;
+        debug!(
+            "starting update table: {} metadata, new table info {:?}",
+            table_ref.to_string(),
+            new_info
+        );
 
         if let AlterKind::RenameTable { new_table_name } = &request.alter_kind {
             let table_route = self
@@ -257,37 +262,40 @@ impl AlterTableProcedure {
 
             // If the metadata already updated.
             if table_global_value.table_info == new_raw_info {
+                debug!("table: {} metadata already updated", table_ref.to_string());
+
                 self.data.state = AlterTableState::DatanodeAlterTable(table_route);
                 return Ok(Status::executing(true));
             }
 
-            table_global_value.table_info = new_raw_info;
-
             let (table_global_key, table_route_key) = build_table_metadata_key(table_ref, table_id);
 
-            let txn = Txn::new()
-                .when(vec![
-                    Compare::with_value(
-                        table_route_key.to_string().into_bytes(),
-                        CompareOp::Equal,
-                        table_route_value.clone().into(),
-                    ),
-                    Compare::with_value(
-                        table_global_key.to_string().into_bytes(),
-                        CompareOp::Equal,
-                        table_global_value
-                            .clone()
-                            .as_bytes()
-                            .context(error::InvalidCatalogValueSnafu)?,
-                    ),
-                ])
-                .and_then(vec![TxnOp::Put(
-                    table_global_key.to_string().into_bytes(),
-                    table_global_value
-                        .clone()
-                        .as_bytes()
-                        .context(error::InvalidCatalogValueSnafu)?,
-                )]);
+            let txn = Txn::new().when(vec![
+                Compare::with_value(
+                    table_route_key.to_string().into_bytes(),
+                    CompareOp::Equal,
+                    table_route_value.clone().into(),
+                ),
+                // TODO(weny): due to unordered map, we cannot compare values directly.
+                // Compare::with_value(
+                //     table_global_key.to_string().into_bytes(),
+                //     CompareOp::Equal,
+                //     table_global_value
+                //         .clone()
+                //         .as_bytes()
+                //         .context(error::InvalidCatalogValueSnafu)?,
+                // ),
+            ]);
+
+            table_global_value.table_info = new_raw_info;
+
+            let txn = txn.and_then(vec![TxnOp::Put(
+                table_global_key.to_string().into_bytes(),
+                table_global_value
+                    .clone()
+                    .as_bytes()
+                    .context(error::InvalidCatalogValueSnafu)?,
+            )]);
 
             let resp = self.context.kv_store.txn(txn).await?;
 
@@ -297,6 +305,8 @@ impl AlterTableProcedure {
                     msg: "table metadata changed"
                 }
             );
+
+            debug!("table: {} metadata updated", table_ref.to_string());
 
             self.data.state = AlterTableState::DatanodeAlterTable(table_route);
 

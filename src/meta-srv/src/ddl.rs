@@ -107,6 +107,20 @@ impl DdlManager {
             )
             .context(error::RegisterProcedureLoaderSnafu {
                 type_name: DropTableProcedure::TYPE_NAME,
+            })?;
+
+        let context = self.create_context();
+
+        self.procedure_manager
+            .register_loader(
+                AlterTableProcedure::TYPE_NAME,
+                Box::new(move |json| {
+                    let context = context.clone();
+                    AlterTableProcedure::from_json(json, context).map(|p| Box::new(p) as _)
+                }),
+            )
+            .context(error::RegisterProcedureLoaderSnafu {
+                type_name: AlterTableProcedure::TYPE_NAME,
             })
     }
 
