@@ -190,7 +190,7 @@ impl Env {
             );
         }
 
-        let process = Command::new("./greptime")
+        let mut process = Command::new("./greptime")
             .current_dir(util::get_binary_dir("debug"))
             .args(args)
             .stdout(log_file)
@@ -198,6 +198,11 @@ impl Env {
             .unwrap_or_else(|error| {
                 panic!("Failed to start the DB with subcommand {subcommand},Error: {error}")
             });
+
+        if !util::check_port(check_ip_addr.parse().unwrap(), Duration::from_secs(10)).await {
+            Env::stop_server(&mut process);
+            panic!("{subcommand} doesn't up in 10 seconds, quit.")
+        }
 
         process
     }
