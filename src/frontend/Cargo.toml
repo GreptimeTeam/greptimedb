@@ -63,7 +63,7 @@ store-api = { path = "../store-api" }
 substrait = { path = "../common/substrait" }
 table = { path = "../table" }
 tokio.workspace = true
-toml = "0.5"
+toml.workspace = true
 tonic.workspace = true
 
 [dev-dependencies]
