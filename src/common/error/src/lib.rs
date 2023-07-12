@@ -20,16 +20,4 @@ pub mod status_code;
 pub const INNER_ERROR_CODE: &str = "INNER_ERROR_CODE";
 pub const INNER_ERROR_MSG: &str = "INNER_ERROR_MSG";
 
-// pub mod prelude {
-//     pub use snafu::prelude::*;
-//     pub use snafu::{Backtrace, ErrorCompat};
-
-//     pub use crate::ext::{BoxedError, ErrorExt};
-//     pub use crate::format::DebugFormat;
-//     pub use crate::status_code::StatusCode;
-
-//     pub const INNER_ERROR_CODE: &str = "INNER_ERROR_CODE";
-//     pub const INNER_ERROR_MSG: &str = "INNER_ERROR_MSG";
-// }
-
 pub use snafu;
