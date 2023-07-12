@@ -363,7 +363,7 @@ impl ManifestObjectStore {
             .context(OpenDalSnafu)
     }
 
-    async fn delete(&self, start: ManifestVersion, end: ManifestVersion) -> Result<()> {
+    pub async fn delete(&self, start: ManifestVersion, end: ManifestVersion) -> Result<()> {
         ensure!(start <= end, InvalidScanIndexSnafu { start, end });
 
         // Due to backward compatibility, it is possible that the user's log between start and end has not been compressed,
@@ -434,7 +434,7 @@ impl ManifestObjectStore {
         Ok(())
     }
 
-    async fn load_checkpoint(
+    pub async fn load_checkpoint(
         &self,
         version: ManifestVersion,
     ) -> Result<Option<(ManifestVersion, Vec<u8>)>> {

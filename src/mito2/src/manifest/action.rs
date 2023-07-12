@@ -21,6 +21,7 @@ use store_api::manifest::action::{ProtocolAction, ProtocolVersion};
 use store_api::manifest::ManifestVersion;
 use store_api::storage::{RegionId, SequenceNumber};
 
+use crate::error::Result;
 use crate::manifest::helper;
 
 /// Minimal data that could be used to persist and recover [RegionMetadata](crate::metadata::RegionMetadata).
@@ -166,11 +167,11 @@ impl RegionCheckpoint {
         self.last_version
     }
 
-    fn encode(&self) -> Result<Vec<u8>, ()> {
+    fn encode(&self) -> Result<Vec<u8>> {
         todo!()
     }
 
-    fn decode(bs: &[u8], reader_version: ProtocolVersion) -> Result<Self, ()> {
+    fn decode(bs: &[u8], reader_version: ProtocolVersion) -> Result<Self> {
         helper::decode_checkpoint(bs, reader_version)
     }
 }
@@ -216,14 +217,14 @@ impl RegionMetaActionList {
     }
 
     /// Encode self into json in the form of string lines, starts with prev_version and then action json list.
-    fn encode(&self) -> Result<Vec<u8>, ()> {
+    fn encode(&self) -> Result<Vec<u8>> {
         helper::encode_actions(self.prev_version, &self.actions)
     }
 
     fn decode(
         _bs: &[u8],
         _reader_version: ProtocolVersion,
-    ) -> Result<(Self, Option<ProtocolAction>), ()> {
+    ) -> Result<(Self, Option<ProtocolAction>)> {
         todo!()
     }
 }
@@ -239,7 +240,7 @@ impl MetaActionIteratorImpl {
         self.last_protocol.clone()
     }
 
-    async fn next_action(&mut self) -> Result<Option<(ManifestVersion, RegionMetaActionList)>, ()> {
+    pub async fn next_action(&mut self) -> Result<Option<(ManifestVersion, RegionMetaActionList)>> {
         todo!()
     }
 }

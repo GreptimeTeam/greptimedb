@@ -12,23 +12,27 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use common_datasource::compression::CompressionType;
 use object_store::ObjectStore;
 use store_api::manifest::action::{ProtocolAction, ProtocolVersion};
 use store_api::manifest::ManifestVersion;
 
+use crate::error::Result;
 use crate::manifest::action::{MetaActionIteratorImpl, RegionCheckpoint, RegionMetaActionList};
-
-type Result<T> = std::result::Result<T, ()>;
+use crate::manifest::region::RegionManifestCheckpointer;
+use crate::manifest::storage::ManifestObjectStore;
 
 // rewrite note:
 // trait Checkpoint -> struct RegionCheckpoint
 // trait MetaAction -> struct RegionMetaActionList
 // trait MetaActionIterator -> struct MetaActionIteratorImpl
+// struct ManifestImpl -> RegionManifest
 #[derive(Clone, Debug)]
-pub struct Regionmanifest {}
+pub struct RegionManifest {}
 
-impl Regionmanifest {
+impl RegionManifest {
     // from impl ManifestImpl
 
     pub fn new() -> Self {
@@ -43,9 +47,9 @@ impl Regionmanifest {
         todo!()
     }
 
-    // pub (crate) fn checkpointer(&self) -> Checkpointer {
-    //     todo!()
-    // }
+    pub(crate) fn checkpointer(&self) -> Option<RegionManifestCheckpointer> {
+        todo!()
+    }
 
     pub(crate) fn set_last_checkpoint_version(&self, _version: ManifestVersion) {
         todo!()
@@ -64,17 +68,17 @@ impl Regionmanifest {
         todo!()
     }
 
-    // pub(crate) fn manifest_store(&self) -> &Arc<ManifestObjectStore> {
-    //     todo!()
-    // }
-
-    // from Manifest
-
-    async fn update(&self, action_list: RegionMetaActionList) -> Result<ManifestVersion> {
+    pub(crate) fn manifest_store(&self) -> &Arc<ManifestObjectStore> {
         todo!()
     }
 
-    async fn scan(
+    // from Manifest
+
+    pub async fn update(&self, action_list: RegionMetaActionList) -> Result<ManifestVersion> {
+        todo!()
+    }
+
+    pub async fn scan(
         &self,
         start: ManifestVersion,
         end: ManifestVersion,
@@ -82,19 +86,19 @@ impl Regionmanifest {
         todo!()
     }
 
-    async fn do_checkpoint(&self) -> Result<Option<RegionCheckpoint>> {
+    pub async fn do_checkpoint(&self) -> Result<Option<RegionCheckpoint>> {
         todo!()
     }
 
-    async fn last_checkpoint(&self) -> Result<Option<RegionCheckpoint>> {
+    pub async fn last_checkpoint(&self) -> Result<Option<RegionCheckpoint>> {
         todo!()
     }
 
-    async fn start(&self) -> Result<()> {
+    pub async fn start(&self) -> Result<()> {
         todo!()
     }
 
-    async fn stop(&self) -> Result<()> {
+    pub async fn stop(&self) -> Result<()> {
         todo!()
     }
 
