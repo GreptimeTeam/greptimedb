@@ -9,6 +9,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fe438c63458706e03479442743baae6c88256498e6431708f6dfc520a26515d3"
 
 [[package]]
+name = "abomonation"
+version = "0.7.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "56e72913c99b1f927aa7bd59a41518fdd9995f63ffc8760f211609e0241c4fb2"
+
+[[package]]
+name = "abomonation_derive"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e50e2a046af56a864c62d97b7153fda72c596e646be1b0c7963736821f6e1efa"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "synstructure",
+]
+
+[[package]]
 name = "addr2line"
 version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2831,6 +2848,20 @@ name = "diff"
 version = "0.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "56254986775e3233ffa9c4d7d3faaf6d36a2c09d30b20687e9f88bc8bafc16c8"
+
+[[package]]
+name = "differential-dataflow"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cecb0345111032cfd995a1e9c1b79387a0e6bf6690be5d8dd12a58f4861bc6d9"
+dependencies = [
+ "abomonation",
+ "abomonation_derive",
+ "fnv",
+ "serde",
+ "serde_derive",
+ "timely",
+]
 
 [[package]]
 name = "digest"
@@ -9555,6 +9586,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9091b6114800a5f2141aee1d1b9d6ca3592ac062dc5decb3764ec5895a47b4eb"
 
 [[package]]
+name = "stream"
+version = "0.1.0"
+dependencies = [
+ "abomonation",
+ "abomonation_derive",
+ "differential-dataflow",
+ "timely",
+]
+
+[[package]]
 name = "streaming-stats"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9790,6 +9831,18 @@ name = "sync_wrapper"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2047c6ded9c721764247e62cd3b03c09ffc529b2ba5b10ec482ae507a4a70160"
+
+[[package]]
+name = "synstructure"
+version = "0.12.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f36bdaa60a83aca3921b5259d5400cbf5e90fc51931376a9bd4a0eb79aa7210f"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 1.0.109",
+ "unicode-xid",
+]
 
 [[package]]
 name = "system-configuration"
@@ -10168,6 +10221,52 @@ checksum = "eb71511c991639bb078fd5bf97757e03914361c48100d52878b8e52b46fb92cd"
 dependencies = [
  "time-core",
 ]
+
+[[package]]
+name = "timely"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "211e9686a84038d2b052c1f70d7423f8716330fb7108fe21a8a9b0c2929b80a7"
+dependencies = [
+ "abomonation",
+ "abomonation_derive",
+ "crossbeam-channel",
+ "futures-util",
+ "getopts",
+ "serde",
+ "serde_derive",
+ "timely_bytes",
+ "timely_communication",
+ "timely_logging",
+]
+
+[[package]]
+name = "timely_bytes"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1f8a545b35b019b8b63afb913214695f542cbbf39032c7b7349e1a15b7f2a2cf"
+
+[[package]]
+name = "timely_communication"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3435bab8a9b9909b5bc907cc562b3659c62a05c1abbc1268e914b024b66dff60"
+dependencies = [
+ "abomonation",
+ "abomonation_derive",
+ "crossbeam-channel",
+ "getopts",
+ "serde",
+ "serde_derive",
+ "timely_bytes",
+ "timely_logging",
+]
+
+[[package]]
+name = "timely_logging"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f9046af28827ac831479d245eb8afd9522599a3cbb22d6c42a82cb9e4ccdf858"
 
 [[package]]
 name = "timsort"
