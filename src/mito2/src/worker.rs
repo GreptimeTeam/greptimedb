@@ -14,7 +14,7 @@
 
 //! Structs and utilities for writing regions.
 
-mod channel;
+pub(crate) mod channel;
 mod handle_create;
 mod handle_open;
 pub(crate) mod request;
@@ -33,7 +33,7 @@ use store_api::storage::RegionId;
 use tokio::sync::Mutex;
 
 use crate::config::MitoConfig;
-use crate::error::{JoinSnafu, Result};
+use crate::error::{JoinSnafu, Result, WorkerStoppedSnafu};
 use crate::region::{RegionMap, RegionMapRef};
 use crate::worker::channel::{Receiver, RequestBuffer, Sender};
 use crate::worker::request::{RequestBody, WorkerRequest};
@@ -48,6 +48,8 @@ pub(crate) struct WorkerGroup {
 
 impl WorkerGroup {
     /// Start a worker group.
+    ///
+    /// The number of workers should be power of two.
     pub(crate) fn start<S: LogStore>(
         config: &MitoConfig,
         log_store: Arc<S>,
@@ -74,7 +76,7 @@ impl WorkerGroup {
     }
 
     /// Submit a request to a worker in the group.
-    pub(crate) fn submit_to_worker(&self, request: WorkerRequest) {
+    pub(crate) fn submit_to_worker(&self, request: WorkerRequest) -> Result<()> {
         self.worker(request.body.region_id())
             .submit_request(request)
     }
@@ -91,7 +93,7 @@ impl WorkerGroup {
 }
 
 /// Identifier for a worker.
-type WorkerId = u32;
+pub(crate) type WorkerId = u32;
 
 /// Worker to write and alter regions bound to it.
 #[derive(Debug)]
@@ -141,8 +143,10 @@ impl RegionWorker {
     }
 
     /// Submit request to background worker thread.
-    fn submit_request(&self, request: WorkerRequest) {
-        self.sender.send(request);
+    fn submit_request(&self, request: WorkerRequest) -> Result<()> {
+        self.sender
+            .send(request)
+            .context(WorkerStoppedSnafu { id: self.id })
     }
 
     /// Stop the worker.
@@ -155,6 +159,9 @@ impl RegionWorker {
 
             self.running.store(false, Ordering::Relaxed);
             self.sender.notify();
+
+            // Close the channel.
+            self.sender.close();
 
             handle.await.context(JoinSnafu)?;
         }

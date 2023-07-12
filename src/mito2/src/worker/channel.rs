@@ -17,33 +17,42 @@
 use std::mem;
 use std::sync::{Arc, Mutex};
 
+use snafu::Snafu;
 use tokio::sync::Notify;
 
 use crate::worker::request::WorkerRequest;
 
+#[derive(Debug, Snafu)]
+#[snafu(display("Channel is closed"))]
+pub struct SendError;
+
 /// Region request sender.
 #[derive(Debug)]
 pub(crate) struct Sender {
-    channel: Arc<RequestChan>,
+    channel: Arc<Chan>,
 }
 
 impl Sender {
     /// Sends a `request` to the channel.
-    pub(crate) fn send(&self, request: WorkerRequest) {
-        self.channel.push_back(request);
+    pub(crate) fn send(&self, request: WorkerRequest) -> Result<(), SendError> {
+        self.channel.push_back(request)
     }
 
     /// Notify the channel receiver without sending a request.
     pub(crate) fn notify(&self) {
         self.channel.notify_one();
     }
+
+    /// Close the channel.
+    pub(crate) fn close(&self) {
+        self.channel.close();
+    }
 }
 
-// Receivers **should not support Clone** since we can't wake up multiple receivers.
 /// Region request receiver.
 #[derive(Debug)]
 pub(crate) struct Receiver {
-    channel: Arc<RequestChan>,
+    channel: Arc<Chan>,
 }
 
 impl Receiver {
@@ -60,7 +69,7 @@ impl Receiver {
 ///
 /// Returns a pair of [Sender] and [Receiver].
 pub(crate) fn request_channel() -> (Sender, Receiver) {
-    let channel = Arc::new(RequestChan::default());
+    let channel = Arc::new(Chan::default());
     let sender = Sender {
         channel: channel.clone(),
     };
@@ -72,34 +81,54 @@ pub(crate) fn request_channel() -> (Sender, Receiver) {
 /// Request queue grouped by request type.
 pub(crate) type RequestBuffer = Vec<WorkerRequest>;
 
-/// A multi-producer, single-consumer channel to batch region requests.
+/// Channel state.
 #[derive(Debug, Default)]
-struct RequestChan {
-    /// Requests in FIFO order.
-    channel: Mutex<RequestBuffer>,
+struct ChanState {
+    buffer: RequestBuffer,
+    closed: bool,
+}
+
+/// A channel to batch region requests.
+#[derive(Debug, Default)]
+struct Chan {
+    state: Mutex<ChanState>,
     /// Receiver notify.
     notify: Notify,
 }
 
-impl RequestChan {
+impl Chan {
     /// Push a new `request` to the end of the channel.
-    fn push_back(&self, request: WorkerRequest) {
-        let mut channel = self.channel.lock().unwrap();
-        let wake = channel.is_empty();
-        channel.push(request);
-        if wake {
-            // Only notify waker when this is the first request
-            // in the channel.
-            self.notify.notify_one();
+    fn push_back(&self, request: WorkerRequest) -> Result<(), SendError> {
+        {
+            let mut state = self.state.lock().unwrap();
+            if state.closed {
+                return Err(SendError);
+            }
+
+            let wake = state.buffer.is_empty();
+            state.buffer.push(request);
+            if wake {
+                // Only notify waker when this is the first request
+                // in the channel.
+                self.notify.notify_one();
+            }
         }
+
+        Ok(())
+    }
+
+    /// Close the channel.
+    fn close(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.closed = true;
     }
 
     /// Take all requests from the channel to the `buffer`.
     ///
     /// Requests in the buffer have the same order as what they have in the channel.
     fn take(&self, buffer: &mut RequestBuffer) {
-        let mut channel = self.channel.lock().unwrap();
-        mem::swap(&mut *channel, buffer);
+        let mut state = self.state.lock().unwrap();
+        mem::swap(&mut state.buffer, buffer);
     }
 
     /// Waits for requests.

@@ -20,6 +20,9 @@ use common_error::status_code::StatusCode;
 use snafu::{Location, Snafu};
 use store_api::manifest::ManifestVersion;
 
+use crate::worker::channel::SendError;
+use crate::worker::WorkerId;
+
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
@@ -76,9 +79,23 @@ pub enum Error {
         source: std::str::Utf8Error,
     },
 
-    #[snafu(display("Failed to join handle, source: {}", source))]
+    #[snafu(display("Failed to join handle, location: {}, source: {}", location, source))]
     Join {
         source: common_runtime::JoinError,
+        location: Location,
+    },
+
+    // We don't print the SendError in message since it is meaningless.
+    #[snafu(display("Worker {} is stopped, location: {}", location, id))]
+    WorkerStopped {
+        id: WorkerId,
+        source: SendError,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to recv result, location: {}, source: {}", location, source))]
+    Recv {
+        source: tokio::sync::oneshot::error::RecvError,
         location: Location,
     },
 }
@@ -95,7 +112,7 @@ impl ErrorExt for Error {
                 StatusCode::Unexpected
             }
             InvalidScanIndex { .. } => StatusCode::InvalidArguments,
-            Join { .. } => StatusCode::Internal,
+            Join { .. } | WorkerStopped { .. } | Recv { .. } => StatusCode::Internal,
         }
     }
 

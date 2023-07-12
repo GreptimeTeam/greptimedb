@@ -15,10 +15,11 @@
 use std::sync::Arc;
 
 use object_store::ObjectStore;
+use snafu::ResultExt;
 use store_api::logstore::LogStore;
 
 use crate::config::MitoConfig;
-use crate::error::Result;
+use crate::error::{RecvSnafu, Result};
 pub use crate::worker::request::CreateRequest;
 use crate::worker::request::{RequestBody, WorkerRequest};
 use crate::worker::WorkerGroup;
@@ -80,7 +81,8 @@ impl EngineInner {
     /// Creates a new region.
     async fn create_region(&self, request: CreateRequest) -> Result<()> {
         let (worker_request, receiver) = WorkerRequest::from_body(RequestBody::Create(request));
+        self.workers.submit_to_worker(worker_request)?;
 
-        todo!()
+        receiver.await.context(RecvSnafu)?
     }
 }
