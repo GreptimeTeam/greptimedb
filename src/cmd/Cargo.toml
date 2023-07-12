@@ -51,7 +51,7 @@ common-test-util = { path = "../common/test-util" }
 rexpect = "0.5"
 temp-env = "0.3"
 serde.workspace = true
-toml = "0.5"
+toml.workspace = true
 
 [build-dependencies]
 build-data = "0.1.4"
