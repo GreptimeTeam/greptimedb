@@ -25,6 +25,12 @@ use store_api::storage::RegionNumber;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
+    #[snafu(display("Unexpected, violated: {}", violated))]
+    Unexpected {
+        violated: String,
+        location: Location,
+    },
+
     #[snafu(display("Execute the operation timeout, source: {}", source))]
     Timeout {
         location: Location,
@@ -652,7 +658,8 @@ impl ErrorExt for Error {
             | Error::BuildParquetRecordBatchStream { .. }
             | Error::ReadRecordBatch { .. }
             | Error::BuildFileStream { .. }
-            | Error::WriteStreamToFile { .. } => StatusCode::Unexpected,
+            | Error::WriteStreamToFile { .. }
+            | Error::Unexpected { .. } => StatusCode::Unexpected,
 
             Error::Catalog { source, .. } => source.status_code(),
             Error::CatalogEntrySerde { source, .. } => source.status_code(),

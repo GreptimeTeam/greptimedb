@@ -44,6 +44,20 @@ impl DdlTask {
     ) -> Self {
         DdlTask::CreateTable(CreateTableTask::new(expr, partitions, table_info))
     }
+
+    pub fn new_drop_table(
+        catalog: String,
+        schema: String,
+        table: String,
+        table_id: TableId,
+    ) -> Self {
+        DdlTask::DropTable(DropTableTask {
+            catalog,
+            schema,
+            table,
+            table_id,
+        })
+    }
 }
 
 impl TryFrom<Task> for DdlTask {
@@ -92,19 +106,17 @@ impl TryFrom<SubmitDdlTaskRequest> for PbSubmitDdlTaskRequest {
 
 pub struct SubmitDdlTaskResponse {
     pub key: Vec<u8>,
-    pub table_id: TableId,
+    pub table_id: Option<TableId>,
 }
 
 impl TryFrom<PbSubmitDdlTaskResponse> for SubmitDdlTaskResponse {
     type Error = error::Error;
 
     fn try_from(resp: PbSubmitDdlTaskResponse) -> Result<Self> {
-        let table_id = resp.table_id.context(error::InvalidProtoMsgSnafu {
-            err_msg: "expected table_id",
-        })?;
+        let table_id = resp.table_id.map(|t| t.id);
         Ok(Self {
             key: resp.key,
-            table_id: table_id.id,
+            table_id,
         })
     }
 }

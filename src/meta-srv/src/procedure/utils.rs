@@ -43,7 +43,7 @@ pub fn build_table_metadata_key(
         table_id,
         catalog_name: table_ref.catalog,
         schema_name: table_ref.schema,
-        table_name: table_ref.schema,
+        table_name: table_ref.table,
     };
 
     let table_global_key = TableGlobalKey {
