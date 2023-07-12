@@ -73,6 +73,16 @@ pub(crate) enum WorkerRequest {
     Ddl(DdlRequest),
 }
 
+impl WorkerRequest {
+    /// Id of the region that this request apply to.
+    pub(crate) fn region_id(&self) -> RegionId {
+        match self {
+            WorkerRequest::Dml(req) => req.region_id,
+            WorkerRequest::Ddl(req) => req.body.region_id(),
+        }
+    }
+}
+
 /// Request to write a region.
 #[derive(Debug)]
 pub(crate) struct DmlRequest {
@@ -97,4 +107,14 @@ pub(crate) enum DdlRequestBody {
 
     /// Opens an existing region.
     Open(OpenRequest),
+}
+
+impl DdlRequestBody {
+    /// Region id of this request.
+    fn region_id(&self) -> RegionId {
+        match self {
+            DdlRequestBody::Create(req) => req.region_id,
+            DdlRequestBody::Open(req) => req.region_id,
+        }
+    }
 }

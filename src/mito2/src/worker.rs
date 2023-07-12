@@ -17,8 +17,10 @@
 mod channel;
 mod handle_create;
 mod handle_open;
-mod request;
+pub(crate) mod request;
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -27,19 +29,64 @@ use common_telemetry::logging;
 use object_store::ObjectStore;
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
+use store_api::storage::RegionId;
 use tokio::sync::Mutex;
 
+use crate::config::MitoConfig;
 use crate::error::{JoinSnafu, Result};
 use crate::region::{RegionMap, RegionMapRef};
 use crate::worker::channel::{Receiver, RequestQueue, Sender};
-use crate::worker::request::{DdlRequest, DdlRequestBody, DmlRequest};
+use crate::worker::request::{DdlRequest, DdlRequestBody, DmlRequest, WorkerRequest};
 
 /// A fixed size group of [RegionWorkers](RegionWorker).
 ///
 /// The group binds each region to a specific [RegionWorker].
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct WorkerGroup {
     workers: Vec<RegionWorker>,
+}
+
+impl WorkerGroup {
+    /// Start a worker group.
+    pub(crate) fn start<S: LogStore>(
+        config: &MitoConfig,
+        log_store: Arc<S>,
+        object_store: ObjectStore,
+    ) -> WorkerGroup {
+        assert!(config.num_workers.is_power_of_two());
+
+        let workers = (0..config.num_workers)
+            .map(|id| RegionWorker::start(id as WorkerId, log_store.clone(), object_store.clone()))
+            .collect();
+
+        WorkerGroup { workers }
+    }
+
+    /// Stop the worker group.
+    pub(crate) async fn stop(&self) -> Result<()> {
+        logging::info!("Stop region worker group");
+
+        for worker in &self.workers {
+            worker.stop().await?;
+        }
+
+        Ok(())
+    }
+
+    /// Submit a request to a worker in the group.
+    pub(crate) fn submit_to_worker(&self, request: WorkerRequest) {
+        self.worker(request.region_id()).submit_request(request)
+    }
+
+    /// Get worker for specific `region_id`.
+    fn worker(&self, region_id: RegionId) -> &RegionWorker {
+        let mut hasher = DefaultHasher::new();
+        region_id.hash(&mut hasher);
+        let value = hasher.finish() as usize;
+        let index = value & (self.workers.len() - 1);
+
+        &self.workers[index]
+    }
 }
 
 /// Identifier for a worker.
@@ -47,7 +94,7 @@ type WorkerId = u32;
 
 /// Worker to write and alter regions bound to it.
 #[derive(Debug)]
-struct RegionWorker {
+pub(crate) struct RegionWorker {
     // Id of the worker.
     id: WorkerId,
     /// Regions bound to the worker.
@@ -90,6 +137,11 @@ impl RegionWorker {
             handle: Mutex::new(Some(handle)),
             running,
         }
+    }
+
+    /// Submit request to background worker thread.
+    fn submit_request(&self, request: WorkerRequest) {
+        self.sender.send(request);
     }
 
     /// Stop the worker.
@@ -139,6 +191,8 @@ struct RegionWorkerThread<S> {
 impl<S> RegionWorkerThread<S> {
     /// Starts the worker loop.
     async fn run(&mut self) {
+        logging::info!("Start region worker thread {}", self.id);
+
         // Buffer to retrieve requests from receiver.
         let mut buffer = RequestQueue::default();
 
@@ -148,6 +202,8 @@ impl<S> RegionWorkerThread<S> {
 
             self.handle_requests(&mut buffer).await;
         }
+
+        logging::info!("Exit region worker thread {}", self.id);
     }
 
     /// Dispatches and processes requests.

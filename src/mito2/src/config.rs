@@ -14,6 +14,32 @@
 
 //! Configurations.
 
+const DEFAULT_NUM_WORKERS: usize = 1;
+const MAX_NUM_WORKERS: usize = 512;
+
 /// Configuration for [MitoEngine](crate::engine::MitoEngine).
 #[derive(Debug)]
-pub struct MitoConfig {}
+pub struct MitoConfig {
+    /// Number of region workers.
+    pub num_workers: usize,
+}
+
+impl Default for MitoConfig {
+    fn default() -> Self {
+        MitoConfig {
+            num_workers: DEFAULT_NUM_WORKERS,
+        }
+    }
+}
+
+impl MitoConfig {
+    /// Sanitize incorrect configurations.
+    pub(crate) fn sanitize(&mut self) {
+        if self.num_workers == 0 {
+            self.num_workers = DEFAULT_NUM_WORKERS;
+        } else if self.num_workers > MAX_NUM_WORKERS {
+            self.num_workers = MAX_NUM_WORKERS;
+        }
+        self.num_workers = self.num_workers.next_power_of_two();
+    }
+}

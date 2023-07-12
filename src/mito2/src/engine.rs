@@ -15,8 +15,11 @@
 use std::sync::Arc;
 
 use object_store::ObjectStore;
+use store_api::logstore::LogStore;
 
 use crate::config::MitoConfig;
+use crate::error::Result;
+pub use crate::worker::request::CreateRequest;
 use crate::worker::WorkerGroup;
 
 /// Region engine implementation for timeseries data.
@@ -27,10 +30,26 @@ pub struct MitoEngine {
 
 impl MitoEngine {
     /// Returns a new [MitoEngine] with specific `config`, `log_store` and `object_store`.
-    pub fn new<S>(config: MitoConfig, log_store: S, object_store: ObjectStore) -> MitoEngine {
+    pub fn new<S: LogStore>(
+        mut config: MitoConfig,
+        log_store: Arc<S>,
+        object_store: ObjectStore,
+    ) -> MitoEngine {
+        config.sanitize();
+
         MitoEngine {
             inner: Arc::new(EngineInner::new(config, log_store, object_store)),
         }
+    }
+
+    /// Stop the engine.
+    pub async fn stop(&self) -> Result<()> {
+        self.inner.stop().await
+    }
+
+    /// Creates a new region.
+    pub async fn create_region(&self, request: CreateRequest) -> Result<()> {
+        self.inner.create_region(request).await
     }
 }
 
@@ -42,9 +61,23 @@ struct EngineInner {
 
 impl EngineInner {
     /// Returns a new [EngineInner] with specific `config`, `log_store` and `object_store`.
-    fn new<S>(_config: MitoConfig, _log_store: S, _object_store: ObjectStore) -> EngineInner {
+    fn new<S: LogStore>(
+        config: MitoConfig,
+        log_store: Arc<S>,
+        object_store: ObjectStore,
+    ) -> EngineInner {
         EngineInner {
-            workers: WorkerGroup::default(),
+            workers: WorkerGroup::start(&config, log_store, object_store),
         }
+    }
+
+    /// Stop the inner engine.
+    async fn stop(&self) -> Result<()> {
+        self.workers.stop().await
+    }
+
+    /// Creates a new region.
+    async fn create_region(&self, request: CreateRequest) -> Result<()> {
+        todo!()
     }
 }

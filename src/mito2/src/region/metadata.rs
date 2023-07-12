@@ -16,8 +16,19 @@
 
 use std::sync::Arc;
 
+use crate::error::Error;
+use crate::worker::request::CreateRequest;
+
 /// Static metadata of a region.
 #[derive(Debug)]
 pub(crate) struct RegionMetadata {}
 
 pub(crate) type RegionMetadataRef = Arc<RegionMetadata>;
+
+impl TryFrom<CreateRequest> for RegionMetadata {
+    type Error = Error;
+
+    fn try_from(_value: CreateRequest) -> Result<Self, Self::Error> {
+        todo!()
+    }
+}

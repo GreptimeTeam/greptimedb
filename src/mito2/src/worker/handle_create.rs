@@ -21,8 +21,13 @@ use crate::worker::RegionWorkerThread;
 impl<S> RegionWorkerThread<S> {
     pub(in crate::worker) async fn handle_create_request(
         &mut self,
-        create_request: CreateRequest,
+        _request: CreateRequest,
     ) -> Result<()> {
+        // 1. Checks whether the table exists.
+
+        // 2. Convert the request into RegionMetadata
+
+        // 3. Write manifest
         unimplemented!()
     }
 }

@@ -21,7 +21,7 @@ use crate::worker::RegionWorkerThread;
 impl<S> RegionWorkerThread<S> {
     pub(in crate::worker) async fn handle_open_request(
         &mut self,
-        _open_request: OpenRequest,
+        _request: OpenRequest,
     ) -> Result<()> {
         unimplemented!()
     }
