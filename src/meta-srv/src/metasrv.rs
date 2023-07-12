@@ -19,6 +19,7 @@ use std::sync::Arc;
 
 use api::v1::meta::Peer;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_procedure::options::ProcedureConfig;
 use common_procedure::ProcedureManagerRef;
 use common_telemetry::logging::LoggingOptions;
 use common_telemetry::{error, info, warn};
@@ -38,7 +39,6 @@ use crate::selector::{Selector, SelectorType};
 use crate::sequence::SequenceRef;
 use crate::service::mailbox::MailboxRef;
 use crate::service::store::kv::{KvStoreRef, ResettableKvStoreRef};
-
 pub const TABLE_ID_SEQ: &str = "table_id";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,6 +53,7 @@ pub struct MetaSrvOptions {
     pub disable_region_failover: bool,
     pub http_opts: HttpOptions,
     pub logging: LoggingOptions,
+    pub procedure: ProcedureConfig,
 }
 
 impl Default for MetaSrvOptions {
@@ -67,7 +68,14 @@ impl Default for MetaSrvOptions {
             disable_region_failover: false,
             http_opts: HttpOptions::default(),
             logging: LoggingOptions::default(),
+            procedure: ProcedureConfig::default(),
         }
+    }
+}
+
+impl MetaSrvOptions {
+    pub fn to_toml_string(&self) -> String {
+        toml::to_string(&self).unwrap()
     }
 }
 

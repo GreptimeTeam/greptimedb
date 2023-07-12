@@ -47,8 +47,6 @@ pub struct DropTableProcedure {
     data: DropTableData,
 }
 
-// TODO(weny): removes in following PRs.
-#[allow(unused)]
 impl DropTableProcedure {
     pub(crate) const TYPE_NAME: &'static str = "metasrv-procedure::DropTable";
 
@@ -185,7 +183,7 @@ impl DropTableProcedure {
             }));
         }
 
-        let _ = join_all(joins)
+        let _r = join_all(joins)
             .await
             .into_iter()
             .map(|e| e.context(error::JoinSnafu).flatten())

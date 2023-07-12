@@ -22,7 +22,6 @@ use common_telemetry::logging::error;
 use common_telemetry::{debug, warn};
 use futures::StreamExt;
 use metrics::{decrement_gauge, increment_gauge};
-use pgwire::api::MakeHandler;
 use pgwire::tokio::process_socket;
 use tokio;
 use tokio_rustls::TlsAcceptor;
@@ -69,32 +68,36 @@ impl PostgresServer {
         accepting_stream: AbortableStream,
         tls_acceptor: Option<Arc<TlsAcceptor>>,
     ) -> impl Future<Output = ()> {
-        let handler = self.make_handler.clone();
+        let handler_maker = self.make_handler.clone();
         accepting_stream.for_each(move |tcp_stream| {
             let io_runtime = io_runtime.clone();
             let tls_acceptor = tls_acceptor.clone();
-            let mut handler = handler.make();
+            let handler_maker = handler_maker.clone();
+
             async move {
                 match tcp_stream {
                     Err(error) => error!("Broken pipe: {}", error), // IoError doesn't impl ErrorExt.
                     Ok(io_stream) => {
-                        match io_stream.peer_addr() {
+                        let addr = match io_stream.peer_addr() {
                             Ok(addr) => {
-                                handler.session.mut_conn_info().client_addr = Some(addr);
-                                debug!("PostgreSQL client coming from {}", addr)
+                                debug!("PostgreSQL client coming from {}", addr);
+                                Some(addr)
                             }
-                            Err(e) => warn!("Failed to get PostgreSQL client addr, err: {}", e),
-                        }
+                            Err(e) => {
+                                warn!("Failed to get PostgreSQL client addr, err: {}", e);
+                                None
+                            }
+                        };
 
                         let _handle = io_runtime.spawn(async move {
                             increment_gauge!(crate::metrics::METRIC_POSTGRES_CONNECTIONS, 1.0);
-                            let handler = Arc::new(handler);
+                            let pg_handler = Arc::new(handler_maker.make(addr));
                             let r = process_socket(
                                 io_stream,
                                 tls_acceptor.clone(),
-                                handler.clone(),
-                                handler.clone(),
-                                handler,
+                                pg_handler.clone(),
+                                pg_handler.clone(),
+                                pg_handler,
                             )
                             .await;
                             decrement_gauge!(crate::metrics::METRIC_POSTGRES_CONNECTIONS, 1.0);

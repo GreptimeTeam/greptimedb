@@ -15,6 +15,7 @@
 mod auth_handler;
 mod handler;
 mod server;
+mod types;
 
 pub(crate) const METADATA_USER: &str = "user";
 pub(crate) const METADATA_DATABASE: &str = "database";
@@ -24,21 +25,22 @@ pub(crate) const METADATA_CATALOG: &str = "catalog";
 pub(crate) const METADATA_SCHEMA: &str = "schema";
 
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use derive_builder::Builder;
 use pgwire::api::auth::ServerParameterProvider;
 use pgwire::api::store::MemPortalStore;
-use pgwire::api::{ClientInfo, MakeHandler};
+use pgwire::api::ClientInfo;
 pub use server::PostgresServer;
 use session::context::Channel;
 use session::Session;
-use sql::statements::statement::Statement;
 
 use self::auth_handler::PgLoginVerifier;
-use self::handler::POCQueryParser;
+use self::handler::DefaultQueryParser;
 use crate::auth::UserProviderRef;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
+use crate::SqlPlan;
 
 pub(crate) struct GreptimeDBStartupParameters {
     version: &'static str,
@@ -73,9 +75,9 @@ pub struct PostgresServerHandler {
     force_tls: bool,
     param_provider: Arc<GreptimeDBStartupParameters>,
 
-    session: Session,
-    portal_store: Arc<MemPortalStore<(Statement, String)>>,
-    query_parser: Arc<POCQueryParser>,
+    session: Arc<Session>,
+    portal_store: Arc<MemPortalStore<SqlPlan>>,
+    query_parser: Arc<DefaultQueryParser>,
 }
 
 #[derive(Builder)]
@@ -84,24 +86,21 @@ pub(crate) struct MakePostgresServerHandler {
     user_provider: Option<UserProviderRef>,
     #[builder(default = "Arc::new(GreptimeDBStartupParameters::new())")]
     param_provider: Arc<GreptimeDBStartupParameters>,
-    #[builder(default = "Arc::new(POCQueryParser::default())")]
-    query_parser: Arc<POCQueryParser>,
     force_tls: bool,
 }
 
-impl MakeHandler for MakePostgresServerHandler {
-    type Handler = PostgresServerHandler;
-
-    fn make(&self) -> Self::Handler {
+impl MakePostgresServerHandler {
+    fn make(&self, addr: Option<SocketAddr>) -> PostgresServerHandler {
+        let session = Arc::new(Session::new(addr, Channel::Postgres));
         PostgresServerHandler {
             query_handler: self.query_handler.clone(),
             login_verifier: PgLoginVerifier::new(self.user_provider.clone()),
             force_tls: self.force_tls,
             param_provider: self.param_provider.clone(),
 
-            session: Session::new(None, Channel::Postgres),
+            session: session.clone(),
             portal_store: Arc::new(MemPortalStore::new()),
-            query_parser: self.query_parser.clone(),
+            query_parser: Arc::new(DefaultQueryParser::new(self.query_handler.clone(), session)),
         }
     }
 }

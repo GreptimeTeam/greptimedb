@@ -285,6 +285,16 @@ pub struct FlushTableRequest {
     pub wait: Option<bool>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct CompactTableRequest {
+    pub catalog_name: String,
+    pub schema_name: String,
+    pub table_name: Option<String>,
+    pub region_number: Option<RegionNumber>,
+    /// Wait until the compaction is done.
+    pub wait: Option<bool>,
+}
+
 #[macro_export]
 macro_rules! meter_insert_request {
     ($req: expr) => {

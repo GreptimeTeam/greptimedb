@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 use std::env;
+use std::fmt::Display;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -61,7 +62,7 @@ use snafu::ResultExt;
 use table::engine::{EngineContext, TableEngineRef};
 use table::requests::{CreateTableRequest, InsertRequest, TableOptions};
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum StorageType {
     S3,
     S3WithCache,
@@ -69,6 +70,19 @@ pub enum StorageType {
     Oss,
     Azblob,
     Gcs,
+}
+
+impl Display for StorageType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StorageType::S3 => write!(f, "S3"),
+            StorageType::S3WithCache => write!(f, "S3"),
+            StorageType::File => write!(f, "File"),
+            StorageType::Oss => write!(f, "Oss"),
+            StorageType::Azblob => write!(f, "Azblob"),
+            StorageType::Gcs => write!(f, "Gcs"),
+        }
+    }
 }
 
 impl StorageType {
@@ -381,6 +395,7 @@ pub async fn setup_test_http_app(store_type: StorageType, name: &str) -> (Router
         )))
         .with_grpc_handler(ServerGrpcQueryHandlerAdaptor::arc(instance.clone()))
         .with_metrics_handler(MetricsHandler)
+        .with_greptime_config_options(opts.to_toml_string())
         .build();
     (http_server.build(http_server.make_app()), guard)
 }
@@ -417,6 +432,7 @@ pub async fn setup_test_http_app_with_frontend(
         .with_sql_handler(ServerSqlQueryHandlerAdaptor::arc(frontend_ref.clone()))
         .with_grpc_handler(ServerGrpcQueryHandlerAdaptor::arc(frontend_ref.clone()))
         .with_script_handler(frontend_ref)
+        .with_greptime_config_options(opts.to_toml_string())
         .build();
     let app = http_server.build(http_server.make_app());
     (app, guard)
@@ -504,6 +520,7 @@ pub async fn setup_test_prom_app_with_frontend(
         .with_grpc_handler(ServerGrpcQueryHandlerAdaptor::arc(frontend_ref.clone()))
         .with_script_handler(frontend_ref.clone())
         .with_prom_handler(frontend_ref.clone())
+        .with_greptime_config_options(opts.to_toml_string())
         .build();
     let prom_server = PromServer::create_server(frontend_ref);
     let app = http_server.build(http_server.make_app());

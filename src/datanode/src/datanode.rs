@@ -20,6 +20,7 @@ use std::time::Duration;
 use common_base::readable_size::ReadableSize;
 use common_base::Plugins;
 use common_error::prelude::BoxedError;
+pub use common_procedure::options::ProcedureConfig;
 use common_telemetry::info;
 use common_telemetry::logging::LoggingOptions;
 use meta_client::MetaClientOptions;
@@ -344,25 +345,6 @@ impl From<&DatanodeOptions> for StorageEngineConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct ProcedureConfig {
-    /// Max retry times of procedure.
-    pub max_retry_times: usize,
-    /// Initial retry delay of procedures, increases exponentially.
-    #[serde(with = "humantime_serde")]
-    pub retry_delay: Duration,
-}
-
-impl Default for ProcedureConfig {
-    fn default() -> ProcedureConfig {
-        ProcedureConfig {
-            max_retry_times: 3,
-            retry_delay: Duration::from_millis(500),
-        }
-    }
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DatanodeOptions {
@@ -404,6 +386,10 @@ impl Default for DatanodeOptions {
 impl DatanodeOptions {
     pub fn env_list_keys() -> Option<&'static [&'static str]> {
         Some(&["meta_client_options.metasrv_addrs"])
+    }
+
+    pub fn to_toml_string(&self) -> String {
+        toml::to_string(&self).unwrap()
     }
 }
 

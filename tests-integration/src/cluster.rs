@@ -26,7 +26,7 @@ use common_meta::peer::Peer;
 use common_meta::DatanodeId;
 use common_runtime::Builder as RuntimeBuilder;
 use common_test_util::temp_dir::create_temp_dir;
-use datanode::datanode::{DatanodeOptions, ObjectStoreConfig};
+use datanode::datanode::{DatanodeOptions, ObjectStoreConfig, ProcedureConfig};
 use datanode::heartbeat::HeartbeatTask;
 use datanode::instance::Instance as DatanodeInstance;
 use frontend::frontend::FrontendOptions;
@@ -118,13 +118,17 @@ impl GreptimeDbClusterBuilder {
     }
 
     async fn build_metasrv(&self, datanode_clients: Arc<DatanodeClients>) -> MockInfo {
-        meta_srv::mocks::mock(
-            MetaSrvOptions::default(),
-            self.kv_store.clone(),
-            None,
-            Some(datanode_clients),
-        )
-        .await
+        let opt = MetaSrvOptions {
+            procedure: ProcedureConfig {
+                // Due to large network delay during cross data-center.
+                // We only make max_retry_times and retry_delay large than the default in tests.
+                max_retry_times: 5,
+                retry_delay: Duration::from_secs(1),
+            },
+            ..Default::default()
+        };
+
+        meta_srv::mocks::mock(opt, self.kv_store.clone(), None, Some(datanode_clients)).await
     }
 
     async fn build_datanodes(

@@ -64,7 +64,7 @@ use self::influxdb::{influxdb_health, influxdb_ping, influxdb_write_v1, influxdb
 use crate::auth::UserProviderRef;
 use crate::configurator::ConfiguratorRef;
 use crate::error::{AlreadyStartedSnafu, Result, StartHttpSnafu};
-use crate::http::admin::flush;
+use crate::http::admin::{compact, flush};
 use crate::metrics::{
     METRIC_HTTP_REQUESTS_ELAPSED, METRIC_HTTP_REQUESTS_TOTAL, METRIC_METHOD_LABEL,
     METRIC_PATH_LABEL, METRIC_STATUS_LABEL,
@@ -124,6 +124,7 @@ pub struct HttpServer {
     user_provider: Option<UserProviderRef>,
     metrics_handler: Option<MetricsHandler>,
     configurator: Option<ConfiguratorRef>,
+    greptime_config_options: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -378,6 +379,11 @@ pub struct ApiState {
     pub script_handler: Option<ScriptHandlerRef>,
 }
 
+#[derive(Clone)]
+pub struct GreptimeOptionsConfigState {
+    pub greptime_config_options: String,
+}
+
 #[derive(Default)]
 pub struct HttpServerBuilder {
     inner: HttpServer,
@@ -398,6 +404,7 @@ impl HttpServerBuilder {
                 metrics_handler: None,
                 shutdown_tx: Mutex::new(None),
                 configurator: None,
+                greptime_config_options: None,
             },
         }
     }
@@ -447,6 +454,11 @@ impl HttpServerBuilder {
         self
     }
 
+    pub fn with_greptime_config_options(&mut self, opts: String) -> &mut Self {
+        self.inner.greptime_config_options = Some(opts);
+        self
+    }
+
     pub fn build(&mut self) -> HttpServer {
         std::mem::take(self).inner
     }
@@ -477,7 +489,7 @@ impl HttpServer {
                     script_handler: self.script_handler.clone(),
                 })
                 .finish_api(&mut api)
-                .layer(Extension(api));
+                .layer(Extension(api.clone()));
             router = router.nest(&format!("/{HTTP_API_VERSION}"), sql_router);
         }
 
@@ -517,6 +529,17 @@ impl HttpServer {
             "/health",
             routing::get(handler::health).post(handler::health),
         );
+
+        let config_router = self
+            .route_config(GreptimeOptionsConfigState {
+                greptime_config_options: self
+                    .greptime_config_options
+                    .clone()
+                    .unwrap_or("".to_string()),
+            })
+            .finish_api(&mut api);
+
+        router = router.nest("", config_router);
 
         router = router.route("/status", routing::get(handler::status));
 
@@ -627,7 +650,14 @@ impl HttpServer {
     fn route_admin<S>(&self, grpc_handler: ServerGrpcQueryHandlerRef) -> Router<S> {
         Router::new()
             .route("/flush", routing::post(flush))
+            .route("/compact", routing::post(compact))
             .with_state(grpc_handler)
+    }
+
+    fn route_config<S>(&self, state: GreptimeOptionsConfigState) -> ApiRouter<S> {
+        ApiRouter::new()
+            .route("/config", apirouting::get(handler::config))
+            .with_state(state)
     }
 }
 

@@ -37,7 +37,9 @@ pub use self::engine::{
     TwcsOptions,
 };
 pub use self::metadata::RegionMeta;
-pub use self::region::{CloseContext, FlushContext, FlushReason, Region, RegionStat, WriteContext};
+pub use self::region::{
+    CloseContext, CompactContext, FlushContext, FlushReason, Region, RegionStat, WriteContext,
+};
 pub use self::requests::{
     AddColumn, AlterOperation, AlterRequest, GetRequest, ScanRequest, WriteRequest,
 };

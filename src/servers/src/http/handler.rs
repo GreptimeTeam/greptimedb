@@ -18,6 +18,7 @@ use std::time::Instant;
 
 use aide::transform::TransformOperation;
 use axum::extract::{Json, Query, State};
+use axum::response::{IntoResponse, Response};
 use axum::{Extension, Form};
 use common_error::status_code::StatusCode;
 use common_telemetry::{error, timer};
@@ -26,7 +27,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use session::context::UserInfo;
 
-use crate::http::{ApiState, JsonResponse};
+use crate::http::{ApiState, GreptimeOptionsConfigState, JsonResponse};
 use crate::metrics::JEMALLOC_COLLECTOR;
 use crate::metrics_handler::MetricsHandler;
 
@@ -183,4 +184,10 @@ pub async fn status() -> Json<StatusResponse<'static>> {
         hostname: env!("BUILD_HOSTNAME"),
         version: env!("CARGO_PKG_VERSION"),
     })
+}
+
+/// Handler to expose configuration information info about runtime, build, etc.
+#[axum_macros::debug_handler]
+pub async fn config(State(state): State<GreptimeOptionsConfigState>) -> Response {
+    (axum::http::StatusCode::OK, state.greptime_config_options).into_response()
 }

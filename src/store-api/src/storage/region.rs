@@ -86,6 +86,8 @@ pub trait Region: Send + Sync + Clone + std::fmt::Debug + 'static {
 
     /// Flush memtable of the region to disk.
     async fn flush(&self, ctx: &FlushContext) -> Result<(), Self::Error>;
+
+    async fn compact(&self, ctx: &CompactContext) -> Result<(), Self::Error>;
 }
 
 #[derive(Default, Debug)]
@@ -129,6 +131,18 @@ impl Default for FlushContext {
             reason: FlushReason::Others,
             force: false,
         }
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct CompactContext {
+    /// Whether to wait the compaction result.
+    pub wait: bool,
+}
+
+impl Default for CompactContext {
+    fn default() -> CompactContext {
+        CompactContext { wait: true }
     }
 }
 

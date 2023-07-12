@@ -14,12 +14,17 @@
 
 use std::collections::HashMap;
 
-use axum::body::Body;
+use axum::body::{Body, Bytes};
 use axum::extract::{Json, Query, RawBody, State};
 use axum::Form;
 use common_telemetry::metric;
+use http_body::combinators::UnsyncBoxBody;
+use hyper::Response;
 use metrics::counter;
-use servers::http::{handler as http_handler, script as script_handler, ApiState, JsonOutput};
+use servers::http::{
+    handler as http_handler, script as script_handler, ApiState, GreptimeOptionsConfigState,
+    JsonOutput,
+};
 use servers::metrics_handler::MetricsHandler;
 use session::context::UserInfo;
 use table::test_util::MemTable;
@@ -379,4 +384,30 @@ async fn test_status() {
 
     let Json(json) = http_handler::status().await;
     assert_eq!(json, expected_json);
+}
+
+#[tokio::test]
+async fn test_config() {
+    let toml_str = r#"
+            mode = "distributed"
+
+            [http_options]
+            addr = "127.0.0.1:4000"
+            timeout = "30s"
+            body_limit = "2GB"
+
+            [logging]
+            level = "debug"
+            dir = "/tmp/greptimedb/test/logs"
+        "#;
+    let rs = http_handler::config(State(GreptimeOptionsConfigState {
+        greptime_config_options: toml_str.to_string(),
+    }))
+    .await;
+    assert_eq!(200_u16, rs.status().as_u16());
+    assert_eq!(get_body(rs).await, toml_str);
+}
+
+async fn get_body(response: Response<UnsyncBoxBody<Bytes, axum::Error>>) -> Bytes {
+    hyper::body::to_bytes(response.into_body()).await.unwrap()
 }

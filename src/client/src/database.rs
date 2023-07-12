@@ -17,9 +17,9 @@ use api::v1::ddl_request::Expr as DdlExpr;
 use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
 use api::v1::{
-    greptime_response, AffectedRows, AlterExpr, AuthHeader, CreateTableExpr, DdlRequest,
-    DeleteRequest, DropTableExpr, FlushTableExpr, GreptimeRequest, InsertRequests, PromRangeQuery,
-    QueryRequest, RequestHeader,
+    greptime_response, AffectedRows, AlterExpr, AuthHeader, CompactTableExpr, CreateTableExpr,
+    DdlRequest, DeleteRequest, DropTableExpr, FlushTableExpr, GreptimeRequest, InsertRequests,
+    PromRangeQuery, QueryRequest, RequestHeader,
 };
 use arrow_flight::{FlightData, Ticket};
 use common_error::prelude::*;
@@ -230,6 +230,14 @@ impl Database {
         let _timer = timer!(metrics::METRIC_GRPC_FLUSH_TABLE);
         self.do_get(Request::Ddl(DdlRequest {
             expr: Some(DdlExpr::FlushTable(expr)),
+        }))
+        .await
+    }
+
+    pub async fn compact_table(&self, expr: CompactTableExpr) -> Result<Output> {
+        let _timer = timer!(metrics::METRIC_GRPC_COMPACT_TABLE);
+        self.do_get(Request::Ddl(DdlRequest {
+            expr: Some(DdlExpr::CompactTable(expr)),
         }))
         .await
     }
