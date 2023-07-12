@@ -12,10 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// rewrite note:
-// trait LogIterator -> struct ObjectStoreLogIterator
-// trait ManifestLogStorage -> struct ManifestObjectStore
-
 use std::collections::HashMap;
 use std::iter::Iterator;
 use std::str::FromStr;
@@ -149,19 +145,16 @@ impl ManifestObjectStore {
         }
     }
 
-    #[inline]
     /// Returns the delta file path under the **current** compression algorithm
     fn delta_file_path(&self, version: ManifestVersion) -> String {
         gen_path(&self.path, &delta_file(version), self.compress_type)
     }
 
-    #[inline]
     /// Returns the checkpoint file path under the **current** compression algorithm
     fn checkpoint_file_path(&self, version: ManifestVersion) -> String {
         gen_path(&self.path, &checkpoint_file(version), self.compress_type)
     }
 
-    #[inline]
     /// Returns the last checkpoint path, because the last checkpoint is not compressed,
     /// so its path name has nothing to do with the compression algorithm used by `ManifestObjectStore`
     fn last_checkpoint_path(&self) -> String {
