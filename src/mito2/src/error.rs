@@ -15,9 +15,6 @@
 use std::any::Any;
 
 use common_error::prelude::*;
-use snafu::Location;
-use store_api::storage::RegionNumber;
-use table::metadata::{TableInfoBuilderError, TableMetaBuilderError, TableVersion};
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
@@ -26,12 +23,11 @@ pub enum Error {}
 pub type Result<T> = std::result::Result<T, Error>;
 
 impl ErrorExt for Error {
+    #[allow(clippy::match_single_binding)]
     fn status_code(&self) -> StatusCode {
-        use Error::*;
-
-        match self {}
-
-        todo!()
+        match self {
+            _ => todo!(),
+        }
     }
 
     fn as_any(&self) -> &dyn Any {
