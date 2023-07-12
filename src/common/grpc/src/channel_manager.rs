@@ -12,13 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use common_telemetry::info;
 use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
+use lazy_static::lazy_static;
 use snafu::{OptionExt, ResultExt};
 use tonic::transport::{
     Certificate, Channel as InnerChannel, ClientTlsConfig, Endpoint, Identity, Uri,
@@ -31,12 +32,17 @@ const RECYCLE_CHANNEL_INTERVAL_SECS: u64 = 60;
 const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 10;
 const DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 10;
 
+lazy_static! {
+    static ref ID: AtomicU64 = AtomicU64::new(0);
+}
+
 #[derive(Clone, Debug)]
 pub struct ChannelManager {
+    id: u64,
     config: ChannelConfig,
     client_tls_config: Option<ClientTlsConfig>,
     pool: Arc<Pool>,
-    channel_recycle_started: Arc<Mutex<bool>>,
+    channel_recycle_started: Arc<AtomicBool>,
 }
 
 impl Default for ChannelManager {
@@ -51,28 +57,15 @@ impl ChannelManager {
     }
 
     pub fn with_config(config: ChannelConfig) -> Self {
+        let id = ID.fetch_add(1, Ordering::Relaxed);
         let pool = Arc::new(Pool::default());
         Self {
+            id,
             config,
             client_tls_config: None,
             pool,
-            channel_recycle_started: Arc::new(Mutex::new(false)),
+            channel_recycle_started: Arc::new(AtomicBool::new(false)),
         }
-    }
-
-    pub fn start_channel_recycle(&self) {
-        let mut started = self.channel_recycle_started.lock().unwrap();
-        if *started {
-            return;
-        }
-
-        let pool = self.pool.clone();
-        let _handle = common_runtime::spawn_bg(async {
-            recycle_channel_in_loop(pool, RECYCLE_CHANNEL_INTERVAL_SECS).await;
-        });
-        info!("Channel recycle is started, running in the background!");
-
-        *started = true;
     }
 
     pub fn with_tls_config(config: ChannelConfig) -> Result<Self> {
@@ -106,6 +99,8 @@ impl ChannelManager {
     }
 
     pub fn get(&self, addr: impl AsRef<str>) -> Result<InnerChannel> {
+        self.trigger_channel_recycling();
+
         let addr = addr.as_ref();
         // It will acquire the read lock.
         if let Some(inner_ch) = self.pool.get(addr) {
@@ -208,6 +203,25 @@ impl ChannelManager {
             .tcp_nodelay(self.config.tcp_nodelay);
 
         Ok(endpoint)
+    }
+
+    fn trigger_channel_recycling(&self) {
+        if self
+            .channel_recycle_started
+            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+            .is_err()
+        {
+            return;
+        }
+
+        let pool = self.pool.clone();
+        let _handle = common_runtime::spawn_bg(async {
+            recycle_channel_in_loop(pool, RECYCLE_CHANNEL_INTERVAL_SECS).await;
+        });
+        info!(
+            "ChannelManager: {}, channel recycle is started, running in the background!",
+            self.id
+        );
     }
 }
 
