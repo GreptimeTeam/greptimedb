@@ -261,10 +261,8 @@ impl<'a> ParserContext<'a> {
     fn parse_describe(&mut self) -> Result<Statement> {
         if self.matches_keyword(Keyword::TABLE) {
             let _ = self.parser.next_token();
-            self.parse_describe_table()
-        } else {
-            self.parse_describe_table()
         }
+        self.parse_describe_table()
     }
 
     fn parse_describe_table(&mut self) -> Result<Statement> {
