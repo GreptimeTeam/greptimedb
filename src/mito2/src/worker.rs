@@ -35,7 +35,7 @@ use tokio::sync::Mutex;
 use crate::config::MitoConfig;
 use crate::error::{JoinSnafu, Result};
 use crate::region::{RegionMap, RegionMapRef};
-use crate::worker::channel::{Receiver, RequestQueue, Sender};
+use crate::worker::channel::{Receiver, RequestBuffer, Sender};
 use crate::worker::request::{DdlRequest, DdlRequestBody, DmlRequest, WorkerRequest};
 
 /// A fixed size group of [RegionWorkers](RegionWorker).
@@ -194,7 +194,7 @@ impl<S> RegionWorkerThread<S> {
         logging::info!("Start region worker thread {}", self.id);
 
         // Buffer to retrieve requests from receiver.
-        let mut buffer = RequestQueue::default();
+        let mut buffer = RequestBuffer::default();
 
         while self.running.load(Ordering::Relaxed) {
             // Clear the buffer before handling next batch of requests.
@@ -209,7 +209,7 @@ impl<S> RegionWorkerThread<S> {
     /// Dispatches and processes requests.
     ///
     /// `buffer` should be empty.
-    async fn handle_requests(&mut self, buffer: &mut RequestQueue) {
+    async fn handle_requests(&mut self, buffer: &mut RequestBuffer) {
         self.receiver.receive_all(buffer).await;
 
         // Handles all dml requests first. So we can alter regions without

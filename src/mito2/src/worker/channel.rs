@@ -50,7 +50,7 @@ impl Receiver {
     /// Receives all requests buffered in the channel in FIFO order.
     ///
     /// Waits for next request if the channel is empty.
-    pub(crate) async fn receive_all(&self, buffer: &mut RequestQueue) {
+    pub(crate) async fn receive_all(&self, buffer: &mut RequestBuffer) {
         self.channel.notified().await;
         self.channel.take(buffer);
     }
@@ -71,14 +71,14 @@ pub(crate) fn request_channel() -> (Sender, Receiver) {
 
 /// Request queue grouped by request type.
 #[derive(Debug, Default)]
-pub(crate) struct RequestQueue {
+pub(crate) struct RequestBuffer {
     /// Queued dml requests.
     pub(crate) dml_requests: Vec<DmlRequest>,
     /// Queued ddl requests.
     pub(crate) ddl_requests: Vec<DdlRequest>,
 }
 
-impl RequestQueue {
+impl RequestBuffer {
     /// Clear the queue.
     pub(crate) fn clear(&mut self) {
         self.dml_requests.clear();
@@ -103,7 +103,7 @@ impl RequestQueue {
 #[derive(Debug, Default)]
 struct RequestChan {
     /// Requests in FIFO order.
-    channel: Mutex<RequestQueue>,
+    channel: Mutex<RequestBuffer>,
     /// Receiver notify.
     notify: Notify,
 }
@@ -124,7 +124,7 @@ impl RequestChan {
     /// Take all requests from the channel to the `buffer`.
     ///
     /// Requests in the buffer have the same order as what they have in the channel.
-    fn take(&self, buffer: &mut RequestQueue) {
+    fn take(&self, buffer: &mut RequestBuffer) {
         let mut channel = self.channel.lock().unwrap();
         mem::swap(&mut *channel, buffer);
     }
