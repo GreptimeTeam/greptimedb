@@ -483,7 +483,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_access_count() {
-        let mgr = Arc::new(ChannelManager::new());
+        let mgr = ChannelManager::new();
+        // Do not start recycle
+        mgr.channel_recycle_started.store(true, Ordering::Relaxed);
+        let mgr = Arc::new(mgr);
         let addr = "test_uri";
 
         let mut joins = Vec::with_capacity(10);
