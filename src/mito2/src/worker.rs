@@ -14,6 +14,7 @@
 
 //! Structs and utilities for writing regions.
 
+mod channel;
 mod handle_create;
 mod handle_open;
 mod request;
@@ -30,7 +31,8 @@ use tokio::sync::Mutex;
 
 use crate::error::{JoinSnafu, Result};
 use crate::region::{RegionMap, RegionMapRef};
-use crate::worker::request::{ControlRequest, Receiver, RequestQueue, Sender, WriteRequest};
+use crate::worker::channel::{Receiver, RequestQueue, Sender};
+use crate::worker::request::{DdlRequest, DdlRequestBody, DmlRequest};
 
 /// A fixed size group of [RegionWorkers](RegionWorker).
 ///
@@ -66,7 +68,7 @@ impl RegionWorker {
         object_store: ObjectStore,
     ) -> RegionWorker {
         let regions = Arc::new(RegionMap::default());
-        let (sender, receiver) = request::request_channel();
+        let (sender, receiver) = channel::request_channel();
 
         let running = Arc::new(AtomicBool::new(true));
         let mut worker_thread = RegionWorkerThread {
@@ -154,18 +156,17 @@ impl<S> RegionWorkerThread<S> {
     async fn handle_requests(&mut self, buffer: &mut RequestQueue) {
         self.receiver.receive_all(buffer).await;
 
-        // Handles all write requests first. So we can alter regions without
-        // considering existing write requests.
-        self.handle_write_requests(&mut buffer.write_requests).await;
+        // Handles all dml requests first. So we can alter regions without
+        // considering existing dml requests.
+        self.handle_dml_requests(&mut buffer.dml_requests).await;
 
-        self.handle_control_requests(&mut buffer.control_requests)
-            .await;
+        self.handle_ddl_requests(&mut buffer.ddl_requests).await;
 
         todo!()
     }
 
-    /// Takes and handles all write requests.
-    async fn handle_write_requests(&mut self, write_requests: &mut Vec<WriteRequest>) {
+    /// Takes and handles all dml requests.
+    async fn handle_dml_requests(&mut self, write_requests: &mut Vec<DmlRequest>) {
         if write_requests.is_empty() {
             return;
         }
@@ -175,16 +176,21 @@ impl<S> RegionWorkerThread<S> {
         unimplemented!()
     }
 
-    /// Takes and handles all control requests.
-    async fn handle_control_requests(&mut self, control_requests: &mut Vec<ControlRequest>) {
-        if control_requests.is_empty() {
+    /// Takes and handles all ddl requests.
+    async fn handle_ddl_requests(&mut self, ddl_requests: &mut Vec<DdlRequest>) {
+        if ddl_requests.is_empty() {
             return;
         }
 
-        for request in control_requests.drain(..) {
-            match request {
-                ControlRequest::Create(req) => self.handle_create_request(req).await,
-                ControlRequest::Open(req) => self.handle_open_request(req).await,
+        for request in ddl_requests.drain(..) {
+            let res = match request.body {
+                DdlRequestBody::Create(req) => self.handle_create_request(req).await,
+                DdlRequestBody::Open(req) => self.handle_open_request(req).await,
+            };
+
+            if let Some(sender) = request.sender {
+                // Ignore send result.
+                let _ = sender.send(res);
             }
         }
         unimplemented!()

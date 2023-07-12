@@ -14,13 +14,15 @@
 
 //! Handling create request.
 
+use crate::error::Result;
 use crate::worker::request::CreateRequest;
 use crate::worker::RegionWorkerThread;
 
 impl<S> RegionWorkerThread<S> {
-    pub(in crate::worker) async fn handle_create_request(&mut self, create_request: CreateRequest) {
-        //
-
+    pub(in crate::worker) async fn handle_create_request(
+        &mut self,
+        create_request: CreateRequest,
+    ) -> Result<()> {
         unimplemented!()
     }
 }

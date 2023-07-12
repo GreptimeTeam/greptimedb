@@ -14,11 +14,15 @@
 
 //! Handling open request.
 
+use crate::error::Result;
 use crate::worker::request::OpenRequest;
 use crate::worker::RegionWorkerThread;
 
 impl<S> RegionWorkerThread<S> {
-    pub(in crate::worker) async fn handle_open_request(&mut self, open_request: OpenRequest) {
+    pub(in crate::worker) async fn handle_open_request(
+        &mut self,
+        _open_request: OpenRequest,
+    ) -> Result<()> {
         unimplemented!()
     }
 }
