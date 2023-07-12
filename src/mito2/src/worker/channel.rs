@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 
 use tokio::sync::Notify;
 
-use crate::worker::request::{DdlRequest, DmlRequest, WorkerRequest};
+use crate::worker::request::WorkerRequest;
 
 /// Region request sender.
 #[derive(Debug)]
@@ -70,34 +70,7 @@ pub(crate) fn request_channel() -> (Sender, Receiver) {
 }
 
 /// Request queue grouped by request type.
-#[derive(Debug, Default)]
-pub(crate) struct RequestBuffer {
-    /// Queued dml requests.
-    pub(crate) dml_requests: Vec<DmlRequest>,
-    /// Queued ddl requests.
-    pub(crate) ddl_requests: Vec<DdlRequest>,
-}
-
-impl RequestBuffer {
-    /// Clear the queue.
-    pub(crate) fn clear(&mut self) {
-        self.dml_requests.clear();
-        self.ddl_requests.clear();
-    }
-
-    /// Push request to a specific queue.
-    fn push_back(&mut self, request: WorkerRequest) {
-        match request {
-            WorkerRequest::Dml(req) => self.dml_requests.push(req),
-            WorkerRequest::Ddl(req) => self.ddl_requests.push(req),
-        }
-    }
-
-    /// Returns true if the queue is empty.
-    fn is_empty(&self) -> bool {
-        self.dml_requests.is_empty() && self.ddl_requests.is_empty()
-    }
-}
+pub(crate) type RequestBuffer = Vec<WorkerRequest>;
 
 /// A multi-producer, single-consumer channel to batch region requests.
 #[derive(Debug, Default)]
@@ -113,7 +86,7 @@ impl RequestChan {
     fn push_back(&self, request: WorkerRequest) {
         let mut channel = self.channel.lock().unwrap();
         let wake = channel.is_empty();
-        channel.push_back(request);
+        channel.push(request);
         if wake {
             // Only notify waker when this is the first request
             // in the channel.

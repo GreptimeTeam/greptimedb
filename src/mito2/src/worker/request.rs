@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use datatypes::schema::RawSchema;
 use store_api::storage::{CompactionStrategy, RegionId};
-use tokio::sync::oneshot::Sender;
+use tokio::sync::oneshot::{self, Receiver, Sender};
 
 use crate::error::Result;
 
@@ -63,58 +63,66 @@ pub struct OpenRequest {
     pub compaction_strategy: CompactionStrategy,
 }
 
-/// Request handled by workers.
-#[derive(Debug)]
-pub(crate) enum WorkerRequest {
-    /// Write a region.
-    Dml(DmlRequest),
-
-    /// Alter a region.
-    Ddl(DdlRequest),
-}
-
-impl WorkerRequest {
-    /// Id of the region that this request apply to.
-    pub(crate) fn region_id(&self) -> RegionId {
-        match self {
-            WorkerRequest::Dml(req) => req.region_id,
-            WorkerRequest::Ddl(req) => req.body.region_id(),
-        }
-    }
-}
-
 /// Request to write a region.
 #[derive(Debug)]
-pub(crate) struct DmlRequest {
+pub(crate) struct WriteRequest {
     /// Region to write.
     pub region_id: RegionId,
 }
 
-/// Request to alter/open a region.
+/// Request handled by workers.
 #[derive(Debug)]
-pub(crate) struct DdlRequest {
-    /// Sender to send ddl result.
+pub(crate) struct WorkerRequest {
+    /// Sender to send result.
     pub(crate) sender: Option<Sender<Result<()>>>,
     /// Request body.
-    pub(crate) body: DdlRequestBody,
+    pub(crate) body: RequestBody,
 }
 
-/// Body to carry actual ddl request.
+impl WorkerRequest {
+    /// Creates a [WorkerRequest] and a receiver from `body`.
+    pub(crate) fn from_body(body: RequestBody) -> (WorkerRequest, Receiver<Result<()>>) {
+        let (sender, receiver) = oneshot::channel();
+        (
+            WorkerRequest {
+                sender: Some(sender),
+                body,
+            },
+            receiver,
+        )
+    }
+}
+
+/// Body to carry actual region request.
 #[derive(Debug)]
-pub(crate) enum DdlRequestBody {
+pub(crate) enum RequestBody {
+    // DML:
+    /// Write to a region.
+    Write(WriteRequest),
+
+    // DDL:
     /// Creates a new region.
     Create(CreateRequest),
-
     /// Opens an existing region.
     Open(OpenRequest),
 }
 
-impl DdlRequestBody {
+impl RequestBody {
     /// Region id of this request.
-    fn region_id(&self) -> RegionId {
+    pub(crate) fn region_id(&self) -> RegionId {
         match self {
-            DdlRequestBody::Create(req) => req.region_id,
-            DdlRequestBody::Open(req) => req.region_id,
+            RequestBody::Write(req) => req.region_id,
+            RequestBody::Create(req) => req.region_id,
+            RequestBody::Open(req) => req.region_id,
+        }
+    }
+
+    /// Returns whether the request is a DDL (e.g. CREATE/OPEN/ALTER).
+    pub(crate) fn is_ddl(&self) -> bool {
+        match self {
+            RequestBody::Write(_) => false,
+            RequestBody::Create(_) => true,
+            RequestBody::Open(_) => true,
         }
     }
 }

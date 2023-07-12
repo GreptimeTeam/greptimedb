@@ -20,6 +20,7 @@ use store_api::logstore::LogStore;
 use crate::config::MitoConfig;
 use crate::error::Result;
 pub use crate::worker::request::CreateRequest;
+use crate::worker::request::{RequestBody, WorkerRequest};
 use crate::worker::WorkerGroup;
 
 /// Region engine implementation for timeseries data.
@@ -78,6 +79,8 @@ impl EngineInner {
 
     /// Creates a new region.
     async fn create_region(&self, request: CreateRequest) -> Result<()> {
+        let (worker_request, receiver) = WorkerRequest::from_body(RequestBody::Create(request));
+
         todo!()
     }
 }

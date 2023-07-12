@@ -36,7 +36,7 @@ use crate::config::MitoConfig;
 use crate::error::{JoinSnafu, Result};
 use crate::region::{RegionMap, RegionMapRef};
 use crate::worker::channel::{Receiver, RequestBuffer, Sender};
-use crate::worker::request::{DdlRequest, DdlRequestBody, DmlRequest, WorkerRequest};
+use crate::worker::request::{RequestBody, WorkerRequest};
 
 /// A fixed size group of [RegionWorkers](RegionWorker).
 ///
@@ -75,7 +75,8 @@ impl WorkerGroup {
 
     /// Submit a request to a worker in the group.
     pub(crate) fn submit_to_worker(&self, request: WorkerRequest) {
-        self.worker(request.region_id()).submit_request(request)
+        self.worker(request.body.region_id())
+            .submit_request(request)
     }
 
     /// Get worker for specific `region_id`.
@@ -212,17 +213,27 @@ impl<S> RegionWorkerThread<S> {
     async fn handle_requests(&mut self, buffer: &mut RequestBuffer) {
         self.receiver.receive_all(buffer).await;
 
+        let mut dml_requests = Vec::with_capacity(buffer.len());
+        let mut ddl_requests = Vec::with_capacity(buffer.len());
+        for req in buffer.drain(..) {
+            if req.body.is_ddl() {
+                ddl_requests.push(req);
+            } else {
+                dml_requests.push(req);
+            }
+        }
+
         // Handles all dml requests first. So we can alter regions without
         // considering existing dml requests.
-        self.handle_dml_requests(&mut buffer.dml_requests).await;
+        self.handle_dml_requests(dml_requests).await;
 
-        self.handle_ddl_requests(&mut buffer.ddl_requests).await;
+        self.handle_ddl_requests(ddl_requests).await;
 
         todo!()
     }
 
     /// Takes and handles all dml requests.
-    async fn handle_dml_requests(&mut self, write_requests: &mut Vec<DmlRequest>) {
+    async fn handle_dml_requests(&mut self, write_requests: Vec<WorkerRequest>) {
         if write_requests.is_empty() {
             return;
         }
@@ -233,15 +244,16 @@ impl<S> RegionWorkerThread<S> {
     }
 
     /// Takes and handles all ddl requests.
-    async fn handle_ddl_requests(&mut self, ddl_requests: &mut Vec<DdlRequest>) {
+    async fn handle_ddl_requests(&mut self, ddl_requests: Vec<WorkerRequest>) {
         if ddl_requests.is_empty() {
             return;
         }
 
-        for request in ddl_requests.drain(..) {
+        for request in ddl_requests {
             let res = match request.body {
-                DdlRequestBody::Create(req) => self.handle_create_request(req).await,
-                DdlRequestBody::Open(req) => self.handle_open_request(req).await,
+                RequestBody::Create(req) => self.handle_create_request(req).await,
+                RequestBody::Open(req) => self.handle_open_request(req).await,
+                RequestBody::Write(_) => unreachable!(),
             };
 
             if let Some(sender) = request.sender {
