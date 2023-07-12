@@ -261,10 +261,8 @@ impl<'a> ParserContext<'a> {
     fn parse_describe(&mut self) -> Result<Statement> {
         if self.matches_keyword(Keyword::TABLE) {
             let _ = self.parser.next_token();
-            self.parse_describe_table()
-        } else {
-            self.unsupported(self.peek_token_as_string())
         }
+        self.parse_describe_table()
     }
 
     fn parse_describe_table(&mut self) -> Result<Statement> {
@@ -676,5 +674,21 @@ mod tests {
         let expr =
             ParserContext::parse_function("current_timestamp()", &GreptimeDbDialect {}).unwrap();
         assert!(matches!(expr, Expr::Function(_)));
+    }
+
+    fn assert_describe_table(sql: &str) {
+        let stmt = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {})
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert!(matches!(stmt, Statement::DescribeTable(_)))
+    }
+
+    #[test]
+    fn test_parse_describe_table() {
+        assert_describe_table("desc table t;");
+        assert_describe_table("describe table t;");
+        assert_describe_table("desc t;");
+        assert_describe_table("describe t;");
     }
 }
