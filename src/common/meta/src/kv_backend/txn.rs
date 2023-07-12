@@ -14,7 +14,7 @@
 
 mod etcd;
 
-use common_error::prelude::ErrorExt;
+use common_error::ext::ErrorExt;
 
 use crate::rpc::store::{DeleteRangeResponse, PutResponse, RangeResponse};
 

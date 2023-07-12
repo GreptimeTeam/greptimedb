@@ -21,7 +21,7 @@ use std::ops::Range;
 use std::sync::RwLock;
 
 use async_trait::async_trait;
-use common_error::prelude::ErrorExt;
+use common_error::ext::ErrorExt;
 use common_telemetry::timer;
 use serde::Serializer;
 
