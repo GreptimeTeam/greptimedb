@@ -645,6 +645,9 @@ pub fn check_permission(
         Statement::Copy(sql::statements::copy::Copy::CopyDatabase(stmt)) => {
             validate_param(&stmt.database_name, query_ctx)?
         }
+        Statement::TruncateTable(stmt) => {
+            validate_param(stmt.table_name(), query_ctx)?;
+        }
     }
     Ok(())
 }

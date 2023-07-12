@@ -127,6 +127,8 @@ impl<'a> ParserContext<'a> {
 
                     Keyword::COPY => self.parse_copy(),
 
+                    Keyword::TRUNCATE => self.parse_truncate(),
+
                     Keyword::NoKeyword
                         if w.value.to_uppercase() == tql_parser::TQL && w.quote_style.is_none() =>
                     {
