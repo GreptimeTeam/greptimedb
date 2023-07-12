@@ -17,7 +17,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::meta::Role;
-use catalog::remote::RemoteCatalogManager;
 use client::client_manager::DatanodeClients;
 use client::Client;
 use common_base::Plugins;
@@ -33,6 +32,7 @@ use frontend::frontend::FrontendOptions;
 use frontend::instance::{FrontendInstance, Instance as FeInstance};
 use meta_client::client::MetaClientBuilder;
 use meta_srv::cluster::MetaPeerClientRef;
+use meta_srv::metadata_service::{DefaultMetadataService, MetadataService};
 use meta_srv::metasrv::{MetaSrv, MetaSrvOptions};
 use meta_srv::mocks::MockInfo;
 use meta_srv::service::store::kv::KvStoreRef;
@@ -128,7 +128,16 @@ impl GreptimeDbClusterBuilder {
             ..Default::default()
         };
 
-        meta_srv::mocks::mock(opt, self.kv_store.clone(), None, Some(datanode_clients)).await
+        let mock =
+            meta_srv::mocks::mock(opt, self.kv_store.clone(), None, Some(datanode_clients)).await;
+
+        let metadata_service = DefaultMetadataService::new(mock.meta_srv.kv_store());
+        metadata_service
+            .create_schema("another_catalog", "another_schema", true)
+            .await
+            .unwrap();
+
+        mock
     }
 
     async fn build_datanodes(
@@ -208,15 +217,6 @@ impl GreptimeDbClusterBuilder {
         if let Some(heartbeat) = heartbeat.as_ref() {
             heartbeat.start().await.unwrap();
         }
-        // create another catalog and schema for testing
-        instance
-            .catalog_manager()
-            .as_any()
-            .downcast_ref::<RemoteCatalogManager>()
-            .unwrap()
-            .create_catalog_and_schema("another_catalog", "another_schema")
-            .await
-            .unwrap();
         (instance, heartbeat)
     }
 

@@ -34,6 +34,7 @@ use catalog::{
 use client::client_manager::DatanodeClients;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME};
 use common_error::prelude::BoxedError;
+use common_meta::key::TableMetadataManagerRef;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::rpc::store::RangeRequest;
 use common_meta::rpc::KeyValue;
@@ -54,6 +55,7 @@ pub struct FrontendCatalogManager {
     backend_cache_invalidator: KvCacheInvalidatorRef,
     partition_manager: PartitionRuleManagerRef,
     datanode_clients: Arc<DatanodeClients>,
+    table_metadata_manager: TableMetadataManagerRef,
 
     // TODO(LFC): Remove this field.
     // DistInstance in FrontendCatalogManager is only used for creating distributed script table now.
@@ -68,12 +70,14 @@ impl FrontendCatalogManager {
         backend_cache_invalidator: KvCacheInvalidatorRef,
         partition_manager: PartitionRuleManagerRef,
         datanode_clients: Arc<DatanodeClients>,
+        table_metadata_manager: TableMetadataManagerRef,
     ) -> Self {
         Self {
             backend,
             backend_cache_invalidator,
             partition_manager,
             datanode_clients,
+            table_metadata_manager,
             dist_instance: None,
         }
     }
@@ -415,6 +419,7 @@ impl CatalogManager for FrontendCatalogManager {
             TableName::new(catalog, schema, table_name),
             table_info,
             Arc::new(self.clone()),
+            self.table_metadata_manager.clone(),
         ));
         Ok(Some(table))
     }

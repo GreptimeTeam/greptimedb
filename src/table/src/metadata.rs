@@ -463,6 +463,12 @@ pub struct TableInfo {
 
 pub type TableInfoRef = Arc<TableInfo>;
 
+impl TableInfo {
+    pub fn table_id(&self) -> TableId {
+        self.ident.table_id
+    }
+}
+
 impl TableInfoBuilder {
     pub fn new<S: Into<String>>(name: S, meta: TableMeta) -> Self {
         Self {

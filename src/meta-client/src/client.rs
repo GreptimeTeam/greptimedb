@@ -537,16 +537,16 @@ mod tests {
         assert!(matches!(res.err(), Some(error::Error::NotStarted { .. })));
     }
 
-    fn new_table_info() -> RawTableInfo {
+    fn new_table_info(table_name: &TableName) -> RawTableInfo {
         RawTableInfo {
             ident: TableIdent {
                 table_id: 0,
                 version: 0,
             },
-            name: "t".to_string(),
+            name: table_name.table_name.clone(),
             desc: None,
-            catalog_name: "c".to_string(),
-            schema_name: "s".to_string(),
+            catalog_name: table_name.catalog_name.clone(),
+            schema_name: table_name.schema_name.clone(),
             meta: RawTableMeta {
                 schema: RawSchema {
                     column_schemas: vec![ColumnSchema::new(
@@ -579,8 +579,9 @@ mod tests {
             .build();
         meta_client.start(urls).await.unwrap();
 
-        let table_info = new_table_info();
-        let req = CreateRequest::new(TableName::new("c", "s", "t"), &table_info);
+        let table_name = TableName::new("c", "s", "t");
+        let table_info = new_table_info(&table_name);
+        let req = CreateRequest::new(table_name, &table_info);
         let res = meta_client.create_route(req).await;
         assert!(matches!(res.err(), Some(error::Error::NotStarted { .. })));
     }
@@ -674,7 +675,7 @@ mod tests {
             value_list: vec![b"Max1".to_vec(), b"Max2".to_vec()],
         };
         let table_name = TableName::new("test_catalog", "test_schema", "test_table");
-        let table_info = new_table_info();
+        let table_info = new_table_info(&table_name);
         let req = CreateRequest::new(table_name.clone(), &table_info)
             .add_partition(p1)
             .add_partition(p2);

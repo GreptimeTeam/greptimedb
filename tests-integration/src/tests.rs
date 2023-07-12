@@ -20,6 +20,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use catalog::RegisterSchemaRequest;
+use common_meta::key::TableMetadataManagerRef;
 use common_test_util::temp_dir::TempDir;
 use datanode::instance::Instance as DatanodeInstance;
 use frontend::instance::Instance;
@@ -49,6 +50,11 @@ impl MockDistributedInstance {
     pub fn datanodes(&self) -> &HashMap<u64, Arc<DatanodeInstance>> {
         &self.0.datanode_instances
     }
+
+    #[allow(unused)]
+    pub fn table_metadata_manager(&self) -> &TableMetadataManagerRef {
+        self.0.meta_srv.table_metadata_manager()
+    }
 }
 
 pub struct MockStandaloneInstance {
@@ -73,6 +79,8 @@ pub(crate) async fn create_standalone_instance(test_name: &str) -> MockStandalon
         .await
         .unwrap();
 
+    dn_instance.start().await.unwrap();
+
     assert!(dn_instance
         .catalog_manager()
         .register_catalog("another_catalog".to_string())
@@ -88,7 +96,6 @@ pub(crate) async fn create_standalone_instance(test_name: &str) -> MockStandalon
         .await
         .is_ok());
 
-    dn_instance.start().await.unwrap();
     if let Some(heartbeat) = heartbeat {
         heartbeat.start().await.unwrap();
     };

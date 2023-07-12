@@ -17,6 +17,7 @@ use std::collections::HashMap;
 use catalog::helper::{
     build_catalog_prefix, build_schema_prefix, build_table_global_prefix, TABLE_GLOBAL_KEY_PREFIX,
 };
+use common_meta::key::TableMetadataManagerRef;
 use common_meta::rpc::store::{RangeRequest, RangeResponse};
 use common_meta::util;
 use snafu::{OptionExt, ResultExt};
@@ -37,10 +38,12 @@ pub struct SchemasHandler {
 
 pub struct TablesHandler {
     pub kv_store: KvStoreRef,
+    pub table_metadata_manager: TableMetadataManagerRef,
 }
 
 pub struct TableHandler {
     pub kv_store: KvStoreRef,
+    pub table_metadata_manager: TableMetadataManagerRef,
 }
 
 #[async_trait::async_trait]

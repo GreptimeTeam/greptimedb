@@ -70,7 +70,7 @@ pub enum Error {
     #[snafu(display("Get null from cache, key: {}", key))]
     CacheNotGet { key: String, location: Location },
 
-    #[snafu(display("Failed to request MetaSrv, source: {}", source))]
+    #[snafu(display("{source}"))]
     MetaSrv {
         source: BoxedError,
         location: Location,

@@ -16,6 +16,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use client::client_manager::DatanodeClients;
+use common_meta::key::TableMetadataManager;
 use common_procedure::local::{LocalManager, ManagerConfig};
 
 use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
@@ -39,7 +40,7 @@ use crate::procedure::state_store::MetaStateStore;
 use crate::selector::lease_based::LeaseBasedSelector;
 use crate::sequence::Sequence;
 use crate::service::store::cached_kv::{CheckLeader, LeaderCachedKvStore};
-use crate::service::store::kv::{KvStoreRef, ResettableKvStoreRef};
+use crate::service::store::kv::{KvBackendAdapter, KvStoreRef, ResettableKvStoreRef};
 use crate::service::store::memory::MemStore;
 
 // TODO(fys): try use derive_builder macro
@@ -173,6 +174,10 @@ impl MetaSrvBuilder {
             .unwrap_or_else(|| Arc::new(DefaultMetadataService::new(kv_store.clone())));
         let lock = lock.unwrap_or_else(|| Arc::new(MemLock::default()));
 
+        let table_metadata_manager = Arc::new(TableMetadataManager::new(KvBackendAdapter::wrap(
+            kv_store.clone(),
+        )));
+
         // TODO(weny): considers to modify the default config of procedure manager
         let ddl_manager = Arc::new(DdlManager::new(
             procedure_manager.clone(),
@@ -180,6 +185,7 @@ impl MetaSrvBuilder {
             datanode_clients.unwrap_or_else(|| Arc::new(DatanodeClients::default())),
             mailbox.clone(),
             options.server_addr.clone(),
+            table_metadata_manager.clone(),
         ));
 
         let _ = ddl_manager.try_start();
@@ -204,6 +210,7 @@ impl MetaSrvBuilder {
                             table: None,
                         },
                         lock.clone(),
+                        table_metadata_manager.clone(),
                     ));
 
                     Some(
@@ -217,6 +224,7 @@ impl MetaSrvBuilder {
                     region_failover_handler
                         .as_ref()
                         .map(|x| x.region_failover_manager().clone()),
+                    table_metadata_manager.clone(),
                 );
 
                 let group = HeartbeatHandlerGroup::new(pushers);
@@ -254,6 +262,7 @@ impl MetaSrvBuilder {
             metadata_service,
             mailbox,
             ddl_manager,
+            table_metadata_manager,
         })
     }
 }

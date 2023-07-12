@@ -369,6 +369,8 @@ pub async fn create_test_table(
 pub async fn setup_test_http_app(store_type: StorageType, name: &str) -> (Router, TestGuard) {
     let (opts, guard) = create_tmp_dir_and_datanode_opts(store_type, name);
     let (instance, heartbeat) = Instance::with_mock_meta_client(&opts).await.unwrap();
+    instance.start().await.unwrap();
+
     create_test_table(
         instance.catalog_manager(),
         instance.sql_handler(),
@@ -380,7 +382,6 @@ pub async fn setup_test_http_app(store_type: StorageType, name: &str) -> (Router
     let frontend_instance = FeInstance::try_new_standalone(instance.clone())
         .await
         .unwrap();
-    instance.start().await.unwrap();
     if let Some(heartbeat) = heartbeat {
         heartbeat.start().await.unwrap();
     }

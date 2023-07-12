@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use common_meta::key::TableMetadataManager;
 use common_procedure::local::{LocalManager, ManagerConfig};
 
 use crate::cluster::MetaPeerClientBuilder;
@@ -24,6 +25,7 @@ use crate::procedure::region_failover::RegionFailoverManager;
 use crate::procedure::state_store::MetaStateStore;
 use crate::selector::lease_based::LeaseBasedSelector;
 use crate::sequence::Sequence;
+use crate::service::store::kv::KvBackendAdapter;
 use crate::service::store::memory::MemStore;
 
 pub(crate) fn create_region_failover_manager() -> Arc<RegionFailoverManager> {
@@ -49,7 +51,7 @@ pub(crate) fn create_region_failover_manager() -> Arc<RegionFailoverManager> {
     let selector_ctx = SelectorContext {
         datanode_lease_secs: 10,
         server_addr: "127.0.0.1:3002".to_string(),
-        kv_store,
+        kv_store: kv_store.clone(),
         meta_peer_client,
         catalog: None,
         schema: None,
@@ -62,5 +64,6 @@ pub(crate) fn create_region_failover_manager() -> Arc<RegionFailoverManager> {
         selector,
         selector_ctx,
         Arc::new(MemLock::default()),
+        Arc::new(TableMetadataManager::new(KvBackendAdapter::wrap(kv_store))),
     ))
 }
