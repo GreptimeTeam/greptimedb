@@ -28,6 +28,7 @@ use common_error::ext::BoxedError;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
 use common_meta::heartbeat::handler::HandlerGroupExecutor;
+use common_meta::key::TableMetadataManager;
 use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::store::state_store::ObjectStateStore;
 use common_procedure::ProcedureManagerRef;
@@ -253,8 +254,9 @@ impl Instance {
                 let catalog_manager = Arc::new(RemoteCatalogManager::new(
                     engine_manager.clone(),
                     opts.node_id.context(MissingNodeIdSnafu)?,
-                    kv_backend,
+                    kv_backend.clone(),
                     region_alive_keepers.clone(),
+                    Arc::new(TableMetadataManager::new(kv_backend)),
                 ));
 
                 (
@@ -265,7 +267,6 @@ impl Instance {
             }
         };
 
-        catalog_manager.start().await.context(CatalogSnafu)?;
         let factory = QueryEngineFactory::new_with_plugins(
             catalog_manager.clone(),
             false,

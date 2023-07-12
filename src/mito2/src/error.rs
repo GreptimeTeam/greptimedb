@@ -14,13 +14,68 @@
 
 use std::any::Any;
 
+use common_datasource::compression::CompressionType;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
-use snafu::Snafu;
+use snafu::{Location, Snafu};
+use store_api::manifest::ManifestVersion;
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
-pub enum Error {}
+pub enum Error {
+    #[snafu(display("OpenDAL operator failed. Location: {}, source: {}", location, source))]
+    OpenDal {
+        location: Location,
+        source: object_store::Error,
+    },
+
+    #[snafu(display(
+        "Fail to compress object by {}, path: {}, source: {}",
+        compress_type,
+        path,
+        source
+    ))]
+    CompressObject {
+        compress_type: CompressionType,
+        path: String,
+        source: std::io::Error,
+    },
+
+    #[snafu(display(
+        "Fail to decompress object by {}, path: {}, source: {}",
+        compress_type,
+        path,
+        source
+    ))]
+    DecompressObject {
+        compress_type: CompressionType,
+        path: String,
+        source: std::io::Error,
+    },
+
+    #[snafu(display(
+        "Failed to ser/de json object. Location: {}, source: {}",
+        location,
+        source
+    ))]
+    SerdeJson {
+        location: Location,
+        source: serde_json::Error,
+    },
+
+    #[snafu(display("Invalid scan index, start: {}, end: {}", start, end))]
+    InvalidScanIndex {
+        start: ManifestVersion,
+        end: ManifestVersion,
+        location: Location,
+    },
+
+    #[snafu(display("Invalid UTF-8 content. Location: {}, source: {}", location, source))]
+    Utf8 {
+        location: Location,
+        source: std::str::Utf8Error,
+    },
+}
 
 pub type Result<T> = std::result::Result<T, Error>;
 

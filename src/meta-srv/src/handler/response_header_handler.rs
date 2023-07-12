@@ -51,12 +51,14 @@ mod tests {
     use std::sync::Arc;
 
     use api::v1::meta::{HeartbeatResponse, RequestHeader};
+    use common_meta::key::TableMetadataManager;
 
     use super::*;
     use crate::cluster::MetaPeerClientBuilder;
     use crate::handler::{Context, HeartbeatMailbox, Pushers};
     use crate::sequence::Sequence;
     use crate::service::store::cached_kv::LeaderCachedKvStore;
+    use crate::service::store::kv::KvBackendAdapter;
     use crate::service::store::memory::MemStore;
 
     #[tokio::test]
@@ -77,13 +79,16 @@ mod tests {
         let mut ctx = Context {
             server_addr: "127.0.0.1:0000".to_string(),
             in_memory,
-            kv_store,
+            kv_store: kv_store.clone(),
             leader_cached_kv_store,
             meta_peer_client,
             mailbox,
             election: None,
             skip_all: Arc::new(AtomicBool::new(false)),
             is_infancy: false,
+            table_metadata_manager: Arc::new(TableMetadataManager::new(KvBackendAdapter::wrap(
+                kv_store.clone(),
+            ))),
         };
 
         let req = HeartbeatRequest {

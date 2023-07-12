@@ -24,6 +24,7 @@ use crate::key::{to_removed_key, TableMetaKey};
 use crate::kv_backend::memory::MemoryKvBackend;
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::store::{CompareAndPutRequest, MoveValueRequest, RangeRequest};
+use crate::table_name::TableName;
 
 #[derive(Debug)]
 pub struct TableNameKey<'a> {
@@ -74,6 +75,16 @@ impl TableMetaKey for TableNameKey<'_> {
             self.table
         )
         .into_bytes()
+    }
+}
+
+impl<'a> From<&'a TableName> for TableNameKey<'a> {
+    fn from(value: &'a TableName) -> Self {
+        Self {
+            catalog: &value.catalog_name,
+            schema: &value.schema_name,
+            table: &value.table_name,
+        }
     }
 }
 
@@ -207,9 +218,18 @@ mod tests {
         test_err(b"__table_name/x/000_invalid_schema/z");
         test_err(b"__table_name/x/y/000_invalid_table");
 
-        let table_name =
-            TableNameKey::strip_table_name(b"__table_name/my_catalog/my_schema/my_table").unwrap();
-        assert_eq!(table_name, "my_table");
+        fn test_ok(table_name: &str) {
+            assert_eq!(
+                table_name,
+                TableNameKey::strip_table_name(
+                    format!("__table_name/my_catalog/my_schema/{}", table_name).as_bytes()
+                )
+                .unwrap()
+            );
+        }
+        test_ok("my_table");
+        test_ok("cpu:metrics");
+        test_ok(":cpu:metrics");
     }
 
     #[test]

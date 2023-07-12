@@ -46,7 +46,7 @@ use crate::error::{
 use crate::grpc::database::DatabaseService;
 use crate::grpc::flight::FlightHandler;
 use crate::grpc::handler::GreptimeRequestHandler;
-use crate::prom::PromHandlerRef;
+use crate::prometheus::PrometheusHandlerRef;
 use crate::query_handler::grpc::ServerGrpcQueryHandlerRef;
 use crate::server::Server;
 
@@ -56,7 +56,7 @@ pub struct GrpcServer {
     shutdown_tx: Mutex<Option<Sender<()>>>,
     request_handler: Arc<GreptimeRequestHandler>,
     /// Handler for Prometheus-compatible PromQL queries. Only present for frontend server.
-    promql_handler: Option<PromHandlerRef>,
+    prometheus_handler: Option<PrometheusHandlerRef>,
 
     /// gRPC serving state receiver. Only present if the gRPC server is started.
     /// Used to wait for the server to stop, performing the old blocking fashion.
@@ -66,7 +66,7 @@ pub struct GrpcServer {
 impl GrpcServer {
     pub fn new(
         query_handler: ServerGrpcQueryHandlerRef,
-        promql_handler: Option<PromHandlerRef>,
+        prometheus_handler: Option<PrometheusHandlerRef>,
         user_provider: Option<UserProviderRef>,
         runtime: Arc<Runtime>,
     ) -> Self {
@@ -78,7 +78,7 @@ impl GrpcServer {
         Self {
             shutdown_tx: Mutex::new(None),
             request_handler,
-            promql_handler,
+            prometheus_handler,
             serve_state: Mutex::new(None),
         }
     }
@@ -97,7 +97,7 @@ impl GrpcServer {
 
     pub fn create_prom_query_gateway_service(
         &self,
-        handler: PromHandlerRef,
+        handler: PrometheusHandlerRef,
     ) -> PrometheusGatewayServer<impl PrometheusGateway> {
         PrometheusGatewayServer::new(PrometheusGatewayService::new(handler))
     }
@@ -178,9 +178,9 @@ impl Server for GrpcServer {
             .add_service(self.create_flight_service())
             .add_service(self.create_database_service())
             .add_service(self.create_healthcheck_service());
-        if let Some(promql_handler) = &self.promql_handler {
-            builder =
-                builder.add_service(self.create_prom_query_gateway_service(promql_handler.clone()))
+        if let Some(prometheus_handler) = &self.prometheus_handler {
+            builder = builder
+                .add_service(self.create_prom_query_gateway_service(prometheus_handler.clone()))
         }
         let builder = builder.add_service(reflection_service);
 

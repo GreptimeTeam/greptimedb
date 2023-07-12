@@ -423,6 +423,12 @@ pub enum Error {
         source: BoxedError,
         location: Location,
     },
+
+    #[snafu(display("Table metadata manager error: {}", source))]
+    TableMetadataManager {
+        source: common_meta::error::Error,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -513,6 +519,7 @@ impl ErrorExt for Error {
 
             Error::TableRouteConversion { source, .. }
             | Error::ConvertProtoData { source, .. }
+            | Error::TableMetadataManager { source, .. }
             | Error::ConvertEtcdTxnObject { source, .. } => source.status_code(),
 
             Error::Other { source, .. } => source.status_code(),

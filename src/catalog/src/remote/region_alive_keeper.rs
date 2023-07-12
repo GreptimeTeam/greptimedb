@@ -312,6 +312,10 @@ impl RegionAliveKeeper {
         }
         deadline
     }
+
+    pub fn table_ident(&self) -> &TableIdent {
+        &self.table_ident
+    }
 }
 
 #[derive(Debug)]

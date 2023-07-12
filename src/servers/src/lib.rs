@@ -33,7 +33,7 @@ pub mod metrics_handler;
 pub mod mysql;
 pub mod opentsdb;
 pub mod postgres;
-pub mod prom;
+pub mod prom_store;
 pub mod prometheus;
 pub mod query_handler;
 pub mod server;

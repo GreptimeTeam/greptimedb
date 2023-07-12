@@ -53,7 +53,7 @@ use servers::http::{HttpOptions, HttpServerBuilder};
 use servers::metrics_handler::MetricsHandler;
 use servers::mysql::server::{MysqlServer, MysqlSpawnConfig, MysqlSpawnRef};
 use servers::postgres::PostgresServer;
-use servers::prom::PromServer;
+use servers::prometheus::PrometheusServer;
 use servers::query_handler::grpc::ServerGrpcQueryHandlerAdaptor;
 use servers::query_handler::sql::ServerSqlQueryHandlerAdaptor;
 use servers::server::Server;
@@ -369,6 +369,8 @@ pub async fn create_test_table(
 pub async fn setup_test_http_app(store_type: StorageType, name: &str) -> (Router, TestGuard) {
     let (opts, guard) = create_tmp_dir_and_datanode_opts(store_type, name);
     let (instance, heartbeat) = Instance::with_mock_meta_client(&opts).await.unwrap();
+    instance.start().await.unwrap();
+
     create_test_table(
         instance.catalog_manager(),
         instance.sql_handler(),
@@ -380,7 +382,6 @@ pub async fn setup_test_http_app(store_type: StorageType, name: &str) -> (Router
     let frontend_instance = FeInstance::try_new_standalone(instance.clone())
         .await
         .unwrap();
-    instance.start().await.unwrap();
     if let Some(heartbeat) = heartbeat {
         heartbeat.start().await.unwrap();
     }
@@ -522,7 +523,7 @@ pub async fn setup_test_prom_app_with_frontend(
         .with_prom_handler(frontend_ref.clone())
         .with_greptime_config_options(opts.to_toml_string())
         .build();
-    let prom_server = PromServer::create_server(frontend_ref);
+    let prom_server = PrometheusServer::create_server(frontend_ref);
     let app = http_server.build(http_server.make_app());
     let app = app.merge(prom_server.make_app());
     (app, guard)

@@ -12,746 +12,920 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! prometheus protocol supportings
-//! handles prometheus remote_write, remote_read logic
-use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashMap};
-use std::hash::{Hash, Hasher};
+//! prom supply the prometheus HTTP API Server compliance
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::net::SocketAddr;
+use std::sync::Arc;
 
-use api::prometheus::remote::label_matcher::Type as MatcherType;
-use api::prometheus::remote::{Label, Query, Sample, TimeSeries, WriteRequest};
-use api::v1::{InsertRequest as GrpcInsertRequest, InsertRequests};
-use common_grpc::writer::{LinesWriter, Precision};
-use common_recordbatch::{RecordBatch, RecordBatches};
-use common_time::timestamp::TimeUnit;
-use datafusion::prelude::{col, lit, regexp_match, Expr};
-use datatypes::prelude::{ConcreteDataType, Value};
-use openmetrics_parser::{MetricsExposition, PrometheusType, PrometheusValue};
-use query::dataframe::DataFrame;
-use query::plan::LogicalPlan;
-use snafu::{ensure, OptionExt, ResultExt};
-use snap::raw::{Decoder, Encoder};
+use async_trait::async_trait;
+use axum::body::BoxBody;
+use axum::extract::{Path, Query, State};
+use axum::{middleware, routing, Form, Json, Router};
+use common_catalog::consts::DEFAULT_SCHEMA_NAME;
+use common_error::prelude::ErrorExt;
+use common_error::status_code::StatusCode;
+use common_query::Output;
+use common_recordbatch::RecordBatches;
+use common_telemetry::info;
+use common_time::util::{current_time_rfc3339, yesterday_rfc3339};
+use datatypes::prelude::ConcreteDataType;
+use datatypes::scalars::ScalarVector;
+use datatypes::vectors::{Float64Vector, StringVector, TimestampMillisecondVector};
+use futures::FutureExt;
+use promql_parser::label::METRIC_NAME;
+use promql_parser::parser::{
+    AggregateExpr, BinaryExpr, Call, Expr as PromqlExpr, MatrixSelector, ParenExpr, SubqueryExpr,
+    UnaryExpr, ValueType, VectorSelector,
+};
+use query::parser::{PromQuery, DEFAULT_LOOKBACK_STRING};
+use schemars::JsonSchema;
+use serde::de::{self, MapAccess, Visitor};
+use serde::{Deserialize, Serialize};
+use session::context::{QueryContext, QueryContextRef};
+use snafu::{ensure, Location, OptionExt, ResultExt};
+use tokio::sync::oneshot::Sender;
+use tokio::sync::{oneshot, Mutex};
+use tower::ServiceBuilder;
+use tower_http::auth::AsyncRequireAuthorizationLayer;
+use tower_http::compression::CompressionLayer;
+use tower_http::trace::TraceLayer;
 
-use crate::error::{self, Result};
+use crate::auth::UserProviderRef;
+use crate::error::{
+    AlreadyStartedSnafu, CollectRecordbatchSnafu, Error, InternalSnafu, InvalidQuerySnafu, Result,
+    StartHttpSnafu, UnexpectedResultSnafu,
+};
+use crate::http::authorize::HttpAuth;
+use crate::http::track_metrics;
+use crate::prom_store::{FIELD_COLUMN_NAME, TIMESTAMP_COLUMN_NAME};
+use crate::server::Server;
 
-pub const TIMESTAMP_COLUMN_NAME: &str = "greptime_timestamp";
-pub const FIELD_COLUMN_NAME: &str = "greptime_value";
-pub const METRIC_NAME_LABEL: &str = "__name__";
+pub const PROMETHEUS_API_VERSION: &str = "v1";
 
-/// Metrics for push gateway protocol
-pub struct Metrics {
-    pub exposition: MetricsExposition<PrometheusType, PrometheusValue>,
+pub type PrometheusHandlerRef = Arc<dyn PrometheusHandler + Send + Sync>;
+
+#[async_trait]
+pub trait PrometheusHandler {
+    async fn do_query(&self, query: &PromQuery, query_ctx: QueryContextRef) -> Result<Output>;
 }
 
-/// Get table name from remote query
-pub fn table_name(q: &Query) -> Result<String> {
-    let label_matches = &q.matchers;
+/// PromServer represents PrometheusServer which handles the compliance with prometheus HTTP API
+pub struct PrometheusServer {
+    query_handler: PrometheusHandlerRef,
+    shutdown_tx: Mutex<Option<Sender<()>>>,
+    user_provider: Option<UserProviderRef>,
+}
 
-    label_matches
-        .iter()
-        .find_map(|m| {
-            if m.name == METRIC_NAME_LABEL {
-                Some(m.value.to_string())
-            } else {
-                None
+impl PrometheusServer {
+    pub fn create_server(query_handler: PrometheusHandlerRef) -> Box<Self> {
+        Box::new(PrometheusServer {
+            query_handler,
+            shutdown_tx: Mutex::new(None),
+            user_provider: None,
+        })
+    }
+
+    pub fn set_user_provider(&mut self, user_provider: UserProviderRef) {
+        debug_assert!(self.user_provider.is_none());
+        self.user_provider = Some(user_provider);
+    }
+
+    pub fn make_app(&self) -> Router {
+        // TODO(ruihang): implement format_query, series, values, query_examplars and targets methods
+
+        let router = Router::new()
+            .route("/query", routing::post(instant_query).get(instant_query))
+            .route("/query_range", routing::post(range_query).get(range_query))
+            .route("/labels", routing::post(labels_query).get(labels_query))
+            .route("/series", routing::post(series_query).get(series_query))
+            .route(
+                "/label/:label_name/values",
+                routing::get(label_values_query),
+            )
+            .with_state(self.query_handler.clone());
+
+        Router::new()
+            .nest(&format!("/api/{PROMETHEUS_API_VERSION}"), router)
+            // middlewares
+            .layer(
+                ServiceBuilder::new()
+                    .layer(TraceLayer::new_for_http())
+                    .layer(CompressionLayer::new())
+                    // custom layer
+                    .layer(AsyncRequireAuthorizationLayer::new(
+                        HttpAuth::<BoxBody>::new(self.user_provider.clone()),
+                    )),
+            )
+            // We need to register the metrics layer again since start a new http server
+            // for the PromServer.
+            .route_layer(middleware::from_fn(track_metrics))
+    }
+}
+
+pub const PROMETHEUS_SERVER: &str = "PROMETHEUS_SERVER";
+
+#[async_trait]
+impl Server for PrometheusServer {
+    async fn shutdown(&self) -> Result<()> {
+        let mut shutdown_tx = self.shutdown_tx.lock().await;
+        if let Some(tx) = shutdown_tx.take() {
+            if tx.send(()).is_err() {
+                info!("Receiver dropped, the Prometheus API server has already existed");
             }
-        })
-        .context(error::InvalidPromRemoteRequestSnafu {
-            msg: "missing '__name__' label in timeseries",
-        })
-}
-
-/// Create a DataFrame from a remote Query
-pub fn query_to_plan(dataframe: DataFrame, q: &Query) -> Result<LogicalPlan> {
-    let DataFrame::DataFusion(dataframe) = dataframe;
-
-    let start_timestamp_ms = q.start_timestamp_ms;
-    let end_timestamp_ms = q.end_timestamp_ms;
-
-    let label_matches = &q.matchers;
-
-    let mut conditions = Vec::with_capacity(label_matches.len() + 1);
-
-    conditions.push(col(TIMESTAMP_COLUMN_NAME).gt_eq(lit(start_timestamp_ms)));
-    conditions.push(col(TIMESTAMP_COLUMN_NAME).lt_eq(lit(end_timestamp_ms)));
-
-    for m in label_matches {
-        let name = &m.name;
-
-        if name == METRIC_NAME_LABEL {
-            continue;
         }
+        info!("Shutdown Prometheus API server");
 
-        let value = &m.value;
-        let m_type =
-            MatcherType::from_i32(m.r#type).context(error::InvalidPromRemoteRequestSnafu {
-                msg: format!("invalid LabelMatcher type: {}", m.r#type),
-            })?;
+        Ok(())
+    }
 
-        match m_type {
-            MatcherType::Eq => {
-                conditions.push(col(name).eq(lit(value)));
-            }
-            MatcherType::Neq => {
-                conditions.push(col(name).not_eq(lit(value)));
-            }
-            // Case sensitive regexp match
-            MatcherType::Re => {
-                conditions.push(regexp_match(vec![col(name), lit(value)]).is_not_null());
-            }
-            // Case sensitive regexp not match
-            MatcherType::Nre => {
-                conditions.push(regexp_match(vec![col(name), lit(value)]).is_null());
+    async fn start(&self, listening: SocketAddr) -> Result<SocketAddr> {
+        let (tx, rx) = oneshot::channel();
+        let server = {
+            let mut shutdown_tx = self.shutdown_tx.lock().await;
+            ensure!(
+                shutdown_tx.is_none(),
+                AlreadyStartedSnafu {
+                    server: "Prometheus"
+                }
+            );
+
+            let app = self.make_app();
+            let server = axum::Server::bind(&listening).serve(app.into_make_service());
+
+            *shutdown_tx = Some(tx);
+
+            server
+        };
+        let listening = server.local_addr();
+        info!("Prometheus API server is bound to {}", listening);
+
+        let graceful = server.with_graceful_shutdown(rx.map(drop));
+        graceful.await.context(StartHttpSnafu)?;
+
+        Ok(listening)
+    }
+
+    fn name(&self) -> &str {
+        PROMETHEUS_SERVER
+    }
+}
+
+#[derive(Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
+pub struct PromSeries {
+    pub metric: HashMap<String, String>,
+    /// For [ValueType::Matrix] result type
+    pub values: Vec<(f64, String)>,
+    /// For [ValueType::Vector] result type
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<(f64, String)>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
+pub struct PromData {
+    #[serde(rename = "resultType")]
+    pub result_type: String,
+    pub result: Vec<PromSeries>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(untagged)]
+pub enum PrometheusResponse {
+    PromData(PromData),
+    Labels(Vec<String>),
+    Series(Vec<HashMap<String, String>>),
+    LabelValues(Vec<String>),
+}
+
+impl Default for PrometheusResponse {
+    fn default() -> Self {
+        PrometheusResponse::PromData(Default::default())
+    }
+}
+
+#[derive(Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
+pub struct PrometheusJsonResponse {
+    pub status: String,
+    pub data: PrometheusResponse,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "errorType")]
+    pub error_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warnings: Option<Vec<String>>,
+}
+
+impl PrometheusJsonResponse {
+    pub fn error<S1, S2>(error_type: S1, reason: S2) -> Json<Self>
+    where
+        S1: Into<String>,
+        S2: Into<String>,
+    {
+        Json(PrometheusJsonResponse {
+            status: "error".to_string(),
+            data: PrometheusResponse::default(),
+            error: Some(reason.into()),
+            error_type: Some(error_type.into()),
+            warnings: None,
+        })
+    }
+
+    pub fn success(data: PrometheusResponse) -> Json<Self> {
+        Json(PrometheusJsonResponse {
+            status: "success".to_string(),
+            data,
+            error: None,
+            error_type: None,
+            warnings: None,
+        })
+    }
+
+    /// Convert from `Result<Output>`
+    pub async fn from_query_result(
+        result: Result<Output>,
+        metric_name: String,
+        result_type: ValueType,
+    ) -> Json<Self> {
+        let response: Result<Json<Self>> = try {
+            let json = match result? {
+                Output::RecordBatches(batches) => Self::success(Self::record_batches_to_data(
+                    batches,
+                    metric_name,
+                    result_type,
+                )?),
+                Output::Stream(stream) => {
+                    let record_batches = RecordBatches::try_collect(stream)
+                        .await
+                        .context(CollectRecordbatchSnafu)?;
+                    Self::success(Self::record_batches_to_data(
+                        record_batches,
+                        metric_name,
+                        result_type,
+                    )?)
+                }
+                Output::AffectedRows(_) => {
+                    Self::error("Unexpected", "expected data result, but got affected rows")
+                }
+            };
+
+            json
+        };
+
+        let result_type_string = result_type.to_string();
+
+        match response {
+            Ok(resp) => resp,
+            Err(err) => {
+                // Prometheus won't report error if querying nonexist label and metric
+                if err.status_code() == StatusCode::TableNotFound
+                    || err.status_code() == StatusCode::TableColumnNotFound
+                {
+                    Self::success(PrometheusResponse::PromData(PromData {
+                        result_type: result_type_string,
+                        ..Default::default()
+                    }))
+                } else {
+                    Self::error(err.status_code().to_string(), err.to_string())
+                }
             }
         }
     }
 
-    // Safety: conditions MUST not be empty, reduce always return Some(expr).
-    let conditions = conditions.into_iter().reduce(Expr::and).unwrap();
+    /// Convert [RecordBatches] to [PromData]
+    fn record_batches_to_data(
+        batches: RecordBatches,
+        metric_name: String,
+        result_type: ValueType,
+    ) -> Result<PrometheusResponse> {
+        // infer semantic type of each column from schema.
+        // TODO(ruihang): wish there is a better way to do this.
+        let mut timestamp_column_index = None;
+        let mut tag_column_indices = Vec::new();
+        let mut first_field_column_index = None;
 
-    let dataframe = dataframe
-        .filter(conditions)
-        .context(error::DataFrameSnafu)?;
-
-    Ok(LogicalPlan::DfPlan(dataframe.into_parts().1))
-}
-
-#[inline]
-fn new_label(name: String, value: String) -> Label {
-    Label { name, value }
-}
-
-// A timeseries id
-#[derive(Debug)]
-struct TimeSeriesId {
-    labels: Vec<Label>,
-}
-
-/// Because Label in protobuf doesn't impl `Eq`, so we have to do it by ourselves.
-impl PartialEq for TimeSeriesId {
-    fn eq(&self, other: &Self) -> bool {
-        if self.labels.len() != other.labels.len() {
-            return false;
+        for (i, column) in batches.schema().column_schemas().iter().enumerate() {
+            match column.data_type {
+                ConcreteDataType::Timestamp(datatypes::types::TimestampType::Millisecond(_)) => {
+                    if timestamp_column_index.is_none() {
+                        timestamp_column_index = Some(i);
+                    }
+                }
+                ConcreteDataType::Float64(_) => {
+                    if first_field_column_index.is_none() {
+                        first_field_column_index = Some(i);
+                    }
+                }
+                ConcreteDataType::String(_) => {
+                    tag_column_indices.push(i);
+                }
+                _ => {}
+            }
         }
 
-        self.labels
+        let timestamp_column_index = timestamp_column_index.context(InternalSnafu {
+            err_msg: "no timestamp column found".to_string(),
+        })?;
+        let first_field_column_index = first_field_column_index.context(InternalSnafu {
+            err_msg: "no value column found".to_string(),
+        })?;
+
+        let metric_name = (METRIC_NAME.to_string(), metric_name);
+        let mut buffer = BTreeMap::<Vec<(String, String)>, Vec<(f64, String)>>::new();
+
+        for batch in batches.iter() {
+            // prepare things...
+            let tag_columns = tag_column_indices
+                .iter()
+                .map(|i| {
+                    batch
+                        .column(*i)
+                        .as_any()
+                        .downcast_ref::<StringVector>()
+                        .unwrap()
+                })
+                .collect::<Vec<_>>();
+            let tag_names = tag_column_indices
+                .iter()
+                .map(|c| batches.schema().column_name_by_index(*c).to_string())
+                .collect::<Vec<_>>();
+            let timestamp_column = batch
+                .column(timestamp_column_index)
+                .as_any()
+                .downcast_ref::<TimestampMillisecondVector>()
+                .unwrap();
+            let field_column = batch
+                .column(first_field_column_index)
+                .as_any()
+                .downcast_ref::<Float64Vector>()
+                .unwrap();
+
+            // assemble rows
+            for row_index in 0..batch.num_rows() {
+                // retrieve tags
+                // TODO(ruihang): push table name `__metric__`
+                let mut tags = vec![metric_name.clone()];
+                for (tag_column, tag_name) in tag_columns.iter().zip(tag_names.iter()) {
+                    // TODO(ruihang): add test for NULL tag
+                    if let Some(tag_value) = tag_column.get_data(row_index) {
+                        tags.push((tag_name.to_string(), tag_value.to_string()));
+                    }
+                }
+
+                // retrieve timestamp
+                let timestamp_millis: i64 = timestamp_column.get_data(row_index).unwrap().into();
+                let timestamp = timestamp_millis as f64 / 1000.0;
+
+                // retrieve value
+                if let Some(v) = field_column.get_data(row_index) {
+                    buffer
+                        .entry(tags)
+                        .or_default()
+                        .push((timestamp, Into::<f64>::into(v).to_string()));
+                };
+            }
+        }
+
+        let result = buffer
+            .into_iter()
+            .map(|(tags, mut values)| {
+                let metric = tags.into_iter().collect();
+                match result_type {
+                    ValueType::Vector | ValueType::Scalar | ValueType::String => Ok(PromSeries {
+                        metric,
+                        value: values.pop(),
+                        ..Default::default()
+                    }),
+                    ValueType::Matrix => Ok(PromSeries {
+                        metric,
+                        values,
+                        ..Default::default()
+                    }),
+                }
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        let result_type_string = result_type.to_string();
+        let data = PrometheusResponse::PromData(PromData {
+            result_type: result_type_string,
+            result,
+        });
+
+        Ok(data)
+    }
+}
+
+#[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
+pub struct InstantQuery {
+    query: Option<String>,
+    time: Option<String>,
+    timeout: Option<String>,
+    db: Option<String>,
+}
+
+#[axum_macros::debug_handler]
+pub async fn instant_query(
+    State(handler): State<PrometheusHandlerRef>,
+    Query(params): Query<InstantQuery>,
+    Form(form_params): Form<InstantQuery>,
+) -> Json<PrometheusJsonResponse> {
+    // Extract time from query string, or use current server time if not specified.
+    let time = params
+        .time
+        .or(form_params.time)
+        .unwrap_or_else(current_time_rfc3339);
+    let prom_query = PromQuery {
+        query: params.query.or(form_params.query).unwrap_or_default(),
+        start: time.clone(),
+        end: time,
+        step: "1s".to_string(),
+    };
+
+    let db = &params.db.unwrap_or(DEFAULT_SCHEMA_NAME.to_string());
+    let (catalog, schema) = crate::parse_catalog_and_schema_from_client_database_name(db);
+
+    let query_ctx = QueryContext::with(catalog, schema);
+
+    let result = handler.do_query(&prom_query, Arc::new(query_ctx)).await;
+    let (metric_name, result_type) = match retrieve_metric_name_and_result_type(&prom_query.query) {
+        Ok((metric_name, result_type)) => (metric_name.unwrap_or_default(), result_type),
+        Err(err) => {
+            return PrometheusJsonResponse::error(err.status_code().to_string(), err.to_string())
+        }
+    };
+    PrometheusJsonResponse::from_query_result(result, metric_name, result_type).await
+}
+
+#[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
+pub struct RangeQuery {
+    query: Option<String>,
+    start: Option<String>,
+    end: Option<String>,
+    step: Option<String>,
+    timeout: Option<String>,
+    db: Option<String>,
+}
+
+#[axum_macros::debug_handler]
+pub async fn range_query(
+    State(handler): State<PrometheusHandlerRef>,
+    Query(params): Query<RangeQuery>,
+    Form(form_params): Form<RangeQuery>,
+) -> Json<PrometheusJsonResponse> {
+    let prom_query = PromQuery {
+        query: params.query.or(form_params.query).unwrap_or_default(),
+        start: params.start.or(form_params.start).unwrap_or_default(),
+        end: params.end.or(form_params.end).unwrap_or_default(),
+        step: params.step.or(form_params.step).unwrap_or_default(),
+    };
+
+    let db = &params.db.unwrap_or(DEFAULT_SCHEMA_NAME.to_string());
+    let (catalog, schema) = crate::parse_catalog_and_schema_from_client_database_name(db);
+
+    let query_ctx = QueryContext::with(catalog, schema);
+
+    let result = handler.do_query(&prom_query, Arc::new(query_ctx)).await;
+    let metric_name = match retrieve_metric_name_and_result_type(&prom_query.query) {
+        Err(err) => {
+            return PrometheusJsonResponse::error(err.status_code().to_string(), err.to_string())
+        }
+        Ok((metric_name, _)) => metric_name.unwrap_or_default(),
+    };
+    PrometheusJsonResponse::from_query_result(result, metric_name, ValueType::Matrix).await
+}
+
+#[derive(Debug, Default, Serialize, JsonSchema)]
+struct Matches(Vec<String>);
+
+#[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
+pub struct LabelsQuery {
+    start: Option<String>,
+    end: Option<String>,
+    #[serde(flatten)]
+    matches: Matches,
+    db: Option<String>,
+}
+
+// Custom Deserialize method to support parsing repeated match[]
+impl<'de> Deserialize<'de> for Matches {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Matches, D::Error>
+    where
+        D: de::Deserializer<'de>,
+    {
+        struct MatchesVisitor;
+
+        impl<'d> Visitor<'d> for MatchesVisitor {
+            type Value = Vec<String>;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a string")
+            }
+
+            fn visit_map<M>(self, mut access: M) -> std::result::Result<Self::Value, M::Error>
+            where
+                M: MapAccess<'d>,
+            {
+                let mut matches = Vec::new();
+                while let Some((key, value)) = access.next_entry::<String, String>()? {
+                    if key == "match[]" {
+                        matches.push(value);
+                    }
+                }
+                Ok(matches)
+            }
+        }
+        Ok(Matches(deserializer.deserialize_map(MatchesVisitor)?))
+    }
+}
+
+#[axum_macros::debug_handler]
+pub async fn labels_query(
+    State(handler): State<PrometheusHandlerRef>,
+    Query(params): Query<LabelsQuery>,
+    Form(form_params): Form<LabelsQuery>,
+) -> Json<PrometheusJsonResponse> {
+    let mut queries = params.matches.0;
+    if queries.is_empty() {
+        queries = form_params.matches.0;
+    }
+    if queries.is_empty() {
+        return PrometheusJsonResponse::error("Unsupported", "match[] parameter is required");
+    }
+
+    let start = params
+        .start
+        .or(form_params.start)
+        .unwrap_or_else(yesterday_rfc3339);
+    let end = params
+        .end
+        .or(form_params.end)
+        .unwrap_or_else(current_time_rfc3339);
+
+    let db = &params.db.unwrap_or(DEFAULT_SCHEMA_NAME.to_string());
+    let (catalog, schema) = crate::parse_catalog_and_schema_from_client_database_name(db);
+    let query_ctx = Arc::new(QueryContext::with(catalog, schema));
+
+    let mut labels = HashSet::new();
+    let _ = labels.insert(METRIC_NAME.to_string());
+
+    for query in queries {
+        let prom_query = PromQuery {
+            query,
+            start: start.clone(),
+            end: end.clone(),
+            step: DEFAULT_LOOKBACK_STRING.to_string(),
+        };
+
+        let result = handler.do_query(&prom_query, query_ctx.clone()).await;
+
+        let response = retrieve_labels_name_from_query_result(result, &mut labels).await;
+
+        if let Err(err) = response {
+            // Prometheus won't report error if querying nonexist label and metric
+            if err.status_code() != StatusCode::TableNotFound
+                && err.status_code() != StatusCode::TableColumnNotFound
+            {
+                return PrometheusJsonResponse::error(
+                    err.status_code().to_string(),
+                    err.to_string(),
+                );
+            }
+        }
+    }
+
+    let _ = labels.remove(TIMESTAMP_COLUMN_NAME);
+    let _ = labels.remove(FIELD_COLUMN_NAME);
+
+    let mut sorted_labels: Vec<String> = labels.into_iter().collect();
+    sorted_labels.sort();
+    PrometheusJsonResponse::success(PrometheusResponse::Labels(sorted_labels))
+}
+
+async fn retrieve_series_from_query_result(
+    result: Result<Output>,
+    series: &mut Vec<HashMap<String, String>>,
+    table_name: &str,
+) -> Result<()> {
+    match result? {
+        Output::RecordBatches(batches) => {
+            record_batches_to_series(batches, series, table_name)?;
+            Ok(())
+        }
+        Output::Stream(stream) => {
+            let batches = RecordBatches::try_collect(stream)
+                .await
+                .context(CollectRecordbatchSnafu)?;
+            record_batches_to_series(batches, series, table_name)?;
+            Ok(())
+        }
+        Output::AffectedRows(_) => Err(Error::UnexpectedResult {
+            reason: "expected data result, but got affected rows".to_string(),
+            location: Location::default(),
+        }),
+    }
+}
+
+/// Retrieve labels name from query result
+async fn retrieve_labels_name_from_query_result(
+    result: Result<Output>,
+    labels: &mut HashSet<String>,
+) -> Result<()> {
+    match result? {
+        Output::RecordBatches(batches) => {
+            record_batches_to_labels_name(batches, labels)?;
+            Ok(())
+        }
+        Output::Stream(stream) => {
+            let batches = RecordBatches::try_collect(stream)
+                .await
+                .context(CollectRecordbatchSnafu)?;
+            record_batches_to_labels_name(batches, labels)?;
+            Ok(())
+        }
+        Output::AffectedRows(_) => UnexpectedResultSnafu {
+            reason: "expected data result, but got affected rows".to_string(),
+        }
+        .fail(),
+    }
+}
+
+fn record_batches_to_series(
+    batches: RecordBatches,
+    series: &mut Vec<HashMap<String, String>>,
+    table_name: &str,
+) -> Result<()> {
+    for batch in batches.iter() {
+        for row in batch.rows() {
+            let mut element: HashMap<String, String> = row
+                .iter()
+                .enumerate()
+                .map(|(idx, column)| {
+                    let column_name = batch.schema.column_name_by_index(idx);
+                    (column_name.to_string(), column.to_string())
+                })
+                .collect();
+            let _ = element.insert("__name__".to_string(), table_name.to_string());
+            series.push(element);
+        }
+    }
+    Ok(())
+}
+
+/// Retrieve labels name from record batches
+fn record_batches_to_labels_name(
+    batches: RecordBatches,
+    labels: &mut HashSet<String>,
+) -> Result<()> {
+    let mut column_indices = Vec::new();
+    let mut field_column_indices = Vec::new();
+    for (i, column) in batches.schema().column_schemas().iter().enumerate() {
+        if let ConcreteDataType::Float64(_) = column.data_type {
+            field_column_indices.push(i);
+        }
+        column_indices.push(i);
+    }
+
+    if field_column_indices.is_empty() {
+        return Err(Error::Internal {
+            err_msg: "no value column found".to_string(),
+        });
+    }
+
+    for batch in batches.iter() {
+        let names = column_indices
             .iter()
-            .zip(other.labels.iter())
-            .all(|(l, r)| l.name == r.name && l.value == r.value)
-    }
-}
-impl Eq for TimeSeriesId {}
+            .map(|c| batches.schema().column_name_by_index(*c).to_string())
+            .collect::<Vec<_>>();
 
-impl Hash for TimeSeriesId {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        for label in &self.labels {
-            label.name.hash(state);
-            label.value.hash(state);
-        }
-    }
-}
+        let field_columns = field_column_indices
+            .iter()
+            .map(|i| {
+                batch
+                    .column(*i)
+                    .as_any()
+                    .downcast_ref::<Float64Vector>()
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
 
-/// For Sorting timeseries
-impl Ord for TimeSeriesId {
-    fn cmp(&self, other: &Self) -> Ordering {
-        let ordering = self.labels.len().cmp(&other.labels.len());
-        if ordering != Ordering::Equal {
-            return ordering;
-        }
-
-        for (l, r) in self.labels.iter().zip(other.labels.iter()) {
-            let ordering = l.name.cmp(&r.name);
-
-            if ordering != Ordering::Equal {
-                return ordering;
-            }
-
-            let ordering = l.value.cmp(&r.value);
-
-            if ordering != Ordering::Equal {
-                return ordering;
-            }
-        }
-        Ordering::Equal
-    }
-}
-
-impl PartialOrd for TimeSeriesId {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-/// Collect each row's timeseries id
-/// This processing is ugly, hope https://github.com/GreptimeTeam/greptimedb/issues/336 making some progress in future.
-fn collect_timeseries_ids(table_name: &str, recordbatch: &RecordBatch) -> Vec<TimeSeriesId> {
-    let row_count = recordbatch.num_rows();
-    let mut timeseries_ids = Vec::with_capacity(row_count);
-
-    for row in 0..row_count {
-        let mut labels = Vec::with_capacity(recordbatch.num_columns() - 1);
-        labels.push(new_label(
-            METRIC_NAME_LABEL.to_string(),
-            table_name.to_string(),
-        ));
-
-        for (i, column_schema) in recordbatch.schema.column_schemas().iter().enumerate() {
-            if column_schema.name == FIELD_COLUMN_NAME
-                || column_schema.name == TIMESTAMP_COLUMN_NAME
+        for row_index in 0..batch.num_rows() {
+            // if all field columns are null, skip this row
+            if field_columns
+                .iter()
+                .all(|c| c.get_data(row_index).is_none())
             {
                 continue;
             }
 
-            let column = &recordbatch.columns()[i];
-            // A label with an empty label value is considered equivalent to a label that does not exist.
-            if column.is_null(row) {
-                continue;
-            }
-
-            let value = column.get(row).to_string();
-            labels.push(new_label(column_schema.name.clone(), value));
-        }
-        timeseries_ids.push(TimeSeriesId { labels });
-    }
-    timeseries_ids
-}
-
-pub fn recordbatches_to_timeseries(
-    table_name: &str,
-    recordbatches: RecordBatches,
-) -> Result<Vec<TimeSeries>> {
-    Ok(recordbatches
-        .take()
-        .into_iter()
-        .map(|x| recordbatch_to_timeseries(table_name, x))
-        .collect::<Result<Vec<_>>>()?
-        .into_iter()
-        .flatten()
-        .collect())
-}
-
-fn recordbatch_to_timeseries(table: &str, recordbatch: RecordBatch) -> Result<Vec<TimeSeries>> {
-    let ts_column = recordbatch.column_by_name(TIMESTAMP_COLUMN_NAME).context(
-        error::InvalidPromRemoteReadQueryResultSnafu {
-            msg: "missing greptime_timestamp column in query result",
-        },
-    )?;
-    ensure!(
-        ts_column.data_type() == ConcreteDataType::timestamp_millisecond_datatype(),
-        error::InvalidPromRemoteReadQueryResultSnafu {
-            msg: format!(
-                "Expect timestamp column of datatype Timestamp(Millisecond), actual {:?}",
-                ts_column.data_type()
-            )
-        }
-    );
-
-    let field_column = recordbatch.column_by_name(FIELD_COLUMN_NAME).context(
-        error::InvalidPromRemoteReadQueryResultSnafu {
-            msg: "missing greptime_value column in query result",
-        },
-    )?;
-    ensure!(
-        field_column.data_type() == ConcreteDataType::float64_datatype(),
-        error::InvalidPromRemoteReadQueryResultSnafu {
-            msg: format!(
-                "Expect value column of datatype Float64, actual {:?}",
-                field_column.data_type()
-            )
-        }
-    );
-
-    // First, collect each row's timeseries id
-    let timeseries_ids = collect_timeseries_ids(table, &recordbatch);
-    // Then, group timeseries by it's id.
-    let mut timeseries_map: BTreeMap<&TimeSeriesId, TimeSeries> = BTreeMap::default();
-
-    for (row, timeseries_id) in timeseries_ids.iter().enumerate() {
-        let timeseries = timeseries_map
-            .entry(timeseries_id)
-            .or_insert_with(|| TimeSeries {
-                labels: timeseries_id.labels.clone(),
-                ..Default::default()
+            // if a field is not null, record the tag name and return
+            names.iter().for_each(|name| {
+                let _ = labels.insert(name.to_string());
             });
-
-        if ts_column.is_null(row) || field_column.is_null(row) {
-            continue;
-        }
-
-        let value: f64 = match field_column.get(row) {
-            Value::Float64(value) => value.into(),
-            _ => unreachable!("checked by the \"ensure\" above"),
-        };
-        let timestamp = match ts_column.get(row) {
-            Value::Timestamp(t) if t.unit() == TimeUnit::Millisecond => t.value(),
-            _ => unreachable!("checked by the \"ensure\" above"),
-        };
-        let sample = Sample { value, timestamp };
-
-        timeseries.samples.push(sample);
-    }
-
-    Ok(timeseries_map.into_values().collect())
-}
-
-pub fn to_grpc_insert_requests(request: WriteRequest) -> Result<(InsertRequests, usize)> {
-    let mut writers: HashMap<String, LinesWriter> = HashMap::new();
-    for timeseries in &request.timeseries {
-        let table_name = timeseries
-            .labels
-            .iter()
-            .find(|label| {
-                // The metric name is a special label
-                label.name == METRIC_NAME_LABEL
-            })
-            .context(error::InvalidPromRemoteRequestSnafu {
-                msg: "missing '__name__' label in timeseries",
-            })?
-            .value
-            .clone();
-
-        let writer = writers
-            .entry(table_name)
-            .or_insert_with(|| LinesWriter::with_lines(16));
-        // For each sample
-        for sample in &timeseries.samples {
-            // Insert labels first.
-            for label in &timeseries.labels {
-                // The metric name is a special label
-                if label.name == METRIC_NAME_LABEL {
-                    continue;
-                }
-
-                writer
-                    .write_tag(&label.name, &label.value)
-                    .context(error::PromSeriesWriteSnafu)?;
-            }
-            // Insert sample timestamp.
-            writer
-                .write_ts(
-                    TIMESTAMP_COLUMN_NAME,
-                    (sample.timestamp, Precision::Millisecond),
-                )
-                .context(error::PromSeriesWriteSnafu)?;
-            // Insert sample value.
-            writer
-                .write_f64(FIELD_COLUMN_NAME, sample.value)
-                .context(error::PromSeriesWriteSnafu)?;
-
-            writer.commit();
+            return Ok(());
         }
     }
+    Ok(())
+}
 
-    let mut sample_counts = 0;
-    let inserts = writers
-        .into_iter()
-        .map(|(table_name, writer)| {
-            let (columns, row_count) = writer.finish();
-            sample_counts += row_count as usize;
-            GrpcInsertRequest {
-                table_name,
-                region_number: 0,
-                columns,
-                row_count,
+pub(crate) fn retrieve_metric_name_and_result_type(
+    promql: &str,
+) -> Result<(Option<String>, ValueType)> {
+    let promql_expr = promql_parser::parser::parse(promql)
+        .map_err(|reason| InvalidQuerySnafu { reason }.build())?;
+    let metric_name = promql_expr_to_metric_name(&promql_expr);
+    let result_type = promql_expr.value_type();
+
+    Ok((metric_name, result_type))
+}
+
+fn promql_expr_to_metric_name(expr: &PromqlExpr) -> Option<String> {
+    match expr {
+        PromqlExpr::Aggregate(AggregateExpr { expr, .. }) => promql_expr_to_metric_name(expr),
+        PromqlExpr::Unary(UnaryExpr { expr }) => promql_expr_to_metric_name(expr),
+        PromqlExpr::Binary(BinaryExpr { lhs, rhs, .. }) => {
+            promql_expr_to_metric_name(lhs).or(promql_expr_to_metric_name(rhs))
+        }
+        PromqlExpr::Paren(ParenExpr { expr }) => promql_expr_to_metric_name(expr),
+        PromqlExpr::Subquery(SubqueryExpr { expr, .. }) => promql_expr_to_metric_name(expr),
+        PromqlExpr::NumberLiteral(_) => Some(String::new()),
+        PromqlExpr::StringLiteral(_) => Some(String::new()),
+        PromqlExpr::Extension(_) => None,
+        PromqlExpr::VectorSelector(VectorSelector { matchers, .. }) => {
+            matchers.find_matchers(METRIC_NAME).pop().cloned()
+        }
+        PromqlExpr::MatrixSelector(MatrixSelector {
+            vector_selector, ..
+        }) => {
+            let VectorSelector { matchers, .. } = vector_selector;
+            matchers.find_matchers(METRIC_NAME).pop().cloned()
+        }
+        PromqlExpr::Call(Call { args, .. }) => {
+            args.args.iter().find_map(|e| promql_expr_to_metric_name(e))
+        }
+    }
+}
+
+#[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
+pub struct LabelValueQuery {
+    start: Option<String>,
+    end: Option<String>,
+    #[serde(flatten)]
+    matches: Matches,
+    db: Option<String>,
+}
+
+#[axum_macros::debug_handler]
+pub async fn label_values_query(
+    State(handler): State<PrometheusHandlerRef>,
+    Path(label_name): Path<String>,
+    Query(params): Query<LabelValueQuery>,
+) -> Json<PrometheusJsonResponse> {
+    let queries = params.matches.0;
+    if queries.is_empty() {
+        return PrometheusJsonResponse::error("Invalid argument", "match[] parameter is required");
+    }
+
+    let start = params.start.unwrap_or_else(yesterday_rfc3339);
+    let end = params.end.unwrap_or_else(current_time_rfc3339);
+    let db = &params.db.unwrap_or(DEFAULT_SCHEMA_NAME.to_string());
+    let (catalog, schema) = crate::parse_catalog_and_schema_from_client_database_name(db);
+    let query_ctx = Arc::new(QueryContext::with(catalog, schema));
+
+    let mut label_values = HashSet::new();
+
+    for query in queries {
+        let prom_query = PromQuery {
+            query,
+            start: start.clone(),
+            end: end.clone(),
+            step: DEFAULT_LOOKBACK_STRING.to_string(),
+        };
+        let result = handler.do_query(&prom_query, query_ctx.clone()).await;
+        let result = retrieve_label_values(result, &label_name, &mut label_values).await;
+        if let Err(err) = result {
+            // Prometheus won't report error if querying nonexist label and metric
+            if err.status_code() != StatusCode::TableNotFound
+                && err.status_code() != StatusCode::TableColumnNotFound
+            {
+                return PrometheusJsonResponse::error(
+                    err.status_code().to_string(),
+                    err.to_string(),
+                );
             }
-        })
-        .collect();
-    Ok((InsertRequests { inserts }, sample_counts))
-}
-
-#[inline]
-pub fn snappy_decompress(buf: &[u8]) -> Result<Vec<u8>> {
-    let mut decoder = Decoder::new();
-    decoder
-        .decompress_vec(buf)
-        .context(error::DecompressPromRemoteRequestSnafu)
-}
-
-#[inline]
-pub fn snappy_compress(buf: &[u8]) -> Result<Vec<u8>> {
-    let mut encoder = Encoder::new();
-    encoder
-        .compress_vec(buf)
-        .context(error::DecompressPromRemoteRequestSnafu)
-}
-
-/// Mock timeseries for test, it is both used in servers and frontend crate
-/// So we present it here
-pub fn mock_timeseries() -> Vec<TimeSeries> {
-    vec![
-        TimeSeries {
-            labels: vec![
-                new_label(METRIC_NAME_LABEL.to_string(), "metric1".to_string()),
-                new_label("job".to_string(), "spark".to_string()),
-            ],
-            samples: vec![
-                Sample {
-                    value: 1.0f64,
-                    timestamp: 1000,
-                },
-                Sample {
-                    value: 2.0f64,
-                    timestamp: 2000,
-                },
-            ],
-            ..Default::default()
-        },
-        TimeSeries {
-            labels: vec![
-                new_label(METRIC_NAME_LABEL.to_string(), "metric2".to_string()),
-                new_label("instance".to_string(), "test_host1".to_string()),
-                new_label("idc".to_string(), "z001".to_string()),
-            ],
-            samples: vec![
-                Sample {
-                    value: 3.0f64,
-                    timestamp: 1000,
-                },
-                Sample {
-                    value: 4.0f64,
-                    timestamp: 2000,
-                },
-            ],
-            ..Default::default()
-        },
-        TimeSeries {
-            labels: vec![
-                new_label(METRIC_NAME_LABEL.to_string(), "metric3".to_string()),
-                new_label("idc".to_string(), "z002".to_string()),
-                new_label("app".to_string(), "biz".to_string()),
-            ],
-            samples: vec![
-                Sample {
-                    value: 5.0f64,
-                    timestamp: 1000,
-                },
-                Sample {
-                    value: 6.0f64,
-                    timestamp: 2000,
-                },
-                Sample {
-                    value: 7.0f64,
-                    timestamp: 3000,
-                },
-            ],
-            ..Default::default()
-        },
-    ]
-}
-
-#[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-
-    use api::prometheus::remote::LabelMatcher;
-    use datafusion::prelude::SessionContext;
-    use datatypes::schema::{ColumnSchema, Schema};
-    use datatypes::vectors::{Float64Vector, StringVector, TimestampMillisecondVector};
-    use table::table::adapter::DfTableProviderAdapter;
-    use table::test_util::MemTable;
-
-    use super::*;
-
-    const EQ_TYPE: i32 = MatcherType::Eq as i32;
-    const NEQ_TYPE: i32 = MatcherType::Neq as i32;
-    const RE_TYPE: i32 = MatcherType::Re as i32;
-
-    #[test]
-    fn test_table_name() {
-        let q = Query {
-            start_timestamp_ms: 1000,
-            end_timestamp_ms: 2000,
-            matchers: vec![],
-            ..Default::default()
-        };
-        let err = table_name(&q).unwrap_err();
-        assert!(matches!(err, error::Error::InvalidPromRemoteRequest { .. }));
-
-        let q = Query {
-            start_timestamp_ms: 1000,
-            end_timestamp_ms: 2000,
-            matchers: vec![LabelMatcher {
-                name: METRIC_NAME_LABEL.to_string(),
-                value: "test".to_string(),
-                r#type: EQ_TYPE,
-            }],
-            ..Default::default()
-        };
-        assert_eq!("test", table_name(&q).unwrap());
+        }
     }
 
-    #[test]
-    fn test_query_to_plan() {
-        let q = Query {
-            start_timestamp_ms: 1000,
-            end_timestamp_ms: 2000,
-            matchers: vec![LabelMatcher {
-                name: METRIC_NAME_LABEL.to_string(),
-                value: "test".to_string(),
-                r#type: EQ_TYPE,
-            }],
-            ..Default::default()
-        };
+    let mut label_values: Vec<_> = label_values.into_iter().collect();
+    label_values.sort();
+    PrometheusJsonResponse::success(PrometheusResponse::LabelValues(label_values))
+}
 
-        let schema = Arc::new(Schema::new(vec![
-            ColumnSchema::new(
-                TIMESTAMP_COLUMN_NAME,
-                ConcreteDataType::timestamp_millisecond_datatype(),
-                true,
-            ),
-            ColumnSchema::new(
-                FIELD_COLUMN_NAME,
-                ConcreteDataType::float64_datatype(),
-                true,
-            ),
-            ColumnSchema::new("instance", ConcreteDataType::string_datatype(), true),
-            ColumnSchema::new("job", ConcreteDataType::string_datatype(), true),
-        ]));
-        let recordbatch = RecordBatch::new(
-            schema,
-            vec![
-                Arc::new(TimestampMillisecondVector::from_vec(vec![1000])) as _,
-                Arc::new(Float64Vector::from_vec(vec![3.0])) as _,
-                Arc::new(StringVector::from(vec!["host1"])) as _,
-                Arc::new(StringVector::from(vec!["job"])) as _,
-            ],
-        )
-        .unwrap();
+async fn retrieve_label_values(
+    result: Result<Output>,
+    label_name: &str,
+    labels_values: &mut HashSet<String>,
+) -> Result<()> {
+    match result? {
+        Output::RecordBatches(batches) => {
+            retrieve_label_values_from_record_batch(batches, label_name, labels_values).await
+        }
+        Output::Stream(stream) => {
+            let batches = RecordBatches::try_collect(stream)
+                .await
+                .context(CollectRecordbatchSnafu)?;
+            retrieve_label_values_from_record_batch(batches, label_name, labels_values).await
+        }
+        Output::AffectedRows(_) => UnexpectedResultSnafu {
+            reason: "expected data result, but got affected rows".to_string(),
+        }
+        .fail(),
+    }
+}
 
-        let ctx = SessionContext::new();
-        let table = Arc::new(MemTable::new("test", recordbatch));
-        let table_provider = Arc::new(DfTableProviderAdapter::new(table));
+async fn retrieve_label_values_from_record_batch(
+    batches: RecordBatches,
+    label_name: &str,
+    labels_values: &mut HashSet<String>,
+) -> Result<()> {
+    let Some(label_col_idx) = batches.schema().column_index_by_name(label_name) else {
+        return Ok(());
+    };
 
-        let dataframe = ctx.read_table(table_provider.clone()).unwrap();
-        let plan = query_to_plan(DataFrame::DataFusion(dataframe), &q).unwrap();
-        let display_string = format!("{}", plan.display_indent());
-
-        assert_eq!("Filter: ?table?.greptime_timestamp >= Int64(1000) AND ?table?.greptime_timestamp <= Int64(2000)\n  TableScan: ?table?", display_string);
-
-        let q = Query {
-            start_timestamp_ms: 1000,
-            end_timestamp_ms: 2000,
-            matchers: vec![
-                LabelMatcher {
-                    name: METRIC_NAME_LABEL.to_string(),
-                    value: "test".to_string(),
-                    r#type: EQ_TYPE,
-                },
-                LabelMatcher {
-                    name: "job".to_string(),
-                    value: "*prom*".to_string(),
-                    r#type: RE_TYPE,
-                },
-                LabelMatcher {
-                    name: "instance".to_string(),
-                    value: "localhost".to_string(),
-                    r#type: NEQ_TYPE,
-                },
-            ],
-            ..Default::default()
-        };
-
-        let dataframe = ctx.read_table(table_provider).unwrap();
-        let plan = query_to_plan(DataFrame::DataFusion(dataframe), &q).unwrap();
-        let display_string = format!("{}", plan.display_indent());
-
-        assert_eq!("Filter: ?table?.greptime_timestamp >= Int64(1000) AND ?table?.greptime_timestamp <= Int64(2000) AND regexp_match(?table?.job, Utf8(\"*prom*\")) IS NOT NULL AND ?table?.instance != Utf8(\"localhost\")\n  TableScan: ?table?", display_string);
+    // check whether label_name belongs to tag column
+    match batches
+        .schema()
+        .column_schema_by_name(label_name)
+        .unwrap()
+        .data_type
+    {
+        ConcreteDataType::String(_) => {}
+        _ => return Ok(()),
+    }
+    for batch in batches.iter() {
+        let label_column = batch
+            .column(label_col_idx)
+            .as_any()
+            .downcast_ref::<StringVector>()
+            .unwrap();
+        for row_index in 0..batch.num_rows() {
+            if let Some(label_value) = label_column.get_data(row_index) {
+                let _ = labels_values.insert(label_value.to_string());
+            }
+        }
     }
 
-    #[test]
-    fn test_write_request_to_insert_exprs() {
-        let write_request = WriteRequest {
-            timeseries: mock_timeseries(),
-            ..Default::default()
+    Ok(())
+}
+
+#[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
+pub struct SeriesQuery {
+    start: Option<String>,
+    end: Option<String>,
+    #[serde(flatten)]
+    matches: Matches,
+    db: Option<String>,
+}
+
+#[axum_macros::debug_handler]
+pub async fn series_query(
+    State(handler): State<PrometheusHandlerRef>,
+    Query(params): Query<SeriesQuery>,
+    Form(form_params): Form<SeriesQuery>,
+) -> Json<PrometheusJsonResponse> {
+    let mut queries: Vec<String> = params.matches.0;
+    if queries.is_empty() {
+        queries = form_params.matches.0;
+    }
+    if queries.is_empty() {
+        return PrometheusJsonResponse::error("Unsupported", "match[] parameter is required");
+    }
+    let start = params
+        .start
+        .or(form_params.start)
+        .unwrap_or_else(yesterday_rfc3339);
+    let end = params
+        .end
+        .or(form_params.end)
+        .unwrap_or_else(current_time_rfc3339);
+
+    let db = &params.db.unwrap_or(DEFAULT_SCHEMA_NAME.to_string());
+    let (catalog, schema) = super::parse_catalog_and_schema_from_client_database_name(db);
+    let query_ctx = Arc::new(QueryContext::with(catalog, schema));
+
+    let mut series = Vec::new();
+    for query in queries {
+        let table_name = query.clone();
+        let prom_query = PromQuery {
+            query,
+            start: start.clone(),
+            end: end.clone(),
+            // TODO: find a better value for step
+            step: DEFAULT_LOOKBACK_STRING.to_string(),
         };
-
-        let mut exprs = to_grpc_insert_requests(write_request).unwrap().0.inserts;
-        exprs.sort_unstable_by(|l, r| l.table_name.cmp(&r.table_name));
-        assert_eq!(3, exprs.len());
-        assert_eq!("metric1", exprs[0].table_name);
-        assert_eq!("metric2", exprs[1].table_name);
-        assert_eq!("metric3", exprs[2].table_name);
-
-        let expr = exprs.get_mut(0).unwrap();
-        expr.columns
-            .sort_unstable_by(|l, r| l.column_name.cmp(&r.column_name));
-
-        let columns = &expr.columns;
-        let row_count = expr.row_count;
-
-        assert_eq!(2, row_count);
-        assert_eq!(columns.len(), 3);
-
-        assert_eq!(columns[0].column_name, TIMESTAMP_COLUMN_NAME);
-        assert_eq!(
-            columns[0].values.as_ref().unwrap().ts_millisecond_values,
-            vec![1000, 2000]
-        );
-
-        assert_eq!(columns[1].column_name, FIELD_COLUMN_NAME);
-        assert_eq!(
-            columns[1].values.as_ref().unwrap().f64_values,
-            vec![1.0, 2.0]
-        );
-
-        assert_eq!(columns[2].column_name, "job");
-        assert_eq!(
-            columns[2].values.as_ref().unwrap().string_values,
-            vec!["spark", "spark"]
-        );
-
-        let expr = exprs.get_mut(1).unwrap();
-        expr.columns
-            .sort_unstable_by(|l, r| l.column_name.cmp(&r.column_name));
-
-        let columns = &expr.columns;
-        let row_count = expr.row_count;
-
-        assert_eq!(2, row_count);
-        assert_eq!(columns.len(), 4);
-
-        assert_eq!(columns[0].column_name, TIMESTAMP_COLUMN_NAME);
-        assert_eq!(
-            columns[0].values.as_ref().unwrap().ts_millisecond_values,
-            vec![1000, 2000]
-        );
-
-        assert_eq!(columns[1].column_name, FIELD_COLUMN_NAME);
-        assert_eq!(
-            columns[1].values.as_ref().unwrap().f64_values,
-            vec![3.0, 4.0]
-        );
-
-        assert_eq!(columns[2].column_name, "idc");
-        assert_eq!(
-            columns[2].values.as_ref().unwrap().string_values,
-            vec!["z001", "z001"]
-        );
-        assert_eq!(columns[3].column_name, "instance");
-        assert_eq!(
-            columns[3].values.as_ref().unwrap().string_values,
-            vec!["test_host1", "test_host1"]
-        );
-
-        let expr = exprs.get_mut(2).unwrap();
-        expr.columns
-            .sort_unstable_by(|l, r| l.column_name.cmp(&r.column_name));
-
-        let columns = &expr.columns;
-        let row_count = expr.row_count;
-
-        assert_eq!(3, row_count);
-        assert_eq!(columns.len(), 4);
-
-        assert_eq!(columns[0].column_name, "app");
-        assert_eq!(
-            columns[0].values.as_ref().unwrap().string_values,
-            vec!["biz", "biz", "biz"]
-        );
-        assert_eq!(columns[1].column_name, TIMESTAMP_COLUMN_NAME);
-        assert_eq!(
-            columns[1].values.as_ref().unwrap().ts_millisecond_values,
-            vec![1000, 2000, 3000]
-        );
-
-        assert_eq!(columns[2].column_name, FIELD_COLUMN_NAME);
-        assert_eq!(
-            columns[2].values.as_ref().unwrap().f64_values,
-            vec![5.0, 6.0, 7.0]
-        );
-
-        assert_eq!(columns[3].column_name, "idc");
-        assert_eq!(
-            columns[3].values.as_ref().unwrap().string_values,
-            vec!["z002", "z002", "z002"]
-        );
+        let result = handler.do_query(&prom_query, query_ctx.clone()).await;
+        if let Err(err) = retrieve_series_from_query_result(result, &mut series, &table_name).await
+        {
+            return PrometheusJsonResponse::error(err.status_code().to_string(), err.to_string());
+        }
     }
-
-    #[test]
-    fn test_recordbatches_to_timeseries() {
-        let schema = Arc::new(Schema::new(vec![
-            ColumnSchema::new(
-                TIMESTAMP_COLUMN_NAME,
-                ConcreteDataType::timestamp_millisecond_datatype(),
-                true,
-            ),
-            ColumnSchema::new(
-                FIELD_COLUMN_NAME,
-                ConcreteDataType::float64_datatype(),
-                true,
-            ),
-            ColumnSchema::new("instance", ConcreteDataType::string_datatype(), true),
-        ]));
-
-        let recordbatches = RecordBatches::try_new(
-            schema.clone(),
-            vec![
-                RecordBatch::new(
-                    schema.clone(),
-                    vec![
-                        Arc::new(TimestampMillisecondVector::from_vec(vec![1000])) as _,
-                        Arc::new(Float64Vector::from_vec(vec![3.0])) as _,
-                        Arc::new(StringVector::from(vec!["host1"])) as _,
-                    ],
-                )
-                .unwrap(),
-                RecordBatch::new(
-                    schema,
-                    vec![
-                        Arc::new(TimestampMillisecondVector::from_vec(vec![2000])) as _,
-                        Arc::new(Float64Vector::from_vec(vec![7.0])) as _,
-                        Arc::new(StringVector::from(vec!["host2"])) as _,
-                    ],
-                )
-                .unwrap(),
-            ],
-        )
-        .unwrap();
-
-        let timeseries = recordbatches_to_timeseries("metric1", recordbatches).unwrap();
-        assert_eq!(2, timeseries.len());
-
-        assert_eq!(
-            vec![
-                Label {
-                    name: METRIC_NAME_LABEL.to_string(),
-                    value: "metric1".to_string(),
-                },
-                Label {
-                    name: "instance".to_string(),
-                    value: "host1".to_string(),
-                },
-            ],
-            timeseries[0].labels
-        );
-
-        assert_eq!(
-            timeseries[0].samples,
-            vec![Sample {
-                value: 3.0,
-                timestamp: 1000,
-            }]
-        );
-
-        assert_eq!(
-            vec![
-                Label {
-                    name: METRIC_NAME_LABEL.to_string(),
-                    value: "metric1".to_string(),
-                },
-                Label {
-                    name: "instance".to_string(),
-                    value: "host2".to_string(),
-                },
-            ],
-            timeseries[1].labels
-        );
-        assert_eq!(
-            timeseries[1].samples,
-            vec![Sample {
-                value: 7.0,
-                timestamp: 2000,
-            }]
-        );
-    }
+    PrometheusJsonResponse::success(PrometheusResponse::Series(series))
 }

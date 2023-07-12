@@ -19,3 +19,4 @@ pub(crate) mod delete_parser;
 pub(crate) mod insert_parser;
 pub(crate) mod query_parser;
 pub(crate) mod tql_parser;
+pub(crate) mod truncate_parser;

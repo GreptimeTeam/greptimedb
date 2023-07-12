@@ -130,6 +130,7 @@ impl StatementExecutor {
             | Statement::CreateExternalTable(_)
             | Statement::Alter(_)
             | Statement::DropTable(_)
+            | Statement::TruncateTable(_)
             | Statement::ShowCreateTable(_) => self
                 .sql_stmt_executor
                 .execute_sql(stmt, query_ctx)

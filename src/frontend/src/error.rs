@@ -395,7 +395,7 @@ pub enum Error {
         "Failed to create logical plan for prometheus query, source: {}",
         source
     ))]
-    PrometheusRemoteQueryPlan {
+    PromStoreRemoteQueryPlan {
         #[snafu(backtrace)]
         source: servers::error::Error,
     },
@@ -612,7 +612,7 @@ impl ErrorExt for Error {
             Error::HandleHeartbeatResponse { source, .. } => source.status_code(),
 
             Error::RuntimeResource { source, .. } => source.status_code(),
-            Error::PrometheusRemoteQueryPlan { source, .. }
+            Error::PromStoreRemoteQueryPlan { source, .. }
             | Error::ExecutePromql { source, .. } => source.status_code(),
 
             Error::SqlExecIntercepted { source, .. } => source.status_code(),

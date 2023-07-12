@@ -22,6 +22,7 @@ client = { path = "../client" }
 common-base = { path = "../common/base" }
 common-error = { path = "../common/error" }
 common-query = { path = "../common/query" }
+common-meta = { path = "../common/meta" }
 common-recordbatch = { path = "../common/recordbatch" }
 common-telemetry = { path = "../common/telemetry", features = [
     "deadlock_detection",
@@ -51,7 +52,7 @@ common-test-util = { path = "../common/test-util" }
 rexpect = "0.5"
 temp-env = "0.3"
 serde.workspace = true
-toml = "0.5"
+toml.workspace = true
 
 [build-dependencies]
 build-data = "0.1.4"

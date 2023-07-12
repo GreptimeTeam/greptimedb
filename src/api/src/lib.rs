@@ -15,7 +15,7 @@
 pub mod error;
 pub mod helper;
 
-pub mod prometheus {
+pub mod prom_store {
     pub mod remote {
         pub use greptime_proto::prometheus::remote::*;
     }

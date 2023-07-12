@@ -19,7 +19,7 @@ pub mod influxdb;
 pub mod mem_prof;
 pub mod opentsdb;
 mod pprof;
-pub mod prometheus;
+pub mod prom_store;
 pub mod script;
 
 #[cfg(feature = "dashboard")]
@@ -73,7 +73,7 @@ use crate::metrics_handler::MetricsHandler;
 use crate::query_handler::grpc::ServerGrpcQueryHandlerRef;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 use crate::query_handler::{
-    InfluxdbLineProtocolHandlerRef, OpentsdbProtocolHandlerRef, PrometheusProtocolHandlerRef,
+    InfluxdbLineProtocolHandlerRef, OpentsdbProtocolHandlerRef, PromStoreProtocolHandlerRef,
     ScriptHandlerRef,
 };
 use crate::server::Server;
@@ -118,7 +118,7 @@ pub struct HttpServer {
     options: HttpOptions,
     influxdb_handler: Option<InfluxdbLineProtocolHandlerRef>,
     opentsdb_handler: Option<OpentsdbProtocolHandlerRef>,
-    prom_handler: Option<PrometheusProtocolHandlerRef>,
+    prom_handler: Option<PromStoreProtocolHandlerRef>,
     script_handler: Option<ScriptHandlerRef>,
     shutdown_tx: Mutex<Option<Sender<()>>>,
     user_provider: Option<UserProviderRef>,
@@ -434,7 +434,7 @@ impl HttpServerBuilder {
         self
     }
 
-    pub fn with_prom_handler(&mut self, handler: PrometheusProtocolHandlerRef) -> &mut Self {
+    pub fn with_prom_handler(&mut self, handler: PromStoreProtocolHandlerRef) -> &mut Self {
         let _ = self.inner.prom_handler.get_or_insert(handler);
         self
     }
@@ -625,10 +625,10 @@ impl HttpServer {
             .with_state(api_state)
     }
 
-    fn route_prom<S>(&self, prom_handler: PrometheusProtocolHandlerRef) -> Router<S> {
+    fn route_prom<S>(&self, prom_handler: PromStoreProtocolHandlerRef) -> Router<S> {
         Router::new()
-            .route("/write", routing::post(prometheus::remote_write))
-            .route("/read", routing::post(prometheus::remote_read))
+            .route("/write", routing::post(prom_store::remote_write))
+            .route("/read", routing::post(prom_store::remote_read))
             .with_state(prom_handler)
     }
 

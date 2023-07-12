@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use api::prometheus::remote::{ReadRequest, WriteRequest};
+use api::prom_store::remote::{ReadRequest, WriteRequest};
 use axum::extract::{Query, RawBody, State};
 use axum::http::{header, StatusCode};
 use axum::response::IntoResponse;
@@ -29,8 +29,8 @@ use snafu::prelude::*;
 
 use crate::error::{self, Result};
 use crate::parse_catalog_and_schema_from_client_database_name;
-use crate::prometheus::snappy_decompress;
-use crate::query_handler::{PrometheusProtocolHandlerRef, PrometheusResponse};
+use crate::prom_store::snappy_decompress;
+use crate::query_handler::{PromStoreProtocolHandlerRef, PromStoreResponse};
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct DatabaseQuery {
@@ -47,14 +47,14 @@ impl Default for DatabaseQuery {
 
 #[axum_macros::debug_handler]
 pub async fn remote_write(
-    State(handler): State<PrometheusProtocolHandlerRef>,
+    State(handler): State<PromStoreProtocolHandlerRef>,
     Query(params): Query<DatabaseQuery>,
     RawBody(body): RawBody,
 ) -> Result<(StatusCode, ())> {
     let request = decode_remote_write_request(body).await?;
 
     let _timer = timer!(
-        crate::metrics::METRIC_HTTP_PROMETHEUS_WRITE_ELAPSED,
+        crate::metrics::METRIC_HTTP_PROM_STORE_WRITE_ELAPSED,
         &[(
             crate::metrics::METRIC_DB_LABEL,
             params.db.clone().unwrap_or_default()
@@ -72,7 +72,7 @@ pub async fn remote_write(
     Ok((StatusCode::NO_CONTENT, ()))
 }
 
-impl IntoResponse for PrometheusResponse {
+impl IntoResponse for PromStoreResponse {
     fn into_response(self) -> axum::response::Response {
         (
             [
@@ -87,14 +87,14 @@ impl IntoResponse for PrometheusResponse {
 
 #[axum_macros::debug_handler]
 pub async fn remote_read(
-    State(handler): State<PrometheusProtocolHandlerRef>,
+    State(handler): State<PromStoreProtocolHandlerRef>,
     Query(params): Query<DatabaseQuery>,
     RawBody(body): RawBody,
-) -> Result<PrometheusResponse> {
+) -> Result<PromStoreResponse> {
     let request = decode_remote_read_request(body).await?;
 
     let _timer = timer!(
-        crate::metrics::METRIC_HTTP_PROMETHEUS_READ_ELAPSED,
+        crate::metrics::METRIC_HTTP_PROM_STORE_READ_ELAPSED,
         &[(
             crate::metrics::METRIC_DB_LABEL,
             params.db.clone().unwrap_or_default()

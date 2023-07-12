@@ -16,7 +16,7 @@ pub mod distributed;
 mod grpc;
 mod influxdb;
 mod opentsdb;
-mod prometheus;
+mod prom_store;
 mod script;
 mod standalone;
 
@@ -39,6 +39,7 @@ use common_error::ext::BoxedError;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
 use common_meta::heartbeat::handler::HandlerGroupExecutor;
+use common_meta::key::TableMetadataManager;
 use common_query::Output;
 use common_telemetry::logging::{debug, info};
 use common_telemetry::timer;
@@ -60,11 +61,11 @@ use servers::error::{ExecuteQuerySnafu, ParsePromQLSnafu};
 use servers::interceptor::{
     PromQueryInterceptor, PromQueryInterceptorRef, SqlQueryInterceptor, SqlQueryInterceptorRef,
 };
-use servers::prom::PromHandler;
+use servers::prometheus::PrometheusHandler;
 use servers::query_handler::grpc::{GrpcQueryHandler, GrpcQueryHandlerRef};
 use servers::query_handler::sql::SqlQueryHandler;
 use servers::query_handler::{
-    InfluxdbLineProtocolHandler, OpentsdbProtocolHandler, PrometheusProtocolHandler, ScriptHandler,
+    InfluxdbLineProtocolHandler, OpentsdbProtocolHandler, PromStoreProtocolHandler, ScriptHandler,
 };
 use session::context::QueryContextRef;
 use snafu::prelude::*;
@@ -95,9 +96,9 @@ pub trait FrontendInstance:
     + SqlQueryHandler<Error = Error>
     + OpentsdbProtocolHandler
     + InfluxdbLineProtocolHandler
-    + PrometheusProtocolHandler
+    + PromStoreProtocolHandler
     + ScriptHandler
-    + PromHandler
+    + PrometheusHandler
     + Send
     + Sync
     + 'static
@@ -149,17 +150,20 @@ impl Instance {
         let table_routes = Arc::new(TableRoutes::new(meta_client.clone()));
         let partition_manager = Arc::new(PartitionRuleManager::new(table_routes));
 
+        let table_metadata_manager = Arc::new(TableMetadataManager::new(meta_backend.clone()));
         let mut catalog_manager = FrontendCatalogManager::new(
             meta_backend.clone(),
             meta_backend.clone(),
             partition_manager.clone(),
             datanode_clients.clone(),
+            table_metadata_manager.clone(),
         );
 
         let dist_instance = DistInstance::new(
             meta_client.clone(),
             Arc::new(catalog_manager.clone()),
             datanode_clients.clone(),
+            table_metadata_manager.clone(),
         );
         let dist_instance = Arc::new(dist_instance);
 
@@ -524,7 +528,7 @@ impl SqlQueryHandler for Instance {
         query: &PromQuery,
         query_ctx: QueryContextRef,
     ) -> Vec<Result<Output>> {
-        let result = PromHandler::do_query(self, query, query_ctx)
+        let result = PrometheusHandler::do_query(self, query, query_ctx)
             .await
             .with_context(|_| ExecutePromqlSnafu {
                 query: format!("{query:?}"),
@@ -566,7 +570,7 @@ impl SqlQueryHandler for Instance {
 }
 
 #[async_trait]
-impl PromHandler for Instance {
+impl PrometheusHandler for Instance {
     async fn do_query(
         &self,
         query: &PromQuery,
@@ -644,6 +648,9 @@ pub fn check_permission(
         },
         Statement::Copy(sql::statements::copy::Copy::CopyDatabase(stmt)) => {
             validate_param(&stmt.database_name, query_ctx)?
+        }
+        Statement::TruncateTable(stmt) => {
+            validate_param(stmt.table_name(), query_ctx)?;
         }
     }
     Ok(())

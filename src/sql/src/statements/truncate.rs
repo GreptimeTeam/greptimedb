@@ -12,18 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod grpc;
-pub mod influxdb;
-pub mod mysql;
-pub mod opentsdb;
-pub mod postgres;
-pub mod prom_store;
-pub mod prometheus;
+use sqlparser::ast::ObjectName;
 
-pub use grpc::GrpcOptions;
-pub use influxdb::InfluxdbOptions;
-pub use mysql::MysqlOptions;
-pub use opentsdb::OpentsdbOptions;
-pub use postgres::PostgresOptions;
-pub use prom_store::PromStoreOptions;
-pub use prometheus::PrometheusOptions;
+/// TRUNCATE TABLE statement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TruncateTable {
+    table_name: ObjectName,
+}
+
+impl TruncateTable {
+    /// Creates a statement for `TRUNCATE TABLE`
+    pub fn new(table_name: ObjectName) -> Self {
+        Self { table_name }
+    }
+
+    pub fn table_name(&self) -> &ObjectName {
+        &self.table_name
+    }
+}

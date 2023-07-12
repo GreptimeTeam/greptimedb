@@ -33,10 +33,12 @@ use tonic::{Request, Response};
 use crate::error::InvalidQuerySnafu;
 use crate::grpc::handler::create_query_context;
 use crate::grpc::TonicResult;
-use crate::prom::{retrieve_metric_name_and_result_type, PromHandlerRef, PromJsonResponse};
+use crate::prometheus::{
+    retrieve_metric_name_and_result_type, PrometheusHandlerRef, PrometheusJsonResponse,
+};
 
 pub struct PrometheusGatewayService {
-    handler: PromHandlerRef,
+    handler: PrometheusHandlerRef,
 }
 
 #[async_trait]
@@ -86,7 +88,7 @@ impl PrometheusGateway for PrometheusGatewayService {
 }
 
 impl PrometheusGatewayService {
-    pub fn new(handler: PromHandlerRef) -> Self {
+    pub fn new(handler: PrometheusHandlerRef) -> Self {
         Self { handler }
     }
 
@@ -95,7 +97,7 @@ impl PrometheusGatewayService {
         query: PromQuery,
         ctx: Arc<QueryContext>,
         is_range_query: bool,
-    ) -> PromJsonResponse {
+    ) -> PrometheusJsonResponse {
         let _timer = timer!(
             crate::metrics::METRIC_SERVER_GRPC_PROM_REQUEST_TIMER,
             &[(crate::metrics::METRIC_DB_LABEL, ctx.get_db_string())]
@@ -106,8 +108,11 @@ impl PrometheusGatewayService {
             match retrieve_metric_name_and_result_type(&query.query) {
                 Ok((metric_name, result_type)) => (metric_name.unwrap_or_default(), result_type),
                 Err(err) => {
-                    return PromJsonResponse::error(err.status_code().to_string(), err.to_string())
-                        .0
+                    return PrometheusJsonResponse::error(
+                        err.status_code().to_string(),
+                        err.to_string(),
+                    )
+                    .0
                 }
             };
         // range query only returns matrix
@@ -115,7 +120,7 @@ impl PrometheusGatewayService {
             result_type = ValueType::Matrix;
         };
 
-        PromJsonResponse::from_query_result(result, metric_name, result_type)
+        PrometheusJsonResponse::from_query_result(result, metric_name, result_type)
             .await
             .0
     }

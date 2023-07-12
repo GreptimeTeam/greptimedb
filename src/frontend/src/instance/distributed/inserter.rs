@@ -181,6 +181,7 @@ mod tests {
     };
     use client::client_manager::DatanodeClients;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+    use common_meta::key::TableMetadataManager;
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_meta::kv_backend::{KvBackend, KvBackendRef};
     use common_meta::rpc::store::PutRequest;
@@ -262,6 +263,7 @@ mod tests {
     async fn test_split_inserts() {
         let backend = prepare_mocked_backend().await;
 
+        let table_metadata_manager = Arc::new(TableMetadataManager::new(backend.clone()));
         let table_name = "one_column_partitioning_table";
         create_testing_table(&backend, table_name).await;
 
@@ -270,6 +272,7 @@ mod tests {
             Arc::new(MockKvCacheInvalidator::default()),
             create_partition_rule_manager().await,
             Arc::new(DatanodeClients::default()),
+            table_metadata_manager,
         ));
 
         let inserter = DistInserter::new(

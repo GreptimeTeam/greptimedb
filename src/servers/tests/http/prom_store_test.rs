@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use api::prometheus::remote::{
+use api::prom_store::remote::{
     LabelMatcher, Query, QueryResult, ReadRequest, ReadResponse, WriteRequest,
 };
 use api::v1::greptime_request::Request;
@@ -29,11 +29,11 @@ use query::plan::LogicalPlan;
 use query::query_engine::DescribeResult;
 use servers::error::{Error, Result};
 use servers::http::{HttpOptions, HttpServerBuilder};
-use servers::prometheus;
-use servers::prometheus::{snappy_compress, Metrics};
+use servers::prom_store;
+use servers::prom_store::{snappy_compress, Metrics};
 use servers::query_handler::grpc::GrpcQueryHandler;
 use servers::query_handler::sql::SqlQueryHandler;
-use servers::query_handler::{PrometheusProtocolHandler, PrometheusResponse};
+use servers::query_handler::{PromStoreProtocolHandler, PromStoreResponse};
 use session::context::QueryContextRef;
 use tokio::sync::mpsc;
 
@@ -55,7 +55,7 @@ impl GrpcQueryHandler for DummyInstance {
 }
 
 #[async_trait]
-impl PrometheusProtocolHandler for DummyInstance {
+impl PromStoreProtocolHandler for DummyInstance {
     async fn write(&self, request: WriteRequest, ctx: QueryContextRef) -> Result<()> {
         let _ = self
             .tx
@@ -64,7 +64,7 @@ impl PrometheusProtocolHandler for DummyInstance {
 
         Ok(())
     }
-    async fn read(&self, request: ReadRequest, ctx: QueryContextRef) -> Result<PrometheusResponse> {
+    async fn read(&self, request: ReadRequest, ctx: QueryContextRef) -> Result<PromStoreResponse> {
         let _ = self
             .tx
             .send((ctx.current_schema(), request.encode_to_vec()))
@@ -72,11 +72,11 @@ impl PrometheusProtocolHandler for DummyInstance {
 
         let response = ReadResponse {
             results: vec![QueryResult {
-                timeseries: prometheus::mock_timeseries(),
+                timeseries: prom_store::mock_timeseries(),
             }],
         };
 
-        Ok(PrometheusResponse {
+        Ok(PromStoreResponse {
             content_type: "application/x-protobuf".to_string(),
             content_encoding: "snappy".to_string(),
             body: response.encode_to_vec(),
@@ -148,7 +148,7 @@ async fn test_prometheus_remote_write_read() {
     let client = TestClient::new(app);
 
     let write_request = WriteRequest {
-        timeseries: prometheus::mock_timeseries(),
+        timeseries: prom_store::mock_timeseries(),
         ..Default::default()
     };
 
@@ -174,7 +174,7 @@ async fn test_prometheus_remote_write_read() {
             start_timestamp_ms: 1000,
             end_timestamp_ms: 2000,
             matchers: vec![LabelMatcher {
-                name: prometheus::METRIC_NAME_LABEL.to_string(),
+                name: prom_store::METRIC_NAME_LABEL.to_string(),
                 value: "metric1".to_string(),
                 r#type: 0,
             }],
@@ -204,7 +204,7 @@ async fn test_prometheus_remote_write_read() {
     assert_eq!(response.results.len(), 1);
     assert_eq!(
         response.results[0].timeseries,
-        prometheus::mock_timeseries()
+        prom_store::mock_timeseries()
     );
 
     // Read from public database
