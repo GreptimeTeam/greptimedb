@@ -23,7 +23,7 @@ use api::v1::{
 use client::{Client, Database, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::consts::{MIN_USER_TABLE_ID, MITO_ENGINE};
 use common_query::Output;
-use servers::prom::{PromData, PromJsonResponse, PromResponse, PromSeries};
+use servers::prometheus::{PromData, PromSeries, PrometheusJsonResponse, PrometheusResponse};
 use servers::server::Server;
 use tests_integration::test_util::{setup_grpc_server, StorageType};
 
@@ -379,10 +379,11 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
         .unwrap()
         .into_inner()
         .body;
-    let instant_query_result = serde_json::from_slice::<PromJsonResponse>(&json_bytes).unwrap();
-    let expected = PromJsonResponse {
+    let instant_query_result =
+        serde_json::from_slice::<PrometheusJsonResponse>(&json_bytes).unwrap();
+    let expected = PrometheusJsonResponse {
         status: "success".to_string(),
-        data: PromResponse::PromData(PromData {
+        data: PrometheusResponse::PromData(PromData {
             result_type: "vector".to_string(),
             result: vec![
                 PromSeries {
@@ -430,10 +431,10 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
         .unwrap()
         .into_inner()
         .body;
-    let range_query_result = serde_json::from_slice::<PromJsonResponse>(&json_bytes).unwrap();
-    let expected = PromJsonResponse {
+    let range_query_result = serde_json::from_slice::<PrometheusJsonResponse>(&json_bytes).unwrap();
+    let expected = PrometheusJsonResponse {
         status: "success".to_string(),
-        data: PromResponse::PromData(PromData {
+        data: PrometheusResponse::PromData(PromData {
             result_type: "matrix".to_string(),
             result: vec![
                 PromSeries {
@@ -481,10 +482,10 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
         .unwrap()
         .into_inner()
         .body;
-    let range_query_result = serde_json::from_slice::<PromJsonResponse>(&json_bytes).unwrap();
-    let expected = PromJsonResponse {
+    let range_query_result = serde_json::from_slice::<PrometheusJsonResponse>(&json_bytes).unwrap();
+    let expected = PrometheusJsonResponse {
         status: "success".to_string(),
-        data: PromResponse::PromData(PromData {
+        data: PrometheusResponse::PromData(PromData {
             result_type: "matrix".to_string(),
             result: vec![],
         }),

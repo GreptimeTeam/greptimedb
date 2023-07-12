@@ -28,7 +28,7 @@ use servers::metrics_handler::MetricsHandler;
 use servers::mysql::server::{MysqlServer, MysqlSpawnConfig, MysqlSpawnRef};
 use servers::opentsdb::OpentsdbServer;
 use servers::postgres::PostgresServer;
-use servers::prom::PromServer;
+use servers::prometheus::PrometheusServer;
 use servers::query_handler::grpc::ServerGrpcQueryHandlerAdaptor;
 use servers::query_handler::sql::ServerSqlQueryHandlerAdaptor;
 use servers::server::Server;
@@ -38,7 +38,7 @@ use crate::error::Error::StartServer;
 use crate::error::{self, Result};
 use crate::frontend::FrontendOptions;
 use crate::instance::FrontendInstance;
-use crate::service_config::{InfluxdbOptions, PrometheusOptions};
+use crate::service_config::{InfluxdbOptions, PromStoreOptions};
 
 pub(crate) struct Services;
 
@@ -172,8 +172,8 @@ impl Services {
             }
 
             if matches!(
-                opts.prometheus_options,
-                Some(PrometheusOptions { enable: true })
+                opts.prom_store_options,
+                Some(PromStoreOptions { enable: true })
             ) {
                 let _ = http_server_builder.with_prom_handler(instance.clone());
             }
@@ -187,10 +187,10 @@ impl Services {
             result.push((Box::new(http_server), http_addr));
         }
 
-        if let Some(prom_options) = &opts.prom_options {
-            let prom_addr = parse_addr(&prom_options.addr)?;
+        if let Some(prometheus_options) = &opts.prometheus_options {
+            let prom_addr = parse_addr(&prometheus_options.addr)?;
 
-            let mut prom_server = PromServer::create_server(instance);
+            let mut prom_server = PrometheusServer::create_server(instance);
             if let Some(user_provider) = user_provider {
                 prom_server.set_user_provider(user_provider);
             }

@@ -15,25 +15,23 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct PromOptions {
-    pub addr: String,
+pub struct PromStoreOptions {
+    pub enable: bool,
 }
 
-impl Default for PromOptions {
+impl Default for PromStoreOptions {
     fn default() -> Self {
-        Self {
-            addr: "127.0.0.1:4004".to_string(),
-        }
+        Self { enable: true }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::PromOptions;
+    use super::PromStoreOptions;
 
     #[test]
-    fn test_prometheus_options() {
-        let default = PromOptions::default();
-        assert_eq!(default.addr, "127.0.0.1:4004".to_string());
+    fn test_prom_store_options() {
+        let default = PromStoreOptions::default();
+        assert!(default.enable);
     }
 }

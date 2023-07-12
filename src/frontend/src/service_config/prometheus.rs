@@ -16,12 +16,14 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PrometheusOptions {
-    pub enable: bool,
+    pub addr: String,
 }
 
 impl Default for PrometheusOptions {
     fn default() -> Self {
-        Self { enable: true }
+        Self {
+            addr: "127.0.0.1:4004".to_string(),
+        }
     }
 }
 
@@ -32,6 +34,6 @@ mod tests {
     #[test]
     fn test_prometheus_options() {
         let default = PrometheusOptions::default();
-        assert!(default.enable);
+        assert_eq!(default.addr, "127.0.0.1:4004".to_string());
     }
 }

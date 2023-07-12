@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::prometheus::remote::read_request::ResponseType;
-use api::prometheus::remote::{Query, QueryResult, ReadRequest, ReadResponse, WriteRequest};
+use api::prom_store::remote::read_request::ResponseType;
+use api::prom_store::remote::{Query, QueryResult, ReadRequest, ReadResponse, WriteRequest};
 use async_trait::async_trait;
 use common_catalog::format_full_table_name;
 use common_error::prelude::BoxedError;
@@ -23,17 +23,17 @@ use common_telemetry::logging;
 use metrics::counter;
 use prost::Message;
 use servers::error::{self, Result as ServerResult};
-use servers::prometheus::{self, Metrics};
-use servers::query_handler::{PrometheusProtocolHandler, PrometheusResponse};
+use servers::prom_store::{self, Metrics};
+use servers::query_handler::{PromStoreProtocolHandler, PromStoreResponse};
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
 
 use crate::error::{
-    CatalogSnafu, ExecLogicalPlanSnafu, PrometheusRemoteQueryPlanSnafu, ReadTableSnafu, Result,
+    CatalogSnafu, ExecLogicalPlanSnafu, PromStoreRemoteQueryPlanSnafu, ReadTableSnafu, Result,
     TableNotFoundSnafu,
 };
 use crate::instance::Instance;
-use crate::metrics::PROMETHEUS_REMOTE_WRITE_SAMPLES;
+use crate::metrics::PROM_STORE_REMOTE_WRITE_SAMPLES;
 
 const SAMPLES_RESPONSE_TYPE: i32 = ResponseType::Samples as i32;
 
@@ -72,7 +72,7 @@ async fn to_query_result(table_name: &str, output: Output) -> ServerResult<Query
         .await
         .context(error::CollectRecordbatchSnafu)?;
     Ok(QueryResult {
-        timeseries: prometheus::recordbatches_to_timeseries(table_name, recordbatches)?,
+        timeseries: prom_store::recordbatches_to_timeseries(table_name, recordbatches)?,
     })
 }
 
@@ -102,7 +102,7 @@ impl Instance {
             })?;
 
         let logical_plan =
-            prometheus::query_to_plan(dataframe, query).context(PrometheusRemoteQueryPlanSnafu)?;
+            prom_store::query_to_plan(dataframe, query).context(PromStoreRemoteQueryPlanSnafu)?;
 
         logging::debug!(
             "Prometheus remote read, table: {}, logical plan: {}",
@@ -127,7 +127,7 @@ impl Instance {
         let schema_name = ctx.current_schema();
 
         for query in queries {
-            let table_name = prometheus::table_name(query)?;
+            let table_name = prom_store::table_name(query)?;
 
             let output = self
                 .handle_remote_query(&ctx, &catalog_name, &schema_name, &table_name, query)
@@ -144,16 +144,16 @@ impl Instance {
 }
 
 #[async_trait]
-impl PrometheusProtocolHandler for Instance {
+impl PromStoreProtocolHandler for Instance {
     async fn write(&self, request: WriteRequest, ctx: QueryContextRef) -> ServerResult<()> {
-        let (requests, samples) = prometheus::to_grpc_insert_requests(request)?;
+        let (requests, samples) = prom_store::to_grpc_insert_requests(request)?;
         let _ = self
             .handle_inserts(requests, ctx)
             .await
             .map_err(BoxedError::new)
             .context(error::ExecuteGrpcQuerySnafu)?;
 
-        counter!(PROMETHEUS_REMOTE_WRITE_SAMPLES, samples as u64);
+        counter!(PROM_STORE_REMOTE_WRITE_SAMPLES, samples as u64);
         Ok(())
     }
 
@@ -161,7 +161,7 @@ impl PrometheusProtocolHandler for Instance {
         &self,
         request: ReadRequest,
         ctx: QueryContextRef,
-    ) -> ServerResult<PrometheusResponse> {
+    ) -> ServerResult<PromStoreResponse> {
         let response_type = negotiate_response_type(&request.accepted_response_types)?;
 
         // TODO(dennis): use read_hints to speedup query if possible
@@ -179,10 +179,10 @@ impl PrometheusProtocolHandler for Instance {
                 };
 
                 // TODO(dennis): may consume too much memory, adds flow control
-                Ok(PrometheusResponse {
+                Ok(PromStoreResponse {
                     content_type: "application/x-protobuf".to_string(),
                     content_encoding: "snappy".to_string(),
-                    body: prometheus::snappy_compress(&response.encode_to_vec())?,
+                    body: prom_store::snappy_compress(&response.encode_to_vec())?,
                 })
             }
             ResponseType::StreamedXorChunks => error::NotSupportedSnafu {

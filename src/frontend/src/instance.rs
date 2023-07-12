@@ -16,7 +16,7 @@ pub mod distributed;
 mod grpc;
 mod influxdb;
 mod opentsdb;
-mod prometheus;
+mod prom_store;
 mod script;
 mod standalone;
 
@@ -60,11 +60,11 @@ use servers::error::{ExecuteQuerySnafu, ParsePromQLSnafu};
 use servers::interceptor::{
     PromQueryInterceptor, PromQueryInterceptorRef, SqlQueryInterceptor, SqlQueryInterceptorRef,
 };
-use servers::prom::PromHandler;
+use servers::prometheus::PrometheusHandler;
 use servers::query_handler::grpc::{GrpcQueryHandler, GrpcQueryHandlerRef};
 use servers::query_handler::sql::SqlQueryHandler;
 use servers::query_handler::{
-    InfluxdbLineProtocolHandler, OpentsdbProtocolHandler, PrometheusProtocolHandler, ScriptHandler,
+    InfluxdbLineProtocolHandler, OpentsdbProtocolHandler, PromStoreProtocolHandler, ScriptHandler,
 };
 use session::context::QueryContextRef;
 use snafu::prelude::*;
@@ -95,9 +95,9 @@ pub trait FrontendInstance:
     + SqlQueryHandler<Error = Error>
     + OpentsdbProtocolHandler
     + InfluxdbLineProtocolHandler
-    + PrometheusProtocolHandler
+    + PromStoreProtocolHandler
     + ScriptHandler
-    + PromHandler
+    + PrometheusHandler
     + Send
     + Sync
     + 'static
@@ -524,7 +524,7 @@ impl SqlQueryHandler for Instance {
         query: &PromQuery,
         query_ctx: QueryContextRef,
     ) -> Vec<Result<Output>> {
-        let result = PromHandler::do_query(self, query, query_ctx)
+        let result = PrometheusHandler::do_query(self, query, query_ctx)
             .await
             .with_context(|_| ExecutePromqlSnafu {
                 query: format!("{query:?}"),
@@ -566,7 +566,7 @@ impl SqlQueryHandler for Instance {
 }
 
 #[async_trait]
-impl PromHandler for Instance {
+impl PrometheusHandler for Instance {
     async fn do_query(
         &self,
         query: &PromQuery,
