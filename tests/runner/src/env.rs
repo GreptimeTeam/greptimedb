@@ -183,12 +183,21 @@ impl Env {
             _ => panic!("Unexpected subcommand: {subcommand}"),
         };
 
+        if util::check_port(check_ip_addr.parse().unwrap(), Duration::from_secs(1)).await {
+            panic!(
+                "Port {check_ip_addr} is already in use, please check and retry.",
+                check_ip_addr = check_ip_addr
+            );
+        }
+
         let mut process = Command::new("./greptime")
             .current_dir(util::get_binary_dir("debug"))
             .args(args)
             .stdout(log_file)
             .spawn()
-            .unwrap_or_else(|_| panic!("Failed to start the DB with subcommand {subcommand}"));
+            .unwrap_or_else(|error| {
+                panic!("Failed to start the DB with subcommand {subcommand},Error: {error}")
+            });
 
         if !util::check_port(check_ip_addr.parse().unwrap(), Duration::from_secs(10)).await {
             Env::stop_server(&mut process);
