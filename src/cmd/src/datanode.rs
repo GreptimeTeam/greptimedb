@@ -206,6 +206,7 @@ mod tests {
             metasrv_addrs = ["127.0.0.1:3002"]
             timeout_millis = 3000
             connect_timeout_millis = 5000
+            ddl_timeout_millis= 10000
             tcp_nodelay = true
 
             [wal]
@@ -259,10 +260,12 @@ mod tests {
             timeout_millis,
             connect_timeout_millis,
             tcp_nodelay,
+            ddl_timeout_millis,
         } = options.meta_client_options.unwrap();
 
         assert_eq!(vec!["127.0.0.1:3002".to_string()], metasrv_addr);
         assert_eq!(5000, connect_timeout_millis);
+        assert_eq!(10000, ddl_timeout_millis);
         assert_eq!(3000, timeout_millis);
         assert!(tcp_nodelay);
 

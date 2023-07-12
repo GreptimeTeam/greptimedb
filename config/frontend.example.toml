@@ -59,6 +59,8 @@ addr = "127.0.0.1:4004"
 [meta_client_options]
 metasrv_addrs = ["127.0.0.1:3002"]
 timeout_millis = 3000
+# DDL timeouts options.
+ddl_timeout_millis = 10000
 connect_timeout_millis = 5000
 tcp_nodelay = true
 
