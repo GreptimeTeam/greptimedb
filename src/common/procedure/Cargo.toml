@@ -7,7 +7,7 @@ license.workspace = true
 [dependencies]
 async-trait.workspace = true
 async-stream.workspace = true
-backon = "0.4.0"
+backon = "0.4"
 common-error = { path = "../error" }
 common-runtime = { path = "../runtime" }
 common-telemetry = { path = "../telemetry" }
