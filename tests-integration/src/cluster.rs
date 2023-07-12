@@ -128,12 +128,8 @@ impl GreptimeDbClusterBuilder {
             ..Default::default()
         };
 
-        let mock = meta_srv::mocks::mock(
-            opt,
-            self.kv_store.clone(),
-            None,
-            Some(datanode_clients),
-        ).await;
+        let mock =
+            meta_srv::mocks::mock(opt, self.kv_store.clone(), None, Some(datanode_clients)).await;
 
         let metadata_service = DefaultMetadataService::new(mock.meta_srv.kv_store());
         metadata_service

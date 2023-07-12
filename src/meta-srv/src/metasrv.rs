@@ -19,8 +19,8 @@ use std::sync::Arc;
 
 use api::v1::meta::Peer;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-use common_procedure::options::ProcedureConfig;
 use common_meta::key::TableMetadataManagerRef;
+use common_procedure::options::ProcedureConfig;
 use common_procedure::ProcedureManagerRef;
 use common_telemetry::logging::LoggingOptions;
 use common_telemetry::{error, info, warn};
