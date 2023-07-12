@@ -48,7 +48,6 @@ use datanode::instance::InstanceRef as DnInstanceRef;
 use datatypes::schema::Schema;
 use distributed::DistInstance;
 use meta_client::client::{MetaClient, MetaClientBuilder};
-use meta_client::MetaClientOptions;
 use partition::manager::PartitionRuleManager;
 use partition::route::TableRoutes;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
@@ -216,21 +215,21 @@ impl Instance {
     }
 
     async fn create_meta_client(opts: &FrontendOptions) -> Result<Arc<MetaClient>> {
-        let metasrv_addr = &opts
+        let meta_client_options = opts
             .meta_client_options
             .as_ref()
-            .context(MissingMetasrvOptsSnafu)?
-            .metasrv_addrs;
+            .context(MissingMetasrvOptsSnafu)?;
         info!(
             "Creating Frontend instance in distributed mode with Meta server addr {:?}",
-            metasrv_addr
+            meta_client_options.metasrv_addrs
         );
 
-        let meta_config = MetaClientOptions::default();
         let channel_config = ChannelConfig::new()
-            .timeout(Duration::from_millis(meta_config.timeout_millis))
-            .connect_timeout(Duration::from_millis(meta_config.connect_timeout_millis))
-            .tcp_nodelay(meta_config.tcp_nodelay);
+            .timeout(Duration::from_millis(meta_client_options.timeout_millis))
+            .connect_timeout(Duration::from_millis(
+                meta_client_options.connect_timeout_millis,
+            ))
+            .tcp_nodelay(meta_client_options.tcp_nodelay);
 
         let channel_manager = ChannelManager::with_config(channel_config);
         channel_manager.start_channel_recycle();
@@ -243,7 +242,7 @@ impl Instance {
             .channel_manager(channel_manager)
             .build();
         meta_client
-            .start(metasrv_addr)
+            .start(&meta_client_options.metasrv_addrs)
             .await
             .context(error::StartMetaClientSnafu)?;
         Ok(Arc::new(meta_client))
