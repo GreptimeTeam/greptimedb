@@ -14,16 +14,25 @@
 
 //! Common traits and structures for the procedure framework.
 
-pub mod error;
-pub mod local;
-pub mod options;
-mod procedure;
-pub mod store;
-pub mod watcher;
+use std::time::Duration;
 
-pub use crate::error::{Error, Result};
-pub use crate::procedure::{
-    BoxedProcedure, Context, ContextProvider, LockKey, Procedure, ProcedureId, ProcedureManager,
-    ProcedureManagerRef, ProcedureState, ProcedureWithId, Status,
-};
-pub use crate::watcher::Watcher;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProcedureConfig {
+    /// Max retry times of procedure.
+    pub max_retry_times: usize,
+    /// Initial retry delay of procedures, increases exponentially.
+    #[serde(with = "humantime_serde")]
+    pub retry_delay: Duration,
+}
+
+impl Default for ProcedureConfig {
+    fn default() -> ProcedureConfig {
+        ProcedureConfig {
+            max_retry_times: 3,
+            retry_delay: Duration::from_millis(500),
+        }
+    }
+}

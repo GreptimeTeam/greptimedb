@@ -20,6 +20,7 @@ use std::time::Duration;
 use common_base::readable_size::ReadableSize;
 use common_base::Plugins;
 use common_error::prelude::BoxedError;
+pub use common_procedure::options::ProcedureConfig;
 use common_telemetry::info;
 use common_telemetry::logging::LoggingOptions;
 use meta_client::MetaClientOptions;
@@ -340,25 +341,6 @@ impl From<&DatanodeOptions> for StorageEngineConfig {
             auto_flush_interval: value.storage.flush.auto_flush_interval,
             global_write_buffer_size: value.storage.flush.global_write_buffer_size,
             global_ttl: value.storage.global_ttl,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct ProcedureConfig {
-    /// Max retry times of procedure.
-    pub max_retry_times: usize,
-    /// Initial retry delay of procedures, increases exponentially.
-    #[serde(with = "humantime_serde")]
-    pub retry_delay: Duration,
-}
-
-impl Default for ProcedureConfig {
-    fn default() -> ProcedureConfig {
-        ProcedureConfig {
-            max_retry_times: 3,
-            retry_delay: Duration::from_millis(500),
         }
     }
 }
