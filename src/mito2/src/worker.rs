@@ -38,6 +38,9 @@ use crate::region::{RegionMap, RegionMapRef};
 use crate::worker::channel::{Receiver, RequestBuffer, Sender};
 use crate::worker::request::{RequestBody, WorkerRequest};
 
+/// Identifier for a worker.
+pub(crate) type WorkerId = u32;
+
 /// A fixed size group of [RegionWorkers](RegionWorker).
 ///
 /// The group binds each region to a specific [RegionWorker].
@@ -86,14 +89,15 @@ impl WorkerGroup {
         let mut hasher = DefaultHasher::new();
         region_id.hash(&mut hasher);
         let value = hasher.finish() as usize;
-        let index = value & (self.workers.len() - 1);
+        let index = value_to_index(value, self.workers.len());
 
         &self.workers[index]
     }
 }
 
-/// Identifier for a worker.
-pub(crate) type WorkerId = u32;
+fn value_to_index(value: usize, num_workers: usize) -> usize {
+    value & (num_workers - 1)
+}
 
 /// Worker to write and alter regions bound to it.
 #[derive(Debug)]
@@ -235,8 +239,6 @@ impl<S> RegionWorkerThread<S> {
         self.handle_dml_requests(dml_requests).await;
 
         self.handle_ddl_requests(ddl_requests).await;
-
-        todo!()
     }
 
     /// Takes and handles all dml requests.
@@ -268,6 +270,34 @@ impl<S> RegionWorkerThread<S> {
                 let _ = sender.send(res);
             }
         }
-        unimplemented!()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_util::TestEnv;
+
+    #[test]
+    fn test_value_to_index() {
+        let num_workers = 1;
+        for i in 0..10 {
+            assert_eq!(0, value_to_index(i, num_workers));
+        }
+
+        let num_workers = 4;
+        for i in 0..10 {
+            assert_eq!(i % 4, value_to_index(i, num_workers));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_worker_group_start_stop() {
+        let env = TestEnv::new("group-stop");
+        let group = env
+            .create_worker_group(&MitoConfig { num_workers: 4 })
+            .await;
+
+        group.stop().await.unwrap();
     }
 }

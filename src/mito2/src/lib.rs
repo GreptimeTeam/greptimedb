@@ -16,6 +16,9 @@
 //!
 //! Mito is the a region engine to store timeseries data.
 
+#[cfg(any(test, feature = "test"))]
+pub mod test_util;
+
 // TODO(yingwen): Remove all `allow(dead_code)` after finish refactoring mito.
 pub mod config;
 #[allow(dead_code)]

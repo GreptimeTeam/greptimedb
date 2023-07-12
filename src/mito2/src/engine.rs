@@ -86,3 +86,17 @@ impl EngineInner {
         receiver.await.context(RecvSnafu)?
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_util::TestEnv;
+
+    #[tokio::test]
+    async fn test_engine_new_stop() {
+        let env = TestEnv::new("engine-stop");
+        let engine = env.create_engine(MitoConfig::default()).await;
+
+        engine.stop().await.unwrap();
+    }
+}
