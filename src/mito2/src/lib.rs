@@ -192,4 +192,9 @@ mod worker;
 /// StoreSchema o-- ColumnMetadata
 /// ColumnsMetadata o-- ColumnMetadata
 /// ```
+///
+/// ## Region workers
+///
+/// The engine handles DMLs and DDLs in dedicated [workers](crate::worker::WorkerGroup).
+///
 mod docs {}

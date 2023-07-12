@@ -44,6 +44,38 @@ pub(crate) type WorkerId = u32;
 /// A fixed size group of [RegionWorkers](RegionWorker).
 ///
 /// The group binds each region to a specific [RegionWorker].
+///
+/// ```mermaid
+/// graph LR
+///
+/// WorkerRequest -- Route by region id --> Worker0 & Worker1
+///
+/// subgraph MitoEngine
+///     subgraph WorkerGroup
+///         Worker0["RegionWorker 0"]
+///         Worker1["RegionWorker 1"]
+///     end
+/// end
+///
+/// Chan0[" Request channel 0"]
+/// Chan1[" Request channel 1"]
+/// WorkerThread1["RegionWorkerThread 1"]
+///
+/// subgraph WorkerThread0["RegionWorkerThread 0"]
+///     subgraph RegionMap["RegionMap (regions bound to worker 0)"]
+///         Region0["Region 0"]
+///         Region2["Region 2"]
+///     end
+///     Buffer0["RequestBuffer"]
+///
+///     Buffer0 -- modify regions --> RegionMap
+/// end
+///
+/// Worker0 --> Chan0
+/// Worker1 --> Chan1
+/// Chan0 --> Buffer0
+/// Chan1 --> WorkerThread1
+/// ```
 #[derive(Debug)]
 pub(crate) struct WorkerGroup {
     workers: Vec<RegionWorker>,
