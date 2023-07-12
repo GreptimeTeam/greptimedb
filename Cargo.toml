@@ -46,6 +46,7 @@ members = [
     "src/sql",
     "src/storage",
     "src/store-api",
+    "src/stream",
     "src/table",
     "src/table-procedure",
     "tests-integration",

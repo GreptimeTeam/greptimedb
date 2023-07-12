@@ -1,0 +1,12 @@
+[package]
+name = "stream"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+timely = "0.12"
+differential-dataflow = "0.12"
+abomonation = "0.7.3"
+abomonation_derive = "0.5"
