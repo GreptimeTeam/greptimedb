@@ -12,25 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::any::Any;
+//! manifest storage
 
-use common_error::prelude::*;
-
-#[derive(Debug, Snafu)]
-#[snafu(visibility(pub))]
-pub enum Error {}
-
-pub type Result<T> = std::result::Result<T, Error>;
-
-impl ErrorExt for Error {
-    #[allow(clippy::match_single_binding)]
-    fn status_code(&self) -> StatusCode {
-        match self {
-            _ => todo!(),
-        }
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-}
+mod action;
+mod gc_task;
+mod helper;
+#[allow(unused_variables)]
+mod impl_;

@@ -12,25 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::any::Any;
+use common_runtime::TaskFunction;
 
-use common_error::prelude::*;
+struct ManifestGcTask {}
 
-#[derive(Debug, Snafu)]
-#[snafu(visibility(pub))]
-pub enum Error {}
-
-pub type Result<T> = std::result::Result<T, Error>;
-
-impl ErrorExt for Error {
-    #[allow(clippy::match_single_binding)]
-    fn status_code(&self) -> StatusCode {
-        match self {
-            _ => todo!(),
-        }
+#[async_trait::async_trait]
+impl TaskFunction<()> for ManifestGcTask {
+    /// Invoke the task.
+    async fn call(&mut self) -> std::result::Result<(), ()> {
+        todo!()
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
+    /// Name of the task.
+    fn name(&self) -> &str {
+        todo!()
     }
 }

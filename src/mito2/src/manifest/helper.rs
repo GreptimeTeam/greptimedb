@@ -12,25 +12,28 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::any::Any;
+use serde::Serialize;
+use store_api::manifest::action::ProtocolVersion;
+use store_api::manifest::ManifestVersion;
 
-use common_error::prelude::*;
+use crate::manifest::action::RegionCheckpoint;
 
-#[derive(Debug, Snafu)]
-#[snafu(visibility(pub))]
-pub enum Error {}
+pub const NEWLINE: &[u8] = b"\n";
 
-pub type Result<T> = std::result::Result<T, Error>;
+pub fn encode_actions<T: Serialize>(
+    prev_version: ManifestVersion,
+    actions: &[T],
+) -> Result<Vec<u8>, ()> {
+    todo!()
+}
 
-impl ErrorExt for Error {
-    #[allow(clippy::match_single_binding)]
-    fn status_code(&self) -> StatusCode {
-        match self {
-            _ => todo!(),
-        }
-    }
+pub fn encode_checkpoint(snasphot: &RegionCheckpoint) -> Result<Vec<u8>, ()> {
+    todo!()
+}
 
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
+pub fn decode_checkpoint(
+    bs: &[u8],
+    reader_version: ProtocolVersion,
+) -> Result<RegionCheckpoint, ()> {
+    todo!()
 }
