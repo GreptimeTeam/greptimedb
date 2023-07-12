@@ -275,12 +275,15 @@ impl MemoryCatalogManager {
 
     pub fn register_catalog_sync(&self, name: String) -> Result<bool> {
         let mut catalogs = self.catalogs.write().unwrap();
-        if catalogs.contains_key(&name) {
-            return Ok(false);
+
+        match catalogs.entry(name) {
+            Entry::Vacant(e) => {
+                e.insert(HashMap::new());
+                increment_gauge!(crate::metrics::METRIC_CATALOG_MANAGER_CATALOG_COUNT, 1.0);
+                Ok(true)
+            }
+            Entry::Occupied(_) => Ok(false),
         }
-        catalogs.insert(name, HashMap::new());
-        increment_gauge!(crate::metrics::METRIC_CATALOG_MANAGER_CATALOG_COUNT, 1.0);
-        Ok(true)
     }
 
     pub fn register_schema_sync(&self, request: RegisterSchemaRequest) -> Result<bool> {
@@ -290,12 +293,15 @@ impl MemoryCatalogManager {
             .with_context(|| CatalogNotFoundSnafu {
                 catalog_name: &request.catalog,
             })?;
-        if catalog.contains_key(&request.schema) {
-            return Ok(false);
+
+        match catalog.entry(request.schema) {
+            Entry::Vacant(e) => {
+                e.insert(HashMap::new());
+                increment_gauge!(crate::metrics::METRIC_CATALOG_MANAGER_SCHEMA_COUNT, 1.0);
+                Ok(true)
+            }
+            Entry::Occupied(_) => Ok(false),
         }
-        catalog.insert(request.schema, HashMap::new());
-        increment_gauge!(crate::metrics::METRIC_CATALOG_MANAGER_SCHEMA_COUNT, 1.0);
-        Ok(true)
     }
 
     pub fn register_table_sync(&self, request: RegisterTableRequest) -> Result<bool> {
