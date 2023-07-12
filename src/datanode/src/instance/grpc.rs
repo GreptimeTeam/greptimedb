@@ -16,7 +16,7 @@ use std::any::Any;
 use std::sync::Arc;
 
 use api::v1::ddl_request::{Expr as DdlExpr, Expr};
-use api::v1::greptime_request::Request as GrpcRequest;
+use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
 use api::v1::{CreateDatabaseExpr, DdlRequest, DeleteRequest, InsertRequests};
 use async_trait::async_trait;
@@ -207,11 +207,11 @@ impl Instance {
 impl GrpcQueryHandler for Instance {
     type Error = error::Error;
 
-    async fn do_query(&self, request: GrpcRequest, ctx: QueryContextRef) -> Result<Output> {
+    async fn do_query(&self, request: Request, ctx: QueryContextRef) -> Result<Output> {
         match request {
-            GrpcRequest::Inserts(requests) => self.handle_inserts(requests, &ctx).await,
-            GrpcRequest::Delete(request) => self.handle_delete(request, ctx).await,
-            GrpcRequest::Query(query_request) => {
+            Request::Inserts(requests) => self.handle_inserts(requests, &ctx).await,
+            Request::Delete(request) => self.handle_delete(request, ctx).await,
+            Request::Query(query_request) => {
                 let query = query_request
                     .query
                     .context(error::MissingRequiredFieldSnafu {
@@ -219,7 +219,7 @@ impl GrpcQueryHandler for Instance {
                     })?;
                 self.handle_query(query, ctx).await
             }
-            GrpcRequest::Ddl(request) => self.handle_ddl(request, ctx).await,
+            Request::Ddl(request) => self.handle_ddl(request, ctx).await,
         }
     }
 }
@@ -332,7 +332,7 @@ mod test {
         let instance = MockInstance::new("test_handle_ddl").await;
         let instance = instance.inner();
 
-        let query = GrpcRequest::Ddl(DdlRequest {
+        let query = Request::Ddl(DdlRequest {
             expr: Some(DdlExpr::CreateDatabase(CreateDatabaseExpr {
                 database_name: "my_database".to_string(),
                 create_if_not_exists: true,
@@ -341,7 +341,7 @@ mod test {
         let output = instance.do_query(query, QueryContext::arc()).await.unwrap();
         assert!(matches!(output, Output::AffectedRows(1)));
 
-        let query = GrpcRequest::Ddl(DdlRequest {
+        let query = Request::Ddl(DdlRequest {
             expr: Some(DdlExpr::CreateTable(CreateTableExpr {
                 catalog_name: "greptime".to_string(),
                 schema_name: "my_database".to_string(),
@@ -369,7 +369,7 @@ mod test {
         let output = instance.do_query(query, QueryContext::arc()).await.unwrap();
         assert!(matches!(output, Output::AffectedRows(0)));
 
-        let query = GrpcRequest::Ddl(DdlRequest {
+        let query = Request::Ddl(DdlRequest {
             expr: Some(DdlExpr::Alter(AlterExpr {
                 catalog_name: "greptime".to_string(),
                 schema_name: "my_database".to_string(),
@@ -494,7 +494,7 @@ mod test {
             ..Default::default()
         };
 
-        let query = GrpcRequest::Inserts(InsertRequests {
+        let query = Request::Inserts(InsertRequests {
             inserts: vec![insert],
         });
         let output = instance.do_query(query, QueryContext::arc()).await.unwrap();
@@ -525,7 +525,7 @@ mod test {
         .await
         .is_ok());
 
-        let query = GrpcRequest::Query(QueryRequest {
+        let query = Request::Query(QueryRequest {
             query: Some(Query::Sql(
                 "INSERT INTO demo(host, cpu, memory, ts) VALUES \
                             ('host1', 66.6, 1024, 1672201025000),\
@@ -563,7 +563,7 @@ mod test {
             row_count: 1,
         };
 
-        let request = GrpcRequest::Delete(request);
+        let request = Request::Delete(request);
         let output = instance
             .do_query(request, QueryContext::arc())
             .await
@@ -594,7 +594,7 @@ mod test {
         .await
         .is_ok());
 
-        let query = GrpcRequest::Query(QueryRequest {
+        let query = Request::Query(QueryRequest {
             query: Some(Query::Sql(
                 "INSERT INTO demo(host, cpu, memory, ts) VALUES \
                             ('host1', 66.6, 1024, 1672201025000),\
@@ -605,7 +605,7 @@ mod test {
         let output = instance.do_query(query, QueryContext::arc()).await.unwrap();
         assert!(matches!(output, Output::AffectedRows(2)));
 
-        let query = GrpcRequest::Query(QueryRequest {
+        let query = Request::Query(QueryRequest {
             query: Some(Query::Sql(
                 "SELECT ts, host, cpu, memory FROM demo".to_string(),
             )),

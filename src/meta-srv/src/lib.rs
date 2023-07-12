@@ -37,7 +37,7 @@ mod sequence;
 pub mod service;
 pub mod table_routes;
 
+pub use crate::error::Result;
+
 #[cfg(test)]
 mod test_util;
-
-pub use crate::error::Result;
