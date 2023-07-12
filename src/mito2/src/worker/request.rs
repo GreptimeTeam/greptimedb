@@ -16,8 +16,53 @@
 
 use std::mem;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
+use datatypes::schema::RawSchema;
+use store_api::storage::{CompactionStrategy, RegionId};
 use tokio::sync::Notify;
+use crate::error::Result;
+
+/// Create region request.
+#[derive(Debug)]
+pub struct CreateRequest {
+    /// Region to create.
+    pub region_id: RegionId,
+    /// Schema of the table that this region belongs to.
+    pub schema: RawSchema,
+    /// Indices of columns in the primary key.
+    pub primary_key_indices: Vec<usize>,
+    /// Create region if not exists.
+    pub create_if_not_exists: bool,
+
+    // Options:
+    /// Region memtable max size in bytes
+    pub write_buffer_size: Option<usize>,
+    /// Region SST files TTL
+    pub ttl: Option<Duration>,
+    /// Compaction strategy
+    pub compaction_strategy: CompactionStrategy,
+}
+
+impl CreateRequest {
+    /// Validate the request.
+    fn validate(&self) -> Result<()> {
+        unimplemented!()
+    }
+}
+
+/// Open region request.
+#[derive(Debug)]
+pub struct OpenRequest {
+    /// Region to open.
+    pub region_id: RegionId,
+    /// Region memtable max size in bytes
+    pub write_buffer_size: Option<usize>,
+    /// Region SST files TTL
+    pub ttl: Option<Duration>,
+    /// Compaction strategy
+    pub compaction_strategy: CompactionStrategy,
+}
 
 /// Request handled by workers.
 #[derive(Debug)]
@@ -31,11 +76,20 @@ pub(crate) enum WorkerRequest {
 
 /// Request to write a region.
 #[derive(Debug)]
-pub(crate) struct WriteRequest {}
+pub(crate) struct WriteRequest {
+    /// Region to write.
+    pub region_id: RegionId,
+}
 
 /// Request to control (alter) a region.
 #[derive(Debug)]
-pub(crate) struct ControlRequest {}
+pub(crate) enum ControlRequest {
+    /// Creates a new region.
+    Create(CreateRequest),
+
+    /// Opens an existing region.
+    Open(OpenRequest),
+}
 
 // Region request sender.
 #[derive(Debug)]

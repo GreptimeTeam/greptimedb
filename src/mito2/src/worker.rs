@@ -14,6 +14,8 @@
 
 //! Structs and utilities for writing regions.
 
+mod handle_create;
+mod handle_open;
 mod request;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -28,7 +30,7 @@ use tokio::sync::Mutex;
 
 use crate::error::{JoinSnafu, Result};
 use crate::region::{RegionMap, RegionMapRef};
-use crate::worker::request::{Receiver, RequestQueue, Sender};
+use crate::worker::request::{ControlRequest, Receiver, RequestQueue, Sender, WriteRequest};
 
 /// A fixed size group of [RegionWorkers](RegionWorker).
 ///
@@ -126,8 +128,9 @@ struct RegionWorkerThread<S> {
     receiver: Receiver,
     // TODO(yingwen): Replaced by Wal.
     log_store: Arc<S>,
+    /// Object store for manifest and SSTs.
     object_store: ObjectStore,
-    // Whether the worker thread is still running.
+    /// Whether the worker thread is still running.
     running: Arc<AtomicBool>,
 }
 
@@ -141,18 +144,49 @@ impl<S> RegionWorkerThread<S> {
             // Clear the buffer before handling next batch of requests.
             buffer.clear();
 
-            if let Err(e) = self.handle_requests(&mut buffer).await {
-                logging::error!(e; "Failed to handle requests, worker: {}", self.id);
-            }
+            self.handle_requests(&mut buffer).await;
         }
     }
 
-    /// Process requests.
+    /// Dispatches and processes requests.
     ///
     /// `buffer` should be empty.
-    async fn handle_requests(&mut self, buffer: &mut RequestQueue) -> Result<()> {
+    async fn handle_requests(&mut self, buffer: &mut RequestQueue) {
         self.receiver.receive_all(buffer).await;
 
+        // Handles all write requests first. So we can alter regions without
+        // considering existing write requests.
+        self.handle_write_requests(&mut buffer.write_requests).await;
+
+        self.handle_control_requests(&mut buffer.control_requests)
+            .await;
+
         todo!()
+    }
+
+    /// Takes and handles all write requests.
+    async fn handle_write_requests(&mut self, write_requests: &mut Vec<WriteRequest>) {
+        if write_requests.is_empty() {
+            return;
+        }
+
+        // Create a write context that holds meta and sequence.
+
+        unimplemented!()
+    }
+
+    /// Takes and handles all control requests.
+    async fn handle_control_requests(&mut self, control_requests: &mut Vec<ControlRequest>) {
+        if control_requests.is_empty() {
+            return;
+        }
+
+        for request in control_requests.drain(..) {
+            match request {
+                ControlRequest::Create(req) => self.handle_create_request(req).await,
+                ControlRequest::Open(req) => self.handle_open_request(req).await,
+            }
+        }
+        unimplemented!()
     }
 }
