@@ -52,6 +52,10 @@ pub enum LogicalTypeId {
     TimeMicrosecond,
     TimeNanosecond,
 
+    IntervalYearMonth,
+    IntervalDayTime,
+    IntervalMonthDayNano,
+
     List,
     Dictionary,
 }
@@ -102,6 +106,11 @@ impl LogicalTypeId {
             LogicalTypeId::TimeMillisecond => ConcreteDataType::time_millisecond_datatype(),
             LogicalTypeId::TimeMicrosecond => ConcreteDataType::time_microsecond_datatype(),
             LogicalTypeId::TimeNanosecond => ConcreteDataType::time_nanosecond_datatype(),
+            LogicalTypeId::IntervalMonthDayNano => {
+                ConcreteDataType::interval_month_day_nano_datatype()
+            }
+            LogicalTypeId::IntervalYearMonth => todo!(),
+            LogicalTypeId::IntervalDayTime => todo!(),
         }
     }
 }

@@ -424,6 +424,7 @@ fn values_to_vector(data_type: &ConcreteDataType, values: Values) -> VectorRef {
             )),
         },
 
+        ConcreteDataType::Interval(_) => todo!("Interval type is not supported yet"),
         ConcreteDataType::Null(_) | ConcreteDataType::List(_) | ConcreteDataType::Dictionary(_) => {
             unreachable!()
         }
@@ -553,6 +554,7 @@ fn convert_values(data_type: &ConcreteDataType, values: Values) -> Vec<Value> {
             .map(|v| Value::Time(Time::new_nanosecond(v)))
             .collect(),
 
+        ConcreteDataType::Interval(_) => todo!("Interval type is not supported yet"),
         ConcreteDataType::Null(_) | ConcreteDataType::List(_) | ConcreteDataType::Dictionary(_) => {
             unreachable!()
         }

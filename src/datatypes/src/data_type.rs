@@ -15,7 +15,9 @@
 use std::fmt;
 use std::sync::Arc;
 
-use arrow::datatypes::{DataType as ArrowDataType, TimeUnit as ArrowTimeUnit};
+use arrow::datatypes::{
+    DataType as ArrowDataType, IntervalUnit as ArrowIntervalUnit, TimeUnit as ArrowTimeUnit,
+};
 use common_time::timestamp::TimeUnit;
 use paste::paste;
 use serde::{Deserialize, Serialize};
@@ -24,8 +26,8 @@ use crate::error::{self, Error, Result};
 use crate::type_id::LogicalTypeId;
 use crate::types::{
     BinaryType, BooleanType, DateTimeType, DateType, DictionaryType, Float32Type, Float64Type,
-    Int16Type, Int32Type, Int64Type, Int8Type, ListType, NullType, StringType, TimeMillisecondType,
-    TimeType, TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType,
+    Int16Type, Int32Type, Int64Type, Int8Type, IntervalMonthDayNanoType, ListType, NullType,
+    StringType, TimeMillisecondType, TimeType, TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType,
     TimestampSecondType, TimestampType, UInt16Type, UInt32Type, UInt64Type, UInt8Type,
 };
 use crate::value::Value;
@@ -58,6 +60,7 @@ pub enum ConcreteDataType {
     DateTime(DateTimeType),
     Timestamp(TimestampType),
     Time(TimeType),
+    Interval(IntervalMonthDayNanoType),
 
     // Compound types:
     List(ListType),
@@ -87,6 +90,7 @@ impl fmt::Display for ConcreteDataType {
             ConcreteDataType::Time(_) => write!(f, "Time"),
             ConcreteDataType::List(_) => write!(f, "List"),
             ConcreteDataType::Dictionary(_) => write!(f, "Dictionary"),
+            ConcreteDataType::Interval(_) => write!(f, "Interval"),
         }
     }
 }
@@ -113,6 +117,7 @@ impl ConcreteDataType {
                 | ConcreteDataType::DateTime(_)
                 | ConcreteDataType::Timestamp(_)
                 | ConcreteDataType::Time(_)
+                | ConcreteDataType::Interval(_)
         )
     }
 
@@ -127,6 +132,7 @@ impl ConcreteDataType {
                 | ConcreteDataType::DateTime(_)
                 | ConcreteDataType::Timestamp(_)
                 | ConcreteDataType::Time(_)
+                | ConcreteDataType::Interval(_)
         )
     }
 
@@ -222,6 +228,7 @@ impl TryFrom<&ArrowDataType> for ConcreteDataType {
             ArrowDataType::Date32 => Self::date_datatype(),
             ArrowDataType::Date64 => Self::datetime_datatype(),
             ArrowDataType::Timestamp(u, _) => ConcreteDataType::from_arrow_time_unit(u),
+            ArrowDataType::Interval(u) => ConcreteDataType::from_arrow_interval_unit(u),
             ArrowDataType::Binary | ArrowDataType::LargeBinary => Self::binary_datatype(),
             ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 => Self::string_datatype(),
             ArrowDataType::List(field) => Self::List(ListType::new(
@@ -311,6 +318,10 @@ impl ConcreteDataType {
         Self::time_datatype(TimeUnit::Nanosecond)
     }
 
+    pub fn interval_month_day_nano_datatype() -> Self {
+        ConcreteDataType::Interval(IntervalMonthDayNanoType::default())
+    }
+
     pub fn timestamp_datatype(unit: TimeUnit) -> Self {
         match unit {
             TimeUnit::Second => Self::timestamp_second_datatype(),
@@ -327,6 +338,14 @@ impl ConcreteDataType {
             ArrowTimeUnit::Millisecond => Self::timestamp_millisecond_datatype(),
             ArrowTimeUnit::Microsecond => Self::timestamp_microsecond_datatype(),
             ArrowTimeUnit::Nanosecond => Self::timestamp_nanosecond_datatype(),
+        }
+    }
+
+    pub fn from_arrow_interval_unit(u: &ArrowIntervalUnit) -> Self {
+        match u {
+            ArrowIntervalUnit::YearMonth => todo!("IntervalYearMonthType not supported yet"),
+            ArrowIntervalUnit::DayTime => todo!("IntervalDayTimeType not supported yet"),
+            ArrowIntervalUnit::MonthDayNano => Self::interval_month_day_nano_datatype(),
         }
     }
 
@@ -691,5 +710,12 @@ mod tests {
             "Date"
         );
         assert_eq!(ConcreteDataType::time_second_datatype().to_string(), "Time");
+        assert_eq!(
+            ConcreteDataType::from_arrow_type(&ArrowDataType::Interval(
+                arrow_schema::IntervalUnit::MonthDayNano,
+            ))
+            .to_string(),
+            "Interval"
+        )
     }
 }

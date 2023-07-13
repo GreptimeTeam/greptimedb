@@ -16,11 +16,12 @@ use std::cmp::Ordering;
 use std::fmt;
 
 use arrow::datatypes::{ArrowNativeType, ArrowPrimitiveType, DataType as ArrowDataType};
-use common_time::{Date, DateTime};
+use common_time::{Date, DateTime, Interval};
 use num::NumCast;
 use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
 
+use super::IntervalMonthDayNanoType;
 use crate::data_type::{ConcreteDataType, DataType};
 use crate::error::{self, Result};
 use crate::scalars::{Scalar, ScalarRef, ScalarVectorBuilder};
@@ -46,6 +47,7 @@ impl_native_type!(i8);
 impl_native_type!(i16);
 impl_native_type!(i32);
 impl_native_type!(i64);
+impl_native_type!(i128);
 impl_native_type!(f32);
 impl_native_type!(f64);
 
@@ -185,6 +187,19 @@ impl WrapperType for DateTime {
 
     fn into_native(self) -> Self::Native {
         self.val()
+    }
+}
+
+impl WrapperType for Interval {
+    type LogicalType = IntervalMonthDayNanoType;
+    type Native = i128;
+
+    fn from_native(value: Self::Native) -> Self {
+        Interval::from_i128(value)
+    }
+
+    fn into_native(self) -> Self::Native {
+        self.to_i128()
     }
 }
 

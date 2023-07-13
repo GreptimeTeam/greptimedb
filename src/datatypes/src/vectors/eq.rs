@@ -18,8 +18,8 @@ use crate::data_type::DataType;
 use crate::types::{TimeType, TimestampType};
 use crate::vectors::constant::ConstantVector;
 use crate::vectors::{
-    BinaryVector, BooleanVector, DateTimeVector, DateVector, ListVector, PrimitiveVector,
-    StringVector, TimeMicrosecondVector, TimeMillisecondVector, TimeNanosecondVector,
+    BinaryVector, BooleanVector, DateTimeVector, DateVector, IntervalVector, ListVector,
+    PrimitiveVector, StringVector, TimeMicrosecondVector, TimeMillisecondVector, TimeNanosecondVector,
     TimeSecondVector, TimestampMicrosecondVector, TimestampMillisecondVector,
     TimestampNanosecondVector, TimestampSecondVector, Vector,
 };
@@ -122,6 +122,7 @@ fn equal(lhs: &dyn Vector, rhs: &dyn Vector) -> bool {
                 is_vector_eq!(TimeNanosecondVector, lhs, rhs)
             }
         },
+        Interval(_) => is_vector_eq!(IntervalVector, lhs, rhs),
     }
 }
 

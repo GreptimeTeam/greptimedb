@@ -111,6 +111,9 @@ impl TryFrom<ConcreteDataType> for ColumnDataTypeWrapper {
                 TimeType::Microsecond(_) => ColumnDataType::TimeMicrosecond,
                 TimeType::Nanosecond(_) => ColumnDataType::TimeNanosecond,
             },
+            ConcreteDataType::Interval(_) => {
+                todo!("ColumnDataType: Interval datatype not supported yet")
+            }
             ConcreteDataType::Null(_)
             | ConcreteDataType::List(_)
             | ConcreteDataType::Dictionary(_) => {
@@ -255,6 +258,7 @@ pub fn push_vals(column: &mut Column, origin_count: usize, vector: VectorRef) {
             TimeUnit::Microsecond => values.time_microsecond_values.push(val.value()),
             TimeUnit::Nanosecond => values.time_nanosecond_values.push(val.value()),
         },
+        Value::Interval(_) => todo!(),
         Value::List(_) => unreachable!(),
     });
     column.null_mask = null_mask.into_vec();

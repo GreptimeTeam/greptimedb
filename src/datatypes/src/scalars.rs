@@ -14,7 +14,7 @@
 
 use std::any::Any;
 
-use common_time::{Date, DateTime};
+use common_time::{Date, DateTime, Interval};
 
 use crate::types::{
     Float32Type, Float64Type, Int16Type, Int32Type, Int64Type, Int8Type, UInt16Type, UInt32Type,
@@ -22,8 +22,8 @@ use crate::types::{
 };
 use crate::value::{ListValue, ListValueRef, Value};
 use crate::vectors::{
-    BinaryVector, BooleanVector, DateTimeVector, DateVector, ListVector, MutableVector,
-    PrimitiveVector, StringVector, Vector,
+    BinaryVector, BooleanVector, DateTimeVector, DateVector, IntervalVector, ListVector,
+    MutableVector, PrimitiveVector, StringVector, Vector,
 };
 
 fn get_iter_capacity<T, I: Iterator<Item = T>>(iter: &I) -> usize {
@@ -298,6 +298,27 @@ impl<'a> ScalarRef<'a> for DateTime {
     }
 }
 
+impl Scalar for Interval {
+    type VectorType = IntervalVector;
+    type RefType<'a> = Interval;
+
+    fn as_scalar_ref(&self) -> Self::RefType<'_> {
+        *self
+    }
+
+    fn upcast_gat<'short, 'long: 'short>(long: Self::RefType<'long>) -> Self::RefType<'short> {
+        long
+    }
+}
+
+impl<'a> ScalarRef<'a> for Interval {
+    type ScalarType = Interval;
+
+    fn to_owned_scalar(&self) -> Self::ScalarType {
+        *self
+    }
+}
+
 // Timestamp types implement Scalar and ScalarRef in `src/timestamp.rs`.
 
 impl Scalar for ListValue {
@@ -439,5 +460,19 @@ mod tests {
         let val = vector.get_data(0).unwrap();
         assert_eq!(val, val.as_scalar_ref());
         assert_eq!(TimestampSecond::from(10), val.to_owned_scalar());
+    }
+
+    #[test]
+    fn test_build_interval_vector() {
+        let expect: Vec<Option<Interval>> = vec![
+            Some(Interval::new(1, 2, 1)),
+            None,
+            Some(Interval::new(3, 4, 1)),
+        ];
+        let vector: IntervalVector = build_vector_from_slice(&expect);
+        assert_vector_eq(&expect, &vector);
+        let val = vector.get_data(0).unwrap();
+        assert_eq!(val, val.as_scalar_ref());
+        assert_eq!(Interval::new(1, 2, 1), val.to_owned_scalar());
     }
 }

@@ -187,11 +187,11 @@ impl Interval {
 
     // `Interval` Type and i128 Convert
     pub fn from_i128(v: i128) -> Self {
-        let mut result = Self::default();
-        result.micros = (v as i64) / 1_000;
-        result.days = (v >> 64) as i32;
-        result.months = (v >> 96) as i32;
-        result
+        Interval {
+            micros: (v as i64) / 1000,
+            days: (v >> 64) as i32,
+            months: (v >> 96) as i32,
+        }
     }
 
     pub fn to_i128(&self) -> i128 {
@@ -421,7 +421,7 @@ mod tests {
     }
 
     #[test]
-    fn test_serde_json(){
+    fn test_serde_json() {
         let interval = Interval::new(1, 1, 1);
         let json = serde_json::to_string(&interval).unwrap();
         assert_eq!(json, "{\"months\":1,\"days\":1,\"micros\":1}");

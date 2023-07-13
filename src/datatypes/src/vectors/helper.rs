@@ -21,6 +21,7 @@ use arrow::array::{Array, ArrayRef, StringArray};
 use arrow::compute;
 use arrow::compute::kernels::comparison;
 use arrow::datatypes::{DataType as ArrowDataType, TimeUnit};
+use arrow_schema::IntervalUnit;
 use datafusion_common::ScalarValue;
 use snafu::{OptionExt, ResultExt};
 
@@ -30,7 +31,7 @@ use crate::scalars::{Scalar, ScalarVectorBuilder};
 use crate::value::{ListValue, ListValueRef};
 use crate::vectors::{
     BinaryVector, BooleanVector, ConstantVector, DateTimeVector, DateVector, Float32Vector,
-    Float64Vector, Int16Vector, Int32Vector, Int64Vector, Int8Vector, ListVector,
+    Float64Vector, Int16Vector, Int32Vector, Int64Vector, Int8Vector, IntervalVector, ListVector,
     ListVectorBuilder, MutableVector, NullVector, StringVector, TimeMicrosecondVector,
     TimeMillisecondVector, TimeNanosecondVector, TimeSecondVector, TimestampMicrosecondVector,
     TimestampMillisecondVector, TimestampNanosecondVector, TimestampSecondVector, UInt16Vector,
@@ -207,10 +208,12 @@ impl Helper {
             ScalarValue::Time64Nanosecond(v) => {
                 ConstantVector::new(Arc::new(TimeNanosecondVector::from(vec![v])), length)
             }
+            ScalarValue::IntervalMonthDayNano(v) => {
+                ConstantVector::new(Arc::new(IntervalVector::from(vec![v])), length)
+            }
             ScalarValue::Decimal128(_, _, _)
             | ScalarValue::IntervalYearMonth(_)
             | ScalarValue::IntervalDayTime(_)
-            | ScalarValue::IntervalMonthDayNano(_)
             | ScalarValue::Struct(_, _)
             | ScalarValue::Dictionary(_, _) => {
                 return error::ConversionSnafu {
@@ -286,9 +289,15 @@ impl Helper {
                 }
                 _ => unimplemented!("Arrow array datatype: {:?}", array.as_ref().data_type()),
             },
+            ArrowDataType::Interval(unit) => match unit {
+                IntervalUnit::YearMonth => todo!(),
+                IntervalUnit::DayTime => todo!(),
+                IntervalUnit::MonthDayNano => {
+                    Arc::new(IntervalVector::try_from_arrow_array(array)?)
+                }
+            },
             ArrowDataType::Float16
             | ArrowDataType::Duration(_)
-            | ArrowDataType::Interval(_)
             | ArrowDataType::LargeList(_)
             | ArrowDataType::FixedSizeList(_, _)
             | ArrowDataType::Struct(_)
