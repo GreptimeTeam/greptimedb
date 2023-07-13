@@ -52,7 +52,7 @@ impl TestEnv {
     pub(crate) async fn create_worker_group(&self, config: &MitoConfig) -> WorkerGroup {
         let (log_store, object_store) = self.create_log_and_object_store().await;
 
-        WorkerGroup::start(&config, Arc::new(log_store), object_store)
+        WorkerGroup::start(config, Arc::new(log_store), object_store)
     }
 
     async fn create_log_and_object_store(&self) -> (RaftEngineLogStore, ObjectStore) {
