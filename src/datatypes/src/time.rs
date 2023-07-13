@@ -26,7 +26,7 @@ use crate::vectors::{
 };
 
 macro_rules! define_time_with_unit {
-    ($unit: ident, $type: ty) => {
+    ($unit: ident, $native_ty: ty) => {
         paste! {
             #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
             pub struct [<Time $unit>](pub Time);
@@ -86,7 +86,7 @@ macro_rules! define_time_with_unit {
 
             impl WrapperType for [<Time $unit>] {
                 type LogicalType = [<Time $unit Type>];
-                type Native = $type;
+                type Native = $native_ty;
 
                 fn from_native(value: Self::Native) -> Self {
                     Self::new(value.into())
@@ -99,11 +99,11 @@ macro_rules! define_time_with_unit {
 
             impl From<i64> for [<Time $unit>] {
                 fn from(val: i64) -> Self {
-                    [<Time $unit>]::from_native(val as $type)
+                    [<Time $unit>]::from_native(val as $native_ty)
                 }
             }
 
-            impl From<[<Time $unit>]> for i64{
+            impl From<[<Time $unit>]> for i64 {
                 fn from(val: [<Time $unit>]) -> Self {
                     val.0.value()
                 }
@@ -124,11 +124,11 @@ mod tests {
     #[test]
     fn test_to_serde_json_value() {
         std::env::set_var("TZ", "Asia/Shanghai");
-        let ts = TimeSecond::new(123);
-        let val = serde_json::Value::from(ts);
+        let time = TimeSecond::new(123);
+        let val = serde_json::Value::from(time);
         match val {
             serde_json::Value::String(s) => {
-                assert_eq!("1970-01-01 08:02:03+0800", s);
+                assert_eq!("08:02:03+0800", s);
             }
             _ => unreachable!(),
         }
@@ -136,17 +136,21 @@ mod tests {
 
     #[test]
     fn test_time_scalar() {
-        let ts = TimeSecond::new(123);
-        assert_eq!(ts, ts.as_scalar_ref());
-        assert_eq!(ts, ts.to_owned_scalar());
-        let ts = TimeMillisecond::new(123);
-        assert_eq!(ts, ts.as_scalar_ref());
-        assert_eq!(ts, ts.to_owned_scalar());
-        let ts = TimeMicrosecond::new(123);
-        assert_eq!(ts, ts.as_scalar_ref());
-        assert_eq!(ts, ts.to_owned_scalar());
-        let ts = TimeNanosecond::new(123);
-        assert_eq!(ts, ts.as_scalar_ref());
-        assert_eq!(ts, ts.to_owned_scalar());
+        let time = TimeSecond::new(123);
+        assert_eq!(time, time.as_scalar_ref());
+        assert_eq!(time, time.to_owned_scalar());
+        assert_eq!(123, time.into_native());
+        let time = TimeMillisecond::new(123);
+        assert_eq!(time, time.as_scalar_ref());
+        assert_eq!(time, time.to_owned_scalar());
+        assert_eq!(123, time.into_native());
+        let time = TimeMicrosecond::new(123);
+        assert_eq!(time, time.as_scalar_ref());
+        assert_eq!(time, time.to_owned_scalar());
+        assert_eq!(123, time.into_native());
+        let time = TimeNanosecond::new(123);
+        assert_eq!(time, time.as_scalar_ref());
+        assert_eq!(time, time.to_owned_scalar());
+        assert_eq!(123, time.into_native());
     }
 }
