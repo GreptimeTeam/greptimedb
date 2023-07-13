@@ -332,13 +332,13 @@ async fn run_region_failover_procedure(
     let procedure = RegionFailoverProcedure::new(
         failed_region.clone(),
         RegionFailoverContext {
-            mailbox: meta_srv.mailbox(),
+            mailbox: meta_srv.mailbox().clone(),
             selector,
             selector_ctx: SelectorContext {
                 datanode_lease_secs: meta_srv.options().datanode_lease_secs,
                 server_addr: meta_srv.options().server_addr.clone(),
-                kv_store: meta_srv.kv_store(),
-                meta_peer_client: meta_srv.meta_peer_client(),
+                kv_store: meta_srv.kv_store().clone(),
+                meta_peer_client: meta_srv.meta_peer_client().clone(),
                 catalog: None,
                 schema: None,
                 table: None,

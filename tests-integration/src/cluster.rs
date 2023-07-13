@@ -97,7 +97,7 @@ impl GreptimeDbClusterBuilder {
 
         build_datanode_clients(datanode_clients.clone(), &datanode_instances, datanodes).await;
 
-        self.wait_datanodes_alive(&meta_srv.meta_srv.meta_peer_client(), datanodes)
+        self.wait_datanodes_alive(meta_srv.meta_srv.meta_peer_client(), datanodes)
             .await;
 
         let frontend = self
@@ -131,7 +131,7 @@ impl GreptimeDbClusterBuilder {
         let mock =
             meta_srv::mocks::mock(opt, self.kv_store.clone(), None, Some(datanode_clients)).await;
 
-        let metadata_service = DefaultMetadataService::new(mock.meta_srv.kv_store());
+        let metadata_service = DefaultMetadataService::new(mock.meta_srv.kv_store().clone());
         metadata_service
             .create_schema("another_catalog", "another_schema", true)
             .await

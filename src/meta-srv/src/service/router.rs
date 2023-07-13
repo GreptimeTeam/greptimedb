@@ -85,8 +85,8 @@ impl router_server::Router for MetaSrv {
         let ctx = SelectorContext {
             datanode_lease_secs: self.options().datanode_lease_secs,
             server_addr: self.options().server_addr.clone(),
-            kv_store: self.kv_store(),
-            meta_peer_client: self.meta_peer_client(),
+            kv_store: self.kv_store().clone(),
+            meta_peer_client: self.meta_peer_client().clone(),
             catalog: Some(table_name.catalog_name.clone()),
             schema: Some(table_name.schema_name.clone()),
             table: Some(table_name.table_name.clone()),
@@ -140,8 +140,8 @@ impl router_server::Router for MetaSrv {
 async fn handle_create(
     req: CreateRequest,
     ctx: SelectorContext,
-    selector: SelectorRef,
-    table_id_sequence: SequenceRef,
+    selector: &SelectorRef,
+    table_id_sequence: &SequenceRef,
 ) -> Result<RouteResponse> {
     let CreateRequest {
         header,
