@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use common_error::prelude::*;
 use datatypes::data_type::ConcreteDataType;
-use datatypes::schema::{ColumnSchema, Metadata, COMMENT_KEY};
+use datatypes::schema::{ColumnSchema, Metadata, Schema, COMMENT_KEY};
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, Location, OptionExt};
 use store_api::storage::consts::{self, ReservedColumnId};
@@ -27,7 +27,7 @@ use store_api::storage::{
     AddColumn, AlterOperation, AlterRequest, ColumnDescriptor, ColumnDescriptorBuilder,
     ColumnDescriptorBuilderError, ColumnFamilyDescriptor, ColumnFamilyDescriptorBuilder,
     ColumnFamilyId, ColumnId, RegionDescriptor, RegionDescriptorBuilder, RegionId, RegionMeta,
-    RowKeyDescriptor, RowKeyDescriptorBuilder, Schema, SchemaRef,
+    RowKeyDescriptor, RowKeyDescriptorBuilder, SchemaRef,
 };
 
 use crate::manifest::action::{RawColumnFamiliesMetadata, RawColumnsMetadata, RawRegionMetadata};
@@ -645,7 +645,7 @@ impl TryFrom<RegionDescriptor> for RegionMetadata {
 
 #[derive(Default)]
 pub struct ColumnsMetadataBuilder {
-    columns: Vec<ColumnMetadata>,
+    pub columns: Vec<ColumnMetadata>,
     name_to_col_index: HashMap<String, usize>,
     /// Column id set, used to validate column id uniqueness.
     column_ids: HashSet<ColumnId>,
@@ -656,7 +656,7 @@ pub struct ColumnsMetadataBuilder {
 }
 
 impl ColumnsMetadataBuilder {
-    fn row_key(&mut self, key: RowKeyDescriptor) -> Result<&mut Self> {
+    pub fn row_key(&mut self, key: RowKeyDescriptor) -> Result<&mut Self> {
         for col in key.columns {
             let _ = self.push_row_key_column(col)?;
         }
@@ -673,7 +673,7 @@ impl ColumnsMetadataBuilder {
         self.push_field_column(consts::KEY_CF_ID, desc)
     }
 
-    fn push_field_column(
+    pub fn push_field_column(
         &mut self,
         cf_id: ColumnFamilyId,
         desc: ColumnDescriptor,

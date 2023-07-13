@@ -16,19 +16,21 @@
 
 // rewrite note:
 // Structs related to column (ColumnsMetadata etc.) still reference to storage/metadata
-// Other structs are ported to this file
+//   other structs are ported to this file
+// Those builder/descriptor can be simplified
 
 use std::sync::Arc;
 
 use snafu::ensure;
 use storage::metadata::{
-    ColumnFamiliesMetadata, ColumnFamiliesMetadataBuilder, ColumnsMetadata, ColumnsMetadataBuilder,
-    ColumnsMetadataRef,
+    ColumnFamiliesMetadata, ColumnFamiliesMetadataBuilder, ColumnFamilyMetadata, ColumnsMetadata,
+    ColumnsMetadataBuilder, ColumnsMetadataRef,
 };
 use storage::schema::{RegionSchema, RegionSchemaRef};
 use store_api::storage::{
-    AddColumn, AlterOperation, AlterRequest, ColumnFamilyDescriptorBuilder, RegionDescriptor,
-    RegionId, SchemaRef,
+    consts, AddColumn, AlterOperation, AlterRequest, ColumnFamilyDescriptor,
+    ColumnFamilyDescriptorBuilder, RegionDescriptor, RegionDescriptorBuilder, RegionId,
+    RowKeyDescriptor, Schema, SchemaRef,
 };
 
 use crate::error::{Error, InvalidAlterOperationSnafu, InvalidAlterVersionSnafu, Result};
