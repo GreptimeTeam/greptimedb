@@ -14,8 +14,9 @@
 
 //! Configurations.
 
+use common_telemetry::logging;
+
 const DEFAULT_NUM_WORKERS: usize = 1;
-const MAX_NUM_WORKERS: usize = 512;
 
 /// Configuration for [MitoEngine](crate::engine::MitoEngine).
 #[derive(Debug)]
@@ -35,11 +36,18 @@ impl Default for MitoConfig {
 impl MitoConfig {
     /// Sanitize incorrect configurations.
     pub(crate) fn sanitize(&mut self) {
+        // Sanitize worker num.
+        let num_workers_before = self.num_workers;
         if self.num_workers == 0 {
             self.num_workers = DEFAULT_NUM_WORKERS;
-        } else if self.num_workers > MAX_NUM_WORKERS {
-            self.num_workers = MAX_NUM_WORKERS;
         }
         self.num_workers = self.num_workers.next_power_of_two();
+        if num_workers_before != self.num_workers {
+            logging::warn!(
+                "Sanitize worker num {} to {}",
+                num_workers_before,
+                self.num_workers
+            );
+        }
     }
 }

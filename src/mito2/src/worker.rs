@@ -135,7 +135,7 @@ fn value_to_index(value: usize, num_workers: usize) -> usize {
 /// Worker to write and alter regions bound to it.
 #[derive(Debug)]
 pub(crate) struct RegionWorker {
-    // Id of the worker.
+    /// Id of the worker.
     id: WorkerId,
     /// Regions bound to the worker.
     regions: RegionMapRef,
