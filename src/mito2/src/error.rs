@@ -86,7 +86,7 @@ pub enum Error {
     },
 
     // We don't print the SendError in message since it is meaningless.
-    #[snafu(display("Worker {} is stopped, location: {}", location, id))]
+    #[snafu(display("Worker {} is stopped, location: {}", id, location))]
     WorkerStopped {
         id: WorkerId,
         source: SendError,

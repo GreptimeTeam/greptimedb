@@ -26,6 +26,7 @@ use std::sync::Arc;
 
 use common_runtime::JoinHandle;
 use common_telemetry::logging;
+use futures::future::try_join_all;
 use object_store::ObjectStore;
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
@@ -104,9 +105,7 @@ impl WorkerGroup {
     pub(crate) async fn stop(&self) -> Result<()> {
         logging::info!("Stop region worker group");
 
-        for worker in &self.workers {
-            worker.stop().await?;
-        }
+        try_join_all(self.workers.iter().map(|worker| worker.stop())).await?;
 
         Ok(())
     }
