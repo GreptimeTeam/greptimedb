@@ -14,7 +14,6 @@
 
 //! Mito region.
 
-mod metadata;
 mod version;
 
 use std::collections::HashMap;
@@ -23,6 +22,7 @@ use std::sync::{Arc, RwLock};
 use store_api::storage::RegionId;
 
 use crate::region::version::VersionControlRef;
+pub type VersionNumber = u32;
 
 /// Metadata and runtime status of a region.
 #[derive(Debug)]
