@@ -18,8 +18,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use chrono::DateTime;
-use common_error::ext::PlainError;
-use common_error::prelude::BoxedError;
+use common_error::ext::{BoxedError, PlainError};
 use common_error::status_code::StatusCode;
 use common_telemetry::timer;
 use promql_parser::parser::ast::{Extension as NodeExtension, ExtensionExpr};

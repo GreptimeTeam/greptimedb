@@ -22,7 +22,7 @@ use common_catalog::consts::{
     DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO_ENGINE, SCRIPTS_TABLE_ID,
 };
 use common_catalog::format_full_table_name;
-use common_error::prelude::BoxedError;
+use common_error::ext::BoxedError;
 use common_query::Output;
 use common_recordbatch::{util as record_util, RecordBatch};
 use common_telemetry::logging;

@@ -15,7 +15,6 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use common_error::prelude::*;
 use common_meta::kv_backend::txn::{Txn as KvTxn, TxnResponse as KvTxnResponse};
 use common_meta::kv_backend::{KvBackend, TxnService};
 use common_meta::metrics::METRIC_META_TXN_REQUEST;
@@ -31,6 +30,7 @@ use etcd_client::{
     Client, Compare, CompareOp, DeleteOptions, GetOptions, PutOptions, Txn, TxnOp, TxnOpResponse,
     TxnResponse,
 };
+use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error;
 use crate::error::{ConvertEtcdTxnObjectSnafu, Error, Result};

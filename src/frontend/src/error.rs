@@ -15,11 +15,12 @@
 use std::any::Any;
 
 use common_datasource::file_format::Format;
-use common_error::prelude::*;
+use common_error::ext::{BoxedError, ErrorExt};
+use common_error::status_code::StatusCode;
 use datafusion::parquet;
 use datatypes::arrow::error::ArrowError;
 use datatypes::value::Value;
-use snafu::Location;
+use snafu::{Location, Snafu};
 use store_api::storage::RegionNumber;
 
 #[derive(Debug, Snafu)]

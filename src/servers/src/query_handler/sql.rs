@@ -15,11 +15,12 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use common_error::prelude::*;
+use common_error::ext::{BoxedError, ErrorExt};
 use common_query::Output;
 use query::parser::PromQuery;
 use query::plan::LogicalPlan;
 use session::context::QueryContextRef;
+use snafu::ResultExt;
 use sql::statements::statement::Statement;
 
 use crate::error::{self, Result};

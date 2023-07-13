@@ -14,7 +14,7 @@
 
 use api::v1::InsertRequests;
 use async_trait::async_trait;
-use common_error::prelude::BoxedError;
+use common_error::ext::BoxedError;
 use servers::error as server_error;
 use servers::opentsdb::codec::DataPoint;
 use servers::query_handler::OpentsdbProtocolHandler;

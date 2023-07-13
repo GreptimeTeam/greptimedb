@@ -15,14 +15,15 @@
 use std::any::Any;
 
 use arrow::error::ArrowError;
-use common_error::prelude::*;
+use common_error::ext::{BoxedError, ErrorExt};
+use common_error::status_code::StatusCode;
 use common_recordbatch::error::Error as RecordbatchError;
 use datafusion_common::DataFusionError;
 use datatypes::arrow;
 use datatypes::arrow::datatypes::DataType as ArrowDatatype;
 use datatypes::error::Error as DataTypeError;
 use datatypes::prelude::ConcreteDataType;
-use snafu::Location;
+use snafu::{Location, Snafu};
 use statrs::StatsError;
 
 #[derive(Debug, Snafu)]

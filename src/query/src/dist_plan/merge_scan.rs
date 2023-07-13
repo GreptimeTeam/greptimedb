@@ -20,7 +20,7 @@ use async_stream::try_stream;
 use client::client_manager::DatanodeClients;
 use client::Database;
 use common_base::bytes::Bytes;
-use common_error::prelude::BoxedError;
+use common_error::ext::BoxedError;
 use common_meta::peer::Peer;
 use common_meta::table_name::TableName;
 use common_query::physical_plan::TaskContext;

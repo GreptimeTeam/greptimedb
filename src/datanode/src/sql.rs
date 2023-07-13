@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use catalog::CatalogManagerRef;
-use common_error::prelude::BoxedError;
+use common_error::ext::BoxedError;
 use common_procedure::ProcedureManagerRef;
 use common_query::Output;
 use common_telemetry::error;

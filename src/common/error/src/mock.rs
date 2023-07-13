@@ -19,7 +19,8 @@ use std::fmt;
 
 use snafu::Location;
 
-use crate::prelude::*;
+use crate::ext::ErrorExt;
+use crate::status_code::StatusCode;
 
 /// A mock error mainly for test.
 #[derive(Debug)]

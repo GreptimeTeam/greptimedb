@@ -15,9 +15,10 @@
 use std::any::Any;
 
 use arrow_schema::ArrowError;
-use common_error::prelude::*;
+use common_error::ext::ErrorExt;
+use common_error::status_code::StatusCode;
 use datafusion::parquet::errors::ParquetError;
-use snafu::Location;
+use snafu::{Location, Snafu};
 use url::ParseError;
 
 #[derive(Debug, Snafu)]

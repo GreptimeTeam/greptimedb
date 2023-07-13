@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use common_base::Plugins;
-use common_error::prelude::BoxedError;
+use common_error::ext::BoxedError;
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_function::scalars::udf::create_udf;
 use common_function::scalars::FunctionRef;

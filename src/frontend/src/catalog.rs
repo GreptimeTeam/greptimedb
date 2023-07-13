@@ -33,7 +33,7 @@ use catalog::{
 };
 use client::client_manager::DatanodeClients;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME};
-use common_error::prelude::BoxedError;
+use common_error::ext::BoxedError;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::rpc::store::RangeRequest;

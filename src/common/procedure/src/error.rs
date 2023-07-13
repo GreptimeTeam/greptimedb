@@ -16,8 +16,9 @@ use std::any::Any;
 use std::string::FromUtf8Error;
 use std::sync::Arc;
 
-use common_error::prelude::*;
-use snafu::Location;
+use common_error::ext::{BoxedError, ErrorExt};
+use common_error::status_code::StatusCode;
+use snafu::{Location, Snafu};
 
 use crate::procedure::ProcedureId;
 

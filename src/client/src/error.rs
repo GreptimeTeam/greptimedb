@@ -15,8 +15,10 @@
 use std::any::Any;
 use std::str::FromStr;
 
-use common_error::prelude::*;
-use snafu::Location;
+use common_error::ext::{BoxedError, ErrorExt};
+use common_error::status_code::StatusCode;
+use common_error::{INNER_ERROR_CODE, INNER_ERROR_MSG};
+use snafu::{Location, Snafu};
 use tonic::{Code, Status};
 
 #[derive(Debug, Snafu)]

@@ -15,11 +15,12 @@
 use std::any::Any;
 
 use common_datasource::file_format::Format;
-use common_error::prelude::*;
+use common_error::ext::{BoxedError, ErrorExt};
+use common_error::status_code::StatusCode;
 use datafusion::arrow::error::ArrowError;
 use datafusion::error::DataFusionError;
 use serde_json::error::Error as JsonError;
-use snafu::Location;
+use snafu::{Location, Snafu};
 use table::metadata::{TableInfoBuilderError, TableMetaBuilderError};
 
 #[derive(Debug, Snafu)]

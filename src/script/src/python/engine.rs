@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use async_trait::async_trait;
-use common_error::prelude::BoxedError;
+use common_error::ext::BoxedError;
 use common_function::scalars::{Function, FUNCTION_REGISTRY};
 use common_query::error::{PyUdfSnafu, UdfTempRecordBatchSnafu};
 use common_query::prelude::Signature;

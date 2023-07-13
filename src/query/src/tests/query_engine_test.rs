@@ -18,7 +18,7 @@ use catalog::local::MemoryCatalogManager;
 use catalog::RegisterTableRequest;
 use common_base::Plugins;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, NUMBERS_TABLE_ID};
-use common_error::prelude::BoxedError;
+use common_error::ext::BoxedError;
 use common_query::prelude::{create_udf, make_scalar_function, Volatility};
 use common_query::Output;
 use common_recordbatch::{util, RecordBatch};

@@ -17,7 +17,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use common_error::prelude::BoxedError;
+use common_error::ext::BoxedError;
 use common_recordbatch::error::Result as RecordBatchResult;
 use common_recordbatch::{RecordBatch, RecordBatchStream, SendableRecordBatchStream};
 use datatypes::prelude::*;

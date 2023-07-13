@@ -17,11 +17,12 @@ use std::num::ParseIntError;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use common_error::prelude::*;
+use common_error::ext::ErrorExt;
+use common_error::status_code::StatusCode;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Metadata, COMMENT_KEY};
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, Location, OptionExt};
+use snafu::{ensure, Location, OptionExt, ResultExt, Snafu};
 use store_api::storage::consts::{self, ReservedColumnId};
 use store_api::storage::{
     AddColumn, AlterOperation, AlterRequest, ColumnDescriptor, ColumnDescriptorBuilder,

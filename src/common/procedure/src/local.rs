@@ -567,7 +567,7 @@ mod test_util {
 #[cfg(test)]
 mod tests {
     use common_error::mock::MockError;
-    use common_error::prelude::StatusCode;
+    use common_error::status_code::StatusCode;
     use common_test_util::temp_dir::create_temp_dir;
 
     use super::*;

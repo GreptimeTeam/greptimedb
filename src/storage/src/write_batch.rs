@@ -349,7 +349,8 @@ mod tests {
     use std::iter;
     use std::sync::Arc;
 
-    use common_error::prelude::*;
+    use common_error::ext::ErrorExt;
+    use common_error::status_code::StatusCode;
     use datatypes::prelude::ScalarVector;
     use datatypes::type_id::LogicalTypeId;
     use datatypes::vectors::{

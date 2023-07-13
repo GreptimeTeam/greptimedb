@@ -12,10 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_error::prelude::*;
+use common_error::ext::{BoxedError, ErrorExt};
+use common_error::status_code::StatusCode;
 use common_meta::peer::Peer;
 use common_runtime::JoinError;
-use snafu::Location;
+use snafu::{Location, Snafu};
 use tokio::sync::mpsc::error::SendError;
 use tonic::codegen::http;
 use tonic::Code;

@@ -15,8 +15,8 @@
 use std::fmt;
 use std::sync::Arc;
 
-use common_error::prelude::*;
 use datatypes::schema::{Schema, SchemaBuilder, SchemaRef};
+use snafu::ResultExt;
 
 use crate::metadata::{self, ColumnMetadata, ColumnsMetadata, ColumnsMetadataRef, Result};
 use crate::schema::{StoreSchema, StoreSchemaRef};

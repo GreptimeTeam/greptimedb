@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use async_trait::async_trait;
-use common_error::prelude::BoxedError;
+use common_error::ext::BoxedError;
 use servers::influxdb::InfluxdbRequest;
 use servers::query_handler::InfluxdbLineProtocolHandler;
 use session::context::QueryContextRef;

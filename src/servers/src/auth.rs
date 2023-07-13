@@ -14,8 +14,7 @@
 
 use std::sync::Arc;
 
-use common_error::ext::BoxedError;
-use common_error::prelude::ErrorExt;
+use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use secrecy::SecretString;
 use session::context::UserInfo;

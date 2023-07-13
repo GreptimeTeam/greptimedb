@@ -24,7 +24,7 @@ use catalog::{CatalogManager, CatalogManagerRef, RegisterTableRequest};
 use common_base::paths::{CLUSTER_DIR, WAL_DIR};
 use common_base::Plugins;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID};
-use common_error::prelude::BoxedError;
+use common_error::ext::BoxedError;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
 use common_meta::heartbeat::handler::HandlerGroupExecutor;

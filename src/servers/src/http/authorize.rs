@@ -16,7 +16,7 @@ use std::marker::PhantomData;
 
 use axum::http::{self, Request, StatusCode};
 use axum::response::Response;
-use common_error::prelude::ErrorExt;
+use common_error::ext::ErrorExt;
 use common_telemetry::warn;
 use futures::future::BoxFuture;
 use http_body::Body;

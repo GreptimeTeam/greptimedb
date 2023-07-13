@@ -40,7 +40,7 @@ use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Json};
 use axum::{routing, BoxError, Extension, Router};
 use common_base::readable_size::ReadableSize;
-use common_error::prelude::ErrorExt;
+use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_query::Output;
 use common_recordbatch::{util, RecordBatch};

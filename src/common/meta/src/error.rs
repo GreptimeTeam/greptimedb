@@ -12,9 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_error::prelude::*;
+use common_error::ext::{BoxedError, ErrorExt};
+use common_error::status_code::StatusCode;
 use serde_json::error::Error as JsonError;
-use snafu::Location;
+use snafu::{Location, Snafu};
 use store_api::storage::RegionNumber;
 use table::metadata::TableId;
 

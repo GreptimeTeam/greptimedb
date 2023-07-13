@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use chrono::{NaiveDate, NaiveDateTime};
-use common_error::prelude::ErrorExt;
+use common_error::ext::ErrorExt;
 use common_query::Output;
 use common_telemetry::{error, logging, timer, trace, warn};
 use datatypes::prelude::ConcreteDataType;

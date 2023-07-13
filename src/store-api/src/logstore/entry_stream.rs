@@ -14,7 +14,7 @@
 
 use std::pin::Pin;
 
-use common_error::prelude::ErrorExt;
+use common_error::ext::ErrorExt;
 use futures::Stream;
 
 use crate::logstore::entry::Entry;
@@ -34,6 +34,7 @@ mod tests {
     use std::task::{Context, Poll};
 
     use futures::StreamExt;
+    use snafu::Snafu;
 
     use super::*;
     pub use crate::logstore::entry::Id;
@@ -42,8 +43,6 @@ mod tests {
         /// Binary data of current entry
         data: Vec<u8>,
     }
-
-    use common_error::prelude::{ErrorExt, Snafu};
 
     #[derive(Debug, Snafu)]
     #[snafu(visibility(pub))]

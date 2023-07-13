@@ -22,7 +22,7 @@ use axum::body::BoxBody;
 use axum::extract::{Path, Query, State};
 use axum::{middleware, routing, Form, Json, Router};
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
-use common_error::prelude::ErrorExt;
+use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_query::Output;
 use common_recordbatch::RecordBatches;

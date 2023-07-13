@@ -15,8 +15,9 @@
 use std::any::Any;
 
 use common_datasource::compression::CompressionType;
-use common_error::prelude::*;
-use snafu::Location;
+use common_error::ext::ErrorExt;
+use common_error::status_code::StatusCode;
+use snafu::{Location, Snafu};
 use store_api::manifest::ManifestVersion;
 
 #[derive(Debug, Snafu)]

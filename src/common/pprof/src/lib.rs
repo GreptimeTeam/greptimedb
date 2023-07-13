@@ -15,7 +15,8 @@
 use std::any::Any;
 use std::time::Duration;
 
-use common_error::prelude::{ErrorExt, StatusCode};
+use common_error::ext::ErrorExt;
+use common_error::status_code::StatusCode;
 use prost::Message;
 use snafu::{Location, ResultExt, Snafu};
 

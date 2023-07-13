@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use common_base::readable_size::ReadableSize;
 use common_base::Plugins;
-use common_error::prelude::BoxedError;
+use common_error::ext::BoxedError;
 pub use common_procedure::options::ProcedureConfig;
 use common_telemetry::info;
 use common_telemetry::logging::LoggingOptions;

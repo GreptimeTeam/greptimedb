@@ -15,7 +15,7 @@
 use std::any::Any;
 
 use common_error::ext::ErrorExt;
-use common_error::prelude::StatusCode;
+use common_error::status_code::StatusCode;
 use datatypes::prelude::ConcreteDataType;
 use snafu::prelude::*;
 use snafu::Location;

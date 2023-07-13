@@ -14,11 +14,12 @@
 
 use std::any::Any;
 
-use common_error::prelude::*;
+use common_error::ext::ErrorExt;
+use common_error::status_code::StatusCode;
 use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
 use datatypes::prelude::{ConcreteDataType, Value};
-use snafu::Location;
+use snafu::{Location, Snafu};
 use sqlparser::parser::ParserError;
 
 use crate::ast::{Expr, Value as SqlValue};

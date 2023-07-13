@@ -16,7 +16,7 @@ use api::prom_store::remote::read_request::ResponseType;
 use api::prom_store::remote::{Query, QueryResult, ReadRequest, ReadResponse, WriteRequest};
 use async_trait::async_trait;
 use common_catalog::format_full_table_name;
-use common_error::prelude::BoxedError;
+use common_error::ext::BoxedError;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
 use common_telemetry::logging;

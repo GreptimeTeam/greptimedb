@@ -17,7 +17,7 @@ use std::fmt::Debug;
 use std::sync::Arc;
 use std::time::Duration;
 
-use common_error::prelude::BoxedError;
+use common_error::ext::BoxedError;
 use common_meta::error::Error::{CacheNotGet, GetKvCache};
 use common_meta::error::{CacheNotGetSnafu, Error, MetaSrvSnafu, Result};
 use common_meta::kv_backend::{KvBackend, KvBackendRef, TxnService};

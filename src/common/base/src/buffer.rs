@@ -16,7 +16,7 @@ use std::any::Any;
 use std::io::{Read, Write};
 
 use bytes::{Buf, BufMut, BytesMut};
-use common_error::prelude::ErrorExt;
+use common_error::ext::ErrorExt;
 use paste::paste;
 use snafu::{ensure, Location, ResultExt, Snafu};
 

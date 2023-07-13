@@ -14,7 +14,7 @@
 
 //! LogStore APIs.
 
-use common_error::prelude::ErrorExt;
+use common_error::ext::ErrorExt;
 
 use crate::logstore::entry::{Entry, Id};
 use crate::logstore::entry_stream::SendableEntryStream;

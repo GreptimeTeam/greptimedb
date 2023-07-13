@@ -18,7 +18,7 @@ use std::time::Instant;
 use api::helper::request_type;
 use api::v1::auth_header::AuthScheme;
 use api::v1::{Basic, GreptimeRequest, RequestHeader};
-use common_error::prelude::ErrorExt;
+use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_query::Output;
 use common_runtime::Runtime;
