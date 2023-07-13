@@ -147,21 +147,6 @@ mod worker;
 /// LevelMetas o-- LevelMeta
 /// LevelMeta o-- FileHandle
 /// FileHandle o-- FileMeta
-/// class RegionMetadata {
-///     +RegionId region_id
-///     +VersionNumber version
-///     +SchemaRef schema
-///     +Vec&lt;ColumnMetadata&gt; column_metadatas
-/// }
-/// class Schema
-/// class ColumnMetadata {
-///     +ColumnSchema column_schema
-///     +SemanticTyle semantic_type
-///     +ColumnId column_id
-/// }
-/// class SemanticType
-/// RegionMetadata o-- Schema
-/// RegionMetadata o-- ColumnMetadata
-/// ColumnMetadata o-- SemanticType
+/// class RegionMetadata
 /// ```
 mod docs {}

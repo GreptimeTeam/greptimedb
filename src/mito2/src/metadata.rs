@@ -22,6 +22,26 @@ use store_api::storage::{ColumnId, RegionId};
 use crate::region::VersionNumber;
 
 /// Static metadata of a region.
+///
+/// ```mermaid
+/// class RegionMetadata {
+///     +RegionId region_id
+///     +VersionNumber version
+///     +SchemaRef schema
+///     +Vec&lt;ColumnMetadata&gt; column_metadatas
+///     +Vec&lt;ColumnId&gt; primary_keys
+/// }
+/// class Schema
+/// class ColumnMetadata {
+///     +ColumnSchema column_schema
+///     +SemanticTyle semantic_type
+///     +ColumnId column_id
+/// }
+/// class SemanticType
+/// RegionMetadata o-- Schema
+/// RegionMetadata o-- ColumnMetadata
+/// ColumnMetadata o-- SemanticType
+/// ```
 #[derive(Debug)]
 pub(crate) struct RegionMetadata {
     /// Latest schema of this region
