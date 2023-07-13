@@ -234,11 +234,10 @@ impl Instance {
                 meta_client_options.connect_timeout_millis,
             ))
             .tcp_nodelay(meta_client_options.tcp_nodelay);
-        let channel_manager = ChannelManager::with_config(channel_config);
-
         let ddl_channel_config = channel_config.clone().timeout(Duration::from_millis(
             meta_client_options.ddl_timeout_millis,
         ));
+        let channel_manager = ChannelManager::with_config(channel_config);
         let ddl_channel_manager = ChannelManager::with_config(ddl_channel_config);
 
         let mut meta_client = MetaClientBuilder::new(0, 0, Role::Frontend)
