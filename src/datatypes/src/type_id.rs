@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_time::timestamp::TimeUnit;
 /// Unique identifier for logical data type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LogicalTypeId {
@@ -99,14 +98,10 @@ impl LogicalTypeId {
                 ConcreteDataType::null_datatype(),
                 ConcreteDataType::null_datatype(),
             ),
-            LogicalTypeId::TimeSecond => ConcreteDataType::time_datatype(TimeUnit::Second),
-            LogicalTypeId::TimeMillisecond => {
-                ConcreteDataType::time_datatype(TimeUnit::Millisecond)
-            }
-            LogicalTypeId::TimeMicrosecond => {
-                ConcreteDataType::time_datatype(TimeUnit::Microsecond)
-            }
-            LogicalTypeId::TimeNanosecond => ConcreteDataType::time_datatype(TimeUnit::Nanosecond),
+            LogicalTypeId::TimeSecond => ConcreteDataType::time_second_datatype(),
+            LogicalTypeId::TimeMillisecond => ConcreteDataType::time_millisecond_datatype(),
+            LogicalTypeId::TimeMicrosecond => ConcreteDataType::time_microsecond_datatype(),
+            LogicalTypeId::TimeNanosecond => ConcreteDataType::time_nanosecond_datatype(),
         }
     }
 }

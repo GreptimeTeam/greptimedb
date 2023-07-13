@@ -71,14 +71,10 @@ impl From<ColumnDataTypeWrapper> for ConcreteDataType {
             ColumnDataType::TimestampNanosecond => {
                 ConcreteDataType::timestamp_nanosecond_datatype()
             }
-            ColumnDataType::TimeSecond => ConcreteDataType::time_datatype(TimeUnit::Second),
-            ColumnDataType::TimeMillisecond => {
-                ConcreteDataType::time_datatype(TimeUnit::Millisecond)
-            }
-            ColumnDataType::TimeMicrosecond => {
-                ConcreteDataType::time_datatype(TimeUnit::Microsecond)
-            }
-            ColumnDataType::TimeNanosecond => ConcreteDataType::time_datatype(TimeUnit::Nanosecond),
+            ColumnDataType::TimeSecond => ConcreteDataType::time_second_datatype(),
+            ColumnDataType::TimeMillisecond => ConcreteDataType::time_millisecond_datatype(),
+            ColumnDataType::TimeMicrosecond => ConcreteDataType::time_microsecond_datatype(),
+            ColumnDataType::TimeNanosecond => ConcreteDataType::time_nanosecond_datatype(),
         }
     }
 }
