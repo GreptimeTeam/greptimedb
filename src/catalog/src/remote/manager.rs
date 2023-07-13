@@ -17,6 +17,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use common_catalog::consts::MITO_ENGINE;
+use common_meta::helper::{
+    build_catalog_prefix, build_schema_prefix, build_table_global_prefix, CatalogKey, SchemaKey,
+    TableGlobalKey, TableGlobalValue, TableRegionalKey, TableRegionalValue,
+};
 use common_meta::ident::TableIdent;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::kv_backend::KvBackendRef;
@@ -35,10 +39,6 @@ use crate::error::{
     InvalidCatalogValueSnafu, OpenTableSnafu, ParallelOpenTableSnafu, Result,
     TableEngineNotFoundSnafu, TableExistsSnafu, TableMetadataManagerSnafu, TableNotFoundSnafu,
     UnimplementedSnafu,
-};
-use crate::helper::{
-    build_catalog_prefix, build_schema_prefix, build_table_global_prefix, CatalogKey, SchemaKey,
-    TableGlobalKey, TableGlobalValue, TableRegionalKey, TableRegionalValue,
 };
 use crate::local::MemoryCatalogManager;
 use crate::remote::region_alive_keeper::RegionAliveKeepers;

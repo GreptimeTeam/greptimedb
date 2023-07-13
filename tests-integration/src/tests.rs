@@ -51,7 +51,6 @@ impl MockDistributedInstance {
         &self.0.datanode_instances
     }
 
-    #[allow(unused)]
     pub fn table_metadata_manager(&self) -> &TableMetadataManagerRef {
         self.0.meta_srv.table_metadata_manager()
     }

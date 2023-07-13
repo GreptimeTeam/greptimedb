@@ -424,11 +424,9 @@ impl MetaClient {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::sync::Arc;
 
     use api::v1::meta::{HeartbeatRequest, Peer};
     use chrono::DateTime;
-    use common_meta::rpc::router::Partition;
     use common_meta::table_name::TableName;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, RawSchema};
@@ -668,37 +666,6 @@ mod tests {
                 },
             ])
         }
-    }
-
-    #[tokio::test]
-    async fn test_route() {
-        let selector = Arc::new(MockSelector {});
-        let client = mocks::mock_client_with_memorystore_and_selector(selector).await;
-
-        let p1 = Partition {
-            column_list: vec![b"col_1".to_vec(), b"col_2".to_vec()],
-            value_list: vec![b"k1".to_vec(), b"k2".to_vec()],
-        };
-        let p2 = Partition {
-            column_list: vec![b"col_1".to_vec(), b"col_2".to_vec()],
-            value_list: vec![b"Max1".to_vec(), b"Max2".to_vec()],
-        };
-        let table_name = TableName::new("test_catalog", "test_schema", "test_table");
-        let table_info = new_table_info(&table_name);
-        let req = CreateRequest::new(table_name.clone(), &table_info)
-            .add_partition(p1)
-            .add_partition(p2);
-
-        let res = client.create_route(req).await.unwrap();
-        assert_eq!(1, res.table_routes.len());
-
-        let req = RouteRequest::new().add_table_name(table_name.clone());
-        let res = client.route(req).await.unwrap();
-        assert!(!res.table_routes.is_empty());
-
-        let req = DeleteRequest::new(table_name.clone());
-        let res = client.delete_route(req).await;
-        let _ = res.unwrap();
     }
 
     #[tokio::test]

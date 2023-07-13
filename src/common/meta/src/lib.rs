@@ -16,6 +16,7 @@
 
 pub mod error;
 pub mod heartbeat;
+pub mod helper;
 pub mod ident;
 pub mod instruction;
 pub mod key;

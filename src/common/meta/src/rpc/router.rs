@@ -18,12 +18,12 @@ use api::v1::meta::{
     CreateRequest as PbCreateRequest, DeleteRequest as PbDeleteRequest, Partition as PbPartition,
     Peer as PbPeer, Region as PbRegion, RegionRoute as PbRegionRoute,
     RouteRequest as PbRouteRequest, RouteResponse as PbRouteResponse, Table as PbTable,
-    TableRoute as PbTableRoute, TableRouteValue as PbTableRouteValue,
+    TableId as PbTableId, TableRoute as PbTableRoute, TableRouteValue as PbTableRouteValue,
 };
 use serde::{Deserialize, Serialize, Serializer};
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::{RegionId, RegionNumber};
-use table::metadata::RawTableInfo;
+use table::metadata::{RawTableInfo, TableId};
 
 use crate::error::{self, Result};
 use crate::peer::Peer;
@@ -70,6 +70,7 @@ impl<'a> CreateRequest<'a> {
 #[derive(Debug, Clone, Default)]
 pub struct RouteRequest {
     pub table_names: Vec<TableName>,
+    pub table_ids: Vec<TableId>,
 }
 
 impl From<RouteRequest> for PbRouteRequest {
@@ -77,15 +78,17 @@ impl From<RouteRequest> for PbRouteRequest {
         Self {
             header: None,
             table_names: req.table_names.drain(..).map(Into::into).collect(),
+            table_ids: req.table_ids.drain(..).map(|id| PbTableId { id }).collect(),
         }
     }
 }
 
 impl RouteRequest {
     #[inline]
-    pub fn new() -> Self {
+    pub fn new(table_id: TableId) -> Self {
         Self {
             table_names: vec![],
+            table_ids: vec![table_id],
         }
     }
 
@@ -99,6 +102,7 @@ impl RouteRequest {
 #[derive(Debug, Clone)]
 pub struct DeleteRequest {
     pub table_name: TableName,
+    pub table_id: TableId,
 }
 
 impl From<DeleteRequest> for PbDeleteRequest {
@@ -106,14 +110,18 @@ impl From<DeleteRequest> for PbDeleteRequest {
         Self {
             header: None,
             table_name: Some(req.table_name.into()),
+            table_id: Some(PbTableId { id: req.table_id }),
         }
     }
 }
 
 impl DeleteRequest {
     #[inline]
-    pub fn new(table_name: TableName) -> Self {
-        Self { table_name }
+    pub fn new(table_name: TableName, table_id: TableId) -> Self {
+        Self {
+            table_name,
+            table_id,
+        }
     }
 }
 
@@ -521,6 +529,7 @@ mod tests {
                 TableName::new("c1", "s1", "t1"),
                 TableName::new("c2", "s2", "t2"),
             ],
+            table_ids: vec![1, 2, 3],
         };
 
         let into_req: PbRouteRequest = req.into();
@@ -532,12 +541,17 @@ mod tests {
         assert_eq!("c2", into_req.table_names.get(1).unwrap().catalog_name);
         assert_eq!("s2", into_req.table_names.get(1).unwrap().schema_name);
         assert_eq!("t2", into_req.table_names.get(1).unwrap().table_name);
+        assert_eq!(
+            (1..=3).map(|id| PbTableId { id }).collect::<Vec<_>>(),
+            into_req.table_ids
+        );
     }
 
     #[test]
     fn test_delete_request_trans() {
         let req = DeleteRequest {
             table_name: TableName::new("c1", "s1", "t1"),
+            table_id: 1,
         };
 
         let into_req: PbDeleteRequest = req.into();
@@ -546,6 +560,7 @@ mod tests {
         assert_eq!("c1", into_req.table_name.as_ref().unwrap().catalog_name);
         assert_eq!("s1", into_req.table_name.as_ref().unwrap().schema_name);
         assert_eq!("t1", into_req.table_name.as_ref().unwrap().table_name);
+        assert_eq!(Some(PbTableId { id: 1 }), into_req.table_id);
     }
 
     #[test]
