@@ -15,7 +15,7 @@
 use common_base::BitVec;
 use common_time::timestamp::TimeUnit;
 use datatypes::prelude::ConcreteDataType;
-use datatypes::types::TimestampType;
+use datatypes::types::{TimeType, TimestampType};
 use datatypes::value::Value;
 use datatypes::vectors::VectorRef;
 use greptime_proto::v1::ddl_request::Expr;
@@ -71,7 +71,14 @@ impl From<ColumnDataTypeWrapper> for ConcreteDataType {
             ColumnDataType::TimestampNanosecond => {
                 ConcreteDataType::timestamp_nanosecond_datatype()
             }
-            _ => unimplemented!("Implemented in #1961"),
+            ColumnDataType::TimeSecond => ConcreteDataType::time_datatype(TimeUnit::Second),
+            ColumnDataType::TimeMillisecond => {
+                ConcreteDataType::time_datatype(TimeUnit::Millisecond)
+            }
+            ColumnDataType::TimeMicrosecond => {
+                ConcreteDataType::time_datatype(TimeUnit::Microsecond)
+            }
+            ColumnDataType::TimeNanosecond => ConcreteDataType::time_datatype(TimeUnit::Nanosecond),
         }
     }
 }
@@ -96,11 +103,17 @@ impl TryFrom<ConcreteDataType> for ColumnDataTypeWrapper {
             ConcreteDataType::String(_) => ColumnDataType::String,
             ConcreteDataType::Date(_) => ColumnDataType::Date,
             ConcreteDataType::DateTime(_) => ColumnDataType::Datetime,
-            ConcreteDataType::Timestamp(unit) => match unit {
+            ConcreteDataType::Timestamp(t) => match t {
                 TimestampType::Second(_) => ColumnDataType::TimestampSecond,
                 TimestampType::Millisecond(_) => ColumnDataType::TimestampMillisecond,
                 TimestampType::Microsecond(_) => ColumnDataType::TimestampMicrosecond,
                 TimestampType::Nanosecond(_) => ColumnDataType::TimestampNanosecond,
+            },
+            ConcreteDataType::Time(t) => match t {
+                TimeType::Second(_) => ColumnDataType::TimeSecond,
+                TimeType::Millisecond(_) => ColumnDataType::TimeMillisecond,
+                TimeType::Microsecond(_) => ColumnDataType::TimeMicrosecond,
+                TimeType::Nanosecond(_) => ColumnDataType::TimeNanosecond,
             },
             ConcreteDataType::Null(_)
             | ConcreteDataType::List(_)
@@ -190,7 +203,22 @@ pub fn values_with_capacity(datatype: ColumnDataType, capacity: usize) -> Values
             ts_nanosecond_values: Vec::with_capacity(capacity),
             ..Default::default()
         },
-        _ => unimplemented!("Implemented in #1961"),
+        ColumnDataType::TimeSecond => Values {
+            time_second_values: Vec::with_capacity(capacity),
+            ..Default::default()
+        },
+        ColumnDataType::TimeMillisecond => Values {
+            time_millisecond_values: Vec::with_capacity(capacity),
+            ..Default::default()
+        },
+        ColumnDataType::TimeMicrosecond => Values {
+            time_microsecond_values: Vec::with_capacity(capacity),
+            ..Default::default()
+        },
+        ColumnDataType::TimeNanosecond => Values {
+            time_nanosecond_values: Vec::with_capacity(capacity),
+            ..Default::default()
+        },
     }
 }
 
@@ -224,6 +252,12 @@ pub fn push_vals(column: &mut Column, origin_count: usize, vector: VectorRef) {
             TimeUnit::Millisecond => values.ts_millisecond_values.push(val.value()),
             TimeUnit::Microsecond => values.ts_microsecond_values.push(val.value()),
             TimeUnit::Nanosecond => values.ts_nanosecond_values.push(val.value()),
+        },
+        Value::Time(val) => match val.unit() {
+            TimeUnit::Second => values.time_second_values.push(val.value()),
+            TimeUnit::Millisecond => values.time_millisecond_values.push(val.value()),
+            TimeUnit::Microsecond => values.time_microsecond_values.push(val.value()),
+            TimeUnit::Nanosecond => values.time_nanosecond_values.push(val.value()),
         },
         Value::List(_) => unreachable!(),
     });

@@ -15,11 +15,12 @@
 use std::sync::Arc;
 
 use crate::data_type::DataType;
-use crate::types::TimestampType;
+use crate::types::{TimeType, TimestampType};
 use crate::vectors::constant::ConstantVector;
 use crate::vectors::{
     BinaryVector, BooleanVector, DateTimeVector, DateVector, ListVector, PrimitiveVector,
-    StringVector, TimestampMicrosecondVector, TimestampMillisecondVector,
+    StringVector, TimeMicrosecondVector, TimeMillisecondVector, TimeNanosecondVector,
+    TimeSecondVector, TimestampMicrosecondVector, TimestampMillisecondVector,
     TimestampNanosecondVector, TimestampSecondVector, Vector,
 };
 use crate::with_match_primitive_type_id;
@@ -107,8 +108,20 @@ fn equal(lhs: &dyn Vector, rhs: &dyn Vector) -> bool {
             })
         }
 
-        Time(_) => todo!(),
-        Duration(_) => todo!(),
+        Time(t) => match t {
+            TimeType::Second(_) => {
+                is_vector_eq!(TimeSecondVector, lhs, rhs)
+            }
+            TimeType::Millisecond(_) => {
+                is_vector_eq!(TimeMillisecondVector, lhs, rhs)
+            }
+            TimeType::Microsecond(_) => {
+                is_vector_eq!(TimeMicrosecondVector, lhs, rhs)
+            }
+            TimeType::Nanosecond(_) => {
+                is_vector_eq!(TimeNanosecondVector, lhs, rhs)
+            }
+        },
     }
 }
 

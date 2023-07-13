@@ -88,6 +88,15 @@ pub(super) fn encode_value(value: &Value, builder: &mut DataRowEncoder) -> PgWir
                 })))
             }
         }
+        Value::Time(v) => {
+            if let Some(time) = v.to_chrono_time() {
+                builder.encode_field(&time)
+            } else {
+                Err(PgWireError::ApiError(Box::new(Error::Internal {
+                    err_msg: format!("Failed to convert time to postgres type {v:?}",),
+                })))
+            }
+        }
         Value::List(_) => Err(PgWireError::ApiError(Box::new(Error::Internal {
             err_msg: format!(
                 "cannot write value {:?} in postgres protocol: unimplemented",
@@ -112,6 +121,7 @@ pub(super) fn type_gt_to_pg(origin: &ConcreteDataType) -> Result<Type> {
         &ConcreteDataType::Date(_) => Ok(Type::DATE),
         &ConcreteDataType::DateTime(_) => Ok(Type::TIMESTAMP),
         &ConcreteDataType::Timestamp(_) => Ok(Type::TIMESTAMP),
+        &ConcreteDataType::Time(_) => Ok(Type::TIME),
         &ConcreteDataType::List(_) | &ConcreteDataType::Dictionary(_) => error::InternalSnafu {
             err_msg: format!("not implemented for column datatype {origin:?}"),
         }

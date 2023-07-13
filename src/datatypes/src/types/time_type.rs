@@ -14,53 +14,165 @@
 
 //! TimeType represents the elapsed time since midnight in the unit of `TimeUnit`.
 
-use std::sync::Arc;
-
-use arrow::datatypes::DataType as ArrowDataType;
+use arrow::datatypes::{
+    DataType as ArrowDataType, Time32MillisecondType as ArrowTimeMillisecondType,
+    Time32SecondType as ArrowTimeSecondType, Time64MicrosecondType as ArrowTimeMicrosecondType,
+    Time64NanosecondType as ArrowTimeNanosecondType, TimeUnit as ArrowTimeUnit,
+};
+use common_time::time::Time;
 use common_time::timestamp::TimeUnit;
+use enum_dispatch::enum_dispatch;
+use paste::paste;
 use serde::{Deserialize, Serialize};
+use snafu::OptionExt;
 
-use crate::data_type::{DataType, DataTypeRef};
-use crate::scalars::ScalarVectorBuilder;
-use crate::type_id::LogicalTypeId;
-use crate::value::Value;
-use crate::vectors::{BooleanVectorBuilder, MutableVector};
+use crate::error;
+use crate::prelude::{
+    ConcreteDataType, DataType, LogicalTypeId, MutableVector, ScalarVectorBuilder, Value, ValueRef,
+    Vector,
+};
+use crate::time::{TimeMicrosecond, TimeMillisecond, TimeNanosecond, TimeSecond};
+use crate::types::LogicalPrimitiveType;
+use crate::vectors::{
+    PrimitiveVector, TimeMicrosecondVector, TimeMicrosecondVectorBuilder, TimeMillisecondVector,
+    TimeMillisecondVectorBuilder, TimeNanosecondVector, TimeNanosecondVectorBuilder,
+    TimeSecondVector, TimeSecondVectorBuilder,
+};
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TimeType(TimeUnit);
+const SECOND_VARIATION: u64 = 0;
+const MILLISECOND_VARIATION: u64 = 3;
+const MICROSECOND_VARIATION: u64 = 6;
+const NANOSECOND_VARIATION: u64 = 9;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[enum_dispatch(DataType)]
+pub enum TimeType {
+    Second(TimeSecondType),
+    Millisecond(TimeMillisecondType),
+    Microsecond(TimeMicrosecondType),
+    Nanosecond(TimeNanosecondType),
+}
 
 impl TimeType {
+    /// Creates time type from `TimeUnit`.
     pub fn from_unit(unit: TimeUnit) -> Self {
-        Self(unit)
+        match unit {
+            TimeUnit::Second => Self::Second(TimeSecondType),
+            TimeUnit::Millisecond => Self::Millisecond(TimeMillisecondType),
+            TimeUnit::Microsecond => Self::Microsecond(TimeMicrosecondType),
+            TimeUnit::Nanosecond => Self::Nanosecond(TimeNanosecondType),
+        }
     }
 
-    pub fn unit(&self) -> &TimeUnit {
-        &self.0
+    /// Returns the time type's `TimeUnit`.
+    pub fn unit(&self) -> TimeUnit {
+        match self {
+            TimeType::Second(_) => TimeUnit::Second,
+            TimeType::Millisecond(_) => TimeUnit::Millisecond,
+            TimeType::Microsecond(_) => TimeUnit::Microsecond,
+            TimeType::Nanosecond(_) => TimeUnit::Nanosecond,
+        }
+    }
+
+    /// Returns the time type's precision.
+    pub fn precision(&self) -> u64 {
+        match self {
+            TimeType::Second(_) => SECOND_VARIATION,
+            TimeType::Millisecond(_) => MILLISECOND_VARIATION,
+            TimeType::Microsecond(_) => MICROSECOND_VARIATION,
+            TimeType::Nanosecond(_) => NANOSECOND_VARIATION,
+        }
     }
 }
 
-impl DataType for TimeType {
-    fn name(&self) -> &str {
-        "Time"
-    }
+macro_rules! impl_data_type_for_time {
+    ($unit: ident,$arrow_type: ident, $type: ty) => {
+        paste! {
+            #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+            pub struct [<Time $unit Type>];
 
-    fn logical_type_id(&self) -> LogicalTypeId {
-        LogicalTypeId::Time
-    }
+            impl DataType for [<Time $unit Type>] {
+                fn name(&self) -> &str {
+                    stringify!([<Time $unit>])
+                }
 
-    fn default_value(&self) -> Value {
-        todo!();
-    }
+                fn logical_type_id(&self) -> LogicalTypeId {
+                    LogicalTypeId::[<Time $unit>]
+                }
 
-    fn as_arrow_type(&self) -> ArrowDataType {
-        ArrowDataType::Time64(self.0.as_arrow_time_unit())
-    }
+                fn default_value(&self) -> Value {
+                    Value::Time(Time::new(0, TimeUnit::$unit))
+                }
 
-    fn create_mutable_vector(&self, capacity: usize) -> Box<dyn MutableVector> {
-        todo!();
-    }
+                fn as_arrow_type(&self) -> ArrowDataType {
+                    ArrowDataType::$arrow_type(ArrowTimeUnit::$unit)
+                }
 
-    fn is_timestamp_compatible(&self) -> bool {
-        false
+                fn create_mutable_vector(&self, capacity: usize) -> Box<dyn MutableVector> {
+                    Box::new([<Time $unit Vector Builder>]::with_capacity(capacity))
+                }
+
+                fn is_timestamp_compatible(&self) -> bool {
+                    false
+                }
+            }
+
+            impl LogicalPrimitiveType for [<Time $unit Type>] {
+                type ArrowPrimitive = [<Arrow Time $unit Type>];
+                type Native = $type;
+                type Wrapper = [<Time $unit>];
+                type LargestType = Self;
+
+                fn build_data_type() -> ConcreteDataType {
+                    ConcreteDataType::Time(TimeType::$unit(
+                        [<Time $unit Type>]::default(),
+                    ))
+                }
+
+                fn type_name() -> &'static str {
+                    stringify!([<Time $unit Type>])
+                }
+
+                fn cast_vector(vector: &dyn Vector) -> crate::Result<&PrimitiveVector<Self>> {
+                    vector
+                        .as_any()
+                        .downcast_ref::<[<Time $unit Vector>]>()
+                        .with_context(|| error::CastTypeSnafu {
+                            msg: format!(
+                                "Failed to cast {} to {}",
+                                vector.vector_type_name(), stringify!([<Time $unit Vector>])
+                            ),
+                        })
+                }
+
+                fn cast_value_ref(value: ValueRef) -> crate::Result<Option<Self::Wrapper>> {
+                    match value {
+                        ValueRef::Null => Ok(None),
+                        ValueRef::Int64(v) =>{
+                            Ok(Some([<Time $unit>]::from(v)))
+                        }
+                        ValueRef::Time(t) => match t.unit() {
+                            TimeUnit::$unit => Ok(Some([<Time $unit>](t))),
+                            other => error::CastTypeSnafu {
+                                msg: format!(
+                                    "Failed to cast Time value with different unit {:?} to {}",
+                                    other, stringify!([<Time $unit>])
+                                ),
+                            }
+                            .fail(),
+                        },
+                        other => error::CastTypeSnafu {
+                            msg: format!("Failed to cast value {:?} to {}", other, stringify!([<Time $unit>])),
+                        }
+                        .fail(),
+                    }
+                }
+            }
+        }
     }
 }
+
+impl_data_type_for_time!(Second, Time32, i32);
+impl_data_type_for_time!(Millisecond, Time32, i32);
+impl_data_type_for_time!(Nanosecond, Time64, i64);
+impl_data_type_for_time!(Microsecond, Time64, i64);

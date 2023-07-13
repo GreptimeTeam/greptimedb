@@ -16,6 +16,7 @@ pub mod date;
 pub mod datetime;
 pub mod error;
 pub mod range;
+pub mod time;
 pub mod timestamp;
 pub mod timestamp_millis;
 pub mod timezone;

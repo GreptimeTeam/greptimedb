@@ -80,7 +80,7 @@ impl PrometheusGateway for PrometheusGatewayService {
         let json_bytes = serde_json::to_string(&json_response).unwrap().into_bytes();
 
         let response = Response::new(PromqlResponse {
-            header: Some(ResponseHeader {}),
+            header: Some(ResponseHeader { status: None }),
             body: json_bytes,
         });
         Ok(response)

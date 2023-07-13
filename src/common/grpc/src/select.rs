@@ -14,10 +14,11 @@
 
 use api::v1::column::Values;
 use common_base::BitVec;
-use datatypes::types::{TimestampType, WrapperType};
+use datatypes::types::{TimeType, TimestampType, WrapperType};
 use datatypes::vectors::{
     BinaryVector, BooleanVector, DateTimeVector, DateVector, Float32Vector, Float64Vector,
-    Int16Vector, Int32Vector, Int64Vector, Int8Vector, StringVector, TimestampMicrosecondVector,
+    Int16Vector, Int32Vector, Int64Vector, Int8Vector, StringVector, TimeMicrosecondVector,
+    TimeMillisecondVector, TimeNanosecondVector, TimeSecondVector, TimestampMicrosecondVector,
     TimestampMillisecondVector, TimestampNanosecondVector, TimestampSecondVector, UInt16Vector,
     UInt32Vector, UInt64Vector, UInt8Vector, VectorRef,
 };
@@ -166,6 +167,30 @@ pub fn values(arrays: &[VectorRef]) -> Result<Values> {
             ConcreteDataType::Timestamp(TimestampType::Nanosecond(_)),
             TimestampNanosecondVector,
             ts_nanosecond_values,
+            |x| { x.into_native() }
+        ),
+        (
+            ConcreteDataType::Time(TimeType::Second(_)),
+            TimeSecondVector,
+            time_second_values,
+            |x| { x.into_native() as i64 }
+        ),
+        (
+            ConcreteDataType::Time(TimeType::Millisecond(_)),
+            TimeMillisecondVector,
+            time_millisecond_values,
+            |x| { x.into_native() as i64 }
+        ),
+        (
+            ConcreteDataType::Time(TimeType::Microsecond(_)),
+            TimeMicrosecondVector,
+            time_microsecond_values,
+            |x| { x.into_native() }
+        ),
+        (
+            ConcreteDataType::Time(TimeType::Nanosecond(_)),
+            TimeNanosecondVector,
+            time_nanosecond_values,
             |x| { x.into_native() }
         )
     )

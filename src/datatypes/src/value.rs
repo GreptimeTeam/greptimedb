@@ -22,6 +22,7 @@ use common_base::bytes::{Bytes, StringBytes};
 use common_telemetry::logging;
 use common_time::date::Date;
 use common_time::datetime::DateTime;
+use common_time::time::Time;
 use common_time::timestamp::{TimeUnit, Timestamp};
 use datafusion_common::ScalarValue;
 pub use ordered_float::OrderedFloat;
@@ -66,6 +67,7 @@ pub enum Value {
     Date(Date),
     DateTime(DateTime),
     Timestamp(Timestamp),
+    Time(Time),
 
     List(ListValue),
 }
@@ -97,6 +99,7 @@ impl Display for Value {
             Value::Date(v) => write!(f, "{v}"),
             Value::DateTime(v) => write!(f, "{v}"),
             Value::Timestamp(v) => write!(f, "{}", v.to_iso8601_string()),
+            Value::Time(t) => write!(f, "{}", t.to_iso8601_string()),
             Value::List(v) => {
                 let default = Box::<Vec<Value>>::default();
                 let items = v.items().as_ref().unwrap_or(&default);
@@ -134,6 +137,7 @@ impl Value {
             Value::Binary(_) => ConcreteDataType::binary_datatype(),
             Value::Date(_) => ConcreteDataType::date_datatype(),
             Value::DateTime(_) => ConcreteDataType::datetime_datatype(),
+            Value::Time(t) => ConcreteDataType::time_datatype(*t.unit()),
             Value::Timestamp(v) => ConcreteDataType::timestamp_datatype(v.unit()),
             Value::List(list) => ConcreteDataType::list_datatype(list.datatype().clone()),
         }
@@ -177,6 +181,7 @@ impl Value {
             Value::DateTime(v) => ValueRef::DateTime(*v),
             Value::List(v) => ValueRef::List(ListValueRef::Ref { val: v }),
             Value::Timestamp(v) => ValueRef::Timestamp(*v),
+            Value::Time(v) => ValueRef::Time(*v),
         }
     }
 
@@ -185,6 +190,15 @@ impl Value {
         match self {
             Value::Int64(v) => Some(Timestamp::new_millisecond(*v)),
             Value::Timestamp(t) => Some(*t),
+            _ => None,
+        }
+    }
+
+    /// Cast Value to [Time]. Return None if value is not a valid time data type.
+    pub fn as_time(&self) -> Option<Time> {
+        match self {
+            Value::Int64(v) => Some(Time::new_millisecond(*v)),
+            Value::Time(t) => Some(*t),
             _ => None,
         }
     }
@@ -214,6 +228,12 @@ impl Value {
                 TimeUnit::Millisecond => LogicalTypeId::TimestampMillisecond,
                 TimeUnit::Microsecond => LogicalTypeId::TimestampMicrosecond,
                 TimeUnit::Nanosecond => LogicalTypeId::TimestampNanosecond,
+            },
+            Value::Time(t) => match t.unit() {
+                TimeUnit::Second => LogicalTypeId::TimeSecond,
+                TimeUnit::Millisecond => LogicalTypeId::TimeMillisecond,
+                TimeUnit::Microsecond => LogicalTypeId::TimeMicrosecond,
+                TimeUnit::Nanosecond => LogicalTypeId::TimeNanosecond,
             },
         }
     }
@@ -255,6 +275,7 @@ impl Value {
                 list.try_to_scalar_value(list_type)?
             }
             Value::Timestamp(t) => timestamp_to_scalar_value(t.unit(), Some(t.value())),
+            Value::Time(t) => time_to_scalar_value(*t.unit(), Some(t.value())),
         };
 
         Ok(scalar_value)
@@ -287,9 +308,7 @@ pub fn to_null_scalar_value(output_type: &ConcreteDataType) -> ScalarValue {
             Box::new(dict.key_type().as_arrow_type()),
             Box::new(to_null_scalar_value(dict.value_type())),
         ),
-        ConcreteDataType::Time(t) => time_to_scalar_value(*t.unit(), None),
-        // Datafusion doesn't support duration scalar value.
-        ConcreteDataType::Duration(_) => unreachable!(),
+        ConcreteDataType::Time(t) => time_to_scalar_value(t.unit(), None),
     }
 }
 
@@ -361,6 +380,7 @@ macro_rules! impl_ord_for_value_like {
                 ($Type::Date(v1), $Type::Date(v2)) => v1.cmp(v2),
                 ($Type::DateTime(v1), $Type::DateTime(v2)) => v1.cmp(v2),
                 ($Type::Timestamp(v1), $Type::Timestamp(v2)) => v1.cmp(v2),
+                ($Type::Time(v1), $Type::Time(v2)) => v1.cmp(v2),
                 ($Type::List(v1), $Type::List(v2)) => v1.cmp(v2),
                 _ => panic!(
                     "Cannot compare different values {:?} and {:?}",
@@ -466,6 +486,7 @@ impl TryFrom<Value> for serde_json::Value {
             Value::DateTime(v) => serde_json::Value::Number(v.val().into()),
             Value::List(v) => serde_json::to_value(v)?,
             Value::Timestamp(v) => serde_json::to_value(v.value())?,
+            Value::Time(v) => serde_json::to_value(v.value())?,
         };
 
         Ok(json_value)
@@ -603,16 +624,25 @@ impl TryFrom<ScalarValue> for Value {
             ScalarValue::TimestampNanosecond(t, _) => t
                 .map(|x| Value::Timestamp(Timestamp::new(x, TimeUnit::Nanosecond)))
                 .unwrap_or(Value::Null),
+            ScalarValue::Time32Second(t) => t
+                .map(|x| Value::Time(Time::new(x as i64, TimeUnit::Second)))
+                .unwrap_or(Value::Null),
+            ScalarValue::Time32Millisecond(t) => t
+                .map(|x| Value::Time(Time::new(x as i64, TimeUnit::Millisecond)))
+                .unwrap_or(Value::Null),
+            ScalarValue::Time64Microsecond(t) => t
+                .map(|x| Value::Time(Time::new(x, TimeUnit::Microsecond)))
+                .unwrap_or(Value::Null),
+            ScalarValue::Time64Nanosecond(t) => t
+                .map(|x| Value::Time(Time::new(x, TimeUnit::Nanosecond)))
+                .unwrap_or(Value::Null),
+
             ScalarValue::Decimal128(_, _, _)
             | ScalarValue::IntervalYearMonth(_)
             | ScalarValue::IntervalDayTime(_)
             | ScalarValue::IntervalMonthDayNano(_)
             | ScalarValue::Struct(_, _)
-            | ScalarValue::Dictionary(_, _)
-            | ScalarValue::Time32Second(_)
-            | ScalarValue::Time32Millisecond(_)
-            | ScalarValue::Time64Microsecond(_)
-            | ScalarValue::Time64Nanosecond(_) => {
+            | ScalarValue::Dictionary(_, _) => {
                 return error::UnsupportedArrowTypeSnafu {
                     arrow_type: v.get_datatype(),
                 }
@@ -649,6 +679,9 @@ pub enum ValueRef<'a> {
     Date(Date),
     DateTime(DateTime),
     Timestamp(Timestamp),
+    Time(Time),
+
+    // Compound types:
     List(ListValueRef<'a>),
 }
 
@@ -700,8 +733,14 @@ impl<'a> ValueRef<'a> {
         impl_as_for_value_ref!(self, DateTime)
     }
 
+    /// Cast itself to [Timestamp].
     pub fn as_timestamp(&self) -> Result<Option<Timestamp>> {
         impl_as_for_value_ref!(self, Timestamp)
+    }
+
+    /// Cast itself to [Time].
+    pub fn as_time(&self) -> Result<Option<Time>> {
+        impl_as_for_value_ref!(self, Time)
     }
 
     /// Cast itself to [ListValueRef].
@@ -755,6 +794,7 @@ impl_value_ref_from!(Float64, f64);
 impl_value_ref_from!(Date, Date);
 impl_value_ref_from!(DateTime, DateTime);
 impl_value_ref_from!(Timestamp, Timestamp);
+impl_value_ref_from!(Time, Time);
 
 impl<'a> From<&'a str> for ValueRef<'a> {
     fn from(string: &'a str) -> ValueRef<'a> {
