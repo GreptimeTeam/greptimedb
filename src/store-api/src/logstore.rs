@@ -14,6 +14,8 @@
 
 //! LogStore APIs.
 
+use std::collections::HashMap;
+
 use common_error::ext::ErrorExt;
 
 use crate::logstore::entry::{Entry, Id};
@@ -41,9 +43,8 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
     /// Append a batch of entries atomically and return the offset of first entry.
     async fn append_batch(
         &self,
-        ns: &Self::Namespace,
-        e: Vec<Self::Entry>,
-    ) -> Result<Vec<Id>, Self::Error>;
+        e: HashMap<Self::Namespace, Vec<Self::Entry>>,
+    ) -> Result<(), Self::Error>;
 
     /// Create a new `EntryStream` to asynchronously generates `Entry` with ids
     /// starting from `id`.

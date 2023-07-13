@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
@@ -20,7 +21,7 @@ use common_runtime::{RepeatedTask, TaskFunction};
 use common_telemetry::{error, info};
 use raft_engine::{Config, Engine, LogBatch, MessageExt, ReadableSize, RecoveryMode};
 use snafu::{ensure, ResultExt};
-use store_api::logstore::entry::Id;
+use store_api::logstore::entry::{Entry, Id};
 use store_api::logstore::entry_stream::SendableEntryStream;
 use store_api::logstore::namespace::Namespace as NamespaceTrait;
 use store_api::logstore::{AppendResponse, LogStore};
@@ -29,9 +30,10 @@ use crate::config::LogConfig;
 use crate::error;
 use crate::error::{
     AddEntryLogBatchSnafu, Error, FetchEntrySnafu, IllegalNamespaceSnafu, IllegalStateSnafu,
-    RaftEngineSnafu, StartGcTaskSnafu, StopGcTaskSnafu,
+    MalformedBatchSnafu, OverrideCompactedEntrySnafu, RaftEngineSnafu, Result, StartGcTaskSnafu,
+    StopGcTaskSnafu,
 };
-use crate::raft_engine::protos::logstore::{EntryImpl as Entry, NamespaceImpl as Namespace};
+use crate::raft_engine::protos::logstore::{EntryImpl, NamespaceImpl as Namespace};
 
 const NAMESPACE_PREFIX: &str = "__sys_namespace_";
 const SYSTEM_NAMESPACE: u64 = 0;
@@ -52,7 +54,7 @@ impl TaskFunction<Error> for PurgeExpiredFilesFunction {
         "RaftEngineLogStore-gc-task"
     }
 
-    async fn call(&mut self) -> Result<(), Error> {
+    async fn call(&mut self) -> Result<()> {
         match self.engine.purge_expired_files().context(RaftEngineSnafu) {
             Ok(res) => {
                 // TODO(hl): the retval of purge_expired_files indicates the namespaces need to be compact,
@@ -72,8 +74,7 @@ impl TaskFunction<Error> for PurgeExpiredFilesFunction {
 }
 
 impl RaftEngineLogStore {
-    pub async fn try_new(config: LogConfig) -> Result<Self, Error> {
-        // TODO(hl): set according to available disk space
+    pub async fn try_new(config: LogConfig) -> Result<Self> {
         let raft_engine_config = Config {
             dir: config.log_file_dir.clone(),
             purge_threshold: ReadableSize(config.purge_threshold),
@@ -103,7 +104,7 @@ impl RaftEngineLogStore {
         self.gc_task.started()
     }
 
-    fn start(&self) -> Result<(), Error> {
+    fn start(&self) -> Result<()> {
         self.gc_task
             .start(common_runtime::bg_runtime())
             .context(StartGcTaskSnafu)
@@ -114,6 +115,41 @@ impl RaftEngineLogStore {
             self.engine.first_index(namespace.id()),
             self.engine.last_index(namespace.id()),
         )
+    }
+
+    /// Checks if:
+    /// - all entries have the same namespace id as `ns_id`,
+    /// - batch does not override the min index of namespace.
+    fn check_entries(&self, ns_id: u64, entries: &[EntryImpl]) -> Result<()> {
+        if cfg!(debug_assertions) {
+            let mut min_entry_id = u64::MAX;
+            for e in entries {
+                ensure!(
+                    e.namespace().id() == ns_id,
+                    MalformedBatchSnafu {
+                        expect_ns: ns_id,
+                        actual_ns: e.namespace().id(),
+                    }
+                );
+                let id = e.get_id();
+                if id < min_entry_id {
+                    min_entry_id = id;
+                }
+            }
+
+            if let Some(first_index) = self.engine.first_index(ns_id) {
+                ensure!(
+                    min_entry_id >= first_index,
+                    OverrideCompactedEntrySnafu {
+                        namespace: ns_id,
+                        first_index,
+                        attempt_index: min_entry_id,
+                    }
+                );
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -130,14 +166,14 @@ impl Debug for RaftEngineLogStore {
 impl LogStore for RaftEngineLogStore {
     type Error = Error;
     type Namespace = Namespace;
-    type Entry = Entry;
+    type Entry = EntryImpl;
 
-    async fn stop(&self) -> Result<(), Self::Error> {
+    async fn stop(&self) -> Result<()> {
         self.gc_task.stop().await.context(StopGcTaskSnafu)
     }
 
     /// Append an entry to logstore. Currently of existence of entry's namespace is not checked.
-    async fn append(&self, e: Self::Entry) -> Result<AppendResponse, Self::Error> {
+    async fn append(&self, e: Self::Entry) -> Result<AppendResponse> {
         ensure!(self.started(), IllegalStateSnafu);
         let entry_id = e.id;
         let namespace_id = e.namespace_id;
@@ -168,47 +204,28 @@ impl LogStore for RaftEngineLogStore {
     /// batch append.
     async fn append_batch(
         &self,
-        ns: &Self::Namespace,
-        entries: Vec<Self::Entry>,
-    ) -> Result<Vec<Id>, Self::Error> {
+        entries: HashMap<Self::Namespace, Vec<Self::Entry>>,
+    ) -> Result<()> {
         ensure!(self.started(), IllegalStateSnafu);
         if entries.is_empty() {
-            return Ok(vec![]);
+            return Ok(());
         }
 
-        let mut min_entry_id = u64::MAX;
-        let entry_ids = entries
-            .iter()
-            .map(|e| {
-                let id = e.get_id();
-                if id < min_entry_id {
-                    min_entry_id = id;
-                }
-                id
-            })
-            .collect::<Vec<_>>();
-
         let mut batch = LogBatch::with_capacity(entries.len());
-        batch
-            .add_entries::<MessageType>(ns.id, &entries)
-            .context(AddEntryLogBatchSnafu)?;
 
-        if let Some(first_index) = self.engine.first_index(ns.id) {
-            ensure!(
-                min_entry_id >= first_index,
-                error::OverrideCompactedEntrySnafu {
-                    namespace: ns.id,
-                    first_index,
-                    attempt_index: min_entry_id,
-                }
-            );
+        for (ns, entries) in entries.into_iter() {
+            let ns_id = ns.id;
+            self.check_entries(ns_id, &entries)?;
+            batch
+                .add_entries::<MessageType>(ns_id, &entries)
+                .context(AddEntryLogBatchSnafu)?;
         }
 
         let _ = self
             .engine
             .write(&mut batch, self.config.sync_write)
             .context(RaftEngineSnafu)?;
-        Ok(entry_ids)
+        Ok(())
     }
 
     /// Create a stream of entries from logstore in the given namespace. The end of stream is
@@ -217,7 +234,7 @@ impl LogStore for RaftEngineLogStore {
         &self,
         ns: &Self::Namespace,
         id: Id,
-    ) -> Result<SendableEntryStream<'_, Self::Entry, Self::Error>, Self::Error> {
+    ) -> Result<SendableEntryStream<'_, Self::Entry, Self::Error>> {
         ensure!(self.started(), IllegalStateSnafu);
         let engine = self.engine.clone();
 
@@ -275,7 +292,7 @@ impl LogStore for RaftEngineLogStore {
         Ok(Box::pin(s))
     }
 
-    async fn create_namespace(&self, ns: &Self::Namespace) -> Result<(), Self::Error> {
+    async fn create_namespace(&self, ns: &Self::Namespace) -> Result<()> {
         ensure!(
             ns.id != SYSTEM_NAMESPACE,
             IllegalNamespaceSnafu { ns: ns.id }
@@ -293,7 +310,7 @@ impl LogStore for RaftEngineLogStore {
         Ok(())
     }
 
-    async fn delete_namespace(&self, ns: &Self::Namespace) -> Result<(), Self::Error> {
+    async fn delete_namespace(&self, ns: &Self::Namespace) -> Result<()> {
         ensure!(
             ns.id != SYSTEM_NAMESPACE,
             IllegalNamespaceSnafu { ns: ns.id }
@@ -309,7 +326,7 @@ impl LogStore for RaftEngineLogStore {
         Ok(())
     }
 
-    async fn list_namespaces(&self) -> Result<Vec<Self::Namespace>, Self::Error> {
+    async fn list_namespaces(&self) -> Result<Vec<Self::Namespace>> {
         ensure!(self.started(), IllegalStateSnafu);
         let mut namespaces: Vec<Namespace> = vec![];
         self.engine
@@ -328,7 +345,7 @@ impl LogStore for RaftEngineLogStore {
     }
 
     fn entry<D: AsRef<[u8]>>(&self, data: D, id: Id, ns: Self::Namespace) -> Self::Entry {
-        Entry {
+        EntryImpl {
             id,
             data: data.as_ref().to_vec(),
             namespace_id: ns.id(),
@@ -343,7 +360,7 @@ impl LogStore for RaftEngineLogStore {
         }
     }
 
-    async fn obsolete(&self, namespace: Self::Namespace, id: Id) -> Result<(), Self::Error> {
+    async fn obsolete(&self, namespace: Self::Namespace, id: Id) -> Result<()> {
         ensure!(self.started(), IllegalStateSnafu);
         let obsoleted = self.engine.compact_to(namespace.id(), id + 1);
         info!(
@@ -361,7 +378,7 @@ impl LogStore for RaftEngineLogStore {
 struct MessageType;
 
 impl MessageExt for MessageType {
-    type Entry = Entry;
+    type Entry = EntryImpl;
 
     fn index(e: &Self::Entry) -> u64 {
         e.id

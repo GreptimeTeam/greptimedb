@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+
 use store_api::logstore::entry::{Entry, Id};
 use store_api::logstore::namespace::{Id as NamespaceId, Namespace};
 use store_api::logstore::{AppendResponse, LogStore};
@@ -25,7 +27,7 @@ pub struct NoopLogStore;
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct EntryImpl;
 
-#[derive(Debug, Clone, Default, Hash, PartialEq)]
+#[derive(Debug, Clone, Default, Eq, PartialEq, Hash)]
 pub struct NamespaceImpl;
 
 impl Namespace for NamespaceImpl {
@@ -65,8 +67,8 @@ impl LogStore for NoopLogStore {
         Ok(AppendResponse { entry_id: 0 })
     }
 
-    async fn append_batch(&self, _ns: &Self::Namespace, _e: Vec<Self::Entry>) -> Result<Vec<Id>> {
-        Ok(vec![])
+    async fn append_batch(&self, _e: HashMap<Self::Namespace, Vec<Self::Entry>>) -> Result<()> {
+        Ok(())
     }
 
     async fn read(
@@ -132,7 +134,7 @@ mod tests {
         let e = store.entry("".as_bytes(), 1, NamespaceImpl::default());
         let _ = store.append(e.clone()).await.unwrap();
         assert!(store
-            .append_batch(&NamespaceImpl::default(), vec![e])
+            .append_batch([(NamespaceImpl::default(), vec![e])].into_iter().collect())
             .await
             .is_ok());
         store
