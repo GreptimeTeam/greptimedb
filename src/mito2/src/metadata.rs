@@ -27,7 +27,10 @@ pub(crate) struct RegionMetadata {
     /// Latest schema of this region
     schema: SchemaRef,
     column_metadatas: Vec<ColumnMetadata>,
+    /// Version of metadata.
     version: VersionNumber,
+    /// Maintains an ordered list of primary keys
+    primary_keys: Vec<ColumnId>,
 
     /// Immutable and unique id
     id: RegionId,
