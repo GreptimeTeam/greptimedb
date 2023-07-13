@@ -151,7 +151,6 @@ mod worker;
 ///     +RegionId region_id
 ///     +VersionNumber version
 ///     +SchemaRef schema
-///     +TableOptions region_options
 ///     +Vec&lt;ColumnMetadata&gt; column_metadatas
 /// }
 /// class Schema

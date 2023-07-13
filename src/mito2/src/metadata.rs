@@ -29,9 +29,8 @@ pub(crate) struct RegionMetadata {
     column_metadatas: Vec<ColumnMetadata>,
     version: VersionNumber,
 
-    // Immutable properties
+    // Immutable and unique id
     id: RegionId,
-    name: String,
 }
 
 pub(crate) type RegionMetadataRef = Arc<RegionMetadata>;
