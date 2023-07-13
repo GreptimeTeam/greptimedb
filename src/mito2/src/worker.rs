@@ -202,14 +202,16 @@ impl RegionWorker {
 
     /// Submit request to background worker thread.
     async fn submit_request(&self, request: WorkerRequest) -> Result<()> {
-        ensure!(
-            self.running.load(Ordering::Relaxed),
-            WorkerStoppedSnafu { id: self.id }
-        );
-        ensure!(
-            self.sender.send(request).await.is_ok(),
-            WorkerStoppedSnafu { id: self.id }
-        );
+        ensure!(self.is_running(), WorkerStoppedSnafu { id: self.id });
+        if self.sender.send(request).await.is_err() {
+            logging::warn!(
+                "Worker {} is already stopped but the running flag is still true",
+                self.id
+            );
+            // Manually set the running flag to false to avoid printing more warning logs.
+            self.set_running(false);
+            return WorkerStoppedSnafu { id: self.id }.fail();
+        }
 
         Ok(())
     }
@@ -222,7 +224,7 @@ impl RegionWorker {
         if let Some(handle) = handle {
             logging::info!("Stop region worker {}", self.id);
 
-            self.running.store(false, Ordering::Relaxed);
+            self.set_running(false);
             // TODO(yingwen): Send shutdown request.
 
             handle.await.context(JoinSnafu)?;
@@ -230,12 +232,22 @@ impl RegionWorker {
 
         Ok(())
     }
+
+    /// Returns true if the worker is still running.
+    fn is_running(&self) -> bool {
+        self.running.load(Ordering::Relaxed)
+    }
+
+    /// Sets whether the worker is still running.
+    fn set_running(&self, value: bool) {
+        self.running.store(value, Ordering::Relaxed)
+    }
 }
 
 impl Drop for RegionWorker {
     fn drop(&mut self) {
-        if self.running.load(Ordering::Relaxed) {
-            self.running.store(false, Ordering::Relaxed);
+        if self.is_running() {
+            self.set_running(false);
             // Once we drop the sender, the worker thread will receive a disconnected error.
         }
     }
