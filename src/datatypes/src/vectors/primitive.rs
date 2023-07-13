@@ -481,7 +481,10 @@ pub(crate) fn replicate_primitive<T: LogicalPrimitiveType>(
 
 #[cfg(test)]
 mod tests {
-    use arrow::array::Int32Array;
+    use arrow::array::{
+        Int32Array, Time32MillisecondArray, Time32SecondArray, Time64MicrosecondArray,
+        Time64NanosecondArray,
+    };
     use arrow::datatypes::DataType as ArrowDataType;
     use serde_json;
 
@@ -489,6 +492,9 @@ mod tests {
     use crate::data_type::DataType;
     use crate::serialize::Serializable;
     use crate::types::Int64Type;
+    use crate::vectors::{
+        TimeMicrosecondVector, TimeMillisecondVector, TimeNanosecondVector, TimeSecondVector,
+    };
 
     fn check_vec(v: Int32Vector) {
         assert_eq!(4, v.len());
@@ -638,5 +644,24 @@ mod tests {
         test_from_wrapper_slice!(Int64Vector, i64);
         test_from_wrapper_slice!(Float32Vector, f32);
         test_from_wrapper_slice!(Float64Vector, f64);
+    }
+
+    #[test]
+    fn test_try_from_arrow_time_array() {
+        let array: ArrayRef = Arc::new(Time32SecondArray::from(vec![1i32, 2, 3]));
+        let vector = TimeSecondVector::try_from_arrow_time_array(array).unwrap();
+        assert_eq!(TimeSecondVector::from_values(vec![1, 2, 3]), vector);
+
+        let array: ArrayRef = Arc::new(Time32MillisecondArray::from(vec![1i32, 2, 3]));
+        let vector = TimeMillisecondVector::try_from_arrow_time_array(array).unwrap();
+        assert_eq!(TimeMillisecondVector::from_values(vec![1, 2, 3]), vector);
+
+        let array: ArrayRef = Arc::new(Time64MicrosecondArray::from(vec![1i64, 2, 3]));
+        let vector = TimeMicrosecondVector::try_from_arrow_time_array(array).unwrap();
+        assert_eq!(TimeMicrosecondVector::from_values(vec![1, 2, 3]), vector);
+
+        let array: ArrayRef = Arc::new(Time64NanosecondArray::from(vec![1i64, 2, 3]));
+        let vector = TimeNanosecondVector::try_from_arrow_time_array(array).unwrap();
+        assert_eq!(TimeNanosecondVector::from_values(vec![1, 2, 3]), vector);
     }
 }

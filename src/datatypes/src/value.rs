@@ -1058,6 +1058,42 @@ mod tests {
                 .unwrap()
         );
 
+        assert_eq!(
+            Value::Time(Time::new(1, TimeUnit::Second)),
+            ScalarValue::Time32Second(Some(1)).try_into().unwrap()
+        );
+        assert_eq!(
+            Value::Null,
+            ScalarValue::Time32Second(None).try_into().unwrap()
+        );
+
+        assert_eq!(
+            Value::Time(Time::new(1, TimeUnit::Millisecond)),
+            ScalarValue::Time32Millisecond(Some(1)).try_into().unwrap()
+        );
+        assert_eq!(
+            Value::Null,
+            ScalarValue::Time32Millisecond(None).try_into().unwrap()
+        );
+
+        assert_eq!(
+            Value::Time(Time::new(1, TimeUnit::Microsecond)),
+            ScalarValue::Time64Microsecond(Some(1)).try_into().unwrap()
+        );
+        assert_eq!(
+            Value::Null,
+            ScalarValue::Time64Microsecond(None).try_into().unwrap()
+        );
+
+        assert_eq!(
+            Value::Time(Time::new(1, TimeUnit::Nanosecond)),
+            ScalarValue::Time64Nanosecond(Some(1)).try_into().unwrap()
+        );
+        assert_eq!(
+            Value::Null,
+            ScalarValue::Time64Nanosecond(None).try_into().unwrap()
+        );
+
         let result: Result<Value> = ScalarValue::Decimal128(Some(1), 0, 0).try_into();
         assert!(result
             .unwrap_err()
@@ -1190,6 +1226,22 @@ mod tests {
             &ConcreteDataType::timestamp_millisecond_datatype(),
             &Value::Timestamp(Timestamp::new_millisecond(1)),
         );
+        check_type_and_value(
+            &ConcreteDataType::time_second_datatype(),
+            &Value::Time(Time::new_second(1)),
+        );
+        check_type_and_value(
+            &ConcreteDataType::time_millisecond_datatype(),
+            &Value::Time(Time::new_millisecond(1)),
+        );
+        check_type_and_value(
+            &ConcreteDataType::time_microsecond_datatype(),
+            &Value::Time(Time::new_microsecond(1)),
+        );
+        check_type_and_value(
+            &ConcreteDataType::time_nanosecond_datatype(),
+            &Value::Time(Time::new_nanosecond(1)),
+        );
     }
 
     #[test]
@@ -1285,6 +1337,10 @@ mod tests {
             serde_json::Value::Number(1.into()),
             to_json(Value::Timestamp(Timestamp::new_millisecond(1)))
         );
+        assert_eq!(
+            serde_json::Value::Number(1.into()),
+            to_json(Value::Time(Time::new_millisecond(1)))
+        );
 
         let json_value: serde_json::Value =
             serde_json::from_str(r#"{"items":[{"Int32":123}],"datatype":{"Int32":{}}}"#).unwrap();
@@ -1342,6 +1398,7 @@ mod tests {
         check_as_value_ref!(Float32, OrderedF32::from(16.0));
         check_as_value_ref!(Float64, OrderedF64::from(16.0));
         check_as_value_ref!(Timestamp, Timestamp::new_millisecond(1));
+        check_as_value_ref!(Time, Time::new_millisecond(1));
 
         assert_eq!(
             ValueRef::String("hello"),
@@ -1391,6 +1448,7 @@ mod tests {
         check_as_correct!(true, Boolean, as_boolean);
         check_as_correct!(Date::new(123), Date, as_date);
         check_as_correct!(DateTime::new(12), DateTime, as_datetime);
+        check_as_correct!(Time::new_second(12), Time, as_time);
         let list = ListValue {
             items: None,
             datatype: ConcreteDataType::int32_datatype(),
@@ -1404,6 +1462,8 @@ mod tests {
         assert!(wrong_value.as_date().is_err());
         assert!(wrong_value.as_datetime().is_err());
         assert!(wrong_value.as_list().is_err());
+        assert!(wrong_value.as_time().is_err());
+        assert!(wrong_value.as_timestamp().is_err());
     }
 
     #[test]
@@ -1435,6 +1495,10 @@ mod tests {
         assert_eq!(
             Value::Timestamp(Timestamp::new(1000, TimeUnit::Millisecond)).to_string(),
             "1970-01-01 08:00:01+0800"
+        );
+        assert_eq!(
+            Value::Time(Time::new(1000, TimeUnit::Millisecond)).to_string(),
+            "08:00:01+0800"
         );
         assert_eq!(
             Value::List(ListValue::new(
@@ -1646,6 +1710,31 @@ mod tests {
                 .try_to_scalar_value(&ConcreteDataType::binary_datatype())
                 .unwrap()
         );
+
+        assert_eq!(
+            ScalarValue::Time32Second(None),
+            Value::Null
+                .try_to_scalar_value(&ConcreteDataType::time_second_datatype())
+                .unwrap()
+        );
+        assert_eq!(
+            ScalarValue::Time32Millisecond(None),
+            Value::Null
+                .try_to_scalar_value(&ConcreteDataType::time_millisecond_datatype())
+                .unwrap()
+        );
+        assert_eq!(
+            ScalarValue::Time64Microsecond(None),
+            Value::Null
+                .try_to_scalar_value(&ConcreteDataType::time_microsecond_datatype())
+                .unwrap()
+        );
+        assert_eq!(
+            ScalarValue::Time64Nanosecond(None),
+            Value::Null
+                .try_to_scalar_value(&ConcreteDataType::time_nanosecond_datatype())
+                .unwrap()
+        );
     }
 
     #[test]
@@ -1689,6 +1778,26 @@ mod tests {
         assert_eq!(
             ScalarValue::TimestampNanosecond(Some(1), None),
             timestamp_to_scalar_value(TimeUnit::Nanosecond, Some(1))
+        );
+    }
+
+    #[test]
+    fn test_time_to_scalar_value() {
+        assert_eq!(
+            ScalarValue::Time32Second(Some(1)),
+            time_to_scalar_value(TimeUnit::Second, Some(1))
+        );
+        assert_eq!(
+            ScalarValue::Time32Millisecond(Some(1)),
+            time_to_scalar_value(TimeUnit::Millisecond, Some(1))
+        );
+        assert_eq!(
+            ScalarValue::Time64Microsecond(Some(1)),
+            time_to_scalar_value(TimeUnit::Microsecond, Some(1))
+        );
+        assert_eq!(
+            ScalarValue::Time64Nanosecond(Some(1)),
+            time_to_scalar_value(TimeUnit::Nanosecond, Some(1))
         );
     }
 }

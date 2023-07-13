@@ -573,10 +573,13 @@ mod tests {
     use api::v1::{Column, ColumnDataType};
     use common_base::BitVec;
     use common_catalog::consts::MITO_ENGINE;
-    use common_time::timestamp::Timestamp;
+    use common_time::timestamp::{TimeUnit, Timestamp};
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, SchemaBuilder};
-    use datatypes::types::{TimestampMillisecondType, TimestampSecondType, TimestampType};
+    use datatypes::types::{
+        TimeMillisecondType, TimeSecondType, TimeType, TimestampMillisecondType,
+        TimestampSecondType, TimestampType,
+    };
     use datatypes::value::Value;
     use paste::paste;
     use snafu::ResultExt;
@@ -633,8 +636,8 @@ mod tests {
         );
 
         let column_defs = create_expr.column_defs;
-        assert_eq!(column_defs[3].name, create_expr.time_index);
-        assert_eq!(4, column_defs.len());
+        assert_eq!(column_defs[4].name, create_expr.time_index);
+        assert_eq!(5, column_defs.len());
 
         assert_eq!(
             ConcreteDataType::string_datatype(),
@@ -679,6 +682,20 @@ mod tests {
         );
 
         assert_eq!(
+            ConcreteDataType::time_datatype(TimeUnit::Millisecond),
+            ConcreteDataType::from(
+                ColumnDataTypeWrapper::try_new(
+                    column_defs
+                        .iter()
+                        .find(|c| c.name == "time")
+                        .unwrap()
+                        .datatype
+                )
+                .unwrap()
+            )
+        );
+
+        assert_eq!(
             ConcreteDataType::timestamp_millisecond_datatype(),
             ConcreteDataType::from(
                 ColumnDataTypeWrapper::try_new(
@@ -711,7 +728,7 @@ mod tests {
 
         let add_columns = find_new_columns(&schema, &insert_batch.0).unwrap().unwrap();
 
-        assert_eq!(2, add_columns.add_columns.len());
+        assert_eq!(3, add_columns.add_columns.len());
         let host_column = &add_columns.add_columns[0];
         assert!(host_column.is_key);
 
@@ -730,6 +747,17 @@ mod tests {
             ConcreteDataType::float64_datatype(),
             ConcreteDataType::from(
                 ColumnDataTypeWrapper::try_new(memory_column.column_def.as_ref().unwrap().datatype)
+                    .unwrap()
+            )
+        );
+
+        let time_column = &add_columns.add_columns[2];
+        assert!(!time_column.is_key);
+
+        assert_eq!(
+            ConcreteDataType::time_datatype(TimeUnit::Millisecond),
+            ConcreteDataType::from(
+                ColumnDataTypeWrapper::try_new(time_column.column_def.as_ref().unwrap().datatype)
                     .unwrap()
             )
         );
@@ -945,6 +973,39 @@ mod tests {
     }
 
     #[test]
+    fn test_convert_time_values() {
+        // second
+        let actual = convert_values(
+            &ConcreteDataType::Time(TimeType::Second(TimeSecondType)),
+            Values {
+                time_second_values: vec![1_i64, 2_i64, 3_i64],
+                ..Default::default()
+            },
+        );
+        let expect = vec![
+            Value::Time(Time::new_second(1_i64)),
+            Value::Time(Time::new_second(2_i64)),
+            Value::Time(Time::new_second(3_i64)),
+        ];
+        assert_eq!(expect, actual);
+
+        // millisecond
+        let actual = convert_values(
+            &ConcreteDataType::Time(TimeType::Millisecond(TimeMillisecondType)),
+            Values {
+                time_millisecond_values: vec![1_i64, 2_i64, 3_i64],
+                ..Default::default()
+            },
+        );
+        let expect = vec![
+            Value::Time(Time::new_millisecond(1_i64)),
+            Value::Time(Time::new_millisecond(2_i64)),
+            Value::Time(Time::new_millisecond(3_i64)),
+        ];
+        assert_eq!(expect, actual);
+    }
+
+    #[test]
     fn test_is_null() {
         let null_mask = BitVec::from_slice(&[0b0000_0001, 0b0000_1000]);
 
@@ -997,6 +1058,18 @@ mod tests {
             datatype: ColumnDataType::Float64 as i32,
         };
 
+        let time_vals = column::Values {
+            time_millisecond_values: vec![100, 101],
+            ..Default::default()
+        };
+        let time_column = Column {
+            column_name: "time".to_string(),
+            semantic_type: SemanticType::Field as i32,
+            values: Some(time_vals),
+            null_mask: vec![0],
+            datatype: ColumnDataType::TimeMillisecond as i32,
+        };
+
         let ts_vals = column::Values {
             ts_millisecond_values: vec![100, 101],
             ..Default::default()
@@ -1010,7 +1083,7 @@ mod tests {
         };
 
         (
-            vec![host_column, cpu_column, mem_column, ts_column],
+            vec![host_column, cpu_column, mem_column, time_column, ts_column],
             row_count,
         )
     }

@@ -302,7 +302,8 @@ mod tests {
     use std::sync::Arc;
 
     use datatypes::vectors::{
-        BooleanVector, TimestampMicrosecondVector, TimestampMillisecondVector,
+        BooleanVector, TimeMicrosecondVector, TimeMillisecondVector, TimeNanosecondVector,
+        TimeSecondVector, TimestampMicrosecondVector, TimestampMillisecondVector,
         TimestampNanosecondVector, TimestampSecondVector,
     };
 
@@ -364,6 +365,10 @@ mod tests {
 
         let values = values_with_capacity(ColumnDataType::TimestampMillisecond, 2);
         let values = values.ts_millisecond_values;
+        assert_eq!(2, values.capacity());
+
+        let values = values_with_capacity(ColumnDataType::TimeMillisecond, 2);
+        let values = values.time_millisecond_values;
         assert_eq!(2, values.capacity());
     }
 
@@ -432,6 +437,10 @@ mod tests {
         assert_eq!(
             ConcreteDataType::timestamp_millisecond_datatype(),
             ColumnDataTypeWrapper(ColumnDataType::TimestampMillisecond).into()
+        );
+        assert_eq!(
+            ConcreteDataType::time_datatype(TimeUnit::Millisecond),
+            ColumnDataTypeWrapper(ColumnDataType::TimeMillisecond).into()
         );
     }
 
@@ -558,6 +567,47 @@ mod tests {
         assert_eq!(
             vec![10, 11, 12],
             column.values.as_ref().unwrap().ts_second_values
+        );
+    }
+
+    #[test]
+    fn test_column_put_time_values() {
+        let mut column = Column {
+            column_name: "test".to_string(),
+            semantic_type: 0,
+            values: Some(Values {
+                ..Default::default()
+            }),
+            null_mask: vec![],
+            datatype: 0,
+        };
+
+        let vector = Arc::new(TimeNanosecondVector::from_vec(vec![1, 2, 3]));
+        push_vals(&mut column, 3, vector);
+        assert_eq!(
+            vec![1, 2, 3],
+            column.values.as_ref().unwrap().time_nanosecond_values
+        );
+
+        let vector = Arc::new(TimeMillisecondVector::from_vec(vec![4, 5, 6]));
+        push_vals(&mut column, 3, vector);
+        assert_eq!(
+            vec![4, 5, 6],
+            column.values.as_ref().unwrap().time_millisecond_values
+        );
+
+        let vector = Arc::new(TimeMicrosecondVector::from_vec(vec![7, 8, 9]));
+        push_vals(&mut column, 3, vector);
+        assert_eq!(
+            vec![7, 8, 9],
+            column.values.as_ref().unwrap().time_microsecond_values
+        );
+
+        let vector = Arc::new(TimeSecondVector::from_vec(vec![10, 11, 12]));
+        push_vals(&mut column, 3, vector);
+        assert_eq!(
+            vec![10, 11, 12],
+            column.values.as_ref().unwrap().time_second_values
         );
     }
 

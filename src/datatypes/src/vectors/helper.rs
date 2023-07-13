@@ -324,10 +324,12 @@ mod tests {
     use arrow::array::{
         ArrayRef, BooleanArray, Date32Array, Date64Array, Float32Array, Float64Array, Int16Array,
         Int32Array, Int64Array, Int8Array, LargeBinaryArray, ListArray, NullArray,
+        Time32MillisecondArray, Time32SecondArray, Time64MicrosecondArray, Time64NanosecondArray,
         TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
         TimestampSecondArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
     };
     use arrow::datatypes::{Field, Int32Type};
+    use common_time::time::Time;
     use common_time::{Date, DateTime};
 
     use super::*;
@@ -461,5 +463,19 @@ mod tests {
         check_try_into_vector(TimestampMillisecondArray::from(vec![1, 2, 3]));
         check_try_into_vector(TimestampMicrosecondArray::from(vec![1, 2, 3]));
         check_try_into_vector(TimestampNanosecondArray::from(vec![1, 2, 3]));
+        check_try_into_vector(Time32SecondArray::from(vec![1, 2, 3]));
+        check_try_into_vector(Time32MillisecondArray::from(vec![1, 2, 3]));
+        check_try_into_vector(Time64MicrosecondArray::from(vec![1, 2, 3]));
+        check_try_into_vector(Time64NanosecondArray::from(vec![1, 2, 3]));
+    }
+
+    #[test]
+    fn test_try_from_scalar_time_value() {
+        let vector = Helper::try_from_scalar_value(ScalarValue::Time32Second(Some(42)), 3).unwrap();
+        assert_eq!(ConcreteDataType::time_second_datatype(), vector.data_type());
+        assert_eq!(3, vector.len());
+        for i in 0..vector.len() {
+            assert_eq!(Value::Time(Time::new_second(42)), vector.get(i));
+        }
     }
 }

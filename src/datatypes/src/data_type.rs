@@ -291,6 +291,26 @@ impl ConcreteDataType {
         ConcreteDataType::Time(TimeType::from_unit(unit))
     }
 
+    /// Creates a [Time(TimeSecondType)] datatype.
+    pub fn time_second_datatype() -> Self {
+        Self::time_datatype(TimeUnit::Second)
+    }
+
+    /// Creates a [Time(TimeMillisecondType)] datatype.
+    pub fn time_millisecond_datatype() -> Self {
+        Self::time_datatype(TimeUnit::Millisecond)
+    }
+
+    /// Creates a [Time(TimeMicrosecond)] datatype.
+    pub fn time_microsecond_datatype() -> Self {
+        Self::time_datatype(TimeUnit::Microsecond)
+    }
+
+    /// Creates a [Time(TimeNanosecond)] datatype.
+    pub fn time_nanosecond_datatype() -> Self {
+        Self::time_datatype(TimeUnit::Nanosecond)
+    }
+
     pub fn timestamp_datatype(unit: TimeUnit) -> Self {
         match unit {
             TimeUnit::Second => Self::timestamp_second_datatype(),
@@ -484,6 +504,10 @@ mod tests {
         assert!(!ConcreteDataType::string_datatype().is_timestamp_compatible());
         assert!(!ConcreteDataType::int32_datatype().is_timestamp_compatible());
         assert!(!ConcreteDataType::uint64_datatype().is_timestamp_compatible());
+        assert!(!ConcreteDataType::time_second_datatype().is_timestamp_compatible());
+        assert!(!ConcreteDataType::time_millisecond_datatype().is_timestamp_compatible());
+        assert!(!ConcreteDataType::time_microsecond_datatype().is_timestamp_compatible());
+        assert!(!ConcreteDataType::time_nanosecond_datatype().is_timestamp_compatible());
     }
 
     #[test]
@@ -517,6 +541,10 @@ mod tests {
         assert!(ConcreteDataType::timestamp_millisecond_datatype().is_stringifiable());
         assert!(ConcreteDataType::timestamp_microsecond_datatype().is_stringifiable());
         assert!(ConcreteDataType::timestamp_nanosecond_datatype().is_stringifiable());
+        assert!(ConcreteDataType::time_second_datatype().is_stringifiable());
+        assert!(ConcreteDataType::time_millisecond_datatype().is_stringifiable());
+        assert!(ConcreteDataType::time_microsecond_datatype().is_stringifiable());
+        assert!(ConcreteDataType::time_nanosecond_datatype().is_stringifiable());
     }
 
     #[test]
@@ -531,6 +559,10 @@ mod tests {
         assert!(ConcreteDataType::timestamp_millisecond_datatype().is_signed());
         assert!(ConcreteDataType::timestamp_microsecond_datatype().is_signed());
         assert!(ConcreteDataType::timestamp_nanosecond_datatype().is_signed());
+        assert!(ConcreteDataType::time_second_datatype().is_signed());
+        assert!(ConcreteDataType::time_millisecond_datatype().is_signed());
+        assert!(ConcreteDataType::time_microsecond_datatype().is_signed());
+        assert!(ConcreteDataType::time_nanosecond_datatype().is_signed());
 
         assert!(!ConcreteDataType::uint8_datatype().is_signed());
         assert!(!ConcreteDataType::uint16_datatype().is_signed());
@@ -553,6 +585,10 @@ mod tests {
         assert!(!ConcreteDataType::timestamp_millisecond_datatype().is_unsigned());
         assert!(!ConcreteDataType::timestamp_microsecond_datatype().is_unsigned());
         assert!(!ConcreteDataType::timestamp_nanosecond_datatype().is_unsigned());
+        assert!(!ConcreteDataType::time_second_datatype().is_unsigned());
+        assert!(!ConcreteDataType::time_millisecond_datatype().is_unsigned());
+        assert!(!ConcreteDataType::time_microsecond_datatype().is_unsigned());
+        assert!(!ConcreteDataType::time_nanosecond_datatype().is_unsigned());
 
         assert!(ConcreteDataType::uint8_datatype().is_unsigned());
         assert!(ConcreteDataType::uint16_datatype().is_unsigned());
@@ -654,5 +690,6 @@ mod tests {
             ConcreteDataType::from_arrow_type(&ArrowDataType::Date32).to_string(),
             "Date"
         );
+        assert_eq!(ConcreteDataType::time_second_datatype().to_string(), "Time");
     }
 }

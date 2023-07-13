@@ -113,6 +113,7 @@ macro_rules! impl_data_type_for_time {
                 }
 
                 fn is_timestamp_compatible(&self) -> bool {
+                    // TODO(dennis): Maybe Make [TimeType] to be timestamp compatible in future.
                     false
                 }
             }
@@ -176,3 +177,45 @@ impl_data_type_for_time!(Second, Time32, i32);
 impl_data_type_for_time!(Millisecond, Time32, i32);
 impl_data_type_for_time!(Nanosecond, Time64, i64);
 impl_data_type_for_time!(Microsecond, Time64, i64);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_time_type_unit() {
+        assert_eq!(TimeUnit::Second, TimeType::Second(TimeSecondType).unit());
+        assert_eq!(
+            TimeUnit::Millisecond,
+            TimeType::Millisecond(TimeMillisecondType).unit()
+        );
+        assert_eq!(
+            TimeUnit::Microsecond,
+            TimeType::Microsecond(TimeMicrosecondType).unit()
+        );
+        assert_eq!(
+            TimeUnit::Nanosecond,
+            TimeType::Nanosecond(TimeNanosecondType).unit()
+        );
+    }
+
+    #[test]
+    fn test_as_arrow_datatype() {
+        assert_eq!(
+            ArrowDataType::Time32(ArrowTimeUnit::Second),
+            TimeSecondType::default().as_arrow_type()
+        );
+        assert_eq!(
+            ArrowDataType::Time32(ArrowTimeUnit::Millisecond),
+            TimeMillisecondType::default().as_arrow_type()
+        );
+        assert_eq!(
+            ArrowDataType::Time64(ArrowTimeUnit::Microsecond),
+            TimeMicrosecondType::default().as_arrow_type()
+        );
+        assert_eq!(
+            ArrowDataType::Time64(ArrowTimeUnit::Nanosecond),
+            TimeNanosecondType::default().as_arrow_type()
+        );
+    }
+}

@@ -526,6 +526,7 @@ mod test {
                 true,
             ),
             ColumnSchema::new("dates", ConcreteDataType::date_datatype(), true),
+            ColumnSchema::new("times", ConcreteDataType::time_second_datatype(), true),
         ];
         let pg_field_info = vec![
             FieldInfo::new("nulls".into(), None, None, Type::UNKNOWN, FieldFormat::Text),
@@ -574,6 +575,7 @@ mod test {
                 FieldFormat::Text,
             ),
             FieldInfo::new("dates".into(), None, None, Type::DATE, FieldFormat::Text),
+            FieldInfo::new("times".into(), None, None, Type::TIME, FieldFormat::Text),
         ];
         let schema = Schema::new(column_schemas);
         let fs = schema_to_pg(&schema, &Format::UnifiedText).unwrap();
@@ -654,6 +656,7 @@ mod test {
                 FieldFormat::Text,
             ),
             FieldInfo::new("dates".into(), None, None, Type::DATE, FieldFormat::Text),
+            FieldInfo::new("times".into(), None, None, Type::TIME, FieldFormat::Text),
             FieldInfo::new(
                 "datetimes".into(),
                 None,
@@ -694,6 +697,7 @@ mod test {
             Value::String("greptime".into()),
             Value::Binary("greptime".as_bytes().into()),
             Value::Date(1001i32.into()),
+            Value::Time(1001i64.into()),
             Value::DateTime(1000001i64.into()),
             Value::Timestamp(1000001i64.into()),
         ];

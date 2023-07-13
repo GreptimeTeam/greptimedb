@@ -193,6 +193,11 @@ mod tests {
         assert_vector_ref_eq(Arc::new(UInt64Vector::from_slice([1, 2, 3, 4])));
         assert_vector_ref_eq(Arc::new(Float32Vector::from_slice([1.0, 2.0, 3.0, 4.0])));
         assert_vector_ref_eq(Arc::new(Float64Vector::from_slice([1.0, 2.0, 3.0, 4.0])));
+
+        assert_vector_ref_eq(Arc::new(TimeSecondVector::from_values([100, 120])));
+        assert_vector_ref_eq(Arc::new(TimeMillisecondVector::from_values([100, 120])));
+        assert_vector_ref_eq(Arc::new(TimeMicrosecondVector::from_values([100, 120])));
+        assert_vector_ref_eq(Arc::new(TimeNanosecondVector::from_values([100, 120])));
     }
 
     #[test]
@@ -240,5 +245,10 @@ mod tests {
             )),
         );
         assert_vector_ref_ne(Arc::new(NullVector::new(5)), Arc::new(NullVector::new(8)));
+
+        assert_vector_ref_ne(
+            Arc::new(TimeMicrosecondVector::from_values([100, 120])),
+            Arc::new(TimeMicrosecondVector::from_values([200, 220])),
+        );
     }
 }

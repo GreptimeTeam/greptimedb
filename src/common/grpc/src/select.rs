@@ -213,6 +213,16 @@ mod tests {
     }
 
     #[test]
+    fn test_convert_arrow_array_time_second() {
+        let array = TimeSecondVector::from(vec![Some(1), Some(2), None, Some(3)]);
+        let array: VectorRef = Arc::new(array);
+
+        let values = values(&[array]).unwrap();
+
+        assert_eq!(vec![1, 2, 3], values.time_second_values);
+    }
+
+    #[test]
     fn test_convert_arrow_arrays_string() {
         let array = StringVector::from(vec![
             Some("1".to_string()),
