@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod alter_table;
 pub mod create_table;
 pub mod drop_table;
 pub mod region_failover;

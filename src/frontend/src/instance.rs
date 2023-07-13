@@ -235,8 +235,15 @@ impl Instance {
             ))
             .tcp_nodelay(meta_client_options.tcp_nodelay);
 
+        let ddl_channel_config = channel_config.clone().timeout(Duration::from_millis(
+            meta_client_options.ddl_timeout_millis,
+        ));
+
         let channel_manager = ChannelManager::with_config(channel_config);
         channel_manager.start_channel_recycle();
+
+        let ddl_channel_manager = ChannelManager::with_config(ddl_channel_config);
+        ddl_channel_manager.start_channel_recycle();
 
         let mut meta_client = MetaClientBuilder::new(0, 0, Role::Frontend)
             .enable_router()
@@ -244,6 +251,7 @@ impl Instance {
             .enable_heartbeat()
             .enable_ddl()
             .channel_manager(channel_manager)
+            .ddl_channel_manager(ddl_channel_manager)
             .build();
         meta_client
             .start(&meta_client_options.metasrv_addrs)

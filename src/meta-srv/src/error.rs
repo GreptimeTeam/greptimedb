@@ -30,6 +30,35 @@ pub enum Error {
         source: JoinError,
     },
 
+    #[snafu(display("Failed to convert grpc expr, source: {}", source))]
+    ConvertGrpcExpr {
+        location: Location,
+        source: common_grpc_expr::error::Error,
+    },
+
+    #[snafu(display(
+        "Failed to build table meta for table: {}, source: {}",
+        table_name,
+        source
+    ))]
+    BuildTableMeta {
+        table_name: String,
+        source: table::metadata::TableMetaBuilderError,
+        location: Location,
+    },
+
+    #[snafu(display("Table occurs error, source: {}", source))]
+    Table {
+        location: Location,
+        source: table::error::Error,
+    },
+
+    #[snafu(display("Failed to convert RawTableInfo into TableInfo: {}", source))]
+    ConvertRawTableInfo {
+        location: Location,
+        source: datatypes::Error,
+    },
+
     #[snafu(display("Failed to execute transaction: {}", msg))]
     Txn { location: Location, msg: String },
 
@@ -315,7 +344,7 @@ pub enum Error {
         source: common_procedure::Error,
     },
 
-    #[snafu(display("Failed to recover procedure, source: {source}"))]
+    #[snafu(display("Failed to wait procedure done, source: {source}"))]
     WaitProcedure {
         location: Location,
         source: common_procedure::Error,
@@ -477,6 +506,7 @@ impl ErrorExt for Error {
             | Error::StartGrpc { .. }
             | Error::Combine { .. }
             | Error::NoEnoughAvailableDatanode { .. }
+            | Error::ConvertGrpcExpr { .. }
             | Error::Join { .. } => StatusCode::Internal,
             Error::EmptyKey { .. }
             | Error::MissingRequiredParameter { .. }
@@ -502,8 +532,11 @@ impl ErrorExt for Error {
             | Error::UnexpectedInstructionReply { .. }
             | Error::Unexpected { .. }
             | Error::Txn { .. }
-            | Error::TableIdChanged { .. } => StatusCode::Unexpected,
+            | Error::TableIdChanged { .. }
+            | Error::ConvertRawTableInfo { .. }
+            | Error::BuildTableMeta { .. } => StatusCode::Unexpected,
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
+            Error::Table { source, .. } => source.status_code(),
             Error::RequestDatanode { source, .. } => source.status_code(),
             Error::InvalidCatalogValue { source, .. } => source.status_code(),
             Error::RecoverProcedure { source, .. }

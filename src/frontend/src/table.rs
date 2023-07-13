@@ -349,6 +349,7 @@ impl DistTable {
             table_name,
             alter_kind,
             table_id: _table_id,
+            ..
         } = request;
 
         let alter_expr = context

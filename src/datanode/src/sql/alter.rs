@@ -95,6 +95,7 @@ impl SqlHandler {
             table_name: table_ref.table.to_string(),
             table_id,
             alter_kind,
+            table_version: None,
         })
     }
 }

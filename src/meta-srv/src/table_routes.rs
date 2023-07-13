@@ -185,13 +185,13 @@ pub(crate) async fn fetch_tables(
     // there won't be many keys, in fact, there is usually just one.
     for tgk in keys {
         let tgv = get_table_global_value(kv_store, &tgk).await?;
-        if tgv.is_none() {
+        let Some(tgv) = tgv else {
             warn!("Table global value is absent: {}", tgk);
             continue;
-        }
-        let tgv = tgv.unwrap();
+        };
 
         let trk = table_route_key(tgv.table_id(), &tgk);
+
         let trv = get_table_route_value(kv_store, &trk).await?;
 
         tables.push((tgv, trv));

@@ -125,6 +125,7 @@ async fn test_alter_table() {
         alter_kind: AlterKind::RenameTable {
             new_table_name: "foo".to_string(),
         },
+        table_version: None,
     };
 
     let unsupported = table_engine

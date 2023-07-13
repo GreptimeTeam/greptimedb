@@ -32,12 +32,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Execute the operation timeout, source: {}", source))]
-    Timeout {
-        location: Location,
-        source: tokio::time::error::Elapsed,
-    },
-
     #[snafu(display("Failed to handle heartbeat response, source: {}", source))]
     HandleHeartbeatResponse {
         location: Location,
@@ -646,8 +640,7 @@ impl ErrorExt for Error {
             | Error::FindRegionRoute { .. }
             | Error::BuildDfLogicalPlan { .. }
             | Error::BuildTableMeta { .. }
-            | Error::VectorToGrpcColumn { .. }
-            | Error::Timeout { .. } => StatusCode::Internal,
+            | Error::VectorToGrpcColumn { .. } => StatusCode::Internal,
 
             Error::IncompleteGrpcResult { .. }
             | Error::ContextValueNotFound { .. }

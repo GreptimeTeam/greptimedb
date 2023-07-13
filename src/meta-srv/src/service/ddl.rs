@@ -17,8 +17,10 @@ use api::v1::meta::{
     Table, TableRoute,
 };
 use api::v1::TableId;
+use catalog::helper::TableGlobalKey;
+use common_grpc_expr::alter_expr_to_request;
 use common_meta::key::TableRouteKey;
-use common_meta::rpc::ddl::{CreateTableTask, DdlTask, DropTableTask};
+use common_meta::rpc::ddl::{AlterTableTask, CreateTableTask, DdlTask, DropTableTask};
 use common_meta::rpc::router;
 use common_meta::table_name::TableName;
 use common_telemetry::{info, warn};
@@ -32,7 +34,7 @@ use crate::ddl::DdlManagerRef;
 use crate::error::{self, Result};
 use crate::metasrv::{MetaSrv, SelectorContext, SelectorRef};
 use crate::sequence::SequenceRef;
-use crate::table_routes::get_table_route_value;
+use crate::table_routes::{get_table_global_value, get_table_route_value};
 
 #[async_trait::async_trait]
 impl ddl_task_server::DdlTask for MetaSrv {
@@ -74,6 +76,15 @@ impl ddl_task_server::DdlTask for MetaSrv {
                 handle_drop_table_task(
                     header.cluster_id,
                     drop_table_task,
+                    self.kv_store().clone(),
+                    self.ddl_manager().clone(),
+                )
+                .await?
+            }
+            DdlTask::AlterTable(alter_table_task) => {
+                handle_alter_table_task(
+                    header.cluster_id,
+                    alter_table_task,
                     self.kv_store().clone(),
                     self.ddl_manager().clone(),
                 )
@@ -229,7 +240,61 @@ async fn handle_drop_table_task(
         .submit_drop_table_task(cluster_id, drop_table_task, table_route)
         .await?;
 
-    info!("Table: {table_id} created via procedure_id {id:?}");
+    Ok(SubmitDdlTaskResponse {
+        key: id.to_string().into(),
+        ..Default::default()
+    })
+}
+
+async fn handle_alter_table_task(
+    cluster_id: u64,
+    mut alter_table_task: AlterTableTask,
+    kv_store: KvStoreRef,
+    ddl_manager: DdlManagerRef,
+) -> Result<SubmitDdlTaskResponse> {
+    let table_id = alter_table_task
+        .alter_table
+        .table_id
+        .as_ref()
+        .context(error::UnexpectedSnafu {
+            violated: "expected table id ",
+        })?
+        .id;
+
+    let mut alter_table_request =
+        alter_expr_to_request(table_id, alter_table_task.alter_table.clone())
+            .context(error::ConvertGrpcExprSnafu)?;
+
+    let table_ref = alter_table_task.table_ref();
+
+    let table_global_key = TableGlobalKey {
+        catalog_name: table_ref.catalog.to_string(),
+        schema_name: table_ref.schema.to_string(),
+        table_name: table_ref.table.to_string(),
+    };
+
+    let table_global_value = get_table_global_value(&kv_store, &table_global_key)
+        .await?
+        .with_context(|| error::TableNotFoundSnafu {
+            name: table_ref.to_string(),
+        })?;
+
+    let table_info = table_global_value.table_info;
+
+    // Sets alter_table's table_version
+    alter_table_task.alter_table.table_version = table_info.ident.version;
+    alter_table_request.table_version = Some(table_info.ident.version);
+
+    let id = ddl_manager
+        .submit_alter_table_task(
+            cluster_id,
+            alter_table_task,
+            alter_table_request,
+            table_info,
+        )
+        .await?;
+
+    info!("Table: {table_id} is altering via procedure_id {id:?}");
 
     Ok(SubmitDdlTaskResponse {
         key: id.to_string().into(),

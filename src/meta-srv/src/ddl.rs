@@ -16,12 +16,15 @@ use std::sync::Arc;
 
 use client::client_manager::DatanodeClients;
 use common_meta::key::TableMetadataManagerRef;
-use common_meta::rpc::ddl::{CreateTableTask, DropTableTask};
+use common_meta::rpc::ddl::{AlterTableTask, CreateTableTask, DropTableTask};
 use common_meta::rpc::router::TableRoute;
 use common_procedure::{watcher, ProcedureId, ProcedureManagerRef, ProcedureWithId};
 use snafu::ResultExt;
+use table::metadata::RawTableInfo;
+use table::requests::AlterTableRequest;
 
 use crate::error::{self, Result};
+use crate::procedure::alter_table::AlterTableProcedure;
 use crate::procedure::create_table::CreateTableProcedure;
 use crate::procedure::drop_table::DropTableProcedure;
 use crate::service::mailbox::MailboxRef;
@@ -33,8 +36,8 @@ pub struct DdlManager {
     procedure_manager: ProcedureManagerRef,
     kv_store: KvStoreRef,
     datanode_clients: Arc<DatanodeClients>,
-    mailbox: MailboxRef,
-    server_addr: String,
+    pub(crate) mailbox: MailboxRef,
+    pub(crate) server_addr: String,
     table_metadata_manager: TableMetadataManagerRef,
 }
 
@@ -104,7 +107,43 @@ impl DdlManager {
             )
             .context(error::RegisterProcedureLoaderSnafu {
                 type_name: DropTableProcedure::TYPE_NAME,
+            })?;
+
+        let context = self.create_context();
+
+        self.procedure_manager
+            .register_loader(
+                AlterTableProcedure::TYPE_NAME,
+                Box::new(move |json| {
+                    let context = context.clone();
+                    AlterTableProcedure::from_json(json, context).map(|p| Box::new(p) as _)
+                }),
+            )
+            .context(error::RegisterProcedureLoaderSnafu {
+                type_name: AlterTableProcedure::TYPE_NAME,
             })
+    }
+
+    pub async fn submit_alter_table_task(
+        &self,
+        cluster_id: u64,
+        alter_table_task: AlterTableTask,
+        alter_table_request: AlterTableRequest,
+        table_info: RawTableInfo,
+    ) -> Result<ProcedureId> {
+        let context = self.create_context();
+
+        let procedure = AlterTableProcedure::new(
+            cluster_id,
+            alter_table_task,
+            alter_table_request,
+            table_info,
+            context,
+        );
+
+        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+
+        self.submit_procedure(procedure_with_id).await
     }
 
     pub async fn submit_create_table_task(

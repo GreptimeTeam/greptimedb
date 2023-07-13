@@ -16,7 +16,6 @@ pub(crate) mod inserter;
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
 
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::ddl_request::{Expr as DdlExpr, Expr};
@@ -60,11 +59,9 @@ use sql::statements::statement::Statement;
 use sql::statements::{self, sql_value_to_value};
 use store_api::storage::RegionNumber;
 use table::engine::TableReference;
-use table::metadata::{RawTableInfo, RawTableMeta, TableId, TableIdent, TableType};
-use table::requests::TableOptions;
-use table::table::AlterContext;
+use table::metadata::{RawTableInfo, RawTableMeta, TableId, TableIdent, TableInfo, TableType};
+use table::requests::{AlterTableRequest, TableOptions};
 use table::TableRef;
-use tokio::time::timeout;
 
 use crate::catalog::FrontendCatalogManager;
 use crate::error::{
@@ -458,7 +455,29 @@ impl DistInstance {
         Ok(Output::AffectedRows(1))
     }
 
-    async fn handle_alter_table(&self, expr: AlterExpr) -> Result<Output> {
+    fn verify_alter(
+        &self,
+        table_id: TableId,
+        table_info: Arc<TableInfo>,
+        expr: AlterExpr,
+    ) -> Result<()> {
+        let request: table::requests::AlterTableRequest =
+            common_grpc_expr::alter_expr_to_request(table_id, expr)
+                .context(AlterExprToRequestSnafu)?;
+
+        let AlterTableRequest { table_name, .. } = &request;
+
+        let _ = table_info
+            .meta
+            .builder_with_alter_kind(table_name, &request.alter_kind)
+            .context(error::TableSnafu)?
+            .build()
+            .context(error::BuildTableMetaSnafu { table_name })?;
+
+        Ok(())
+    }
+
+    async fn handle_alter_table(&self, mut expr: AlterExpr) -> Result<Output> {
         let catalog_name = if expr.catalog_name.is_empty() {
             DEFAULT_CATALOG_NAME
         } else {
@@ -482,17 +501,19 @@ impl DistInstance {
                 table_name: format_full_table_name(catalog_name, schema_name, table_name),
             })?;
 
-        let request = common_grpc_expr::alter_expr_to_request(
-            table.table_info().ident.table_id,
-            expr.clone(),
-        )
-        .context(AlterExprToRequestSnafu)?;
+        let table_id = table.table_info().ident.table_id;
+        expr.table_id = Some(api::v1::TableId { id: table_id });
 
-        let mut context = AlterContext::with_capacity(1);
+        self.verify_alter(table_id, table.table_info(), expr.clone())?;
 
-        let _ = context.insert(expr);
+        let req = SubmitDdlTaskRequest {
+            task: DdlTask::new_alter_table(expr.clone()),
+        };
 
-        table.alter(context, &request).await.context(TableSnafu)?;
+        self.meta_client
+            .submit_ddl_task(req)
+            .await
+            .context(error::RequestMetaSnafu)?;
 
         Ok(Output::AffectedRows(0))
     }
@@ -510,14 +531,10 @@ impl DistInstance {
             task: DdlTask::new_create_table(create_table.clone(), partitions, table_info),
         };
 
-        timeout(
-            // TODO(weny): makes timeout configurable.
-            Duration::from_secs(10),
-            self.meta_client.submit_ddl_task(request),
-        )
-        .await
-        .context(error::TimeoutSnafu)?
-        .context(error::RequestMetaSnafu)
+        self.meta_client
+            .submit_ddl_task(request)
+            .await
+            .context(error::RequestMetaSnafu)
     }
 
     async fn drop_table_procedure(
@@ -534,14 +551,10 @@ impl DistInstance {
             ),
         };
 
-        timeout(
-            // TODO(weny): makes timeout configurable.
-            Duration::from_secs(10),
-            self.meta_client.submit_ddl_task(request),
-        )
-        .await
-        .context(error::TimeoutSnafu)?
-        .context(error::RequestMetaSnafu)
+        self.meta_client
+            .submit_ddl_task(request)
+            .await
+            .context(error::RequestMetaSnafu)
     }
 
     async fn handle_dist_insert(

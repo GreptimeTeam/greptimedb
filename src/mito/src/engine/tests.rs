@@ -548,6 +548,7 @@ fn new_add_columns_req(
                 },
             ],
         },
+        table_version: None,
     }
 }
 
@@ -577,6 +578,7 @@ pub(crate) fn new_add_columns_req_with_location(
                 },
             ],
         },
+        table_version: None,
     }
 }
 
@@ -672,6 +674,7 @@ async fn test_alter_table_remove_column() {
         alter_kind: AlterKind::DropColumns {
             names: vec![String::from("memory"), String::from("my_field")],
         },
+        table_version: None,
     };
     let table = table_engine
         .alter_table(&EngineContext::default(), req)
@@ -719,6 +722,7 @@ async fn test_alter_rename_table() {
         alter_kind: AlterKind::RenameTable {
             new_table_name: new_table_name.to_string(),
         },
+        table_version: None,
     };
     let table = table_engine.alter_table(&ctx, req).await.unwrap();
 

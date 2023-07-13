@@ -317,6 +317,7 @@ mod tests {
             alter_kind: AlterKind::RenameTable {
                 new_table_name: new_table_name.to_string(),
             },
+            table_version: None,
         };
 
         let TestEnv {
