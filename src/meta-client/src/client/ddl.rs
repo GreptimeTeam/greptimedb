@@ -21,7 +21,7 @@ use snafu::{ensure, ResultExt};
 use tokio::sync::RwLock;
 use tonic::transport::Channel;
 
-use crate::client::heartbeat::Inner as HeartbeatInner;
+use crate::client::ask_leader::AskLeader;
 use crate::client::Id;
 use crate::error;
 use crate::error::Result;
@@ -36,8 +36,8 @@ impl Client {
         let inner = Arc::new(RwLock::new(Inner {
             id,
             role,
-            channel_manager: channel_manager.clone(),
-            heartbeat_inner: HeartbeatInner::new(id, role, channel_manager),
+            channel_manager,
+            ask_leader: None,
         }));
 
         Self { inner }
@@ -61,7 +61,7 @@ impl Client {
         &self,
         req: SubmitDdlTaskRequest,
     ) -> Result<SubmitDdlTaskResponse> {
-        let mut inner = self.inner.write().await;
+        let inner = self.inner.read().await;
         inner.submit_ddl_task(req).await
     }
 }
@@ -72,7 +72,7 @@ struct Inner {
     id: Id,
     role: Role,
     channel_manager: ChannelManager,
-    heartbeat_inner: HeartbeatInner,
+    ask_leader: Option<AskLeader>,
 }
 
 impl Inner {
@@ -84,11 +84,22 @@ impl Inner {
         ensure!(
             !self.is_started(),
             error::IllegalGrpcClientStateSnafu {
-                err_msg: "Router client already started",
+                err_msg: "DDL client already started",
             }
         );
 
-        self.heartbeat_inner.start(urls).await?;
+        let peers = urls
+            .as_ref()
+            .iter()
+            .map(|url| url.as_ref().to_string())
+            .collect::<Vec<_>>();
+        self.ask_leader = Some(AskLeader::new(
+            self.id,
+            self.role,
+            peers,
+            self.channel_manager.clone(),
+        ));
+
         Ok(())
     }
 
@@ -103,17 +114,24 @@ impl Inner {
 
     #[inline]
     fn is_started(&self) -> bool {
-        self.heartbeat_inner.is_started()
+        self.ask_leader.is_some()
     }
 
     pub async fn submit_ddl_task(
-        &mut self,
+        &self,
         mut req: SubmitDdlTaskRequest,
     ) -> Result<SubmitDdlTaskResponse> {
-        req.set_header(self.id, self.role);
+        ensure!(
+            self.is_started(),
+            error::IllegalGrpcClientStateSnafu {
+                err_msg: "DDL client not start"
+            }
+        );
 
+        req.set_header(self.id, self.role);
+        let ask_leader = self.ask_leader.as_ref().unwrap();
         loop {
-            if let Some(leader) = &self.heartbeat_inner.get_leader() {
+            if let Some(leader) = &ask_leader.get_leader() {
                 let mut client = self.make_client(leader)?;
                 let res = client
                     .submit_ddl_task(req.clone())
@@ -125,14 +143,14 @@ impl Inner {
                 if let Some(header) = res.header.as_ref() {
                     if let Some(err) = header.error.as_ref() {
                         if err.code == ErrorCode::NotLeader as i32 {
-                            self.heartbeat_inner.ask_leader().await?;
+                            let _ = ask_leader.ask_leader().await?;
                             continue;
                         }
                     }
                 }
 
                 return Ok(res);
-            } else if let Err(err) = self.heartbeat_inner.ask_leader().await {
+            } else if let Err(err) = ask_leader.ask_leader().await {
                 return Err(err);
             }
         }
