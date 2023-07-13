@@ -238,6 +238,7 @@ pub(crate) fn create_mysql_column(
             Ok(ColumnType::MYSQL_TYPE_VARCHAR)
         }
         ConcreteDataType::Timestamp(_) => Ok(ColumnType::MYSQL_TYPE_TIMESTAMP),
+        ConcreteDataType::Time(_) => Ok(ColumnType::MYSQL_TYPE_TIME),
         ConcreteDataType::Date(_) => Ok(ColumnType::MYSQL_TYPE_DATE),
         ConcreteDataType::DateTime(_) => Ok(ColumnType::MYSQL_TYPE_DATETIME),
         _ => error::InternalSnafu {

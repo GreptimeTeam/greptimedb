@@ -18,6 +18,8 @@ use std::sync::Arc;
 
 use arrow::array::{
     Array, ArrayBuilder, ArrayData, ArrayIter, ArrayRef, PrimitiveArray, PrimitiveBuilder,
+    Time32MillisecondArray as TimeMillisecondArray, Time32SecondArray as TimeSecondArray,
+    Time64MicrosecondArray as TimeMicrosecondArray, Time64NanosecondArray as TimeNanosecondArray,
     TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
     TimestampSecondArray,
 };
@@ -101,6 +103,44 @@ impl<T: LogicalPrimitiveType> PrimitiveVector<T> {
                     .unwrap()
                     .with_timezone_opt(None::<String>)
                     .to_data(),
+            },
+            _ => {
+                unreachable!()
+            }
+        };
+        let concrete_array = PrimitiveArray::<T::ArrowPrimitive>::from(array_data);
+        Ok(Self::new(concrete_array))
+    }
+
+    /// Converts arrow time array to vectors
+    pub fn try_from_arrow_time_array(array: impl AsRef<dyn Array>) -> Result<Self> {
+        let array = array.as_ref();
+        let array_data = match array.data_type() {
+            DataType::Time32(unit) => match unit {
+                arrow_schema::TimeUnit::Second => array
+                    .as_any()
+                    .downcast_ref::<TimeSecondArray>()
+                    .unwrap()
+                    .to_data(),
+                arrow_schema::TimeUnit::Millisecond => array
+                    .as_any()
+                    .downcast_ref::<TimeMillisecondArray>()
+                    .unwrap()
+                    .to_data(),
+                _ => unreachable!(),
+            },
+            DataType::Time64(unit) => match unit {
+                arrow_schema::TimeUnit::Microsecond => array
+                    .as_any()
+                    .downcast_ref::<TimeMicrosecondArray>()
+                    .unwrap()
+                    .to_data(),
+                arrow_schema::TimeUnit::Nanosecond => array
+                    .as_any()
+                    .downcast_ref::<TimeNanosecondArray>()
+                    .unwrap()
+                    .to_data(),
+                _ => unreachable!(),
             },
             _ => {
                 unreachable!()
