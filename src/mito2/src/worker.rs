@@ -14,7 +14,6 @@
 
 //! Structs and utilities for writing regions.
 
-pub(crate) mod channel;
 mod handle_create;
 mod handle_open;
 pub(crate) mod request;
@@ -28,15 +27,15 @@ use common_runtime::JoinHandle;
 use common_telemetry::logging;
 use futures::future::try_join_all;
 use object_store::ObjectStore;
-use snafu::ResultExt;
+use snafu::{ensure, ResultExt};
 use store_api::logstore::LogStore;
 use store_api::storage::RegionId;
-use tokio::sync::Mutex;
+use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::sync::{mpsc, Mutex};
 
 use crate::config::MitoConfig;
 use crate::error::{JoinSnafu, Result, WorkerStoppedSnafu};
 use crate::region::{RegionMap, RegionMapRef};
-use crate::worker::channel::{Receiver, RequestBuffer, Sender};
 use crate::worker::request::{RequestBody, WorkerRequest};
 
 /// Identifier for a worker.
@@ -95,7 +94,17 @@ impl WorkerGroup {
         assert!(config.num_workers.is_power_of_two());
 
         let workers = (0..config.num_workers)
-            .map(|id| RegionWorker::start(id as WorkerId, log_store.clone(), object_store.clone()))
+            .map(|id| {
+                RegionWorker::start(
+                    WorkerConfig {
+                        id: id as WorkerId,
+                        channel_size: config.worker_channel_size,
+                        request_batch_size: config.worker_request_batch_size,
+                    },
+                    log_store.clone(),
+                    object_store.clone(),
+                )
+            })
             .collect();
 
         WorkerGroup { workers }
@@ -111,9 +120,10 @@ impl WorkerGroup {
     }
 
     /// Submit a request to a worker in the group.
-    pub(crate) fn submit_to_worker(&self, request: WorkerRequest) -> Result<()> {
+    pub(crate) async fn submit_to_worker(&self, request: WorkerRequest) -> Result<()> {
         self.worker(request.body.region_id())
             .submit_request(request)
+            .await
     }
 
     /// Get worker for specific `region_id`.
@@ -131,6 +141,17 @@ fn value_to_index(value: usize, num_workers: usize) -> usize {
     value & (num_workers - 1)
 }
 
+/// Config for region worker.
+#[derive(Debug, Clone)]
+struct WorkerConfig {
+    /// Id of the worker
+    id: WorkerId,
+    /// Capacity of the request channel.
+    channel_size: usize,
+    /// Batch size to process request.
+    request_batch_size: usize,
+}
+
 /// Worker to write and alter regions bound to it.
 #[derive(Debug)]
 pub(crate) struct RegionWorker {
@@ -139,7 +160,7 @@ pub(crate) struct RegionWorker {
     /// Regions bound to the worker.
     regions: RegionMapRef,
     /// Request sender.
-    sender: Sender,
+    sender: Sender<WorkerRequest>,
     /// Handle to the worker thread.
     handle: Mutex<Option<JoinHandle<()>>>,
     /// Whether to run the worker thread.
@@ -149,28 +170,29 @@ pub(crate) struct RegionWorker {
 impl RegionWorker {
     /// Start a region worker and its background thread.
     fn start<S: LogStore>(
-        id: WorkerId,
+        config: WorkerConfig,
         log_store: Arc<S>,
         object_store: ObjectStore,
     ) -> RegionWorker {
         let regions = Arc::new(RegionMap::default());
-        let (sender, receiver) = channel::request_channel();
+        let (sender, receiver) = mpsc::channel(config.channel_size);
 
         let running = Arc::new(AtomicBool::new(true));
         let mut worker_thread = RegionWorkerThread {
-            id,
+            id: config.id,
             regions: regions.clone(),
             receiver,
             log_store,
             object_store,
             running: running.clone(),
+            request_batch_size: config.request_batch_size,
         };
         let handle = common_runtime::spawn_bg(async move {
             worker_thread.run().await;
         });
 
         RegionWorker {
-            id,
+            id: config.id,
             regions,
             sender,
             handle: Mutex::new(Some(handle)),
@@ -179,10 +201,17 @@ impl RegionWorker {
     }
 
     /// Submit request to background worker thread.
-    fn submit_request(&self, request: WorkerRequest) -> Result<()> {
-        self.sender
-            .send(request)
-            .context(WorkerStoppedSnafu { id: self.id })
+    async fn submit_request(&self, request: WorkerRequest) -> Result<()> {
+        ensure!(
+            self.running.load(Ordering::Relaxed),
+            WorkerStoppedSnafu { id: self.id }
+        );
+        ensure!(
+            self.sender.send(request).await.is_ok(),
+            WorkerStoppedSnafu { id: self.id }
+        );
+
+        Ok(())
     }
 
     /// Stop the worker.
@@ -194,10 +223,7 @@ impl RegionWorker {
             logging::info!("Stop region worker {}", self.id);
 
             self.running.store(false, Ordering::Relaxed);
-            self.sender.notify();
-
-            // Close the channel.
-            self.sender.close();
+            // TODO(yingwen): Send shutdown request.
 
             handle.await.context(JoinSnafu)?;
         }
@@ -210,11 +236,12 @@ impl Drop for RegionWorker {
     fn drop(&mut self) {
         if self.running.load(Ordering::Relaxed) {
             self.running.store(false, Ordering::Relaxed);
-            // Notify worker thread.
-            self.sender.notify();
+            // Once we drop the sender, the worker thread will receive a disconnected error.
         }
     }
 }
+
+type RequestBuffer = Vec<WorkerRequest>;
 
 /// Background worker thread to handle requests.
 struct RegionWorkerThread<S> {
@@ -223,13 +250,15 @@ struct RegionWorkerThread<S> {
     /// Regions bound to the worker.
     regions: RegionMapRef,
     /// Request receiver.
-    receiver: Receiver,
+    receiver: Receiver<WorkerRequest>,
     // TODO(yingwen): Replaced by Wal.
     log_store: Arc<S>,
     /// Object store for manifest and SSTs.
     object_store: ObjectStore,
     /// Whether the worker thread is still running.
     running: Arc<AtomicBool>,
+    /// Batch size to fetch requests from channel.
+    request_batch_size: usize,
 }
 
 impl<S> RegionWorkerThread<S> {
@@ -238,11 +267,26 @@ impl<S> RegionWorkerThread<S> {
         logging::info!("Start region worker thread {}", self.id);
 
         // Buffer to retrieve requests from receiver.
-        let mut buffer = RequestBuffer::default();
+        let mut buffer = RequestBuffer::with_capacity(self.request_batch_size);
 
         while self.running.load(Ordering::Relaxed) {
             // Clear the buffer before handling next batch of requests.
             buffer.clear();
+
+            match self.receiver.recv().await {
+                Some(request) => buffer.push(request),
+                None => break,
+            }
+
+            // Try to recv more requests from the channel.
+            for _ in 1..buffer.capacity() {
+                // We have received one request so we start from 1.
+                match self.receiver.try_recv() {
+                    Ok(req) => buffer.push(req),
+                    // We still need to handle remaining requests.
+                    Err(_) => break,
+                }
+            }
 
             self.handle_requests(&mut buffer).await;
         }
@@ -254,8 +298,6 @@ impl<S> RegionWorkerThread<S> {
     ///
     /// `buffer` should be empty.
     async fn handle_requests(&mut self, buffer: &mut RequestBuffer) {
-        self.receiver.receive_all(buffer).await;
-
         let mut dml_requests = Vec::with_capacity(buffer.len());
         let mut ddl_requests = Vec::with_capacity(buffer.len());
         for req in buffer.drain(..) {
@@ -327,7 +369,10 @@ mod tests {
     async fn test_worker_group_start_stop() {
         let env = TestEnv::new("group-stop");
         let group = env
-            .create_worker_group(&MitoConfig { num_workers: 4 })
+            .create_worker_group(&MitoConfig {
+                num_workers: 4,
+                ..Default::default()
+            })
             .await;
 
         group.stop().await.unwrap();

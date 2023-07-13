@@ -70,7 +70,7 @@ pub(crate) struct WriteRequest {
     pub region_id: RegionId,
 }
 
-/// Request handled by workers.
+/// Request sent to a worker
 #[derive(Debug)]
 pub(crate) struct WorkerRequest {
     /// Sender to send result.

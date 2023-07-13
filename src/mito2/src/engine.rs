@@ -81,7 +81,7 @@ impl EngineInner {
     /// Creates a new region.
     async fn create_region(&self, request: CreateRequest) -> Result<()> {
         let (worker_request, receiver) = WorkerRequest::from_body(RequestBody::Create(request));
-        self.workers.submit_to_worker(worker_request)?;
+        self.workers.submit_to_worker(worker_request).await?;
 
         receiver.await.context(RecvSnafu)?
     }

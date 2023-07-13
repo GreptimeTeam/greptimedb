@@ -23,12 +23,18 @@ const DEFAULT_NUM_WORKERS: usize = 1;
 pub struct MitoConfig {
     /// Number of region workers.
     pub num_workers: usize,
+    /// Request channel size of each worker.
+    pub worker_channel_size: usize,
+    /// Max batch size for a worker to handle requests.
+    pub worker_request_batch_size: usize,
 }
 
 impl Default for MitoConfig {
     fn default() -> Self {
         MitoConfig {
             num_workers: DEFAULT_NUM_WORKERS,
+            worker_channel_size: 128,
+            worker_request_batch_size: 64,
         }
     }
 }
@@ -48,6 +54,12 @@ impl MitoConfig {
                 num_workers_before,
                 self.num_workers
             );
+        }
+
+        // Sanitize channel size.
+        if self.worker_channel_size == 0 {
+            logging::warn!("Sanitize channel size 0 to 1");
+            self.worker_channel_size = 1;
         }
     }
 }

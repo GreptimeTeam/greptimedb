@@ -20,7 +20,6 @@ use common_error::status_code::StatusCode;
 use snafu::{Location, Snafu};
 use store_api::manifest::ManifestVersion;
 
-use crate::worker::channel::SendError;
 use crate::worker::WorkerId;
 
 #[derive(Debug, Snafu)]
@@ -85,13 +84,8 @@ pub enum Error {
         location: Location,
     },
 
-    // We don't print the SendError in message since it is meaningless.
     #[snafu(display("Worker {} is stopped, location: {}", id, location))]
-    WorkerStopped {
-        id: WorkerId,
-        source: SendError,
-        location: Location,
-    },
+    WorkerStopped { id: WorkerId, location: Location },
 
     #[snafu(display("Failed to recv result, location: {}, source: {}", location, source))]
     Recv {
