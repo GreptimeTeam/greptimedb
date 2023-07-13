@@ -6,6 +6,8 @@ CREATE SCHEMA IF NOT EXISTS test_public_schema;
 
 SHOW DATABASES LIKE '%public%';
 
+SHOW DATABASES WHERE Schemas='test_public_schema';
+
 USE test_public_schema;
 
 CREATE TABLE hello(i BIGINT TIME INDEX);
