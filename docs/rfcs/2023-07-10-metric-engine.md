@@ -148,3 +148,7 @@ We can also do this "special" route rule in the meta server. But there is no dif
 Once we have implemented the "region family" that allows multiple physical schemas exist in one region, we can store the metadata and table data into one region.
 
 Before that, we can also let the `MetricRegion` holds a `KvBackend` to access the storage layer directly. But this breaks the abstraction in some way.
+
+# Drawbacks
+
+Since the physical storage is mixed together. It's hard to do fine-grained operations in table level. Like configuring TTL, memtable size or compaction strategy in table level. Or define different partition rules for different tables. For scenarios like this, it's better to move the table out of metrics engine and "upgrade" it to a normal mito engine table. This requires a migration process in a low cost. And we have to ensure data consistency during the migration, which may require a out-of-service period.
