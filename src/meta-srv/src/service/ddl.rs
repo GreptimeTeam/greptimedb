@@ -53,8 +53,8 @@ impl ddl_task_server::DdlTask for MetaSrv {
         let ctx = SelectorContext {
             datanode_lease_secs: self.options().datanode_lease_secs,
             server_addr: self.options().server_addr.clone(),
-            kv_store: self.kv_store(),
-            meta_peer_client: self.meta_peer_client(),
+            kv_store: self.kv_store().clone(),
+            meta_peer_client: self.meta_peer_client().clone(),
             catalog: None,
             schema: None,
             table: None,
