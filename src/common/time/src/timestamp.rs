@@ -1040,6 +1040,18 @@ mod tests {
 
     #[test]
     fn test_from_arrow_time_unit() {
-        todo!();
+        assert_eq!(TimeUnit::Second, TimeUnit::from(ArrowTimeUnit::Second));
+        assert_eq!(
+            TimeUnit::Millisecond,
+            TimeUnit::from(ArrowTimeUnit::Millisecond)
+        );
+        assert_eq!(
+            TimeUnit::Microsecond,
+            TimeUnit::from(ArrowTimeUnit::Microsecond)
+        );
+        assert_eq!(
+            TimeUnit::Nanosecond,
+            TimeUnit::from(ArrowTimeUnit::Nanosecond)
+        );
     }
 }

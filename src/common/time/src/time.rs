@@ -11,6 +11,7 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
 use std::cmp::Ordering;
 use std::hash::{Hash, Hasher};
 
@@ -78,11 +79,11 @@ impl Time {
 
     /// Split a [Time] into seconds part and nanoseconds part.
     /// Notice the seconds part of split result is always rounded down to floor.
-    fn split(&self) -> (u32, u32) {
+    fn split(&self) -> (i64, u32) {
         let sec_mul = (TimeUnit::Second.factor() / self.unit.factor()) as i64;
         let nsec_mul = (self.unit.factor() / TimeUnit::Nanosecond.factor()) as i64;
 
-        let sec_div = u32::try_from(self.value.div_euclid(sec_mul)).unwrap();
+        let sec_div = self.value.div_euclid(sec_mul);
         let sec_mod = self.value.rem_euclid(sec_mul);
         // safety:  the max possible value of `sec_mod` is 999,999,999
         let nsec = u32::try_from(sec_mod * nsec_mul).unwrap();
@@ -131,7 +132,11 @@ impl Time {
     /// Cast the [Time] into chrono NaiveDateTime
     pub fn to_chrono_time(&self) -> Option<NaiveTime> {
         let (sec, nsec) = self.split();
-        NaiveTime::from_num_seconds_from_midnight_opt(sec, nsec)
+        if let Ok(sec) = u32::try_from(sec) {
+            NaiveTime::from_num_seconds_from_midnight_opt(sec, nsec)
+        } else {
+            None
+        }
     }
 }
 
@@ -196,7 +201,212 @@ impl Eq for Time {}
 impl Hash for Time {
     fn hash<H: Hasher>(&self, state: &mut H) {
         let (sec, nsec) = self.split();
-        state.write_u32(sec);
+        state.write_i64(sec);
         state.write_u32(nsec);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::hash_map::DefaultHasher;
+
+    use serde_json::Value;
+
+    use super::*;
+
+    #[test]
+    fn test_time() {
+        let t = Time::new(1, TimeUnit::Millisecond);
+        assert_eq!(TimeUnit::Millisecond, *t.unit());
+        assert_eq!(1, t.value());
+        assert_eq!(Time::new(1000, TimeUnit::Microsecond), t);
+        assert!(t > Time::new(999, TimeUnit::Microsecond));
+    }
+
+    #[test]
+    fn test_cmp_time() {
+        let t1 = Time::new(0, TimeUnit::Millisecond);
+        let t2 = Time::new(0, TimeUnit::Second);
+        assert_eq!(t2, t1);
+
+        let t1 = Time::new(100_100, TimeUnit::Millisecond);
+        let t2 = Time::new(100, TimeUnit::Second);
+        assert!(t1 > t2);
+
+        let t1 = Time::new(10_010_001, TimeUnit::Millisecond);
+        let t2 = Time::new(100, TimeUnit::Second);
+        assert!(t1 > t2);
+
+        let t1 = Time::new(10_010_001, TimeUnit::Nanosecond);
+        let t2 = Time::new(100, TimeUnit::Second);
+        assert!(t1 < t2);
+
+        let t1 = Time::new(i64::MAX / 1000 * 1000, TimeUnit::Millisecond);
+        let t2 = Time::new(i64::MAX / 1000, TimeUnit::Second);
+        assert_eq!(t2, t1);
+
+        let t1 = Time::new(i64::MAX, TimeUnit::Millisecond);
+        let t2 = Time::new(i64::MAX / 1000 + 1, TimeUnit::Second);
+        assert!(t2 > t1);
+
+        let t1 = Time::new(i64::MAX, TimeUnit::Millisecond);
+        let t2 = Time::new(i64::MAX / 1000, TimeUnit::Second);
+        assert!(t2 < t1);
+
+        let t1 = Time::new(10_010_001, TimeUnit::Millisecond);
+        let t2 = Time::new(100, TimeUnit::Second);
+        assert!(t1 > t2);
+
+        let t1 = Time::new(-100 * 10_001, TimeUnit::Millisecond);
+        let t2 = Time::new(-100, TimeUnit::Second);
+        assert!(t2 > t1);
+    }
+
+    fn check_hash_eq(t1: Time, t2: Time) {
+        let mut hasher = DefaultHasher::new();
+        t1.hash(&mut hasher);
+        let t1_hash = hasher.finish();
+
+        let mut hasher = DefaultHasher::new();
+        t2.hash(&mut hasher);
+        let t2_hash = hasher.finish();
+        assert_eq!(t2_hash, t1_hash);
+    }
+
+    #[test]
+    fn test_hash() {
+        check_hash_eq(
+            Time::new(0, TimeUnit::Millisecond),
+            Time::new(0, TimeUnit::Second),
+        );
+        check_hash_eq(
+            Time::new(1000, TimeUnit::Millisecond),
+            Time::new(1, TimeUnit::Second),
+        );
+        check_hash_eq(
+            Time::new(1_000_000, TimeUnit::Microsecond),
+            Time::new(1, TimeUnit::Second),
+        );
+        check_hash_eq(
+            Time::new(1_000_000_000, TimeUnit::Nanosecond),
+            Time::new(1, TimeUnit::Second),
+        );
+    }
+
+    #[test]
+    pub fn test_from_i64() {
+        let t: Time = 42.into();
+        assert_eq!(42, t.value());
+        assert_eq!(TimeUnit::Millisecond, *t.unit());
+    }
+
+    #[test]
+    fn test_to_iso8601_string() {
+        std::env::set_var("TZ", "Asia/Shanghai");
+        let time_millis = 1000001;
+        let ts = Time::new_millisecond(time_millis);
+        assert_eq!("08:16:40.001+0800", ts.to_iso8601_string());
+
+        let time_millis = 1000;
+        let ts = Time::new_millisecond(time_millis);
+        assert_eq!("08:00:01+0800", ts.to_iso8601_string());
+
+        let time_millis = 1;
+        let ts = Time::new_millisecond(time_millis);
+        assert_eq!("08:00:00.001+0800", ts.to_iso8601_string());
+
+        let time_seconds = 9 * 3600;
+        let ts = Time::new_second(time_seconds);
+        assert_eq!("17:00:00+0800", ts.to_iso8601_string());
+
+        let time_seconds = 23 * 3600;
+        let ts = Time::new_second(time_seconds);
+        assert_eq!("07:00:00+0800", ts.to_iso8601_string());
+    }
+
+    #[test]
+    fn test_serialize_to_json_value() {
+        std::env::set_var("TZ", "Asia/Shanghai");
+        assert_eq!(
+            "08:00:01+0800",
+            match serde_json::Value::from(Time::new(1, TimeUnit::Second)) {
+                Value::String(s) => s,
+                _ => unreachable!(),
+            }
+        );
+
+        assert_eq!(
+            "08:00:00.001+0800",
+            match serde_json::Value::from(Time::new(1, TimeUnit::Millisecond)) {
+                Value::String(s) => s,
+                _ => unreachable!(),
+            }
+        );
+
+        assert_eq!(
+            "08:00:00.000001+0800",
+            match serde_json::Value::from(Time::new(1, TimeUnit::Microsecond)) {
+                Value::String(s) => s,
+                _ => unreachable!(),
+            }
+        );
+
+        assert_eq!(
+            "08:00:00.000000001+0800",
+            match serde_json::Value::from(Time::new(1, TimeUnit::Nanosecond)) {
+                Value::String(s) => s,
+                _ => unreachable!(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_to_timezone_aware_string() {
+        std::env::set_var("TZ", "Asia/Shanghai");
+
+        assert_eq!(
+            "08:00:00.001",
+            Time::new(1, TimeUnit::Millisecond).to_timezone_aware_string(None)
+        );
+        assert_eq!(
+            "08:00:00.001",
+            Time::new(1, TimeUnit::Millisecond)
+                .to_timezone_aware_string(TimeZone::from_tz_string("SYSTEM").unwrap())
+        );
+        assert_eq!(
+            "08:00:00.001",
+            Time::new(1, TimeUnit::Millisecond)
+                .to_timezone_aware_string(TimeZone::from_tz_string("+08:00").unwrap())
+        );
+        assert_eq!(
+            "07:00:00.001",
+            Time::new(1, TimeUnit::Millisecond)
+                .to_timezone_aware_string(TimeZone::from_tz_string("+07:00").unwrap())
+        );
+        assert_eq!(
+            "23:00:00.001",
+            Time::new(1, TimeUnit::Millisecond)
+                .to_timezone_aware_string(TimeZone::from_tz_string("-01:00").unwrap())
+        );
+        assert_eq!(
+            "08:00:00.001",
+            Time::new(1, TimeUnit::Millisecond)
+                .to_timezone_aware_string(TimeZone::from_tz_string("Asia/Shanghai").unwrap())
+        );
+        assert_eq!(
+            "00:00:00.001",
+            Time::new(1, TimeUnit::Millisecond)
+                .to_timezone_aware_string(TimeZone::from_tz_string("UTC").unwrap())
+        );
+        assert_eq!(
+            "02:00:00.001",
+            Time::new(1, TimeUnit::Millisecond)
+                .to_timezone_aware_string(TimeZone::from_tz_string("Europe/Berlin").unwrap())
+        );
+        assert_eq!(
+            "03:00:00.001",
+            Time::new(1, TimeUnit::Millisecond)
+                .to_timezone_aware_string(TimeZone::from_tz_string("Europe/Moscow").unwrap())
+        );
     }
 }
