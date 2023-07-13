@@ -102,7 +102,7 @@ impl Display for Value {
             Value::DateTime(v) => write!(f, "{v}"),
             Value::Timestamp(v) => write!(f, "{}", v.to_iso8601_string()),
             Value::Time(t) => write!(f, "{}", t.to_iso8601_string()),
-            Value::Interval(v) => write!(f, "{}", v.to_string()),
+            Value::Interval(v) => write!(f, "{}", v),
             Value::List(v) => {
                 let default = Box::<Vec<Value>>::default();
                 let items = v.items().as_ref().unwrap_or(&default);
