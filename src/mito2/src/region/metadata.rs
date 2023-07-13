@@ -222,6 +222,18 @@ impl TryFrom<RawRegionMetadata> for RegionMetadata {
     }
 }
 
+impl TryFrom<RegionDescriptor> for RegionMetadata {
+    type Error = Error;
+
+    fn try_from(desc: RegionDescriptor) -> Result<RegionMetadata> {
+        // Doesn't set version explicitly here, because this is a new region meta
+        // created from descriptor, using initial version is reasonable.
+        let builder = RegionMetadataBuilder::try_from(desc)?;
+
+        builder.build()
+    }
+}
+
 struct RegionMetadataBuilder {
     id: RegionId,
     name: String,
