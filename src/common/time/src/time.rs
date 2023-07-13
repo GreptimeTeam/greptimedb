@@ -200,3 +200,17 @@ impl Hash for Time {
         state.write_u32(nsec);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_time() {
+        let t = Time::new(1, TimeUnit::Millisecond);
+        assert_eq!(TimeUnit::Millisecond, *t.unit());
+        assert_eq!(1, t.value());
+        assert_eq!(Time::new(1000, TimeUnit::Microsecond), t);
+        assert!(t > Time::new(999, TimeUnit::Microsecond));
+    }
+}
