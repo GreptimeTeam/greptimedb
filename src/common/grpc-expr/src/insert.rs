@@ -22,17 +22,19 @@ use api::v1::{
     InsertRequest as GrpcInsertRequest,
 };
 use common_base::BitVec;
+use common_time::time::Time;
 use common_time::timestamp::Timestamp;
 use common_time::{Date, DateTime};
 use datatypes::data_type::{ConcreteDataType, DataType};
 use datatypes::prelude::{ValueRef, VectorRef};
 use datatypes::scalars::ScalarVector;
 use datatypes::schema::SchemaRef;
-use datatypes::types::{Int16Type, Int8Type, TimestampType, UInt16Type, UInt8Type};
+use datatypes::types::{Int16Type, Int8Type, TimeType, TimestampType, UInt16Type, UInt8Type};
 use datatypes::value::Value;
 use datatypes::vectors::{
     BinaryVector, BooleanVector, DateTimeVector, DateVector, Float32Vector, Float64Vector,
-    Int32Vector, Int64Vector, PrimitiveVector, StringVector, TimestampMicrosecondVector,
+    Int32Vector, Int64Vector, PrimitiveVector, StringVector, TimeMicrosecondVector,
+    TimeMillisecondVector, TimeNanosecondVector, TimeSecondVector, TimestampMicrosecondVector,
     TimestampMillisecondVector, TimestampNanosecondVector, TimestampSecondVector, UInt32Vector,
     UInt64Vector,
 };
@@ -192,6 +194,27 @@ fn collect_column_values(column_datatype: ColumnDataType, values: &Values) -> Ve
         ColumnDataType::TimestampNanosecond => {
             collect_values!(values.ts_millisecond_values, |v| ValueRef::Timestamp(
                 Timestamp::new_nanosecond(*v)
+            ))
+        }
+
+        ColumnDataType::TimeSecond => {
+            collect_values!(values.time_second_values, |v| ValueRef::Time(
+                Time::new_second(*v)
+            ))
+        }
+        ColumnDataType::TimeMillisecond => {
+            collect_values!(values.time_millisecond_values, |v| ValueRef::Time(
+                Time::new_millisecond(*v)
+            ))
+        }
+        ColumnDataType::TimeMicrosecond => {
+            collect_values!(values.time_millisecond_values, |v| ValueRef::Time(
+                Time::new_microsecond(*v)
+            ))
+        }
+        ColumnDataType::TimeNanosecond => {
+            collect_values!(values.time_millisecond_values, |v| ValueRef::Time(
+                Time::new_nanosecond(*v)
             ))
         }
     }
@@ -387,6 +410,21 @@ fn values_to_vector(data_type: &ConcreteDataType, values: Values) -> VectorRef {
                 values.ts_nanosecond_values,
             )),
         },
+        ConcreteDataType::Time(unit) => match unit {
+            TimeType::Second(_) => Arc::new(TimeSecondVector::from_iter_values(
+                values.time_second_values.iter().map(|x| *x as i32),
+            )),
+            TimeType::Millisecond(_) => Arc::new(TimeMillisecondVector::from_iter_values(
+                values.time_millisecond_values.iter().map(|x| *x as i32),
+            )),
+            TimeType::Microsecond(_) => Arc::new(TimeMicrosecondVector::from_vec(
+                values.time_microsecond_values,
+            )),
+            TimeType::Nanosecond(_) => Arc::new(TimeNanosecondVector::from_vec(
+                values.time_nanosecond_values,
+            )),
+        },
+
         ConcreteDataType::Null(_) | ConcreteDataType::List(_) | ConcreteDataType::Dictionary(_) => {
             unreachable!()
         }
@@ -495,6 +533,27 @@ fn convert_values(data_type: &ConcreteDataType, values: Values) -> Vec<Value> {
             .into_iter()
             .map(|v| Value::Timestamp(Timestamp::new_nanosecond(v)))
             .collect(),
+        ConcreteDataType::Time(TimeType::Second(_)) => values
+            .time_second_values
+            .into_iter()
+            .map(|v| Value::Time(Time::new_second(v)))
+            .collect(),
+        ConcreteDataType::Time(TimeType::Millisecond(_)) => values
+            .time_millisecond_values
+            .into_iter()
+            .map(|v| Value::Time(Time::new_millisecond(v)))
+            .collect(),
+        ConcreteDataType::Time(TimeType::Microsecond(_)) => values
+            .time_microsecond_values
+            .into_iter()
+            .map(|v| Value::Time(Time::new_microsecond(v)))
+            .collect(),
+        ConcreteDataType::Time(TimeType::Nanosecond(_)) => values
+            .time_nanosecond_values
+            .into_iter()
+            .map(|v| Value::Time(Time::new_nanosecond(v)))
+            .collect(),
+
         ConcreteDataType::Null(_) | ConcreteDataType::List(_) | ConcreteDataType::Dictionary(_) => {
             unreachable!()
         }

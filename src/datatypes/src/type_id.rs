@@ -48,9 +48,10 @@ pub enum LogicalTypeId {
     TimestampMicrosecond,
     TimestampNanosecond,
     /// A 64-bit time representing the elapsed time since midnight in the unit of `TimeUnit`.
-    Time,
-    /// Measure of elapsed time in the unit of `TimeUnit`.
-    Duration,
+    TimeSecond,
+    TimeMillisecond,
+    TimeMicrosecond,
+    TimeNanosecond,
 
     List,
     Dictionary,
@@ -98,8 +99,14 @@ impl LogicalTypeId {
                 ConcreteDataType::null_datatype(),
                 ConcreteDataType::null_datatype(),
             ),
-            LogicalTypeId::Time => ConcreteDataType::time_datatype(TimeUnit::default()),
-            LogicalTypeId::Duration => ConcreteDataType::duration_datatype(TimeUnit::default()),
+            LogicalTypeId::TimeSecond => ConcreteDataType::time_datatype(TimeUnit::Second),
+            LogicalTypeId::TimeMillisecond => {
+                ConcreteDataType::time_datatype(TimeUnit::Millisecond)
+            }
+            LogicalTypeId::TimeMicrosecond => {
+                ConcreteDataType::time_datatype(TimeUnit::Microsecond)
+            }
+            LogicalTypeId::TimeNanosecond => ConcreteDataType::time_datatype(TimeUnit::Nanosecond),
         }
     }
 }

@@ -396,6 +396,10 @@ pub fn concrete_data_type_to_sql_data_type(data_type: &ConcreteDataType) -> Resu
             Some(ts_type.precision()),
             TimezoneInfo::None,
         )),
+        ConcreteDataType::Time(time_type) => Ok(SqlDataType::Time(
+            Some(time_type.precision()),
+            TimezoneInfo::None,
+        )),
         ConcreteDataType::Binary(_) => Ok(SqlDataType::Varbinary(None)),
         ConcreteDataType::Null(_) | ConcreteDataType::List(_) | ConcreteDataType::Dictionary(_) => {
             unreachable!()

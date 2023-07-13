@@ -162,6 +162,8 @@ impl Database {
                 schema: self.schema.clone(),
                 authorization: self.ctx.auth_header.clone(),
                 dbname: self.dbname.clone(),
+                trace_id: None,
+                span_id: None,
             }),
             request: Some(request),
         }

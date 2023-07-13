@@ -22,6 +22,7 @@ pub mod prelude;
 pub mod scalars;
 pub mod schema;
 pub mod serialize;
+pub mod time;
 pub mod timestamp;
 pub mod type_id;
 pub mod types;

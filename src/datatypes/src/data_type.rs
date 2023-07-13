@@ -23,8 +23,8 @@ use serde::{Deserialize, Serialize};
 use crate::error::{self, Error, Result};
 use crate::type_id::LogicalTypeId;
 use crate::types::{
-    BinaryType, BooleanType, DateTimeType, DateType, DictionaryType, DurationType, Float32Type,
-    Float64Type, Int16Type, Int32Type, Int64Type, Int8Type, ListType, NullType, StringType,
+    BinaryType, BooleanType, DateTimeType, DateType, DictionaryType, Float32Type, Float64Type,
+    Int16Type, Int32Type, Int64Type, Int8Type, ListType, NullType, StringType, TimeMillisecondType,
     TimeType, TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType,
     TimestampSecondType, TimestampType, UInt16Type, UInt32Type, UInt64Type, UInt8Type,
 };
@@ -58,7 +58,6 @@ pub enum ConcreteDataType {
     DateTime(DateTimeType),
     Timestamp(TimestampType),
     Time(TimeType),
-    Duration(DurationType),
 
     // Compound types:
     List(ListType),
@@ -86,7 +85,6 @@ impl fmt::Display for ConcreteDataType {
             ConcreteDataType::DateTime(_) => write!(f, "DateTime"),
             ConcreteDataType::Timestamp(_) => write!(f, "Timestamp"),
             ConcreteDataType::Time(_) => write!(f, "Time"),
-            ConcreteDataType::Duration(_) => write!(f, "Duration"),
             ConcreteDataType::List(_) => write!(f, "List"),
             ConcreteDataType::Dictionary(_) => write!(f, "Dictionary"),
         }
@@ -114,6 +112,7 @@ impl ConcreteDataType {
                 | ConcreteDataType::Date(_)
                 | ConcreteDataType::DateTime(_)
                 | ConcreteDataType::Timestamp(_)
+                | ConcreteDataType::Time(_)
         )
     }
 
@@ -127,6 +126,7 @@ impl ConcreteDataType {
                 | ConcreteDataType::Date(_)
                 | ConcreteDataType::DateTime(_)
                 | ConcreteDataType::Timestamp(_)
+                | ConcreteDataType::Time(_)
         )
     }
 
@@ -185,6 +185,15 @@ impl ConcreteDataType {
             _ => None,
         }
     }
+
+    /// Try to cast data type as a [`TimeType`].
+    pub fn as_time(&self) -> Option<TimeType> {
+        match self {
+            ConcreteDataType::Int64(_) => Some(TimeType::Millisecond(TimeMillisecondType)),
+            ConcreteDataType::Time(t) => Some(*t),
+            _ => None,
+        }
+    }
 }
 
 impl From<&ConcreteDataType> for ConcreteDataType {
@@ -225,9 +234,6 @@ impl TryFrom<&ArrowDataType> for ConcreteDataType {
             }
             ArrowDataType::Time32(u) => ConcreteDataType::Time(TimeType::from_unit(u.into())),
             ArrowDataType::Time64(u) => ConcreteDataType::Time(TimeType::from_unit(u.into())),
-            ArrowDataType::Duration(u) => {
-                ConcreteDataType::Duration(DurationType::from_unit(u.into()))
-            }
             _ => {
                 return error::UnsupportedArrowTypeSnafu {
                     arrow_type: dt.clone(),
@@ -283,11 +289,6 @@ impl ConcreteDataType {
     /// Returns the time data type with `TimeUnit`.
     pub fn time_datatype(unit: TimeUnit) -> Self {
         ConcreteDataType::Time(TimeType::from_unit(unit))
-    }
-
-    /// Returns the duration data type with `TimeUnit`.
-    pub fn duration_datatype(unit: TimeUnit) -> Self {
-        ConcreteDataType::Duration(DurationType::from_unit(unit))
     }
 
     pub fn timestamp_datatype(unit: TimeUnit) -> Self {

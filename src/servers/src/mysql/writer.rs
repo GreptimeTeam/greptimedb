@@ -190,6 +190,8 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
                             ),
                         })
                     }
+                    Value::Time(v) => row_writer
+                        .write_col(v.to_timezone_aware_string(query_context.time_zone()))?,
                 }
             }
             row_writer.end_row().await?;
