@@ -14,7 +14,7 @@
 
 //! manifest storage
 
-mod action;
+pub(crate) mod action;
 mod gc_task;
 mod helper;
 #[allow(unused_variables)]

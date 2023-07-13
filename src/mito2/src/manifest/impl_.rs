@@ -33,6 +33,32 @@ use crate::manifest::storage::ManifestObjectStore;
 pub struct RegionManifest {}
 
 impl RegionManifest {
+    // pub fn with_checkpointer(
+    //     manifest_dir: &str,
+    //     object_store: ObjectStore,
+    //     compress_type: CompressionType,
+    //     checkpoint_actions_margin: Option<u16>,
+    //     gc_duration: Option<Duration>,
+    // ) -> Self {
+    //     Self::new(
+    //         manifest_dir,
+    //         object_store,
+    //         compress_type,
+    //         checkpoint_actions_margin,
+    //         gc_duration,
+    //         Some(Arc::new(RegionManifestCheckpointer {
+    //             flushed_manifest_version: AtomicU64::new(0),
+    //         })),
+    //     )
+    // }
+
+    // Update flushed manifest version in checkpointer
+    pub fn set_flushed_manifest_version(&self, manifest_version: ManifestVersion) {
+        if let Some(checkpointer) = self.checkpointer() {
+            checkpointer.set_flushed_manifest_version(manifest_version);
+        }
+    }
+
     // from impl ManifestImpl
 
     pub fn new() -> Self {

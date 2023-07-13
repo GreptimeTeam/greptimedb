@@ -14,7 +14,7 @@
 
 //! Mito region.
 
-mod metadata;
+pub(crate) mod metadata;
 mod version;
 
 use std::collections::HashMap;

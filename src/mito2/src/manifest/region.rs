@@ -19,20 +19,14 @@
 
 use std::any::Any;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
 
-use common_datasource::compression::CompressionType;
 use common_telemetry::{info, warn};
-use object_store::ObjectStore;
 use store_api::manifest::action::ProtocolAction;
 use store_api::manifest::{ManifestVersion, MIN_VERSION};
 
-use crate::error::Result;
+use crate::error::{ManifestCheckpointSnafu, Result};
 use crate::manifest::action::{RegionCheckpoint, RegionManifestDataBuilder, RegionMetaAction};
 use crate::manifest::impl_::RegionManifest;
-
-// pub type RegionManifest = ManifestImpl<RegionCheckpoint, RegionMetaActionList>;
 
 #[derive(Debug)]
 pub struct RegionManifestCheckpointer {
@@ -50,9 +44,6 @@ impl RegionManifestCheckpointer {
 }
 
 impl RegionManifestCheckpointer {
-    // type Checkpoint = RegionCheckpoint;
-    // type MetaAction = RegionMetaActionList;
-
     async fn do_checkpoint(&self, manifest: &RegionManifest) -> Result<Option<RegionCheckpoint>> {
         let last_checkpoint = manifest.last_checkpoint().await?;
 
@@ -89,10 +80,7 @@ impl RegionManifestCheckpointer {
                     RegionMetaAction::Edit(e) => manifest_builder.apply_edit(version, e),
                     RegionMetaAction::Protocol(p) => protocol = p,
                     action => {
-                        return ManifestCheckpointSnafu {
-                            msg: format!("can't apply region action: {:?}", action),
-                        }
-                        .fail();
+                        return ManifestCheckpointSnafu { action }.fail();
                     }
                 }
             }
@@ -119,7 +107,7 @@ impl RegionManifestCheckpointer {
             .await
         {
             // We only log when the error kind isn't `NotFound`
-            if !e.is_object_to_delete_not_found() {
+            if !e.is_opendal_not_found() {
                 // It doesn't matter when deletion fails, they will be purged by gc task.
                 warn!(
                     "Failed to delete manifest logs [{},{}] in path: {}. err: {}",
@@ -141,51 +129,18 @@ impl RegionManifestCheckpointer {
     }
 }
 
-impl RegionManifest {
-    pub fn with_checkpointer(
-        manifest_dir: &str,
-        object_store: ObjectStore,
-        compress_type: CompressionType,
-        checkpoint_actions_margin: Option<u16>,
-        gc_duration: Option<Duration>,
-    ) -> Self {
-        Self::new(
-            manifest_dir,
-            object_store,
-            compress_type,
-            checkpoint_actions_margin,
-            gc_duration,
-            Some(Arc::new(RegionManifestCheckpointer {
-                flushed_manifest_version: AtomicU64::new(0),
-            })),
-        )
-    }
-
-    // Update flushed manifest version in checkpointer
-    pub fn set_flushed_manifest_version(&self, manifest_version: ManifestVersion) {
-        if let Some(checkpointer) = self.checkpointer() {
-            if let Some(checkpointer) = checkpointer
-                .as_any()
-                .downcast_ref::<RegionManifestCheckpointer>()
-            {
-                checkpointer.set_flushed_manifest_version(manifest_version);
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use core::time::Duration;
     use std::sync::Arc;
 
     use common_test_util::temp_dir::create_temp_dir;
     use object_store::services::{Fs, S3};
     use object_store::test_util::{s3_test_config, TempFolder};
     use object_store::ObjectStore;
-    use storage::metadata::RegionMetadata;
     use storage::sst::FileId;
     use store_api::manifest::action::ProtocolAction;
-    use store_api::manifest::{Manifest, MetaActionIterator, MAX_VERSION};
+    use store_api::manifest::MAX_VERSION;
 
     use super::*;
     use crate::manifest::action::{
@@ -193,6 +148,7 @@ mod tests {
     };
     use crate::manifest::storage::manifest_compress_type;
     use crate::manifest::test_utils::*;
+    use crate::region::metadata::RegionMetadata;
 
     #[tokio::test]
     async fn test_fs_region_manifest_compress() {

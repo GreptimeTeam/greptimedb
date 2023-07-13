@@ -86,18 +86,18 @@ impl StoreSchema {
         self.row_key_end - 1
     }
 
-    pub(crate) fn contains_column(&self, name: &str) -> bool {
+    pub fn contains_column(&self, name: &str) -> bool {
         self.schema.column_schema_by_name(name).is_some()
     }
 
-    pub(crate) fn is_key_column(&self, name: &str) -> bool {
+    pub fn is_key_column(&self, name: &str) -> bool {
         self.schema
             .column_index_by_name(name)
             .map(|idx| idx < self.row_key_end)
             .unwrap_or(false)
     }
 
-    pub(crate) fn is_user_column(&self, name: &str) -> bool {
+    pub fn is_user_column(&self, name: &str) -> bool {
         self.schema
             .column_index_by_name(name)
             .map(|idx| idx < self.user_column_end)

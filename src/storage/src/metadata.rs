@@ -61,7 +61,6 @@ pub enum Error {
     #[snafu(display("Missing timestamp key column"))]
     MissingTimestamp { location: Location },
 
-    // Variants for validating `AlterRequest`, which won't have a backtrace.
     #[snafu(display("Expect altering metadata with version {}, given {}", expect, given))]
     InvalidAlterVersion {
         expect: VersionNumber,
@@ -368,6 +367,7 @@ impl TryFrom<RawRegionMetadata> for RegionMetadata {
     }
 }
 
+// TODO(yingwen): remove this elegant design
 const METADATA_CF_ID_KEY: &str = "greptime:storage:cf_id";
 const METADATA_COLUMN_ID_KEY: &str = "greptime:storage:column_id";
 
@@ -460,7 +460,7 @@ pub struct ColumnsMetadata {
     /// ```
     ///
     /// The key columns, timestamp and version forms the row key.
-    columns: Vec<ColumnMetadata>,
+    pub columns: Vec<ColumnMetadata>,
     /// Maps column name to index of columns, used to fast lookup column by name.
     name_to_col_index: HashMap<String, usize>,
     /// Exclusive end index of row key columns.
@@ -526,7 +526,7 @@ impl ColumnsMetadata {
         &self.columns[idx]
     }
 
-    fn to_row_key_descriptor(&self) -> RowKeyDescriptor {
+    pub fn to_row_key_descriptor(&self) -> RowKeyDescriptor {
         let mut builder = RowKeyDescriptorBuilder::default();
         for (idx, column) in self.iter_row_key_columns().enumerate() {
             // Not a timestamp column.
@@ -572,10 +572,11 @@ impl From<RawColumnsMetadata> for ColumnsMetadata {
     }
 }
 
+// TODO(yingwen): remove this elegant design
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ColumnFamiliesMetadata {
     /// Map column family id to column family metadata.
-    id_to_cfs: HashMap<ColumnFamilyId, ColumnFamilyMetadata>,
+    pub id_to_cfs: HashMap<ColumnFamilyId, ColumnFamilyMetadata>,
 }
 
 impl ColumnFamiliesMetadata {
@@ -643,7 +644,7 @@ impl TryFrom<RegionDescriptor> for RegionMetadata {
 }
 
 #[derive(Default)]
-struct ColumnsMetadataBuilder {
+pub struct ColumnsMetadataBuilder {
     columns: Vec<ColumnMetadata>,
     name_to_col_index: HashMap<String, usize>,
     /// Column id set, used to validate column id uniqueness.
@@ -711,7 +712,7 @@ impl ColumnsMetadataBuilder {
         Ok(self)
     }
 
-    fn build(mut self) -> Result<ColumnsMetadata> {
+    pub fn build(mut self) -> Result<ColumnsMetadata> {
         let timestamp_key_index = self.timestamp_key_index.context(MissingTimestampSnafu)?;
 
         let user_column_end = self.columns.len();
@@ -731,13 +732,13 @@ impl ColumnsMetadataBuilder {
 }
 
 #[derive(Default)]
-struct ColumnFamiliesMetadataBuilder {
+pub struct ColumnFamiliesMetadataBuilder {
     id_to_cfs: HashMap<ColumnFamilyId, ColumnFamilyMetadata>,
     cf_names: HashSet<String>,
 }
 
 impl ColumnFamiliesMetadataBuilder {
-    fn add_column_family(&mut self, cf: ColumnFamilyMetadata) -> Result<&mut Self> {
+    pub fn add_column_family(&mut self, cf: ColumnFamilyMetadata) -> Result<&mut Self> {
         ensure!(
             !self.id_to_cfs.contains_key(&cf.cf_id),
             CfIdExistsSnafu { id: cf.cf_id }
@@ -754,7 +755,7 @@ impl ColumnFamiliesMetadataBuilder {
         Ok(self)
     }
 
-    fn build(self) -> ColumnFamiliesMetadata {
+    pub fn build(self) -> ColumnFamiliesMetadata {
         ColumnFamiliesMetadata {
             id_to_cfs: self.id_to_cfs,
         }

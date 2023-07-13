@@ -19,6 +19,9 @@ use common_error::prelude::*;
 use snafu::Location;
 use store_api::manifest::ManifestVersion;
 
+use crate::manifest::action::RegionMetaAction;
+use crate::region::metadata::VersionNumber;
+
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
@@ -74,6 +77,40 @@ pub enum Error {
         location: Location,
         source: std::str::Utf8Error,
     },
+
+    #[snafu(display(
+        "Unsupported action when making manifest checkpoint: {:?}. Location {}",
+        action,
+        location
+    ))]
+    ManifestCheckpoint {
+        action: RegionMetaAction,
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Expect altering metadata with version {}, given {}. Location {}",
+        expect,
+        given,
+        location
+    ))]
+    InvalidAlterVersion {
+        expect: VersionNumber,
+        given: VersionNumber,
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Invalid alter operation on {}: {}. Location {}",
+        name,
+        reason,
+        location
+    ))]
+    InvalidAlterOperation {
+        name: String,
+        reason: String,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -88,5 +125,17 @@ impl ErrorExt for Error {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+}
+
+impl Error {
+    /// Returns true if the error is the object path to delete
+    /// doesn't exist.
+    pub fn is_opendal_not_found(&self) -> bool {
+        if let Error::OpenDal { source, .. } = self {
+            source.kind() == object_store::ErrorKind::NotFound
+        } else {
+            false
+        }
     }
 }
