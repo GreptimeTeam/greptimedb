@@ -14,6 +14,7 @@
 
 //! Mito region.
 
+pub(crate) mod columns;
 pub(crate) mod metadata;
 mod version;
 

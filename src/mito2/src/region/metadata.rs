@@ -22,16 +22,18 @@
 
 use std::sync::Arc;
 
-use snafu::ensure;
-use storage::metadata::{ColumnsMetadata, ColumnsMetadataBuilder, ColumnsMetadataRef};
+use snafu::{ensure, ResultExt};
 use storage::schema::{RegionSchema, RegionSchemaRef};
 use store_api::storage::{
     AddColumn, AlterOperation, AlterRequest, RegionDescriptor, RegionDescriptorBuilder, RegionId,
     RowKeyDescriptor, Schema, SchemaRef,
 };
 
-use crate::error::{Error, InvalidAlterOperationSnafu, InvalidAlterVersionSnafu, Result};
+use crate::error::{
+    Error, InvalidAlterOperationSnafu, InvalidAlterVersionSnafu, Result, StorageMetadataSnafu,
+};
 use crate::manifest::action::{RawColumnsMetadata, RawRegionMetadata};
+use crate::region::columns::{ColumnsMetadata, ColumnsMetadataBuilder, ColumnsMetadataRef};
 
 pub type VersionNumber = u32;
 
@@ -39,14 +41,14 @@ pub type VersionNumber = u32;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RegionMetadata {
     // The following fields are immutable.
-    id: RegionId,
-    name: String,
+    pub(crate) id: RegionId,
+    pub(crate) name: String,
 
     // The following fields are mutable.
     /// Latest schema of the region.
-    schema: RegionSchemaRef,
-    pub columns: ColumnsMetadataRef,
-    version: VersionNumber,
+    pub(crate) schema: RegionSchemaRef,
+    pub(crate) columns: ColumnsMetadataRef,
+    pub(crate) version: VersionNumber,
 }
 
 impl RegionMetadata {
@@ -174,7 +176,7 @@ impl RegionMetadata {
 
     fn to_descriptor(&self) -> RegionDescriptor {
         let row_key = self.columns.to_row_key_descriptor();
-        let mut builder = RegionDescriptorBuilder::default()
+        let builder = RegionDescriptorBuilder::default()
             .id(self.id)
             .name(&self.name)
             .row_key(row_key);
@@ -201,14 +203,20 @@ impl TryFrom<RawRegionMetadata> for RegionMetadata {
     type Error = Error;
 
     fn try_from(raw: RawRegionMetadata) -> Result<RegionMetadata> {
-        let columns = Arc::new(ColumnsMetadata::from(raw.columns));
-        let schema = Arc::new(RegionSchema::new(columns.clone(), raw.version)?);
+        let columns = ColumnsMetadata::from(raw.columns);
+        let schema = Arc::new(
+            RegionSchema::new(
+                Arc::new(convert_columns_metadata(columns.clone())),
+                raw.version,
+            )
+            .context(StorageMetadataSnafu)?,
+        );
 
         Ok(RegionMetadata {
             id: raw.id,
             name: raw.name,
             schema,
-            columns,
+            columns: Arc::new(columns),
             version: raw.version,
         })
     }
@@ -259,15 +267,53 @@ impl RegionMetadataBuilder {
     }
 
     fn build(self) -> Result<RegionMetadata> {
-        let columns = Arc::new(self.columns_meta_builder.build()?);
-        let schema = Arc::new(RegionSchema::new(columns.clone(), self.version)?);
+        let columns = self.columns_meta_builder.build()?;
+        let schema = Arc::new(
+            RegionSchema::new(
+                Arc::new(convert_columns_metadata(columns.clone())),
+                self.version,
+            )
+            .context(StorageMetadataSnafu)?,
+        );
 
         Ok(RegionMetadata {
             id: self.id,
             name: self.name,
             schema,
-            columns,
+            columns: Arc::new(columns),
             version: self.version,
         })
+    }
+}
+
+impl TryFrom<RegionDescriptor> for RegionMetadataBuilder {
+    type Error = Error;
+
+    fn try_from(desc: RegionDescriptor) -> Result<RegionMetadataBuilder> {
+        let builder = RegionMetadataBuilder::new()
+            .name(desc.name)
+            .id(desc.id)
+            .row_key(desc.row_key)?;
+
+        Ok(builder)
+    }
+}
+
+fn convert_columns_metadata(
+    columns: crate::region::columns::ColumnsMetadata,
+) -> storage::metadata::ColumnsMetadata {
+    storage::metadata::ColumnsMetadata {
+        columns: columns
+            .columns
+            .into_iter()
+            .map(|col| storage::metadata::ColumnMetadata {
+                cf_id: 0,
+                desc: col.desc,
+            })
+            .collect(),
+        name_to_col_index: columns.name_to_col_index,
+        row_key_end: columns.row_key_end,
+        timestamp_key_index: columns.timestamp_key_index,
+        user_column_end: columns.user_column_end,
     }
 }

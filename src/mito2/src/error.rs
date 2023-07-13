@@ -18,6 +18,7 @@ use common_datasource::compression::CompressionType;
 use common_error::prelude::*;
 use snafu::Location;
 use store_api::manifest::ManifestVersion;
+use store_api::storage::{ColumnDescriptorBuilderError, ColumnId};
 
 use crate::manifest::action::RegionMetaAction;
 use crate::region::metadata::VersionNumber;
@@ -109,6 +110,54 @@ pub enum Error {
     InvalidAlterOperation {
         name: String,
         reason: String,
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Failed to convert to column schema, source: {}. Location {}",
+        source,
+        location
+    ))]
+    ToColumnSchema {
+        location: Location,
+        source: datatypes::error::Error,
+    },
+
+    #[snafu(display(
+        "Failed to build column descriptor, source: {}. Location {}",
+        source,
+        location
+    ))]
+    BuildColumnDescriptor {
+        source: ColumnDescriptorBuilderError,
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Failed to access k-v metadata, source: {}. Location {}",
+        source,
+        location
+    ))]
+    AccessKvMetadata {
+        source: datatypes::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Column name {} is reserved by the system", name))]
+    ReservedColumn { name: String, location: Location },
+
+    #[snafu(display("Column name {} already exists", name))]
+    ColNameExists { name: String, location: Location },
+
+    #[snafu(display("Column id {} already exists", id))]
+    ColIdExists { id: ColumnId, location: Location },
+
+    #[snafu(display("Missing timestamp key column"))]
+    MissingTimestamp { location: Location },
+
+    #[snafu(display("Error from storage metadata: {}. Location: {}", source, location))]
+    StorageMetadata {
+        source: storage::metadata::Error,
         location: Location,
     },
 }

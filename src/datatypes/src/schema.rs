@@ -25,7 +25,9 @@ use snafu::{ensure, ResultExt};
 
 use crate::data_type::DataType;
 use crate::error::{self, Error, ProjectArrowSchemaSnafu, Result};
-pub use crate::schema::column_schema::{ColumnSchema, Metadata, COMMENT_KEY, TIME_INDEX_KEY};
+pub use crate::schema::column_schema::{
+    try_parse_int, ColumnSchema, Metadata, COMMENT_KEY, TIME_INDEX_KEY,
+};
 pub use crate::schema::constraint::ColumnDefaultConstraint;
 pub use crate::schema::raw::RawSchema;
 

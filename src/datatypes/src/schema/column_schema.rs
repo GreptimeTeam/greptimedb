@@ -13,13 +13,15 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::num::ParseIntError;
+use std::str::FromStr;
 
 use arrow::datatypes::Field;
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::data_type::{ConcreteDataType, DataType};
-use crate::error::{self, Error, Result};
+use crate::error::{self, Error, MetaNotFoundSnafu, ParseMetaIntSnafu, Result};
 use crate::schema::constraint::ColumnDefaultConstraint;
 use crate::value::Value;
 use crate::vectors::VectorRef;
@@ -218,6 +220,20 @@ impl TryFrom<&ColumnSchema> for Field {
         )
         .with_metadata(metadata))
     }
+}
+
+pub fn try_parse_int<T>(metadata: &Metadata, key: &str, default_value: Option<T>) -> Result<T>
+where
+    T: FromStr<Err = ParseIntError>,
+{
+    if let Some(value) = metadata.get(key) {
+        return value.parse().with_context(|_| ParseMetaIntSnafu {
+            key_value: format!("{key}={value}"),
+        });
+    }
+    // No such key in metadata.
+
+    default_value.context(MetaNotFoundSnafu { key })
 }
 
 #[cfg(test)]

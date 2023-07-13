@@ -17,6 +17,7 @@ use std::fmt;
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 
+use crate::storage::consts::ReservedColumnId;
 use crate::storage::{consts, ColumnDefaultConstraint, ColumnSchema, ConcreteDataType};
 
 /// Id of column, unique in each region.

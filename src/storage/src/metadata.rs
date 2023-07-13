@@ -462,15 +462,15 @@ pub struct ColumnsMetadata {
     /// The key columns, timestamp and version forms the row key.
     pub columns: Vec<ColumnMetadata>,
     /// Maps column name to index of columns, used to fast lookup column by name.
-    name_to_col_index: HashMap<String, usize>,
+    pub name_to_col_index: HashMap<String, usize>,
     /// Exclusive end index of row key columns.
-    row_key_end: usize,
+    pub row_key_end: usize,
     /// Index of timestamp key column.
-    timestamp_key_index: usize,
+    pub timestamp_key_index: usize,
     /// Exclusive end index of user columns.
     ///
     /// Columns in `[user_column_end..)` are internal columns.
-    user_column_end: usize,
+    pub user_column_end: usize,
 }
 
 impl ColumnsMetadata {
@@ -842,7 +842,7 @@ impl RegionMetadataBuilder {
     }
 }
 
-fn internal_column_descs() -> [ColumnDescriptor; 2] {
+pub fn internal_column_descs() -> [ColumnDescriptor; 2] {
     [
         ColumnDescriptorBuilder::new(
             ReservedColumnId::sequence(),
@@ -865,7 +865,7 @@ fn internal_column_descs() -> [ColumnDescriptor; 2] {
 
 /// Returns true if this is an internal column for value column.
 #[inline]
-fn is_internal_field_column(column_name: &str) -> bool {
+pub fn is_internal_field_column(column_name: &str) -> bool {
     matches!(
         column_name,
         consts::SEQUENCE_COLUMN_NAME | consts::OP_TYPE_COLUMN_NAME

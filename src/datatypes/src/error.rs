@@ -105,6 +105,21 @@ pub enum Error {
 
     #[snafu(display("Invalid timestamp precision: {}", precision))]
     InvalidTimestampPrecision { precision: u64, location: Location },
+
+    #[snafu(display(
+        "Failed to parse metadata to int, key_value: {}, source: {}",
+        key_value,
+        source
+    ))]
+    ParseMetaInt {
+        // Store key and value in one string to reduce the enum size.
+        key_value: String,
+        source: std::num::ParseIntError,
+        location: Location,
+    },
+
+    #[snafu(display("Metadata of {} not found", key))]
+    MetaNotFound { key: String, location: Location },
 }
 
 impl ErrorExt for Error {

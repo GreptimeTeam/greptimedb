@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
-use storage::metadata::{ColumnMetadata, VersionNumber};
+use storage::metadata::VersionNumber;
 use storage::sst::{FileId, FileMeta};
 use store_api::manifest::action::{ProtocolAction, ProtocolVersion};
 use store_api::manifest::ManifestVersion;
@@ -23,6 +23,7 @@ use store_api::storage::{RegionId, SequenceNumber};
 
 use crate::error::Result;
 use crate::manifest::helper;
+use crate::region::columns::ColumnMetadata;
 
 /// Minimal data that could be used to persist and recover [RegionMetadata](crate::metadata::RegionMetadata).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
