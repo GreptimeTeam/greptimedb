@@ -43,7 +43,8 @@ pub(crate) type WorkerId = u32;
 
 /// A fixed size group of [RegionWorkers](RegionWorker).
 ///
-/// The group binds each region to a specific [RegionWorker].
+/// A worker group binds each region to a specific [RegionWorker] and sends
+/// requests to region's dedicated worker.
 ///
 /// ```mermaid
 /// graph LR
