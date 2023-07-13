@@ -29,6 +29,21 @@ pub fn normalize_dir(dir: &str) -> String {
     dir
 }
 
+/// Join two paths and normalize the output dir.
+///
+/// The output dir is always ends with `/`. e.g.
+/// - `/a/b` join `c` => `/a/b/c/`
+/// - `/a/b` join `/c/` => `/a/b/c/`
+///
+/// All internal `//` will be replaced by `/`.
+pub fn join_dir(parent: &str, child: &str) -> String {
+    // Always adds a `/` to the output path.
+    let output = format!("{parent}/{child}/");
+    // We call opendal's normalize_dir which doesn't push `/` to
+    // the end of path.
+    opendal::raw::normalize_root(&output)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -38,5 +53,19 @@ mod tests {
         assert_eq!("/", normalize_dir("/"));
         assert_eq!("/", normalize_dir(""));
         assert_eq!("/test/", normalize_dir("/test"));
+    }
+
+    #[test]
+    fn test_join_paths() {
+        assert_eq!("/", join_dir("", ""));
+        assert_eq!("/", join_dir("/", ""));
+        assert_eq!("/", join_dir("", "/"));
+        assert_eq!("/", join_dir("/", "/"));
+        assert_eq!("/a/", join_dir("/a", ""));
+        assert_eq!("/a/b/c/", join_dir("a/b", "c"));
+        assert_eq!("/a/b/c/", join_dir("/a/b", "c"));
+        assert_eq!("/a/b/c/", join_dir("/a/b", "c/"));
+        assert_eq!("/a/b/c/", join_dir("/a/b", "/c/"));
+        assert_eq!("/a/b/c/", join_dir("/a/b", "//c"));
     }
 }

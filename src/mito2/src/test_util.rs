@@ -20,7 +20,7 @@ use common_test_util::temp_dir::{create_temp_dir, TempDir};
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use log_store::test_util::log_store_util;
 use object_store::services::Fs;
-use object_store::util::normalize_dir;
+use object_store::util::join_dir;
 use object_store::ObjectStore;
 
 use crate::config::MitoConfig;
@@ -57,9 +57,8 @@ impl TestEnv {
 
     async fn create_log_and_object_store(&self) -> (RaftEngineLogStore, ObjectStore) {
         let data_home = self.data_home.path().to_str().unwrap();
-        let data_home = normalize_dir(data_home);
-        let wal_path = format!("{}wal", data_home);
-        let data_path = format!("{}data", data_home);
+        let wal_path = join_dir(data_home, "wal");
+        let data_path = join_dir(data_home, "data");
 
         let log_store = log_store_util::create_tmp_local_file_log_store(&wal_path).await;
         let mut builder = Fs::default();
