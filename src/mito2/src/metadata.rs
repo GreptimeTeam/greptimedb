@@ -29,7 +29,7 @@ pub(crate) struct RegionMetadata {
     column_metadatas: Vec<ColumnMetadata>,
     version: VersionNumber,
 
-    // Immutable and unique id
+    /// Immutable and unique id
     id: RegionId,
 }
 
