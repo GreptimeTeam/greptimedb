@@ -22,6 +22,7 @@ datafusion.workspace = true
 datatypes = { path = "../../datatypes" }
 flatbuffers = "23.1"
 futures = "0.3"
+lazy_static.workspace = true
 prost.workspace = true
 snafu = { version = "0.7", features = ["backtraces"] }
 tokio.workspace = true
