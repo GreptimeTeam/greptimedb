@@ -71,20 +71,29 @@ pub(crate) struct WriteRequest {
 }
 
 /// Request sent to a worker
+pub(crate) enum WorkerRequest {
+    /// Region request.
+    Region(RegionRequest),
+
+    /// Notify a worker to stop.
+    Stop,
+}
+
+/// Request to modify a region.
 #[derive(Debug)]
-pub(crate) struct WorkerRequest {
+pub(crate) struct RegionRequest {
     /// Sender to send result.
     pub(crate) sender: Option<Sender<Result<()>>>,
     /// Request body.
     pub(crate) body: RequestBody,
 }
 
-impl WorkerRequest {
-    /// Creates a [WorkerRequest] and a receiver from `body`.
-    pub(crate) fn from_body(body: RequestBody) -> (WorkerRequest, Receiver<Result<()>>) {
+impl RegionRequest {
+    /// Creates a [RegionRequest] and a receiver from `body`.
+    pub(crate) fn from_body(body: RequestBody) -> (RegionRequest, Receiver<Result<()>>) {
         let (sender, receiver) = oneshot::channel();
         (
-            WorkerRequest {
+            RegionRequest {
                 sender: Some(sender),
                 body,
             },

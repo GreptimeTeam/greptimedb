@@ -21,7 +21,7 @@ use store_api::logstore::LogStore;
 use crate::config::MitoConfig;
 use crate::error::{RecvSnafu, Result};
 pub use crate::worker::request::CreateRequest;
-use crate::worker::request::{RequestBody, WorkerRequest};
+use crate::worker::request::{RegionRequest, RequestBody};
 use crate::worker::WorkerGroup;
 
 /// Region engine implementation for timeseries data.
@@ -79,9 +79,9 @@ impl EngineInner {
     }
 
     /// Creates a new region.
-    async fn create_region(&self, request: CreateRequest) -> Result<()> {
-        let (worker_request, receiver) = WorkerRequest::from_body(RequestBody::Create(request));
-        self.workers.submit_to_worker(worker_request).await?;
+    async fn create_region(&self, create_request: CreateRequest) -> Result<()> {
+        let (request, receiver) = RegionRequest::from_body(RequestBody::Create(create_request));
+        self.workers.submit_to_worker(request).await?;
 
         receiver.await.context(RecvSnafu)?
     }

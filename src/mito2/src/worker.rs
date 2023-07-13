@@ -36,7 +36,7 @@ use tokio::sync::{mpsc, Mutex};
 use crate::config::MitoConfig;
 use crate::error::{JoinSnafu, Result, WorkerStoppedSnafu};
 use crate::region::{RegionMap, RegionMapRef};
-use crate::worker::request::{RequestBody, WorkerRequest};
+use crate::worker::request::{RegionRequest, RequestBody, WorkerRequest};
 
 /// Identifier for a worker.
 pub(crate) type WorkerId = u32;
@@ -49,7 +49,7 @@ pub(crate) type WorkerId = u32;
 /// ```mermaid
 /// graph LR
 ///
-/// WorkerRequest -- Route by region id --> Worker0 & Worker1
+/// RegionRequest -- Route by region id --> Worker0 & Worker1
 ///
 /// subgraph MitoEngine
 ///     subgraph WorkerGroup
@@ -120,7 +120,7 @@ impl WorkerGroup {
     }
 
     /// Submit a request to a worker in the group.
-    pub(crate) async fn submit_to_worker(&self, request: WorkerRequest) -> Result<()> {
+    pub(crate) async fn submit_to_worker(&self, request: RegionRequest) -> Result<()> {
         self.worker(request.body.region_id())
             .submit_request(request)
             .await
@@ -201,11 +201,16 @@ impl RegionWorker {
     }
 
     /// Submit request to background worker thread.
-    async fn submit_request(&self, request: WorkerRequest) -> Result<()> {
+    async fn submit_request(&self, request: RegionRequest) -> Result<()> {
         ensure!(self.is_running(), WorkerStoppedSnafu { id: self.id });
-        if self.sender.send(request).await.is_err() {
+        if self
+            .sender
+            .send(WorkerRequest::Region(request))
+            .await
+            .is_err()
+        {
             logging::warn!(
-                "Worker {} is already stopped but the running flag is still true",
+                "Worker {} is already exited but the running flag is still true",
                 self.id
             );
             // Manually set the running flag to false to avoid printing more warning logs.
@@ -225,7 +230,9 @@ impl RegionWorker {
             logging::info!("Stop region worker {}", self.id);
 
             self.set_running(false);
-            // TODO(yingwen): Send shutdown request.
+            if self.sender.send(WorkerRequest::Stop).await.is_err() {
+                logging::warn!("Worker {} is already exited before stop", self.id);
+            }
 
             handle.await.context(JoinSnafu)?;
         }
@@ -312,11 +319,21 @@ impl<S> RegionWorkerThread<S> {
     async fn handle_requests(&mut self, buffer: &mut RequestBuffer) {
         let mut dml_requests = Vec::with_capacity(buffer.len());
         let mut ddl_requests = Vec::with_capacity(buffer.len());
-        for req in buffer.drain(..) {
-            if req.body.is_ddl() {
-                ddl_requests.push(req);
-            } else {
-                dml_requests.push(req);
+        for worker_req in buffer.drain(..) {
+            match worker_req {
+                WorkerRequest::Region(req) => {
+                    if req.body.is_ddl() {
+                        ddl_requests.push(req);
+                    } else {
+                        dml_requests.push(req);
+                    }
+                }
+                // We receive a stop signal, but we still want to process remaining
+                // requests. The worker thread will then check the running flag and
+                // then exit.
+                WorkerRequest::Stop => {
+                    debug_assert!(!self.running.load(Ordering::Relaxed));
+                }
             }
         }
 
@@ -328,7 +345,7 @@ impl<S> RegionWorkerThread<S> {
     }
 
     /// Takes and handles all dml requests.
-    async fn handle_dml_requests(&mut self, write_requests: Vec<WorkerRequest>) {
+    async fn handle_dml_requests(&mut self, write_requests: Vec<RegionRequest>) {
         if write_requests.is_empty() {
             return;
         }
@@ -339,7 +356,7 @@ impl<S> RegionWorkerThread<S> {
     }
 
     /// Takes and handles all ddl requests.
-    async fn handle_ddl_requests(&mut self, ddl_requests: Vec<WorkerRequest>) {
+    async fn handle_ddl_requests(&mut self, ddl_requests: Vec<RegionRequest>) {
         if ddl_requests.is_empty() {
             return;
         }
