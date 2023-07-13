@@ -63,7 +63,7 @@ impl Interval {
     }
 
     // Creates a new interval from months, days and nanoseconds.
-    // If nanoseconds is between [-999,999], the data will be losted, the
+    // If nanoseconds is between [-999,999], the data will be lost, the
     // precision is microsecond.
     pub fn from_month_day_nano(months: i32, days: i32, nsecs: i64) -> Self {
         Interval {
