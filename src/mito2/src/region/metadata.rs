@@ -18,23 +18,20 @@
 // Structs related to column (ColumnsMetadata etc.) still reference to storage/metadata
 //   other structs are ported to this file
 // Those builder/descriptor can be simplified
+// Structs related to ColumnFamilies are removed
 
 use std::sync::Arc;
 
 use snafu::ensure;
-use storage::metadata::{
-    ColumnFamiliesMetadata, ColumnFamiliesMetadataBuilder, ColumnFamilyMetadata, ColumnsMetadata,
-    ColumnsMetadataBuilder, ColumnsMetadataRef,
-};
+use storage::metadata::{ColumnsMetadata, ColumnsMetadataBuilder, ColumnsMetadataRef};
 use storage::schema::{RegionSchema, RegionSchemaRef};
 use store_api::storage::{
-    consts, AddColumn, AlterOperation, AlterRequest, ColumnFamilyDescriptor,
-    ColumnFamilyDescriptorBuilder, RegionDescriptor, RegionDescriptorBuilder, RegionId,
+    AddColumn, AlterOperation, AlterRequest, RegionDescriptor, RegionDescriptorBuilder, RegionId,
     RowKeyDescriptor, Schema, SchemaRef,
 };
 
 use crate::error::{Error, InvalidAlterOperationSnafu, InvalidAlterVersionSnafu, Result};
-use crate::manifest::action::{RawColumnFamiliesMetadata, RawColumnsMetadata, RawRegionMetadata};
+use crate::manifest::action::{RawColumnsMetadata, RawRegionMetadata};
 
 pub type VersionNumber = u32;
 
@@ -49,7 +46,6 @@ pub struct RegionMetadata {
     /// Latest schema of the region.
     schema: RegionSchemaRef,
     pub columns: ColumnsMetadataRef,
-    column_families: ColumnFamiliesMetadata,
     version: VersionNumber,
 }
 
@@ -183,22 +179,6 @@ impl RegionMetadata {
             .name(&self.name)
             .row_key(row_key);
 
-        for (cf_id, cf) in &self.column_families.id_to_cfs {
-            let mut cf_builder = ColumnFamilyDescriptorBuilder::default()
-                .cf_id(*cf_id)
-                .name(&cf.name);
-            for column in &self.columns.columns[cf.column_index_start..cf.column_index_end] {
-                cf_builder = cf_builder.push_column(column.desc.clone());
-            }
-            // It should always be able to build the descriptor back.
-            let desc = cf_builder.build().unwrap();
-            if *cf_id == consts::DEFAULT_CF_ID {
-                builder = builder.default_cf(desc);
-            } else {
-                builder = builder.push_extra_column_family(desc);
-            }
-        }
-
         // We could ensure all fields are set here.
         builder.build().unwrap()
     }
@@ -212,7 +192,6 @@ impl From<&RegionMetadata> for RawRegionMetadata {
             id: data.id,
             name: data.name.clone(),
             columns: RawColumnsMetadata::from(&*data.columns),
-            column_families: RawColumnFamiliesMetadata::from(&data.column_families),
             version: data.version,
         }
     }
@@ -230,7 +209,6 @@ impl TryFrom<RawRegionMetadata> for RegionMetadata {
             name: raw.name,
             schema,
             columns,
-            column_families: raw.column_families.into(),
             version: raw.version,
         })
     }
@@ -240,7 +218,6 @@ struct RegionMetadataBuilder {
     id: RegionId,
     name: String,
     columns_meta_builder: ColumnsMetadataBuilder,
-    cfs_meta_builder: ColumnFamiliesMetadataBuilder,
     version: VersionNumber,
 }
 
@@ -256,7 +233,6 @@ impl RegionMetadataBuilder {
             id: 0.into(),
             name: String::new(),
             columns_meta_builder: ColumnsMetadataBuilder::default(),
-            cfs_meta_builder: ColumnFamiliesMetadataBuilder::default(),
             version: Schema::INITIAL_VERSION,
         }
     }
@@ -282,25 +258,6 @@ impl RegionMetadataBuilder {
         Ok(self)
     }
 
-    fn add_column_family(mut self, cf: ColumnFamilyDescriptor) -> Result<Self> {
-        let column_index_start = self.columns_meta_builder.columns.len();
-        let column_index_end = column_index_start + cf.columns.len();
-        let cf_meta = ColumnFamilyMetadata {
-            name: cf.name.clone(),
-            cf_id: cf.cf_id,
-            column_index_start,
-            column_index_end,
-        };
-
-        let _ = self.cfs_meta_builder.add_column_family(cf_meta)?;
-
-        for col in cf.columns {
-            let _ = self.columns_meta_builder.push_field_column(cf.cf_id, col)?;
-        }
-
-        Ok(self)
-    }
-
     fn build(self) -> Result<RegionMetadata> {
         let columns = Arc::new(self.columns_meta_builder.build()?);
         let schema = Arc::new(RegionSchema::new(columns.clone(), self.version)?);
@@ -310,7 +267,6 @@ impl RegionMetadataBuilder {
             name: self.name,
             schema,
             columns,
-            column_families: self.cfs_meta_builder.build(),
             version: self.version,
         })
     }

@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
-use storage::metadata::{ColumnFamilyMetadata, ColumnMetadata, VersionNumber};
+use storage::metadata::{ColumnMetadata, VersionNumber};
 use storage::sst::{FileId, FileMeta};
 use store_api::manifest::action::{ProtocolAction, ProtocolVersion};
 use store_api::manifest::ManifestVersion;
@@ -30,7 +30,6 @@ pub struct RawRegionMetadata {
     pub id: RegionId,
     pub name: String,
     pub columns: RawColumnsMetadata,
-    pub column_families: RawColumnFamiliesMetadata,
     pub version: VersionNumber,
 }
 
@@ -41,12 +40,6 @@ pub struct RawColumnsMetadata {
     pub row_key_end: usize,
     pub timestamp_key_index: usize,
     pub user_column_end: usize,
-}
-
-/// Minimal data that could be used to persist and recover [ColumnFamiliesMetadata](crate::metadata::ColumnFamiliesMetadata).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct RawColumnFamiliesMetadata {
-    pub column_families: Vec<ColumnFamilyMetadata>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
