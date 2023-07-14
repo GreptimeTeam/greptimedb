@@ -19,6 +19,7 @@ use std::sync::Arc;
 
 use api::v1::meta::Peer;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_grpc::channel_manager;
 use common_meta::key::TableMetadataManagerRef;
 use common_procedure::options::ProcedureConfig;
 use common_procedure::ProcedureManagerRef;
@@ -55,7 +56,7 @@ pub struct MetaSrvOptions {
     pub http_opts: HttpOptions,
     pub logging: LoggingOptions,
     pub procedure: ProcedureConfig,
-    pub datanode_client_options: DatanodeClientOptions,
+    pub datanode: DatanodeOptions,
 }
 
 impl Default for MetaSrvOptions {
@@ -71,7 +72,7 @@ impl Default for MetaSrvOptions {
             http_opts: HttpOptions::default(),
             logging: LoggingOptions::default(),
             procedure: ProcedureConfig::default(),
-            datanode_client_options: DatanodeClientOptions::default(),
+            datanode: DatanodeOptions::default(),
         }
     }
 }
@@ -82,7 +83,13 @@ impl MetaSrvOptions {
     }
 }
 
-// Options for database client
+// Options for datanode.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct DatanodeOptions {
+    client_options: DatanodeClientOptions,
+}
+
+// Options for datanode client.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DatanodeClientOptions {
     pub timeout_millis: u64,
@@ -93,8 +100,8 @@ pub struct DatanodeClientOptions {
 impl Default for DatanodeClientOptions {
     fn default() -> Self {
         Self {
-            timeout_millis: common_grpc::channel_manager::DEFAULT_REQUEST_TIMEOUT_SECS,
-            connect_timeout_millis: common_grpc::channel_manager::DEFAULT_CONNECT_TIMEOUT_SECS,
+            timeout_millis: channel_manager::DEFAULT_GRPC_REQUEST_TIMEOUT_SECS * 1000,
+            connect_timeout_millis: channel_manager::DEFAULT_GRPC_CONNECT_TIMEOUT_SECS * 1000,
             tcp_nodelay: true,
         }
     }

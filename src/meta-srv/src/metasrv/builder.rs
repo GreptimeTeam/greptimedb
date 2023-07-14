@@ -180,17 +180,17 @@ impl MetaSrvBuilder {
             kv_store.clone(),
         )));
 
-        let datanode_client_channel_config = ChannelConfig::new()
-            .timeout(Duration::from_millis(
-                options.datanode_client_options.timeout_millis,
-            ))
-            .connect_timeout(Duration::from_millis(
-                options.datanode_client_options.connect_timeout_millis,
-            ))
-            .tcp_nodelay(options.datanode_client_options.tcp_nodelay);
-
-        let datanode_clients = datanode_clients
-            .unwrap_or_else(|| Arc::new(DatanodeClients::new(datanode_client_channel_config)));
+        let datanode_clients = datanode_clients.unwrap_or_else(|| {
+            let datanode_client_channel_config = ChannelConfig::new()
+                .timeout(Duration::from_millis(
+                    options.datanode.client_options.timeout_millis,
+                ))
+                .connect_timeout(Duration::from_millis(
+                    options.datanode.client_options.connect_timeout_millis,
+                ))
+                .tcp_nodelay(options.datanode.client_options.tcp_nodelay);
+            Arc::new(DatanodeClients::new(datanode_client_channel_config))
+        });
 
         // TODO(weny): considers to modify the default config of procedure manager
         let ddl_manager = Arc::new(DdlManager::new(
