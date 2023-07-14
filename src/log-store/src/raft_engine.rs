@@ -52,6 +52,8 @@ impl Hash for NamespaceImpl {
     }
 }
 
+impl Eq for NamespaceImpl {}
+
 impl Namespace for NamespaceImpl {
     fn id(&self) -> store_api::logstore::namespace::Id {
         self.id

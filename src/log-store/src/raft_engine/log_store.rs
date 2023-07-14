@@ -387,7 +387,7 @@ impl MessageExt for MessageType {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
     use std::time::Duration;
 
     use common_telemetry::debug;
@@ -596,5 +596,43 @@ mod tests {
         let mut vec = collect_entries(res).await;
         vec.sort_by(|a, b| a.id.partial_cmp(&b.id).unwrap());
         assert_eq!(101, vec.first().unwrap().id);
+    }
+
+    #[tokio::test]
+    async fn test_append_batch() {
+        common_telemetry::init_default_ut_logging();
+        let dir = create_temp_dir("logstore-append-batch-test");
+
+        let config = LogConfig {
+            log_file_dir: dir.path().to_str().unwrap().to_string(),
+            file_size: ReadableSize::mb(2).0,
+            purge_threshold: ReadableSize::mb(4).0,
+            purge_interval: Duration::from_secs(5),
+            ..Default::default()
+        };
+
+        let logstore = RaftEngineLogStore::try_new(config).await.unwrap();
+
+        let mut entries = HashMap::with_capacity(16);
+
+        for ns_id in 0..8 {
+            let namespace = Namespace::with_id(ns_id);
+            let data = [ns_id as u8].repeat(4096);
+            entries.insert(
+                namespace.clone(),
+                (0..16)
+                    .into_iter()
+                    .map(|idx| Entry::create(idx, namespace.id(), data.clone()))
+                    .collect(),
+            );
+        }
+
+        logstore.append_batch(entries).await.unwrap();
+        for ns_id in 0..8 {
+            let namespace = Namespace::with_id(ns_id);
+            let (first, last) = logstore.span(&namespace);
+            assert_eq!(0, first.unwrap());
+            assert_eq!(15, last.unwrap());
+        }
     }
 }
