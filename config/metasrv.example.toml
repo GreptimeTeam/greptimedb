@@ -25,3 +25,9 @@ use_memory_store = false
 max_retry_times = 3
 # Initial retry delay of procedures, increases exponentially
 retry_delay = "500ms"
+
+# Datanode client options.
+# [datanode_client_options]
+# timeout_millis = 10000
+# connect_timeout_millis = 10000
+# tcp_nodelay = true

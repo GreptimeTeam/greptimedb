@@ -55,6 +55,7 @@ pub struct MetaSrvOptions {
     pub http_opts: HttpOptions,
     pub logging: LoggingOptions,
     pub procedure: ProcedureConfig,
+    pub datanode_client_options: DatanodeClientOptions,
 }
 
 impl Default for MetaSrvOptions {
@@ -70,6 +71,7 @@ impl Default for MetaSrvOptions {
             http_opts: HttpOptions::default(),
             logging: LoggingOptions::default(),
             procedure: ProcedureConfig::default(),
+            datanode_client_options: DatanodeClientOptions::default(),
         }
     }
 }
@@ -77,6 +79,24 @@ impl Default for MetaSrvOptions {
 impl MetaSrvOptions {
     pub fn to_toml_string(&self) -> String {
         toml::to_string(&self).unwrap()
+    }
+}
+
+// Options for database client
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DatanodeClientOptions {
+    pub timeout_millis: u64,
+    pub connect_timeout_millis: u64,
+    pub tcp_nodelay: bool,
+}
+
+impl Default for DatanodeClientOptions {
+    fn default() -> Self {
+        Self {
+            timeout_millis: common_grpc::channel_manager::DEFAULT_REQUEST_TIMEOUT_SECS,
+            connect_timeout_millis: common_grpc::channel_manager::DEFAULT_CONNECT_TIMEOUT_SECS,
+            tcp_nodelay: true,
+        }
     }
 }
 

@@ -29,8 +29,8 @@ use tower::make::MakeConnection;
 use crate::error::{CreateChannelSnafu, InvalidConfigFilePathSnafu, InvalidTlsConfigSnafu, Result};
 
 const RECYCLE_CHANNEL_INTERVAL_SECS: u64 = 60;
-const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 10;
-const DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 10;
+pub const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 10;
+pub const DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 10;
 
 lazy_static! {
     static ref ID: AtomicU64 = AtomicU64::new(0);
