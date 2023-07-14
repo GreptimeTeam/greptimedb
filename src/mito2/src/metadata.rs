@@ -23,6 +23,7 @@ use store_api::storage::{ColumnId, RegionId};
 
 use crate::region::VersionNumber;
 
+#[cfg_attr(doc, aquamarine::aquamarine)]
 /// Static metadata of a region.
 ///
 /// This struct implements [Serialize] and [Deserialize] traits.
