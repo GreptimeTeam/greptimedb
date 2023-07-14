@@ -27,7 +27,6 @@ mod tests {
     use arrow::array::{Array, PrimitiveArray};
     use arrow_array::ArrayRef;
     use common_time::DateTime;
-    use datafusion_common::from_slice::FromSlice;
 
     use super::*;
     use crate::data_type::DataType;
@@ -39,7 +38,7 @@ mod tests {
     #[test]
     fn test_datetime_vector() {
         std::env::set_var("TZ", "Asia/Shanghai");
-        let v = DateTimeVector::new(PrimitiveArray::from_slice([1, 2, 3]));
+        let v = DateTimeVector::new(PrimitiveArray::from(vec![1, 2, 3]));
         assert_eq!(ConcreteDataType::datetime_datatype(), v.data_type());
         assert_eq!(3, v.len());
         assert_eq!("DateTimeVector", v.vector_type_name());

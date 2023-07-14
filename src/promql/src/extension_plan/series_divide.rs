@@ -314,7 +314,6 @@ impl SeriesDivideStream {
 #[cfg(test)]
 mod test {
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
-    use datafusion::from_slice::FromSlice;
     use datafusion::physical_plan::memory::MemoryExec;
     use datafusion::prelude::SessionContext;
 
@@ -326,20 +325,20 @@ mod test {
             Field::new("path", DataType::Utf8, true),
         ]));
 
-        let path_column_1 = Arc::new(StringArray::from_slice([
+        let path_column_1 = Arc::new(StringArray::from(vec![
             "foo", "foo", "foo", "bar", "bar", "bar", "bar", "bar", "bar", "bla", "bla", "bla",
         ])) as _;
-        let host_column_1 = Arc::new(StringArray::from_slice([
+        let host_column_1 = Arc::new(StringArray::from(vec![
             "000", "000", "001", "002", "002", "002", "002", "002", "003", "005", "005", "005",
         ])) as _;
 
-        let path_column_2 = Arc::new(StringArray::from_slice(["bla", "bla", "bla"])) as _;
-        let host_column_2 = Arc::new(StringArray::from_slice(["005", "005", "005"])) as _;
+        let path_column_2 = Arc::new(StringArray::from(vec!["bla", "bla", "bla"])) as _;
+        let host_column_2 = Arc::new(StringArray::from(vec!["005", "005", "005"])) as _;
 
-        let path_column_3 = Arc::new(StringArray::from_slice([
+        let path_column_3 = Arc::new(StringArray::from(vec![
             "bla", "🥺", "🥺", "🥺", "🥺", "🥺", "🫠", "🫠",
         ])) as _;
-        let host_column_3 = Arc::new(StringArray::from_slice([
+        let host_column_3 = Arc::new(StringArray::from(vec![
             "005", "001", "001", "001", "001", "001", "001", "001",
         ])) as _;
 

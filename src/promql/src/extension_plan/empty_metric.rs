@@ -322,7 +322,7 @@ pub fn build_special_time_expr(time_index_column_name: &str) -> Expr {
 
 #[cfg(test)]
 mod test {
-    use datafusion::physical_plan::planner::DefaultPhysicalPlanner;
+    use datafusion::physical_planner::DefaultPhysicalPlanner;
     use datafusion::prelude::SessionContext;
 
     use super::*;

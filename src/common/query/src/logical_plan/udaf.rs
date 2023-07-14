@@ -105,13 +105,12 @@ impl From<AggregateFunction> for DfAggregateUdf {
 fn to_df_accumulator_func(
     accumulator: AccumulatorFunctionImpl,
     creator: AggregateFunctionCreatorRef,
-) -> Arc<AccumulatorFactoryFunction> {
-    // Arc::new(move |_| {
-    //     let accumulator = accumulator()?;
-    //     let creator = creator.clone();
-    //     Ok(Box::new(DfAccumulatorAdaptor::new(accumulator, creator)) as _)
-    // })
-    todo!()
+) -> AccumulatorFactoryFunction {
+    Arc::new(move |_| {
+        let accumulator = accumulator()?;
+        let creator = creator.clone();
+        Ok(Box::new(DfAccumulatorAdaptor::new(accumulator, creator)) as _)
+    })
 }
 
 fn to_df_state_type(func: StateTypeFunction) -> DfStateTypeFunction {
