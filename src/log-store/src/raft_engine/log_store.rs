@@ -576,7 +576,6 @@ mod tests {
         assert_eq!(101, vec.first().unwrap().id);
     }
 
-    #[allow(clippy::mutable_key_type)]
     #[tokio::test]
     async fn test_append_batch() {
         common_telemetry::init_default_ut_logging();
@@ -606,5 +605,34 @@ mod tests {
             assert_eq!(0, first.unwrap());
             assert_eq!(15, last.unwrap());
         }
+    }
+
+    #[tokio::test]
+    async fn test_append_batch_interleaved() {
+        common_telemetry::init_default_ut_logging();
+        let dir = create_temp_dir("logstore-append-batch-test");
+
+        let config = LogConfig {
+            log_file_dir: dir.path().to_str().unwrap().to_string(),
+            file_size: ReadableSize::mb(2).0,
+            purge_threshold: ReadableSize::mb(4).0,
+            purge_interval: Duration::from_secs(5),
+            ..Default::default()
+        };
+
+        let logstore = RaftEngineLogStore::try_new(config).await.unwrap();
+
+        let entries = vec![
+            Entry::create(0, 0, [b'0'; 4096].to_vec()),
+            Entry::create(1, 0, [b'0'; 4096].to_vec()),
+            Entry::create(0, 1, [b'1'; 4096].to_vec()),
+            Entry::create(2, 0, [b'0'; 4096].to_vec()),
+            Entry::create(1, 1, [b'1'; 4096].to_vec()),
+        ];
+
+        logstore.append_batch(entries).await.unwrap();
+
+        assert_eq!((Some(0), Some(2)), logstore.span(&Namespace::with_id(0)));
+        assert_eq!((Some(0), Some(1)), logstore.span(&Namespace::with_id(1)));
     }
 }
