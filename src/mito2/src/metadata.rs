@@ -51,13 +51,15 @@ pub struct RegionMetadata {
     /// Latest schema of this region
     #[serde(skip)]
     schema: SchemaRef,
+    /// Columns in the region. Has the same order as columns
+    /// in [schema](RegionMetadata::schema).
     column_metadatas: Vec<ColumnMetadata>,
     /// Version of metadata.
     version: VersionNumber,
     /// Maintains an ordered list of primary keys
     primary_key: Vec<ColumnId>,
 
-    /// Immutable and unique id
+    /// Immutable and unique id of a region.
     region_id: RegionId,
 }
 
@@ -148,15 +150,20 @@ impl RegionMetadataBuilder {
 pub struct ColumnMetadata {
     /// Schema of this column. Is the same as `column_schema` in [SchemaRef].
     column_schema: ColumnSchema,
+    /// Semantic type of this column (e.g. tag or timestamp).
     semantic_type: SemanticType,
+    /// Immutable and unique id of a region.
     column_id: ColumnId,
 }
 
 /// The semantic type of one column
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum SemanticType {
+    /// Tag column, also is a part of primary key.
     Tag,
+    /// A column that isn't a time index or part of primary key.
     Field,
+    /// Time index column.
     Timestamp,
 }
 

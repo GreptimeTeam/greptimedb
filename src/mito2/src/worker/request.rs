@@ -16,10 +16,11 @@
 
 use std::time::Duration;
 
-use store_api::storage::{CompactionStrategy, RegionId, ColumnId};
+use store_api::storage::{ColumnId, CompactionStrategy, RegionId};
 use tokio::sync::oneshot::{self, Receiver, Sender};
 
-use crate::{error::Result, metadata::ColumnMetadata};
+use crate::error::Result;
+use crate::metadata::ColumnMetadata;
 
 /// Options that affect the entire region.
 ///
@@ -47,7 +48,6 @@ pub struct CreateRequest {
     pub create_if_not_exists: bool,
     /// Options of the created region.
     pub options: RegionOptions,
-
 }
 
 impl CreateRequest {
