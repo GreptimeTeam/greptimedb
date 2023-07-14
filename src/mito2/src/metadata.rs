@@ -194,7 +194,6 @@ mod test {
     fn test_region_metadata_serde() {
         let region_metadata = build_test_region_metadata();
         let serialized = serde_json::to_string(&region_metadata).unwrap();
-        println!("serialized = {}", serialized);
         let deserialized: RegionMetadata = serde_json::from_str(&serialized).unwrap();
         assert_eq!(region_metadata, deserialized);
     }
