@@ -78,6 +78,9 @@ pub enum Error {
         source: std::str::Utf8Error,
     },
 
+    #[snafu(display("Cannot find RegionMetadata. Location: {}", location))]
+    RegionMetadataNotFound { location: Location },
+
     #[snafu(display("Failed to join handle, location: {}, source: {}", location, source))]
     Join {
         source: common_runtime::JoinError,
@@ -106,7 +109,9 @@ impl ErrorExt for Error {
                 StatusCode::Unexpected
             }
             InvalidScanIndex { .. } => StatusCode::InvalidArguments,
-            Join { .. } | WorkerStopped { .. } | Recv { .. } => StatusCode::Internal,
+            RegionMetadataNotFound { .. } | Join { .. } | WorkerStopped { .. } | Recv { .. } => {
+                StatusCode::Internal
+            }
         }
     }
 
