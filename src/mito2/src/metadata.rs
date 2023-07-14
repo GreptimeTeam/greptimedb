@@ -17,8 +17,7 @@
 use std::sync::Arc;
 
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
-use serde::ser::SerializeStruct;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize};
 use store_api::storage::{ColumnId, RegionId};
 
 use crate::region::VersionNumber;
@@ -47,9 +46,10 @@ use crate::region::VersionNumber;
 /// RegionMetadata o-- ColumnMetadata
 /// ColumnMetadata o-- SemanticType
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RegionMetadata {
     /// Latest schema of this region
+    #[serde(skip)]
     schema: SchemaRef,
     column_metadatas: Vec<ColumnMetadata>,
     /// Version of metadata.
@@ -67,19 +67,19 @@ impl RegionMetadata {
     // pub fn try_new(id:RegionId, primary_keys:Vec<ColumnId>, version_num)
 }
 
-impl Serialize for RegionMetadata {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let mut se = serializer.serialize_struct("RegionMetadata", 4)?;
-        se.serialize_field("column_metadatas", &self.column_metadatas)?;
-        se.serialize_field("version", &self.version)?;
-        se.serialize_field("primary_keys", &self.primary_keys)?;
-        se.serialize_field("id", &self.id)?;
-        se.end()
-    }
-}
+// impl Serialize for RegionMetadata {
+//     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+//     where
+//         S: Serializer,
+//     {
+//         let mut se = serializer.serialize_struct("RegionMetadata", 4)?;
+//         se.serialize_field("column_metadatas", &self.column_metadatas)?;
+//         se.serialize_field("version", &self.version)?;
+//         se.serialize_field("primary_keys", &self.primary_keys)?;
+//         se.serialize_field("id", &self.id)?;
+//         se.end()
+//     }
+// }
 
 impl<'de> Deserialize<'de> for RegionMetadata {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
