@@ -16,9 +16,9 @@
 
 use crate::error::Result;
 use crate::worker::request::OpenRequest;
-use crate::worker::RegionWorkerThread;
+use crate::worker::RegionWorkerLoop;
 
-impl<S> RegionWorkerThread<S> {
+impl<S> RegionWorkerLoop<S> {
     pub(crate) async fn handle_open_request(&mut self, _request: OpenRequest) -> Result<()> {
         unimplemented!()
     }

@@ -16,9 +16,9 @@
 
 use crate::error::Result;
 use crate::worker::request::CreateRequest;
-use crate::worker::RegionWorkerThread;
+use crate::worker::RegionWorkerLoop;
 
-impl<S> RegionWorkerThread<S> {
+impl<S> RegionWorkerLoop<S> {
     pub(crate) async fn handle_create_request(&mut self, _request: CreateRequest) -> Result<()> {
         // 1. Checks whether the table exists.
 

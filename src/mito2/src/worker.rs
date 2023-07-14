@@ -60,9 +60,9 @@ pub(crate) type WorkerId = u32;
 ///
 /// Chan0[" Request channel 0"]
 /// Chan1[" Request channel 1"]
-/// WorkerThread1["RegionWorkerThread 1"]
+/// WorkerThread1["RegionWorkerLoop 1"]
 ///
-/// subgraph WorkerThread0["RegionWorkerThread 0"]
+/// subgraph WorkerThread0["RegionWorkerLoop 0"]
 ///     subgraph RegionMap["RegionMap (regions bound to worker 0)"]
 ///         Region0["Region 0"]
 ///         Region2["Region 2"]
@@ -178,7 +178,7 @@ impl RegionWorker {
         let (sender, receiver) = mpsc::channel(config.channel_size);
 
         let running = Arc::new(AtomicBool::new(true));
-        let mut worker_thread = RegionWorkerThread {
+        let mut worker_thread = RegionWorkerLoop {
             id: config.id,
             regions: regions.clone(),
             receiver,
@@ -262,8 +262,8 @@ impl Drop for RegionWorker {
 
 type RequestBuffer = Vec<WorkerRequest>;
 
-/// Background worker thread to handle requests.
-struct RegionWorkerThread<S> {
+/// Background worker loop to handle requests.
+struct RegionWorkerLoop<S> {
     // Id of the worker.
     id: WorkerId,
     /// Regions bound to the worker.
@@ -280,7 +280,7 @@ struct RegionWorkerThread<S> {
     request_batch_size: usize,
 }
 
-impl<S> RegionWorkerThread<S> {
+impl<S> RegionWorkerLoop<S> {
     /// Starts the worker loop.
     async fn run(&mut self) {
         logging::info!("Start region worker thread {}", self.id);
