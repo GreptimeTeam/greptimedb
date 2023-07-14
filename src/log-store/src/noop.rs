@@ -25,7 +25,7 @@ pub struct NoopLogStore;
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct EntryImpl;
 
-#[derive(Debug, Clone, Default, Hash, PartialEq)]
+#[derive(Debug, Clone, Default, Eq, PartialEq, Hash)]
 pub struct NamespaceImpl;
 
 impl Namespace for NamespaceImpl {
@@ -65,8 +65,8 @@ impl LogStore for NoopLogStore {
         Ok(AppendResponse { entry_id: 0 })
     }
 
-    async fn append_batch(&self, _ns: &Self::Namespace, _e: Vec<Self::Entry>) -> Result<Vec<Id>> {
-        Ok(vec![])
+    async fn append_batch(&self, _e: Vec<Self::Entry>) -> Result<()> {
+        Ok(())
     }
 
     async fn read(
@@ -131,10 +131,7 @@ mod tests {
         let store = NoopLogStore::default();
         let e = store.entry("".as_bytes(), 1, NamespaceImpl::default());
         let _ = store.append(e.clone()).await.unwrap();
-        assert!(store
-            .append_batch(&NamespaceImpl::default(), vec![e])
-            .await
-            .is_ok());
+        assert!(store.append_batch(vec![e]).await.is_ok());
         store
             .create_namespace(&NamespaceImpl::default())
             .await

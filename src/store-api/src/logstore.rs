@@ -36,14 +36,10 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
 
     /// Append an `Entry` to WAL with given namespace and return append response containing
     /// the entry id.
-    async fn append(&self, mut e: Self::Entry) -> Result<AppendResponse, Self::Error>;
+    async fn append(&self, e: Self::Entry) -> Result<AppendResponse, Self::Error>;
 
     /// Append a batch of entries atomically and return the offset of first entry.
-    async fn append_batch(
-        &self,
-        ns: &Self::Namespace,
-        e: Vec<Self::Entry>,
-    ) -> Result<Vec<Id>, Self::Error>;
+    async fn append_batch(&self, e: Vec<Self::Entry>) -> Result<(), Self::Error>;
 
     /// Create a new `EntryStream` to asynchronously generates `Entry` with ids
     /// starting from `id`.

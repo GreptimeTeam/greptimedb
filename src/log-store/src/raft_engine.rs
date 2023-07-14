@@ -36,6 +36,7 @@ impl EntryImpl {
         }
     }
 }
+
 impl NamespaceImpl {
     pub fn with_id(id: Id) -> Self {
         Self {
@@ -51,6 +52,8 @@ impl Hash for NamespaceImpl {
         self.id.hash(state);
     }
 }
+
+impl Eq for NamespaceImpl {}
 
 impl Namespace for NamespaceImpl {
     fn id(&self) -> store_api::logstore::namespace::Id {
