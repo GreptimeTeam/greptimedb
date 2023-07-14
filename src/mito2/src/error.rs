@@ -20,6 +20,8 @@ use common_error::status_code::StatusCode;
 use snafu::{Location, Snafu};
 use store_api::manifest::ManifestVersion;
 
+use crate::worker::WorkerId;
+
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
@@ -78,15 +80,38 @@ pub enum Error {
 
     #[snafu(display("Cannot find RegionMetadata. Location: {}", location))]
     RegionMetadataNotFound { location: Location },
+
+    #[snafu(display("Failed to join handle, location: {}, source: {}", location, source))]
+    Join {
+        source: common_runtime::JoinError,
+        location: Location,
+    },
+
+    #[snafu(display("Worker {} is stopped, location: {}", id, location))]
+    WorkerStopped { id: WorkerId, location: Location },
+
+    #[snafu(display("Failed to recv result, location: {}, source: {}", location, source))]
+    Recv {
+        source: tokio::sync::oneshot::error::RecvError,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
 
 impl ErrorExt for Error {
-    #[allow(clippy::match_single_binding)]
     fn status_code(&self) -> StatusCode {
+        use Error::*;
+
         match self {
-            _ => todo!(),
+            OpenDal { .. } => StatusCode::StorageUnavailable,
+            CompressObject { .. } | DecompressObject { .. } | SerdeJson { .. } | Utf8 { .. } => {
+                StatusCode::Unexpected
+            }
+            InvalidScanIndex { .. } => StatusCode::InvalidArguments,
+            RegionMetadataNotFound { .. } | Join { .. } | WorkerStopped { .. } | Recv { .. } => {
+                StatusCode::Internal
+            }
         }
     }
 

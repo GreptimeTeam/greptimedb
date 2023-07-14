@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+test = ["common-test-util"]
+
 [dependencies]
 aquamarine = "0.3"
 anymap = "1.0.0-beta.2"
@@ -12,6 +16,7 @@ async-stream.workspace = true
 async-trait = "0.1"
 chrono.workspace = true
 common-catalog = { path = "../common/catalog" }
+common-base = { path = "../common/base" }
 common-error = { path = "../common/error" }
 common-procedure = { path = "../common/procedure" }
 common-query = { path = "../common/query" }
