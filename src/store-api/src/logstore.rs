@@ -14,8 +14,6 @@
 
 //! LogStore APIs.
 
-use std::collections::HashMap;
-
 use common_error::ext::ErrorExt;
 
 use crate::logstore::entry::{Entry, Id};
@@ -41,11 +39,7 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
     async fn append(&self, e: Self::Entry) -> Result<AppendResponse, Self::Error>;
 
     /// Append a batch of entries atomically and return the offset of first entry.
-    #[allow(clippy::mutable_key_type)]
-    async fn append_batch(
-        &self,
-        e: HashMap<Self::Namespace, Vec<Self::Entry>>,
-    ) -> Result<(), Self::Error>;
+    async fn append_batch(&self, e: Vec<Self::Entry>) -> Result<(), Self::Error>;
 
     /// Create a new `EntryStream` to asynchronously generates `Entry` with ids
     /// starting from `id`.

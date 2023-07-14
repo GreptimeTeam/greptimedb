@@ -80,18 +80,6 @@ pub enum Error {
         attempt_index: u64,
         location: Location,
     },
-
-    #[snafu(display(
-        "Malformed append batch, expect namespace: {}, actual namespace: {}, location: {}",
-        expect_ns,
-        actual_ns,
-        location
-    ))]
-    MalformedBatch {
-        expect_ns: u64,
-        actual_ns: u64,
-        location: Location,
-    },
 }
 
 impl ErrorExt for Error {

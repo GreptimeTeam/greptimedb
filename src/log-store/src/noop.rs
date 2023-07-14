@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
-
 use store_api::logstore::entry::{Entry, Id};
 use store_api::logstore::namespace::{Id as NamespaceId, Namespace};
 use store_api::logstore::{AppendResponse, LogStore};
@@ -67,7 +65,7 @@ impl LogStore for NoopLogStore {
         Ok(AppendResponse { entry_id: 0 })
     }
 
-    async fn append_batch(&self, _e: HashMap<Self::Namespace, Vec<Self::Entry>>) -> Result<()> {
+    async fn append_batch(&self, _e: Vec<Self::Entry>) -> Result<()> {
         Ok(())
     }
 
@@ -133,10 +131,7 @@ mod tests {
         let store = NoopLogStore::default();
         let e = store.entry("".as_bytes(), 1, NamespaceImpl::default());
         let _ = store.append(e.clone()).await.unwrap();
-        assert!(store
-            .append_batch([(NamespaceImpl::default(), vec![e])].into_iter().collect())
-            .await
-            .is_ok());
+        assert!(store.append_batch(vec![e]).await.is_ok());
         store
             .create_namespace(&NamespaceImpl::default())
             .await

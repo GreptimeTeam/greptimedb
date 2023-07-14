@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
@@ -30,8 +29,7 @@ use crate::config::LogConfig;
 use crate::error;
 use crate::error::{
     AddEntryLogBatchSnafu, Error, FetchEntrySnafu, IllegalNamespaceSnafu, IllegalStateSnafu,
-    MalformedBatchSnafu, OverrideCompactedEntrySnafu, RaftEngineSnafu, Result, StartGcTaskSnafu,
-    StopGcTaskSnafu,
+    OverrideCompactedEntrySnafu, RaftEngineSnafu, Result, StartGcTaskSnafu, StopGcTaskSnafu,
 };
 use crate::raft_engine::protos::logstore::{EntryImpl, NamespaceImpl as Namespace};
 
@@ -117,38 +115,21 @@ impl RaftEngineLogStore {
         )
     }
 
-    /// Checks if:
-    /// - all entries have the same namespace id as `ns_id`,
-    /// - batch does not override the min index of namespace.
-    fn check_entries(&self, ns_id: u64, entries: &[EntryImpl]) -> Result<()> {
+    /// Checks if entry does not override the min index of namespace.
+    fn check_entry(&self, e: &EntryImpl) -> Result<()> {
         if cfg!(debug_assertions) {
-            let mut min_entry_id = u64::MAX;
-            for e in entries {
-                ensure!(
-                    e.namespace().id() == ns_id,
-                    MalformedBatchSnafu {
-                        expect_ns: ns_id,
-                        actual_ns: e.namespace().id(),
-                    }
-                );
-                let id = e.get_id();
-                if id < min_entry_id {
-                    min_entry_id = id;
-                }
-            }
-
+            let ns_id = e.namespace_id;
             if let Some(first_index) = self.engine.first_index(ns_id) {
                 ensure!(
-                    min_entry_id >= first_index,
+                    e.id() >= first_index,
                     OverrideCompactedEntrySnafu {
                         namespace: ns_id,
                         first_index,
-                        attempt_index: min_entry_id,
+                        attempt_index: e.id(),
                     }
                 );
             }
         }
-
         Ok(())
     }
 }
@@ -202,11 +183,7 @@ impl LogStore for RaftEngineLogStore {
 
     /// Append a batch of entries to logstore. `RaftEngineLogStore` assures the atomicity of
     /// batch append.
-    #[allow(clippy::mutable_key_type)] // this is a false positive because NamespaceImpl contains protobuf generated fields.
-    async fn append_batch(
-        &self,
-        entries: HashMap<Self::Namespace, Vec<Self::Entry>>,
-    ) -> Result<()> {
+    async fn append_batch(&self, entries: Vec<Self::Entry>) -> Result<()> {
         ensure!(self.started(), IllegalStateSnafu);
         if entries.is_empty() {
             return Ok(());
@@ -214,11 +191,11 @@ impl LogStore for RaftEngineLogStore {
 
         let mut batch = LogBatch::with_capacity(entries.len());
 
-        for (ns, entries) in entries.into_iter() {
-            let ns_id = ns.id;
-            self.check_entries(ns_id, &entries)?;
+        for e in entries {
+            self.check_entry(&e)?;
+            let ns_id = e.namespace_id;
             batch
-                .add_entries::<MessageType>(ns_id, &entries)
+                .add_entries::<MessageType>(ns_id, &[e])
                 .context(AddEntryLogBatchSnafu)?;
         }
 
@@ -388,7 +365,7 @@ impl MessageExt for MessageType {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashSet;
     use std::time::Duration;
 
     use common_telemetry::debug;
@@ -615,18 +592,12 @@ mod tests {
 
         let logstore = RaftEngineLogStore::try_new(config).await.unwrap();
 
-        let mut entries = HashMap::with_capacity(16);
-
-        for ns_id in 0..8 {
-            let namespace = Namespace::with_id(ns_id);
-            let data = [ns_id as u8].repeat(4096);
-            entries.insert(
-                namespace.clone(),
-                (0..16)
-                    .map(|idx| Entry::create(idx, namespace.id(), data.clone()))
-                    .collect(),
-            );
-        }
+        let entries = (0..8)
+            .flat_map(|ns_id| {
+                let data = [ns_id as u8].repeat(4096);
+                (0..16).map(move |idx| Entry::create(idx, ns_id, data.clone()))
+            })
+            .collect();
 
         logstore.append_batch(entries).await.unwrap();
         for ns_id in 0..8 {
