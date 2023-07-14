@@ -16,6 +16,7 @@ async-stream.workspace = true
 async-trait = "0.1"
 chrono.workspace = true
 common-catalog = { path = "../common/catalog" }
+common-base = { path = "../common/base" }
 common-error = { path = "../common/error" }
 common-procedure = { path = "../common/procedure" }
 common-query = { path = "../common/query" }

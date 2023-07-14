@@ -16,6 +16,7 @@
 
 use std::time::Duration;
 
+use common_base::readable_size::ReadableSize;
 use store_api::storage::{ColumnId, CompactionStrategy, RegionId};
 use tokio::sync::oneshot::{self, Receiver, Sender};
 
@@ -28,7 +29,7 @@ use crate::metadata::ColumnMetadata;
 #[derive(Debug)]
 pub struct RegionOptions {
     /// Region memtable max size in bytes.
-    pub write_buffer_size: Option<usize>,
+    pub write_buffer_size: Option<ReadableSize>,
     /// Region SST files TTL.
     pub ttl: Option<Duration>,
     /// Compaction strategy.

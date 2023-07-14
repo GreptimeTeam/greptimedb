@@ -5464,6 +5464,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "chrono",
+ "common-base",
  "common-catalog",
  "common-datasource",
  "common-error",
