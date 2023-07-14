@@ -27,9 +27,10 @@ use datafusion::logical_expr::{ExprSchemable, LogicalPlan, UserDefinedLogicalNod
 use datafusion::physical_expr::{PhysicalExprRef, PhysicalSortExpr};
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
-    DisplayFormatType, ExecutionPlan, Partitioning, PhysicalPlanner, RecordBatchStream,
+    DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, RecordBatchStream,
     SendableRecordBatchStream,
 };
+use datafusion::physical_planner::PhysicalPlanner;
 use datafusion::prelude::{col, lit, Expr};
 use datatypes::arrow::array::TimestampMillisecondArray;
 use datatypes::arrow::datatypes::SchemaRef;
@@ -207,16 +208,6 @@ impl ExecutionPlan for EmptyMetricExec {
         }))
     }
 
-    fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match t {
-            DisplayFormatType::Default => write!(
-                f,
-                "EmptyMetric: range=[{}..{}], interval=[{}]",
-                self.start, self.end, self.interval,
-            ),
-        }
-    }
-
     fn metrics(&self) -> Option<MetricsSet> {
         Some(self.metric.clone_inner())
     }
@@ -230,6 +221,18 @@ impl ExecutionPlan for EmptyMetricExec {
             total_byte_size: Some(total_byte_size.floor() as _),
             column_statistics: None,
             is_exact: true,
+        }
+    }
+}
+
+impl DisplayAs for EmptyMetricExec {
+    fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match t {
+            DisplayFormatType::Default | DisplayFormatType::Verbose => write!(
+                f,
+                "EmptyMetric: range=[{}..{}], interval=[{}]",
+                self.start, self.end, self.interval,
+            ),
         }
     }
 }

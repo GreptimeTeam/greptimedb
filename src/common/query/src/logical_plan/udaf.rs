@@ -19,9 +19,11 @@
 use std::fmt::{self, Debug, Formatter};
 use std::sync::Arc;
 
+use datafusion_expr::AccumulatorFactoryFunction;
 use datafusion_expr::{
-    AccumulatorFunctionImplementation as DfAccumulatorFunctionImplementation,
-    AggregateUDF as DfAggregateUdf, StateTypeFunction as DfStateTypeFunction,
+    // AccumulatorFunctionImplementation as DfAccumulatorFunctionImplementation,
+    AggregateUDF as DfAggregateUdf,
+    StateTypeFunction as DfStateTypeFunction,
 };
 use datatypes::arrow::datatypes::DataType as ArrowDataType;
 use datatypes::prelude::*;
@@ -103,12 +105,13 @@ impl From<AggregateFunction> for DfAggregateUdf {
 fn to_df_accumulator_func(
     accumulator: AccumulatorFunctionImpl,
     creator: AggregateFunctionCreatorRef,
-) -> DfAccumulatorFunctionImplementation {
-    Arc::new(move |_| {
-        let accumulator = accumulator()?;
-        let creator = creator.clone();
-        Ok(Box::new(DfAccumulatorAdaptor::new(accumulator, creator)))
-    })
+) -> Arc<AccumulatorFactoryFunction> {
+    // Arc::new(move |_| {
+    //     let accumulator = accumulator()?;
+    //     let creator = creator.clone();
+    //     Ok(Box::new(DfAccumulatorAdaptor::new(accumulator, creator)) as _)
+    // })
+    todo!()
 }
 
 fn to_df_state_type(func: StateTypeFunction) -> DfStateTypeFunction {

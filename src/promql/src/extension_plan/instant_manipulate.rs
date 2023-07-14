@@ -28,8 +28,8 @@ use datafusion::logical_expr::{EmptyRelation, Expr, LogicalPlan, UserDefinedLogi
 use datafusion::physical_expr::PhysicalSortExpr;
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
-    DisplayFormatType, ExecutionPlan, Partitioning, RecordBatchStream, SendableRecordBatchStream,
-    Statistics,
+    DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, RecordBatchStream,
+    SendableRecordBatchStream, Statistics,
 };
 use datatypes::arrow::compute;
 use datatypes::arrow::error::Result as ArrowResult;
@@ -258,18 +258,6 @@ impl ExecutionPlan for InstantManipulateExec {
         }))
     }
 
-    fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match t {
-            DisplayFormatType::Default => {
-                write!(
-                    f,
-                    "PromInstantManipulateExec: range=[{}..{}], lookback=[{}], interval=[{}], time index=[{}]",
-                   self.start,self.end, self.lookback_delta, self.interval, self.time_index_column
-                )
-            }
-        }
-    }
-
     fn metrics(&self) -> Option<MetricsSet> {
         Some(self.metric.clone_inner())
     }
@@ -290,6 +278,20 @@ impl ExecutionPlan for InstantManipulateExec {
             // TODO(ruihang): support this column statistics
             column_statistics: None,
             is_exact: false,
+        }
+    }
+}
+
+impl DisplayAs for InstantManipulateExec {
+    fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match t {
+            DisplayFormatType::Default | DisplayFormatType::Verbose => {
+                write!(
+                    f,
+                    "PromInstantManipulateExec: range=[{}..{}], lookback=[{}], interval=[{}], time index=[{}]",
+                   self.start,self.end, self.lookback_delta, self.interval, self.time_index_column
+                )
+            }
         }
     }
 }

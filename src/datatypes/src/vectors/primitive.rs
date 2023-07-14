@@ -81,24 +81,28 @@ impl<T: LogicalPrimitiveType> PrimitiveVector<T> {
                     .as_any()
                     .downcast_ref::<TimestampSecondArray>()
                     .unwrap()
+                    .clone()
                     .with_timezone_opt(None::<String>)
                     .to_data(),
                 arrow_schema::TimeUnit::Millisecond => array
                     .as_any()
                     .downcast_ref::<TimestampMillisecondArray>()
                     .unwrap()
+                    .clone()
                     .with_timezone_opt(None::<String>)
                     .to_data(),
                 arrow_schema::TimeUnit::Microsecond => array
                     .as_any()
                     .downcast_ref::<TimestampMicrosecondArray>()
                     .unwrap()
+                    .clone()
                     .with_timezone_opt(None::<String>)
                     .to_data(),
                 arrow_schema::TimeUnit::Nanosecond => array
                     .as_any()
                     .downcast_ref::<TimestampNanosecondArray>()
                     .unwrap()
+                    .clone()
                     .with_timezone_opt(None::<String>)
                     .to_data(),
             },

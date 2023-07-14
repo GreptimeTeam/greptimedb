@@ -56,28 +56,27 @@ edition = "2021"
 license = "Apache-2.0"
 
 [workspace.dependencies]
-arrow = { version = "40.0" }
-arrow-array = "40.0"
-arrow-flight = "40.0"
-arrow-schema = { version = "40.0", features = ["serde"] }
+arrow = { version = "43.0" }
+arrow-array = "43.0"
+arrow-flight = "43.0"
+arrow-schema = { version = "43.0", features = ["serde"] }
 async-stream = "0.3"
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
-# TODO(ruihang): use arrow-datafusion when it contains https://github.com/apache/arrow-datafusion/pull/6032
-datafusion = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "63e52dde9e44cac4b1f6c6e6b6bf6368ba3bd323" }
-datafusion-common = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "63e52dde9e44cac4b1f6c6e6b6bf6368ba3bd323" }
-datafusion-expr = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "63e52dde9e44cac4b1f6c6e6b6bf6368ba3bd323" }
-datafusion-optimizer = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "63e52dde9e44cac4b1f6c6e6b6bf6368ba3bd323" }
-datafusion-physical-expr = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "63e52dde9e44cac4b1f6c6e6b6bf6368ba3bd323" }
-datafusion-sql = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "63e52dde9e44cac4b1f6c6e6b6bf6368ba3bd323" }
-datafusion-substrait = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "63e52dde9e44cac4b1f6c6e6b6bf6368ba3bd323" }
+datafusion = { git = "https://github.com/apache/arrow-datafusion.git", rev = "16303ada9bda90c89b28c0d6d3600782967da03a" }
+datafusion-common = { git = "https://github.com/apache/arrow-datafusion.git", rev = "16303ada9bda90c89b28c0d6d3600782967da03a" }
+datafusion-expr = { git = "https://github.com/apache/arrow-datafusion.git", rev = "16303ada9bda90c89b28c0d6d3600782967da03a" }
+datafusion-optimizer = { git = "https://github.com/apache/arrow-datafusion.git", rev = "16303ada9bda90c89b28c0d6d3600782967da03a" }
+datafusion-physical-expr = { git = "https://github.com/apache/arrow-datafusion.git", rev = "16303ada9bda90c89b28c0d6d3600782967da03a" }
+datafusion-sql = { git = "https://github.com/apache/arrow-datafusion.git", rev = "16303ada9bda90c89b28c0d6d3600782967da03a" }
+datafusion-substrait = { git = "https://github.com/apache/arrow-datafusion.git", rev = "16303ada9bda90c89b28c0d6d3600782967da03a" }
 etcd-client = "0.11"
 futures = "0.3"
 futures-util = "0.3"
 greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "9b26cca2132df83916692cc6fc092a26a1a76f0b" }
 itertools = "0.10"
 lazy_static = "1.4"
-parquet = "40.0"
+parquet = "43.0"
 paste = "1.0"
 prost = "0.11"
 rand = "0.8"
@@ -85,7 +84,7 @@ regex = "1.8"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 snafu = { version = "0.7", features = ["backtraces"] }
-sqlparser = "0.34"
+sqlparser = "0.35"
 tempfile = "3"
 tokio = { version = "1.28", features = ["full"] }
 tokio-util = { version = "0.7", features = ["io-util", "compat"] }

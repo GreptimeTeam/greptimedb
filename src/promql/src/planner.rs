@@ -21,7 +21,7 @@ use async_recursion::async_recursion;
 use catalog::table_source::DfTableSourceProvider;
 use datafusion::common::{DFSchemaRef, OwnedTableReference, Result as DfResult};
 use datafusion::datasource::DefaultTableSource;
-use datafusion::logical_expr::expr::{AggregateFunction, ScalarFunction, ScalarUDF};
+use datafusion::logical_expr::expr::{AggregateFunction, Alias, ScalarFunction, ScalarUDF};
 use datafusion::logical_expr::expr_rewriter::normalize_cols;
 use datafusion::logical_expr::{
     AggregateFunction as AggregateFunctionEnum, BinaryExpr, BuiltinScalarFunction, Cast, Extension,
@@ -1249,7 +1249,7 @@ impl PromPlanner {
         let field_columns_iter = result_field_columns
             .into_iter()
             .zip(self.ctx.field_columns.iter())
-            .map(|(expr, name)| Ok(DfExpr::Alias(Box::new(expr), name.to_string())));
+            .map(|(expr, name)| Ok(DfExpr::Alias(Alias::new(expr, name.to_string()))));
 
         // chain non-value columns (unchanged) and value columns (applied computation then alias)
         let project_fields = non_field_columns_iter

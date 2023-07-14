@@ -89,7 +89,7 @@ impl Categorizer {
 
     pub fn check_expr(expr: &Expr) -> Commutativity {
         match expr {
-            Expr::Alias(_, _)
+            Expr::Alias(_)
             | Expr::Column(_)
             | Expr::ScalarVariable(_, _)
             | Expr::Literal(_)

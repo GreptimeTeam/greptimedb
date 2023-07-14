@@ -24,7 +24,7 @@ table = { path = "../../table" }
 
 [dependencies.substrait_proto]
 package = "substrait"
-version = "0.10"
+version = "0.12"
 
 [dev-dependencies]
 datatypes = { path = "../../datatypes" }

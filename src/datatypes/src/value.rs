@@ -561,7 +561,7 @@ impl TryFrom<ScalarValue> for Value {
             ScalarValue::Binary(b)
             | ScalarValue::LargeBinary(b)
             | ScalarValue::FixedSizeBinary(_, b) => Value::from(b.map(Bytes::from)),
-            ScalarValue::List(vs, field) => {
+            ScalarValue::List(vs, field) | ScalarValue::Fixedsizelist(vs, field, _) => {
                 let items = if let Some(vs) = vs {
                     let vs = vs
                         .into_iter()
@@ -599,7 +599,11 @@ impl TryFrom<ScalarValue> for Value {
             | ScalarValue::Time32Second(_)
             | ScalarValue::Time32Millisecond(_)
             | ScalarValue::Time64Microsecond(_)
-            | ScalarValue::Time64Nanosecond(_) => {
+            | ScalarValue::Time64Nanosecond(_)
+            | ScalarValue::DurationSecond(_)
+            | ScalarValue::DurationMillisecond(_)
+            | ScalarValue::DurationMicrosecond(_)
+            | ScalarValue::DurationNanosecond(_) => {
                 return error::UnsupportedArrowTypeSnafu {
                     arrow_type: v.get_datatype(),
                 }

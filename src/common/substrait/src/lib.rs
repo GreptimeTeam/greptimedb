@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::{Buf, Bytes};
-use datafusion::catalog::catalog::CatalogList;
+use datafusion::catalog::CatalogList;
 
 pub use crate::df_substrait::DFLogicalSubstraitConvertor;
 

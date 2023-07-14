@@ -156,7 +156,7 @@ impl Helper {
             | ScalarValue::FixedSizeBinary(_, v) => {
                 ConstantVector::new(Arc::new(BinaryVector::from(vec![v])), length)
             }
-            ScalarValue::List(v, field) => {
+            ScalarValue::List(v, field) | ScalarValue::Fixedsizelist(v, field, _) => {
                 let item_type = ConcreteDataType::try_from(field.data_type())?;
                 let mut builder = ListVectorBuilder::with_type_capacity(item_type.clone(), 1);
                 if let Some(values) = v {
@@ -203,7 +203,11 @@ impl Helper {
             | ScalarValue::Time32Second(_)
             | ScalarValue::Time32Millisecond(_)
             | ScalarValue::Time64Microsecond(_)
-            | ScalarValue::Time64Nanosecond(_) => {
+            | ScalarValue::Time64Nanosecond(_)
+            | ScalarValue::DurationSecond(_)
+            | ScalarValue::DurationMillisecond(_)
+            | ScalarValue::DurationMicrosecond(_)
+            | ScalarValue::DurationNanosecond(_) => {
                 return error::ConversionSnafu {
                     from: format!("Unsupported scalar value: {value}"),
                 }
