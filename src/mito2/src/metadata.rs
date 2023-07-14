@@ -63,24 +63,6 @@ pub struct RegionMetadata {
 
 pub type RegionMetadataRef = Arc<RegionMetadata>;
 
-impl RegionMetadata {
-    // pub fn try_new(id:RegionId, primary_keys:Vec<ColumnId>, version_num)
-}
-
-// impl Serialize for RegionMetadata {
-//     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-//     where
-//         S: Serializer,
-//     {
-//         let mut se = serializer.serialize_struct("RegionMetadata", 4)?;
-//         se.serialize_field("column_metadatas", &self.column_metadatas)?;
-//         se.serialize_field("version", &self.version)?;
-//         se.serialize_field("primary_keys", &self.primary_keys)?;
-//         se.serialize_field("id", &self.id)?;
-//         se.end()
-//     }
-// }
-
 impl<'de> Deserialize<'de> for RegionMetadata {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
