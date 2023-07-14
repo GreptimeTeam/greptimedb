@@ -38,9 +38,10 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
 
     /// Append an `Entry` to WAL with given namespace and return append response containing
     /// the entry id.
-    async fn append(&self, mut e: Self::Entry) -> Result<AppendResponse, Self::Error>;
+    async fn append(&self, e: Self::Entry) -> Result<AppendResponse, Self::Error>;
 
     /// Append a batch of entries atomically and return the offset of first entry.
+    #[allow(clippy::mutable_key_type)]
     async fn append_batch(
         &self,
         e: HashMap<Self::Namespace, Vec<Self::Entry>>,

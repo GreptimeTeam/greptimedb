@@ -82,7 +82,7 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Malformed append batch,expect namespace: {}, actual namespace: {}, location: {}",
+        "Malformed append batch, expect namespace: {}, actual namespace: {}, location: {}",
         expect_ns,
         actual_ns,
         location

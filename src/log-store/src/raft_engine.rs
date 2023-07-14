@@ -36,6 +36,7 @@ impl EntryImpl {
         }
     }
 }
+
 impl NamespaceImpl {
     pub fn with_id(id: Id) -> Self {
         Self {

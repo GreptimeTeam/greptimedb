@@ -202,6 +202,7 @@ impl LogStore for RaftEngineLogStore {
 
     /// Append a batch of entries to logstore. `RaftEngineLogStore` assures the atomicity of
     /// batch append.
+    #[allow(clippy::mutable_key_type)] // this is a false positive because NamespaceImpl contains protobuf generated fields.
     async fn append_batch(
         &self,
         entries: HashMap<Self::Namespace, Vec<Self::Entry>>,
@@ -598,6 +599,7 @@ mod tests {
         assert_eq!(101, vec.first().unwrap().id);
     }
 
+    #[allow(clippy::mutable_key_type)]
     #[tokio::test]
     async fn test_append_batch() {
         common_telemetry::init_default_ut_logging();
@@ -621,7 +623,6 @@ mod tests {
             entries.insert(
                 namespace.clone(),
                 (0..16)
-                    .into_iter()
                     .map(|idx| Entry::create(idx, namespace.id(), data.clone()))
                     .collect(),
             );
