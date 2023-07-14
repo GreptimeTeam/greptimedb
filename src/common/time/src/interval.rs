@@ -13,18 +13,17 @@
 // limitations under the License.
 
 use std::cmp::Ordering;
+use std::default::Default;
 use std::fmt::{self, Display, Formatter};
 use std::hash::{Hash, Hasher};
-use std::ops::{Add, Neg, Sub};
-use std::str::FromStr;
 
+use arrow::datatypes::IntervalUnit as ArrowIntervalUnit;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::error::Error;
-use crate::Timestamp;
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(
+    Debug, Default, Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
+)]
 pub enum IntervalUnit {
     /// Indicates the number of elapsed whole months, stored as 4-byte integers.
     YearMonth,
@@ -38,17 +37,36 @@ pub enum IntervalUnit {
     /// (e.g. there is no constraint that nanoseconds have the same sign
     /// as days or that the quantity of nanoseconds represents less
     /// than a day's worth of time).
+    #[default]
     MonthDayNano,
+}
+
+impl From<&ArrowIntervalUnit> for IntervalUnit {
+    fn from(unit: &ArrowIntervalUnit) -> Self {
+        match unit {
+            ArrowIntervalUnit::YearMonth => IntervalUnit::YearMonth,
+            ArrowIntervalUnit::DayTime => IntervalUnit::DayTime,
+            ArrowIntervalUnit::MonthDayNano => IntervalUnit::MonthDayNano,
+        }
+    }
+}
+
+impl From<ArrowIntervalUnit> for IntervalUnit {
+    fn from(unit: ArrowIntervalUnit) -> Self {
+        (&unit).into()
+    }
 }
 
 /// Interval data format
 /// | months | days   | micros     |
 /// | 4bytes | 4bytes | 8bytes     |  
+/// All interval types are stored in this format.
 #[derive(Debug, Clone, Default, Copy, Serialize, Deserialize)]
 pub struct Interval {
     months: i32,
     days: i32,
     micros: i64,
+    unit: IntervalUnit,
 }
 
 // The number of microseconds in a second, day, month etc.
@@ -73,6 +91,7 @@ impl Interval {
             months,
             days,
             micros,
+            unit: IntervalUnit::MonthDayNano,
         }
     }
 
@@ -84,6 +103,25 @@ impl Interval {
             months,
             days,
             micros: nsecs / 1_000,
+            unit: IntervalUnit::MonthDayNano,
+        }
+    }
+
+    pub fn from_year_month(months: i32) -> Self {
+        Interval {
+            months,
+            days: 0,
+            micros: 0,
+            unit: IntervalUnit::YearMonth,
+        }
+    }
+
+    pub fn from_day_time(days: i32, millis: i32) -> Self {
+        Interval {
+            months: 0,
+            days,
+            micros: (millis as i64) * 1_000,
+            unit: IntervalUnit::DayTime,
         }
     }
 
@@ -92,6 +130,7 @@ impl Interval {
         months: i32::MIN,
         days: i32::MIN,
         micros: i64::MIN,
+        unit: IntervalUnit::MonthDayNano,
     };
 
     // Largest interval value.
@@ -99,39 +138,8 @@ impl Interval {
         months: i32::MAX,
         days: i32::MAX,
         micros: i64::MAX,
+        unit: IntervalUnit::MonthDayNano,
     };
-
-    pub fn years(&self) -> i32 {
-        self.months / 12
-    }
-
-    pub fn months(&self) -> i32 {
-        self.months % 12
-    }
-
-    pub fn days(&self) -> i32 {
-        self.days
-    }
-
-    pub fn hours(&self) -> i32 {
-        (self.micros / MICROS_PER_SEC / SECS_PER_HOUR as i64) as i32
-    }
-
-    pub fn minutes(&self) -> i32 {
-        (self.micros / MICROS_PER_SEC / SECS_PER_MINUTE as i64) as i32
-    }
-
-    pub fn seconds(&self) -> i32 {
-        (self.micros / MICROS_PER_SEC) as i32
-    }
-
-    pub fn microseconds(&self) -> i64 {
-        self.micros
-    }
-
-    pub fn get_diff(_t1: Timestamp, _t2: Timestamp) -> Self {
-        todo!("get interval type from 2 timestamps")
-    }
 
     /// Returns the normalized interval.
     pub fn normalize_interval(&self) -> Self {
@@ -160,6 +168,11 @@ impl Interval {
         self.months == 0 && self.days == 0 && self.micros == 0
     }
 
+    // get unit
+    pub fn unit(&self) -> IntervalUnit {
+        self.unit
+    }
+
     /// Multiple [`Interval`] by an integer with overflow check.
     /// Returns `None` if overflow occurred.
     pub fn checked_mul_int<I>(&self, rhs: I) -> Option<Self>
@@ -175,6 +188,7 @@ impl Interval {
             months,
             days,
             micros: nsecs,
+            unit: self.unit,
         })
     }
 
@@ -199,12 +213,33 @@ impl Interval {
         format!("P{years}Y{months}M{days}DT{hours}H{minutes}M{seconds}{fract_str}S")
     }
 
-    // `Interval` Type and i128 Convert
+    // `Interval` Type and i128(MonthDayNano) Convert
     pub fn from_i128(v: i128) -> Self {
         Interval {
-            micros: (v as i64) / 1000,
+            micros: (v as i64) / 1_000,
             days: (v >> 64) as i32,
             months: (v >> 96) as i32,
+            unit: IntervalUnit::MonthDayNano,
+        }
+    }
+
+    // `Interval` Type and i64(DayTime) Convert
+    pub fn from_i64(v: i64) -> Self {
+        Interval {
+            micros: ((v as i32) as i64) * 1_000,
+            days: (v >> 32) as i32,
+            months: 0,
+            unit: IntervalUnit::DayTime,
+        }
+    }
+
+    // `Interval` Type and i32(YearMonth) Convert
+    pub fn from_i32(v: i32) -> Self {
+        Interval {
+            micros: 0,
+            days: 0,
+            months: v,
+            unit: IntervalUnit::YearMonth,
         }
     }
 
@@ -217,63 +252,17 @@ impl Interval {
         result |= (self.micros * 1_000) as i128;
         result
     }
-}
 
-impl FromStr for Interval {
-    type Err = Error;
-
-    // E.g: INTERVAL '1 years 2 months 3 days 4 hours 5 minutes 6 seconds'
-    fn from_str(_s: &str) -> Result<Self, Self::Err> {
-        // parse str
-        todo!("Interval::from_str")
+    pub fn to_i64(&self) -> i64 {
+        let mut result = 0;
+        result |= self.days as i64;
+        result <<= 32;
+        result |= self.micros / 1_000;
+        result
     }
-}
 
-// impl Add trait for Interval
-// TODO: overflow check
-impl Add for Interval {
-    type Output = Self;
-
-    fn add(self, rhs: Self) -> Self::Output {
-        let months = self.months + rhs.months;
-        let days = self.days + rhs.days;
-        let micros = self.micros + rhs.micros;
-        Self {
-            months,
-            days,
-            micros,
-        }
-    }
-}
-
-// impl Neg for Interval
-// TODO: overflow check, if months | days | micros is i32 or i64 MIN, then overflow
-impl Neg for Interval {
-    type Output = Self;
-
-    fn neg(self) -> Self::Output {
-        Self {
-            months: -self.months,
-            days: -self.days,
-            micros: -self.micros,
-        }
-    }
-}
-
-// impl Sub trait for Interval
-// TODO: overflow check
-impl Sub for Interval {
-    type Output = Self;
-
-    fn sub(self, rhs: Self) -> Self::Output {
-        let months = self.months - rhs.months;
-        let days = self.days - rhs.days;
-        let micros = self.micros - rhs.micros;
-        Self {
-            months,
-            days,
-            micros,
-        }
+    pub fn to_i32(&self) -> i32 {
+        self.months
     }
 }
 
@@ -376,35 +365,6 @@ mod tests {
     }
 
     #[test]
-    fn test_interval_add() {
-        let interval = Interval::new(1, 1, 1);
-        let interval2 = Interval::new(1, 1, 1);
-        let interval3 = interval + interval2;
-        assert_eq!(interval3.months, 2);
-        assert_eq!(interval3.days, 2);
-        assert_eq!(interval3.micros, 2);
-    }
-
-    #[test]
-    fn test_interval_sub() {
-        let interval = Interval::new(1, 1, 1);
-        let interval2 = Interval::new(1, 1, 1);
-        let interval3 = interval - interval2;
-        assert_eq!(interval3.months, 0);
-        assert_eq!(interval3.days, 0);
-        assert_eq!(interval3.micros, 0);
-    }
-
-    #[test]
-    fn test_interval_neg() {
-        let interval = Interval::new(1, 1, 1);
-        let interval2 = -interval;
-        assert_eq!(interval2.months, -1);
-        assert_eq!(interval2.days, -1);
-        assert_eq!(interval2.micros, -1);
-    }
-
-    #[test]
     fn test_interval_mul_int() {
         let interval = Interval::new(1, 1, 1);
         let interval2 = interval.checked_mul_int(2).unwrap();
@@ -438,8 +398,32 @@ mod tests {
     fn test_serde_json() {
         let interval = Interval::new(1, 1, 1);
         let json = serde_json::to_string(&interval).unwrap();
-        assert_eq!(json, "{\"months\":1,\"days\":1,\"micros\":1}");
+        assert_eq!(
+            json,
+            "{\"months\":1,\"days\":1,\"micros\":1,\"unit\":\"MonthDayNano\"}"
+        );
         let interval2: Interval = serde_json::from_str(&json).unwrap();
         assert_eq!(interval, interval2);
+    }
+
+    #[test]
+    fn test_to_iso8601_string() {
+        let interval = Interval::from_month_day_nano(1, 1, 1);
+        assert_eq!(interval.to_iso_8601(), "P0Y1M1DT0H0M0S");
+
+        let interval = Interval::from_month_day_nano(14, 31, 10000000000);
+        assert_eq!(interval.to_iso_8601(), "P1Y2M31DT0H0M10S");
+    }
+
+    #[test]
+    fn test_from_arrow_interval_unit() {
+        let unit = ArrowIntervalUnit::YearMonth;
+        assert_eq!(IntervalUnit::from(unit), IntervalUnit::YearMonth);
+
+        let unit = ArrowIntervalUnit::DayTime;
+        assert_eq!(IntervalUnit::from(unit), IntervalUnit::DayTime);
+
+        let unit = ArrowIntervalUnit::MonthDayNano;
+        assert_eq!(IntervalUnit::from(unit), IntervalUnit::MonthDayNano);
     }
 }

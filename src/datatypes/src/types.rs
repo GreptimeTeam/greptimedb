@@ -30,7 +30,9 @@ pub use boolean_type::BooleanType;
 pub use date_type::DateType;
 pub use datetime_type::DateTimeType;
 pub use dictionary_type::DictionaryType;
-pub use interval_type::IntervalMonthDayNanoType;
+pub use interval_type::{
+    IntervalDayTimeType, IntervalMonthDayNanoType, IntervalType, IntervalYearMonthType,
+};
 pub use list_type::ListType;
 pub use null_type::NullType;
 pub use primitive_type::{

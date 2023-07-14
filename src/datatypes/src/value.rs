@@ -23,6 +23,7 @@ use common_telemetry::logging;
 use common_time::date::Date;
 use common_time::datetime::DateTime;
 use common_time::time::Time;
+use common_time::interval::IntervalUnit;
 use common_time::timestamp::{TimeUnit, Timestamp};
 use common_time::Interval;
 use datafusion_common::ScalarValue;
@@ -34,7 +35,7 @@ use crate::error;
 use crate::error::Result;
 use crate::prelude::*;
 use crate::type_id::LogicalTypeId;
-use crate::types::ListType;
+use crate::types::{IntervalType, ListType};
 use crate::vectors::ListVector;
 
 pub type OrderedF32 = OrderedFloat<f32>;
@@ -142,7 +143,7 @@ impl Value {
             Value::DateTime(_) => ConcreteDataType::datetime_datatype(),
             Value::Time(t) => ConcreteDataType::time_datatype(*t.unit()),
             Value::Timestamp(v) => ConcreteDataType::timestamp_datatype(v.unit()),
-            Value::Interval(_) => ConcreteDataType::interval_month_day_nano_datatype(),
+            Value::Interval(v) => ConcreteDataType::interval_datatype(v.unit()),
             Value::List(list) => ConcreteDataType::list_datatype(list.datatype().clone()),
         }
     }
@@ -240,7 +241,11 @@ impl Value {
                 TimeUnit::Microsecond => LogicalTypeId::TimeMicrosecond,
                 TimeUnit::Nanosecond => LogicalTypeId::TimeNanosecond,
             },
-            Value::Interval(_) => LogicalTypeId::IntervalMonthDayNano,
+            Value::Interval(v) => match v.unit() {
+                IntervalUnit::YearMonth => LogicalTypeId::IntervalYearMonth,
+                IntervalUnit::DayTime => LogicalTypeId::IntervalDayTime,
+                IntervalUnit::MonthDayNano => LogicalTypeId::IntervalMonthDayNano,
+            },
         }
     }
 
@@ -282,7 +287,11 @@ impl Value {
             }
             Value::Timestamp(t) => timestamp_to_scalar_value(t.unit(), Some(t.value())),
             Value::Time(t) => time_to_scalar_value(*t.unit(), Some(t.value()))?,
-            Value::Interval(v) => ScalarValue::IntervalMonthDayNano(Some(v.to_i128())),
+            Value::Interval(v) => match v.unit() {
+                IntervalUnit::YearMonth => ScalarValue::IntervalYearMonth(Some(v.to_i32())),
+                IntervalUnit::DayTime => ScalarValue::IntervalDayTime(Some(v.to_i64())),
+                IntervalUnit::MonthDayNano => ScalarValue::IntervalMonthDayNano(Some(v.to_i128())),
+            },
         };
 
         Ok(scalar_value)
@@ -308,7 +317,11 @@ pub fn to_null_scalar_value(output_type: &ConcreteDataType) -> Result<ScalarValu
         ConcreteDataType::Date(_) => ScalarValue::Date32(None),
         ConcreteDataType::DateTime(_) => ScalarValue::Date64(None),
         ConcreteDataType::Timestamp(t) => timestamp_to_scalar_value(t.unit(), None),
-        ConcreteDataType::Interval(_) => ScalarValue::IntervalMonthDayNano(None),
+        ConcreteDataType::Interval(v) => match v {
+            IntervalType::YearMonth(_) => ScalarValue::IntervalYearMonth(None),
+            IntervalType::DayTime(_) => ScalarValue::IntervalDayTime(None),
+            IntervalType::MonthDayNano(_) => ScalarValue::IntervalMonthDayNano(None),
+        },
         ConcreteDataType::List(_) => {
             ScalarValue::List(None, Arc::new(new_item_field(output_type.as_arrow_type())))
         }
@@ -369,7 +382,7 @@ pub fn scalar_value_to_timestamp(scalar: &ScalarValue) -> Option<Timestamp> {
     }
 }
 
-/// Convert [ScalarValue] to [Duration].
+/// Convert [ScalarValue] to [Interval].
 pub fn scalar_value_to_interval(scalar: &ScalarValue) -> Option<Interval> {
     match scalar {
         ScalarValue::IntervalYearMonth(_) => todo!(),
@@ -664,12 +677,16 @@ impl TryFrom<ScalarValue> for Value {
                 .map(|x| Value::Time(Time::new(x, TimeUnit::Nanosecond)))
                 .unwrap_or(Value::Null),
 
+            ScalarValue::IntervalYearMonth(t) => t
+                .map(|x| Value::Interval(Interval::from_i32(x)))
+                .unwrap_or(Value::Null),
+            ScalarValue::IntervalDayTime(t) => t
+                .map(|x| Value::Interval(Interval::from_i64(x)))
+                .unwrap_or(Value::Null),
             ScalarValue::IntervalMonthDayNano(t) => t
                 .map(|x| Value::Interval(Interval::from_i128(x)))
                 .unwrap_or(Value::Null),
             ScalarValue::Decimal128(_, _, _)
-            | ScalarValue::IntervalYearMonth(_)
-            | ScalarValue::IntervalDayTime(_)
             | ScalarValue::Struct(_, _)
             | ScalarValue::Dictionary(_, _) => {
                 return error::UnsupportedArrowTypeSnafu {

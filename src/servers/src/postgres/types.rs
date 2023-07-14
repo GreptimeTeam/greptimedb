@@ -97,13 +97,13 @@ pub(super) fn encode_value(value: &Value, builder: &mut DataRowEncoder) -> PgWir
                 })))
             }
         }
+        Value::Interval(_) => todo!("interval type not implemented in postgres protocol"),
         Value::List(_) => Err(PgWireError::ApiError(Box::new(Error::Internal {
             err_msg: format!(
                 "cannot write value {:?} in postgres protocol: unimplemented",
                 &value
             ),
         }))),
-        Value::Interval(_) => todo!(),
     }
 }
 

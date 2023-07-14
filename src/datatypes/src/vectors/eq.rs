@@ -14,14 +14,17 @@
 
 use std::sync::Arc;
 
+use common_time::interval::IntervalUnit;
+
 use crate::data_type::DataType;
 use crate::types::{TimeType, TimestampType};
 use crate::vectors::constant::ConstantVector;
 use crate::vectors::{
-    BinaryVector, BooleanVector, DateTimeVector, DateVector, IntervalVector, ListVector,
-    PrimitiveVector, StringVector, TimeMicrosecondVector, TimeMillisecondVector, TimeNanosecondVector,
-    TimeSecondVector, TimestampMicrosecondVector, TimestampMillisecondVector,
-    TimestampNanosecondVector, TimestampSecondVector, Vector,
+    BinaryVector, BooleanVector, DateTimeVector, DateVector, IntervalDayTimeVector,
+    IntervalMonthDayNanoVector, IntervalYearMonthVector, ListVector, PrimitiveVector, StringVector,
+    TimeMicrosecondVector, TimeMillisecondVector, TimeNanosecondVector,
+    TimeSecondVector, TimestampMicrosecondVector, TimestampMillisecondVector, TimestampNanosecondVector,
+    TimestampSecondVector, Vector,
 };
 use crate::with_match_primitive_type_id;
 
@@ -94,6 +97,17 @@ fn equal(lhs: &dyn Vector, rhs: &dyn Vector) -> bool {
                 is_vector_eq!(TimestampNanosecondVector, lhs, rhs)
             }
         },
+        Interval(v) => match v.unit() {
+            IntervalUnit::YearMonth => {
+                is_vector_eq!(IntervalYearMonthVector, lhs, rhs)
+            }
+            IntervalUnit::DayTime => {
+                is_vector_eq!(IntervalDayTimeVector, lhs, rhs)
+            }
+            IntervalUnit::MonthDayNano => {
+                is_vector_eq!(IntervalMonthDayNanoVector, lhs, rhs)
+            }
+        },
         List(_) => is_vector_eq!(ListVector, lhs, rhs),
         UInt8(_) | UInt16(_) | UInt32(_) | UInt64(_) | Int8(_) | Int16(_) | Int32(_) | Int64(_)
         | Float32(_) | Float64(_) | Dictionary(_) => {
@@ -122,7 +136,6 @@ fn equal(lhs: &dyn Vector, rhs: &dyn Vector) -> bool {
                 is_vector_eq!(TimeNanosecondVector, lhs, rhs)
             }
         },
-        Interval(_) => is_vector_eq!(IntervalVector, lhs, rhs),
     }
 }
 

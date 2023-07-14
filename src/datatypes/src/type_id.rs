@@ -106,11 +106,11 @@ impl LogicalTypeId {
             LogicalTypeId::TimeMillisecond => ConcreteDataType::time_millisecond_datatype(),
             LogicalTypeId::TimeMicrosecond => ConcreteDataType::time_microsecond_datatype(),
             LogicalTypeId::TimeNanosecond => ConcreteDataType::time_nanosecond_datatype(),
+            LogicalTypeId::IntervalYearMonth => ConcreteDataType::interval_year_month_datatype(),
+            LogicalTypeId::IntervalDayTime => ConcreteDataType::interval_day_time_datatype(),
             LogicalTypeId::IntervalMonthDayNano => {
                 ConcreteDataType::interval_month_day_nano_datatype()
             }
-            LogicalTypeId::IntervalYearMonth => todo!(),
-            LogicalTypeId::IntervalDayTime => todo!(),
         }
     }
 }

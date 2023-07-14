@@ -25,17 +25,19 @@ use arrow_schema::IntervalUnit;
 use datafusion_common::ScalarValue;
 use snafu::{OptionExt, ResultExt};
 
+use super::{IntervalDayTimeVector, IntervalYearMonthVector};
 use crate::data_type::ConcreteDataType;
 use crate::error::{self, Result};
 use crate::scalars::{Scalar, ScalarVectorBuilder};
 use crate::value::{ListValue, ListValueRef};
 use crate::vectors::{
     BinaryVector, BooleanVector, ConstantVector, DateTimeVector, DateVector, Float32Vector,
-    Float64Vector, Int16Vector, Int32Vector, Int64Vector, Int8Vector, IntervalVector, ListVector,
-    ListVectorBuilder, MutableVector, NullVector, StringVector, TimeMicrosecondVector,
-    TimeMillisecondVector, TimeNanosecondVector, TimeSecondVector, TimestampMicrosecondVector,
-    TimestampMillisecondVector, TimestampNanosecondVector, TimestampSecondVector, UInt16Vector,
-    UInt32Vector, UInt64Vector, UInt8Vector, Vector, VectorRef,
+    Float64Vector, Int16Vector, Int32Vector, Int64Vector, Int8Vector, IntervalMonthDayNanoVector,
+    ListVector, ListVectorBuilder, MutableVector, NullVector, StringVector,
+    TimeMicrosecondVector,
+    TimeMillisecondVector, TimeNanosecondVector, TimeSecondVector, TimestampMicrosecondVector, TimestampMillisecondVector, TimestampNanosecondVector,
+    TimestampSecondVector, UInt16Vector, UInt32Vector, UInt64Vector, UInt8Vector, Vector,
+    VectorRef,
 };
 
 /// Helper functions for `Vector`.
@@ -208,12 +210,16 @@ impl Helper {
             ScalarValue::Time64Nanosecond(v) => {
                 ConstantVector::new(Arc::new(TimeNanosecondVector::from(vec![v])), length)
             }
+            ScalarValue::IntervalYearMonth(v) => {
+                ConstantVector::new(Arc::new(IntervalYearMonthVector::from(vec![v])), length)
+            }
+            ScalarValue::IntervalDayTime(v) => {
+                ConstantVector::new(Arc::new(IntervalDayTimeVector::from(vec![v])), length)
+            }
             ScalarValue::IntervalMonthDayNano(v) => {
-                ConstantVector::new(Arc::new(IntervalVector::from(vec![v])), length)
+                ConstantVector::new(Arc::new(IntervalMonthDayNanoVector::from(vec![v])), length)
             }
             ScalarValue::Decimal128(_, _, _)
-            | ScalarValue::IntervalYearMonth(_)
-            | ScalarValue::IntervalDayTime(_)
             | ScalarValue::Struct(_, _)
             | ScalarValue::Dictionary(_, _) => {
                 return error::ConversionSnafu {
@@ -290,10 +296,14 @@ impl Helper {
                 _ => unimplemented!("Arrow array datatype: {:?}", array.as_ref().data_type()),
             },
             ArrowDataType::Interval(unit) => match unit {
-                IntervalUnit::YearMonth => todo!(),
-                IntervalUnit::DayTime => todo!(),
+                IntervalUnit::YearMonth => {
+                    Arc::new(IntervalYearMonthVector::try_from_arrow_array(array)?)
+                }
+                IntervalUnit::DayTime => {
+                    Arc::new(IntervalDayTimeVector::try_from_arrow_array(array)?)
+                }
                 IntervalUnit::MonthDayNano => {
-                    Arc::new(IntervalVector::try_from_arrow_array(array)?)
+                    Arc::new(IntervalMonthDayNanoVector::try_from_arrow_array(array)?)
                 }
             },
             ArrowDataType::Float16

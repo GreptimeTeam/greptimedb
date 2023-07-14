@@ -13,87 +13,123 @@
 // limitations under the License.
 
 use arrow::datatypes::{
-    DataType as ArrowDataType, IntervalMonthDayNanoType as ArrowIntervalMonthDayNanoType,
-    IntervalUnit as ArrowIntervalUnit,
+    DataType as ArrowDataType, IntervalDayTimeType as ArrowIntervalDayTimeType,
+    IntervalMonthDayNanoType as ArrowIntervalMonthDayNanoType, IntervalUnit as ArrowIntervalUnit,
+    IntervalYearMonthType as ArrowIntervalYearMonthType,
 };
+use common_time::interval::IntervalUnit;
 use common_time::Interval;
+use enum_dispatch::enum_dispatch;
+use paste::paste;
 use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
 
-use super::LogicalPrimitiveType;
-use crate::data_type::{ConcreteDataType, DataType};
+use crate::data_type::ConcreteDataType;
 use crate::error;
-use crate::prelude::ScalarVectorBuilder;
-use crate::type_id::LogicalTypeId;
-use crate::value::Value;
-use crate::vectors::{IntervalVector, IntervalVectorBuilder};
+use crate::interval::{IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth};
+use crate::prelude::{
+    DataType, LogicalTypeId, MutableVector, ScalarVectorBuilder, Value, ValueRef, Vector,
+};
+use crate::types::LogicalPrimitiveType;
+use crate::vectors::{
+    IntervalDayTimeVector, IntervalDayTimeVectorBuilder, IntervalMonthDayNanoVector,
+    IntervalMonthDayNanoVectorBuilder, IntervalYearMonthVector, IntervalYearMonthVectorBuilder,
+    PrimitiveVector,
+};
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
-
-pub struct IntervalMonthDayNanoType;
-
-impl DataType for IntervalMonthDayNanoType {
-    fn name(&self) -> &str {
-        "IntervalMonthDayNanoType"
-    }
-
-    fn logical_type_id(&self) -> LogicalTypeId {
-        LogicalTypeId::IntervalMonthDayNano
-    }
-
-    fn default_value(&self) -> crate::value::Value {
-        Value::Interval(Default::default())
-    }
-
-    fn as_arrow_type(&self) -> ArrowDataType {
-        ArrowDataType::Interval(ArrowIntervalUnit::MonthDayNano)
-    }
-
-    fn create_mutable_vector(&self, capacity: usize) -> Box<dyn crate::vectors::MutableVector> {
-        Box::new(IntervalVectorBuilder::with_capacity(capacity))
-    }
-
-    fn is_timestamp_compatible(&self) -> bool {
-        false
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[enum_dispatch(DataType)]
+pub enum IntervalType {
+    YearMonth(IntervalYearMonthType),
+    DayTime(IntervalDayTimeType),
+    MonthDayNano(IntervalMonthDayNanoType),
 }
 
-impl LogicalPrimitiveType for IntervalMonthDayNanoType {
-    type ArrowPrimitive = ArrowIntervalMonthDayNanoType;
-
-    type Native = i128;
-
-    type Wrapper = Interval;
-
-    type LargestType = Self;
-
-    fn build_data_type() -> ConcreteDataType {
-        ConcreteDataType::Interval(IntervalMonthDayNanoType::default())
-    }
-
-    fn type_name() -> &'static str {
-        stringify!(IntervalMonthDayNanoType)
-    }
-
-    fn cast_vector(
-        vector: &dyn crate::vectors::Vector,
-    ) -> crate::Result<&crate::vectors::PrimitiveVector<Self>> {
-        vector
-            .as_any()
-            .downcast_ref::<IntervalVector>()
-            .with_context(|| error::CastTypeSnafu {
-                msg: format!("Failed to cast vector to {}", Self::type_name()),
-            })
-    }
-
-    fn cast_value_ref(value: crate::value::ValueRef) -> crate::Result<Option<Self::Wrapper>> {
-        match value {
-            crate::value::ValueRef::Null => Ok(None),
-            crate::value::ValueRef::Interval(interval) => Ok(Some(interval)),
-            other => error::CastTypeSnafu {
-                msg: format!("Failed to cast value {:?} to {}", other, Self::type_name()),
-            }
-            .fail(),
+impl IntervalType {
+    pub fn unit(&self) -> IntervalUnit {
+        match self {
+            IntervalType::YearMonth(_) => IntervalUnit::YearMonth,
+            IntervalType::DayTime(_) => IntervalUnit::DayTime,
+            IntervalType::MonthDayNano(_) => IntervalUnit::MonthDayNano,
         }
     }
 }
+
+macro_rules! impl_data_type_for_interval {
+    ($unit: ident, $type: ty) => {
+        paste! {
+            #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+            pub struct [<Interval $unit Type>];
+
+            impl DataType for [<Interval $unit Type>] {
+                fn name(&self) -> &str {
+                    stringify!([<Interval $unit>])
+                }
+
+                fn logical_type_id(&self) -> LogicalTypeId {
+                    LogicalTypeId::[<Interval $unit>]
+                }
+
+                fn default_value(&self) -> Value {
+                    Value::Interval(Interval::from_i128(0))
+                }
+
+                fn as_arrow_type(&self) -> ArrowDataType {
+                    ArrowDataType::Interval(ArrowIntervalUnit::$unit)
+                }
+
+                fn create_mutable_vector(&self, capacity: usize) -> Box<dyn MutableVector> {
+                    Box::new([<Interval $unit Vector Builder>]::with_capacity(capacity))
+                }
+
+                fn is_timestamp_compatible(&self) -> bool {
+                    false
+                }
+            }
+
+            impl LogicalPrimitiveType for [<Interval $unit Type>] {
+                type ArrowPrimitive = [<Arrow Interval $unit Type>];
+                type Native = $type;
+                type Wrapper = [<Interval $unit>];
+                type LargestType = Self;
+
+                fn build_data_type() -> ConcreteDataType {
+                    ConcreteDataType::Interval(IntervalType::$unit(
+                        [<Interval $unit Type>]::default(),
+                    ))
+                }
+
+                fn type_name() -> &'static str {
+                    stringify!([<Interval $unit Type>])
+                }
+
+                fn cast_vector(vector: &dyn Vector) -> crate::Result<&PrimitiveVector<Self>> {
+                    vector
+                        .as_any()
+                        .downcast_ref::<[<Interval $unit Vector>]>()
+                        .with_context(|| error::CastTypeSnafu {
+                            msg: format!(
+                                "Failed to cast {} to {}",
+                                vector.vector_type_name(), stringify!([<Interval $unit Vector>])
+                            ),
+                        })
+                }
+
+                fn cast_value_ref(value: ValueRef) -> crate::Result<Option<Self::Wrapper>> {
+                    match value {
+                        ValueRef::Null => Ok(None),
+                        ValueRef::Interval(t) => Ok(Some([<Interval $unit>](t))),
+                        other => error::CastTypeSnafu {
+                            msg: format!("Failed to cast value {:?} to {}", other, stringify!([<Interval $unit>])),
+                        }
+                        .fail(),
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl_data_type_for_interval!(YearMonth, i32);
+impl_data_type_for_interval!(DayTime, i64);
+impl_data_type_for_interval!(MonthDayNano, i128);
