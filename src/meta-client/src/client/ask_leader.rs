@@ -64,11 +64,9 @@ impl AskLeader {
     }
 
     pub async fn ask_leader(&self) -> Result<String> {
-        let (prev_leader, mut peers) = {
+        let mut peers = {
             let leadership_group = self.leadership_group.read().unwrap();
-            let leader = leadership_group.leader.clone();
-            let peers = leadership_group.peers.clone();
-            (leader, peers)
+            leadership_group.peers.clone()
         };
         peers.shuffle(&mut rand::thread_rng());
 
@@ -95,10 +93,9 @@ impl AskLeader {
         }
 
         let leader = leader.context(error::NoLeaderSnafu)?;
-        if prev_leader.as_ref() != Some(&leader) {
-            let mut leadership_group = self.leadership_group.write().unwrap();
-            leadership_group.leader = Some(leader.clone());
-        }
+        let mut leadership_group = self.leadership_group.write().unwrap();
+        leadership_group.leader = Some(leader.clone());
+
         Ok(leader)
     }
 
