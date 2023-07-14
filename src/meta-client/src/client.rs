@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod ask_leader;
 mod ddl;
 mod heartbeat;
 mod load_balance;
@@ -201,7 +202,7 @@ impl MetaClient {
         }
         if let Some(client) = &mut self.ddl {
             client.start(urls).await?;
-            info!("Ddl client started");
+            info!("DDL client started");
         }
 
         Ok(())
