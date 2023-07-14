@@ -1773,6 +1773,7 @@ dependencies = [
  "datatypes",
  "flatbuffers",
  "futures",
+ "lazy_static",
  "prost",
  "rand",
  "snafu",

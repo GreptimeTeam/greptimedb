@@ -515,6 +515,15 @@ impl DistInstance {
             .await
             .context(error::RequestMetaSnafu)?;
 
+        let table_info = table.table_info();
+        self.catalog_manager
+            .invalidate_table(
+                &table_info.catalog_name,
+                &table_info.schema_name,
+                &table_info.name,
+            )
+            .await;
+
         Ok(Output::AffectedRows(0))
     }
 

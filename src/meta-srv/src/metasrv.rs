@@ -238,57 +238,46 @@ impl MetaSrv {
         &self.options
     }
 
-    #[inline]
-    pub fn in_memory(&self) -> ResettableKvStoreRef {
-        self.in_memory.clone()
+    pub fn in_memory(&self) -> &ResettableKvStoreRef {
+        &self.in_memory
     }
 
-    #[inline]
-    pub fn kv_store(&self) -> KvStoreRef {
-        self.kv_store.clone()
+    pub fn kv_store(&self) -> &KvStoreRef {
+        &self.kv_store
     }
 
-    #[inline]
-    pub fn leader_cached_kv_store(&self) -> ResettableKvStoreRef {
-        self.leader_cached_kv_store.clone()
+    pub fn leader_cached_kv_store(&self) -> &ResettableKvStoreRef {
+        &self.leader_cached_kv_store
     }
 
-    #[inline]
-    pub fn meta_peer_client(&self) -> MetaPeerClientRef {
-        self.meta_peer_client.clone()
+    pub fn meta_peer_client(&self) -> &MetaPeerClientRef {
+        &self.meta_peer_client
     }
 
-    #[inline]
-    pub fn table_id_sequence(&self) -> SequenceRef {
-        self.table_id_sequence.clone()
+    pub fn table_id_sequence(&self) -> &SequenceRef {
+        &self.table_id_sequence
     }
 
-    #[inline]
-    pub fn selector(&self) -> SelectorRef {
-        self.selector.clone()
+    pub fn selector(&self) -> &SelectorRef {
+        &self.selector
     }
 
-    #[inline]
-    pub fn handler_group(&self) -> HeartbeatHandlerGroup {
-        self.handler_group.clone()
+    pub fn handler_group(&self) -> &HeartbeatHandlerGroup {
+        &self.handler_group
     }
 
-    #[inline]
-    pub fn election(&self) -> Option<ElectionRef> {
-        self.election.clone()
+    pub fn election(&self) -> Option<&ElectionRef> {
+        self.election.as_ref()
     }
 
-    #[inline]
     pub fn lock(&self) -> &DistLockRef {
         &self.lock
     }
 
-    #[inline]
-    pub fn mailbox(&self) -> MailboxRef {
-        self.mailbox.clone()
+    pub fn mailbox(&self) -> &MailboxRef {
+        &self.mailbox
     }
 
-    #[inline]
     pub fn ddl_manager(&self) -> &DdlManagerRef {
         &self.ddl_manager
     }
@@ -304,12 +293,12 @@ impl MetaSrv {
     #[inline]
     pub fn new_ctx(&self) -> Context {
         let server_addr = self.options().server_addr.clone();
-        let in_memory = self.in_memory();
-        let kv_store = self.kv_store();
-        let leader_cached_kv_store = self.leader_cached_kv_store();
-        let meta_peer_client = self.meta_peer_client();
-        let mailbox = self.mailbox();
-        let election = self.election();
+        let in_memory = self.in_memory.clone();
+        let kv_store = self.kv_store.clone();
+        let leader_cached_kv_store = self.leader_cached_kv_store.clone();
+        let meta_peer_client = self.meta_peer_client.clone();
+        let mailbox = self.mailbox.clone();
+        let election = self.election.clone();
         let skip_all = Arc::new(AtomicBool::new(false));
         Context {
             server_addr,

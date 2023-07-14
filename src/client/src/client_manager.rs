@@ -13,12 +13,10 @@
 // limitations under the License.
 
 use std::fmt::{Debug, Formatter};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_meta::peer::Peer;
-use common_telemetry::info;
 use moka::future::{Cache, CacheBuilder};
 
 use crate::Client;
@@ -28,7 +26,6 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 pub struct DatanodeClients {
     channel_manager: ChannelManager,
     clients: Cache<Peer, Client>,
-    started: Arc<Mutex<bool>>,
 }
 
 impl Default for DatanodeClients {
@@ -43,7 +40,6 @@ impl Default for DatanodeClients {
                 .time_to_live(Duration::from_secs(30 * 60))
                 .time_to_idle(Duration::from_secs(5 * 60))
                 .build(),
-            started: Arc::new(Mutex::new(false)),
         }
     }
 }
@@ -57,18 +53,6 @@ impl Debug for DatanodeClients {
 }
 
 impl DatanodeClients {
-    pub fn start(&self) {
-        let mut started = self.started.lock().unwrap();
-        if *started {
-            return;
-        }
-
-        self.channel_manager.start_channel_recycle();
-
-        info!("Datanode clients manager is started!");
-        *started = true;
-    }
-
     pub async fn get_client(&self, datanode: &Peer) -> Client {
         self.clients
             .get_with_by_ref(datanode, async move {

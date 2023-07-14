@@ -36,35 +36,35 @@ pub fn make_admin_service(meta_srv: MetaSrv) -> Admin {
     let router = router.route(
         "/node-lease",
         node_lease::NodeLeaseHandler {
-            meta_peer_client: meta_srv.meta_peer_client(),
+            meta_peer_client: meta_srv.meta_peer_client().clone(),
         },
     );
 
     let router = router.route(
         "/heartbeat",
         heartbeat::HeartBeatHandler {
-            meta_peer_client: meta_srv.meta_peer_client(),
+            meta_peer_client: meta_srv.meta_peer_client().clone(),
         },
     );
 
     let router = router.route(
         "/catalogs",
         meta::CatalogsHandler {
-            kv_store: meta_srv.kv_store(),
+            kv_store: meta_srv.kv_store().clone(),
         },
     );
 
     let router = router.route(
         "/schemas",
         meta::SchemasHandler {
-            kv_store: meta_srv.kv_store(),
+            kv_store: meta_srv.kv_store().clone(),
         },
     );
 
     let router = router.route(
         "/tables",
         meta::TablesHandler {
-            kv_store: meta_srv.kv_store(),
+            kv_store: meta_srv.kv_store().clone(),
             table_metadata_manager: meta_srv.table_metadata_manager().clone(),
         },
     );
@@ -72,7 +72,7 @@ pub fn make_admin_service(meta_srv: MetaSrv) -> Admin {
     let router = router.route(
         "/table",
         meta::TableHandler {
-            kv_store: meta_srv.kv_store(),
+            kv_store: meta_srv.kv_store().clone(),
             table_metadata_manager: meta_srv.table_metadata_manager().clone(),
         },
     );
@@ -80,14 +80,14 @@ pub fn make_admin_service(meta_srv: MetaSrv) -> Admin {
     let router = router.route(
         "/leader",
         leader::LeaderHandler {
-            election: meta_srv.election(),
+            election: meta_srv.election().cloned(),
         },
     );
 
     let router = router.route(
         "/route",
         route::RouteHandler {
-            kv_store: meta_srv.kv_store(),
+            kv_store: meta_srv.kv_store().clone(),
         },
     );
 

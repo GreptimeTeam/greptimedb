@@ -28,6 +28,8 @@ pub mod error;
 #[allow(unused_variables)]
 pub mod manifest;
 #[allow(dead_code)]
+pub mod metadata;
+#[allow(dead_code)]
 mod region;
 #[allow(dead_code)]
 mod worker;
@@ -141,7 +143,6 @@ mod worker;
 ///     +Level level
 ///     +u64 file_size
 /// }
-///
 /// VersionControl o-- Version
 /// Version o-- RegionMetadata
 /// Version o-- MemtableVersion
@@ -149,48 +150,7 @@ mod worker;
 /// LevelMetas o-- LevelMeta
 /// LevelMeta o-- FileHandle
 /// FileHandle o-- FileMeta
-///
-/// class RegionMetadata {
-///     +RegionId region_id
-///     +VersionNumber version
-///     +SchemaRef table_schema
-///     +Vec~usize~ primary_key_indices
-///     +Vec~usize~ value_indices
-///     +ColumnId next_column_id
-///     +TableOptions region_options
-///     +DateTime~Utc~ created_on
-///     +RegionSchemaRef region_schema
-/// }
-/// class RegionSchema {
-///     -SchemaRef user_schema
-///     -StoreSchemaRef store_schema
-///     -ColumnsMetadataRef columns
-/// }
-/// class Schema
-/// class StoreSchema {
-///     -Vec~ColumnMetadata~ columns
-///     -SchemaRef schema
-///     -usize row_key_end
-///     -usize user_column_end
-/// }
-/// class ColumnsMetadata {
-///     -Vec~ColumnMetadata~ columns
-///     -HashMap&lt;String, usize&gt; name_to_col_index
-///     -usize row_key_end
-///     -usize timestamp_key_index
-///     -usize user_column_end
-/// }
-/// class ColumnMetadata
-///
-/// RegionMetadata o-- RegionSchema
-/// RegionMetadata o-- Schema
-/// RegionSchema o-- StoreSchema
-/// RegionSchema o-- Schema
-/// RegionSchema o-- ColumnsMetadata
-/// StoreSchema o-- ColumnsMetadata
-/// StoreSchema o-- Schema
-/// StoreSchema o-- ColumnMetadata
-/// ColumnsMetadata o-- ColumnMetadata
+/// class RegionMetadata
 /// ```
 ///
 /// ## Region workers
