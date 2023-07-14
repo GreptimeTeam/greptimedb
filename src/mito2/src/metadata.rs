@@ -33,7 +33,7 @@ use crate::region::VersionNumber;
 ///     +VersionNumber version
 ///     +SchemaRef schema
 ///     +Vec&lt;ColumnMetadata&gt; column_metadatas
-///     +Vec&lt;ColumnId&gt; primary_keys
+///     +Vec&lt;ColumnId&gt; primary_key
 /// }
 /// class Schema
 /// class ColumnMetadata {
@@ -55,10 +55,10 @@ pub struct RegionMetadata {
     /// Version of metadata.
     version: VersionNumber,
     /// Maintains an ordered list of primary keys
-    primary_keys: Vec<ColumnId>,
+    primary_key: Vec<ColumnId>,
 
     /// Immutable and unique id
-    id: RegionId,
+    region_id: RegionId,
 }
 
 pub type RegionMetadataRef = Arc<RegionMetadata>;
@@ -73,8 +73,8 @@ impl<'de> Deserialize<'de> for RegionMetadata {
         struct RegionMetadataWithoutSchema {
             column_metadatas: Vec<ColumnMetadata>,
             version: VersionNumber,
-            primary_keys: Vec<ColumnId>,
-            id: RegionId,
+            primary_key: Vec<ColumnId>,
+            region_id: RegionId,
         }
 
         let region_metadata_without_schema =
@@ -91,8 +91,8 @@ impl<'de> Deserialize<'de> for RegionMetadata {
             schema,
             column_metadatas: region_metadata_without_schema.column_metadatas,
             version: region_metadata_without_schema.version,
-            primary_keys: region_metadata_without_schema.primary_keys,
-            id: region_metadata_without_schema.id,
+            primary_key: region_metadata_without_schema.primary_key,
+            region_id: region_metadata_without_schema.region_id,
         })
     }
 }
@@ -101,8 +101,8 @@ pub struct RegionMetadataBuilder {
     schema: SchemaRef,
     column_metadatas: Vec<ColumnMetadata>,
     version: VersionNumber,
-    primary_keys: Vec<ColumnId>,
-    id: RegionId,
+    primary_key: Vec<ColumnId>,
+    region_id: RegionId,
 }
 
 impl RegionMetadataBuilder {
@@ -111,8 +111,8 @@ impl RegionMetadataBuilder {
             schema: Arc::new(Schema::new(vec![])),
             column_metadatas: vec![],
             version,
-            primary_keys: vec![],
-            id,
+            primary_key: vec![],
+            region_id: id,
         }
     }
 
@@ -120,7 +120,7 @@ impl RegionMetadataBuilder {
     /// This method will check the semantic type and add it to primary keys automatically.
     pub fn add_column_metadata(mut self, column_metadata: ColumnMetadata) -> Self {
         if column_metadata.semantic_type == SemanticType::Tag {
-            self.primary_keys.push(column_metadata.column_id);
+            self.primary_key.push(column_metadata.column_id);
         }
         self.column_metadatas.push(column_metadata);
         self
@@ -137,8 +137,8 @@ impl RegionMetadataBuilder {
             schema,
             column_metadatas: self.column_metadatas,
             version: self.version,
-            primary_keys: self.primary_keys,
-            id: self.id,
+            primary_key: self.primary_key,
+            region_id: self.region_id,
         }
     }
 }
@@ -194,6 +194,7 @@ mod test {
     fn test_region_metadata_serde() {
         let region_metadata = build_test_region_metadata();
         let serialized = serde_json::to_string(&region_metadata).unwrap();
+        println!("serialized = {}", serialized);
         let deserialized: RegionMetadata = serde_json::from_str(&serialized).unwrap();
         assert_eq!(region_metadata, deserialized);
     }
