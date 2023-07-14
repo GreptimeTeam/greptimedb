@@ -75,6 +75,9 @@ pub enum Error {
         location: Location,
         source: std::str::Utf8Error,
     },
+
+    #[snafu(display("Cannot find RegionMetadata. Location: {}", location))]
+    RegionMetadataNotFound { location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

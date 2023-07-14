@@ -15,38 +15,16 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
-use storage::metadata::{ColumnFamilyMetadata, ColumnMetadata, VersionNumber};
+use snafu::OptionExt;
+use storage::metadata::VersionNumber;
 use storage::sst::{FileId, FileMeta};
 use store_api::manifest::action::{ProtocolAction, ProtocolVersion};
 use store_api::manifest::ManifestVersion;
 use store_api::storage::{RegionId, SequenceNumber};
 
+use crate::error::{RegionMetadataNotFoundSnafu, Result};
 use crate::manifest::helper;
-
-/// Minimal data that could be used to persist and recover [RegionMetadata](crate::metadata::RegionMetadata).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-pub struct RawRegionMetadata {
-    pub id: RegionId,
-    pub name: String,
-    pub columns: RawColumnsMetadata,
-    pub column_families: RawColumnFamiliesMetadata,
-    pub version: VersionNumber,
-}
-
-/// Minimal data that could be used to persist and recover [ColumnsMetadata](crate::metadata::ColumnsMetadata).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct RawColumnsMetadata {
-    pub columns: Vec<ColumnMetadata>,
-    pub row_key_end: usize,
-    pub timestamp_key_index: usize,
-    pub user_column_end: usize,
-}
-
-/// Minimal data that could be used to persist and recover [ColumnFamiliesMetadata](crate::metadata::ColumnFamiliesMetadata).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct RawColumnFamiliesMetadata {
-    pub column_families: Vec<ColumnFamilyMetadata>,
-}
+use crate::metadata::RegionMetadata;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct RegionChange {
@@ -55,7 +33,7 @@ pub struct RegionChange {
     /// metadata.
     pub committed_sequence: SequenceNumber,
     /// The metadata after changed.
-    pub metadata: RawRegionMetadata,
+    pub metadata: RegionMetadata,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -81,17 +59,17 @@ pub struct RegionVersion {
 }
 
 /// The region manifest data checkpoint
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct RegionManifestData {
     pub committed_sequence: SequenceNumber,
-    pub metadata: RawRegionMetadata,
+    pub metadata: RegionMetadata,
     pub version: Option<RegionVersion>,
 }
 
 #[derive(Debug, Default)]
 pub struct RegionManifestDataBuilder {
     committed_sequence: SequenceNumber,
-    metadata: RawRegionMetadata,
+    metadata: Option<RegionMetadata>,
     version: Option<RegionVersion>,
 }
 
@@ -99,7 +77,7 @@ impl RegionManifestDataBuilder {
     pub fn with_checkpoint(checkpoint: Option<RegionManifestData>) -> Self {
         if let Some(s) = checkpoint {
             Self {
-                metadata: s.metadata,
+                metadata: Some(s.metadata),
                 version: s.version,
                 committed_sequence: s.committed_sequence,
             }
@@ -109,7 +87,7 @@ impl RegionManifestDataBuilder {
     }
 
     pub fn apply_change(&mut self, change: RegionChange) {
-        self.metadata = change.metadata;
+        self.metadata = Some(change.metadata);
         self.committed_sequence = change.committed_sequence;
     }
 
@@ -135,12 +113,13 @@ impl RegionManifestDataBuilder {
             });
         }
     }
-    pub fn build(self) -> RegionManifestData {
-        RegionManifestData {
-            metadata: self.metadata,
+
+    pub fn try_build(self) -> Result<RegionManifestData> {
+        Ok(RegionManifestData {
+            metadata: self.metadata.context(RegionMetadataNotFoundSnafu)?,
             version: self.version,
             committed_sequence: self.committed_sequence,
-        }
+        })
     }
 }
 
@@ -166,11 +145,11 @@ impl RegionCheckpoint {
         self.last_version
     }
 
-    fn encode(&self) -> Result<Vec<u8>, ()> {
+    fn encode(&self) -> Result<Vec<u8>> {
         todo!()
     }
 
-    fn decode(bs: &[u8], reader_version: ProtocolVersion) -> Result<Self, ()> {
+    fn decode(bs: &[u8], reader_version: ProtocolVersion) -> Result<Self> {
         helper::decode_checkpoint(bs, reader_version)
     }
 }
@@ -216,14 +195,14 @@ impl RegionMetaActionList {
     }
 
     /// Encode self into json in the form of string lines, starts with prev_version and then action json list.
-    fn encode(&self) -> Result<Vec<u8>, ()> {
+    fn encode(&self) -> Result<Vec<u8>> {
         helper::encode_actions(self.prev_version, &self.actions)
     }
 
     fn decode(
         _bs: &[u8],
         _reader_version: ProtocolVersion,
-    ) -> Result<(Self, Option<ProtocolAction>), ()> {
+    ) -> Result<(Self, Option<ProtocolAction>)> {
         todo!()
     }
 }
@@ -239,7 +218,7 @@ impl MetaActionIteratorImpl {
         self.last_protocol.clone()
     }
 
-    async fn next_action(&mut self) -> Result<Option<(ManifestVersion, RegionMetaActionList)>, ()> {
+    async fn next_action(&mut self) -> Result<Option<(ManifestVersion, RegionMetaActionList)>> {
         todo!()
     }
 }
