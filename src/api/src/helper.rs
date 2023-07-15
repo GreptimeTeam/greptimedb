@@ -71,6 +71,7 @@ impl From<ColumnDataTypeWrapper> for ConcreteDataType {
             ColumnDataType::TimestampNanosecond => {
                 ConcreteDataType::timestamp_nanosecond_datatype()
             }
+            _ => unimplemented!("Implemented in #1961"),
         }
     }
 }
@@ -189,6 +190,7 @@ pub fn values_with_capacity(datatype: ColumnDataType, capacity: usize) -> Values
             ts_nanosecond_values: Vec::with_capacity(capacity),
             ..Default::default()
         },
+        _ => unimplemented!("Implemented in #1961"),
     }
 }
 

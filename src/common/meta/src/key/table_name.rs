@@ -170,6 +170,7 @@ impl TableNameManager {
         })
     }
 
+    // TODO(LFC): Remove this method when table metadata refactor is done.
     pub async fn get_old(&self, key: &TableNameKey<'_>) -> Result<Option<TableNameValue>> {
         let table_global_key = TableGlobalKey {
             catalog_name: key.catalog.to_string(),
@@ -185,6 +186,7 @@ impl TableNameManager {
             .context(InvalidCatalogValueSnafu)
     }
 
+    // TODO(LFC): Remove this method when table metadata refactor is done.
     pub async fn tables_old(&self, catalog: &str, schema: &str) -> Result<Vec<String>> {
         let key = build_table_global_prefix(catalog, schema);
         let req = RangeRequest::new().with_prefix(key.as_bytes());

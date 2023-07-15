@@ -23,7 +23,7 @@ use api::v1::meta::Role;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_meta::rpc::ddl::{SubmitDdlTaskRequest, SubmitDdlTaskResponse};
 use common_meta::rpc::lock::{LockRequest, LockResponse, UnlockRequest};
-use common_meta::rpc::router::{CreateRequest, DeleteRequest, RouteRequest, RouteResponse};
+use common_meta::rpc::router::{RouteRequest, RouteResponse};
 use common_meta::rpc::store::{
     BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
     BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse, DeleteRangeRequest,
@@ -40,7 +40,7 @@ use store::Client as StoreClient;
 
 pub use self::heartbeat::{HeartbeatSender, HeartbeatStream};
 use crate::error;
-use crate::error::{ConvertMetaRequestSnafu, ConvertMetaResponseSnafu, Result};
+use crate::error::{ConvertMetaResponseSnafu, Result};
 
 pub type Id = (u64, u64);
 
@@ -223,21 +223,6 @@ impl MetaClient {
         self.heartbeat_client()?.heartbeat().await
     }
 
-    /// Provides routing information for distributed create table requests.
-    ///
-    /// When a distributed create table request is received, this method returns
-    /// a list of `datanode` addresses that are generated based on the partition
-    /// information contained in the request and using some intelligent policies,
-    /// such as load-based.
-    pub async fn create_route(&self, req: CreateRequest<'_>) -> Result<RouteResponse> {
-        let req = req.try_into().context(ConvertMetaRequestSnafu)?;
-        self.router_client()?
-            .create(req)
-            .await?
-            .try_into()
-            .context(ConvertMetaResponseSnafu)
-    }
-
     /// Fetch routing information for tables. The smallest unit is the complete
     /// routing information(all regions) of a table.
     ///
@@ -260,17 +245,6 @@ impl MetaClient {
     pub async fn route(&self, req: RouteRequest) -> Result<RouteResponse> {
         self.router_client()?
             .route(req.into())
-            .await?
-            .try_into()
-            .context(ConvertMetaResponseSnafu)
-    }
-
-    /// Can be called repeatedly, the first call will delete and return the
-    /// table of routing information, the nth call can still return the
-    /// deleted route information.
-    pub async fn delete_route(&self, req: DeleteRequest) -> Result<RouteResponse> {
-        self.router_client()?
-            .delete(req.into())
             .await?
             .try_into()
             .context(ConvertMetaResponseSnafu)
@@ -423,18 +397,10 @@ impl MetaClient {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use api::v1::meta::{HeartbeatRequest, Peer};
-    use chrono::DateTime;
-    use common_meta::table_name::TableName;
-    use datatypes::prelude::ConcreteDataType;
-    use datatypes::schema::{ColumnSchema, RawSchema};
     use meta_srv::metasrv::SelectorContext;
     use meta_srv::selector::{Namespace, Selector};
     use meta_srv::Result as MetaResult;
-    use table::metadata::{RawTableInfo, RawTableMeta, TableIdent, TableType};
-    use table::requests::TableOptions;
 
     use super::*;
     use crate::mocks;
@@ -544,39 +510,6 @@ mod tests {
         assert!(matches!(res.err(), Some(error::Error::NotStarted { .. })));
     }
 
-    fn new_table_info(table_name: &TableName) -> RawTableInfo {
-        RawTableInfo {
-            ident: TableIdent {
-                table_id: 0,
-                version: 0,
-            },
-            name: table_name.table_name.clone(),
-            desc: None,
-            catalog_name: table_name.catalog_name.clone(),
-            schema_name: table_name.schema_name.clone(),
-            meta: RawTableMeta {
-                schema: RawSchema {
-                    column_schemas: vec![ColumnSchema::new(
-                        "ts",
-                        ConcreteDataType::timestamp_millisecond_datatype(),
-                        false,
-                    )],
-                    timestamp_index: Some(0),
-                    version: 0,
-                },
-                primary_key_indices: vec![],
-                value_indices: vec![],
-                engine: "mito".to_string(),
-                next_column_id: 0,
-                region_numbers: vec![],
-                engine_options: HashMap::new(),
-                options: TableOptions::default(),
-                created_on: DateTime::default(),
-            },
-            table_type: TableType::Base,
-        }
-    }
-
     #[tokio::test]
     async fn test_not_start_router_client() {
         let urls = &["127.0.0.1:3001", "127.0.0.1:3002"];
@@ -586,10 +519,8 @@ mod tests {
             .build();
         meta_client.start(urls).await.unwrap();
 
-        let table_name = TableName::new("c", "s", "t");
-        let table_info = new_table_info(&table_name);
-        let req = CreateRequest::new(table_name, &table_info);
-        let res = meta_client.create_route(req).await;
+        let req = RouteRequest::new(1);
+        let res = meta_client.route(req).await;
         assert!(matches!(res.err(), Some(error::Error::NotStarted { .. })));
     }
 

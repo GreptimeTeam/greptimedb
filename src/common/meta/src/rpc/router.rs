@@ -15,57 +15,19 @@
 use std::collections::{HashMap, HashSet};
 
 use api::v1::meta::{
-    CreateRequest as PbCreateRequest, DeleteRequest as PbDeleteRequest, Partition as PbPartition,
-    Peer as PbPeer, Region as PbRegion, RegionRoute as PbRegionRoute,
+    Partition as PbPartition, Peer as PbPeer, Region as PbRegion, RegionRoute as PbRegionRoute,
     RouteRequest as PbRouteRequest, RouteResponse as PbRouteResponse, Table as PbTable,
     TableId as PbTableId, TableRoute as PbTableRoute, TableRouteValue as PbTableRouteValue,
 };
 use serde::{Deserialize, Serialize, Serializer};
-use snafu::{OptionExt, ResultExt};
+use snafu::OptionExt;
 use store_api::storage::{RegionId, RegionNumber};
-use table::metadata::{RawTableInfo, TableId};
+use table::metadata::TableId;
 
 use crate::error::{self, Result};
 use crate::peer::Peer;
 use crate::rpc::util;
 use crate::table_name::TableName;
-
-#[derive(Debug, Clone)]
-pub struct CreateRequest<'a> {
-    pub table_name: TableName,
-    pub partitions: Vec<Partition>,
-    pub table_info: &'a RawTableInfo,
-}
-
-impl TryFrom<CreateRequest<'_>> for PbCreateRequest {
-    type Error = error::Error;
-
-    fn try_from(mut req: CreateRequest) -> Result<Self> {
-        Ok(Self {
-            header: None,
-            table_name: Some(req.table_name.into()),
-            partitions: req.partitions.drain(..).map(Into::into).collect(),
-            table_info: serde_json::to_vec(&req.table_info).context(error::SerdeJsonSnafu)?,
-        })
-    }
-}
-
-impl<'a> CreateRequest<'a> {
-    #[inline]
-    pub fn new(table_name: TableName, table_info: &'a RawTableInfo) -> Self {
-        Self {
-            table_name,
-            partitions: vec![],
-            table_info,
-        }
-    }
-
-    #[inline]
-    pub fn add_partition(mut self, partition: Partition) -> Self {
-        self.partitions.push(partition);
-        self
-    }
-}
 
 #[derive(Debug, Clone, Default)]
 pub struct RouteRequest {
@@ -96,32 +58,6 @@ impl RouteRequest {
     pub fn add_table_name(mut self, table_name: TableName) -> Self {
         self.table_names.push(table_name);
         self
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct DeleteRequest {
-    pub table_name: TableName,
-    pub table_id: TableId,
-}
-
-impl From<DeleteRequest> for PbDeleteRequest {
-    fn from(req: DeleteRequest) -> Self {
-        Self {
-            header: None,
-            table_name: Some(req.table_name.into()),
-            table_id: Some(PbTableId { id: req.table_id }),
-        }
-    }
-}
-
-impl DeleteRequest {
-    #[inline]
-    pub fn new(table_name: TableName, table_id: TableId) -> Self {
-        Self {
-            table_name,
-            table_id,
-        }
     }
 }
 
@@ -431,96 +367,12 @@ impl From<PbPartition> for Partition {
 #[cfg(test)]
 mod tests {
     use api::v1::meta::{
-        DeleteRequest as PbDeleteRequest, Partition as PbPartition, Peer as PbPeer,
-        Region as PbRegion, RegionRoute as PbRegionRoute, RouteRequest as PbRouteRequest,
-        RouteResponse as PbRouteResponse, Table as PbTable, TableName as PbTableName,
-        TableRoute as PbTableRoute,
+        Partition as PbPartition, Peer as PbPeer, Region as PbRegion, RegionRoute as PbRegionRoute,
+        RouteRequest as PbRouteRequest, RouteResponse as PbRouteResponse, Table as PbTable,
+        TableName as PbTableName, TableRoute as PbTableRoute,
     };
-    use chrono::DateTime;
-    use datatypes::prelude::ConcreteDataType;
-    use datatypes::schema::{ColumnSchema, RawSchema};
-    use table::metadata::{RawTableMeta, TableIdent, TableType};
-    use table::requests::TableOptions;
 
     use super::*;
-
-    fn new_table_info() -> RawTableInfo {
-        RawTableInfo {
-            ident: TableIdent {
-                table_id: 0,
-                version: 0,
-            },
-            name: "t1".to_string(),
-            desc: None,
-            catalog_name: "c1".to_string(),
-            schema_name: "s1".to_string(),
-            meta: RawTableMeta {
-                schema: RawSchema {
-                    column_schemas: vec![
-                        ColumnSchema::new(
-                            "ts",
-                            ConcreteDataType::timestamp_millisecond_datatype(),
-                            false,
-                        ),
-                        ColumnSchema::new("c1", ConcreteDataType::string_datatype(), true),
-                        ColumnSchema::new("c2", ConcreteDataType::string_datatype(), true),
-                    ],
-                    timestamp_index: Some(0),
-                    version: 0,
-                },
-                primary_key_indices: vec![],
-                value_indices: vec![],
-                engine: "mito".to_string(),
-                next_column_id: 0,
-                region_numbers: vec![],
-                engine_options: HashMap::new(),
-                options: TableOptions::default(),
-                created_on: DateTime::default(),
-            },
-            table_type: TableType::Base,
-        }
-    }
-
-    #[test]
-    fn test_create_request_trans() {
-        let req = CreateRequest {
-            table_name: TableName::new("c1", "s1", "t1"),
-            partitions: vec![
-                Partition {
-                    column_list: vec![b"c1".to_vec(), b"c2".to_vec()],
-                    value_list: vec![b"v1".to_vec(), b"v2".to_vec()],
-                },
-                Partition {
-                    column_list: vec![b"c1".to_vec(), b"c2".to_vec()],
-                    value_list: vec![b"v11".to_vec(), b"v22".to_vec()],
-                },
-            ],
-            table_info: &new_table_info(),
-        };
-        let into_req: PbCreateRequest = req.try_into().unwrap();
-
-        assert!(into_req.header.is_none());
-        let table_name = into_req.table_name;
-        assert_eq!("c1", table_name.as_ref().unwrap().catalog_name);
-        assert_eq!("s1", table_name.as_ref().unwrap().schema_name);
-        assert_eq!("t1", table_name.as_ref().unwrap().table_name);
-        assert_eq!(
-            vec![b"c1".to_vec(), b"c2".to_vec()],
-            into_req.partitions.get(0).unwrap().column_list
-        );
-        assert_eq!(
-            vec![b"v1".to_vec(), b"v2".to_vec()],
-            into_req.partitions.get(0).unwrap().value_list
-        );
-        assert_eq!(
-            vec![b"c1".to_vec(), b"c2".to_vec()],
-            into_req.partitions.get(1).unwrap().column_list
-        );
-        assert_eq!(
-            vec![b"v11".to_vec(), b"v22".to_vec()],
-            into_req.partitions.get(1).unwrap().value_list
-        );
-    }
 
     #[test]
     fn test_route_request_trans() {
@@ -545,22 +397,6 @@ mod tests {
             (1..=3).map(|id| PbTableId { id }).collect::<Vec<_>>(),
             into_req.table_ids
         );
-    }
-
-    #[test]
-    fn test_delete_request_trans() {
-        let req = DeleteRequest {
-            table_name: TableName::new("c1", "s1", "t1"),
-            table_id: 1,
-        };
-
-        let into_req: PbDeleteRequest = req.into();
-
-        assert!(into_req.header.is_none());
-        assert_eq!("c1", into_req.table_name.as_ref().unwrap().catalog_name);
-        assert_eq!("s1", into_req.table_name.as_ref().unwrap().schema_name);
-        assert_eq!("t1", into_req.table_name.as_ref().unwrap().table_name);
-        assert_eq!(Some(PbTableId { id: 1 }), into_req.table_id);
     }
 
     #[test]

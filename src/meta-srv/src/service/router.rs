@@ -15,8 +15,8 @@
 use std::collections::HashMap;
 
 use api::v1::meta::{
-    router_server, CreateRequest, DeleteRequest, Peer, PeerDict, ResponseHeader, RouteRequest,
-    RouteResponse, TableRoute, TableRouteValue,
+    router_server, Peer, PeerDict, ResponseHeader, RouteRequest, RouteResponse, TableRoute,
+    TableRouteValue,
 };
 use common_meta::helper::TableGlobalValue;
 use common_meta::key::table_info::TableInfoValue;
@@ -35,10 +35,6 @@ use crate::table_routes::fetch_tables;
 
 #[async_trait::async_trait]
 impl router_server::Router for MetaSrv {
-    async fn create(&self, _req: Request<CreateRequest>) -> GrpcResult<RouteResponse> {
-        unimplemented!()
-    }
-
     async fn route(&self, req: Request<RouteRequest>) -> GrpcResult<RouteResponse> {
         let req = req.into_inner();
         let cluster_id = req.header.as_ref().map_or(0, |h| h.cluster_id);
@@ -55,10 +51,6 @@ impl router_server::Router for MetaSrv {
         let res = handle_route(req, ctx).await?;
 
         Ok(Response::new(res))
-    }
-
-    async fn delete(&self, _req: Request<DeleteRequest>) -> GrpcResult<RouteResponse> {
-        unimplemented!()
     }
 }
 

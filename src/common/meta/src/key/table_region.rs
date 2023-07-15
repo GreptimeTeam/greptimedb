@@ -71,6 +71,7 @@ impl TableRegionManager {
             .transpose()
     }
 
+    // TODO(LFC): Remove this method when table metadata refactor is done.
     pub async fn get_old(&self, table_name: &TableName) -> Result<Option<TableRegionValue>> {
         let key = TableGlobalKey {
             catalog_name: table_name.catalog_name.clone(),
@@ -94,6 +95,7 @@ impl TableRegionManager {
             .context(InvalidCatalogValueSnafu)
     }
 
+    // TODO(LFC): Remove this method when table metadata refactor is done.
     pub async fn put_old(
         &self,
         table_name: &TableName,

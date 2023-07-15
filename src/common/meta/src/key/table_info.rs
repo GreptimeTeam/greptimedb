@@ -55,6 +55,7 @@ impl TableInfoManager {
         Self { kv_backend }
     }
 
+    // TODO(LFC): Remove this method when table metadata refactor is done.
     pub async fn get_old(&self, table_name: &TableName) -> Result<Option<TableInfoValue>> {
         let table_global_key = TableGlobalKey {
             catalog_name: table_name.catalog_name.clone(),
@@ -75,6 +76,7 @@ impl TableInfoManager {
             .context(InvalidCatalogValueSnafu)
     }
 
+    // TODO(LFC): Remove this method when table metadata refactor is done.
     pub async fn put_old(&self, table_info: RawTableInfo) -> Result<()> {
         let key = TableGlobalKey {
             catalog_name: table_info.catalog_name.clone(),
