@@ -511,9 +511,9 @@ pub async fn test_config_api(store_type: StorageType) {
     enable_memory_catalog = false
     rpc_addr = "127.0.0.1:3001"
     rpc_runtime_size = 8
-    
+
     [heartbeat]
-    heartbeat_interval_millis = 5000
+    interval_millis = 5000
 
     [http_opts]
     addr = "127.0.0.1:4000"

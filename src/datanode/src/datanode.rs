@@ -320,13 +320,13 @@ impl Default for FlushConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HeartBeatOptions {
-    pub heartbeat_interval_millis: u64,
+    pub interval_millis: u64,
 }
 
 impl Default for HeartBeatOptions {
     fn default() -> Self {
         Self {
-            heartbeat_interval_millis: 5000,
+            interval_millis: 5000,
         }
     }
 }

@@ -36,14 +36,14 @@ pub mod handler;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HeartBeatOptions {
-    pub heartbeat_interval_millis: u64,
+    pub interval_millis: u64,
     pub retry_interval_millis: u64,
 }
 
 impl Default for HeartBeatOptions {
     fn default() -> Self {
         Self {
-            heartbeat_interval_millis: 5000,
+            interval_millis: 5000,
             retry_interval_millis: 5000,
         }
     }
@@ -65,7 +65,7 @@ impl HeartbeatTask {
     ) -> Self {
         HeartbeatTask {
             meta_client,
-            report_interval: heartbeat.heartbeat_interval_millis,
+            report_interval: heartbeat.interval_millis,
             retry_interval: heartbeat.retry_interval_millis,
             resp_handler_executor,
         }

@@ -13,7 +13,7 @@ rpc_runtime_size = 8
 
 [heartbeat]
 # Interval for sending heartbeat messages to the Metasrv in milliseconds, 5000 by default.
-heartbeat_interval_millis = 5000
+interval_millis = 5000
 
 # Metasrv client options.
 [meta_client_options]

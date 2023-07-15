@@ -3,7 +3,7 @@ mode = "distributed"
 
 [heartbeat]
 # Interval for sending heartbeat task to the Metasrv in milliseconds, 5000 by default.
-heartbeat_interval_millis = 5000
+interval_millis = 5000
 # Interval for retry sending heartbeat task in milliseconds, 5000 by default.
 retry_interval_millis = 5000
 
