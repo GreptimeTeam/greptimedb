@@ -24,6 +24,7 @@ pub mod auth;
 pub mod configurator;
 pub mod error;
 pub mod grpc;
+pub mod heartbeat_options;
 pub mod http;
 pub mod influxdb;
 pub mod interceptor;
