@@ -27,13 +27,13 @@ use crate::kv_backend::KvBackendRef;
 use crate::rpc::store::{CompareAndPutRequest, MoveValueRequest, RangeRequest};
 use crate::DatanodeId;
 
-struct DatanodeTableKey {
+pub struct DatanodeTableKey {
     datanode_id: DatanodeId,
     table_id: TableId,
 }
 
 impl DatanodeTableKey {
-    fn new(datanode_id: DatanodeId, table_id: TableId) -> Self {
+    pub fn new(datanode_id: DatanodeId, table_id: TableId) -> Self {
         Self {
             datanode_id,
             table_id,
@@ -81,7 +81,7 @@ pub struct DatanodeTableValue {
 }
 
 impl DatanodeTableValue {
-    fn new(table_id: TableId, regions: Vec<RegionNumber>) -> Self {
+    pub fn new(table_id: TableId, regions: Vec<RegionNumber>) -> Self {
         Self {
             table_id,
             regions,
