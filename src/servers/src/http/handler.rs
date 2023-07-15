@@ -169,19 +169,22 @@ pub struct StatusResponse<'a> {
     pub commit: &'a str,
     pub branch: &'a str,
     pub rustc_version: &'a str,
-    pub hostname: &'a str,
+    pub hostname: String,
     pub version: &'a str,
 }
 
 /// Handler to expose information info about runtime, build, etc.
 #[axum_macros::debug_handler]
 pub async fn status() -> Json<StatusResponse<'static>> {
+    let hostname = hostname::get()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "localhost".to_string());
     Json(StatusResponse {
         source_time: env!("SOURCE_TIMESTAMP"),
         commit: env!("GIT_COMMIT"),
         branch: env!("GIT_BRANCH"),
         rustc_version: env!("RUSTC_VERSION"),
-        hostname: env!("BUILD_HOSTNAME"),
+        hostname,
         version: env!("CARGO_PKG_VERSION"),
     })
 }

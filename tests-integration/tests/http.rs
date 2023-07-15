@@ -59,6 +59,7 @@ macro_rules! http_tests {
                 test_metrics_api,
                 test_scripts_api,
                 test_health_api,
+                test_status_api,
                 test_config_api,
                 test_dashboard_path,
             );
@@ -496,6 +497,23 @@ pub async fn test_health_api(store_type: StorageType) {
 
     let body = serde_json::from_str::<HealthResponse>(&body_text).unwrap();
     assert_eq!(body, HealthResponse {});
+}
+
+pub async fn test_status_api(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, _guard) = setup_test_http_app_with_frontend(store_type, "status_api").await;
+    let client = TestClient::new(app);
+
+    let res_get = client.get("/status").send().await;
+    assert_eq!(res_get.status(), StatusCode::OK);
+
+    let res_body = res_get.text().await;
+    assert_eq!(true, res_body.contains("{\"source_time\""));
+    assert_eq!(true, res_body.contains("\"commit\":"));
+    assert_eq!(true, res_body.contains("\"branch\":"));
+    assert_eq!(true, res_body.contains("\"rustc_version\":"));
+    assert_eq!(true, res_body.contains("\"hostname\":"));
+    assert_eq!(true, res_body.contains("\"version\":"));
 }
 
 pub async fn test_config_api(store_type: StorageType) {
