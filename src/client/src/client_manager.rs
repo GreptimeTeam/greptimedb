@@ -21,8 +21,6 @@ use moka::future::{Cache, CacheBuilder};
 
 use crate::Client;
 
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
-
 pub struct DatanodeClients {
     channel_manager: ChannelManager,
     clients: Cache<Peer, Client>,
@@ -30,17 +28,7 @@ pub struct DatanodeClients {
 
 impl Default for DatanodeClients {
     fn default() -> Self {
-        let config = ChannelConfig::new()
-            .timeout(DEFAULT_TIMEOUT)
-            .connect_timeout(DEFAULT_TIMEOUT);
-
-        Self {
-            channel_manager: ChannelManager::with_config(config),
-            clients: CacheBuilder::new(1024)
-                .time_to_live(Duration::from_secs(30 * 60))
-                .time_to_idle(Duration::from_secs(5 * 60))
-                .build(),
-        }
+        Self::new(ChannelConfig::new())
     }
 }
 
@@ -53,6 +41,16 @@ impl Debug for DatanodeClients {
 }
 
 impl DatanodeClients {
+    pub fn new(config: ChannelConfig) -> Self {
+        Self {
+            channel_manager: ChannelManager::with_config(config),
+            clients: CacheBuilder::new(1024)
+                .time_to_live(Duration::from_secs(30 * 60))
+                .time_to_idle(Duration::from_secs(5 * 60))
+                .build(),
+        }
+    }
+
     pub async fn get_client(&self, datanode: &Peer) -> Client {
         self.clients
             .get_with_by_ref(datanode, async move {

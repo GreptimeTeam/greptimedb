@@ -14,8 +14,10 @@
 
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::time::Duration;
 
 use client::client_manager::DatanodeClients;
+use common_grpc::channel_manager::ChannelConfig;
 use common_meta::key::TableMetadataManager;
 use common_procedure::local::{LocalManager, ManagerConfig};
 
@@ -178,11 +180,23 @@ impl MetaSrvBuilder {
             kv_store.clone(),
         )));
 
+        let datanode_clients = datanode_clients.unwrap_or_else(|| {
+            let datanode_client_channel_config = ChannelConfig::new()
+                .timeout(Duration::from_millis(
+                    options.datanode.client_options.timeout_millis,
+                ))
+                .connect_timeout(Duration::from_millis(
+                    options.datanode.client_options.connect_timeout_millis,
+                ))
+                .tcp_nodelay(options.datanode.client_options.tcp_nodelay);
+            Arc::new(DatanodeClients::new(datanode_client_channel_config))
+        });
+
         // TODO(weny): considers to modify the default config of procedure manager
         let ddl_manager = Arc::new(DdlManager::new(
             procedure_manager.clone(),
             kv_store.clone(),
-            datanode_clients.unwrap_or_else(|| Arc::new(DatanodeClients::default())),
+            datanode_clients,
             mailbox.clone(),
             options.server_addr.clone(),
             table_metadata_manager.clone(),

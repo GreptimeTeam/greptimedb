@@ -29,8 +29,8 @@ use tower::make::MakeConnection;
 use crate::error::{CreateChannelSnafu, InvalidConfigFilePathSnafu, InvalidTlsConfigSnafu, Result};
 
 const RECYCLE_CHANNEL_INTERVAL_SECS: u64 = 60;
-const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 10;
-const DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 10;
+pub const DEFAULT_GRPC_REQUEST_TIMEOUT_SECS: u64 = 10;
+pub const DEFAULT_GRPC_CONNECT_TIMEOUT_SECS: u64 = 10;
 
 lazy_static! {
     static ref ID: AtomicU64 = AtomicU64::new(0);
@@ -252,8 +252,8 @@ pub struct ChannelConfig {
 impl Default for ChannelConfig {
     fn default() -> Self {
         Self {
-            timeout: Some(Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS)),
-            connect_timeout: Some(Duration::from_secs(DEFAULT_CONNECT_TIMEOUT_SECS)),
+            timeout: Some(Duration::from_secs(DEFAULT_GRPC_REQUEST_TIMEOUT_SECS)),
+            connect_timeout: Some(Duration::from_secs(DEFAULT_GRPC_CONNECT_TIMEOUT_SECS)),
             concurrency_limit: None,
             rate_limit: None,
             initial_stream_window_size: None,
@@ -516,8 +516,8 @@ mod tests {
         let default_cfg = ChannelConfig::new();
         assert_eq!(
             ChannelConfig {
-                timeout: Some(Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS)),
-                connect_timeout: Some(Duration::from_secs(DEFAULT_CONNECT_TIMEOUT_SECS)),
+                timeout: Some(Duration::from_secs(DEFAULT_GRPC_REQUEST_TIMEOUT_SECS)),
+                connect_timeout: Some(Duration::from_secs(DEFAULT_GRPC_CONNECT_TIMEOUT_SECS)),
                 concurrency_limit: None,
                 rate_limit: None,
                 initial_stream_window_size: None,
