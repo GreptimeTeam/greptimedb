@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use servers::http::HttpOptions;
 use servers::Mode;
 
+use crate::heartbeat::HeartBeatOptions;
 use crate::service_config::{
     GrpcOptions, InfluxdbOptions, MysqlOptions, OpentsdbOptions, PostgresOptions, PromStoreOptions,
     PrometheusOptions,
@@ -27,8 +28,7 @@ use crate::service_config::{
 #[serde(default)]
 pub struct FrontendOptions {
     pub mode: Mode,
-    pub heartbeat_interval_millis: u64,
-    pub retry_interval_millis: u64,
+    pub heartbeat: HeartBeatOptions,
     pub http_options: Option<HttpOptions>,
     pub grpc_options: Option<GrpcOptions>,
     pub mysql_options: Option<MysqlOptions>,
@@ -45,8 +45,7 @@ impl Default for FrontendOptions {
     fn default() -> Self {
         Self {
             mode: Mode::Standalone,
-            heartbeat_interval_millis: 5000,
-            retry_interval_millis: 5000,
+            heartbeat: HeartBeatOptions::default(),
             http_options: Some(HttpOptions::default()),
             grpc_options: Some(GrpcOptions::default()),
             mysql_options: Some(MysqlOptions::default()),
