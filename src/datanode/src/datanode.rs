@@ -317,6 +317,20 @@ impl Default for FlushConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HeartBeatOptions {
+    pub heartbeat_interval_millis: u64,
+}
+
+impl Default for HeartBeatOptions {
+    fn default() -> Self {
+        Self {
+            heartbeat_interval_millis: 5000,
+        }
+    }
+}
+
 impl From<&DatanodeOptions> for SchedulerConfig {
     fn from(value: &DatanodeOptions) -> Self {
         Self {
@@ -354,7 +368,7 @@ pub struct DatanodeOptions {
     pub rpc_addr: String,
     pub rpc_hostname: Option<String>,
     pub rpc_runtime_size: usize,
-    pub heartbeat_interval_millis: u64,
+    pub heartbeat: HeartBeatOptions,
     pub http_opts: HttpOptions,
     pub meta_client_options: Option<MetaClientOptions>,
     pub wal: WalConfig,
@@ -378,7 +392,7 @@ impl Default for DatanodeOptions {
             storage: StorageConfig::default(),
             procedure: ProcedureConfig::default(),
             logging: LoggingOptions::default(),
-            heartbeat_interval_millis: 5000,
+            heartbeat: HeartBeatOptions::default(),
         }
     }
 }

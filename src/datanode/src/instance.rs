@@ -148,7 +148,7 @@ impl Instance {
                     meta_client,
                     catalog_manager,
                     Arc::new(handlers_executor),
-                    opts.heartbeat_interval_millis,
+                    opts.heartbeat.heartbeat_interval_millis,
                     region_alive_keepers,
                 ))
             }
@@ -248,7 +248,7 @@ impl Instance {
 
                 let region_alive_keepers = Arc::new(RegionAliveKeepers::new(
                     engine_manager.clone(),
-                    opts.heartbeat_interval_millis,
+                    opts.heartbeat.heartbeat_interval_millis,
                 ));
 
                 let catalog_manager = Arc::new(RemoteCatalogManager::new(
