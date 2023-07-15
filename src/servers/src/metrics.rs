@@ -43,6 +43,7 @@ pub(crate) const METRIC_HTTP_INFLUXDB_WRITE_ELAPSED: &str = "servers.http_influx
 pub(crate) const METRIC_HTTP_PROM_STORE_WRITE_ELAPSED: &str =
     "servers.http_prometheus_write_elapsed";
 pub(crate) const METRIC_HTTP_PROM_STORE_READ_ELAPSED: &str = "servers.http_prometheus_read_elapsed";
+pub(crate) const METRIC_HTTP_OPENTELEMETRY_ELAPSED: &str = "servers.http_otlp_elapsed";
 pub(crate) const METRIC_TCP_OPENTSDB_LINE_WRITE_ELAPSED: &str =
     "servers.opentsdb_line_write_elapsed";
 

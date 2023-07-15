@@ -77,6 +77,7 @@ futures-util = "0.3"
 greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "9b26cca2132df83916692cc6fc092a26a1a76f0b" }
 itertools = "0.10"
 lazy_static = "1.4"
+opentelemetry-proto = { version = "0.2", features = ["gen-tonic", "metrics"] }
 parquet = "40.0"
 paste = "1.0"
 prost = "0.11"

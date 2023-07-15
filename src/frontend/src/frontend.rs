@@ -19,8 +19,8 @@ use servers::http::HttpOptions;
 use servers::Mode;
 
 use crate::service_config::{
-    GrpcOptions, InfluxdbOptions, MysqlOptions, OpentsdbOptions, PostgresOptions, PromStoreOptions,
-    PrometheusOptions,
+    GrpcOptions, InfluxdbOptions, MysqlOptions, OpentsdbOptions, OtlpOptions, PostgresOptions,
+    PromStoreOptions, PrometheusOptions,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -37,6 +37,7 @@ pub struct FrontendOptions {
     pub influxdb_options: Option<InfluxdbOptions>,
     pub prom_store_options: Option<PromStoreOptions>,
     pub prometheus_options: Option<PrometheusOptions>,
+    pub otlp_options: Option<OtlpOptions>,
     pub meta_client_options: Option<MetaClientOptions>,
     pub logging: LoggingOptions,
 }
@@ -55,6 +56,7 @@ impl Default for FrontendOptions {
             influxdb_options: Some(InfluxdbOptions::default()),
             prom_store_options: Some(PromStoreOptions::default()),
             prometheus_options: Some(PrometheusOptions::default()),
+            otlp_options: Some(OtlpOptions::default()),
             meta_client_options: None,
             logging: LoggingOptions::default(),
         }

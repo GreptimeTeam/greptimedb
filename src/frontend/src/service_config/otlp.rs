@@ -12,20 +12,26 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod grpc;
-pub mod influxdb;
-pub mod mysql;
-pub mod opentsdb;
-pub mod otlp;
-pub mod postgres;
-pub mod prom_store;
-pub mod prometheus;
+use serde::{Deserialize, Serialize};
 
-pub use grpc::GrpcOptions;
-pub use influxdb::InfluxdbOptions;
-pub use mysql::MysqlOptions;
-pub use opentsdb::OpentsdbOptions;
-pub use otlp::OtlpOptions;
-pub use postgres::PostgresOptions;
-pub use prom_store::PromStoreOptions;
-pub use prometheus::PrometheusOptions;
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct OtlpOptions {
+    pub enable: bool,
+}
+
+impl Default for OtlpOptions {
+    fn default() -> Self {
+        Self { enable: true }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_otlp_options() {
+        let default = OtlpOptions::default();
+        assert!(default.enable);
+    }
+}
