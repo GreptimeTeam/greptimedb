@@ -508,12 +508,12 @@ pub async fn test_status_api(store_type: StorageType) {
     assert_eq!(res_get.status(), StatusCode::OK);
 
     let res_body = res_get.text().await;
-    assert_eq!(true, res_body.contains("{\"source_time\""));
-    assert_eq!(true, res_body.contains("\"commit\":"));
-    assert_eq!(true, res_body.contains("\"branch\":"));
-    assert_eq!(true, res_body.contains("\"rustc_version\":"));
-    assert_eq!(true, res_body.contains("\"hostname\":"));
-    assert_eq!(true, res_body.contains("\"version\":"));
+    assert!(res_body.contains("{\"source_time\""));
+    assert!(res_body.contains("\"commit\":"));
+    assert!(res_body.contains("\"branch\":"));
+    assert!(res_body.contains("\"rustc_version\":"));
+    assert!(res_body.contains("\"hostname\":"));
+    assert!(res_body.contains("\"version\":"));
 }
 
 pub async fn test_config_api(store_type: StorageType) {
