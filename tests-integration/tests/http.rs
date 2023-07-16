@@ -514,6 +514,7 @@ pub async fn test_config_api(store_type: StorageType) {
 
     [heartbeat]
     interval_millis = 5000
+    retry_interval_millis = 5000
 
     [http_opts]
     addr = "127.0.0.1:4000"
