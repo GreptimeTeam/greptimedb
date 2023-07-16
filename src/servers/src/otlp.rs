@@ -68,9 +68,9 @@ fn encode_metrics(metric: &Metric) -> Result<Option<InsertRequest>> {
         let inserts = match data {
             metric::Data::Gauge(gauge) => encode_gauge(name, gauge)?,
             metric::Data::Sum(sum) => encode_sum(name, sum)?,
-            _ => {
-                todo!()
-            }
+            metric::Data::Histogram(hist) => encode_histogram(name, hist)?,
+            metric::Data::ExponentialHistogram(hist) => encode_exponential_histogram(name, hist)?,
+            metric::Data::Summary(summary) => encode_summary(name, summary)?,
         };
         Ok(Some(inserts))
     } else {
@@ -114,7 +114,6 @@ fn encode_gauge(name: &str, gauge: &Gauge) -> Result<InsertRequest> {
     let mut lines = LinesWriter::with_lines(gauge.data_points.len());
 
     for data_point in &gauge.data_points {
-        // TODO(sunng87): pull up this
         for attr in &data_point.attributes {
             write_attribute(&mut lines, attr)?;
         }
@@ -149,8 +148,175 @@ fn encode_gauge(name: &str, gauge: &Gauge) -> Result<InsertRequest> {
 }
 
 /// encode this sum metric
-fn encode_sum(_name: &str, _sum: &Sum) -> Result<InsertRequest> {
-    todo!()
+///
+/// `aggregation_temporality` and `monotonic` are ignored for now
+fn encode_sum(name: &str, sum: &Sum) -> Result<InsertRequest> {
+    let mut lines = LinesWriter::with_lines(sum.data_points.len());
+
+    for data_point in &sum.data_points {
+        for attr in &data_point.attributes {
+            write_attribute(&mut lines, attr)?;
+        }
+
+        write_timestamp(&mut lines, data_point.time_unix_nano as i64)?;
+
+        match data_point.value {
+            Some(number_data_point::Value::AsInt(val)) => {
+                // we coerce all values to f64
+                lines
+                    .write_f64(GREPTIME_VALUE, val as f64)
+                    .context(error::OptlMetricsWriteSnafu)?
+            }
+            Some(number_data_point::Value::AsDouble(val)) => {
+                lines
+                    .write_f64(GREPTIME_VALUE, val)
+                    .context(error::OptlMetricsWriteSnafu)?
+            }
+            _ => {}
+        }
+
+        lines.commit();
+    }
+
+    let (columns, row_count) = lines.finish();
+    Ok(InsertRequest {
+        table_name: normalize_otlp_name(name),
+        region_number: 0,
+        columns,
+        row_count,
+    })
+}
+
+fn encode_histogram(name: &str, hist: &Histogram) -> Result<InsertRequest> {
+    let mut lines = LinesWriter::with_lines(hist.data_points.len());
+
+    for data_point in &hist.data_points {
+        for attr in &data_point.attributes {
+            write_attribute(&mut lines, attr)?;
+        }
+
+        write_timestamp(&mut lines, data_point.time_unix_nano as i64)?;
+
+        for (idx, count) in data_point.bucket_counts.iter().enumerate() {
+            // here we don't store bucket boundary
+            lines
+                .write_u64(&format!("bucket_{}", idx), *count)
+                .context(error::OptlMetricsWriteSnafu)?;
+        }
+
+        if let Some(min) = data_point.min {
+            lines
+                .write_f64("min", min)
+                .context(error::OptlMetricsWriteSnafu)?;
+        }
+
+        if let Some(max) = data_point.max {
+            lines
+                .write_f64("max", max)
+                .context(error::OptlMetricsWriteSnafu)?;
+        }
+
+        lines.commit();
+    }
+
+    let (columns, row_count) = lines.finish();
+    Ok(InsertRequest {
+        table_name: normalize_otlp_name(name),
+        region_number: 0,
+        columns,
+        row_count,
+    })
+}
+
+fn encode_exponential_histogram(name: &str, hist: &ExponentialHistogram) -> Result<InsertRequest> {
+    let mut lines = LinesWriter::with_lines(hist.data_points.len());
+
+    for data_point in &hist.data_points {
+        for attr in &data_point.attributes {
+            write_attribute(&mut lines, attr)?;
+        }
+
+        write_timestamp(&mut lines, data_point.time_unix_nano as i64)?;
+
+        // TODO(sunng87): confirm if this working
+        if let Some(positive_buckets) = &data_point.positive {
+            for (idx, count) in positive_buckets.bucket_counts.iter().enumerate() {
+                // here we don't store bucket boundary
+                lines
+                    .write_u64(
+                        &format!("bucket_{}", idx + positive_buckets.offset as usize),
+                        *count,
+                    )
+                    .context(error::OptlMetricsWriteSnafu)?;
+            }
+        }
+
+        if let Some(negative_buckets) = &data_point.negative {
+            for (idx, count) in negative_buckets.bucket_counts.iter().enumerate() {
+                lines
+                    .write_u64(
+                        &format!("bucket_{}", idx + negative_buckets.offset as usize),
+                        *count,
+                    )
+                    .context(error::OptlMetricsWriteSnafu)?;
+            }
+        }
+
+        if let Some(min) = data_point.min {
+            lines
+                .write_f64("min", min)
+                .context(error::OptlMetricsWriteSnafu)?;
+        }
+
+        if let Some(max) = data_point.max {
+            lines
+                .write_f64("max", max)
+                .context(error::OptlMetricsWriteSnafu)?;
+        }
+
+        lines.commit();
+    }
+
+    let (columns, row_count) = lines.finish();
+    Ok(InsertRequest {
+        table_name: normalize_otlp_name(name),
+        region_number: 0,
+        columns,
+        row_count,
+    })
+}
+
+fn encode_summary(name: &str, summary: &Summary) -> Result<InsertRequest> {
+    let mut lines = LinesWriter::with_lines(summary.data_points.len());
+
+    for data_point in &summary.data_points {
+        for attr in &data_point.attributes {
+            write_attribute(&mut lines, attr)?;
+        }
+
+        write_timestamp(&mut lines, data_point.time_unix_nano as i64)?;
+
+        for quantile in &data_point.quantile_values {
+            // here we don't store bucket boundary
+            lines
+                .write_f64(&format!("p{:02}", quantile.quantile), quantile.value)
+                .context(error::OptlMetricsWriteSnafu)?;
+        }
+
+        lines
+            .write_u64("count", data_point.count)
+            .context(error::OptlMetricsWriteSnafu)?;
+
+        lines.commit();
+    }
+
+    let (columns, row_count) = lines.finish();
+    Ok(InsertRequest {
+        table_name: normalize_otlp_name(name),
+        region_number: 0,
+        columns,
+        row_count,
+    })
 }
 
 #[cfg(test)]
