@@ -385,8 +385,8 @@ pub fn scalar_value_to_timestamp(scalar: &ScalarValue) -> Option<Timestamp> {
 /// Convert [ScalarValue] to [Interval].
 pub fn scalar_value_to_interval(scalar: &ScalarValue) -> Option<Interval> {
     match scalar {
-        ScalarValue::IntervalYearMonth(_) => todo!(),
-        ScalarValue::IntervalDayTime(_) => todo!(),
+        ScalarValue::IntervalYearMonth(v) => v.map(Interval::from_i32),
+        ScalarValue::IntervalDayTime(v) => v.map(Interval::from_i64),
         ScalarValue::IntervalMonthDayNano(v) => v.map(Interval::from_i128),
         _ => None,
     }
@@ -1467,6 +1467,7 @@ mod tests {
         check_as_value_ref!(Float64, OrderedF64::from(16.0));
         check_as_value_ref!(Timestamp, Timestamp::new_millisecond(1));
         check_as_value_ref!(Time, Time::new_millisecond(1));
+        check_as_value_ref!(Interval, Interval::new(1, 2, 3));
 
         assert_eq!(
             ValueRef::String("hello"),

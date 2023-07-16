@@ -103,3 +103,11 @@ DROP TABLE test_unixtime;
 
 Affected Rows: 1
 
+select Interval '1 year 2 months 3 days 4 hours 5 minutes 6 seconds 100 microseconds';
+
++---------------------------------------------------------+
+| IntervalMonthDayNano("1109194275255040973236744059552") |
++---------------------------------------------------------+
+| 0 years 14 mons 3 days 4 hours 5 mins 6.000100000 secs  |
++---------------------------------------------------------+
+

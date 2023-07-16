@@ -113,3 +113,26 @@ macro_rules! define_interval_with_unit {
 define_interval_with_unit!(YearMonth, i32);
 define_interval_with_unit!(DayTime, i64);
 define_interval_with_unit!(MonthDayNano, i128);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_interval_scalar() {
+        let interval = IntervalYearMonth::new(1000);
+        assert_eq!(interval, interval.as_scalar_ref());
+        assert_eq!(interval, interval.to_owned_scalar());
+        assert_eq!(1000, interval.into_native());
+
+        let interval = IntervalDayTime::new(1000);
+        assert_eq!(interval, interval.as_scalar_ref());
+        assert_eq!(interval, interval.to_owned_scalar());
+        assert_eq!(1000, interval.into_native());
+
+        let interval = IntervalMonthDayNano::new(1000);
+        assert_eq!(interval, interval.as_scalar_ref());
+        assert_eq!(interval, interval.to_owned_scalar());
+        assert_eq!(1000, interval.into_native());
+    }
+}

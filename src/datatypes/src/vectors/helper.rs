@@ -349,7 +349,7 @@ mod tests {
     };
     use arrow::datatypes::{Field, Int32Type};
     use common_time::time::Time;
-    use common_time::{Date, DateTime};
+    use common_time::{Date, DateTime, Interval};
 
     use super::*;
     use crate::value::Value;
@@ -495,6 +495,22 @@ mod tests {
         assert_eq!(3, vector.len());
         for i in 0..vector.len() {
             assert_eq!(Value::Time(Time::new_second(42)), vector.get(i));
+        }
+    }
+
+    #[test]
+    fn test_try_from_scalar_interval_value() {
+        let vector =
+            Helper::try_from_scalar_value(ScalarValue::IntervalMonthDayNano(Some(2000)), 3)
+                .unwrap();
+
+        assert_eq!(
+            ConcreteDataType::interval_month_day_nano_datatype(),
+            vector.data_type()
+        );
+        assert_eq!(3, vector.len());
+        for i in 0..vector.len() {
+            assert_eq!(Value::Interval(Interval::from_i128(2000)), vector.get(i));
         }
     }
 }

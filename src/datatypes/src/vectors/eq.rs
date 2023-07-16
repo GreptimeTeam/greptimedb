@@ -212,6 +212,16 @@ mod tests {
         assert_vector_ref_eq(Arc::new(TimeMillisecondVector::from_values([100, 120])));
         assert_vector_ref_eq(Arc::new(TimeMicrosecondVector::from_values([100, 120])));
         assert_vector_ref_eq(Arc::new(TimeNanosecondVector::from_values([100, 120])));
+
+        assert_vector_ref_eq(Arc::new(IntervalYearMonthVector::from_values([
+            1000, 2000, 3000, 4000,
+        ])));
+        assert_vector_ref_eq(Arc::new(IntervalDayTimeVector::from_values([
+            1000, 2000, 3000, 4000,
+        ])));
+        assert_vector_ref_eq(Arc::new(IntervalMonthDayNanoVector::from_values([
+            1000, 2000, 3000, 4000,
+        ])));
     }
 
     #[test]
@@ -263,6 +273,19 @@ mod tests {
         assert_vector_ref_ne(
             Arc::new(TimeMicrosecondVector::from_values([100, 120])),
             Arc::new(TimeMicrosecondVector::from_values([200, 220])),
+        );
+
+        assert_vector_ref_ne(
+            Arc::new(IntervalDayTimeVector::from_values([1000, 2000])),
+            Arc::new(IntervalDayTimeVector::from_values([2100, 1200])),
+        );
+        assert_vector_ref_ne(
+            Arc::new(IntervalMonthDayNanoVector::from_values([1000, 2000])),
+            Arc::new(IntervalMonthDayNanoVector::from_values([2100, 1200])),
+        );
+        assert_vector_ref_ne(
+            Arc::new(IntervalYearMonthVector::from_values([1000, 2000])),
+            Arc::new(IntervalYearMonthVector::from_values([2100, 1200])),
         );
     }
 }

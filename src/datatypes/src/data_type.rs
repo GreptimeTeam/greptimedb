@@ -586,6 +586,10 @@ mod tests {
         assert!(ConcreteDataType::time_millisecond_datatype().is_stringifiable());
         assert!(ConcreteDataType::time_microsecond_datatype().is_stringifiable());
         assert!(ConcreteDataType::time_nanosecond_datatype().is_stringifiable());
+
+        assert!(ConcreteDataType::interval_year_month_datatype().is_stringifiable());
+        assert!(ConcreteDataType::interval_day_time_datatype().is_stringifiable());
+        assert!(ConcreteDataType::interval_month_day_nano_datatype().is_stringifiable());
     }
 
     #[test]
@@ -604,6 +608,9 @@ mod tests {
         assert!(ConcreteDataType::time_millisecond_datatype().is_signed());
         assert!(ConcreteDataType::time_microsecond_datatype().is_signed());
         assert!(ConcreteDataType::time_nanosecond_datatype().is_signed());
+        assert!(ConcreteDataType::interval_year_month_datatype().is_signed());
+        assert!(ConcreteDataType::interval_day_time_datatype().is_signed());
+        assert!(ConcreteDataType::interval_month_day_nano_datatype().is_signed());
 
         assert!(!ConcreteDataType::uint8_datatype().is_signed());
         assert!(!ConcreteDataType::uint16_datatype().is_signed());
@@ -630,6 +637,9 @@ mod tests {
         assert!(!ConcreteDataType::time_millisecond_datatype().is_unsigned());
         assert!(!ConcreteDataType::time_microsecond_datatype().is_unsigned());
         assert!(!ConcreteDataType::time_nanosecond_datatype().is_unsigned());
+        assert!(!ConcreteDataType::interval_year_month_datatype().is_unsigned());
+        assert!(!ConcreteDataType::interval_day_time_datatype().is_unsigned());
+        assert!(!ConcreteDataType::interval_month_day_nano_datatype().is_unsigned());
 
         assert!(ConcreteDataType::uint8_datatype().is_unsigned());
         assert!(ConcreteDataType::uint16_datatype().is_unsigned());

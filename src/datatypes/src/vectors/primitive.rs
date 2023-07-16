@@ -495,6 +495,7 @@ mod tests {
         Time64NanosecondArray,
     };
     use arrow::datatypes::DataType as ArrowDataType;
+    use arrow_array::{IntervalDayTimeArray, IntervalYearMonthArray};
     use serde_json;
 
     use super::*;
@@ -506,6 +507,7 @@ mod tests {
         TimestampMicrosecondVector, TimestampMillisecondVector, TimestampNanosecondVector,
         TimestampSecondVector,
     };
+    use crate::vectors::{IntervalDayTimeVector, IntervalYearMonthVector};
 
     fn check_vec(v: Int32Vector) {
         assert_eq!(4, v.len());
@@ -710,5 +712,29 @@ mod tests {
         // Test convert error
         let array: ArrayRef = Arc::new(Int32Array::from(vec![1i32, 2, 3]));
         assert!(TimestampSecondVector::try_from_arrow_timestamp_array(array).is_err());
+    }
+
+    #[test]
+    fn test_try_from_arrow_interval_array() {
+        let array: ArrayRef = Arc::new(IntervalYearMonthArray::from(vec![1000, 2000, 3000]));
+        let vector = IntervalYearMonthVector::try_from_arrow_array(array).unwrap();
+        assert_eq!(
+            IntervalYearMonthVector::from_values(vec![1000, 2000, 3000]),
+            vector
+        );
+
+        let array: ArrayRef = Arc::new(IntervalDayTimeArray::from(vec![1000, 2000, 3000]));
+        let vector = IntervalDayTimeVector::try_from_arrow_array(array).unwrap();
+        assert_eq!(
+            IntervalDayTimeVector::from_values(vec![1000, 2000, 3000]),
+            vector
+        );
+
+        let array: ArrayRef = Arc::new(IntervalYearMonthArray::from(vec![1000, 2000, 3000]));
+        let vector = IntervalYearMonthVector::try_from_arrow_array(array).unwrap();
+        assert_eq!(
+            IntervalYearMonthVector::from_values(vec![1000, 2000, 3000]),
+            vector
+        );
     }
 }

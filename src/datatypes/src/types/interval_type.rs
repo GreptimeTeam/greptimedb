@@ -133,3 +133,40 @@ macro_rules! impl_data_type_for_interval {
 impl_data_type_for_interval!(YearMonth, i32);
 impl_data_type_for_interval!(DayTime, i64);
 impl_data_type_for_interval!(MonthDayNano, i128);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_interval_type_unit() {
+        assert_eq!(
+            IntervalUnit::DayTime,
+            IntervalType::DayTime(IntervalDayTimeType).unit()
+        );
+        assert_eq!(
+            IntervalUnit::MonthDayNano,
+            IntervalType::MonthDayNano(IntervalMonthDayNanoType).unit()
+        );
+        assert_eq!(
+            IntervalUnit::YearMonth,
+            IntervalType::YearMonth(IntervalYearMonthType).unit()
+        );
+    }
+
+    #[test]
+    fn test_interval_as_arrow_type() {
+        assert_eq!(
+            ArrowDataType::Interval(ArrowIntervalUnit::DayTime),
+            IntervalType::DayTime(IntervalDayTimeType).as_arrow_type()
+        );
+        assert_eq!(
+            ArrowDataType::Interval(ArrowIntervalUnit::MonthDayNano),
+            IntervalType::MonthDayNano(IntervalMonthDayNanoType).as_arrow_type()
+        );
+        assert_eq!(
+            ArrowDataType::Interval(ArrowIntervalUnit::YearMonth),
+            IntervalType::YearMonth(IntervalYearMonthType).as_arrow_type()
+        );
+    }
+}
