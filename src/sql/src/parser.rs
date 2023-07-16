@@ -19,12 +19,12 @@ use sqlparser::parser::{Parser, ParserError};
 use sqlparser::tokenizer::{Token, TokenWithLocation};
 
 use crate::ast::{Expr, ObjectName};
-use crate::error::{self, InvalidDatabaseNameSnafu, InvalidTableNameSnafu, Result, SyntaxSnafu};
+use crate::error::{self, InvalidTableNameSnafu, Result, SyntaxSnafu};
 use crate::parsers::tql_parser;
 use crate::statements::describe::DescribeTable;
 use crate::statements::drop::DropTable;
 use crate::statements::explain::Explain;
-use crate::statements::show::{ShowCreateTable, ShowDatabases, ShowKind, ShowTables};
+use crate::statements::show::{ShowDatabases, ShowKind};
 use crate::statements::statement::Statement;
 
 /// GrepTime SQL parser context, a simple wrapper for Datafusion SQL parser.
@@ -153,111 +153,111 @@ impl<'a> ParserContext<'a> {
         .fail()
     }
 
-    /// Parses SHOW statements
-    /// todo(hl) support `show settings`/`show create`/`show users` etc.
-    fn parse_show(&mut self) -> Result<Statement> {
-        if self.consume_token("DATABASES") || self.consume_token("SCHEMAS") {
-            self.parse_show_databases()
-        } else if self.matches_keyword(Keyword::TABLES) {
-            let _ = self.parser.next_token();
-            self.parse_show_tables()
-        } else if self.consume_token("CREATE") {
-            if self.consume_token("TABLE") {
-                self.parse_show_create_table()
-            } else {
-                self.unsupported(self.peek_token_as_string())
-            }
-        } else {
-            self.unsupported(self.peek_token_as_string())
-        }
-    }
+    // /// Parses SHOW statements
+    // /// todo(hl) support `show settings`/`show create`/`show users` etc.
+    // fn parse_show(&mut self) -> Result<Statement> {
+    //     if self.consume_token("DATABASES") || self.consume_token("SCHEMAS") {
+    //         self.parse_show_databases()
+    //     } else if self.matches_keyword(Keyword::TABLES) {
+    //         let _ = self.parser.next_token();
+    //         self.parse_show_tables()
+    //     } else if self.consume_token("CREATE") {
+    //         if self.consume_token("TABLE") {
+    //             self.parse_show_create_table()
+    //         } else {
+    //             self.unsupported(self.peek_token_as_string())
+    //         }
+    //     } else {
+    //         self.unsupported(self.peek_token_as_string())
+    //     }
+    // }
 
-    /// Parse SHOW CREATE TABLE statement
-    fn parse_show_create_table(&mut self) -> Result<Statement> {
-        let table_name =
-            self.parser
-                .parse_object_name()
-                .with_context(|_| error::UnexpectedSnafu {
-                    sql: self.sql,
-                    expected: "a table name",
-                    actual: self.peek_token_as_string(),
-                })?;
-        ensure!(
-            !table_name.0.is_empty(),
-            InvalidTableNameSnafu {
-                name: table_name.to_string(),
-            }
-        );
-        Ok(Statement::ShowCreateTable(ShowCreateTable { table_name }))
-    }
+    // /// Parse SHOW CREATE TABLE statement
+    // fn parse_show_create_table(&mut self) -> Result<Statement> {
+    //     let table_name =
+    //         self.parser
+    //             .parse_object_name()
+    //             .with_context(|_| error::UnexpectedSnafu {
+    //                 sql: self.sql,
+    //                 expected: "a table name",
+    //                 actual: self.peek_token_as_string(),
+    //             })?;
+    //     ensure!(
+    //         !table_name.0.is_empty(),
+    //         InvalidTableNameSnafu {
+    //             name: table_name.to_string(),
+    //         }
+    //     );
+    //     Ok(Statement::ShowCreateTable(ShowCreateTable { table_name }))
+    // }
 
-    fn parse_show_tables(&mut self) -> Result<Statement> {
-        let database = match self.parser.peek_token().token {
-            Token::EOF | Token::SemiColon => {
-                return Ok(Statement::ShowTables(ShowTables {
-                    kind: ShowKind::All,
-                    database: None,
-                }));
-            }
+    // fn parse_show_tables(&mut self) -> Result<Statement> {
+    //     let database = match self.parser.peek_token().token {
+    //         Token::EOF | Token::SemiColon => {
+    //             return Ok(Statement::ShowTables(ShowTables {
+    //                 kind: ShowKind::All,
+    //                 database: None,
+    //             }));
+    //         }
 
-            // SHOW TABLES [in | FROM] [DATABASE]
-            Token::Word(w) => match w.keyword {
-                Keyword::IN | Keyword::FROM => {
-                    let _ = self.parser.next_token();
-                    let db_name = self.parser.parse_object_name().with_context(|_| {
-                        error::UnexpectedSnafu {
-                            sql: self.sql,
-                            expected: "a database name",
-                            actual: self.peek_token_as_string(),
-                        }
-                    })?;
+    //         // SHOW TABLES [in | FROM] [DATABASE]
+    //         Token::Word(w) => match w.keyword {
+    //             Keyword::IN | Keyword::FROM => {
+    //                 let _ = self.parser.next_token();
+    //                 let db_name = self.parser.parse_object_name().with_context(|_| {
+    //                     error::UnexpectedSnafu {
+    //                         sql: self.sql,
+    //                         expected: "a database name",
+    //                         actual: self.peek_token_as_string(),
+    //                     }
+    //                 })?;
 
-                    ensure!(
-                        db_name.0.len() == 1,
-                        InvalidDatabaseNameSnafu {
-                            name: db_name.to_string(),
-                        }
-                    );
+    //                 ensure!(
+    //                     db_name.0.len() == 1,
+    //                     InvalidDatabaseNameSnafu {
+    //                         name: db_name.to_string(),
+    //                     }
+    //                 );
 
-                    Some(db_name.to_string())
-                }
+    //                 Some(db_name.to_string())
+    //             }
 
-                _ => None,
-            },
-            _ => None,
-        };
+    //             _ => None,
+    //         },
+    //         _ => None,
+    //     };
 
-        let kind = match self.parser.peek_token().token {
-            Token::EOF | Token::SemiColon => ShowKind::All,
-            // SHOW TABLES [WHERE | LIKE] [EXPR]
-            Token::Word(w) => match w.keyword {
-                Keyword::LIKE => {
-                    let _ = self.parser.next_token();
-                    ShowKind::Like(self.parser.parse_identifier().with_context(|_| {
-                        error::UnexpectedSnafu {
-                            sql: self.sql,
-                            expected: "LIKE",
-                            actual: self.peek_token_as_string(),
-                        }
-                    })?)
-                }
-                Keyword::WHERE => {
-                    let _ = self.parser.next_token();
-                    ShowKind::Where(self.parser.parse_expr().with_context(|_| {
-                        error::UnexpectedSnafu {
-                            sql: self.sql,
-                            expected: "some valid expression",
-                            actual: self.peek_token_as_string(),
-                        }
-                    })?)
-                }
-                _ => return self.unsupported(self.peek_token_as_string()),
-            },
-            _ => return self.unsupported(self.peek_token_as_string()),
-        };
+    //     let kind = match self.parser.peek_token().token {
+    //         Token::EOF | Token::SemiColon => ShowKind::All,
+    //         // SHOW TABLES [WHERE | LIKE] [EXPR]
+    //         Token::Word(w) => match w.keyword {
+    //             Keyword::LIKE => {
+    //                 let _ = self.parser.next_token();
+    //                 ShowKind::Like(self.parser.parse_identifier().with_context(|_| {
+    //                     error::UnexpectedSnafu {
+    //                         sql: self.sql,
+    //                         expected: "LIKE",
+    //                         actual: self.peek_token_as_string(),
+    //                     }
+    //                 })?)
+    //             }
+    //             Keyword::WHERE => {
+    //                 let _ = self.parser.next_token();
+    //                 ShowKind::Where(self.parser.parse_expr().with_context(|_| {
+    //                     error::UnexpectedSnafu {
+    //                         sql: self.sql,
+    //                         expected: "some valid expression",
+    //                         actual: self.peek_token_as_string(),
+    //                     }
+    //                 })?)
+    //             }
+    //             _ => return self.unsupported(self.peek_token_as_string()),
+    //         },
+    //         _ => return self.unsupported(self.peek_token_as_string()),
+    //     };
 
-        Ok(Statement::ShowTables(ShowTables { kind, database }))
-    }
+    //     Ok(Statement::ShowTables(ShowTables { kind, database }))
+    // }
 
     /// Parses DESCRIBE statements
     fn parse_describe(&mut self) -> Result<Statement> {
@@ -387,7 +387,7 @@ impl<'a> ParserContext<'a> {
 
 #[cfg(test)]
 mod tests {
-    use std::assert_matches::assert_matches;
+    // use std::assert_matches::assert_matches;
 
     use datatypes::prelude::ConcreteDataType;
     use sqlparser::ast::{
@@ -399,137 +399,137 @@ mod tests {
     use crate::statements::create::CreateTable;
     use crate::statements::sql_data_type_to_concrete_data_type;
 
-    #[test]
-    pub fn test_show_database_all() {
-        let sql = "SHOW DATABASES";
-        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
-        let stmts = result.unwrap();
-        assert_eq!(1, stmts.len());
+    // #[test]
+    // pub fn test_show_database_all() {
+    //     let sql = "SHOW DATABASES";
+    //     let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
+    //     let stmts = result.unwrap();
+    //     assert_eq!(1, stmts.len());
 
-        assert_matches!(
-            &stmts[0],
-            Statement::ShowDatabases(ShowDatabases {
-                kind: ShowKind::All
-            })
-        );
-    }
+    //     assert_matches!(
+    //         &stmts[0],
+    //         Statement::ShowDatabases(ShowDatabases {
+    //             kind: ShowKind::All
+    //         })
+    //     );
+    // }
 
-    #[test]
-    pub fn test_show_database_like() {
-        let sql = "SHOW DATABASES LIKE test_database";
-        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
-        let stmts = result.unwrap();
-        assert_eq!(1, stmts.len());
+    // #[test]
+    // pub fn test_show_database_like() {
+    //     let sql = "SHOW DATABASES LIKE test_database";
+    //     let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
+    //     let stmts = result.unwrap();
+    //     assert_eq!(1, stmts.len());
 
-        assert_matches!(
-            &stmts[0],
-            Statement::ShowDatabases(ShowDatabases {
-                kind: ShowKind::Like(sqlparser::ast::Ident {
-                    value: _,
-                    quote_style: None,
-                })
-            })
-        );
-    }
+    //     assert_matches!(
+    //         &stmts[0],
+    //         Statement::ShowDatabases(ShowDatabases {
+    //             kind: ShowKind::Like(sqlparser::ast::Ident {
+    //                 value: _,
+    //                 quote_style: None,
+    //             })
+    //         })
+    //     );
+    // }
 
-    #[test]
-    pub fn test_show_database_where() {
-        let sql = "SHOW DATABASES WHERE Database LIKE '%whatever1%' OR Database LIKE '%whatever2%'";
-        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
-        let stmts = result.unwrap();
-        assert_eq!(1, stmts.len());
+    // #[test]
+    // pub fn test_show_database_where() {
+    //     let sql = "SHOW DATABASES WHERE Database LIKE '%whatever1%' OR Database LIKE '%whatever2%'";
+    //     let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
+    //     let stmts = result.unwrap();
+    //     assert_eq!(1, stmts.len());
 
-        assert_matches!(
-            &stmts[0],
-            Statement::ShowDatabases(ShowDatabases {
-                kind: ShowKind::Where(sqlparser::ast::Expr::BinaryOp {
-                    left: _,
-                    right: _,
-                    op: sqlparser::ast::BinaryOperator::Or,
-                })
-            })
-        );
-    }
+    //     assert_matches!(
+    //         &stmts[0],
+    //         Statement::ShowDatabases(ShowDatabases {
+    //             kind: ShowKind::Where(sqlparser::ast::Expr::BinaryOp {
+    //                 left: _,
+    //                 right: _,
+    //                 op: sqlparser::ast::BinaryOperator::Or,
+    //             })
+    //         })
+    //     );
+    // }
 
-    #[test]
-    pub fn test_show_tables_all() {
-        let sql = "SHOW TABLES";
-        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
-        let stmts = result.unwrap();
-        assert_eq!(1, stmts.len());
+    // #[test]
+    // pub fn test_show_tables_all() {
+    //     let sql = "SHOW TABLES";
+    //     let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
+    //     let stmts = result.unwrap();
+    //     assert_eq!(1, stmts.len());
 
-        assert_matches!(
-            &stmts[0],
-            Statement::ShowTables(ShowTables {
-                kind: ShowKind::All,
-                database: None,
-            })
-        );
-    }
+    //     assert_matches!(
+    //         &stmts[0],
+    //         Statement::ShowTables(ShowTables {
+    //             kind: ShowKind::All,
+    //             database: None,
+    //         })
+    //     );
+    // }
 
-    #[test]
-    pub fn test_show_tables_like() {
-        let sql = "SHOW TABLES LIKE test_table";
-        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
-        let stmts = result.unwrap();
-        assert_eq!(1, stmts.len());
+    // #[test]
+    // pub fn test_show_tables_like() {
+    //     let sql = "SHOW TABLES LIKE test_table";
+    //     let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
+    //     let stmts = result.unwrap();
+    //     assert_eq!(1, stmts.len());
 
-        assert_matches!(
-            &stmts[0],
-            Statement::ShowTables(ShowTables {
-                kind: ShowKind::Like(sqlparser::ast::Ident {
-                    value: _,
-                    quote_style: None,
-                }),
-                database: None,
-            })
-        );
+    //     assert_matches!(
+    //         &stmts[0],
+    //         Statement::ShowTables(ShowTables {
+    //             kind: ShowKind::Like(sqlparser::ast::Ident {
+    //                 value: _,
+    //                 quote_style: None,
+    //             }),
+    //             database: None,
+    //         })
+    //     );
 
-        let sql = "SHOW TABLES in test_db LIKE test_table";
-        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
-        let stmts = result.unwrap();
-        assert_eq!(1, stmts.len());
+    //     let sql = "SHOW TABLES in test_db LIKE test_table";
+    //     let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
+    //     let stmts = result.unwrap();
+    //     assert_eq!(1, stmts.len());
 
-        assert_matches!(
-            &stmts[0],
-            Statement::ShowTables(ShowTables {
-                kind: ShowKind::Like(sqlparser::ast::Ident {
-                    value: _,
-                    quote_style: None,
-                }),
-                database: Some(_),
-            })
-        );
-    }
+    //     assert_matches!(
+    //         &stmts[0],
+    //         Statement::ShowTables(ShowTables {
+    //             kind: ShowKind::Like(sqlparser::ast::Ident {
+    //                 value: _,
+    //                 quote_style: None,
+    //             }),
+    //             database: Some(_),
+    //         })
+    //     );
+    // }
 
-    #[test]
-    pub fn test_show_tables_where() {
-        let sql = "SHOW TABLES where name like test_table";
-        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
-        let stmts = result.unwrap();
-        assert_eq!(1, stmts.len());
+    // #[test]
+    // pub fn test_show_tables_where() {
+    //     let sql = "SHOW TABLES where name like test_table";
+    //     let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
+    //     let stmts = result.unwrap();
+    //     assert_eq!(1, stmts.len());
 
-        assert_matches!(
-            &stmts[0],
-            Statement::ShowTables(ShowTables {
-                kind: ShowKind::Where(sqlparser::ast::Expr::Like { .. }),
-                database: None,
-            })
-        );
+    //     assert_matches!(
+    //         &stmts[0],
+    //         Statement::ShowTables(ShowTables {
+    //             kind: ShowKind::Where(sqlparser::ast::Expr::Like { .. }),
+    //             database: None,
+    //         })
+    //     );
 
-        let sql = "SHOW TABLES in test_db where name LIKE test_table";
-        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
-        let stmts = result.unwrap();
-        assert_eq!(1, stmts.len());
+    //     let sql = "SHOW TABLES in test_db where name LIKE test_table";
+    //     let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
+    //     let stmts = result.unwrap();
+    //     assert_eq!(1, stmts.len());
 
-        assert_matches!(
-            &stmts[0],
-            Statement::ShowTables(ShowTables {
-                kind: ShowKind::Where(sqlparser::ast::Expr::Like { .. }),
-                database: Some(_),
-            })
-        );
-    }
+    //     assert_matches!(
+    //         &stmts[0],
+    //         Statement::ShowTables(ShowTables {
+    //             kind: ShowKind::Where(sqlparser::ast::Expr::Like { .. }),
+    //             database: Some(_),
+    //         })
+    //     );
+    // }
 
     #[test]
     pub fn test_explain() {
