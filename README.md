@@ -47,13 +47,9 @@ for years. Based on their best-practices, GreptimeDB is born to give you:
 
 ## Quick Start
 
-### GreptimePlay
+### [GreptimePlay](https://greptime.com/playground)
 
 Try out the features of GreptimeDB right from your browser.
-
-<a href="https://greptime.com/playground" target="_blank"><img
-src="https://www.greptime.com/assets/greptime_play_button_colorful.1bbe2746.png"
-alt="GreptimePlay" width="200px" /></a>
 
 ### Build
 
