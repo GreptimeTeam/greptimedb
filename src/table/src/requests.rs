@@ -297,6 +297,25 @@ pub struct CompactTableRequest {
     pub wait: Option<bool>,
 }
 
+/// Truncate table request
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TruncateTableRequest {
+    pub catalog_name: String,
+    pub schema_name: String,
+    pub table_name: String,
+    pub table_id: TableId,
+}
+
+impl TruncateTableRequest {
+    pub fn table_ref(&self) -> TableReference {
+        TableReference {
+            catalog: &self.catalog_name,
+            schema: &self.schema_name,
+            table: &self.table_name,
+        }
+    }
+}
+
 #[macro_export]
 macro_rules! meter_insert_request {
     ($req: expr) => {

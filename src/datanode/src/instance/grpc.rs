@@ -1,5 +1,3 @@
-// Copyright 2023 Greptime Team
-//
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -15,7 +13,7 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use api::v1::ddl_request::{Expr as DdlExpr, Expr};
+use api::v1::ddl_request::Expr as DdlExpr;
 use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
 use api::v1::{CreateDatabaseExpr, DdlRequest, DeleteRequest, InsertRequests};
@@ -198,7 +196,8 @@ impl Instance {
             DdlExpr::CreateDatabase(expr) => self.handle_create_database(expr, query_ctx).await,
             DdlExpr::DropTable(expr) => self.handle_drop_table(expr).await,
             DdlExpr::FlushTable(expr) => self.handle_flush_table(expr).await,
-            Expr::CompactTable(expr) => self.handle_compact_table(expr).await,
+            DdlExpr::CompactTable(expr) => self.handle_compact_table(expr).await,
+            DdlExpr::TruncateTable(expr) => self.handle_truncate_table(expr).await,
         }
     }
 }
@@ -306,7 +305,7 @@ mod test {
     use api::v1::{
         alter_expr, AddColumn, AddColumns, AlterExpr, Column, ColumnDataType, ColumnDef,
         CreateDatabaseExpr, CreateTableExpr, DropTableExpr, InsertRequest, InsertRequests,
-        QueryRequest, RenameTable, TableId,
+        QueryRequest, RenameTable, TableId, TruncateTableExpr,
     };
     use common_catalog::consts::MITO_ENGINE;
     use common_error::ext::ErrorExt;
@@ -739,6 +738,35 @@ mod test {
 |   | s |   | 2022-12-30T07:09:00 | 1 |
 +---+---+---+---------------------+---+";
         assert_eq!(recordbatches.pretty_print().unwrap(), expected);
+
+        let query = Request::Ddl(DdlRequest {
+            expr: Some(DdlExpr::TruncateTable(TruncateTableExpr {
+                catalog_name: "greptime".to_string(),
+                schema_name: "my_database".to_string(),
+                table_name: "my_table".to_string(),
+                table_id: None,
+            })),
+        });
+
+        let output = instance.do_query(query, QueryContext::arc()).await.unwrap();
+        assert!(matches!(output, Output::AffectedRows(0)));
+        // TODO(DevilExileSu): Validate is an empty table.
+
+        let query = Request::Ddl(DdlRequest {
+            expr: Some(DdlExpr::DropTable(DropTableExpr {
+                catalog_name: "greptime".to_string(),
+                schema_name: "my_database".to_string(),
+                table_name: "my_table".to_string(),
+                table_id: None,
+            })),
+        });
+        let output = instance.do_query(query, QueryContext::arc()).await.unwrap();
+        assert!(matches!(output, Output::AffectedRows(1)));
+        assert!(!instance
+            .catalog_manager
+            .table_exist("greptime", "my_database", "my_table")
+            .await
+            .unwrap());
     }
 
     #[tokio::test(flavor = "multi_thread")]

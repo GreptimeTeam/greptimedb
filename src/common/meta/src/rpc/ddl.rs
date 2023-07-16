@@ -18,9 +18,9 @@ use api::v1::meta::submit_ddl_task_request::Task;
 use api::v1::meta::{
     AlterTableTask as PbAlterTableTask, CreateTableTask as PbCreateTableTask,
     DropTableTask as PbDropTableTask, Partition, SubmitDdlTaskRequest as PbSubmitDdlTaskRequest,
-    SubmitDdlTaskResponse as PbSubmitDdlTaskResponse,
+    SubmitDdlTaskResponse as PbSubmitDdlTaskResponse, TruncateTableTask as PbTruncateTableTask,
 };
-use api::v1::{AlterExpr, CreateTableExpr, DropTableExpr};
+use api::v1::{AlterExpr, CreateTableExpr, DropTableExpr, TruncateTableExpr};
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
@@ -35,6 +35,7 @@ pub enum DdlTask {
     CreateTable(CreateTableTask),
     DropTable(DropTableTask),
     AlterTable(AlterTableTask),
+    TruncateTable(TruncateTableTask),
 }
 
 impl DdlTask {
@@ -63,6 +64,10 @@ impl DdlTask {
     pub fn new_alter_table(alter_table: AlterExpr) -> Self {
         DdlTask::AlterTable(AlterTableTask { alter_table })
     }
+
+    pub fn new_truncate_table(truncate_table: TruncateTableExpr) -> Self {
+        DdlTask::TruncateTable(TruncateTableTask { truncate_table })
+    }
 }
 
 impl TryFrom<Task> for DdlTask {
@@ -74,6 +79,9 @@ impl TryFrom<Task> for DdlTask {
             }
             Task::DropTableTask(drop_table) => Ok(DdlTask::DropTable(drop_table.try_into()?)),
             Task::AlterTableTask(alter_table) => Ok(DdlTask::AlterTable(alter_table.try_into()?)),
+            Task::TruncateTableTask(truncate_table) => {
+                Ok(DdlTask::TruncateTable(truncate_table.try_into()?))
+            }
         }
     }
 }
@@ -102,6 +110,9 @@ impl TryFrom<SubmitDdlTaskRequest> for PbSubmitDdlTaskRequest {
             }),
             DdlTask::AlterTable(task) => Task::AlterTableTask(PbAlterTableTask {
                 alter_table: Some(task.alter_table),
+            }),
+            DdlTask::TruncateTable(task) => Task::TruncateTableTask(PbTruncateTableTask {
+                truncate_table: Some(task.truncate_table),
             }),
         };
 
@@ -334,6 +345,72 @@ impl<'de> Deserialize<'de> for AlterTableTask {
     }
 }
 
+#[derive(Debug, PartialEq)]
+pub struct TruncateTableTask {
+    pub truncate_table: TruncateTableExpr,
+}
+
+impl TruncateTableTask {
+    pub fn table_ref(&self) -> TableReference {
+        TableReference {
+            catalog: &self.truncate_table.catalog_name,
+            schema: &self.truncate_table.schema_name,
+            table: &self.truncate_table.table_name,
+        }
+    }
+
+    pub fn table_name(&self) -> TableName {
+        let table = &self.truncate_table;
+
+        TableName {
+            catalog_name: table.catalog_name.to_string(),
+            schema_name: table.schema_name.to_string(),
+            table_name: table.table_name.to_string(),
+        }
+    }
+}
+
+impl TryFrom<PbTruncateTableTask> for TruncateTableTask {
+    type Error = error::Error;
+
+    fn try_from(pb: PbTruncateTableTask) -> Result<Self> {
+        let truncate_table = pb.truncate_table.context(error::InvalidProtoMsgSnafu {
+            err_msg: "expected truncate_table",
+        })?;
+
+        Ok(TruncateTableTask { truncate_table })
+    }
+}
+
+impl Serialize for TruncateTableTask {
+    fn serialize<S>(&self, serializer: S) -> result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let pb = PbTruncateTableTask {
+            truncate_table: Some(self.truncate_table.clone()),
+        };
+        let buf = pb.encode_to_vec();
+        serializer.serialize_bytes(&buf)
+    }
+}
+
+impl<'de> Deserialize<'de> for TruncateTableTask {
+    fn deserialize<D>(deserializer: D) -> result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let buf = Vec::<u8>::deserialize(deserializer)?;
+        let task: PbTruncateTableTask = PbTruncateTableTask::decode(&*buf)
+            .map_err(|err| serde::de::Error::custom(err.to_string()))?;
+
+        let task = TruncateTableTask::try_from(task)
+            .map_err(|err| serde::de::Error::custom(err.to_string()))?;
+
+        Ok(task)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -343,7 +420,7 @@ mod tests {
     use table::metadata::RawTableInfo;
     use table::test_util::table_info::test_table_info;
 
-    use super::CreateTableTask;
+    use super::*;
 
     #[test]
     fn test_basic_ser_de_create_table_task() {

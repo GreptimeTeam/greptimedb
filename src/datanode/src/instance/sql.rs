@@ -27,7 +27,7 @@ use snafu::prelude::*;
 use sql::ast::ObjectName;
 use sql::statements::statement::Statement;
 use table::engine::TableReference;
-use table::requests::{CreateDatabaseRequest, DropTableRequest};
+use table::requests::{CreateDatabaseRequest, DropTableRequest, TruncateTableRequest};
 
 use crate::error::{
     self, BumpTableIdSnafu, ExecuteSqlSnafu, ExecuteStatementSnafu, NotSupportSqlSnafu,
@@ -148,7 +148,7 @@ impl Instance {
                     table_idents_to_full_name(truncate_table.table_name(), query_ctx.clone())?;
                 let table_ref = TableReference::full(&catalog_name, &schema_name, &table_name);
                 let table = self.sql_handler.get_table(&table_ref).await?;
-                let req = DropTableRequest {
+                let req = TruncateTableRequest {
                     catalog_name,
                     schema_name,
                     table_name,

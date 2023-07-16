@@ -19,7 +19,7 @@ use api::v1::query_request::Query;
 use api::v1::{
     AlterExpr, AuthHeader, CompactTableExpr, CreateTableExpr, DdlRequest, DeleteRequest,
     DropTableExpr, FlushTableExpr, GreptimeRequest, InsertRequests, PromRangeQuery, QueryRequest,
-    RequestHeader,
+    RequestHeader,TruncateTableExpr,
 };
 use arrow_flight::{FlightData, Ticket};
 use common_error::ext::{BoxedError, ErrorExt};
@@ -230,6 +230,14 @@ impl Database {
         let _timer = timer!(metrics::METRIC_GRPC_COMPACT_TABLE);
         self.do_get(Request::Ddl(DdlRequest {
             expr: Some(DdlExpr::CompactTable(expr)),
+        }))
+        .await
+    }
+
+    pub async fn truncate_table(&self, expr: TruncateTableExpr) -> Result<Output> {
+        let _timer = timer!(metrics::METRIC_GRPC_FLUSH_TABLE);
+        self.do_get(Request::Ddl(DdlRequest {
+            expr: Some(DdlExpr::TruncateTable(expr)),
         }))
         .await
     }

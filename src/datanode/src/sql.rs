@@ -47,7 +47,7 @@ pub enum SqlRequest {
     DropTable(DropTableRequest),
     FlushTable(FlushTableRequest),
     CompactTable(CompactTableRequest),
-    TruncateTable(DropTableRequest),
+    TruncateTable(TruncateTableRequest),
 }
 
 // Handler to execute SQL except query
