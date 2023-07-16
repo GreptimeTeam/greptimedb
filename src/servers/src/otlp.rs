@@ -39,7 +39,11 @@ fn normalize_otlp_name(name: &str) -> String {
 /// See
 /// https://github.com/open-telemetry/opentelemetry-proto/blob/main/opentelemetry/proto/metrics/v1/metrics.proto#L162
 /// for data structure of OTLP metrics.
-pub fn to_grpc_insert_requests(request: ExportMetricsServiceRequest) -> Result<InsertRequests> {
+///
+/// Returns `InsertRequests` and total number of rows to ingest
+pub fn to_grpc_insert_requests(
+    request: ExportMetricsServiceRequest,
+) -> Result<(InsertRequests, usize)> {
     let metrics = request
         .resource_metrics
         .iter()
@@ -53,11 +57,12 @@ pub fn to_grpc_insert_requests(request: ExportMetricsServiceRequest) -> Result<I
         }
     }
 
+    let rows = insert_batch.iter().map(|i| i.row_count as usize).sum();
     let inserts = InsertRequests {
         inserts: insert_batch,
     };
 
-    Ok(inserts)
+    Ok((inserts, rows))
 }
 
 fn encode_metrics(metric: &Metric) -> Result<Option<InsertRequest>> {

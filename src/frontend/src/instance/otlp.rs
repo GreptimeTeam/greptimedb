@@ -14,6 +14,7 @@
 
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
+use metrics::counter;
 use opentelemetry_proto::tonic::collector::metrics::v1::{
     ExportMetricsServiceRequest, ExportMetricsServiceResponse,
 };
@@ -24,6 +25,7 @@ use session::context::QueryContextRef;
 use snafu::ResultExt;
 
 use crate::instance::Instance;
+use crate::metrics::OTLP_METRICS_ROWS;
 
 #[async_trait]
 impl OpenTelemetryProtocolHandler for Instance {
@@ -32,16 +34,17 @@ impl OpenTelemetryProtocolHandler for Instance {
         request: ExportMetricsServiceRequest,
         ctx: QueryContextRef,
     ) -> ServerResult<ExportMetricsServiceResponse> {
-        let requests = otlp::to_grpc_insert_requests(request)?;
+        let (requests, rows) = otlp::to_grpc_insert_requests(request)?;
         let _ = self
             .handle_inserts(requests, ctx)
             .await
             .map_err(BoxedError::new)
             .context(error::ExecuteGrpcQuerySnafu)?;
 
-        // TODO(sunng97): metrics
-        // counter!(OTLP_REMOTE_WRITE_SAMPLES, samples as u64);
+        counter!(OTLP_METRICS_ROWS, rows as u64);
+
         let resp = ExportMetricsServiceResponse {
+            // TODO(sunng87): add support for partial_success in future patch
             partial_success: None,
         };
         Ok(resp)
