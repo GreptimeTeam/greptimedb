@@ -51,13 +51,6 @@ pub struct CreateRequest {
     pub options: RegionOptions,
 }
 
-impl CreateRequest {
-    /// Validate the request.
-    fn validate(&self) -> Result<()> {
-        unimplemented!()
-    }
-}
-
 /// Open region request.
 #[derive(Debug)]
 pub struct OpenRequest {

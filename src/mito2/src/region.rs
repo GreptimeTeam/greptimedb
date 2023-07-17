@@ -42,6 +42,14 @@ pub(crate) struct RegionMap {
     regions: RwLock<HashMap<RegionId, MitoRegionRef>>,
 }
 
+impl RegionMap {
+    /// Returns true if the region exists.
+    pub(crate) fn is_region_exists(&self, region_id: RegionId) -> bool {
+        let regions = self.regions.read().unwrap();
+        regions.contains_key(&region_id)
+    }
+}
+
 pub(crate) type RegionMapRef = Arc<RegionMap>;
 
 /// [MitoRegion] builder.

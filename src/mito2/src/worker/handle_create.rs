@@ -14,17 +14,34 @@
 
 //! Handling create request.
 
-use crate::error::Result;
+use snafu::ensure;
+
+use crate::error::{RegionExistsSnafu, Result};
 use crate::worker::request::CreateRequest;
 use crate::worker::RegionWorkerLoop;
 
 impl<S> RegionWorkerLoop<S> {
-    pub(crate) async fn handle_create_request(&mut self, _request: CreateRequest) -> Result<()> {
-        // 1. Checks whether the table exists.
+    pub(crate) async fn handle_create_request(&mut self, request: CreateRequest) -> Result<()> {
+        // Checks whether the table exists.
+        if self.regions.is_region_exists(request.region_id) {
+            ensure!(
+                request.create_if_not_exists,
+                RegionExistsSnafu {
+                    region_id: request.region_id,
+                }
+            );
 
-        // 2. Convert the request into RegionMetadata
+            // Table already exists.
+            return Ok(());
+        }
 
-        // 3. Write manifest
+        // Convert the request into a RegionMetadata and validate it.
+
+        // Create a MitoRegion from the RegionMetadata.
+
+        // Write manifest
+
+        // Insert the MitoRegion into the RegionMap.
         unimplemented!()
     }
 }
