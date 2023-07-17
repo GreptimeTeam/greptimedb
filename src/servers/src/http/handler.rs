@@ -178,7 +178,7 @@ pub struct StatusResponse<'a> {
 pub async fn status() -> Json<StatusResponse<'static>> {
     let hostname = hostname::get()
         .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_else(|_| "localhost".to_string());
+        .unwrap_or_else(|_| "unknown".to_string());
     Json(StatusResponse {
         source_time: env!("SOURCE_TIMESTAMP"),
         commit: env!("GIT_COMMIT"),

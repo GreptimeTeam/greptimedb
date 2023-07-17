@@ -375,7 +375,7 @@ async fn test_health() {
 async fn test_status() {
     let hostname = hostname::get()
         .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_else(|_| "localhost".to_string());
+        .unwrap_or_else(|_| "unknown".to_string());
     let expected_json = http_handler::StatusResponse {
         source_time: env!("SOURCE_TIMESTAMP"),
         commit: env!("GIT_COMMIT"),
