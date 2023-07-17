@@ -41,6 +41,7 @@ derive_builder = "0.12"
 digest = "0.10"
 futures = "0.3"
 hex = { version = "0.4" }
+hostname = "0.3.1"
 http-body = "0.4"
 humantime-serde = "1.1"
 hyper = { version = "0.14", features = ["full"] }
