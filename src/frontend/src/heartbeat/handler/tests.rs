@@ -17,12 +17,12 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use api::v1::meta::HeartbeatResponse;
-use catalog::helper::TableGlobalKey;
 use catalog::remote::KvCacheInvalidator;
 use common_meta::heartbeat::handler::{
     HandlerGroupExecutor, HeartbeatResponseHandlerContext, HeartbeatResponseHandlerExecutor,
 };
 use common_meta::heartbeat::mailbox::{HeartbeatMailbox, MessageMeta};
+use common_meta::helper::TableGlobalKey;
 use common_meta::ident::TableIdent;
 use common_meta::instruction::{Instruction, InstructionReply, SimpleReply};
 use common_meta::table_name::TableName;

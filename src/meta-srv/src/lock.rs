@@ -52,14 +52,14 @@ pub trait DistLock: Send + Sync {
 
 pub type DistLockRef = Arc<dyn DistLock>;
 
-pub(crate) struct DistLockGuard<'a> {
+pub struct DistLockGuard<'a> {
     lock: &'a DistLockRef,
     name: Vec<u8>,
     key: Option<Key>,
 }
 
 impl<'a> DistLockGuard<'a> {
-    pub(crate) fn new(lock: &'a DistLockRef, name: Vec<u8>) -> Self {
+    pub fn new(lock: &'a DistLockRef, name: Vec<u8>) -> Self {
         Self {
             lock,
             name,
@@ -67,7 +67,7 @@ impl<'a> DistLockGuard<'a> {
         }
     }
 
-    pub(crate) async fn lock(&mut self) -> Result<()> {
+    pub async fn lock(&mut self) -> Result<()> {
         if self.key.is_some() {
             return Ok(());
         }

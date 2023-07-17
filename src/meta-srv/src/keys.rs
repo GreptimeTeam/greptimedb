@@ -24,7 +24,6 @@ use crate::error;
 use crate::error::Result;
 use crate::handler::node_stat::Stat;
 
-pub(crate) const REMOVED_PREFIX: &str = "__removed";
 pub(crate) const DN_LEASE_PREFIX: &str = "__meta_dnlease";
 pub(crate) const SEQ_PREFIX: &str = "__meta_seq";
 
@@ -126,10 +125,6 @@ impl TryFrom<LeaseValue> for Vec<u8> {
             })?
             .into_bytes())
     }
-}
-
-pub(crate) fn to_removed_key(key: &str) -> String {
-    format!("{REMOVED_PREFIX}-{key}")
 }
 
 pub fn build_table_route_prefix(catalog: impl AsRef<str>, schema: impl AsRef<str>) -> String {

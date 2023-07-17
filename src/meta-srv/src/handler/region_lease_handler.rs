@@ -17,18 +17,19 @@ use std::sync::Arc;
 
 use api::v1::meta::{HeartbeatRequest, RegionLease, Role};
 use async_trait::async_trait;
-use catalog::helper::TableGlobalKey;
 use common_meta::ident::TableIdent;
 use common_meta::key::TableMetadataManagerRef;
+use common_meta::table_name::TableName;
 use common_meta::ClusterId;
+use common_telemetry::warn;
+use snafu::ResultExt;
 use store_api::storage::{RegionId, RegionNumber};
+use table::metadata::TableId;
 
-use crate::error::Result;
+use crate::error::{Result, TableMetadataManagerSnafu};
 use crate::handler::{HeartbeatAccumulator, HeartbeatHandler};
 use crate::metasrv::Context;
 use crate::procedure::region_failover::{RegionFailoverKey, RegionFailoverManager};
-use crate::service::store::kv::KvStoreRef;
-use crate::table_routes;
 
 /// The lease seconds of a region. It's set by two default heartbeat intervals (5 second × 2) plus
 /// two roundtrip time (2 second × 2 × 2), plus some extra buffer (2 second).
@@ -36,23 +37,42 @@ use crate::table_routes;
 pub(crate) const REGION_LEASE_SECONDS: u64 = 20;
 
 pub(crate) struct RegionLeaseHandler {
-    kv_store: KvStoreRef,
     region_failover_manager: Option<Arc<RegionFailoverManager>>,
-    #[allow(unused)]
     table_metadata_manager: TableMetadataManagerRef,
 }
 
 impl RegionLeaseHandler {
     pub(crate) fn new(
-        kv_store: KvStoreRef,
         region_failover_manager: Option<Arc<RegionFailoverManager>>,
         table_metadata_manager: TableMetadataManagerRef,
     ) -> Self {
         Self {
-            kv_store,
             region_failover_manager,
             table_metadata_manager,
         }
+    }
+
+    async fn find_table_ident(
+        &self,
+        table_id: TableId,
+        table_name: &TableName,
+    ) -> Result<Option<TableIdent>> {
+        let value = self
+            .table_metadata_manager
+            .table_info_manager()
+            .get_old(table_name)
+            .await
+            .context(TableMetadataManagerSnafu)?;
+        Ok(value.map(|x| {
+            let table_info = &x.table_info;
+            TableIdent {
+                catalog: table_info.catalog_name.clone(),
+                schema: table_info.schema_name.clone(),
+                table: table_info.name.clone(),
+                table_id,
+                engine: table_info.meta.engine.clone(),
+            }
+        }))
     }
 
     /// Filter out the regions that are currently in failover.
@@ -96,46 +116,55 @@ impl HeartbeatHandler for RegionLeaseHandler {
         acc: &mut HeartbeatAccumulator,
     ) -> Result<()> {
         let Some(stat) = acc.stat.as_ref() else { return Ok(()) };
+        let datanode_id = stat.id;
 
         let mut datanode_regions = HashMap::new();
         stat.region_stats.iter().for_each(|x| {
-            let key = TableGlobalKey {
-                catalog_name: x.catalog.to_string(),
-                schema_name: x.schema.to_string(),
-                table_name: x.table.to_string(),
-            };
+            let region_id: RegionId = x.id.into();
+            let table_id = region_id.table_id();
+            let table_name = TableName::new(
+                x.catalog.to_string(),
+                x.schema.to_string(),
+                x.table.to_string(),
+            );
             datanode_regions
-                .entry(key)
+                .entry((table_id, table_name))
                 .or_insert_with(Vec::new)
                 .push(RegionId::from(x.id).region_number());
         });
 
-        // TODO(LFC): Retrieve table global values from some cache here.
-        let table_global_values = table_routes::batch_get_table_global_value(
-            &self.kv_store,
-            datanode_regions.keys().collect::<Vec<_>>(),
-        )
-        .await?;
-
         let mut region_leases = Vec::with_capacity(datanode_regions.len());
-        for (table_global_key, local_regions) in datanode_regions {
-            let Some(Some(table_global_value)) = table_global_values.get(&table_global_key) else { continue };
+        for ((table_id, table_name), local_regions) in datanode_regions {
+            let Some(table_ident) = self.find_table_ident(table_id, &table_name).await? else {
+                warn!("Reject region lease request from Datanode {datanode_id} for table id {table_id}. \
+                       Reason: table not found.");
+                continue;
+            };
 
-            let Some(global_regions) = table_global_value.regions_id_map.get(&stat.id) else { continue };
+            let Some(table_region_value) = self
+                .table_metadata_manager
+                .table_region_manager()
+                .get_old(&table_name)
+                .await
+                .context(TableMetadataManagerSnafu)? else {
+                warn!("Reject region lease request from Datanode {datanode_id} for table id {table_id}. \
+                       Reason: table region value not found.");
+                continue;
+            };
+            let Some(global_regions) = table_region_value
+                .region_distribution
+                .get(&datanode_id) else {
+                warn!("Reject region lease request from Datanode {datanode_id} for table id {table_id}. \
+                       Reason: not expected to place the region on it.");
+                continue;
+            };
 
-            // Filter out the designated regions from table global metadata for the given table on the given Datanode.
+            // Filter out the designated regions from table info value for the given table on the given Datanode.
             let designated_regions = local_regions
                 .into_iter()
                 .filter(|x| global_regions.contains(x))
                 .collect::<Vec<_>>();
 
-            let table_ident = TableIdent {
-                catalog: table_global_key.catalog_name.to_string(),
-                schema: table_global_key.schema_name.to_string(),
-                table: table_global_key.table_name.to_string(),
-                table_id: table_global_value.table_id(),
-                engine: table_global_value.engine().to_string(),
-            };
             let designated_regions =
                 self.filter_failover_regions(stat.cluster_id, &table_ident, designated_regions);
 
@@ -160,7 +189,7 @@ mod test {
     use crate::handler::node_stat::{RegionStat, Stat};
     use crate::metasrv::builder::MetaSrvBuilder;
     use crate::service::store::kv::KvBackendAdapter;
-    use crate::test_util;
+    use crate::{table_routes, test_util};
 
     #[tokio::test]
     async fn test_handle_region_lease() {
@@ -171,17 +200,22 @@ mod test {
             .kv_store
             .clone();
 
+        let table_id = 1;
         let table_name = "my_table";
         let table_metadata_manager = Arc::new(TableMetadataManager::new(KvBackendAdapter::wrap(
             kv_store.clone(),
         )));
-        let _ = table_routes::tests::prepare_table_global_value(&kv_store, table_name).await;
+        table_routes::tests::prepare_table_region_and_info_value(
+            &table_metadata_manager,
+            table_name,
+        )
+        .await;
 
         let table_ident = TableIdent {
             catalog: DEFAULT_CATALOG_NAME.to_string(),
             schema: DEFAULT_SCHEMA_NAME.to_string(),
             table: table_name.to_string(),
-            table_id: 1,
+            table_id,
             engine: "mito".to_string(),
         };
         let _ = region_failover_manager
@@ -194,11 +228,8 @@ mod test {
                 region_number: 1,
             });
 
-        let handler = RegionLeaseHandler::new(
-            kv_store,
-            Some(region_failover_manager),
-            table_metadata_manager,
-        );
+        let handler =
+            RegionLeaseHandler::new(Some(region_failover_manager), table_metadata_manager);
 
         let req = HeartbeatRequest {
             duration_since_epoch: 1234,
@@ -210,9 +241,10 @@ mod test {
         let ctx = &mut metasrv.new_ctx();
 
         let acc = &mut HeartbeatAccumulator::default();
-        let new_region_stat = |region_id: u64| -> RegionStat {
+        let new_region_stat = |region_number: RegionNumber| -> RegionStat {
+            let region_id = RegionId::new(table_id, region_number);
             RegionStat {
-                id: region_id,
+                id: region_id.as_u64(),
                 catalog: DEFAULT_CATALOG_NAME.to_string(),
                 schema: DEFAULT_SCHEMA_NAME.to_string(),
                 table: table_name.to_string(),
@@ -228,7 +260,7 @@ mod test {
 
         handler.handle(&req, ctx, acc).await.unwrap();
 
-        // region 1 is during failover and region 3 is not in table global value,
+        // region 1 is during failover and region 3 is not in table region value,
         // so only region 2's lease is extended.
         assert_eq!(acc.region_leases.len(), 1);
         let lease = acc.region_leases.remove(0);

@@ -15,18 +15,19 @@
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use snafu::OptionExt;
+use snafu::{OptionExt, ResultExt};
 use table::metadata::TableId;
 
 use super::{TABLE_NAME_KEY_PATTERN, TABLE_NAME_KEY_PREFIX};
-use crate::error::{InvalidTableMetadataSnafu, Result};
+use crate::error::{Error, InvalidCatalogValueSnafu, InvalidTableMetadataSnafu, Result};
+use crate::helper::{build_table_global_prefix, TableGlobalKey, TableGlobalValue};
 use crate::key::{to_removed_key, TableMetaKey};
 use crate::kv_backend::memory::MemoryKvBackend;
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::store::{CompareAndPutRequest, MoveValueRequest, RangeRequest};
 use crate::table_name::TableName;
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct TableNameKey<'a> {
     pub catalog: &'a str,
     pub schema: &'a str,
@@ -88,6 +89,34 @@ impl<'a> From<&'a TableName> for TableNameKey<'a> {
     }
 }
 
+impl From<TableNameKey<'_>> for TableName {
+    fn from(value: TableNameKey<'_>) -> Self {
+        Self {
+            catalog_name: value.catalog.to_string(),
+            schema_name: value.schema.to_string(),
+            table_name: value.table.to_string(),
+        }
+    }
+}
+
+impl<'a> TryFrom<&'a str> for TableNameKey<'a> {
+    type Error = Error;
+
+    fn try_from(s: &'a str) -> Result<Self> {
+        let captures = TABLE_NAME_KEY_PATTERN
+            .captures(s)
+            .context(InvalidTableMetadataSnafu {
+                err_msg: format!("Illegal TableNameKey format: '{s}'"),
+            })?;
+        // Safety: pass the regex check above
+        Ok(Self {
+            catalog: captures.get(1).unwrap().as_str(),
+            schema: captures.get(2).unwrap().as_str(),
+            table: captures.get(3).unwrap().as_str(),
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub struct TableNameValue {
     table_id: TableId,
@@ -118,7 +147,12 @@ impl TableNameManager {
         Self { kv_backend }
     }
 
-    pub async fn create(&self, key: &TableNameKey<'_>, table_id: TableId) -> Result<bool> {
+    /// Creates a new table name entry. Returns the current [TableNameValue] if the entry already existed.
+    pub async fn create(
+        &self,
+        key: &TableNameKey<'_>,
+        table_id: TableId,
+    ) -> Result<Option<TableNameValue>> {
         let raw_key = key.as_raw_key();
         let value = TableNameValue::new(table_id);
         let raw_value = value.try_as_raw_value()?;
@@ -126,7 +160,46 @@ impl TableNameManager {
             .with_key(raw_key)
             .with_value(raw_value);
         let result = self.kv_backend.compare_and_put(req).await?;
-        Ok(result.success)
+        Ok(if result.success {
+            None
+        } else {
+            result
+                .prev_kv
+                .map(|x| TableNameValue::try_from_raw_value(x.value))
+                .transpose()?
+        })
+    }
+
+    // TODO(LFC): Remove this method when table metadata refactor is done.
+    pub async fn get_old(&self, key: &TableNameKey<'_>) -> Result<Option<TableNameValue>> {
+        let table_global_key = TableGlobalKey {
+            catalog_name: key.catalog.to_string(),
+            schema_name: key.schema.to_string(),
+            table_name: key.table.to_string(),
+        };
+        self.kv_backend
+            .get(table_global_key.to_string().as_bytes())
+            .await?
+            .map(|kv| TableGlobalValue::from_bytes(kv.value()))
+            .transpose()
+            .map(|v| v.map(|v| TableNameValue::new(v.table_id())))
+            .context(InvalidCatalogValueSnafu)
+    }
+
+    // TODO(LFC): Remove this method when table metadata refactor is done.
+    pub async fn tables_old(&self, catalog: &str, schema: &str) -> Result<Vec<String>> {
+        let key = build_table_global_prefix(catalog, schema);
+        let req = RangeRequest::new().with_prefix(key.as_bytes());
+
+        let resp = self.kv_backend.range(req).await?;
+
+        let mut table_names = Vec::with_capacity(resp.kvs.len());
+        for kv in resp.kvs {
+            let key = TableGlobalKey::parse(String::from_utf8_lossy(kv.key()))
+                .context(InvalidCatalogValueSnafu)?;
+            table_names.push(key.table_name);
+        }
+        Ok(table_names)
     }
 
     pub async fn get(&self, key: &TableNameKey<'_>) -> Result<Option<TableNameValue>> {
@@ -175,12 +248,14 @@ mod tests {
         for i in 1..=3 {
             let table_name = format!("table_{}", i);
             let key = TableNameKey::new("my_catalog", "my_schema", &table_name);
-            assert!(manager.create(&key, i).await.unwrap());
+            assert!(manager.create(&key, i).await.unwrap().is_none());
         }
 
         let key = TableNameKey::new("my_catalog", "my_schema", "my_table");
-        assert!(manager.create(&key, 99).await.unwrap());
-        assert!(!manager.create(&key, 99).await.unwrap());
+        assert!(manager.create(&key, 99).await.unwrap().is_none());
+
+        let curr = manager.create(&key, 9).await.unwrap();
+        assert_eq!(Some(TableNameValue::new(99)), curr);
 
         let value = manager.get(&key).await.unwrap().unwrap();
         assert_eq!(value.table_id(), 99);

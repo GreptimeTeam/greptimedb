@@ -234,7 +234,6 @@ impl MetaSrvBuilder {
                 };
 
                 let region_lease_handler = RegionLeaseHandler::new(
-                    kv_store.clone(),
                     region_failover_handler
                         .as_ref()
                         .map(|x| x.region_failover_manager().clone()),

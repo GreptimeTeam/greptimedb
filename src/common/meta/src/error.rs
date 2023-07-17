@@ -92,6 +92,12 @@ pub enum Error {
         err_msg: String,
         location: Location,
     },
+
+    #[snafu(display("Invalid catalog value, source: {}", source))]
+    InvalidCatalogValue {
+        source: common_catalog::error::Error,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -118,6 +124,8 @@ impl ErrorExt for Error {
             }
 
             MetaSrv { source, .. } => source.status_code(),
+
+            InvalidCatalogValue { source, .. } => source.status_code(),
         }
     }
 

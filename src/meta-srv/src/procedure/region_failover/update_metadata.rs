@@ -12,12 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::meta::{TableName, TableRouteValue};
+use api::v1::meta::{TableName as PbTableName, TableRouteValue};
 use async_trait::async_trait;
-use catalog::helper::TableGlobalKey;
 use common_meta::key::TableRouteKey;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::TableRoute;
+use common_meta::table_name::TableName;
 use common_meta::RegionIdent;
 use common_telemetry::info;
 use serde::{Deserialize, Serialize};
@@ -26,8 +26,8 @@ use snafu::{OptionExt, ResultExt};
 use super::invalidate_cache::InvalidateCache;
 use super::{RegionFailoverContext, State};
 use crate::error::{
-    CorruptedTableRouteSnafu, Result, RetryLaterSnafu, TableNotFoundSnafu,
-    TableRouteConversionSnafu,
+    CorruptedTableRouteSnafu, Result, RetryLaterSnafu, TableMetadataManagerSnafu,
+    TableNotFoundSnafu, TableRouteConversionSnafu,
 };
 use crate::lock::keys::table_metadata_lock_key;
 use crate::lock::Opts;
@@ -43,7 +43,7 @@ impl UpdateRegionMetadata {
         Self { candidate }
     }
 
-    /// Updates the metadata of the table. Specifically, the [TableGlobalValue] and [TableRouteValue].
+    /// Updates the metadata of the table.
     async fn update_metadata(
         &self,
         ctx: &RegionFailoverContext,
@@ -52,54 +52,60 @@ impl UpdateRegionMetadata {
         let key = table_metadata_lock_key(failed_region);
         let key = ctx.dist_lock.lock(key, Opts::default()).await?;
 
-        self.update_table_global_value(ctx, failed_region).await?;
+        self.update_table_region_value(ctx, failed_region).await?;
+
         self.update_table_route(ctx, failed_region).await?;
 
         ctx.dist_lock.unlock(key).await?;
         Ok(())
     }
 
-    async fn update_table_global_value(
+    async fn update_table_region_value(
         &self,
         ctx: &RegionFailoverContext,
         failed_region: &RegionIdent,
     ) -> Result<()> {
-        let key = TableGlobalKey {
-            catalog_name: failed_region.table_ident.catalog.clone(),
-            schema_name: failed_region.table_ident.schema.clone(),
-            table_name: failed_region.table_ident.table.clone(),
-        };
-        let mut value = table_routes::get_table_global_value(&ctx.selector_ctx.kv_store, &key)
-            .await?
+        let table_ident = &failed_region.table_ident;
+        let table_id = table_ident.table_id;
+        let table_name = TableName::new(
+            &table_ident.catalog,
+            &table_ident.schema,
+            &table_ident.table,
+        );
+        let value = ctx
+            .table_metadata_manager
+            .table_region_manager()
+            .get_old(&table_name)
+            .await
+            .context(TableMetadataManagerSnafu)?
             .with_context(|| TableNotFoundSnafu {
-                name: common_catalog::format_full_table_name(
-                    &key.catalog_name,
-                    &key.schema_name,
-                    &key.table_name,
-                ),
+                name: table_ident.to_string(),
             })?;
+        let mut region_distribution = value.region_distribution.clone();
 
-        if let Some(mut region_numbers) = value.regions_id_map.remove(&failed_region.datanode_id) {
+        if let Some(mut region_numbers) = region_distribution.remove(&failed_region.datanode_id) {
             region_numbers.retain(|x| *x != failed_region.region_number);
 
             if !region_numbers.is_empty() {
-                let _ = value
-                    .regions_id_map
-                    .insert(failed_region.datanode_id, region_numbers);
+                region_distribution.insert(failed_region.datanode_id, region_numbers);
             }
         }
 
-        let region_numbers = value
-            .regions_id_map
+        let region_numbers = region_distribution
             .entry(self.candidate.id)
             .or_insert_with(Vec::new);
         region_numbers.push(failed_region.region_number);
 
-        table_routes::put_table_global_value(&ctx.selector_ctx.kv_store, &key, &value).await?;
+        ctx.table_metadata_manager
+            .table_region_manager()
+            .put_old(&table_name, region_distribution.clone())
+            .await
+            .context(TableMetadataManagerSnafu)?;
+
         info!(
-            "Region mappings in table global value (key = '{key}') are updated to {:?}. \
+            "Region distribution of table (id = {table_id}) is updated to {:?}. \
             Failed region {} was on Datanode {}.",
-            value.regions_id_map, failed_region.region_number, failed_region.datanode_id,
+            region_distribution, failed_region.region_number, failed_region.datanode_id,
         );
         Ok(())
     }
@@ -109,7 +115,7 @@ impl UpdateRegionMetadata {
         ctx: &RegionFailoverContext,
         failed_region: &RegionIdent,
     ) -> Result<()> {
-        let table_name = TableName {
+        let table_name = PbTableName {
             catalog_name: failed_region.table_ident.catalog.clone(),
             schema_name: failed_region.table_ident.schema.clone(),
             table_name: failed_region.table_ident.table.clone(),
@@ -210,8 +216,10 @@ impl State for UpdateRegionMetadata {
 #[cfg(test)]
 mod tests {
     use api::v1::meta::TableRouteValue;
-    use catalog::helper::TableGlobalValue;
+    use common_meta::key::table_region::TableRegionValue;
     use common_meta::key::TableRouteKey;
+    use common_meta::DatanodeId;
+    use store_api::storage::RegionNumber;
 
     use super::super::tests::{TestingEnv, TestingEnvBuilder};
     use super::{State, *};
@@ -232,40 +240,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_update_table_global_value() {
+    async fn test_update_table_info_value() {
         common_telemetry::init_default_ut_logging();
 
-        async fn test(env: TestingEnv, failed_region: u32, candidate: u64) -> TableGlobalValue {
+        async fn test(
+            env: TestingEnv,
+            failed_region: RegionNumber,
+            candidate: DatanodeId,
+        ) -> TableRegionValue {
             let failed_region = env.failed_region(failed_region).await;
-
-            let key = TableGlobalKey {
-                catalog_name: failed_region.table_ident.catalog.clone(),
-                schema_name: failed_region.table_ident.schema.clone(),
-                table_name: failed_region.table_ident.table.clone(),
-            };
-
-            let original =
-                table_routes::get_table_global_value(&env.context.selector_ctx.kv_store, &key)
-                    .await
-                    .unwrap()
-                    .unwrap();
 
             let state = UpdateRegionMetadata::new(Peer::new(candidate, ""));
             state
-                .update_table_global_value(&env.context, &failed_region)
+                .update_table_region_value(&env.context, &failed_region)
                 .await
                 .unwrap();
 
-            let updated =
-                table_routes::get_table_global_value(&env.context.selector_ctx.kv_store, &key)
-                    .await
-                    .unwrap()
-                    .unwrap();
-
-            // verifies that other data stay untouched
-            assert_eq!(original.node_id, updated.node_id);
-            assert_eq!(original.table_info, updated.table_info);
-            updated
+            let table_ident = failed_region.table_ident;
+            env.context
+                .table_metadata_manager
+                .table_region_manager()
+                .get_old(&TableName::new(
+                    &table_ident.catalog,
+                    &table_ident.schema,
+                    &table_ident.table,
+                ))
+                .await
+                .unwrap()
+                .unwrap()
         }
 
         // Region distribution:
@@ -278,7 +280,7 @@ mod tests {
         let env = TestingEnvBuilder::new().build().await;
         let updated = test(env, 1, 2).await;
 
-        let new_region_id_map = updated.regions_id_map;
+        let new_region_id_map = updated.region_distribution;
         assert_eq!(new_region_id_map.len(), 3);
         assert_eq!(new_region_id_map.get(&1), Some(&vec![2]));
         assert_eq!(new_region_id_map.get(&2), Some(&vec![3, 1]));
@@ -288,7 +290,7 @@ mod tests {
         let env = TestingEnvBuilder::new().build().await;
         let updated = test(env, 3, 3).await;
 
-        let new_region_id_map = updated.regions_id_map;
+        let new_region_id_map = updated.region_distribution;
         assert_eq!(new_region_id_map.len(), 2);
         assert_eq!(new_region_id_map.get(&1), Some(&vec![1, 2]));
         assert_eq!(new_region_id_map.get(&3), Some(&vec![4, 3]));
@@ -297,7 +299,7 @@ mod tests {
         let env = TestingEnvBuilder::new().build().await;
         let updated = test(env, 1, 4).await;
 
-        let new_region_id_map = updated.regions_id_map;
+        let new_region_id_map = updated.region_distribution;
         assert_eq!(new_region_id_map.len(), 4);
         assert_eq!(new_region_id_map.get(&1), Some(&vec![2]));
         assert_eq!(new_region_id_map.get(&2), Some(&vec![3]));
@@ -308,7 +310,7 @@ mod tests {
         let env = TestingEnvBuilder::new().build().await;
         let updated = test(env, 3, 4).await;
 
-        let new_region_id_map = updated.regions_id_map;
+        let new_region_id_map = updated.region_distribution;
         assert_eq!(new_region_id_map.len(), 3);
         assert_eq!(new_region_id_map.get(&1), Some(&vec![1, 2]));
         assert_eq!(new_region_id_map.get(&3), Some(&vec![4]));
@@ -435,7 +437,7 @@ mod tests {
     async fn test_update_metadata_concurrently() {
         common_telemetry::init_default_ut_logging();
 
-        // Test the correctness of concurrently updating the region distribution in table global
+        // Test the correctness of concurrently updating the region distribution in table region
         // value, and region routes in table route value. Region 1 moves to Datanode 2; region 2
         // moves to Datanode 3.
         //
@@ -512,19 +514,15 @@ mod tests {
             assert_eq!(peers.len(), 2);
             assert_eq!(actual, expected);
 
-            let table_global_key = TableGlobalKey {
-                catalog_name,
-                schema_name,
-                table_name,
-            };
-            let table_global_value = table_routes::get_table_global_value(
-                &env.context.selector_ctx.kv_store,
-                &table_global_key,
-            )
-            .await
-            .unwrap()
-            .unwrap();
-            let map = table_global_value.regions_id_map;
+            let map = env
+                .context
+                .table_metadata_manager
+                .table_region_manager()
+                .get_old(&TableName::new(&catalog_name, &schema_name, &table_name))
+                .await
+                .unwrap()
+                .unwrap()
+                .region_distribution;
             assert_eq!(map.len(), 2);
             assert_eq!(map.get(&2), Some(&vec![3, 1]));
             assert_eq!(map.get(&3), Some(&vec![4, 2]));

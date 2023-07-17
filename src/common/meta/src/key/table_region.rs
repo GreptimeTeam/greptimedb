@@ -15,14 +15,17 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
+use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionNumber;
 use table::metadata::TableId;
 
 use super::TABLE_REGION_KEY_PREFIX;
-use crate::error::Result;
+use crate::error::{InvalidCatalogValueSnafu, InvalidTableMetadataSnafu, Result};
+use crate::helper::{TableGlobalKey, TableGlobalValue};
 use crate::key::{to_removed_key, TableMetaKey};
 use crate::kv_backend::KvBackendRef;
-use crate::rpc::store::{CompareAndPutRequest, MoveValueRequest};
+use crate::rpc::store::{CompareAndPutRequest, MoveValueRequest, PutRequest};
+use crate::table_name::TableName;
 use crate::DatanodeId;
 
 pub type RegionDistribution = BTreeMap<DatanodeId, Vec<RegionNumber>>;
@@ -66,6 +69,69 @@ impl TableRegionManager {
             .await?
             .map(|x| TableRegionValue::try_from_raw_value(x.value))
             .transpose()
+    }
+
+    // TODO(LFC): Remove this method when table metadata refactor is done.
+    pub async fn get_old(&self, table_name: &TableName) -> Result<Option<TableRegionValue>> {
+        let key = TableGlobalKey {
+            catalog_name: table_name.catalog_name.clone(),
+            schema_name: table_name.schema_name.clone(),
+            table_name: table_name.table_name.clone(),
+        }
+        .to_string();
+        let raw_key = key.as_bytes();
+
+        self.kv_backend
+            .get(raw_key)
+            .await?
+            .map(|kv| TableGlobalValue::from_bytes(kv.value()))
+            .transpose()
+            .map(|v| {
+                v.map(|v| TableRegionValue {
+                    region_distribution: v.regions_id_map.into_iter().collect(),
+                    version: 0,
+                })
+            })
+            .context(InvalidCatalogValueSnafu)
+    }
+
+    // TODO(LFC): Remove this method when table metadata refactor is done.
+    pub async fn put_old(
+        &self,
+        table_name: &TableName,
+        region_distribution: RegionDistribution,
+    ) -> Result<()> {
+        let key = TableGlobalKey {
+            catalog_name: table_name.catalog_name.clone(),
+            schema_name: table_name.schema_name.clone(),
+            table_name: table_name.table_name.clone(),
+        }
+        .to_string();
+        let raw_key = key.as_bytes();
+
+        let table_info = self
+            .kv_backend
+            .get(raw_key)
+            .await?
+            .map(|kv| TableGlobalValue::from_bytes(kv.value()))
+            .transpose()
+            .context(InvalidCatalogValueSnafu)?
+            .map(|v| v.table_info)
+            .with_context(|| InvalidTableMetadataSnafu {
+                err_msg: format!("table global value for {table_name} is empty"),
+            })?;
+
+        let raw_value = TableGlobalValue {
+            node_id: 0,
+            regions_id_map: region_distribution.into_iter().collect(),
+            table_info,
+        }
+        .as_bytes()
+        .context(InvalidCatalogValueSnafu)?;
+
+        let req = PutRequest::new().with_key(raw_key).with_value(raw_value);
+        self.kv_backend.put(req).await?;
+        Ok(())
     }
 
     /// Compare and put value of key. `expect` is the expected value, if backend's current value associated

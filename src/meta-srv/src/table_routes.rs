@@ -12,20 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
-
 use api::v1::meta::TableRouteValue;
-use catalog::helper::{TableGlobalKey, TableGlobalValue};
+use common_meta::helper::{TableGlobalKey, TableGlobalValue};
+use common_meta::key::table_info::TableInfoValue;
 use common_meta::key::TableRouteKey;
-use common_meta::rpc::store::{BatchGetRequest, MoveValueRequest, PutRequest};
-use common_telemetry::warn;
+use common_meta::rpc::store::PutRequest;
+use common_meta::table_name::TableName;
 use snafu::{OptionExt, ResultExt};
 use table::engine::TableReference;
 
 use crate::error::{
-    DecodeTableRouteSnafu, InvalidCatalogValueSnafu, Result, TableNotFoundSnafu,
+    DecodeTableRouteSnafu, InvalidCatalogValueSnafu, Result, TableMetadataManagerSnafu,
     TableRouteNotFoundSnafu,
 };
+use crate::metasrv::Context;
 use crate::service::store::kv::KvStoreRef;
 
 pub async fn get_table_global_value(
@@ -35,58 +35,6 @@ pub async fn get_table_global_value(
     let kv = kv_store.get(&key.to_raw_key()).await?;
     kv.map(|kv| TableGlobalValue::from_bytes(kv.value).context(InvalidCatalogValueSnafu))
         .transpose()
-}
-
-pub(crate) async fn batch_get_table_global_value(
-    kv_store: &KvStoreRef,
-    keys: Vec<&TableGlobalKey>,
-) -> Result<HashMap<TableGlobalKey, Option<TableGlobalValue>>> {
-    let req = BatchGetRequest {
-        keys: keys.iter().map(|x| x.to_raw_key()).collect::<Vec<_>>(),
-    };
-    let kvs = kv_store.batch_get(req).await?.kvs;
-
-    let mut result = HashMap::with_capacity(kvs.len());
-    for kv in kvs {
-        let key = TableGlobalKey::try_from_raw_key(kv.key()).context(InvalidCatalogValueSnafu)?;
-        let value = TableGlobalValue::from_bytes(kv.value()).context(InvalidCatalogValueSnafu)?;
-        let _ = result.insert(key, Some(value));
-    }
-
-    for key in keys {
-        if !result.contains_key(key) {
-            let _ = result.insert(key.clone(), None);
-        }
-    }
-    Ok(result)
-}
-
-pub(crate) async fn put_table_global_value(
-    kv_store: &KvStoreRef,
-    key: &TableGlobalKey,
-    value: &TableGlobalValue,
-) -> Result<()> {
-    let req = PutRequest {
-        key: key.to_raw_key(),
-        value: value.as_bytes().context(InvalidCatalogValueSnafu)?,
-        prev_kv: false,
-    };
-    let _ = kv_store.put(req).await;
-    Ok(())
-}
-
-pub(crate) async fn remove_table_global_value(
-    kv_store: &KvStoreRef,
-    key: &TableGlobalKey,
-) -> Result<(Vec<u8>, TableGlobalValue)> {
-    let key = key.to_string();
-    let removed_key = crate::keys::to_removed_key(&key);
-    let kv = move_value(kv_store, key.as_bytes(), removed_key)
-        .await?
-        .context(TableNotFoundSnafu { name: key })?;
-    let value: TableGlobalValue =
-        TableGlobalValue::from_bytes(&kv.1).context(InvalidCatalogValueSnafu)?;
-    Ok((kv.0, value))
 }
 
 pub(crate) async fn get_table_route_value(
@@ -114,35 +62,6 @@ pub(crate) async fn put_table_route_value(
     };
     let _ = kv_store.put(req).await?;
     Ok(())
-}
-
-pub(crate) async fn remove_table_route_value(
-    kv_store: &KvStoreRef,
-    key: &TableRouteKey<'_>,
-) -> Result<(Vec<u8>, TableRouteValue)> {
-    let from_key = key.to_string().into_bytes();
-    let to_key = key.removed_key().into_bytes();
-    let v = move_value(kv_store, from_key, to_key)
-        .await?
-        .context(TableRouteNotFoundSnafu {
-            key: key.to_string(),
-        })?;
-    let trv: TableRouteValue = v.1.as_slice().try_into().context(DecodeTableRouteSnafu)?;
-
-    Ok((v.0, trv))
-}
-
-async fn move_value(
-    kv_store: &KvStoreRef,
-    from_key: impl Into<Vec<u8>>,
-    to_key: impl Into<Vec<u8>>,
-) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
-    let from_key = from_key.into();
-    let to_key = to_key.into();
-    let move_req = MoveValueRequest { from_key, to_key };
-    let res = kv_store.move_value(move_req).await?;
-
-    Ok(res.0.map(Into::into))
 }
 
 pub(crate) fn table_route_key(table_id: u32, t: &TableGlobalKey) -> TableRouteKey<'_> {
@@ -177,21 +96,30 @@ pub(crate) async fn fetch_table(
 }
 
 pub(crate) async fn fetch_tables(
-    kv_store: &KvStoreRef,
-    keys: impl Iterator<Item = TableGlobalKey>,
-) -> Result<Vec<(TableGlobalValue, TableRouteValue)>> {
+    ctx: &Context,
+    table_names: Vec<TableName>,
+) -> Result<Vec<(TableInfoValue, TableRouteValue)>> {
+    let kv_store = &ctx.kv_store;
+
     let mut tables = vec![];
     // Maybe we can optimize the for loop in the future, but in general,
     // there won't be many keys, in fact, there is usually just one.
-    for tgk in keys {
-        let tgv = get_table_global_value(kv_store, &tgk).await?;
-        let Some(tgv) = tgv else {
-            warn!("Table global value is absent: {}", tgk);
+    for table_name in table_names {
+        let Some(tgv) = ctx.table_metadata_manager
+            .table_info_manager()
+            .get_old(&table_name)
+            .await
+            .context(TableMetadataManagerSnafu)? else {
             continue;
         };
+        let table_info = &tgv.table_info;
 
-        let trk = table_route_key(tgv.table_id(), &tgk);
-
+        let trk = TableRouteKey {
+            table_id: table_info.ident.table_id,
+            catalog_name: &table_info.catalog_name,
+            schema_name: &table_info.schema_name,
+            table_name: &table_info.name,
+        };
         let trv = get_table_route_value(kv_store, &trk).await?;
 
         tables.push((tgv, trv));
@@ -205,9 +133,11 @@ pub(crate) mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
-    use api::v1::meta::{Peer, Region, RegionRoute, Table, TableName, TableRoute};
+    use api::v1::meta::{Peer, Region, RegionRoute, Table, TableRoute};
     use chrono::DateTime;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO_ENGINE};
+    use common_meta::key::table_region::RegionDistribution;
+    use common_meta::key::TableMetadataManagerRef;
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, RawSchema};
     use table::metadata::{RawTableInfo, RawTableMeta, TableIdent, TableType};
@@ -217,53 +147,52 @@ pub(crate) mod tests {
     use crate::error;
     use crate::service::store::memory::MemStore;
 
-    pub(crate) async fn prepare_table_global_value(
-        kv_store: &KvStoreRef,
+    pub(crate) async fn prepare_table_region_and_info_value(
+        table_metadata_manager: &TableMetadataManagerRef,
         table: &str,
-    ) -> (TableGlobalKey, TableGlobalValue) {
+    ) {
+        let table_info = RawTableInfo {
+            ident: TableIdent::new(1),
+            name: table.to_string(),
+            desc: None,
+            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+            meta: RawTableMeta {
+                schema: RawSchema::new(vec![ColumnSchema::new(
+                    "a",
+                    ConcreteDataType::string_datatype(),
+                    true,
+                )]),
+                primary_key_indices: vec![],
+                value_indices: vec![],
+                engine: MITO_ENGINE.to_string(),
+                next_column_id: 1,
+                region_numbers: vec![1, 2, 3, 4],
+                engine_options: HashMap::new(),
+                options: TableOptions::default(),
+                created_on: DateTime::default(),
+            },
+            table_type: TableType::Base,
+        };
+        table_metadata_manager
+            .table_info_manager()
+            .put_old(table_info)
+            .await
+            .unwrap();
+
         // Region distribution:
         // Datanode => Regions
         // 1 => 1, 2
         // 2 => 3
         // 3 => 4
-        let regions_id_map = HashMap::from([(1, vec![1, 2]), (2, vec![3]), (3, vec![4])]);
-
-        let key = TableGlobalKey {
-            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
-            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
-            table_name: table.to_string(),
-        };
-        let value = TableGlobalValue {
-            node_id: 1,
-            regions_id_map,
-            table_info: RawTableInfo {
-                ident: TableIdent::new(1),
-                name: table.to_string(),
-                desc: None,
-                catalog_name: DEFAULT_CATALOG_NAME.to_string(),
-                schema_name: DEFAULT_SCHEMA_NAME.to_string(),
-                meta: RawTableMeta {
-                    schema: RawSchema::new(vec![ColumnSchema::new(
-                        "a",
-                        ConcreteDataType::string_datatype(),
-                        true,
-                    )]),
-                    primary_key_indices: vec![],
-                    value_indices: vec![],
-                    engine: MITO_ENGINE.to_string(),
-                    next_column_id: 1,
-                    region_numbers: vec![1, 2, 3, 4],
-                    engine_options: HashMap::new(),
-                    options: TableOptions::default(),
-                    created_on: DateTime::default(),
-                },
-                table_type: TableType::Base,
-            },
-        };
-        put_table_global_value(kv_store, &key, &value)
+        table_metadata_manager
+            .table_region_manager()
+            .put_old(
+                &TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, table),
+                RegionDistribution::from([(1, vec![1, 2]), (2, vec![3]), (3, vec![4])]),
+            )
             .await
             .unwrap();
-        (key, value)
     }
 
     pub(crate) async fn prepare_table_route_value<'a>(
@@ -299,11 +228,9 @@ pub(crate) mod tests {
         let table_route = TableRoute {
             table: Some(Table {
                 id: 1,
-                table_name: Some(TableName {
-                    catalog_name: DEFAULT_CATALOG_NAME.to_string(),
-                    schema_name: DEFAULT_SCHEMA_NAME.to_string(),
-                    table_name: table.to_string(),
-                }),
+                table_name: Some(
+                    TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, table).into(),
+                ),
                 table_schema: vec![],
             }),
             region_routes,
@@ -345,34 +272,6 @@ pub(crate) mod tests {
             leader_peer_index,
             follower_peer_indexes: vec![],
         }
-    }
-
-    #[tokio::test]
-    async fn test_put_and_get_table_global_value() {
-        let kv_store = Arc::new(MemStore::new()) as _;
-
-        let not_exist_key = TableGlobalKey {
-            catalog_name: "not_exist_catalog".to_string(),
-            schema_name: "not_exist_schema".to_string(),
-            table_name: "not_exist_table".to_string(),
-        };
-        assert!(get_table_global_value(&kv_store, &not_exist_key)
-            .await
-            .unwrap()
-            .is_none());
-
-        let (key, value) = prepare_table_global_value(&kv_store, "my_table").await;
-        let actual = get_table_global_value(&kv_store, &key)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(actual, value);
-
-        let keys = vec![&not_exist_key, &key];
-        let result = batch_get_table_global_value(&kv_store, keys).await.unwrap();
-        assert_eq!(result.len(), 2);
-        assert!(result.get(&not_exist_key).unwrap().is_none());
-        assert_eq!(result.get(&key).unwrap().as_ref().unwrap(), &value);
     }
 
     #[tokio::test]

@@ -16,7 +16,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use api::v1::meta::router_client::RouterClient;
-use api::v1::meta::{CreateRequest, DeleteRequest, Role, RouteRequest, RouteResponse};
+use api::v1::meta::{Role, RouteRequest, RouteResponse};
 use common_grpc::channel_manager::ChannelManager;
 use snafu::{ensure, OptionExt, ResultExt};
 use tokio::sync::RwLock;
@@ -57,19 +57,9 @@ impl Client {
         inner.is_started()
     }
 
-    pub async fn create(&self, req: CreateRequest) -> Result<RouteResponse> {
-        let inner = self.inner.read().await;
-        inner.create(req).await
-    }
-
     pub async fn route(&self, req: RouteRequest) -> Result<RouteResponse> {
         let inner = self.inner.read().await;
         inner.route(req).await
-    }
-
-    pub async fn delete(&self, req: DeleteRequest) -> Result<RouteResponse> {
-        let inner = self.inner.read().await;
-        inner.delete(req).await
     }
 }
 
@@ -105,26 +95,10 @@ impl Inner {
         Ok(())
     }
 
-    async fn create(&self, mut req: CreateRequest) -> Result<RouteResponse> {
-        let mut client = self.random_client()?;
-        req.set_header(self.id, self.role);
-        let res = client.create(req).await.context(error::TonicStatusSnafu)?;
-
-        Ok(res.into_inner())
-    }
-
     async fn route(&self, mut req: RouteRequest) -> Result<RouteResponse> {
         let mut client = self.random_client()?;
         req.set_header(self.id, self.role);
         let res = client.route(req).await.context(error::TonicStatusSnafu)?;
-
-        Ok(res.into_inner())
-    }
-
-    async fn delete(&self, mut req: DeleteRequest) -> Result<RouteResponse> {
-        let mut client = self.random_client()?;
-        req.set_header(self.id, self.role);
-        let res = client.delete(req).await.context(error::TonicStatusSnafu)?;
 
         Ok(res.into_inner())
     }

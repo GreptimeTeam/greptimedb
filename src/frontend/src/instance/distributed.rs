@@ -25,7 +25,6 @@ use api::v1::{
     FlushTableExpr, InsertRequests,
 };
 use async_trait::async_trait;
-use catalog::helper::{SchemaKey, SchemaValue};
 use catalog::{CatalogManager, RegisterTableRequest};
 use chrono::DateTime;
 use client::client_manager::DatanodeClients;
@@ -33,7 +32,7 @@ use client::Database;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::format_full_table_name;
 use common_error::ext::BoxedError;
-use common_meta::key::TableMetadataManagerRef;
+use common_meta::helper::{SchemaKey, SchemaValue};
 use common_meta::peer::Peer;
 use common_meta::rpc::ddl::{DdlTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse};
 use common_meta::rpc::router::{Partition as MetaPartition, RouteRequest};
@@ -82,7 +81,6 @@ pub struct DistInstance {
     meta_client: Arc<MetaClient>,
     catalog_manager: Arc<FrontendCatalogManager>,
     datanode_clients: Arc<DatanodeClients>,
-    table_metadata_manager: TableMetadataManagerRef,
 }
 
 impl DistInstance {
@@ -90,13 +88,11 @@ impl DistInstance {
         meta_client: Arc<MetaClient>,
         catalog_manager: Arc<FrontendCatalogManager>,
         datanode_clients: Arc<DatanodeClients>,
-        table_metadata_manager: TableMetadataManagerRef,
     ) -> Self {
         Self {
             meta_client,
             catalog_manager,
             datanode_clients,
-            table_metadata_manager,
         }
     }
 
@@ -132,7 +128,6 @@ impl DistInstance {
             table_name.clone(),
             table_info,
             self.catalog_manager.clone(),
-            self.table_metadata_manager.clone(),
         ));
 
         let request = RegisterTableRequest {
@@ -161,6 +156,7 @@ impl DistInstance {
                 &table_name.catalog_name,
                 &table_name.schema_name,
                 &table_name.table_name,
+                table_id,
             )
             .await;
 
@@ -194,6 +190,7 @@ impl DistInstance {
                 &table_name.catalog_name,
                 &table_name.schema_name,
                 &table_name.table_name,
+                table_id,
             )
             .await;
 
@@ -265,7 +262,7 @@ impl DistInstance {
         table_name: &TableName,
         region_number: Option<RegionNumber>,
     ) -> Result<Vec<Peer>> {
-        let _ = self
+        let table = self
             .catalog_manager
             .table(
                 &table_name.catalog_name,
@@ -277,11 +274,13 @@ impl DistInstance {
             .with_context(|| TableNotFoundSnafu {
                 table_name: table_name.to_string(),
             })?;
+        let table_id = table.table_info().table_id();
 
         let route_response = self
             .meta_client
             .route(RouteRequest {
                 table_names: vec![table_name.clone()],
+                table_ids: vec![table_id],
             })
             .await
             .context(RequestMetaSnafu)?;
@@ -521,6 +520,7 @@ impl DistInstance {
                 &table_info.catalog_name,
                 &table_info.schema_name,
                 &table_info.name,
+                table_info.table_id(),
             )
             .await;
 
