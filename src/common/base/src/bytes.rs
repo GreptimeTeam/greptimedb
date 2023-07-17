@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::borrow::Borrow;
 use std::ops::Deref;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -73,6 +74,12 @@ impl PartialEq<[u8]> for Bytes {
 impl PartialEq<Bytes> for [u8] {
     fn eq(&self, other: &Bytes) -> bool {
         self == other.0
+    }
+}
+
+impl Borrow<[u8]> for Bytes {
+    fn borrow(&self) -> &[u8] {
+        &self.0
     }
 }
 
