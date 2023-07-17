@@ -16,6 +16,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
+use arrow_schema::TimeUnit::Nanosecond;
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
 use datafusion::datasource::listing::PartitionedFile;
 use datafusion::datasource::object_store::ObjectStoreUrl;
@@ -73,6 +74,32 @@ pub fn test_basic_schema() -> SchemaRef {
     let schema = Schema::new(vec![
         Field::new("num", DataType::Int64, false),
         Field::new("str", DataType::Utf8, false),
+    ]);
+    Arc::new(schema)
+}
+
+pub fn test_orc_schema() -> SchemaRef {
+    let schema = Schema::new(vec![
+        Field::new("double_a", DataType::Float64, true),
+        Field::new("a", DataType::Float32, true),
+        Field::new("b", DataType::Boolean, true),
+        Field::new("str_direct", DataType::Utf8, true),
+        Field::new("d", DataType::Utf8, true),
+        Field::new("e", DataType::Utf8, true),
+        Field::new("f", DataType::Utf8, true),
+        Field::new("int_short_repeated", DataType::Int32, true),
+        Field::new("int_neg_short_repeated", DataType::Int32, true),
+        Field::new("int_delta", DataType::Int32, true),
+        Field::new("int_neg_delta", DataType::Int32, true),
+        Field::new("int_direct", DataType::Int32, true),
+        Field::new("int_neg_direct", DataType::Int32, true),
+        Field::new("bigint_direct", DataType::Int64, true),
+        Field::new("bigint_neg_direct", DataType::Int64, true),
+        Field::new("bigint_other", DataType::Int64, true),
+        Field::new("utf8_increase", DataType::Utf8, true),
+        Field::new("utf8_decrease", DataType::Utf8, true),
+        Field::new("timestamp_simple", DataType::Timestamp(Nanosecond, None), true),
+        Field::new("date_simple", DataType::Date32, true)
     ]);
     Arc::new(schema)
 }

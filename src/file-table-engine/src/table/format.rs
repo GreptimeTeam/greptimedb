@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use common_datasource::file_format::csv::{CsvConfigBuilder, CsvFormat, CsvOpener};
 use common_datasource::file_format::json::{JsonFormat, JsonOpener};
+use common_datasource::file_format::orc::{OrcFormat, OrcOpener};
 use common_datasource::file_format::parquet::{DefaultParquetFileReaderFactory, ParquetFormat};
 use common_datasource::file_format::Format;
 use common_query::prelude::Expr;
@@ -83,6 +84,19 @@ fn build_json_opener(
         config.store.clone(),
         format.compression_type,
     ))
+}
+
+fn build_orc_opener(file_schema: Arc<ArrowSchema>, config: &ScanPlanConfig) -> Result<OrcOpener> {
+    let projected_schema = if let Some(projection) = config.projection {
+        Arc::new(
+            file_schema
+                .project(projection)
+                .context(error::ProjectSchemaSnafu)?,
+        )
+    } else {
+        file_schema
+    };
+    Ok(OrcOpener::new(config.store.clone(), projected_schema))
 }
 
 fn build_record_batch_stream<T: FileOpener + Send + 'static>(
@@ -213,6 +227,22 @@ fn new_parquet_stream_with_exec_plan(
     ))
 }
 
+fn new_orc_stream(
+    _ctx: &CreateScanPlanContext,
+    config: &ScanPlanConfig,
+    _format: &OrcFormat,
+) -> Result<SendableRecordBatchStream> {
+    let file_schema = config.file_schema.arrow_schema().clone();
+    let opener = build_orc_opener(file_schema.clone(), config)?;
+    build_record_batch_stream(
+        opener,
+        file_schema,
+        config.files,
+        config.projection,
+        config.limit,
+    )
+}
+
 #[derive(Debug, Clone)]
 pub struct ScanPlanConfig<'a> {
     pub file_schema: SchemaRef,
@@ -232,6 +262,7 @@ pub fn create_stream(
         Format::Csv(format) => new_csv_stream(ctx, config, format),
         Format::Json(format) => new_json_stream(ctx, config, format),
         Format::Parquet(format) => new_parquet_stream_with_exec_plan(ctx, config, format),
+        Format::Orc(format) => new_orc_stream(ctx, config, format),
         _ => error::UnsupportedFormatSnafu { format: *format }.fail(),
     }
 }

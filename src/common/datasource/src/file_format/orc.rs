@@ -13,19 +13,20 @@
 // limitations under the License.
 
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use arrow::compute::cast;
-use arrow_schema::{Schema, SchemaRef};
+use arrow_schema::{ArrowError, Schema, SchemaRef};
 use async_trait::async_trait;
 use datafusion::arrow::record_batch::RecordBatch as DfRecordBatch;
 use datafusion::error::{DataFusionError, Result as DfResult};
+use datafusion::physical_plan::file_format::{FileMeta, FileOpenFuture, FileOpener};
 use datafusion::physical_plan::RecordBatchStream;
-use futures::Stream;
+use futures::{Stream, StreamExt, TryStreamExt};
 use object_store::ObjectStore;
 use orc_rust::arrow_reader::{create_arrow_schema, Cursor};
 use orc_rust::async_arrow_reader::ArrowStreamReader;
-pub use orc_rust::error::Error as OrcError;
 use orc_rust::reader::Reader;
 use snafu::ResultExt;
 use tokio::io::{AsyncRead, AsyncSeek};
@@ -121,5 +122,42 @@ impl FileFormat for OrcFormat {
         let schema = infer_orc_schema(reader).await?;
 
         Ok(schema)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct OrcOpener {
+    object_store: Arc<ObjectStore>,
+    schema: SchemaRef,
+}
+
+impl OrcOpener {
+    pub fn new(object_store: ObjectStore, schema: SchemaRef) -> Self {
+        Self {
+            object_store: Arc::from(object_store),
+            schema,
+        }
+    }
+}
+
+impl FileOpener for OrcOpener {
+    fn open(&self, meta: FileMeta) -> DfResult<FileOpenFuture> {
+        let object_store = self.object_store.clone();
+        let schema = self.schema.clone();
+        Ok(Box::pin(async move {
+            let reader = object_store
+                .reader(meta.location().to_string().as_str())
+                .await
+                .map_err(|e| DataFusionError::External(Box::new(e)))?;
+
+            let stream_reader = new_orc_stream_reader(reader)
+                .await
+                .map_err(|e| DataFusionError::External(Box::new(e)))?;
+
+            let stream = OrcArrowStreamReaderAdapter::new(schema, stream_reader);
+
+            let adopted = stream.map_err(|e| ArrowError::ExternalError(Box::new(e)));
+            Ok(adopted.boxed())
+        }))
     }
 }
