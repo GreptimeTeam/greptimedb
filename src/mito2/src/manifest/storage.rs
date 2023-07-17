@@ -106,7 +106,7 @@ pub struct ObjectStoreLogIterator {
 }
 
 impl ObjectStoreLogIterator {
-    async fn next_log(&mut self) -> Result<Option<(ManifestVersion, Vec<u8>)>> {
+    pub async fn next_log(&mut self) -> Result<Option<(ManifestVersion, Vec<u8>)>> {
         match self.iter.next() {
             Some((v, entry)) => {
                 let compress_type = file_compress_type(entry.name());
@@ -182,31 +182,8 @@ impl ManifestObjectStore {
     pub(crate) fn path(&self) -> &str {
         &self.path
     }
-}
 
-#[derive(Serialize, Deserialize, Debug)]
-struct CheckpointMetadata {
-    pub size: usize,
-    /// The latest version this checkpoint contains.
-    pub version: ManifestVersion,
-    pub checksum: Option<String>,
-    pub extend_metadata: Option<HashMap<String, String>>,
-}
-
-impl CheckpointMetadata {
-    fn encode(&self) -> Result<impl AsRef<[u8]>> {
-        serde_json::to_string(self).context(SerdeJsonSnafu)
-    }
-
-    fn decode(bs: &[u8]) -> Result<Self> {
-        let data = std::str::from_utf8(bs).context(Utf8Snafu)?;
-
-        serde_json::from_str(data).context(SerdeJsonSnafu)
-    }
-}
-
-impl ManifestObjectStore {
-    async fn scan(
+    pub async fn scan(
         &self,
         start: ManifestVersion,
         end: ManifestVersion,
@@ -346,7 +323,7 @@ impl ManifestObjectStore {
         Ok(())
     }
 
-    async fn save(&self, version: ManifestVersion, bytes: &[u8]) -> Result<()> {
+    pub async fn save(&self, version: ManifestVersion, bytes: &[u8]) -> Result<()> {
         let path = self.delta_file_path(version);
         logging::debug!("Save log to manifest storage, version: {}", version);
         let data = self
@@ -513,7 +490,9 @@ impl ManifestObjectStore {
         Ok(())
     }
 
-    async fn load_last_checkpoint(&self) -> Result<Option<(ManifestVersion, Vec<u8>)>> {
+    /// Load the latest checkpoint.
+    /// Return manifest version and the raw [RegionCheckpoint](crate::manifest::action::RegionCheckpoint) content if any
+    pub async fn load_last_checkpoint(&self) -> Result<Option<(ManifestVersion, Vec<u8>)>> {
         let last_checkpoint_path = self.last_checkpoint_path();
         let last_checkpoint_data = match self.object_store.read(&last_checkpoint_path).await {
             Ok(data) => data,
@@ -534,6 +513,27 @@ impl ManifestObjectStore {
         );
 
         self.load_checkpoint(checkpoint_metadata.version).await
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct CheckpointMetadata {
+    pub size: usize,
+    /// The latest version this checkpoint contains.
+    pub version: ManifestVersion,
+    pub checksum: Option<String>,
+    pub extend_metadata: Option<HashMap<String, String>>,
+}
+
+impl CheckpointMetadata {
+    fn encode(&self) -> Result<impl AsRef<[u8]>> {
+        serde_json::to_string(self).context(SerdeJsonSnafu)
+    }
+
+    fn decode(bs: &[u8]) -> Result<Self> {
+        let data = std::str::from_utf8(bs).context(Utf8Snafu)?;
+
+        serde_json::from_str(data).context(SerdeJsonSnafu)
     }
 }
 

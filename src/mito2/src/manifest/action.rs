@@ -15,14 +15,16 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
-use snafu::OptionExt;
+use snafu::{OptionExt, ResultExt};
 use storage::metadata::VersionNumber;
 use storage::sst::{FileId, FileMeta};
 use store_api::manifest::action::{ProtocolAction, ProtocolVersion};
 use store_api::manifest::ManifestVersion;
 use store_api::storage::{RegionId, SequenceNumber};
 
-use crate::error::{RegionMetadataNotFoundSnafu, Result};
+use crate::error::{
+    RegionMetadataNotFoundSnafu, RegionVersionNotFoundSnafu, Result, SerdeJsonSnafu, Utf8Snafu,
+};
 use crate::manifest::helper;
 use crate::metadata::RegionMetadata;
 
@@ -66,7 +68,7 @@ pub struct RegionRemove {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct RegionManifest {
     pub metadata: RegionMetadata,
-    pub version: Option<RegionVersion>,
+    pub version: RegionVersion,
 }
 
 #[derive(Debug, Default)]
@@ -81,7 +83,7 @@ impl RegionManifestBuilder {
         if let Some(s) = checkpoint {
             Self {
                 metadata: Some(s.metadata),
-                version: s.version,
+                version: Some(s.version),
             }
         } else {
             Default::default()
@@ -116,7 +118,7 @@ impl RegionManifestBuilder {
     pub fn try_build(self) -> Result<RegionManifest> {
         Ok(RegionManifest {
             metadata: self.metadata.context(RegionMetadataNotFoundSnafu)?,
-            version: self.version,
+            version: self.version.context(RegionVersionNotFoundSnafu)?,
         })
     }
 }
@@ -142,20 +144,21 @@ pub struct RegionCheckpoint {
 }
 
 impl RegionCheckpoint {
-    fn set_protocol(&mut self, action: ProtocolAction) {
+    pub fn set_protocol(&mut self, action: ProtocolAction) {
         self.protocol = action;
     }
 
-    fn last_version(&self) -> ManifestVersion {
+    pub fn last_version(&self) -> ManifestVersion {
         self.last_version
     }
 
-    fn encode(&self) -> Result<Vec<u8>> {
+    pub fn encode(&self) -> Result<Vec<u8>> {
         todo!()
     }
 
-    fn decode(bs: &[u8], reader_version: ProtocolVersion) -> Result<Self> {
-        helper::decode_checkpoint(bs, reader_version)
+    pub fn decode(bs: &[u8]) -> Result<Self> {
+        // helper::decode_checkpoint(bs, reader_version)
+        todo!()
     }
 }
 
@@ -192,15 +195,14 @@ impl RegionMetaActionList {
     }
 
     /// Encode self into json in the form of string lines, starts with prev_version and then action json list.
-    fn encode(&self) -> Result<Vec<u8>> {
+    pub fn encode(&self) -> Result<Vec<u8>> {
         helper::encode_actions(self.prev_version, &self.actions)
     }
 
-    fn decode(
-        _bs: &[u8],
-        _reader_version: ProtocolVersion,
-    ) -> Result<(Self, Option<ProtocolAction>)> {
-        todo!()
+    pub fn decode(bytes: &[u8]) -> Result<(Self, Option<ProtocolAction>)> {
+        let data = std::str::from_utf8(bytes).context(Utf8Snafu)?;
+
+        serde_json::from_str(data).context(SerdeJsonSnafu)
     }
 }
 

@@ -12,16 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
+use arc_swap::ArcSwap;
+use common_telemetry::{debug, info};
 use store_api::manifest::action::{ProtocolAction, ProtocolVersion};
-use store_api::manifest::{AtomicManifestVersion, ManifestVersion};
+use store_api::manifest::{AtomicManifestVersion, ManifestVersion, MAX_VERSION, MIN_VERSION};
 
-use crate::manifest::action::{RegionCheckpoint, RegionMetaActionIter, RegionMetaActionList};
+use crate::error::Result;
+use crate::manifest::action::{
+    RegionCheckpoint, RegionManifest, RegionManifestBuilder, RegionMetaAction,
+    RegionMetaActionIter, RegionMetaActionList,
+};
 use crate::manifest::options::RegionManifestOptions;
 use crate::manifest::storage::ManifestObjectStore;
-
-type Result<T> = std::result::Result<T, ()>;
 
 // rewrite note:
 // trait Checkpoint -> struct RegionCheckpoint
@@ -32,32 +37,114 @@ type Result<T> = std::result::Result<T, ()>;
 /// metadata.
 #[derive(Clone, Debug)]
 pub struct RegionManifestManager {
-    store: ManifestObjectStore,
-    options: RegionManifestOptions,
-    version: Arc<AtomicManifestVersion>,
+    inner: Arc<RegionManifestManagerInner>,
 }
 
 impl RegionManifestManager {
-    // from impl ManifestImpl
-
-    pub fn new(options: RegionManifestOptions) -> Self {
-        todo!()
-    }
-
-    pub async fn start(&self) -> Result<()> {
-        todo!()
+    /// Construct and recover a region's manifest from storage.
+    pub async fn new(options: RegionManifestOptions) -> Result<Self> {
+        let inner = RegionManifestManagerInner::new(options).await?;
+        Ok(Self {
+            inner: Arc::new(inner),
+        })
     }
 
     pub async fn stop(&self) -> Result<()> {
-        todo!()
+        self.inner.stop().await
     }
 
     pub async fn update(&self, action_list: RegionMetaActionList) -> Result<ManifestVersion> {
-        todo!()
+        self.inner.update(action_list).await
     }
 }
 
-impl RegionManifestManager {
+#[derive(Debug)]
+struct RegionManifestManagerInner {
+    store: ManifestObjectStore,
+    options: RegionManifestOptions,
+    version: AtomicManifestVersion,
+    manifest: ArcSwap<RegionManifest>,
+}
+
+impl RegionManifestManagerInner {
+    pub async fn new(options: RegionManifestOptions) -> Result<Self> {
+        // construct storage
+        let store = ManifestObjectStore::new(
+            &options.manifest_dir,
+            options.object_store.clone(),
+            options.compress_type,
+        );
+
+        // recover from storage
+        // construct manifest builder
+        let mut version = MIN_VERSION;
+        let last_checkpoint = store.load_last_checkpoint().await?;
+        let checkpoint = last_checkpoint
+            .map(|(_, raw_checkpoint)| RegionCheckpoint::decode(&raw_checkpoint))
+            .transpose()?;
+        let mut manifest_builder = if let Some(checkpoint) = checkpoint {
+            info!(
+                "Recover region manifest from checkpoint version {}",
+                checkpoint.last_version
+            );
+            version = version.max(checkpoint.last_version + 1);
+            RegionManifestBuilder::with_checkpoint(checkpoint.checkpoint)
+        } else {
+            info!("Checkpoint not found, build manifest from scratch");
+            RegionManifestBuilder::default()
+        };
+
+        // apply actions from storage
+        let mut action_iter = store.scan(version, MAX_VERSION).await?;
+        while let Some((manifest_version, raw_action_list)) = action_iter.next_log().await? {
+            let (action_list, _) = RegionMetaActionList::decode(&raw_action_list)?;
+            for action in action_list.actions {
+                match action {
+                    RegionMetaAction::Change(action) => {
+                        manifest_builder.apply_change(action);
+                    }
+                    RegionMetaAction::Edit(action) => {
+                        manifest_builder.apply_edit(manifest_version, action);
+                    }
+                    RegionMetaAction::Remove(_) | RegionMetaAction::Protocol(_) => {
+                        debug!("Unhandled action: {:?}", action);
+                    }
+                }
+            }
+        }
+        let manifest = manifest_builder.try_build()?;
+        debug!("Recovered region manifest: {:?}", manifest);
+        let version = manifest.version.manifest_version;
+
+        // todo: start gc task
+
+        Ok(Self {
+            store,
+            options,
+            version: AtomicManifestVersion::new(version),
+            manifest: ArcSwap::new(Arc::new(manifest)),
+        })
+    }
+
+    pub async fn stop(&self) -> Result<()> {
+        // todo: stop gc task
+        Ok(())
+    }
+
+    pub async fn update(&self, action_list: RegionMetaActionList) -> Result<ManifestVersion> {
+        let version = self.inc_version();
+
+        self.store.save(version, &action_list.encode()?).await?;
+
+        Ok(version)
+    }
+}
+
+impl RegionManifestManagerInner {
+    fn inc_version(&self) -> ManifestVersion {
+        self.version.fetch_add(1, Ordering::Relaxed)
+    }
+
     // pub (crate) fn checkpointer(&self) -> Checkpointer {
     //     todo!()
     // }

@@ -19,9 +19,10 @@ use object_store::ObjectStore;
 
 #[derive(Debug, Clone)]
 pub struct RegionManifestOptions {
-    manifest_dir: String,
-    object_store: ObjectStore,
-    compress_type: CompressionType,
+    pub manifest_dir: String,
+    pub object_store: ObjectStore,
+    pub compress_type: CompressionType,
     /// Interval of version ([ManifestVersion](store_api::manifest::ManifestVersion)) between two checkpoints
-    checkpoint_interval: u64,
+    /// `None` means disable checkpoint.
+    pub checkpoint_interval: Option<u64>,
 }
