@@ -12,12 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_datasource::compression::CompressionType;
-use object_store::ObjectStore;
-use store_api::manifest::action::{ProtocolAction, ProtocolVersion};
-use store_api::manifest::ManifestVersion;
+use std::sync::Arc;
 
-use crate::manifest::action::{MetaActionIteratorImpl, RegionCheckpoint, RegionMetaActionList};
+use store_api::manifest::action::{ProtocolAction, ProtocolVersion};
+use store_api::manifest::{AtomicManifestVersion, ManifestVersion};
+
+use crate::manifest::action::{RegionCheckpoint, RegionMetaActionIter, RegionMetaActionList};
+use crate::manifest::options::RegionManifestOptions;
+use crate::manifest::storage::ManifestObjectStore;
 
 type Result<T> = std::result::Result<T, ()>;
 
@@ -25,24 +27,37 @@ type Result<T> = std::result::Result<T, ()>;
 // trait Checkpoint -> struct RegionCheckpoint
 // trait MetaAction -> struct RegionMetaActionList
 // trait MetaActionIterator -> struct MetaActionIteratorImpl
-#[derive(Clone, Debug)]
-pub struct Regionmanifest {}
 
-impl Regionmanifest {
+/// Manage region's manifest. Provide APIs to access (create/modify/recover) region's persisted
+/// metadata.
+#[derive(Clone, Debug)]
+pub struct RegionManifestManager {
+    store: ManifestObjectStore,
+    options: RegionManifestOptions,
+    version: Arc<AtomicManifestVersion>,
+}
+
+impl RegionManifestManager {
     // from impl ManifestImpl
 
-    pub fn new() -> Self {
+    pub fn new(options: RegionManifestOptions) -> Self {
         todo!()
     }
 
-    pub fn create(
-        _manifest_dir: &str,
-        _object_store: ObjectStore,
-        _compress_type: CompressionType,
-    ) -> Self {
+    pub async fn start(&self) -> Result<()> {
         todo!()
     }
 
+    pub async fn stop(&self) -> Result<()> {
+        todo!()
+    }
+
+    pub async fn update(&self, action_list: RegionMetaActionList) -> Result<ManifestVersion> {
+        todo!()
+    }
+}
+
+impl RegionManifestManager {
     // pub (crate) fn checkpointer(&self) -> Checkpointer {
     //     todo!()
     // }
@@ -70,15 +85,11 @@ impl Regionmanifest {
 
     // from Manifest
 
-    async fn update(&self, action_list: RegionMetaActionList) -> Result<ManifestVersion> {
-        todo!()
-    }
-
     async fn scan(
         &self,
         start: ManifestVersion,
         end: ManifestVersion,
-    ) -> Result<MetaActionIteratorImpl> {
+    ) -> Result<RegionMetaActionIter> {
         todo!()
     }
 
@@ -87,14 +98,6 @@ impl Regionmanifest {
     }
 
     async fn last_checkpoint(&self) -> Result<Option<RegionCheckpoint>> {
-        todo!()
-    }
-
-    async fn start(&self) -> Result<()> {
-        todo!()
-    }
-
-    async fn stop(&self) -> Result<()> {
         todo!()
     }
 

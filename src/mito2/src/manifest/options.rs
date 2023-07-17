@@ -12,12 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! manifest storage
+//! Options for [RegionManifestManager](crate::manifest::manager::RegionManifestManager).
 
-mod action;
-mod gc_task;
-mod helper;
-#[allow(unused_variables)]
-mod manager;
-mod options;
-mod storage;
+use common_datasource::compression::CompressionType;
+use object_store::ObjectStore;
+
+#[derive(Debug, Clone)]
+pub struct RegionManifestOptions {
+    manifest_dir: String,
+    object_store: ObjectStore,
+    compress_type: CompressionType,
+    /// Interval of version ([ManifestVersion](store_api::manifest::ManifestVersion)) between two checkpoints
+    checkpoint_interval: u64,
+}
