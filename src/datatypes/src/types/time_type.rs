@@ -113,7 +113,6 @@ macro_rules! impl_data_type_for_time {
                 }
 
                 fn is_timestamp_compatible(&self) -> bool {
-                    // TODO(dennis): Maybe Make [TimeType] to be timestamp compatible in future.
                     false
                 }
             }

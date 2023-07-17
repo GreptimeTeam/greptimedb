@@ -27,7 +27,7 @@ use common_time::timestamp::{TimeUnit, Timestamp};
 use datafusion_common::ScalarValue;
 pub use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize};
-use snafu::ensure;
+use snafu::{ensure, ResultExt};
 
 use crate::error;
 use crate::error::Result;
@@ -268,22 +268,22 @@ impl Value {
             Value::Binary(v) => ScalarValue::LargeBinary(Some(v.to_vec())),
             Value::Date(v) => ScalarValue::Date32(Some(v.val())),
             Value::DateTime(v) => ScalarValue::Date64(Some(v.val())),
-            Value::Null => to_null_scalar_value(output_type),
+            Value::Null => to_null_scalar_value(output_type)?,
             Value::List(list) => {
                 // Safety: The logical type of the value and output_type are the same.
                 let list_type = output_type.as_list().unwrap();
                 list.try_to_scalar_value(list_type)?
             }
             Value::Timestamp(t) => timestamp_to_scalar_value(t.unit(), Some(t.value())),
-            Value::Time(t) => time_to_scalar_value(*t.unit(), Some(t.value())),
+            Value::Time(t) => time_to_scalar_value(*t.unit(), Some(t.value()))?,
         };
 
         Ok(scalar_value)
     }
 }
 
-pub fn to_null_scalar_value(output_type: &ConcreteDataType) -> ScalarValue {
-    match output_type {
+pub fn to_null_scalar_value(output_type: &ConcreteDataType) -> Result<ScalarValue> {
+    Ok(match output_type {
         ConcreteDataType::Null(_) => ScalarValue::Null,
         ConcreteDataType::Boolean(_) => ScalarValue::Boolean(None),
         ConcreteDataType::Int8(_) => ScalarValue::Int8(None),
@@ -306,10 +306,10 @@ pub fn to_null_scalar_value(output_type: &ConcreteDataType) -> ScalarValue {
         }
         ConcreteDataType::Dictionary(dict) => ScalarValue::Dictionary(
             Box::new(dict.key_type().as_arrow_type()),
-            Box::new(to_null_scalar_value(dict.value_type())),
+            Box::new(to_null_scalar_value(dict.value_type())?),
         ),
-        ConcreteDataType::Time(t) => time_to_scalar_value(t.unit(), None),
-    }
+        ConcreteDataType::Time(t) => time_to_scalar_value(t.unit(), None)?,
+    })
 }
 
 fn new_item_field(data_type: ArrowDataType) -> Field {
@@ -326,13 +326,19 @@ pub fn timestamp_to_scalar_value(unit: TimeUnit, val: Option<i64>) -> ScalarValu
 }
 
 /// Cast the 64-bit elapsed time into the arrow ScalarValue by time unit.
-pub fn time_to_scalar_value(unit: TimeUnit, val: Option<i64>) -> ScalarValue {
-    match unit {
-        TimeUnit::Second => ScalarValue::Time32Second(val.map(|i| i as i32)),
-        TimeUnit::Millisecond => ScalarValue::Time32Millisecond(val.map(|i| i as i32)),
+pub fn time_to_scalar_value(unit: TimeUnit, val: Option<i64>) -> Result<ScalarValue> {
+    Ok(match unit {
+        TimeUnit::Second => ScalarValue::Time32Second(
+            val.map(|i| i.try_into().context(error::CastTimeTypeSnafu))
+                .transpose()?,
+        ),
+        TimeUnit::Millisecond => ScalarValue::Time32Millisecond(
+            val.map(|i| i.try_into().context(error::CastTimeTypeSnafu))
+                .transpose()?,
+        ),
         TimeUnit::Microsecond => ScalarValue::Time64Microsecond(val),
         TimeUnit::Nanosecond => ScalarValue::Time64Nanosecond(val),
-    }
+    })
 }
 
 /// Convert [ScalarValue] to [Timestamp].
@@ -1785,19 +1791,19 @@ mod tests {
     fn test_time_to_scalar_value() {
         assert_eq!(
             ScalarValue::Time32Second(Some(1)),
-            time_to_scalar_value(TimeUnit::Second, Some(1))
+            time_to_scalar_value(TimeUnit::Second, Some(1)).unwrap()
         );
         assert_eq!(
             ScalarValue::Time32Millisecond(Some(1)),
-            time_to_scalar_value(TimeUnit::Millisecond, Some(1))
+            time_to_scalar_value(TimeUnit::Millisecond, Some(1)).unwrap()
         );
         assert_eq!(
             ScalarValue::Time64Microsecond(Some(1)),
-            time_to_scalar_value(TimeUnit::Microsecond, Some(1))
+            time_to_scalar_value(TimeUnit::Microsecond, Some(1)).unwrap()
         );
         assert_eq!(
             ScalarValue::Time64Nanosecond(Some(1)),
-            time_to_scalar_value(TimeUnit::Nanosecond, Some(1))
+            time_to_scalar_value(TimeUnit::Nanosecond, Some(1)).unwrap()
         );
     }
 }
