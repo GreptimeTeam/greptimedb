@@ -458,6 +458,23 @@ async fn open_and_register_table(
         })?;
     info!("Successfully opened table, {table_ident}");
 
+    if !memory_catalog_manager
+        .catalog_exist(&table_ident.catalog)
+        .await?
+    {
+        memory_catalog_manager.register_catalog_sync(table_ident.catalog.clone())?;
+    }
+
+    if !memory_catalog_manager
+        .schema_exist(&table_ident.catalog, &table_ident.schema)
+        .await?
+    {
+        memory_catalog_manager.register_schema_sync(RegisterSchemaRequest {
+            catalog: table_ident.catalog.clone(),
+            schema: table_ident.schema.clone(),
+        })?;
+    }
+
     let request = RegisterTableRequest {
         catalog: table_ident.catalog.clone(),
         schema: table_ident.schema.clone(),

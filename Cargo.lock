@@ -1589,6 +1589,7 @@ name = "cmd"
 version = "0.3.2"
 dependencies = [
  "anymap",
+ "async-trait",
  "build-data",
  "catalog",
  "clap 3.2.25",
@@ -1603,6 +1604,7 @@ dependencies = [
  "config",
  "datanode",
  "either",
+ "etcd-client",
  "frontend",
  "futures",
  "meta-client",

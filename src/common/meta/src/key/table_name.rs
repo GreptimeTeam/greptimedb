@@ -123,7 +123,7 @@ pub struct TableNameValue {
 }
 
 impl TableNameValue {
-    fn new(table_id: TableId) -> Self {
+    pub fn new(table_id: TableId) -> Self {
         Self { table_id }
     }
 

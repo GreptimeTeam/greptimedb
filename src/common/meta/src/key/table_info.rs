@@ -46,6 +46,15 @@ pub struct TableInfoValue {
     version: u64,
 }
 
+impl TableInfoValue {
+    pub fn new(table_info: RawTableInfo) -> Self {
+        Self {
+            table_info,
+            version: 0,
+        }
+    }
+}
+
 pub struct TableInfoManager {
     kv_backend: KvBackendRef,
 }

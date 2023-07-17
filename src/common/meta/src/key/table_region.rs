@@ -52,6 +52,15 @@ pub struct TableRegionValue {
     version: u64,
 }
 
+impl TableRegionValue {
+    pub fn new(region_distribution: RegionDistribution) -> Self {
+        Self {
+            region_distribution,
+            version: 0,
+        }
+    }
+}
+
 pub struct TableRegionManager {
     kv_backend: KvBackendRef,
 }
