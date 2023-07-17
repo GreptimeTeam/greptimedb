@@ -22,12 +22,12 @@ mod tests {
     use std::time::Duration;
 
     use catalog::error::Error;
-    use catalog::helper::{CatalogKey, CatalogValue, SchemaKey, SchemaValue};
     use catalog::remote::mock::MockTableEngine;
     use catalog::remote::region_alive_keeper::RegionAliveKeepers;
     use catalog::remote::{CachedMetaKvBackend, RemoteCatalogManager};
     use catalog::{CatalogManager, RegisterSchemaRequest, RegisterTableRequest};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO_ENGINE};
+    use common_meta::helper::{CatalogKey, CatalogValue, SchemaKey, SchemaValue};
     use common_meta::ident::TableIdent;
     use common_meta::key::TableMetadataManager;
     use common_meta::kv_backend::memory::MemoryKvBackend;

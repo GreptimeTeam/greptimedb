@@ -17,13 +17,9 @@ use std::iter;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use api::v1::AlterExpr;
 use async_trait::async_trait;
-use catalog::helper::{TableGlobalKey, TableGlobalValue};
 use client::Database;
 use common_error::ext::BoxedError;
-use common_meta::key::{TableMetadataManagerRef, TableRouteKey};
-use common_meta::rpc::store::{MoveValueRequest, PutRequest};
 use common_meta::table_name::TableName;
 use common_query::error::Result as QueryResult;
 use common_query::logical_plan::Expr;
@@ -36,7 +32,6 @@ use common_recordbatch::error::{
 use common_recordbatch::{
     RecordBatch, RecordBatchStreamAdaptor, RecordBatches, SendableRecordBatchStream,
 };
-use common_telemetry::debug;
 use datafusion::execution::context::TaskContext;
 use datafusion::physical_plan::{
     Partitioning, SendableRecordBatchStream as DfSendableRecordBatchStream,
@@ -44,21 +39,17 @@ use datafusion::physical_plan::{
 use datafusion_common::DataFusionError;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use futures_util::{Stream, StreamExt};
-use partition::manager::TableRouteCacheInvalidator;
 use partition::splitter::WriteSplitter;
 use snafu::prelude::*;
 use store_api::storage::{RegionNumber, ScanRequest};
 use table::error::TableOperationSnafu;
-use table::metadata::{FilterPushDownType, TableInfo, TableInfoRef};
-use table::requests::{AlterKind, AlterTableRequest, DeleteRequest, InsertRequest};
-use table::table::AlterContext;
+use table::metadata::{FilterPushDownType, TableInfoRef};
+use table::requests::{DeleteRequest, InsertRequest};
 use table::Table;
 use tokio::sync::RwLock;
 
 use crate::catalog::FrontendCatalogManager;
-use crate::error::{
-    self, FindDatanodeSnafu, FindTableRouteSnafu, Result, TableMetadataManagerSnafu,
-};
+use crate::error::{FindDatanodeSnafu, FindTableRouteSnafu, Result};
 use crate::instance::distributed::inserter::DistInserter;
 use crate::table::delete::to_grpc_delete_request;
 use crate::table::scan::{DatanodeInstance, TableScanPlan};
@@ -72,8 +63,6 @@ pub struct DistTable {
     table_name: TableName,
     table_info: TableInfoRef,
     catalog_manager: Arc<FrontendCatalogManager>,
-    #[allow(unused)]
-    table_metadata_manager: TableMetadataManagerRef,
 }
 
 #[async_trait]
@@ -179,13 +168,6 @@ impl Table for DistTable {
         Ok(vec![FilterPushDownType::Inexact; filters.len()])
     }
 
-    async fn alter(&self, context: AlterContext, request: &AlterTableRequest) -> table::Result<()> {
-        self.handle_alter(context, request)
-            .await
-            .map_err(BoxedError::new)
-            .context(TableOperationSnafu)
-    }
-
     async fn delete(&self, request: DeleteRequest) -> table::Result<usize> {
         let partition_manager = self.catalog_manager.partition_manager();
 
@@ -244,203 +226,12 @@ impl DistTable {
         table_name: TableName,
         table_info: TableInfoRef,
         catalog_manager: Arc<FrontendCatalogManager>,
-        table_metadata_manager: TableMetadataManagerRef,
     ) -> Self {
         Self {
             table_name,
             table_info,
             catalog_manager,
-            table_metadata_manager,
         }
-    }
-
-    pub async fn table_global_value(
-        &self,
-        key: &TableGlobalKey,
-    ) -> Result<Option<TableGlobalValue>> {
-        let raw = self
-            .catalog_manager
-            .backend()
-            .get(key.to_string().as_bytes())
-            .await
-            .context(TableMetadataManagerSnafu)?;
-        Ok(if let Some(raw) = raw {
-            Some(TableGlobalValue::from_bytes(raw.value).context(error::CatalogEntrySerdeSnafu)?)
-        } else {
-            None
-        })
-    }
-
-    async fn set_table_global_value(
-        &self,
-        key: TableGlobalKey,
-        value: TableGlobalValue,
-    ) -> Result<()> {
-        let value = value.as_bytes().context(error::CatalogEntrySerdeSnafu)?;
-        let req = PutRequest::new()
-            .with_key(key.to_string().as_bytes())
-            .with_value(value);
-        let _ = self
-            .catalog_manager
-            .backend()
-            .put(req)
-            .await
-            .context(TableMetadataManagerSnafu)?;
-        Ok(())
-    }
-
-    async fn delete_table_global_value(&self, key: TableGlobalKey) -> Result<()> {
-        let _ = self
-            .catalog_manager
-            .backend()
-            .delete(key.to_string().as_bytes(), false)
-            .await
-            .context(TableMetadataManagerSnafu)?;
-        Ok(())
-    }
-
-    async fn move_table_route_value(
-        &self,
-        catalog_name: &str,
-        schema_name: &str,
-        table_id: u32,
-        old_table_name: &str,
-        new_table_name: &str,
-    ) -> Result<()> {
-        let old_key = TableRouteKey {
-            table_id,
-            catalog_name,
-            schema_name,
-            table_name: old_table_name,
-        }
-        .to_string();
-
-        let new_key = TableRouteKey {
-            table_id,
-            catalog_name,
-            schema_name,
-            table_name: new_table_name,
-        }
-        .to_string();
-
-        let req = MoveValueRequest::new(old_key.as_bytes(), new_key.as_bytes());
-        self.catalog_manager
-            .backend()
-            .move_value(req)
-            .await
-            .context(TableMetadataManagerSnafu)?;
-
-        self.catalog_manager
-            .partition_manager()
-            .invalidate_table_route(&TableName {
-                catalog_name: catalog_name.to_string(),
-                schema_name: schema_name.to_string(),
-                table_name: old_table_name.to_string(),
-            })
-            .await;
-
-        Ok(())
-    }
-
-    async fn handle_alter(&self, context: AlterContext, request: &AlterTableRequest) -> Result<()> {
-        let AlterTableRequest {
-            catalog_name,
-            schema_name,
-            table_name,
-            alter_kind,
-            table_id: _table_id,
-            ..
-        } = request;
-
-        let alter_expr = context
-            .get::<AlterExpr>()
-            .context(error::ContextValueNotFoundSnafu { key: "AlterExpr" })?;
-
-        self.alter_by_expr(alter_expr).await?;
-
-        let table_info = self.table_info();
-        let new_meta = table_info
-            .meta
-            .builder_with_alter_kind(table_name, &request.alter_kind)
-            .context(error::TableSnafu)?
-            .build()
-            .context(error::BuildTableMetaSnafu {
-                table_name: table_name.clone(),
-            })?;
-
-        let mut new_info = TableInfo::clone(&*table_info);
-        new_info.ident.version = table_info.ident.version + 1;
-        new_info.meta = new_meta;
-
-        let key = TableGlobalKey {
-            catalog_name: catalog_name.clone(),
-            schema_name: schema_name.clone(),
-            table_name: table_name.clone(),
-        };
-        let mut value = self
-            .table_global_value(&key)
-            .await?
-            .context(error::TableNotFoundSnafu { table_name })?;
-
-        value.table_info = new_info.into();
-
-        if let AlterKind::RenameTable { new_table_name } = alter_kind {
-            let new_key = TableGlobalKey {
-                catalog_name: catalog_name.clone(),
-                schema_name: schema_name.clone(),
-                table_name: new_table_name.clone(),
-            };
-            self.set_table_global_value(new_key, value).await?;
-            self.delete_table_global_value(key).await?;
-            self.move_table_route_value(
-                catalog_name,
-                schema_name,
-                table_info.ident.table_id,
-                table_name,
-                new_table_name,
-            )
-            .await?;
-            Ok(())
-        } else {
-            self.set_table_global_value(key, value).await
-        }
-    }
-
-    /// Define a `alter_by_expr` instead of impl [`Table::alter`] to avoid redundant conversion between
-    /// [`table::requests::AlterTableRequest`] and [`AlterExpr`].
-    async fn alter_by_expr(&self, expr: &AlterExpr) -> Result<()> {
-        let table_routes = self
-            .catalog_manager
-            .partition_manager()
-            .find_table_route(&self.table_name)
-            .await
-            .with_context(|_| error::FindTableRouteSnafu {
-                table_name: self.table_name.to_string(),
-            })?;
-        let leaders = table_routes.find_leaders();
-        ensure!(
-            !leaders.is_empty(),
-            error::LeaderNotFoundSnafu {
-                table: format!(
-                    "{:?}.{:?}.{}",
-                    expr.catalog_name, expr.schema_name, expr.table_name
-                )
-            }
-        );
-
-        let datanode_clients = self.catalog_manager.datanode_clients();
-        for datanode in leaders {
-            let client = datanode_clients.get_client(&datanode).await;
-            let db = Database::new(&expr.catalog_name, &expr.schema_name, client);
-            debug!("Sending {:?} to {:?}", expr, db);
-            let result = db
-                .alter(expr.clone())
-                .await
-                .context(error::RequestDatanodeSnafu)?;
-            debug!("Alter table result: {:?}", result);
-            // TODO(hl): We should further check and track alter result in some global DDL task tracker
-        }
-        Ok(())
     }
 
     async fn find_datanode_instances(
@@ -698,7 +489,7 @@ pub(crate) mod test {
         );
         let table_route = TableRoute::new(
             Table {
-                id: 1,
+                id: 2,
                 table_name: table_name.clone(),
                 table_schema: vec![],
             },

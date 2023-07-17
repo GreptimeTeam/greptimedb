@@ -194,6 +194,7 @@ fn collect_column_values(column_datatype: ColumnDataType, values: &Values) -> Ve
                 Timestamp::new_nanosecond(*v)
             ))
         }
+        _ => unimplemented!("Implemented in #1961"),
     }
 }
 

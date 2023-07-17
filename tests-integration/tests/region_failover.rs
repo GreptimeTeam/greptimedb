@@ -17,9 +17,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::meta::Peer;
-use catalog::helper::TableGlobalKey;
 use catalog::remote::CachedMetaKvBackend;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO_ENGINE};
+use common_meta::helper::TableGlobalKey;
 use common_meta::ident::TableIdent;
 use common_meta::rpc::router::TableRoute;
 use common_meta::rpc::KeyValue;

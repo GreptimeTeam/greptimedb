@@ -14,10 +14,10 @@
 
 use api::v1::meta::TableRouteValue;
 use async_trait::async_trait;
-use catalog::helper::TableGlobalKey;
 use client::Database;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
+use common_meta::helper::TableGlobalKey;
 use common_meta::key::TableRouteKey;
 use common_meta::kv_backend::txn::{Compare, CompareOp, Txn, TxnOp};
 use common_meta::rpc::ddl::CreateTableTask;

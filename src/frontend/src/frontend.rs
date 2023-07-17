@@ -15,6 +15,7 @@
 use common_telemetry::logging::LoggingOptions;
 use meta_client::MetaClientOptions;
 use serde::{Deserialize, Serialize};
+use servers::heartbeat_options::HeartbeatOptions;
 use servers::http::HttpOptions;
 use servers::Mode;
 
@@ -27,8 +28,7 @@ use crate::service_config::{
 #[serde(default)]
 pub struct FrontendOptions {
     pub mode: Mode,
-    pub heartbeat_interval_millis: u64,
-    pub retry_interval_millis: u64,
+    pub heartbeat: HeartbeatOptions,
     pub http_options: Option<HttpOptions>,
     pub grpc_options: Option<GrpcOptions>,
     pub mysql_options: Option<MysqlOptions>,
@@ -45,8 +45,7 @@ impl Default for FrontendOptions {
     fn default() -> Self {
         Self {
             mode: Mode::Standalone,
-            heartbeat_interval_millis: 5000,
-            retry_interval_millis: 5000,
+            heartbeat: HeartbeatOptions::default(),
             http_options: Some(HttpOptions::default()),
             grpc_options: Some(GrpcOptions::default()),
             mysql_options: Some(MysqlOptions::default()),

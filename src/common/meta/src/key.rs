@@ -49,13 +49,13 @@ mod table_route;
 
 use std::sync::Arc;
 
-use datanode_table::{DatanodeTableManager, DatanodeTableValue};
+use datanode_table::{DatanodeTableKey, DatanodeTableManager, DatanodeTableValue};
 use lazy_static::lazy_static;
 use regex::Regex;
 use snafu::ResultExt;
-use table_info::{TableInfoManager, TableInfoValue};
-use table_name::{TableNameManager, TableNameValue};
-use table_region::{TableRegionManager, TableRegionValue};
+use table_info::{TableInfoKey, TableInfoManager, TableInfoValue};
+use table_name::{TableNameKey, TableNameManager, TableNameValue};
+use table_region::{TableRegionKey, TableRegionManager, TableRegionValue};
 
 use crate::error::{InvalidTableMetadataSnafu, Result, SerdeJsonSnafu};
 pub use crate::key::table_route::{TableRouteKey, TABLE_ROUTE_PREFIX};
@@ -125,6 +125,25 @@ impl TableMetadataManager {
         &self.datanode_table_manager
     }
 }
+
+macro_rules! impl_table_meta_key {
+    ( $($val_ty: ty), *) => {
+        $(
+            impl std::fmt::Display for $val_ty {
+                fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    write!(f, "{}", String::from_utf8_lossy(&self.as_raw_key()))
+                }
+            }
+        )*
+    }
+}
+
+impl_table_meta_key!(
+    TableNameKey<'_>,
+    TableInfoKey,
+    TableRegionKey,
+    DatanodeTableKey
+);
 
 macro_rules! impl_table_meta_value {
     ( $($val_ty: ty), *) => {

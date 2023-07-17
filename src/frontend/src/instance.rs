@@ -163,7 +163,6 @@ impl Instance {
             meta_client.clone(),
             Arc::new(catalog_manager.clone()),
             datanode_clients.clone(),
-            table_metadata_manager.clone(),
         );
         let dist_instance = Arc::new(dist_instance);
 
@@ -200,8 +199,7 @@ impl Instance {
 
         let heartbeat_task = Some(HeartbeatTask::new(
             meta_client,
-            opts.heartbeat_interval_millis,
-            opts.retry_interval_millis,
+            opts.heartbeat.clone(),
             Arc::new(handlers_executor),
         ));
 

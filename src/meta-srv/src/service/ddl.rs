@@ -14,11 +14,10 @@
 
 use api::v1::meta::{
     ddl_task_server, Partition, Region, RegionRoute, SubmitDdlTaskRequest, SubmitDdlTaskResponse,
-    Table, TableRoute,
+    Table, TableId, TableRoute,
 };
-use api::v1::TableId;
-use catalog::helper::TableGlobalKey;
 use common_grpc_expr::alter_expr_to_request;
+use common_meta::helper::TableGlobalKey;
 use common_meta::key::TableRouteKey;
 use common_meta::rpc::ddl::{AlterTableTask, CreateTableTask, DdlTask, DropTableTask};
 use common_meta::rpc::router;

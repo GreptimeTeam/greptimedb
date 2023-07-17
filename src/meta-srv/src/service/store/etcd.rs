@@ -57,11 +57,11 @@ impl EtcdStore {
             .await
             .context(error::ConnectEtcdSnafu)?;
 
-        Self::with_etcd_client(client)
+        Ok(Self::with_etcd_client(client))
     }
 
-    pub fn with_etcd_client(client: Client) -> Result<KvStoreRef> {
-        Ok(Arc::new(Self { client }))
+    pub fn with_etcd_client(client: Client) -> KvStoreRef {
+        Arc::new(Self { client })
     }
 
     async fn do_multi_txn(&self, txn_ops: Vec<TxnOp>) -> Result<Vec<TxnResponse>> {

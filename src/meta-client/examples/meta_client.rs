@@ -12,23 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
 use std::time::Duration;
 
 use api::v1::meta::{HeartbeatRequest, Peer, Role};
-use chrono::DateTime;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
-use common_meta::rpc::router::{CreateRequest, Partition};
 use common_meta::rpc::store::{
     BatchDeleteRequest, BatchGetRequest, BatchPutRequest, CompareAndPutRequest, DeleteRangeRequest,
     PutRequest, RangeRequest,
 };
-use common_meta::table_name::TableName;
-use datatypes::prelude::ConcreteDataType;
-use datatypes::schema::{ColumnSchema, RawSchema};
 use meta_client::client::MetaClientBuilder;
-use table::metadata::{RawTableInfo, RawTableMeta, TableIdent, TableType};
-use table::requests::TableOptions;
 use tracing::{event, subscriber, Level};
 use tracing_subscriber::FmtSubscriber;
 
@@ -77,25 +69,6 @@ async fn run() {
             event!(Level::TRACE, "heartbeat response: {:#?}", res);
         }
     });
-
-    let p1 = Partition {
-        column_list: vec![b"col_1".to_vec(), b"col_2".to_vec()],
-        value_list: vec![b"k1".to_vec(), b"k2".to_vec()],
-    };
-
-    let p2 = Partition {
-        column_list: vec![b"col_1".to_vec(), b"col_2".to_vec()],
-        value_list: vec![b"Max1".to_vec(), b"Max2".to_vec()],
-    };
-
-    let table_name = TableName::new("test_catalog", "test_schema", "test_table");
-    let table_info = new_table_info();
-    let create_req = CreateRequest::new(table_name, &table_info)
-        .add_partition(p1)
-        .add_partition(p2);
-
-    let res = meta_client.create_route(create_req).await;
-    event!(Level::INFO, "create_route result: {:#?}", res);
 
     // put
     let put = PutRequest::new()
@@ -172,41 +145,4 @@ async fn run() {
 
     let res = meta_client.batch_get(batch_get).await.unwrap();
     event!(Level::INFO, "batch get result: {:#?}", res);
-}
-
-fn new_table_info() -> RawTableInfo {
-    RawTableInfo {
-        ident: TableIdent {
-            table_id: 0,
-            version: 0,
-        },
-        name: "test_table".to_string(),
-        desc: None,
-        catalog_name: "test_catalog".to_string(),
-        schema_name: "test_schema".to_string(),
-        meta: RawTableMeta {
-            schema: RawSchema {
-                column_schemas: vec![
-                    ColumnSchema::new(
-                        "ts",
-                        ConcreteDataType::timestamp_millisecond_datatype(),
-                        false,
-                    ),
-                    ColumnSchema::new("col1", ConcreteDataType::string_datatype(), true),
-                    ColumnSchema::new("col2", ConcreteDataType::string_datatype(), true),
-                ],
-                timestamp_index: Some(0),
-                version: 0,
-            },
-            primary_key_indices: vec![],
-            value_indices: vec![],
-            engine: "mito".to_string(),
-            next_column_id: 0,
-            region_numbers: vec![],
-            engine_options: HashMap::new(),
-            options: TableOptions::default(),
-            created_on: DateTime::default(),
-        },
-        table_type: TableType::Base,
-    }
 }

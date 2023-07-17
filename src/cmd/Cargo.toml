@@ -16,6 +16,7 @@ metrics-process = ["servers/metrics-process"]
 
 [dependencies]
 anymap = "1.0.0-beta.2"
+async-trait.workspace = true
 catalog = { path = "../catalog" }
 clap = { version = "3.1", features = ["derive"] }
 client = { path = "../client" }
@@ -30,6 +31,7 @@ common-telemetry = { path = "../common/telemetry", features = [
 config = "0.13"
 datanode = { path = "../datanode" }
 either = "1.8"
+etcd-client.workspace = true
 frontend = { path = "../frontend" }
 futures.workspace = true
 meta-client = { path = "../meta-client" }

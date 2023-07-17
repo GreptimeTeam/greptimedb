@@ -25,8 +25,8 @@ mod test {
         CreateDatabaseExpr, CreateTableExpr, DdlRequest, DeleteRequest, DropTableExpr,
         FlushTableExpr, InsertRequest, InsertRequests, QueryRequest,
     };
-    use catalog::helper::{TableGlobalKey, TableGlobalValue};
-    use common_catalog::consts::MITO_ENGINE;
+    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO_ENGINE};
+    use common_meta::table_name::TableName;
     use common_query::Output;
     use common_recordbatch::RecordBatches;
     use frontend::instance::Instance;
@@ -35,6 +35,7 @@ mod test {
     use servers::query_handler::grpc::GrpcQueryHandler;
     use session::context::QueryContext;
     use store_api::storage::RegionNumber;
+    use table::Table;
     use tests::{has_parquet_file, test_region_dir};
 
     use crate::tests;
@@ -332,20 +333,22 @@ CREATE TABLE {table_name} (
             .unwrap()
             .unwrap();
         let table = table.as_any().downcast_ref::<DistTable>().unwrap();
+        let table_id = table.table_info().table_id();
 
-        let tgv = table
-            .table_global_value(&TableGlobalKey {
-                catalog_name: "greptime".to_string(),
-                schema_name: "public".to_string(),
-                table_name: table_name.to_string(),
-            })
+        let table_region_value = instance
+            .table_metadata_manager()
+            .table_region_manager()
+            .get_old(&TableName::new(
+                DEFAULT_CATALOG_NAME,
+                DEFAULT_SCHEMA_NAME,
+                table_name,
+            ))
             .await
             .unwrap()
             .unwrap();
-        let table_id = tgv.table_id();
 
-        let region_to_dn_map = tgv
-            .regions_id_map
+        let region_to_dn_map = table_region_value
+            .region_distribution
             .iter()
             .map(|(k, v)| (v[0], *k))
             .collect::<HashMap<u32, u64>>();
@@ -603,25 +606,19 @@ CREATE TABLE {table_name} (
         table_name: &str,
         expected_distribution: HashMap<u32, &str>,
     ) {
-        let table = instance
-            .frontend()
-            .catalog_manager()
-            .table("greptime", "public", table_name)
+        let table_region_value = instance
+            .table_metadata_manager()
+            .table_region_manager()
+            .get_old(&TableName::new(
+                DEFAULT_CATALOG_NAME,
+                DEFAULT_SCHEMA_NAME,
+                table_name,
+            ))
             .await
             .unwrap()
             .unwrap();
-        let table = table.as_any().downcast_ref::<DistTable>().unwrap();
-
-        let TableGlobalValue { regions_id_map, .. } = table
-            .table_global_value(&TableGlobalKey {
-                catalog_name: "greptime".to_string(),
-                schema_name: "public".to_string(),
-                table_name: table_name.to_string(),
-            })
-            .await
-            .unwrap()
-            .unwrap();
-        let region_to_dn_map = regions_id_map
+        let region_to_dn_map = table_region_value
+            .region_distribution
             .iter()
             .map(|(k, v)| (v[0], *k))
             .collect::<HashMap<u32, u64>>();

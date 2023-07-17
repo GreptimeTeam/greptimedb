@@ -32,7 +32,6 @@ use table::TableRef;
 use crate::error::{CreateTableSnafu, Result};
 
 pub mod error;
-pub mod helper;
 pub mod information_schema;
 pub mod local;
 mod metrics;

@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use api::v1::meta::TableRouteValue;
-use catalog::helper::TableGlobalKey;
+use common_meta::helper::TableGlobalKey;
 use common_meta::key::TableRouteKey;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::TableRoute;

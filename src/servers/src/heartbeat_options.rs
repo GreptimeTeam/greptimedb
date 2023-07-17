@@ -12,21 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! All keys used for distributed locking in the Metasrv.
-//! Place them in this unified module for better maintenance.
+use serde::{Deserialize, Serialize};
 
-use common_meta::RegionIdent;
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HeartbeatOptions {
+    pub interval_millis: u64,
+    pub retry_interval_millis: u64,
+}
 
-use crate::lock::Key;
-
-pub(crate) fn table_metadata_lock_key(region: &RegionIdent) -> Key {
-    format!(
-        "table_metadata_lock_({}-{}.{}.{}-{})",
-        region.cluster_id,
-        region.table_ident.catalog,
-        region.table_ident.schema,
-        region.table_ident.table,
-        region.table_ident.table_id,
-    )
-    .into_bytes()
+impl Default for HeartbeatOptions {
+    fn default() -> Self {
+        Self {
+            interval_millis: 5000,
+            retry_interval_millis: 5000,
+        }
+    }
 }

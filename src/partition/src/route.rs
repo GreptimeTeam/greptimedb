@@ -66,6 +66,7 @@ impl TableRoutes {
             .meta_client
             .route(RouteRequest {
                 table_names: vec![table_name.clone()],
+                table_ids: vec![],
             })
             .await
             .context(error::RequestMetaSnafu)?;
