@@ -15,6 +15,7 @@
 mod admin;
 pub mod authorize;
 pub mod handler;
+pub mod header;
 pub mod influxdb;
 pub mod mem_prof;
 pub mod opentsdb;
