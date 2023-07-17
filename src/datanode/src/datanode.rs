@@ -26,6 +26,7 @@ use common_telemetry::logging::LoggingOptions;
 use meta_client::MetaClientOptions;
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
+use servers::heartbeat_options::HeartbeatOptions;
 use servers::http::HttpOptions;
 use servers::Mode;
 use snafu::ResultExt;
@@ -354,7 +355,7 @@ pub struct DatanodeOptions {
     pub rpc_addr: String,
     pub rpc_hostname: Option<String>,
     pub rpc_runtime_size: usize,
-    pub heartbeat_interval_millis: u64,
+    pub heartbeat: HeartbeatOptions,
     pub http_opts: HttpOptions,
     pub meta_client_options: Option<MetaClientOptions>,
     pub wal: WalConfig,
@@ -378,7 +379,7 @@ impl Default for DatanodeOptions {
             storage: StorageConfig::default(),
             procedure: ProcedureConfig::default(),
             logging: LoggingOptions::default(),
-            heartbeat_interval_millis: 5000,
+            heartbeat: HeartbeatOptions::default(),
         }
     }
 }

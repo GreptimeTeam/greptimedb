@@ -200,8 +200,7 @@ impl Instance {
 
         let heartbeat_task = Some(HeartbeatTask::new(
             meta_client,
-            opts.heartbeat_interval_millis,
-            opts.retry_interval_millis,
+            opts.heartbeat.clone(),
             Arc::new(handlers_executor),
         ));
 
