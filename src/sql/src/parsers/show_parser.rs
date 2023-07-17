@@ -18,7 +18,7 @@ use sqlparser::tokenizer::Token;
 
 use crate::error::{self, InvalidDatabaseNameSnafu, InvalidTableNameSnafu, Result};
 use crate::parser::ParserContext;
-use crate::statements::show::{ShowCreateTable, ShowKind, ShowTables};
+use crate::statements::show::{ShowCreateTable, ShowDatabases, ShowKind, ShowTables};
 use crate::statements::statement::Statement;
 
 /// SHOW statement parser implementation
@@ -127,6 +127,38 @@ impl<'a> ParserContext<'a> {
         };
 
         Ok(Statement::ShowTables(ShowTables { kind, database }))
+    }
+
+    /// Parses `SHOW DATABASES` statement.
+    pub fn parse_show_databases(&mut self) -> Result<Statement> {
+        let tok = self.parser.next_token().token;
+        match &tok {
+            Token::EOF | Token::SemiColon => {
+                Ok(Statement::ShowDatabases(ShowDatabases::new(ShowKind::All)))
+            }
+            Token::Word(w) => match w.keyword {
+                Keyword::LIKE => Ok(Statement::ShowDatabases(ShowDatabases::new(
+                    ShowKind::Like(self.parser.parse_identifier().with_context(|_| {
+                        error::UnexpectedSnafu {
+                            sql: self.sql,
+                            expected: "LIKE",
+                            actual: tok.to_string(),
+                        }
+                    })?),
+                ))),
+                Keyword::WHERE => Ok(Statement::ShowDatabases(ShowDatabases::new(
+                    ShowKind::Where(self.parser.parse_expr().with_context(|_| {
+                        error::UnexpectedSnafu {
+                            sql: self.sql,
+                            expected: "some valid expression",
+                            actual: self.peek_token_as_string(),
+                        }
+                    })?),
+                ))),
+                _ => self.unsupported(self.peek_token_as_string()),
+            },
+            _ => self.unsupported(self.peek_token_as_string()),
+        }
     }
 }
 
