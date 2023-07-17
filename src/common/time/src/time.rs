@@ -51,7 +51,7 @@ impl Time {
         }
     }
 
-    /// Creates the time in millissecond.
+    /// Creates the time in millisecond.
     pub fn new_millisecond(value: i64) -> Self {
         Self {
             value,
