@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use async_trait::async_trait;
-use catalog::helper::TableGlobalValue;
 use clap::Parser;
+use common_meta::helper::TableGlobalValue;
 use common_meta::key::datanode_table::{DatanodeTableKey, DatanodeTableValue};
 use common_meta::key::table_info::{TableInfoKey, TableInfoValue};
 use common_meta::key::table_name::{TableNameKey, TableNameValue};
