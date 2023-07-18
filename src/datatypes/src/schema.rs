@@ -24,9 +24,7 @@ use datafusion_common::DFSchemaRef;
 use snafu::{ensure, ResultExt};
 
 use crate::data_type::DataType;
-use crate::error::{
-    self, DuplicateColumnSnafu, DuplicateMetaSnafu, Error, ProjectArrowSchemaSnafu, Result,
-};
+use crate::error::{self, DuplicateColumnSnafu, Error, ProjectArrowSchemaSnafu, Result};
 pub use crate::schema::column_schema::{ColumnSchema, Metadata, COMMENT_KEY, TIME_INDEX_KEY};
 pub use crate::schema::constraint::ColumnDefaultConstraint;
 pub use crate::schema::raw::RawSchema;
@@ -213,12 +211,8 @@ impl SchemaBuilder {
             validate_timestamp_index(&self.column_schemas, timestamp_index)?;
         }
 
-        ensure!(
-            self.metadata
-                .insert(VERSION_KEY.to_string(), self.version.to_string())
-                .is_none(),
-            DuplicateMetaSnafu { key: VERSION_KEY }
-        );
+        self.metadata
+            .insert(VERSION_KEY.to_string(), self.version.to_string());
 
         let arrow_schema = ArrowSchema::new(self.fields).with_metadata(self.metadata);
 
