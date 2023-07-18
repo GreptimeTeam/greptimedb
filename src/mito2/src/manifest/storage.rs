@@ -393,7 +393,7 @@ impl ManifestObjectStore {
             size: bytes.len(),
             version,
             checksum: None,
-            extend_metadata: None,
+            extend_metadata: HashMap::new(),
         };
 
         logging::debug!(
@@ -402,9 +402,9 @@ impl ManifestObjectStore {
             checkpoint_metadata
         );
 
-        let bs = checkpoint_metadata.encode()?;
+        let bytes = checkpoint_metadata.encode()?;
         self.object_store
-            .write(&last_checkpoint_path, bs.as_ref().to_vec())
+            .write(&last_checkpoint_path, bytes)
             .await
             .context(OpenDalSnafu)?;
 
@@ -522,12 +522,14 @@ struct CheckpointMetadata {
     /// The latest version this checkpoint contains.
     pub version: ManifestVersion,
     pub checksum: Option<String>,
-    pub extend_metadata: Option<HashMap<String, String>>,
+    pub extend_metadata: HashMap<String, String>,
 }
 
 impl CheckpointMetadata {
-    fn encode(&self) -> Result<impl AsRef<[u8]>> {
-        serde_json::to_string(self).context(SerdeJsonSnafu)
+    fn encode(&self) -> Result<Vec<u8>> {
+        Ok(serde_json::to_string(self)
+            .context(SerdeJsonSnafu)?
+            .into_bytes())
     }
 
     fn decode(bs: &[u8]) -> Result<Self> {
