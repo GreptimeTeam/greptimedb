@@ -21,7 +21,7 @@ Affected Rows: 0
 
 INSERT INTO test VALUES (3, NULL);
 
-Error: 1004(InvalidArguments), Column k is not null but input has null
+Error: 1004(InvalidArguments), Failed to insert value to table: greptime.public.test, source: Failed to operate table, source: Column k is not null but input has null
 
 INSERT INTO test VALUES (3, 13);
 
