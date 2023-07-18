@@ -17,6 +17,8 @@ use std::vec;
 use api::v1::meta::MailboxMessage;
 use async_trait::async_trait;
 use client::Database;
+use common_error::ext::ErrorExt;
+use common_error::status_code::StatusCode;
 use common_meta::ident::TableIdent;
 use common_meta::instruction::Instruction;
 use common_meta::kv_backend::txn::{Compare, CompareOp, Txn, TxnOp};
@@ -95,10 +97,12 @@ impl AlterTableProcedure {
             let expr = self.data.task.alter_table.clone();
             joins.push(common_runtime::spawn_bg(async move {
                 debug!("Sending {:?} to {:?}", expr, client);
-                client
-                    .alter(expr)
-                    .await
-                    .map_err(handle_request_datanode_error(datanode))
+                if let Err(err) = client.alter(expr).await {
+                    if err.status_code() != StatusCode::TableNotFound {
+                        return Err(handle_request_datanode_error(datanode)(err));
+                    }
+                }
+                Ok(())
             }));
         }
 
