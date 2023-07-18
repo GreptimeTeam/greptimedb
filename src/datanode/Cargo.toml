@@ -21,6 +21,7 @@ common-function = { path = "../common/function" }
 common-grpc = { path = "../common/grpc" }
 common-grpc-expr = { path = "../common/grpc-expr" }
 common-meta = { path = "../common/meta" }
+common-options = { path = "../common/options" }
 common-procedure = { path = "../common/procedure" }
 common-query = { path = "../common/query" }
 common-recordbatch = { path = "../common/recordbatch" }

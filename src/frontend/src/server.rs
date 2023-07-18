@@ -17,6 +17,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use common_base::Plugins;
+use common_options::frontend::{FrontendOptions, InfluxdbOptions, PromStoreOptions};
 use common_runtime::Builder as RuntimeBuilder;
 use common_telemetry::info;
 use servers::auth::UserProviderRef;
@@ -36,9 +37,7 @@ use snafu::ResultExt;
 
 use crate::error::Error::StartServer;
 use crate::error::{self, Result};
-use crate::frontend::FrontendOptions;
 use crate::instance::FrontendInstance;
-use crate::service_config::{InfluxdbOptions, PromStoreOptions};
 
 pub(crate) struct Services;
 

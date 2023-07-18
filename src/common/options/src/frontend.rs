@@ -12,17 +12,28 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod grpc;
+mod influxdb;
+mod mysql;
+mod opentsdb;
+mod postgres;
+mod prom_store;
+mod prometheus;
+
 use common_telemetry::logging::LoggingOptions;
-use meta_client::MetaClientOptions;
+pub use grpc::GrpcOptions;
+pub use influxdb::InfluxdbOptions;
+pub use mysql::MysqlOptions;
+pub use opentsdb::OpentsdbOptions;
+pub use postgres::PostgresOptions;
+pub use prom_store::PromStoreOptions;
+pub use prometheus::PrometheusOptions;
 use serde::{Deserialize, Serialize};
 use servers::heartbeat_options::HeartbeatOptions;
 use servers::http::HttpOptions;
 use servers::Mode;
 
-use crate::service_config::{
-    GrpcOptions, InfluxdbOptions, MysqlOptions, OpentsdbOptions, PostgresOptions, PromStoreOptions,
-    PrometheusOptions,
-};
+use crate::meta::MetaClientOptions;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]

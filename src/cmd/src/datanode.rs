@@ -15,9 +15,9 @@
 use std::time::Duration;
 
 use clap::Parser;
+use common_options::meta::MetaClientOptions;
 use common_telemetry::logging;
 use datanode::datanode::{Datanode, DatanodeOptions, FileConfig, ObjectStoreConfig};
-use meta_client::MetaClientOptions;
 use servers::Mode;
 use snafu::ResultExt;
 

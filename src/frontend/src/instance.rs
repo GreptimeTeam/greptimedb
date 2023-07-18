@@ -40,6 +40,7 @@ use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
 use common_meta::heartbeat::handler::HandlerGroupExecutor;
 use common_meta::key::TableMetadataManager;
+use common_options::frontend::FrontendOptions;
 use common_query::Output;
 use common_telemetry::logging::{debug, info};
 use common_telemetry::timer;
@@ -81,7 +82,6 @@ use crate::error::{
     SqlExecInterceptedSnafu,
 };
 use crate::expr_factory::{CreateExprFactoryRef, DefaultCreateExprFactory};
-use crate::frontend::FrontendOptions;
 use crate::heartbeat::handler::invalidate_table_cache::InvalidateTableCacheHandler;
 use crate::heartbeat::HeartbeatTask;
 use crate::instance::standalone::StandaloneGrpcQueryHandler;

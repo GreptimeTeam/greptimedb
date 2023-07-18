@@ -106,6 +106,33 @@ impl TryFrom<&str> for SelectorType {
     }
 }
 
+// Options for meta client in datanode instance.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MetaClientOptions {
+    pub metasrv_addrs: Vec<String>,
+    pub timeout_millis: u64,
+    #[serde(default = "default_ddl_timeout_millis")]
+    pub ddl_timeout_millis: u64,
+    pub connect_timeout_millis: u64,
+    pub tcp_nodelay: bool,
+}
+
+fn default_ddl_timeout_millis() -> u64 {
+    10_000u64
+}
+
+impl Default for MetaClientOptions {
+    fn default() -> Self {
+        Self {
+            metasrv_addrs: vec!["127.0.0.1:3002".to_string()],
+            timeout_millis: 3_000u64,
+            ddl_timeout_millis: default_ddl_timeout_millis(),
+            connect_timeout_millis: 5_000u64,
+            tcp_nodelay: true,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::SelectorType;

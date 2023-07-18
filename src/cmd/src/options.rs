@@ -12,11 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_options::frontend::FrontendOptions;
 use common_options::meta::MetaSrvOptions;
 use common_telemetry::logging::LoggingOptions;
 use config::{Config, Environment, File, FileFormat};
 use datanode::datanode::DatanodeOptions;
-use frontend::frontend::FrontendOptions;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 

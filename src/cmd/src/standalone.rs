@@ -16,16 +16,15 @@ use std::sync::Arc;
 
 use clap::Parser;
 use common_base::Plugins;
+use common_options::frontend::{
+    FrontendOptions, GrpcOptions, InfluxdbOptions, MysqlOptions, OpentsdbOptions, PostgresOptions,
+    PromStoreOptions, PrometheusOptions,
+};
 use common_telemetry::info;
 use common_telemetry::logging::LoggingOptions;
 use datanode::datanode::{Datanode, DatanodeOptions, ProcedureConfig, StorageConfig, WalConfig};
 use datanode::instance::InstanceRef;
-use frontend::frontend::FrontendOptions;
 use frontend::instance::{FrontendInstance, Instance as FeInstance};
-use frontend::service_config::{
-    GrpcOptions, InfluxdbOptions, MysqlOptions, OpentsdbOptions, PostgresOptions, PromStoreOptions,
-    PrometheusOptions,
-};
 use serde::{Deserialize, Serialize};
 use servers::http::HttpOptions;
 use servers::tls::{TlsMode, TlsOption};

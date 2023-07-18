@@ -24,6 +24,7 @@ use catalog::{CatalogManagerRef, RegisterTableRequest};
 use common_catalog::consts::{
     DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID, MITO_ENGINE,
 };
+use common_options::frontend::{MysqlOptions, PostgresOptions};
 use common_query::Output;
 use common_recordbatch::util;
 use common_runtime::Builder as RuntimeBuilder;
@@ -43,7 +44,6 @@ use datatypes::vectors::{
     Float64VectorBuilder, MutableVector, StringVectorBuilder, TimestampMillisecondVectorBuilder,
 };
 use frontend::instance::Instance as FeInstance;
-use frontend::service_config::{MysqlOptions, PostgresOptions};
 use object_store::services::{Azblob, Gcs, Oss, S3};
 use object_store::test_util::TempFolder;
 use object_store::ObjectStore;
