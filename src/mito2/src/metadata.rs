@@ -19,8 +19,9 @@ use std::sync::Arc;
 
 use datatypes::prelude::DataType;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
+use serde::de::Error;
 use serde::{Deserialize, Deserializer, Serialize};
-use snafu::{ensure, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::{ColumnId, RegionId};
 
 use crate::error::{InvalidMetaSnafu, InvalidSchemaSnafu, Result};
@@ -55,6 +56,13 @@ pub struct RegionMetadata {
     /// Latest schema constructed from [column_metadatas](RegionMetadata::column_metadatas).
     #[serde(skip)]
     schema: SchemaRef,
+    /// Id of the time index column.
+    #[serde(skip)]
+    time_index: ColumnId,
+    /// Map column id to column's index in [column_metadatas](RegionMetadata::column_metadatas).
+    #[serde(skip)]
+    id_to_index: HashMap<ColumnId, usize>,
+
     /// Columns in the region. Has the same order as columns
     /// in [schema](RegionMetadata::schema).
     column_metadatas: Vec<ColumnMetadata>,
@@ -83,29 +91,69 @@ impl<'de> Deserialize<'de> for RegionMetadata {
             region_id: RegionId,
         }
 
-        let region_metadata_without_schema =
-            RegionMetadataWithoutSchema::deserialize(deserializer)?;
+        let without_schema = RegionMetadataWithoutSchema::deserialize(deserializer)?;
+        let skipped =
+            SkippedFields::new(&without_schema.column_metadatas).map_err(D::Error::custom)?;
 
-        let column_schemas = region_metadata_without_schema
-            .column_metadatas
+        Ok(Self {
+            schema: skipped.schema,
+            time_index: skipped.time_index,
+            id_to_index: skipped.id_to_index,
+            column_metadatas: without_schema.column_metadatas,
+            version: without_schema.version,
+            primary_key: without_schema.primary_key,
+            region_id: without_schema.region_id,
+        })
+    }
+}
+
+/// Fields skipped in serialization.
+struct SkippedFields {
+    /// Last schema.
+    schema: SchemaRef,
+    /// Id of the time index column.
+    time_index: ColumnId,
+    /// Map column id to column's index in [column_metadatas](RegionMetadata::column_metadatas).
+    id_to_index: HashMap<ColumnId, usize>,
+}
+
+impl SkippedFields {
+    /// Constructs skipped fields from `column_metadatas`.
+    fn new(column_metadatas: &[ColumnMetadata]) -> Result<SkippedFields> {
+        let column_schemas = column_metadatas
             .iter()
             .map(|column_metadata| column_metadata.column_schema.clone())
             .collect();
-        let schema = Arc::new(Schema::new(column_schemas));
+        let schema = Arc::new(Schema::try_new(column_schemas).context(InvalidSchemaSnafu)?);
+        let time_index = column_metadatas
+            .iter()
+            .find_map(|col| {
+                if col.semantic_type == SemanticType::Timestamp {
+                    Some(col.column_id)
+                } else {
+                    None
+                }
+            })
+            .context(InvalidMetaSnafu {
+                reason: "time index not found",
+            })?;
+        let id_to_index = column_metadatas
+            .iter()
+            .enumerate()
+            .map(|(idx, col)| (col.column_id, idx))
+            .collect();
 
-        Ok(Self {
+        Ok(SkippedFields {
             schema,
-            column_metadatas: region_metadata_without_schema.column_metadatas,
-            version: region_metadata_without_schema.version,
-            primary_key: region_metadata_without_schema.primary_key,
-            region_id: region_metadata_without_schema.region_id,
+            time_index,
+            id_to_index,
         })
     }
 }
 
 impl RegionMetadata {
     /// Checks whether the metadata is valid.
-    pub fn validate(&self) -> Result<()> {
+    fn validate(&self) -> Result<()> {
         ensure!(
             !self.column_metadatas.is_empty(),
             InvalidMetaSnafu {
@@ -113,14 +161,14 @@ impl RegionMetadata {
             }
         );
 
-        // Checks whether column id or name is duplicate.
-        let mut names = HashSet::with_capacity(self.column_metadatas.len());
         // Id to name.
         let mut id_names = HashMap::with_capacity(self.column_metadatas.len());
         for col in &self.column_metadatas {
             // Validate each column.
             col.validate()?;
 
+            // Check whether column id is duplicated. We already check column name
+            // is unique in `Schema` so we only check column id here.
             ensure!(
                 !id_names.contains_key(&col.column_id),
                 InvalidMetaSnafu {
@@ -131,14 +179,6 @@ impl RegionMetadata {
                 }
             );
             id_names.insert(col.column_id, &col.column_schema.name);
-
-            ensure!(
-                !names.contains(&col.column_schema.name),
-                InvalidMetaSnafu {
-                    reason: format!("there are two {} column", col.column_schema.name,),
-                }
-            );
-            names.insert(&col.column_schema.name);
         }
 
         // Checks there is only one time index.
@@ -218,18 +258,12 @@ impl RegionMetadataBuilder {
 
     /// Consume the builder and build a [RegionMetadata].
     pub fn build(self) -> Result<RegionMetadata> {
-        let schema = Arc::new(
-            Schema::try_new(
-                self.column_metadatas
-                    .iter()
-                    .map(|column_metadata| column_metadata.column_schema.clone())
-                    .collect(),
-            )
-            .context(InvalidSchemaSnafu)?,
-        );
+        let skipped = SkippedFields::new(&self.column_metadatas)?;
 
         let meta = RegionMetadata {
-            schema,
+            schema: skipped.schema,
+            time_index: skipped.time_index,
+            id_to_index: skipped.id_to_index,
             column_metadatas: self.column_metadatas,
             version: self.version,
             primary_key: self.primary_key,
@@ -286,8 +320,12 @@ mod test {
 
     use super::*;
 
+    fn create_builder() -> RegionMetadataBuilder {
+        RegionMetadataBuilder::new(RegionId::new(1234, 5678), 9)
+    }
+
     fn build_test_region_metadata() -> RegionMetadata {
-        let mut builder = RegionMetadataBuilder::new(RegionId::new(1234, 5678), 9);
+        let mut builder = create_builder();
         builder
             .push_column_metadata(ColumnMetadata {
                 column_schema: ColumnSchema::new("a", ConcreteDataType::int64_datatype(), false),
@@ -318,5 +356,19 @@ mod test {
         let serialized = serde_json::to_string(&region_metadata).unwrap();
         let deserialized: RegionMetadata = serde_json::from_str(&serialized).unwrap();
         assert_eq!(region_metadata, deserialized);
+    }
+
+    #[test]
+    fn test_column_metadata_validate() {
+        let mut builder = create_builder();
+        let col = ColumnMetadata {
+            column_schema: ColumnSchema::new("ts", ConcreteDataType::string_datatype(), false),
+            semantic_type: SemanticType::Timestamp,
+            column_id: 1,
+        };
+        col.validate().unwrap_err();
+
+        builder.push_column_metadata(col);
+        builder.build().unwrap_err();
     }
 }
