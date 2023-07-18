@@ -270,7 +270,7 @@ impl AlterTableProcedure {
                 .context(error::TableRouteConversionSnafu)?;
             let new_raw_info: RawTableInfo = new_info.into();
 
-            self.update_table_info_value(table_id, &table_info_value, new_raw_info.clone())
+            self.update_table_info_value(table_id, &table_info_value, new_raw_info)
                 .await?;
             info!("Updated TableInfoValue for table {table_id} when altering table");
 
