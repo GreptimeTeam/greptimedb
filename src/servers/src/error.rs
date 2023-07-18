@@ -137,7 +137,7 @@ pub enum Error {
     },
 
     #[snafu(display("Failed to write OPTL metrics, source: {}", source))]
-    OptlMetricsWrite {
+    OtlpMetricsWrite {
         location: Location,
         source: common_grpc::error::Error,
     },
@@ -379,7 +379,7 @@ impl ErrorExt for Error {
 
             InfluxdbLinesWrite { source, .. }
             | PromSeriesWrite { source, .. }
-            | OptlMetricsWrite { source, .. } => source.status_code(),
+            | OtlpMetricsWrite { source, .. } => source.status_code(),
 
             Hyper { .. } => StatusCode::Unknown,
             TlsRequired { .. } => StatusCode::Unknown,

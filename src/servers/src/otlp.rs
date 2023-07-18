@@ -88,14 +88,14 @@ fn write_attribute(lines: &mut LinesWriter, attr: &KeyValue) -> Result<()> {
         match val {
             any_value::Value::StringValue(s) => lines
                 .write_tag(&attr.key, s)
-                .context(error::OptlMetricsWriteSnafu)?,
+                .context(error::OtlpMetricsWriteSnafu)?,
 
             any_value::Value::IntValue(v) => lines
                 .write_tag(&normalize_otlp_name(&attr.key), &v.to_string())
-                .context(error::OptlMetricsWriteSnafu)?,
+                .context(error::OtlpMetricsWriteSnafu)?,
             any_value::Value::DoubleValue(v) => lines
                 .write_tag(&normalize_otlp_name(&attr.key), &v.to_string())
-                .context(error::OptlMetricsWriteSnafu)?,
+                .context(error::OtlpMetricsWriteSnafu)?,
             // TODO(sunng87): allow different type of values
             _ => {}
         }
@@ -107,7 +107,7 @@ fn write_attribute(lines: &mut LinesWriter, attr: &KeyValue) -> Result<()> {
 fn write_timestamp(lines: &mut LinesWriter, time_nano: i64) -> Result<()> {
     lines
         .write_ts(GREPTIME_TIMESTAMP, (time_nano, Precision::Nanosecond))
-        .context(error::OptlMetricsWriteSnafu)?;
+        .context(error::OtlpMetricsWriteSnafu)?;
     Ok(())
 }
 
@@ -130,12 +130,12 @@ fn encode_gauge(name: &str, gauge: &Gauge) -> Result<InsertRequest> {
                 // we coerce all values to f64
                 lines
                     .write_f64(GREPTIME_VALUE, val as f64)
-                    .context(error::OptlMetricsWriteSnafu)?
+                    .context(error::OtlpMetricsWriteSnafu)?
             }
             Some(number_data_point::Value::AsDouble(val)) => {
                 lines
                     .write_f64(GREPTIME_VALUE, val)
-                    .context(error::OptlMetricsWriteSnafu)?
+                    .context(error::OtlpMetricsWriteSnafu)?
             }
             _ => {}
         }
@@ -170,12 +170,12 @@ fn encode_sum(name: &str, sum: &Sum) -> Result<InsertRequest> {
                 // we coerce all values to f64
                 lines
                     .write_f64(GREPTIME_VALUE, val as f64)
-                    .context(error::OptlMetricsWriteSnafu)?
+                    .context(error::OtlpMetricsWriteSnafu)?
             }
             Some(number_data_point::Value::AsDouble(val)) => {
                 lines
                     .write_f64(GREPTIME_VALUE, val)
-                    .context(error::OptlMetricsWriteSnafu)?
+                    .context(error::OtlpMetricsWriteSnafu)?
             }
             _ => {}
         }
@@ -208,19 +208,19 @@ fn encode_histogram(name: &str, hist: &Histogram) -> Result<InsertRequest> {
             // here we don't store bucket boundary
             lines
                 .write_u64(&format!("bucket_{}", idx), *count)
-                .context(error::OptlMetricsWriteSnafu)?;
+                .context(error::OtlpMetricsWriteSnafu)?;
         }
 
         if let Some(min) = data_point.min {
             lines
                 .write_f64("min", min)
-                .context(error::OptlMetricsWriteSnafu)?;
+                .context(error::OtlpMetricsWriteSnafu)?;
         }
 
         if let Some(max) = data_point.max {
             lines
                 .write_f64("max", max)
-                .context(error::OptlMetricsWriteSnafu)?;
+                .context(error::OtlpMetricsWriteSnafu)?;
         }
 
         lines.commit();
@@ -255,7 +255,7 @@ fn encode_exponential_histogram(name: &str, hist: &ExponentialHistogram) -> Resu
                         &format!("bucket_{}", idx + positive_buckets.offset as usize),
                         *count,
                     )
-                    .context(error::OptlMetricsWriteSnafu)?;
+                    .context(error::OtlpMetricsWriteSnafu)?;
             }
         }
 
@@ -266,20 +266,20 @@ fn encode_exponential_histogram(name: &str, hist: &ExponentialHistogram) -> Resu
                         &format!("bucket_{}", idx + negative_buckets.offset as usize),
                         *count,
                     )
-                    .context(error::OptlMetricsWriteSnafu)?;
+                    .context(error::OtlpMetricsWriteSnafu)?;
             }
         }
 
         if let Some(min) = data_point.min {
             lines
                 .write_f64("min", min)
-                .context(error::OptlMetricsWriteSnafu)?;
+                .context(error::OtlpMetricsWriteSnafu)?;
         }
 
         if let Some(max) = data_point.max {
             lines
                 .write_f64("max", max)
-                .context(error::OptlMetricsWriteSnafu)?;
+                .context(error::OtlpMetricsWriteSnafu)?;
         }
 
         lines.commit();
@@ -308,12 +308,12 @@ fn encode_summary(name: &str, summary: &Summary) -> Result<InsertRequest> {
             // here we don't store bucket boundary
             lines
                 .write_f64(&format!("p{:02}", quantile.quantile), quantile.value)
-                .context(error::OptlMetricsWriteSnafu)?;
+                .context(error::OtlpMetricsWriteSnafu)?;
         }
 
         lines
             .write_u64("count", data_point.count)
-            .context(error::OptlMetricsWriteSnafu)?;
+            .context(error::OtlpMetricsWriteSnafu)?;
 
         lines.commit();
     }
