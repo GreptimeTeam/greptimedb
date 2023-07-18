@@ -70,14 +70,14 @@ fn encode_metrics(metric: &Metric) -> Result<Option<InsertRequest>> {
     // note that we don't store description or unit, we might want to deal with
     // these fields in the future.
     if let Some(data) = &metric.data {
-        let inserts = match data {
-            metric::Data::Gauge(gauge) => encode_gauge(name, gauge)?,
-            metric::Data::Sum(sum) => encode_sum(name, sum)?,
-            metric::Data::Histogram(hist) => encode_histogram(name, hist)?,
-            metric::Data::ExponentialHistogram(hist) => encode_exponential_histogram(name, hist)?,
-            metric::Data::Summary(summary) => encode_summary(name, summary)?,
-        };
-        Ok(Some(inserts))
+        match data {
+            metric::Data::Gauge(gauge) => encode_gauge(name, gauge).map(Some),
+            metric::Data::Sum(sum) => encode_sum(name, sum).map(Some),
+            metric::Data::Summary(summary) => encode_summary(name, summary).map(Some),
+            // TODO(sunng87) leave histogram for next release
+            metric::Data::Histogram(_hist) => Ok(None),
+            metric::Data::ExponentialHistogram(_hist) => Ok(None),
+        }
     } else {
         Ok(None)
     }
@@ -192,6 +192,8 @@ fn encode_sum(name: &str, sum: &Sum) -> Result<InsertRequest> {
     })
 }
 
+// TODO(sunng87): we may need better implementation for histogram
+#[allow(dead_code)]
 fn encode_histogram(name: &str, hist: &Histogram) -> Result<InsertRequest> {
     let mut lines = LinesWriter::with_lines(hist.data_points.len());
 
@@ -233,6 +235,7 @@ fn encode_histogram(name: &str, hist: &Histogram) -> Result<InsertRequest> {
     })
 }
 
+#[allow(dead_code)]
 fn encode_exponential_histogram(name: &str, hist: &ExponentialHistogram) -> Result<InsertRequest> {
     let mut lines = LinesWriter::with_lines(hist.data_points.len());
 
