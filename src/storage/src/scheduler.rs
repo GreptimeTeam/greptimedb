@@ -18,6 +18,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use async_trait::async_trait;
+pub use common_options::storage::SchedulerConfig;
 use common_telemetry::{debug, error, info};
 use snafu::{ensure, ResultExt};
 use tokio::sync::Notify;
@@ -29,7 +30,6 @@ use crate::scheduler::dedup_deque::DedupDeque;
 use crate::scheduler::rate_limit::{
     BoxedRateLimitToken, CascadeRateLimiter, MaxInflightTaskLimiter, RateLimiter,
 };
-
 pub mod dedup_deque;
 pub mod rate_limit;
 
@@ -71,20 +71,6 @@ pub trait Scheduler: Debug {
     /// Stops scheduler. If `await_termination` is set to true, the scheduler will
     /// wait until all queued requests are processed.
     async fn stop(&self, await_termination: bool) -> Result<()>;
-}
-
-/// Scheduler config.
-#[derive(Debug)]
-pub struct SchedulerConfig {
-    pub max_inflight_tasks: usize,
-}
-
-impl Default for SchedulerConfig {
-    fn default() -> Self {
-        Self {
-            max_inflight_tasks: 4,
-        }
-    }
 }
 
 const STATE_RUNNING: u8 = 0;

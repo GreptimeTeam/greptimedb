@@ -14,12 +14,12 @@
 
 use std::{fs, path};
 
+use common_options::datanode::FileConfig;
 use common_telemetry::logging::info;
 use object_store::services::Fs as FsBuilder;
 use object_store::{util, ObjectStore};
 use snafu::prelude::*;
 
-use crate::datanode::FileConfig;
 use crate::error::{self, Result};
 use crate::store;
 

@@ -16,6 +16,7 @@ use std::default::Default;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use common_options::datanode::DatanodeOptions;
 use common_runtime::Builder as RuntimeBuilder;
 use futures::future;
 use servers::grpc::GrpcServer;
@@ -25,7 +26,6 @@ use servers::query_handler::grpc::ServerGrpcQueryHandlerAdaptor;
 use servers::server::Server;
 use snafu::ResultExt;
 
-use crate::datanode::DatanodeOptions;
 use crate::error::{
     ParseAddrSnafu, Result, RuntimeResourceSnafu, ShutdownServerSnafu, StartServerSnafu,
     WaitForGrpcServingSnafu,

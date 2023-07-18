@@ -27,7 +27,7 @@ mod dashboard;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use aide::axum::{routing as apirouting, ApiRouter, IntoApiResponse};
 use aide::openapi::{Info, OpenApi, Server as OpenAPIServer};
@@ -39,9 +39,10 @@ use axum::http::Request;
 use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Json};
 use axum::{routing, BoxError, Extension, Router};
-use common_base::readable_size::ReadableSize;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
+pub use common_options::servers::HttpOptions;
+use common_options::servers::DEFAULT_BODY_LIMIT;
 use common_query::Output;
 use common_recordbatch::{util, RecordBatch};
 use common_telemetry::logging::{self, info};
@@ -105,8 +106,6 @@ pub(crate) async fn query_context_from_db(
 
 pub const HTTP_API_VERSION: &str = "v1";
 pub const HTTP_API_PREFIX: &str = "/v1/";
-/// Default http body limit (64M).
-const DEFAULT_BODY_LIMIT: ReadableSize = ReadableSize::mb(64);
 
 // TODO(fys): This is a temporary workaround, it will be improved later
 pub static PUBLIC_APIS: [&str; 2] = ["/v1/influxdb/ping", "/v1/influxdb/health"];
@@ -125,31 +124,6 @@ pub struct HttpServer {
     metrics_handler: Option<MetricsHandler>,
     configurator: Option<ConfiguratorRef>,
     greptime_config_options: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct HttpOptions {
-    pub addr: String,
-
-    #[serde(with = "humantime_serde")]
-    pub timeout: Duration,
-
-    #[serde(skip)]
-    pub disable_dashboard: bool,
-
-    pub body_limit: ReadableSize,
-}
-
-impl Default for HttpOptions {
-    fn default() -> Self {
-        Self {
-            addr: "127.0.0.1:4000".to_string(),
-            timeout: Duration::from_secs(30),
-            disable_dashboard: false,
-            body_limit: DEFAULT_BODY_LIMIT,
-        }
-    }
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema, Eq, PartialEq)]
@@ -754,12 +728,14 @@ async fn handle_error(err: BoxError) -> Json<JsonResponse> {
 mod test {
     use std::future::pending;
     use std::sync::Arc;
+    use std::time::Duration;
 
     use api::v1::greptime_request::Request;
     use axum::handler::Handler;
     use axum::http::StatusCode;
     use axum::routing::get;
     use axum_test_helper::TestClient;
+    use common_options::servers::HttpOptions;
     use common_recordbatch::RecordBatches;
     use datatypes::prelude::*;
     use datatypes::schema::{ColumnSchema, Schema};

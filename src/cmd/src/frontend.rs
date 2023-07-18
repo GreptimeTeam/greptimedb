@@ -18,11 +18,12 @@ use clap::Parser;
 use common_base::Plugins;
 use common_options::frontend::{FrontendOptions, InfluxdbOptions, PrometheusOptions};
 use common_options::meta::MetaClientOptions;
+use common_options::servers::Mode;
 use common_telemetry::logging;
 use frontend::instance::{FrontendInstance, Instance as FeInstance};
+use servers::auth;
 use servers::auth::UserProviderRef;
 use servers::tls::{TlsMode, TlsOption};
-use servers::{auth, Mode};
 use snafu::ResultExt;
 
 use crate::error::{self, IllegalAuthConfigSnafu, Result, StartCatalogManagerSnafu};

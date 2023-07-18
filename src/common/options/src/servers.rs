@@ -12,7 +12,45 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::time::Duration;
+
+use common_base::readable_size::ReadableSize;
 use serde::{Deserialize, Serialize};
+
+/// Default http body limit (64M).
+pub const DEFAULT_BODY_LIMIT: ReadableSize = ReadableSize::mb(64);
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HttpOptions {
+    pub addr: String,
+
+    #[serde(with = "humantime_serde")]
+    pub timeout: Duration,
+
+    #[serde(skip)]
+    pub disable_dashboard: bool,
+
+    pub body_limit: ReadableSize,
+}
+
+impl Default for HttpOptions {
+    fn default() -> Self {
+        Self {
+            addr: "127.0.0.1:4000".to_string(),
+            timeout: Duration::from_secs(30),
+            disable_dashboard: false,
+            body_limit: DEFAULT_BODY_LIMIT,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum Mode {
+    Standalone,
+    Distributed,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]

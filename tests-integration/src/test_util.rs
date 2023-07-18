@@ -24,16 +24,18 @@ use catalog::{CatalogManagerRef, RegisterTableRequest};
 use common_catalog::consts::{
     DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID, MITO_ENGINE,
 };
+use common_options::datanode::{
+    AzblobConfig, DatanodeOptions, FileConfig, GcsConfig, ObjectStoreConfig, OssConfig, S3Config,
+    StorageConfig, WalConfig,
+};
 use common_options::frontend::{MysqlOptions, PostgresOptions};
+use common_options::servers::Mode;
 use common_query::Output;
 use common_recordbatch::util;
 use common_runtime::Builder as RuntimeBuilder;
 use common_test_util::ports;
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
-use datanode::datanode::{
-    AzblobConfig, DatanodeOptions, FileConfig, GcsConfig, ObjectStoreConfig, OssConfig,
-    ProcedureConfig, S3Config, StorageConfig, WalConfig,
-};
+use datanode::datanode::ProcedureConfig;
 use datanode::error::{CreateTableSnafu, Result};
 use datanode::instance::Instance;
 use datanode::sql::SqlHandler;
@@ -57,7 +59,6 @@ use servers::prometheus::PrometheusServer;
 use servers::query_handler::grpc::ServerGrpcQueryHandlerAdaptor;
 use servers::query_handler::sql::ServerSqlQueryHandlerAdaptor;
 use servers::server::Server;
-use servers::Mode;
 use snafu::ResultExt;
 use table::engine::{EngineContext, TableEngineRef};
 use table::requests::{CreateTableRequest, InsertRequest, TableOptions};

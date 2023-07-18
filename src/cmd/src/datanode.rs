@@ -15,10 +15,11 @@
 use std::time::Duration;
 
 use clap::Parser;
+use common_options::datanode::{DatanodeOptions, FileConfig, ObjectStoreConfig};
 use common_options::meta::MetaClientOptions;
+use common_options::servers::Mode;
 use common_telemetry::logging;
-use datanode::datanode::{Datanode, DatanodeOptions, FileConfig, ObjectStoreConfig};
-use servers::Mode;
+use datanode::datanode::Datanode;
 use snafu::ResultExt;
 
 use crate::error::{MissingConfigSnafu, Result, ShutdownDatanodeSnafu, StartDatanodeSnafu};
@@ -184,9 +185,9 @@ mod tests {
     use std::time::Duration;
 
     use common_base::readable_size::ReadableSize;
+    use common_options::datanode::{CompactionConfig, ObjectStoreConfig, RegionManifestConfig};
+    use common_options::servers::Mode;
     use common_test_util::temp_dir::create_named_temp_file;
-    use datanode::datanode::{CompactionConfig, ObjectStoreConfig, RegionManifestConfig};
-    use servers::Mode;
 
     use super::*;
     use crate::options::ENV_VAR_SEP;

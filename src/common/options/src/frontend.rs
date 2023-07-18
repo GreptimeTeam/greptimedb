@@ -29,11 +29,9 @@ pub use postgres::PostgresOptions;
 pub use prom_store::PromStoreOptions;
 pub use prometheus::PrometheusOptions;
 use serde::{Deserialize, Serialize};
-use servers::heartbeat_options::HeartbeatOptions;
-use servers::http::HttpOptions;
-use servers::Mode;
 
 use crate::meta::MetaClientOptions;
+use crate::servers::{HeartbeatOptions, HttpOptions, Mode};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]

@@ -1848,14 +1848,19 @@ dependencies = [
 name = "common-options"
 version = "0.3.2"
 dependencies = [
+ "common-base",
  "common-error",
  "common-grpc",
  "common-procedure",
  "common-telemetry",
+ "humantime-serde",
+ "rustls 0.21.1",
+ "rustls-pemfile",
+ "secrecy",
  "serde",
  "serde_json",
- "servers",
  "snafu",
+ "strum",
  "toml 0.7.6",
 ]
 
@@ -8718,6 +8723,7 @@ dependencies = [
  "common-grpc",
  "common-grpc-expr",
  "common-mem-prof",
+ "common-options",
  "common-pprof",
  "common-query",
  "common-recordbatch",
@@ -9303,6 +9309,7 @@ dependencies = [
  "common-base",
  "common-datasource",
  "common-error",
+ "common-options",
  "common-query",
  "common-recordbatch",
  "common-runtime",

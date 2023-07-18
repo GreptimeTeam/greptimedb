@@ -20,9 +20,9 @@ use common_meta::heartbeat::handler::{
 };
 use common_meta::heartbeat::mailbox::{HeartbeatMailbox, MailboxRef, OutgoingMessage};
 use common_meta::heartbeat::utils::outgoing_message_to_mailbox_message;
+use common_options::servers::HeartbeatOptions;
 use common_telemetry::{debug, error, info};
 use meta_client::client::{HeartbeatSender, HeartbeatStream, MetaClient};
-use servers::heartbeat_options::HeartbeatOptions;
 use snafu::ResultExt;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Receiver;

@@ -13,7 +13,8 @@
 // limitations under the License.
 
 use serde::{Deserialize, Serialize};
-use servers::tls::TlsOption;
+
+use crate::tls::TlsOption;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PostgresOptions {

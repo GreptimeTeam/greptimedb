@@ -24,13 +24,13 @@ use std::path;
 use std::sync::Arc;
 
 use common_base::readable_size::ReadableSize;
+use common_options::datanode::{ObjectStoreConfig, DEFAULT_OBJECT_STORE_CACHE_SIZE};
 use common_telemetry::logging::info;
 use object_store::layers::{LoggingLayer, LruCacheLayer, MetricsLayer, RetryLayer, TracingLayer};
 use object_store::services::Fs as FsBuilder;
 use object_store::{util, ObjectStore, ObjectStoreBuilder};
 use snafu::prelude::*;
 
-use crate::datanode::{ObjectStoreConfig, DEFAULT_OBJECT_STORE_CACHE_SIZE};
 use crate::error::{self, Result};
 
 pub(crate) async fn new_object_store(store_config: &ObjectStoreConfig) -> Result<ObjectStore> {

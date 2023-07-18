@@ -24,13 +24,13 @@ use common_meta::heartbeat::handler::{
 };
 use common_meta::heartbeat::mailbox::{HeartbeatMailbox, MailboxRef};
 use common_meta::heartbeat::utils::outgoing_message_to_mailbox_message;
+use common_options::datanode::DatanodeOptions;
 use common_telemetry::{debug, error, info, trace, warn};
 use meta_client::client::{HeartbeatSender, MetaClient};
 use snafu::ResultExt;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
-use crate::datanode::DatanodeOptions;
 use crate::error::{self, MetaClientInitSnafu, Result};
 
 pub(crate) mod handler;

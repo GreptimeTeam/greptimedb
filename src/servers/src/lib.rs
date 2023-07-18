@@ -18,13 +18,11 @@
 use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use datatypes::schema::Schema;
 use query::plan::LogicalPlan;
-use serde::{Deserialize, Serialize};
 
 pub mod auth;
 pub mod configurator;
 pub mod error;
 pub mod grpc;
-pub mod heartbeat_options;
 pub mod http;
 pub mod influxdb;
 pub mod interceptor;
@@ -40,13 +38,6 @@ pub mod query_handler;
 pub mod server;
 mod shutdown;
 pub mod tls;
-
-#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum Mode {
-    Standalone,
-    Distributed,
-}
 
 /// Attempt to parse catalog and schema from given database name
 ///

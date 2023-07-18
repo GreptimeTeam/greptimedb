@@ -29,8 +29,11 @@ use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
 use common_meta::heartbeat::handler::HandlerGroupExecutor;
 use common_meta::key::TableMetadataManager;
+use common_options::datanode::{DatanodeOptions, ObjectStoreConfig, WalConfig};
 use common_options::meta::MetaClientOptions;
+use common_options::servers::Mode;
 use common_procedure::local::{LocalManager, ManagerConfig};
+use common_procedure::options::ProcedureConfig;
 use common_procedure::store::state_store::ObjectStateStore;
 use common_procedure::ProcedureManagerRef;
 use common_telemetry::logging::info;
@@ -42,7 +45,6 @@ use mito::config::EngineConfig as TableEngineConfig;
 use mito::engine::MitoEngine;
 use object_store::{util, ObjectStore};
 use query::query_engine::{QueryEngineFactory, QueryEngineRef};
-use servers::Mode;
 use session::context::QueryContext;
 use snafu::prelude::*;
 use storage::compaction::{CompactionHandler, CompactionSchedulerRef};
@@ -57,7 +59,6 @@ use table::table::numbers::NumbersTable;
 use table::table::TableIdProviderRef;
 use table::Table;
 
-use crate::datanode::{DatanodeOptions, ObjectStoreConfig, ProcedureConfig, WalConfig};
 use crate::error::{
     self, CatalogSnafu, IncorrectInternalStateSnafu, MetaClientInitSnafu, MissingMetasrvOptsSnafu,
     MissingNodeIdSnafu, NewCatalogSnafu, OpenLogStoreSnafu, RecoverProcedureSnafu, Result,

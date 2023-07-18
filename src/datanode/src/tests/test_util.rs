@@ -16,18 +16,19 @@ use catalog::RegisterTableRequest;
 use common_catalog::consts::{
     DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID, MITO_ENGINE,
 };
+use common_options::datanode::{
+    DatanodeOptions, FileConfig, ObjectStoreConfig, StorageConfig, WalConfig,
+};
+use common_options::servers::Mode;
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, RawSchema};
-use servers::Mode;
 use snafu::ResultExt;
 use table::engine::{EngineContext, TableEngineRef};
 use table::requests::{CreateTableRequest, TableOptions};
 use table::TableRef;
 
-use crate::datanode::{
-    DatanodeOptions, FileConfig, ObjectStoreConfig, ProcedureConfig, StorageConfig, WalConfig,
-};
+use crate::datanode::ProcedureConfig;
 use crate::error::{CreateTableSnafu, Result};
 use crate::heartbeat::HeartbeatTask;
 use crate::instance::{Instance, InstanceRef};

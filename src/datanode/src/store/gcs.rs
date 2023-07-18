@@ -12,13 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_options::datanode::GcsConfig;
 use common_telemetry::logging::info;
 use object_store::services::Gcs as GCSBuilder;
 use object_store::{util, ObjectStore};
 use secrecy::ExposeSecret;
 use snafu::prelude::*;
 
-use crate::datanode::GcsConfig;
 use crate::error::{self, Result};
 
 pub(crate) async fn new_gcs_object_store(gcs_config: &GcsConfig) -> Result<ObjectStore> {

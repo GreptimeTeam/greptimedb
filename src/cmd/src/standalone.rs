@@ -16,19 +16,20 @@ use std::sync::Arc;
 
 use clap::Parser;
 use common_base::Plugins;
+use common_options::datanode::{DatanodeOptions, StorageConfig, WalConfig};
 use common_options::frontend::{
     FrontendOptions, GrpcOptions, InfluxdbOptions, MysqlOptions, OpentsdbOptions, PostgresOptions,
     PromStoreOptions, PrometheusOptions,
 };
+use common_options::servers::Mode;
 use common_telemetry::info;
 use common_telemetry::logging::LoggingOptions;
-use datanode::datanode::{Datanode, DatanodeOptions, ProcedureConfig, StorageConfig, WalConfig};
+use datanode::datanode::{Datanode, ProcedureConfig};
 use datanode::instance::InstanceRef;
 use frontend::instance::{FrontendInstance, Instance as FeInstance};
 use serde::{Deserialize, Serialize};
 use servers::http::HttpOptions;
 use servers::tls::{TlsMode, TlsOption};
-use servers::Mode;
 use snafu::ResultExt;
 
 use crate::error::{
@@ -342,9 +343,9 @@ mod tests {
     use std::time::Duration;
 
     use common_base::readable_size::ReadableSize;
+    use common_options::servers::Mode;
     use common_test_util::temp_dir::create_named_temp_file;
     use servers::auth::{Identity, Password, UserProviderRef};
-    use servers::Mode;
 
     use super::*;
     use crate::options::ENV_VAR_SEP;
@@ -456,7 +457,7 @@ mod tests {
 
         assert_eq!("/tmp/greptimedb/test/wal", dn_opts.wal.dir.unwrap());
         match &dn_opts.storage.store {
-            datanode::datanode::ObjectStoreConfig::S3(s3_config) => {
+            common_options::datanode::ObjectStoreConfig::S3(s3_config) => {
                 assert_eq!(
                     "Secret([REDACTED alloc::string::String])".to_string(),
                     format!("{:?}", s3_config.access_key_id)

@@ -12,6 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod datanode;
 pub mod error;
 pub mod frontend;
 pub mod meta;
+pub mod servers;
+pub mod storage;
+pub mod tls;

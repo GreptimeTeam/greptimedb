@@ -16,9 +16,9 @@ use common_grpc::channel_manager;
 use common_procedure::options::ProcedureConfig;
 use common_telemetry::logging::LoggingOptions;
 use serde::{Deserialize, Serialize};
-use servers::http::HttpOptions;
 
 use crate::error::{self, Result};
+use crate::servers::HttpOptions;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]

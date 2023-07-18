@@ -15,11 +15,11 @@
 use std::sync::Arc;
 
 use api::v1::meta::Role;
+use common_options::datanode::DatanodeOptions;
 use meta_client::client::{MetaClient, MetaClientBuilder};
 use meta_srv::mocks::MockInfo;
 use storage::compaction::noop::NoopCompactionScheduler;
 
-use crate::datanode::DatanodeOptions;
 use crate::error::Result;
 use crate::heartbeat::HeartbeatTask;
 use crate::instance::{Instance, InstanceRef};
