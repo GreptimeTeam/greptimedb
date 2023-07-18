@@ -295,15 +295,15 @@ impl Helper {
                 _ => unimplemented!("Arrow array datatype: {:?}", array.as_ref().data_type()),
             },
             ArrowDataType::Interval(unit) => match unit {
-                IntervalUnit::YearMonth => {
-                    Arc::new(IntervalYearMonthVector::try_from_arrow_interval_array(array)?)
-                }
+                IntervalUnit::YearMonth => Arc::new(
+                    IntervalYearMonthVector::try_from_arrow_interval_array(array)?,
+                ),
                 IntervalUnit::DayTime => {
                     Arc::new(IntervalDayTimeVector::try_from_arrow_interval_array(array)?)
                 }
-                IntervalUnit::MonthDayNano => {
-                    Arc::new(IntervalMonthDayNanoVector::try_from_arrow_interval_array(array)?)
-                }
+                IntervalUnit::MonthDayNano => Arc::new(
+                    IntervalMonthDayNanoVector::try_from_arrow_interval_array(array)?,
+                ),
             },
             ArrowDataType::Float16
             | ArrowDataType::Duration(_)

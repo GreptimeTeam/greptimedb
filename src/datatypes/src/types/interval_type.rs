@@ -39,7 +39,7 @@ use crate::vectors::{
 
 /// The "calendar" interval is a type of time interval that does not
 /// have a precise duration without taking into account a specific
-/// base timestamp. 
+/// base timestamp.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[enum_dispatch(DataType)]
 pub enum IntervalType {
