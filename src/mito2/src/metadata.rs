@@ -193,7 +193,7 @@ impl RegionMetadata {
             for column_id in &self.primary_key {
                 // Checks whether the column id exists.
                 ensure!(
-                    id_names.contains_key(&column_id),
+                    id_names.contains_key(column_id),
                     InvalidMetaSnafu {
                         reason: format!("unknown column id {}", column_id),
                     }
@@ -203,7 +203,7 @@ impl RegionMetadata {
                 ensure!(
                     !pk_ids.contains(&column_id),
                     InvalidMetaSnafu {
-                        reason: format!("duplicate column {} in primary key", id_names[&column_id]),
+                        reason: format!("duplicate column {} in primary key", id_names[column_id]),
                     }
                 );
 
@@ -213,7 +213,7 @@ impl RegionMetadata {
                     InvalidMetaSnafu {
                         reason: format!(
                             "column {} is already a time index column",
-                            id_names[&column_id]
+                            id_names[column_id]
                         ),
                     }
                 );

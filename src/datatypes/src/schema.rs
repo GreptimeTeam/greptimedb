@@ -394,7 +394,7 @@ mod tests {
             ColumnSchema::new("col1", ConcreteDataType::int32_datatype(), false),
             ColumnSchema::new("col1", ConcreteDataType::float64_datatype(), true),
         ];
-        let err = Schema::try_new(column_schemas.clone()).unwrap_err();
+        let err = Schema::try_new(column_schemas).unwrap_err();
 
         assert!(
             matches!(err, Error::DuplicateColumn { .. }),
