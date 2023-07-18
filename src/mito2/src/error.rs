@@ -95,6 +95,15 @@ pub enum Error {
         source: tokio::sync::oneshot::error::RecvError,
         location: Location,
     },
+
+    #[snafu(display("Invalid metadata, {}, location: {}", reason, location))]
+    InvalidMeta { reason: String, location: Location },
+
+    #[snafu(display("Invalid schema, source: {}, location: {}", source, location))]
+    InvalidSchema {
+        source: datatypes::error::Error,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -108,7 +117,9 @@ impl ErrorExt for Error {
             CompressObject { .. } | DecompressObject { .. } | SerdeJson { .. } | Utf8 { .. } => {
                 StatusCode::Unexpected
             }
-            InvalidScanIndex { .. } => StatusCode::InvalidArguments,
+            InvalidScanIndex { .. } | InvalidMeta { .. } | InvalidSchema { .. } => {
+                StatusCode::InvalidArguments
+            }
             RegionMetadataNotFound { .. } | Join { .. } | WorkerStopped { .. } | Recv { .. } => {
                 StatusCode::Internal
             }
