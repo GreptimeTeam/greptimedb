@@ -15,17 +15,16 @@
 use api::v1::greptime_database_client::GreptimeDatabaseClient;
 use api::v1::greptime_request::Request;
 use api::v1::{
-    greptime_response, AffectedRows, AuthHeader, GreptimeRequest, GreptimeResponse, InsertRequest,
-    InsertRequests, RequestHeader,
+    AuthHeader, GreptimeRequest, GreptimeResponse, InsertRequest, InsertRequests, RequestHeader,
 };
-use snafu::OptionExt;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Channel;
 use tonic::{Response, Status};
 
-use crate::error::{self, IllegalDatabaseResponseSnafu, Result};
+use crate::error::{self, Result};
+use crate::parse_grpc_response;
 
 /// A structure that provides some methods for streaming data insert.
 ///
@@ -89,17 +88,8 @@ impl StreamInserter {
         drop(self.sender);
 
         let response = self.join.await.unwrap()?;
-
-        let response = response
-            .into_inner()
-            .response
-            .context(IllegalDatabaseResponseSnafu {
-                err_msg: "GreptimeResponse is empty",
-            })?;
-
-        let greptime_response::Response::AffectedRows(AffectedRows { value }) = response;
-
-        Ok(value)
+        let response = response.into_inner();
+        parse_grpc_response(response)
     }
 
     fn to_rpc_request(&self, request: Request) -> GreptimeRequest {

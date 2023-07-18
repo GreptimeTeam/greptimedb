@@ -21,9 +21,37 @@ mod metrics;
 mod stream_insert;
 
 pub use api;
+use api::v1::greptime_response::Response;
+use api::v1::{AffectedRows, GreptimeResponse, ResponseHeader, Status};
 pub use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_error::status_code::StatusCode;
 
 pub use self::client::Client;
 pub use self::database::Database;
 pub use self::error::{Error, Result};
 pub use self::stream_insert::StreamInserter;
+use crate::error::{IllegalDatabaseResponseSnafu, ServerSnafu};
+
+pub fn parse_grpc_response(response: GreptimeResponse) -> Result<u32> {
+    match (response.header, response.response) {
+        (Some(_), Some(Response::AffectedRows(AffectedRows { value }))) => Ok(value),
+        (
+            Some(ResponseHeader {
+                status:
+                    Some(Status {
+                        status_code,
+                        err_msg,
+                    }),
+            }),
+            None,
+        ) => ServerSnafu {
+            code: StatusCode::from(status_code),
+            msg: err_msg,
+        }
+        .fail(),
+        (header, res) => IllegalDatabaseResponseSnafu {
+            err_msg: format!("unexpected header: {:?} or response: {:?}", header, res),
+        }
+        .fail(),
+    }
+}

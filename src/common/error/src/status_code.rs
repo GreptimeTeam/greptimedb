@@ -163,6 +163,38 @@ impl fmt::Display for StatusCode {
     }
 }
 
+impl From<u32> for StatusCode {
+    fn from(value: u32) -> Self {
+        match value {
+            0 => StatusCode::Success,
+            1000 => StatusCode::Unknown,
+            1001 => StatusCode::Unsupported,
+            1002 => StatusCode::Unexpected,
+            1003 => StatusCode::Internal,
+            1004 => StatusCode::InvalidArguments,
+            1005 => StatusCode::Cancelled,
+            2000 => StatusCode::InvalidSyntax,
+            3000 => StatusCode::PlanQuery,
+            3001 => StatusCode::EngineExecuteQuery,
+            4000 => StatusCode::TableAlreadyExists,
+            4001 => StatusCode::TableNotFound,
+            4002 => StatusCode::TableColumnNotFound,
+            4003 => StatusCode::TableColumnExists,
+            4004 => StatusCode::DatabaseNotFound,
+            5000 => StatusCode::StorageUnavailable,
+            6000 => StatusCode::RuntimeResourcesExhausted,
+            6001 => StatusCode::RateLimited,
+            7000 => StatusCode::UserNotFound,
+            7001 => StatusCode::UnsupportedPasswordType,
+            7002 => StatusCode::UserPasswordMismatch,
+            7003 => StatusCode::AuthHeaderNotFound,
+            7004 => StatusCode::InvalidAuthHeader,
+            7005 => StatusCode::AccessDenied,
+            _ => StatusCode::Unknown,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
