@@ -26,6 +26,7 @@ use crate::region::VersionNumber;
 /// Static metadata of a region.
 ///
 /// This struct implements [Serialize] and [Deserialize] traits.
+/// To build a [RegionMetadata] object, use [RegionMetadataBuilder].
 ///
 /// ```mermaid
 /// class RegionMetadata {
@@ -50,17 +51,17 @@ use crate::region::VersionNumber;
 pub struct RegionMetadata {
     /// Latest schema of this region
     #[serde(skip)]
-    schema: SchemaRef,
+    pub schema: SchemaRef,
     /// Columns in the region. Has the same order as columns
     /// in [schema](RegionMetadata::schema).
-    column_metadatas: Vec<ColumnMetadata>,
+    pub column_metadatas: Vec<ColumnMetadata>,
     /// Version of metadata.
-    version: VersionNumber,
+    pub version: VersionNumber,
     /// Maintains an ordered list of primary keys
-    primary_key: Vec<ColumnId>,
+    pub primary_key: Vec<ColumnId>,
 
     /// Immutable and unique id of a region.
-    region_id: RegionId,
+    pub region_id: RegionId,
 }
 
 pub type RegionMetadataRef = Arc<RegionMetadata>;
@@ -118,6 +119,17 @@ impl RegionMetadataBuilder {
         }
     }
 
+    /// Create a builder from existing [RegionMetadata].
+    pub fn from_existing(existing: RegionMetadata, new_version: VersionNumber) -> Self {
+        Self {
+            schema: existing.schema,
+            column_metadatas: existing.column_metadatas,
+            version: new_version,
+            primary_key: existing.primary_key,
+            region_id: existing.region_id,
+        }
+    }
+
     /// Add a column metadata to this region metadata.
     /// This method will check the semantic type and add it to primary keys automatically.
     pub fn add_column_metadata(mut self, column_metadata: ColumnMetadata) -> Self {
@@ -149,11 +161,11 @@ impl RegionMetadataBuilder {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ColumnMetadata {
     /// Schema of this column. Is the same as `column_schema` in [SchemaRef].
-    column_schema: ColumnSchema,
+    pub column_schema: ColumnSchema,
     /// Semantic type of this column (e.g. tag or timestamp).
-    semantic_type: SemanticType,
+    pub semantic_type: SemanticType,
     /// Immutable and unique id of a region.
-    column_id: ColumnId,
+    pub column_id: ColumnId,
 }
 
 /// The semantic type of one column

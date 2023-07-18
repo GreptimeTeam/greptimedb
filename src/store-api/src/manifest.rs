@@ -16,6 +16,8 @@
 pub mod action;
 mod storage;
 
+use std::sync::atomic::AtomicU64;
+
 use async_trait::async_trait;
 use common_error::ext::ErrorExt;
 use serde::de::DeserializeOwned;
@@ -25,6 +27,7 @@ use crate::manifest::action::{ProtocolAction, ProtocolVersion};
 pub use crate::manifest::storage::*;
 
 pub type ManifestVersion = u64;
+pub type AtomicManifestVersion = AtomicU64;
 pub const MIN_VERSION: u64 = 0;
 pub const MAX_VERSION: u64 = u64::MAX;
 

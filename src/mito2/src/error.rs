@@ -95,6 +95,12 @@ pub enum Error {
         source: tokio::sync::oneshot::error::RecvError,
         location: Location,
     },
+
+    #[snafu(display(
+        "Expect initial region metadata on creating/opening a new region, location: {}",
+        location
+    ))]
+    InitialMetadata { location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -108,7 +114,7 @@ impl ErrorExt for Error {
             CompressObject { .. } | DecompressObject { .. } | SerdeJson { .. } | Utf8 { .. } => {
                 StatusCode::Unexpected
             }
-            InvalidScanIndex { .. } => StatusCode::InvalidArguments,
+            InvalidScanIndex { .. } | InitialMetadata { .. } => StatusCode::InvalidArguments,
             RegionMetadataNotFound { .. } | Join { .. } | WorkerStopped { .. } | Recv { .. } => {
                 StatusCode::Internal
             }
