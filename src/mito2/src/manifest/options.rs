@@ -17,6 +17,8 @@
 use common_datasource::compression::CompressionType;
 use object_store::ObjectStore;
 
+use crate::metadata::RegionMetadata;
+
 #[derive(Debug, Clone)]
 pub struct RegionManifestOptions {
     pub manifest_dir: String,
@@ -25,4 +27,7 @@ pub struct RegionManifestOptions {
     /// Interval of version ([ManifestVersion](store_api::manifest::ManifestVersion)) between two checkpoints
     /// `None` means disable checkpoint.
     pub checkpoint_interval: Option<u64>,
+    /// Initial [RegionMetadata](crate::metadata::RegionMetadata) of this region.
+    /// Only need to set when create a new region, otherwise it will be ignored.
+    pub initial_metadata: Option<RegionMetadata>,
 }

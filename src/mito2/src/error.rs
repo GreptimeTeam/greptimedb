@@ -81,9 +81,6 @@ pub enum Error {
     #[snafu(display("Cannot find RegionMetadata. Location: {}", location))]
     RegionMetadataNotFound { location: Location },
 
-    #[snafu(display("Cannot find RegionVersion. Location: {}", location))]
-    RegionVersionNotFound { location: Location },
-
     #[snafu(display("Failed to join handle, location: {}, source: {}", location, source))]
     Join {
         source: common_runtime::JoinError,
@@ -98,6 +95,12 @@ pub enum Error {
         source: tokio::sync::oneshot::error::RecvError,
         location: Location,
     },
+
+    #[snafu(display(
+        "Expect initial region metadata on creating/opening a new region, location: {}",
+        location
+    ))]
+    InitialMetadata { location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -111,12 +114,10 @@ impl ErrorExt for Error {
             CompressObject { .. } | DecompressObject { .. } | SerdeJson { .. } | Utf8 { .. } => {
                 StatusCode::Unexpected
             }
-            InvalidScanIndex { .. } => StatusCode::InvalidArguments,
-            RegionMetadataNotFound { .. }
-            | Join { .. }
-            | WorkerStopped { .. }
-            | Recv { .. }
-            | RegionVersionNotFound { .. } => StatusCode::Internal,
+            InvalidScanIndex { .. } | InitialMetadata { .. } => StatusCode::InvalidArguments,
+            RegionMetadataNotFound { .. } | Join { .. } | WorkerStopped { .. } | Recv { .. } => {
+                StatusCode::Internal
+            }
         }
     }
 

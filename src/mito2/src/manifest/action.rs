@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 
+use common_telemetry::info;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use storage::metadata::VersionNumber;
@@ -22,10 +23,7 @@ use store_api::manifest::action::{ProtocolAction, ProtocolVersion};
 use store_api::manifest::ManifestVersion;
 use store_api::storage::{RegionId, SequenceNumber};
 
-use crate::error::{
-    RegionMetadataNotFoundSnafu, RegionVersionNotFoundSnafu, Result, SerdeJsonSnafu, Utf8Snafu,
-};
-use crate::manifest::helper;
+use crate::error::{RegionMetadataNotFoundSnafu, Result, SerdeJsonSnafu, Utf8Snafu};
 use crate::metadata::RegionMetadata;
 
 /// Actions that can be applied to region manifest.
@@ -43,10 +41,6 @@ pub enum RegionMetaAction {
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct RegionChange {
-    /// The committed sequence of the region when this change happens. So the
-    /// data with sequence **greater than** this sequence would use the new
-    /// metadata.
-    pub committed_sequence: SequenceNumber,
     /// The metadata after changed.
     pub metadata: RegionMetadata,
 }
@@ -57,6 +51,7 @@ pub struct RegionEdit {
     pub files_to_add: Vec<FileMeta>,
     pub files_to_remove: Vec<FileMeta>,
     pub compaction_time_window: Option<i64>,
+    pub flushed_sequence: Option<SequenceNumber>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -115,16 +110,26 @@ impl RegionManifestBuilder {
         }
     }
 
+    /// Check if the builder keeps a [RegionMetadata]
+    pub fn contains_metadata(&self) -> bool {
+        self.metadata.is_some()
+    }
+
     pub fn try_build(self) -> Result<RegionManifest> {
-        Ok(RegionManifest {
-            metadata: self.metadata.context(RegionMetadataNotFoundSnafu)?,
-            version: self.version.context(RegionVersionNotFoundSnafu)?,
-        })
+        let metadata = self.metadata.context(RegionMetadataNotFoundSnafu)?;
+        let version = self.version.unwrap_or_else(|| {
+            info!(
+                "Create new default region version for region {:?}",
+                metadata.region_id
+            );
+            RegionVersion::default()
+        });
+        Ok(RegionManifest { metadata, version })
     }
 }
 
 /// The region version checkpoint
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
 pub struct RegionVersion {
     pub manifest_version: ManifestVersion,
     pub files: HashMap<FileId, FileMeta>,
@@ -190,16 +195,18 @@ impl RegionMetaActionList {
         self.actions.insert(0, RegionMetaAction::Protocol(action));
     }
 
-    fn set_prev_version(&mut self, version: ManifestVersion) {
+    pub fn set_prev_version(&mut self, version: ManifestVersion) {
         self.prev_version = version;
     }
 
     /// Encode self into json in the form of string lines, starts with prev_version and then action json list.
     pub fn encode(&self) -> Result<Vec<u8>> {
-        helper::encode_actions(self.prev_version, &self.actions)
+        let json = serde_json::to_string(&self).context(SerdeJsonSnafu)?;
+
+        Ok(json.into_bytes())
     }
 
-    pub fn decode(bytes: &[u8]) -> Result<(Self, Option<ProtocolAction>)> {
+    pub fn decode(bytes: &[u8]) -> Result<Self> {
         let data = std::str::from_utf8(bytes).context(Utf8Snafu)?;
 
         serde_json::from_str(data).context(SerdeJsonSnafu)

@@ -17,12 +17,13 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use common_telemetry::{debug, info};
+use snafu::OptionExt;
 use store_api::manifest::action::{ProtocolAction, ProtocolVersion};
 use store_api::manifest::{AtomicManifestVersion, ManifestVersion, MAX_VERSION, MIN_VERSION};
 
-use crate::error::Result;
+use crate::error::{InitialMetadataSnafu, Result};
 use crate::manifest::action::{
-    RegionCheckpoint, RegionManifest, RegionManifestBuilder, RegionMetaAction,
+    RegionChange, RegionCheckpoint, RegionManifest, RegionManifestBuilder, RegionMetaAction,
     RegionMetaActionIter, RegionMetaActionList,
 };
 use crate::manifest::options::RegionManifestOptions;
@@ -53,8 +54,14 @@ impl RegionManifestManager {
         self.inner.stop().await
     }
 
+    /// Update the manifest. Return the current manifest version number.
     pub async fn update(&self, action_list: RegionMetaActionList) -> Result<ManifestVersion> {
         self.inner.update(action_list).await
+    }
+
+    /// Retrieve the current [RegionManifest].
+    pub fn manifest(&self) -> Arc<RegionManifest> {
+        self.inner.manifest.load().clone()
     }
 }
 
@@ -67,7 +74,7 @@ struct RegionManifestManagerInner {
 }
 
 impl RegionManifestManagerInner {
-    pub async fn new(options: RegionManifestOptions) -> Result<Self> {
+    pub async fn new(mut options: RegionManifestOptions) -> Result<Self> {
         // construct storage
         let store = ManifestObjectStore::new(
             &options.manifest_dir,
@@ -97,7 +104,7 @@ impl RegionManifestManagerInner {
         // apply actions from storage
         let mut action_iter = store.scan(version, MAX_VERSION).await?;
         while let Some((manifest_version, raw_action_list)) = action_iter.next_log().await? {
-            let (action_list, _) = RegionMetaActionList::decode(&raw_action_list)?;
+            let action_list = RegionMetaActionList::decode(&raw_action_list)?;
             for action in action_list.actions {
                 match action {
                     RegionMetaAction::Change(action) => {
@@ -112,6 +119,17 @@ impl RegionManifestManagerInner {
                 }
             }
         }
+
+        // set the initial metadata if necessary
+        if !manifest_builder.contains_metadata() {
+            let metadata = options
+                .initial_metadata
+                .take()
+                .context(InitialMetadataSnafu)?;
+            info!("Creating region manifest with metadata {:?}", metadata);
+            manifest_builder.apply_change(RegionChange { metadata });
+        }
+
         let manifest = manifest_builder.try_build()?;
         debug!("Recovered region manifest: {:?}", manifest);
         let version = manifest.version.manifest_version;
@@ -135,6 +153,24 @@ impl RegionManifestManagerInner {
         let version = self.inc_version();
 
         self.store.save(version, &action_list.encode()?).await?;
+
+        let mut manifest_builder =
+            RegionManifestBuilder::with_checkpoint(Some(self.manifest.load().as_ref().clone()));
+        for action in action_list.actions {
+            match action {
+                RegionMetaAction::Change(action) => {
+                    manifest_builder.apply_change(action);
+                }
+                RegionMetaAction::Edit(action) => {
+                    manifest_builder.apply_edit(version, action);
+                }
+                RegionMetaAction::Remove(_) | RegionMetaAction::Protocol(_) => {
+                    debug!("Unhandled action: {:?}", action);
+                }
+            }
+        }
+        let new_manifest = manifest_builder.try_build()?;
+        self.manifest.store(Arc::new(new_manifest));
 
         Ok(version)
     }
@@ -207,5 +243,98 @@ impl RegionManifestManagerInner {
 
     pub fn decode(_bytes: &[u8], _reader_version: ProtocolVersion) -> Result<Self> {
         todo!()
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use common_datasource::compression::CompressionType;
+    use datatypes::prelude::ConcreteDataType;
+    use datatypes::schema::ColumnSchema;
+    use store_api::storage::RegionId;
+
+    use super::*;
+    use crate::error::Error;
+    use crate::manifest::action::RegionChange;
+    use crate::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder, SemanticType};
+    use crate::test_util::TestEnv;
+
+    fn basic_region_metadata() -> RegionMetadata {
+        let builder = RegionMetadataBuilder::new(RegionId::new(23, 33), 0);
+        let builder = builder.add_column_metadata(ColumnMetadata {
+            column_schema: ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+            semantic_type: SemanticType::Timestamp,
+            column_id: 45,
+        });
+        let builder = builder.add_column_metadata(ColumnMetadata {
+            column_schema: ColumnSchema::new("pk", ConcreteDataType::string_datatype(), false),
+            semantic_type: SemanticType::Tag,
+            column_id: 36,
+        });
+        let builder = builder.add_column_metadata(ColumnMetadata {
+            column_schema: ColumnSchema::new("val", ConcreteDataType::float64_datatype(), false),
+            semantic_type: SemanticType::Field,
+            column_id: 251,
+        });
+        builder.build()
+    }
+
+    #[tokio::test]
+    async fn create_region_without_initial_metadata() {
+        let env = TestEnv::new("");
+        let result = env
+            .create_manifest_manager(CompressionType::Uncompressed, None, None)
+            .await;
+        assert!(matches!(
+            result.err().unwrap(),
+            Error::InitialMetadata { .. }
+        ))
+    }
+
+    #[tokio::test]
+    async fn create_manifest_manager() {
+        let metadata = basic_region_metadata();
+        let env = TestEnv::new("");
+        let manager = env
+            .create_manifest_manager(CompressionType::Uncompressed, None, Some(metadata.clone()))
+            .await
+            .unwrap();
+
+        let manifest = manager.manifest();
+        assert_eq!(manifest.metadata, metadata);
+    }
+
+    #[tokio::test]
+    async fn region_change_add_column() {
+        let metadata = basic_region_metadata();
+        let env = TestEnv::new("");
+        let manager = env
+            .create_manifest_manager(CompressionType::Uncompressed, None, Some(metadata.clone()))
+            .await
+            .unwrap();
+
+        let new_metadata_builder = RegionMetadataBuilder::from_existing(metadata, 1);
+        let new_metadata_builder = new_metadata_builder.add_column_metadata(ColumnMetadata {
+            column_schema: ColumnSchema::new("val2", ConcreteDataType::float64_datatype(), false),
+            semantic_type: SemanticType::Field,
+            column_id: 252,
+        });
+        let new_metadata = new_metadata_builder.build();
+
+        let mut action_list =
+            RegionMetaActionList::with_action(RegionMetaAction::Change(RegionChange {
+                metadata: new_metadata.clone(),
+            }));
+        action_list.set_prev_version(0);
+
+        let prev_version = manager.update(action_list).await.unwrap();
+        assert_eq!(prev_version, 0);
+
+        let manifest = manager.manifest();
+        assert_eq!(manifest.metadata, new_metadata);
     }
 }
