@@ -28,3 +28,13 @@ pub(crate) struct MemtableVersion {
 }
 
 pub(crate) type MemtableVersionRef = Arc<MemtableVersion>;
+
+impl MemtableVersion {
+    /// Returns a new [MemtableVersion] with specific mutable memtable.
+    pub(crate) fn new(mutable: MemtableRef) -> MemtableVersion {
+        MemtableVersion {
+            mutable,
+            immutables: vec![],
+        }
+    }
+}

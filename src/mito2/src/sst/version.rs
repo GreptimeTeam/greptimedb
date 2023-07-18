@@ -28,6 +28,15 @@ pub(crate) struct SstVersion {
 
 pub(crate) type SstVersionRef = Arc<SstVersion>;
 
+impl SstVersion {
+    /// Returns a new [SstVersion].
+    pub(crate) fn new() -> SstVersion {
+        SstVersion {
+            levels: new_level_meta_vec(),
+        }
+    }
+}
+
 // We only has fixed number of level, so we use array to hold elements. This implementation
 // detail of LevelMetaVec should not be exposed to the user of [LevelMetas].
 type LevelMetaVec = [LevelMeta; MAX_LEVEL as usize];
@@ -40,6 +49,16 @@ pub struct LevelMeta {
     files: HashMap<FileId, FileHandle>,
 }
 
+impl LevelMeta {
+    /// Returns an empty meta of specific `level`.
+    pub(crate) fn new(level: Level) -> LevelMeta {
+        LevelMeta {
+            level,
+            files: HashMap::new(),
+        }
+    }
+}
+
 impl fmt::Debug for LevelMeta {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LevelMeta")
@@ -47,4 +66,12 @@ impl fmt::Debug for LevelMeta {
             .field("files", &self.files.keys())
             .finish()
     }
+}
+
+fn new_level_meta_vec() -> LevelMetaVec {
+    (0u8..MAX_LEVEL)
+        .map(LevelMeta::new)
+        .collect::<Vec<_>>()
+        .try_into()
+        .unwrap() // safety: LevelMetaVec is a fixed length array with length MAX_LEVEL
 }

@@ -29,15 +29,25 @@ use arc_swap::ArcSwap;
 use store_api::manifest::ManifestVersion;
 use store_api::storage::SequenceNumber;
 
-use crate::memtable::version::MemtableVersionRef;
+use crate::memtable::version::{MemtableVersion, MemtableVersionRef};
+use crate::memtable::MemtableRef;
 use crate::metadata::RegionMetadataRef;
-use crate::sst::version::SstVersionRef;
+use crate::sst::version::{SstVersion, SstVersionRef};
 
 /// Controls version of in memory metadata for a region.
 #[derive(Debug)]
 pub(crate) struct VersionControl {
     /// Latest version.
     version: ArcSwap<Version>,
+}
+
+impl VersionControl {
+    /// Returns a new [VersionControl] with specific `version`.
+    pub(crate) fn new(version: Version) -> VersionControl {
+        VersionControl {
+            version: ArcSwap::new(Arc::new(version)),
+        }
+    }
 }
 
 pub(crate) type VersionControlRef = Arc<VersionControl>;
@@ -60,4 +70,29 @@ pub(crate) struct Version {
     flushed_sequence: SequenceNumber,
     /// Current version of region manifest.
     manifest_version: ManifestVersion,
+}
+
+/// Version builder.
+pub(crate) struct VersionBuilder {
+    metadata: RegionMetadataRef,
+    /// Mutable memtable.
+    mutable: MemtableRef,
+}
+
+impl VersionBuilder {
+    /// Returns a new builder.
+    pub(crate) fn new(metadata: RegionMetadataRef, mutable: MemtableRef) -> VersionBuilder {
+        VersionBuilder { metadata, mutable }
+    }
+
+    /// Builds a new [Version] from the builder.
+    pub(crate) fn build(self) -> Version {
+        Version {
+            metadata: self.metadata,
+            memtables: Arc::new(MemtableVersion::new(self.mutable)),
+            ssts: Arc::new(SstVersion::new()),
+            flushed_sequence: 0,
+            manifest_version: 0,
+        }
+    }
 }

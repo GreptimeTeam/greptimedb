@@ -19,7 +19,11 @@ pub(crate) mod version;
 use std::fmt;
 use std::sync::Arc;
 
-/// Unique id for memtables under the same region.
+use crate::metadata::RegionMetadataRef;
+
+/// Id for memtables.
+///
+/// Should be unique under the same region.
 pub type MemtableId = u32;
 
 /// In memory write buffer.
@@ -33,7 +37,7 @@ pub type MemtableRef = Arc<dyn Memtable>;
 /// Builder to build a new [Memtable].
 pub trait MemtableBuilder: Send + Sync + fmt::Debug {
     /// Builds a new memtable instance.
-    fn build(&self) -> MemtableRef;
+    fn build(&self, metadata: &RegionMetadataRef) -> MemtableRef;
 }
 
 pub type MemtableBuilderRef = Arc<dyn MemtableBuilder>;
