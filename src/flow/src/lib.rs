@@ -1,13 +1,20 @@
-use differential_dataflow::lattice::Lattice;
-use differential_dataflow::operators::Count;
-use timely::progress::timestamp::Refines;
+mod adapter;
+mod compute;
+mod expr;
+mod repr;
+mod storage;
+
+/// Record count difference type.
+pub type Diff = i64;
 
 #[test]
-fn demo() {
-    use abomonation_derive::Abomonation;
+fn demo_multitemporal() {
     use differential_dataflow::input::InputSession;
-    use differential_dataflow::operators::Join;
-    #[derive(Debug, Clone, Default, Eq, PartialEq, Hash, Abomonation)]
+    use differential_dataflow::lattice::Lattice;
+    use differential_dataflow::operators::{Count, Join};
+    use serde::{Deserialize, Serialize};
+    use timely::progress::timestamp::Refines;
+    #[derive(Debug, Clone, Default, Eq, PartialEq, Hash, Deserialize, Serialize)]
     /// (System, Event)
     struct MT(usize, usize);
     impl Ord for MT {
@@ -91,7 +98,7 @@ fn demo() {
         });
 
         // Read a size for our organization from the arguments.
-        let size = 100;
+        let size = 10;
 
         // Load input (a binary tree).
         input.advance_to(MT(0, 0));
