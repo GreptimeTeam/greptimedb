@@ -1,0 +1,185 @@
+// Copyright 2023 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! Structures to describe metadata of files.
+
+use std::fmt;
+use std::str::FromStr;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
+
+use common_time::Timestamp;
+use serde::{Deserialize, Serialize};
+use snafu::{ResultExt, Snafu};
+use store_api::storage::RegionId;
+use uuid::Uuid;
+
+/// Type to store SST level.
+pub type Level = u8;
+/// Maximum level of SSTs.
+pub const MAX_LEVEL: Level = 2;
+
+#[derive(Debug, Snafu, PartialEq)]
+pub struct ParseIdError {
+    source: uuid::Error,
+}
+
+/// Unique id for [SST File].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub struct FileId(Uuid);
+
+impl FileId {
+    /// Returns a new unique [FileId] randomly.
+    pub fn random() -> FileId {
+        FileId(Uuid::new_v4())
+    }
+
+    /// Parses id from string.
+    pub fn parse_str(input: &str) -> std::result::Result<FileId, ParseIdError> {
+        Uuid::parse_str(input).map(FileId).context(ParseIdSnafu)
+    }
+
+    /// Append `.parquet` to file id to make a complete file name
+    pub fn as_parquet(&self) -> String {
+        format!("{}{}", self.0.hyphenated(), ".parquet")
+    }
+}
+
+impl fmt::Display for FileId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl FromStr for FileId {
+    type Err = ParseIdError;
+
+    fn from_str(s: &str) -> std::result::Result<FileId, ParseIdError> {
+        FileId::parse_str(s)
+    }
+}
+
+/// Time range of a SST file.
+pub type FileTimeRange = (Timestamp, Timestamp);
+
+/// Metadata of a SST file.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct FileMeta {
+    /// Region of file.
+    pub region_id: RegionId,
+    /// Compared to normal file names, FileId ignore the extension
+    pub file_id: FileId,
+    /// Timestamp range of file.
+    pub time_range: FileTimeRange,
+    /// SST level of the file.
+    pub level: Level,
+    /// Size of the file.
+    pub file_size: u64,
+}
+
+/// Handle to a SST file.
+#[derive(Clone)]
+pub struct FileHandle {
+    inner: Arc<FileHandleInner>,
+}
+
+impl fmt::Debug for FileHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FileHandle")
+            .field("file_id", &self.inner.meta.file_id)
+            .field("region_id", &self.inner.meta.region_id)
+            .field("time_range", &self.inner.meta.time_range)
+            .field("size", &self.inner.meta.file_size)
+            .field("level", &self.inner.meta.level)
+            .field("compacting", &self.inner.compacting)
+            .field("deleted", &self.inner.deleted)
+            .finish()
+    }
+}
+
+/// Inner data of [FileHandle].
+///
+/// Contains meta of the file, and other mutable info like whether the file is compacting.
+struct FileHandleInner {
+    meta: FileMeta,
+    compacting: AtomicBool,
+    deleted: AtomicBool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_file_id() {
+        let id = FileId::random();
+        let uuid_str = id.to_string();
+        assert_eq!(id.0.to_string(), uuid_str);
+
+        let parsed = FileId::parse_str(&uuid_str).unwrap();
+        assert_eq!(id, parsed);
+        let parsed = uuid_str.parse().unwrap();
+        assert_eq!(id, parsed);
+    }
+
+    #[test]
+    fn test_file_id_serialization() {
+        let id = FileId::random();
+        let json = serde_json::to_string(&id).unwrap();
+        assert_eq!(format!("\"{id}\""), json);
+
+        let parsed = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, parsed);
+    }
+
+    #[test]
+    fn test_file_id_as_parquet() {
+        let id = FileId::from_str("67e55044-10b1-426f-9247-bb680e5fe0c8").unwrap();
+        assert_eq!(
+            "67e55044-10b1-426f-9247-bb680e5fe0c8.parquet",
+            id.as_parquet()
+        );
+    }
+
+    fn create_file_meta(file_id: FileId, level: Level) -> FileMeta {
+        FileMeta {
+            region_id: 0.into(),
+            file_id,
+            time_range: FileTimeRange::default(),
+            level,
+            file_size: 0,
+        }
+    }
+
+    #[test]
+    fn test_deserialize_file_meta() {
+        let file_meta = create_file_meta(FileId::random(), 0);
+        let serialized_file_meta = serde_json::to_string(&file_meta).unwrap();
+        let deserialized_file_meta = serde_json::from_str(&serialized_file_meta);
+        assert_eq!(file_meta, deserialized_file_meta.unwrap());
+    }
+
+    #[test]
+    fn test_deserialize_from_string() {
+        let json_file_meta = "{\"region_id\":0,\"file_id\":\"bc5896ec-e4d8-4017-a80d-f2de73188d55\",\
+        \"time_range\":[{\"value\":0,\"unit\":\"Millisecond\"},{\"value\":0,\"unit\":\"Millisecond\"}],\"level\":0}";
+        let file_meta = create_file_meta(
+            FileId::from_str("bc5896ec-e4d8-4017-a80d-f2de73188d55").unwrap(),
+            0,
+        );
+        let deserialized_file_meta: FileMeta = serde_json::from_str(json_file_meta).unwrap();
+        assert_eq!(file_meta, deserialized_file_meta);
+    }
+}

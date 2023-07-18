@@ -25,8 +25,39 @@
 
 use std::sync::Arc;
 
+use arc_swap::ArcSwap;
+use store_api::manifest::ManifestVersion;
+use store_api::storage::SequenceNumber;
+
+use crate::memtable::version::MemtableVersionRef;
+use crate::metadata::RegionMetadataRef;
+use crate::sst::version::SstVersionRef;
+
 /// Controls version of in memory metadata for a region.
 #[derive(Debug)]
-pub(crate) struct VersionControl {}
+pub(crate) struct VersionControl {
+    /// Latest version.
+    version: ArcSwap<Version>,
+}
 
 pub(crate) type VersionControlRef = Arc<VersionControl>;
+
+/// Static metadata of a region.
+#[derive(Clone, Debug)]
+pub(crate) struct Version {
+    /// Metadata of the region.
+    ///
+    /// Altering metadata isn't frequent, storing metadata in Arc to allow sharing
+    /// metadata and reuse metadata when creating a new `Version`.
+    metadata: RegionMetadataRef,
+    /// Mutable and immutable memtables.
+    ///
+    /// Wrapped in Arc to make clone of `Version` much cheaper.
+    memtables: MemtableVersionRef,
+    /// SSTs of the region.
+    ssts: SstVersionRef,
+    /// Inclusive max sequence of flushed data.
+    flushed_sequence: SequenceNumber,
+    /// Current version of region manifest.
+    manifest_version: ManifestVersion,
+}
