@@ -256,8 +256,7 @@ pub fn push_vals(column: &mut Column, origin_count: usize, vector: VectorRef) {
             TimeUnit::Microsecond => values.time_microsecond_values.push(val.value()),
             TimeUnit::Nanosecond => values.time_nanosecond_values.push(val.value()),
         },
-        Value::Interval(_) => todo!(),
-        Value::List(_) => unreachable!(),
+        Value::Interval(_) | Value::List(_) => unreachable!(),
     });
     column.null_mask = null_mask.into_vec();
 }

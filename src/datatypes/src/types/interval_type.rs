@@ -37,6 +37,9 @@ use crate::vectors::{
     PrimitiveVector,
 };
 
+/// The "calendar" interval is a type of time interval that does not
+/// have a precise duration without taking into account a specific
+/// base timestamp. 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[enum_dispatch(DataType)]
 pub enum IntervalType {
@@ -46,6 +49,7 @@ pub enum IntervalType {
 }
 
 impl IntervalType {
+    /// Returns the unit of the interval.
     pub fn unit(&self) -> IntervalUnit {
         match self {
             IntervalType::YearMonth(_) => IntervalUnit::YearMonth,

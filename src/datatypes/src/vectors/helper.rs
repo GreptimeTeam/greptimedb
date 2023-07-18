@@ -296,13 +296,13 @@ impl Helper {
             },
             ArrowDataType::Interval(unit) => match unit {
                 IntervalUnit::YearMonth => {
-                    Arc::new(IntervalYearMonthVector::try_from_arrow_array(array)?)
+                    Arc::new(IntervalYearMonthVector::try_from_arrow_interval_array(array)?)
                 }
                 IntervalUnit::DayTime => {
-                    Arc::new(IntervalDayTimeVector::try_from_arrow_array(array)?)
+                    Arc::new(IntervalDayTimeVector::try_from_arrow_interval_array(array)?)
                 }
                 IntervalUnit::MonthDayNano => {
-                    Arc::new(IntervalMonthDayNanoVector::try_from_arrow_array(array)?)
+                    Arc::new(IntervalMonthDayNanoVector::try_from_arrow_interval_array(array)?)
                 }
             },
             ArrowDataType::Float16

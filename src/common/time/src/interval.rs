@@ -85,7 +85,7 @@ pub const SECS_PER_DAY: i32 = SECS_PER_HOUR * HOURS_PER_DAY;
 pub const SECS_PER_WEEK: i32 = SECS_PER_DAY * DAYS_PER_WEEK;
 
 impl Interval {
-    // Creates a new default interval.
+    /// Creates a new default interval.
     pub fn new(months: i32, days: i32, micros: i64) -> Self {
         Interval {
             months,
@@ -95,9 +95,9 @@ impl Interval {
         }
     }
 
-    // Creates a new interval from months, days and nanoseconds.
-    // If nanoseconds is between [-999,999], the data will be lost, the
-    // precision is microsecond.
+    /// Creates a new interval from months, days and nanoseconds.
+    /// If nanoseconds is between [-999,999], the data will be lost, the
+    /// precision is microsecond.
     pub fn from_month_day_nano(months: i32, days: i32, nsecs: i64) -> Self {
         Interval {
             months,
@@ -107,6 +107,7 @@ impl Interval {
         }
     }
 
+    /// Creates a new interval from months.
     pub fn from_year_month(months: i32) -> Self {
         Interval {
             months,
@@ -116,6 +117,7 @@ impl Interval {
         }
     }
 
+    /// Creates a new interval from days and milliseconds.
     pub fn from_day_time(days: i32, millis: i32) -> Self {
         Interval {
             months: 0,
@@ -133,7 +135,7 @@ impl Interval {
         unit: IntervalUnit::MonthDayNano,
     };
 
-    // Largest interval value.
+    /// Largest interval value.
     pub const MAX: Self = Self {
         months: i32::MAX,
         days: i32::MAX,
@@ -163,12 +165,12 @@ impl Interval {
         self.months >= 0 && self.days >= 0 && self.micros >= 0
     }
 
-    // is_zero
+    /// is_zero
     pub fn is_zero(&self) -> bool {
         self.months == 0 && self.days == 0 && self.micros == 0
     }
 
-    // get unit
+    /// get unit
     pub fn unit(&self) -> IntervalUnit {
         self.unit
     }
@@ -192,14 +194,15 @@ impl Interval {
         })
     }
 
-    pub fn to_iso_8601(&self) -> String {
+    /// Convert Interval to ISO 8601 string
+    pub fn to_iso8601_string(&self) -> String {
         // ISO pattern - PnYnMnDTnHnMnS
         let years = self.months / 12;
         let months = self.months % 12;
         let days = self.days;
         let secs_fract = (self.micros % MICROS_PER_SEC).abs();
         let total_secs = (self.micros / MICROS_PER_SEC).abs();
-        let hours = total_secs / 3600;
+        let hours = total_secs / (SECS_PER_HOUR as i64);
         let minutes = (total_secs / 60) % 60;
         let seconds = total_secs % 60;
 
@@ -213,7 +216,7 @@ impl Interval {
         format!("P{years}Y{months}M{days}DT{hours}H{minutes}M{seconds}{fract_str}S")
     }
 
-    // `Interval` Type and i128(MonthDayNano) Convert
+    /// `Interval` Type and i128[MonthDayNano] Convert
     pub fn from_i128(v: i128) -> Self {
         Interval {
             micros: (v as i64) / 1_000,
@@ -223,7 +226,7 @@ impl Interval {
         }
     }
 
-    // `Interval` Type and i64(DayTime) Convert
+    /// `Interval` Type and i64[DayTime] Convert
     pub fn from_i64(v: i64) -> Self {
         Interval {
             micros: ((v as i32) as i64) * 1_000,
@@ -233,7 +236,7 @@ impl Interval {
         }
     }
 
-    // `Interval` Type and i32(YearMonth) Convert
+    /// `Interval` Type and i32[YearMonth] Convert
     pub fn from_i32(v: i32) -> Self {
         Interval {
             micros: 0,
@@ -409,10 +412,10 @@ mod tests {
     #[test]
     fn test_to_iso8601_string() {
         let interval = Interval::from_month_day_nano(1, 1, 1);
-        assert_eq!(interval.to_iso_8601(), "P0Y1M1DT0H0M0S");
+        assert_eq!(interval.to_iso8601_string(), "P0Y1M1DT0H0M0S");
 
         let interval = Interval::from_month_day_nano(14, 31, 10000000000);
-        assert_eq!(interval.to_iso_8601(), "P1Y2M31DT0H0M10S");
+        assert_eq!(interval.to_iso8601_string(), "P1Y2M31DT0H0M10S");
     }
 
     #[test]
