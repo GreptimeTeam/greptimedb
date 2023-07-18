@@ -195,7 +195,7 @@ impl RegionMetadata {
                 ensure!(
                     id_names.contains_key(&column_id),
                     InvalidMetaSnafu {
-                        reason: format!("Unknown column id {}", column_id),
+                        reason: format!("unknown column id {}", column_id),
                     }
                 );
 
@@ -203,9 +203,17 @@ impl RegionMetadata {
                 ensure!(
                     !pk_ids.contains(&column_id),
                     InvalidMetaSnafu {
+                        reason: format!("duplicate column {} in primary key", id_names[&column_id]),
+                    }
+                );
+
+                // Checks this is not a time index column.
+                ensure!(
+                    *column_id != self.time_index,
+                    InvalidMetaSnafu {
                         reason: format!(
-                            "duplicate column {} (id {}) in primary key",
-                            id_names[&column_id], column_id
+                            "column {} is already a time index column",
+                            id_names[&column_id]
                         ),
                     }
                 );
@@ -377,6 +385,141 @@ mod test {
         // A region must have a time index.
         assert!(
             err.to_string().contains("time index not found"),
+            "unexpected err: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_same_column_id() {
+        let mut builder = create_builder();
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("a", ConcreteDataType::int64_datatype(), false),
+                semantic_type: SemanticType::Tag,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "b",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 1,
+            });
+        let err = builder.build().unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("column a and b have the same column id"),
+            "unexpected err: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_duplicate_time_index() {
+        let mut builder = create_builder();
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "a",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "b",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 2,
+            });
+        let err = builder.build().unwrap_err();
+        assert!(
+            err.to_string().contains("expect only one time index"),
+            "unexpected err: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_unknown_primary_key() {
+        let mut builder = create_builder();
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("a", ConcreteDataType::string_datatype(), false),
+                semantic_type: SemanticType::Tag,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "b",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 2,
+            })
+            .primary_key(vec![3]);
+        let err = builder.build().unwrap_err();
+        assert!(
+            err.to_string().contains("unknown column id 3"),
+            "unexpected err: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_same_primary_key() {
+        let mut builder = create_builder();
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("a", ConcreteDataType::string_datatype(), false),
+                semantic_type: SemanticType::Tag,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "b",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 2,
+            })
+            .primary_key(vec![1, 1]);
+        let err = builder.build().unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("duplicate column a in primary key"),
+            "unexpected err: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_in_time_index() {
+        let mut builder = create_builder();
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 1,
+            })
+            .primary_key(vec![1]);
+        let err = builder.build().unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("column ts is already a time index column"),
             "unexpected err: {}",
             err
         );
