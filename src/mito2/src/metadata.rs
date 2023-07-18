@@ -154,13 +154,6 @@ impl SkippedFields {
 impl RegionMetadata {
     /// Checks whether the metadata is valid.
     fn validate(&self) -> Result<()> {
-        ensure!(
-            !self.column_metadatas.is_empty(),
-            InvalidMetaSnafu {
-                reason: "No column",
-            }
-        );
-
         // Id to name.
         let mut id_names = HashMap::with_capacity(self.column_metadatas.len());
         for col in &self.column_metadatas {
@@ -190,7 +183,7 @@ impl RegionMetadata {
         ensure!(
             num_time_index == 1,
             InvalidMetaSnafu {
-                reason: format!("Expect only one time index, found {}", num_time_index),
+                reason: format!("expect only one time index, found {}", num_time_index),
             }
         );
 
@@ -369,6 +362,23 @@ mod test {
         col.validate().unwrap_err();
 
         builder.push_column_metadata(col);
-        builder.build().unwrap_err();
+        let err = builder.build().unwrap_err();
+        assert!(
+            err.to_string().contains("ts is not timestamp compatible"),
+            "unexpected err: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_empty_region_metadata() {
+        let builder = create_builder();
+        let err = builder.build().unwrap_err();
+        // A region must have a time index.
+        assert!(
+            err.to_string().contains("time index not found"),
+            "unexpected err: {}",
+            err
+        );
     }
 }
