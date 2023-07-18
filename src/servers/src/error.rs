@@ -136,7 +136,7 @@ pub enum Error {
         source: common_grpc::error::Error,
     },
 
-    #[snafu(display("Failed to write OPTL metrics, source: {}", source))]
+    #[snafu(display("Failed to write OTLP metrics, source: {}", source))]
     OtlpMetricsWrite {
         location: Location,
         source: common_grpc::error::Error,
