@@ -357,16 +357,13 @@ impl Procedure for RegionFailoverProcedure {
 
     fn lock_key(&self) -> LockKey {
         let region_ident = &self.node.failed_region;
-        let key = format!(
-            "{}/region-{}",
-            common_catalog::format_full_table_name(
-                &region_ident.table_ident.catalog,
-                &region_ident.table_ident.schema,
-                &region_ident.table_ident.table
-            ),
-            region_ident.region_number
+        let table_key = common_catalog::format_full_table_name(
+            &region_ident.table_ident.catalog,
+            &region_ident.table_ident.schema,
+            &region_ident.table_ident.table,
         );
-        LockKey::single(key)
+        let region_key = format!("{}/region-{}", table_key, region_ident.region_number);
+        LockKey::new(vec![table_key, region_key])
     }
 }
 
