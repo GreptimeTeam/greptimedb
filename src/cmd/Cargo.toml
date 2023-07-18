@@ -24,6 +24,7 @@ common-base = { path = "../common/base" }
 common-error = { path = "../common/error" }
 common-query = { path = "../common/query" }
 common-meta = { path = "../common/meta" }
+common-options = { path = "../common/options" }
 common-recordbatch = { path = "../common/recordbatch" }
 common-telemetry = { path = "../common/telemetry", features = [
     "deadlock_detection",

@@ -77,11 +77,10 @@ pub enum Error {
         source: servers::auth::Error,
     },
 
-    #[snafu(display("Unsupported selector type, {} source: {}", selector_type, source))]
-    UnsupportedSelectorType {
-        selector_type: String,
+    #[snafu(display("invalid options, source: {}", source))]
+    InvalidOptions {
         location: Location,
-        source: meta_srv::error::Error,
+        source: common_options::error::Error,
     },
 
     #[snafu(display("Invalid REPL command: {reason}"))]
@@ -175,7 +174,7 @@ impl ErrorExt for Error {
             Error::StartMetaServer { source, .. } => source.status_code(),
             Error::ShutdownMetaServer { source, .. } => source.status_code(),
             Error::BuildMetaServer { source, .. } => source.status_code(),
-            Error::UnsupportedSelectorType { source, .. } => source.status_code(),
+            Error::InvalidOptions { source, .. } => source.status_code(),
             Error::MissingConfig { .. }
             | Error::LoadLayeredConfig { .. }
             | Error::IllegalConfig { .. }

@@ -19,14 +19,10 @@ use std::sync::Arc;
 
 use api::v1::meta::Peer;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-use common_grpc::channel_manager;
 use common_meta::key::TableMetadataManagerRef;
-use common_procedure::options::ProcedureConfig;
+use common_options::meta::MetaSrvOptions;
 use common_procedure::ProcedureManagerRef;
-use common_telemetry::logging::LoggingOptions;
 use common_telemetry::{error, info, warn};
-use serde::{Deserialize, Serialize};
-use servers::http::HttpOptions;
 use snafu::ResultExt;
 use tokio::sync::broadcast::error::RecvError;
 
@@ -37,75 +33,11 @@ use crate::error::{RecoverProcedureSnafu, Result};
 use crate::handler::HeartbeatHandlerGroup;
 use crate::lock::DistLockRef;
 use crate::metadata_service::MetadataServiceRef;
-use crate::selector::{Selector, SelectorType};
+use crate::selector::Selector;
 use crate::sequence::SequenceRef;
 use crate::service::mailbox::MailboxRef;
 use crate::service::store::kv::{KvStoreRef, ResettableKvStoreRef};
 pub const TABLE_ID_SEQ: &str = "table_id";
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct MetaSrvOptions {
-    pub bind_addr: String,
-    pub server_addr: String,
-    pub store_addr: String,
-    pub datanode_lease_secs: i64,
-    pub selector: SelectorType,
-    pub use_memory_store: bool,
-    pub disable_region_failover: bool,
-    pub http_opts: HttpOptions,
-    pub logging: LoggingOptions,
-    pub procedure: ProcedureConfig,
-    pub datanode: DatanodeOptions,
-}
-
-impl Default for MetaSrvOptions {
-    fn default() -> Self {
-        Self {
-            bind_addr: "127.0.0.1:3002".to_string(),
-            server_addr: "127.0.0.1:3002".to_string(),
-            store_addr: "127.0.0.1:2379".to_string(),
-            datanode_lease_secs: 15,
-            selector: SelectorType::default(),
-            use_memory_store: false,
-            disable_region_failover: false,
-            http_opts: HttpOptions::default(),
-            logging: LoggingOptions::default(),
-            procedure: ProcedureConfig::default(),
-            datanode: DatanodeOptions::default(),
-        }
-    }
-}
-
-impl MetaSrvOptions {
-    pub fn to_toml_string(&self) -> String {
-        toml::to_string(&self).unwrap()
-    }
-}
-
-// Options for datanode.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct DatanodeOptions {
-    client_options: DatanodeClientOptions,
-}
-
-// Options for datanode client.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DatanodeClientOptions {
-    pub timeout_millis: u64,
-    pub connect_timeout_millis: u64,
-    pub tcp_nodelay: bool,
-}
-
-impl Default for DatanodeClientOptions {
-    fn default() -> Self {
-        Self {
-            timeout_millis: channel_manager::DEFAULT_GRPC_REQUEST_TIMEOUT_SECS * 1000,
-            connect_timeout_millis: channel_manager::DEFAULT_GRPC_CONNECT_TIMEOUT_SECS * 1000,
-            tcp_nodelay: true,
-        }
-    }
-}
 
 #[derive(Clone)]
 pub struct Context {

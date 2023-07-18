@@ -12,17 +12,5 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod lease_based;
-pub mod load_based;
-
-use crate::error::Result;
-
-pub type Namespace = u64;
-
-#[async_trait::async_trait]
-pub trait Selector: Send + Sync {
-    type Context;
-    type Output;
-
-    async fn select(&self, ns: Namespace, ctx: &Self::Context) -> Result<Self::Output>;
-}
+pub mod error;
+pub mod meta;

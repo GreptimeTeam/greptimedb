@@ -15,9 +15,9 @@
 use std::time::Duration;
 
 use clap::Parser;
+use common_options::meta::MetaSrvOptions;
 use common_telemetry::logging;
 use meta_srv::bootstrap::MetaSrvInstance;
-use meta_srv::metasrv::MetaSrvOptions;
 use snafu::ResultExt;
 
 use crate::error::{self, Result};
@@ -133,7 +133,7 @@ impl StartCommand {
         if let Some(selector_type) = &self.selector {
             opts.selector = selector_type[..]
                 .try_into()
-                .context(error::UnsupportedSelectorTypeSnafu { selector_type })?;
+                .context(error::InvalidOptionsSnafu)?;
         }
 
         opts.use_memory_store = self.use_memory_store;
@@ -171,8 +171,8 @@ impl StartCommand {
 mod tests {
     use std::io::Write;
 
+    use common_options::meta::SelectorType;
     use common_test_util::temp_dir::create_named_temp_file;
-    use meta_srv::selector::SelectorType;
 
     use super::*;
     use crate::options::ENV_VAR_SEP;

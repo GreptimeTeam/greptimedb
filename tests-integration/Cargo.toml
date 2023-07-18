@@ -20,6 +20,7 @@ common-catalog = { path = "../src/common/catalog" }
 common-error = { path = "../src/common/error" }
 common-grpc = { path = "../src/common/grpc" }
 common-meta = { path = "../src/common/meta" }
+common-options = { path = "../src/common/options" }
 common-query = { path = "../src/common/query" }
 common-recordbatch = { path = "../src/common/recordbatch" }
 common-runtime = { path = "../src/common/runtime" }

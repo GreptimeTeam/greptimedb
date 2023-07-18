@@ -1,0 +1,16 @@
+[package]
+name = "common-options"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+common-error = { path = "../error" }
+common-grpc = { path = "../grpc" }
+common-procedure = { path = "../procedure" }
+common-telemetry = { path = "../telemetry" }
+servers = { path = "../../servers" }
+serde.workspace = true
+serde_json.workspace = true
+snafu.workspace = true
+toml.workspace = true
