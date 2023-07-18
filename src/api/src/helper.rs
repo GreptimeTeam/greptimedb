@@ -111,10 +111,8 @@ impl TryFrom<ConcreteDataType> for ColumnDataTypeWrapper {
                 TimeType::Microsecond(_) => ColumnDataType::TimeMicrosecond,
                 TimeType::Nanosecond(_) => ColumnDataType::TimeNanosecond,
             },
-            ConcreteDataType::Interval(_) => {
-                todo!("ColumnDataType: Interval datatype not supported yet")
-            }
-            ConcreteDataType::Null(_)
+            ConcreteDataType::Interval(_)
+            | ConcreteDataType::Null(_)
             | ConcreteDataType::List(_)
             | ConcreteDataType::Dictionary(_) => {
                 return error::IntoColumnDataTypeSnafu { from: datatype }.fail()

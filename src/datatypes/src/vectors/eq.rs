@@ -22,8 +22,8 @@ use crate::vectors::constant::ConstantVector;
 use crate::vectors::{
     BinaryVector, BooleanVector, DateTimeVector, DateVector, IntervalDayTimeVector,
     IntervalMonthDayNanoVector, IntervalYearMonthVector, ListVector, PrimitiveVector, StringVector,
-    TimeMicrosecondVector, TimeMillisecondVector, TimeNanosecondVector,
-    TimeSecondVector, TimestampMicrosecondVector, TimestampMillisecondVector, TimestampNanosecondVector,
+    TimeMicrosecondVector, TimeMillisecondVector, TimeNanosecondVector, TimeSecondVector,
+    TimestampMicrosecondVector, TimestampMillisecondVector, TimestampNanosecondVector,
     TimestampSecondVector, Vector,
 };
 use crate::with_match_primitive_type_id;

@@ -503,11 +503,10 @@ mod tests {
     use crate::serialize::Serializable;
     use crate::types::Int64Type;
     use crate::vectors::{
-        TimeMicrosecondVector, TimeMillisecondVector, TimeNanosecondVector, TimeSecondVector,
-        TimestampMicrosecondVector, TimestampMillisecondVector, TimestampNanosecondVector,
-        TimestampSecondVector,
+        IntervalDayTimeVector, IntervalYearMonthVector, TimeMicrosecondVector,
+        TimeMillisecondVector, TimeNanosecondVector, TimeSecondVector, TimestampMicrosecondVector,
+        TimestampMillisecondVector, TimestampNanosecondVector, TimestampSecondVector,
     };
-    use crate::vectors::{IntervalDayTimeVector, IntervalYearMonthVector};
 
     fn check_vec(v: Int32Vector) {
         assert_eq!(4, v.len());

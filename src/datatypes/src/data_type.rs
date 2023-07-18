@@ -28,9 +28,9 @@ use crate::type_id::LogicalTypeId;
 use crate::types::{
     BinaryType, BooleanType, DateTimeType, DateType, DictionaryType, Float32Type, Float64Type,
     Int16Type, Int32Type, Int64Type, Int8Type, IntervalDayTimeType, IntervalMonthDayNanoType,
-    IntervalType, IntervalYearMonthType, ListType, NullType, StringType, TimeMillisecondType, TimeType, TimestampMicrosecondType,
-    TimestampMillisecondType, TimestampNanosecondType, TimestampSecondType, TimestampType,
-    UInt16Type, UInt32Type, UInt64Type, UInt8Type,
+    IntervalType, IntervalYearMonthType, ListType, NullType, StringType, TimeMillisecondType,
+    TimeType, TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType,
+    TimestampSecondType, TimestampType, UInt16Type, UInt32Type, UInt64Type, UInt8Type,
 };
 use crate::value::Value;
 use crate::vectors::MutableVector;

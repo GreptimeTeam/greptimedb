@@ -33,11 +33,10 @@ use crate::value::{ListValue, ListValueRef};
 use crate::vectors::{
     BinaryVector, BooleanVector, ConstantVector, DateTimeVector, DateVector, Float32Vector,
     Float64Vector, Int16Vector, Int32Vector, Int64Vector, Int8Vector, IntervalMonthDayNanoVector,
-    ListVector, ListVectorBuilder, MutableVector, NullVector, StringVector,
-    TimeMicrosecondVector,
-    TimeMillisecondVector, TimeNanosecondVector, TimeSecondVector, TimestampMicrosecondVector, TimestampMillisecondVector, TimestampNanosecondVector,
-    TimestampSecondVector, UInt16Vector, UInt32Vector, UInt64Vector, UInt8Vector, Vector,
-    VectorRef,
+    ListVector, ListVectorBuilder, MutableVector, NullVector, StringVector, TimeMicrosecondVector,
+    TimeMillisecondVector, TimeNanosecondVector, TimeSecondVector, TimestampMicrosecondVector,
+    TimestampMillisecondVector, TimestampNanosecondVector, TimestampSecondVector, UInt16Vector,
+    UInt32Vector, UInt64Vector, UInt8Vector, Vector, VectorRef,
 };
 
 /// Helper functions for `Vector`.

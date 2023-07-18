@@ -97,18 +97,14 @@ pub(super) fn encode_value(value: &Value, builder: &mut DataRowEncoder) -> PgWir
                 })))
             }
         }
-        Value::Interval(_) => Err(PgWireError::ApiError(Box::new(Error::Internal {
-            err_msg: format!(
-                "cannot write value {:?} in postgres protocol: unimplemented",
-                &value
-            ),
-        }))),
-        Value::List(_) => Err(PgWireError::ApiError(Box::new(Error::Internal {
-            err_msg: format!(
-                "cannot write value {:?} in postgres protocol: unimplemented",
-                &value
-            ),
-        }))),
+        Value::Interval(_) | Value::List(_) => {
+            Err(PgWireError::ApiError(Box::new(Error::Internal {
+                err_msg: format!(
+                    "cannot write value {:?} in postgres protocol: unimplemented",
+                    &value
+                ),
+            })))
+        }
     }
 }
 
