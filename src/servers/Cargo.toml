@@ -91,6 +91,7 @@ tower-http = { version = "0.3", features = ["full"] }
 
 [dev-dependencies]
 axum-test-helper = { git = "https://github.com/sunng87/axum-test-helper.git", branch = "patch-1" }
+catalog = { path = "../catalog", features = ["testing"] }
 client = { path = "../client" }
 common-base = { path = "../common/base" }
 common-test-util = { path = "../common/test-util" }

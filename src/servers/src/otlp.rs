@@ -307,7 +307,10 @@ fn encode_summary(name: &str, summary: &Summary) -> Result<InsertRequest> {
         for quantile in &data_point.quantile_values {
             // here we don't store bucket boundary
             lines
-                .write_f64(&format!("p{:02}", quantile.quantile), quantile.value)
+                .write_f64(
+                    &format!("p{:02}", quantile.quantile * 100f64),
+                    quantile.value,
+                )
                 .context(error::OtlpMetricsWriteSnafu)?;
         }
 
@@ -329,6 +332,11 @@ fn encode_summary(name: &str, summary: &Summary) -> Result<InsertRequest> {
 
 #[cfg(test)]
 mod tests {
+    use opentelemetry_proto::tonic::common::v1::any_value::Value as Val;
+    use opentelemetry_proto::tonic::common::v1::{AnyValue, KeyValue};
+    use opentelemetry_proto::tonic::metrics::v1::number_data_point::Value;
+    use opentelemetry_proto::tonic::metrics::v1::summary_data_point::ValueAtQuantile;
+    use opentelemetry_proto::tonic::metrics::v1::NumberDataPoint;
 
     use super::*;
 
@@ -339,5 +347,116 @@ mod tests {
         assert_eq!(normalize_otlp_name("jvm_memory_free"), "jvm_memory_free");
         assert_eq!(normalize_otlp_name("JVM_MEMORY_FREE"), "jvm_memory_free");
         assert_eq!(normalize_otlp_name("JVM_memory_FREE"), "jvm_memory_free");
+    }
+
+    fn keyvalue(key: &str, value: &str) -> KeyValue {
+        KeyValue {
+            key: key.into(),
+            value: Some(AnyValue {
+                value: Some(Val::StringValue(value.into())),
+            }),
+        }
+    }
+
+    #[test]
+    fn test_encode_gauge() {
+        let data_points = vec![
+            NumberDataPoint {
+                attributes: vec![keyvalue("host", "testsevrer")],
+                time_unix_nano: 100,
+                value: Some(Value::AsInt(100)),
+                ..Default::default()
+            },
+            NumberDataPoint {
+                attributes: vec![keyvalue("host", "testserver")],
+                time_unix_nano: 105,
+                value: Some(Value::AsInt(105)),
+                ..Default::default()
+            },
+        ];
+        let gauge = Gauge { data_points };
+        let inserts = encode_gauge("datamon", &gauge).unwrap();
+
+        assert_eq!(inserts.table_name, "datamon");
+        assert_eq!(inserts.row_count, 2);
+        assert_eq!(inserts.columns.len(), 3);
+        assert_eq!(
+            inserts
+                .columns
+                .iter()
+                .map(|c| &c.column_name)
+                .collect::<Vec<&String>>(),
+            vec!["host", "greptime_timestamp", "greptime_value"]
+        );
+    }
+
+    #[test]
+    fn test_encode_sum() {
+        let data_points = vec![
+            NumberDataPoint {
+                attributes: vec![keyvalue("host", "testserver")],
+                time_unix_nano: 100,
+                value: Some(Value::AsInt(100)),
+                ..Default::default()
+            },
+            NumberDataPoint {
+                attributes: vec![keyvalue("host", "testserver")],
+                time_unix_nano: 105,
+                value: Some(Value::AsInt(0)),
+                ..Default::default()
+            },
+        ];
+        let sum = Sum {
+            data_points,
+            ..Default::default()
+        };
+        let inserts = encode_sum("datamon", &sum).unwrap();
+
+        assert_eq!(inserts.table_name, "datamon");
+        assert_eq!(inserts.row_count, 2);
+        assert_eq!(inserts.columns.len(), 3);
+        assert_eq!(
+            inserts
+                .columns
+                .iter()
+                .map(|c| &c.column_name)
+                .collect::<Vec<&String>>(),
+            vec!["host", "greptime_timestamp", "greptime_value"]
+        );
+    }
+
+    #[test]
+    fn test_encode_summary() {
+        let data_points = vec![SummaryDataPoint {
+            attributes: vec![keyvalue("host", "testserver")],
+            time_unix_nano: 100,
+            count: 25,
+            sum: 5400.0,
+            quantile_values: vec![
+                ValueAtQuantile {
+                    quantile: 0.90,
+                    value: 1000.0,
+                },
+                ValueAtQuantile {
+                    quantile: 0.95,
+                    value: 3030.0,
+                },
+            ],
+            ..Default::default()
+        }];
+        let summary = Summary { data_points };
+        let inserts = encode_summary("datamon", &summary).unwrap();
+
+        assert_eq!(inserts.table_name, "datamon");
+        assert_eq!(inserts.row_count, 1);
+        assert_eq!(inserts.columns.len(), 5);
+        assert_eq!(
+            inserts
+                .columns
+                .iter()
+                .map(|c| &c.column_name)
+                .collect::<Vec<&String>>(),
+            vec!["host", "greptime_timestamp", "p90", "p95", "count"]
+        );
     }
 }
