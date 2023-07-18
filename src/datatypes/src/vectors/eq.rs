@@ -15,11 +15,12 @@
 use std::sync::Arc;
 
 use crate::data_type::DataType;
-use crate::types::TimestampType;
+use crate::types::{TimeType, TimestampType};
 use crate::vectors::constant::ConstantVector;
 use crate::vectors::{
     BinaryVector, BooleanVector, DateTimeVector, DateVector, ListVector, PrimitiveVector,
-    StringVector, TimestampMicrosecondVector, TimestampMillisecondVector,
+    StringVector, TimeMicrosecondVector, TimeMillisecondVector, TimeNanosecondVector,
+    TimeSecondVector, TimestampMicrosecondVector, TimestampMillisecondVector,
     TimestampNanosecondVector, TimestampSecondVector, Vector,
 };
 use crate::with_match_primitive_type_id;
@@ -106,6 +107,21 @@ fn equal(lhs: &dyn Vector, rhs: &dyn Vector) -> bool {
                 unreachable!("should not compare {} with {}", lhs.vector_type_name(), rhs.vector_type_name())
             })
         }
+
+        Time(t) => match t {
+            TimeType::Second(_) => {
+                is_vector_eq!(TimeSecondVector, lhs, rhs)
+            }
+            TimeType::Millisecond(_) => {
+                is_vector_eq!(TimeMillisecondVector, lhs, rhs)
+            }
+            TimeType::Microsecond(_) => {
+                is_vector_eq!(TimeMicrosecondVector, lhs, rhs)
+            }
+            TimeType::Nanosecond(_) => {
+                is_vector_eq!(TimeNanosecondVector, lhs, rhs)
+            }
+        },
     }
 }
 
@@ -177,6 +193,11 @@ mod tests {
         assert_vector_ref_eq(Arc::new(UInt64Vector::from_slice([1, 2, 3, 4])));
         assert_vector_ref_eq(Arc::new(Float32Vector::from_slice([1.0, 2.0, 3.0, 4.0])));
         assert_vector_ref_eq(Arc::new(Float64Vector::from_slice([1.0, 2.0, 3.0, 4.0])));
+
+        assert_vector_ref_eq(Arc::new(TimeSecondVector::from_values([100, 120])));
+        assert_vector_ref_eq(Arc::new(TimeMillisecondVector::from_values([100, 120])));
+        assert_vector_ref_eq(Arc::new(TimeMicrosecondVector::from_values([100, 120])));
+        assert_vector_ref_eq(Arc::new(TimeNanosecondVector::from_values([100, 120])));
     }
 
     #[test]
@@ -224,5 +245,10 @@ mod tests {
             )),
         );
         assert_vector_ref_ne(Arc::new(NullVector::new(5)), Arc::new(NullVector::new(8)));
+
+        assert_vector_ref_ne(
+            Arc::new(TimeMicrosecondVector::from_values([100, 120])),
+            Arc::new(TimeMicrosecondVector::from_values([200, 220])),
+        );
     }
 }

@@ -190,6 +190,8 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
                             ),
                         })
                     }
+                    Value::Time(v) => row_writer
+                        .write_col(v.to_timezone_aware_string(query_context.time_zone()))?,
                 }
             }
             row_writer.end_row().await?;
@@ -236,6 +238,7 @@ pub(crate) fn create_mysql_column(
             Ok(ColumnType::MYSQL_TYPE_VARCHAR)
         }
         ConcreteDataType::Timestamp(_) => Ok(ColumnType::MYSQL_TYPE_TIMESTAMP),
+        ConcreteDataType::Time(_) => Ok(ColumnType::MYSQL_TYPE_TIME),
         ConcreteDataType::Date(_) => Ok(ColumnType::MYSQL_TYPE_DATE),
         ConcreteDataType::DateTime(_) => Ok(ColumnType::MYSQL_TYPE_DATETIME),
         _ => error::InternalSnafu {

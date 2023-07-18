@@ -22,11 +22,12 @@ use common_base::bytes::{Bytes, StringBytes};
 use common_telemetry::logging;
 use common_time::date::Date;
 use common_time::datetime::DateTime;
+use common_time::time::Time;
 use common_time::timestamp::{TimeUnit, Timestamp};
 use datafusion_common::ScalarValue;
 pub use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize};
-use snafu::ensure;
+use snafu::{ensure, ResultExt};
 
 use crate::error;
 use crate::error::Result;
@@ -66,6 +67,7 @@ pub enum Value {
     Date(Date),
     DateTime(DateTime),
     Timestamp(Timestamp),
+    Time(Time),
 
     List(ListValue),
 }
@@ -97,6 +99,7 @@ impl Display for Value {
             Value::Date(v) => write!(f, "{v}"),
             Value::DateTime(v) => write!(f, "{v}"),
             Value::Timestamp(v) => write!(f, "{}", v.to_iso8601_string()),
+            Value::Time(t) => write!(f, "{}", t.to_iso8601_string()),
             Value::List(v) => {
                 let default = Box::<Vec<Value>>::default();
                 let items = v.items().as_ref().unwrap_or(&default);
@@ -134,6 +137,7 @@ impl Value {
             Value::Binary(_) => ConcreteDataType::binary_datatype(),
             Value::Date(_) => ConcreteDataType::date_datatype(),
             Value::DateTime(_) => ConcreteDataType::datetime_datatype(),
+            Value::Time(t) => ConcreteDataType::time_datatype(*t.unit()),
             Value::Timestamp(v) => ConcreteDataType::timestamp_datatype(v.unit()),
             Value::List(list) => ConcreteDataType::list_datatype(list.datatype().clone()),
         }
@@ -177,6 +181,7 @@ impl Value {
             Value::DateTime(v) => ValueRef::DateTime(*v),
             Value::List(v) => ValueRef::List(ListValueRef::Ref { val: v }),
             Value::Timestamp(v) => ValueRef::Timestamp(*v),
+            Value::Time(v) => ValueRef::Time(*v),
         }
     }
 
@@ -185,6 +190,15 @@ impl Value {
         match self {
             Value::Int64(v) => Some(Timestamp::new_millisecond(*v)),
             Value::Timestamp(t) => Some(*t),
+            _ => None,
+        }
+    }
+
+    /// Cast Value to [Time]. Return None if value is not a valid time data type.
+    pub fn as_time(&self) -> Option<Time> {
+        match self {
+            Value::Int64(v) => Some(Time::new_millisecond(*v)),
+            Value::Time(t) => Some(*t),
             _ => None,
         }
     }
@@ -214,6 +228,12 @@ impl Value {
                 TimeUnit::Millisecond => LogicalTypeId::TimestampMillisecond,
                 TimeUnit::Microsecond => LogicalTypeId::TimestampMicrosecond,
                 TimeUnit::Nanosecond => LogicalTypeId::TimestampNanosecond,
+            },
+            Value::Time(t) => match t.unit() {
+                TimeUnit::Second => LogicalTypeId::TimeSecond,
+                TimeUnit::Millisecond => LogicalTypeId::TimeMillisecond,
+                TimeUnit::Microsecond => LogicalTypeId::TimeMicrosecond,
+                TimeUnit::Nanosecond => LogicalTypeId::TimeNanosecond,
             },
         }
     }
@@ -248,21 +268,22 @@ impl Value {
             Value::Binary(v) => ScalarValue::LargeBinary(Some(v.to_vec())),
             Value::Date(v) => ScalarValue::Date32(Some(v.val())),
             Value::DateTime(v) => ScalarValue::Date64(Some(v.val())),
-            Value::Null => to_null_scalar_value(output_type),
+            Value::Null => to_null_scalar_value(output_type)?,
             Value::List(list) => {
                 // Safety: The logical type of the value and output_type are the same.
                 let list_type = output_type.as_list().unwrap();
                 list.try_to_scalar_value(list_type)?
             }
             Value::Timestamp(t) => timestamp_to_scalar_value(t.unit(), Some(t.value())),
+            Value::Time(t) => time_to_scalar_value(*t.unit(), Some(t.value()))?,
         };
 
         Ok(scalar_value)
     }
 }
 
-pub fn to_null_scalar_value(output_type: &ConcreteDataType) -> ScalarValue {
-    match output_type {
+pub fn to_null_scalar_value(output_type: &ConcreteDataType) -> Result<ScalarValue> {
+    Ok(match output_type {
         ConcreteDataType::Null(_) => ScalarValue::Null,
         ConcreteDataType::Boolean(_) => ScalarValue::Boolean(None),
         ConcreteDataType::Int8(_) => ScalarValue::Int8(None),
@@ -285,9 +306,10 @@ pub fn to_null_scalar_value(output_type: &ConcreteDataType) -> ScalarValue {
         }
         ConcreteDataType::Dictionary(dict) => ScalarValue::Dictionary(
             Box::new(dict.key_type().as_arrow_type()),
-            Box::new(to_null_scalar_value(dict.value_type())),
+            Box::new(to_null_scalar_value(dict.value_type())?),
         ),
-    }
+        ConcreteDataType::Time(t) => time_to_scalar_value(t.unit(), None)?,
+    })
 }
 
 fn new_item_field(data_type: ArrowDataType) -> Field {
@@ -301,6 +323,22 @@ pub fn timestamp_to_scalar_value(unit: TimeUnit, val: Option<i64>) -> ScalarValu
         TimeUnit::Microsecond => ScalarValue::TimestampMicrosecond(val, None),
         TimeUnit::Nanosecond => ScalarValue::TimestampNanosecond(val, None),
     }
+}
+
+/// Cast the 64-bit elapsed time into the arrow ScalarValue by time unit.
+pub fn time_to_scalar_value(unit: TimeUnit, val: Option<i64>) -> Result<ScalarValue> {
+    Ok(match unit {
+        TimeUnit::Second => ScalarValue::Time32Second(
+            val.map(|i| i.try_into().context(error::CastTimeTypeSnafu))
+                .transpose()?,
+        ),
+        TimeUnit::Millisecond => ScalarValue::Time32Millisecond(
+            val.map(|i| i.try_into().context(error::CastTimeTypeSnafu))
+                .transpose()?,
+        ),
+        TimeUnit::Microsecond => ScalarValue::Time64Microsecond(val),
+        TimeUnit::Nanosecond => ScalarValue::Time64Nanosecond(val),
+    })
 }
 
 /// Convert [ScalarValue] to [Timestamp].
@@ -348,6 +386,7 @@ macro_rules! impl_ord_for_value_like {
                 ($Type::Date(v1), $Type::Date(v2)) => v1.cmp(v2),
                 ($Type::DateTime(v1), $Type::DateTime(v2)) => v1.cmp(v2),
                 ($Type::Timestamp(v1), $Type::Timestamp(v2)) => v1.cmp(v2),
+                ($Type::Time(v1), $Type::Time(v2)) => v1.cmp(v2),
                 ($Type::List(v1), $Type::List(v2)) => v1.cmp(v2),
                 _ => panic!(
                     "Cannot compare different values {:?} and {:?}",
@@ -453,6 +492,7 @@ impl TryFrom<Value> for serde_json::Value {
             Value::DateTime(v) => serde_json::Value::Number(v.val().into()),
             Value::List(v) => serde_json::to_value(v)?,
             Value::Timestamp(v) => serde_json::to_value(v.value())?,
+            Value::Time(v) => serde_json::to_value(v.value())?,
         };
 
         Ok(json_value)
@@ -590,16 +630,25 @@ impl TryFrom<ScalarValue> for Value {
             ScalarValue::TimestampNanosecond(t, _) => t
                 .map(|x| Value::Timestamp(Timestamp::new(x, TimeUnit::Nanosecond)))
                 .unwrap_or(Value::Null),
+            ScalarValue::Time32Second(t) => t
+                .map(|x| Value::Time(Time::new(x as i64, TimeUnit::Second)))
+                .unwrap_or(Value::Null),
+            ScalarValue::Time32Millisecond(t) => t
+                .map(|x| Value::Time(Time::new(x as i64, TimeUnit::Millisecond)))
+                .unwrap_or(Value::Null),
+            ScalarValue::Time64Microsecond(t) => t
+                .map(|x| Value::Time(Time::new(x, TimeUnit::Microsecond)))
+                .unwrap_or(Value::Null),
+            ScalarValue::Time64Nanosecond(t) => t
+                .map(|x| Value::Time(Time::new(x, TimeUnit::Nanosecond)))
+                .unwrap_or(Value::Null),
+
             ScalarValue::Decimal128(_, _, _)
             | ScalarValue::IntervalYearMonth(_)
             | ScalarValue::IntervalDayTime(_)
             | ScalarValue::IntervalMonthDayNano(_)
             | ScalarValue::Struct(_, _)
-            | ScalarValue::Dictionary(_, _)
-            | ScalarValue::Time32Second(_)
-            | ScalarValue::Time32Millisecond(_)
-            | ScalarValue::Time64Microsecond(_)
-            | ScalarValue::Time64Nanosecond(_) => {
+            | ScalarValue::Dictionary(_, _) => {
                 return error::UnsupportedArrowTypeSnafu {
                     arrow_type: v.get_datatype(),
                 }
@@ -636,6 +685,9 @@ pub enum ValueRef<'a> {
     Date(Date),
     DateTime(DateTime),
     Timestamp(Timestamp),
+    Time(Time),
+
+    // Compound types:
     List(ListValueRef<'a>),
 }
 
@@ -687,8 +739,14 @@ impl<'a> ValueRef<'a> {
         impl_as_for_value_ref!(self, DateTime)
     }
 
+    /// Cast itself to [Timestamp].
     pub fn as_timestamp(&self) -> Result<Option<Timestamp>> {
         impl_as_for_value_ref!(self, Timestamp)
+    }
+
+    /// Cast itself to [Time].
+    pub fn as_time(&self) -> Result<Option<Time>> {
+        impl_as_for_value_ref!(self, Time)
     }
 
     /// Cast itself to [ListValueRef].
@@ -742,6 +800,7 @@ impl_value_ref_from!(Float64, f64);
 impl_value_ref_from!(Date, Date);
 impl_value_ref_from!(DateTime, DateTime);
 impl_value_ref_from!(Timestamp, Timestamp);
+impl_value_ref_from!(Time, Time);
 
 impl<'a> From<&'a str> for ValueRef<'a> {
     fn from(string: &'a str) -> ValueRef<'a> {
@@ -1005,6 +1064,42 @@ mod tests {
                 .unwrap()
         );
 
+        assert_eq!(
+            Value::Time(Time::new(1, TimeUnit::Second)),
+            ScalarValue::Time32Second(Some(1)).try_into().unwrap()
+        );
+        assert_eq!(
+            Value::Null,
+            ScalarValue::Time32Second(None).try_into().unwrap()
+        );
+
+        assert_eq!(
+            Value::Time(Time::new(1, TimeUnit::Millisecond)),
+            ScalarValue::Time32Millisecond(Some(1)).try_into().unwrap()
+        );
+        assert_eq!(
+            Value::Null,
+            ScalarValue::Time32Millisecond(None).try_into().unwrap()
+        );
+
+        assert_eq!(
+            Value::Time(Time::new(1, TimeUnit::Microsecond)),
+            ScalarValue::Time64Microsecond(Some(1)).try_into().unwrap()
+        );
+        assert_eq!(
+            Value::Null,
+            ScalarValue::Time64Microsecond(None).try_into().unwrap()
+        );
+
+        assert_eq!(
+            Value::Time(Time::new(1, TimeUnit::Nanosecond)),
+            ScalarValue::Time64Nanosecond(Some(1)).try_into().unwrap()
+        );
+        assert_eq!(
+            Value::Null,
+            ScalarValue::Time64Nanosecond(None).try_into().unwrap()
+        );
+
         let result: Result<Value> = ScalarValue::Decimal128(Some(1), 0, 0).try_into();
         assert!(result
             .unwrap_err()
@@ -1137,6 +1232,22 @@ mod tests {
             &ConcreteDataType::timestamp_millisecond_datatype(),
             &Value::Timestamp(Timestamp::new_millisecond(1)),
         );
+        check_type_and_value(
+            &ConcreteDataType::time_second_datatype(),
+            &Value::Time(Time::new_second(1)),
+        );
+        check_type_and_value(
+            &ConcreteDataType::time_millisecond_datatype(),
+            &Value::Time(Time::new_millisecond(1)),
+        );
+        check_type_and_value(
+            &ConcreteDataType::time_microsecond_datatype(),
+            &Value::Time(Time::new_microsecond(1)),
+        );
+        check_type_and_value(
+            &ConcreteDataType::time_nanosecond_datatype(),
+            &Value::Time(Time::new_nanosecond(1)),
+        );
     }
 
     #[test]
@@ -1232,6 +1343,10 @@ mod tests {
             serde_json::Value::Number(1.into()),
             to_json(Value::Timestamp(Timestamp::new_millisecond(1)))
         );
+        assert_eq!(
+            serde_json::Value::Number(1.into()),
+            to_json(Value::Time(Time::new_millisecond(1)))
+        );
 
         let json_value: serde_json::Value =
             serde_json::from_str(r#"{"items":[{"Int32":123}],"datatype":{"Int32":{}}}"#).unwrap();
@@ -1289,6 +1404,7 @@ mod tests {
         check_as_value_ref!(Float32, OrderedF32::from(16.0));
         check_as_value_ref!(Float64, OrderedF64::from(16.0));
         check_as_value_ref!(Timestamp, Timestamp::new_millisecond(1));
+        check_as_value_ref!(Time, Time::new_millisecond(1));
 
         assert_eq!(
             ValueRef::String("hello"),
@@ -1338,6 +1454,7 @@ mod tests {
         check_as_correct!(true, Boolean, as_boolean);
         check_as_correct!(Date::new(123), Date, as_date);
         check_as_correct!(DateTime::new(12), DateTime, as_datetime);
+        check_as_correct!(Time::new_second(12), Time, as_time);
         let list = ListValue {
             items: None,
             datatype: ConcreteDataType::int32_datatype(),
@@ -1351,6 +1468,8 @@ mod tests {
         assert!(wrong_value.as_date().is_err());
         assert!(wrong_value.as_datetime().is_err());
         assert!(wrong_value.as_list().is_err());
+        assert!(wrong_value.as_time().is_err());
+        assert!(wrong_value.as_timestamp().is_err());
     }
 
     #[test]
@@ -1382,6 +1501,10 @@ mod tests {
         assert_eq!(
             Value::Timestamp(Timestamp::new(1000, TimeUnit::Millisecond)).to_string(),
             "1970-01-01 08:00:01+0800"
+        );
+        assert_eq!(
+            Value::Time(Time::new(1000, TimeUnit::Millisecond)).to_string(),
+            "08:00:01+0800"
         );
         assert_eq!(
             Value::List(ListValue::new(
@@ -1593,6 +1716,31 @@ mod tests {
                 .try_to_scalar_value(&ConcreteDataType::binary_datatype())
                 .unwrap()
         );
+
+        assert_eq!(
+            ScalarValue::Time32Second(None),
+            Value::Null
+                .try_to_scalar_value(&ConcreteDataType::time_second_datatype())
+                .unwrap()
+        );
+        assert_eq!(
+            ScalarValue::Time32Millisecond(None),
+            Value::Null
+                .try_to_scalar_value(&ConcreteDataType::time_millisecond_datatype())
+                .unwrap()
+        );
+        assert_eq!(
+            ScalarValue::Time64Microsecond(None),
+            Value::Null
+                .try_to_scalar_value(&ConcreteDataType::time_microsecond_datatype())
+                .unwrap()
+        );
+        assert_eq!(
+            ScalarValue::Time64Nanosecond(None),
+            Value::Null
+                .try_to_scalar_value(&ConcreteDataType::time_nanosecond_datatype())
+                .unwrap()
+        );
     }
 
     #[test]
@@ -1636,6 +1784,26 @@ mod tests {
         assert_eq!(
             ScalarValue::TimestampNanosecond(Some(1), None),
             timestamp_to_scalar_value(TimeUnit::Nanosecond, Some(1))
+        );
+    }
+
+    #[test]
+    fn test_time_to_scalar_value() {
+        assert_eq!(
+            ScalarValue::Time32Second(Some(1)),
+            time_to_scalar_value(TimeUnit::Second, Some(1)).unwrap()
+        );
+        assert_eq!(
+            ScalarValue::Time32Millisecond(Some(1)),
+            time_to_scalar_value(TimeUnit::Millisecond, Some(1)).unwrap()
+        );
+        assert_eq!(
+            ScalarValue::Time64Microsecond(Some(1)),
+            time_to_scalar_value(TimeUnit::Microsecond, Some(1)).unwrap()
+        );
+        assert_eq!(
+            ScalarValue::Time64Nanosecond(Some(1)),
+            time_to_scalar_value(TimeUnit::Nanosecond, Some(1)).unwrap()
         );
     }
 }

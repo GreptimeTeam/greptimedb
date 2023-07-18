@@ -37,6 +37,7 @@ mod null;
 mod operations;
 mod primitive;
 mod string;
+mod time;
 mod timestamp;
 mod validity;
 
@@ -56,6 +57,11 @@ pub use primitive::{
     UInt64VectorBuilder, UInt8Vector, UInt8VectorBuilder,
 };
 pub use string::{StringVector, StringVectorBuilder};
+pub use time::{
+    TimeMicrosecondVector, TimeMicrosecondVectorBuilder, TimeMillisecondVector,
+    TimeMillisecondVectorBuilder, TimeNanosecondVector, TimeNanosecondVectorBuilder,
+    TimeSecondVector, TimeSecondVectorBuilder,
+};
 pub use timestamp::{
     TimestampMicrosecondVector, TimestampMicrosecondVectorBuilder, TimestampMillisecondVector,
     TimestampMillisecondVectorBuilder, TimestampNanosecondVector, TimestampNanosecondVectorBuilder,
