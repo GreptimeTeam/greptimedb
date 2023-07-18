@@ -51,18 +51,19 @@ pub fn to_grpc_insert_requests(
         .flat_map(|scope_metrics| &scope_metrics.metrics);
 
     let mut insert_batch = Vec::with_capacity(metrics.size_hint().0);
+    let mut rows = 0;
     for metric in metrics {
         if let Some(insert) = encode_metrics(metric)? {
+            rows += insert.row_count;
             insert_batch.push(insert);
         }
     }
 
-    let rows = insert_batch.iter().map(|i| i.row_count as usize).sum();
     let inserts = InsertRequests {
         inserts: insert_batch,
     };
 
-    Ok((inserts, rows))
+    Ok((inserts, rows as usize))
 }
 
 fn encode_metrics(metric: &Metric) -> Result<Option<InsertRequest>> {
@@ -111,6 +112,26 @@ fn write_timestamp(lines: &mut LinesWriter, time_nano: i64) -> Result<()> {
     Ok(())
 }
 
+fn write_data_point_value(
+    lines: &mut LinesWriter,
+    field: &str,
+    value: &Option<number_data_point::Value>,
+) -> Result<()> {
+    match value {
+        Some(number_data_point::Value::AsInt(val)) => {
+            // we coerce all values to f64
+            lines
+                .write_f64(field, *val as f64)
+                .context(error::OtlpMetricsWriteSnafu)?
+        }
+        Some(number_data_point::Value::AsDouble(val)) => lines
+            .write_f64(field, *val)
+            .context(error::OtlpMetricsWriteSnafu)?,
+        _ => {}
+    }
+    Ok(())
+}
+
 /// encode this gauge metric
 ///
 /// note that there can be multiple data points in the request, it's going to be
@@ -125,20 +146,7 @@ fn encode_gauge(name: &str, gauge: &Gauge) -> Result<InsertRequest> {
 
         write_timestamp(&mut lines, data_point.time_unix_nano as i64)?;
 
-        match data_point.value {
-            Some(number_data_point::Value::AsInt(val)) => {
-                // we coerce all values to f64
-                lines
-                    .write_f64(GREPTIME_VALUE, val as f64)
-                    .context(error::OtlpMetricsWriteSnafu)?
-            }
-            Some(number_data_point::Value::AsDouble(val)) => {
-                lines
-                    .write_f64(GREPTIME_VALUE, val)
-                    .context(error::OtlpMetricsWriteSnafu)?
-            }
-            _ => {}
-        }
+        write_data_point_value(&mut lines, GREPTIME_VALUE, &data_point.value)?;
 
         lines.commit();
     }
@@ -165,20 +173,7 @@ fn encode_sum(name: &str, sum: &Sum) -> Result<InsertRequest> {
 
         write_timestamp(&mut lines, data_point.time_unix_nano as i64)?;
 
-        match data_point.value {
-            Some(number_data_point::Value::AsInt(val)) => {
-                // we coerce all values to f64
-                lines
-                    .write_f64(GREPTIME_VALUE, val as f64)
-                    .context(error::OtlpMetricsWriteSnafu)?
-            }
-            Some(number_data_point::Value::AsDouble(val)) => {
-                lines
-                    .write_f64(GREPTIME_VALUE, val)
-                    .context(error::OtlpMetricsWriteSnafu)?
-            }
-            _ => {}
-        }
+        write_data_point_value(&mut lines, GREPTIME_VALUE, &data_point.value)?;
 
         lines.commit();
     }
