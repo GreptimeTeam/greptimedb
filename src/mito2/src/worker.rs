@@ -88,20 +88,18 @@ impl WorkerGroup {
     ///
     /// The number of workers should be power of two.
     pub(crate) fn start<S: LogStore>(
-        config: &MitoConfig,
+        config: MitoConfig,
         log_store: Arc<S>,
         object_store: ObjectStore,
     ) -> WorkerGroup {
         assert!(config.num_workers.is_power_of_two());
+        let config = Arc::new(config);
 
         let workers = (0..config.num_workers)
             .map(|id| {
                 RegionWorker::start(
-                    WorkerConfig {
-                        id: id as WorkerId,
-                        channel_size: config.worker_channel_size,
-                        request_batch_size: config.worker_request_batch_size,
-                    },
+                    id as WorkerId,
+                    config.clone(),
                     log_store.clone(),
                     object_store.clone(),
                 )
@@ -142,17 +140,6 @@ fn value_to_index(value: usize, num_workers: usize) -> usize {
     value & (num_workers - 1)
 }
 
-/// Config for region worker.
-#[derive(Debug, Clone)]
-struct WorkerConfig {
-    /// Id of the worker
-    id: WorkerId,
-    /// Capacity of the request channel.
-    channel_size: usize,
-    /// Batch size to process request.
-    request_batch_size: usize,
-}
-
 /// Worker to write and alter regions bound to it.
 #[derive(Debug)]
 pub(crate) struct RegionWorker {
@@ -171,22 +158,23 @@ pub(crate) struct RegionWorker {
 impl RegionWorker {
     /// Start a region worker and its background thread.
     fn start<S: LogStore>(
-        config: WorkerConfig,
+        id: WorkerId,
+        config: Arc<MitoConfig>,
         log_store: Arc<S>,
         object_store: ObjectStore,
     ) -> RegionWorker {
         let regions = Arc::new(RegionMap::default());
-        let (sender, receiver) = mpsc::channel(config.channel_size);
+        let (sender, receiver) = mpsc::channel(config.worker_channel_size);
 
         let running = Arc::new(AtomicBool::new(true));
         let mut worker_thread = RegionWorkerLoop {
-            id: config.id,
+            id,
+            config,
             regions: regions.clone(),
             receiver,
             log_store,
             object_store,
             running: running.clone(),
-            request_batch_size: config.request_batch_size,
             memtable_builder: Arc::new(DefaultMemtableBuilder::default()),
         };
         let handle = common_runtime::spawn_bg(async move {
@@ -194,7 +182,7 @@ impl RegionWorker {
         });
 
         RegionWorker {
-            id: config.id,
+            id,
             regions,
             sender,
             handle: Mutex::new(Some(handle)),
@@ -268,6 +256,8 @@ type RequestBuffer = Vec<WorkerRequest>;
 struct RegionWorkerLoop<S> {
     // Id of the worker.
     id: WorkerId,
+    /// Engine config.
+    config: Arc<MitoConfig>,
     /// Regions bound to the worker.
     regions: RegionMapRef,
     /// Request receiver.
@@ -278,8 +268,6 @@ struct RegionWorkerLoop<S> {
     object_store: ObjectStore,
     /// Whether the worker thread is still running.
     running: Arc<AtomicBool>,
-    /// Batch size to fetch requests from channel.
-    request_batch_size: usize,
     /// Memtable builder for each region.
     memtable_builder: MemtableBuilderRef,
 }
@@ -290,7 +278,7 @@ impl<S> RegionWorkerLoop<S> {
         logging::info!("Start region worker thread {}", self.id);
 
         // Buffer to retrieve requests from receiver.
-        let mut buffer = RequestBuffer::with_capacity(self.request_batch_size);
+        let mut buffer = RequestBuffer::with_capacity(self.config.worker_request_batch_size);
 
         while self.running.load(Ordering::Relaxed) {
             // Clear the buffer before handling next batch of requests.
@@ -402,7 +390,7 @@ mod tests {
     async fn test_worker_group_start_stop() {
         let env = TestEnv::new("group-stop");
         let group = env
-            .create_worker_group(&MitoConfig {
+            .create_worker_group(MitoConfig {
                 num_workers: 4,
                 ..Default::default()
             })

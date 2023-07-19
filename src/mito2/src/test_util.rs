@@ -56,7 +56,7 @@ impl TestEnv {
     }
 
     /// Creates a new [WorkerGroup] with specific config under this env.
-    pub(crate) async fn create_worker_group(&self, config: &MitoConfig) -> WorkerGroup {
+    pub(crate) async fn create_worker_group(&self, config: MitoConfig) -> WorkerGroup {
         let (log_store, object_store) = self.create_log_and_object_store().await;
 
         WorkerGroup::start(config, Arc::new(log_store), object_store)

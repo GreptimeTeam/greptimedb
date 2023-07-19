@@ -69,7 +69,7 @@ impl EngineInner {
         object_store: ObjectStore,
     ) -> EngineInner {
         EngineInner {
-            workers: WorkerGroup::start(&config, log_store, object_store),
+            workers: WorkerGroup::start(config, log_store, object_store),
         }
     }
 
