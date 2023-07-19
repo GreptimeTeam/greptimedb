@@ -31,6 +31,7 @@ use crate::region::VersionNumber;
 /// Static metadata of a region.
 ///
 /// This struct implements [Serialize] and [Deserialize] traits.
+/// To build a [RegionMetadata] object, use [RegionMetadataBuilder].
 ///
 /// ```mermaid
 /// class RegionMetadata {
@@ -55,7 +56,7 @@ use crate::region::VersionNumber;
 pub struct RegionMetadata {
     /// Latest schema constructed from [column_metadatas](RegionMetadata::column_metadatas).
     #[serde(skip)]
-    schema: SchemaRef,
+    pub schema: SchemaRef,
     /// Id of the time index column.
     #[serde(skip)]
     time_index: ColumnId,
@@ -65,14 +66,14 @@ pub struct RegionMetadata {
 
     /// Columns in the region. Has the same order as columns
     /// in [schema](RegionMetadata::schema).
-    column_metadatas: Vec<ColumnMetadata>,
+    pub column_metadatas: Vec<ColumnMetadata>,
     /// Version of metadata.
-    version: VersionNumber,
+    pub version: VersionNumber,
     /// Maintains an ordered list of primary keys
-    primary_key: Vec<ColumnId>,
+    pub primary_key: Vec<ColumnId>,
 
     /// Immutable and unique id of a region.
-    region_id: RegionId,
+    pub region_id: RegionId,
 }
 
 pub type RegionMetadataRef = Arc<RegionMetadata>;
@@ -245,6 +246,16 @@ impl RegionMetadataBuilder {
         }
     }
 
+    /// Create a builder from existing [RegionMetadata].
+    pub fn from_existing(existing: RegionMetadata, new_version: VersionNumber) -> Self {
+        Self {
+            column_metadatas: existing.column_metadatas,
+            version: new_version,
+            primary_key: existing.primary_key,
+            region_id: existing.region_id,
+        }
+    }
+
     /// Push a new column metadata to this region's metadata.
     pub fn push_column_metadata(&mut self, column_metadata: ColumnMetadata) -> &mut Self {
         self.column_metadatas.push(column_metadata);
@@ -281,11 +292,11 @@ impl RegionMetadataBuilder {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ColumnMetadata {
     /// Schema of this column. Is the same as `column_schema` in [SchemaRef].
-    column_schema: ColumnSchema,
+    pub column_schema: ColumnSchema,
     /// Semantic type of this column (e.g. tag or timestamp).
-    semantic_type: SemanticType,
+    pub semantic_type: SemanticType,
     /// Immutable and unique id of a region.
-    column_id: ColumnId,
+    pub column_id: ColumnId,
 }
 
 impl ColumnMetadata {

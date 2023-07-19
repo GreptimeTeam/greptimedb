@@ -17,6 +17,7 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
+use common_datasource::compression::CompressionType;
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use log_store::test_util::log_store_util;
@@ -26,8 +27,11 @@ use object_store::ObjectStore;
 
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
+use crate::error::Result;
+use crate::manifest::manager::RegionManifestManager;
+use crate::manifest::options::RegionManifestOptions;
 use crate::memtable::{Memtable, MemtableBuilder, MemtableId, MemtableRef};
-use crate::metadata::RegionMetadataRef;
+use crate::metadata::{RegionMetadata, RegionMetadataRef};
 use crate::worker::WorkerGroup;
 
 /// Env to test mito engine.
@@ -69,6 +73,30 @@ impl TestEnv {
         let object_store = ObjectStore::new(builder).unwrap().finish();
 
         (log_store, object_store)
+    }
+
+    pub async fn create_manifest_manager(
+        &self,
+        compress_type: CompressionType,
+        checkpoint_interval: Option<u64>,
+        initial_metadata: Option<RegionMetadata>,
+    ) -> Result<RegionManifestManager> {
+        let data_home = self.data_home.path().to_str().unwrap();
+        let manifest_dir = join_dir(data_home, "manifest");
+
+        let mut builder = Fs::default();
+        let _ = builder.root(&manifest_dir);
+        let object_store = ObjectStore::new(builder).unwrap().finish();
+
+        let manifest_opts = RegionManifestOptions {
+            manifest_dir,
+            object_store,
+            compress_type,
+            checkpoint_interval,
+            initial_metadata,
+        };
+
+        RegionManifestManager::new(manifest_opts).await
     }
 }
 
