@@ -17,6 +17,8 @@
 use snafu::ensure;
 
 use crate::error::{RegionExistsSnafu, Result};
+use crate::metadata::{RegionMetadataBuilder, INIT_REGION_VERSION};
+use crate::region::opener::RegionOpener;
 use crate::worker::request::CreateRequest;
 use crate::worker::RegionWorkerLoop;
 
@@ -36,8 +38,20 @@ impl<S> RegionWorkerLoop<S> {
         }
 
         // Convert the request into a RegionMetadata and validate it.
+        let mut builder = RegionMetadataBuilder::new(request.region_id, INIT_REGION_VERSION);
+        for column in request.column_metadatas {
+            builder.push_column_metadata(column);
+        }
+        builder.primary_key(request.primary_key);
+        let metadata = builder.build()?;
 
         // Create a MitoRegion from the RegionMetadata.
+        let region = RegionOpener::new(
+            metadata,
+            self.memtable_builder.clone(),
+            self.object_store.clone(),
+        )
+        .region_dir(&request.region_dir);
 
         // Write manifest
 

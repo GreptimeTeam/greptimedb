@@ -26,8 +26,10 @@ pub struct RegionManifestOptions {
     pub compress_type: CompressionType,
     /// Interval of version ([ManifestVersion](store_api::manifest::ManifestVersion)) between two checkpoints
     /// `None` means disable checkpoint.
+    // TODO(yingwen): Remove Option.
     pub checkpoint_interval: Option<u64>,
     /// Initial [RegionMetadata](crate::metadata::RegionMetadata) of this region.
     /// Only need to set when create a new region, otherwise it will be ignored.
+    // TODO(yingwen): Could we pass RegionMetadataRef?
     pub initial_metadata: Option<RegionMetadata>,
 }

@@ -35,6 +35,7 @@ use tokio::sync::{mpsc, Mutex};
 
 use crate::config::MitoConfig;
 use crate::error::{JoinSnafu, Result, WorkerStoppedSnafu};
+use crate::memtable::{DefaultMemtableBuilder, MemtableBuilderRef};
 use crate::region::{RegionMap, RegionMapRef};
 use crate::worker::request::{RegionRequest, RequestBody, WorkerRequest};
 
@@ -186,6 +187,7 @@ impl RegionWorker {
             object_store,
             running: running.clone(),
             request_batch_size: config.request_batch_size,
+            memtable_builder: Arc::new(DefaultMemtableBuilder::default()),
         };
         let handle = common_runtime::spawn_bg(async move {
             worker_thread.run().await;
@@ -278,6 +280,8 @@ struct RegionWorkerLoop<S> {
     running: Arc<AtomicBool>,
     /// Batch size to fetch requests from channel.
     request_batch_size: usize,
+    /// Memtable builder for each region.
+    memtable_builder: MemtableBuilderRef,
 }
 
 impl<S> RegionWorkerLoop<S> {

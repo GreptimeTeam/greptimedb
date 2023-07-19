@@ -14,6 +14,7 @@
 
 //! Configurations.
 
+use common_datasource::compression::CompressionType;
 use common_telemetry::logging;
 
 const DEFAULT_NUM_WORKERS: usize = 1;
@@ -21,12 +22,20 @@ const DEFAULT_NUM_WORKERS: usize = 1;
 /// Configuration for [MitoEngine](crate::engine::MitoEngine).
 #[derive(Debug)]
 pub struct MitoConfig {
+    // Worker configs:
     /// Number of region workers.
     pub num_workers: usize,
     /// Request channel size of each worker.
     pub worker_channel_size: usize,
     /// Max batch size for a worker to handle requests.
     pub worker_request_batch_size: usize,
+
+    // Manifest configs:
+    /// Number of meta action updated to trigger a new checkpoint
+    /// for the manifest. `None` to disable checkpoint.
+    pub manifest_checkpoint_interval: u64,
+    /// Manifest compression type.
+    pub manifest_compress_type: CompressionType,
 }
 
 impl Default for MitoConfig {
@@ -35,6 +44,8 @@ impl Default for MitoConfig {
             num_workers: DEFAULT_NUM_WORKERS,
             worker_channel_size: 128,
             worker_request_batch_size: 64,
+            manifest_checkpoint_interval: 10,
+            manifest_compress_type: CompressionType::Uncompressed,
         }
     }
 }

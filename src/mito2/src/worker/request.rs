@@ -41,6 +41,8 @@ pub struct RegionOptions {
 pub struct CreateRequest {
     /// Region to create.
     pub region_id: RegionId,
+    /// Data directory of the region.
+    pub region_dir: String,
     /// Columns in this region.
     pub column_metadatas: Vec<ColumnMetadata>,
     /// Columns in the primary key.

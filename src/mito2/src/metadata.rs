@@ -27,6 +27,9 @@ use store_api::storage::{ColumnId, RegionId};
 use crate::error::{InvalidMetaSnafu, InvalidSchemaSnafu, Result};
 use crate::region::VersionNumber;
 
+/// Initial version number of a new region.
+pub(crate) const INIT_REGION_VERSION: VersionNumber = 0;
+
 #[cfg_attr(doc, aquamarine::aquamarine)]
 /// Static metadata of a region.
 ///
