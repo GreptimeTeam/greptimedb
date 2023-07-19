@@ -17,7 +17,7 @@
 use store_api::storage::RegionId;
 
 use super::*;
-use crate::test_util::{CreateRequestMocker, TestEnv};
+use crate::test_util::{CreateRequestBuilder, TestEnv};
 
 #[tokio::test]
 async fn test_engine_new_stop() {
@@ -25,13 +25,48 @@ async fn test_engine_new_stop() {
     let engine = env.create_engine(MitoConfig::default()).await;
 
     engine.stop().await.unwrap();
+
+    let request = CreateRequestBuilder::new(RegionId::new(1, 1)).build();
+    let err = engine.create_region(request).await.unwrap_err();
+    assert!(
+        err.to_string().contains("is stopped"),
+        "unexpected err: {err}"
+    );
 }
 
 #[tokio::test]
 async fn test_engine_create_new_region() {
-    let env = TestEnv::new("engine-stop");
+    let env = TestEnv::new("new-region");
     let engine = env.create_engine(MitoConfig::default()).await;
 
-    let request = CreateRequestMocker::new(RegionId::new(1, 1)).build();
+    let request = CreateRequestBuilder::new(RegionId::new(1, 1)).build();
     engine.create_region(request).await.unwrap();
+}
+
+#[tokio::test]
+async fn test_engine_create_region_if_not_exists() {
+    let env = TestEnv::new("create-not-exists");
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let builder = CreateRequestBuilder::new(RegionId::new(1, 1)).create_if_not_exists(true);
+    engine.create_region(builder.build()).await.unwrap();
+
+    // Create the same region again.
+    engine.create_region(builder.build()).await.unwrap();
+}
+
+#[tokio::test]
+async fn test_engine_create_existing_region() {
+    let env = TestEnv::new("create-existing");
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let builder = CreateRequestBuilder::new(RegionId::new(1, 1));
+    engine.create_region(builder.build()).await.unwrap();
+
+    // Create the same region again.
+    let err = engine.create_region(builder.build()).await.unwrap_err();
+    assert!(
+        err.to_string().contains("already exists"),
+        "unexpected err: {err}"
+    );
 }

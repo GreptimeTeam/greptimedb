@@ -103,7 +103,7 @@ impl TestEnv {
 }
 
 /// Builder to mock a [CreateRequest].
-pub struct CreateRequestMocker {
+pub struct CreateRequestBuilder {
     region_id: RegionId,
     region_dir: String,
     tag_num: usize,
@@ -111,9 +111,9 @@ pub struct CreateRequestMocker {
     create_if_not_exists: bool,
 }
 
-impl Default for CreateRequestMocker {
+impl Default for CreateRequestBuilder {
     fn default() -> Self {
-        CreateRequestMocker {
+        CreateRequestBuilder {
             region_id: RegionId::default(),
             region_dir: "test".to_string(),
             tag_num: 1,
@@ -123,9 +123,9 @@ impl Default for CreateRequestMocker {
     }
 }
 
-impl CreateRequestMocker {
-    pub fn new(region_id: RegionId) -> CreateRequestMocker {
-        CreateRequestMocker {
+impl CreateRequestBuilder {
+    pub fn new(region_id: RegionId) -> CreateRequestBuilder {
+        CreateRequestBuilder {
             region_id,
             ..Default::default()
         }
@@ -151,7 +151,7 @@ impl CreateRequestMocker {
         self
     }
 
-    pub fn build(self) -> CreateRequest {
+    pub fn build(&self) -> CreateRequest {
         let mut column_id = 0;
         let mut column_metadatas = Vec::with_capacity(self.tag_num + self.field_num + 1);
         let mut primary_key = Vec::with_capacity(self.tag_num);
@@ -192,7 +192,7 @@ impl CreateRequestMocker {
 
         CreateRequest {
             region_id: self.region_id,
-            region_dir: self.region_dir,
+            region_dir: self.region_dir.clone(),
             column_metadatas,
             primary_key,
             create_if_not_exists: self.create_if_not_exists,

@@ -428,8 +428,7 @@ mod test {
         let err = builder.build().unwrap_err();
         assert!(
             err.to_string().contains("ts is not timestamp compatible"),
-            "unexpected err: {}",
-            err
+            "unexpected err: {err}",
         );
     }
 
@@ -440,8 +439,7 @@ mod test {
         // A region must have a time index.
         assert!(
             err.to_string().contains("time index not found"),
-            "unexpected err: {}",
-            err
+            "unexpected err: {err}",
         );
     }
 
@@ -467,8 +465,7 @@ mod test {
         assert!(
             err.to_string()
                 .contains("column a and b have the same column id"),
-            "unexpected err: {}",
-            err
+            "unexpected err: {err}",
         );
     }
 
@@ -497,8 +494,7 @@ mod test {
         let err = builder.build().unwrap_err();
         assert!(
             err.to_string().contains("expect only one time index"),
-            "unexpected err: {}",
-            err
+            "unexpected err: {err}",
         );
     }
 
@@ -524,8 +520,7 @@ mod test {
         let err = builder.build().unwrap_err();
         assert!(
             err.to_string().contains("unknown column id 3"),
-            "unexpected err: {}",
-            err
+            "unexpected err: {err}",
         );
     }
 
@@ -552,8 +547,7 @@ mod test {
         assert!(
             err.to_string()
                 .contains("duplicate column a in primary key"),
-            "unexpected err: {}",
-            err
+            "unexpected err: {err}",
         );
     }
 
@@ -575,8 +569,7 @@ mod test {
         assert!(
             err.to_string()
                 .contains("column ts is already a time index column"),
-            "unexpected err: {}",
-            err
+            "unexpected err: {err}",
         );
     }
 
@@ -596,8 +589,7 @@ mod test {
         assert!(
             err.to_string()
                 .contains("time index column ts must be NOT NULL"),
-            "unexpected err: {}",
-            err
+            "unexpected err: {err}",
         );
     }
 }
