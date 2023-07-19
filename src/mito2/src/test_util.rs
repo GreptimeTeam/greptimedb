@@ -163,7 +163,7 @@ impl CreateRequestBuilder {
                     true,
                 ),
                 semantic_type: SemanticType::Tag,
-                column_id: column_id,
+                column_id,
             });
             primary_key.push(column_id);
             column_id += 1;
@@ -176,7 +176,7 @@ impl CreateRequestBuilder {
                     true,
                 ),
                 semantic_type: SemanticType::Field,
-                column_id: column_id,
+                column_id,
             });
             column_id += 1;
         }
@@ -187,7 +187,7 @@ impl CreateRequestBuilder {
                 false,
             ),
             semantic_type: SemanticType::Timestamp,
-            column_id: column_id,
+            column_id,
         });
 
         CreateRequest {
