@@ -420,7 +420,7 @@ mod tests {
     use table::metadata::RawTableInfo;
     use table::test_util::table_info::test_table_info;
 
-    use super::*;
+    use super::CreateTableTask;
 
     #[test]
     fn test_basic_ser_de_create_table_task() {

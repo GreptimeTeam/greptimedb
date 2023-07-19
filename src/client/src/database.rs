@@ -19,7 +19,7 @@ use api::v1::query_request::Query;
 use api::v1::{
     AlterExpr, AuthHeader, CompactTableExpr, CreateTableExpr, DdlRequest, DeleteRequest,
     DropTableExpr, FlushTableExpr, GreptimeRequest, InsertRequests, PromRangeQuery, QueryRequest,
-    RequestHeader,TruncateTableExpr,
+    RequestHeader, TruncateTableExpr,
 };
 use arrow_flight::{FlightData, Ticket};
 use common_error::ext::{BoxedError, ErrorExt};

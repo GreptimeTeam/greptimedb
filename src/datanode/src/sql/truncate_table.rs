@@ -29,7 +29,7 @@ impl SqlHandler {
         };
 
         let _table = self.get_table(&table_ref).await?;
-        // todo(DevilExileSu): implement truncate table-procedure.
+        // TODO(DevilExileSu): implement truncate table-procedure.
         Ok(Output::AffectedRows(0))
     }
 }

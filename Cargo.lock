@@ -4137,7 +4137,7 @@ checksum = "d2fabcfbdc87f4758337ca535fb41a6d701b65693ce38287d856d1674551ec9b"
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/DevilExileSu/greptime-proto.git?rev=834888717f81d46df01d94532cbb41bdeed8dec5#834888717f81d46df01d94532cbb41bdeed8dec5"
+source = "git+https://github.com/DevilExileSu/greptime-proto.git?rev=c7fea8059be6c5e0b1745d12b0c8304dfde5118d#c7fea8059be6c5e0b1745d12b0c8304dfde5118d"
 dependencies = [
  "prost",
  "serde",
