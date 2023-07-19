@@ -86,17 +86,12 @@ fn build_json_opener(
     ))
 }
 
-fn build_orc_opener(file_schema: Arc<ArrowSchema>, config: &ScanPlanConfig) -> Result<OrcOpener> {
-    let projected_schema = if let Some(projection) = config.projection {
-        Arc::new(
-            file_schema
-                .project(projection)
-                .context(error::ProjectSchemaSnafu)?,
-        )
-    } else {
-        file_schema
-    };
-    Ok(OrcOpener::new(config.store.clone(), projected_schema))
+fn build_orc_opener(output_schema: Arc<ArrowSchema>, config: &ScanPlanConfig) -> Result<OrcOpener> {
+    Ok(OrcOpener::new(
+        config.store.clone(),
+        output_schema,
+        config.projection.cloned(),
+    ))
 }
 
 fn build_record_batch_stream<T: FileOpener + Send + 'static>(
@@ -263,6 +258,5 @@ pub fn create_stream(
         Format::Json(format) => new_json_stream(ctx, config, format),
         Format::Parquet(format) => new_parquet_stream_with_exec_plan(ctx, config, format),
         Format::Orc(format) => new_orc_stream(ctx, config, format),
-        _ => error::UnsupportedFormatSnafu { format: *format }.fail(),
     }
 }

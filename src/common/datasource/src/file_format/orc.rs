@@ -1,5 +1,3 @@
-// Copyright 2023 Greptime Team
-//
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -63,14 +61,20 @@ pub async fn infer_orc_schema<R: AsyncRead + AsyncSeek + Unpin + Send + 'static>
 
 pub struct OrcArrowStreamReaderAdapter<T: AsyncRead + AsyncSeek + Unpin + Send + 'static> {
     output_schema: SchemaRef,
+    projection: Vec<usize>,
     stream: ArrowStreamReader<T>,
 }
 
 impl<T: AsyncRead + AsyncSeek + Unpin + Send + 'static> OrcArrowStreamReaderAdapter<T> {
-    pub fn new(output_schema: SchemaRef, stream: ArrowStreamReader<T>) -> Self {
+    pub fn new(
+        output_schema: SchemaRef,
+        projection: Vec<usize>,
+        stream: ArrowStreamReader<T>,
+    ) -> Self {
         Self {
-            stream,
             output_schema,
+            projection,
+            stream,
         }
     }
 }
@@ -92,16 +96,21 @@ impl<T: AsyncRead + AsyncSeek + Unpin + Send + 'static> Stream for OrcArrowStrea
 
         let batch = batch.map(|b| {
             b.and_then(|b| {
-                let mut columns = Vec::with_capacity(b.num_columns());
-                for (idx, column) in b.columns().iter().enumerate() {
-                    if column.data_type() != self.output_schema.field(idx).data_type() {
-                        let output = cast(&column, self.output_schema.field(idx).data_type())?;
+                let mut columns = Vec::with_capacity(self.projection.len());
+                for idx in self.projection.iter() {
+                    let column = b.column(*idx);
+                    let field = self.output_schema.field(*idx);
+
+                    if column.data_type() != field.data_type() {
+                        let output = cast(&column, field.data_type())?;
                         columns.push(output)
                     } else {
                         columns.push(column.clone())
                     }
                 }
-                let record_batch = DfRecordBatch::try_new(self.output_schema.clone(), columns)?;
+
+                let projected_schema = self.output_schema.project(&self.projection)?;
+                let record_batch = DfRecordBatch::try_new(projected_schema.into(), columns)?;
 
                 Ok(record_batch)
             })
@@ -128,14 +137,21 @@ impl FileFormat for OrcFormat {
 #[derive(Debug, Clone)]
 pub struct OrcOpener {
     object_store: Arc<ObjectStore>,
-    schema: SchemaRef,
+    output_schema: SchemaRef,
+    projection: Option<Vec<usize>>,
 }
 
 impl OrcOpener {
-    pub fn new(object_store: ObjectStore, schema: SchemaRef) -> Self {
+    /// Return a new [`OrcOpener`]. Fields indexes that are not in the `projection` will be ignored.
+    pub fn new(
+        object_store: ObjectStore,
+        output_schema: SchemaRef,
+        projection: Option<Vec<usize>>,
+    ) -> Self {
         Self {
             object_store: Arc::from(object_store),
-            schema,
+            output_schema,
+            projection,
         }
     }
 }
@@ -143,7 +159,12 @@ impl OrcOpener {
 impl FileOpener for OrcOpener {
     fn open(&self, meta: FileMeta) -> DfResult<FileOpenFuture> {
         let object_store = self.object_store.clone();
-        let schema = self.schema.clone();
+        let output_schema = self.output_schema.clone();
+        let projection = if let Some(projection) = &self.projection {
+            projection.clone()
+        } else {
+            (0..output_schema.fields().len()).collect()
+        };
         Ok(Box::pin(async move {
             let reader = object_store
                 .reader(meta.location().to_string().as_str())
@@ -154,10 +175,55 @@ impl FileOpener for OrcOpener {
                 .await
                 .map_err(|e| DataFusionError::External(Box::new(e)))?;
 
-            let stream = OrcArrowStreamReaderAdapter::new(schema, stream_reader);
+            let stream = OrcArrowStreamReaderAdapter::new(output_schema, projection, stream_reader);
 
             let adopted = stream.map_err(|e| ArrowError::ExternalError(Box::new(e)));
             Ok(adopted.boxed())
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::file_format::FileFormat;
+    use crate::test_util::{self, format_schema, test_store};
+
+    fn test_data_root() -> String {
+        test_util::get_data_dir("tests/orc").display().to_string()
+    }
+
+    #[tokio::test]
+    async fn test_orc_infer_schema() {
+        let orc = OrcFormat::default();
+        let store = test_store(&test_data_root());
+        let schema = orc.infer_schema(&store, "test.orc").await.unwrap();
+        let formatted: Vec<_> = format_schema(schema);
+
+        assert_eq!(
+            vec![
+                "double_a: Float64: NULL",
+                "a: Float32: NULL",
+                "b: Boolean: NULL",
+                "str_direct: Utf8: NULL",
+                "d: Utf8: NULL",
+                "e: Utf8: NULL",
+                "f: Utf8: NULL",
+                "int_short_repeated: Int32: NULL",
+                "int_neg_short_repeated: Int32: NULL",
+                "int_delta: Int32: NULL",
+                "int_neg_delta: Int32: NULL",
+                "int_direct: Int32: NULL",
+                "int_neg_direct: Int32: NULL",
+                "bigint_direct: Int64: NULL",
+                "bigint_neg_direct: Int64: NULL",
+                "bigint_other: Int64: NULL",
+                "utf8_increase: Utf8: NULL",
+                "utf8_decrease: Utf8: NULL",
+                "timestamp_simple: Timestamp(Nanosecond, None): NULL",
+                "date_simple: Date32: NULL"
+            ],
+            formatted
+        );
     }
 }

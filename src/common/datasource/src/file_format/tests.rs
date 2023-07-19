@@ -30,10 +30,10 @@ use crate::compression::CompressionType;
 use crate::error;
 use crate::file_format::csv::{CsvConfigBuilder, CsvOpener};
 use crate::file_format::json::JsonOpener;
-use crate::file_format::orc::OrcOpener;
+use crate::file_format::orc::{OrcFormat, OrcOpener};
 use crate::file_format::parquet::DefaultParquetFileReaderFactory;
-use crate::file_format::Format;
-use crate::test_util::{self, scan_config, test_basic_schema, test_orc_schema, test_store};
+use crate::file_format::{FileFormat, Format};
+use crate::test_util::{self, scan_config, test_basic_schema, test_store};
 
 struct Test<'a, T: FileOpener> {
     config: FileScanConfig,
@@ -196,15 +196,15 @@ async fn test_parquet_exec() {
 
 #[tokio::test]
 async fn test_orc_opener() {
-    let store = test_store("/");
+    let root = test_util::get_data_dir("tests/orc").display().to_string();
+    let store = test_store(&root);
+    let orc = OrcFormat::default();
+    let schema = orc.infer_schema(&store, "test.orc").await.unwrap();
+    let schema = Arc::new(schema);
 
-    let schema = test_orc_schema();
+    let orc_opener = OrcOpener::new(store.clone(), schema.clone(), None);
+    let path = &test_util::get_data_dir("/test.orc").display().to_string();
 
-    let orc_opener = OrcOpener::new(store.clone(), schema.clone());
-
-    let path = &test_util::get_data_dir("tests/orc/test.orc")
-        .display()
-        .to_string();
     let tests = [
         Test {
             config: scan_config(schema.clone(), None, path),
@@ -231,7 +231,7 @@ async fn test_orc_opener() {
                 "| 1.0      | 1.0 | true | a          | a | ddd | aaaaa | 5                  | -5                     | 1         | 5             | 1          | -1             | 1             | -1                | 5            | a             | eeeee         | 2023-04-01T20:15:30.002 | 2023-04-01  |",
                 "+----------+-----+------+------------+---+-----+-------+--------------------+------------------------+-----------+---------------+------------+----------------+---------------+-------------------+--------------+---------------+---------------+-------------------------+-------------+",
             ],
-        }, 
+        },
     ];
 
     for test in tests {
