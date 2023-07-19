@@ -9845,6 +9845,7 @@ dependencies = [
  "mito",
  "object-store",
  "once_cell",
+ "opentelemetry-proto",
  "partition",
  "paste",
  "prost",

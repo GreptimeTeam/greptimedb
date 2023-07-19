@@ -69,3 +69,4 @@ paste.workspace = true
 prost.workspace = true
 script = { path = "../src/script" }
 store-api = { path = "../src/store-api" }
+opentelemetry-proto.workspace = true
