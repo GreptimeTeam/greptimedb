@@ -174,13 +174,6 @@ impl TreeNodeVisitor for CommutativeVisitor {
         // find the first merge scan and stop traversing down
         // todo: check if it works for join
         Ok(match plan {
-            LogicalPlan::Extension(ext) => {
-                if ext.node.name() == MergeScanLogicalPlan::name() {
-                    VisitRecursion::Skip
-                } else {
-                    VisitRecursion::Continue
-                }
-            }
             LogicalPlan::TableScan(table_scan) => {
                 if let Some(source) = table_scan
                     .source
