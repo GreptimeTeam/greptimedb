@@ -98,6 +98,7 @@ impl AlterTableProcedure {
             joins.push(common_runtime::spawn_bg(async move {
                 debug!("Sending {:?} to {:?}", expr, client);
                 if let Err(err) = client.alter(expr).await {
+                    // Maybe table has been renamed during the previous execution.
                     if err.status_code() != StatusCode::TableNotFound {
                         return Err(handle_request_datanode_error(datanode)(err));
                     }
