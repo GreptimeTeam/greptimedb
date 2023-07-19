@@ -34,7 +34,7 @@ pub(crate) struct MitoRegion {
     /// Id of this region.
     // Accessing region id from the version control is inconvenient so
     // we also store it here.
-    region_id: RegionId,
+    pub(crate) region_id: RegionId,
 
     /// Version controller for this region.
     version_control: VersionControlRef,
@@ -55,6 +55,12 @@ impl RegionMap {
     pub(crate) fn is_region_exists(&self, region_id: RegionId) -> bool {
         let regions = self.regions.read().unwrap();
         regions.contains_key(&region_id)
+    }
+
+    /// Inserts a new region into the map.
+    pub(crate) fn insert_region(&self, region: MitoRegionRef) {
+        let mut regions = self.regions.write().unwrap();
+        regions.insert(region.region_id, region);
     }
 }
 

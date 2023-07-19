@@ -16,7 +16,6 @@
 
 use std::sync::Arc;
 
-use common_telemetry::logging;
 use object_store::util::join_dir;
 use object_store::ObjectStore;
 
@@ -58,7 +57,7 @@ impl RegionOpener {
         self
     }
 
-    /// Creates a new region.
+    /// Writes region manifest and creates a new region.
     pub(crate) async fn create(self, config: &MitoConfig) -> Result<MitoRegion> {
         let region_id = self.metadata.region_id;
         // Create a manifest manager for this region.
@@ -70,6 +69,7 @@ impl RegionOpener {
             // We are creating a new region, so we need to set this field.
             initial_metadata: Some(self.metadata.clone()),
         };
+        // Writes regions to the manifest file.
         let manifest_manager = RegionManifestManager::new(options).await?;
 
         let metadata = Arc::new(self.metadata);
@@ -77,9 +77,6 @@ impl RegionOpener {
 
         let version = VersionBuilder::new(metadata, mutable).build();
         let version_control = Arc::new(VersionControl::new(version));
-
-        // TODO(yingwen): Custom the Debug format for the metadata and also print it.
-        logging::info!("A new region created, region_id: {}", region_id);
 
         Ok(MitoRegion {
             region_id,
