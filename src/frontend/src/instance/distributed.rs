@@ -25,7 +25,7 @@ use api::v1::{
     FlushTableExpr, InsertRequests,
 };
 use async_trait::async_trait;
-use catalog::{CatalogManager, RegisterTableRequest};
+use catalog::{CatalogManager, DeregisterTableRequest, RegisterTableRequest};
 use chrono::DateTime;
 use client::client_manager::DatanodeClients;
 use client::Database;
@@ -176,10 +176,19 @@ impl DistInstance {
             .with_context(|| TableNotFoundSnafu {
                 table_name: table_name.to_string(),
             })?;
-
-        let table_id = table.table_info().ident.table_id;
+        let table_id = table.table_info().table_id();
 
         self.drop_table_procedure(&table_name, table_id).await?;
+
+        let request = DeregisterTableRequest {
+            catalog: table_name.catalog_name.clone(),
+            schema: table_name.schema_name.clone(),
+            table_name: table_name.table_name.clone(),
+        };
+        self.catalog_manager
+            .deregister_table(request)
+            .await
+            .context(CatalogSnafu)?;
 
         // Since the table information dropped on meta does not go through KvBackend, so we
         // manually invalidate the cache here.
@@ -279,7 +288,6 @@ impl DistInstance {
         let route_response = self
             .meta_client
             .route(RouteRequest {
-                table_names: vec![table_name.clone()],
                 table_ids: vec![table_id],
             })
             .await
@@ -383,7 +391,7 @@ impl DistInstance {
         let partitions = self
             .catalog_manager
             .partition_manager()
-            .find_table_partitions(&table_name)
+            .find_table_partitions(table.table_info().table_id())
             .await
             .context(error::FindTablePartitionRuleSnafu {
                 table_name: &table_name.table_name,

@@ -27,7 +27,6 @@ use std::time::Duration;
 use async_trait::async_trait;
 use common_meta::ident::TableIdent;
 use common_meta::key::TableMetadataManagerRef;
-use common_meta::table_name::TableName;
 use common_meta::{ClusterId, RegionIdent};
 use common_procedure::error::{
     Error as ProcedureError, FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu,
@@ -207,11 +206,7 @@ impl RegionFailoverManager {
         Ok(self
             .table_metadata_manager
             .table_region_manager()
-            .get_old(&TableName::new(
-                &table_ident.catalog,
-                &table_ident.schema,
-                &table_ident.table,
-            ))
+            .get(table_ident.table_id)
             .await
             .context(TableMetadataManagerSnafu)?
             .is_some())
@@ -422,15 +417,10 @@ mod tests {
                 .context
                 .table_metadata_manager
                 .table_region_manager()
-                .get_old(&TableName::new(
-                    DEFAULT_CATALOG_NAME,
-                    DEFAULT_SCHEMA_NAME,
-                    "my_table",
-                ))
+                .get(1)
                 .await
                 .unwrap()
                 .unwrap();
-
             let failed_datanode = value
                 .region_distribution
                 .iter()
@@ -493,11 +483,7 @@ mod tests {
             .await;
             let table_region_value = table_metadata_manager
                 .table_region_manager()
-                .get_old(&TableName::new(
-                    DEFAULT_CATALOG_NAME,
-                    DEFAULT_SCHEMA_NAME,
-                    table,
-                ))
+                .get(1)
                 .await
                 .unwrap()
                 .unwrap();
@@ -532,7 +518,7 @@ mod tests {
             let selector_ctx = SelectorContext {
                 datanode_lease_secs: 10,
                 server_addr: "127.0.0.1:3002".to_string(),
-                kv_store,
+                kv_store: kv_store.clone(),
                 meta_peer_client,
                 catalog: Some(DEFAULT_CATALOG_NAME.to_string()),
                 schema: Some(DEFAULT_SCHEMA_NAME.to_string()),
@@ -664,11 +650,7 @@ mod tests {
             .context
             .table_metadata_manager
             .table_region_manager()
-            .get_old(&TableName::new(
-                DEFAULT_CATALOG_NAME,
-                DEFAULT_SCHEMA_NAME,
-                "my_table",
-            ))
+            .get(1)
             .await
             .unwrap()
             .unwrap();

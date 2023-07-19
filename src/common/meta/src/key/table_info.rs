@@ -13,16 +13,14 @@
 // limitations under the License.
 
 use serde::{Deserialize, Serialize};
-use snafu::ResultExt;
+use snafu::ensure;
 use table::metadata::{RawTableInfo, TableId};
 
 use super::TABLE_INFO_KEY_PREFIX;
-use crate::error::{InvalidCatalogValueSnafu, Result};
-use crate::helper::{TableGlobalKey, TableGlobalValue};
+use crate::error::{Result, UnexpectedSnafu};
 use crate::key::{to_removed_key, TableMetaKey};
 use crate::kv_backend::KvBackendRef;
-use crate::rpc::store::{CompareAndPutRequest, MoveValueRequest, PutRequest};
-use crate::table_name::TableName;
+use crate::rpc::store::{CompareAndPutRequest, MoveValueRequest};
 
 pub struct TableInfoKey {
     table_id: TableId,
@@ -64,60 +62,6 @@ impl TableInfoManager {
         Self { kv_backend }
     }
 
-    // TODO(LFC): Remove this method when table metadata refactor is done.
-    pub async fn get_old(&self, table_name: &TableName) -> Result<Option<TableInfoValue>> {
-        let table_global_key = TableGlobalKey {
-            catalog_name: table_name.catalog_name.clone(),
-            schema_name: table_name.schema_name.clone(),
-            table_name: table_name.table_name.clone(),
-        };
-        self.kv_backend
-            .get(table_global_key.to_string().as_bytes())
-            .await?
-            .map(|kv| TableGlobalValue::from_bytes(kv.value))
-            .transpose()
-            .map(|v| {
-                v.map(|v| TableInfoValue {
-                    table_info: v.table_info,
-                    version: 0,
-                })
-            })
-            .context(InvalidCatalogValueSnafu)
-    }
-
-    // TODO(LFC): Remove this method when table metadata refactor is done.
-    pub async fn put_old(&self, table_info: RawTableInfo) -> Result<()> {
-        let key = TableGlobalKey {
-            catalog_name: table_info.catalog_name.clone(),
-            schema_name: table_info.schema_name.clone(),
-            table_name: table_info.name.clone(),
-        }
-        .to_string();
-        let raw_key = key.as_bytes();
-
-        let regions_id_map = self
-            .kv_backend
-            .get(raw_key)
-            .await?
-            .map(|kv| TableGlobalValue::from_bytes(kv.value()))
-            .transpose()
-            .context(InvalidCatalogValueSnafu)?
-            .map(|v| v.regions_id_map)
-            .unwrap_or_default();
-
-        let raw_value = TableGlobalValue {
-            node_id: 0,
-            regions_id_map,
-            table_info,
-        }
-        .as_bytes()
-        .context(InvalidCatalogValueSnafu)?;
-
-        let req = PutRequest::new().with_key(raw_key).with_value(raw_value);
-        self.kv_backend.put(req).await?;
-        Ok(())
-    }
-
     pub async fn get(&self, table_id: TableId) -> Result<Option<TableInfoValue>> {
         let key = TableInfoKey::new(table_id);
         let raw_key = key.as_raw_key();
@@ -126,6 +70,29 @@ impl TableInfoManager {
             .await?
             .map(|x| TableInfoValue::try_from_raw_value(x.value))
             .transpose()
+    }
+
+    /// Create TableInfo key and value. If the key already exists, check if the value is the same.
+    pub async fn create(&self, table_id: TableId, table_info: &RawTableInfo) -> Result<()> {
+        let result = self
+            .compare_and_put(table_id, None, table_info.clone())
+            .await?;
+        if let Err(curr) = result {
+            let Some(curr) = curr else {
+                return UnexpectedSnafu {
+                    err_msg: format!("compare_and_put expect None but failed with current value None, table_id: {table_id}, table_info: {table_info:?}"),
+                }.fail()
+            };
+            ensure!(
+                &curr.table_info == table_info,
+                UnexpectedSnafu {
+                    err_msg: format!(
+                        "TableInfoValue for table {table_id} is updated before it is created!"
+                    )
+                }
+            )
+        }
+        Ok(())
     }
 
     /// Compare and put value of key. `expect` is the expected value, if backend's current value associated
@@ -211,6 +178,13 @@ mod tests {
         }
 
         let manager = TableInfoManager::new(backend.clone());
+        assert!(manager.create(99, &new_table_info(99)).await.is_ok());
+        assert!(manager.create(99, &new_table_info(99)).await.is_ok());
+
+        let result = manager.create(99, &new_table_info(88)).await;
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg
+            .contains("Unexpected: TableInfoValue for table 99 is updated before it is created!"));
 
         let val = manager.get(1).await.unwrap().unwrap();
         assert_eq!(

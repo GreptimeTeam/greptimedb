@@ -18,13 +18,11 @@ use store_api::storage::RegionNumber;
 use table::metadata::TableId;
 
 use super::{DATANODE_TABLE_KEY_PATTERN, DATANODE_TABLE_KEY_PREFIX};
-use crate::error::{
-    ConcurrentModifyRegionsPlacementSnafu, InvalidTableMetadataSnafu, MoveRegionSnafu, Result,
-};
+use crate::error::{InvalidTableMetadataSnafu, MoveRegionSnafu, Result, UnexpectedSnafu};
 use crate::key::{to_removed_key, TableMetaKey};
 use crate::kv_backend::txn::{Compare, CompareOp, Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
-use crate::rpc::store::{CompareAndPutRequest, MoveValueRequest, RangeRequest};
+use crate::rpc::store::{BatchGetRequest, CompareAndPutRequest, MoveValueRequest, RangeRequest};
 use crate::DatanodeId;
 
 pub struct DatanodeTableKey {
@@ -99,7 +97,7 @@ impl DatanodeTableManager {
         Self { kv_backend }
     }
 
-    async fn get(&self, key: &DatanodeTableKey) -> Result<Option<DatanodeTableValue>> {
+    pub async fn get(&self, key: &DatanodeTableKey) -> Result<Option<DatanodeTableValue>> {
         self.kv_backend
             .get(&key.as_raw_key())
             .await?
@@ -107,31 +105,36 @@ impl DatanodeTableManager {
             .transpose()
     }
 
+    /// Create DatanodeTable key and value. If the key already exists, check if the value is the same.
     pub async fn create(
         &self,
         datanode_id: DatanodeId,
         table_id: TableId,
         regions: Vec<RegionNumber>,
     ) -> Result<()> {
-        let key = DatanodeTableKey::new(datanode_id, table_id).as_raw_key();
-        let val = DatanodeTableValue::new(table_id, regions).try_as_raw_value()?;
-        let req = CompareAndPutRequest::new().with_key(key).with_value(val);
+        let key = DatanodeTableKey::new(datanode_id, table_id);
+        let val = DatanodeTableValue::new(table_id, regions.clone());
+        let req = CompareAndPutRequest::new()
+            .with_key(key.as_raw_key())
+            .with_value(val.try_as_raw_value()?);
 
         let resp = self.kv_backend.compare_and_put(req).await?;
         if !resp.success {
-            let curr = resp.prev_kv.map_or_else(
-                || "empty".to_string(),
-                |kv| {
-                    DatanodeTableValue::try_from_raw_value(kv.value).map_or_else(
-                        |e| format!("Invalid DatanodeTableValue for Datanode {datanode_id}: {e}"),
-                        |v| format!("{v:?}"),
-                    )
-                },
+            let Some(curr) = resp
+                .prev_kv
+                .map(|kv| DatanodeTableValue::try_from_raw_value(kv.value))
+                .transpose()? else {
+                return UnexpectedSnafu {
+                    err_msg: format!("compare_and_put expect None but failed with current value None, key: {key}, val: {val:?}"),
+                }.fail();
+            };
+
+            ensure!(
+                curr.table_id == table_id && curr.regions == regions,
+                UnexpectedSnafu {
+                    err_msg: format!("current value '{curr:?}' already existed for key '{key}', {val:?} is not set"),
+                }
             );
-            return ConcurrentModifyRegionsPlacementSnafu {
-                err_msg: format!("Datanode {datanode_id} already existed {curr}"),
-            }
-            .fail();
         }
         Ok(())
     }
@@ -150,13 +153,26 @@ impl DatanodeTableManager {
         to_datanode: DatanodeId,
         table_id: TableId,
         region: RegionNumber,
-    ) -> Result<bool> {
+    ) -> Result<()> {
         let from_key = DatanodeTableKey::new(from_datanode, table_id);
-        let mut from_value = self.get(&from_key).await?.context(MoveRegionSnafu {
-            table_id,
-            region,
-            err_msg: format!("DatanodeTableKey not found for Datanode {from_datanode}"),
-        })?;
+        let to_key = DatanodeTableKey::new(to_datanode, table_id);
+        let mut kvs = self
+            .kv_backend
+            .batch_get(BatchGetRequest {
+                keys: vec![from_key.as_raw_key(), to_key.as_raw_key()],
+            })
+            .await?
+            .kvs;
+
+        ensure!(
+            !kvs.is_empty(),
+            MoveRegionSnafu {
+                table_id,
+                region,
+                err_msg: format!("DatanodeTableKey not found for Datanode {from_datanode}"),
+            }
+        );
+        let mut from_value = DatanodeTableValue::try_from_raw_value(kvs.remove(0).value)?;
 
         ensure!(
             from_value.regions.contains(&region),
@@ -167,8 +183,11 @@ impl DatanodeTableManager {
             }
         );
 
-        let to_key = DatanodeTableKey::new(to_datanode, table_id);
-        let to_value = self.get(&to_key).await?;
+        let to_value = if !kvs.is_empty() {
+            Some(DatanodeTableValue::try_from_raw_value(kvs.remove(0).value)?)
+        } else {
+            None
+        };
 
         if let Some(v) = to_value.as_ref() {
             ensure!(
@@ -221,7 +240,15 @@ impl DatanodeTableManager {
 
         let txn = Txn::new().when(compares).and_then(operations);
         let resp = self.kv_backend.txn(txn).await?;
-        Ok(resp.succeeded)
+        ensure!(
+            resp.succeeded,
+            MoveRegionSnafu {
+                table_id,
+                region,
+                err_msg: format!("txn failed with responses: {:?}", resp.responses),
+            }
+        );
+        Ok(())
     }
 
     pub async fn tables(&self, datanode_id: DatanodeId) -> Result<Vec<DatanodeTableValue>> {
@@ -262,7 +289,7 @@ mod tests {
 
         // Move region 1 from datanode 1 to datanode 2.
         // Note that the DatanodeTableValue is not existed for datanode 2 now.
-        assert!(manager.move_region(1, 2, 1, 1).await.unwrap());
+        assert!(manager.move_region(1, 2, 1, 1).await.is_ok());
         let value = manager
             .get(&DatanodeTableKey::new(1, 1))
             .await
@@ -348,12 +375,15 @@ mod tests {
         assert!(manager.create(2, 1, vec![4, 5, 6]).await.is_ok());
         assert!(manager.create(2, 2, vec![1, 2, 3]).await.is_ok());
 
+        // If the value is the same, "create" can be called again.
+        assert!(manager.create(2, 2, vec![1, 2, 3]).await.is_ok());
+
         let err_msg = manager
             .create(1, 1, vec![4, 5, 6])
             .await
             .unwrap_err()
             .to_string();
-        assert!(err_msg.contains("Concurrent modify regions placement: Datanode 1 already existed DatanodeTableValue { table_id: 1, regions: [1, 2, 3], version: 0 }"));
+        assert!(err_msg.contains("Unexpected: current value 'DatanodeTableValue { table_id: 1, regions: [1, 2, 3], version: 0 }' already existed for key '__dn_table/1/1', DatanodeTableValue { table_id: 1, regions: [4, 5, 6], version: 0 } is not set"));
 
         let to_be_removed_key = DatanodeTableKey::new(2, 1);
         let expected_value = DatanodeTableValue {

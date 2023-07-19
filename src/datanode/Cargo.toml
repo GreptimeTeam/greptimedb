@@ -46,7 +46,6 @@ object-store = { path = "../object-store" }
 pin-project = "1.0"
 prost.workspace = true
 query = { path = "../query" }
-regex = "1.6"
 secrecy = { version = "0.8", features = ["serde", "alloc"] }
 serde = "1.0"
 serde_json = "1.0"

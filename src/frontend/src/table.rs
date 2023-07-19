@@ -101,8 +101,9 @@ impl Table for DistTable {
         let partition_manager = self.catalog_manager.partition_manager();
         let datanode_clients = self.catalog_manager.datanode_clients();
 
+        let table_id = self.table_info.table_id();
         let partition_rule = partition_manager
-            .find_table_partition_rule(&self.table_name)
+            .find_table_partition_rule(table_id)
             .await
             .map_err(BoxedError::new)
             .context(TableOperationSnafu)?;
@@ -112,7 +113,7 @@ impl Table for DistTable {
             .map_err(BoxedError::new)
             .context(TableOperationSnafu)?;
         let datanodes = partition_manager
-            .find_region_datanodes(&self.table_name, regions)
+            .find_region_datanodes(table_id, regions)
             .await
             .map_err(BoxedError::new)
             .context(TableOperationSnafu)?;
@@ -171,8 +172,9 @@ impl Table for DistTable {
     async fn delete(&self, request: DeleteRequest) -> table::Result<usize> {
         let partition_manager = self.catalog_manager.partition_manager();
 
+        let table_id = self.table_info.table_id();
         let partition_rule = partition_manager
-            .find_table_partition_rule(&self.table_name)
+            .find_table_partition_rule(table_id)
             .await
             .map_err(BoxedError::new)
             .context(TableOperationSnafu)?;
@@ -242,7 +244,7 @@ impl DistTable {
         let route = self
             .catalog_manager
             .partition_manager()
-            .find_table_route(table_name)
+            .find_table_route(self.table_info.table_id())
             .await
             .with_context(|_| FindTableRouteSnafu {
                 table_name: table_name.to_string(),
@@ -479,7 +481,7 @@ pub(crate) mod test {
             ],
         );
         table_routes
-            .insert_table_route(table_name.clone(), Arc::new(table_route))
+            .insert_table_route(1, Arc::new(table_route))
             .await;
 
         let table_name = TableName::new(
@@ -554,7 +556,7 @@ pub(crate) mod test {
             ],
         );
         table_routes
-            .insert_table_route(table_name.clone(), Arc::new(table_route))
+            .insert_table_route(2, Arc::new(table_route))
             .await;
 
         partition_manager
@@ -564,12 +566,9 @@ pub(crate) mod test {
     async fn test_find_partition_rule() {
         let partition_manager = create_partition_rule_manager().await;
 
+        // "one_column_partitioning_table" has id 1
         let partition_rule = partition_manager
-            .find_table_partition_rule(&TableName::new(
-                DEFAULT_CATALOG_NAME,
-                DEFAULT_SCHEMA_NAME,
-                "one_column_partitioning_table",
-            ))
+            .find_table_partition_rule(1)
             .await
             .unwrap();
         let range_rule = partition_rule
@@ -580,12 +579,9 @@ pub(crate) mod test {
         assert_eq!(range_rule.all_regions(), &vec![3, 2, 1]);
         assert_eq!(range_rule.bounds(), &vec![10_i32.into(), 50_i32.into()]);
 
+        // "two_column_partitioning_table" has table 2
         let partition_rule = partition_manager
-            .find_table_partition_rule(&TableName::new(
-                DEFAULT_CATALOG_NAME,
-                DEFAULT_SCHEMA_NAME,
-                "two_column_partitioning_table",
-            ))
+            .find_table_partition_rule(2)
             .await
             .unwrap();
         let range_columns_rule = partition_rule

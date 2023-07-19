@@ -21,7 +21,7 @@ mod tests {
 
     use common_base::Plugins;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-    use common_meta::table_name::TableName;
+    use common_meta::key::table_name::TableNameKey;
     use common_query::Output;
     use common_recordbatch::RecordBatches;
     use frontend::error::{self, Error, Result};
@@ -177,14 +177,22 @@ mod tests {
         instance: &MockDistributedInstance,
         expected_distribution: HashMap<u32, &str>,
     ) {
-        let table_region_value = instance
-            .table_metadata_manager()
-            .table_region_manager()
-            .get_old(&TableName::new(
+        let manager = instance.table_metadata_manager();
+        let table_id = manager
+            .table_name_manager()
+            .get(TableNameKey::new(
                 DEFAULT_CATALOG_NAME,
                 DEFAULT_SCHEMA_NAME,
                 "demo",
             ))
+            .await
+            .unwrap()
+            .unwrap()
+            .table_id();
+
+        let table_region_value = manager
+            .table_region_manager()
+            .get(table_id)
             .await
             .unwrap()
             .unwrap();

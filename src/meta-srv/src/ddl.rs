@@ -38,7 +38,7 @@ pub struct DdlManager {
     datanode_clients: Arc<DatanodeClients>,
     pub(crate) mailbox: MailboxRef,
     pub(crate) server_addr: String,
-    table_metadata_manager: TableMetadataManagerRef,
+    pub(crate) table_metadata_manager: TableMetadataManagerRef,
 }
 
 #[derive(Clone)]

@@ -13,14 +13,10 @@
 // limitations under the License.
 
 use api::v1::meta::TableRouteValue;
-use common_meta::helper::TableGlobalKey;
-use common_meta::key::TableRouteKey;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::TableRoute;
 use common_procedure::error::Error as ProcedureError;
 use snafu::{location, Location, ResultExt};
-use table::engine::TableReference;
-use table::metadata::TableId;
 
 use crate::error::{self, Error, Result};
 
@@ -33,26 +29,6 @@ pub fn build_table_route_value(table_route: TableRoute) -> Result<TableRouteValu
         peers,
         table_route: Some(table_route),
     })
-}
-
-pub fn build_table_metadata_key(
-    table_ref: TableReference<'_>,
-    table_id: TableId,
-) -> (TableGlobalKey, TableRouteKey) {
-    let table_route_key = TableRouteKey {
-        table_id,
-        catalog_name: table_ref.catalog,
-        schema_name: table_ref.schema,
-        table_name: table_ref.table,
-    };
-
-    let table_global_key = TableGlobalKey {
-        catalog_name: table_ref.catalog.to_string(),
-        schema_name: table_ref.schema.to_string(),
-        table_name: table_ref.table.to_string(),
-    };
-
-    (table_global_key, table_route_key)
 }
 
 pub fn handle_request_datanode_error(datanode: Peer) -> impl FnOnce(client::error::Error) -> Error {

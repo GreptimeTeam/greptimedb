@@ -17,7 +17,7 @@ use async_trait::async_trait;
 use client::Database;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
-use common_meta::helper::TableGlobalKey;
+use common_meta::key::table_name::TableNameKey;
 use common_meta::key::TableRouteKey;
 use common_meta::kv_backend::txn::{Compare, CompareOp, Txn, TxnOp};
 use common_meta::rpc::ddl::CreateTableTask;
@@ -25,6 +25,7 @@ use common_meta::rpc::router::TableRoute;
 use common_meta::table_name::TableName;
 use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu};
 use common_procedure::{Context as ProcedureContext, LockKey, Procedure, Status};
+use common_telemetry::info;
 use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
@@ -33,9 +34,8 @@ use table::metadata::TableId;
 
 use super::utils::{handle_request_datanode_error, handle_retry_error};
 use crate::ddl::DdlContext;
-use crate::error::{self, Result};
-use crate::service::router::create_table_global_value;
-use crate::table_routes::get_table_global_value;
+use crate::error::{self, Result, TableMetadataManagerSnafu};
+use crate::service::router::create_region_distribution;
 
 pub struct CreateTableProcedure {
     context: DdlContext,
@@ -65,25 +65,25 @@ impl CreateTableProcedure {
         })
     }
 
-    fn global_table_key(&self) -> TableGlobalKey {
-        let table_ref = self.creator.data.table_ref();
-
-        TableGlobalKey {
-            catalog_name: table_ref.catalog.to_string(),
-            schema_name: table_ref.schema.to_string(),
-            table_name: table_ref.table.to_string(),
-        }
-    }
-
     fn table_name(&self) -> TableName {
         self.creator.data.task.table_name()
     }
 
     /// Checks whether the table exists.
     async fn on_prepare(&mut self) -> Result<Status> {
-        if (get_table_global_value(&self.context.kv_store, &self.global_table_key()).await?)
-            .is_some()
-        {
+        let expr = &self.creator.data.task.create_table;
+        let value = self
+            .context
+            .table_metadata_manager
+            .table_name_manager()
+            .get(TableNameKey::new(
+                &expr.catalog_name,
+                &expr.schema_name,
+                &expr.table_name,
+            ))
+            .await
+            .context(TableMetadataManagerSnafu)?;
+        if value.is_some() {
             ensure!(
                 self.creator.data.task.create_table.create_if_not_exists,
                 error::TableAlreadyExistsSnafu {
@@ -99,8 +99,7 @@ impl CreateTableProcedure {
         Ok(Status::executing(true))
     }
 
-    /// registers the `TableRouteValue`,`TableGlobalValue`
-    async fn register_metadata(&self) -> Result<()> {
+    async fn on_create_metadata(&self) -> Result<Status> {
         let _timer = common_telemetry::timer!(
             crate::metrics::METRIC_META_CREATE_TABLE_PROCEDURE_CREATE_META
         );
@@ -111,14 +110,6 @@ impl CreateTableProcedure {
         let table_route_key = TableRouteKey::with_table_name(table_id, &table_name.clone().into())
             .to_string()
             .into_bytes();
-
-        let table_global_key = TableGlobalKey {
-            catalog_name: table_name.catalog_name.clone(),
-            schema_name: table_name.schema_name.clone(),
-            table_name: table_name.table_name.clone(),
-        }
-        .to_string()
-        .into_bytes();
 
         let (peers, table_route) = self
             .creator
@@ -133,22 +124,38 @@ impl CreateTableProcedure {
             table_route: Some(table_route),
         };
 
-        let table_global_value = create_table_global_value(
-            &table_route_value,
-            self.creator.data.task.table_info.clone(),
-        )?
-        .as_bytes()
-        .context(error::InvalidCatalogValueSnafu)?;
+        let manager = &self.context.table_metadata_manager;
+
+        let region_distribution = create_region_distribution(&table_route_value)?;
+        manager
+            .table_region_manager()
+            .create(table_id, &region_distribution)
+            .await
+            .context(TableMetadataManagerSnafu)?;
+        info!("Created TableRegionValue for table {table_id}");
+
+        manager
+            .table_info_manager()
+            .create(table_id, &self.creator.data.task.table_info)
+            .await
+            .context(TableMetadataManagerSnafu)?;
+        info!("Created TableInfoValue for table {table_id}");
+
+        for (datanode_id, regions) in region_distribution {
+            manager
+                .datanode_table_manager()
+                .create(datanode_id, table_id, regions)
+                .await
+                .context(TableMetadataManagerSnafu)?;
+            info!("Create DatanodeTableValue for table {table_id}");
+        }
 
         let txn = Txn::new()
-            .when(vec![
-                Compare::with_not_exist_value(table_route_key.clone(), CompareOp::Equal),
-                Compare::with_not_exist_value(table_global_key.clone(), CompareOp::Equal),
-            ])
-            .and_then(vec![
-                TxnOp::Put(table_route_key, table_route_value.into()),
-                TxnOp::Put(table_global_key, table_global_value),
-            ]);
+            .when(vec![Compare::with_not_exist_value(
+                table_route_key.clone(),
+                CompareOp::Equal,
+            )])
+            .and_then(vec![TxnOp::Put(table_route_key, table_route_value.into())]);
 
         let resp = self.context.kv_store.txn(txn).await?;
 
@@ -158,38 +165,23 @@ impl CreateTableProcedure {
                 msg: "table_route_key or table_global_key exists"
             }
         );
+        info!("Created TableRouteValue for table {table_id}");
 
-        Ok(())
-    }
-
-    async fn on_create_metadata(&mut self) -> Result<Status> {
-        let kv_store = &self.context.kv_store;
-        let key = &self.global_table_key();
-
-        match get_table_global_value(kv_store, key).await? {
-            Some(table_global_value) => {
-                // The metasrv crashed after metadata was created immediately.
-                // Recovers table_route from kv.
-                let table_id = table_global_value.table_id() as u64;
-
-                let expected = self.creator.data.table_route.table.id;
-                // If there is something like:
-                // Create table A, Create table A(from another Fe, Somehow, Failed), Renames table A to B, Create table A(Recovered).
-                // We must ensure the table_id isn't changed.
-                ensure!(
-                    table_id == expected,
-                    error::TableIdChangedSnafu {
-                        expected,
-                        found: table_id
-                    }
-                );
-            }
-            None => {
-                // registers metadata
-                self.register_metadata().await?;
-            }
-        }
-
+        // Create TableNameValue at last, because we use it to check whether the table exists at
+        // the beginning of the procedure.
+        manager
+            .table_name_manager()
+            .create(
+                &TableNameKey::new(
+                    &table_name.catalog_name,
+                    &table_name.schema_name,
+                    &table_name.table_name,
+                ),
+                table_id,
+            )
+            .await
+            .context(TableMetadataManagerSnafu)?;
+        info!("Created TableNameValue for table {table_id}");
         Ok(Status::Done)
     }
 

@@ -17,7 +17,6 @@ use api::v1::meta::{
     Table, TableId, TableRoute,
 };
 use common_grpc_expr::alter_expr_to_request;
-use common_meta::helper::TableGlobalKey;
 use common_meta::key::TableRouteKey;
 use common_meta::rpc::ddl::{AlterTableTask, CreateTableTask, DdlTask, DropTableTask};
 use common_meta::rpc::router;
@@ -30,10 +29,10 @@ use tonic::{Request, Response};
 use super::store::kv::KvStoreRef;
 use super::GrpcResult;
 use crate::ddl::DdlManagerRef;
-use crate::error::{self, Result};
+use crate::error::{self, Result, TableMetadataManagerSnafu};
 use crate::metasrv::{MetaSrv, SelectorContext, SelectorRef};
 use crate::sequence::SequenceRef;
-use crate::table_routes::{get_table_global_value, get_table_route_value};
+use crate::table_routes::get_table_route_value;
 
 #[async_trait::async_trait]
 impl ddl_task_server::DdlTask for MetaSrv {
@@ -84,7 +83,6 @@ impl ddl_task_server::DdlTask for MetaSrv {
                 handle_alter_table_task(
                     header.cluster_id,
                     alter_table_task,
-                    self.kv_store().clone(),
                     self.ddl_manager().clone(),
                 )
                 .await?
@@ -248,7 +246,6 @@ async fn handle_drop_table_task(
 async fn handle_alter_table_task(
     cluster_id: u64,
     mut alter_table_task: AlterTableTask,
-    kv_store: KvStoreRef,
     ddl_manager: DdlManagerRef,
 ) -> Result<SubmitDdlTaskResponse> {
     let table_id = alter_table_task
@@ -266,19 +263,16 @@ async fn handle_alter_table_task(
 
     let table_ref = alter_table_task.table_ref();
 
-    let table_global_key = TableGlobalKey {
-        catalog_name: table_ref.catalog.to_string(),
-        schema_name: table_ref.schema.to_string(),
-        table_name: table_ref.table.to_string(),
-    };
-
-    let table_global_value = get_table_global_value(&kv_store, &table_global_key)
-        .await?
+    let table_info_value = ddl_manager
+        .table_metadata_manager
+        .table_info_manager()
+        .get(table_id)
+        .await
+        .context(TableMetadataManagerSnafu)?
         .with_context(|| error::TableNotFoundSnafu {
             name: table_ref.to_string(),
         })?;
-
-    let table_info = table_global_value.table_info;
+    let table_info = table_info_value.table_info;
 
     // Sets alter_table's table_version
     alter_table_task.alter_table.table_version = table_info.ident.version;

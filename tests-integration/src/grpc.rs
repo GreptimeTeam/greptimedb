@@ -25,8 +25,7 @@ mod test {
         CreateDatabaseExpr, CreateTableExpr, DdlRequest, DeleteRequest, DropTableExpr,
         FlushTableExpr, InsertRequest, InsertRequests, QueryRequest,
     };
-    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO_ENGINE};
-    use common_meta::table_name::TableName;
+    use common_catalog::consts::MITO_ENGINE;
     use common_query::Output;
     use common_recordbatch::RecordBatches;
     use frontend::instance::Instance;
@@ -338,11 +337,7 @@ CREATE TABLE {table_name} (
         let table_region_value = instance
             .table_metadata_manager()
             .table_region_manager()
-            .get_old(&TableName::new(
-                DEFAULT_CATALOG_NAME,
-                DEFAULT_SCHEMA_NAME,
-                table_name,
-            ))
+            .get(table_id)
             .await
             .unwrap()
             .unwrap();
@@ -606,17 +601,23 @@ CREATE TABLE {table_name} (
         table_name: &str,
         expected_distribution: HashMap<u32, &str>,
     ) {
-        let table_region_value = instance
-            .table_metadata_manager()
-            .table_region_manager()
-            .get_old(&TableName::new(
-                DEFAULT_CATALOG_NAME,
-                DEFAULT_SCHEMA_NAME,
-                table_name,
-            ))
+        let table = instance
+            .frontend()
+            .catalog_manager()
+            .table("greptime", "public", table_name)
             .await
             .unwrap()
             .unwrap();
+        let table = table.as_any().downcast_ref::<DistTable>().unwrap();
+        let table_id = table.table_info().ident.table_id;
+        let table_region_value = instance
+            .table_metadata_manager()
+            .table_region_manager()
+            .get(table_id)
+            .await
+            .unwrap()
+            .unwrap();
+
         let region_to_dn_map = table_region_value
             .region_distribution
             .iter()

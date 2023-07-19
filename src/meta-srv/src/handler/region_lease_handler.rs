@@ -19,7 +19,6 @@ use api::v1::meta::{HeartbeatRequest, RegionLease, Role};
 use async_trait::async_trait;
 use common_meta::ident::TableIdent;
 use common_meta::key::TableMetadataManagerRef;
-use common_meta::table_name::TableName;
 use common_meta::ClusterId;
 use common_telemetry::warn;
 use snafu::ResultExt;
@@ -52,15 +51,11 @@ impl RegionLeaseHandler {
         }
     }
 
-    async fn find_table_ident(
-        &self,
-        table_id: TableId,
-        table_name: &TableName,
-    ) -> Result<Option<TableIdent>> {
+    async fn find_table_ident(&self, table_id: TableId) -> Result<Option<TableIdent>> {
         let value = self
             .table_metadata_manager
             .table_info_manager()
-            .get_old(table_name)
+            .get(table_id)
             .await
             .context(TableMetadataManagerSnafu)?;
         Ok(value.map(|x| {
@@ -122,20 +117,15 @@ impl HeartbeatHandler for RegionLeaseHandler {
         stat.region_stats.iter().for_each(|x| {
             let region_id: RegionId = x.id.into();
             let table_id = region_id.table_id();
-            let table_name = TableName::new(
-                x.catalog.to_string(),
-                x.schema.to_string(),
-                x.table.to_string(),
-            );
             datanode_regions
-                .entry((table_id, table_name))
+                .entry(table_id)
                 .or_insert_with(Vec::new)
                 .push(RegionId::from(x.id).region_number());
         });
 
         let mut region_leases = Vec::with_capacity(datanode_regions.len());
-        for ((table_id, table_name), local_regions) in datanode_regions {
-            let Some(table_ident) = self.find_table_ident(table_id, &table_name).await? else {
+        for (table_id, local_regions) in datanode_regions {
+            let Some(table_ident) = self.find_table_ident(table_id).await? else {
                 warn!("Reject region lease request from Datanode {datanode_id} for table id {table_id}. \
                        Reason: table not found.");
                 continue;
@@ -144,20 +134,20 @@ impl HeartbeatHandler for RegionLeaseHandler {
             let Some(table_region_value) = self
                 .table_metadata_manager
                 .table_region_manager()
-                .get_old(&table_name)
+                .get(table_id)
                 .await
                 .context(TableMetadataManagerSnafu)? else {
-                warn!("Reject region lease request from Datanode {datanode_id} for table id {table_id}. \
-                       Reason: table region value not found.");
-                continue;
-            };
+                    warn!("Reject region lease request from Datanode {datanode_id} for table id {table_id}. \
+                           Reason: table region value not found.");
+                    continue;
+                };
             let Some(global_regions) = table_region_value
                 .region_distribution
                 .get(&datanode_id) else {
-                warn!("Reject region lease request from Datanode {datanode_id} for table id {table_id}. \
-                       Reason: not expected to place the region on it.");
-                continue;
-            };
+                    warn!("Reject region lease request from Datanode {datanode_id} for table id {table_id}. \
+                           Reason: not expected to place the region on it.");
+                    continue;
+                };
 
             // Filter out the designated regions from table info value for the given table on the given Datanode.
             let designated_regions = local_regions

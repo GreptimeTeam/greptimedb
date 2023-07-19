@@ -1673,8 +1673,6 @@ dependencies = [
  "common-error",
  "common-telemetry",
  "datatypes",
- "lazy_static",
- "regex",
  "serde",
  "serde_json",
  "snafu",
@@ -2661,7 +2659,6 @@ dependencies = [
  "pin-project",
  "prost",
  "query",
- "regex",
  "secrecy",
  "serde",
  "serde_json",
@@ -4140,7 +4137,7 @@ checksum = "d2fabcfbdc87f4758337ca535fb41a6d701b65693ce38287d856d1674551ec9b"
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=bec16e50c9322758111f73e42fb5d377c7235e05#bec16e50c9322758111f73e42fb5d377c7235e05"
+source = "git+https://github.com/MichaelScofield/greptime-proto.git?rev=71c0002045f6cc8d6e42609bcc5ca6cea963baad#71c0002045f6cc8d6e42609bcc5ca6cea963baad"
 dependencies = [
  "prost",
  "serde",
