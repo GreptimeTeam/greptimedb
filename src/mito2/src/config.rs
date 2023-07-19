@@ -14,10 +14,14 @@
 
 //! Configurations.
 
+use common_base::readable_size::ReadableSize;
 use common_datasource::compression::CompressionType;
 use common_telemetry::logging;
 
+/// Default region worker num.
 const DEFAULT_NUM_WORKERS: usize = 1;
+/// Default region write buffer size.
+pub(crate) const DEFAULT_WRITE_BUFFER_SIZE: ReadableSize = ReadableSize::mb(32);
 
 /// Configuration for [MitoEngine](crate::engine::MitoEngine).
 #[derive(Debug)]

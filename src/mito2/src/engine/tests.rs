@@ -14,8 +14,10 @@
 
 //! Tests for mito engine.
 
+use store_api::storage::RegionId;
+
 use super::*;
-use crate::test_util::TestEnv;
+use crate::test_util::{CreateRequestMocker, TestEnv};
 
 #[tokio::test]
 async fn test_engine_new_stop() {
@@ -23,4 +25,13 @@ async fn test_engine_new_stop() {
     let engine = env.create_engine(MitoConfig::default()).await;
 
     engine.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_engine_create_new_region() {
+    let env = TestEnv::new("engine-stop");
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let request = CreateRequestMocker::new(RegionId::new(1, 1)).build();
+    engine.create_region(request).await.unwrap();
 }

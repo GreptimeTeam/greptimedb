@@ -20,6 +20,7 @@ use common_base::readable_size::ReadableSize;
 use store_api::storage::{ColumnId, CompactionStrategy, RegionId};
 use tokio::sync::oneshot::{self, Receiver, Sender};
 
+use crate::config::DEFAULT_WRITE_BUFFER_SIZE;
 use crate::error::Result;
 use crate::metadata::ColumnMetadata;
 
@@ -34,6 +35,16 @@ pub struct RegionOptions {
     pub ttl: Option<Duration>,
     /// Compaction strategy.
     pub compaction_strategy: CompactionStrategy,
+}
+
+impl Default for RegionOptions {
+    fn default() -> Self {
+        RegionOptions {
+            write_buffer_size: Some(DEFAULT_WRITE_BUFFER_SIZE),
+            ttl: None,
+            compaction_strategy: CompactionStrategy::LeveledTimeWindow,
+        }
+    }
 }
 
 /// Create region request.
