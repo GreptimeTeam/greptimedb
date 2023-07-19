@@ -56,11 +56,11 @@ impl SubstraitPlan for DFLogicalSubstraitConvertor {
         Ok(df_plan)
     }
 
-    fn encode(&self, plan: Self::Plan) -> Result<Bytes, Self::Error> {
+    fn encode(&self, plan: &Self::Plan) -> Result<Bytes, Self::Error> {
         let mut buf = BytesMut::new();
         let context = SessionContext::new();
 
-        let substrait_plan = to_substrait_plan(&plan, &context).context(EncodeDfPlanSnafu)?;
+        let substrait_plan = to_substrait_plan(plan, &context).context(EncodeDfPlanSnafu)?;
         substrait_plan.encode(&mut buf).context(EncodeRelSnafu)?;
 
         Ok(buf.freeze())

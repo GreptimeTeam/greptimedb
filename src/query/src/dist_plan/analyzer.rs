@@ -19,6 +19,7 @@ use datafusion_common::config::ConfigOptions;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeVisitor, VisitRecursion};
 use datafusion_expr::{Extension, LogicalPlan};
 use datafusion_optimizer::analyzer::AnalyzerRule;
+use substrait::{DFLogicalSubstraitConvertor,SubstraitPlan};
 use table::table::adapter::DfTableProviderAdapter;
 
 use crate::dist_plan::commutativity::{
@@ -202,8 +203,14 @@ impl TreeNodeVisitor for CommutativeVisitor {
     }
 
     fn post_visit(&mut self, plan: &LogicalPlan) -> datafusion_common::Result<VisitRecursion> {
-        if let Some(partition_cols) = &self.current_partition_cols && partition_cols.is_empty() {
-            // no partition columns, skip
+        if DFLogicalSubstraitConvertor.encode(&plan).is_err(){
+            self.stop_node = Some(utils::hash_plan(plan));
+            return Ok(VisitRecursion::Stop);
+        }
+
+        if let Some(partition_cols) = &self.current_partition_cols 
+            && partition_cols.is_empty() {
+            // no partition columns, and can be encoded skip
             return Ok(VisitRecursion::Continue);
         }
 

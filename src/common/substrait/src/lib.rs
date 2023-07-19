@@ -40,5 +40,5 @@ pub trait SubstraitPlan {
         schema: &str,
     ) -> Result<Self::Plan, Self::Error>;
 
-    fn encode(&self, plan: Self::Plan) -> Result<Bytes, Self::Error>;
+    fn encode(&self, plan: &Self::Plan) -> Result<Bytes, Self::Error>;
 }

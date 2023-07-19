@@ -36,7 +36,7 @@ pub struct Categorizer {}
 impl Categorizer {
     pub fn check_plan(plan: &LogicalPlan) -> Commutativity {
         match plan {
-            LogicalPlan::Projection(_) => Commutativity::Unimplemented,
+            LogicalPlan::Projection(_) => Commutativity::Commutative,
             // TODO(ruihang): Change this to Commutative once Like is supported in substrait
             LogicalPlan::Filter(filter) => Self::check_expr(&filter.predicate),
             LogicalPlan::Window(_) => Commutativity::Unimplemented,

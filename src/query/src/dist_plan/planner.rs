@@ -87,7 +87,7 @@ impl ExtensionPlanner for DistExtensionPlanner {
                 let input_schema = input_plan.schema().clone();
                 let input_plan = self.set_table_name(&table_name, input_plan.clone())?;
                 let substrait_plan: Bytes = DFLogicalSubstraitConvertor
-                    .encode(input_plan.clone())
+                    .encode(&input_plan)
                     .context(error::EncodeSubstraitLogicalPlanSnafu)?
                     .into();
                 let peers = self.get_peers(&table_name).await;

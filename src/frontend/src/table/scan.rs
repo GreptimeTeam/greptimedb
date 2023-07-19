@@ -55,7 +55,7 @@ impl DatanodeInstance {
         let logical_plan = self.build_logical_plan(&plan)?;
 
         let substrait_plan = DFLogicalSubstraitConvertor
-            .encode(logical_plan)
+            .encode(&logical_plan)
             .context(error::EncodeSubstraitLogicalPlanSnafu)?;
 
         let result = self
