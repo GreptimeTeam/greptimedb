@@ -68,8 +68,8 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Table not exists, table_name: {}", table_name))]
-    TableNotExists {
+    #[snafu(display("Table does not exist, table_name: {}", table_name))]
+    TableNotExist {
         table_name: String,
         location: Location,
     },
@@ -134,7 +134,7 @@ impl ErrorExt for Error {
             | GetKvCache { .. }
             | CacheNotGet { .. }
             | TableAlreadyExists { .. }
-            | TableNotExists { .. }
+            | TableNotExist { .. }
             | RenameTable { .. } => StatusCode::Internal,
 
             EncodeJson { .. } | DecodeJson { .. } | PayloadNotExist { .. } => {

@@ -22,7 +22,7 @@ use crate::error::{InvalidTableMetadataSnafu, MoveRegionSnafu, Result, Unexpecte
 use crate::key::{to_removed_key, TableMetaKey};
 use crate::kv_backend::txn::{Compare, CompareOp, Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
-use crate::rpc::store::{CompareAndPutRequest, MoveValueRequest, RangeRequest};
+use crate::rpc::store::{BatchGetRequest, CompareAndPutRequest, MoveValueRequest, RangeRequest};
 use crate::DatanodeId;
 
 pub struct DatanodeTableKey {
@@ -97,7 +97,7 @@ impl DatanodeTableManager {
         Self { kv_backend }
     }
 
-    async fn get(&self, key: &DatanodeTableKey) -> Result<Option<DatanodeTableValue>> {
+    pub async fn get(&self, key: &DatanodeTableKey) -> Result<Option<DatanodeTableValue>> {
         self.kv_backend
             .get(&key.as_raw_key())
             .await?
@@ -155,11 +155,24 @@ impl DatanodeTableManager {
         region: RegionNumber,
     ) -> Result<()> {
         let from_key = DatanodeTableKey::new(from_datanode, table_id);
-        let mut from_value = self.get(&from_key).await?.context(MoveRegionSnafu {
-            table_id,
-            region,
-            err_msg: format!("DatanodeTableKey not found for Datanode {from_datanode}"),
-        })?;
+        let to_key = DatanodeTableKey::new(to_datanode, table_id);
+        let mut kvs = self
+            .kv_backend
+            .batch_get(BatchGetRequest {
+                keys: vec![from_key.as_raw_key(), to_key.as_raw_key()],
+            })
+            .await?
+            .kvs;
+
+        ensure!(
+            !kvs.is_empty(),
+            MoveRegionSnafu {
+                table_id,
+                region,
+                err_msg: format!("DatanodeTableKey not found for Datanode {from_datanode}"),
+            }
+        );
+        let mut from_value = DatanodeTableValue::try_from_raw_value(kvs.remove(0).value)?;
 
         ensure!(
             from_value.regions.contains(&region),
@@ -170,8 +183,11 @@ impl DatanodeTableManager {
             }
         );
 
-        let to_key = DatanodeTableKey::new(to_datanode, table_id);
-        let to_value = self.get(&to_key).await?;
+        let to_value = if !kvs.is_empty() {
+            Some(DatanodeTableValue::try_from_raw_value(kvs.remove(0).value)?)
+        } else {
+            None
+        };
 
         if let Some(v) = to_value.as_ref() {
             ensure!(

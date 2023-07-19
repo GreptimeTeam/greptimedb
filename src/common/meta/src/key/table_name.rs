@@ -21,7 +21,7 @@ use table::metadata::TableId;
 use super::{TABLE_NAME_KEY_PATTERN, TABLE_NAME_KEY_PREFIX};
 use crate::error::{
     Error, InvalidTableMetadataSnafu, RenameTableSnafu, Result, TableAlreadyExistsSnafu,
-    TableNotExistsSnafu, UnexpectedSnafu,
+    TableNotExistSnafu, UnexpectedSnafu,
 };
 use crate::key::{to_removed_key, TableMetaKey};
 use crate::kv_backend::memory::MemoryKvBackend;
@@ -224,7 +224,7 @@ impl TableNameManager {
             let Some(value) = self.get(new_key).await? else {
                 // If we can't get the table by its original name, nor can we get by its altered
                 // name, then the table must not exist at the first place.
-                return TableNotExistsSnafu {
+                return TableNotExistSnafu {
                     table_name: TableName::from(key).to_string(),
                 }.fail();
             };
@@ -330,7 +330,7 @@ mod tests {
 
         let result = manager.rename(not_existed, 1, "zz").await;
         let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("Table not exists, table_name: x.y.z"));
+        assert!(err_msg.contains("Table does not exist, table_name: x.y.z"));
 
         let tables = manager.tables("my_catalog", "my_schema").await.unwrap();
         assert_eq!(tables.len(), 3);
