@@ -108,7 +108,7 @@ async fn test_show_create_table(instance: Arc<dyn MockInstance>) {
 |       |   ts BIGINT NOT NULL,                      |
 |       |   TIME INDEX (ts)                          |
 |       | )                                          |
-|       | PARTITION BY RANGE COLUMNS (ts) (          |
+|       | PARTITION BY RANGE COLUMNS () (            |
 |       |   PARTITION r0 VALUES LESS THAN (MAXVALUE) |
 |       | )                                          |
 |       | ENGINE=mito                                |

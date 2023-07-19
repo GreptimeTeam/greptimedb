@@ -790,7 +790,7 @@ fn parse_partitions(
 ) -> Result<(Vec<MetaPartition>, Vec<String>)> {
     // If partitions are not defined by user, use the timestamp column (which has to be existed) as
     // the partition column, and create only one partition.
-    let partition_columns = find_partition_columns(create_table, &partitions)?;
+    let partition_columns = find_partition_columns(&partitions)?;
     let partition_entries = find_partition_entries(create_table, &partitions, &partition_columns)?;
 
     Ok((
@@ -852,10 +852,7 @@ fn find_partition_entries(
     Ok(entries)
 }
 
-fn find_partition_columns(
-    create_table: &CreateTableExpr,
-    partitions: &Option<Partitions>,
-) -> Result<Vec<String>> {
+fn find_partition_columns(partitions: &Option<Partitions>) -> Result<Vec<String>> {
     let columns = if let Some(partitions) = partitions {
         partitions
             .column_list
@@ -863,7 +860,7 @@ fn find_partition_columns(
             .map(|x| x.value.clone())
             .collect::<Vec<_>>()
     } else {
-        vec![create_table.time_index.clone()]
+        vec![]
     };
     Ok(columns)
 }

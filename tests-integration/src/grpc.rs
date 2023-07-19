@@ -755,6 +755,7 @@ CREATE TABLE {table_name} (
         };
 
         let output = query(instance, Request::Delete(delete)).await;
+        println!("output: {:?}", output);
         assert!(matches!(output, Output::AffectedRows(2)));
 
         let output = query(instance, request).await;
