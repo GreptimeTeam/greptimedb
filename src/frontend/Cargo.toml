@@ -47,6 +47,7 @@ mito = { path = "../mito", features = ["test"] }
 moka = { version = "0.9", features = ["future"] }
 object-store = { path = "../object-store" }
 openmetrics-parser = "0.4"
+opentelemetry-proto.workspace = true
 partition = { path = "../partition" }
 prost.workspace = true
 query = { path = "../query" }

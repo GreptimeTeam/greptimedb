@@ -33,6 +33,7 @@ mod metrics;
 pub mod metrics_handler;
 pub mod mysql;
 pub mod opentsdb;
+pub mod otlp;
 pub mod postgres;
 pub mod prom_store;
 pub mod prometheus;
