@@ -266,8 +266,8 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Cannot find primary key column by name: {}", msg))]
-    PrimaryKeyNotFound { msg: String, location: Location },
+    #[snafu(display("Cannot find column by name: {}", msg))]
+    ColumnNotFound { msg: String, location: Location },
 
     #[snafu(display("Failed to execute statement, source: {}", source))]
     ExecuteStatement {
@@ -592,7 +592,7 @@ impl ErrorExt for Error {
             | Error::CatalogNotFound { .. }
             | Error::SchemaNotFound { .. }
             | Error::SchemaExists { .. }
-            | Error::PrimaryKeyNotFound { .. }
+            | Error::ColumnNotFound { .. }
             | Error::MissingMetasrvOpts { .. }
             | Error::BuildRegex { .. }
             | Error::InvalidSchema { .. }

@@ -35,7 +35,7 @@ use common_error::ext::BoxedError;
 use common_meta::helper::{SchemaKey, SchemaValue};
 use common_meta::peer::Peer;
 use common_meta::rpc::ddl::{DdlTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse};
-use common_meta::rpc::router::{Partition as MetaPartition, RouteRequest};
+use common_meta::rpc::router::{Partition, Partition as MetaPartition, RouteRequest};
 use common_meta::rpc::store::CompareAndPutRequest;
 use common_meta::table_name::TableName;
 use common_query::Output;
@@ -65,7 +65,7 @@ use table::TableRef;
 use crate::catalog::FrontendCatalogManager;
 use crate::error::{
     self, AlterExprToRequestSnafu, CatalogEntrySerdeSnafu, CatalogSnafu, ColumnDataTypeSnafu,
-    DeserializePartitionSnafu, InvokeDatanodeSnafu, ParseSqlSnafu, PrimaryKeyNotFoundSnafu,
+    ColumnNotFoundSnafu, DeserializePartitionSnafu, InvokeDatanodeSnafu, ParseSqlSnafu,
     RequestDatanodeSnafu, RequestMetaSnafu, Result, SchemaExistsSnafu, StartMetaClientSnafu,
     TableAlreadyExistSnafu, TableNotFoundSnafu, TableSnafu, ToTableDeleteRequestSnafu,
     UnrecognizedTableOptionSnafu,
@@ -108,7 +108,9 @@ impl DistInstance {
             &create_table.table_name,
         );
 
-        let mut table_info = create_table_info(create_table)?;
+        let (partitions, partition_cols) = parse_partitions(create_table, partitions)?;
+
+        let mut table_info = create_table_info(create_table, partition_cols)?;
 
         let resp = self
             .create_table_procedure(create_table, partitions, table_info.clone())
@@ -520,10 +522,9 @@ impl DistInstance {
     async fn create_table_procedure(
         &self,
         create_table: &CreateTableExpr,
-        partitions: Option<Partitions>,
+        partitions: Vec<Partition>,
         table_info: RawTableInfo,
     ) -> Result<SubmitDdlTaskResponse> {
-        let partitions = parse_partitions(create_table, partitions)?;
         let partitions = partitions.into_iter().map(Into::into).collect();
 
         let request = SubmitDdlTaskRequest {
@@ -698,7 +699,10 @@ fn create_partitions_stmt(partitions: Vec<PartitionInfo>) -> Result<Option<Parti
     }))
 }
 
-fn create_table_info(create_table: &CreateTableExpr) -> Result<RawTableInfo> {
+fn create_table_info(
+    create_table: &CreateTableExpr,
+    partition_columns: Vec<String>,
+) -> Result<RawTableInfo> {
     let mut column_schemas = Vec::with_capacity(create_table.column_defs.len());
     let mut column_name_to_index_map = HashMap::new();
 
@@ -730,7 +734,17 @@ fn create_table_info(create_table: &CreateTableExpr) -> Result<RawTableInfo> {
             column_name_to_index_map
                 .get(name)
                 .cloned()
-                .context(PrimaryKeyNotFoundSnafu { msg: name })
+                .context(ColumnNotFoundSnafu { msg: name })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let partition_key_indices = partition_columns
+        .into_iter()
+        .map(|col_name| {
+            column_name_to_index_map
+                .get(&col_name)
+                .cloned()
+                .context(ColumnNotFoundSnafu { msg: col_name })
         })
         .collect::<Result<Vec<_>>>()?;
 
@@ -745,6 +759,7 @@ fn create_table_info(create_table: &CreateTableExpr) -> Result<RawTableInfo> {
         options: TableOptions::try_from(&create_table.table_options)
             .context(UnrecognizedTableOptionSnafu)?,
         created_on: DateTime::default(),
+        partition_key_indices,
     };
 
     let desc = if create_table.desc.is_empty() {
@@ -772,17 +787,20 @@ fn create_table_info(create_table: &CreateTableExpr) -> Result<RawTableInfo> {
 fn parse_partitions(
     create_table: &CreateTableExpr,
     partitions: Option<Partitions>,
-) -> Result<Vec<MetaPartition>> {
+) -> Result<(Vec<MetaPartition>, Vec<String>)> {
     // If partitions are not defined by user, use the timestamp column (which has to be existed) as
     // the partition column, and create only one partition.
     let partition_columns = find_partition_columns(create_table, &partitions)?;
     let partition_entries = find_partition_entries(create_table, &partitions, &partition_columns)?;
 
-    partition_entries
-        .into_iter()
-        .map(|x| MetaPartition::try_from(PartitionDef::new(partition_columns.clone(), x)))
-        .collect::<std::result::Result<_, _>>()
-        .context(DeserializePartitionSnafu)
+    Ok((
+        partition_entries
+            .into_iter()
+            .map(|x| MetaPartition::try_from(PartitionDef::new(partition_columns.clone(), x)))
+            .collect::<std::result::Result<_, _>>()
+            .context(DeserializePartitionSnafu)?,
+        partition_columns,
+    ))
 }
 
 fn find_partition_entries(
@@ -891,7 +909,7 @@ ENGINE=mito",
             match &result[0] {
                 Statement::CreateTable(c) => {
                     let expr = expr_factory::create_to_expr(c, QueryContext::arc()).unwrap();
-                    let partitions = parse_partitions(&expr, c.partitions.clone()).unwrap();
+                    let (partitions, _) = parse_partitions(&expr, c.partitions.clone()).unwrap();
                     let json = serde_json::to_string(&partitions).unwrap();
                     assert_eq!(json, expected);
                 }

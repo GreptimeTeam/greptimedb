@@ -14,10 +14,12 @@
 
 use std::sync::{Arc, Mutex};
 
+use datafusion::datasource::DefaultTableSource;
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeVisitor, VisitRecursion};
 use datafusion_expr::{Extension, LogicalPlan};
 use datafusion_optimizer::analyzer::AnalyzerRule;
+use table::table::adapter::DfTableProviderAdapter;
 
 use crate::dist_plan::commutativity::{
     partial_commutative_transformer, Categorizer, Commutativity,
@@ -161,6 +163,8 @@ struct CommutativeVisitor {
     next_stage: Vec<LogicalPlan>,
     // hash of the stop node
     stop_node: Option<u64>,
+    /// Partiton columns of current visiting table
+    current_partition_cols: Option<Vec<String>>,
 }
 
 impl TreeNodeVisitor for CommutativeVisitor {
@@ -177,11 +181,39 @@ impl TreeNodeVisitor for CommutativeVisitor {
                     VisitRecursion::Continue
                 }
             }
+            LogicalPlan::TableScan(table_scan) => {
+                if let Some(source) = table_scan
+                    .source
+                    .as_any()
+                    .downcast_ref::<DefaultTableSource>()
+                {
+                    if let Some(provider) = source
+                        .table_provider
+                        .as_any()
+                        .downcast_ref::<DfTableProviderAdapter>()
+                    {
+                        let info = provider.table().table_info();
+                        let partition_key_indices = info.meta.partition_key_indices.clone();
+                        let schema = info.meta.schema.clone();
+                        let partition_cols = partition_key_indices
+                            .into_iter()
+                            .map(|index| schema.column_name_by_index(index).to_string())
+                            .collect::<Vec<String>>();
+                        self.current_partition_cols = Some(partition_cols);
+                    }
+                }
+                VisitRecursion::Continue
+            }
             _ => VisitRecursion::Continue,
         })
     }
 
     fn post_visit(&mut self, plan: &LogicalPlan) -> datafusion_common::Result<VisitRecursion> {
+        if let Some(partition_cols) = &self.current_partition_cols && partition_cols.is_empty() {
+            // no partition columns, skip
+            return Ok(VisitRecursion::Continue);
+        }
+
         match Categorizer::check_plan(plan) {
             Commutativity::Commutative => {}
             Commutativity::PartialCommutative => {
@@ -218,6 +250,7 @@ impl CommutativeVisitor {
         Self {
             next_stage: vec![],
             stop_node: None,
+            current_partition_cols: None,
         }
     }
 }

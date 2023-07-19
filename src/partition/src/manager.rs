@@ -115,6 +115,16 @@ impl PartitionRuleManager {
         Ok(peers)
     }
 
+    pub async fn find_table_partition_columns(&self, table: TableName) -> Result<Vec<String>> {
+        let partiton_infos = self.find_table_partitions(&table).await?;
+        // Take region 0's partion columns as the table partition column.
+        // This is a workarond and isn't by design
+        Ok(partiton_infos
+            .first()
+            .map(|info| info.partition.partition_columns().clone())
+            .unwrap_or_default())
+    }
+
     pub async fn find_table_partitions(&self, table: &TableName) -> Result<Vec<PartitionInfo>> {
         let route = self.table_routes.get_route(table).await?;
         ensure!(
@@ -165,13 +175,6 @@ impl PartitionRuleManager {
         let partitions = self.find_table_partitions(table).await?;
 
         let partition_columns = partitions[0].partition.partition_columns();
-        ensure!(
-            !partition_columns.is_empty(),
-            error::InvalidTableRouteDataSnafu {
-                table_name: table.to_string(),
-                err_msg: "no partition columns found"
-            }
-        );
 
         let regions = partitions
             .iter()

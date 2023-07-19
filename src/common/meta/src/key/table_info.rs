@@ -313,6 +313,7 @@ mod tests {
             value_indices: vec![2, 3],
             options: Default::default(),
             region_numbers: vec![1],
+            partition_key_indices: vec![],
         };
 
         RawTableInfo {
