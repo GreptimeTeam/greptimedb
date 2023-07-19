@@ -65,7 +65,7 @@ impl RegionOpener {
             manifest_dir: new_manifest_dir(&self.region_dir),
             object_store: self.object_store,
             compress_type: config.manifest_compress_type,
-            checkpoint_interval: Some(config.manifest_checkpoint_interval),
+            checkpoint_interval: config.manifest_checkpoint_interval,
             // We are creating a new region, so we need to set this field.
             initial_metadata: Some(self.metadata.clone()),
         };

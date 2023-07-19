@@ -80,7 +80,7 @@ impl TestEnv {
     pub async fn create_manifest_manager(
         &self,
         compress_type: CompressionType,
-        checkpoint_interval: Option<u64>,
+        checkpoint_interval: u64,
         initial_metadata: Option<RegionMetadata>,
     ) -> Result<RegionManifestManager> {
         let data_home = self.data_home.path().to_str().unwrap();
