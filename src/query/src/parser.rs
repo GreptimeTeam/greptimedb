@@ -337,11 +337,7 @@ mod test {
                 expr: VectorSelector(VectorSelector { \
                     name: Some(\"http_request\"), \
                     matchers: Matchers { \
-                        matchers: {Matcher { \
-                            op: Equal, \
-                            name: \"__name__\", \
-                            value: \"http_request\" \
-                    }} }, \
+                        matchers: {} }, \
                     offset: None, at: None }), \
                 start: SystemTime { tv_sec: 1644772440, tv_nsec: 0 }, \
                 end: SystemTime { tv_sec: 1676308440, tv_nsec: 0 }, \

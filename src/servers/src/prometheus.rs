@@ -749,14 +749,14 @@ fn promql_expr_to_metric_name(expr: &PromqlExpr) -> Option<String> {
         PromqlExpr::NumberLiteral(_) => Some(String::new()),
         PromqlExpr::StringLiteral(_) => Some(String::new()),
         PromqlExpr::Extension(_) => None,
-        PromqlExpr::VectorSelector(VectorSelector { matchers, .. }) => {
-            matchers.find_matcher(METRIC_NAME)
+        PromqlExpr::VectorSelector(VectorSelector { name, matchers, .. }) => {
+            name.clone().or(matchers.find_matcher(METRIC_NAME))
         }
         PromqlExpr::MatrixSelector(MatrixSelector {
             vector_selector, ..
         }) => {
-            let VectorSelector { matchers, .. } = vector_selector;
-            matchers.find_matcher(METRIC_NAME)
+            let VectorSelector { name, matchers, .. } = vector_selector;
+            name.clone().or(matchers.find_matcher(METRIC_NAME))
         }
         PromqlExpr::Call(Call { args, .. }) => {
             args.args.iter().find_map(|e| promql_expr_to_metric_name(e))

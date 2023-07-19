@@ -56,7 +56,7 @@ mod tests {
         assert_eq!(Some(DateTime::new(2)), iter.next().unwrap());
         assert_eq!(Some(DateTime::new(3)), iter.next().unwrap());
         assert!(!v.is_null(0));
-        assert_eq!(64, v.memory_size());
+        assert_eq!(24, v.memory_size());
 
         if let Value::DateTime(d) = v.get(0) {
             assert_eq!(1, d.val());
