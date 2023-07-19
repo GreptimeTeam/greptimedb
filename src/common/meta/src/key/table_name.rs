@@ -20,8 +20,8 @@ use table::metadata::TableId;
 
 use super::{TABLE_NAME_KEY_PATTERN, TABLE_NAME_KEY_PREFIX};
 use crate::error::{
-    Error, InvalidTableMetadataSnafu, RenameTableSnafu, Result, TableAlreadyExistedSnafu,
-    TableNotExistedByNameSnafu, UnexpectedSnafu,
+    Error, InvalidTableMetadataSnafu, RenameTableSnafu, Result, TableAlreadyExistsSnafu,
+    TableNotExistsSnafu, UnexpectedSnafu,
 };
 use crate::key::{to_removed_key, TableMetaKey};
 use crate::kv_backend::memory::MemoryKvBackend;
@@ -170,7 +170,7 @@ impl TableNameManager {
             };
             ensure!(
                 curr.table_id == table_id,
-                TableAlreadyExistedSnafu {
+                TableAlreadyExistsSnafu {
                     table_id: curr.table_id
                 }
             );
@@ -222,14 +222,16 @@ impl TableNameManager {
             );
         } else {
             let Some(value) = self.get(new_key).await? else {
-                return TableNotExistedByNameSnafu {
-                    table_name: Into::<TableName>::into(key).to_string(),
+                // If we can't get the table by its original name, nor can we get by its altered
+                // name, then the table must not exist at the first place.
+                return TableNotExistsSnafu {
+                    table_name: TableName::from(key).to_string(),
                 }.fail();
             };
 
             ensure!(
                 value.table_id == expected_table_id,
-                TableAlreadyExistedSnafu {
+                TableAlreadyExistsSnafu {
                     table_id: value.table_id
                 }
             );
@@ -292,7 +294,7 @@ mod tests {
 
         let result = manager.create(&key, 9).await;
         let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("Table already existed, table_id: 99"));
+        assert!(err_msg.contains("Table already exists, table_id: 99"));
 
         let value = manager.get(key).await.unwrap().unwrap();
         assert_eq!(value.table_id(), 99);
@@ -314,7 +316,7 @@ mod tests {
 
         let result = manager.rename(key, 2, "table_1_new").await;
         let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("Table already existed, table_id: 1"));
+        assert!(err_msg.contains("Table already exists, table_id: 1"));
 
         let result = manager
             .rename(
@@ -328,7 +330,7 @@ mod tests {
 
         let result = manager.rename(not_existed, 1, "zz").await;
         let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("Table not existed, table_name: x.y.z"));
+        assert!(err_msg.contains("Table not exists, table_name: x.y.z"));
 
         let tables = manager.tables("my_catalog", "my_schema").await.unwrap();
         assert_eq!(tables.len(), 3);

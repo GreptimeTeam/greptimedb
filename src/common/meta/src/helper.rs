@@ -27,16 +27,17 @@ use table::metadata::{RawTableInfo, TableId};
 pub const CATALOG_KEY_PREFIX: &str = "__c";
 pub const SCHEMA_KEY_PREFIX: &str = "__s";
 
-const TABLE_NAME_PATTERN: &str = "[a-zA-Z_:][a-zA-Z0-9_:]*";
+/// The pattern of a valid catalog, schema or table name.
+const NAME_PATTERN: &str = "[a-zA-Z_:][a-zA-Z0-9_:]*";
 
 lazy_static! {
     static ref CATALOG_KEY_PATTERN: Regex =
-        Regex::new(&format!("^{CATALOG_KEY_PREFIX}-({TABLE_NAME_PATTERN})$")).unwrap();
+        Regex::new(&format!("^{CATALOG_KEY_PREFIX}-({NAME_PATTERN})$")).unwrap();
 }
 
 lazy_static! {
     static ref SCHEMA_KEY_PATTERN: Regex = Regex::new(&format!(
-        "^{SCHEMA_KEY_PREFIX}-({TABLE_NAME_PATTERN})-({TABLE_NAME_PATTERN})$"
+        "^{SCHEMA_KEY_PREFIX}-({NAME_PATTERN})-({NAME_PATTERN})$"
     ))
     .unwrap();
 }

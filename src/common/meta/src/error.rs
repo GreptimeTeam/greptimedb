@@ -62,14 +62,14 @@ pub enum Error {
     #[snafu(display("Unexpected: {err_msg}"))]
     Unexpected { err_msg: String, location: Location },
 
-    #[snafu(display("Table already existed, table_id: {}", table_id))]
-    TableAlreadyExisted {
+    #[snafu(display("Table already exists, table_id: {}", table_id))]
+    TableAlreadyExists {
         table_id: TableId,
         location: Location,
     },
 
-    #[snafu(display("Table not existed, table_name: {}", table_name))]
-    TableNotExistedByName {
+    #[snafu(display("Table not exists, table_name: {}", table_name))]
+    TableNotExists {
         table_name: String,
         location: Location,
     },
@@ -133,8 +133,8 @@ impl ErrorExt for Error {
             SendMessage { .. }
             | GetKvCache { .. }
             | CacheNotGet { .. }
-            | TableAlreadyExisted { .. }
-            | TableNotExistedByName { .. }
+            | TableAlreadyExists { .. }
+            | TableNotExists { .. }
             | RenameTable { .. } => StatusCode::Internal,
 
             EncodeJson { .. } | DecodeJson { .. } | PayloadNotExist { .. } => {
