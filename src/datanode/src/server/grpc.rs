@@ -70,21 +70,27 @@ impl Instance {
     }
 
     pub(crate) async fn handle_alter(&self, expr: AlterExpr) -> Result<Output> {
-        let table = self
-            .catalog_manager
-            .table(&expr.catalog_name, &expr.schema_name, &expr.table_name)
-            .await
-            .context(CatalogSnafu)?
-            .with_context(|| TableNotFoundSnafu {
-                table_name: format_full_table_name(
-                    &expr.catalog_name,
-                    &expr.schema_name,
-                    &expr.table_name,
-                ),
-            })?;
+        let table_id = match expr.table_id.as_ref() {
+            None => {
+                self.catalog_manager
+                    .table(&expr.catalog_name, &expr.schema_name, &expr.table_name)
+                    .await
+                    .context(CatalogSnafu)?
+                    .with_context(|| TableNotFoundSnafu {
+                        table_name: format_full_table_name(
+                            &expr.catalog_name,
+                            &expr.schema_name,
+                            &expr.table_name,
+                        ),
+                    })?
+                    .table_info()
+                    .ident
+                    .table_id
+            }
+            Some(table_id) => table_id.id, // For requests from Metasrv.
+        };
 
-        let request = alter_expr_to_request(table.table_info().ident.table_id, expr)
-            .context(AlterExprToRequestSnafu)?;
+        let request = alter_expr_to_request(table_id, expr).context(AlterExprToRequestSnafu)?;
         self.sql_handler()
             .execute(SqlRequest::Alter(request), QueryContext::arc())
             .await

@@ -306,7 +306,7 @@ mod test {
     use api::v1::{
         alter_expr, AddColumn, AddColumns, AlterExpr, Column, ColumnDataType, ColumnDef,
         CreateDatabaseExpr, CreateTableExpr, DropTableExpr, InsertRequest, InsertRequests,
-        QueryRequest, TableId,
+        QueryRequest, RenameTable, TableId,
     };
     use common_catalog::consts::MITO_ENGINE;
     use common_error::ext::ErrorExt;
@@ -552,6 +552,79 @@ mod test {
             .await
             .unwrap_err();
         assert_eq!(err.status_code(), StatusCode::TableColumnExists);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_rename_table_twice() {
+        common_telemetry::init_default_ut_logging();
+        let instance = MockInstance::new("test_alter_table_twice").await;
+        let instance = instance.inner();
+
+        let query = Request::Ddl(DdlRequest {
+            expr: Some(DdlExpr::CreateDatabase(CreateDatabaseExpr {
+                database_name: "my_database".to_string(),
+                create_if_not_exists: true,
+            })),
+        });
+        let output = instance.do_query(query, QueryContext::arc()).await.unwrap();
+        assert!(matches!(output, Output::AffectedRows(1)));
+
+        let query = Request::Ddl(DdlRequest {
+            expr: Some(DdlExpr::CreateTable(CreateTableExpr {
+                catalog_name: "greptime".to_string(),
+                schema_name: "my_database".to_string(),
+                table_name: "my_table".to_string(),
+                desc: "blabla".to_string(),
+                column_defs: vec![
+                    ColumnDef {
+                        name: "a".to_string(),
+                        datatype: ColumnDataType::String as i32,
+                        is_nullable: true,
+                        default_constraint: vec![],
+                    },
+                    ColumnDef {
+                        name: "ts".to_string(),
+                        datatype: ColumnDataType::TimestampMillisecond as i32,
+                        is_nullable: false,
+                        default_constraint: vec![],
+                    },
+                ],
+                time_index: "ts".to_string(),
+                engine: MITO_ENGINE.to_string(),
+                table_id: Some(TableId { id: 1025 }),
+                ..Default::default()
+            })),
+        });
+        let output = instance
+            .do_query(query.clone(), QueryContext::arc())
+            .await
+            .unwrap();
+        assert!(matches!(output, Output::AffectedRows(0)));
+
+        let query = Request::Ddl(DdlRequest {
+            expr: Some(DdlExpr::Alter(AlterExpr {
+                catalog_name: "greptime".to_string(),
+                schema_name: "my_database".to_string(),
+                table_name: "my_table".to_string(),
+                kind: Some(alter_expr::Kind::RenameTable(RenameTable {
+                    new_table_name: "new_my_table".to_string(),
+                })),
+                table_id: Some(TableId { id: 1025 }),
+                ..Default::default()
+            })),
+        });
+        let output = instance
+            .do_query(query.clone(), QueryContext::arc())
+            .await
+            .unwrap();
+        assert!(matches!(output, Output::AffectedRows(0)));
+
+        // renames it again.
+        let output = instance
+            .do_query(query.clone(), QueryContext::arc())
+            .await
+            .unwrap();
+        assert!(matches!(output, Output::AffectedRows(0)));
     }
 
     #[tokio::test(flavor = "multi_thread")]
