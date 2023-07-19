@@ -15,7 +15,7 @@ console-subscriber = { version = "0.1", optional = true }
 metrics-exporter-prometheus = { version = "0.11", default-features = false }
 metrics-util = "0.14"
 metrics.workspace = true
-once_cell = "1.10"
+once_cell.workspace = true
 opentelemetry = { version = "0.17", default-features = false, features = [
     "trace",
     "rt-tokio",
