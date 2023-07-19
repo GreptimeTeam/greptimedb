@@ -579,6 +579,7 @@ impl PrometheusHandler for Instance {
         query: &PromQuery,
         query_ctx: QueryContextRef,
     ) -> server_error::Result<Output> {
+        let _timer = timer!(metrics::METRIC_HANDLE_PROMQL_ELAPSED);
         let interceptor = self
             .plugins
             .get::<PromQueryInterceptorRef<server_error::Error>>();

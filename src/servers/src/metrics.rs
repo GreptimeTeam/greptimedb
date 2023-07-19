@@ -45,6 +45,16 @@ pub(crate) const METRIC_HTTP_PROM_STORE_WRITE_ELAPSED: &str =
 pub(crate) const METRIC_HTTP_PROM_STORE_READ_ELAPSED: &str = "servers.http_prometheus_read_elapsed";
 pub(crate) const METRIC_TCP_OPENTSDB_LINE_WRITE_ELAPSED: &str =
     "servers.opentsdb_line_write_elapsed";
+pub(crate) const METRIC_HTTP_PROMQL_INSTANT_QUERY_ELAPSED: &str =
+    "servers.http_promql_instant_query_elapsed";
+pub(crate) const METRIC_HTTP_PROMQL_RANGE_QUERY_ELAPSED: &str =
+    "servers.http_promql_range_query_elapsed";
+pub(crate) const METRIC_HTTP_PROMQL_LABEL_QUERY_ELAPSED: &str =
+    "servers.http_promql_label_query_elapsed";
+pub(crate) const METRIC_HTTP_PROMQL_SERIES_QUERY_ELAPSED: &str =
+    "servers.http_promql_series_query_elapsed";
+pub(crate) const METRIC_HTTP_PROMQL_LABEL_VALUE_QUERY_ELAPSED: &str =
+    "servers.http_promql_label_value_query_elapsed";
 
 pub(crate) const METRIC_MYSQL_CONNECTIONS: &str = "servers.mysql_connection_count";
 pub(crate) const METRIC_MYSQL_QUERY_TIMER: &str = "servers.mysql_query_elapsed";

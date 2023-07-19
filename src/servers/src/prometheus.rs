@@ -26,7 +26,7 @@ use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
-use common_telemetry::info;
+use common_telemetry::{info, timer};
 use common_time::util::{current_time_rfc3339, yesterday_rfc3339};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::scalars::ScalarVector;
@@ -91,7 +91,7 @@ impl PrometheusServer {
     }
 
     pub fn make_app(&self) -> Router {
-        // TODO(ruihang): implement format_query, series, values, query_examplars and targets methods
+        // TODO(ruihang): implement format_query, series, values, query_exemplars and targets methods
 
         let router = Router::new()
             .route("/query", routing::post(instant_query).get(instant_query))
@@ -428,6 +428,7 @@ pub async fn instant_query(
     Query(params): Query<InstantQuery>,
     Form(form_params): Form<InstantQuery>,
 ) -> Json<PrometheusJsonResponse> {
+    let _timer = timer!(crate::metrics::METRIC_HTTP_PROMQL_INSTANT_QUERY_ELAPSED);
     // Extract time from query string, or use current server time if not specified.
     let time = params
         .time
@@ -471,6 +472,7 @@ pub async fn range_query(
     Query(params): Query<RangeQuery>,
     Form(form_params): Form<RangeQuery>,
 ) -> Json<PrometheusJsonResponse> {
+    let _timer = timer!(crate::metrics::METRIC_HTTP_PROMQL_RANGE_QUERY_ELAPSED);
     let prom_query = PromQuery {
         query: params.query.or(form_params.query).unwrap_or_default(),
         start: params.start.or(form_params.start).unwrap_or_default(),
@@ -543,6 +545,7 @@ pub async fn labels_query(
     Query(params): Query<LabelsQuery>,
     Form(form_params): Form<LabelsQuery>,
 ) -> Json<PrometheusJsonResponse> {
+    let _timer = timer!(crate::metrics::METRIC_HTTP_PROMQL_LABEL_QUERY_ELAPSED);
     let mut queries = params.matches.0;
     if queries.is_empty() {
         queries = form_params.matches.0;
@@ -779,6 +782,7 @@ pub async fn label_values_query(
     Path(label_name): Path<String>,
     Query(params): Query<LabelValueQuery>,
 ) -> Json<PrometheusJsonResponse> {
+    let _timer = timer!(crate::metrics::METRIC_HTTP_PROMQL_LABEL_VALUE_QUERY_ELAPSED);
     let queries = params.matches.0;
     if queries.is_empty() {
         return PrometheusJsonResponse::error("Invalid argument", "match[] parameter is required");
@@ -891,6 +895,7 @@ pub async fn series_query(
     Query(params): Query<SeriesQuery>,
     Form(form_params): Form<SeriesQuery>,
 ) -> Json<PrometheusJsonResponse> {
+    let _timer = timer!(crate::metrics::METRIC_HTTP_PROMQL_SERIES_QUERY_ELAPSED);
     let mut queries: Vec<String> = params.matches.0;
     if queries.is_empty() {
         queries = form_params.matches.0;
