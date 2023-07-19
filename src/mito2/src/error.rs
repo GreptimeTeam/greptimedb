@@ -101,6 +101,15 @@ pub enum Error {
         location
     ))]
     InitialMetadata { location: Location },
+
+    #[snafu(display("Invalid metadata, {}, location: {}", reason, location))]
+    InvalidMeta { reason: String, location: Location },
+
+    #[snafu(display("Invalid schema, source: {}, location: {}", source, location))]
+    InvalidSchema {
+        source: datatypes::error::Error,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -114,7 +123,10 @@ impl ErrorExt for Error {
             CompressObject { .. } | DecompressObject { .. } | SerdeJson { .. } | Utf8 { .. } => {
                 StatusCode::Unexpected
             }
-            InvalidScanIndex { .. } | InitialMetadata { .. } => StatusCode::InvalidArguments,
+            InvalidScanIndex { .. }
+            | InitialMetadata { .. }
+            | InvalidMeta { .. }
+            | InvalidSchema { .. } => StatusCode::InvalidArguments,
             RegionMetadataNotFound { .. } | Join { .. } | WorkerStopped { .. } | Recv { .. } => {
                 StatusCode::Internal
             }

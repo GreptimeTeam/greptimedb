@@ -21,7 +21,11 @@ use std::sync::{Arc, RwLock};
 
 use store_api::storage::RegionId;
 
-use crate::region::version::VersionControlRef;
+use crate::memtable::MemtableBuilderRef;
+use crate::metadata::RegionMetadataRef;
+use crate::region::version::{VersionBuilder, VersionControl, VersionControlRef};
+
+/// Type to store region version.
 pub type VersionNumber = u32;
 
 /// Metadata and runtime status of a region.
@@ -39,3 +43,32 @@ pub(crate) struct RegionMap {
 }
 
 pub(crate) type RegionMapRef = Arc<RegionMap>;
+
+/// [MitoRegion] builder.
+pub(crate) struct RegionBuilder {
+    metadata: RegionMetadataRef,
+    memtable_builder: MemtableBuilderRef,
+}
+
+impl RegionBuilder {
+    /// Returns a new builder.
+    pub(crate) fn new(
+        metadata: RegionMetadataRef,
+        memtable_builder: MemtableBuilderRef,
+    ) -> RegionBuilder {
+        RegionBuilder {
+            metadata,
+            memtable_builder,
+        }
+    }
+
+    /// Builds a new region.
+    pub(crate) fn build(self) -> MitoRegion {
+        let mutable = self.memtable_builder.build(&self.metadata);
+
+        let version = VersionBuilder::new(self.metadata, mutable).build();
+        let version_control = Arc::new(VersionControl::new(version));
+
+        MitoRegion { version_control }
+    }
+}

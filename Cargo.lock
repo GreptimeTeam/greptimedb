@@ -5541,6 +5541,7 @@ dependencies = [
  "store-api",
  "table",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

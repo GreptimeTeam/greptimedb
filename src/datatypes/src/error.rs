@@ -112,6 +112,9 @@ pub enum Error {
 
     #[snafu(display("Invalid timestamp precision: {}", precision))]
     InvalidTimestampPrecision { precision: u64, location: Location },
+
+    #[snafu(display("Column {} already exists", column))]
+    DuplicateColumn { column: String, location: Location },
 }
 
 impl ErrorExt for Error {

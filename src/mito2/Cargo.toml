@@ -44,6 +44,7 @@ storage = { path = "../storage" }
 store-api = { path = "../store-api" }
 table = { path = "../table" }
 tokio.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 common-test-util = { path = "../common/test-util" }

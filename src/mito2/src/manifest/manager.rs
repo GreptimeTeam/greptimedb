@@ -260,27 +260,32 @@ mod test {
     use crate::test_util::TestEnv;
 
     fn basic_region_metadata() -> RegionMetadata {
-        let builder = RegionMetadataBuilder::new(RegionId::new(23, 33), 0);
-        let builder = builder.add_column_metadata(ColumnMetadata {
-            column_schema: ColumnSchema::new(
-                "ts",
-                ConcreteDataType::timestamp_millisecond_datatype(),
-                false,
-            ),
-            semantic_type: SemanticType::Timestamp,
-            column_id: 45,
-        });
-        let builder = builder.add_column_metadata(ColumnMetadata {
-            column_schema: ColumnSchema::new("pk", ConcreteDataType::string_datatype(), false),
-            semantic_type: SemanticType::Tag,
-            column_id: 36,
-        });
-        let builder = builder.add_column_metadata(ColumnMetadata {
-            column_schema: ColumnSchema::new("val", ConcreteDataType::float64_datatype(), false),
-            semantic_type: SemanticType::Field,
-            column_id: 251,
-        });
-        builder.build()
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(23, 33), 0);
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 45,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("pk", ConcreteDataType::string_datatype(), false),
+                semantic_type: SemanticType::Tag,
+                column_id: 36,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "val",
+                    ConcreteDataType::float64_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id: 251,
+            });
+        builder.build().unwrap()
     }
 
     #[tokio::test]
@@ -317,13 +322,13 @@ mod test {
             .await
             .unwrap();
 
-        let new_metadata_builder = RegionMetadataBuilder::from_existing(metadata, 1);
-        let new_metadata_builder = new_metadata_builder.add_column_metadata(ColumnMetadata {
+        let mut new_metadata_builder = RegionMetadataBuilder::from_existing(metadata, 1);
+        new_metadata_builder.push_column_metadata(ColumnMetadata {
             column_schema: ColumnSchema::new("val2", ConcreteDataType::float64_datatype(), false),
             semantic_type: SemanticType::Field,
             column_id: 252,
         });
-        let new_metadata = new_metadata_builder.build();
+        let new_metadata = new_metadata_builder.build().unwrap();
 
         let mut action_list =
             RegionMetaActionList::with_action(RegionMetaAction::Change(RegionChange {

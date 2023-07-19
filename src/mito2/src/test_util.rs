@@ -14,6 +14,7 @@
 
 //! Utilities for testing.
 
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use common_datasource::compression::CompressionType;
@@ -29,7 +30,8 @@ use crate::engine::MitoEngine;
 use crate::error::Result;
 use crate::manifest::manager::RegionManifestManager;
 use crate::manifest::options::RegionManifestOptions;
-use crate::metadata::RegionMetadata;
+use crate::memtable::{Memtable, MemtableBuilder, MemtableId, MemtableRef};
+use crate::metadata::{RegionMetadata, RegionMetadataRef};
 use crate::worker::WorkerGroup;
 
 /// Env to test mito engine.
@@ -95,5 +97,39 @@ impl TestEnv {
         };
 
         RegionManifestManager::new(manifest_opts).await
+    }
+}
+
+/// Memtable that only for testing metadata.
+#[derive(Debug, Default)]
+pub struct MetaOnlyMemtable {
+    /// Id of this memtable.
+    id: MemtableId,
+}
+
+impl MetaOnlyMemtable {
+    /// Returns a new memtable with specific `id`.
+    pub fn new(id: MemtableId) -> MetaOnlyMemtable {
+        MetaOnlyMemtable { id }
+    }
+}
+
+impl Memtable for MetaOnlyMemtable {
+    fn id(&self) -> MemtableId {
+        self.id
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct MetaOnlyBuilder {
+    /// Next memtable id.
+    next_id: AtomicU32,
+}
+
+impl MemtableBuilder for MetaOnlyBuilder {
+    fn build(&self, _metadata: &RegionMetadataRef) -> MemtableRef {
+        Arc::new(MetaOnlyMemtable::new(
+            self.next_id.fetch_add(1, Ordering::Relaxed),
+        ))
     }
 }
