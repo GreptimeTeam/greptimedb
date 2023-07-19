@@ -16,8 +16,10 @@ use std::sync::Arc;
 
 use api::v1::greptime_database_server::GreptimeDatabase;
 use api::v1::greptime_response::Response as RawResponse;
-use api::v1::{AffectedRows, GreptimeRequest, GreptimeResponse};
+use api::v1::{AffectedRows, GreptimeRequest, GreptimeResponse, ResponseHeader};
 use async_trait::async_trait;
+use common_error::ext::ErrorExt;
+use common_error::status_code::StatusCode;
 use common_query::Output;
 use futures::StreamExt;
 use tonic::{Request, Response, Status, Streaming};
@@ -44,13 +46,27 @@ impl GreptimeDatabase for DatabaseService {
         let request = request.into_inner();
         let output = self.handler.handle_request(request).await?;
         let response = match output {
-            Output::AffectedRows(rows) => GreptimeResponse {
-                header: None,
+            Ok(Output::AffectedRows(rows)) => GreptimeResponse {
+                header: Some(ResponseHeader {
+                    status: Some(api::v1::Status {
+                        status_code: StatusCode::Success as _,
+                        ..Default::default()
+                    }),
+                }),
                 response: Some(RawResponse::AffectedRows(AffectedRows { value: rows as _ })),
             },
-            Output::Stream(_) | Output::RecordBatches(_) => {
+            Ok(Output::Stream(_)) | Ok(Output::RecordBatches(_)) => {
                 return Err(Status::unimplemented("GreptimeDatabase::Handle for query"));
             }
+            Err(e) => GreptimeResponse {
+                header: Some(ResponseHeader {
+                    status: Some(api::v1::Status {
+                        status_code: e.status_code() as _,
+                        err_msg: e.to_string(),
+                    }),
+                }),
+                response: None,
+            },
         };
         Ok(Response::new(response))
     }
@@ -66,17 +82,26 @@ impl GreptimeDatabase for DatabaseService {
             let request = request?;
             let output = self.handler.handle_request(request).await?;
             match output {
-                Output::AffectedRows(rows) => affected_rows += rows,
-                Output::Stream(_) | Output::RecordBatches(_) => {
+                Ok(Output::AffectedRows(rows)) => affected_rows += rows,
+                Ok(Output::Stream(_)) | Ok(Output::RecordBatches(_)) => {
                     return Err(Status::unimplemented(
                         "GreptimeDatabase::HandleRequests for query",
                     ));
+                }
+                Err(e) => {
+                    // We directly convert it to a tonic error and fail immediately in stream.
+                    return Err(e.into());
                 }
             }
         }
 
         let response = GreptimeResponse {
-            header: None,
+            header: Some(ResponseHeader {
+                status: Some(api::v1::Status {
+                    status_code: StatusCode::Success as _,
+                    ..Default::default()
+                }),
+            }),
             response: Some(RawResponse::AffectedRows(AffectedRows {
                 value: affected_rows as u32,
             })),

@@ -22,6 +22,7 @@ use api::v1::promql_request::Promql;
 use api::v1::{PromqlRequest, PromqlResponse, ResponseHeader};
 use async_trait::async_trait;
 use common_error::ext::ErrorExt;
+use common_error::status_code::StatusCode;
 use common_telemetry::timer;
 use common_time::util::current_time_rfc3339;
 use promql_parser::parser::ValueType;
@@ -80,7 +81,12 @@ impl PrometheusGateway for PrometheusGatewayService {
         let json_bytes = serde_json::to_string(&json_response).unwrap().into_bytes();
 
         let response = Response::new(PromqlResponse {
-            header: Some(ResponseHeader { status: None }),
+            header: Some(ResponseHeader {
+                status: Some(api::v1::Status {
+                    status_code: StatusCode::Success as _,
+                    ..Default::default()
+                }),
+            }),
             body: json_bytes,
         });
         Ok(response)

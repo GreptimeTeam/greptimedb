@@ -17,9 +17,9 @@ use api::v1::ddl_request::Expr as DdlExpr;
 use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
 use api::v1::{
-    greptime_response, AffectedRows, AlterExpr, AuthHeader, CompactTableExpr, CreateTableExpr,
-    DdlRequest, DeleteRequest, DropTableExpr, FlushTableExpr, GreptimeRequest, InsertRequests,
-    PromRangeQuery, QueryRequest, RequestHeader,
+    AlterExpr, AuthHeader, CompactTableExpr, CreateTableExpr, DdlRequest, DeleteRequest,
+    DropTableExpr, FlushTableExpr, GreptimeRequest, InsertRequests, PromRangeQuery, QueryRequest,
+    RequestHeader,
 };
 use arrow_flight::{FlightData, Ticket};
 use common_error::ext::{BoxedError, ErrorExt};
@@ -28,12 +28,10 @@ use common_query::Output;
 use common_telemetry::{logging, timer};
 use futures_util::{TryFutureExt, TryStreamExt};
 use prost::Message;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{ensure, ResultExt};
 
-use crate::error::{
-    ConvertFlightDataSnafu, IllegalDatabaseResponseSnafu, IllegalFlightMessagesSnafu,
-};
-use crate::{error, metrics, Client, Result, StreamInserter};
+use crate::error::{ConvertFlightDataSnafu, IllegalFlightMessagesSnafu, ServerSnafu};
+use crate::{error, from_grpc_response, metrics, Client, Result, StreamInserter};
 
 #[derive(Clone, Debug, Default)]
 pub struct Database {
@@ -142,16 +140,8 @@ impl Database {
     async fn handle(&self, request: Request) -> Result<u32> {
         let mut client = self.client.make_database_client()?.inner;
         let request = self.to_rpc_request(request);
-        let response = client
-            .handle(request)
-            .await?
-            .into_inner()
-            .response
-            .context(IllegalDatabaseResponseSnafu {
-                err_msg: "GreptimeResponse is empty",
-            })?;
-        let greptime_response::Response::AffectedRows(AffectedRows { value }) = response;
-        Ok(value)
+        let response = client.handle(request).await?.into_inner();
+        from_grpc_response(response)
     }
 
     #[inline]
@@ -264,7 +254,7 @@ impl Database {
                 let e: error::Error = e.into();
                 let code = e.status_code();
                 let msg = e.to_string();
-                error::ServerSnafu { code, msg }
+                ServerSnafu { code, msg }
                     .fail::<()>()
                     .map_err(BoxedError::new)
                     .context(error::FlightGetSnafu {
