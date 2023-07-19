@@ -44,9 +44,10 @@ use table::table::adapter::DfTableProviderAdapter;
 
 use crate::error::{
     CatalogSnafu, ColumnNotFoundSnafu, DataFusionPlanningSnafu, ExpectExprSnafu,
-    ExpectRangeSelectorSnafu, MultipleVectorSnafu, Result, TableNameNotFoundSnafu,
-    TimeIndexNotFoundSnafu, UnexpectedPlanExprSnafu, UnexpectedTokenSnafu, UnknownTableSnafu,
-    UnsupportedExprSnafu, ValueNotFoundSnafu, ZeroRangeSelectorSnafu,
+    ExpectRangeSelectorSnafu, MultipleMetricMatchersSnafu, MultipleVectorSnafu,
+    NoMetricMatcherSnafu, Result, TableNameNotFoundSnafu, TimeIndexNotFoundSnafu,
+    UnexpectedPlanExprSnafu, UnexpectedTokenSnafu, UnknownTableSnafu, UnsupportedExprSnafu,
+    ValueNotFoundSnafu, ZeroRangeSelectorSnafu,
 };
 use crate::extension_plan::{
     build_special_time_expr, EmptyMetric, InstantManipulate, Millisecond, RangeManipulate,
@@ -337,12 +338,12 @@ impl PromPlanner {
                 })
             }
             PromExpr::VectorSelector(VectorSelector {
-                name: _,
+                name,
                 offset,
                 matchers,
                 at: _,
             }) => {
-                let matchers = self.preprocess_label_matchers(matchers)?;
+                let matchers = self.preprocess_label_matchers(matchers, name)?;
                 self.setup_context().await?;
                 let normalize = self
                     .selector_to_series_normalize_plan(offset, matchers, false)
@@ -368,9 +369,13 @@ impl PromPlanner {
                 range,
             }) => {
                 let VectorSelector {
-                    offset, matchers, ..
+                    name,
+                    offset,
+                    matchers,
+                    ..
                 } = vector_selector;
-                let matchers = self.preprocess_label_matchers(matchers)?;
+                // self.ctx.table_name = Some(name.context());
+                let matchers = self.preprocess_label_matchers(matchers, name)?;
                 self.setup_context().await?;
 
                 ensure!(!range.is_zero(), ZeroRangeSelectorSnafu);
@@ -470,13 +475,35 @@ impl PromPlanner {
 
     /// Extract metric name from `__name__` matcher and set it into [PromPlannerContext].
     /// Returns a new [Matchers] that doesn't contains metric name matcher.
-    fn preprocess_label_matchers(&mut self, label_matchers: &Matchers) -> Result<Matchers> {
+    ///
+    /// Name rule:
+    /// - if `name` is some, then the matchers MUST NOT contains `__name__` matcher.
+    /// - if `name` is none, then the matchers MAY contains NONE OR MULTIPLE `__name__` matchers.
+    fn preprocess_label_matchers(
+        &mut self,
+        label_matchers: &Matchers,
+        name: &Option<String>,
+    ) -> Result<Matchers> {
+        let metric_name;
+        if let Some(name) = name.clone() {
+            metric_name = Some(name);
+            ensure!(
+                label_matchers.find_matcher(METRIC_NAME).is_none(),
+                MultipleMetricMatchersSnafu
+            );
+        } else {
+            metric_name = Some(
+                label_matchers
+                    .find_matcher(METRIC_NAME)
+                    .context(NoMetricMatcherSnafu)?,
+            );
+        }
+        self.ctx.table_name = metric_name;
+
         let mut matchers = HashSet::new();
         for matcher in &label_matchers.matchers {
             // TODO(ruihang): support other metric match ops
-            if matcher.name == METRIC_NAME && matches!(matcher.op, MatchOp::Equal) {
-                self.ctx.table_name = Some(matcher.value.clone());
-            } else if matcher.name == FIELD_COLUMN_MATCHER {
+            if matcher.name == FIELD_COLUMN_MATCHER {
                 self.ctx
                     .field_column_matcher
                     .get_or_insert_default()
@@ -1614,7 +1641,7 @@ mod test {
         let plan = PromPlanner::stmt_to_plan(table_provider, eval_stmt.clone())
             .await
             .unwrap();
-        let  expected_no_without = String::from(
+        let expected_no_without = String::from(
             "Sort: some_metric.tag_1 ASC NULLS LAST, some_metric.timestamp ASC NULLS LAST [tag_1:Utf8, timestamp:Timestamp(Millisecond, None), TEMPLATE(some_metric.field_0):Float64;N, TEMPLATE(some_metric.field_1):Float64;N]\
             \n  Aggregate: groupBy=[[some_metric.tag_1, some_metric.timestamp]], aggr=[[TEMPLATE(some_metric.field_0), TEMPLATE(some_metric.field_1)]] [tag_1:Utf8, timestamp:Timestamp(Millisecond, None), TEMPLATE(some_metric.field_0):Float64;N, TEMPLATE(some_metric.field_1):Float64;N]\
             \n    PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, tag_1:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N, field_1:Float64;N]\
@@ -1639,7 +1666,7 @@ mod test {
         let plan = PromPlanner::stmt_to_plan(table_provider, eval_stmt)
             .await
             .unwrap();
-        let  expected_without = String::from(
+        let expected_without = String::from(
             "Sort: some_metric.tag_0 ASC NULLS LAST, some_metric.timestamp ASC NULLS LAST [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), TEMPLATE(some_metric.field_0):Float64;N, TEMPLATE(some_metric.field_1):Float64;N]\
             \n  Aggregate: groupBy=[[some_metric.tag_0, some_metric.timestamp]], aggr=[[TEMPLATE(some_metric.field_0), TEMPLATE(some_metric.field_1)]] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), TEMPLATE(some_metric.field_0):Float64;N, TEMPLATE(some_metric.field_1):Float64;N]\
             \n    PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, tag_1:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N, field_1:Float64;N]\
