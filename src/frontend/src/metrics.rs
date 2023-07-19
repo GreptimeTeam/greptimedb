@@ -24,3 +24,5 @@ pub const DIST_INGEST_ROW_COUNT: &str = "frontend.dist.ingest_rows";
 
 /// The samples count of Prometheus remote write.
 pub const PROM_STORE_REMOTE_WRITE_SAMPLES: &str = "frontend.prometheus.remote_write.samples";
+
+pub const OTLP_METRICS_ROWS: &str = "frontend.otlp.metrics.rows";

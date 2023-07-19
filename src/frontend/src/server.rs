@@ -38,7 +38,7 @@ use crate::error::Error::StartServer;
 use crate::error::{self, Result};
 use crate::frontend::FrontendOptions;
 use crate::instance::FrontendInstance;
-use crate::service_config::{InfluxdbOptions, PromStoreOptions};
+use crate::service_config::{InfluxdbOptions, OtlpOptions, PromStoreOptions};
 
 pub(crate) struct Services;
 
@@ -176,6 +176,10 @@ impl Services {
                 Some(PromStoreOptions { enable: true })
             ) {
                 let _ = http_server_builder.with_prom_handler(instance.clone());
+            }
+
+            if matches!(opts.otlp_options, Some(OtlpOptions { enable: true })) {
+                let _ = http_server_builder.with_otlp_handler(instance.clone());
             }
 
             let http_server = http_server_builder
