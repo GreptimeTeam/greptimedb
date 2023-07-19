@@ -22,9 +22,10 @@ mod test {
     use frontend::instance::Instance;
     use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
     use opentelemetry_proto::tonic::common::v1::any_value::Value as Val;
-    use opentelemetry_proto::tonic::common::v1::{AnyValue, KeyValue};
+    use opentelemetry_proto::tonic::common::v1::{AnyValue, InstrumentationScope, KeyValue};
     use opentelemetry_proto::tonic::metrics::v1::number_data_point::Value;
     use opentelemetry_proto::tonic::metrics::v1::{metric, NumberDataPoint, *};
+    use opentelemetry_proto::tonic::resource::v1::Resource;
     use servers::query_handler::sql::SqlQueryHandler;
     use servers::query_handler::OpenTelemetryProtocolHandler;
     use session::context::QueryContext;
@@ -76,12 +77,12 @@ mod test {
         assert_eq!(
             recordbatches.pretty_print().unwrap(),
             "\
-+------------+---------------------+----------------+
-| host       | greptime_timestamp  | greptime_value |
-+------------+---------------------+----------------+
-| testserver | 1970-01-01T00:00:00 | 105.0          |
-| testsevrer | 1970-01-01T00:00:00 | 100.0          |
-+------------+---------------------+----------------+"
++------------+-------+------------+---------------------+----------------+
+| resource   | scope | host       | greptime_timestamp  | greptime_value |
++------------+-------+------------+---------------------+----------------+
+| greptimedb | otel  | testserver | 1970-01-01T00:00:00 | 105.0          |
+| greptimedb | otel  | testsevrer | 1970-01-01T00:00:00 | 100.0          |
++------------+-------+------------+---------------------+----------------+",
         );
     }
 
@@ -111,8 +112,16 @@ mod test {
                         unit: "my ignored unit".into(),
                         data: Some(metric::Data::Gauge(gauge)),
                     }],
+                    scope: Some(InstrumentationScope {
+                        attributes: vec![keyvalue("scope", "otel")],
+                        ..Default::default()
+                    }),
                     ..Default::default()
                 }],
+                resource: Some(Resource {
+                    attributes: vec![keyvalue("resource", "greptimedb")],
+                    dropped_attributes_count: 0,
+                }),
                 ..Default::default()
             }],
         }
