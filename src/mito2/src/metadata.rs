@@ -60,6 +60,9 @@ pub struct RegionMetadata {
     /// Latest schema constructed from [column_metadatas](RegionMetadata::column_metadatas).
     #[serde(skip)]
     pub schema: SchemaRef,
+
+    // We don't pub `time_index` and `id_to_index` and always construct them via [SkippedFields]
+    // so we can assumes they are valid.
     /// Id of the time index column.
     #[serde(skip)]
     time_index: ColumnId,
@@ -156,6 +159,22 @@ impl SkippedFields {
 }
 
 impl RegionMetadata {
+    /// Find column by id.
+    pub(crate) fn column_by_id(&self, column_id: ColumnId) -> Option<&ColumnMetadata> {
+        self.id_to_index
+            .get(&column_id)
+            .map(|index| &self.column_metadatas[*index])
+    }
+
+    /// Returns the time index column
+    ///
+    /// # Panics
+    /// Panics if the time index column id is invalid.
+    pub(crate) fn time_index_column(&self) -> &ColumnMetadata {
+        let index = self.id_to_index[&self.time_index];
+        &self.column_metadatas[index]
+    }
+
     /// Checks whether the metadata is valid.
     fn validate(&self) -> Result<()> {
         // Id to name.
@@ -188,6 +207,17 @@ impl RegionMetadata {
             num_time_index == 1,
             InvalidMetaSnafu {
                 reason: format!("expect only one time index, found {}", num_time_index),
+            }
+        );
+
+        // Checks the time index column is not nullable.
+        ensure!(
+            !self.time_index_column().column_schema.is_nullable(),
+            InvalidMetaSnafu {
+                reason: format!(
+                    "time index column {} must be NOT NULL",
+                    self.time_index_column().column_schema.name
+                ),
             }
         );
 
@@ -366,6 +396,17 @@ mod test {
     }
 
     #[test]
+    fn test_region_metadata() {
+        let region_metadata = build_test_region_metadata();
+        assert_eq!("c", region_metadata.time_index_column().column_schema.name);
+        assert_eq!(
+            "a",
+            region_metadata.column_by_id(1).unwrap().column_schema.name
+        );
+        assert_eq!(None, region_metadata.column_by_id(10));
+    }
+
+    #[test]
     fn test_region_metadata_serde() {
         let region_metadata = build_test_region_metadata();
         let serialized = serde_json::to_string(&region_metadata).unwrap();
@@ -534,6 +575,27 @@ mod test {
         assert!(
             err.to_string()
                 .contains("column ts is already a time index column"),
+            "unexpected err: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_nullable_time_index() {
+        let mut builder = create_builder();
+        builder.push_column_metadata(ColumnMetadata {
+            column_schema: ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                true,
+            ),
+            semantic_type: SemanticType::Timestamp,
+            column_id: 1,
+        });
+        let err = builder.build().unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("time index column ts must be NOT NULL"),
             "unexpected err: {}",
             err
         );
