@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use arrow::array::{make_array, ArrayData};
-use arrow::pyarrow::PyArrowConvert;
+use arrow::pyarrow::ToPyArrow;
 use datafusion::arrow::array::BooleanArray;
 use datafusion::arrow::compute;
 use datafusion::arrow::compute::kernels::{arithmetic, comparison};
