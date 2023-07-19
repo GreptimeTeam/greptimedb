@@ -19,6 +19,14 @@ SHOW DATABASES LIKE '%public%';
 | test_public_schema |
 +--------------------+
 
+SHOW DATABASES WHERE Schemas='test_public_schema';
+
++--------------------+
+| Schemas            |
++--------------------+
+| test_public_schema |
++--------------------+
+
 USE test_public_schema;
 
 ++
