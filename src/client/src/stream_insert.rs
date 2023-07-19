@@ -24,7 +24,7 @@ use tonic::transport::Channel;
 use tonic::{Response, Status};
 
 use crate::error::{self, Result};
-use crate::parse_grpc_response;
+use crate::from_grpc_response;
 
 /// A structure that provides some methods for streaming data insert.
 ///
@@ -89,7 +89,7 @@ impl StreamInserter {
 
         let response = self.join.await.unwrap()?;
         let response = response.into_inner();
-        parse_grpc_response(response)
+        from_grpc_response(response)
     }
 
     fn to_rpc_request(&self, request: Request) -> GreptimeRequest {

@@ -31,7 +31,7 @@ use prost::Message;
 use snafu::{ensure, ResultExt};
 
 use crate::error::{ConvertFlightDataSnafu, IllegalFlightMessagesSnafu, ServerSnafu};
-use crate::{error, metrics, parse_grpc_response, Client, Result, StreamInserter};
+use crate::{error, from_grpc_response, metrics, Client, Result, StreamInserter};
 
 #[derive(Clone, Debug, Default)]
 pub struct Database {
@@ -141,7 +141,7 @@ impl Database {
         let mut client = self.client.make_database_client()?.inner;
         let request = self.to_rpc_request(request);
         let response = client.handle(request).await?.into_inner();
-        parse_grpc_response(response)
+        from_grpc_response(response)
     }
 
     #[inline]

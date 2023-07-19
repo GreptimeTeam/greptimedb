@@ -22,9 +22,10 @@ mod stream_insert;
 
 pub use api;
 use api::v1::greptime_response::Response;
-use api::v1::{AffectedRows, GreptimeResponse, ResponseHeader, Status};
+use api::v1::{AffectedRows, GreptimeResponse};
 pub use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::status_code::StatusCode;
+use snafu::OptionExt;
 
 pub use self::client::Client;
 pub use self::database::Database;
@@ -32,26 +33,30 @@ pub use self::error::{Error, Result};
 pub use self::stream_insert::StreamInserter;
 use crate::error::{IllegalDatabaseResponseSnafu, ServerSnafu};
 
-pub fn parse_grpc_response(response: GreptimeResponse) -> Result<u32> {
-    match (response.header, response.response) {
-        (Some(_), Some(Response::AffectedRows(AffectedRows { value }))) => Ok(value),
-        (
-            Some(ResponseHeader {
-                status:
-                    Some(Status {
-                        status_code,
-                        err_msg,
-                    }),
-            }),
-            None,
-        ) => ServerSnafu {
-            code: StatusCode::from(status_code),
-            msg: err_msg,
+pub fn from_grpc_response(response: GreptimeResponse) -> Result<u32> {
+    let header = response.header.context(IllegalDatabaseResponseSnafu {
+        err_msg: "missing header",
+    })?;
+    let status = header.status.context(IllegalDatabaseResponseSnafu {
+        err_msg: "missing status",
+    })?;
+
+    if StatusCode::is_success(status.status_code) {
+        let res = response.response.context(IllegalDatabaseResponseSnafu {
+            err_msg: "missing response",
+        })?;
+        match res {
+            Response::AffectedRows(AffectedRows { value }) => Ok(value),
         }
-        .fail(),
-        (header, res) => IllegalDatabaseResponseSnafu {
-            err_msg: format!("unexpected header: {:?} or response: {:?}", header, res),
+    } else {
+        let status_code =
+            StatusCode::from_u32(status.status_code).context(IllegalDatabaseResponseSnafu {
+                err_msg: format!("invalid status: {:?}", status),
+            })?;
+        ServerSnafu {
+            code: status_code,
+            msg: status.err_msg,
         }
-        .fail(),
+        .fail()
     }
 }

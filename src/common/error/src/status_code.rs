@@ -154,44 +154,50 @@ impl StatusCode {
             | StatusCode::AccessDenied => false,
         }
     }
+
+    pub fn from_u32(value: u32) -> Option<Self> {
+        match value {
+            v if v == StatusCode::Success as u32 => Some(StatusCode::Success),
+            v if v == StatusCode::Unknown as u32 => Some(StatusCode::Unknown),
+            v if v == StatusCode::Unsupported as u32 => Some(StatusCode::Unsupported),
+            v if v == StatusCode::Unexpected as u32 => Some(StatusCode::Unexpected),
+            v if v == StatusCode::Internal as u32 => Some(StatusCode::Internal),
+            v if v == StatusCode::InvalidArguments as u32 => Some(StatusCode::InvalidArguments),
+            v if v == StatusCode::Cancelled as u32 => Some(StatusCode::Cancelled),
+            v if v == StatusCode::InvalidSyntax as u32 => Some(StatusCode::InvalidSyntax),
+            v if v == StatusCode::PlanQuery as u32 => Some(StatusCode::PlanQuery),
+            v if v == StatusCode::EngineExecuteQuery as u32 => Some(StatusCode::EngineExecuteQuery),
+            v if v == StatusCode::TableAlreadyExists as u32 => Some(StatusCode::TableAlreadyExists),
+            v if v == StatusCode::TableNotFound as u32 => Some(StatusCode::TableNotFound),
+            v if v == StatusCode::TableColumnNotFound as u32 => {
+                Some(StatusCode::TableColumnNotFound)
+            }
+            v if v == StatusCode::TableColumnExists as u32 => Some(StatusCode::TableColumnExists),
+            v if v == StatusCode::DatabaseNotFound as u32 => Some(StatusCode::DatabaseNotFound),
+            v if v == StatusCode::StorageUnavailable as u32 => Some(StatusCode::StorageUnavailable),
+            v if v == StatusCode::RuntimeResourcesExhausted as u32 => {
+                Some(StatusCode::RuntimeResourcesExhausted)
+            }
+            v if v == StatusCode::RateLimited as u32 => Some(StatusCode::RateLimited),
+            v if v == StatusCode::UserNotFound as u32 => Some(StatusCode::UserNotFound),
+            v if v == StatusCode::UnsupportedPasswordType as u32 => {
+                Some(StatusCode::UnsupportedPasswordType)
+            }
+            v if v == StatusCode::UserPasswordMismatch as u32 => {
+                Some(StatusCode::UserPasswordMismatch)
+            }
+            v if v == StatusCode::AuthHeaderNotFound as u32 => Some(StatusCode::AuthHeaderNotFound),
+            v if v == StatusCode::InvalidAuthHeader as u32 => Some(StatusCode::InvalidAuthHeader),
+            v if v == StatusCode::AccessDenied as u32 => Some(StatusCode::AccessDenied),
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for StatusCode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // The current debug format is suitable to display.
         write!(f, "{self:?}")
-    }
-}
-
-impl From<u32> for StatusCode {
-    fn from(value: u32) -> Self {
-        match value {
-            0 => StatusCode::Success,
-            1000 => StatusCode::Unknown,
-            1001 => StatusCode::Unsupported,
-            1002 => StatusCode::Unexpected,
-            1003 => StatusCode::Internal,
-            1004 => StatusCode::InvalidArguments,
-            1005 => StatusCode::Cancelled,
-            2000 => StatusCode::InvalidSyntax,
-            3000 => StatusCode::PlanQuery,
-            3001 => StatusCode::EngineExecuteQuery,
-            4000 => StatusCode::TableAlreadyExists,
-            4001 => StatusCode::TableNotFound,
-            4002 => StatusCode::TableColumnNotFound,
-            4003 => StatusCode::TableColumnExists,
-            4004 => StatusCode::DatabaseNotFound,
-            5000 => StatusCode::StorageUnavailable,
-            6000 => StatusCode::RuntimeResourcesExhausted,
-            6001 => StatusCode::RateLimited,
-            7000 => StatusCode::UserNotFound,
-            7001 => StatusCode::UnsupportedPasswordType,
-            7002 => StatusCode::UserPasswordMismatch,
-            7003 => StatusCode::AuthHeaderNotFound,
-            7004 => StatusCode::InvalidAuthHeader,
-            7005 => StatusCode::AccessDenied,
-            _ => StatusCode::Unknown,
-        }
     }
 }
 
