@@ -333,7 +333,7 @@ impl InstantManipulateStream {
     // refer to Go version: https://github.com/prometheus/prometheus/blob/e934d0f01158a1d55fa0ebb035346b195fcc1260/promql/engine.go#L1571
     // and the function `vectorSelectorSingle`
     pub fn manipulate(&self, input: RecordBatch) -> DataFusionResult<RecordBatch> {
-        let mut take_indices = Vec::with_capacity(input.num_rows());
+        let mut take_indices = vec![];
         // TODO(ruihang): maybe the input is not timestamp millisecond array
         let ts_column = input
             .column(self.time_index)
@@ -347,9 +347,6 @@ impl InstantManipulateStream {
             .and_then(|index| input.column(index).as_any().downcast_ref::<Float64Array>());
 
         let mut cursor = 0;
-        // let aligned_ts = (self.start..=self.end)
-        //     .step_by(self.interval as usize)
-        //     .collect::<Vec<_>>();
 
         let aligned_ts_iter = (self.start..=self.end).step_by(self.interval as usize);
         let mut aligned_ts = vec![];
@@ -363,9 +360,8 @@ impl InstantManipulateStream {
                     Ordering::Equal => {
                         if let Some(field_column) = &field_column && field_column.value(cursor).is_nan() {
                             // ignore the NaN value
-                            // take_indices.push(None);
                         } else {
-                            take_indices.push(Some(cursor as u64));
+                            take_indices.push(cursor as u64);
                             aligned_ts.push(expected_ts);
                         }
                         continue 'next;
@@ -386,33 +382,29 @@ impl InstantManipulateStream {
             // then examine the value
             let curr_ts = ts_column.value(cursor);
             if curr_ts + self.lookback_delta < expected_ts {
-                // take_indices.push(None);
                 continue;
             }
             if curr_ts > expected_ts {
                 // exceeds current expected timestamp, examine the previous value
                 if let Some(prev_cursor) = cursor.checked_sub(1) {
                     let prev_ts = ts_column.value(prev_cursor);
-                    if prev_ts + self.lookback_delta < expected_ts {
-                        // not found in lookback, leave this field blank.
-                        // take_indices.push(None);
-                    } else if let Some(field_column) = &field_column && field_column.value(prev_cursor).is_nan() {
-                        // if the newest value is NaN, it means the value is stale, so we should not use it
-                        // take_indices.push(None);
-                    } else {
+                    if prev_ts + self.lookback_delta >= expected_ts {
+                        // only use the point in the time range
+                        if let Some(field_column) = &field_column
+                            && field_column.value(prev_cursor).is_nan() {
+                            // if the newest value is NaN, it means the value is stale, so we should not use it
+                            continue;
+                        }
                         // use this point
-                        take_indices.push(Some(prev_cursor as u64));
+                        take_indices.push(prev_cursor as u64);
                         aligned_ts.push(expected_ts);
                     }
-                } else {
-                    // take_indices.push(None);
                 }
             } else if let Some(field_column) = &field_column && field_column.value(cursor).is_nan() {
                 // if the newest value is NaN, it means the value is stale, so we should not use it
-                // take_indices.push(None);
             } else {
                 // use this point
-                take_indices.push(Some(cursor as u64));
+                take_indices.push(cursor as u64);
                 aligned_ts.push(expected_ts);
             }
         }
@@ -425,20 +417,10 @@ impl InstantManipulateStream {
     fn take_record_batch_optional(
         &self,
         record_batch: RecordBatch,
-        take_indices: Vec<Option<u64>>,
+        take_indices: Vec<u64>,
         aligned_ts: Vec<Millisecond>,
     ) -> DataFusionResult<RecordBatch> {
         assert_eq!(take_indices.len(), aligned_ts.len());
-        let aligned_ts = aligned_ts
-            .into_iter()
-            .zip(take_indices.iter())
-            .filter_map(|(ts, i)| i.map(|_| ts))
-            .collect::<Vec<_>>();
-        let take_indices = take_indices
-            .iter()
-            .filter(|i| i.is_some())
-            .copied()
-            .collect::<Vec<_>>();
 
         let indices_array = UInt64Array::from(take_indices);
         let mut arrays = record_batch
