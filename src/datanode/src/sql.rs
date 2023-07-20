@@ -37,6 +37,7 @@ mod create_external;
 mod drop_table;
 mod flush_table;
 pub(crate) mod insert;
+mod truncate_table;
 
 #[derive(Debug)]
 pub enum SqlRequest {
@@ -46,6 +47,7 @@ pub enum SqlRequest {
     DropTable(DropTableRequest),
     FlushTable(FlushTableRequest),
     CompactTable(CompactTableRequest),
+    TruncateTable(TruncateTableRequest),
 }
 
 // Handler to execute SQL except query
@@ -77,6 +79,7 @@ impl SqlHandler {
             SqlRequest::DropTable(req) => self.drop_table(req).await,
             SqlRequest::FlushTable(req) => self.flush_table(req).await,
             SqlRequest::CompactTable(req) => self.compact_table(req).await,
+            SqlRequest::TruncateTable(req) => self.truncate_table(req).await,
         };
         if let Err(e) = &result {
             error!(e; "{query_ctx}");

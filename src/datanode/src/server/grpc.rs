@@ -12,7 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::{AlterExpr, CompactTableExpr, CreateTableExpr, DropTableExpr, FlushTableExpr};
+use api::v1::{
+    AlterExpr, CompactTableExpr, CreateTableExpr, DropTableExpr, FlushTableExpr, TruncateTableExpr,
+};
 use common_catalog::consts::IMMUTABLE_FILE_ENGINE;
 use common_catalog::format_full_table_name;
 use common_grpc_expr::{alter_expr_to_request, create_expr_to_request};
@@ -20,7 +22,9 @@ use common_query::Output;
 use common_telemetry::info;
 use session::context::QueryContext;
 use snafu::prelude::*;
-use table::requests::{CompactTableRequest, DropTableRequest, FlushTableRequest};
+use table::requests::{
+    CompactTableRequest, DropTableRequest, FlushTableRequest, TruncateTableRequest,
+};
 
 use crate::error::{
     AlterExprToRequestSnafu, BumpTableIdSnafu, CatalogSnafu, CreateExprToRequestSnafu,
@@ -156,6 +160,31 @@ impl Instance {
         };
         self.sql_handler()
             .execute(SqlRequest::CompactTable(req), QueryContext::arc())
+            .await
+    }
+
+    pub(crate) async fn handle_truncate_table(&self, expr: TruncateTableExpr) -> Result<Output> {
+        let table = self
+            .catalog_manager
+            .table(&expr.catalog_name, &expr.schema_name, &expr.table_name)
+            .await
+            .context(CatalogSnafu)?
+            .with_context(|| TableNotFoundSnafu {
+                table_name: format_full_table_name(
+                    &expr.catalog_name,
+                    &expr.schema_name,
+                    &expr.table_name,
+                ),
+            })?;
+
+        let req = TruncateTableRequest {
+            catalog_name: expr.catalog_name,
+            schema_name: expr.schema_name,
+            table_name: expr.table_name,
+            table_id: table.table_info().ident.table_id,
+        };
+        self.sql_handler()
+            .execute(SqlRequest::TruncateTable(req), QueryContext::arc())
             .await
     }
 }

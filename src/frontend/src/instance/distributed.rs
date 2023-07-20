@@ -18,11 +18,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
-use api::v1::ddl_request::{Expr as DdlExpr, Expr};
+use api::v1::ddl_request::Expr as DdlExpr;
 use api::v1::greptime_request::Request;
 use api::v1::{
     column_def, AlterExpr, CompactTableExpr, CreateDatabaseExpr, CreateTableExpr, DeleteRequest,
-    FlushTableExpr, InsertRequests,
+    FlushTableExpr, InsertRequests, TruncateTableExpr,
 };
 use async_trait::async_trait;
 use catalog::{CatalogManager, DeregisterTableRequest, RegisterTableRequest};
@@ -307,6 +307,32 @@ impl DistInstance {
         Ok(res)
     }
 
+    async fn truncate_table(&self, table_name: TableName) -> Result<Output> {
+        let table = self
+            .catalog_manager
+            .table(
+                &table_name.catalog_name,
+                &table_name.schema_name,
+                &table_name.table_name,
+            )
+            .await
+            .context(CatalogSnafu)?
+            .with_context(|| TableNotFoundSnafu {
+                table_name: table_name.to_string(),
+            })?;
+        let table_id = table.table_info().ident.table_id;
+
+        let expr = TruncateTableExpr {
+            catalog_name: table_name.catalog_name.clone(),
+            schema_name: table_name.schema_name.clone(),
+            table_name: table_name.table_name.clone(),
+            table_id: Some(api::v1::TableId { id: table_id }),
+        };
+        self.truncate_table_procedure(&expr).await?;
+
+        Ok(Output::AffectedRows(0))
+    }
+
     async fn handle_statement(
         &self,
         stmt: Statement,
@@ -379,6 +405,14 @@ impl DistInstance {
                 let table_name = TableName::new(catalog, schema, table);
 
                 self.show_create_table(table_name, table_ref).await
+            }
+            Statement::TruncateTable(stmt) => {
+                let (catalog, schema, table) =
+                    table_idents_to_full_name(stmt.table_name(), query_ctx)
+                        .map_err(BoxedError::new)
+                        .context(error::ExternalSnafu)?;
+                let table_name = TableName::new(catalog, schema, table);
+                self.truncate_table(table_name).await
             }
             _ => error::NotSupportedSnafu {
                 feat: format!("{stmt:?}"),
@@ -564,6 +598,20 @@ impl DistInstance {
             .context(error::RequestMetaSnafu)
     }
 
+    async fn truncate_table_procedure(
+        &self,
+        truncate_table: &TruncateTableExpr,
+    ) -> Result<SubmitDdlTaskResponse> {
+        let request = SubmitDdlTaskRequest {
+            task: DdlTask::new_truncate_table(truncate_table.clone()),
+        };
+
+        self.meta_client
+            .submit_ddl_task(request)
+            .await
+            .context(error::RequestMetaSnafu)
+    }
+
     async fn handle_dist_insert(
         &self,
         requests: InsertRequests,
@@ -655,10 +703,15 @@ impl GrpcQueryHandler for DistInstance {
                             TableName::new(&expr.catalog_name, &expr.schema_name, &expr.table_name);
                         self.flush_table(table_name, expr.region_number).await
                     }
-                    Expr::CompactTable(expr) => {
+                    DdlExpr::CompactTable(expr) => {
                         let table_name =
                             TableName::new(&expr.catalog_name, &expr.schema_name, &expr.table_name);
                         self.compact_table(table_name, expr.region_number).await
+                    }
+                    DdlExpr::TruncateTable(expr) => {
+                        let table_name =
+                            TableName::new(&expr.catalog_name, &expr.schema_name, &expr.table_name);
+                        self.truncate_table(table_name).await
                     }
                 }
             }
