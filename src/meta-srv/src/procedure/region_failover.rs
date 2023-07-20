@@ -133,10 +133,6 @@ impl RegionFailoverManager {
             })
     }
 
-    pub(crate) fn is_region_failover_running(&self, key: &RegionFailoverKey) -> bool {
-        self.running_procedures.read().unwrap().contains(key)
-    }
-
     fn insert_running_procedures(
         &self,
         failed_region: &RegionIdent,
@@ -151,11 +147,6 @@ impl RegionFailoverManager {
         } else {
             None
         }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn running_procedures(&self) -> Arc<RwLock<HashSet<RegionFailoverKey>>> {
-        self.running_procedures.clone()
     }
 
     pub(crate) async fn do_region_failover(&self, failed_region: &RegionIdent) -> Result<()> {

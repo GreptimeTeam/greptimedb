@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use api::v1::meta::Peer;
+use common_meta::ident::TableIdent;
 use common_telemetry::warn;
 
 use crate::error::Result;
@@ -102,9 +103,13 @@ fn contains_table(
 
     if let Some(latest) = may_latest {
         for RegionStat {
-            catalog,
-            schema,
-            table,
+            table_ident:
+                TableIdent {
+                    catalog,
+                    schema,
+                    table,
+                    ..
+                },
             ..
         } in latest.region_stats.iter()
         {
@@ -121,6 +126,8 @@ fn contains_table(
 
 #[cfg(test)]
 mod tests {
+    use common_meta::ident::TableIdent;
+
     use crate::handler::node_stat::{RegionStat, Stat};
     use crate::keys::StatValue;
     use crate::selector::load_based::contains_table;
@@ -135,44 +142,30 @@ mod tests {
                 Stat {
                     region_stats: vec![
                         RegionStat {
-                            catalog: "greptime_1".to_string(),
-                            schema: "public_1".to_string(),
-                            table: "demo_1".to_string(),
+                            table_ident: TableIdent {
+                                catalog: "greptime_1".to_string(),
+                                schema: "public_1".to_string(),
+                                table: "demo_1".to_string(),
+                                ..Default::default()
+                            },
                             ..Default::default()
                         },
                         RegionStat {
-                            catalog: "greptime_2".to_string(),
-                            schema: "public_2".to_string(),
-                            table: "demo_2".to_string(),
+                            table_ident: TableIdent {
+                                catalog: "greptime_2".to_string(),
+                                schema: "public_2".to_string(),
+                                table: "demo_2".to_string(),
+                                ..Default::default()
+                            },
                             ..Default::default()
                         },
                         RegionStat {
-                            catalog: "greptime_3".to_string(),
-                            schema: "public_3".to_string(),
-                            table: "demo_3".to_string(),
-                            ..Default::default()
-                        },
-                    ],
-                    ..Default::default()
-                },
-                Stat {
-                    region_stats: vec![
-                        RegionStat {
-                            catalog: "greptime_1".to_string(),
-                            schema: "public_1".to_string(),
-                            table: "demo_1".to_string(),
-                            ..Default::default()
-                        },
-                        RegionStat {
-                            catalog: "greptime_2".to_string(),
-                            schema: "public_2".to_string(),
-                            table: "demo_2".to_string(),
-                            ..Default::default()
-                        },
-                        RegionStat {
-                            catalog: "greptime_3".to_string(),
-                            schema: "public_3".to_string(),
-                            table: "demo_3".to_string(),
+                            table_ident: TableIdent {
+                                catalog: "greptime_3".to_string(),
+                                schema: "public_3".to_string(),
+                                table: "demo_3".to_string(),
+                                ..Default::default()
+                            },
                             ..Default::default()
                         },
                     ],
@@ -181,21 +174,62 @@ mod tests {
                 Stat {
                     region_stats: vec![
                         RegionStat {
-                            catalog: "greptime_1".to_string(),
-                            schema: "public_1".to_string(),
-                            table: "demo_1".to_string(),
+                            table_ident: TableIdent {
+                                catalog: "greptime_1".to_string(),
+                                schema: "public_1".to_string(),
+                                table: "demo_1".to_string(),
+                                ..Default::default()
+                            },
                             ..Default::default()
                         },
                         RegionStat {
-                            catalog: "greptime_2".to_string(),
-                            schema: "public_2".to_string(),
-                            table: "demo_2".to_string(),
+                            table_ident: TableIdent {
+                                catalog: "greptime_2".to_string(),
+                                schema: "public_2".to_string(),
+                                table: "demo_2".to_string(),
+                                ..Default::default()
+                            },
                             ..Default::default()
                         },
                         RegionStat {
-                            catalog: "greptime_4".to_string(),
-                            schema: "public_4".to_string(),
-                            table: "demo_4".to_string(),
+                            table_ident: TableIdent {
+                                catalog: "greptime_3".to_string(),
+                                schema: "public_3".to_string(),
+                                table: "demo_3".to_string(),
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        },
+                    ],
+                    ..Default::default()
+                },
+                Stat {
+                    region_stats: vec![
+                        RegionStat {
+                            table_ident: TableIdent {
+                                catalog: "greptime_1".to_string(),
+                                schema: "public_1".to_string(),
+                                table: "demo_1".to_string(),
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        },
+                        RegionStat {
+                            table_ident: TableIdent {
+                                catalog: "greptime_2".to_string(),
+                                schema: "public_2".to_string(),
+                                table: "demo_2".to_string(),
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        },
+                        RegionStat {
+                            table_ident: TableIdent {
+                                catalog: "greptime_4".to_string(),
+                                schema: "public_4".to_string(),
+                                table: "demo_4".to_string(),
+                                ..Default::default()
+                            },
                             ..Default::default()
                         },
                     ],
