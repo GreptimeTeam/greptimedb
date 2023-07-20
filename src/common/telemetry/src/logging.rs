@@ -32,6 +32,10 @@ use tracing_subscriber::{filter, EnvFilter, Registry};
 
 pub use crate::{debug, error, info, log, trace, warn};
 
+tokio::task_local! {
+    pub static TRACE_ID: Option<u64>;
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LoggingOptions {

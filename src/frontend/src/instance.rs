@@ -486,6 +486,9 @@ impl SqlQueryHandler for Instance {
             Err(e) => return vec![Err(e)],
         };
 
+        let trace_id = common_telemetry::TRACE_ID.get();
+        common_telemetry::info!("trace id at frontend instance: {}", trace_id.unwrap());
+
         match parse_stmt(query.as_ref(), query_ctx.sql_dialect())
             .and_then(|stmts| query_interceptor.post_parsing(stmts, query_ctx.clone()))
         {

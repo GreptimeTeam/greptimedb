@@ -498,6 +498,11 @@ impl MergeReader {
     async fn fetch_next_batch(&mut self) -> Result<Option<Batch>> {
         self.try_init().await?;
 
+        let trace_id = common_telemetry::TRACE_ID
+            .try_with(|id| id.clone())
+            .unwrap_or(None);
+        common_telemetry::info!("trace id at merge reader: {:?}", trace_id);
+
         while !self.hot.is_empty() && self.batch_builder.num_rows() < self.batch_size {
             if self.hot.len() == 1 {
                 // No need to do merge sort if only one batch in the hot heap.

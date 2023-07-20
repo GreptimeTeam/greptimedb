@@ -7027,6 +7027,7 @@ dependencies = [
  "common-catalog",
  "common-error",
  "common-function-macro",
+ "common-telemetry",
  "datafusion",
  "datatypes",
  "futures",
