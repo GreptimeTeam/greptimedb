@@ -2,10 +2,14 @@
 
 mod func;
 mod id;
+mod linear;
+mod relation;
 
 use datatypes::prelude::ConcreteDataType;
 use datatypes::value::Value;
 pub use id::{GlobalId, Id, LocalId};
+pub use linear::MapFilterProject;
+pub use relation::{AggregateExpr, TableFunc};
 use serde::{Deserialize, Serialize};
 
 use crate::storage::errors::DataflowError;
