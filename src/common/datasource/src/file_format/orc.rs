@@ -150,7 +150,6 @@ pub struct OrcOpener {
 }
 
 impl OrcOpener {
-    /// Return a new [`OrcOpener`]. Fields indexes that are not in the `projection` will be ignored.
     pub fn new(
         object_store: ObjectStore,
         output_schema: SchemaRef,
