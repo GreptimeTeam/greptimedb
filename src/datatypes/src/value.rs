@@ -726,9 +726,9 @@ pub enum ValueRef<'a> {
     DateTime(DateTime),
     Timestamp(Timestamp),
     Time(Time),
+    Interval(Interval),
 
     // Compound types:
-    Interval(Interval),
 
     List(ListValueRef<'a>),
 }

@@ -180,9 +180,13 @@ impl<T: LogicalPrimitiveType> PrimitiveVector<T> {
                     .unwrap()
                     .to_data(),
             },
-            _ => {
-                unreachable!()
-            }
+            arrow_type => {
+                return CastTypeSnafu {
+                    msg: format!(
+                        "Failed to cast arrow array {:?} to interval vector",
+                        arrow_type,
+                    ),
+                }.fail()?;
         };
         let concrete_array = PrimitiveArray::<T::ArrowPrimitive>::from(array_data);
         Ok(Self::new(concrete_array))

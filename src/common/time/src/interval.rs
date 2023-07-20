@@ -131,7 +131,7 @@ impl Interval {
 
     /// Converts the interval to microseconds.
     pub fn to_micros(&self) -> i128 {
-        let days = (self.days as i64) + 30i64 * (self.months as i64);
+        let days = (self.days as i64) + DAYS_PER_MONTH * (self.months as i64);
         (self.micros as i128) + (MICROS_PER_DAY as i128) * (days as i128)
     }
 
@@ -293,13 +293,13 @@ impl Display for Interval {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         let mut s = String::new();
         if self.months != 0 {
-            s.push_str(&format!("{} months ", self.months));
+            write!(s, "{} months ", self.months)?;
         }
         if self.days != 0 {
-            s.push_str(&format!("{} days ", self.days));
+            write!(s, "{} days ", self.days)?;
         }
         if self.micros != 0 {
-            s.push_str(&format!("{} micros", self.micros));
+            write!(s, "{} micros", self.micros)?;
         }
         write!(f, "{}", s.trim())
     }
@@ -318,8 +318,8 @@ pub struct IntervalFormat {
     pub microseconds: i64,
 }
 
-impl<'a> From<&'a Interval> for IntervalFormat {
-    fn from(val: &Interval) -> IntervalFormat {
+impl From<Interval> for IntervalFormat {
+    fn from(val: Interval) -> IntervalFormat {
         let months = val.months;
         let days = val.days;
         let microseconds = val.micros;
@@ -420,7 +420,7 @@ impl IntervalFormat {
     /// Convert IntervalFormat to iso8601 format string
     pub fn to_iso8601_string(&self) -> String {
         if self.is_zero() {
-            return "PT0S".to_owned();
+            return "PT0S".to_string();
         }
         let mut result = "P".to_owned();
         let mut day = "".to_owned();
@@ -493,25 +493,20 @@ impl IntervalFormat {
         if self.is_zero() {
             return "00:00:00".to_owned();
         }
-        let mut result = "".to_owned();
-        let mut year_month = "".to_owned();
-        let mut day = "".to_owned();
-        let time_part = self.get_postgres_time_part();
-        if self.has_day() {
-            day = format!("{} days ", self.days)
-        }
+        let mut result = "".to_string();
         if self.has_year_month() {
             if self.years != 0 {
-                year_month.push_str(&format!("{} year ", self.years))
+                result.push_str(&format!("{} year ", self.years));
             }
             if self.months != 0 {
-                year_month.push_str(&format!("{} mons ", self.months));
+                result.push_str(&format!("{} mons ", self.months));
             }
         }
-        result.push_str(&year_month);
-        result.push_str(&day);
-        result.push_str(&time_part);
-        result.trim().to_owned()
+        if self.has_day() {
+            result.push_str(&format!("{} days ", self.days));
+        }
+        result.push_str(&self.get_postgres_time_part());
+        result.trim().to_string()
     }
 
     /// get postgres time part(include hours, minutes, seconds, microseconds)
@@ -519,10 +514,13 @@ impl IntervalFormat {
         let mut time_part = "".to_owned();
         if self.has_time_part() {
             let sign = if !self.has_time_part_positive() {
-                "-".to_owned()
+                "-"
             } else {
-                "".to_owned()
+                ""
             };
+            // You could also push it directly.
+            time_part.push_str(sign);
+            time_part.push_str(&hours);
             let hours = Self::padding_i64(self.hours);
             time_part.push_str(
                 &(sign
