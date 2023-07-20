@@ -68,9 +68,15 @@ pub struct OrcArrowStreamReaderAdapter<T: AsyncRead + AsyncSeek + Unpin + Send +
 impl<T: AsyncRead + AsyncSeek + Unpin + Send + 'static> OrcArrowStreamReaderAdapter<T> {
     pub fn new(
         output_schema: SchemaRef,
-        projection: Vec<usize>,
         stream: ArrowStreamReader<T>,
+        projection: Option<Vec<usize>>,
     ) -> Self {
+        let projection = if let Some(projection) = projection {
+            projection
+        } else {
+            (0..output_schema.fields().len()).collect()
+        };
+
         Self {
             output_schema,
             projection,
@@ -160,11 +166,7 @@ impl FileOpener for OrcOpener {
     fn open(&self, meta: FileMeta) -> DfResult<FileOpenFuture> {
         let object_store = self.object_store.clone();
         let output_schema = self.output_schema.clone();
-        let projection = if let Some(projection) = &self.projection {
-            projection.clone()
-        } else {
-            (0..output_schema.fields().len()).collect()
-        };
+        let projection = self.projection.clone();
         Ok(Box::pin(async move {
             let reader = object_store
                 .reader(meta.location().to_string().as_str())
@@ -175,7 +177,7 @@ impl FileOpener for OrcOpener {
                 .await
                 .map_err(|e| DataFusionError::External(Box::new(e)))?;
 
-            let stream = OrcArrowStreamReaderAdapter::new(output_schema, projection, stream_reader);
+            let stream = OrcArrowStreamReaderAdapter::new(output_schema, stream_reader, projection);
 
             let adopted = stream.map_err(|e| ArrowError::ExternalError(Box::new(e)));
             Ok(adopted.boxed())
