@@ -92,6 +92,7 @@ impl PrometheusServer {
 
     pub fn make_app(&self) -> Router {
         // TODO(ruihang): implement format_query, series, values, query_exemplars and targets methods
+        // TODO(shawnh2): may finally remove this method
 
         let router = Router::new()
             .route("/query", routing::post(instant_query).get(instant_query))
