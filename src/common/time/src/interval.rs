@@ -129,6 +129,7 @@ impl Interval {
         }
     }
 
+    /// Converts the interval to microseconds.
     pub fn to_micros(&self) -> i128 {
         let days = (self.days as i64) + 30i64 * (self.months as i64);
         (self.micros as i128) + (MICROS_PER_DAY as i128) * (days as i128)
@@ -168,7 +169,7 @@ impl Interval {
         result
     }
 
-    /// check if [IntervalMonthDayNano] is positive
+    /// check if Interval is positive
     pub fn is_positive(&self) -> bool {
         self.months >= 0 && self.days >= 0 && self.micros >= 0
     }
@@ -217,7 +218,7 @@ impl Interval {
         IntervalFormat::from(self).to_sql_standard_string()
     }
 
-    /// `Interval` Type and i128[MonthDayNano] Convert
+    /// Interval Type and i128[MonthDayNano] Convert
     pub fn from_i128(v: i128) -> Self {
         Interval {
             micros: (v as i64) / 1_000,
@@ -343,6 +344,7 @@ impl<'a> From<&'a Interval> for IntervalFormat {
 }
 
 impl IntervalFormat {
+    /// Convert IntervalFormat to Interval Type
     pub fn try_into_interval(self) -> crate::error::Result<Interval> {
         let months = self
             .years
@@ -395,14 +397,17 @@ impl IntervalFormat {
             && self.microseconds == 0
     }
 
+    /// Determine if year or month exist
     pub fn has_year_month(&self) -> bool {
         self.years != 0 || self.months != 0
     }
 
+    /// Determine if day exists
     pub fn has_day(&self) -> bool {
         self.days != 0
     }
 
+    /// Determine time part(includes hours, minutes, seconds, microseconds) is positive
     pub fn has_time_part_positive(&self) -> bool {
         self.hours > 0 || self.minutes > 0 || self.seconds > 0 || self.microseconds > 0
     }
@@ -412,6 +417,7 @@ impl IntervalFormat {
         self.hours != 0 || self.minutes != 0 || self.seconds != 0 || self.microseconds != 0
     }
 
+    /// Convert IntervalFormat to iso8601 format string
     pub fn to_iso8601_string(&self) -> String {
         if self.is_zero() {
             return "PT0S".to_owned();
@@ -451,6 +457,7 @@ impl IntervalFormat {
         result
     }
 
+    /// Convert IntervalFormat to sql standard format string
     pub fn to_sql_standard_string(self) -> String {
         if self.is_zero() {
             "0".to_owned()
@@ -481,6 +488,7 @@ impl IntervalFormat {
         }
     }
 
+    /// Convert IntervalFormat to postgres format string
     pub fn to_postgres_string(&self) -> String {
         if self.is_zero() {
             return "00:00:00".to_owned();
@@ -506,6 +514,7 @@ impl IntervalFormat {
         result.trim().to_owned()
     }
 
+    /// get postgres time part(include hours, minutes, seconds, microseconds)
     fn get_postgres_time_part(&self) -> String {
         let mut time_part = "".to_owned();
         if self.has_time_part() {
@@ -530,6 +539,7 @@ impl IntervalFormat {
         time_part
     }
 
+    /// padding i64 to string with 2 digits
     fn padding_i64(val: i64) -> String {
         let num = if val < 0 {
             val.unsigned_abs()
@@ -540,6 +550,7 @@ impl IntervalFormat {
     }
 }
 
+/// get year month string
 fn get_year_month(mons: i32, years: i32, is_only_year_month: bool) -> String {
     let months = mons.unsigned_abs();
     if years == 0 || is_only_year_month {
@@ -549,6 +560,7 @@ fn get_year_month(mons: i32, years: i32, is_only_year_month: bool) -> String {
     }
 }
 
+/// get time part string
 fn get_time_part(
     hours: i64,
     mins: i64,
@@ -572,6 +584,8 @@ fn get_time_part(
     interval
 }
 
+/// IntervalCompare is used to compare two intervals
+/// It make interval into microseconds style.
 #[derive(PartialEq, Eq, Hash, PartialOrd, Ord)]
 struct IntervalCompare(i128);
 
