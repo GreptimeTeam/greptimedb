@@ -27,18 +27,18 @@ pub(crate) const DEFAULT_WRITE_BUFFER_SIZE: ReadableSize = ReadableSize::mb(32);
 #[derive(Debug)]
 pub struct MitoConfig {
     // Worker configs:
-    /// Number of region workers.
+    /// Number of region workers (default 1).
     pub num_workers: usize,
-    /// Request channel size of each worker.
+    /// Request channel size of each worker (default 128).
     pub worker_channel_size: usize,
-    /// Max batch size for a worker to handle requests.
+    /// Max batch size for a worker to handle requests (default 64).
     pub worker_request_batch_size: usize,
 
     // Manifest configs:
     /// Number of meta action updated to trigger a new checkpoint
-    /// for the manifest. `None` to disable checkpoint.
+    /// for the manifest (default 10).
     pub manifest_checkpoint_interval: u64,
-    /// Manifest compression type.
+    /// Manifest compression type (default uncompressed).
     pub manifest_compress_type: CompressionType,
 }
 

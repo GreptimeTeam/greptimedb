@@ -24,8 +24,7 @@ pub struct RegionManifestOptions {
     pub manifest_dir: String,
     pub object_store: ObjectStore,
     pub compress_type: CompressionType,
-    /// Interval of version ([ManifestVersion](store_api::manifest::ManifestVersion)) between two checkpoints
-    /// `None` means disable checkpoint.
+    /// Interval of version ([ManifestVersion](store_api::manifest::ManifestVersion)) between two checkpoints.
     pub checkpoint_interval: u64,
     /// Initial [RegionMetadata](crate::metadata::RegionMetadata) of this region.
     /// Only need to set when create a new region, otherwise it will be ignored.

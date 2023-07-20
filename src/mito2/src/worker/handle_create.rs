@@ -36,7 +36,7 @@ impl<S> RegionWorkerLoop<S> {
                 }
             );
 
-            // Table already exists.
+            // Region already exists.
             return Ok(());
         }
 

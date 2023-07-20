@@ -22,6 +22,7 @@ use std::sync::Arc;
 use object_store::ObjectStore;
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
+use store_api::storage::RegionId;
 
 use crate::config::MitoConfig;
 use crate::error::{RecvSnafu, Result};
@@ -57,6 +58,11 @@ impl MitoEngine {
     /// Creates a new region.
     pub async fn create_region(&self, request: CreateRequest) -> Result<()> {
         self.inner.create_region(request).await
+    }
+
+    /// Returns true if the specific region exists.
+    pub fn is_region_exists(&self, region_id: RegionId) -> bool {
+        self.inner.workers.is_region_exists(region_id)
     }
 }
 

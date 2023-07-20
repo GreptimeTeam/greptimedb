@@ -17,6 +17,7 @@
 use store_api::storage::RegionId;
 
 use super::*;
+use crate::error::Error;
 use crate::test_util::{CreateRequestBuilder, TestEnv};
 
 #[tokio::test]
@@ -29,7 +30,7 @@ async fn test_engine_new_stop() {
     let request = CreateRequestBuilder::new(RegionId::new(1, 1)).build();
     let err = engine.create_region(request).await.unwrap_err();
     assert!(
-        err.to_string().contains("is stopped"),
+        matches!(err, Error::WorkerStopped { .. }),
         "unexpected err: {err}"
     );
 }
@@ -39,8 +40,11 @@ async fn test_engine_create_new_region() {
     let env = TestEnv::new("new-region");
     let engine = env.create_engine(MitoConfig::default()).await;
 
-    let request = CreateRequestBuilder::new(RegionId::new(1, 1)).build();
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new(region_id).build();
     engine.create_region(request).await.unwrap();
+
+    assert!(engine.is_region_exists(region_id));
 }
 
 #[tokio::test]
@@ -66,7 +70,7 @@ async fn test_engine_create_existing_region() {
     // Create the same region again.
     let err = engine.create_region(builder.build()).await.unwrap_err();
     assert!(
-        err.to_string().contains("already exists"),
+        matches!(err, Error::RegionExists { .. }),
         "unexpected err: {err}"
     );
 }

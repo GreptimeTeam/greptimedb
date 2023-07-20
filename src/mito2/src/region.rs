@@ -32,8 +32,9 @@ pub type VersionNumber = u32;
 #[derive(Debug)]
 pub(crate) struct MitoRegion {
     /// Id of this region.
-    // Accessing region id from the version control is inconvenient so
-    // we also store it here.
+    ///
+    /// Accessing region id from the version control is inconvenient so
+    /// we also store it here.
     pub(crate) region_id: RegionId,
 
     /// Version controller for this region.

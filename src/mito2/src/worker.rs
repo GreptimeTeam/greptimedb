@@ -125,6 +125,11 @@ impl WorkerGroup {
             .await
     }
 
+    /// Returns true if the specific region exists.
+    pub(crate) fn is_region_exists(&self, region_id: RegionId) -> bool {
+        self.worker(region_id).is_region_exists(region_id)
+    }
+
     /// Get worker for specific `region_id`.
     fn worker(&self, region_id: RegionId) -> &RegionWorker {
         let mut hasher = DefaultHasher::new();
@@ -238,6 +243,11 @@ impl RegionWorker {
     /// Sets whether the worker is still running.
     fn set_running(&self, value: bool) {
         self.running.store(value, Ordering::Relaxed)
+    }
+
+    /// Returns true if the worker contains specific region.
+    fn is_region_exists(&self, region_id: RegionId) -> bool {
+        self.regions.is_region_exists(region_id)
     }
 }
 
