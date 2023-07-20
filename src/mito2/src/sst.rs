@@ -15,4 +15,5 @@
 //! Sorted strings tables.
 
 pub mod file;
+mod stream_writer;
 pub(crate) mod version;

@@ -5534,6 +5534,7 @@ dependencies = [
  "log-store",
  "metrics",
  "object-store",
+ "parquet",
  "regex",
  "serde",
  "serde_json",

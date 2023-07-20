@@ -31,10 +31,11 @@ pub mod manifest;
 pub mod memtable;
 #[allow(dead_code)]
 pub mod metadata;
+pub mod read;
 #[allow(dead_code)]
 mod region;
 #[allow(dead_code)]
-pub(crate) mod sst;
+pub mod sst;
 #[allow(dead_code)]
 mod worker;
 
