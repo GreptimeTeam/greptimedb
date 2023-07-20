@@ -30,4 +30,8 @@ select TO_UNIXTIME(b) from test_unixtime;
 
 DROP TABLE test_unixtime;
 
-select Interval '1 year 2 months 3 days 4 hours 5 minutes 6 seconds 100 microseconds';
+select INTERVAL '1 year 2 months 3 days 4 hours 5 minutes 6 seconds 100 microseconds';
+
+select INTERVAL '1 year 2 months 3 days 4 hours' + INTERVAL '1 year';
+
+select INTERVAL '1 year 2 months 3 days 4 hours' - INTERVAL '1 year';

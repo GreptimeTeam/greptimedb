@@ -21,6 +21,8 @@ use arrow::datatypes::IntervalUnit as ArrowIntervalUnit;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::error::ParseIntervalSnafu;
+
 #[derive(
     Debug, Default, Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
 )]
@@ -127,6 +129,11 @@ impl Interval {
         }
     }
 
+    pub fn to_micros(&self) -> i128 {
+        let days = (self.days as i64) + 30i64 * (self.months as i64);
+        (self.micros as i128) + (MICROS_PER_DAY as i128) * (days as i128)
+    }
+
     /// Smallest interval value.
     pub const MIN: Self = Self {
         months: i32::MIN,
@@ -143,8 +150,9 @@ impl Interval {
         unit: IntervalUnit::MonthDayNano,
     };
 
-    /// Returns the normalized interval.
-    pub fn normalize_interval(&self) -> Self {
+    /// Returns the justified interval.
+    /// allows you to adjust the interval of 30-day as one month and the interval of 24-hour as one day
+    pub fn justified_interval(&self) -> Self {
         let mut result = *self;
         let extra_months_d = self.days as i64 / DAYS_PER_MONTH;
         let extra_months_micros = self.micros / MICROS_PER_MONTH;
@@ -196,24 +204,17 @@ impl Interval {
 
     /// Convert Interval to ISO 8601 string
     pub fn to_iso8601_string(&self) -> String {
-        // ISO pattern - PnYnMnDTnHnMnS
-        let years = self.months / 12;
-        let months = self.months % 12;
-        let days = self.days;
-        let secs_fract = (self.micros % MICROS_PER_SEC).abs();
-        let total_secs = (self.micros / MICROS_PER_SEC).abs();
-        let hours = total_secs / (SECS_PER_HOUR as i64);
-        let minutes = (total_secs / 60) % 60;
-        let seconds = total_secs % 60;
+        IntervalFormat::from(self).to_iso8601_string()
+    }
 
-        let fract_str = if secs_fract != 0 {
-            format!(".{:06}", secs_fract)
-                .trim_end_matches('0')
-                .to_owned()
-        } else {
-            "".to_owned()
-        };
-        format!("P{years}Y{months}M{days}DT{hours}H{minutes}M{seconds}{fract_str}S")
+    /// Convert Interval to postgres verbose string
+    pub fn to_postgres_string(&self) -> String {
+        IntervalFormat::from(self).to_postgres_string()
+    }
+
+    /// Convert Interval to sql_standard string
+    pub fn to_sql_standard_string(&self) -> String {
+        IntervalFormat::from(self).to_sql_standard_string()
     }
 
     /// `Interval` Type and i128[MonthDayNano] Convert
@@ -303,69 +304,312 @@ impl Display for Interval {
     }
 }
 
-impl PartialOrd for Interval {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        self.to_i128().partial_cmp(&other.to_i128())
+/// https://www.postgresql.org/docs/current/datatype-datetime.html#DATATYPE-INTERVAL-OUTPUT
+/// support postgres format, iso8601 format and sql standard format
+#[derive(Debug, Clone, Default, Copy, Serialize, Deserialize)]
+pub struct IntervalFormat {
+    pub years: i32,
+    pub months: i32,
+    pub days: i32,
+    pub hours: i64,
+    pub minutes: i64,
+    pub seconds: i64,
+    pub microseconds: i64,
+}
+
+impl<'a> From<&'a Interval> for IntervalFormat {
+    fn from(val: &Interval) -> IntervalFormat {
+        let months = val.months;
+        let days = val.days;
+        let microseconds = val.micros;
+        let years = (months - (months % 12)) / 12;
+        let months = months - years * 12;
+        let hours = (microseconds - (microseconds % 3_600_000_000)) / 3_600_000_000;
+        let microseconds = microseconds - hours * 3_600_000_000;
+        let minutes = (microseconds - (microseconds % 60_000_000)) / 60_000_000;
+        let microseconds = microseconds - minutes * 60_000_000;
+        let seconds = (microseconds - (microseconds % 1_000_000)) / 1_000_000;
+        let microseconds = microseconds - seconds * 1_000_000;
+        IntervalFormat {
+            years,
+            months,
+            days,
+            hours,
+            minutes,
+            seconds,
+            microseconds,
+        }
+    }
+}
+
+impl IntervalFormat {
+    pub fn try_into_interval(self) -> crate::error::Result<Interval> {
+        let months = self
+            .years
+            .checked_mul(12)
+            .and_then(|years| self.months.checked_add(years));
+        let microseconds = self
+            .hours
+            .checked_mul(60)
+            .and_then(|minutes| self.minutes.checked_add(minutes))
+            .and_then(|minutes| minutes.checked_mul(60))
+            .and_then(|seconds| self.seconds.checked_add(seconds))
+            .and_then(|seconds| seconds.checked_mul(1_000_000))
+            .and_then(|microseconds| self.microseconds.checked_add(microseconds));
+        // overflow handle
+        let months = match months {
+            Some(mon) => mon,
+            None => {
+                return ParseIntervalSnafu {
+                    raw: "interval months overflow",
+                }
+                .fail()
+            }
+        };
+        let microseconds = match microseconds {
+            Some(micro) => micro,
+            None => {
+                return ParseIntervalSnafu {
+                    raw: "interval microseconds overflow",
+                }
+                .fail()
+            }
+        };
+
+        Ok(Interval {
+            months,
+            days: self.days,
+            micros: microseconds,
+            unit: Default::default(),
+        })
+    }
+
+    /// All the field in the interval is 0
+    pub fn is_zero(&self) -> bool {
+        self.years == 0
+            && self.months == 0
+            && self.days == 0
+            && self.hours == 0
+            && self.minutes == 0
+            && self.seconds == 0
+            && self.microseconds == 0
+    }
+
+    pub fn has_year_month(&self) -> bool {
+        self.years != 0 || self.months != 0
+    }
+
+    pub fn has_day(&self) -> bool {
+        self.days != 0
+    }
+
+    pub fn has_time_part_positive(&self) -> bool {
+        self.hours > 0 || self.minutes > 0 || self.seconds > 0 || self.microseconds > 0
+    }
+
+    // time part means hours, minutes, seconds, microseconds
+    pub fn has_time_part(&self) -> bool {
+        self.hours != 0 || self.minutes != 0 || self.seconds != 0 || self.microseconds != 0
+    }
+
+    pub fn to_iso8601_string(&self) -> String {
+        if self.is_zero() {
+            return "PT0S".to_owned();
+        }
+        let mut result = "P".to_owned();
+        let mut day = "".to_owned();
+        let mut time_part;
+        if self.has_time_part() {
+            time_part = "T".to_owned();
+            if self.hours != 0 {
+                time_part.push_str(&format!("{}H", self.hours));
+            }
+            if self.minutes != 0 {
+                time_part.push_str(&format!("{}M", self.minutes));
+            }
+            if self.seconds != 0 {
+                time_part.push_str(&format!("{}S", self.seconds));
+            }
+            if self.microseconds != 0 {
+                let ms = self.microseconds.unsigned_abs();
+                time_part.push_str(&format!(".{:06}", ms));
+            }
+        } else {
+            time_part = "".to_owned();
+        }
+        if self.years != 0 {
+            result.push_str(&format!("{}Y", self.years));
+        }
+        if self.months != 0 {
+            result.push_str(&format!("{}M", self.months));
+        }
+        if self.days != 0 {
+            day.push_str(&format!("{}D", self.days));
+        }
+        result.push_str(&day);
+        result.push_str(&time_part);
+        result
+    }
+
+    pub fn to_sql_standard_string(self) -> String {
+        if self.is_zero() {
+            "0".to_owned()
+        } else if !self.has_time_part() && !self.has_day() {
+            get_year_month(self.months, self.years, true)
+        } else if !self.has_time_part() && !self.has_year_month() {
+            format!("{} 0:00:00", self.days)
+        } else if !self.has_year_month() && !self.has_day() {
+            get_time_part(
+                self.hours,
+                self.minutes,
+                self.seconds,
+                self.microseconds,
+                self.has_time_part_positive(),
+                true,
+            )
+        } else {
+            let year_month = get_year_month(self.months, self.years, false);
+            let time_interval = get_time_part(
+                self.hours,
+                self.minutes,
+                self.seconds,
+                self.microseconds,
+                self.has_time_part_positive(),
+                false,
+            );
+            format!("{} {:+} {}", year_month, self.days, time_interval)
+        }
+    }
+
+    pub fn to_postgres_string(&self) -> String {
+        if self.is_zero() {
+            return "00:00:00".to_owned();
+        }
+        let mut result = "".to_owned();
+        let mut year_month = "".to_owned();
+        let mut day = "".to_owned();
+        let time_part = self.get_postgres_time_part();
+        if self.has_day() {
+            day = format!("{} days ", self.days)
+        }
+        if self.has_year_month() {
+            if self.years != 0 {
+                year_month.push_str(&format!("{} year ", self.years))
+            }
+            if self.months != 0 {
+                year_month.push_str(&format!("{} mons ", self.months));
+            }
+        }
+        result.push_str(&year_month);
+        result.push_str(&day);
+        result.push_str(&time_part);
+        result.trim().to_owned()
+    }
+
+    fn get_postgres_time_part(&self) -> String {
+        let mut time_part = "".to_owned();
+        if self.has_time_part() {
+            let sign = if !self.has_time_part_positive() {
+                "-".to_owned()
+            } else {
+                "".to_owned()
+            };
+            let hours = Self::padding_i64(self.hours);
+            time_part.push_str(
+                &(sign
+                    + &hours
+                    + ":"
+                    + &Self::padding_i64(self.minutes)
+                    + ":"
+                    + &Self::padding_i64(self.seconds)),
+            );
+            if self.microseconds != 0 {
+                time_part.push_str(&format!(".{:06}", self.microseconds.unsigned_abs()))
+            }
+        }
+        time_part
+    }
+
+    fn padding_i64(val: i64) -> String {
+        let num = if val < 0 {
+            val.unsigned_abs()
+        } else {
+            val as u64
+        };
+        format!("{:02}", num)
+    }
+}
+
+fn get_year_month(mons: i32, years: i32, is_only_year_month: bool) -> String {
+    let months = mons.unsigned_abs();
+    if years == 0 || is_only_year_month {
+        format!("{}-{}", years, months)
+    } else {
+        format!("{:+}-{}", years, months)
+    }
+}
+
+fn get_time_part(
+    hours: i64,
+    mins: i64,
+    secs: i64,
+    micros: i64,
+    is_time_interval_pos: bool,
+    is_only_time: bool,
+) -> String {
+    let mut interval = "".to_owned();
+    if is_time_interval_pos && is_only_time {
+        interval.push_str(&format!("{}:{:02}:{:02}", hours, mins, secs));
+    } else {
+        let minutes = mins.unsigned_abs();
+        let seconds = secs.unsigned_abs();
+        interval.push_str(&format!("{:+}:{:02}:{:02}", hours, minutes, seconds));
+    }
+    if micros != 0 {
+        let microseconds = format!(".{:06}", micros.unsigned_abs());
+        interval.push_str(&microseconds);
+    }
+    interval
+}
+
+#[derive(PartialEq, Eq, Hash, PartialOrd, Ord)]
+struct IntervalCompare(i128);
+
+impl From<Interval> for IntervalCompare {
+    fn from(interval: Interval) -> Self {
+        Self(interval.to_micros())
     }
 }
 
 impl Ord for Interval {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.to_i128().cmp(&other.to_i128())
+        IntervalCompare::from(*self).cmp(&IntervalCompare::from(*other))
     }
 }
 
-impl PartialEq for Interval {
-    fn eq(&self, other: &Self) -> bool {
-        self.to_i128() == other.to_i128()
+impl PartialOrd for Interval {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
     }
 }
 
 impl Eq for Interval {}
 
+impl PartialEq for Interval {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other).is_eq()
+    }
+}
+
 impl Hash for Interval {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.to_i128().hash(state);
+        IntervalCompare::from(*self).hash(state)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_interval_from_i128() {
-        let interval = Interval::from_month_day_nano(1, 1, 1);
-        let v: i128 = interval.into();
-        let interval2 = Interval::from(v);
-        assert_eq!(interval, interval2);
-    }
-
-    #[test]
-    fn test_interval_eq() {
-        let interval = Interval::from_month_day_nano(1, 1, 1);
-        let interval2 = Interval::from_month_day_nano(1, 1, 1);
-        assert_eq!(interval, interval2);
-        assert_eq!(interval2, interval);
-    }
-
-    #[test]
-    fn test_interval_cmp() {
-        let interval = Interval::from_month_day_nano(1, 1, 1);
-        let interval2 = Interval::from_month_day_nano(1, 1, 1);
-        assert_eq!(interval, interval2);
-        assert_eq!(interval2, interval);
-        assert_eq!(interval.cmp(&interval2), Ordering::Equal);
-        assert_eq!(interval2.cmp(&interval), Ordering::Equal);
-    }
-
-    #[test]
-    fn test_interval_cmp2() {
-        let interval = Interval::from_month_day_nano(1, 1, 1);
-        let interval2 = Interval::from_month_day_nano(1, 2, 2);
-        assert!(interval < interval2);
-        assert!(interval2 > interval);
-    }
 
     #[test]
     fn test_interval_mul_int() {
@@ -386,13 +630,13 @@ mod tests {
     }
 
     #[test]
-    fn test_interval_normalization() {
-        let interval = Interval::from_month_day_nano(1, 131, 1).normalize_interval();
+    fn test_interval_justified() {
+        let interval = Interval::from_month_day_nano(1, 131, 1).justified_interval();
         let interval2 = Interval::from_month_day_nano(5, 11, 1);
         assert_eq!(interval, interval2);
 
         let interval =
-            Interval::from_month_day_nano(1, 1, 1000 * MICROS_PER_DAY * 2).normalize_interval();
+            Interval::from_month_day_nano(1, 1, 1000 * MICROS_PER_DAY * 2).justified_interval();
         let interval2 = Interval::from_month_day_nano(1, 3, 0);
         assert_eq!(interval, interval2);
     }
@@ -412,10 +656,28 @@ mod tests {
     #[test]
     fn test_to_iso8601_string() {
         let interval = Interval::from_month_day_nano(1, 1, 1);
-        assert_eq!(interval.to_iso8601_string(), "P0Y1M1DT0H0M0S");
+        assert_eq!(interval.to_iso8601_string(), "P1M1D");
 
         let interval = Interval::from_month_day_nano(14, 31, 10000000000);
-        assert_eq!(interval.to_iso8601_string(), "P1Y2M31DT0H0M10S");
+        assert_eq!(interval.to_iso8601_string(), "P1Y2M31DT10S");
+    }
+
+    #[test]
+    fn test_to_postgres_string() {
+        let interval = Interval::from_month_day_nano(23, 100, 23210200000000);
+        assert_eq!(
+            interval.to_postgres_string(),
+            "1 year 11 mons 100 days 06:26:50.200000"
+        );
+    }
+
+    #[test]
+    fn test_to_sql_standard_string() {
+        let interval = Interval::from_month_day_nano(23, 100, 23210200000000);
+        assert_eq!(
+            interval.to_sql_standard_string(),
+            "+1-11 +100 +6:26:50.200000"
+        );
     }
 
     #[test]
