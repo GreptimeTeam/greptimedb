@@ -2852,7 +2852,8 @@ checksum = "56254986775e3233ffa9c4d7d3faaf6d36a2c09d30b20687e9f88bc8bafc16c8"
 [[package]]
 name = "differential-dataflow"
 version = "0.12.0"
-source = "git+https://github.com/TimelyDataflow/differential-dataflow.git#99fa67db2b92d2ee938c6ffef0912908de3ef288"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cecb0345111032cfd995a1e9c1b79387a0e6bf6690be5d8dd12a58f4861bc6d9"
 dependencies = [
  "abomonation",
  "abomonation_derive",
@@ -9588,9 +9589,11 @@ checksum = "9091b6114800a5f2141aee1d1b9d6ca3592ac062dc5decb3764ec5895a47b4eb"
 name = "stream"
 version = "0.1.0"
 dependencies = [
- "abomonation",
- "abomonation_derive",
+ "datafusion-expr",
+ "datafusion-substrait",
+ "datatypes",
  "differential-dataflow",
+ "serde",
  "timely",
 ]
 
