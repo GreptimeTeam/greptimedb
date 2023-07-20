@@ -68,8 +68,8 @@ where
     /// MoveValue atomically renames the key to the given updated key.
     async fn move_value(&self, req: MoveValueRequest) -> Result<MoveValueResponse, Self::Error>;
 
-    /// The following methods are implemented based on the above methods,
-    /// and a higher-level interface is provided for to simplify usage.
+    // The following methods are implemented based on the above methods,
+    // and a higher-level interface is provided for to simplify usage.
 
     async fn get(&self, key: &[u8]) -> Result<Option<KeyValue>, Self::Error> {
         let req = RangeRequest::new().with_key(key.to_vec());
