@@ -156,12 +156,22 @@ mod test {
             ..Default::default()
         });
 
+        let inactive_node_manager = InactiveNodeManager::new(&ctx.leader_cached_kv_store);
+        inactive_node_manager
+            .register_inactive_region(1, 1, 1, 1)
+            .await
+            .unwrap();
+        inactive_node_manager
+            .register_inactive_region(1, 1, 1, 3)
+            .await
+            .unwrap();
+
         handler.handle(&req, ctx, acc).await.unwrap();
 
         assert_eq!(acc.region_leases.len(), 1);
         let lease = acc.region_leases.remove(0);
         assert_eq!(lease.table_ident.unwrap(), table_ident.into());
-        assert_eq!(lease.regions, vec![1, 2, 3]);
+        assert_eq!(lease.regions, vec![2]);
         assert_eq!(lease.duration_since_epoch, 1234);
         assert_eq!(lease.lease_seconds, REGION_LEASE_SECONDS);
     }
