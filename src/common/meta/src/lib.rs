@@ -31,3 +31,6 @@ pub type ClusterId = u64;
 pub type DatanodeId = u64;
 
 pub use instruction::RegionIdent;
+
+#[cfg(feature = "version-report")]
+pub mod version_reporter;

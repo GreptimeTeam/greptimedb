@@ -23,6 +23,8 @@ use common_grpc::channel_manager;
 use common_meta::key::TableMetadataManagerRef;
 use common_procedure::options::ProcedureConfig;
 use common_procedure::ProcedureManagerRef;
+#[cfg(feature = "version-report")]
+use common_meta::version_reporter::VersionReportTask;
 use common_telemetry::logging::LoggingOptions;
 use common_telemetry::{error, info, warn};
 use serde::{Deserialize, Serialize};
@@ -175,6 +177,8 @@ pub struct MetaSrv {
     mailbox: MailboxRef,
     ddl_manager: DdlManagerRef,
     table_metadata_manager: TableMetadataManagerRef,
+    #[cfg(feature = "version-report")]
+    version_reporter_task: Arc<VersionReportTask>,
 }
 
 impl MetaSrv {
@@ -244,6 +248,17 @@ impl MetaSrv {
                 .recover()
                 .await
                 .context(RecoverProcedureSnafu)?;
+        }
+
+        #[cfg(feature = "version-report")]
+        {
+            info!("start version report task {:?}", self.version_reporter_task);
+            let _ = self
+                .version_reporter_task
+                .start(common_runtime::bg_runtime())
+                .map_err(|_e| {
+                    warn!("start version report task error");
+                });
         }
 
         info!("MetaSrv started");

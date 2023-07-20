@@ -6,6 +6,7 @@ license.workspace = true
 
 [features]
 mock = []
+version-report = ["common-meta/version-report"]
 
 [dependencies]
 anymap = "1.0.0-beta.2"

@@ -8,6 +8,7 @@ license.workspace = true
 default = ["python"]
 python = ["dep:script"]
 testing = []
+version-report = ["common-meta/version-report"]
 
 [dependencies]
 api = { path = "../api" }

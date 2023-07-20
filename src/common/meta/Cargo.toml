@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+version-report = []
+
 [dependencies]
 api = { path = "../../api" }
 async-stream.workspace = true
@@ -24,7 +27,13 @@ snafu.workspace = true
 store-api = { path = "../../store-api" }
 table = { path = "../../table" }
 tokio.workspace = true
+reqwest = { version = "0.11", features = ["json"] }
+once_cell = "1.10"
 
 [dev-dependencies]
 chrono.workspace = true
 datatypes = { path = "../../datatypes" }
+hyper = { version = "0.14", features = ["full"] }
+
+[build-dependencies]
+build-data = "0.1.3"
