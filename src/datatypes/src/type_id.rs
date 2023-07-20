@@ -51,9 +51,11 @@ pub enum LogicalTypeId {
     TimeMillisecond,
     TimeMicrosecond,
     TimeNanosecond,
-    /// A 128-bit interval representing the elapsed time in the unit of `IntervalUnit`.
+    /// A 32-bit interval representing the elapsed time in months.
     IntervalYearMonth,
+    /// A 64-bit interval representing the elapsed time in days and milliseconds.
     IntervalDayTime,
+    /// A 128-bit interval representing the elapsed time in months, days and nanoseconds.
     IntervalMonthDayNano,
 
     List,

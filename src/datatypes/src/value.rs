@@ -729,7 +729,6 @@ pub enum ValueRef<'a> {
     Interval(Interval),
 
     // Compound types:
-
     List(ListValueRef<'a>),
 }
 
@@ -1116,10 +1115,12 @@ mod tests {
             ScalarValue::IntervalMonthDayNano(None).try_into().unwrap()
         );
         assert_eq!(
-            Value::Interval(Interval::new(1, 1, 1)),
-            ScalarValue::IntervalMonthDayNano(Some(Interval::new(1, 1, 1).to_i128()))
-                .try_into()
-                .unwrap()
+            Value::Interval(Interval::from_month_day_nano(1, 1, 1)),
+            ScalarValue::IntervalMonthDayNano(Some(
+                Interval::from_month_day_nano(1, 1, 1).to_i128()
+            ))
+            .try_into()
+            .unwrap()
         );
 
         assert_eq!(
@@ -1308,7 +1309,7 @@ mod tests {
         );
         check_type_and_value(
             &ConcreteDataType::interval_month_day_nano_datatype(),
-            &Value::Interval(Interval::new(1, 2, 3)),
+            &Value::Interval(Interval::from_month_day_nano(1, 2, 3)),
         );
     }
 
@@ -1467,7 +1468,7 @@ mod tests {
         check_as_value_ref!(Float64, OrderedF64::from(16.0));
         check_as_value_ref!(Timestamp, Timestamp::new_millisecond(1));
         check_as_value_ref!(Time, Time::new_millisecond(1));
-        check_as_value_ref!(Interval, Interval::new(1, 2, 3));
+        check_as_value_ref!(Interval, Interval::from_month_day_nano(1, 2, 3));
 
         assert_eq!(
             ValueRef::String("hello"),
