@@ -22,24 +22,14 @@ use crate::error::Result;
 use crate::handler::{HeartbeatAccumulator, HeartbeatHandler};
 use crate::inactive_node_manager::InactiveNodeManager;
 use crate::metasrv::Context;
-use crate::service::store::kv::ResettableKvStoreRef;
 
 /// The lease seconds of a region. It's set by two default heartbeat intervals (5 second × 2) plus
 /// two roundtrip time (2 second × 2 × 2), plus some extra buffer (2 second).
 // TODO(LFC): Make region lease seconds calculated from Datanode heartbeat configuration.
 pub(crate) const REGION_LEASE_SECONDS: u64 = 20;
 
-pub(crate) struct RegionLeaseHandler {
-    inactive_node_manager: InactiveNodeManager,
-}
-
-impl RegionLeaseHandler {
-    pub(crate) fn new(kv_store: ResettableKvStoreRef) -> Self {
-        Self {
-            inactive_node_manager: InactiveNodeManager::new(kv_store),
-        }
-    }
-}
+#[derive(Default)]
+pub(crate) struct RegionLeaseHandler;
 
 #[async_trait]
 impl HeartbeatHandler for RegionLeaseHandler {
@@ -50,7 +40,7 @@ impl HeartbeatHandler for RegionLeaseHandler {
     async fn handle(
         &self,
         req: &HeartbeatRequest,
-        _: &mut Context,
+        ctx: &mut Context,
         acc: &mut HeartbeatAccumulator,
     ) -> Result<()> {
         let Some(stat) = acc.stat.as_ref() else { return Ok(()) };
@@ -64,8 +54,9 @@ impl HeartbeatHandler for RegionLeaseHandler {
                 .push(RegionId::from(region_stat.id).region_number());
         });
 
+        let inactive_node_manager = InactiveNodeManager::new(&ctx.leader_cached_kv_store);
         for (table_ident, region_numbers) in table_region_leases.iter_mut() {
-            self.inactive_node_manager
+            inactive_node_manager
                 .retain_active_regions(
                     stat.cluster_id,
                     stat.id,
@@ -141,7 +132,7 @@ mod test {
         let builder = MetaSrvBuilder::new();
         let metasrv = builder.build().await.unwrap();
         let ctx = &mut metasrv.new_ctx();
-        let handler = RegionLeaseHandler::new(ctx.leader_cached_kv_store.clone());
+        let handler = RegionLeaseHandler::default();
 
         let acc = &mut HeartbeatAccumulator::default();
         let new_region_stat = |region_number: RegionNumber| -> RegionStat {

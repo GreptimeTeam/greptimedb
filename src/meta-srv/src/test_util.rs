@@ -25,6 +25,7 @@ use crate::procedure::region_failover::RegionFailoverManager;
 use crate::procedure::state_store::MetaStateStore;
 use crate::selector::lease_based::LeaseBasedSelector;
 use crate::sequence::Sequence;
+use crate::service::store::cached_kv::LeaderCachedKvStore;
 use crate::service::store::kv::KvBackendAdapter;
 use crate::service::store::memory::MemStore;
 
@@ -46,6 +47,8 @@ pub(crate) fn create_region_failover_manager() -> Arc<RegionFailoverManager> {
         .map(Arc::new)
         // Safety: all required fields set at initialization
         .unwrap();
+    let leader_cached_kv_store =
+        Arc::new(LeaderCachedKvStore::with_always_leader(kv_store.clone()));
 
     let selector = Arc::new(LeaseBasedSelector);
     let selector_ctx = SelectorContext {
@@ -59,6 +62,7 @@ pub(crate) fn create_region_failover_manager() -> Arc<RegionFailoverManager> {
     };
 
     Arc::new(RegionFailoverManager::new(
+        leader_cached_kv_store,
         mailbox,
         procedure_manager,
         selector,

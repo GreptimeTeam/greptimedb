@@ -14,21 +14,60 @@
 
 use std::collections::HashSet;
 
-use common_meta::rpc::store::BatchGetRequest;
+use common_meta::rpc::store::{BatchGetRequest, PutRequest};
 use store_api::storage::RegionNumber;
 
 use crate::error::Result;
 use crate::keys::InactiveNodeKey;
 use crate::service::store::kv::ResettableKvStoreRef;
 
-#[derive(Clone)]
-pub struct InactiveNodeManager {
-    store: ResettableKvStoreRef,
+pub struct InactiveNodeManager<'a> {
+    store: &'a ResettableKvStoreRef,
 }
 
-impl InactiveNodeManager {
-    pub fn new(store: ResettableKvStoreRef) -> Self {
+impl<'a> InactiveNodeManager<'a> {
+    pub fn new(store: &'a ResettableKvStoreRef) -> Self {
         Self { store }
+    }
+
+    pub async fn register_inactive_region(
+        &self,
+        cluster_id: u64,
+        node_id: u64,
+        table_id: u32,
+        region_number: RegionNumber,
+    ) -> Result<()> {
+        let key = InactiveNodeKey {
+            cluster_id,
+            node_id,
+            table_id,
+            region_number,
+        };
+        let req = PutRequest {
+            key: key.into(),
+            value: vec![],
+            prev_kv: false,
+        };
+        self.store.put(req).await?;
+        Ok(())
+    }
+
+    pub async fn deregister_inactive_region(
+        &self,
+        cluster_id: u64,
+        node_id: u64,
+        table_id: u32,
+        region_number: RegionNumber,
+    ) -> Result<()> {
+        let key: Vec<u8> = InactiveNodeKey {
+            cluster_id,
+            node_id,
+            table_id,
+            region_number,
+        }
+        .into();
+        self.store.delete(&key, false).await?;
+        Ok(())
     }
 
     /// The input is a list of regions from a table on a specific node. If one or more

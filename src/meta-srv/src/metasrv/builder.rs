@@ -160,17 +160,18 @@ impl MetaSrvBuilder {
         });
         let selector = selector.unwrap_or_else(|| Arc::new(LeaseBasedSelector));
         let pushers = Pushers::default();
+
         let mailbox_sequence = Sequence::new("heartbeat_mailbox", 1, 100, kv_store.clone());
         let mailbox = HeartbeatMailbox::create(pushers.clone(), mailbox_sequence);
-        let state_store = Arc::new(MetaStateStore::new(kv_store.clone()));
 
         let manager_config = ManagerConfig {
             max_retry_times: options.procedure.max_retry_times,
             retry_delay: options.procedure.retry_delay,
             ..Default::default()
         };
-
+        let state_store = Arc::new(MetaStateStore::new(kv_store.clone()));
         let procedure_manager = Arc::new(LocalManager::new(manager_config, state_store));
+
         let table_id_sequence = Arc::new(Sequence::new(TABLE_ID_SEQ, 1024, 10, kv_store.clone()));
         let metadata_service = metadata_service
             .unwrap_or_else(|| Arc::new(DefaultMetadataService::new(kv_store.clone())));
@@ -191,7 +192,6 @@ impl MetaSrvBuilder {
                 .tcp_nodelay(options.datanode.client_options.tcp_nodelay);
             Arc::new(DatanodeClients::new(datanode_client_channel_config))
         });
-
         // TODO(weny): considers to modify the default config of procedure manager
         let ddl_manager = Arc::new(DdlManager::new(
             procedure_manager.clone(),
@@ -211,6 +211,7 @@ impl MetaSrvBuilder {
                     None
                 } else {
                     let region_failover_manager = Arc::new(RegionFailoverManager::new(
+                        leader_cached_kv_store.clone(),
                         mailbox.clone(),
                         procedure_manager.clone(),
                         selector.clone(),
@@ -232,7 +233,6 @@ impl MetaSrvBuilder {
                             .await?,
                     )
                 };
-                let region_lease_handler = RegionLeaseHandler::new(leader_cached_kv_store.clone());
 
                 let group = HeartbeatHandlerGroup::new(pushers);
                 group.add_handler(ResponseHeaderHandler::default()).await;
@@ -247,7 +247,7 @@ impl MetaSrvBuilder {
                 if let Some(region_failover_handler) = region_failover_handler {
                     group.add_handler(region_failover_handler).await;
                 }
-                group.add_handler(region_lease_handler).await;
+                group.add_handler(RegionLeaseHandler::default()).await;
                 group.add_handler(PersistStatsHandler::default()).await;
                 group
             }
