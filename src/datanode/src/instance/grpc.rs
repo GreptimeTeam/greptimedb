@@ -742,19 +742,6 @@ mod test {
         assert_eq!(recordbatches.pretty_print().unwrap(), expected);
 
         let query = Request::Ddl(DdlRequest {
-            expr: Some(DdlExpr::TruncateTable(TruncateTableExpr {
-                catalog_name: "greptime".to_string(),
-                schema_name: "my_database".to_string(),
-                table_name: "my_table".to_string(),
-                table_id: None,
-            })),
-        });
-
-        let output = instance.do_query(query, QueryContext::arc()).await.unwrap();
-        assert!(matches!(output, Output::AffectedRows(0)));
-        // TODO(DevilExileSu): Validate is an empty table.
-
-        let query = Request::Ddl(DdlRequest {
             expr: Some(DdlExpr::DropTable(DropTableExpr {
                 catalog_name: "greptime".to_string(),
                 schema_name: "my_database".to_string(),
@@ -769,6 +756,45 @@ mod test {
             .table_exist("greptime", "my_database", "my_table")
             .await
             .unwrap());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_handle_truncate_table() {
+        let instance = MockInstance::new("test_handle_truncate_table").await;
+        let instance = instance.inner();
+        assert!(test_util::create_test_table(
+            instance,
+            ConcreteDataType::timestamp_millisecond_datatype()
+        )
+        .await
+        .is_ok());
+
+        // Insert data.
+        let query = Request::Query(QueryRequest {
+            query: Some(Query::Sql(
+                "INSERT INTO demo(host, cpu, memory, ts) VALUES \
+                            ('host1', 66.6, 1024, 1672201025000),\
+                            ('host2', 88.8, 333.3, 1672201026000),\
+                            ('host3', 88.8, 333.3, 1672201026000)"
+                    .to_string(),
+            )),
+        });
+
+        let output = instance.do_query(query, QueryContext::arc()).await.unwrap();
+        assert!(matches!(output, Output::AffectedRows(3)));
+
+        let query = Request::Ddl(DdlRequest {
+            expr: Some(DdlExpr::TruncateTable(TruncateTableExpr {
+                catalog_name: "greptime".to_string(),
+                schema_name: "public".to_string(),
+                table_name: "demo".to_string(),
+                table_id: None,
+            })),
+        });
+
+        let output = instance.do_query(query, QueryContext::arc()).await.unwrap();
+        assert!(matches!(output, Output::AffectedRows(0)));
+        // TODO(DevilExileSu): Validate is an empty table.
     }
 
     #[tokio::test(flavor = "multi_thread")]

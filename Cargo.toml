@@ -74,7 +74,7 @@ datafusion-substrait = { git = "https://github.com/waynexia/arrow-datafusion.git
 etcd-client = "0.11"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/DevilExileSu/greptime-proto.git", rev = "c7fea8059be6c5e0b1745d12b0c8304dfde5118d" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "c7fea8059be6c5e0b1745d12b0c8304dfde5118d" }
 itertools = "0.10"
 lazy_static = "1.4"
 opentelemetry-proto = { version = "0.2", features = ["gen-tonic", "metrics"] }

@@ -235,7 +235,7 @@ impl Database {
     }
 
     pub async fn truncate_table(&self, expr: TruncateTableExpr) -> Result<Output> {
-        let _timer = timer!(metrics::METRIC_GRPC_FLUSH_TABLE);
+        let _timer = timer!(metrics::METRIC_GRPC_TRUNCATE_TABLE);
         self.do_get(Request::Ddl(DdlRequest {
             expr: Some(DdlExpr::TruncateTable(expr)),
         }))
