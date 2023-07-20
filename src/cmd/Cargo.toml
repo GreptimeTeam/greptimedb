@@ -49,7 +49,7 @@ servers = { path = "../servers" }
 session = { path = "../session" }
 snafu.workspace = true
 substrait = { path = "../common/substrait" }
-table = {path = "../table"}
+table = { path = "../table" }
 tikv-jemallocator = "0.5"
 tokio.workspace = true
 
