@@ -232,6 +232,7 @@ impl MetaSrvBuilder {
                             .await?,
                     )
                 };
+                let region_lease_handler = RegionLeaseHandler::new(leader_cached_kv_store.clone());
 
                 let group = HeartbeatHandlerGroup::new(pushers);
                 group.add_handler(ResponseHeaderHandler::default()).await;
@@ -246,7 +247,7 @@ impl MetaSrvBuilder {
                 if let Some(region_failover_handler) = region_failover_handler {
                     group.add_handler(region_failover_handler).await;
                 }
-                group.add_handler(RegionLeaseHandler::default()).await;
+                group.add_handler(region_lease_handler).await;
                 group.add_handler(PersistStatsHandler::default()).await;
                 group
             }

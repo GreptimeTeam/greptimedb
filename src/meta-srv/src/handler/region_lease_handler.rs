@@ -20,15 +20,26 @@ use store_api::storage::RegionId;
 
 use crate::error::Result;
 use crate::handler::{HeartbeatAccumulator, HeartbeatHandler};
+use crate::inactive_node_manager::InactiveNodeManager;
 use crate::metasrv::Context;
+use crate::service::store::kv::ResettableKvStoreRef;
 
 /// The lease seconds of a region. It's set by two default heartbeat intervals (5 second × 2) plus
 /// two roundtrip time (2 second × 2 × 2), plus some extra buffer (2 second).
 // TODO(LFC): Make region lease seconds calculated from Datanode heartbeat configuration.
 pub(crate) const REGION_LEASE_SECONDS: u64 = 20;
 
-#[derive(Default)]
-pub(crate) struct RegionLeaseHandler;
+pub(crate) struct RegionLeaseHandler {
+    inactive_node_manager: InactiveNodeManager,
+}
+
+impl RegionLeaseHandler {
+    pub(crate) fn new(kv_store: ResettableKvStoreRef) -> Self {
+        Self {
+            inactive_node_manager: InactiveNodeManager::new(kv_store),
+        }
+    }
+}
 
 #[async_trait]
 impl HeartbeatHandler for RegionLeaseHandler {
@@ -53,8 +64,20 @@ impl HeartbeatHandler for RegionLeaseHandler {
                 .push(RegionId::from(region_stat.id).region_number());
         });
 
+        for (table_ident, region_numbers) in table_region_leases.iter_mut() {
+            self.inactive_node_manager
+                .retain_active_regions(
+                    stat.cluster_id,
+                    stat.id,
+                    table_ident.table_id,
+                    region_numbers,
+                )
+                .await?;
+        }
+
         acc.region_leases = table_region_leases
             .into_iter()
+            .filter(|(_, regions)| !regions.is_empty()) // filter out empty region_numbers
             .map(|(table_ident, regions)| RegionLease {
                 table_ident: Some(table_ident.into()),
                 regions,
@@ -110,8 +133,6 @@ mod test {
             engine: "mito".to_string(),
         };
 
-        let handler = RegionLeaseHandler::default();
-
         let req = HeartbeatRequest {
             duration_since_epoch: 1234,
             ..Default::default()
@@ -120,6 +141,7 @@ mod test {
         let builder = MetaSrvBuilder::new();
         let metasrv = builder.build().await.unwrap();
         let ctx = &mut metasrv.new_ctx();
+        let handler = RegionLeaseHandler::new(ctx.leader_cached_kv_store.clone());
 
         let acc = &mut HeartbeatAccumulator::default();
         let new_region_stat = |region_number: RegionNumber| -> RegionStat {
