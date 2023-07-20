@@ -1,3 +1,5 @@
+// Copyright 2023 Greptime Team
+//
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -100,6 +102,7 @@ impl<T: AsyncRead + AsyncSeek + Unpin + Send + 'static> Stream for OrcArrowStrea
         let batch = futures::ready!(Pin::new(&mut self.stream).poll_next(cx))
             .map(|r| r.map_err(|e| DataFusionError::External(Box::new(e))));
 
+        let projected_schema = self.output_schema.project(&self.projection)?;
         let batch = batch.map(|b| {
             b.and_then(|b| {
                 let mut columns = Vec::with_capacity(self.projection.len());
@@ -115,7 +118,6 @@ impl<T: AsyncRead + AsyncSeek + Unpin + Send + 'static> Stream for OrcArrowStrea
                     }
                 }
 
-                let projected_schema = self.output_schema.project(&self.projection)?;
                 let record_batch = DfRecordBatch::try_new(projected_schema.into(), columns)?;
 
                 Ok(record_batch)

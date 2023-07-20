@@ -648,19 +648,19 @@ async fn test_execute_query_external_table_orc(instance: Arc<dyn MockInstance>) 
 
     let output = execute_sql(
         &instance,
-        &format!("select double_a,a, str_direct as c from {table_name};"),
+        &format!("select double_a,a, str_direct as c, a as another_a from {table_name};"),
     )
     .await;
     let expect = "\
-+----------+-----+--------+
-| double_a | a   | c      |
-+----------+-----+--------+
-| 1.0      | 1.0 | a      |
-| 2.0      | 2.0 | cccccc |
-| 3.0      |     |        |
-| 4.0      | 4.0 | ddd    |
-| 5.0      | 5.0 | ee     |
-+----------+-----+--------+";
++----------+-----+--------+-----------+
+| double_a | a   | c      | another_a |
++----------+-----+--------+-----------+
+| 1.0      | 1.0 | a      | 1.0       |
+| 2.0      | 2.0 | cccccc | 2.0       |
+| 3.0      |     |        |           |
+| 4.0      | 4.0 | ddd    | 4.0       |
+| 5.0      | 5.0 | ee     | 5.0       |
++----------+-----+--------+-----------+";
     check_output_stream(output, expect).await;
 }
 
