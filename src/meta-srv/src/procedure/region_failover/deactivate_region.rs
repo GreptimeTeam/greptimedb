@@ -67,7 +67,7 @@ impl DeactivateRegion {
             input: instruction.to_string(),
         })?;
 
-        let inactive_node_manager = InactiveNodeManager::new(&ctx.leader_cached_kv_store);
+        let inactive_node_manager = InactiveNodeManager::new(&ctx.in_memory);
         inactive_node_manager
             .register_inactive_region(
                 failed_region.cluster_id,
@@ -99,8 +99,7 @@ impl DeactivateRegion {
                     }.fail();
                 };
                 if result {
-                    let inactive_node_manager =
-                        InactiveNodeManager::new(&ctx.leader_cached_kv_store);
+                    let inactive_node_manager = InactiveNodeManager::new(&ctx.in_memory);
                     inactive_node_manager
                         .deregister_inactive_region(
                             failed_region.cluster_id,

@@ -349,7 +349,7 @@ async fn run_region_failover_procedure(
     let procedure = RegionFailoverProcedure::new(
         failed_region.clone(),
         RegionFailoverContext {
-            leader_cached_kv_store: meta_srv.leader_cached_kv_store().clone(),
+            in_memory: meta_srv.in_memory().clone(),
             mailbox: meta_srv.mailbox().clone(),
             selector,
             selector_ctx: SelectorContext {

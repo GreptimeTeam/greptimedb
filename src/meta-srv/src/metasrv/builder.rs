@@ -185,7 +185,7 @@ impl MetaSrvBuilder {
                         table: None,
                     };
                     let region_failover_manager = Arc::new(RegionFailoverManager::new(
-                        leader_cached_kv_store.clone(),
+                        in_memory.clone(),
                         mailbox.clone(),
                         procedure_manager.clone(),
                         selector.clone(),

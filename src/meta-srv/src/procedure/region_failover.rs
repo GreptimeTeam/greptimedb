@@ -69,7 +69,7 @@ impl From<RegionIdent> for RegionFailoverKey {
 }
 
 pub(crate) struct RegionFailoverManager {
-    leader_cached_kv_store: ResettableKvStoreRef,
+    in_memory: ResettableKvStoreRef,
     mailbox: MailboxRef,
     procedure_manager: ProcedureManagerRef,
     selector: SelectorRef,
@@ -92,7 +92,7 @@ impl Drop for FailoverProcedureGuard {
 
 impl RegionFailoverManager {
     pub(crate) fn new(
-        leader_cached_kv_store: ResettableKvStoreRef,
+        in_memory: ResettableKvStoreRef,
         mailbox: MailboxRef,
         procedure_manager: ProcedureManagerRef,
         selector: SelectorRef,
@@ -101,7 +101,7 @@ impl RegionFailoverManager {
         table_metadata_manager: TableMetadataManagerRef,
     ) -> Self {
         Self {
-            leader_cached_kv_store,
+            in_memory,
             mailbox,
             procedure_manager,
             selector,
@@ -114,7 +114,7 @@ impl RegionFailoverManager {
 
     pub(crate) fn create_context(&self) -> RegionFailoverContext {
         RegionFailoverContext {
-            leader_cached_kv_store: self.leader_cached_kv_store.clone(),
+            in_memory: self.in_memory.clone(),
             mailbox: self.mailbox.clone(),
             selector: self.selector.clone(),
             selector_ctx: self.selector_ctx.clone(),
@@ -220,7 +220,7 @@ struct Node {
 /// The "Context" of region failover procedure state machine.
 #[derive(Clone)]
 pub struct RegionFailoverContext {
-    pub leader_cached_kv_store: ResettableKvStoreRef,
+    pub in_memory: ResettableKvStoreRef,
     pub mailbox: MailboxRef,
     pub selector: SelectorRef,
     pub selector_ctx: SelectorContext,
@@ -381,7 +381,6 @@ mod tests {
     use crate::selector::{Namespace, Selector};
     use crate::sequence::Sequence;
     use crate::service::mailbox::Channel;
-    use crate::service::store::cached_kv::LeaderCachedKvStore;
     use crate::service::store::kv::{KvBackendAdapter, KvStoreRef};
     use crate::service::store::memory::MemStore;
     use crate::table_routes;
@@ -461,6 +460,7 @@ mod tests {
         }
 
         pub async fn build(self) -> TestingEnv {
+            let in_memory = Arc::new(MemStore::new());
             let kv_store: KvStoreRef = Arc::new(MemStore::new());
             let meta_peer_client = MetaPeerClientBuilder::default()
                 .election(None)
@@ -469,8 +469,6 @@ mod tests {
                 .map(Arc::new)
                 // Safety: all required fields set at initialization
                 .unwrap();
-            let leader_cached_kv_store =
-                Arc::new(LeaderCachedKvStore::with_always_leader(kv_store.clone()));
 
             let table = "my_table";
             let table_metadata_manager = Arc::new(TableMetadataManager::new(
@@ -527,7 +525,7 @@ mod tests {
 
             TestingEnv {
                 context: RegionFailoverContext {
-                    leader_cached_kv_store,
+                    in_memory,
                     mailbox,
                     selector,
                     selector_ctx,

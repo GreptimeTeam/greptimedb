@@ -54,7 +54,7 @@ impl HeartbeatHandler for RegionLeaseHandler {
                 .push(RegionId::from(region_stat.id).region_number());
         });
 
-        let inactive_node_manager = InactiveNodeManager::new(&ctx.leader_cached_kv_store);
+        let inactive_node_manager = InactiveNodeManager::new(&ctx.in_memory);
         for (table_ident, region_numbers) in table_region_leases.iter_mut() {
             inactive_node_manager
                 .retain_active_regions(
@@ -156,7 +156,7 @@ mod test {
             ..Default::default()
         });
 
-        let inactive_node_manager = InactiveNodeManager::new(&ctx.leader_cached_kv_store);
+        let inactive_node_manager = InactiveNodeManager::new(&ctx.in_memory);
         inactive_node_manager
             .register_inactive_region(1, 1, 1, 1)
             .await
