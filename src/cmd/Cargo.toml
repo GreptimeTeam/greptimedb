@@ -13,6 +13,7 @@ path = "src/bin/greptime.rs"
 default = ["metrics-process"]
 tokio-console = ["common-telemetry/tokio-console"]
 metrics-process = ["servers/metrics-process"]
+version-report = ["datanode/version-report"]
 
 [dependencies]
 anymap = "1.0.0-beta.2"

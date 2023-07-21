@@ -19,10 +19,6 @@ use std::time::Duration;
 use client::client_manager::DatanodeClients;
 use common_grpc::channel_manager::ChannelConfig;
 use common_meta::key::TableMetadataManager;
-#[cfg(feature = "version-report")]
-use common_meta::version_reporter::{
-    GreptimeVersionReport, Reporter, VersionReportTask, VERSION_REPORT_INTERVAL,
-};
 use common_procedure::local::{LocalManager, ManagerConfig};
 
 use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
@@ -48,6 +44,8 @@ use crate::sequence::Sequence;
 use crate::service::store::cached_kv::{CheckLeader, LeaderCachedKvStore};
 use crate::service::store::kv::{KvBackendAdapter, KvStoreRef, ResettableKvStoreRef};
 use crate::service::store::memory::MemStore;
+#[cfg(feature = "version-report")]
+use crate::version_reporter::get_version_reporter_task;
 
 // TODO(fys): try use derive_builder macro
 pub struct MetaSrvBuilder {
@@ -266,8 +264,8 @@ impl MetaSrvBuilder {
         Ok(MetaSrv {
             started,
             options,
-            in_memory,
-            kv_store,
+            in_memory: in_memory.clone(),
+            kv_store: kv_store.clone(),
             leader_cached_kv_store,
             meta_peer_client: meta_peer_client.clone(),
             table_id_sequence,
@@ -281,30 +279,7 @@ impl MetaSrvBuilder {
             ddl_manager,
             table_metadata_manager,
             #[cfg(feature = "version-report")]
-            version_reporter_task: {
-                struct MetaVersionReport {
-                    meta_peer_client: MetaPeerClientRef,
-                }
-                #[async_trait::async_trait]
-                impl Reporter for MetaVersionReport {
-                    async fn get_mode(&self) -> String {
-                        "distributed".to_string()
-                    }
-                    async fn get_nodes(&self) -> i32 {
-                        self.meta_peer_client
-                            .get_node_cnt()
-                            .await
-                            .ok()
-                            .unwrap_or(-1)
-                    }
-                }
-                Arc::new(VersionReportTask::new(
-                    *VERSION_REPORT_INTERVAL,
-                    Box::new(GreptimeVersionReport::new(Arc::new(MetaVersionReport {
-                        meta_peer_client,
-                    }))),
-                ))
-            },
+            version_reporter_task: get_version_reporter_task(meta_peer_client, kv_store).await,
         })
     }
 }

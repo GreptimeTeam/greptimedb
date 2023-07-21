@@ -41,3 +41,6 @@ pub use crate::error::Result;
 
 #[cfg(test)]
 mod test_util;
+
+#[cfg(feature = "version-report")]
+mod version_reporter;

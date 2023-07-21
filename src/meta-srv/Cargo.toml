@@ -52,6 +52,7 @@ tower = "0.4"
 typetag = "0.2"
 url = "2.3"
 servers = { path = "../servers" }
+uuid.workspace = true
 
 [dev-dependencies]
 chrono.workspace = true

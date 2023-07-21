@@ -2686,6 +2686,7 @@ dependencies = [
  "tower",
  "tower-http",
  "url",
+ "uuid",
 ]
 
 [[package]]
@@ -5352,6 +5353,7 @@ dependencies = [
  "tracing-subscriber",
  "typetag",
  "url",
+ "uuid",
 ]
 
 [[package]]

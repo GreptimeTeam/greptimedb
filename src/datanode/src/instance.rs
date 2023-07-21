@@ -29,10 +29,14 @@ use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
 use common_meta::heartbeat::handler::HandlerGroupExecutor;
 use common_meta::key::TableMetadataManager;
+#[cfg(feature = "version-report")]
+use common_meta::version_reporter::VersionReportTask;
 use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::store::state_store::ObjectStateStore;
 use common_procedure::ProcedureManagerRef;
 use common_telemetry::logging::info;
+#[cfg(feature = "version-report")]
+use common_telemetry::tracing::log::warn;
 use file_table_engine::engine::immutable::ImmutableFileTableEngine;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use log_store::LogConfig;
@@ -68,6 +72,8 @@ use crate::heartbeat::handler::open_region::OpenRegionHandler;
 use crate::heartbeat::HeartbeatTask;
 use crate::sql::{SqlHandler, SqlRequest};
 use crate::store;
+#[cfg(feature = "version-report")]
+use crate::version_reporter::get_report_task;
 
 mod grpc;
 pub mod sql;
@@ -81,6 +87,8 @@ pub struct Instance {
     pub(crate) catalog_manager: CatalogManagerRef,
     pub(crate) table_id_provider: Option<TableIdProviderRef>,
     procedure_manager: ProcedureManagerRef,
+    #[cfg(feature = "version-report")]
+    version_reporter_task: Option<Arc<VersionReportTask>>,
 }
 
 pub type InstanceRef = Arc<Instance>;
@@ -276,9 +284,12 @@ impl Instance {
         );
         let query_engine = factory.query_engine();
 
-        let procedure_manager =
-            create_procedure_manager(opts.node_id.unwrap_or(0), &opts.procedure, object_store)
-                .await?;
+        let procedure_manager = create_procedure_manager(
+            opts.node_id.unwrap_or(0),
+            &opts.procedure,
+            object_store.clone(),
+        )
+        .await?;
         // Register all procedures.
         // Register procedures of the mito engine.
         mito_engine.register_procedure_loaders(&*procedure_manager);
@@ -302,6 +313,8 @@ impl Instance {
             catalog_manager: catalog_manager.clone(),
             table_id_provider,
             procedure_manager,
+            #[cfg(feature = "version-report")]
+            version_reporter_task: get_report_task(opts, object_store.clone()).await,
         });
 
         let heartbeat_task = Instance::build_heartbeat_task(
@@ -330,6 +343,14 @@ impl Instance {
         self.procedure_manager
             .start()
             .context(StartProcedureManagerSnafu)?;
+        #[cfg(feature = "version-report")]
+        {
+            if let Some(task) = &self.version_reporter_task {
+                let _ = task.start(common_runtime::bg_runtime()).map_err(|_e| {
+                    warn!("start version report task error");
+                });
+            }
+        }
         Ok(())
     }
 
