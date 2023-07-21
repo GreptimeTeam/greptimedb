@@ -127,7 +127,7 @@ impl TableMetadataManager {
 }
 
 macro_rules! impl_table_meta_key {
-    ( $($val_ty: ty), *) => {
+    ($($val_ty: ty), *) => {
         $(
             impl std::fmt::Display for $val_ty {
                 fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -146,7 +146,7 @@ impl_table_meta_key!(
 );
 
 macro_rules! impl_table_meta_value {
-    ( $($val_ty: ty), *) => {
+    ($($val_ty: ty), *) => {
         $(
             impl $val_ty {
                 pub fn try_from_raw_value(raw_value: Vec<u8>) -> Result<Self> {
