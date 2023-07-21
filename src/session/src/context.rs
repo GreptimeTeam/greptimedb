@@ -14,6 +14,8 @@
 
 use std::fmt::{Display, Formatter};
 use std::net::SocketAddr;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering::{Relaxed, Release};
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
@@ -32,7 +34,7 @@ pub struct QueryContext {
     current_schema: ArcSwap<String>,
     time_zone: ArcSwap<Option<TimeZone>>,
     sql_dialect: Box<dyn Dialect + Send + Sync>,
-    trace_id: ArcSwap<u64>,
+    trace_id: AtomicU64,
 }
 
 impl Default for QueryContext {
@@ -63,7 +65,7 @@ impl QueryContext {
             current_schema: ArcSwap::new(Arc::new(DEFAULT_SCHEMA_NAME.to_string())),
             time_zone: ArcSwap::new(Arc::new(None)),
             sql_dialect: Box::new(GreptimeDbDialect {}),
-            trace_id: ArcSwap::new(Arc::new(0)),
+            trace_id: AtomicU64::new(0),
         }
     }
 
@@ -81,7 +83,7 @@ impl QueryContext {
             current_schema: ArcSwap::new(Arc::new(schema.to_string())),
             time_zone: ArcSwap::new(Arc::new(None)),
             sql_dialect,
-            trace_id: ArcSwap::new(Arc::new(0)),
+            trace_id: AtomicU64::new(0),
         }
     }
 
@@ -138,12 +140,14 @@ impl QueryContext {
 
     #[inline]
     pub fn trace_id(&self) -> u64 {
-        *self.trace_id.load().as_ref()
+        self.trace_id.load(Relaxed)
     }
 
     #[inline]
     pub fn set_trace_id(&self, trace_id: u64) {
-        self.trace_id.swap(Arc::new(trace_id));
+        let _ = self
+            .trace_id
+            .compare_exchange(0, trace_id, Release, Relaxed);
     }
 }
 

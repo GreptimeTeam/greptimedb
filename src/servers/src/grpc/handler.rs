@@ -71,6 +71,9 @@ impl GreptimeRequestHandler {
 
         let _ = self.auth(header, &query_ctx).await?;
 
+        // set trace_id
+        query_ctx.set_trace_id(common_telemetry::gen_trace_id());
+
         let handler = self.handler.clone();
         let request_type = request_type(&query);
         let db = query_ctx.get_db_string();
