@@ -91,7 +91,7 @@ impl BufferedWriter {
         let arrow_batch = RecordBatch::try_new(
             self.arrow_schema.clone(),
             batch
-                .columns()
+                .columns
                 .iter()
                 .map(|v| v.to_arrow_array())
                 .collect::<Vec<_>>(),

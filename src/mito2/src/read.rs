@@ -14,7 +14,11 @@
 
 //! Common structs and utilities for reading data.
 
+use common_time::Timestamp;
 use datatypes::vectors::VectorRef;
+
+use crate::error::Result;
+use crate::metadata::RegionMetadataRef;
 
 /// Storage internal representation of a batch of rows.
 ///
@@ -22,9 +26,6 @@ use datatypes::vectors::VectorRef;
 #[derive(Debug, Default, PartialEq, Eq, Clone)]
 pub struct Batch {
     /// Rows organized in columnar format.
-    ///
-    /// Columns follow the same order convention of region schema:
-    /// key, value, internal columns.
     pub columns: Vec<VectorRef>,
 }
 
@@ -39,29 +40,19 @@ impl Batch {
         Batch { columns }
     }
 
-    #[inline]
+    /// Returns number of columns in the batch.
     pub fn num_columns(&self) -> usize {
         self.columns.len()
     }
 
-    #[inline]
+    /// Returns number of rows in the batch.
     pub fn num_rows(&self) -> usize {
         self.columns.get(0).map(|v| v.len()).unwrap_or(0)
     }
 
-    #[inline]
+    /// Returns true if the number of rows in the batch is 0.
     pub fn is_empty(&self) -> bool {
         self.num_rows() == 0
-    }
-
-    #[inline]
-    pub fn columns(&self) -> &[VectorRef] {
-        &self.columns
-    }
-
-    #[inline]
-    pub fn column(&self, idx: usize) -> &VectorRef {
-        &self.columns[idx]
     }
 
     /// Slice the batch, returning a new batch.
@@ -84,5 +75,42 @@ impl Batch {
 
         let length = columns[0].len();
         assert!(columns.iter().all(|col| col.len() == length));
+    }
+}
+
+/// Collected [Source] statistics.
+#[derive(Debug, Clone)]
+pub struct SourceStats {
+    /// Number of rows fetched.
+    pub num_rows: usize,
+    /// Min timestamp from fetched batches.
+    ///
+    /// If no rows fetched, the value of the timestamp is i64::MIN.
+    pub min_timestamp: Timestamp,
+    /// Max timestamp from fetched batches.
+    ///
+    /// If no rows fetched, the value of the timestamp is i64::MAX.
+    pub max_timestamp: Timestamp,
+}
+
+/// Async [Batch] reader and iterator wrapper.
+///
+/// This is the data source for SST writers or internal readers.
+pub enum Source {}
+
+impl Source {
+    /// Returns next [Batch] from this data source.
+    pub(crate) async fn next_batch(&mut self) -> Result<Option<Batch>> {
+        unimplemented!()
+    }
+
+    /// Returns the metadata of the source region.
+    pub(crate) fn metadata(&self) -> RegionMetadataRef {
+        unimplemented!()
+    }
+
+    /// Returns statisics of fetched batches.
+    pub(crate) fn stats(&self) -> SourceStats {
+        unimplemented!()
     }
 }
