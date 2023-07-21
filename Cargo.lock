@@ -5509,6 +5509,7 @@ dependencies = [
  "anymap",
  "aquamarine",
  "arc-swap",
+ "async-compat",
  "async-stream",
  "async-trait",
  "chrono",

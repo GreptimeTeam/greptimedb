@@ -64,7 +64,7 @@ impl BufferedWriter {
         let buffer = SharedBuffer::with_capacity(buffer_threshold);
 
         let arrow_writer = ArrowWriter::try_new(buffer.clone(), arrow_schema.clone(), props)
-            .context(WriteParquetSnafu)?;
+            .context(WriteParquetSnafu { path: &path })?;
 
         Ok(Self {
             inner: LazyBufferedWriter::new(

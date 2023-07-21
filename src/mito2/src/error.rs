@@ -140,13 +140,27 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Failed to write parquet file, location: {}, source: {}",
+        "Failed to write parquet file, path: {}, location: {}, source: {}",
+        path,
         location,
         source
     ))]
     WriteParquet {
+        path: String,
         location: Location,
         source: parquet::errors::ParquetError,
+    },
+
+    #[snafu(display(
+        "Failed to read parquet file, path: {}, location: {}, source: {}",
+        path,
+        location,
+        source
+    ))]
+    ReadParquet {
+        path: String,
+        source: parquet::errors::ParquetError,
+        location: Location,
     },
 }
 
@@ -157,7 +171,9 @@ impl ErrorExt for Error {
         use Error::*;
 
         match self {
-            OpenDal { .. } | WriteParquet { .. } => StatusCode::StorageUnavailable,
+            OpenDal { .. } | WriteParquet { .. } | ReadParquet { .. } => {
+                StatusCode::StorageUnavailable
+            }
             CompressObject { .. }
             | DecompressObject { .. }
             | SerdeJson { .. }

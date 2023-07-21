@@ -14,6 +14,7 @@
 
 //! SST in parquet format.
 
+mod reader;
 mod writer;
 
 use common_base::readable_size::ReadableSize;

@@ -20,6 +20,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use common_time::Timestamp;
+use object_store::util::join_path;
 use serde::{Deserialize, Serialize};
 use snafu::{ResultExt, Snafu};
 use store_api::storage::RegionId;
@@ -58,7 +59,7 @@ impl FileId {
 
 impl fmt::Display for FileId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
+        write!(f, "{}", self.0.hyphenated())
     }
 }
 
@@ -106,6 +107,18 @@ impl fmt::Debug for FileHandle {
             .field("compacting", &self.inner.compacting)
             .field("deleted", &self.inner.deleted)
             .finish()
+    }
+}
+
+impl FileHandle {
+    /// Returns the file id.
+    pub fn file_id(&self) -> FileId {
+        self.inner.meta.file_id
+    }
+
+    /// Returns the complete file path of the file.
+    pub fn file_path(&self, file_dir: &str) -> String {
+        join_path(file_dir, &self.file_id().as_parquet())
     }
 }
 

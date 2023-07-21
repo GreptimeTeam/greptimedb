@@ -12,6 +12,7 @@ test = ["common-test-util"]
 aquamarine = "0.3"
 anymap = "1.0.0-beta.2"
 arc-swap = "1.0"
+async-compat = "0.2"
 async-stream.workspace = true
 async-trait = "0.1"
 chrono.workspace = true
