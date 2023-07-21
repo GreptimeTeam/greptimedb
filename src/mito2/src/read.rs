@@ -14,6 +14,7 @@
 
 //! Common structs and utilities for reading data.
 
+use async_trait::async_trait;
 use common_time::Timestamp;
 use datatypes::vectors::VectorRef;
 
@@ -112,5 +113,28 @@ impl Source {
     /// Returns statisics of fetched batches.
     pub(crate) fn stats(&self) -> SourceStats {
         unimplemented!()
+    }
+}
+
+/// Async batch reader.
+#[async_trait]
+pub trait BatchReader: Send {
+    /// Fetch next [Batch].
+    ///
+    /// Returns `Ok(None)` when the reader has reached its end and calling `next_batch()`
+    /// again won't return batch again.
+    ///
+    /// If `Err` is returned, caller should not call this method again, the implementor
+    /// may or may not panic in such case.
+    async fn next_batch(&mut self) -> Result<Option<Batch>>;
+}
+
+/// Pointer to [BatchReader].
+pub type BoxedBatchReader = Box<dyn BatchReader>;
+
+#[async_trait::async_trait]
+impl<T: BatchReader + ?Sized> BatchReader for Box<T> {
+    async fn next_batch(&mut self) -> Result<Option<Batch>> {
+        (**self).next_batch().await
     }
 }
