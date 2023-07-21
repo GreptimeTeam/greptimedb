@@ -43,7 +43,7 @@ use common_meta::heartbeat::handler::HandlerGroupExecutor;
 use common_meta::key::TableMetadataManager;
 use common_query::Output;
 use common_telemetry::logging::{debug, info};
-use common_telemetry::{gen_trace_id, timer};
+use common_telemetry::timer;
 use datafusion::sql::sqlparser::ast::ObjectName;
 use datanode::instance::sql::table_idents_to_full_name;
 use datanode::instance::InstanceRef as DnInstanceRef;
@@ -478,9 +478,6 @@ impl SqlQueryHandler for Instance {
     type Error = Error;
 
     async fn do_query(&self, query: &str, query_ctx: QueryContextRef) -> Vec<Result<Output>> {
-        let trace_id = gen_trace_id();
-        info!("[DEBUG]Query: {} with trace_id: {}", query, trace_id);
-
         let _timer = timer!(metrics::METRIC_HANDLE_SQL_ELAPSED);
         let query_interceptor_opt = self.plugins.get::<SqlQueryInterceptorRef<Error>>();
         let query_interceptor = query_interceptor_opt.as_ref();
