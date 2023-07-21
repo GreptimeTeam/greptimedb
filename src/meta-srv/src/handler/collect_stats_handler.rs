@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use api::v1::meta::{HeartbeatRequest, Role};
-use common_telemetry::debug;
+use common_telemetry::warn;
 
 use super::node_stat::Stat;
 use crate::error::Result;
@@ -45,8 +45,8 @@ impl HeartbeatHandler for CollectStatsHandler {
             Ok(stat) => {
                 let _ = acc.stat.insert(stat);
             }
-            Err(_) => {
-                debug!("Incomplete heartbeat data: {:?}", req);
+            Err(err) => {
+                warn!("Incomplete heartbeat data: {:?}, err: {:?}", req, err);
             }
         };
 

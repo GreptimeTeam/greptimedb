@@ -16,7 +16,9 @@ use api::v1::meta::HeartbeatRequest;
 use common_meta::ident::TableIdent;
 use common_time::util as time_util;
 use serde::{Deserialize, Serialize};
+use snafu::OptionExt;
 
+use crate::error::{Error, InvalidHeartbeatRequestSnafu};
 use crate::keys::StatKey;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -62,7 +64,7 @@ impl Stat {
 }
 
 impl TryFrom<HeartbeatRequest> for Stat {
-    type Error = ();
+    type Error = Error;
 
     fn try_from(value: HeartbeatRequest) -> Result<Self, Self::Error> {
         let HeartbeatRequest {
@@ -99,20 +101,27 @@ impl TryFrom<HeartbeatRequest> for Stat {
                     node_epoch,
                 })
             }
-            _ => Err(()),
+            _ => InvalidHeartbeatRequestSnafu {
+                err_msg: "missing header, peer or node_stat",
+            }
+            .fail(),
         }
     }
 }
 
 impl TryFrom<api::v1::meta::RegionStat> for RegionStat {
-    type Error = ();
+    type Error = Error;
 
     fn try_from(value: api::v1::meta::RegionStat) -> Result<Self, Self::Error> {
-        let Some(table_ident) = value.table_ident else {
-            return Err(());
-        };
-        let Ok(table_ident) = TableIdent::try_from(table_ident) else {
-            return Err(());
+        let table_ident = value.table_ident.context(InvalidHeartbeatRequestSnafu {
+            err_msg: "missing table_ident",
+        })?;
+        let table_ident_result = TableIdent::try_from(table_ident);
+        let Ok(table_ident) = table_ident_result else {
+            return InvalidHeartbeatRequestSnafu {
+                err_msg: format!("invalid table_ident: {:?}", table_ident_result.err()),
+            }
+            .fail();
         };
 
         Ok(Self {
