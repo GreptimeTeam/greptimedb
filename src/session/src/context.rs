@@ -57,6 +57,10 @@ impl QueryContext {
         Arc::new(QueryContext::new())
     }
 
+    pub fn arc_with_trace(trace_id: u64) -> QueryContextRef {
+        Arc::new(QueryContext::new_with_trace(trace_id))
+    }
+
     pub fn new() -> Self {
         Self {
             current_catalog: ArcSwap::new(Arc::new(DEFAULT_CATALOG_NAME.to_string())),
@@ -64,6 +68,16 @@ impl QueryContext {
             time_zone: ArcSwap::new(Arc::new(None)),
             sql_dialect: Box::new(GreptimeDbDialect {}),
             trace_id: common_telemetry::gen_trace_id(),
+        }
+    }
+
+    pub fn new_with_trace(trace_id: u64) -> Self {
+        Self {
+            current_catalog: ArcSwap::new(Arc::new(DEFAULT_CATALOG_NAME.to_string())),
+            current_schema: ArcSwap::new(Arc::new(DEFAULT_SCHEMA_NAME.to_string())),
+            time_zone: ArcSwap::new(Arc::new(None)),
+            sql_dialect: Box::new(GreptimeDbDialect {}),
+            trace_id,
         }
     }
 
