@@ -47,7 +47,7 @@ impl<'a> ParquetWriter<'a> {
     /// Iterates source and writes all rows to Parquet file.
     ///
     /// Returns the [SstInfo] if the SST is written.
-    pub async fn write_all(mut self, opts: &WriteOptions) -> Result<Option<SstInfo>> {
+    pub async fn write_all(&mut self, opts: &WriteOptions) -> Result<Option<SstInfo>> {
         let metadata = self.source.metadata();
 
         let json = metadata.to_json()?;
