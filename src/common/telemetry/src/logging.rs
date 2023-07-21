@@ -53,7 +53,7 @@ tokio::task_local! {
 /// Then all functions called from this stack will be able to retrieve the trace id
 /// via this method.
 pub fn trace_id() -> Option<u64> {
-    TRACE_ID.try_with(|id| Some(id.clone())).unwrap_or(None)
+    TRACE_ID.try_with(|id| Some(*id)).unwrap_or(None)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
