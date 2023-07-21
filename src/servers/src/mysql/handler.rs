@@ -101,7 +101,7 @@ impl MysqlInstanceShim {
                 common_telemetry::info!("trace_id: {}, query: {}", trace_id, query);
 
                 common_telemetry::TRACE_ID
-                    .scope(Some(trace_id), async move {
+                    .scope(trace_id, async move {
                         self.query_handler
                             .do_query(query, self.session.context())
                             .await

@@ -114,9 +114,6 @@ impl PromPlanner {
             ctx: PromPlannerContext::from_eval_stmt(&stmt),
         };
 
-        let trace_id = common_telemetry::TRACE_ID.get();
-        common_telemetry::info!("trace id at promql planner: {}", trace_id.unwrap());
-
         planner.prom_expr_to_plan(stmt.expr).await
     }
 
