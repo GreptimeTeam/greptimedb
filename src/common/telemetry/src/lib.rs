@@ -26,10 +26,10 @@ use snowflake::SnowflakeIdBucket;
 pub use {common_error, tracing, tracing_appender, tracing_futures, tracing_subscriber};
 
 static NODE_ID: OnceCell<u64> = OnceCell::new();
-static TRACE_GENERATOR: OnceCell<Mutex<SnowflakeIdBucket>> = OnceCell::new();
+static TRACE_BUCKET: OnceCell<Mutex<SnowflakeIdBucket>> = OnceCell::new();
 
 pub fn gen_trace_id() -> u64 {
-    let mut traver = TRACE_GENERATOR
+    let mut bucket = TRACE_BUCKET
         .get_or_init(|| {
             // if node_id is not initialized, how about random one?
             let node_id = NODE_ID.get_or_init(|| 0);
@@ -38,7 +38,7 @@ pub fn gen_trace_id() -> u64 {
             Mutex::new(bucket)
         })
         .lock();
-    (*traver).get_id() as u64
+    (*bucket).get_id() as u64
 }
 
 pub fn init_node_id(node_id: u64) {
