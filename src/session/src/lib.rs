@@ -20,8 +20,9 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use common_catalog::build_db_string;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use context::QueryContextBuilder;
 
-use crate::context::{Channel, ConnInfo, QueryContext, QueryContextRef, UserInfo};
+use crate::context::{Channel, ConnInfo, QueryContextRef, UserInfo};
 
 /// Session for persistent connection such as MySQL, PostgreSQL etc.
 #[derive(Debug)]
@@ -46,11 +47,12 @@ impl Session {
 
     #[inline]
     pub fn new_query_context(&self) -> QueryContextRef {
-        Arc::new(QueryContext::with_sql_dialect(
-            self.catalog.load().as_ref(),
-            self.schema.load().as_ref(),
-            self.conn_info.channel.dialect(),
-        ))
+        QueryContextBuilder::new()
+            .catalog(self.catalog.load().to_string())
+            .schema(self.schema.load().to_string())
+            .sql_dialect(self.conn_info.channel.dialect())
+            .build()
+            .to_arc()
     }
 
     #[inline]

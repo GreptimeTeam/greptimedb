@@ -57,8 +57,8 @@ impl QueryContext {
         Arc::new(QueryContext::new())
     }
 
-    pub fn arc_with_trace(trace_id: u64) -> QueryContextRef {
-        Arc::new(QueryContext::new_with_trace(trace_id))
+    pub fn to_arc(self) -> QueryContextRef {
+        Arc::new(self)
     }
 
     pub fn new() -> Self {
@@ -71,32 +71,11 @@ impl QueryContext {
         }
     }
 
-    pub fn new_with_trace(trace_id: u64) -> Self {
-        Self {
-            current_catalog: ArcSwap::new(Arc::new(DEFAULT_CATALOG_NAME.to_string())),
-            current_schema: ArcSwap::new(Arc::new(DEFAULT_SCHEMA_NAME.to_string())),
-            time_zone: ArcSwap::new(Arc::new(None)),
-            sql_dialect: Box::new(GreptimeDbDialect {}),
-            trace_id,
-        }
-    }
-
     pub fn with(catalog: &str, schema: &str) -> Self {
-        Self::with_sql_dialect(catalog, schema, Box::new(GreptimeDbDialect {}))
-    }
-
-    pub fn with_sql_dialect(
-        catalog: &str,
-        schema: &str,
-        sql_dialect: Box<dyn Dialect + Send + Sync>,
-    ) -> Self {
-        Self {
-            current_catalog: ArcSwap::new(Arc::new(catalog.to_string())),
-            current_schema: ArcSwap::new(Arc::new(schema.to_string())),
-            time_zone: ArcSwap::new(Arc::new(None)),
-            sql_dialect,
-            trace_id: common_telemetry::gen_trace_id(),
-        }
+        QueryContextBuilder::new()
+            .catalog(catalog.to_string())
+            .schema(schema.to_string())
+            .build()
     }
 
     #[inline]
@@ -153,6 +132,65 @@ impl QueryContext {
     #[inline]
     pub fn trace_id(&self) -> u64 {
         self.trace_id
+    }
+}
+
+#[derive(Default)]
+pub struct QueryContextBuilder {
+    catalog: Option<String>,
+    schema: Option<String>,
+    time_zone: Option<TimeZone>,
+    sql_dialect: Option<Box<dyn Dialect + Send + Sync>>,
+    trace_id: Option<u64>,
+}
+
+impl QueryContextBuilder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn catalog(mut self, catalog: String) -> Self {
+        self.catalog = Some(catalog);
+        self
+    }
+
+    pub fn schema(mut self, schema: String) -> Self {
+        self.schema = Some(schema);
+        self
+    }
+
+    pub fn time_zone(mut self, tz: TimeZone) -> Self {
+        self.time_zone = Some(tz);
+        self
+    }
+
+    pub fn sql_dialect(mut self, sql_dialect: Box<dyn Dialect + Send + Sync>) -> Self {
+        self.sql_dialect = Some(sql_dialect);
+        self
+    }
+
+    pub fn trace_id(mut self, trace_id: u64) -> Self {
+        self.trace_id = Some(trace_id);
+        self
+    }
+
+    pub fn try_trace_id(mut self, trace_id: Option<u64>) -> Self {
+        self.trace_id = trace_id;
+        self
+    }
+
+    pub fn build(self) -> QueryContext {
+        QueryContext {
+            current_catalog: ArcSwap::new(Arc::new(
+                self.catalog.unwrap_or(DEFAULT_CATALOG_NAME.to_string()),
+            )),
+            current_schema: ArcSwap::new(Arc::new(
+                self.schema.unwrap_or(DEFAULT_SCHEMA_NAME.to_string()),
+            )),
+            time_zone: ArcSwap::new(Arc::new(self.time_zone)),
+            sql_dialect: self.sql_dialect.unwrap_or(Box::new(GreptimeDbDialect {})),
+            trace_id: self.trace_id.unwrap_or(common_telemetry::gen_trace_id()),
+        }
     }
 }
 
