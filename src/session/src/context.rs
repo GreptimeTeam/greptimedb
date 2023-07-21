@@ -32,6 +32,7 @@ pub struct QueryContext {
     current_schema: ArcSwap<String>,
     time_zone: ArcSwap<Option<TimeZone>>,
     sql_dialect: Box<dyn Dialect + Send + Sync>,
+    trace_id: ArcSwap<u64>,
 }
 
 impl Default for QueryContext {
@@ -62,6 +63,7 @@ impl QueryContext {
             current_schema: ArcSwap::new(Arc::new(DEFAULT_SCHEMA_NAME.to_string())),
             time_zone: ArcSwap::new(Arc::new(None)),
             sql_dialect: Box::new(GreptimeDbDialect {}),
+            trace_id: ArcSwap::new(Arc::new(0)),
         }
     }
 
@@ -79,6 +81,7 @@ impl QueryContext {
             current_schema: ArcSwap::new(Arc::new(schema.to_string())),
             time_zone: ArcSwap::new(Arc::new(None)),
             sql_dialect,
+            trace_id: ArcSwap::new(Arc::new(0)),
         }
     }
 
@@ -131,6 +134,16 @@ impl QueryContext {
     #[inline]
     pub fn set_time_zone(&self, tz: Option<TimeZone>) {
         let _ = self.time_zone.swap(Arc::new(tz));
+    }
+
+    #[inline]
+    pub fn trace_id(&self) -> u64 {
+        *self.trace_id.load().as_ref()
+    }
+
+    #[inline]
+    pub fn set_trace_id(&self, trace_id: u64) {
+        self.trace_id.swap(Arc::new(trace_id));
     }
 }
 
