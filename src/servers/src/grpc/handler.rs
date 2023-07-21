@@ -146,7 +146,7 @@ impl GreptimeRequestHandler {
 pub(crate) fn create_query_context(header: Option<&RequestHeader>) -> QueryContextRef {
     let ctx = header
         .and_then(|header| header.trace_id)
-        .map(|trace_id| QueryContext::arc_with_trace(trace_id))
+        .map(QueryContext::arc_with_trace)
         .unwrap_or(QueryContext::arc());
 
     if let Some(header) = header {
