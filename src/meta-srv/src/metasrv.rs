@@ -21,10 +21,10 @@ use api::v1::meta::Peer;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_grpc::channel_manager;
 use common_meta::key::TableMetadataManagerRef;
-use common_procedure::options::ProcedureConfig;
-use common_procedure::ProcedureManagerRef;
 #[cfg(feature = "version-report")]
 use common_meta::version_reporter::VersionReportTask;
+use common_procedure::options::ProcedureConfig;
+use common_procedure::ProcedureManagerRef;
 use common_telemetry::logging::LoggingOptions;
 use common_telemetry::{error, info, warn};
 use serde::{Deserialize, Serialize};
