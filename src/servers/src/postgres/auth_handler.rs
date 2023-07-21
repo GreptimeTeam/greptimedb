@@ -118,12 +118,11 @@ fn set_client_info<C>(client: &C, session: &Session)
 where
     C: ClientInfo,
 {
-    let ctx = session.context();
     if let Some(current_catalog) = client.metadata().get(super::METADATA_CATALOG) {
-        ctx.set_current_catalog(current_catalog);
+        session.set_catalog(current_catalog.clone());
     }
     if let Some(current_schema) = client.metadata().get(super::METADATA_SCHEMA) {
-        ctx.set_current_schema(current_schema);
+        session.set_schema(current_schema.clone());
     }
     if let Some(username) = client.metadata().get(super::METADATA_USER) {
         session.set_user_info(UserInfo::new(username));
