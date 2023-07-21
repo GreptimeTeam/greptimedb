@@ -19,5 +19,23 @@ mod panic_hook;
 
 pub use logging::{init_default_ut_logging, init_global_logging};
 pub use metric::init_default_metrics_recorder;
+use once_cell::sync::OnceCell;
 pub use panic_hook::set_panic_hook;
+use parking_lot::Mutex;
+use snowflake::SnowflakeIdBucket;
 pub use {common_error, tracing, tracing_appender, tracing_futures, tracing_subscriber};
+
+static NODE_ID: OnceCell<u64> = OnceCell::new();
+static TRACE_GENERATOR: OnceCell<Mutex<SnowflakeIdBucket>> = OnceCell::new();
+
+pub fn gen_trace_id() -> u64 {
+    let mut traver = TRACE_GENERATOR
+        .get_or_init(|| {
+            // if node_id is not initialized, how about random one?
+            let node_id = NODE_ID.get_or_init(|| 0);
+            let bucket = SnowflakeIdBucket::new(1, (*node_id) as i32);
+            Mutex::new(bucket)
+        })
+        .lock();
+    (*traver).get_id() as u64
+}
