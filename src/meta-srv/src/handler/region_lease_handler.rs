@@ -88,6 +88,7 @@ mod test {
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_meta::ident::TableIdent;
     use common_meta::key::TableMetadataManager;
+    use common_meta::RegionIdent;
     use store_api::storage::RegionNumber;
 
     use super::*;
@@ -158,11 +159,27 @@ mod test {
 
         let inactive_node_manager = InactiveNodeManager::new(&ctx.in_memory);
         inactive_node_manager
-            .register_inactive_region(1, 1, 1, 1)
+            .register_inactive_region(&RegionIdent {
+                cluster_id: 1,
+                datanode_id: 1,
+                table_ident: TableIdent {
+                    table_id: 1,
+                    ..Default::default()
+                },
+                region_number: 1,
+            })
             .await
             .unwrap();
         inactive_node_manager
-            .register_inactive_region(1, 1, 1, 3)
+            .register_inactive_region(&RegionIdent {
+                cluster_id: 1,
+                datanode_id: 1,
+                table_ident: TableIdent {
+                    table_id: 1,
+                    ..Default::default()
+                },
+                region_number: 3,
+            })
             .await
             .unwrap();
 

@@ -15,6 +15,7 @@
 use std::collections::HashSet;
 
 use common_meta::rpc::store::{BatchGetRequest, PutRequest};
+use common_meta::RegionIdent;
 use store_api::storage::RegionNumber;
 
 use crate::error::Result;
@@ -30,18 +31,12 @@ impl<'a> InactiveNodeManager<'a> {
         Self { store }
     }
 
-    pub async fn register_inactive_region(
-        &self,
-        cluster_id: u64,
-        node_id: u64,
-        table_id: u32,
-        region_number: RegionNumber,
-    ) -> Result<()> {
+    pub async fn register_inactive_region(&self, region_ident: &RegionIdent) -> Result<()> {
         let key = InactiveNodeKey {
-            cluster_id,
-            node_id,
-            table_id,
-            region_number,
+            cluster_id: region_ident.cluster_id,
+            node_id: region_ident.datanode_id,
+            table_id: region_ident.table_ident.table_id,
+            region_number: region_ident.region_number,
         };
         let req = PutRequest {
             key: key.into(),
@@ -52,18 +47,12 @@ impl<'a> InactiveNodeManager<'a> {
         Ok(())
     }
 
-    pub async fn deregister_inactive_region(
-        &self,
-        cluster_id: u64,
-        node_id: u64,
-        table_id: u32,
-        region_number: RegionNumber,
-    ) -> Result<()> {
+    pub async fn deregister_inactive_region(&self, region_ident: &RegionIdent) -> Result<()> {
         let key: Vec<u8> = InactiveNodeKey {
-            cluster_id,
-            node_id,
-            table_id,
-            region_number,
+            cluster_id: region_ident.cluster_id,
+            node_id: region_ident.datanode_id,
+            table_id: region_ident.table_ident.table_id,
+            region_number: region_ident.region_number,
         }
         .into();
         self.store.delete(&key, false).await?;

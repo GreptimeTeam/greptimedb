@@ -69,12 +69,7 @@ impl DeactivateRegion {
 
         let inactive_node_manager = InactiveNodeManager::new(&ctx.in_memory);
         inactive_node_manager
-            .register_inactive_region(
-                failed_region.cluster_id,
-                failed_region.datanode_id,
-                failed_region.table_ident.table_id,
-                failed_region.region_number,
-            )
+            .register_inactive_region(failed_region)
             .await?;
 
         let ch = Channel::Datanode(failed_region.datanode_id);
@@ -101,12 +96,7 @@ impl DeactivateRegion {
                 if result {
                     let inactive_node_manager = InactiveNodeManager::new(&ctx.in_memory);
                     inactive_node_manager
-                        .deregister_inactive_region(
-                            failed_region.cluster_id,
-                            failed_region.datanode_id,
-                            failed_region.table_ident.table_id,
-                            failed_region.region_number,
-                        )
+                        .deregister_inactive_region(failed_region)
                         .await?;
 
                     Ok(Box::new(ActivateRegion::new(self.candidate)))
