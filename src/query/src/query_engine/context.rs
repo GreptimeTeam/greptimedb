@@ -12,20 +12,42 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use datafusion::execution::context::SessionState;
+use std::sync::Arc;
+
+use datafusion::execution::context::{SessionState, TaskContext};
+use session::context::QueryContextRef;
 
 #[derive(Debug)]
 pub struct QueryEngineContext {
     state: SessionState,
+    query_ctx: QueryContextRef,
 }
 
 impl QueryEngineContext {
-    pub fn new(state: SessionState) -> Self {
-        Self { state }
+    pub fn new(state: SessionState, query_ctx: QueryContextRef) -> Self {
+        Self { state, query_ctx }
     }
 
     #[inline]
     pub fn state(&self) -> &SessionState {
         &self.state
+    }
+
+    #[inline]
+    pub fn query_ctx(&self) -> QueryContextRef {
+        self.query_ctx.clone()
+    }
+
+    pub fn build_task_ctx(&self) -> Arc<TaskContext> {
+        let task_id = self.query_ctx.trace_id().to_string();
+        let state = &self.state;
+        Arc::new(TaskContext::new(
+            Some(task_id),
+            state.session_id().to_string(),
+            state.config().clone(),
+            state.scalar_functions().clone(),
+            state.aggregate_functions().clone(),
+            state.runtime_env().clone(),
+        ))
     }
 }
