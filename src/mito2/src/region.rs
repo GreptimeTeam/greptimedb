@@ -14,6 +14,7 @@
 
 //! Mito region.
 
+pub(crate) mod opener;
 mod version;
 
 use std::collections::HashMap;
@@ -21,9 +22,8 @@ use std::sync::{Arc, RwLock};
 
 use store_api::storage::RegionId;
 
-use crate::memtable::MemtableBuilderRef;
-use crate::metadata::RegionMetadataRef;
-use crate::region::version::{VersionBuilder, VersionControl, VersionControlRef};
+use crate::manifest::manager::RegionManifestManager;
+use crate::region::version::VersionControlRef;
 
 /// Type to store region version.
 pub type VersionNumber = u32;
@@ -31,7 +31,16 @@ pub type VersionNumber = u32;
 /// Metadata and runtime status of a region.
 #[derive(Debug)]
 pub(crate) struct MitoRegion {
+    /// Id of this region.
+    ///
+    /// Accessing region id from the version control is inconvenient so
+    /// we also store it here.
+    pub(crate) region_id: RegionId,
+
+    /// Version controller for this region.
     version_control: VersionControlRef,
+    /// Manager to maintain manifest for this region.
+    manifest_manager: RegionManifestManager,
 }
 
 pub(crate) type MitoRegionRef = Arc<MitoRegion>;
@@ -42,33 +51,18 @@ pub(crate) struct RegionMap {
     regions: RwLock<HashMap<RegionId, MitoRegionRef>>,
 }
 
+impl RegionMap {
+    /// Returns true if the region exists.
+    pub(crate) fn is_region_exists(&self, region_id: RegionId) -> bool {
+        let regions = self.regions.read().unwrap();
+        regions.contains_key(&region_id)
+    }
+
+    /// Inserts a new region into the map.
+    pub(crate) fn insert_region(&self, region: MitoRegionRef) {
+        let mut regions = self.regions.write().unwrap();
+        regions.insert(region.region_id, region);
+    }
+}
+
 pub(crate) type RegionMapRef = Arc<RegionMap>;
-
-/// [MitoRegion] builder.
-pub(crate) struct RegionBuilder {
-    metadata: RegionMetadataRef,
-    memtable_builder: MemtableBuilderRef,
-}
-
-impl RegionBuilder {
-    /// Returns a new builder.
-    pub(crate) fn new(
-        metadata: RegionMetadataRef,
-        memtable_builder: MemtableBuilderRef,
-    ) -> RegionBuilder {
-        RegionBuilder {
-            metadata,
-            memtable_builder,
-        }
-    }
-
-    /// Builds a new region.
-    pub(crate) fn build(self) -> MitoRegion {
-        let mutable = self.memtable_builder.build(&self.metadata);
-
-        let version = VersionBuilder::new(self.metadata, mutable).build();
-        let version_control = Arc::new(VersionControl::new(version));
-
-        MitoRegion { version_control }
-    }
-}

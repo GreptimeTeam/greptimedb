@@ -68,8 +68,10 @@ pub(crate) struct Version {
     ssts: SstVersionRef,
     /// Inclusive max sequence of flushed data.
     flushed_sequence: SequenceNumber,
+    // TODO(yingwen): Remove this.
     /// Current version of region manifest.
     manifest_version: ManifestVersion,
+    // TODO(yingwen): RegionOptions.
 }
 
 /// Version builder.

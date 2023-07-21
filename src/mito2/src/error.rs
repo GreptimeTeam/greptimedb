@@ -19,6 +19,7 @@ use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use snafu::{Location, Snafu};
 use store_api::manifest::ManifestVersion;
+use store_api::storage::RegionId;
 
 use crate::worker::WorkerId;
 
@@ -110,6 +111,12 @@ pub enum Error {
         source: datatypes::error::Error,
         location: Location,
     },
+
+    #[snafu(display("Region {} already exists, location: {}", region_id, location))]
+    RegionExists {
+        region_id: RegionId,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -120,9 +127,11 @@ impl ErrorExt for Error {
 
         match self {
             OpenDal { .. } => StatusCode::StorageUnavailable,
-            CompressObject { .. } | DecompressObject { .. } | SerdeJson { .. } | Utf8 { .. } => {
-                StatusCode::Unexpected
-            }
+            CompressObject { .. }
+            | DecompressObject { .. }
+            | SerdeJson { .. }
+            | Utf8 { .. }
+            | RegionExists { .. } => StatusCode::Unexpected,
             InvalidScanIndex { .. }
             | InitialMetadata { .. }
             | InvalidMeta { .. }
