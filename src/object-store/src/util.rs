@@ -39,8 +39,7 @@ pub fn normalize_dir(dir: &str) -> String {
 pub fn join_dir(parent: &str, child: &str) -> String {
     // Always adds a `/` to the output path.
     let output = format!("{parent}/{child}/");
-    // We call opendal's normalize_dir which doesn't push `/` to
-    // the end of path.
+    // We call opendal's normalize_root which keep the last `/`.
     opendal::raw::normalize_root(&output)
 }
 

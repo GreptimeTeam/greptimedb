@@ -12,11 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Mito region engine.
+
+#[cfg(test)]
+mod tests;
+
 use std::sync::Arc;
 
 use object_store::ObjectStore;
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
+use store_api::storage::RegionId;
 
 use crate::config::MitoConfig;
 use crate::error::{RecvSnafu, Result};
@@ -53,6 +59,11 @@ impl MitoEngine {
     pub async fn create_region(&self, request: CreateRequest) -> Result<()> {
         self.inner.create_region(request).await
     }
+
+    /// Returns true if the specific region exists.
+    pub fn is_region_exists(&self, region_id: RegionId) -> bool {
+        self.inner.workers.is_region_exists(region_id)
+    }
 }
 
 /// Inner struct of [MitoEngine].
@@ -69,7 +80,7 @@ impl EngineInner {
         object_store: ObjectStore,
     ) -> EngineInner {
         EngineInner {
-            workers: WorkerGroup::start(&config, log_store, object_store),
+            workers: WorkerGroup::start(config, log_store, object_store),
         }
     }
 
@@ -84,19 +95,5 @@ impl EngineInner {
         self.workers.submit_to_worker(request).await?;
 
         receiver.await.context(RecvSnafu)?
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::test_util::TestEnv;
-
-    #[tokio::test]
-    async fn test_engine_new_stop() {
-        let env = TestEnv::new("engine-stop");
-        let engine = env.create_engine(MitoConfig::default()).await;
-
-        engine.stop().await.unwrap();
     }
 }

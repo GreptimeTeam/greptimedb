@@ -20,6 +20,7 @@ use common_base::readable_size::ReadableSize;
 use store_api::storage::{ColumnId, CompactionStrategy, RegionId};
 use tokio::sync::oneshot::{self, Receiver, Sender};
 
+use crate::config::DEFAULT_WRITE_BUFFER_SIZE;
 use crate::error::Result;
 use crate::metadata::ColumnMetadata;
 
@@ -36,11 +37,23 @@ pub struct RegionOptions {
     pub compaction_strategy: CompactionStrategy,
 }
 
+impl Default for RegionOptions {
+    fn default() -> Self {
+        RegionOptions {
+            write_buffer_size: Some(DEFAULT_WRITE_BUFFER_SIZE),
+            ttl: None,
+            compaction_strategy: CompactionStrategy::LeveledTimeWindow,
+        }
+    }
+}
+
 /// Create region request.
 #[derive(Debug)]
 pub struct CreateRequest {
     /// Region to create.
     pub region_id: RegionId,
+    /// Data directory of the region.
+    pub region_dir: String,
     /// Columns in this region.
     pub column_metadatas: Vec<ColumnMetadata>,
     /// Columns in the primary key.
@@ -49,13 +62,6 @@ pub struct CreateRequest {
     pub create_if_not_exists: bool,
     /// Options of the created region.
     pub options: RegionOptions,
-}
-
-impl CreateRequest {
-    /// Validate the request.
-    fn validate(&self) -> Result<()> {
-        unimplemented!()
-    }
 }
 
 /// Open region request.

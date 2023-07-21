@@ -102,7 +102,7 @@ Please see [the online document site](https://docs.greptime.com/getting-started/
 
 Read the [complete getting started guide](https://docs.greptime.com/getting-started/overview#connect) on our [official document site](https://docs.greptime.com/).
 
-To write and query data, GreptimeDB is compatible with multiple [protocols and clients](https://docs.greptime.com/user-guide/client/overview).
+To write and query data, GreptimeDB is compatible with multiple [protocols and clients](https://docs.greptime.com/user-guide/clients/overview).
 
 ## Resources
 

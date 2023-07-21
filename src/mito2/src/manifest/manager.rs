@@ -292,7 +292,7 @@ mod test {
     async fn create_region_without_initial_metadata() {
         let env = TestEnv::new("");
         let result = env
-            .create_manifest_manager(CompressionType::Uncompressed, None, None)
+            .create_manifest_manager(CompressionType::Uncompressed, 10, None)
             .await;
         assert!(matches!(
             result.err().unwrap(),
@@ -305,7 +305,7 @@ mod test {
         let metadata = basic_region_metadata();
         let env = TestEnv::new("");
         let manager = env
-            .create_manifest_manager(CompressionType::Uncompressed, None, Some(metadata.clone()))
+            .create_manifest_manager(CompressionType::Uncompressed, 10, Some(metadata.clone()))
             .await
             .unwrap();
 
@@ -318,7 +318,7 @@ mod test {
         let metadata = basic_region_metadata();
         let env = TestEnv::new("");
         let manager = env
-            .create_manifest_manager(CompressionType::Uncompressed, None, Some(metadata.clone()))
+            .create_manifest_manager(CompressionType::Uncompressed, 10, Some(metadata.clone()))
             .await
             .unwrap();
 

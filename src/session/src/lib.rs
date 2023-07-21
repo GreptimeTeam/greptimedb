@@ -18,6 +18,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
+use common_catalog::build_db_string;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 
 use crate::context::{Channel, ConnInfo, QueryContext, QueryContextRef, UserInfo};
@@ -25,7 +26,8 @@ use crate::context::{Channel, ConnInfo, QueryContext, QueryContextRef, UserInfo}
 /// Session for persistent connection such as MySQL, PostgreSQL etc.
 #[derive(Debug)]
 pub struct Session {
-    query_ctx: QueryContextRef,
+    catalog: ArcSwap<String>,
+    schema: ArcSwap<String>,
     user_info: ArcSwap<UserInfo>,
     conn_info: ConnInfo,
 }
@@ -35,19 +37,20 @@ pub type SessionRef = Arc<Session>;
 impl Session {
     pub fn new(addr: Option<SocketAddr>, channel: Channel) -> Self {
         Session {
-            query_ctx: Arc::new(QueryContext::with_sql_dialect(
-                DEFAULT_CATALOG_NAME,
-                DEFAULT_SCHEMA_NAME,
-                channel.dialect(),
-            )),
+            catalog: ArcSwap::new(Arc::new(DEFAULT_CATALOG_NAME.into())),
+            schema: ArcSwap::new(Arc::new(DEFAULT_SCHEMA_NAME.into())),
             user_info: ArcSwap::new(Arc::new(UserInfo::default())),
             conn_info: ConnInfo::new(addr, channel),
         }
     }
 
     #[inline]
-    pub fn context(&self) -> QueryContextRef {
-        self.query_ctx.clone()
+    pub fn new_query_context(&self) -> QueryContextRef {
+        Arc::new(QueryContext::with_sql_dialect(
+            self.catalog.load().as_ref(),
+            self.schema.load().as_ref(),
+            self.conn_info.channel.dialect(),
+        ))
     }
 
     #[inline]
@@ -68,5 +71,19 @@ impl Session {
     #[inline]
     pub fn set_user_info(&self, user_info: UserInfo) {
         self.user_info.store(Arc::new(user_info));
+    }
+
+    #[inline]
+    pub fn set_catalog(&self, catalog: String) {
+        self.catalog.store(Arc::new(catalog));
+    }
+
+    #[inline]
+    pub fn set_schema(&self, schema: String) {
+        self.schema.store(Arc::new(schema));
+    }
+
+    pub fn get_db_string(&self) -> String {
+        build_db_string(self.catalog.load().as_ref(), self.schema.load().as_ref())
     }
 }
