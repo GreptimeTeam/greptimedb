@@ -67,8 +67,7 @@ impl DeactivateRegion {
             input: instruction.to_string(),
         })?;
 
-        let inactive_node_manager = InactiveNodeManager::new(&ctx.in_memory);
-        inactive_node_manager
+        InactiveNodeManager::new(&ctx.in_memory)
             .register_inactive_region(failed_region)
             .await?;
 
@@ -94,8 +93,7 @@ impl DeactivateRegion {
                     }.fail();
                 };
                 if result {
-                    let inactive_node_manager = InactiveNodeManager::new(&ctx.in_memory);
-                    inactive_node_manager
+                    InactiveNodeManager::new(&ctx.in_memory)
                         .deregister_inactive_region(failed_region)
                         .await?;
 

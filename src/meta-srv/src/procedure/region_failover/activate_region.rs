@@ -29,6 +29,7 @@ use crate::error::{
     Error, Result, RetryLaterSnafu, SerializeToJsonSnafu, UnexpectedInstructionReplySnafu,
 };
 use crate::handler::HeartbeatMailbox;
+use crate::inactive_node_manager::InactiveNodeManager;
 use crate::procedure::region_failover::OPEN_REGION_MESSAGE_TIMEOUT;
 use crate::service::mailbox::{Channel, MailboxReceiver};
 
@@ -63,6 +64,21 @@ impl ActivateRegion {
         .with_context(|_| SerializeToJsonSnafu {
             input: instruction.to_string(),
         })?;
+
+        // Ensure that metasrv will renew the lease for this candidate node.
+        //
+        // This operation may not be redundant, imagine the following scenario:
+        // This candidate once had the current region, and because it did not respond to the `close`
+        // command in time, it was considered an inactive node by metasrv, then it replied, and the
+        // current region failed over again, and the node was selected as a candidate, so it needs
+        // to clear its previous state first.
+        let candidate = RegionIdent {
+            datanode_id: self.candidate.id,
+            ..failed_region.clone()
+        };
+        InactiveNodeManager::new(&ctx.in_memory)
+            .deregister_inactive_region(&candidate)
+            .await?;
 
         let ch = Channel::Datanode(self.candidate.id);
         ctx.mailbox.send(&ch, msg, timeout).await
