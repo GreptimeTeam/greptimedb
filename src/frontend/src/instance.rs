@@ -206,6 +206,10 @@ impl Instance {
             Arc::new(handlers_executor),
         ));
 
+        if let Some(node_id) = opts.node_id {
+            common_telemetry::init_node_id(node_id);
+        }
+
         Ok(Instance {
             catalog_manager,
             script_executor,

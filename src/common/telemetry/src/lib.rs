@@ -33,9 +33,17 @@ pub fn gen_trace_id() -> u64 {
         .get_or_init(|| {
             // if node_id is not initialized, how about random one?
             let node_id = NODE_ID.get_or_init(|| 0);
+            info!("initializing bucket with node_id: {}", node_id);
             let bucket = SnowflakeIdBucket::new(1, (*node_id) as i32);
             Mutex::new(bucket)
         })
         .lock();
     (*traver).get_id() as u64
+}
+
+pub fn init_node_id(node_id: u64) {
+    match NODE_ID.set(node_id) {
+        Ok(_) => {}
+        Err(_) => warn!("node_id is already initialized"),
+    }
 }
