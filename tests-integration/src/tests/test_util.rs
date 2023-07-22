@@ -12,11 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use common_query::Output;
 use common_recordbatch::util;
+use common_test_util::find_workspace_path;
 use frontend::instance::Instance;
 use rstest_reuse::{self, template};
 
@@ -110,8 +110,20 @@ pub(crate) async fn check_unordered_output_stream(output: Output, expected: &str
     assert_eq!(pretty_print, expected);
 }
 
-pub fn get_data_dir(path: &str) -> PathBuf {
-    let dir = env!("CARGO_MANIFEST_DIR");
+/// Find the testing file resource under workspace root to be used in object store.
+pub fn find_testing_resource(path: &str) -> String {
+    let p = find_workspace_path(path).display().to_string();
 
-    PathBuf::from(dir).join(path)
+    #[cfg(windows)]
+    let p = {
+        // We need unix style path even in the Windows, because the path is used in object-store, must
+        // be delimited with '/'. Inside the object-store, it will be converted to file system needed
+        // path in the end.
+        let p = p.replace('\\', "/");
+
+        // Prepend a '/' to indicate it's a file system path when parsed as object-store url in Windows.
+        format!("/{p}")
+    };
+
+    p
 }

@@ -27,6 +27,11 @@ async fn main() {
         "".to_string()
     };
 
+    #[cfg(windows)]
+    let data_home = std::env::temp_dir();
+    #[cfg(not(windows))]
+    let data_home = std::path::PathBuf::from("/tmp");
+
     let config = ConfigBuilder::default()
         .case_dir(util::get_case_dir())
         .fail_fast(true)
@@ -34,6 +39,6 @@ async fn main() {
         .follow_links(true)
         .build()
         .unwrap();
-    let runner = Runner::new(config, Env {});
+    let runner = Runner::new(config, Env::new(data_home));
     runner.run().await.unwrap();
 }

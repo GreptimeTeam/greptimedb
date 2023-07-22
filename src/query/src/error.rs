@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::any::Any;
+use std::time::Duration;
 
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
@@ -234,6 +235,12 @@ pub enum Error {
         location
     ))]
     TimeIndexNotFound { table: String, location: Location },
+
+    #[snafu(display("Failed to add duration '{:?}' to SystemTime, overflowed", duration))]
+    AddSystemTimeOverflow {
+        duration: Duration,
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -253,7 +260,8 @@ impl ErrorExt for Error {
             | ParseFloat { .. }
             | MissingRequiredField { .. }
             | BuildRegex { .. }
-            | ConvertSchema { .. } => StatusCode::InvalidArguments,
+            | ConvertSchema { .. }
+            | AddSystemTimeOverflow { .. } => StatusCode::InvalidArguments,
 
             BuildBackend { .. } | ListObjects { .. } => StatusCode::StorageUnavailable,
             EncodeSubstraitLogicalPlan { source, .. } => source.status_code(),

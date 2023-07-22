@@ -158,11 +158,13 @@ impl ArrowWriterCloser for ArrowWriter<SharedBuffer> {
 
 #[cfg(test)]
 mod tests {
+    use common_test_util::find_workspace_path;
+
     use super::*;
-    use crate::test_util::{self, format_schema, test_store};
+    use crate::test_util::{format_schema, test_store};
 
     fn test_data_root() -> String {
-        test_util::get_data_dir("tests/parquet")
+        find_workspace_path("/src/common/datasource/tests/parquet")
             .display()
             .to_string()
     }

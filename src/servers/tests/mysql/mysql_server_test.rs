@@ -199,8 +199,7 @@ async fn test_shutdown_mysql_server() -> Result<()> {
     for handle in join_handles.iter_mut() {
         let result = handle.await.unwrap();
         assert!(result.is_err());
-        let error = result.unwrap_err().to_string();
-        assert!(error.contains("Connection refused") || error.contains("Connection reset by peer"));
+        assert!(result.unwrap_err().is_fatal());
     }
     Ok(())
 }

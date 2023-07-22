@@ -12,21 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#[cfg(not(windows))]
+pub(crate) mod jemalloc;
+
 use std::task::{Context, Poll};
 use std::time::Instant;
 
-use common_telemetry::error;
 use hyper::Body;
-use metrics::gauge;
-use once_cell::sync::Lazy;
-use snafu::ResultExt;
-use tikv_jemalloc_ctl::stats::{allocated_mib, resident_mib};
-use tikv_jemalloc_ctl::{epoch, epoch_mib, stats};
 use tonic::body::BoxBody;
 use tower::{Layer, Service};
-
-use crate::error;
-use crate::error::UpdateJemallocMetricsSnafu;
 
 pub(crate) const METRIC_DB_LABEL: &str = "db";
 pub(crate) const METRIC_CODE_LABEL: &str = "code";
@@ -80,60 +74,18 @@ pub(crate) const METRIC_GRPC_REQUESTS_TOTAL: &str = "servers.grpc_requests_total
 pub(crate) const METRIC_GRPC_REQUESTS_ELAPSED: &str = "servers.grpc_requests_elapsed";
 pub(crate) const METRIC_METHOD_LABEL: &str = "method";
 pub(crate) const METRIC_PATH_LABEL: &str = "path";
+pub(crate) const METRIC_STATUS_LABEL: &str = "status";
 pub(crate) const METRIC_JEMALLOC_RESIDENT: &str = "sys.jemalloc.resident";
 pub(crate) const METRIC_JEMALLOC_ALLOCATED: &str = "sys.jemalloc.allocated";
 
 /// Prometheus style process metrics collector.
 #[cfg(feature = "metrics-process")]
-pub(crate) static PROCESS_COLLECTOR: Lazy<metrics_process::Collector> = Lazy::new(|| {
-    let collector = metrics_process::Collector::default();
-    // Describe collector.
-    collector.describe();
-    collector
-});
-
-pub(crate) static JEMALLOC_COLLECTOR: Lazy<Option<JemallocCollector>> = Lazy::new(|| {
-    let collector = JemallocCollector::try_new()
-        .map_err(|e| {
-            error!(e; "Failed to retrieve jemalloc metrics");
-            e
-        })
-        .ok();
-    collector.map(|c| {
-        if let Err(e) = c.update() {
-            error!(e; "Failed to update jemalloc metrics");
-        };
-        c
-    })
-});
-
-pub(crate) struct JemallocCollector {
-    epoch: epoch_mib,
-    allocated: allocated_mib,
-    resident: resident_mib,
-}
-
-impl JemallocCollector {
-    pub(crate) fn try_new() -> error::Result<Self> {
-        let e = epoch::mib().context(UpdateJemallocMetricsSnafu)?;
-        let allocated = stats::allocated::mib().context(UpdateJemallocMetricsSnafu)?;
-        let resident = stats::resident::mib().context(UpdateJemallocMetricsSnafu)?;
-        Ok(Self {
-            epoch: e,
-            allocated,
-            resident,
-        })
-    }
-
-    pub(crate) fn update(&self) -> error::Result<()> {
-        let _ = self.epoch.advance().context(UpdateJemallocMetricsSnafu)?;
-        let allocated = self.allocated.read().context(UpdateJemallocMetricsSnafu)?;
-        let resident = self.resident.read().context(UpdateJemallocMetricsSnafu)?;
-        gauge!(METRIC_JEMALLOC_ALLOCATED, allocated as f64);
-        gauge!(METRIC_JEMALLOC_RESIDENT, resident as f64);
-        Ok(())
-    }
-}
+pub(crate) static PROCESS_COLLECTOR: once_cell::sync::Lazy<metrics_process::Collector> =
+    once_cell::sync::Lazy::new(|| {
+        let collector = metrics_process::Collector::default();
+        collector.describe();
+        collector
+    });
 
 // Based on https://github.com/hyperium/tonic/blob/master/examples/src/tower/server.rs
 // See https://github.com/hyperium/tonic/issues/242
