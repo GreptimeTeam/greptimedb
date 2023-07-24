@@ -26,7 +26,7 @@ common-telemetry = { path = "../common/telemetry" }
 common-time = { path = "../common/time" }
 dashmap = "5.4"
 datatypes = { path = "../datatypes" }
-derive_builder = "0.12"
+derive_builder.workspace = true
 etcd-client.workspace = true
 futures.workspace = true
 h2 = "0.3"

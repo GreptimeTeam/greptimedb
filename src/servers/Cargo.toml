@@ -37,7 +37,7 @@ datafusion-common.workspace = true
 datafusion-expr.workspace = true
 
 datatypes = { path = "../datatypes" }
-derive_builder = "0.12"
+derive_builder.workspace = true
 digest = "0.10"
 futures = "0.3"
 headers = "0.3"
@@ -103,6 +103,7 @@ rand.workspace = true
 rustls = { version = "0.21", features = ["dangerous_configuration"] }
 script = { path = "../script", features = ["python"] }
 serde_json = "1.0"
+session = { path = "../session", features = ["testing"] }
 table = { path = "../table" }
 tokio-postgres = "0.7"
 tokio-postgres-rustls = "0.10"

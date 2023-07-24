@@ -1374,7 +1374,7 @@ mod test {
             })
             .await
             .is_ok());
-        DfTableSourceProvider::new(catalog_list, false, &QueryContext::new())
+        DfTableSourceProvider::new(catalog_list, false, QueryContext::arc().as_ref())
     }
 
     // {

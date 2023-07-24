@@ -71,6 +71,7 @@ datafusion-optimizer = { git = "https://github.com/waynexia/arrow-datafusion.git
 datafusion-physical-expr = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "63e52dde9e44cac4b1f6c6e6b6bf6368ba3bd323" }
 datafusion-sql = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "63e52dde9e44cac4b1f6c6e6b6bf6368ba3bd323" }
 datafusion-substrait = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "63e52dde9e44cac4b1f6c6e6b6bf6368ba3bd323" }
+derive_builder = "0.12"
 etcd-client = "0.11"
 futures = "0.3"
 futures-util = "0.3"

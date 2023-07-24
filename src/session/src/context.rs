@@ -19,26 +19,22 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use common_catalog::build_db_string;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-use common_telemetry::debug;
 use common_time::TimeZone;
+use derive_builder::Builder;
 use sql::dialect::{Dialect, GreptimeDbDialect, MySqlDialect, PostgreSqlDialect};
 
 pub type QueryContextRef = Arc<QueryContext>;
 pub type ConnInfoRef = Arc<ConnInfo>;
 
-#[derive(Debug)]
+#[derive(Debug, Builder)]
+#[builder(pattern = "owned")]
+#[builder(build_fn(skip))]
 pub struct QueryContext {
-    current_catalog: ArcSwap<String>,
-    current_schema: ArcSwap<String>,
+    current_catalog: String,
+    current_schema: String,
     time_zone: ArcSwap<Option<TimeZone>>,
     sql_dialect: Box<dyn Dialect + Send + Sync>,
     trace_id: u64,
-}
-
-impl Default for QueryContext {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 impl Display for QueryContext {
@@ -53,64 +49,31 @@ impl Display for QueryContext {
 }
 
 impl QueryContext {
+    #[cfg(any(test, feature = "testing"))]
     pub fn arc() -> QueryContextRef {
-        Arc::new(QueryContext::new())
-    }
-
-    pub fn to_arc(self) -> QueryContextRef {
-        Arc::new(self)
-    }
-
-    pub fn new() -> Self {
-        Self {
-            current_catalog: ArcSwap::new(Arc::new(DEFAULT_CATALOG_NAME.to_string())),
-            current_schema: ArcSwap::new(Arc::new(DEFAULT_SCHEMA_NAME.to_string())),
-            time_zone: ArcSwap::new(Arc::new(None)),
-            sql_dialect: Box::new(GreptimeDbDialect {}),
-            trace_id: common_telemetry::gen_trace_id(),
-        }
+        QueryContextBuilder::default().build_to_arc()
     }
 
     pub fn with(catalog: &str, schema: &str) -> Self {
-        QueryContextBuilder::new()
-            .catalog(catalog.to_string())
-            .schema(schema.to_string())
+        QueryContextBuilder::default()
+            .current_catalog(catalog.to_string())
+            .current_schema(schema.to_string())
             .build()
     }
 
     #[inline]
     pub fn current_schema(&self) -> String {
-        self.current_schema.load().as_ref().clone()
+        self.current_schema.clone()
     }
 
     #[inline]
     pub fn current_catalog(&self) -> String {
-        self.current_catalog.load().as_ref().clone()
+        self.current_catalog.clone()
     }
 
     #[inline]
     pub fn sql_dialect(&self) -> &(dyn Dialect + Send + Sync) {
         &*self.sql_dialect
-    }
-
-    pub fn set_current_schema(&self, schema: &str) {
-        let last = self.current_schema.swap(Arc::new(schema.to_string()));
-        if schema != last.as_str() {
-            debug!(
-                "set new session default schema: {:?}, swap old: {:?}",
-                schema, last
-            )
-        }
-    }
-
-    pub fn set_current_catalog(&self, catalog: &str) {
-        let last = self.current_catalog.swap(Arc::new(catalog.to_string()));
-        if catalog != last.as_str() {
-            debug!(
-                "set new session default catalog: {:?}, swap old: {:?}",
-                catalog, last
-            )
-        }
     }
 
     pub fn get_db_string(&self) -> String {
@@ -135,62 +98,28 @@ impl QueryContext {
     }
 }
 
-#[derive(Default)]
-pub struct QueryContextBuilder {
-    catalog: Option<String>,
-    schema: Option<String>,
-    time_zone: Option<TimeZone>,
-    sql_dialect: Option<Box<dyn Dialect + Send + Sync>>,
-    trace_id: Option<u64>,
-}
-
 impl QueryContextBuilder {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn build(self) -> QueryContext {
+        QueryContext {
+            current_catalog: self
+                .current_catalog
+                .unwrap_or(DEFAULT_CATALOG_NAME.to_string()),
+            current_schema: self
+                .current_schema
+                .unwrap_or(DEFAULT_SCHEMA_NAME.to_string()),
+            time_zone: self.time_zone.unwrap_or(ArcSwap::new(Arc::new(None))),
+            sql_dialect: self.sql_dialect.unwrap_or(Box::new(GreptimeDbDialect {})),
+            trace_id: self.trace_id.unwrap_or(common_telemetry::gen_trace_id()),
+        }
     }
 
-    pub fn catalog(mut self, catalog: String) -> Self {
-        self.catalog = Some(catalog);
-        self
-    }
-
-    pub fn schema(mut self, schema: String) -> Self {
-        self.schema = Some(schema);
-        self
-    }
-
-    pub fn time_zone(mut self, tz: TimeZone) -> Self {
-        self.time_zone = Some(tz);
-        self
-    }
-
-    pub fn sql_dialect(mut self, sql_dialect: Box<dyn Dialect + Send + Sync>) -> Self {
-        self.sql_dialect = Some(sql_dialect);
-        self
-    }
-
-    pub fn trace_id(mut self, trace_id: u64) -> Self {
-        self.trace_id = Some(trace_id);
-        self
+    pub fn build_to_arc(self) -> QueryContextRef {
+        Arc::new(self.build())
     }
 
     pub fn try_trace_id(mut self, trace_id: Option<u64>) -> Self {
         self.trace_id = trace_id;
         self
-    }
-
-    pub fn build(self) -> QueryContext {
-        QueryContext {
-            current_catalog: ArcSwap::new(Arc::new(
-                self.catalog.unwrap_or(DEFAULT_CATALOG_NAME.to_string()),
-            )),
-            current_schema: ArcSwap::new(Arc::new(
-                self.schema.unwrap_or(DEFAULT_SCHEMA_NAME.to_string()),
-            )),
-            time_zone: ArcSwap::new(Arc::new(self.time_zone)),
-            sql_dialect: self.sql_dialect.unwrap_or(Box::new(GreptimeDbDialect {})),
-            trace_id: self.trace_id.unwrap_or(common_telemetry::gen_trace_id()),
-        }
     }
 }
 
@@ -227,8 +156,8 @@ pub struct ConnInfo {
     pub channel: Channel,
 }
 
-impl std::fmt::Display for ConnInfo {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+impl Display for ConnInfo {
+    fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
         write!(
             f,
             "{}[{}]",
@@ -265,8 +194,8 @@ impl Channel {
     }
 }
 
-impl std::fmt::Display for Channel {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+impl Display for Channel {
+    fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
         match self {
             Channel::Mysql => write!(f, "mysql"),
             Channel::Postgres => write!(f, "postgres"),
@@ -276,6 +205,8 @@ impl std::fmt::Display for Channel {
 
 #[cfg(test)]
 mod test {
+    use common_catalog::consts::DEFAULT_CATALOG_NAME;
+
     use super::*;
     use crate::context::{Channel, UserInfo};
     use crate::Session;
@@ -299,16 +230,10 @@ mod test {
 
     #[test]
     fn test_context_db_string() {
-        let context = QueryContext::new();
-
-        context.set_current_catalog("a0b1c2d3");
-        context.set_current_schema("test");
-
+        let context = QueryContext::with("a0b1c2d3", "test");
         assert_eq!("a0b1c2d3-test", context.get_db_string());
 
-        context.set_current_catalog(DEFAULT_CATALOG_NAME);
-        context.set_current_schema("test");
-
+        let context = QueryContext::with(DEFAULT_CATALOG_NAME, "test");
         assert_eq!("test", context.get_db_string());
     }
 }

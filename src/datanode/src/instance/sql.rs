@@ -306,7 +306,7 @@ mod test {
 
         let using_schema = "foo";
         let query_ctx = Arc::new(QueryContext::with(DEFAULT_CATALOG_NAME, using_schema));
-        let empty_ctx = Arc::new(QueryContext::new());
+        let empty_ctx = QueryContext::arc();
 
         assert_eq!(
             table_idents_to_full_name(&full, query_ctx.clone()).unwrap(),

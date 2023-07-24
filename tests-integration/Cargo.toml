@@ -68,5 +68,6 @@ partition = { path = "../src/partition" }
 paste.workspace = true
 prost.workspace = true
 script = { path = "../src/script" }
+session = { path = "../src/session", features = ["testing"] }
 store-api = { path = "../src/store-api" }
 opentelemetry-proto.workspace = true

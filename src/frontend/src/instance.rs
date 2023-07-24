@@ -777,7 +777,7 @@ mod tests {
 
     #[test]
     fn test_exec_validation() {
-        let query_ctx = Arc::new(QueryContext::new());
+        let query_ctx = QueryContext::arc();
         let plugins = Plugins::new();
         plugins.insert(QueryOptions {
             disallow_cross_schema_query: true,

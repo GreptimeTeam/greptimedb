@@ -8871,6 +8871,7 @@ dependencies = [
  "common-catalog",
  "common-telemetry",
  "common-time",
+ "derive_builder 0.12.0",
  "sql",
 ]
 
@@ -9433,7 +9434,7 @@ dependencies = [
  "common-recordbatch",
  "common-time",
  "datatypes",
- "derive_builder 0.11.2",
+ "derive_builder 0.12.0",
  "futures",
  "serde",
  "serde_json",
@@ -9711,7 +9712,7 @@ dependencies = [
  "datafusion-expr",
  "datafusion-physical-expr",
  "datatypes",
- "derive_builder 0.11.2",
+ "derive_builder 0.12.0",
  "futures",
  "humantime",
  "humantime-serde",
