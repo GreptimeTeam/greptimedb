@@ -53,13 +53,13 @@ impl FileId {
 
     /// Append `.parquet` to file id to make a complete file name
     pub fn as_parquet(&self) -> String {
-        format!("{}{}", self.0.hyphenated(), ".parquet")
+        format!("{}{}", self, ".parquet")
     }
 }
 
 impl fmt::Display for FileId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0.hyphenated())
+        write!(f, "{}", self.0)
     }
 }
 

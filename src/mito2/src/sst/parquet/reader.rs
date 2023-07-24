@@ -143,7 +143,7 @@ impl ParquetReader {
         })?;
         self.stream = Some(Box::pin(stream));
 
-        todo!()
+        Ok(())
     }
 
     /// Converts our [Batch] from arrow's [RecordBatch].
