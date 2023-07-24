@@ -24,8 +24,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 
-pub const VERSION_REPORT_URL: &str =
-    "https://api.greptime.cloud/opentelemetry/greptimedb-statistic";
+pub const VERSION_REPORT_URL: &str = "https://api.greptime.cloud/db/otel/statistics";
 
 pub static VERSION_REPORT_INTERVAL: Lazy<Duration> = Lazy::new(|| Duration::from_secs(60 * 30));
 
