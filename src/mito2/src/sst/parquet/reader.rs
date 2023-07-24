@@ -123,7 +123,7 @@ impl ParquetReader {
                 path: &self.file_path,
             })?;
 
-        // TODO(yingwen): Decode region metadata, create read adpater.
+        // TODO(yingwen): Decode region metadata, create read adapter.
 
         // Prune row groups by metadata.
         if let Some(predicate) = &self.predicate {
