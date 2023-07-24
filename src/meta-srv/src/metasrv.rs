@@ -176,7 +176,7 @@ pub struct MetaSrv {
     mailbox: MailboxRef,
     ddl_manager: DdlManagerRef,
     table_metadata_manager: TableMetadataManagerRef,
-    greptimedb_telemerty_task: Option<Arc<GreptimeDBTelemetryTask>>,
+    greptimedb_telemerty_task: Arc<GreptimeDBTelemetryTask>,
 }
 
 impl MetaSrv {
@@ -248,15 +248,12 @@ impl MetaSrv {
                 .context(RecoverProcedureSnafu)?;
         }
 
-        if let Some(ref task) = self.greptimedb_telemerty_task {
-            info!(
-                "start version report task {:?}",
-                self.greptimedb_telemerty_task
-            );
-            let _ = task.start(common_runtime::bg_runtime()).map_err(|_e| {
-                warn!("start version report task error");
-            });
-        }
+        // FIXME (paomian)
+        // should be started after election and only run on leader node
+        // when leader switch, should be closed and re-started on new leader node
+        let _ = self
+            .greptimedb_telemerty_task
+            .start(common_runtime::bg_runtime());
 
         info!("MetaSrv started");
         Ok(())

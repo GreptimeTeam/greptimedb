@@ -83,7 +83,7 @@ pub struct Instance {
     pub(crate) catalog_manager: CatalogManagerRef,
     pub(crate) table_id_provider: Option<TableIdProviderRef>,
     procedure_manager: ProcedureManagerRef,
-    greptimedb_telemerty_task: Option<Arc<GreptimeDBTelemetryTask>>,
+    greptimedb_telemerty_task: Arc<GreptimeDBTelemetryTask>,
 }
 
 pub type InstanceRef = Arc<Instance>;
@@ -308,8 +308,11 @@ impl Instance {
             catalog_manager: catalog_manager.clone(),
             table_id_provider,
             procedure_manager,
-            greptimedb_telemerty_task: get_greptimedb_telemetry_task(&opts.mode, object_store.clone())
-                .await,
+            greptimedb_telemerty_task: get_greptimedb_telemetry_task(
+                &opts.mode,
+                object_store.clone(),
+            )
+            .await,
         });
 
         let heartbeat_task = Instance::build_heartbeat_task(
@@ -338,11 +341,10 @@ impl Instance {
         self.procedure_manager
             .start()
             .context(StartProcedureManagerSnafu)?;
-        {
-            if let Some(task) = &self.greptimedb_telemerty_task {
-                let _ = task.start(common_runtime::bg_runtime());
-            }
-        }
+        let _ = self
+            .greptimedb_telemerty_task
+            .start(common_runtime::bg_runtime());
+
         Ok(())
     }
 

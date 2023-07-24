@@ -16,7 +16,7 @@ use std::env;
 use std::time::Duration;
 
 use common_runtime::error::{Error, Result};
-use common_runtime::{RepeatedTask, TaskFunction};
+use common_runtime::{BoxedTaskFunction, RepeatedTask, Runtime, TaskFunction};
 use common_telemetry::debug;
 use reqwest::{Client, Response};
 use serde::{Deserialize, Serialize};
@@ -27,7 +27,29 @@ pub static TELEMETRY_INTERVAL: Duration = Duration::from_secs(30);
 
 pub static TELEMETRY_UUID_KEY: &str = "greptimedb_telemetry_uuid";
 
-pub type GreptimeDBTelemetryTask = RepeatedTask<Error>;
+//pub type GreptimeDBTelemetryTask = RepeatedTask<Error>;
+
+pub enum GreptimeDBTelemetryTask {
+    Enable(RepeatedTask<Error>),
+    Disable,
+}
+
+impl GreptimeDBTelemetryTask {
+    pub fn enable(interval: Duration, task_fn: BoxedTaskFunction<Error>) -> Self {
+        GreptimeDBTelemetryTask::Enable(RepeatedTask::new(interval, task_fn))
+    }
+
+    pub fn disable() -> Self {
+        GreptimeDBTelemetryTask::Disable
+    }
+
+    pub fn start(&self, runtime: Runtime) -> Result<()> {
+        match self {
+            GreptimeDBTelemetryTask::Enable(task) => task.start(runtime),
+            GreptimeDBTelemetryTask::Disable => Ok(()),
+        }
+    }
+}
 
 #[derive(Serialize, Deserialize, Debug)]
 struct StatisticData {

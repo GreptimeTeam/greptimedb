@@ -24,7 +24,7 @@ use common_meta::rpc::store::{PutRequest, RangeRequest};
 use crate::cluster::MetaPeerClientRef;
 use crate::service::store::kv::KvStoreRef;
 
-struct MetaVersionReport {
+struct DistributedGreptimeDBTelemetryCollector {
     meta_peer_client: MetaPeerClientRef,
     kv_store: KvStoreRef,
     uuid: Option<String>,
@@ -57,7 +57,7 @@ async fn get_uuid(key: &Vec<u8>, kv_store: KvStoreRef) -> Option<String> {
 }
 
 #[async_trait]
-impl Collector for MetaVersionReport {
+impl Collector for DistributedGreptimeDBTelemetryCollector {
     fn get_mode(&self) -> VersionReporterMode {
         VersionReporterMode::Distributed
     }
@@ -89,19 +89,21 @@ impl Collector for MetaVersionReport {
 pub async fn get_greptimedb_telemetry_task(
     meta_peer_client: MetaPeerClientRef,
     kv_store: KvStoreRef,
-) -> Option<Arc<GreptimeDBTelemetryTask>> {
+) -> Arc<GreptimeDBTelemetryTask> {
     if cfg!(feature = "greptimedb-telemetry") {
-        Some(Arc::new(GreptimeDBTelemetryTask::new(
+        Arc::new(GreptimeDBTelemetryTask::enable(
             TELEMETRY_INTERVAL,
-            Box::new(GreptimeDBTelemetry::new(Box::new(MetaVersionReport {
-                meta_peer_client,
-                kv_store,
-                uuid: None,
-                retry: 0,
-                uuid_key_name: TELEMETRY_UUID_KEY.as_bytes().to_vec(),
-            }))),
-        )))
+            Box::new(GreptimeDBTelemetry::new(Box::new(
+                DistributedGreptimeDBTelemetryCollector {
+                    meta_peer_client,
+                    kv_store,
+                    uuid: None,
+                    retry: 0,
+                    uuid_key_name: TELEMETRY_UUID_KEY.as_bytes().to_vec(),
+                },
+            ))),
+        ))
     } else {
-        None
+        Arc::new(GreptimeDBTelemetryTask::disable())
     }
 }

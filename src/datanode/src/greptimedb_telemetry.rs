@@ -45,14 +45,14 @@ async fn get_uuid(file_name: &str, object_store: ObjectStore) -> Option<String> 
     uuid
 }
 
-struct FrontendVersionReport {
+struct StandaloneGreptimeDBTelemetryCollector {
     object_store: ObjectStore,
     uuid: Option<String>,
     retry: i32,
     uuid_file_name: String,
 }
 #[async_trait]
-impl Collector for FrontendVersionReport {
+impl Collector for StandaloneGreptimeDBTelemetryCollector {
     fn get_mode(&self) -> VersionReporterMode {
         VersionReporterMode::Standalone
     }
@@ -81,22 +81,24 @@ impl Collector for FrontendVersionReport {
 pub async fn get_greptimedb_telemetry_task(
     mode: &Mode,
     object_store: ObjectStore,
-) -> Option<Arc<GreptimeDBTelemetryTask>> {
+) -> Arc<GreptimeDBTelemetryTask> {
     if cfg!(feature = "greptimedb-telemetry") {
         let uuid_file_name = format!("./.{}", TELEMETRY_UUID_KEY);
         match mode {
-            Mode::Standalone => Some(Arc::new(GreptimeDBTelemetryTask::new(
+            Mode::Standalone => Arc::new(GreptimeDBTelemetryTask::enable(
                 TELEMETRY_INTERVAL,
-                Box::new(GreptimeDBTelemetry::new(Box::new(FrontendVersionReport {
-                    object_store: object_store.clone(),
-                    uuid: get_uuid(uuid_file_name.as_str(), object_store.clone()).await,
-                    retry: 0,
-                    uuid_file_name,
-                }))),
-            ))),
-            Mode::Distributed => None,
+                Box::new(GreptimeDBTelemetry::new(Box::new(
+                    StandaloneGreptimeDBTelemetryCollector {
+                        object_store: object_store.clone(),
+                        uuid: get_uuid(uuid_file_name.as_str(), object_store.clone()).await,
+                        retry: 0,
+                        uuid_file_name,
+                    },
+                ))),
+            )),
+            Mode::Distributed => Arc::new(GreptimeDBTelemetryTask::disable()),
         }
     } else {
-        None
+        Arc::new(GreptimeDBTelemetryTask::disable())
     }
 }
