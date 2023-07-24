@@ -30,6 +30,7 @@ use crate::error::{
 };
 use crate::handler::region_lease_handler::REGION_LEASE_SECONDS;
 use crate::handler::HeartbeatMailbox;
+use crate::inactive_node_manager::InactiveNodeManager;
 use crate::procedure::region_failover::CLOSE_REGION_MESSAGE_TIMEOUT;
 use crate::service::mailbox::{Channel, MailboxReceiver};
 
@@ -66,12 +67,17 @@ impl DeactivateRegion {
             input: instruction.to_string(),
         })?;
 
+        InactiveNodeManager::new(&ctx.in_memory)
+            .register_inactive_region(failed_region)
+            .await?;
+
         let ch = Channel::Datanode(failed_region.datanode_id);
         ctx.mailbox.send(&ch, msg, timeout).await
     }
 
     async fn handle_response(
         self,
+        ctx: &RegionFailoverContext,
         mailbox_receiver: MailboxReceiver,
         failed_region: &RegionIdent,
     ) -> Result<Box<dyn State>> {
@@ -87,6 +93,10 @@ impl DeactivateRegion {
                     }.fail();
                 };
                 if result {
+                    InactiveNodeManager::new(&ctx.in_memory)
+                        .deregister_inactive_region(failed_region)
+                        .await?;
+
                     Ok(Box::new(ActivateRegion::new(self.candidate)))
                 } else {
                     // Under rare circumstances would a Datanode fail to close a Region.
@@ -138,7 +148,8 @@ impl State for DeactivateRegion {
             Err(e) => return Err(e),
         };
 
-        self.handle_response(mailbox_receiver, failed_region).await
+        self.handle_response(ctx, mailbox_receiver, failed_region)
+            .await
     }
 }
 
@@ -207,7 +218,7 @@ mod tests {
             .unwrap();
 
         let next_state = state
-            .handle_response(mailbox_receiver, &failed_region)
+            .handle_response(&env.context, mailbox_receiver, &failed_region)
             .await
             .unwrap();
         assert_eq!(
@@ -251,7 +262,7 @@ mod tests {
         );
 
         let next_state = state
-            .handle_response(mailbox_receiver, &failed_region)
+            .handle_response(&env.context, mailbox_receiver, &failed_region)
             .await
             .unwrap();
         // Timeout or not, proceed to `ActivateRegion`.

@@ -18,13 +18,14 @@ use std::time::Instant;
 use api::helper::request_type;
 use api::v1::auth_header::AuthScheme;
 use api::v1::{Basic, GreptimeRequest, RequestHeader};
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_query::Output;
 use common_runtime::Runtime;
 use common_telemetry::logging;
 use metrics::{histogram, increment_counter};
-use session::context::{QueryContext, QueryContextRef};
+use session::context::{QueryContextBuilder, QueryContextRef};
 use snafu::{OptionExt, ResultExt};
 
 use crate::auth::{Identity, Password, UserProviderRef};
@@ -70,7 +71,6 @@ impl GreptimeRequestHandler {
         let query_ctx = create_query_context(header);
 
         let _ = self.auth(header, &query_ctx).await?;
-
         let handler = self.handler.clone();
         let request_type = request_type(&query);
         let db = query_ctx.get_db_string();
@@ -145,25 +145,35 @@ impl GreptimeRequestHandler {
 }
 
 pub(crate) fn create_query_context(header: Option<&RequestHeader>) -> QueryContextRef {
-    let ctx = QueryContext::arc();
-    if let Some(header) = header {
-        // We provide dbname field in newer versions of protos/sdks
-        // parse dbname from header in priority
-        if !header.dbname.is_empty() {
-            let (catalog, schema) =
-                crate::parse_catalog_and_schema_from_client_database_name(&header.dbname);
-            ctx.set_current_catalog(catalog);
-            ctx.set_current_schema(schema);
-        } else {
-            if !header.catalog.is_empty() {
-                ctx.set_current_catalog(&header.catalog);
+    let (catalog, schema) = header
+        .map(|header| {
+            // We provide dbname field in newer versions of protos/sdks
+            // parse dbname from header in priority
+            if !header.dbname.is_empty() {
+                crate::parse_catalog_and_schema_from_client_database_name(&header.dbname)
+            } else {
+                (
+                    if !header.catalog.is_empty() {
+                        &header.catalog
+                    } else {
+                        DEFAULT_CATALOG_NAME
+                    },
+                    if !header.schema.is_empty() {
+                        &header.schema
+                    } else {
+                        DEFAULT_SCHEMA_NAME
+                    },
+                )
             }
-            if !header.schema.is_empty() {
-                ctx.set_current_schema(&header.schema);
-            }
-        }
-    };
-    ctx
+        })
+        .unwrap_or((DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME));
+
+    QueryContextBuilder::new()
+        .catalog(catalog.to_string())
+        .schema(schema.to_string())
+        .try_trace_id(header.and_then(|h: &RequestHeader| h.trace_id))
+        .build()
+        .to_arc()
 }
 
 /// Histogram timer for handling gRPC request.

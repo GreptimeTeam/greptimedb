@@ -34,7 +34,7 @@ meta-client = { path = "../src/meta-client" }
 meta-srv = { path = "../src/meta-srv" }
 mito = { path = "../src/mito", features = ["test"] }
 object-store = { path = "../src/object-store" }
-once_cell = "1.16"
+once_cell.workspace = true
 query = { path = "../src/query" }
 rand.workspace = true
 rstest = "0.17"

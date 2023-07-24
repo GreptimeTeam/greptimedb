@@ -16,7 +16,7 @@ datatypes = { path = "../../datatypes" }
 libc = "0.2"
 num = "0.4"
 num-traits = "0.2"
-once_cell = "1.10"
+once_cell.workspace = true
 paste = "1.0"
 snafu.workspace = true
 statrs = "0.16"

@@ -40,11 +40,15 @@ where
 {
     fn name(&self) -> &str;
 
+    fn as_any(&self) -> &dyn Any;
+
     async fn range(&self, req: RangeRequest) -> Result<RangeResponse, Self::Error>;
 
     async fn put(&self, req: PutRequest) -> Result<PutResponse, Self::Error>;
 
     async fn batch_put(&self, req: BatchPutRequest) -> Result<BatchPutResponse, Self::Error>;
+
+    async fn batch_get(&self, req: BatchGetRequest) -> Result<BatchGetResponse, Self::Error>;
 
     async fn compare_and_put(
         &self,
@@ -55,6 +59,35 @@ where
         &self,
         req: DeleteRangeRequest,
     ) -> Result<DeleteRangeResponse, Self::Error>;
+
+    async fn batch_delete(
+        &self,
+        req: BatchDeleteRequest,
+    ) -> Result<BatchDeleteResponse, Self::Error>;
+
+    /// MoveValue atomically renames the key to the given updated key.
+    async fn move_value(&self, req: MoveValueRequest) -> Result<MoveValueResponse, Self::Error>;
+
+    // The following methods are implemented based on the above methods,
+    // and a higher-level interface is provided for to simplify usage.
+
+    async fn get(&self, key: &[u8]) -> Result<Option<KeyValue>, Self::Error> {
+        let req = RangeRequest::new().with_key(key.to_vec());
+        let mut resp = self.range(req).await?;
+        Ok(if resp.kvs.is_empty() {
+            None
+        } else {
+            Some(resp.kvs.remove(0))
+        })
+    }
+
+    /// Check if the key exists, not returning the value.
+    /// If the value is large, this method is more efficient than `get`.
+    async fn exists(&self, key: &[u8]) -> Result<bool, Self::Error> {
+        let req = RangeRequest::new().with_key(key.to_vec()).with_keys_only();
+        let resp = self.range(req).await?;
+        Ok(!resp.kvs.is_empty())
+    }
 
     async fn delete(&self, key: &[u8], prev_kv: bool) -> Result<Option<KeyValue>, Self::Error> {
         let mut req = DeleteRangeRequest::new().with_key(key.to_vec());
@@ -70,27 +103,4 @@ where
             Ok(None)
         }
     }
-
-    async fn batch_delete(
-        &self,
-        req: BatchDeleteRequest,
-    ) -> Result<BatchDeleteResponse, Self::Error>;
-
-    /// Default get is implemented based on `range` method.
-    async fn get(&self, key: &[u8]) -> Result<Option<KeyValue>, Self::Error> {
-        let req = RangeRequest::new().with_key(key.to_vec());
-        let mut resp = self.range(req).await?;
-        Ok(if resp.kvs.is_empty() {
-            None
-        } else {
-            Some(resp.kvs.remove(0))
-        })
-    }
-
-    async fn batch_get(&self, req: BatchGetRequest) -> Result<BatchGetResponse, Self::Error>;
-
-    /// MoveValue atomically renames the key to the given updated key.
-    async fn move_value(&self, req: MoveValueRequest) -> Result<MoveValueResponse, Self::Error>;
-
-    fn as_any(&self) -> &dyn Any;
 }
