@@ -263,7 +263,7 @@ impl MetaSrvBuilder {
         Ok(MetaSrv {
             started,
             options,
-            in_memory: in_memory.clone(),
+            in_memory,
             kv_store: kv_store.clone(),
             leader_cached_kv_store,
             meta_peer_client: meta_peer_client.clone(),
