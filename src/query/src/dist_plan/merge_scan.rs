@@ -132,18 +132,19 @@ impl MergeScanExec {
         }
     }
 
-    pub fn to_stream(&self) -> Result<SendableRecordBatchStream> {
+    pub fn to_stream(&self, context: Arc<TaskContext>) -> Result<SendableRecordBatchStream> {
         let substrait_plan = self.substrait_plan.to_vec();
         let peers = self.peers.clone();
         let clients = self.clients.clone();
         let table = self.table.clone();
+        let trace_id = context.task_id().and_then(|id| id.parse().ok());
 
         let stream = try_stream! {
             for peer in peers {
                 let client = clients.get_client(&peer).await;
                 let database = Database::new(&table.catalog_name, &table.schema_name, client);
                 let output: Output = database
-                    .logical_plan(substrait_plan.clone())
+                    .logical_plan(substrait_plan.clone(), trace_id)
                     .await
                     .context(RemoteRequestSnafu)
                     .map_err(BoxedError::new)
@@ -220,9 +221,11 @@ impl ExecutionPlan for MergeScanExec {
     fn execute(
         &self,
         _partition: usize,
-        _context: Arc<TaskContext>,
+        context: Arc<TaskContext>,
     ) -> Result<DfSendableRecordBatchStream> {
-        Ok(Box::pin(DfRecordBatchStreamAdapter::new(self.to_stream()?)))
+        Ok(Box::pin(DfRecordBatchStreamAdapter::new(
+            self.to_stream(context)?,
+        )))
     }
 
     fn statistics(&self) -> Statistics {
