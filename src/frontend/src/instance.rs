@@ -206,9 +206,7 @@ impl Instance {
             Arc::new(handlers_executor),
         ));
 
-        if let Some(node_id) = opts.node_id {
-            common_telemetry::init_node_id(node_id);
-        }
+        common_telemetry::init_node_id(opts.node_id.clone());
 
         Ok(Instance {
             catalog_manager,

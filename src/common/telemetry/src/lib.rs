@@ -17,11 +17,15 @@ mod macros;
 pub mod metric;
 mod panic_hook;
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+
 pub use logging::{init_default_ut_logging, init_global_logging};
 pub use metric::init_default_metrics_recorder;
 use once_cell::sync::OnceCell;
 pub use panic_hook::set_panic_hook;
 use parking_lot::Mutex;
+use rand::random;
 use snowflake::SnowflakeIdBucket;
 pub use {common_error, tracing, tracing_appender, tracing_futures, tracing_subscriber};
 
@@ -41,9 +45,16 @@ pub fn gen_trace_id() -> u64 {
     (*bucket).get_id() as u64
 }
 
-pub fn init_node_id(node_id: u64) {
+pub fn init_node_id(node_id: Option<String>) {
+    let node_id = node_id.map(|id| calculate_hash(&id)).unwrap_or(random());
     match NODE_ID.set(node_id) {
         Ok(_) => {}
         Err(_) => warn!("node_id is already initialized"),
     }
+}
+
+fn calculate_hash<T: Hash>(t: &T) -> u64 {
+    let mut s = DefaultHasher::new();
+    t.hash(&mut s);
+    s.finish()
 }

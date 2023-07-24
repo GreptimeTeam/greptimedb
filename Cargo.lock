@@ -1954,6 +1954,7 @@ dependencies = [
  "opentelemetry 0.17.0",
  "opentelemetry-jaeger",
  "parking_lot 0.12.1",
+ "rand",
  "rs-snowflake",
  "serde",
  "tokio",

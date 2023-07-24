@@ -28,7 +28,7 @@ use crate::service_config::{
 #[serde(default)]
 pub struct FrontendOptions {
     pub mode: Mode,
-    pub node_id: Option<u64>,
+    pub node_id: Option<String>,
     pub heartbeat: HeartbeatOptions,
     pub http_options: Option<HttpOptions>,
     pub grpc_options: Option<GrpcOptions>,
