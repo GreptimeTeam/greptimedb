@@ -17,6 +17,7 @@ use std::any::Any;
 use common_datasource::compression::CompressionType;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
+use datatypes::arrow::error::ArrowError;
 use snafu::{Location, Snafu};
 use store_api::manifest::ManifestVersion;
 use store_api::storage::RegionId;
@@ -117,6 +118,50 @@ pub enum Error {
         region_id: RegionId,
         location: Location,
     },
+
+    #[snafu(display(
+        "Failed to create RecordBatch from vectors, location: {}, source: {}",
+        location,
+        source
+    ))]
+    NewRecordBatch {
+        location: Location,
+        source: ArrowError,
+    },
+
+    #[snafu(display(
+        "Failed to write to buffer, location: {}, source: {}",
+        location,
+        source
+    ))]
+    WriteBuffer {
+        location: Location,
+        source: common_datasource::error::Error,
+    },
+
+    #[snafu(display(
+        "Failed to write parquet file, path: {}, location: {}, source: {}",
+        path,
+        location,
+        source
+    ))]
+    WriteParquet {
+        path: String,
+        location: Location,
+        source: parquet::errors::ParquetError,
+    },
+
+    #[snafu(display(
+        "Failed to read parquet file, path: {}, location: {}, source: {}",
+        path,
+        location,
+        source
+    ))]
+    ReadParquet {
+        path: String,
+        source: parquet::errors::ParquetError,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -126,12 +171,15 @@ impl ErrorExt for Error {
         use Error::*;
 
         match self {
-            OpenDal { .. } => StatusCode::StorageUnavailable,
+            OpenDal { .. } | WriteParquet { .. } | ReadParquet { .. } => {
+                StatusCode::StorageUnavailable
+            }
             CompressObject { .. }
             | DecompressObject { .. }
             | SerdeJson { .. }
             | Utf8 { .. }
-            | RegionExists { .. } => StatusCode::Unexpected,
+            | RegionExists { .. }
+            | NewRecordBatch { .. } => StatusCode::Unexpected,
             InvalidScanIndex { .. }
             | InitialMetadata { .. }
             | InvalidMeta { .. }
@@ -139,6 +187,7 @@ impl ErrorExt for Error {
             RegionMetadataNotFound { .. } | Join { .. } | WorkerStopped { .. } | Recv { .. } => {
                 StatusCode::Internal
             }
+            WriteBuffer { source, .. } => source.status_code(),
         }
     }
 

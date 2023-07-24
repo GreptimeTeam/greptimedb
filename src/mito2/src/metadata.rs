@@ -24,7 +24,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::{ColumnId, RegionId};
 
-use crate::error::{InvalidMetaSnafu, InvalidSchemaSnafu, Result};
+use crate::error::{InvalidMetaSnafu, InvalidSchemaSnafu, Result, SerdeJsonSnafu};
 use crate::region::VersionNumber;
 
 /// Initial version number of a new region.
@@ -111,6 +111,13 @@ impl<'de> Deserialize<'de> for RegionMetadata {
             primary_key: without_schema.primary_key,
             region_id: without_schema.region_id,
         })
+    }
+}
+
+impl RegionMetadata {
+    /// Encode the metadata to a JSON string.
+    pub fn to_json(&self) -> Result<String> {
+        serde_json::to_string(&self).context(SerdeJsonSnafu)
     }
 }
 
