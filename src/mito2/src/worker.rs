@@ -14,6 +14,7 @@
 
 //! Structs and utilities for writing regions.
 
+mod handle_close;
 mod handle_create;
 mod handle_open;
 pub(crate) mod request;
@@ -367,6 +368,7 @@ impl<S> RegionWorkerLoop<S> {
             let res = match request.body {
                 RequestBody::Create(req) => self.handle_create_request(req).await,
                 RequestBody::Open(req) => self.handle_open_request(req).await,
+                RequestBody::Close(req) => self.handle_close_request(req).await,
                 RequestBody::Write(_) => unreachable!(),
             };
 

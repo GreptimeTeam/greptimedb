@@ -73,6 +73,13 @@ pub struct OpenRequest {
     pub options: RegionOptions,
 }
 
+/// Close region request.
+#[derive(Debug)]
+pub struct CloseRequest {
+    /// Region to close.
+    pub region_id: RegionId,
+}
+
 /// Request to write a region.
 #[derive(Debug)]
 pub(crate) struct WriteRequest {
@@ -124,6 +131,8 @@ pub(crate) enum RequestBody {
     Create(CreateRequest),
     /// Opens an existing region.
     Open(OpenRequest),
+    /// Closes a region.
+    Close(CloseRequest),
 }
 
 impl RequestBody {
@@ -133,6 +142,7 @@ impl RequestBody {
             RequestBody::Write(req) => req.region_id,
             RequestBody::Create(req) => req.region_id,
             RequestBody::Open(req) => req.region_id,
+            RequestBody::Close(req) => req.region_id,
         }
     }
 
@@ -142,6 +152,7 @@ impl RequestBody {
             RequestBody::Write(_) => false,
             RequestBody::Create(_) => true,
             RequestBody::Open(_) => true,
+            RequestBody::Close(_) => true,
         }
     }
 }
