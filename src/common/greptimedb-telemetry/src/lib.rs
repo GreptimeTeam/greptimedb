@@ -49,6 +49,13 @@ impl GreptimeDBTelemetryTask {
             GreptimeDBTelemetryTask::Disable => Ok(()),
         }
     }
+
+    pub async fn stop(&self) -> Result<()> {
+        match self {
+            GreptimeDBTelemetryTask::Enable(task) => task.stop().await,
+            GreptimeDBTelemetryTask::Disable => Ok(()),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -74,9 +81,11 @@ pub trait Collector {
     fn get_version(&self) -> String {
         env!("CARGO_PKG_VERSION").to_string()
     }
+
     fn get_git_hash(&self) -> String {
         env!("GIT_COMMIT").to_string()
     }
+
     fn get_os(&self) -> String {
         env::consts::OS.to_string()
     }
@@ -86,7 +95,9 @@ pub trait Collector {
     }
 
     fn get_mode(&self) -> Mode;
+
     async fn get_nodes(&self) -> i32;
+
     async fn get_uuid(&mut self) -> String;
 }
 
@@ -120,6 +131,7 @@ impl GreptimeDBTelemetry {
             telemetry_url: TELEMETRY_URL,
         }
     }
+
     pub async fn report_telemetry_info(&mut self) -> Option<Response> {
         let data = StatisticData {
             os: self.statistics.get_os(),

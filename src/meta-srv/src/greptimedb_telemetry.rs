@@ -61,6 +61,7 @@ impl Collector for DistributedGreptimeDBTelemetryCollector {
     fn get_mode(&self) -> VersionReporterMode {
         VersionReporterMode::Distributed
     }
+
     async fn get_nodes(&self) -> i32 {
         self.meta_peer_client
             .get_node_cnt()
@@ -68,6 +69,7 @@ impl Collector for DistributedGreptimeDBTelemetryCollector {
             .ok()
             .unwrap_or(-1)
     }
+
     async fn get_uuid(&mut self) -> String {
         if let Some(uuid) = self.uuid.clone() {
             return uuid;

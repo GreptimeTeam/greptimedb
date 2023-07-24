@@ -50,19 +50,19 @@ pub struct MetaPeerClient {
 }
 
 impl MetaPeerClient {
-    async fn get_dn_key_value(&self) -> Result<Vec<KeyValue>> {
+    async fn get_dn_key_value(&self, keys_only: bool) -> Result<Vec<KeyValue>> {
         let key = format!("{DN_STAT_PREFIX}-").into_bytes();
         let range_end = util::get_prefix_end_key(&key);
-        self.range(key, range_end).await
+        self.range(key, range_end, keys_only).await
     }
     // Get all datanode stat kvs from leader meta.
     pub async fn get_all_dn_stat_kvs(&self) -> Result<HashMap<StatKey, StatValue>> {
-        let kvs = self.get_dn_key_value().await?;
+        let kvs = self.get_dn_key_value(false).await?;
         to_stat_kv_map(kvs)
     }
 
     pub async fn get_node_cnt(&self) -> Result<i32> {
-        let kvs = self.get_dn_key_value().await?;
+        let kvs = self.get_dn_key_value(true).await?;
         kvs.into_iter()
             .map(|kv| kv.key.try_into())
             .collect::<Result<HashSet<StatKey>>>()
@@ -79,7 +79,12 @@ impl MetaPeerClient {
     }
 
     // Range kv information from the leader's in_mem kv store
-    pub async fn range(&self, key: Vec<u8>, range_end: Vec<u8>) -> Result<Vec<KeyValue>> {
+    pub async fn range(
+        &self,
+        key: Vec<u8>,
+        range_end: Vec<u8>,
+        keys_only: bool,
+    ) -> Result<Vec<KeyValue>> {
         if self.is_leader() {
             let request = RangeRequest {
                 key,
@@ -94,7 +99,10 @@ impl MetaPeerClient {
         let retry_interval_ms = self.retry_interval_ms;
 
         for _ in 0..max_retry_count {
-            match self.remote_range(key.clone(), range_end.clone()).await {
+            match self
+                .remote_range(key.clone(), range_end.clone(), keys_only)
+                .await
+            {
                 Ok(kvs) => return Ok(kvs),
                 Err(e) => {
                     if need_retry(&e) {
@@ -114,7 +122,12 @@ impl MetaPeerClient {
         .fail()
     }
 
-    async fn remote_range(&self, key: Vec<u8>, range_end: Vec<u8>) -> Result<Vec<KeyValue>> {
+    async fn remote_range(
+        &self,
+        key: Vec<u8>,
+        range_end: Vec<u8>,
+        keys_only: bool,
+    ) -> Result<Vec<KeyValue>> {
         // Safety: when self.is_leader() == false, election must not empty.
         let election = self.election.as_ref().unwrap();
 
@@ -128,6 +141,7 @@ impl MetaPeerClient {
         let request = tonic::Request::new(PbRangeRequest {
             key,
             range_end,
+            keys_only,
             ..Default::default()
         });
 
