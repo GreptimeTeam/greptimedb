@@ -51,10 +51,10 @@ impl Display for QueryContext {
 impl QueryContext {
     #[cfg(any(test, feature = "testing"))]
     pub fn arc() -> QueryContextRef {
-        QueryContextBuilder::default().build_to_arc()
+        QueryContextBuilder::default().build()
     }
 
-    pub fn with(catalog: &str, schema: &str) -> Self {
+    pub fn with(catalog: &str, schema: &str) -> QueryContextRef {
         QueryContextBuilder::default()
             .current_catalog(catalog.to_string())
             .current_schema(schema.to_string())
@@ -99,8 +99,8 @@ impl QueryContext {
 }
 
 impl QueryContextBuilder {
-    pub fn build(self) -> QueryContext {
-        QueryContext {
+    pub fn build(self) -> QueryContextRef {
+        Arc::new(QueryContext {
             current_catalog: self
                 .current_catalog
                 .unwrap_or(DEFAULT_CATALOG_NAME.to_string()),
@@ -110,11 +110,7 @@ impl QueryContextBuilder {
             time_zone: self.time_zone.unwrap_or(ArcSwap::new(Arc::new(None))),
             sql_dialect: self.sql_dialect.unwrap_or(Box::new(GreptimeDbDialect {})),
             trace_id: self.trace_id.unwrap_or(common_telemetry::gen_trace_id()),
-        }
-    }
-
-    pub fn build_to_arc(self) -> QueryContextRef {
-        Arc::new(self.build())
+        })
     }
 
     pub fn try_trace_id(mut self, trace_id: Option<u64>) -> Self {

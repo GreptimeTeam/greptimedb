@@ -381,7 +381,7 @@ impl PyQueryEngine {
                 let res = handle.block_on(async {
                     let plan = engine
                         .planner()
-                        .plan(stmt, QueryContextBuilder::default().build_to_arc())
+                        .plan(stmt, QueryContextBuilder::default().build())
                         .await
                         .map_err(|e| e.to_string())?;
                     let res = engine

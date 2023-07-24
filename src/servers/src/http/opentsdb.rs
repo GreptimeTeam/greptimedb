@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use axum::extract::{Query, RawBody, State};
 use axum::http::StatusCode as HttpStatusCode;
@@ -91,7 +90,7 @@ pub async fn put(
         .unwrap_or(DEFAULT_SCHEMA_NAME);
 
     let (catalog, schema) = parse_catalog_and_schema_from_client_database_name(db);
-    let ctx = Arc::new(QueryContext::with(catalog, schema));
+    let ctx = QueryContext::with(catalog, schema);
 
     let data_points = parse_data_points(body).await?;
 

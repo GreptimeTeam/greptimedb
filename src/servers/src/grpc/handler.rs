@@ -172,7 +172,7 @@ pub(crate) fn create_query_context(header: Option<&RequestHeader>) -> QueryConte
         .current_catalog(catalog.to_string())
         .current_schema(schema.to_string())
         .try_trace_id(header.and_then(|h: &RequestHeader| h.trace_id))
-        .build_to_arc()
+        .build()
 }
 
 /// Histogram timer for handling gRPC request.

@@ -62,7 +62,7 @@ impl<S: AsyncWrite + AsyncRead + Unpin> Handler<S> {
 
     pub(crate) async fn run(&mut self) -> Result<()> {
         // TODO(shuiyisong): figure out how to auth in tcp connection.
-        let ctx = QueryContextBuilder::default().build_to_arc();
+        let ctx = QueryContextBuilder::default().build();
         while !self.shutdown.is_shutdown() {
             // While reading a request, also listen for the shutdown signal.
             let maybe_line = tokio::select! {

@@ -51,7 +51,7 @@ impl Session {
             .current_catalog(self.catalog.load().to_string())
             .current_schema(self.schema.load().to_string())
             .sql_dialect(self.conn_info.channel.dialect())
-            .build_to_arc()
+            .build()
     }
 
     #[inline]
