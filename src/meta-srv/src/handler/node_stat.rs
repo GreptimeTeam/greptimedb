@@ -13,9 +13,12 @@
 // limitations under the License.
 
 use api::v1::meta::HeartbeatRequest;
+use common_meta::ident::TableIdent;
 use common_time::util as time_util;
 use serde::{Deserialize, Serialize};
+use snafu::OptionExt;
 
+use crate::error::{Error, InvalidHeartbeatRequestSnafu};
 use crate::keys::StatKey;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -40,9 +43,7 @@ pub struct Stat {
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct RegionStat {
     pub id: u64,
-    pub catalog: String,
-    pub schema: String,
-    pub table: String,
+    pub table_ident: TableIdent,
     /// The read capacity units during this period
     pub rcus: i64,
     /// The write capacity units during this period
@@ -63,7 +64,7 @@ impl Stat {
 }
 
 impl TryFrom<HeartbeatRequest> for Stat {
-    type Error = ();
+    type Error = Error;
 
     fn try_from(value: HeartbeatRequest) -> Result<Self, Self::Error> {
         let HeartbeatRequest {
@@ -82,6 +83,10 @@ impl TryFrom<HeartbeatRequest> for Stat {
                 } else {
                     None
                 };
+                let region_stats = region_stats
+                    .into_iter()
+                    .map(RegionStat::try_from)
+                    .collect::<Result<Vec<_>, _>>()?;
 
                 Ok(Self {
                     timestamp_millis: time_util::current_time_millis(),
@@ -92,31 +97,41 @@ impl TryFrom<HeartbeatRequest> for Stat {
                     wcus: node_stat.wcus,
                     table_num: node_stat.table_num,
                     region_num,
-                    region_stats: region_stats.into_iter().map(RegionStat::from).collect(),
+                    region_stats,
                     node_epoch,
                 })
             }
-            _ => Err(()),
+            _ => InvalidHeartbeatRequestSnafu {
+                err_msg: "missing header, peer or node_stat",
+            }
+            .fail(),
         }
     }
 }
 
-impl From<api::v1::meta::RegionStat> for RegionStat {
-    fn from(value: api::v1::meta::RegionStat) -> Self {
-        let table = value
-            .table_ident
-            .as_ref()
-            .and_then(|t| t.table_name.as_ref());
-        Self {
+impl TryFrom<api::v1::meta::RegionStat> for RegionStat {
+    type Error = Error;
+
+    fn try_from(value: api::v1::meta::RegionStat) -> Result<Self, Self::Error> {
+        let table_ident = value.table_ident.context(InvalidHeartbeatRequestSnafu {
+            err_msg: "missing table_ident",
+        })?;
+        let table_ident_result = TableIdent::try_from(table_ident);
+        let Ok(table_ident) = table_ident_result else {
+            return InvalidHeartbeatRequestSnafu {
+                err_msg: format!("invalid table_ident: {:?}", table_ident_result.err()),
+            }
+            .fail();
+        };
+
+        Ok(Self {
             id: value.region_id,
-            catalog: table.map_or("", |t| &t.catalog_name).to_string(),
-            schema: table.map_or("", |t| &t.schema_name).to_string(),
-            table: table.map_or("", |t| &t.table_name).to_string(),
+            table_ident,
             rcus: value.rcus,
             wcus: value.wcus,
             approximate_bytes: value.approximate_bytes,
             approximate_rows: value.approximate_rows,
-        }
+        })
     }
 }
 

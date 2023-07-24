@@ -45,6 +45,7 @@ use crate::error::{Error, RegisterProcedureLoaderSnafu, Result, TableMetadataMan
 use crate::lock::DistLockRef;
 use crate::metasrv::{SelectorContext, SelectorRef};
 use crate::service::mailbox::MailboxRef;
+use crate::service::store::kv::ResettableKvStoreRef;
 
 const OPEN_REGION_MESSAGE_TIMEOUT: Duration = Duration::from_secs(30);
 const CLOSE_REGION_MESSAGE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -68,6 +69,7 @@ impl From<RegionIdent> for RegionFailoverKey {
 }
 
 pub(crate) struct RegionFailoverManager {
+    in_memory: ResettableKvStoreRef,
     mailbox: MailboxRef,
     procedure_manager: ProcedureManagerRef,
     selector: SelectorRef,
@@ -90,6 +92,7 @@ impl Drop for FailoverProcedureGuard {
 
 impl RegionFailoverManager {
     pub(crate) fn new(
+        in_memory: ResettableKvStoreRef,
         mailbox: MailboxRef,
         procedure_manager: ProcedureManagerRef,
         selector: SelectorRef,
@@ -98,6 +101,7 @@ impl RegionFailoverManager {
         table_metadata_manager: TableMetadataManagerRef,
     ) -> Self {
         Self {
+            in_memory,
             mailbox,
             procedure_manager,
             selector,
@@ -110,6 +114,7 @@ impl RegionFailoverManager {
 
     pub(crate) fn create_context(&self) -> RegionFailoverContext {
         RegionFailoverContext {
+            in_memory: self.in_memory.clone(),
             mailbox: self.mailbox.clone(),
             selector: self.selector.clone(),
             selector_ctx: self.selector_ctx.clone(),
@@ -133,10 +138,6 @@ impl RegionFailoverManager {
             })
     }
 
-    pub(crate) fn is_region_failover_running(&self, key: &RegionFailoverKey) -> bool {
-        self.running_procedures.read().unwrap().contains(key)
-    }
-
     fn insert_running_procedures(
         &self,
         failed_region: &RegionIdent,
@@ -151,11 +152,6 @@ impl RegionFailoverManager {
         } else {
             None
         }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn running_procedures(&self) -> Arc<RwLock<HashSet<RegionFailoverKey>>> {
-        self.running_procedures.clone()
     }
 
     pub(crate) async fn do_region_failover(&self, failed_region: &RegionIdent) -> Result<()> {
@@ -224,6 +220,7 @@ struct Node {
 /// The "Context" of region failover procedure state machine.
 #[derive(Clone)]
 pub struct RegionFailoverContext {
+    pub in_memory: ResettableKvStoreRef,
     pub mailbox: MailboxRef,
     pub selector: SelectorRef,
     pub selector_ctx: SelectorContext,
@@ -463,6 +460,7 @@ mod tests {
         }
 
         pub async fn build(self) -> TestingEnv {
+            let in_memory = Arc::new(MemStore::new());
             let kv_store: KvStoreRef = Arc::new(MemStore::new());
             let meta_peer_client = MetaPeerClientBuilder::default()
                 .election(None)
@@ -527,6 +525,7 @@ mod tests {
 
             TestingEnv {
                 context: RegionFailoverContext {
+                    in_memory,
                     mailbox,
                     selector,
                     selector_ctx,
