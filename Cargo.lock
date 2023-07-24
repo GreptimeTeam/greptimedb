@@ -1591,7 +1591,6 @@ version = "0.3.2"
 dependencies = [
  "anymap",
  "async-trait",
- "build-data",
  "catalog",
  "chrono",
  "clap 3.2.25",
@@ -1603,6 +1602,7 @@ dependencies = [
  "common-recordbatch",
  "common-telemetry",
  "common-test-util",
+ "common-version",
  "config",
  "datanode",
  "datatypes",
@@ -1757,6 +1757,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-greptimedb-telemetry"
+version = "0.3.2"
+dependencies = [
+ "async-trait",
+ "common-error",
+ "common-runtime",
+ "common-telemetry",
+ "common-version",
+ "hyper",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "common-grpc"
 version = "0.3.2"
 dependencies = [
@@ -1826,7 +1842,6 @@ dependencies = [
  "api",
  "async-stream",
  "async-trait",
- "build-data",
  "chrono",
  "common-catalog",
  "common-error",
@@ -1838,7 +1853,6 @@ dependencies = [
  "futures",
  "hyper",
  "lazy_static",
- "once_cell",
  "prost",
  "regex",
  "reqwest",
@@ -1990,6 +2004,13 @@ dependencies = [
  "serde",
  "serde_json",
  "snafu",
+]
+
+[[package]]
+name = "common-version"
+version = "0.3.2"
+dependencies = [
+ "build-data",
 ]
 
 [[package]]
@@ -2638,6 +2659,7 @@ dependencies = [
  "common-datasource",
  "common-error",
  "common-function",
+ "common-greptimedb-telemetry",
  "common-grpc",
  "common-grpc-expr",
  "common-meta",
@@ -5316,6 +5338,7 @@ dependencies = [
  "common-base",
  "common-catalog",
  "common-error",
+ "common-greptimedb-telemetry",
  "common-grpc",
  "common-grpc-expr",
  "common-meta",

@@ -44,8 +44,7 @@ use crate::sequence::Sequence;
 use crate::service::store::cached_kv::{CheckLeader, LeaderCachedKvStore};
 use crate::service::store::kv::{KvBackendAdapter, KvStoreRef, ResettableKvStoreRef};
 use crate::service::store::memory::MemStore;
-#[cfg(feature = "version-report")]
-use crate::version_reporter::get_version_reporter_task;
+use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
 
 // TODO(fys): try use derive_builder macro
 pub struct MetaSrvBuilder {
@@ -278,8 +277,7 @@ impl MetaSrvBuilder {
             mailbox,
             ddl_manager,
             table_metadata_manager,
-            #[cfg(feature = "version-report")]
-            version_reporter_task: get_version_reporter_task(meta_peer_client, kv_store).await,
+            greptimedb_telemerty_task: get_greptimedb_telemetry_task(meta_peer_client, kv_store).await,
         })
     }
 }

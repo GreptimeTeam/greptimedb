@@ -15,50 +15,40 @@
 use std::env;
 use std::time::Duration;
 
+use common_runtime::error::{Error, Result};
 use common_runtime::{RepeatedTask, TaskFunction};
-use common_telemetry::info;
-use common_telemetry::tracing::log::warn;
-use once_cell::sync::Lazy;
+use common_telemetry::debug;
 use reqwest::{Client, Response};
 use serde::{Deserialize, Serialize};
 
-use crate::error::{Error, Result};
+pub const TELEMETRY_URL: &str = "https://api-preview.greptime.cloud/db/otel/statistics";
 
-pub const VERSION_REPORT_URL: &str = "https://api.greptime.cloud/db/otel/statistics";
+pub static TELEMETRY_INTERVAL: Duration = Duration::from_secs(30);
 
-pub static VERSION_REPORT_INTERVAL: Lazy<Duration> = Lazy::new(|| Duration::from_secs(60 * 30));
+pub static TELEMETRY_UUID_KEY: &str = "greptimedb_telemetry_uuid";
 
-pub static VERSION_UUID_KEY: &'static str = "greptimedb_version_reporter_uuid";
-
-pub type VersionReportTask = RepeatedTask<Error>;
+pub type GreptimeDBTelemetryTask = RepeatedTask<Error>;
 
 #[derive(Serialize, Deserialize, Debug)]
 struct StatisticData {
     pub os: String,
     pub version: String,
     pub arch: String,
-    pub mode: String,
+    pub mode: Mode,
     pub git_commit: String,
     pub nodes: Option<i32>,
     pub uuid: String,
 }
 
+#[derive(Serialize, Deserialize, Debug, Eq, PartialEq)]
+#[serde(rename_all = "lowercase")]
 pub enum Mode {
     Distributed,
     Standalone,
 }
 
-impl Mode {
-    pub fn to_string(&self) -> String {
-        match self {
-            Mode::Distributed => "distributed".to_string(),
-            Mode::Standalone => "standalone".to_string(),
-        }
-    }
-}
-
 #[async_trait::async_trait]
-pub trait Reporter {
+pub trait Collector {
     fn get_version(&self) -> String {
         env!("CARGO_PKG_VERSION").to_string()
     }
@@ -78,27 +68,26 @@ pub trait Reporter {
     async fn get_uuid(&mut self) -> String;
 }
 
-pub struct GreptimeVersionReport {
-    statistics: Box<dyn Reporter + Send + Sync>,
+pub struct GreptimeDBTelemetry {
+    statistics: Box<dyn Collector + Send + Sync>,
     client: Option<Client>,
-    report_url: &'static str,
+    telemetry_url: &'static str,
 }
 
 #[async_trait::async_trait]
-impl TaskFunction<Error> for GreptimeVersionReport {
+impl TaskFunction<Error> for GreptimeDBTelemetry {
     fn name(&self) -> &str {
-        "Greptime-version-report-task"
+        "Greptimedb-telemetry-task"
     }
 
     async fn call(&mut self) -> Result<()> {
-        //ignore result
-        let _ = self.report_version().await;
+        self.report_telemetry_info().await;
         Ok(())
     }
 }
 
-impl GreptimeVersionReport {
-    pub fn new(statistics: Box<dyn Reporter + Send + Sync>) -> Self {
+impl GreptimeDBTelemetry {
+    pub fn new(statistics: Box<dyn Collector + Send + Sync>) -> Self {
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(3))
             .timeout(Duration::from_secs(3))
@@ -106,25 +95,29 @@ impl GreptimeVersionReport {
         Self {
             statistics,
             client: client.ok(),
-            report_url: VERSION_REPORT_URL,
+            telemetry_url: TELEMETRY_URL,
         }
     }
-    pub async fn report_version(&mut self) -> Option<Response> {
+    pub async fn report_telemetry_info(&mut self) -> Option<Response> {
         let data = StatisticData {
             os: self.statistics.get_os(),
             version: self.statistics.get_version(),
             git_commit: self.statistics.get_git_hash(),
             arch: self.statistics.get_arch(),
-            mode: self.statistics.get_mode().to_string(),
+            mode: self.statistics.get_mode(),
             nodes: Some(self.statistics.get_nodes().await),
             uuid: self.statistics.get_uuid().await,
         };
 
         if let Some(client) = self.client.as_ref() {
-            info!("report version: {:?}", data);
-            client.post(self.report_url).json(&data).send().await.ok()
+            debug!("report version: {:?}", data);
+            client
+                .post(self.telemetry_url)
+                .json(&data)
+                .send()
+                .await
+                .ok()
         } else {
-            warn!("report version failed: client init failed.");
             None
         }
     }
@@ -139,14 +132,14 @@ mod tests {
     use hyper::Server;
     use tokio::spawn;
 
-    use crate::version_reporter::{GreptimeVersionReport, Mode, Reporter, StatisticData};
+    use crate::{Collector, GreptimeDBTelemetry, Mode, StatisticData};
 
     async fn echo(req: hyper::Request<hyper::Body>) -> hyper::Result<hyper::Response<hyper::Body>> {
         Ok(hyper::Response::new(req.into_body()))
     }
 
     #[tokio::test]
-    async fn test_version_report() {
+    async fn test_gretimedb_telemetry() {
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
         spawn(async move {
             let make_svc = make_service_fn(|_conn| {
@@ -168,7 +161,7 @@ mod tests {
         struct TestStatistic {}
 
         #[async_trait::async_trait]
-        impl Reporter for TestStatistic {
+        impl Collector for TestStatistic {
             fn get_mode(&self) -> Mode {
                 Mode::Standalone
             }
@@ -183,15 +176,15 @@ mod tests {
         }
 
         let statistic = Box::new(TestStatistic {});
-        let mut report = GreptimeVersionReport::new(statistic);
-        report.report_url = "http://localhost:9527";
-        let response = report.report_version().await.unwrap();
+        let mut report = GreptimeDBTelemetry::new(statistic);
+        report.telemetry_url = "http://localhost:9527";
+        let response = report.report_telemetry_info().await.unwrap();
         let body = response.json::<StatisticData>().await.unwrap();
         assert_eq!(env::consts::ARCH, body.arch);
         assert_eq!(env::consts::OS, body.os);
         assert_eq!(env!("CARGO_PKG_VERSION"), body.version);
         assert_eq!(env!("GIT_COMMIT"), body.git_commit);
-        assert_eq!("standalone", body.mode);
+        assert_eq!(Mode::Standalone, body.mode);
         assert_eq!(1, body.nodes.unwrap());
         tx.send(()).unwrap();
     }

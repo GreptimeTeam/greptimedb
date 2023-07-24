@@ -19,10 +19,9 @@ use std::sync::Arc;
 
 use api::v1::meta::Peer;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
 use common_grpc::channel_manager;
 use common_meta::key::TableMetadataManagerRef;
-#[cfg(feature = "version-report")]
-use common_meta::version_reporter::VersionReportTask;
 use common_procedure::options::ProcedureConfig;
 use common_procedure::ProcedureManagerRef;
 use common_telemetry::logging::LoggingOptions;
@@ -177,8 +176,7 @@ pub struct MetaSrv {
     mailbox: MailboxRef,
     ddl_manager: DdlManagerRef,
     table_metadata_manager: TableMetadataManagerRef,
-    #[cfg(feature = "version-report")]
-    version_reporter_task: Arc<VersionReportTask>,
+    greptimedb_telemerty_task: Option<Arc<GreptimeDBTelemetryTask>>,
 }
 
 impl MetaSrv {
@@ -250,15 +248,14 @@ impl MetaSrv {
                 .context(RecoverProcedureSnafu)?;
         }
 
-        #[cfg(feature = "version-report")]
-        {
-            info!("start version report task {:?}", self.version_reporter_task);
-            let _ = self
-                .version_reporter_task
-                .start(common_runtime::bg_runtime())
-                .map_err(|_e| {
-                    warn!("start version report task error");
-                });
+        if let Some(ref task) = self.greptimedb_telemerty_task {
+            info!(
+                "start version report task {:?}",
+                self.greptimedb_telemerty_task
+            );
+            let _ = task.start(common_runtime::bg_runtime()).map_err(|_e| {
+                warn!("start version report task error");
+            });
         }
 
         info!("MetaSrv started");

@@ -27,5 +27,4 @@ mod store;
 #[cfg(test)]
 mod tests;
 
-#[cfg(feature = "version-report")]
-mod version_reporter;
+mod greptimedb_telemetry;

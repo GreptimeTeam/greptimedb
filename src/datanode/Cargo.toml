@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-version-report = ["common-meta/version-report"]
+greptimedb-telemetry = []
 
 [dependencies]
 async-compat = "0.2"
@@ -30,6 +30,7 @@ common-recordbatch = { path = "../common/recordbatch" }
 common-runtime = { path = "../common/runtime" }
 common-telemetry = { path = "../common/telemetry" }
 common-time = { path = "../common/time" }
+common-greptimedb-telemetry = { path = "../common/greptimedb-telemetry" }
 datafusion.workspace = true
 datafusion-common.workspace = true
 datafusion-expr.workspace = true

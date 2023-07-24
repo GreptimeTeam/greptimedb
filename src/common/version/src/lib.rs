@@ -13,10 +13,16 @@
 // limitations under the License.
 
 const DEFAULT_VALUE: &str = "unknown";
-fn main() {
+
+#[allow(clippy::print_stdout)]
+pub fn set_git_version() {
     println!(
         "cargo:rustc-env=GIT_COMMIT={}",
         build_data::get_git_commit().unwrap_or_else(|_| DEFAULT_VALUE.to_string())
+    );
+    println!(
+        "cargo:rustc-env=GIT_COMMIT_SHORT={}",
+        build_data::get_git_commit_short().unwrap_or_else(|_| DEFAULT_VALUE.to_string())
     );
     println!(
         "cargo:rustc-env=GIT_BRANCH={}",

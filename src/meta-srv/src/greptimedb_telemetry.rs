@@ -15,11 +15,11 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use common_meta::rpc::store::{PutRequest, RangeRequest};
-use common_meta::version_reporter::{
-    GreptimeVersionReport, Mode as VersionReporterMode, Reporter, VersionReportTask,
-    VERSION_REPORT_INTERVAL, VERSION_UUID_KEY,
+use common_greptimedb_telemetry::{
+    Collector, GreptimeDBTelemetry, GreptimeDBTelemetryTask, Mode as VersionReporterMode,
+    TELEMETRY_INTERVAL, TELEMETRY_UUID_KEY,
 };
+use common_meta::rpc::store::{PutRequest, RangeRequest};
 
 use crate::cluster::MetaPeerClientRef;
 use crate::service::store::kv::KvStoreRef;
@@ -37,7 +37,7 @@ async fn get_uuid(key: &Vec<u8>, kv_store: KvStoreRef) -> Option<String> {
     let kv_res = kv_store.range(req).await;
     match kv_res {
         Ok(mut res) => {
-            if res.kvs.len() > 0 {
+            if !res.kvs.is_empty() {
                 res.kvs
                     .pop()
                     .and_then(|kv| String::from_utf8(kv.value).ok())
@@ -57,7 +57,7 @@ async fn get_uuid(key: &Vec<u8>, kv_store: KvStoreRef) -> Option<String> {
 }
 
 #[async_trait]
-impl Reporter for MetaVersionReport {
+impl Collector for MetaVersionReport {
     fn get_mode(&self) -> VersionReporterMode {
         VersionReporterMode::Distributed
     }
@@ -69,37 +69,39 @@ impl Reporter for MetaVersionReport {
             .unwrap_or(-1)
     }
     async fn get_uuid(&mut self) -> String {
-        if let Some(_uuid) = self.uuid.clone() {
-            return _uuid;
+        if let Some(uuid) = self.uuid.clone() {
+            return uuid;
+        } else if self.retry > 3 {
+            return "".to_string();
         } else {
-            if self.retry > 3 {
-                return "".to_string();
+            let uuid = get_uuid(&self.uuid_key_name, self.kv_store.clone()).await;
+            if let Some(_uuid) = uuid {
+                self.uuid = Some(_uuid.clone());
+                return _uuid;
             } else {
-                let uuid = get_uuid(&self.uuid_key_name, self.kv_store.clone()).await;
-                if let Some(_uuid) = uuid {
-                    self.uuid = Some(_uuid.clone());
-                    return _uuid;
-                } else {
-                    self.retry += 1;
-                    return "".to_string();
-                }
+                self.retry += 1;
+                return "".to_string();
             }
         }
     }
 }
 
-pub async fn get_version_reporter_task(
+pub async fn get_greptimedb_telemetry_task(
     meta_peer_client: MetaPeerClientRef,
     kv_store: KvStoreRef,
-) -> Arc<VersionReportTask> {
-    Arc::new(VersionReportTask::new(
-        *VERSION_REPORT_INTERVAL,
-        Box::new(GreptimeVersionReport::new(Box::new(MetaVersionReport {
-            meta_peer_client,
-            kv_store,
-            uuid: None,
-            retry: 0,
-            uuid_key_name: VERSION_UUID_KEY.as_bytes().to_vec(),
-        }))),
-    ))
+) -> Option<Arc<GreptimeDBTelemetryTask>> {
+    if cfg!(feature = "greptimedb-telemetry") {
+        Some(Arc::new(GreptimeDBTelemetryTask::new(
+            TELEMETRY_INTERVAL,
+            Box::new(GreptimeDBTelemetry::new(Box::new(MetaVersionReport {
+                meta_peer_client,
+                kv_store,
+                uuid: None,
+                retry: 0,
+                uuid_key_name: TELEMETRY_UUID_KEY.as_bytes().to_vec(),
+            }))),
+        )))
+    } else {
+        None
+    }
 }

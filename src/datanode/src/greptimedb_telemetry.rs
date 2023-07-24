@@ -15,18 +15,16 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use common_meta::version_reporter::{
-    GreptimeVersionReport, Mode as VersionReporterMode, Reporter, VersionReportTask,
-    VERSION_REPORT_INTERVAL, VERSION_UUID_KEY,
+use common_greptimedb_telemetry::{
+    Collector, GreptimeDBTelemetry, GreptimeDBTelemetryTask, Mode as VersionReporterMode,
+    TELEMETRY_INTERVAL, TELEMETRY_UUID_KEY,
 };
 use object_store::{ErrorKind, ObjectStore};
 use servers::Mode;
 
-use crate::datanode::DatanodeOptions;
-
 async fn get_uuid(file_name: &str, object_store: ObjectStore) -> Option<String> {
     let mut uuid = None;
-    let bs = object_store.clone().read(file_name).await;
+    let bs = object_store.read(file_name).await;
     match bs {
         Ok(bytes) => {
             let result = String::from_utf8(bytes);
@@ -34,18 +32,17 @@ async fn get_uuid(file_name: &str, object_store: ObjectStore) -> Option<String> 
                 uuid = Some(s);
             }
         }
-        Err(e) => match e.kind() {
-            ErrorKind::NotFound => {
+        Err(e) => {
+            if e.kind() == ErrorKind::NotFound {
                 let bs = uuid::Uuid::new_v4().to_string().into_bytes();
                 let write_result = object_store.clone().write(file_name, bs.clone()).await;
                 if write_result.is_ok() {
                     uuid = Some(String::from_utf8(bs).unwrap());
                 }
             }
-            _ => {}
-        },
+        }
     }
-    return uuid;
+    uuid
 }
 
 struct FrontendVersionReport {
@@ -55,7 +52,7 @@ struct FrontendVersionReport {
     uuid_file_name: String,
 }
 #[async_trait]
-impl Reporter for FrontendVersionReport {
+impl Collector for FrontendVersionReport {
     fn get_mode(&self) -> VersionReporterMode {
         VersionReporterMode::Standalone
     }
@@ -81,23 +78,25 @@ impl Reporter for FrontendVersionReport {
     }
 }
 
-pub async fn get_report_task(
-    opts: &DatanodeOptions,
+pub async fn get_greptimedb_telemetry_task(
+    mode: &Mode,
     object_store: ObjectStore,
-) -> Option<Arc<VersionReportTask>> {
-    let uuid_file_name = format!("./.{}", VERSION_UUID_KEY);
-    match opts.mode {
-        Mode::Standalone => Some(Arc::new(VersionReportTask::new(
-            *VERSION_REPORT_INTERVAL,
-            Box::new(GreptimeVersionReport::new(Box::new(
-                FrontendVersionReport {
+) -> Option<Arc<GreptimeDBTelemetryTask>> {
+    if cfg!(feature = "greptimedb-telemetry") {
+        let uuid_file_name = format!("./.{}", TELEMETRY_UUID_KEY);
+        match mode {
+            Mode::Standalone => Some(Arc::new(GreptimeDBTelemetryTask::new(
+                TELEMETRY_INTERVAL,
+                Box::new(GreptimeDBTelemetry::new(Box::new(FrontendVersionReport {
                     object_store: object_store.clone(),
                     uuid: get_uuid(uuid_file_name.as_str(), object_store.clone()).await,
                     retry: 0,
                     uuid_file_name,
-                },
+                }))),
             ))),
-        ))),
-        Mode::Distributed => None,
+            Mode::Distributed => None,
+        }
+    } else {
+        None
     }
 }
