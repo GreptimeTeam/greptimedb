@@ -101,8 +101,6 @@ impl StatementExecutor {
 
             Statement::DescribeTable(stmt) => self.describe_table(stmt, query_ctx).await,
 
-            Statement::Use(db) => self.handle_use(db, query_ctx).await,
-
             Statement::ShowDatabases(stmt) => self.show_databases(stmt, query_ctx).await,
 
             Statement::ShowTables(stmt) => self.show_tables(stmt, query_ctx).await,
@@ -148,15 +146,6 @@ impl StatementExecutor {
             .execute(plan, query_ctx)
             .await
             .context(ExecLogicalPlanSnafu)
-    }
-
-    async fn handle_use(&self, _db: String, _query_ctx: QueryContextRef) -> Result<Output> {
-        // use in mysql actually goes into `on_init` in mysql shim
-        // pg doesn't have this behavior
-        // stateless api schema is set on connection
-
-        // so this method is actually unreachable
-        unreachable!()
     }
 
     async fn get_table(&self, table_ref: &TableReference<'_>) -> Result<TableRef> {

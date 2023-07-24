@@ -623,7 +623,7 @@ pub fn check_permission(
         // These are executed by query engine, and will be checked there.
         Statement::Query(_) | Statement::Explain(_) | Statement::Tql(_) | Statement::Delete(_) => {}
         // database ops won't be checked
-        Statement::CreateDatabase(_) | Statement::ShowDatabases(_) | Statement::Use(_) => {}
+        Statement::CreateDatabase(_) | Statement::ShowDatabases(_) => {}
         // show create table and alter are not supported yet
         Statement::ShowCreateTable(_) | Statement::CreateExternalTable(_) | Statement::Alter(_) => {
         }
@@ -807,11 +807,6 @@ mod tests {
             let re = check_permission(plugins.clone(), &stmt, &query_ctx);
             re.unwrap();
         }
-
-        let sql = "USE randomschema";
-        let stmts = parse_stmt(sql, &GreptimeDbDialect {}).unwrap();
-        let re = check_permission(plugins.clone(), &stmts[0], &query_ctx);
-        re.unwrap();
 
         fn replace_test(template_sql: &str, plugins: Arc<Plugins>, query_ctx: &QueryContextRef) {
             // test right
