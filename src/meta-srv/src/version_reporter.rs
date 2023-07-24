@@ -32,10 +32,6 @@ struct MetaVersionReport {
     uuid_key_name: Vec<u8>,
 }
 
-fn get_uuid_key_name() -> Vec<u8> {
-    VERSION_UUID_KEY.as_bytes().to_vec()
-}
-
 async fn get_uuid(key: &Vec<u8>, kv_store: KvStoreRef) -> Option<String> {
     let req = RangeRequest::new().with_key((*key).clone()).with_limit(1);
     let kv_res = kv_store.range(req).await;
@@ -62,7 +58,7 @@ async fn get_uuid(key: &Vec<u8>, kv_store: KvStoreRef) -> Option<String> {
 
 #[async_trait]
 impl Reporter for MetaVersionReport {
-    async fn get_mode(&self) -> VersionReporterMode {
+    fn get_mode(&self) -> VersionReporterMode {
         VersionReporterMode::Distributed
     }
     async fn get_nodes(&self) -> i32 {
@@ -103,7 +99,7 @@ pub async fn get_version_reporter_task(
             kv_store,
             uuid: None,
             retry: 0,
-            uuid_key_name: get_uuid_key_name(),
+            uuid_key_name: VERSION_UUID_KEY.as_bytes().to_vec(),
         }))),
     ))
 }

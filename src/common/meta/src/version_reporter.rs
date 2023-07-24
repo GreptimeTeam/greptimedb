@@ -29,12 +29,12 @@ pub const VERSION_REPORT_URL: &str =
 
 pub static VERSION_REPORT_INTERVAL: Lazy<Duration> = Lazy::new(|| Duration::from_secs(60 * 30));
 
-pub static VERSION_UUID_KEY: &'static str = "greptime_version_reporter_uuid";
+pub static VERSION_UUID_KEY: &'static str = "greptimedb_version_reporter_uuid";
 
 pub type VersionReportTask = RepeatedTask<Error>;
 
 #[derive(Serialize, Deserialize, Debug)]
-struct ReportData {
+struct StatisticData {
     pub os: String,
     pub version: String,
     pub arch: String,
@@ -60,27 +60,27 @@ impl Mode {
 
 #[async_trait::async_trait]
 pub trait Reporter {
-    async fn get_version(&self) -> String {
+    fn get_version(&self) -> String {
         env!("CARGO_PKG_VERSION").to_string()
     }
-    async fn get_git_hash(&self) -> String {
+    fn get_git_hash(&self) -> String {
         env!("GIT_COMMIT").to_string()
     }
-    async fn get_os(&self) -> String {
+    fn get_os(&self) -> String {
         env::consts::OS.to_string()
     }
 
-    async fn get_arch(&self) -> String {
+    fn get_arch(&self) -> String {
         env::consts::ARCH.to_string()
     }
 
-    async fn get_mode(&self) -> Mode;
+    fn get_mode(&self) -> Mode;
     async fn get_nodes(&self) -> i32;
     async fn get_uuid(&mut self) -> String;
 }
 
 pub struct GreptimeVersionReport {
-    statistic: Box<dyn Reporter + Send + Sync>,
+    statistics: Box<dyn Reporter + Send + Sync>,
     client: Option<Client>,
     report_url: &'static str,
 }
@@ -99,27 +99,26 @@ impl TaskFunction<Error> for GreptimeVersionReport {
 }
 
 impl GreptimeVersionReport {
-    pub fn new(statistic: Box<dyn Reporter + Send + Sync>) -> Self {
-        let builder = Client::builder();
-        let client = builder
+    pub fn new(statistics: Box<dyn Reporter + Send + Sync>) -> Self {
+        let client = Client::builder()
             .connect_timeout(Duration::from_secs(3))
             .timeout(Duration::from_secs(3))
             .build();
         Self {
-            statistic,
+            statistics,
             client: client.ok(),
             report_url: VERSION_REPORT_URL,
         }
     }
     pub async fn report_version(&mut self) -> Option<Response> {
-        let data = ReportData {
-            os: self.statistic.get_os().await,
-            version: self.statistic.get_version().await,
-            git_commit: self.statistic.get_git_hash().await,
-            arch: self.statistic.get_arch().await,
-            mode: self.statistic.get_mode().await.to_string(),
-            nodes: Some(self.statistic.get_nodes().await),
-            uuid: self.statistic.get_uuid().await,
+        let data = StatisticData {
+            os: self.statistics.get_os(),
+            version: self.statistics.get_version(),
+            git_commit: self.statistics.get_git_hash(),
+            arch: self.statistics.get_arch(),
+            mode: self.statistics.get_mode().to_string(),
+            nodes: Some(self.statistics.get_nodes().await),
+            uuid: self.statistics.get_uuid().await,
         };
 
         if let Some(client) = self.client.as_ref() {
@@ -141,7 +140,7 @@ mod tests {
     use hyper::Server;
     use tokio::spawn;
 
-    use crate::version_reporter::{GreptimeVersionReport, Mode, ReportData, Reporter};
+    use crate::version_reporter::{GreptimeVersionReport, Mode, Reporter, StatisticData};
 
     async fn echo(req: hyper::Request<hyper::Body>) -> hyper::Result<hyper::Response<hyper::Body>> {
         Ok(hyper::Response::new(req.into_body()))
@@ -171,7 +170,7 @@ mod tests {
 
         #[async_trait::async_trait]
         impl Reporter for TestStatistic {
-            async fn get_mode(&self) -> Mode {
+            fn get_mode(&self) -> Mode {
                 Mode::Standalone
             }
 
@@ -188,7 +187,7 @@ mod tests {
         let mut report = GreptimeVersionReport::new(statistic);
         report.report_url = "http://localhost:9527";
         let response = report.report_version().await.unwrap();
-        let body = response.json::<ReportData>().await.unwrap();
+        let body = response.json::<StatisticData>().await.unwrap();
         assert_eq!(env::consts::ARCH, body.arch);
         assert_eq!(env::consts::OS, body.os);
         assert_eq!(env!("CARGO_PKG_VERSION"), body.version);

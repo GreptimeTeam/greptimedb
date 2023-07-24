@@ -24,10 +24,6 @@ use servers::Mode;
 
 use crate::datanode::DatanodeOptions;
 
-fn get_uuid_file_name() -> String {
-    format!("./.{}", VERSION_UUID_KEY)
-}
-
 async fn get_uuid(file_name: &str, object_store: ObjectStore) -> Option<String> {
     let mut uuid = None;
     let bs = object_store.clone().read(file_name).await;
@@ -52,58 +48,56 @@ async fn get_uuid(file_name: &str, object_store: ObjectStore) -> Option<String> 
     return uuid;
 }
 
+struct FrontendVersionReport {
+    object_store: ObjectStore,
+    uuid: Option<String>,
+    retry: i32,
+    uuid_file_name: String,
+}
+#[async_trait]
+impl Reporter for FrontendVersionReport {
+    fn get_mode(&self) -> VersionReporterMode {
+        VersionReporterMode::Standalone
+    }
+    async fn get_nodes(&self) -> i32 {
+        1
+    }
+    async fn get_uuid(&mut self) -> String {
+        if let Some(uuid) = &self.uuid {
+            uuid.clone()
+        } else {
+            if self.retry > 3 {
+                return "".to_string();
+            }
+            let uuid = get_uuid(self.uuid_file_name.as_str(), self.object_store.clone()).await;
+            if let Some(_uuid) = uuid {
+                self.uuid = Some(_uuid.clone());
+                return _uuid;
+            } else {
+                self.retry += 1;
+                return "".to_string();
+            }
+        }
+    }
+}
+
 pub async fn get_report_task(
     opts: &DatanodeOptions,
     object_store: ObjectStore,
 ) -> Option<Arc<VersionReportTask>> {
-    let uuid_file_name = get_uuid_file_name();
+    let uuid_file_name = format!("./.{}", VERSION_UUID_KEY);
     match opts.mode {
-        Mode::Standalone => {
-            struct FrontendVersionReport {
-                object_store: ObjectStore,
-                uuid: Option<String>,
-                retry: i32,
-                uuid_file_name: String,
-            }
-            #[async_trait]
-            impl Reporter for FrontendVersionReport {
-                async fn get_mode(&self) -> VersionReporterMode {
-                    VersionReporterMode::Standalone
-                }
-                async fn get_nodes(&self) -> i32 {
-                    1
-                }
-                async fn get_uuid(&mut self) -> String {
-                    if let Some(uuid) = &self.uuid {
-                        uuid.clone()
-                    } else {
-                        if self.retry > 3 {
-                            return "".to_string();
-                        }
-                        let uuid =
-                            get_uuid(self.uuid_file_name.as_str(), self.object_store.clone()).await;
-                        if let Some(_uuid) = uuid {
-                            self.uuid = Some(_uuid.clone());
-                            return _uuid;
-                        } else {
-                            self.retry += 1;
-                            return "".to_string();
-                        }
-                    }
-                }
-            }
-            Some(Arc::new(VersionReportTask::new(
-                *VERSION_REPORT_INTERVAL,
-                Box::new(GreptimeVersionReport::new(Box::new(
-                    FrontendVersionReport {
-                        object_store: object_store.clone(),
-                        uuid: get_uuid(uuid_file_name.as_str(), object_store.clone()).await,
-                        retry: 0,
-                        uuid_file_name: uuid_file_name,
-                    },
-                ))),
-            )))
-        }
+        Mode::Standalone => Some(Arc::new(VersionReportTask::new(
+            *VERSION_REPORT_INTERVAL,
+            Box::new(GreptimeVersionReport::new(Box::new(
+                FrontendVersionReport {
+                    object_store: object_store.clone(),
+                    uuid: get_uuid(uuid_file_name.as_str(), object_store.clone()).await,
+                    retry: 0,
+                    uuid_file_name,
+                },
+            ))),
+        ))),
         Mode::Distributed => None,
     }
 }

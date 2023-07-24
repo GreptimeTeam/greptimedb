@@ -50,21 +50,19 @@ pub struct MetaPeerClient {
 }
 
 impl MetaPeerClient {
-    // Get all datanode stat kvs from leader meta.
-    pub async fn get_all_dn_stat_kvs(&self) -> Result<HashMap<StatKey, StatValue>> {
+    async fn get_dn_key_value(&self) -> Result<Vec<KeyValue>> {
         let key = format!("{DN_STAT_PREFIX}-").into_bytes();
         let range_end = util::get_prefix_end_key(&key);
-
-        let kvs = self.range(key, range_end).await?;
-
+        self.range(key, range_end).await
+    }
+    // Get all datanode stat kvs from leader meta.
+    pub async fn get_all_dn_stat_kvs(&self) -> Result<HashMap<StatKey, StatValue>> {
+        let kvs = self.get_dn_key_value().await?;
         to_stat_kv_map(kvs)
     }
 
     pub async fn get_node_cnt(&self) -> Result<i32> {
-        let key = format!("{DN_STAT_PREFIX}-").into_bytes();
-        let range_end = util::get_prefix_end_key(&key);
-
-        let kvs = self.range(key, range_end).await?;
+        let kvs = self.get_dn_key_value().await?;
         kvs.into_iter()
             .map(|kv| kv.key.try_into())
             .collect::<Result<HashSet<StatKey>>>()
