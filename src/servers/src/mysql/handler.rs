@@ -21,7 +21,7 @@ use async_trait::async_trait;
 use chrono::{NaiveDate, NaiveDateTime};
 use common_error::ext::ErrorExt;
 use common_query::Output;
-use common_telemetry::{error, info, logging, timer, trace, warn};
+use common_telemetry::{error, info, logging, timer, warn};
 use datatypes::prelude::ConcreteDataType;
 use metrics::increment_counter;
 use opensrv_mysql::{
