@@ -21,7 +21,7 @@ use async_trait::async_trait;
 use chrono::{NaiveDate, NaiveDateTime};
 use common_error::ext::ErrorExt;
 use common_query::Output;
-use common_telemetry::{error, logging, timer, trace, warn};
+use common_telemetry::{error, info, logging, timer, trace, warn};
 use datatypes::prelude::ConcreteDataType;
 use metrics::increment_counter;
 use opensrv_mysql::{
@@ -90,16 +90,14 @@ impl MysqlInstanceShim {
     }
 
     async fn do_query(&self, query: &str, query_ctx: QueryContextRef) -> Vec<Result<Output>> {
-        trace!("Start executing query: '{}'", query);
+        let trace_id = query_ctx.trace_id();
+        info!("Start executing query: '{}'", query);
         let start = Instant::now();
 
         let output = if let Some(output) = crate::mysql::federated::check(query, query_ctx.clone())
         {
             vec![Ok(output)]
         } else {
-            let trace_id = query.len() as u64;
-            common_telemetry::info!("trace_id: {}, query: {}", trace_id, query);
-
             common_telemetry::TRACE_ID
                 .scope(trace_id, async move {
                     self.query_handler.do_query(query, query_ctx).await
@@ -107,7 +105,7 @@ impl MysqlInstanceShim {
                 .await
         };
 
-        trace!(
+        info!(
             "Finished executing query: '{}', total time costs in microseconds: {}",
             query,
             start.elapsed().as_micros()
