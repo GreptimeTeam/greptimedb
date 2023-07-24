@@ -399,7 +399,7 @@ jobs:
         uses: docker/build-push-action@v3
         if: success() || steps.unzip-arm64.conclusion == 'success' # Build and push all platform if unzip-arm64 succeeds
         with:
-          context: ./docker/ci/
+          context: .
           file: ./docker/ci/Dockerfile
           push: true
           platforms: linux/amd64,linux/arm64
@@ -411,7 +411,7 @@ jobs:
         uses: docker/build-push-action@v3
         if: success() || steps.download-arm64.conclusion == 'failure' # Only build and push amd64 platform if download-arm64 fails
         with:
-          context: ./docker/ci/
+          context: .
           file: ./docker/ci/Dockerfile
           push: true
           platforms: linux/amd64
