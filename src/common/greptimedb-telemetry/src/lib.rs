@@ -23,11 +23,9 @@ use reqwest::{Client, Response};
 use serde::{Deserialize, Serialize};
 
 pub const TELEMETRY_URL: &str = "https://api-preview.greptime.cloud/db/otel/statistics";
-const TELEMETRY_UUID_FILE_NAME: &str = "greptimedb_telemetry_uuid";
+const TELEMETRY_UUID_FILE_NAME: &str = "/tmp/.greptimedb_telemetry_uuid";
 
 pub static TELEMETRY_INTERVAL: Duration = Duration::from_secs(60 * 30);
-
-pub static TELEMETRY_UUID_KEY: &str = "greptimedb_telemetry_uuid";
 
 //pub type GreptimeDBTelemetryTask = RepeatedTask<Error>;
 
@@ -108,20 +106,16 @@ pub trait Collector {
 
     async fn get_nodes(&self) -> i32;
 
-    fn get_uuid(&mut self) -> String {
-        if let Some(uuid) = self.get_uuid_cache() {
-            uuid
-        } else {
-            if self.get_retry() > 3 {
-                return "".to_string();
-            }
-            let uuid = default_get_uuid();
-            if let Some(_uuid) = uuid {
-                self.set_uuid_cache(_uuid.clone());
-                return _uuid;
-            } else {
-                self.inc_retry();
-                return "".to_string();
+    fn get_uuid(&mut self) -> Option<String> {
+        match self.get_uuid_cache() {
+            Some(uuid) => Some(uuid),
+            None => {
+                if self.get_retry() > 3 {
+                    return None;
+                }
+                let uuid = default_get_uuid()?;
+                self.set_uuid_cache(uuid.clone());
+                Some(uuid)
             }
         }
     }
@@ -174,26 +168,31 @@ impl GreptimeDBTelemetry {
     }
 
     pub async fn report_telemetry_info(&mut self) -> Option<Response> {
-        let data = StatisticData {
-            os: self.statistics.get_os(),
-            version: self.statistics.get_version(),
-            git_commit: self.statistics.get_git_hash(),
-            arch: self.statistics.get_arch(),
-            mode: self.statistics.get_mode(),
-            nodes: Some(self.statistics.get_nodes().await),
-            uuid: self.statistics.get_uuid(),
-        };
+        match self.statistics.get_uuid() {
+            Some(uuid) => {
+                let data = StatisticData {
+                    os: self.statistics.get_os(),
+                    version: self.statistics.get_version(),
+                    git_commit: self.statistics.get_git_hash(),
+                    arch: self.statistics.get_arch(),
+                    mode: self.statistics.get_mode(),
+                    nodes: Some(self.statistics.get_nodes().await),
+                    uuid,
+                };
 
-        if let Some(client) = self.client.as_ref() {
-            debug!("report version: {:?}", data);
-            client
-                .post(self.telemetry_url)
-                .json(&data)
-                .send()
-                .await
-                .ok()
-        } else {
-            None
+                if let Some(client) = self.client.as_ref() {
+                    debug!("report version: {:?}", data);
+                    client
+                        .post(self.telemetry_url)
+                        .json(&data)
+                        .send()
+                        .await
+                        .ok()
+                } else {
+                    None
+                }
+            }
+            None => None,
         }
     }
 }
@@ -203,6 +202,7 @@ mod tests {
     use std::convert::Infallible;
     use std::env;
 
+    use common_test_util::ports;
     use hyper::service::{make_service_fn, service_fn};
     use hyper::Server;
     use tokio::spawn;
@@ -216,6 +216,7 @@ mod tests {
     #[tokio::test]
     async fn test_gretimedb_telemetry() {
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let port: u16 = ports::get_port() as u16;
         spawn(async move {
             let make_svc = make_service_fn(|_conn| {
                 // This is the `Service` that will handle the connection.
@@ -223,8 +224,7 @@ mod tests {
                 // returns a Response into a `Service`.
                 async { Ok::<_, Infallible>(service_fn(echo)) }
             });
-
-            let addr = ([127, 0, 0, 1], 9527).into();
+            let addr = ([127, 0, 0, 1], port).into();
 
             let server = Server::bind(&addr).serve(make_svc);
             let graceful = server.with_graceful_shutdown(async {
@@ -261,14 +261,15 @@ mod tests {
                 unimplemented!()
             }
 
-            fn get_uuid(&mut self) -> String {
-                "test".to_string()
+            fn get_uuid(&mut self) -> Option<String> {
+                Some("test".to_string())
             }
         }
 
         let statistic = Box::new(TestStatistic {});
         let mut report = GreptimeDBTelemetry::new(statistic);
-        report.telemetry_url = "http://localhost:9527";
+        let url = format!("{}{}", "http://localhost:", port);
+        report.telemetry_url = Box::leak(url.into_boxed_str());
         let response = report.report_telemetry_info().await.unwrap();
         let body = response.json::<StatisticData>().await.unwrap();
         assert_eq!(env::consts::ARCH, body.arch);

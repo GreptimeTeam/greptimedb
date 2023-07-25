@@ -1764,6 +1764,7 @@ dependencies = [
  "common-error",
  "common-runtime",
  "common-telemetry",
+ "common-test-util",
  "common-version",
  "hyper",
  "reqwest",

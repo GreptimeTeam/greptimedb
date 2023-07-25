@@ -28,4 +28,4 @@ mod store;
 #[cfg(test)]
 mod tests;
 
-use greptimedb_telemetry::greptimedb_telemetry as telemetry;
+use greptimedb_telemetry::telemetry;

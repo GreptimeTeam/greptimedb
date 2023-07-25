@@ -64,12 +64,12 @@ use crate::error::{
     MissingNodeIdSnafu, NewCatalogSnafu, OpenLogStoreSnafu, RecoverProcedureSnafu, Result,
     ShutdownInstanceSnafu, StartProcedureManagerSnafu, StopProcedureManagerSnafu,
 };
-use crate::telemetry::get_greptimedb_telemetry_task;
 use crate::heartbeat::handler::close_region::CloseRegionHandler;
 use crate::heartbeat::handler::open_region::OpenRegionHandler;
 use crate::heartbeat::HeartbeatTask;
 use crate::sql::{SqlHandler, SqlRequest};
 use crate::store;
+use crate::telemetry::get_greptimedb_telemetry_task;
 
 mod grpc;
 pub mod sql;

@@ -13,7 +13,7 @@
 // limitations under the License.
 
 #[cfg(feature = "greptimedb-telemetry")]
-pub mod greptimedb_telemetry {
+pub mod telemetry {
     use std::sync::Arc;
 
     use async_trait::async_trait;
@@ -84,7 +84,7 @@ pub mod greptimedb_telemetry {
 }
 
 #[cfg(not(feature = "greptimedb-telemetry"))]
-pub mod greptimedb_telemetry {
+pub mod telemetry {
     use std::sync::Arc;
 
     use common_greptimedb_telemetry::GreptimeDBTelemetryTask;

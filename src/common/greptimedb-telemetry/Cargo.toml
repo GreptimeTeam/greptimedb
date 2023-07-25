@@ -17,6 +17,7 @@ uuid.workspace = true
 
 [dev-dependencies]
 hyper = { version = "0.14", features = ["full"] }
+common-test-util = { path = "../test-util" }
 
 [build-dependencies]
 common-version = { path = "../version" }
