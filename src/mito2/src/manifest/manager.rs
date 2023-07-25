@@ -108,7 +108,7 @@ impl RegionManifestManagerInner {
             "Build region manifest in {}, manifest: {:?}",
             options.manifest_dir, manifest
         );
-        let version = manifest.version.manifest_version;
+        let version = manifest.manifest_version;
 
         // todo: start gc task
 
@@ -186,7 +186,7 @@ impl RegionManifestManagerInner {
             "Recovered region manifest from {}, manifest: {:?}",
             options.manifest_dir, manifest
         );
-        let version = manifest.version.manifest_version;
+        let version = manifest.manifest_version;
 
         // todo: start gc task
 
