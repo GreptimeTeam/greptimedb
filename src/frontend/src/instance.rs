@@ -201,7 +201,7 @@ impl Instance {
         ]);
 
         let heartbeat_task = Some(HeartbeatTask::new(
-            meta_client.clone(),
+            meta_client,
             opts.heartbeat.clone(),
             Arc::new(handlers_executor),
         ));

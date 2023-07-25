@@ -14,20 +14,30 @@
 
 use std::env;
 use std::io::ErrorKind;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use common_runtime::error::{Error, Result};
 use common_runtime::{BoxedTaskFunction, RepeatedTask, Runtime, TaskFunction};
 use common_telemetry::debug;
+use once_cell::sync::Lazy;
 use reqwest::{Client, Response};
 use serde::{Deserialize, Serialize};
 
 pub const TELEMETRY_URL: &str = "https://api-preview.greptime.cloud/db/otel/statistics";
-const TELEMETRY_UUID_FILE_NAME: &str = "/tmp/.greptimedb_telemetry_uuid";
+
+// Getting the right path when running on windows
+static TELEMETRY_UUID_FILE_NAME: Lazy<PathBuf> = Lazy::new(|| {
+    let mut path = PathBuf::new();
+    path.push(env::temp_dir());
+    path.push(".greptimedb-telemetry-uuid");
+    path
+});
 
 pub static TELEMETRY_INTERVAL: Duration = Duration::from_secs(60 * 30);
 
-//pub type GreptimeDBTelemetryTask = RepeatedTask<Error>;
+const GREPTIMEDB_TELEMETRY_CLIENT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const GREPTIMEDB_TELEMETRY_CLIENT_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub enum GreptimeDBTelemetryTask {
     Enable(RepeatedTask<Error>),
@@ -113,21 +123,29 @@ pub trait Collector {
                 if self.get_retry() > 3 {
                     return None;
                 }
-                let uuid = default_get_uuid()?;
-                self.set_uuid_cache(uuid.clone());
-                Some(uuid)
+                match default_get_uuid() {
+                    Some(uuid) => {
+                        self.set_uuid_cache(uuid.clone());
+                        Some(uuid)
+                    }
+                    None => {
+                        self.inc_retry();
+                        None
+                    }
+                }
             }
         }
     }
 }
 
 pub fn default_get_uuid() -> Option<String> {
-    match std::fs::read(TELEMETRY_UUID_FILE_NAME) {
+    let path = (*TELEMETRY_UUID_FILE_NAME).as_path();
+    match std::fs::read(path) {
         Ok(bytes) => Some(String::from_utf8_lossy(&bytes).to_string()),
         Err(e) => {
             if e.kind() == ErrorKind::NotFound {
                 let uuid = uuid::Uuid::new_v4().to_string();
-                let _ = std::fs::write(TELEMETRY_UUID_FILE_NAME, uuid.as_bytes());
+                let _ = std::fs::write(path, uuid.as_bytes());
                 Some(uuid)
             } else {
                 None
@@ -136,6 +154,13 @@ pub fn default_get_uuid() -> Option<String> {
     }
 }
 
+// Report version info to GreptimeDB.
+// We do not collect any identity-sensitive information.
+// This task is scheduled to run every 30 minutes.
+// The task will be disabled default. It can be enabled by setting the build feature `greptimedb-telemetry`
+// Collector is used to collect the version info. It can be implemented by different components.
+// client is used to send the HTTP request to GreptimeDB.
+// telemetry_url is the GreptimeDB url.
 pub struct GreptimeDBTelemetry {
     statistics: Box<dyn Collector + Send + Sync>,
     client: Option<Client>,
@@ -157,8 +182,8 @@ impl TaskFunction<Error> for GreptimeDBTelemetry {
 impl GreptimeDBTelemetry {
     pub fn new(statistics: Box<dyn Collector + Send + Sync>) -> Self {
         let client = Client::builder()
-            .connect_timeout(Duration::from_secs(3))
-            .timeout(Duration::from_secs(3))
+            .connect_timeout(GREPTIMEDB_TELEMETRY_CLIENT_CONNECT_TIMEOUT)
+            .timeout(GREPTIMEDB_TELEMETRY_CLIENT_TIMEOUT)
             .build();
         Self {
             statistics,
@@ -182,12 +207,9 @@ impl GreptimeDBTelemetry {
 
                 if let Some(client) = self.client.as_ref() {
                     debug!("report version: {:?}", data);
-                    client
-                        .post(self.telemetry_url)
-                        .json(&data)
-                        .send()
-                        .await
-                        .ok()
+                    let result = client.post(self.telemetry_url).json(&data).send().await;
+                    debug!("report version result: {:?}", result);
+                    result.ok()
                 } else {
                     None
                 }
@@ -201,16 +223,31 @@ impl GreptimeDBTelemetry {
 mod tests {
     use std::convert::Infallible;
     use std::env;
+    use std::sync::atomic::AtomicUsize;
+    use std::time::Duration;
 
     use common_test_util::ports;
     use hyper::service::{make_service_fn, service_fn};
     use hyper::Server;
+    use reqwest::Client;
     use tokio::spawn;
 
     use crate::{Collector, GreptimeDBTelemetry, Mode, StatisticData};
 
+    static COUNT: AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
     async fn echo(req: hyper::Request<hyper::Body>) -> hyper::Result<hyper::Response<hyper::Body>> {
-        Ok(hyper::Response::new(req.into_body()))
+        let path = req.uri().path();
+        if path == "/req-cnt" {
+            let body = hyper::Body::from(format!(
+                "{}",
+                COUNT.load(std::sync::atomic::Ordering::SeqCst)
+            ));
+            Ok(hyper::Response::new(body))
+        } else {
+            COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(hyper::Response::new(req.into_body()))
+        }
     }
 
     #[tokio::test]
@@ -233,7 +270,9 @@ mod tests {
             let _ = graceful.await;
             Ok::<_, Infallible>(())
         });
-        struct TestStatistic {}
+        struct TestStatistic;
+
+        struct FailedStatistic;
 
         #[async_trait::async_trait]
         impl Collector for TestStatistic {
@@ -266,11 +305,43 @@ mod tests {
             }
         }
 
-        let statistic = Box::new(TestStatistic {});
-        let mut report = GreptimeDBTelemetry::new(statistic);
-        let url = format!("{}{}", "http://localhost:", port);
-        report.telemetry_url = Box::leak(url.into_boxed_str());
-        let response = report.report_telemetry_info().await.unwrap();
+        #[async_trait::async_trait]
+        impl Collector for FailedStatistic {
+            fn get_mode(&self) -> Mode {
+                Mode::Standalone
+            }
+
+            async fn get_nodes(&self) -> Option<i32> {
+                None
+            }
+
+            fn get_retry(&self) -> i32 {
+                unimplemented!()
+            }
+
+            fn inc_retry(&mut self) {
+                unimplemented!()
+            }
+
+            fn set_uuid_cache(&mut self, _: String) {
+                unimplemented!()
+            }
+
+            fn get_uuid_cache(&self) -> Option<String> {
+                unimplemented!()
+            }
+
+            fn get_uuid(&mut self) -> Option<String> {
+                None
+            }
+        }
+
+        let test_statistic = Box::new(TestStatistic);
+        let mut test_report = GreptimeDBTelemetry::new(test_statistic);
+        let url = Box::leak(format!("{}:{}", "http://localhost", port).into_boxed_str());
+        test_report.telemetry_url = url;
+        let response = test_report.report_telemetry_info().await.unwrap();
+
         let body = response.json::<StatisticData>().await.unwrap();
         assert_eq!(env::consts::ARCH, body.arch);
         assert_eq!(env::consts::OS, body.os);
@@ -278,6 +349,23 @@ mod tests {
         assert_eq!(env!("GIT_COMMIT"), body.git_commit);
         assert_eq!(Mode::Standalone, body.mode);
         assert_eq!(1, body.nodes.unwrap());
+
+        let failed_statistic = Box::new(FailedStatistic);
+        let mut failed_report = GreptimeDBTelemetry::new(failed_statistic);
+        failed_report.telemetry_url = url;
+        let response = failed_report.report_telemetry_info().await;
+        assert!(response.is_none());
+
+        let client = Client::builder()
+            .connect_timeout(Duration::from_secs(3))
+            .timeout(Duration::from_secs(3))
+            .build()
+            .unwrap();
+
+        let cnt_url = format!("{}/req-cnt", url);
+        let response = client.get(cnt_url).send().await.unwrap();
+        let body = response.text().await.unwrap();
+        assert_eq!("1", body);
         tx.send(()).unwrap();
     }
 }
