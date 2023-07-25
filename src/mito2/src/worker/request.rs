@@ -100,6 +100,9 @@ pub(crate) enum WorkerRequest {
 #[derive(Debug)]
 pub(crate) struct RegionRequest {
     /// Sender to send result.
+    ///
+    /// Now the result is a `Result<()>`, but we could replace the empty tuple
+    /// with an enum if we need to carry more information.
     pub(crate) sender: Option<Sender<Result<()>>>,
     /// Request body.
     pub(crate) body: RequestBody,

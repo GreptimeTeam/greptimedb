@@ -61,6 +61,8 @@ impl<S> RegionWorkerLoop<S> {
         // TODO(yingwen): Custom the Debug format for the metadata and also print it.
         logging::info!("A new region created, region_id: {}", region.region_id);
 
+        // TODO(yingwen): Metrics.
+
         // Insert the MitoRegion into the RegionMap.
         self.regions.insert_region(Arc::new(region));
 

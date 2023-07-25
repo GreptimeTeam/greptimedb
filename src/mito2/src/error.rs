@@ -156,6 +156,12 @@ pub enum Error {
         source: parquet::errors::ParquetError,
         location: Location,
     },
+
+    #[snafu(display("Region {} not found, location: {}", region_id, location))]
+    RegionNotFound {
+        region_id: RegionId,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -173,7 +179,8 @@ impl ErrorExt for Error {
             | SerdeJson { .. }
             | Utf8 { .. }
             | RegionExists { .. }
-            | NewRecordBatch { .. } => StatusCode::Unexpected,
+            | NewRecordBatch { .. }
+            | RegionNotFound { .. } => StatusCode::Unexpected,
             InvalidScanIndex { .. } | InvalidMeta { .. } | InvalidSchema { .. } => {
                 StatusCode::InvalidArguments
             }

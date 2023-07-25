@@ -27,7 +27,7 @@ use store_api::storage::RegionId;
 use crate::config::MitoConfig;
 use crate::error::{RecvSnafu, Result};
 pub use crate::worker::request::CreateRequest;
-use crate::worker::request::{RegionRequest, RequestBody};
+use crate::worker::request::{CloseRequest, OpenRequest, RegionRequest, RequestBody};
 use crate::worker::WorkerGroup;
 
 /// Region engine implementation for timeseries data.
@@ -56,8 +56,28 @@ impl MitoEngine {
     }
 
     /// Creates a new region.
-    pub async fn create_region(&self, request: CreateRequest) -> Result<()> {
-        self.inner.create_region(request).await
+    pub async fn create_region(&self, create_request: CreateRequest) -> Result<()> {
+        self.inner
+            .handle_request_body(RequestBody::Create(create_request))
+            .await
+    }
+
+    /// Opens an existing region.
+    ///
+    /// Returns error if the region does not exist.
+    pub async fn open_region(&self, open_request: OpenRequest) -> Result<()> {
+        self.inner
+            .handle_request_body(RequestBody::Open(open_request))
+            .await
+    }
+
+    /// Closes a region.
+    ///
+    /// Does nothing if the region is already closed.
+    pub async fn close_region(&self, close_request: CloseRequest) -> Result<()> {
+        self.inner
+            .handle_request_body(RequestBody::Close(close_request))
+            .await
     }
 
     /// Returns true if the specific region exists.
@@ -89,9 +109,9 @@ impl EngineInner {
         self.workers.stop().await
     }
 
-    /// Creates a new region.
-    async fn create_region(&self, create_request: CreateRequest) -> Result<()> {
-        let (request, receiver) = RegionRequest::from_body(RequestBody::Create(create_request));
+    /// Handles [RequestBody] and return its executed result.
+    async fn handle_request_body(&self, body: RequestBody) -> Result<()> {
+        let (request, receiver) = RegionRequest::from_body(body);
         self.workers.submit_to_worker(request).await?;
 
         receiver.await.context(RecvSnafu)?
