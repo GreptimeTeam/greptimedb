@@ -113,6 +113,7 @@ impl PromPlanner {
             table_provider,
             ctx: PromPlannerContext::from_eval_stmt(&stmt),
         };
+
         planner.prom_expr_to_plan(stmt.expr).await
     }
 

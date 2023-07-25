@@ -182,7 +182,7 @@ impl RegionWorker {
             running: running.clone(),
             memtable_builder: Arc::new(DefaultMemtableBuilder::default()),
         };
-        let handle = common_runtime::spawn_bg(async move {
+        let handle = common_runtime::spawn_write(async move {
             worker_thread.run().await;
         });
 
