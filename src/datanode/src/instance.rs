@@ -64,7 +64,7 @@ use crate::error::{
     MissingNodeIdSnafu, NewCatalogSnafu, OpenLogStoreSnafu, RecoverProcedureSnafu, Result,
     ShutdownInstanceSnafu, StartProcedureManagerSnafu, StopProcedureManagerSnafu,
 };
-use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
+use crate::telemetry::get_greptimedb_telemetry_task;
 use crate::heartbeat::handler::close_region::CloseRegionHandler;
 use crate::heartbeat::handler::open_region::OpenRegionHandler;
 use crate::heartbeat::HeartbeatTask;
@@ -279,12 +279,9 @@ impl Instance {
         );
         let query_engine = factory.query_engine();
 
-        let procedure_manager = create_procedure_manager(
-            opts.node_id.unwrap_or(0),
-            &opts.procedure,
-            object_store.clone(),
-        )
-        .await?;
+        let procedure_manager =
+            create_procedure_manager(opts.node_id.unwrap_or(0), &opts.procedure, object_store)
+                .await?;
         // Register all procedures.
         // Register procedures of the mito engine.
         mito_engine.register_procedure_loaders(&*procedure_manager);
@@ -308,11 +305,7 @@ impl Instance {
             catalog_manager: catalog_manager.clone(),
             table_id_provider,
             procedure_manager,
-            greptimedb_telemerty_task: get_greptimedb_telemetry_task(
-                &opts.mode,
-                object_store.clone(),
-            )
-            .await,
+            greptimedb_telemerty_task: get_greptimedb_telemetry_task(&opts.mode).await,
         });
 
         let heartbeat_task = Instance::build_heartbeat_task(

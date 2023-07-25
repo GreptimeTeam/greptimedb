@@ -12,93 +12,69 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
+#[cfg(feature = "greptimedb-telemetry")]
+pub mod greptimedb_telemetry {
+    use std::sync::Arc;
 
-use async_trait::async_trait;
-use common_greptimedb_telemetry::{
-    Collector, GreptimeDBTelemetry, GreptimeDBTelemetryTask, Mode as VersionReporterMode,
-    TELEMETRY_INTERVAL, TELEMETRY_UUID_KEY,
-};
-use object_store::{ErrorKind, ObjectStore};
-use servers::Mode;
+    use async_trait::async_trait;
+    use common_greptimedb_telemetry::{
+        default_get_uuid, Collector, GreptimeDBTelemetry, GreptimeDBTelemetryTask,
+        Mode as VersionReporterMode, TELEMETRY_INTERVAL,
+    };
+    use servers::Mode;
 
-async fn get_uuid(file_name: &str, object_store: ObjectStore) -> Option<String> {
-    let mut uuid = None;
-    let bs = object_store.read(file_name).await;
-    match bs {
-        Ok(bytes) => {
-            let result = String::from_utf8(bytes);
-            if let Ok(s) = result {
-                uuid = Some(s);
-            }
+    struct StandaloneGreptimeDBTelemetryCollector {
+        uuid: Option<String>,
+        retry: i32,
+    }
+    #[async_trait]
+    impl Collector for StandaloneGreptimeDBTelemetryCollector {
+        fn get_mode(&self) -> VersionReporterMode {
+            VersionReporterMode::Standalone
         }
-        Err(e) => {
-            if e.kind() == ErrorKind::NotFound {
-                let bs = uuid::Uuid::new_v4().to_string().into_bytes();
-                let write_result = object_store.clone().write(file_name, bs.clone()).await;
-                if write_result.is_ok() {
-                    uuid = Some(String::from_utf8(bs).unwrap());
-                }
-            }
+        async fn get_nodes(&self) -> i32 {
+            1
         }
-    }
-    uuid
-}
+        fn get_retry(&self) -> i32 {
+            self.retry
+        }
 
-struct StandaloneGreptimeDBTelemetryCollector {
-    object_store: ObjectStore,
-    uuid: Option<String>,
-    retry: i32,
-    uuid_file_name: String,
-}
-#[async_trait]
-impl Collector for StandaloneGreptimeDBTelemetryCollector {
-    fn get_mode(&self) -> VersionReporterMode {
-        VersionReporterMode::Standalone
-    }
-    async fn get_nodes(&self) -> i32 {
-        1
-    }
-    async fn get_uuid(&mut self) -> String {
-        if let Some(uuid) = &self.uuid {
-            uuid.clone()
-        } else {
-            if self.retry > 3 {
-                return "".to_string();
-            }
-            let uuid = get_uuid(self.uuid_file_name.as_str(), self.object_store.clone()).await;
-            if let Some(_uuid) = uuid {
-                self.uuid = Some(_uuid.clone());
-                return _uuid;
-            } else {
-                self.retry += 1;
-                return "".to_string();
-            }
+        fn inc_retry(&mut self) {
+            self.retry += 1;
+        }
+
+        fn set_uuid_cache(&mut self, uuid: String) {
+            self.uuid = Some(uuid);
+        }
+
+        fn get_uuid_cache(&self) -> Option<String> {
+            self.uuid.clone()
         }
     }
-}
 
-pub async fn get_greptimedb_telemetry_task(
-    mode: &Mode,
-    object_store: ObjectStore,
-) -> Arc<GreptimeDBTelemetryTask> {
-    if cfg!(feature = "greptimedb-telemetry") {
-        let uuid_file_name = format!("./.{}", TELEMETRY_UUID_KEY);
+    pub async fn get_greptimedb_telemetry_task(mode: &Mode) -> Arc<GreptimeDBTelemetryTask> {
         match mode {
             Mode::Standalone => Arc::new(GreptimeDBTelemetryTask::enable(
                 TELEMETRY_INTERVAL,
                 Box::new(GreptimeDBTelemetry::new(Box::new(
                     StandaloneGreptimeDBTelemetryCollector {
-                        object_store: object_store.clone(),
-                        uuid: get_uuid(uuid_file_name.as_str(), object_store.clone()).await,
+                        uuid: default_get_uuid(),
                         retry: 0,
-                        uuid_file_name,
                     },
                 ))),
             )),
             Mode::Distributed => Arc::new(GreptimeDBTelemetryTask::disable()),
         }
-    } else {
+    }
+}
+
+#[cfg(not(feature = "greptimedb-telemetry"))]
+pub mod greptimedb_telemetry {
+    use std::sync::Arc;
+
+    use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
+    use servers::Mode;
+    pub async fn get_greptimedb_telemetry_task(_: &Mode) -> Arc<GreptimeDBTelemetryTask> {
         Arc::new(GreptimeDBTelemetryTask::disable())
     }
 }

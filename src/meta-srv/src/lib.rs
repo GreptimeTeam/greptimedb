@@ -43,3 +43,4 @@ pub use crate::error::Result;
 mod test_util;
 
 mod greptimedb_telemetry;
+use greptimedb_telemetry::greptimedb_telemetry as telemetry;

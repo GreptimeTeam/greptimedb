@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::env;
+use std::io::ErrorKind;
 use std::time::Duration;
 
 use common_runtime::error::{Error, Result};
@@ -22,8 +23,9 @@ use reqwest::{Client, Response};
 use serde::{Deserialize, Serialize};
 
 pub const TELEMETRY_URL: &str = "https://api-preview.greptime.cloud/db/otel/statistics";
+const TELEMETRY_UUID_FILE_NAME: &str = "greptimedb_telemetry_uuid";
 
-pub static TELEMETRY_INTERVAL: Duration = Duration::from_secs(30);
+pub static TELEMETRY_INTERVAL: Duration = Duration::from_secs(60 * 30);
 
 pub static TELEMETRY_UUID_KEY: &str = "greptimedb_telemetry_uuid";
 
@@ -96,9 +98,48 @@ pub trait Collector {
 
     fn get_mode(&self) -> Mode;
 
+    fn get_retry(&self) -> i32;
+
+    fn inc_retry(&mut self);
+
+    fn set_uuid_cache(&mut self, uuid: String);
+
+    fn get_uuid_cache(&self) -> Option<String>;
+
     async fn get_nodes(&self) -> i32;
 
-    async fn get_uuid(&mut self) -> String;
+    fn get_uuid(&mut self) -> String {
+        if let Some(uuid) = self.get_uuid_cache() {
+            uuid
+        } else {
+            if self.get_retry() > 3 {
+                return "".to_string();
+            }
+            let uuid = default_get_uuid();
+            if let Some(_uuid) = uuid {
+                self.set_uuid_cache(_uuid.clone());
+                return _uuid;
+            } else {
+                self.inc_retry();
+                return "".to_string();
+            }
+        }
+    }
+}
+
+pub fn default_get_uuid() -> Option<String> {
+    match std::fs::read(TELEMETRY_UUID_FILE_NAME) {
+        Ok(bytes) => Some(String::from_utf8_lossy(&bytes).to_string()),
+        Err(e) => {
+            if e.kind() == ErrorKind::NotFound {
+                let uuid = uuid::Uuid::new_v4().to_string();
+                let _ = std::fs::write(TELEMETRY_UUID_FILE_NAME, uuid.as_bytes());
+                Some(uuid)
+            } else {
+                None
+            }
+        }
+    }
 }
 
 pub struct GreptimeDBTelemetry {
@@ -140,7 +181,7 @@ impl GreptimeDBTelemetry {
             arch: self.statistics.get_arch(),
             mode: self.statistics.get_mode(),
             nodes: Some(self.statistics.get_nodes().await),
-            uuid: self.statistics.get_uuid().await,
+            uuid: self.statistics.get_uuid(),
         };
 
         if let Some(client) = self.client.as_ref() {
@@ -204,7 +245,23 @@ mod tests {
                 1
             }
 
-            async fn get_uuid(&mut self) -> String {
+            fn get_retry(&self) -> i32 {
+                unimplemented!()
+            }
+
+            fn inc_retry(&mut self) {
+                unimplemented!()
+            }
+
+            fn set_uuid_cache(&mut self, _: String) {
+                unimplemented!()
+            }
+
+            fn get_uuid_cache(&self) -> Option<String> {
+                unimplemented!()
+            }
+
+            fn get_uuid(&mut self) -> String {
                 "test".to_string()
             }
         }

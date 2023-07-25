@@ -24,7 +24,6 @@ use common_procedure::local::{LocalManager, ManagerConfig};
 use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
 use crate::ddl::DdlManager;
 use crate::error::Result;
-use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
 use crate::handler::mailbox_handler::MailboxHandler;
 use crate::handler::region_lease_handler::RegionLeaseHandler;
 use crate::handler::{
@@ -45,6 +44,7 @@ use crate::sequence::Sequence;
 use crate::service::store::cached_kv::{CheckLeader, LeaderCachedKvStore};
 use crate::service::store::kv::{KvBackendAdapter, KvStoreRef, ResettableKvStoreRef};
 use crate::service::store::memory::MemStore;
+use crate::telemetry::get_greptimedb_telemetry_task;
 
 // TODO(fys): try use derive_builder macro
 pub struct MetaSrvBuilder {
@@ -264,7 +264,7 @@ impl MetaSrvBuilder {
             started,
             options,
             in_memory,
-            kv_store: kv_store.clone(),
+            kv_store,
             leader_cached_kv_store,
             meta_peer_client: meta_peer_client.clone(),
             table_id_sequence,
@@ -277,8 +277,7 @@ impl MetaSrvBuilder {
             mailbox,
             ddl_manager,
             table_metadata_manager,
-            greptimedb_telemerty_task: get_greptimedb_telemetry_task(meta_peer_client, kv_store)
-                .await,
+            greptimedb_telemerty_task: get_greptimedb_telemetry_task(meta_peer_client).await,
         })
     }
 }
