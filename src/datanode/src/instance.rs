@@ -334,7 +334,8 @@ impl Instance {
         self.procedure_manager
             .start()
             .context(StartProcedureManagerSnafu)?;
-        self.greptimedb_telemerty_task
+        let _ = self
+            .greptimedb_telemerty_task
             .start(common_runtime::bg_runtime());
 
         Ok(())

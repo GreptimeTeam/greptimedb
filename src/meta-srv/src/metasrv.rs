@@ -213,11 +213,11 @@ impl MetaSrv {
                                     if let Err(e) = procedure_manager.recover().await {
                                         error!("Failed to recover procedures, error: {e}");
                                     }
-                                    task_handler.start(common_runtime::bg_runtime());
+                                    let _ = task_handler.start(common_runtime::bg_runtime());
                                 }
                                 LeaderChangeMessage::StepDown(leader) => {
                                     error!("Leader :{:?} step down", leader);
-                                    task_handler.stop().await;
+                                    let _ = task_handler.stop().await;
                                 }
                             }
                         }
