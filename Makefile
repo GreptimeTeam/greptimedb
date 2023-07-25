@@ -16,20 +16,25 @@ CARGO_REGISTRY_CACHE ?= ${HOME}/.cargo/registry
 ETCD_VERSION ?= v3.5.9
 ETCD_IMAGE ?= quay.io/coreos/etcd:${ETCD_VERSION}
 RETRY_COUNT ?= 3
-BUILD_JOBS ?= $(shell expr $$(nproc) / 2)
+NEXTEST_OPTS := --retries ${RETRY_COUNT}
+BUILD_JOBS ?= $(shell which nproc 1>/dev/null && expr $$(nproc) / 2) # If nproc is not available, we don't set the build jobs.
 ifeq ($(BUILD_JOBS), 0) # If the number of cores is less than 2, set the build jobs to 1.
   BUILD_JOBS := 1
 endif
 
-ifdef CARGO_PROFILE
+ifneq ($(strip $(BUILD_JOBS)),)
+	NEXTEST_OPTS += --build-jobs=${BUILD_JOBS}
+endif
+
+ifneq ($(strip $(CARGO_PROFILE)),)
 	CARGO_BUILD_OPTS += --profile ${CARGO_PROFILE}
 endif
 
-ifdef FEATURES
+ifneq ($(strip $(FEATURES)),)
 	CARGO_BUILD_OPTS += --features ${FEATURES}
 endif
 
-ifdef TARGET_DIR
+ifneq ($(strip $(TARGET_DIR)),)
 	CARGO_BUILD_OPTS += --target-dir ${TARGET_DIR}
 endif
 
@@ -111,7 +116,7 @@ multi-platform-buildx: ## Create buildx multi-platform builder.
 
 ##@ Test
 test: nextest ## Run unit and integration tests.
-	cargo nextest run --retries ${RETRY_COUNT} --build-jobs=${BUILD_JOBS}
+	cargo nextest run ${NEXTEST_OPTS}
 
 .PHONY: nextest ## Install nextest tools.
 nextest:
