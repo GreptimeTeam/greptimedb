@@ -12,13 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use arc_swap::ArcSwap;
 use common_telemetry::{debug, info};
 use store_api::manifest::action::{ProtocolAction, ProtocolVersion};
-use store_api::manifest::{AtomicManifestVersion, ManifestVersion, MAX_VERSION, MIN_VERSION};
+use store_api::manifest::{ManifestVersion, MAX_VERSION, MIN_VERSION};
+use tokio::sync::RwLock;
 
 use crate::error::Result;
 use crate::manifest::action::{
@@ -38,7 +37,7 @@ use crate::metadata::RegionMetadataRef;
 /// metadata.
 #[derive(Debug)]
 pub struct RegionManifestManager {
-    inner: Arc<RegionManifestManagerInner>,
+    inner: RwLock<RegionManifestManagerInner>,
 }
 
 impl RegionManifestManager {
@@ -46,7 +45,7 @@ impl RegionManifestManager {
     pub async fn new(metadata: RegionMetadataRef, options: RegionManifestOptions) -> Result<Self> {
         let inner = RegionManifestManagerInner::new(metadata, options).await?;
         Ok(Self {
-            inner: Arc::new(inner),
+            inner: RwLock::new(inner),
         })
     }
 
@@ -54,25 +53,29 @@ impl RegionManifestManager {
     pub async fn open(options: RegionManifestOptions) -> Result<Option<Self>> {
         if let Some(inner) = RegionManifestManagerInner::open(options).await? {
             Ok(Some(Self {
-                inner: Arc::new(inner),
+                inner: RwLock::new(inner),
             }))
         } else {
             Ok(None)
         }
     }
 
+    /// Stop background tasks gracefully.
     pub async fn stop(&self) -> Result<()> {
-        self.inner.stop().await
+        let mut inner = self.inner.write().await;
+        inner.stop().await
     }
 
     /// Update the manifest. Return the current manifest version number.
     pub async fn update(&self, action_list: RegionMetaActionList) -> Result<ManifestVersion> {
-        self.inner.update(action_list).await
+        let mut inner = self.inner.write().await;
+        inner.update(action_list).await
     }
 
     /// Retrieve the current [RegionManifest].
-    pub fn manifest(&self) -> Arc<RegionManifest> {
-        self.inner.manifest.load().clone()
+    pub async fn manifest(&self) -> Arc<RegionManifest> {
+        let inner = self.inner.read().await;
+        inner.manifest.clone()
     }
 }
 
@@ -80,8 +83,8 @@ impl RegionManifestManager {
 struct RegionManifestManagerInner {
     store: ManifestObjectStore,
     options: RegionManifestOptions,
-    version: AtomicManifestVersion,
-    manifest: ArcSwap<RegionManifest>,
+    version: ManifestVersion,
+    manifest: Arc<RegionManifest>,
 }
 
 impl RegionManifestManagerInner {
@@ -115,8 +118,8 @@ impl RegionManifestManagerInner {
         Ok(Self {
             store,
             options,
-            version: AtomicManifestVersion::new(version),
-            manifest: ArcSwap::new(Arc::new(manifest)),
+            version,
+            manifest: Arc::new(manifest),
         })
     }
 
@@ -193,23 +196,23 @@ impl RegionManifestManagerInner {
         Ok(Some(Self {
             store,
             options,
-            version: AtomicManifestVersion::new(version),
-            manifest: ArcSwap::new(Arc::new(manifest)),
+            version,
+            manifest: Arc::new(manifest),
         }))
     }
 
-    async fn stop(&self) -> Result<()> {
+    async fn stop(&mut self) -> Result<()> {
         // todo: stop gc task
         Ok(())
     }
 
-    async fn update(&self, action_list: RegionMetaActionList) -> Result<ManifestVersion> {
+    async fn update(&mut self, action_list: RegionMetaActionList) -> Result<ManifestVersion> {
         let version = self.inc_version();
 
         self.store.save(version, &action_list.encode()?).await?;
 
         let mut manifest_builder =
-            RegionManifestBuilder::with_checkpoint(Some(self.manifest.load().as_ref().clone()));
+            RegionManifestBuilder::with_checkpoint(Some(self.manifest.as_ref().clone()));
         for action in action_list.actions {
             match action {
                 RegionMetaAction::Change(action) => {
@@ -219,20 +222,26 @@ impl RegionManifestManagerInner {
                     manifest_builder.apply_edit(version, action);
                 }
                 RegionMetaAction::Remove(_) | RegionMetaAction::Protocol(_) => {
-                    debug!("Unhandled action: {:?}", action);
+                    debug!(
+                        "Unhandled action for region {}, action: {:?}",
+                        self.manifest.metadata.region_id, action
+                    );
                 }
             }
         }
         let new_manifest = manifest_builder.try_build()?;
-        self.manifest.store(Arc::new(new_manifest));
+        self.manifest = Arc::new(new_manifest);
 
         Ok(version)
     }
 }
 
 impl RegionManifestManagerInner {
-    fn inc_version(&self) -> ManifestVersion {
-        self.version.fetch_add(1, Ordering::Relaxed)
+    /// Increases current version and returns previous version.
+    fn inc_version(&mut self) -> ManifestVersion {
+        let version = self.version;
+        self.version += 1;
+        version
     }
 
     // pub (crate) fn checkpointer(&self) -> Checkpointer {
@@ -364,7 +373,7 @@ mod test {
             .unwrap()
             .unwrap();
 
-        let manifest = manager.manifest();
+        let manifest = manager.manifest().await;
         assert_eq!(manifest.metadata, metadata);
     }
 
@@ -395,7 +404,7 @@ mod test {
             .unwrap()
             .unwrap();
 
-        let manifest = manager.manifest();
+        let manifest = manager.manifest().await;
         assert_eq!(manifest.metadata, metadata);
     }
 
@@ -426,7 +435,7 @@ mod test {
         let prev_version = manager.update(action_list).await.unwrap();
         assert_eq!(prev_version, 0);
 
-        let manifest = manager.manifest();
+        let manifest = manager.manifest().await;
         assert_eq!(manifest.metadata, new_metadata);
 
         // Reopen the manager.
@@ -436,7 +445,7 @@ mod test {
             .await
             .unwrap()
             .unwrap();
-        let manifest = manager.manifest();
+        let manifest = manager.manifest().await;
         assert_eq!(manifest.metadata, new_metadata);
     }
 }
