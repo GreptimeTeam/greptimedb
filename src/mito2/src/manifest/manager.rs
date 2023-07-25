@@ -17,17 +17,17 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use common_telemetry::{debug, info};
-use snafu::OptionExt;
 use store_api::manifest::action::{ProtocolAction, ProtocolVersion};
 use store_api::manifest::{AtomicManifestVersion, ManifestVersion, MAX_VERSION, MIN_VERSION};
 
-use crate::error::{InitialMetadataSnafu, Result};
+use crate::error::Result;
 use crate::manifest::action::{
     RegionChange, RegionCheckpoint, RegionManifest, RegionManifestBuilder, RegionMetaAction,
     RegionMetaActionIter, RegionMetaActionList,
 };
 use crate::manifest::options::RegionManifestOptions;
 use crate::manifest::storage::ManifestObjectStore;
+use crate::metadata::RegionMetadataRef;
 
 // rewrite note:
 // trait Checkpoint -> struct RegionCheckpoint
@@ -36,18 +36,29 @@ use crate::manifest::storage::ManifestObjectStore;
 
 /// Manage region's manifest. Provide APIs to access (create/modify/recover) region's persisted
 /// metadata.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct RegionManifestManager {
     inner: Arc<RegionManifestManagerInner>,
 }
 
 impl RegionManifestManager {
-    /// Construct and recover a region's manifest from storage.
-    pub async fn new(options: RegionManifestOptions) -> Result<Self> {
-        let inner = RegionManifestManagerInner::new(options).await?;
+    /// Construct a region's manifest and persist it.
+    pub async fn new(metadata: RegionMetadataRef, options: RegionManifestOptions) -> Result<Self> {
+        let inner = RegionManifestManagerInner::new(metadata, options).await?;
         Ok(Self {
             inner: Arc::new(inner),
         })
+    }
+
+    /// Open an existing manifest.
+    pub async fn open(options: RegionManifestOptions) -> Result<Option<Self>> {
+        if let Some(inner) = RegionManifestManagerInner::open(options).await? {
+            Ok(Some(Self {
+                inner: Arc::new(inner),
+            }))
+        } else {
+            Ok(None)
+        }
     }
 
     pub async fn stop(&self) -> Result<()> {
@@ -74,7 +85,45 @@ struct RegionManifestManagerInner {
 }
 
 impl RegionManifestManagerInner {
-    pub async fn new(mut options: RegionManifestOptions) -> Result<Self> {
+    /// Creates a new manifest.
+    async fn new(metadata: RegionMetadataRef, options: RegionManifestOptions) -> Result<Self> {
+        // construct storage
+        let store = ManifestObjectStore::new(
+            &options.manifest_dir,
+            options.object_store.clone(),
+            options.compress_type,
+        );
+
+        info!(
+            "Creating region manifest in {} with metadata {:?}",
+            options.manifest_dir, metadata
+        );
+
+        let mut manifest_builder = RegionManifestBuilder::default();
+        // set the initial metadata.
+        manifest_builder.apply_change(RegionChange { metadata });
+
+        let manifest = manifest_builder.try_build()?;
+        debug!(
+            "Build region manifest in {}, manifest: {:?}",
+            options.manifest_dir, manifest
+        );
+        let version = manifest.version.manifest_version;
+
+        // todo: start gc task
+
+        Ok(Self {
+            store,
+            options,
+            version: AtomicManifestVersion::new(version),
+            manifest: ArcSwap::new(Arc::new(manifest)),
+        })
+    }
+
+    /// Open an existing manifest.
+    ///
+    /// Returns `Ok(None)` if no such manifest.
+    async fn open(options: RegionManifestOptions) -> Result<Option<Self>> {
         // construct storage
         let store = ManifestObjectStore::new(
             &options.manifest_dir,
@@ -91,13 +140,16 @@ impl RegionManifestManagerInner {
             .transpose()?;
         let mut manifest_builder = if let Some(checkpoint) = checkpoint {
             info!(
-                "Recover region manifest from checkpoint version {}",
-                checkpoint.last_version
+                "Recover region manifest {} from checkpoint version {}",
+                options.manifest_dir, checkpoint.last_version
             );
             version = version.max(checkpoint.last_version + 1);
             RegionManifestBuilder::with_checkpoint(checkpoint.checkpoint)
         } else {
-            info!("Checkpoint not found, build manifest from scratch");
+            info!(
+                "Checkpoint not found in {}, build manifest from scratch",
+                options.manifest_dir
+            );
             RegionManifestBuilder::default()
         };
 
@@ -114,7 +166,10 @@ impl RegionManifestManagerInner {
                         manifest_builder.apply_edit(manifest_version, action);
                     }
                     RegionMetaAction::Remove(_) | RegionMetaAction::Protocol(_) => {
-                        debug!("Unhandled action: {:?}", action);
+                        debug!(
+                            "Unhandled action in {}, action: {:?}",
+                            options.manifest_dir, action
+                        );
                     }
                 }
             }
@@ -122,34 +177,33 @@ impl RegionManifestManagerInner {
 
         // set the initial metadata if necessary
         if !manifest_builder.contains_metadata() {
-            let metadata = options
-                .initial_metadata
-                .take()
-                .context(InitialMetadataSnafu)?;
-            info!("Creating region manifest with metadata {:?}", metadata);
-            manifest_builder.apply_change(RegionChange { metadata });
+            debug!("No region manifest in {}", options.manifest_dir);
+            return Ok(None);
         }
 
         let manifest = manifest_builder.try_build()?;
-        debug!("Recovered region manifest: {:?}", manifest);
+        debug!(
+            "Recovered region manifest from {}, manifest: {:?}",
+            options.manifest_dir, manifest
+        );
         let version = manifest.version.manifest_version;
 
         // todo: start gc task
 
-        Ok(Self {
+        Ok(Some(Self {
             store,
             options,
             version: AtomicManifestVersion::new(version),
             manifest: ArcSwap::new(Arc::new(manifest)),
-        })
+        }))
     }
 
-    pub async fn stop(&self) -> Result<()> {
+    async fn stop(&self) -> Result<()> {
         // todo: stop gc task
         Ok(())
     }
 
-    pub async fn update(&self, action_list: RegionMetaActionList) -> Result<ManifestVersion> {
+    async fn update(&self, action_list: RegionMetaActionList) -> Result<ManifestVersion> {
         let version = self.inc_version();
 
         self.store.save(version, &action_list.encode()?).await?;
@@ -302,11 +356,43 @@ mod test {
 
     #[tokio::test]
     async fn create_manifest_manager() {
-        let metadata = basic_region_metadata();
+        let metadata = Arc::new(basic_region_metadata());
         let env = TestEnv::new("");
         let manager = env
             .create_manifest_manager(CompressionType::Uncompressed, 10, Some(metadata.clone()))
             .await
+            .unwrap()
+            .unwrap();
+
+        let manifest = manager.manifest();
+        assert_eq!(manifest.metadata, metadata);
+    }
+
+    #[tokio::test]
+    async fn open_manifest_manager() {
+        let env = TestEnv::new("");
+        // Try to opens an empty manifest.
+        assert!(env
+            .create_manifest_manager(CompressionType::Uncompressed, 10, None)
+            .await
+            .unwrap()
+            .is_none());
+
+        // Creates a manifest.
+        let metadata = Arc::new(basic_region_metadata());
+        let manager = env
+            .create_manifest_manager(CompressionType::Uncompressed, 10, Some(metadata.clone()))
+            .await
+            .unwrap()
+            .unwrap();
+        // Stops it.
+        manager.stop().await.unwrap();
+
+        // Open it.
+        let manager = env
+            .create_manifest_manager(CompressionType::Uncompressed, 10, None)
+            .await
+            .unwrap()
             .unwrap();
 
         let manifest = manager.manifest();
@@ -315,20 +401,21 @@ mod test {
 
     #[tokio::test]
     async fn region_change_add_column() {
-        let metadata = basic_region_metadata();
+        let metadata = Arc::new(basic_region_metadata());
         let env = TestEnv::new("");
         let manager = env
             .create_manifest_manager(CompressionType::Uncompressed, 10, Some(metadata.clone()))
             .await
+            .unwrap()
             .unwrap();
 
-        let mut new_metadata_builder = RegionMetadataBuilder::from_existing(metadata, 1);
+        let mut new_metadata_builder = RegionMetadataBuilder::from_existing((*metadata).clone(), 1);
         new_metadata_builder.push_column_metadata(ColumnMetadata {
             column_schema: ColumnSchema::new("val2", ConcreteDataType::float64_datatype(), false),
             semantic_type: SemanticType::Field,
             column_id: 252,
         });
-        let new_metadata = new_metadata_builder.build().unwrap();
+        let new_metadata = Arc::new(new_metadata_builder.build().unwrap());
 
         let mut action_list =
             RegionMetaActionList::with_action(RegionMetaAction::Change(RegionChange {
@@ -339,6 +426,16 @@ mod test {
         let prev_version = manager.update(action_list).await.unwrap();
         assert_eq!(prev_version, 0);
 
+        let manifest = manager.manifest();
+        assert_eq!(manifest.metadata, new_metadata);
+
+        // Reopen the manager.
+        manager.stop().await.unwrap();
+        let manager = env
+            .create_manifest_manager(CompressionType::Uncompressed, 10, None)
+            .await
+            .unwrap()
+            .unwrap();
         let manifest = manager.manifest();
         assert_eq!(manifest.metadata, new_metadata);
     }

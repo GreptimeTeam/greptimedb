@@ -98,6 +98,7 @@ pub enum Error {
         location: Location,
     },
 
+    // TODO(yingwen): Remove this.
     #[snafu(display(
         "Expect initial region metadata on creating/opening a new region, location: {}",
         location

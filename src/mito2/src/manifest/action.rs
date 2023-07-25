@@ -24,7 +24,7 @@ use store_api::manifest::ManifestVersion;
 use store_api::storage::{RegionId, SequenceNumber};
 
 use crate::error::{RegionMetadataNotFoundSnafu, Result, SerdeJsonSnafu, Utf8Snafu};
-use crate::metadata::RegionMetadata;
+use crate::metadata::RegionMetadataRef;
 
 /// Actions that can be applied to region manifest.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -42,7 +42,7 @@ pub enum RegionMetaAction {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct RegionChange {
     /// The metadata after changed.
-    pub metadata: RegionMetadata,
+    pub metadata: RegionMetadataRef,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -62,13 +62,13 @@ pub struct RegionRemove {
 /// The region manifest data
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct RegionManifest {
-    pub metadata: RegionMetadata,
+    pub metadata: RegionMetadataRef,
     pub version: RegionVersion,
 }
 
 #[derive(Debug, Default)]
 pub struct RegionManifestBuilder {
-    metadata: Option<RegionMetadata>,
+    metadata: Option<RegionMetadataRef>,
     version: Option<RegionVersion>,
 }
 
@@ -93,10 +93,10 @@ impl RegionManifestBuilder {
         if let Some(version) = &mut self.version {
             version.manifest_version = manifest_version;
             for file in edit.files_to_add {
-                let _ = version.files.insert(file.file_id, file);
+                version.files.insert(file.file_id, file);
             }
             for file in edit.files_to_remove {
-                let _ = version.files.remove(&file.file_id);
+                version.files.remove(&file.file_id);
             }
         } else {
             self.version = Some(RegionVersion {
