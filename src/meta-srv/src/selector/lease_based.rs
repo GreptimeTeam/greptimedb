@@ -36,8 +36,6 @@ impl Selector for LeaseBasedSelector {
                 .into_iter()
                 .collect();
 
-        // TODO(jiachun): At the moment we are just arrange them randomly, and it is better
-        // to use load-based strategies in the future.
         lease_kvs.shuffle(&mut thread_rng());
 
         let peers = lease_kvs
