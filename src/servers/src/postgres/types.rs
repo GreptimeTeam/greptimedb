@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::ops::Deref;
 
 use chrono::{NaiveDate, NaiveDateTime};
@@ -256,6 +257,7 @@ pub(super) fn parameters_to_scalar_values(
         ));
     }
 
+    // TODO(sunng87): when client parameters are not provided, use inferenced types
     for (idx, client_type) in client_param_types.iter().enumerate() {
         let Some(Some(server_type)) = param_types.get(&format!("${}", idx + 1)) else { continue };
         let value = match client_type {
@@ -493,6 +495,22 @@ pub(super) fn parameters_to_scalar_values(
     }
 
     Ok(results)
+}
+
+pub(super) fn param_types_to_pg_types(
+    param_types: &HashMap<String, Option<ConcreteDataType>>,
+) -> Result<Vec<Type>> {
+    let param_count = param_types.len();
+    let mut types = Vec::with_capacity(param_count);
+    for i in 0..param_count {
+        if let Some(Some(param_type)) = param_types.get(&format!("${}", i + 1)) {
+            let pg_type = type_gt_to_pg(param_type)?;
+            types.push(pg_type);
+        } else {
+            types.push(Type::UNKNOWN);
+        }
+    }
+    Ok(types)
 }
 
 #[cfg(test)]
