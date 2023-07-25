@@ -23,6 +23,7 @@ pub mod key;
 pub mod kv_backend;
 pub mod metrics;
 pub mod peer;
+pub mod range_stream;
 pub mod rpc;
 pub mod table_name;
 pub mod util;
