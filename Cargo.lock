@@ -3282,6 +3282,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "flow"
+version = "0.1.0"
+dependencies = [
+ "datafusion-expr",
+ "datafusion-substrait",
+ "datatypes",
+ "differential-dataflow",
+ "serde",
+ "timely",
+]
+
+[[package]]
 name = "fnv"
 version = "1.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9584,18 +9596,6 @@ name = "str_stack"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9091b6114800a5f2141aee1d1b9d6ca3592ac062dc5decb3764ec5895a47b4eb"
-
-[[package]]
-name = "stream"
-version = "0.1.0"
-dependencies = [
- "datafusion-expr",
- "datafusion-substrait",
- "datatypes",
- "differential-dataflow",
- "serde",
- "timely",
-]
 
 [[package]]
 name = "streaming-stats"

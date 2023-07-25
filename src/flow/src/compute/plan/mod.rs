@@ -84,7 +84,7 @@ impl AvailableCollections {
 
 /// Rendering Plan
 ///
-/// TODO: see if we ever need to support recursive plans
+/// TODO(discord9): see if we ever need to support recursive plans
 pub enum Plan<T = repr::Timestamp> {
     /// A collection containing a pre-determined collection.
     Constant {
@@ -187,5 +187,12 @@ pub enum Plan<T = repr::Timestamp> {
     },
 }
 
-/// TODO: impl GetPlan
-pub enum GetPlan {}
+/// TODO(discord9): impl GetPlan
+pub enum GetPlan {
+    /// Simply pass input arrangements on to the next stage.
+    PassArrangements,
+    /// Using the supplied key, optionally seek the row, and apply the MFP.
+    Arrangement(Vec<ScalarExpr>, Option<Row>, MapFilterProject),
+    /// Scan the input collection (unarranged) and apply the MFP.
+    Collection(MapFilterProject),
+}

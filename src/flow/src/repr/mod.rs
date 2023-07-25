@@ -9,11 +9,11 @@ pub type Diff = i64;
 
 /// A row is a vector of values.
 ///
-#[derive(Clone)]
+/// TODO(discord9): use a more efficient representation
+///i.e. more compact like raw u8 of \[tag0, value0, tag1, value1, ...\]
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Row {
-    /// TODO: use a more efficient representation
-    ///
-    /// i.e. more compact like raw u8 of \[tag0, value0, tag1, value1, ...\]
     inner: Vec<Value>,
 }
 

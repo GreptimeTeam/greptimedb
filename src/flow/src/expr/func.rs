@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-// TODO: more function & eval
+// TODO(discord9): more function & eval
 use crate::repr::Row;
 /// Stateless functions
 #[derive(Debug, Clone)]

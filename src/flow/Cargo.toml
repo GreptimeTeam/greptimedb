@@ -1,5 +1,5 @@
 [package]
-name = "stream"
+name = "flow"
 version = "0.1.0"
 edition = "2021"
 
@@ -12,7 +12,7 @@ edition = "2021"
 # differential-dataflow = "0.12.0"
 timely = "0.12.0"
 differential-dataflow = "0.12.0"
-# TODO: fork later for fixed version git dependency
+# TODO(discord9): fork later for fixed version git dependency
 # timely = { git = "https://github.com/TimelyDataflow/timely-dataflow", default-features = false }
 # differential-dataflow = { git = "https://github.com/TimelyDataflow/differential-dataflow", rev ="99fa67db"}
 datafusion-expr.workspace = true

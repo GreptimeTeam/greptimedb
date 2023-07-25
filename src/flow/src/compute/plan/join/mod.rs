@@ -4,7 +4,7 @@ mod linear_join;
 pub use delta_join::DeltaJoinPlan;
 pub use linear_join::LinearJoinPlan;
 
-/// TODO(discord9): impl Join
+/// TODO(discord9)(discord9): impl Join
 /// A complete enumeration of possible join plans to render.
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub enum JoinPlan {

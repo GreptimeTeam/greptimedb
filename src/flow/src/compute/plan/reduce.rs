@@ -11,7 +11,7 @@ pub struct KeyValPlan {
     pub val_plan: MapFilterProject,
 }
 
-/// TODO(discord9): Reduce Plan
+/// TODO(discord9)(discord9): Reduce Plan
 /// A `ReducePlan` provides a concise description for how we will
 /// execute a given reduce expression.
 ///
@@ -64,7 +64,7 @@ pub struct AccumulablePlan {
     pub distinct_aggrs: Vec<(usize, usize, AggregateExpr)>,
 }
 
-// TODO: others
+// TODO(discord9): others
 
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub enum HierarchicalPlan {}

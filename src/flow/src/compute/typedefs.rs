@@ -4,7 +4,7 @@ use differential_dataflow::trace::implementations::ord::{OrdKeySpine, OrdValSpin
 use crate::repr::{Diff, Row, Timestamp};
 use crate::storage::errors::DataflowError;
 
-// TODO: consider use ColValSpine for columnation storage
+// TODO(discord9): consider use ColValSpine for columnation storage
 
 /// T: Time, R: Diff, O: Offset
 pub type RowSpine<K, V, T, R, O = usize> = OrdValSpine<K, V, T, R, O>;

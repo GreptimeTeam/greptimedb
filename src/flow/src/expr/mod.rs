@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::storage::errors::DataflowError;
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ScalarExpr {
     /// A column of the input row
     Column(usize),

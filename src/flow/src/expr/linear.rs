@@ -42,3 +42,42 @@ pub struct MapFilterProject {
     /// columns in the output.
     pub input_arity: usize,
 }
+
+impl MapFilterProject {
+    pub fn optimize(&mut self) {
+        // TODO(discord9): optimize later
+    }
+
+    /// True if the operator describes the identity transformation.
+    pub fn is_identity(&self) -> bool {
+        self.expressions.is_empty()
+            && self.predicates.is_empty()
+            && self.projection.len() == self.input_arity
+            && self.projection.iter().enumerate().all(|(i, p)| i == *p)
+    }
+}
+
+/// A wrapper type which indicates it is safe to simply evaluate all expressions.
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+pub struct SafeMfpPlan {
+    pub(crate) mfp: MapFilterProject,
+}
+
+/// Predicates partitioned into temporal and non-temporal.
+///
+/// Temporal predicates require some recognition to determine their
+/// structure, and it is best to do that once and re-use the results.
+///
+/// There are restrictions on the temporal predicates we currently support.
+/// They must directly constrain `MzNow` from below or above,
+/// by expressions that do not themselves contain `MzNow`.
+/// Conjunctions of such constraints are also ok.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MfpPlan {
+    /// Normal predicates to evaluate on `&[Datum]` and expect `Ok(Datum::True)`.
+    pub(crate) mfp: SafeMfpPlan,
+    /// Expressions that when evaluated lower-bound `MzNow`.
+    pub(crate) lower_bounds: Vec<ScalarExpr>,
+    /// Expressions that when evaluated upper-bound `MzNow`.
+    pub(crate) upper_bounds: Vec<ScalarExpr>,
+}
