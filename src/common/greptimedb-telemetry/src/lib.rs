@@ -104,7 +104,7 @@ pub trait Collector {
 
     fn get_uuid_cache(&self) -> Option<String>;
 
-    async fn get_nodes(&self) -> i32;
+    async fn get_nodes(&self) -> Option<i32>;
 
     fn get_uuid(&mut self) -> Option<String> {
         match self.get_uuid_cache() {
@@ -176,7 +176,7 @@ impl GreptimeDBTelemetry {
                     git_commit: self.statistics.get_git_hash(),
                     arch: self.statistics.get_arch(),
                     mode: self.statistics.get_mode(),
-                    nodes: Some(self.statistics.get_nodes().await),
+                    nodes: self.statistics.get_nodes().await,
                     uuid,
                 };
 
@@ -241,8 +241,8 @@ mod tests {
                 Mode::Standalone
             }
 
-            async fn get_nodes(&self) -> i32 {
-                1
+            async fn get_nodes(&self) -> Option<i32> {
+                Some(1)
             }
 
             fn get_retry(&self) -> i32 {

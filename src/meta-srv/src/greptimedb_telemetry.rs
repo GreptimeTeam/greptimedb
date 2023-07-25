@@ -24,7 +24,6 @@ pub mod telemetry {
 
     use crate::cluster::MetaPeerClientRef;
     struct DistributedGreptimeDBTelemetryCollector {
-        #[cfg(feature = "greptimedb-telemetry")]
         meta_peer_client: MetaPeerClientRef,
         uuid: Option<String>,
         retry: i32,
@@ -36,18 +35,8 @@ pub mod telemetry {
             VersionReporterMode::Distributed
         }
 
-        #[cfg(feature = "greptimedb-telemetry")]
-        async fn get_nodes(&self) -> i32 {
-            self.meta_peer_client
-                .get_node_cnt()
-                .await
-                .ok()
-                .unwrap_or(-1)
-        }
-
-        #[cfg(not(feature = "greptimedb-telemetry"))]
-        async fn get_nodes(&self) -> i32 {
-            -1
+        async fn get_nodes(&self) -> Option<i32> {
+            self.meta_peer_client.get_node_cnt().await.ok()
         }
 
         fn get_retry(&self) -> i32 {

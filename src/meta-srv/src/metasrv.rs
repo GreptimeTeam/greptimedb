@@ -197,6 +197,7 @@ impl MetaSrv {
             let in_memory = self.in_memory.clone();
             let leader_cached_kv_store = self.leader_cached_kv_store.clone();
             let mut rx = election.subscribe_leader_change();
+            let task_handler = self.greptimedb_telemerty_task.clone();
             let _handle = common_runtime::spawn_bg(async move {
                 loop {
                     match rx.recv().await {
@@ -212,9 +213,11 @@ impl MetaSrv {
                                     if let Err(e) = procedure_manager.recover().await {
                                         error!("Failed to recover procedures, error: {e}");
                                     }
+                                    let _ = task_handler.start(common_runtime::bg_runtime());
                                 }
                                 LeaderChangeMessage::StepDown(leader) => {
                                     error!("Leader :{:?} step down", leader);
+                                    let _ = task_handler.stop().await;
                                 }
                             }
                         }
@@ -247,13 +250,6 @@ impl MetaSrv {
                 .await
                 .context(RecoverProcedureSnafu)?;
         }
-
-        // FIXME (paomian)
-        // should be started after election and only run on leader node
-        // when leader switch, should be closed and re-started on new leader node
-        let _ = self
-            .greptimedb_telemerty_task
-            .start(common_runtime::bg_runtime());
 
         info!("MetaSrv started");
         Ok(())

@@ -32,9 +32,11 @@ pub mod telemetry {
         fn get_mode(&self) -> VersionReporterMode {
             VersionReporterMode::Standalone
         }
-        async fn get_nodes(&self) -> i32 {
-            1
+
+        async fn get_nodes(&self) -> Option<i32> {
+            Some(1)
         }
+
         fn get_retry(&self) -> i32 {
             self.retry
         }
