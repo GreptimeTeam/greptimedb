@@ -6,7 +6,7 @@ license.workspace = true
 
 [features]
 tokio-console = ["console-subscriber", "tokio/tracing"]
-deadlock_detection = ["parking_lot"]
+deadlock_detection = ["parking_lot/deadlock_detection"]
 
 [dependencies]
 backtrace = "0.3"
@@ -21,9 +21,7 @@ opentelemetry = { version = "0.17", default-features = false, features = [
     "rt-tokio",
 ] }
 opentelemetry-jaeger = { version = "0.16", features = ["rt-tokio"] }
-parking_lot = { version = "0.12", features = [
-    "deadlock_detection",
-], optional = true }
+parking_lot = { version = "0.12" }
 rand.workspace = true
 rs-snowflake = "0.6"
 serde.workspace = true
