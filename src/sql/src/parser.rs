@@ -107,20 +107,6 @@ impl<'a> ParserContext<'a> {
 
                     Keyword::DROP => self.parse_drop(),
 
-                    Keyword::USE => {
-                        let _ = self.parser.next_token();
-
-                        let database_name =
-                            self.parser
-                                .parse_identifier()
-                                .context(error::UnexpectedSnafu {
-                                    sql: self.sql,
-                                    expected: "a database name",
-                                    actual: self.peek_token_as_string(),
-                                })?;
-                        Ok(Statement::Use(database_name.value))
-                    }
-
                     Keyword::COPY => self.parse_copy(),
 
                     Keyword::TRUNCATE => self.parse_truncate(),

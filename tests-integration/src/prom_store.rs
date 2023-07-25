@@ -53,7 +53,7 @@ mod tests {
         };
 
         let db = "prometheus";
-        let ctx = Arc::new(QueryContext::with(DEFAULT_CATALOG_NAME, db));
+        let ctx = QueryContext::with(DEFAULT_CATALOG_NAME, db);
 
         assert!(SqlQueryHandler::do_query(
             instance.as_ref(),

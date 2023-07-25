@@ -333,15 +333,15 @@ mod test {
     #[test]
     fn test_check() {
         let query = "select 1";
-        let result = check(query, Arc::new(QueryContext::new()));
+        let result = check(query, QueryContext::arc());
         assert!(result.is_none());
 
         let query = "select versiona";
-        let output = check(query, Arc::new(QueryContext::new()));
+        let output = check(query, QueryContext::arc());
         assert!(output.is_none());
 
         fn test(query: &str, expected: &str) {
-            let output = check(query, Arc::new(QueryContext::new()));
+            let output = check(query, QueryContext::arc());
             match output.unwrap() {
                 Output::RecordBatches(r) => {
                     assert_eq!(&r.pretty_print().unwrap(), expected)
@@ -428,7 +428,7 @@ mod test {
 
     #[test]
     fn test_set_time_zone() {
-        let query_context = Arc::new(QueryContext::new());
+        let query_context = QueryContext::arc();
         let output = check("set time_zone = 'UTC'", query_context.clone());
         match output.unwrap() {
             Output::AffectedRows(rows) => {

@@ -168,12 +168,11 @@ pub(crate) fn create_query_context(header: Option<&RequestHeader>) -> QueryConte
         })
         .unwrap_or((DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME));
 
-    QueryContextBuilder::new()
-        .catalog(catalog.to_string())
-        .schema(schema.to_string())
+    QueryContextBuilder::default()
+        .current_catalog(catalog.to_string())
+        .current_schema(schema.to_string())
         .try_trace_id(header.and_then(|h: &RequestHeader| h.trace_id))
         .build()
-        .to_arc()
 }
 
 /// Histogram timer for handling gRPC request.

@@ -356,7 +356,7 @@ mod tests {
             }
         }
 
-        let query_ctx = Arc::new(QueryContext::new());
+        let query_ctx = QueryContext::arc();
 
         let standalone = tests::create_standalone_instance("test_db_hook").await;
         let mut instance = standalone.instance;

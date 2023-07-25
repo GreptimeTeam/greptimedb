@@ -47,12 +47,11 @@ impl Session {
 
     #[inline]
     pub fn new_query_context(&self) -> QueryContextRef {
-        QueryContextBuilder::new()
-            .catalog(self.catalog.load().to_string())
-            .schema(self.schema.load().to_string())
+        QueryContextBuilder::default()
+            .current_catalog(self.catalog.load().to_string())
+            .current_schema(self.schema.load().to_string())
             .sql_dialect(self.conn_info.channel.dialect())
             .build()
-            .to_arc()
     }
 
     #[inline]

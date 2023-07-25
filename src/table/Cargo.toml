@@ -24,7 +24,7 @@ datafusion-common.workspace = true
 datafusion-expr.workspace = true
 datafusion-physical-expr.workspace = true
 datatypes = { path = "../datatypes" }
-derive_builder = "0.11"
+derive_builder.workspace = true
 futures.workspace = true
 humantime = "2.1"
 humantime-serde = "1.1"

@@ -29,8 +29,7 @@ SHOW DATABASES WHERE Schemas='test_public_schema';
 
 USE test_public_schema;
 
-++
-++
+Affected Rows: 0
 
 CREATE TABLE hello(i BIGINT TIME INDEX);
 
@@ -125,6 +124,5 @@ Error: 3000(PlanQuery), Error during planning: Table not found: greptime.test_pu
 
 USE public;
 
-++
-++
+Affected Rows: 0
 

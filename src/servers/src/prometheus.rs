@@ -446,7 +446,7 @@ pub async fn instant_query(
 
     let query_ctx = QueryContext::with(catalog, schema);
 
-    let result = handler.do_query(&prom_query, Arc::new(query_ctx)).await;
+    let result = handler.do_query(&prom_query, query_ctx).await;
     let (metric_name, result_type) = match retrieve_metric_name_and_result_type(&prom_query.query) {
         Ok((metric_name, result_type)) => (metric_name.unwrap_or_default(), result_type),
         Err(err) => {
@@ -485,7 +485,7 @@ pub async fn range_query(
 
     let query_ctx = QueryContext::with(catalog, schema);
 
-    let result = handler.do_query(&prom_query, Arc::new(query_ctx)).await;
+    let result = handler.do_query(&prom_query, query_ctx).await;
     let metric_name = match retrieve_metric_name_and_result_type(&prom_query.query) {
         Err(err) => {
             return PrometheusJsonResponse::error(err.status_code().to_string(), err.to_string())
@@ -565,7 +565,7 @@ pub async fn labels_query(
 
     let db = &params.db.unwrap_or(DEFAULT_SCHEMA_NAME.to_string());
     let (catalog, schema) = crate::parse_catalog_and_schema_from_client_database_name(db);
-    let query_ctx = Arc::new(QueryContext::with(catalog, schema));
+    let query_ctx = QueryContext::with(catalog, schema);
 
     let mut labels = HashSet::new();
     let _ = labels.insert(METRIC_NAME.to_string());
@@ -792,7 +792,7 @@ pub async fn label_values_query(
     let end = params.end.unwrap_or_else(current_time_rfc3339);
     let db = &params.db.unwrap_or(DEFAULT_SCHEMA_NAME.to_string());
     let (catalog, schema) = crate::parse_catalog_and_schema_from_client_database_name(db);
-    let query_ctx = Arc::new(QueryContext::with(catalog, schema));
+    let query_ctx = QueryContext::with(catalog, schema);
 
     let mut label_values = HashSet::new();
 
@@ -914,7 +914,7 @@ pub async fn series_query(
 
     let db = &params.db.unwrap_or(DEFAULT_SCHEMA_NAME.to_string());
     let (catalog, schema) = super::parse_catalog_and_schema_from_client_database_name(db);
-    let query_ctx = Arc::new(QueryContext::with(catalog, schema));
+    let query_ctx = QueryContext::with(catalog, schema);
 
     let mut series = Vec::new();
     for query in queries {

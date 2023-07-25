@@ -75,7 +75,7 @@ mod tests {
         let output = instance
             .do_query(
                 "select * from my_metric_1 order by greptime_timestamp",
-                Arc::new(QueryContext::new()),
+                QueryContext::arc(),
             )
             .await
             .remove(0)

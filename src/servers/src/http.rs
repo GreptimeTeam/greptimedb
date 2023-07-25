@@ -90,7 +90,7 @@ pub(crate) async fn query_context_from_db(
         let (catalog, schema) = super::parse_catalog_and_schema_from_client_database_name(db);
 
         match query_handler.is_valid_schema(catalog, schema).await {
-            Ok(true) => Ok(Arc::new(QueryContext::with(catalog, schema))),
+            Ok(true) => Ok(QueryContext::with(catalog, schema)),
             Ok(false) => Err(JsonResponse::with_error(
                 format!("Database not found: {db}"),
                 StatusCode::DatabaseNotFound,

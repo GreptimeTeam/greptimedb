@@ -21,7 +21,7 @@ common-base = { path = "../base" }
 common-error = { path = "../error" }
 common-runtime = { path = "../runtime" }
 datafusion.workspace = true
-derive_builder = "0.12"
+derive_builder.workspace = true
 futures.workspace = true
 object-store = { path = "../../object-store" }
 orc-rust = "0.2"

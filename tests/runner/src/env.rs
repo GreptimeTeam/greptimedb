@@ -331,10 +331,13 @@ impl Database for GreptimeDB {
                 .expect("Illegal `USE` statement: expecting a database.")
                 .trim_end_matches(';');
             client.set_schema(database);
+            Box::new(ResultDisplayer {
+                result: Ok(Output::AffectedRows(0)),
+            }) as _
+        } else {
+            let result = client.sql(&query).await;
+            Box::new(ResultDisplayer { result }) as _
         }
-
-        let result = client.sql(&query).await;
-        Box::new(ResultDisplayer { result }) as _
     }
 }
 
