@@ -19,7 +19,6 @@ pub mod datafusion;
 pub mod dist_plan;
 pub mod error;
 pub mod executor;
-pub mod extension_serializer;
 pub mod logical_optimizer;
 mod metrics;
 mod optimizer;

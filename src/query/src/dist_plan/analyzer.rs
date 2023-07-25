@@ -19,7 +19,8 @@ use datafusion_common::config::ConfigOptions;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeVisitor, VisitRecursion};
 use datafusion_expr::{Extension, LogicalPlan};
 use datafusion_optimizer::analyzer::AnalyzerRule;
-use substrait::{DFLogicalSubstraitConvertor,SubstraitPlan};
+use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
+use table::metadata::TableType;
 use table::table::adapter::DfTableProviderAdapter;
 
 use crate::dist_plan::commutativity::{
@@ -176,6 +177,7 @@ impl TreeNodeVisitor for CommutativeVisitor {
         // todo: check if it works for join
         Ok(match plan {
             LogicalPlan::TableScan(table_scan) => {
+                // TODO(ruihang): spawn a sub visitor to retrieve partition columns
                 if let Some(source) = table_scan
                     .source
                     .as_any()
@@ -186,14 +188,16 @@ impl TreeNodeVisitor for CommutativeVisitor {
                         .as_any()
                         .downcast_ref::<DfTableProviderAdapter>()
                     {
-                        let info = provider.table().table_info();
-                        let partition_key_indices = info.meta.partition_key_indices.clone();
-                        let schema = info.meta.schema.clone();
-                        let partition_cols = partition_key_indices
-                            .into_iter()
-                            .map(|index| schema.column_name_by_index(index).to_string())
-                            .collect::<Vec<String>>();
-                        self.current_partition_cols = Some(partition_cols);
+                        if provider.table().table_type() == TableType::Base {
+                            let info = provider.table().table_info();
+                            let partition_key_indices = info.meta.partition_key_indices.clone();
+                            let schema = info.meta.schema.clone();
+                            let partition_cols = partition_key_indices
+                                .into_iter()
+                                .map(|index| schema.column_name_by_index(index).to_string())
+                                .collect::<Vec<String>>();
+                            self.current_partition_cols = Some(partition_cols);
+                        }
                     }
                 }
                 VisitRecursion::Continue
@@ -203,15 +207,13 @@ impl TreeNodeVisitor for CommutativeVisitor {
     }
 
     fn post_visit(&mut self, plan: &LogicalPlan) -> datafusion_common::Result<VisitRecursion> {
-        if DFLogicalSubstraitConvertor.encode(&plan).is_err(){
+        if DFLogicalSubstraitConvertor.encode(&plan).is_err() {
+            common_telemetry::info!(
+                "substrait error: {:?}",
+                DFLogicalSubstraitConvertor.encode(&plan)
+            );
             self.stop_node = Some(utils::hash_plan(plan));
             return Ok(VisitRecursion::Stop);
-        }
-
-        if let Some(partition_cols) = &self.current_partition_cols 
-            && partition_cols.is_empty() {
-            // no partition columns, and can be encoded skip
-            return Ok(VisitRecursion::Continue);
         }
 
         match Categorizer::check_plan(plan) {
@@ -231,6 +233,16 @@ impl TreeNodeVisitor for CommutativeVisitor {
                 if let Some(transformer) = transformer
                     && let Some(plan) = transformer(plan) {
                     self.next_stage.push(plan)
+                }
+            },
+            Commutativity::CheckPartition => {
+                if let Some(partition_cols) = &self.current_partition_cols
+                    && partition_cols.is_empty() {
+                    // no partition columns, and can be encoded skip
+                    return Ok(VisitRecursion::Continue);
+                } else {
+                    self.stop_node = Some(utils::hash_plan(plan));
+                    return Ok(VisitRecursion::Stop);
                 }
             },
             Commutativity::NonCommutative

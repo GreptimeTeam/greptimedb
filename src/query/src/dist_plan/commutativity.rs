@@ -19,6 +19,8 @@ use promql::extension_plan::{
     EmptyMetric, InstantManipulate, RangeManipulate, SeriesDivide, SeriesNormalize,
 };
 
+use crate::dist_plan::MergeScanLogicalPlan;
+
 #[allow(dead_code)]
 pub enum Commutativity {
     Commutative,
@@ -27,6 +29,7 @@ pub enum Commutativity {
     TransformedCommutative(Option<Transformer>),
     NonCommutative,
     Unimplemented,
+    CheckPartition,
     /// For unrelated plans like DDL
     Unsupported,
 }
@@ -36,15 +39,23 @@ pub struct Categorizer {}
 impl Categorizer {
     pub fn check_plan(plan: &LogicalPlan) -> Commutativity {
         match plan {
-            LogicalPlan::Projection(_) => Commutativity::Commutative,
+            LogicalPlan::Projection(proj) => {
+                for expr in &proj.expr {
+                    let commutativity = Self::check_expr(expr);
+                    if !matches!(commutativity, Commutativity::Commutative) {
+                        return commutativity;
+                    }
+                }
+                Commutativity::Commutative
+            }
             // TODO(ruihang): Change this to Commutative once Like is supported in substrait
             LogicalPlan::Filter(filter) => Self::check_expr(&filter.predicate),
-            LogicalPlan::Window(_) => Commutativity::Unimplemented,
+            LogicalPlan::Window(_) => Commutativity::CheckPartition,
             LogicalPlan::Aggregate(_) => {
                 // check all children exprs and uses the strictest level
-                Commutativity::Unimplemented
+                Commutativity::CheckPartition
             }
-            LogicalPlan::Sort(_) => Commutativity::NonCommutative,
+            LogicalPlan::Sort(_) => Commutativity::CheckPartition,
             LogicalPlan::Join(_) => Commutativity::NonCommutative,
             LogicalPlan::CrossJoin(_) => Commutativity::NonCommutative,
             LogicalPlan::Repartition(_) => {
@@ -52,7 +63,7 @@ impl Categorizer {
                 Commutativity::Unimplemented
             }
             LogicalPlan::Union(_) => Commutativity::Unimplemented,
-            LogicalPlan::TableScan(_) => Commutativity::NonCommutative,
+            LogicalPlan::TableScan(_) => Commutativity::CheckPartition,
             LogicalPlan::EmptyRelation(_) => Commutativity::NonCommutative,
             LogicalPlan::Subquery(_) => Commutativity::Unimplemented,
             LogicalPlan::SubqueryAlias(_) => Commutativity::Unimplemented,
@@ -79,7 +90,8 @@ impl Categorizer {
                 || name == InstantManipulate::name()
                 || name == SeriesNormalize::name()
                 || name == RangeManipulate::name()
-                || name == SeriesDivide::name() =>
+                || name == SeriesDivide::name()
+                || name == MergeScanLogicalPlan::name() =>
             {
                 Commutativity::Commutative
             }
@@ -89,8 +101,7 @@ impl Categorizer {
 
     pub fn check_expr(expr: &Expr) -> Commutativity {
         match expr {
-            Expr::Alias(_, _)
-            | Expr::Column(_)
+            Expr::Column(_)
             | Expr::ScalarVariable(_, _)
             | Expr::Literal(_)
             | Expr::BinaryExpr(_)
@@ -124,7 +135,9 @@ impl Categorizer {
             | Expr::InSubquery(_)
             | Expr::ScalarSubquery(_)
             | Expr::Wildcard => Commutativity::Unimplemented,
-            Expr::QualifiedWildcard { .. }
+
+            Expr::Alias(_, _)
+            | Expr::QualifiedWildcard { .. }
             | Expr::GroupingSet(_)
             | Expr::Placeholder(_)
             | Expr::OuterReferenceColumn(_, _) => Commutativity::Unimplemented,

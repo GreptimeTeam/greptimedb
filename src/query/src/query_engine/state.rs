@@ -39,11 +39,11 @@ use datafusion_optimizer::analyzer::Analyzer;
 use datafusion_optimizer::optimizer::Optimizer;
 use partition::manager::PartitionRuleManager;
 use promql::extension_plan::PromExtensionPlanner;
+use substrait::extension_serializer::ExtensionSerializer;
 use table::table::adapter::DfTableProviderAdapter;
 use table::TableRef;
 
 use crate::dist_plan::{DistExtensionPlanner, DistPlannerAnalyzer};
-use crate::extension_serializer::ExtensionSerializer;
 use crate::optimizer::order_hint::OrderHintRule;
 use crate::optimizer::type_conversion::TypeConversionRule;
 use crate::query_engine::options::QueryOptions;
