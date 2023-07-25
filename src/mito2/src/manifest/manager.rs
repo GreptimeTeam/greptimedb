@@ -317,7 +317,6 @@ mod test {
     use store_api::storage::RegionId;
 
     use super::*;
-    use crate::error::Error;
     use crate::manifest::action::RegionChange;
     use crate::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder, SemanticType};
     use crate::test_util::TestEnv;
@@ -349,18 +348,6 @@ mod test {
                 column_id: 251,
             });
         builder.build().unwrap()
-    }
-
-    #[tokio::test]
-    async fn create_region_without_initial_metadata() {
-        let env = TestEnv::new("");
-        let result = env
-            .create_manifest_manager(CompressionType::Uncompressed, 10, None)
-            .await;
-        assert!(matches!(
-            result.err().unwrap(),
-            Error::InitialMetadata { .. }
-        ))
     }
 
     #[tokio::test]
