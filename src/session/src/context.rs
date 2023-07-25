@@ -107,9 +107,13 @@ impl QueryContextBuilder {
             current_schema: self
                 .current_schema
                 .unwrap_or_else(|| DEFAULT_SCHEMA_NAME.to_string()),
-            time_zone: self.time_zone.unwrap_or(ArcSwap::new(Arc::new(None))),
-            sql_dialect: self.sql_dialect.unwrap_or(Box::new(GreptimeDbDialect {})),
-            trace_id: self.trace_id.unwrap_or(common_telemetry::gen_trace_id()),
+            time_zone: self
+                .time_zone
+                .unwrap_or_else(|| ArcSwap::new(Arc::new(None))),
+            sql_dialect: self
+                .sql_dialect
+                .unwrap_or_else(|| Box::new(GreptimeDbDialect {})),
+            trace_id: self.trace_id.unwrap_or_else(common_telemetry::gen_trace_id),
         })
     }
 
