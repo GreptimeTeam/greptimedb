@@ -5,8 +5,7 @@ Affected Rows: 1
 
 use my_db;
 
-++
-++
+Affected Rows: 0
 
 create table foo
 (
@@ -52,6 +51,5 @@ order by table_schema, table_name;
 
 use public;
 
-++
-++
+Affected Rows: 0
 
