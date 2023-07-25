@@ -13,8 +13,10 @@
 // limitations under the License.
 use std::sync::Arc;
 mod to_unixtime;
+mod to_timezone;
 
 use to_unixtime::ToUnixtimeFunction;
+use to_timezone::ToTimeZoneFunction;
 
 use crate::scalars::function_registry::FunctionRegistry;
 
@@ -23,5 +25,6 @@ pub(crate) struct TimestampFunction;
 impl TimestampFunction {
     pub fn register(registry: &FunctionRegistry) {
         registry.register(Arc::new(ToUnixtimeFunction::default()));
+        registry.register(Arc::new(ToTimeZoneFunction::default()));
     }
 }
