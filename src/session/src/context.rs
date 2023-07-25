@@ -103,10 +103,10 @@ impl QueryContextBuilder {
         Arc::new(QueryContext {
             current_catalog: self
                 .current_catalog
-                .unwrap_or(DEFAULT_CATALOG_NAME.to_string()),
+                .unwrap_or_else(|| DEFAULT_CATALOG_NAME.to_string()),
             current_schema: self
                 .current_schema
-                .unwrap_or(DEFAULT_SCHEMA_NAME.to_string()),
+                .unwrap_or_else(|| DEFAULT_SCHEMA_NAME.to_string()),
             time_zone: self.time_zone.unwrap_or(ArcSwap::new(Arc::new(None))),
             sql_dialect: self.sql_dialect.unwrap_or(Box::new(GreptimeDbDialect {})),
             trace_id: self.trace_id.unwrap_or(common_telemetry::gen_trace_id()),
