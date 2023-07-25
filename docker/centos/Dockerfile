@@ -26,7 +26,7 @@ ENV PATH /opt/rh/rh-python38/root/usr/bin:/usr/local/bin:/root/.cargo/bin/:$PATH
 
 # Build the project in release mode.
 RUN --mount=target=.,rw \
-    --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/root/.cargo/registry \
     make build \
     CARGO_PROFILE=${CARGO_PROFILE} \
     FEATURES=${FEATURES} \
