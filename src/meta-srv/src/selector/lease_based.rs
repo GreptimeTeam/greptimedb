@@ -13,6 +13,8 @@
 // limitations under the License.
 
 use api::v1::meta::Peer;
+use rand::seq::SliceRandom;
+use rand::thread_rng;
 
 use crate::error::Result;
 use crate::lease;
@@ -34,9 +36,9 @@ impl Selector for LeaseBasedSelector {
                 .into_iter()
                 .collect();
 
-        // TODO(jiachun): At the moment we are just pushing the latest to the forefront,
-        // and it is better to use load-based strategies in the future.
-        lease_kvs.sort_by(|a, b| b.1.timestamp_millis.cmp(&a.1.timestamp_millis));
+        // TODO(jiachun): At the moment we are just arrange them randomly, and it is better
+        // to use load-based strategies in the future.
+        lease_kvs.shuffle(&mut thread_rng());
 
         let peers = lease_kvs
             .into_iter()
