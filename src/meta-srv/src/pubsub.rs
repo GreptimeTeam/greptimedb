@@ -12,38 +12,33 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(async_closure)]
-#![feature(btree_drain_filter)]
-#![feature(result_flattening)]
+use api::v1::meta::HeartbeatRequest;
 
-pub mod bootstrap;
-pub mod cluster;
-pub mod ddl;
-pub mod election;
-pub mod error;
-mod failure_detector;
-pub mod handler;
-pub mod keys;
-pub mod lease;
-pub mod lock;
-pub mod metadata_service;
-pub mod metasrv;
-mod metrics;
-#[cfg(feature = "mock")]
-pub mod mocks;
-pub mod procedure;
-pub mod pubsub;
-pub mod selector;
-mod sequence;
-pub mod service;
-pub mod table_routes;
-
-pub use crate::error::Result;
-
-mod inactive_node_manager;
-
-mod greptimedb_telemetry;
-use greptimedb_telemetry::telemetry;
-
+mod publish;
+mod subscribe_manager;
+mod subscriber;
 #[cfg(test)]
-mod test_util;
+mod tests;
+
+pub use publish::*;
+pub use subscribe_manager::*;
+pub use subscriber::*;
+
+/// Subscribed topic type, determined by the ability of meta.
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
+pub enum Topic {
+    Heartbeat,
+}
+
+#[derive(Clone, Debug)]
+pub enum Message {
+    Heartbeat(Box<HeartbeatRequest>),
+}
+
+impl Message {
+    pub fn topic(&self) -> Topic {
+        match self {
+            Message::Heartbeat(_) => Topic::Heartbeat,
+        }
+    }
+}

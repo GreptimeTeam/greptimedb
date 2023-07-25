@@ -21,12 +21,14 @@ use common_grpc::channel_manager::ChannelConfig;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::ProcedureManagerRef;
+use tokio::sync::mpsc::Sender;
 
 use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
 use crate::ddl::{DdlManager, DdlManagerRef};
 use crate::error::Result;
 use crate::handler::mailbox_handler::MailboxHandler;
 use crate::handler::region_lease_handler::RegionLeaseHandler;
+use crate::handler::report_handler::ReportHandler;
 use crate::handler::{
     CheckLeaderHandler, CollectStatsHandler, HeartbeatHandlerGroup, HeartbeatMailbox,
     KeepLeaseHandler, OnLeaderStartHandler, PersistStatsHandler, Pushers, RegionFailureHandler,
@@ -40,6 +42,9 @@ use crate::metasrv::{
 };
 use crate::procedure::region_failover::RegionFailoverManager;
 use crate::procedure::state_store::MetaStateStore;
+use crate::pubsub::{
+    DefaultPublish, DefaultSubscribeManager, Message, PublishRef, SubscribeManagerRef,
+};
 use crate::selector::lease_based::LeaseBasedSelector;
 use crate::sequence::Sequence;
 use crate::service::mailbox::MailboxRef;
@@ -169,6 +174,7 @@ impl MetaSrvBuilder {
             &table_metadata_manager,
         );
         let _ = ddl_manager.try_start();
+        let (publish, sub_manager) = build_publish();
 
         let handler_group = match handler_group {
             Some(handler_group) => handler_group,
@@ -215,6 +221,7 @@ impl MetaSrvBuilder {
                 }
                 group.add_handler(RegionLeaseHandler::default()).await;
                 group.add_handler(PersistStatsHandler::default()).await;
+                group.add_handler(ReportHandler).await;
                 group
             }
         };
@@ -237,6 +244,8 @@ impl MetaSrvBuilder {
             ddl_manager,
             table_metadata_manager,
             greptimedb_telemerty_task: get_greptimedb_telemetry_task(meta_peer_client).await,
+            publish: Some(publish),
+            subscribe_manager: Some(sub_manager),
         })
     }
 }
@@ -313,6 +322,12 @@ fn build_ddl_manager(
         options.server_addr.clone(),
         table_metadata_manager.clone(),
     ))
+}
+
+fn build_publish() -> (PublishRef, SubscribeManagerRef) {
+    let sub_manager = Arc::new(DefaultSubscribeManager::<Sender<Message>>::default());
+    let publish = Arc::new(DefaultPublish::new(sub_manager.clone()));
+    (publish, sub_manager)
 }
 
 impl Default for MetaSrvBuilder {
