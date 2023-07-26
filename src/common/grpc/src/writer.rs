@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::fmt::Display;
 
 use api::helper::values_with_capacity;
 use api::v1::column::SemanticType;
@@ -244,6 +245,19 @@ pub enum Precision {
     Second,
     Minute,
     Hour,
+}
+
+impl Display for Precision {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Precision::Nanosecond => write!(f, "Precision::Nanosecond"),
+            Precision::Microsecond => write!(f, "Precision::Microsecond"),
+            Precision::Millisecond => write!(f, "Precision::Millisecond"),
+            Precision::Second => write!(f, "Precision::Second"),
+            Precision::Minute => write!(f, "Precision::Minute"),
+            Precision::Hour => write!(f, "Precision::Hour"),
+        }
+    }
 }
 
 #[cfg(test)]

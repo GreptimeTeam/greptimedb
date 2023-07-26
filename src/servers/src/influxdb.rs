@@ -16,10 +16,12 @@ use std::collections::HashMap;
 
 use api::v1::{InsertRequest as GrpcInsertRequest, InsertRequests};
 use common_grpc::writer::{LinesWriter, Precision};
+use common_time::timestamp::TimeUnit;
+use common_time::Timestamp;
 use influxdb_line_protocol::{parse_lines, FieldValue};
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 
-use crate::error::{Error, InfluxdbLineProtocolSnafu, InfluxdbLinesWriteSnafu};
+use crate::error::{Error, InfluxdbLineProtocolSnafu, InfluxdbLinesWriteSnafu, TimePrecisionSnafu};
 
 pub const INFLUXDB_TIMESTAMP_COLUMN_NAME: &str = "ts";
 pub const DEFAULT_TIME_PRECISION: Precision = Precision::Nanosecond;
@@ -98,8 +100,36 @@ impl TryFrom<&InfluxdbRequest> for InsertRequests {
                 writer
                     .write_ts(INFLUXDB_TIMESTAMP_COLUMN_NAME, (timestamp, precision))
                     .context(InfluxdbLinesWriteSnafu)?;
+            } else {
+                let precision = if let Some(val) = &value.precision {
+                    *val
+                } else {
+                    DEFAULT_TIME_PRECISION
+                };
+                let timestamp = Timestamp::current_millis();
+                let unit = match precision {
+                    Precision::Second => TimeUnit::Second,
+                    Precision::Millisecond => TimeUnit::Millisecond,
+                    Precision::Microsecond => TimeUnit::Microsecond,
+                    Precision::Nanosecond => TimeUnit::Nanosecond,
+                    _ => {
+                        return Err(Error::NotSupported {
+                            feat: format!("convert {precision} into TimeUnit"),
+                        })
+                    }
+                };
+                let timestamp = Timestamp::new(timestamp.into(), TimeUnit::Millisecond)
+                    .convert_to(unit)
+                    .with_context(|| TimePrecisionSnafu {
+                        name: precision.to_string(),
+                    })?;
+                writer
+                    .write_ts(
+                        INFLUXDB_TIMESTAMP_COLUMN_NAME,
+                        (timestamp.into(), precision),
+                    )
+                    .context(InfluxdbLinesWriteSnafu)?;
             }
-
             writer.commit();
         }
 

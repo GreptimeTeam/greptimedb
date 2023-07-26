@@ -42,6 +42,42 @@ mod test {
         test_put_influxdb_lines(&instance.frontend()).await;
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_standalone_put_influxdb_lines_without_time_column() {
+        let standalone =
+            tests::create_standalone_instance("test_standalone_put_influxdb_lines").await;
+        test_put_influxdb_lines_without_time_column(&standalone.instance).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_distributed_put_influxdb_lines_without_time_column() {
+        let instance =
+            tests::create_distributed_instance("test_distributed_put_influxdb_lines").await;
+        test_put_influxdb_lines_without_time_column(&instance.frontend()).await;
+    }
+
+    async fn test_put_influxdb_lines_without_time_column(instance: &Arc<Instance>) {
+        let lines = r"
+monitor1,host=host1 cpu=66.6,memory=1024
+monitor1,host=host2 memory=1027";
+        let request = InfluxdbRequest {
+            precision: None,
+            lines: lines.to_string(),
+        };
+        assert!(instance.exec(&request, QueryContext::arc()).await.is_ok());
+
+        let mut output = instance
+            .do_query(
+                "SELECT ts, host, cpu, memory FROM monitor1 ORDER BY ts",
+                QueryContext::arc(),
+            )
+            .await;
+        let output = output.remove(0).unwrap();
+        let Output::Stream(stream) = output else { unreachable!() };
+
+        assert!(RecordBatches::try_collect(stream).await.is_ok());
+    }
+
     async fn test_put_influxdb_lines(instance: &Arc<Instance>) {
         let lines = r"
 monitor1,host=host1 cpu=66.6,memory=1024 1663840496100023100
