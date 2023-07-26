@@ -34,7 +34,7 @@ mod eq;
 mod helper;
 mod list;
 mod null;
-mod operations;
+pub(crate) mod operations;
 mod primitive;
 mod string;
 mod time;

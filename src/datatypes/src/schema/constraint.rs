@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::fmt::{Display, Formatter};
-use std::sync::Arc;
 
 use common_time::util;
 use serde::{Deserialize, Serialize};
@@ -22,7 +21,8 @@ use snafu::{ensure, ResultExt};
 use crate::data_type::{ConcreteDataType, DataType};
 use crate::error::{self, Result};
 use crate::value::Value;
-use crate::vectors::{Int64Vector, TimestampMillisecondVector, VectorRef};
+use crate::vectors::operations::VectorOp;
+use crate::vectors::{TimestampMillisecondVector, VectorRef};
 
 const CURRENT_TIMESTAMP: &str = "current_timestamp()";
 
@@ -164,22 +164,23 @@ fn create_current_timestamp_vector(
 ) -> Result<VectorRef> {
     // FIXME(yingwen): We should implements cast in VectorOp so we could cast the millisecond vector
     // to other data type and avoid this match.
-    match data_type {
-        ConcreteDataType::Timestamp(_) => Ok(Arc::new(TimestampMillisecondVector::from_values(
-            std::iter::repeat(util::current_time_millis()).take(num_rows),
-        ))),
-        ConcreteDataType::Int64(_) => Ok(Arc::new(Int64Vector::from_values(
-            std::iter::repeat(util::current_time_millis()).take(num_rows),
-        ))),
-        _ => error::DefaultValueTypeSnafu {
+    let current_timestamp_vector = TimestampMillisecondVector::from_values(
+        std::iter::repeat(util::current_time_millis()).take(num_rows),
+    );
+    if data_type.is_timestamp_compatible() {
+        current_timestamp_vector.cast(data_type)
+    } else {
+        error::DefaultValueTypeSnafu {
             reason: format!("Not support to assign current timestamp to {data_type:?} type",),
         }
-        .fail(),
+        .fail()
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use crate::error::Error;
     use crate::vectors::Int32Vector;
