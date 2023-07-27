@@ -70,3 +70,11 @@ tcp_nodelay = true
 # [logging]
 # dir = "/tmp/greptimedb/logs"
 # level = "info"
+
+# # Datanode options.
+# [datanode]
+# # Datanode client options.
+# [datanode.client_options]
+# timeout_millis = 10000
+# connect_timeout_millis = 10000
+# tcp_nodelay = true
