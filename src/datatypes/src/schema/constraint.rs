@@ -162,8 +162,6 @@ fn create_current_timestamp_vector(
     data_type: &ConcreteDataType,
     num_rows: usize,
 ) -> Result<VectorRef> {
-    // FIXME(yingwen): We should implements cast in VectorOp so we could cast the millisecond vector
-    // to other data type and avoid this match.
     let current_timestamp_vector = TimestampMillisecondVector::from_values(
         std::iter::repeat(util::current_time_millis()).take(num_rows),
     );
@@ -263,6 +261,39 @@ mod tests {
         let constraint = ColumnDefaultConstraint::Function(CURRENT_TIMESTAMP.to_string());
         // Timestamp type.
         let data_type = ConcreteDataType::timestamp_millisecond_datatype();
+        let v = constraint
+            .create_default_vector(&data_type, false, 4)
+            .unwrap();
+        assert_eq!(4, v.len());
+        assert!(
+            matches!(v.get(0), Value::Timestamp(_)),
+            "v {:?} is not timestamp",
+            v.get(0)
+        );
+
+        let data_type = ConcreteDataType::timestamp_second_datatype();
+        let v = constraint
+            .create_default_vector(&data_type, false, 4)
+            .unwrap();
+        assert_eq!(4, v.len());
+        assert!(
+            matches!(v.get(0), Value::Timestamp(_)),
+            "v {:?} is not timestamp",
+            v.get(0)
+        );
+
+        let data_type = ConcreteDataType::timestamp_microsecond_datatype();
+        let v = constraint
+            .create_default_vector(&data_type, false, 4)
+            .unwrap();
+        assert_eq!(4, v.len());
+        assert!(
+            matches!(v.get(0), Value::Timestamp(_)),
+            "v {:?} is not timestamp",
+            v.get(0)
+        );
+
+        let data_type = ConcreteDataType::timestamp_nanosecond_datatype();
         let v = constraint
             .create_default_vector(&data_type, false, 4)
             .unwrap();
