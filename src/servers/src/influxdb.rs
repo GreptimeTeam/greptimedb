@@ -92,20 +92,12 @@ impl TryFrom<&InfluxdbRequest> for InsertRequests {
             }
 
             if let Some(timestamp) = line.timestamp {
-                let precision = if let Some(val) = &value.precision {
-                    *val
-                } else {
-                    DEFAULT_TIME_PRECISION
-                };
+                let precision = unwarp_or_default_precision(value.precision);
                 writer
                     .write_ts(INFLUXDB_TIMESTAMP_COLUMN_NAME, (timestamp, precision))
                     .context(InfluxdbLinesWriteSnafu)?;
             } else {
-                let precision = if let Some(val) = &value.precision {
-                    *val
-                } else {
-                    DEFAULT_TIME_PRECISION
-                };
+                let precision = unwarp_or_default_precision(value.precision);
                 let timestamp = Timestamp::current_millis();
                 let unit = match precision {
                     Precision::Second => TimeUnit::Second,
@@ -118,7 +110,7 @@ impl TryFrom<&InfluxdbRequest> for InsertRequests {
                         })
                     }
                 };
-                let timestamp = Timestamp::new(timestamp.into(), TimeUnit::Millisecond)
+                let timestamp = timestamp
                     .convert_to(unit)
                     .with_context(|| TimePrecisionSnafu {
                         name: precision.to_string(),
@@ -146,6 +138,14 @@ impl TryFrom<&InfluxdbRequest> for InsertRequests {
             })
             .collect();
         Ok(InsertRequests { inserts })
+    }
+}
+
+fn unwarp_or_default_precision(precision: Option<Precision>) -> Precision {
+    if let Some(val) = precision {
+        val
+    } else {
+        DEFAULT_TIME_PRECISION
     }
 }
 
