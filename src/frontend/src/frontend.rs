@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_grpc::channel_manager;
 use common_telemetry::logging::LoggingOptions;
 use meta_client::MetaClientOptions;
 use serde::{Deserialize, Serialize};
@@ -41,6 +42,7 @@ pub struct FrontendOptions {
     pub otlp_options: Option<OtlpOptions>,
     pub meta_client_options: Option<MetaClientOptions>,
     pub logging: LoggingOptions,
+    pub datanode: DatanodeOptions,
 }
 
 impl Default for FrontendOptions {
@@ -60,6 +62,7 @@ impl Default for FrontendOptions {
             otlp_options: Some(OtlpOptions::default()),
             meta_client_options: None,
             logging: LoggingOptions::default(),
+            datanode: DatanodeOptions::default(),
         }
     }
 }
@@ -71,6 +74,28 @@ impl FrontendOptions {
 
     pub fn to_toml_string(&self) -> String {
         toml::to_string(&self).unwrap()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct DatanodeOptions {
+    client_options: DatanodeClientOptions,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DatanodeClientOptions {
+    pub timeout_millis: u64,
+    pub connect_timeout_millis: u64,
+    pub tcp_nodelay: bool,
+}
+
+impl Default for DatanodeClientOptions {
+    fn default() -> Self {
+        Self {
+            timeout_millis: channel_manager::DEFAULT_GRPC_REQUEST_TIMEOUT_SECS * 1000,
+            connect_timeout_millis: channel_manager::DEFAULT_GRPC_CONNECT_TIMEOUT_SECS * 1000,
+            tcp_nodelay: true,
+        }
     }
 }
 
