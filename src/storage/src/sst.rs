@@ -147,6 +147,13 @@ impl LevelMetas {
         })
     }
 
+    pub fn collect_all_files(&self) -> Vec<FileMeta> {
+        self.levels().iter().fold(vec![], |mut files, level| {
+            files.extend(level.files().map(|f| f.meta()));
+            files
+        })
+    }
+
     pub fn levels(&self) -> &[LevelMeta] {
         &self.levels
     }

@@ -334,6 +334,13 @@ mod tests {
             .await
             .is_ok());
 
+        assert!(manifest
+            .update(RegionMetaActionList::new(vec![RegionMetaAction::Truncate(
+                build_region_truncate(3)
+            ),]))
+            .await
+            .is_ok());
+
         let mut iter = manifest.scan(0, MAX_VERSION).await.unwrap();
         let (v, action_list) = iter.next_action().await.unwrap().unwrap();
         assert_eq!(0, v);
@@ -362,6 +369,17 @@ mod tests {
         assert!(matches!(&action_list.actions[0], RegionMetaAction::Edit(_)));
         assert!(matches!(&action_list.actions[1], RegionMetaAction::Edit(_)));
 
+        let (v, action_list) = iter.next_action().await.unwrap().unwrap();
+        assert_eq!(2, v);
+        assert_eq!(1, action_list.actions.len());
+        let action = &action_list.actions[0];
+
+        match action {
+            RegionMetaAction::Truncate(t) => {
+                assert_eq!(3, t.committed_sequence)
+            }
+            _ => unreachable!(),
+        }
         // Reach end
         assert!(iter.next_action().await.unwrap().is_none());
 

@@ -555,21 +555,22 @@ impl<S: LogStore> RegionImpl<S> {
         action: RegionMetaAction,
         version: Option<Version>,
     ) -> Option<Version> {
-        if let RegionMetaAction::Edit(e) = action {
-            let edit = VersionEdit {
-                files_to_add: e.files_to_add,
-                files_to_remove: e.files_to_remove,
-                flushed_sequence: e.flushed_sequence,
-                manifest_version,
-                max_memtable_id: None,
-                compaction_time_window: e.compaction_time_window,
-            };
-            version.map(|mut v| {
-                v.apply_edit(edit);
-                v
-            })
-        } else {
-            version
+        match action {
+            RegionMetaAction::Edit(e) => {
+                let edit = VersionEdit {
+                    files_to_add: e.files_to_add,
+                    files_to_remove: e.files_to_remove,
+                    flushed_sequence: e.flushed_sequence,
+                    manifest_version,
+                    max_memtable_id: None,
+                    compaction_time_window: e.compaction_time_window,
+                };
+                version.map(|mut v| {
+                    v.apply_edit(edit);
+                    v
+                })
+            }
+            _ => version,
         }
     }
 

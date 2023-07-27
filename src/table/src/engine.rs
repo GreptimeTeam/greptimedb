@@ -169,6 +169,13 @@ pub trait TableEngineProcedure: Send + Sync {
         ctx: &EngineContext,
         request: DropTableRequest,
     ) -> Result<BoxedProcedure>;
+
+    /// Returns a procedure that truncates a table by specific `request`.
+    fn truncate_table_procedure(
+        &self,
+        ctx: &EngineContext,
+        request: TruncateTableRequest,
+    ) -> Result<BoxedProcedure>;
 }
 
 pub type TableEngineProcedureRef = Arc<dyn TableEngineProcedure>;

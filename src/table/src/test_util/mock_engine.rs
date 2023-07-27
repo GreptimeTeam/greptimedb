@@ -139,4 +139,12 @@ impl TableEngineProcedure for MockTableEngine {
     ) -> Result<BoxedProcedure> {
         unimplemented!()
     }
+
+    fn truncate_table_procedure(
+        &self,
+        _ctx: &EngineContext,
+        _request: TruncateTableRequest,
+    ) -> Result<BoxedProcedure> {
+        unimplemented!()
+    }
 }

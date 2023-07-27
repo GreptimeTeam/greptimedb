@@ -153,6 +153,17 @@ impl TableEngineProcedure for ImmutableFileTableEngine {
         let procedure = Box::new(DropImmutableFileTable::new(request, self.clone()));
         Ok(procedure)
     }
+
+    fn truncate_table_procedure(
+        &self,
+        _ctx: &EngineContext,
+        _request: TruncateTableRequest,
+    ) -> TableResult<BoxedProcedure> {
+        table_error::UnsupportedSnafu {
+            operation: "TRUNCATE TABLE",
+        }
+        .fail()
+    }
 }
 
 #[cfg(test)]

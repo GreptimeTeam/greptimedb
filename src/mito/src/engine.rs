@@ -47,6 +47,7 @@ use table::requests::{
 };
 use table::{error as table_error, Result as TableResult, Table, TableRef};
 
+use self::procedure::TruncateMitoTable;
 use crate::config::EngineConfig;
 use crate::engine::procedure::{AlterMitoTable, CreateMitoTable, DropMitoTable, TableCreator};
 use crate::error::{
@@ -233,6 +234,19 @@ impl<S: StorageEngine> TableEngineProcedure for MitoEngine<S> {
     ) -> TableResult<BoxedProcedure> {
         let procedure = Box::new(
             DropMitoTable::new(request, self.inner.clone())
+                .map_err(BoxedError::new)
+                .context(table_error::TableOperationSnafu)?,
+        );
+        Ok(procedure)
+    }
+
+    fn truncate_table_procedure(
+        &self,
+        _ctx: &EngineContext,
+        request: TruncateTableRequest,
+    ) -> TableResult<BoxedProcedure> {
+        let procedure = Box::new(
+            TruncateMitoTable::new(request, self.inner.clone())
                 .map_err(BoxedError::new)
                 .context(table_error::TableOperationSnafu)?,
         );
@@ -731,6 +745,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
                 .await
                 .map_err(BoxedError::new)
                 .context(table_error::TableOperationSnafu)?;
+
             Ok(true)
         } else {
             Ok(false)
