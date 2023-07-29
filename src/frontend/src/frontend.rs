@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_grpc::channel_manager;
 use common_telemetry::logging::LoggingOptions;
 use meta_client::MetaClientOptions;
 use serde::{Deserialize, Serialize};
@@ -21,8 +20,8 @@ use servers::http::HttpOptions;
 use servers::Mode;
 
 use crate::service_config::{
-    GrpcOptions, InfluxdbOptions, MysqlOptions, OpentsdbOptions, OtlpOptions, PostgresOptions,
-    PromStoreOptions, PrometheusOptions,
+    DatanodeOptions, GrpcOptions, InfluxdbOptions, MysqlOptions, OpentsdbOptions, OtlpOptions,
+    PostgresOptions, PromStoreOptions, PrometheusOptions,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -74,28 +73,6 @@ impl FrontendOptions {
 
     pub fn to_toml_string(&self) -> String {
         toml::to_string(&self).unwrap()
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct DatanodeOptions {
-    client_options: DatanodeClientOptions,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DatanodeClientOptions {
-    pub timeout_millis: u64,
-    pub connect_timeout_millis: u64,
-    pub tcp_nodelay: bool,
-}
-
-impl Default for DatanodeClientOptions {
-    fn default() -> Self {
-        Self {
-            timeout_millis: channel_manager::DEFAULT_GRPC_REQUEST_TIMEOUT_SECS * 1000,
-            connect_timeout_millis: channel_manager::DEFAULT_GRPC_CONNECT_TIMEOUT_SECS * 1000,
-            tcp_nodelay: true,
-        }
     }
 }
 
