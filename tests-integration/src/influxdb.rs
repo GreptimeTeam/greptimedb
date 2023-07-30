@@ -75,7 +75,12 @@ monitor1,host=host2 memory=1027";
         let output = output.remove(0).unwrap();
         let Output::Stream(stream) = output else { unreachable!() };
 
-        assert!(RecordBatches::try_collect(stream).await.is_ok());
+        let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
+        let recordbatches: Vec<_> = recordbatches.iter().collect();
+        let total = recordbatches
+            .into_iter()
+            .fold(0, |total, recordbatch| total + recordbatch.num_rows());
+        assert_eq!(total, 2);
     }
 
     async fn test_put_influxdb_lines(instance: &Arc<Instance>) {
