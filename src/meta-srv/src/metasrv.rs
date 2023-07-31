@@ -25,7 +25,7 @@ use common_meta::key::TableMetadataManagerRef;
 use common_procedure::options::ProcedureConfig;
 use common_procedure::ProcedureManagerRef;
 use common_telemetry::logging::LoggingOptions;
-use common_telemetry::{error, info, warn};
+use common_telemetry::{debug, error, info, warn};
 use serde::{Deserialize, Serialize};
 use servers::http::HttpOptions;
 use snafu::ResultExt;
@@ -213,11 +213,18 @@ impl MetaSrv {
                                     if let Err(e) = procedure_manager.recover().await {
                                         error!("Failed to recover procedures, error: {e}");
                                     }
-                                    let _ = task_handler.start(common_runtime::bg_runtime());
+                                    let _ = task_handler.start(common_runtime::bg_runtime())
+                                    .map_err(|e| {
+                                        debug!("Failed to start greptimedb telemetry task, error: {e}");
+                                    });
                                 }
                                 LeaderChangeMessage::StepDown(leader) => {
                                     error!("Leader :{:?} step down", leader);
-                                    let _ = task_handler.stop().await;
+                                    let _ = task_handler.stop().await.map_err(|e| {
+                                        debug!(
+                                            "Failed to stop greptimedb telemetry task, error: {e}"
+                                        );
+                                    });
                                 }
                             }
                         }

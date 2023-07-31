@@ -33,7 +33,7 @@ use common_meta::key::TableMetadataManager;
 use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::store::state_store::ObjectStateStore;
 use common_procedure::ProcedureManagerRef;
-use common_telemetry::logging::info;
+use common_telemetry::logging::{debug, info};
 use file_table_engine::engine::immutable::ImmutableFileTableEngine;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use log_store::LogConfig;
@@ -336,7 +336,10 @@ impl Instance {
             .context(StartProcedureManagerSnafu)?;
         let _ = self
             .greptimedb_telemerty_task
-            .start(common_runtime::bg_runtime());
+            .start(common_runtime::bg_runtime())
+            .map_err(|e| {
+                debug!("Failed to start greptimedb telemetry task: {}", e);
+            });
 
         Ok(())
     }
