@@ -19,15 +19,22 @@ use store_api::storage::RegionId;
 use super::*;
 use crate::error::Error;
 use crate::test_util::{CreateRequestBuilder, TestEnv};
+use crate::worker::request::RegionOptions;
 
 #[tokio::test]
 async fn test_engine_new_stop() {
     let env = TestEnv::with_prefix("engine-stop");
     let engine = env.create_engine(MitoConfig::default()).await;
 
-    engine.stop().await.unwrap();
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new(region_id).build();
+    engine.create_region(request).await.unwrap();
 
-    let request = CreateRequestBuilder::new(RegionId::new(1, 1)).build();
+    // Stop the engine to reject further requests.
+    engine.stop().await.unwrap();
+    assert!(!engine.is_region_exists(region_id));
+
+    let request = CreateRequestBuilder::new(RegionId::new(1, 2)).build();
     let err = engine.create_region(request).await.unwrap_err();
     assert!(
         matches!(err, Error::WorkerStopped { .. }),
@@ -73,4 +80,99 @@ async fn test_engine_create_existing_region() {
         matches!(err, Error::RegionExists { .. }),
         "unexpected err: {err}"
     );
+}
+
+#[tokio::test]
+async fn test_engine_open_empty() {
+    let env = TestEnv::with_prefix("open-empty");
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let err = engine
+        .open_region(OpenRequest {
+            region_id: RegionId::new(1, 1),
+            region_dir: "empty".to_string(),
+            options: RegionOptions::default(),
+        })
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, Error::RegionNotFound { .. }),
+        "unexpected err: {err}"
+    );
+}
+
+#[tokio::test]
+async fn test_engine_open_existing() {
+    let env = TestEnv::with_prefix("open-exiting");
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new(region_id).build();
+    let region_dir = request.region_dir.clone();
+    engine.create_region(request).await.unwrap();
+
+    engine
+        .open_region(OpenRequest {
+            region_id,
+            region_dir,
+            options: RegionOptions::default(),
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_engine_close_region() {
+    let env = TestEnv::with_prefix("close");
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    // It's okay to close a region doesn't exist.
+    engine
+        .close_region(CloseRequest { region_id })
+        .await
+        .unwrap();
+
+    let request = CreateRequestBuilder::new(region_id).build();
+    engine.create_region(request).await.unwrap();
+
+    engine
+        .close_region(CloseRequest { region_id })
+        .await
+        .unwrap();
+    assert!(!engine.is_region_exists(region_id));
+
+    // It's okay to close this region again.
+    engine
+        .close_region(CloseRequest { region_id })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_engine_reopen_region() {
+    let env = TestEnv::with_prefix("reopen-region");
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new(region_id).build();
+    let region_dir = request.region_dir.clone();
+    engine.create_region(request).await.unwrap();
+
+    // Close the region.
+    engine
+        .close_region(CloseRequest { region_id })
+        .await
+        .unwrap();
+
+    // Open the region again.
+    engine
+        .open_region(OpenRequest {
+            region_id,
+            region_dir,
+            options: RegionOptions::default(),
+        })
+        .await
+        .unwrap();
+    assert!(engine.is_region_exists(region_id));
 }

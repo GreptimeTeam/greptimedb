@@ -88,6 +88,17 @@ impl RegionMap {
         let mut regions = self.regions.write().unwrap();
         regions.remove(&region_id);
     }
+
+    /// List all regions.
+    pub(crate) fn list_regions(&self) -> Vec<MitoRegionRef> {
+        let regions = self.regions.read().unwrap();
+        regions.values().cloned().collect()
+    }
+
+    /// Clear the map.
+    pub(crate) fn clear(&self) {
+        self.regions.write().unwrap().clear();
+    }
 }
 
 pub(crate) type RegionMapRef = Arc<RegionMap>;

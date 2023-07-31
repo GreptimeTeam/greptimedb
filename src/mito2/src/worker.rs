@@ -313,6 +313,8 @@ impl<S> RegionWorkerLoop<S> {
             self.handle_requests(&mut buffer).await;
         }
 
+        self.clean().await;
+
         logging::info!("Exit region worker thread {}", self.id);
     }
 
@@ -377,6 +379,19 @@ impl<S> RegionWorkerLoop<S> {
                 let _ = sender.send(res);
             }
         }
+    }
+
+    // Clean up the worker.
+    async fn clean(&self) {
+        // Closes remaining regions.
+        let regions = self.regions.list_regions();
+        for region in regions {
+            if let Err(e) = region.stop().await {
+                logging::error!(e; "Failed to stop region {}", region.region_id);
+            }
+        }
+
+        self.regions.clear();
     }
 }
 
