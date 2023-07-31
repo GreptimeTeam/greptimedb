@@ -419,14 +419,10 @@ mod tests {
         assert_eq!("demo", r1_insert.table_name);
 
         let r1_columns = &r1_insert.columns_values;
-        assert_eq!(3, r1_columns.len());
+        assert_eq!(2, r1_columns.len());
         assert_columns(
             r1_columns,
             &[
-                (
-                    "id",
-                    &[Value::from(1_i16), Value::from(1_i16), Value::from(1_i16)],
-                ),
                 (
                     "host",
                     &[Value::from("host1"), Value::Null, Value::from("host3")],

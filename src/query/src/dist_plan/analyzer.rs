@@ -207,10 +207,10 @@ impl TreeNodeVisitor for CommutativeVisitor {
     }
 
     fn post_visit(&mut self, plan: &LogicalPlan) -> datafusion_common::Result<VisitRecursion> {
-        if DFLogicalSubstraitConvertor.encode(&plan).is_err() {
+        if DFLogicalSubstraitConvertor.encode(plan).is_err() {
             common_telemetry::info!(
                 "substrait error: {:?}",
-                DFLogicalSubstraitConvertor.encode(&plan)
+                DFLogicalSubstraitConvertor.encode(plan)
             );
             self.stop_node = Some(utils::hash_plan(plan));
             return Ok(VisitRecursion::Stop);
