@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use arrow::array::{make_array, ArrayData};
-use arrow::pyarrow::ToPyArrow;
+use arrow::pyarrow::{FromPyArrow, ToPyArrow};
 use datafusion::arrow::array::BooleanArray;
 use datafusion::arrow::compute;
 use datafusion::arrow::compute::kernels::{arithmetic, comparison};
@@ -33,7 +33,7 @@ use crate::python::pyo3::utils::{pyo3_obj_try_to_typed_val, to_py_err};
 macro_rules! get_con_type {
     ($obj:ident, $($pyty:ident => $con_ty:ident),*$(,)?) => {
     $(
-        if $obj.is_instance_of::<$pyty>()?{
+        if $obj.is_instance_of::<$pyty>(){
             Ok(ConcreteDataType::$con_ty())
         }
     )else* else{
