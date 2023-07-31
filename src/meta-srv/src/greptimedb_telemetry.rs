@@ -23,6 +23,7 @@ pub mod telemetry {
     };
 
     use crate::cluster::MetaPeerClientRef;
+
     struct DistributedGreptimeDBTelemetryCollector {
         meta_peer_client: MetaPeerClientRef,
         uuid: Option<String>,

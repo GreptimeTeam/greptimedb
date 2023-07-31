@@ -154,13 +154,13 @@ pub fn default_get_uuid() -> Option<String> {
     }
 }
 
-// Report version info to GreptimeDB.
-// We do not collect any identity-sensitive information.
-// This task is scheduled to run every 30 minutes.
-// The task will be disabled default. It can be enabled by setting the build feature `greptimedb-telemetry`
-// Collector is used to collect the version info. It can be implemented by different components.
-// client is used to send the HTTP request to GreptimeDB.
-// telemetry_url is the GreptimeDB url.
+/// Report version info to GreptimeDB.
+/// We do not collect any identity-sensitive information.
+/// This task is scheduled to run every 30 minutes.
+/// The task will be disabled default. It can be enabled by setting the build feature `greptimedb-telemetry`
+/// Collector is used to collect the version info. It can be implemented by different components.
+/// client is used to send the HTTP request to GreptimeDB.
+/// telemetry_url is the GreptimeDB url.
 pub struct GreptimeDBTelemetry {
     statistics: Box<dyn Collector + Send + Sync>,
     client: Option<Client>,

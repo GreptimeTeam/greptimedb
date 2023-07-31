@@ -76,6 +76,7 @@ pub mod telemetry {
 
     use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
     use servers::Mode;
+
     pub async fn get_greptimedb_telemetry_task(_: &Mode) -> Arc<GreptimeDBTelemetryTask> {
         Arc::new(GreptimeDBTelemetryTask::disable())
     }
