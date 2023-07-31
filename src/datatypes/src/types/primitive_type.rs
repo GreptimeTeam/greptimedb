@@ -46,6 +46,7 @@ impl_native_type!(i8);
 impl_native_type!(i16);
 impl_native_type!(i32);
 impl_native_type!(i64);
+impl_native_type!(i128);
 impl_native_type!(f32);
 impl_native_type!(f64);
 

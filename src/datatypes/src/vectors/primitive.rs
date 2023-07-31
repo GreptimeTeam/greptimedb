@@ -23,6 +23,7 @@ use arrow::array::{
     TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
     TimestampSecondArray,
 };
+use arrow_array::{IntervalDayTimeArray, IntervalMonthDayNanoArray, IntervalYearMonthArray};
 use arrow_schema::DataType;
 use serde_json::Value as JsonValue;
 use snafu::OptionExt;
@@ -151,6 +152,40 @@ impl<T: LogicalPrimitiveType> PrimitiveVector<T> {
             arrow_type => {
                 return CastTypeSnafu {
                     msg: format!("Failed to cast arrow array {:?} to time vector", arrow_type,),
+                }
+                .fail()?;
+            }
+        };
+        let concrete_array = PrimitiveArray::<T::ArrowPrimitive>::from(array_data);
+        Ok(Self::new(concrete_array))
+    }
+
+    pub fn try_from_arrow_interval_array(array: impl AsRef<dyn Array>) -> Result<Self> {
+        let array = array.as_ref();
+        let array_data = match array.data_type() {
+            DataType::Interval(unit) => match unit {
+                arrow_schema::IntervalUnit::YearMonth => array
+                    .as_any()
+                    .downcast_ref::<IntervalYearMonthArray>()
+                    .unwrap()
+                    .to_data(),
+                arrow_schema::IntervalUnit::DayTime => array
+                    .as_any()
+                    .downcast_ref::<IntervalDayTimeArray>()
+                    .unwrap()
+                    .to_data(),
+                arrow_schema::IntervalUnit::MonthDayNano => array
+                    .as_any()
+                    .downcast_ref::<IntervalMonthDayNanoArray>()
+                    .unwrap()
+                    .to_data(),
+            },
+            arrow_type => {
+                return CastTypeSnafu {
+                    msg: format!(
+                        "Failed to cast arrow array {:?} to interval vector",
+                        arrow_type,
+                    ),
                 }
                 .fail()?;
             }
@@ -495,6 +530,7 @@ mod tests {
         Time64NanosecondArray,
     };
     use arrow::datatypes::DataType as ArrowDataType;
+    use arrow_array::{IntervalDayTimeArray, IntervalYearMonthArray};
     use serde_json;
 
     use super::*;
@@ -502,9 +538,9 @@ mod tests {
     use crate::serialize::Serializable;
     use crate::types::Int64Type;
     use crate::vectors::{
-        TimeMicrosecondVector, TimeMillisecondVector, TimeNanosecondVector, TimeSecondVector,
-        TimestampMicrosecondVector, TimestampMillisecondVector, TimestampNanosecondVector,
-        TimestampSecondVector,
+        IntervalDayTimeVector, IntervalYearMonthVector, TimeMicrosecondVector,
+        TimeMillisecondVector, TimeNanosecondVector, TimeSecondVector, TimestampMicrosecondVector,
+        TimestampMillisecondVector, TimestampNanosecondVector, TimestampSecondVector,
     };
 
     fn check_vec(v: Int32Vector) {
@@ -710,5 +746,29 @@ mod tests {
         // Test convert error
         let array: ArrayRef = Arc::new(Int32Array::from(vec![1i32, 2, 3]));
         assert!(TimestampSecondVector::try_from_arrow_timestamp_array(array).is_err());
+    }
+
+    #[test]
+    fn test_try_from_arrow_interval_array() {
+        let array: ArrayRef = Arc::new(IntervalYearMonthArray::from(vec![1000, 2000, 3000]));
+        let vector = IntervalYearMonthVector::try_from_arrow_interval_array(array).unwrap();
+        assert_eq!(
+            IntervalYearMonthVector::from_values(vec![1000, 2000, 3000]),
+            vector
+        );
+
+        let array: ArrayRef = Arc::new(IntervalDayTimeArray::from(vec![1000, 2000, 3000]));
+        let vector = IntervalDayTimeVector::try_from_arrow_interval_array(array).unwrap();
+        assert_eq!(
+            IntervalDayTimeVector::from_values(vec![1000, 2000, 3000]),
+            vector
+        );
+
+        let array: ArrayRef = Arc::new(IntervalYearMonthArray::from(vec![1000, 2000, 3000]));
+        let vector = IntervalYearMonthVector::try_from_arrow_interval_array(array).unwrap();
+        assert_eq!(
+            IntervalYearMonthVector::from_values(vec![1000, 2000, 3000]),
+            vector
+        );
     }
 }

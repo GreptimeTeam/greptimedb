@@ -32,6 +32,7 @@ mod date;
 mod datetime;
 mod eq;
 mod helper;
+mod interval;
 mod list;
 mod null;
 pub(crate) mod operations;
@@ -47,6 +48,10 @@ pub use constant::ConstantVector;
 pub use date::{DateVector, DateVectorBuilder};
 pub use datetime::{DateTimeVector, DateTimeVectorBuilder};
 pub use helper::Helper;
+pub use interval::{
+    IntervalDayTimeVector, IntervalDayTimeVectorBuilder, IntervalMonthDayNanoVector,
+    IntervalMonthDayNanoVectorBuilder, IntervalYearMonthVector, IntervalYearMonthVectorBuilder,
+};
 pub use list::{ListIter, ListVector, ListVectorBuilder};
 pub use null::{NullVector, NullVectorBuilder};
 pub use primitive::{
