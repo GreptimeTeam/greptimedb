@@ -94,7 +94,7 @@ impl WriteSplitter {
 
         let partition_columns = self.partition_rule.partition_columns();
         if partition_columns.is_empty() {
-            // If no partition column, all rows are inserted into the first region.
+            // If no partition column, all requests are sent to the first region.
             let mut split = HashMap::new();
             split.insert(0, request);
             return Ok(split);
