@@ -73,8 +73,12 @@ pub enum Error {
     #[snafu(display("Catalog already exists, catalog: {}", catalog))]
     CatalogAlreadyExists { catalog: String, location: Location },
 
-    #[snafu(display("Schema already exists, schema: {}", schema))]
-    SchemaAlreadyExists { schema: String, location: Location },
+    #[snafu(display("Schema already exists, catalog:{}, schema: {}", catalog, schema))]
+    SchemaAlreadyExists {
+        catalog: String,
+        schema: String,
+        location: Location,
+    },
 
     #[snafu(display("Failed to convert raw key to str, source: {}", source))]
     ConvertRawKey {

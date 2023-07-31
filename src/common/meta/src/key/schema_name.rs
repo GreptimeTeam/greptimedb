@@ -26,7 +26,6 @@ use crate::kv_backend::KvBackendRef;
 use crate::range_stream::{PaginationStream, DEFAULT_PAGE_SIZE};
 use crate::rpc::store::{CompareAndPutRequest, RangeRequest};
 use crate::rpc::KeyValue;
-use crate::table_name::TableName;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SchemaNameKey<'a> {
@@ -44,15 +43,6 @@ impl<'a> SchemaNameKey<'a> {
 
     pub fn range_start_key(catalog: &str) -> String {
         format!("{}/{}/", SCHEMA_NAME_KEY_PREFIX, catalog)
-    }
-}
-
-impl<'a> From<&'a TableName> for SchemaNameKey<'a> {
-    fn from(value: &'a TableName) -> Self {
-        Self {
-            catalog: &value.catalog_name,
-            schema: &value.schema_name,
-        }
     }
 }
 
@@ -119,7 +109,8 @@ impl SchemaManager {
                 Ok(())
             } else {
                 error::SchemaAlreadyExistsSnafu {
-                    schema: schema.to_string(),
+                    catalog: schema.catalog,
+                    schema: schema.schema,
                 }
                 .fail()
             }
@@ -140,7 +131,6 @@ impl SchemaManager {
 
         Ok(CompareAndPutRequest::new()
             .with_key(raw_key)
-            .with_expect(vec![])
             .with_expect(SchemaNameValue.try_as_raw_value()?))
     }
 

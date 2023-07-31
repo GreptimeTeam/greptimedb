@@ -30,10 +30,11 @@ pub fn get_prefix_end_key(key: &[u8]) -> Vec<u8> {
 /// Get next prefix key of `key`.
 #[inline]
 pub fn get_next_prefix_key(key: &[u8]) -> Vec<u8> {
-    let mut key = Vec::from(key);
-    key.push(0);
+    let mut next = Vec::with_capacity(key.len() + 1);
+    next.extend_from_slice(key);
+    next.push(0);
 
-    key
+    next
 }
 
 #[cfg(test)]

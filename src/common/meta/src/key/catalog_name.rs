@@ -20,7 +20,6 @@ use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 
-use super::schema_name::SchemaNameKey;
 use crate::error::{self, Error, InvalidTableMetadataSnafu, Result};
 use crate::key::{TableMetaKey, CATALOG_NAME_KEY_PATTERN, CATALOG_NAME_KEY_PREFIX};
 use crate::kv_backend::KvBackendRef;
@@ -51,14 +50,6 @@ impl<'a> From<&'a TableName> for CatalogNameKey<'a> {
     fn from(value: &'a TableName) -> Self {
         Self {
             catalog: &value.catalog_name,
-        }
-    }
-}
-
-impl<'a, 'b: 'a> From<&'b SchemaNameKey<'b>> for CatalogNameKey<'a> {
-    fn from(value: &'b SchemaNameKey) -> Self {
-        Self {
-            catalog: value.catalog,
         }
     }
 }
@@ -142,7 +133,6 @@ impl CatalogManager {
 
         Ok(CompareAndPutRequest::new()
             .with_key(raw_key)
-            .with_expect(vec![])
             .with_expect(CatalogNameValue.try_as_raw_value()?))
     }
 
