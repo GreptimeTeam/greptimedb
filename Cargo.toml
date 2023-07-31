@@ -64,13 +64,13 @@ arrow-schema = { version = "43.0", features = ["serde"] }
 async-stream = "0.3"
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
-datafusion = { git = "https://github.com/apache/arrow-datafusion.git", rev = "16303ada9bda90c89b28c0d6d3600782967da03a" }
-datafusion-common = { git = "https://github.com/apache/arrow-datafusion.git", rev = "16303ada9bda90c89b28c0d6d3600782967da03a" }
-datafusion-expr = { git = "https://github.com/apache/arrow-datafusion.git", rev = "16303ada9bda90c89b28c0d6d3600782967da03a" }
-datafusion-optimizer = { git = "https://github.com/apache/arrow-datafusion.git", rev = "16303ada9bda90c89b28c0d6d3600782967da03a" }
-datafusion-physical-expr = { git = "https://github.com/apache/arrow-datafusion.git", rev = "16303ada9bda90c89b28c0d6d3600782967da03a" }
-datafusion-sql = { git = "https://github.com/apache/arrow-datafusion.git", rev = "16303ada9bda90c89b28c0d6d3600782967da03a" }
-datafusion-substrait = { git = "https://github.com/apache/arrow-datafusion.git", rev = "16303ada9bda90c89b28c0d6d3600782967da03a" }
+datafusion = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "2ceb7f927c40787773fdc466d6a4b79f3a6c0001" }
+datafusion-common = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "2ceb7f927c40787773fdc466d6a4b79f3a6c0001" }
+datafusion-expr = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "2ceb7f927c40787773fdc466d6a4b79f3a6c0001" }
+datafusion-optimizer = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "2ceb7f927c40787773fdc466d6a4b79f3a6c0001" }
+datafusion-physical-expr = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "2ceb7f927c40787773fdc466d6a4b79f3a6c0001" }
+datafusion-sql = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "2ceb7f927c40787773fdc466d6a4b79f3a6c0001" }
+datafusion-substrait = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "2ceb7f927c40787773fdc466d6a4b79f3a6c0001" }
 derive_builder = "0.12"
 futures = "0.3"
 futures-util = "0.3"

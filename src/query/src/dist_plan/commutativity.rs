@@ -107,7 +107,6 @@ impl Categorizer {
             | Expr::Exists(_) => Commutativity::Commutative,
 
             Expr::Like(_)
-            | Expr::ILike(_)
             | Expr::SimilarTo(_)
             | Expr::IsUnknown(_)
             | Expr::IsNotUnknown(_)
