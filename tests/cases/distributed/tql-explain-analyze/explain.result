@@ -15,13 +15,17 @@ TQL EXPLAIN (0, 10, '5s') test;
 +---------------+-----------------------------------------------------------------------------------------------------------------------------------------------------+
 | plan_type     | plan                                                                                                                                                |
 +---------------+-----------------------------------------------------------------------------------------------------------------------------------------------------+
-| logical_plan  | MergeScan [is_placeholder=false]                                                                                                                    |
-|               |   PromInstantManipulate: range=[0..0], lookback=[300000], interval=[300000], time index=[j]                                                         |
-|               |     PromSeriesNormalize: offset=[0], time index=[j], filter NaN: [false]                                                                            |
-|               |       PromSeriesDivide: tags=["k"]                                                                                                                  |
-|               |         Sort: test.k DESC NULLS LAST, test.j DESC NULLS LAST                                                                                        |
+| logical_plan  | PromInstantManipulate: range=[0..0], lookback=[300000], interval=[300000], time index=[j]                                                           |
+|               |   PromSeriesNormalize: offset=[0], time index=[j], filter NaN: [false]                                                                              |
+|               |     PromSeriesDivide: tags=["k"]                                                                                                                    |
+|               |       Sort: test.k DESC NULLS LAST, test.j DESC NULLS LAST                                                                                          |
+|               |         MergeScan [is_placeholder=false]                                                                                                            |
 |               |           TableScan: test projection=[i, j, k], partial_filters=[j >= TimestampMillisecond(-300000, None), j <= TimestampMillisecond(300000, None)] |
-| physical_plan | MergeScanExec: peers=[REDACTED
+| physical_plan | PromInstantManipulateExec: range=[0..0], lookback=[300000], interval=[300000], time index=[j]                                                       |
+|               |   PromSeriesNormalizeExec: offset=[0], time index=[j], filter NaN: [false]                                                                          |
+|               |     RepartitionExec: partitioning=REDACTED
+|               |       PromSeriesDivideExec: tags=["k"]                                                                                                              |
+|               |         MergeScanExec: peers=[REDACTED
 |               |                                                                                                                                                     |
 +---------------+-----------------------------------------------------------------------------------------------------------------------------------------------------+
 
@@ -47,14 +51,18 @@ TQL EXPLAIN host_load1{__field__="val"};
 +---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | plan_type     | plan                                                                                                                                                                           |
 +---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| logical_plan  | MergeScan [is_placeholder=false]                                                                                                                                               |
-|               |   PromInstantManipulate: range=[0..0], lookback=[300000], interval=[300000], time index=[ts]                                                                                   |
-|               |     PromSeriesNormalize: offset=[0], time index=[ts], filter NaN: [false]                                                                                                      |
-|               |       PromSeriesDivide: tags=["collector", "host"]                                                                                                                             |
-|               |         Sort: host_load1.collector DESC NULLS LAST, host_load1.host DESC NULLS LAST, host_load1.ts DESC NULLS LAST                                                             |
+| logical_plan  | PromInstantManipulate: range=[0..0], lookback=[300000], interval=[300000], time index=[ts]                                                                                     |
+|               |   PromSeriesNormalize: offset=[0], time index=[ts], filter NaN: [false]                                                                                                        |
+|               |     PromSeriesDivide: tags=["collector", "host"]                                                                                                                               |
+|               |       Sort: host_load1.collector DESC NULLS LAST, host_load1.host DESC NULLS LAST, host_load1.ts DESC NULLS LAST                                                               |
+|               |         MergeScan [is_placeholder=false]                                                                                                                                       |
 |               |           Projection: host_load1.val, host_load1.collector, host_load1.host, host_load1.ts                                                                                     |
 |               |             TableScan: host_load1 projection=[ts, collector, host, val], partial_filters=[ts >= TimestampMillisecond(-300000, None), ts <= TimestampMillisecond(300000, None)] |
-| physical_plan | MergeScanExec: peers=[REDACTED
+| physical_plan | PromInstantManipulateExec: range=[0..0], lookback=[300000], interval=[300000], time index=[ts]                                                                                 |
+|               |   PromSeriesNormalizeExec: offset=[0], time index=[ts], filter NaN: [false]                                                                                                    |
+|               |     RepartitionExec: partitioning=REDACTED
+|               |       PromSeriesDivideExec: tags=["collector", "host"]                                                                                                                         |
+|               |         MergeScanExec: peers=[REDACTED
 |               |                                                                                                                                                                                |
 +---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 

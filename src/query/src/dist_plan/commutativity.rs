@@ -50,12 +50,12 @@ impl Categorizer {
             }
             // TODO(ruihang): Change this to Commutative once Like is supported in substrait
             LogicalPlan::Filter(filter) => Self::check_expr(&filter.predicate),
-            LogicalPlan::Window(_) => Commutativity::CheckPartition,
+            LogicalPlan::Window(_) => Commutativity::Unimplemented,
             LogicalPlan::Aggregate(_) => {
                 // check all children exprs and uses the strictest level
-                Commutativity::CheckPartition
+                Commutativity::Unimplemented
             }
-            LogicalPlan::Sort(_) => Commutativity::CheckPartition,
+            LogicalPlan::Sort(_) => Commutativity::Unimplemented,
             LogicalPlan::Join(_) => Commutativity::NonCommutative,
             LogicalPlan::CrossJoin(_) => Commutativity::NonCommutative,
             LogicalPlan::Repartition(_) => {
