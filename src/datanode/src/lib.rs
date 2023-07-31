@@ -25,7 +25,8 @@ mod mock;
 pub mod server;
 pub mod sql;
 mod store;
-#[cfg(test)]
-mod tests;
 
 use greptimedb_telemetry::telemetry;
+
+#[cfg(test)]
+mod tests;

@@ -365,16 +365,13 @@ impl PromPlanner {
                     node: Arc::new(manipulate),
                 })
             }
-            PromExpr::MatrixSelector(MatrixSelector {
-                vector_selector,
-                range,
-            }) => {
+            PromExpr::MatrixSelector(MatrixSelector { vs, range }) => {
                 let VectorSelector {
                     name,
                     offset,
                     matchers,
                     ..
-                } = vector_selector;
+                } = vs;
                 // self.ctx.table_name = Some(name.context());
                 let matchers = self.preprocess_label_matchers(matchers, name)?;
                 self.setup_context().await?;
@@ -513,6 +510,7 @@ impl PromPlanner {
                 let _ = matchers.insert(matcher.clone());
             }
         }
+        let matchers = matchers.into_iter().collect();
         Ok(Matchers { matchers })
     }
 
@@ -667,8 +665,8 @@ impl PromPlanner {
     ) -> Result<Vec<DfExpr>> {
         match modifier {
             LabelModifier::Include(labels) => {
-                let mut exprs = Vec::with_capacity(labels.len());
-                for label in labels {
+                let mut exprs = Vec::with_capacity(labels.labels.len());
+                for label in &labels.labels {
                     // nonexistence label will be ignored
                     if let Ok(field) = input_schema.field_with_unqualified_name(label) {
                         exprs.push(DfExpr::Column(Column::from(field.name())));
@@ -676,7 +674,7 @@ impl PromPlanner {
                 }
 
                 // change the tag columns in context
-                self.ctx.tag_columns = labels.iter().cloned().collect();
+                self.ctx.tag_columns = labels.labels.to_vec();
 
                 // add timestamp column
                 exprs.push(self.create_time_index_column_expr()?);
@@ -692,7 +690,7 @@ impl PromPlanner {
 
                 // remove "without"-ed fields
                 // nonexistence label will be ignored
-                for label in labels {
+                for label in &labels.labels {
                     let _ = all_fields.remove(label);
                 }
 
@@ -1342,6 +1340,7 @@ mod test {
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
+    use promql_parser::label::Labels;
     use promql_parser::parser;
     use session::context::QueryContext;
     use table::metadata::{TableInfoBuilder, TableMetaBuilder};
@@ -1659,9 +1658,9 @@ mod test {
 
         // test group without
         if let PromExpr::Aggregate(AggregateExpr { modifier, .. }) = &mut eval_stmt.expr {
-            *modifier = Some(LabelModifier::Exclude(
-                vec![String::from("tag_1")].into_iter().collect(),
-            ));
+            *modifier = Some(LabelModifier::Exclude(Labels {
+                labels: vec![String::from("tag_1")].into_iter().collect(),
+            }));
         }
         let table_provider = build_test_table_provider("some_metric".to_string(), 2, 2).await;
         let plan = PromPlanner::stmt_to_plan(table_provider, eval_stmt)
