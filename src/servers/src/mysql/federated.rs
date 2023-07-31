@@ -239,7 +239,7 @@ fn select_variable(query: &str, query_context: QueryContextRef) -> Option<Output
 }
 
 fn check_select_variable(query: &str, query_context: QueryContextRef) -> Option<Output> {
-    if vec![&SELECT_VAR_PATTERN, &MYSQL_CONN_JAVA_PATTERN]
+    if [&SELECT_VAR_PATTERN, &MYSQL_CONN_JAVA_PATTERN]
         .iter()
         .any(|r| r.is_match(query))
     {

@@ -151,7 +151,12 @@ impl InformationSchemaTablesBuilder {
                 .table_names(&catalog_name, &schema_name)
                 .await?
             {
-                let Some(table) = catalog_manager.table(&catalog_name, &schema_name, &table_name).await? else { continue };
+                let Some(table) = catalog_manager
+                    .table(&catalog_name, &schema_name, &table_name)
+                    .await?
+                else {
+                    continue;
+                };
                 let table_info = table.table_info();
                 self.add_table(
                     &catalog_name,

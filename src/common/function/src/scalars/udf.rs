@@ -77,7 +77,7 @@ mod tests {
 
     #[test]
     fn test_create_udf() {
-        let f = Arc::new(TestAndFunction::default());
+        let f = Arc::new(TestAndFunction);
 
         let args: Vec<VectorRef> = vec![
             Arc::new(ConstantVector::new(

@@ -146,7 +146,9 @@ pub fn print_caller(args: TokenStream, input: TokenStream) -> TokenStream {
                 .expect("Expected an ident!")
                 .to_string();
             if ident == "depth" {
-                let Lit::Int(i) = &name_value.lit else { panic!("Expected 'depth' to be a valid int!") };
+                let Lit::Int(i) = &name_value.lit else {
+                    panic!("Expected 'depth' to be a valid int!")
+                };
                 depth = i.base10_parse::<usize>().expect("Invalid 'depth' value");
                 break;
             }

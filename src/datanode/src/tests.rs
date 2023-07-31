@@ -154,7 +154,9 @@ async fn test_open_region_handler() {
     ]));
 
     let instruction = open_region_instruction();
-    let Instruction::OpenRegion(region_ident) = instruction.clone() else { unreachable!() };
+    let Instruction::OpenRegion(region_ident) = instruction.clone() else {
+        unreachable!()
+    };
     let table_ident = &region_ident.table_ident;
 
     let table = prepare_table(instance.inner()).await;

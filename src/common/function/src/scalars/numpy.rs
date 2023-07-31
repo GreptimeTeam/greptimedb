@@ -25,6 +25,6 @@ pub(crate) struct NumpyFunction;
 
 impl NumpyFunction {
     pub fn register(registry: &FunctionRegistry) {
-        registry.register(Arc::new(ClipFunction::default()));
+        registry.register(Arc::new(ClipFunction));
     }
 }

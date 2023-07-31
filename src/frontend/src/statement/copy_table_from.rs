@@ -315,7 +315,7 @@ impl StatementExecutor {
                 let columns_values = fields
                     .iter()
                     .cloned()
-                    .zip(vectors.into_iter())
+                    .zip(vectors)
                     .collect::<HashMap<_, _>>();
 
                 pending.push(table.insert(InsertRequest {

@@ -264,7 +264,7 @@ pub fn build_insert_request(entry_type: EntryType, key: &[u8], value: &[u8]) -> 
     let primary_key_columns = build_primary_key_columns(entry_type, key);
 
     let mut columns_values = HashMap::with_capacity(6);
-    columns_values.extend(primary_key_columns.into_iter());
+    columns_values.extend(primary_key_columns);
 
     let _ = columns_values.insert(
         "value".to_string(),
@@ -523,7 +523,7 @@ mod tests {
             EngineConfig::default(),
             EngineImpl::new(
                 StorageEngineConfig::default(),
-                Arc::new(NoopLogStore::default()),
+                Arc::new(NoopLogStore),
                 object_store.clone(),
                 noop_compaction_scheduler,
             )
@@ -574,9 +574,15 @@ mod tests {
         assert_eq!(batch.num_rows(), 1);
 
         let row = batch.rows().next().unwrap();
-        let Value::UInt8(entry_type) = row[0] else { unreachable!() };
-        let Value::Binary(key) = row[1].clone() else { unreachable!() };
-        let Value::Binary(value) = row[3].clone() else { unreachable!() };
+        let Value::UInt8(entry_type) = row[0] else {
+            unreachable!()
+        };
+        let Value::Binary(key) = row[1].clone() else {
+            unreachable!()
+        };
+        let Value::Binary(value) = row[3].clone() else {
+            unreachable!()
+        };
         let entry = decode_system_catalog(Some(entry_type), Some(&*key), Some(&*value)).unwrap();
         let expected = Entry::Table(TableEntry {
             catalog_name: DEFAULT_CATALOG_NAME.to_string(),

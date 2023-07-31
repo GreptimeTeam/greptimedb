@@ -654,7 +654,9 @@ mod tests {
         let columns = vec![builder.to_vector()];
         let record_batch = RecordBatch::new(schema, columns).unwrap();
         let output = execute_show_with_filter(record_batch, None).await.unwrap();
-        let Output::RecordBatches(record_batches) = output else {unreachable!()};
+        let Output::RecordBatches(record_batches) = output else {
+            unreachable!()
+        };
         let expected = "\
 +----------------+
 | Tables         |
@@ -682,12 +684,18 @@ mod tests {
         )
         .unwrap()[0]
             .clone();
-        let Statement::ShowTables(ShowTables { kind, .. }) = statement else {unreachable!()};
-        let ShowKind::Where(filter) = kind else {unreachable!()};
+        let Statement::ShowTables(ShowTables { kind, .. }) = statement else {
+            unreachable!()
+        };
+        let ShowKind::Where(filter) = kind else {
+            unreachable!()
+        };
         let output = execute_show_with_filter(record_batch, Some(filter))
             .await
             .unwrap();
-        let Output::RecordBatches(record_batches) = output else {unreachable!()};
+        let Output::RecordBatches(record_batches) = output else {
+            unreachable!()
+        };
         let expected = "\
 +---------+
 | Tables  |

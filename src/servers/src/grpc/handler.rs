@@ -111,7 +111,9 @@ impl GreptimeRequestHandler {
         header: Option<&RequestHeader>,
         query_ctx: &QueryContextRef,
     ) -> TonicResult<InternalResult<()>> {
-        let Some(user_provider) = self.user_provider.as_ref() else { return Ok(Ok(())) };
+        let Some(user_provider) = self.user_provider.as_ref() else {
+            return Ok(Ok(()));
+        };
 
         let auth_scheme = header
             .and_then(|header| {

@@ -78,7 +78,9 @@ impl CreateTable {
             .iter()
             .map(|c| {
                 if is_time_index(c) {
-                    let TableConstraint::Unique { columns, ..} = c else { unreachable!() };
+                    let TableConstraint::Unique { columns, .. } = c else {
+                        unreachable!()
+                    };
 
                     format_indent!("{}TIME INDEX ({})", format_list_comma!(columns))
                 } else {

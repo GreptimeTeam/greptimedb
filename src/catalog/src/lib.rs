@@ -218,13 +218,27 @@ pub async fn datanode_stat(catalog_manager: &CatalogManagerRef) -> (u64, Vec<Reg
     let mut region_number: u64 = 0;
     let mut region_stats = Vec::new();
 
-    let Ok(catalog_names) = catalog_manager.catalog_names().await else { return (region_number, region_stats) };
+    let Ok(catalog_names) = catalog_manager.catalog_names().await else {
+        return (region_number, region_stats);
+    };
     for catalog_name in catalog_names {
-        let Ok(schema_names) = catalog_manager.schema_names(&catalog_name).await else { continue };
+        let Ok(schema_names) = catalog_manager.schema_names(&catalog_name).await else {
+            continue;
+        };
         for schema_name in schema_names {
-            let Ok(table_names) = catalog_manager.table_names(&catalog_name,&schema_name).await else { continue };
+            let Ok(table_names) = catalog_manager
+                .table_names(&catalog_name, &schema_name)
+                .await
+            else {
+                continue;
+            };
             for table_name in table_names {
-                let Ok(Some(table)) = catalog_manager.table(&catalog_name, &schema_name, &table_name).await else { continue };
+                let Ok(Some(table)) = catalog_manager
+                    .table(&catalog_name, &schema_name, &table_name)
+                    .await
+                else {
+                    continue;
+                };
 
                 let table_info = table.table_info();
                 let region_numbers = &table_info.meta.region_numbers;

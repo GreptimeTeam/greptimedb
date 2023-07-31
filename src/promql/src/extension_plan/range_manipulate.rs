@@ -115,7 +115,11 @@ impl RangeManipulate {
         // process time index column
         // the raw timestamp field is preserved. And a new timestamp_range field is appended to the last.
         let Some(ts_col_index) = input_schema.index_of_column_by_name(None, time_index)? else {
-            return Err(datafusion::common::field_not_found(None::<TableReference>, time_index, input_schema.as_ref()))
+            return Err(datafusion::common::field_not_found(
+                None::<TableReference>,
+                time_index,
+                input_schema.as_ref(),
+            ));
         };
         let ts_col_field = columns[ts_col_index].field();
         let timestamp_range_field = Field::new(
@@ -128,7 +132,11 @@ impl RangeManipulate {
         // process value columns
         for name in field_columns {
             let Some(index) = input_schema.index_of_column_by_name(None, name)? else {
-                return Err(datafusion::common::field_not_found(None::<TableReference>, name, input_schema.as_ref()))
+                return Err(datafusion::common::field_not_found(
+                    None::<TableReference>,
+                    name,
+                    input_schema.as_ref(),
+                ));
             };
             columns[index] = DFField::from(RangeArray::convert_field(columns[index].field()));
         }

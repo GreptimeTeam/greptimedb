@@ -13,6 +13,7 @@ common-telemetry = { path = "../telemetry" }
 proc-macro2 = "1.0"
 quote = "1.0"
 syn = "1.0"
+proc-macro2 = "1.0.66"
 
 [dev-dependencies]
 arc-swap = "1.0"

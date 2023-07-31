@@ -89,8 +89,9 @@ impl DeactivateRegion {
                 let InstructionReply::CloseRegion(SimpleReply { result, error }) = reply else {
                     return UnexpectedInstructionReplySnafu {
                         mailbox_message: msg.to_string(),
-                        reason: "expect close region reply"
-                    }.fail();
+                        reason: "expect close region reply",
+                    }
+                    .fail();
                 };
                 if result {
                     InactiveNodeManager::new(&ctx.in_memory)
@@ -108,7 +109,7 @@ impl DeactivateRegion {
                     RetryLaterSnafu { reason }.fail()
                 }
             }
-            Err(e) if matches!(e, Error::MailboxTimeout { .. }) => {
+            Err(Error::MailboxTimeout { .. }) => {
                 // Since we are in a region failover situation, the Datanode that the failed region
                 // resides might be unreachable. So we wait for the region lease to expire. The
                 // region would be closed by its own [RegionAliveKeeper].
@@ -140,7 +141,7 @@ impl State for DeactivateRegion {
             .await;
         let mailbox_receiver = match result {
             Ok(mailbox_receiver) => mailbox_receiver,
-            Err(e) if matches!(e, Error::PusherNotFound { .. }) => {
+            Err(Error::PusherNotFound { .. }) => {
                 // See the mailbox received timeout situation comments above.
                 self.wait_for_region_lease_expiry().await;
                 return Ok(Box::new(ActivateRegion::new(self.candidate)));

@@ -86,7 +86,7 @@ impl ExtensionPlanner for DistExtensionPlanner {
                     .create_physical_plan(input_plan, session_state)
                     .await?;
                 let Some(table_name) = self.get_table_name(input_plan)? else {
-                    // no relation found in input plan, going to execute them locally 
+                    // no relation found in input plan, going to execute them locally
                     return Ok(Some(input_physical_plan));
                 };
 

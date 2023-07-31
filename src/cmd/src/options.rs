@@ -158,10 +158,10 @@ mod tests {
         let env_prefix = "DATANODE_UT";
         temp_env::with_vars(
             // The following environment variables will be used to override the values in the config file.
-            vec![
+            [
                 (
                     // storage.manifest.checkpoint_margin = 99
-                    vec![
+                    [
                         env_prefix.to_string(),
                         "storage".to_uppercase(),
                         "manifest".to_uppercase(),
@@ -172,7 +172,7 @@ mod tests {
                 ),
                 (
                     // storage.type = S3
-                    vec![
+                    [
                         env_prefix.to_string(),
                         "storage".to_uppercase(),
                         "type".to_uppercase(),
@@ -182,7 +182,7 @@ mod tests {
                 ),
                 (
                     // storage.bucket = mybucket
-                    vec![
+                    [
                         env_prefix.to_string(),
                         "storage".to_uppercase(),
                         "bucket".to_uppercase(),
@@ -192,7 +192,7 @@ mod tests {
                 ),
                 (
                     // storage.manifest.gc_duration = 42s
-                    vec![
+                    [
                         env_prefix.to_string(),
                         "storage".to_uppercase(),
                         "manifest".to_uppercase(),
@@ -203,7 +203,7 @@ mod tests {
                 ),
                 (
                     // storage.manifest.checkpoint_on_startup = true
-                    vec![
+                    [
                         env_prefix.to_string(),
                         "storage".to_uppercase(),
                         "manifest".to_uppercase(),
@@ -214,7 +214,7 @@ mod tests {
                 ),
                 (
                     // wal.dir = /other/wal/dir
-                    vec![
+                    [
                         env_prefix.to_string(),
                         "wal".to_uppercase(),
                         "dir".to_uppercase(),
@@ -224,7 +224,7 @@ mod tests {
                 ),
                 (
                     // meta_client_options.metasrv_addrs = 127.0.0.1:3001,127.0.0.1:3002,127.0.0.1:3003
-                    vec![
+                    [
                         env_prefix.to_string(),
                         "meta_client_options".to_uppercase(),
                         "metasrv_addrs".to_uppercase(),

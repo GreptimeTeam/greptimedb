@@ -58,7 +58,7 @@ impl From<NullArray> for NullVector {
 
 impl Vector for NullVector {
     fn data_type(&self) -> ConcreteDataType {
-        ConcreteDataType::Null(NullType::default())
+        ConcreteDataType::Null(NullType)
     }
 
     fn vector_type_name(&self) -> String {
@@ -269,7 +269,7 @@ mod tests {
 
     #[test]
     fn test_null_vector_builder() {
-        let mut builder = NullType::default().create_mutable_vector(3);
+        let mut builder = NullType.create_mutable_vector(3);
         builder.push_null();
         assert!(builder.try_push_value_ref(ValueRef::Int32(123)).is_err());
 

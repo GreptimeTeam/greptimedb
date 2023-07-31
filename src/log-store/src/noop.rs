@@ -96,12 +96,12 @@ impl LogStore for NoopLogStore {
         let _ = data;
         let _ = id;
         let _ = ns;
-        EntryImpl::default()
+        EntryImpl
     }
 
     fn namespace(&self, id: NamespaceId) -> Self::Namespace {
         let _ = id;
-        NamespaceImpl::default()
+        NamespaceImpl
     }
 
     async fn obsolete(
@@ -121,27 +121,21 @@ mod tests {
 
     #[test]
     fn test_mock_entry() {
-        let e = EntryImpl::default();
+        let e = EntryImpl;
         assert_eq!(0, e.data().len());
         assert_eq!(0, e.id());
     }
 
     #[tokio::test]
     async fn test_noop_logstore() {
-        let store = NoopLogStore::default();
-        let e = store.entry("".as_bytes(), 1, NamespaceImpl::default());
+        let store = NoopLogStore;
+        let e = store.entry("".as_bytes(), 1, NamespaceImpl);
         let _ = store.append(e.clone()).await.unwrap();
         assert!(store.append_batch(vec![e]).await.is_ok());
-        store
-            .create_namespace(&NamespaceImpl::default())
-            .await
-            .unwrap();
+        store.create_namespace(&NamespaceImpl).await.unwrap();
         assert_eq!(0, store.list_namespaces().await.unwrap().len());
-        store
-            .delete_namespace(&NamespaceImpl::default())
-            .await
-            .unwrap();
-        assert_eq!(NamespaceImpl::default(), store.namespace(0));
-        store.obsolete(NamespaceImpl::default(), 1).await.unwrap();
+        store.delete_namespace(&NamespaceImpl).await.unwrap();
+        assert_eq!(NamespaceImpl, store.namespace(0));
+        store.obsolete(NamespaceImpl, 1).await.unwrap();
     }
 }

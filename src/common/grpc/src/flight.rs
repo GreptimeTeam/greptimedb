@@ -249,7 +249,9 @@ mod test {
         )
         .unwrap();
         assert_eq!(flight_data.len(), 3);
-        let [d1, d2, d3] = flight_data.as_slice() else { unreachable!() };
+        let [d1, d2, d3] = flight_data.as_slice() else {
+            unreachable!()
+        };
 
         let decoder = &mut FlightDecoder::default();
         assert!(decoder.schema.is_none());
@@ -263,19 +265,25 @@ mod test {
 
         let message = decoder.try_decode(d1.clone()).unwrap();
         assert!(matches!(message, FlightMessage::Schema(_)));
-        let FlightMessage::Schema(decoded_schema) = message else { unreachable!() };
+        let FlightMessage::Schema(decoded_schema) = message else {
+            unreachable!()
+        };
         assert_eq!(decoded_schema, schema);
 
         let _ = decoder.schema.as_ref().unwrap();
 
         let message = decoder.try_decode(d2.clone()).unwrap();
         assert!(matches!(message, FlightMessage::Recordbatch(_)));
-        let FlightMessage::Recordbatch(actual_batch) = message else { unreachable!() };
+        let FlightMessage::Recordbatch(actual_batch) = message else {
+            unreachable!()
+        };
         assert_eq!(actual_batch, batch1);
 
         let message = decoder.try_decode(d3.clone()).unwrap();
         assert!(matches!(message, FlightMessage::Recordbatch(_)));
-        let FlightMessage::Recordbatch(actual_batch) = message else { unreachable!() };
+        let FlightMessage::Recordbatch(actual_batch) = message else {
+            unreachable!()
+        };
         assert_eq!(actual_batch, batch2);
     }
 

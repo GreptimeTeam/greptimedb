@@ -218,21 +218,27 @@ mod tests {
     #[test]
     fn test_transform_placeholders() {
         let insert = parse_sql("insert into demo values(?,?,?)");
-        let Statement::Insert(insert) = transform_placeholders(insert) else { unreachable!()};
+        let Statement::Insert(insert) = transform_placeholders(insert) else {
+            unreachable!()
+        };
         assert_eq!(
             "INSERT INTO demo VALUES ($1, $2, $3)",
             insert.inner.to_string()
         );
 
         let delete = parse_sql("delete from demo where host=? and idc=?");
-        let Statement::Delete(delete) = transform_placeholders(delete) else { unreachable!()};
+        let Statement::Delete(delete) = transform_placeholders(delete) else {
+            unreachable!()
+        };
         assert_eq!(
             "DELETE FROM demo WHERE host = $1 AND idc = $2",
             delete.inner.to_string()
         );
 
         let select = parse_sql("select from demo where host=? and idc in (select idc from idcs where name=?) and cpu>?");
-        let Statement::Query(select) = transform_placeholders(select) else { unreachable!()};
+        let Statement::Query(select) = transform_placeholders(select) else {
+            unreachable!()
+        };
         assert_eq!("SELECT from AS demo WHERE host = $1 AND idc IN (SELECT idc FROM idcs WHERE name = $2) AND cpu > $3", select.inner.to_string());
     }
 }
