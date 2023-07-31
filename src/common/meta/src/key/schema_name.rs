@@ -73,7 +73,7 @@ impl TableMetaKey for SchemaNameKey<'_> {
 }
 
 /// Decoder `KeyValue` to ({schema},())
-pub fn schema_decoder(kv: &KeyValue) -> Result<(String, ())> {
+pub fn schema_decoder(kv: KeyValue) -> Result<(String, ())> {
     let str = std::str::from_utf8(&kv.key).context(error::ConvertRawKeySnafu)?;
     let schema_name = SchemaNameKey::try_from(str)?;
 

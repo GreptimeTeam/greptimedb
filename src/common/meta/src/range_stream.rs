@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::VecDeque;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -25,9 +26,9 @@ use crate::rpc::store::{RangeRequest, RangeResponse};
 use crate::rpc::KeyValue;
 use crate::util::get_next_prefix_key;
 
-pub type KeyValueDecoderFn<K, V> = dyn Fn(&KeyValue) -> Result<(K, V)> + Send + Sync;
+pub type KeyValueDecoderFn<K, V> = dyn Fn(KeyValue) -> Result<(K, V)> + Send + Sync;
 
-pub enum PaginationStreamState<K, V> {
+enum PaginationStreamState<K, V> {
     /// At the start of reading.
     Init,
     /// Decoding key value pairs.
@@ -40,7 +41,7 @@ pub enum PaginationStreamState<K, V> {
 
 pub const DEFAULT_PAGE_SIZE: usize = 512;
 
-pub struct PaginationStreamFactory {
+struct PaginationStreamFactory {
     kv: KvBackendRef,
     /// key is the first key for the range, If range_end is not given, the
     /// request only looks up key.
@@ -147,22 +148,17 @@ impl<K, V> PaginationStream<K, V> {
     }
 }
 
-pub struct SimpleKeyValueDecoder<K, V> {
-    kv: Vec<KeyValue>,
+struct SimpleKeyValueDecoder<K, V> {
+    kv: VecDeque<KeyValue>,
     decoder: Arc<KeyValueDecoderFn<K, V>>,
-    index: usize,
 }
 
 impl<K, V> Iterator for SimpleKeyValueDecoder<K, V> {
     type Item = Result<(K, V)>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.index < self.kv.len() {
-            let kv = &self.kv[self.index];
-            let kv = (self.decoder)(kv);
-            self.index += 1;
-
-            Some(kv)
+        if let Some(kv) = self.kv.pop_front() {
+            Some((self.decoder)(kv))
         } else {
             None
         }
@@ -195,9 +191,8 @@ impl<K, V> Stream for PaginationStream<K, V> {
                     Ok((factory, Some(resp))) => {
                         self.factory = Some(factory);
                         let decoder = SimpleKeyValueDecoder {
-                            kv: resp.kvs,
+                            kv: resp.kvs.into(),
                             decoder: self.decoder_fn.clone(),
-                            index: 0,
                         };
                         self.state = PaginationStreamState::Decoding(decoder);
                     }
@@ -229,8 +224,8 @@ mod tests {
     use crate::kv_backend::KvBackend;
     use crate::rpc::store::PutRequest;
 
-    fn decoder(kv: &KeyValue) -> Result<(Vec<u8>, Vec<u8>)> {
-        Ok((kv.key.clone(), kv.value.clone()))
+    fn decoder(kv: KeyValue) -> Result<(Vec<u8>, Vec<u8>)> {
+        Ok((kv.key.clone(), kv.value))
     }
 
     #[tokio::test]
