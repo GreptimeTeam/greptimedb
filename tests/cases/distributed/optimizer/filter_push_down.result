@@ -56,7 +56,7 @@ SELECT i1.i,i2.i FROM integers i1 LEFT OUTER JOIN integers i2 ON 1=1 WHERE i1.i>
 
 SELECT i1.i,i2.i FROM integers i1 LEFT OUTER JOIN integers i2 ON 1=0 WHERE i2.i IS NOT NULL ORDER BY 2;
 
-Error: 1003(Internal), This feature is not implemented: Unsupported expression: greptime.public.integers.i IS NOT NULL
+Error: 1003(Internal), This feature is not implemented: Unsupported expression: IsNotNull(Column(Column { relation: Some(Full { catalog: "greptime", schema: "public", table: "integers" }), name: "i" }))
 
 SELECT i1.i,i2.i FROM integers i1 LEFT OUTER JOIN integers i2 ON 1=0 WHERE i2.i>1 ORDER BY 2;
 
@@ -65,7 +65,7 @@ SELECT i1.i,i2.i FROM integers i1 LEFT OUTER JOIN integers i2 ON 1=0 WHERE i2.i>
 
 SELECT i1.i,i2.i FROM integers i1 LEFT OUTER JOIN integers i2 ON 1=0 WHERE CASE WHEN i2.i IS NULL THEN False ELSE True END ORDER BY 2;
 
-Error: 1003(Internal), This feature is not implemented: Unsupported expression: greptime.public.integers.i IS NOT NULL
+Error: 1003(Internal), This feature is not implemented: Unsupported expression: IsNotNull(Column(Column { relation: Some(Full { catalog: "greptime", schema: "public", table: "integers" }), name: "i" }))
 
 SELECT DISTINCT i1.i,i2.i FROM integers i1 LEFT OUTER JOIN integers i2 ON 1=0 WHERE i2.i IS NULL ORDER BY 1;
 
@@ -110,7 +110,7 @@ SELECT * FROM integers WHERE i NOT IN ((SELECT i FROM integers WHERE i=1)) ORDER
 
 SELECT * FROM integers WHERE i IN ((SELECT i FROM integers)) AND i<3 ORDER BY i;
 
-Error: 3001(EngineExecuteQuery), No field named __correlated_sq_3.i. Valid fields are integers.i, integers.j.
+Error: 3001(EngineExecuteQuery), No field named __correlated_sq_1.i. Valid fields are integers.i, integers.j.
 
 SELECT i1.i,i2.i FROM integers i1, integers i2 WHERE i IN ((SELECT i FROM integers)) AND i1.i=i2.i ORDER BY 1;
 
