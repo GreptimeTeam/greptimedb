@@ -13,12 +13,11 @@
 // limitations under the License.
 
 use api::v1::alter_expr::Kind;
-use api::v1::column::SemanticType;
 use api::v1::promql_request::Promql;
 use api::v1::{
     column, AddColumn, AddColumns, AlterExpr, Column, ColumnDataType, ColumnDef, CreateTableExpr,
     InsertRequest, InsertRequests, PromInstantQuery, PromRangeQuery, PromqlRequest, RequestHeader,
-    TableId,
+    SemanticType, TableId,
 };
 use client::{Client, Database, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::consts::{MIN_USER_TABLE_ID, MITO_ENGINE};

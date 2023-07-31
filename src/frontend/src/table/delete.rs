@@ -68,8 +68,8 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
-    use api::v1::column::{SemanticType, Values};
-    use api::v1::{Column, ColumnDataType};
+    use api::v1::column::Values;
+    use api::v1::{Column, ColumnDataType, SemanticType};
     use datatypes::prelude::{ConcreteDataType, VectorRef};
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::Int32Vector;

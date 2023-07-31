@@ -195,6 +195,7 @@ impl GrpcQueryHandler for DummyInstance {
                 }
             }
             Request::Ddl(_) => unimplemented!(),
+            Request::RowInserts(_) => unimplemented!(),
         };
         Ok(output)
     }

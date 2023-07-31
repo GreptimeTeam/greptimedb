@@ -12,8 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::column::SemanticType;
-use api::v1::{column, Column, ColumnDataType, InsertRequest as GrpcInsertRequest};
+use api::v1::{column, Column, ColumnDataType, InsertRequest as GrpcInsertRequest, SemanticType};
 
 use crate::error::{self, Result};
 

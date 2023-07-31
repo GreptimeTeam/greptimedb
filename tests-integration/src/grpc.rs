@@ -16,14 +16,14 @@
 mod test {
     use std::collections::HashMap;
 
-    use api::v1::column::{SemanticType, Values};
+    use api::v1::column::Values;
     use api::v1::ddl_request::Expr as DdlExpr;
     use api::v1::greptime_request::Request;
     use api::v1::query_request::Query;
     use api::v1::{
         alter_expr, AddColumn, AddColumns, AlterExpr, Column, ColumnDataType, ColumnDef,
         CreateDatabaseExpr, CreateTableExpr, DdlRequest, DeleteRequest, DropTableExpr,
-        FlushTableExpr, InsertRequest, InsertRequests, QueryRequest,
+        FlushTableExpr, InsertRequest, InsertRequests, QueryRequest, SemanticType,
     };
     use common_catalog::consts::MITO_ENGINE;
     use common_query::Output;

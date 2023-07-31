@@ -16,10 +16,10 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
-use api::v1::column::{SemanticType, Values};
+use api::v1::column::Values;
 use api::v1::{
     AddColumn, AddColumns, Column, ColumnDataType, ColumnDef, CreateTableExpr,
-    InsertRequest as GrpcInsertRequest,
+    InsertRequest as GrpcInsertRequest, SemanticType,
 };
 use common_base::BitVec;
 use common_time::time::Time;
@@ -575,8 +575,8 @@ mod tests {
     use std::{assert_eq, vec};
 
     use api::helper::ColumnDataTypeWrapper;
-    use api::v1::column::{self, SemanticType, Values};
-    use api::v1::{Column, ColumnDataType};
+    use api::v1::column::{self, Values};
+    use api::v1::{Column, ColumnDataType, SemanticType};
     use common_base::BitVec;
     use common_catalog::consts::MITO_ENGINE;
     use common_time::timestamp::{TimeUnit, Timestamp};

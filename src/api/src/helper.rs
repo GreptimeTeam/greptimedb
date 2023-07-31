@@ -268,6 +268,7 @@ pub fn request_type(request: &Request) -> &'static str {
         Request::Query(query_req) => query_request_type(query_req),
         Request::Ddl(ddl_req) => ddl_request_type(ddl_req),
         Request::Delete(_) => "delete",
+        Request::RowInserts(_) => "row_inserts",
     }
 }
 
@@ -611,7 +612,7 @@ mod tests {
 
     #[test]
     fn test_column_put_vector() {
-        use crate::v1::column::SemanticType;
+        use crate::v1::SemanticType;
         // Some(false), None, Some(true), Some(true)
         let mut column = Column {
             column_name: "test".to_string(),

@@ -715,6 +715,7 @@ impl GrpcQueryHandler for DistInstance {
                     }
                 }
             }
+            Request::RowInserts(_) => todo!("jeremy"),
         }
     }
 }
