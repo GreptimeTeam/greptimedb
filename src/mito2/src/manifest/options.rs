@@ -17,17 +17,13 @@
 use common_datasource::compression::CompressionType;
 use object_store::ObjectStore;
 
-use crate::metadata::RegionMetadata;
-
+/// Options for manifest.
 #[derive(Debug, Clone)]
 pub struct RegionManifestOptions {
+    /// Directory to store manifest.
     pub manifest_dir: String,
     pub object_store: ObjectStore,
     pub compress_type: CompressionType,
     /// Interval of version ([ManifestVersion](store_api::manifest::ManifestVersion)) between two checkpoints.
     pub checkpoint_interval: u64,
-    /// Initial [RegionMetadata](crate::metadata::RegionMetadata) of this region.
-    /// Only need to set when create a new region, otherwise it will be ignored.
-    // TODO(yingwen): Could we pass RegionMetadataRef?
-    pub initial_metadata: Option<RegionMetadata>,
 }
