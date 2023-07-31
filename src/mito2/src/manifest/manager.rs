@@ -377,7 +377,7 @@ mod test {
     #[tokio::test]
     async fn create_manifest_manager() {
         let metadata = Arc::new(basic_region_metadata());
-        let env = TestEnv::new("");
+        let env = TestEnv::new();
         let manager = env
             .create_manifest_manager(CompressionType::Uncompressed, 10, Some(metadata.clone()))
             .await
@@ -389,7 +389,7 @@ mod test {
 
     #[tokio::test]
     async fn open_manifest_manager() {
-        let env = TestEnv::new("");
+        let env = TestEnv::new();
         // Try to opens an empty manifest.
         assert!(env
             .create_manifest_manager(CompressionType::Uncompressed, 10, None)
@@ -420,7 +420,7 @@ mod test {
     #[tokio::test]
     async fn region_change_add_column() {
         let metadata = Arc::new(basic_region_metadata());
-        let env = TestEnv::new("");
+        let env = TestEnv::new();
         let manager = env
             .create_manifest_manager(CompressionType::Uncompressed, 10, Some(metadata.clone()))
             .await

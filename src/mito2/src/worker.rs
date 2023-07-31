@@ -400,7 +400,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_worker_group_start_stop() {
-        let env = TestEnv::new("group-stop");
+        let env = TestEnv::with_prefix("group-stop");
         let group = env
             .create_worker_group(MitoConfig {
                 num_workers: 4,

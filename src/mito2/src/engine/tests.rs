@@ -22,7 +22,7 @@ use crate::test_util::{CreateRequestBuilder, TestEnv};
 
 #[tokio::test]
 async fn test_engine_new_stop() {
-    let env = TestEnv::new("engine-stop");
+    let env = TestEnv::with_prefix("engine-stop");
     let engine = env.create_engine(MitoConfig::default()).await;
 
     engine.stop().await.unwrap();
@@ -37,7 +37,7 @@ async fn test_engine_new_stop() {
 
 #[tokio::test]
 async fn test_engine_create_new_region() {
-    let env = TestEnv::new("new-region");
+    let env = TestEnv::with_prefix("new-region");
     let engine = env.create_engine(MitoConfig::default()).await;
 
     let region_id = RegionId::new(1, 1);
@@ -49,7 +49,7 @@ async fn test_engine_create_new_region() {
 
 #[tokio::test]
 async fn test_engine_create_region_if_not_exists() {
-    let env = TestEnv::new("create-not-exists");
+    let env = TestEnv::with_prefix("create-not-exists");
     let engine = env.create_engine(MitoConfig::default()).await;
 
     let builder = CreateRequestBuilder::new(RegionId::new(1, 1)).create_if_not_exists(true);
@@ -61,7 +61,7 @@ async fn test_engine_create_region_if_not_exists() {
 
 #[tokio::test]
 async fn test_engine_create_existing_region() {
-    let env = TestEnv::new("create-existing");
+    let env = TestEnv::with_prefix("create-existing");
     let engine = env.create_engine(MitoConfig::default()).await;
 
     let builder = CreateRequestBuilder::new(RegionId::new(1, 1));
@@ -73,9 +73,4 @@ async fn test_engine_create_existing_region() {
         matches!(err, Error::RegionExists { .. }),
         "unexpected err: {err}"
     );
-}
-
-#[tokio::test]
-async fn test_engine_open_empty() {
-    let env = TestEnv::new("open-empty");
 }
