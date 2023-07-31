@@ -69,6 +69,8 @@ pub struct CreateRequest {
 pub struct OpenRequest {
     /// Region to open.
     pub region_id: RegionId,
+    /// Data directory of the region.
+    pub region_dir: String,
     /// Options of the created region.
     pub options: RegionOptions,
 }

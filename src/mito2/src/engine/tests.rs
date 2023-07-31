@@ -74,3 +74,8 @@ async fn test_engine_create_existing_region() {
         "unexpected err: {err}"
     );
 }
+
+#[tokio::test]
+async fn test_engine_open_empty() {
+    let env = TestEnv::new("open-empty");
+}

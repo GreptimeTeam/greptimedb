@@ -162,6 +162,18 @@ pub enum Error {
         region_id: RegionId,
         location: Location,
     },
+
+    #[snafu(display(
+        "Region {} is corrupted, reason: {}, location: {}",
+        region_id,
+        reason,
+        location
+    ))]
+    RegionCorrupted {
+        region_id: RegionId,
+        reason: String,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -180,7 +192,8 @@ impl ErrorExt for Error {
             | Utf8 { .. }
             | RegionExists { .. }
             | NewRecordBatch { .. }
-            | RegionNotFound { .. } => StatusCode::Unexpected,
+            | RegionNotFound { .. }
+            | RegionCorrupted { .. } => StatusCode::Unexpected,
             InvalidScanIndex { .. } | InvalidMeta { .. } | InvalidSchema { .. } => {
                 StatusCode::InvalidArguments
             }

@@ -50,10 +50,11 @@ impl<S> RegionWorkerLoop<S> {
 
         // Create a MitoRegion from the RegionMetadata.
         let region = RegionOpener::new(
-            metadata,
+            request.region_id,
             self.memtable_builder.clone(),
             self.object_store.clone(),
         )
+        .metadata(metadata)
         .region_dir(&request.region_dir)
         .create(&self.config)
         .await?;

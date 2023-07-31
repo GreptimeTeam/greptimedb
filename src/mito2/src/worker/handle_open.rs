@@ -14,9 +14,12 @@
 
 //! Handling open request.
 
+use std::sync::Arc;
+
 use common_telemetry::logging;
 
 use crate::error::Result;
+use crate::region::opener::RegionOpener;
 use crate::worker::request::OpenRequest;
 use crate::worker::RegionWorkerLoop;
 
@@ -28,11 +31,21 @@ impl<S> RegionWorkerLoop<S> {
 
         logging::info!("Try to open region {}", request.region_id);
 
-        // TODO(yingwen):
-        // 1. try to open manifest
-        // 2. recover region from wal
-        // 3. insert region into wal
+        // Open region from specific region dir.
+        let region = RegionOpener::new(
+            request.region_id,
+            self.memtable_builder.clone(),
+            self.object_store.clone(),
+        )
+        .region_dir(&request.region_dir)
+        .open(&self.config)
+        .await?;
 
-        unimplemented!()
+        logging::info!("Region {} is opened", request.region_id);
+
+        // Insert the MitoRegion into the RegionMap.
+        self.regions.insert_region(Arc::new(region));
+
+        Ok(())
     }
 }
