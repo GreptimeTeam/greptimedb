@@ -165,7 +165,7 @@ struct CommutativeVisitor {
     next_stage: Vec<LogicalPlan>,
     // hash of the stop node
     stop_node: Option<u64>,
-    /// Partiton columns of current visiting table
+    /// Partition columns of current visiting table
     current_partition_cols: Option<Vec<String>>,
 }
 
