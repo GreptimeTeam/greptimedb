@@ -674,7 +674,7 @@ impl PromPlanner {
                 }
 
                 // change the tag columns in context
-                self.ctx.tag_columns = labels.labels.to_vec();
+                self.ctx.tag_columns = labels.labels.clone();
 
                 // add timestamp column
                 exprs.push(self.create_time_index_column_expr()?);
