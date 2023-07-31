@@ -21,7 +21,12 @@ use common_query::prelude::{Signature, Volatility};
 use common_time::timezone::TimeZone;
 use common_time::Timestamp;
 use datatypes::prelude::{ConcreteDataType, Vector};
-use datatypes::vectors::{StringVector, VectorRef};
+use datatypes::types::TimestampType;
+use datatypes::value::Value;
+use datatypes::vectors::{
+    Int64Vector, StringVector, TimestampMicrosecondVector, TimestampMillisecondVector,
+    TimestampNanosecondVector, TimestampSecondVector, VectorRef,
+};
 use snafu::ensure;
 
 use crate::scalars::function::{Function, FunctionContext};
@@ -38,10 +43,15 @@ fn convert_to_timezone(arg: &str) -> Option<TimeZone> {
     }
 }
 
-fn convert_to_timestrap(arg: &str) -> Option<Timestamp> {
-    match Timestamp::from_str(arg) {
-        Ok(ts) => Some(ts),
-        Err(_) => None,
+fn convert_to_timestamp(arg: &Value) -> Option<Timestamp> {
+    match arg {
+        Value::Int64(ts) => Some(Timestamp::from(*ts)),
+        Value::String(ts) => match Timestamp::from_str(ts.as_utf8()) {
+            Ok(ts) => Some(ts),
+            Err(_) => None,
+        },
+        Value::Timestamp(ts) => Some(*ts),
+        _ => None,
     }
 }
 
@@ -73,6 +83,9 @@ impl Function for ToTimeZoneFunction {
             2,
             vec![
                 ConcreteDataType::timestamp_second_datatype(),
+                ConcreteDataType::timestamp_microsecond_datatype(),
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                ConcreteDataType::timestamp_nanosecond_datatype(),
                 ConcreteDataType::int64_datatype(),
                 ConcreteDataType::string_datatype(),
             ],
@@ -96,8 +109,54 @@ impl Function for ToTimeZoneFunction {
                 let array = columns[0].to_arrow_array();
                 let vector = StringVector::try_from_arrow_array(&array).unwrap();
                 Ok((0..vector.len())
-                    .map(|i| convert_to_timestrap(&vector.get(i).to_string()))
+                    .map(|i| convert_to_timestamp(&vector.get(i)))
                     .collect::<Vec<_>>())
+            }
+            ConcreteDataType::Int64(_) | ConcreteDataType::Int32(_) => {
+                let array = columns[0].to_arrow_array();
+                let vector = Int64Vector::try_from_arrow_array(&array).unwrap();
+                Ok((0..vector.len())
+                    .map(|i| convert_to_timestamp(&vector.get(i)))
+                    .collect::<Vec<_>>())
+            }
+            ConcreteDataType::Timestamp(ts) => {
+                let array = columns[0].to_arrow_array();
+                match ts {
+                    TimestampType::Second(_) => {
+                        let vector = paste::expr!(TimestampSecondVector::try_from_arrow_array(
+                            array
+                        )
+                        .unwrap());
+                        Ok((0..vector.len())
+                            .map(|i| convert_to_timestamp(&vector.get(i)))
+                            .collect::<Vec<_>>())
+                    }
+                    TimestampType::Millisecond(_) => {
+                        let vector = paste::expr!(
+                            TimestampMillisecondVector::try_from_arrow_array(array).unwrap()
+                        );
+                        Ok((0..vector.len())
+                            .map(|i| convert_to_timestamp(&vector.get(i)))
+                            .collect::<Vec<_>>())
+                    }
+                    TimestampType::Microsecond(_) => {
+                        let vector = paste::expr!(
+                            TimestampMicrosecondVector::try_from_arrow_array(array).unwrap()
+                        );
+                        Ok((0..vector.len())
+                            .map(|i| convert_to_timestamp(&vector.get(i)))
+                            .collect::<Vec<_>>())
+                    }
+                    TimestampType::Nanosecond(_) => {
+                        let vector = paste::expr!(TimestampNanosecondVector::try_from_arrow_array(
+                            array
+                        )
+                        .unwrap());
+                        Ok((0..vector.len())
+                            .map(|i| convert_to_timestamp(&vector.get(i)))
+                            .collect::<Vec<_>>())
+                    }
+                }
             }
             _ => UnsupportedInputDataTypeSnafu {
                 function: NAME,
@@ -144,8 +203,13 @@ impl fmt::Display for ToTimeZoneFunction {
 mod tests {
 
     use common_query::prelude::TypeSignature;
+    use datatypes::prelude::ScalarVectorBuilder;
+    use datatypes::scalars::ScalarVector;
+    use datatypes::timestamp::{
+        TimestampMicrosecond, TimestampMillisecond, TimestampNanosecond, TimestampSecond,
+    };
     use datatypes::value::Value;
-    use datatypes::vectors::StringVector;
+    use datatypes::vectors::{Int64Vector, StringVector};
 
     use super::{ToTimeZoneFunction, *};
     use crate::scalars::Function;
@@ -166,6 +230,9 @@ mod tests {
                 volatility: Volatility::Immutable
             } if  valid_types == vec![
                 ConcreteDataType::timestamp_second_datatype(),
+                ConcreteDataType::timestamp_microsecond_datatype(),
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                ConcreteDataType::timestamp_nanosecond_datatype(),
                 ConcreteDataType::int64_datatype(),
                 ConcreteDataType::string_datatype(),
             ]
@@ -203,5 +270,230 @@ mod tests {
                 _ => unreachable!(),
             }
         }
+    }
+
+    #[test]
+    fn test_i64_to_timezone() {
+        let f = ToTimeZoneFunction::default();
+        assert_eq!("to_timezone", f.name());
+
+        assert_eq!(
+            ConcreteDataType::string_datatype(),
+            f.return_type(&[]).unwrap()
+        );
+
+        assert!(matches!(f.signature(),
+        Signature {
+                type_signature: TypeSignature::Uniform(2, valid_types),
+                volatility: Volatility::Immutable
+            } if  valid_types == vec![
+                ConcreteDataType::timestamp_second_datatype(),
+                ConcreteDataType::timestamp_microsecond_datatype(),
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                ConcreteDataType::timestamp_nanosecond_datatype(),
+                ConcreteDataType::int64_datatype(),
+                ConcreteDataType::string_datatype(),
+            ]
+        ));
+
+        let times = vec![Some(0), None, Some(0), None];
+        let tzs = vec![Some("America/New_York"), None, Some("Europe/Moscow"), None];
+        let results = vec![
+            Some("1969-12-31 19:00:00"),
+            None,
+            Some("1970-01-01 03:00:00"),
+            None,
+        ];
+        let args: Vec<VectorRef> = vec![
+            Arc::new(Int64Vector::from(times.clone())),
+            Arc::new(StringVector::from(tzs.clone())),
+        ];
+        let vector = f.eval(FunctionContext::default(), &args).unwrap();
+        assert_eq!(4, vector.len());
+        for (i, _t) in times.iter().enumerate() {
+            let v = vector.get(i);
+            if i == 1 || i == 3 {
+                assert_eq!(Value::Null, v);
+                continue;
+            }
+            match v {
+                Value::String(time) => {
+                    assert_eq!(time.as_utf8(), (*results.get(i).unwrap()).unwrap());
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    fn test_timestamp_to_timezone() {
+        let f = ToTimeZoneFunction::default();
+        assert_eq!("to_timezone", f.name());
+
+        assert_eq!(
+            ConcreteDataType::string_datatype(),
+            f.return_type(&[]).unwrap()
+        );
+
+        assert!(matches!(f.signature(),
+        Signature {
+                type_signature: TypeSignature::Uniform(2, valid_types),
+                volatility: Volatility::Immutable
+            } if  valid_types == vec![
+                ConcreteDataType::timestamp_second_datatype(),
+                ConcreteDataType::timestamp_microsecond_datatype(),
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                ConcreteDataType::timestamp_nanosecond_datatype(),
+                ConcreteDataType::int64_datatype(),
+                ConcreteDataType::string_datatype(),
+            ]
+        ));
+
+        let results = vec![
+            Some("1969-12-31 19:00:01"),
+            None,
+            Some("1970-01-01 03:00:01"),
+            None,
+        ];
+
+        let times: Vec<Option<TimestampSecond>> = vec![
+            Some(TimestampSecond::new(1)),
+            None,
+            Some(TimestampSecond::new(1)),
+            None,
+        ];
+        let ts_vector: TimestampSecondVector = build_vector_from_slice(&times);
+        let tzs = vec![Some("America/New_York"), None, Some("Europe/Moscow"), None];
+        let args: Vec<VectorRef> = vec![
+            Arc::new(ts_vector),
+            Arc::new(StringVector::from(tzs.clone())),
+        ];
+        let vector = f.eval(FunctionContext::default(), &args).unwrap();
+        assert_eq!(4, vector.len());
+        for (i, _t) in times.iter().enumerate() {
+            let v = vector.get(i);
+            if i == 1 || i == 3 {
+                assert_eq!(Value::Null, v);
+                continue;
+            }
+            match v {
+                Value::String(time) => {
+                    assert_eq!(time.as_utf8(), (*results.get(i).unwrap()).unwrap());
+                }
+                _ => unreachable!(),
+            }
+        }
+
+        let results = vec![
+            Some("1969-12-31 19:00:00.001"),
+            None,
+            Some("1970-01-01 03:00:00.001"),
+            None,
+        ];
+
+        let times: Vec<Option<TimestampMillisecond>> = vec![
+            Some(TimestampMillisecond::new(1)),
+            None,
+            Some(TimestampMillisecond::new(1)),
+            None,
+        ];
+        let ts_vector: TimestampMillisecondVector = build_vector_from_slice(&times);
+
+        let args: Vec<VectorRef> = vec![
+            Arc::new(ts_vector),
+            Arc::new(StringVector::from(tzs.clone())),
+        ];
+        let vector = f.eval(FunctionContext::default(), &args).unwrap();
+        assert_eq!(4, vector.len());
+        for (i, _t) in times.iter().enumerate() {
+            let v = vector.get(i);
+            if i == 1 || i == 3 {
+                assert_eq!(Value::Null, v);
+                continue;
+            }
+            match v {
+                Value::String(time) => {
+                    assert_eq!(time.as_utf8(), (*results.get(i).unwrap()).unwrap());
+                }
+                _ => unreachable!(),
+            }
+        }
+
+        let results = vec![
+            Some("1969-12-31 19:00:00.000001"),
+            None,
+            Some("1970-01-01 03:00:00.000001"),
+            None,
+        ];
+
+        let times: Vec<Option<TimestampMicrosecond>> = vec![
+            Some(TimestampMicrosecond::new(1)),
+            None,
+            Some(TimestampMicrosecond::new(1)),
+            None,
+        ];
+        let ts_vector: TimestampMicrosecondVector = build_vector_from_slice(&times);
+
+        let args: Vec<VectorRef> = vec![
+            Arc::new(ts_vector),
+            Arc::new(StringVector::from(tzs.clone())),
+        ];
+        let vector = f.eval(FunctionContext::default(), &args).unwrap();
+        assert_eq!(4, vector.len());
+        for (i, _t) in times.iter().enumerate() {
+            let v = vector.get(i);
+            if i == 1 || i == 3 {
+                assert_eq!(Value::Null, v);
+                continue;
+            }
+            match v {
+                Value::String(time) => {
+                    assert_eq!(time.as_utf8(), (*results.get(i).unwrap()).unwrap());
+                }
+                _ => unreachable!(),
+            }
+        }
+
+        let results = vec![
+            Some("1969-12-31 19:00:00.000000001"),
+            None,
+            Some("1970-01-01 03:00:00.000000001"),
+            None,
+        ];
+
+        let times: Vec<Option<TimestampNanosecond>> = vec![
+            Some(TimestampNanosecond::new(1)),
+            None,
+            Some(TimestampNanosecond::new(1)),
+            None,
+        ];
+        let ts_vector: TimestampNanosecondVector = build_vector_from_slice(&times);
+
+        let args: Vec<VectorRef> = vec![
+            Arc::new(ts_vector),
+            Arc::new(StringVector::from(tzs.clone())),
+        ];
+        let vector = f.eval(FunctionContext::default(), &args).unwrap();
+        assert_eq!(4, vector.len());
+        for (i, _t) in times.iter().enumerate() {
+            let v = vector.get(i);
+            if i == 1 || i == 3 {
+                assert_eq!(Value::Null, v);
+                continue;
+            }
+            match v {
+                Value::String(time) => {
+                    assert_eq!(time.as_utf8(), (*results.get(i).unwrap()).unwrap());
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+    fn build_vector_from_slice<T: ScalarVector>(items: &[Option<T::RefItem<'_>>]) -> T {
+        let mut builder = T::Builder::with_capacity(items.len());
+        for item in items {
+            builder.push(*item);
+        }
+        builder.finish()
     }
 }
