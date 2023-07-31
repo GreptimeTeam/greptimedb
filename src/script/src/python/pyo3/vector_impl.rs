@@ -33,10 +33,10 @@ use crate::python::pyo3::utils::{pyo3_obj_try_to_typed_val, to_py_err};
 macro_rules! get_con_type {
     ($obj:ident, $($pyty:ident => $con_ty:ident),*$(,)?) => {
     $(
-        if $obj.is_instance_of::<$pyty>(){
+        if $obj.is_instance_of::<$pyty>() {
             Ok(ConcreteDataType::$con_ty())
         }
-    )else* else{
+    ) else* else{
         Err(PyValueError::new_err("Unsupported pyobject type: {obj:?}"))
     }
     };

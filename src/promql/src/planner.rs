@@ -372,7 +372,6 @@ impl PromPlanner {
                     matchers,
                     ..
                 } = vs;
-                // self.ctx.table_name = Some(name.context());
                 let matchers = self.preprocess_label_matchers(matchers, name)?;
                 self.setup_context().await?;
 

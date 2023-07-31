@@ -19,10 +19,8 @@
 use std::fmt::{self, Debug, Formatter};
 use std::sync::Arc;
 
-use datafusion_expr::AccumulatorFactoryFunction;
 use datafusion_expr::{
-    // AccumulatorFunctionImplementation as DfAccumulatorFunctionImplementation,
-    AggregateUDF as DfAggregateUdf,
+    AccumulatorFactoryFunction, AggregateUDF as DfAggregateUdf,
     StateTypeFunction as DfStateTypeFunction,
 };
 use datatypes::arrow::datatypes::DataType as ArrowDataType;
