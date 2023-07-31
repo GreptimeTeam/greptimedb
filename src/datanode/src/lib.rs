@@ -17,6 +17,7 @@
 
 pub mod datanode;
 pub mod error;
+mod greptimedb_telemetry;
 pub mod heartbeat;
 pub mod instance;
 pub mod metrics;
@@ -26,3 +27,5 @@ pub mod sql;
 mod store;
 #[cfg(test)]
 mod tests;
+
+use greptimedb_telemetry::telemetry;

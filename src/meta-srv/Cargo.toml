@@ -6,6 +6,7 @@ license.workspace = true
 
 [features]
 mock = []
+greptimedb-telemetry = []
 
 [dependencies]
 anymap = "1.0.0-beta.2"
@@ -24,6 +25,7 @@ common-procedure = { path = "../common/procedure" }
 common-runtime = { path = "../common/runtime" }
 common-telemetry = { path = "../common/telemetry" }
 common-time = { path = "../common/time" }
+common-greptimedb-telemetry = { path = "../common/greptimedb-telemetry" }
 dashmap = "5.4"
 datatypes = { path = "../datatypes" }
 derive_builder.workspace = true
@@ -51,6 +53,7 @@ tower = "0.4"
 typetag = "0.2"
 url = "2.3"
 servers = { path = "../servers" }
+uuid.workspace = true
 
 [dev-dependencies]
 chrono.workspace = true
