@@ -332,7 +332,10 @@ impl CatalogManager for FrontendCatalogManager {
             .table_name_manager()
             .tables(catalog, schema)
             .await
-            .context(TableMetadataManagerSnafu)?;
+            .context(TableMetadataManagerSnafu)?
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect::<Vec<String>>();
         if catalog == DEFAULT_CATALOG_NAME && schema == DEFAULT_SCHEMA_NAME {
             tables.push("numbers".to_string());
         }
