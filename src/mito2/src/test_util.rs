@@ -78,7 +78,7 @@ impl TestEnv {
     }
 
     /// If `initial_metadata` is `Some`, creates a new manifest. If `initial_metadata`
-    /// is `None`, opens an existing manifest.
+    /// is `None`, opens an existing manifest and returns `None` if no such manifest.
     pub async fn create_manifest_manager(
         &self,
         compress_type: CompressionType,
