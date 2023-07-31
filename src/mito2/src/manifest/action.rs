@@ -90,8 +90,9 @@ impl RegionManifestBuilder {
         }
     }
 
-    pub fn apply_change(&mut self, change: RegionChange) {
+    pub fn apply_change(&mut self, manifest_version: ManifestVersion, change: RegionChange) {
         self.metadata = Some(change.metadata);
+        self.manifest_version = manifest_version;
     }
 
     pub fn apply_edit(&mut self, manifest_version: ManifestVersion, edit: RegionEdit) {
@@ -154,22 +155,17 @@ impl RegionCheckpoint {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct RegionMetaActionList {
     pub actions: Vec<RegionMetaAction>,
-    pub prev_version: ManifestVersion,
 }
 
 impl RegionMetaActionList {
     pub fn with_action(action: RegionMetaAction) -> Self {
         Self {
             actions: vec![action],
-            prev_version: 0,
         }
     }
 
     pub fn new(actions: Vec<RegionMetaAction>) -> Self {
-        Self {
-            actions,
-            prev_version: 0,
-        }
+        Self { actions }
     }
 }
 
@@ -179,11 +175,7 @@ impl RegionMetaActionList {
         self.actions.insert(0, RegionMetaAction::Protocol(action));
     }
 
-    pub fn set_prev_version(&mut self, version: ManifestVersion) {
-        self.prev_version = version;
-    }
-
-    /// Encode self into json in the form of string lines, starts with prev_version and then action json list.
+    /// Encode self into json in the form of string lines.
     pub fn encode(&self) -> Result<Vec<u8>> {
         let json = serde_json::to_string(&self).context(SerdeJsonSnafu)?;
 

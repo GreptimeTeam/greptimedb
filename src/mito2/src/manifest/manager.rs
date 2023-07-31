@@ -79,11 +79,27 @@ impl RegionManifestManager {
     }
 }
 
+#[cfg(test)]
+impl RegionManifestManager {
+    pub(crate) async fn validate_manifest(
+        &self,
+        expect: &RegionMetadataRef,
+        last_version: ManifestVersion,
+    ) {
+        let manifest = self.manifest().await;
+        assert_eq!(manifest.metadata, *expect);
+
+        let inner = self.inner.read().await;
+        assert_eq!(inner.manifest.manifest_version, inner.last_version);
+        assert_eq!(last_version, inner.last_version);
+    }
+}
+
 #[derive(Debug)]
 struct RegionManifestManagerInner {
     store: ManifestObjectStore,
     options: RegionManifestOptions,
-    version: ManifestVersion,
+    last_version: ManifestVersion,
     manifest: Arc<RegionManifest>,
 }
 
@@ -102,23 +118,33 @@ impl RegionManifestManagerInner {
             options.manifest_dir, metadata
         );
 
+        let version = MIN_VERSION;
         let mut manifest_builder = RegionManifestBuilder::default();
         // set the initial metadata.
-        manifest_builder.apply_change(RegionChange { metadata });
-
+        manifest_builder.apply_change(
+            version,
+            RegionChange {
+                metadata: metadata.clone(),
+            },
+        );
         let manifest = manifest_builder.try_build()?;
+
         debug!(
             "Build region manifest in {}, manifest: {:?}",
             options.manifest_dir, manifest
         );
-        let version = manifest.manifest_version;
+
+        // Persist region change.
+        let action_list =
+            RegionMetaActionList::with_action(RegionMetaAction::Change(RegionChange { metadata }));
+        store.save(version, &action_list.encode()?).await?;
 
         // todo: start gc task
 
         Ok(Self {
             store,
             options,
-            version,
+            last_version: version,
             manifest: Arc::new(manifest),
         })
     }
@@ -163,7 +189,7 @@ impl RegionManifestManagerInner {
             for action in action_list.actions {
                 match action {
                     RegionMetaAction::Change(action) => {
-                        manifest_builder.apply_change(action);
+                        manifest_builder.apply_change(manifest_version, action);
                     }
                     RegionMetaAction::Edit(action) => {
                         manifest_builder.apply_edit(manifest_version, action);
@@ -196,7 +222,7 @@ impl RegionManifestManagerInner {
         Ok(Some(Self {
             store,
             options,
-            version,
+            last_version: version,
             manifest: Arc::new(manifest),
         }))
     }
@@ -207,8 +233,7 @@ impl RegionManifestManagerInner {
     }
 
     async fn update(&mut self, action_list: RegionMetaActionList) -> Result<ManifestVersion> {
-        let version = self.inc_version();
-
+        let version = self.increase_version();
         self.store.save(version, &action_list.encode()?).await?;
 
         let mut manifest_builder =
@@ -216,7 +241,7 @@ impl RegionManifestManagerInner {
         for action in action_list.actions {
             match action {
                 RegionMetaAction::Change(action) => {
-                    manifest_builder.apply_change(action);
+                    manifest_builder.apply_change(version, action);
                 }
                 RegionMetaAction::Edit(action) => {
                     manifest_builder.apply_edit(version, action);
@@ -237,11 +262,10 @@ impl RegionManifestManagerInner {
 }
 
 impl RegionManifestManagerInner {
-    /// Increases current version and returns previous version.
-    fn inc_version(&mut self) -> ManifestVersion {
-        let version = self.version;
-        self.version += 1;
-        version
+    /// Increases last version and returns the increased version.
+    fn increase_version(&mut self) -> ManifestVersion {
+        self.last_version += 1;
+        self.last_version
     }
 
     // pub (crate) fn checkpointer(&self) -> Checkpointer {
@@ -360,8 +384,7 @@ mod test {
             .unwrap()
             .unwrap();
 
-        let manifest = manager.manifest().await;
-        assert_eq!(manifest.metadata, metadata);
+        manager.validate_manifest(&metadata, 0).await;
     }
 
     #[tokio::test]
@@ -391,8 +414,7 @@ mod test {
             .unwrap()
             .unwrap();
 
-        let manifest = manager.manifest().await;
-        assert_eq!(manifest.metadata, metadata);
+        manager.validate_manifest(&metadata, 0).await;
     }
 
     #[tokio::test]
@@ -413,17 +435,14 @@ mod test {
         });
         let new_metadata = Arc::new(new_metadata_builder.build().unwrap());
 
-        let mut action_list =
+        let action_list =
             RegionMetaActionList::with_action(RegionMetaAction::Change(RegionChange {
                 metadata: new_metadata.clone(),
             }));
-        action_list.set_prev_version(0);
 
-        let prev_version = manager.update(action_list).await.unwrap();
-        assert_eq!(prev_version, 0);
-
-        let manifest = manager.manifest().await;
-        assert_eq!(manifest.metadata, new_metadata);
+        let current_version = manager.update(action_list).await.unwrap();
+        assert_eq!(current_version, 1);
+        manager.validate_manifest(&new_metadata, 1).await;
 
         // Reopen the manager.
         manager.stop().await.unwrap();
@@ -432,7 +451,6 @@ mod test {
             .await
             .unwrap()
             .unwrap();
-        let manifest = manager.manifest().await;
-        assert_eq!(manifest.metadata, new_metadata);
+        manager.validate_manifest(&new_metadata, 1).await;
     }
 }
