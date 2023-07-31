@@ -396,6 +396,7 @@ pub(crate) fn to_alter_expr(
         AlterTableOperation::RenameTable { new_table_name } => Kind::RenameTable(RenameTable {
             new_table_name: new_table_name.to_string(),
         }),
+        AlterTableOperation::SetOptions { .. } => todo!(),
     };
 
     Ok(AlterExpr {

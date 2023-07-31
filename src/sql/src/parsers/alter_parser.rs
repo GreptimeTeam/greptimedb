@@ -84,9 +84,13 @@ impl<'a> ParserContext<'a> {
                 }
             };
             AlterTableOperation::RenameTable { new_table_name }
+        } else if parser.parse_keyword(Keyword::SET) {
+            let options = self.parser.parse_options(Keyword::OPTIONS)?;
+
+            AlterTableOperation::SetOptions { options }
         } else {
             return Err(ParserError::ParserError(format!(
-                "expect keyword ADD or DROP or RENAME after ALTER TABLE, found {}",
+                "expect keyword ADD, DROP, SET or RENAME after ALTER TABLE, found {}",
                 parser.peek_token()
             )));
         };
@@ -245,8 +249,11 @@ mod tests {
     fn test_parse_alter_rename_table() {
         let sql = "ALTER TABLE test_table table_t";
         let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap_err();
+
         let err = result.iter_chain().last().unwrap().to_string();
-        assert!(err.contains("expect keyword ADD or DROP or RENAME after ALTER TABLE"));
+        assert!(err
+            .to_string()
+            .contains("expect keyword ADD, DROP, SET or RENAME after ALTER TABLE"));
 
         let sql = "ALTER TABLE test_table RENAME table_t";
         let mut result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap();
@@ -263,6 +270,34 @@ mod tests {
                 match alter_operation {
                     AlterTableOperation::RenameTable { new_table_name } => {
                         assert_eq!("table_t", new_table_name);
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn test_parse_alter_table_options() {
+        let sql = "ALTER TABLE test_table SET OPTIONS(ttl='30d', write_buffer_size='32MB')";
+        let mut result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap();
+        assert_eq!(1, result.len());
+
+        let statement = result.remove(0);
+        assert_matches!(statement, Statement::Alter { .. });
+        match statement {
+            Statement::Alter(alter_table) => {
+                assert_eq!("test_table", alter_table.table_name().0[0].value);
+
+                let alter_operation = alter_table.alter_operation();
+                match alter_operation {
+                    AlterTableOperation::SetOptions { options } => {
+                        assert_eq!(2, options.len());
+                        assert_eq!("ttl", options[0].name.to_string());
+                        assert_eq!("'30d'", options[0].value.to_string());
+                        assert_eq!("write_buffer_size", options[1].name.to_string());
+                        assert_eq!("'32MB'", options[1].value.to_string());
                     }
                     _ => unreachable!(),
                 }

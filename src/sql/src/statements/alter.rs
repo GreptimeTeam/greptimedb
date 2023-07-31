@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use common_query::AddColumnLocation;
-use sqlparser::ast::{ColumnDef, Ident, ObjectName, TableConstraint};
 use sqlparser_derive::{Visit, VisitMut};
+use sqlparser::ast::{ColumnDef, Ident, ObjectName, SqlOption, TableConstraint};
 
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
 pub struct AlterTable {
@@ -49,7 +49,14 @@ pub enum AlterTableOperation {
         location: Option<AddColumnLocation>,
     },
     /// `DROP COLUMN <name>`
-    DropColumn { name: Ident },
+    DropColumn {
+        name: Ident,
+    },
     /// `RENAME <new_table_name>`
-    RenameTable { new_table_name: String },
+    RenameTable {
+        new_table_name: String,
+    },
+    SetOptions {
+        options: Vec<SqlOption>,
+    },
 }
