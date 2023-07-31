@@ -51,6 +51,12 @@ impl WriteSplitter {
         let row_nums = check_req(&insert)?;
         let mut insert = insert;
         let partition_columns = self.partition_rule.partition_columns();
+        if partition_columns.is_empty() {
+            // If no partition column, all rows are inserted into the first region.
+            let mut split = HashMap::new();
+            split.insert(0, insert);
+            return Ok(split);
+        }
         let missing_columns = schema
             .column_schemas()
             .iter()
@@ -87,6 +93,12 @@ impl WriteSplitter {
         Self::validate_delete_request(&request)?;
 
         let partition_columns = self.partition_rule.partition_columns();
+        if partition_columns.is_empty() {
+            // If no partition column, all requests are sent to the first region.
+            let mut split = HashMap::new();
+            split.insert(0, request);
+            return Ok(split);
+        }
         let values = find_partitioning_values(&request.key_column_values, &partition_columns)?;
         let regional_value_indexes = self.split_partitioning_values(&values)?;
 
@@ -280,7 +292,8 @@ mod tests {
     use datatypes::types::{BooleanType, Int16Type, StringType};
     use datatypes::value::Value;
     use datatypes::vectors::{
-        BooleanVectorBuilder, Int16VectorBuilder, MutableVector, StringVectorBuilder, Vector,
+        BooleanVectorBuilder, Int16VectorBuilder, MutableVector, StringVector, StringVectorBuilder,
+        Vector,
     };
     use serde::{Deserialize, Serialize};
     use store_api::storage::RegionNumber;
@@ -359,7 +372,7 @@ mod tests {
     }
 
     #[test]
-    fn test_writer_spliter_without_partition_columns() {
+    fn test_writer_spliter_with_id_partition_columns() {
         let (mock_schema, insert) = mock_schema_and_insert_request_without_partition_columns();
         let rule = Arc::new(MockPartitionRule) as PartitionRuleRef;
         let spliter = WriteSplitter::with_partition_rule(rule);
@@ -390,6 +403,53 @@ mod tests {
                 ),
             ],
         );
+    }
+
+    #[test]
+    fn test_writer_spliter_without_partition_columns() {
+        let (mock_schema, insert) = mock_schema_and_insert_request_without_partition_columns();
+        let rule = Arc::new(EmptyPartitionRule) as PartitionRuleRef;
+        let spliter = WriteSplitter::with_partition_rule(rule);
+        let ret = spliter.split_insert(insert, &mock_schema).unwrap();
+
+        assert_eq!(1, ret.len());
+
+        let r1_insert = ret.get(&0).unwrap();
+
+        assert_eq!("demo", r1_insert.table_name);
+
+        let r1_columns = &r1_insert.columns_values;
+        assert_eq!(2, r1_columns.len());
+        assert_columns(
+            r1_columns,
+            &[
+                (
+                    "host",
+                    &[Value::from("host1"), Value::Null, Value::from("host3")],
+                ),
+                (
+                    "enable_reboot",
+                    &[Value::from(true), Value::from(false), Value::from(true)],
+                ),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_delete_spliter_without_partition_columns() {
+        let mut key_column_values = HashMap::new();
+        key_column_values.insert(
+            "host".to_string(),
+            Arc::new(StringVector::from(vec!["localhost"])) as _,
+        );
+        let delete = DeleteRequest { key_column_values };
+        let rule = Arc::new(EmptyPartitionRule) as PartitionRuleRef;
+        let spliter = WriteSplitter::with_partition_rule(rule);
+        let ret = spliter
+            .split_delete(delete, vec![&String::from("host")])
+            .unwrap();
+
+        assert_eq!(1, ret.len());
     }
 
     #[test]
@@ -625,6 +685,30 @@ mod tests {
                 return Ok(1);
             }
             unreachable!()
+        }
+
+        fn find_regions_by_exprs(&self, _: &[PartitionExpr]) -> Result<Vec<RegionNumber>, Error> {
+            unimplemented!()
+        }
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    struct EmptyPartitionRule;
+
+    // PARTITION BY LIST COLUMNS() (
+    //     PARTITION r0 VALUES LESS THAN MAXVALUE,
+    // );
+    impl PartitionRule for EmptyPartitionRule {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
+        fn partition_columns(&self) -> Vec<String> {
+            vec![]
+        }
+
+        fn find_region(&self, _: &[Value]) -> Result<RegionNumber, Error> {
+            Ok(0)
         }
 
         fn find_regions_by_exprs(&self, _: &[PartitionExpr]) -> Result<Vec<RegionNumber>, Error> {

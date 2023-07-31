@@ -60,6 +60,7 @@ impl SerializerRegistry for ExtensionSerializer {
             name if name == EmptyMetric::name() => Err(DataFusionError::Substrait(
                 "EmptyMetric should not be serialized".to_string(),
             )),
+            name if name == "MergeScan" => Ok(vec![]),
             other => Err(DataFusionError::NotImplemented(format!(
                 "Serizlize logical plan for {}",
                 other

@@ -19,4 +19,5 @@ mod planner;
 mod utils;
 
 pub use analyzer::DistPlannerAnalyzer;
+pub use merge_scan::MergeScanLogicalPlan;
 pub use planner::DistExtensionPlanner;

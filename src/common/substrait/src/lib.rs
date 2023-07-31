@@ -17,6 +17,7 @@
 
 mod df_substrait;
 pub mod error;
+pub mod extension_serializer;
 
 use std::sync::Arc;
 
@@ -40,5 +41,5 @@ pub trait SubstraitPlan {
         schema: &str,
     ) -> Result<Self::Plan, Self::Error>;
 
-    fn encode(&self, plan: Self::Plan) -> Result<Bytes, Self::Error>;
+    fn encode(&self, plan: &Self::Plan) -> Result<Bytes, Self::Error>;
 }
