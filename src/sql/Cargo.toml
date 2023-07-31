@@ -17,6 +17,6 @@ datatypes = { path = "../datatypes" }
 hex = "0.4"
 itertools.workspace = true
 mito = { path = "../mito" }
-once_cell = "1.10"
+once_cell.workspace = true
 snafu = { version = "0.7", features = ["backtraces"] }
 sqlparser.workspace = true

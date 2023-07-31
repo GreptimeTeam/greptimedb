@@ -18,6 +18,7 @@ mod grpc;
 mod influxdb;
 mod instance;
 mod opentsdb;
+mod otlp;
 mod prom_store;
 pub mod test_util;
 

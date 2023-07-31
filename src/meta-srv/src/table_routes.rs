@@ -13,29 +13,17 @@
 // limitations under the License.
 
 use api::v1::meta::TableRouteValue;
-use common_meta::helper::{TableGlobalKey, TableGlobalValue};
 use common_meta::key::table_info::TableInfoValue;
-use common_meta::key::TableRouteKey;
+use common_meta::key::{TableMetadataManagerRef, TableRouteKey};
 use common_meta::rpc::store::PutRequest;
-use common_meta::table_name::TableName;
 use snafu::{OptionExt, ResultExt};
-use table::engine::TableReference;
+use table::metadata::TableId;
 
 use crate::error::{
-    DecodeTableRouteSnafu, InvalidCatalogValueSnafu, Result, TableMetadataManagerSnafu,
-    TableRouteNotFoundSnafu,
+    DecodeTableRouteSnafu, Result, TableMetadataManagerSnafu, TableRouteNotFoundSnafu,
 };
 use crate::metasrv::Context;
 use crate::service::store::kv::KvStoreRef;
-
-pub async fn get_table_global_value(
-    kv_store: &KvStoreRef,
-    key: &TableGlobalKey,
-) -> Result<Option<TableGlobalValue>> {
-    let kv = kv_store.get(&key.to_raw_key()).await?;
-    kv.map(|kv| TableGlobalValue::from_bytes(kv.value).context(InvalidCatalogValueSnafu))
-        .transpose()
-}
 
 pub(crate) async fn get_table_route_value(
     kv_store: &KvStoreRef,
@@ -64,65 +52,45 @@ pub(crate) async fn put_table_route_value(
     Ok(())
 }
 
-pub(crate) fn table_route_key(table_id: u32, t: &TableGlobalKey) -> TableRouteKey<'_> {
-    TableRouteKey {
-        table_id,
-        catalog_name: &t.catalog_name,
-        schema_name: &t.schema_name,
-        table_name: &t.table_name,
-    }
-}
-
 pub(crate) async fn fetch_table(
     kv_store: &KvStoreRef,
-    table_ref: TableReference<'_>,
-) -> Result<Option<(TableGlobalValue, TableRouteValue)>> {
-    let tgk = TableGlobalKey {
-        catalog_name: table_ref.catalog.to_string(),
-        schema_name: table_ref.schema.to_string(),
-        table_name: table_ref.table.to_string(),
+    table_metadata_manager: &TableMetadataManagerRef,
+    table_id: TableId,
+) -> Result<Option<(TableInfoValue, TableRouteValue)>> {
+    let Some(table_info_value) = table_metadata_manager
+        .table_info_manager()
+        .get(table_id)
+        .await
+        .context(TableMetadataManagerSnafu)? else {
+        return Ok(None);
     };
 
-    let tgv = get_table_global_value(kv_store, &tgk).await?;
+    let table_info = &table_info_value.table_info;
+    let trk = TableRouteKey {
+        table_id,
+        catalog_name: &table_info.catalog_name,
+        schema_name: &table_info.schema_name,
+        table_name: &table_info.name,
+    };
+    let table_route_value = get_table_route_value(kv_store, &trk).await?;
 
-    if let Some(tgv) = tgv {
-        let trk = table_route_key(tgv.table_id(), &tgk);
-        let trv = get_table_route_value(kv_store, &trk).await?;
-
-        return Ok(Some((tgv, trv)));
-    }
-
-    Ok(None)
+    Ok(Some((table_info_value, table_route_value)))
 }
 
 pub(crate) async fn fetch_tables(
     ctx: &Context,
-    table_names: Vec<TableName>,
+    table_ids: Vec<TableId>,
 ) -> Result<Vec<(TableInfoValue, TableRouteValue)>> {
     let kv_store = &ctx.kv_store;
+    let table_metadata_manager = &ctx.table_metadata_manager;
 
     let mut tables = vec![];
     // Maybe we can optimize the for loop in the future, but in general,
     // there won't be many keys, in fact, there is usually just one.
-    for table_name in table_names {
-        let Some(tgv) = ctx.table_metadata_manager
-            .table_info_manager()
-            .get_old(&table_name)
-            .await
-            .context(TableMetadataManagerSnafu)? else {
-            continue;
-        };
-        let table_info = &tgv.table_info;
-
-        let trk = TableRouteKey {
-            table_id: table_info.ident.table_id,
-            catalog_name: &table_info.catalog_name,
-            schema_name: &table_info.schema_name,
-            table_name: &table_info.name,
-        };
-        let trv = get_table_route_value(kv_store, &trk).await?;
-
-        tables.push((tgv, trv));
+    for table_id in table_ids {
+        if let Some(x) = fetch_table(kv_store, table_metadata_manager, table_id).await? {
+            tables.push(x);
+        }
     }
 
     Ok(tables)
@@ -138,6 +106,7 @@ pub(crate) mod tests {
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO_ENGINE};
     use common_meta::key::table_region::RegionDistribution;
     use common_meta::key::TableMetadataManagerRef;
+    use common_meta::table_name::TableName;
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, RawSchema};
     use table::metadata::{RawTableInfo, RawTableMeta, TableIdent, TableType};
@@ -177,7 +146,7 @@ pub(crate) mod tests {
         };
         table_metadata_manager
             .table_info_manager()
-            .put_old(table_info)
+            .create(1, &table_info)
             .await
             .unwrap();
 
@@ -186,14 +155,21 @@ pub(crate) mod tests {
         // 1 => 1, 2
         // 2 => 3
         // 3 => 4
+        let region_distribution =
+            RegionDistribution::from([(1, vec![1, 2]), (2, vec![3]), (3, vec![4])]);
         table_metadata_manager
             .table_region_manager()
-            .put_old(
-                &TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, table),
-                RegionDistribution::from([(1, vec![1, 2]), (2, vec![3]), (3, vec![4])]),
-            )
+            .create(1, &region_distribution)
             .await
             .unwrap();
+
+        for (datanode_id, regions) in region_distribution {
+            table_metadata_manager
+                .datanode_table_manager()
+                .create(datanode_id, 1, regions)
+                .await
+                .unwrap();
+        }
     }
 
     pub(crate) async fn prepare_table_route_value<'a>(

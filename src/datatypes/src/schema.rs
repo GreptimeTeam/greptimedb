@@ -24,7 +24,7 @@ use datafusion_common::DFSchemaRef;
 use snafu::{ensure, ResultExt};
 
 use crate::data_type::DataType;
-use crate::error::{self, Error, ProjectArrowSchemaSnafu, Result};
+use crate::error::{self, DuplicateColumnSnafu, Error, ProjectArrowSchemaSnafu, Result};
 pub use crate::schema::column_schema::{ColumnSchema, Metadata, COMMENT_KEY, TIME_INDEX_KEY};
 pub use crate::schema::constraint::ColumnDefaultConstraint;
 pub use crate::schema::raw::RawSchema;
@@ -211,8 +211,7 @@ impl SchemaBuilder {
             validate_timestamp_index(&self.column_schemas, timestamp_index)?;
         }
 
-        let _ = self
-            .metadata
+        self.metadata
             .insert(VERSION_KEY.to_string(), self.version.to_string());
 
         let arrow_schema = ArrowSchema::new(self.fields).with_metadata(self.metadata);
@@ -243,7 +242,14 @@ fn collect_fields(column_schemas: &[ColumnSchema]) -> Result<FieldsAndIndices> {
         }
         let field = Field::try_from(column_schema)?;
         fields.push(field);
-        let _ = name_to_index.insert(column_schema.name.clone(), index);
+        ensure!(
+            name_to_index
+                .insert(column_schema.name.clone(), index)
+                .is_none(),
+            DuplicateColumnSnafu {
+                column: &column_schema.name,
+            }
+        );
     }
 
     Ok(FieldsAndIndices {
@@ -380,6 +386,21 @@ mod tests {
 
         assert_eq!(schema, new_schema);
         assert_eq!(column_schemas, schema.column_schemas());
+    }
+
+    #[test]
+    fn test_schema_duplicate_column() {
+        let column_schemas = vec![
+            ColumnSchema::new("col1", ConcreteDataType::int32_datatype(), false),
+            ColumnSchema::new("col1", ConcreteDataType::float64_datatype(), true),
+        ];
+        let err = Schema::try_new(column_schemas).unwrap_err();
+
+        assert!(
+            matches!(err, Error::DuplicateColumn { .. }),
+            "expect DuplicateColumn, found {}",
+            err
+        );
     }
 
     #[test]

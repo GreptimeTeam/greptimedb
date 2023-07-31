@@ -17,13 +17,13 @@ use std::sync::Arc;
 
 use common_meta::peer::Peer;
 use common_meta::rpc::router::TableRoute;
-use common_meta::table_name::TableName;
 use common_query::prelude::Expr;
 use datafusion_expr::{BinaryExpr, Expr as DfExpr, Operator};
 use datatypes::prelude::Value;
 use datatypes::schema::Schema;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::{RegionId, RegionNumber};
+use table::metadata::TableId;
 use table::requests::InsertRequest;
 
 use crate::columns::RangeColumnsPartitionRule;
@@ -36,7 +36,7 @@ use crate::{error, PartitionRuleRef};
 
 #[async_trait::async_trait]
 pub trait TableRouteCacheInvalidator: Send + Sync {
-    async fn invalidate_table_route(&self, table: &TableName);
+    async fn invalidate_table_route(&self, table: TableId);
 }
 
 pub type TableRouteCacheInvalidatorRef = Arc<dyn TableRouteCacheInvalidator>;
@@ -59,7 +59,7 @@ pub struct PartitionInfo {
 
 #[async_trait::async_trait]
 impl TableRouteCacheInvalidator for PartitionRuleManager {
-    async fn invalidate_table_route(&self, table: &TableName) {
+    async fn invalidate_table_route(&self, table: TableId) {
         self.table_routes.invalidate_table_route(table).await
     }
 }
@@ -74,23 +74,23 @@ impl PartitionRuleManager {
     }
 
     /// Find table route of given table name.
-    pub async fn find_table_route(&self, table: &TableName) -> Result<Arc<TableRoute>> {
+    pub async fn find_table_route(&self, table: TableId) -> Result<Arc<TableRoute>> {
         self.table_routes.get_route(table).await
     }
 
     /// Find datanodes of corresponding regions of given table.
     pub async fn find_region_datanodes(
         &self,
-        table: &TableName,
+        table_id: TableId,
         regions: Vec<RegionNumber>,
     ) -> Result<HashMap<Peer, Vec<RegionNumber>>> {
-        let route = self.table_routes.get_route(table).await?;
+        let route = self.table_routes.get_route(table_id).await?;
         let mut datanodes = HashMap::with_capacity(regions.len());
         for region in regions.iter() {
             let datanode = route
                 .find_region_leader(*region)
                 .context(error::FindDatanodeSnafu {
-                    table: table.to_string(),
+                    table_id,
                     region: *region,
                 })?;
             datanodes
@@ -102,48 +102,36 @@ impl PartitionRuleManager {
     }
 
     /// Find all leader peers of given table.
-    pub async fn find_table_region_leaders(&self, table: &TableName) -> Result<Vec<Peer>> {
-        let route = self.table_routes.get_route(table).await?;
+    pub async fn find_table_region_leaders(&self, table_id: TableId) -> Result<Vec<Peer>> {
+        let route = self.table_routes.get_route(table_id).await?;
         let mut peers = Vec::with_capacity(route.region_routes.len());
         for peer in &route.region_routes {
             peers.push(peer.leader_peer.clone().with_context(|| FindLeaderSnafu {
                 region_id: peer.region.id,
-                table_name: table.to_string(),
+                table_id,
             })?);
         }
 
         Ok(peers)
     }
 
-    pub async fn find_table_partition_columns(&self, table: TableName) -> Result<Vec<String>> {
-        let partiton_infos = self.find_table_partitions(&table).await?;
-        // Take region 0's partion columns as the table partition column.
-        // This is a workarond and isn't by design
-        Ok(partiton_infos
-            .first()
-            .map(|info| info.partition.partition_columns().clone())
-            .unwrap_or_default())
-    }
-
-    pub async fn find_table_partitions(&self, table: &TableName) -> Result<Vec<PartitionInfo>> {
-        let route = self.table_routes.get_route(table).await?;
+    pub async fn find_table_partitions(&self, table_id: TableId) -> Result<Vec<PartitionInfo>> {
+        let route = self.table_routes.get_route(table_id).await?;
         ensure!(
             !route.region_routes.is_empty(),
-            error::FindTableRoutesSnafu {
-                table_name: table.to_string()
-            }
+            error::FindTableRoutesSnafu { table_id }
         );
 
         let mut partitions = Vec::with_capacity(route.region_routes.len());
         for r in route.region_routes.iter() {
-            let partition =
-                r.region
-                    .partition
-                    .clone()
-                    .with_context(|| error::FindRegionRoutesSnafu {
-                        region_id: r.region.id,
-                        table_name: table.to_string(),
-                    })?;
+            let partition = r
+                .region
+                .partition
+                .clone()
+                .context(error::FindRegionRoutesSnafu {
+                    region_id: r.region.id,
+                    table_id,
+                })?;
             let partition_def = PartitionDef::try_from(partition)?;
 
             partitions.push(PartitionInfo {
@@ -162,7 +150,7 @@ impl PartitionRuleManager {
                 .windows(2)
                 .all(|w| w[0].partition.partition_columns() == w[1].partition.partition_columns()),
             error::InvalidTableRouteDataSnafu {
-                table_name: table.to_string(),
+                table_id,
                 err_msg: "partition columns of all regions are not the same"
             }
         );
@@ -171,8 +159,8 @@ impl PartitionRuleManager {
     }
 
     /// Get partition rule of given table.
-    pub async fn find_table_partition_rule(&self, table: &TableName) -> Result<PartitionRuleRef> {
-        let partitions = self.find_table_partitions(table).await?;
+    pub async fn find_table_partition_rule(&self, table_id: TableId) -> Result<PartitionRuleRef> {
+        let partitions = self.find_table_partitions(table_id).await?;
 
         let partition_columns = partitions[0].partition.partition_columns();
 
@@ -250,7 +238,7 @@ impl PartitionRuleManager {
     /// of given table.
     pub async fn split_insert_request(
         &self,
-        table: &TableName,
+        table: TableId,
         req: InsertRequest,
         schema: &Schema,
     ) -> Result<InsertRequestSplit> {

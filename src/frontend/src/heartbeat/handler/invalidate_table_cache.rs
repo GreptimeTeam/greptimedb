@@ -18,13 +18,13 @@ use common_meta::error::Result as MetaResult;
 use common_meta::heartbeat::handler::{
     HandleControl, HeartbeatResponseHandler, HeartbeatResponseHandlerContext,
 };
-use common_meta::helper::TableGlobalKey;
 use common_meta::ident::TableIdent;
 use common_meta::instruction::{Instruction, InstructionReply, SimpleReply};
+use common_meta::key::table_info::TableInfoKey;
+use common_meta::key::table_name::TableNameKey;
 use common_meta::key::table_region::TableRegionKey;
 use common_meta::key::TableMetaKey;
-use common_meta::table_name::TableName;
-use common_telemetry::{error, info};
+use common_telemetry::error;
 use partition::manager::TableRouteCacheInvalidatorRef;
 
 #[derive(Clone)]
@@ -83,26 +83,28 @@ impl InvalidateTableCacheHandler {
     }
 
     async fn invalidate_table_cache(&self, table_ident: TableIdent) {
-        let tg_key = TableGlobalKey {
-            catalog_name: table_ident.catalog.clone(),
-            schema_name: table_ident.schema.clone(),
-            table_name: table_ident.table.clone(),
-        }
-        .to_string();
-        info!("invalidate table cache: {}", tg_key);
-        let tg_key = tg_key.as_bytes();
+        let table_id = table_ident.table_id;
+        self.backend_cache_invalidator
+            .invalidate_key(&TableInfoKey::new(table_id).as_raw_key())
+            .await;
 
-        self.backend_cache_invalidator.invalidate_key(tg_key).await;
+        self.backend_cache_invalidator
+            .invalidate_key(&TableRegionKey::new(table_id).as_raw_key())
+            .await;
 
-        let key = &TableRegionKey::new(table_ident.table_id).as_raw_key();
-        self.backend_cache_invalidator.invalidate_key(key).await;
+        self.backend_cache_invalidator
+            .invalidate_key(
+                &TableNameKey::new(
+                    &table_ident.catalog,
+                    &table_ident.schema,
+                    &table_ident.table,
+                )
+                .as_raw_key(),
+            )
+            .await;
 
         self.table_route_cache_invalidator
-            .invalidate_table_route(&TableName::new(
-                table_ident.catalog,
-                table_ident.schema,
-                table_ident.table,
-            ))
+            .invalidate_table_route(table_id)
             .await;
     }
 }

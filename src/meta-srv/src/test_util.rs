@@ -41,7 +41,7 @@ pub(crate) fn create_region_failover_manager() -> Arc<RegionFailoverManager> {
     let in_memory = Arc::new(MemStore::new());
     let meta_peer_client = MetaPeerClientBuilder::default()
         .election(None)
-        .in_memory(in_memory)
+        .in_memory(in_memory.clone())
         .build()
         .map(Arc::new)
         // Safety: all required fields set at initialization
@@ -59,6 +59,7 @@ pub(crate) fn create_region_failover_manager() -> Arc<RegionFailoverManager> {
     };
 
     Arc::new(RegionFailoverManager::new(
+        in_memory,
         mailbox,
         procedure_manager,
         selector,

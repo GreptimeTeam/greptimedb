@@ -31,7 +31,6 @@ use crate::table_name::TableName;
 
 #[derive(Debug, Clone, Default)]
 pub struct RouteRequest {
-    pub table_names: Vec<TableName>,
     pub table_ids: Vec<TableId>,
 }
 
@@ -39,7 +38,6 @@ impl From<RouteRequest> for PbRouteRequest {
     fn from(mut req: RouteRequest) -> Self {
         Self {
             header: None,
-            table_names: req.table_names.drain(..).map(Into::into).collect(),
             table_ids: req.table_ids.drain(..).map(|id| PbTableId { id }).collect(),
         }
     }
@@ -49,15 +47,8 @@ impl RouteRequest {
     #[inline]
     pub fn new(table_id: TableId) -> Self {
         Self {
-            table_names: vec![],
             table_ids: vec![table_id],
         }
-    }
-
-    #[inline]
-    pub fn add_table_name(mut self, table_name: TableName) -> Self {
-        self.table_names.push(table_name);
-        self
     }
 }
 
@@ -377,26 +368,14 @@ mod tests {
     #[test]
     fn test_route_request_trans() {
         let req = RouteRequest {
-            table_names: vec![
-                TableName::new("c1", "s1", "t1"),
-                TableName::new("c2", "s2", "t2"),
-            ],
-            table_ids: vec![1, 2, 3],
+            table_ids: vec![1, 2],
         };
 
         let into_req: PbRouteRequest = req.into();
 
         assert!(into_req.header.is_none());
-        assert_eq!("c1", into_req.table_names.get(0).unwrap().catalog_name);
-        assert_eq!("s1", into_req.table_names.get(0).unwrap().schema_name);
-        assert_eq!("t1", into_req.table_names.get(0).unwrap().table_name);
-        assert_eq!("c2", into_req.table_names.get(1).unwrap().catalog_name);
-        assert_eq!("s2", into_req.table_names.get(1).unwrap().schema_name);
-        assert_eq!("t2", into_req.table_names.get(1).unwrap().table_name);
-        assert_eq!(
-            (1..=3).map(|id| PbTableId { id }).collect::<Vec<_>>(),
-            into_req.table_ids
-        );
+        assert_eq!(1, into_req.table_ids.get(0).unwrap().id);
+        assert_eq!(2, into_req.table_ids.get(1).unwrap().id);
     }
 
     #[test]

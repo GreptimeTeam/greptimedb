@@ -13,7 +13,7 @@ common-query = { path = "../common/query" }
 common-recordbatch = { path = "../common/recordbatch" }
 common-time = { path = "../common/time" }
 datatypes = { path = "../datatypes" }
-derive_builder = "0.11"
+derive_builder.workspace = true
 futures.workspace = true
 serde.workspace = true
 snafu.workspace = true

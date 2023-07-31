@@ -4,9 +4,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+testing = []
+
 [dependencies]
 arc-swap = "1.5"
 common-catalog = { path = "../common/catalog" }
 common-telemetry = { path = "../common/telemetry" }
 common-time = { path = "../common/time" }
+derive_builder.workspace = true
 sql = { path = "../sql" }

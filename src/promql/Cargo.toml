@@ -21,6 +21,7 @@ prost.workspace = true
 session = { path = "../session" }
 snafu = { version = "0.7", features = ["backtraces"] }
 table = { path = "../table" }
+common-telemetry = { path = "../common/telemetry" }
 
 [dev-dependencies]
 tokio.workspace = true

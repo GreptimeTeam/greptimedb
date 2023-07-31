@@ -603,7 +603,8 @@ impl ErrorExt for Error {
 
             Error::NotSupported { .. } => StatusCode::Unsupported,
 
-            Error::HandleHeartbeatResponse { source, .. } => source.status_code(),
+            Error::HandleHeartbeatResponse { source, .. }
+            | Error::TableMetadataManager { source, .. } => source.status_code(),
 
             Error::RuntimeResource { source, .. } => source.status_code(),
             Error::PromStoreRemoteQueryPlan { source, .. }
@@ -702,7 +703,6 @@ impl ErrorExt for Error {
 
             Error::WriteParquet { source, .. } => source.status_code(),
             Error::InvalidCopyParameter { .. } => StatusCode::InvalidArguments,
-            Error::TableMetadataManager { source, .. } => source.status_code(),
         }
     }
 

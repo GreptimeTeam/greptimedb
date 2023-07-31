@@ -65,6 +65,10 @@ impl KvBackend for KvBackendAdapter {
         self.0.name()
     }
 
+    fn as_any(&self) -> &dyn Any {
+        self.0.as_any()
+    }
+
     async fn range(&self, req: RangeRequest) -> Result<RangeResponse, Self::Error> {
         self.0
             .range(req)
@@ -84,6 +88,14 @@ impl KvBackend for KvBackendAdapter {
     async fn batch_put(&self, req: BatchPutRequest) -> Result<BatchPutResponse, Self::Error> {
         self.0
             .batch_put(req)
+            .await
+            .map_err(BoxedError::new)
+            .context(MetaSrvSnafu)
+    }
+
+    async fn batch_get(&self, req: BatchGetRequest) -> Result<BatchGetResponse, Self::Error> {
+        self.0
+            .batch_get(req)
             .await
             .map_err(BoxedError::new)
             .context(MetaSrvSnafu)
@@ -122,23 +134,11 @@ impl KvBackend for KvBackendAdapter {
             .context(MetaSrvSnafu)
     }
 
-    async fn batch_get(&self, req: BatchGetRequest) -> Result<BatchGetResponse, Self::Error> {
-        self.0
-            .batch_get(req)
-            .await
-            .map_err(BoxedError::new)
-            .context(MetaSrvSnafu)
-    }
-
     async fn move_value(&self, req: MoveValueRequest) -> Result<MoveValueResponse, Self::Error> {
         self.0
             .move_value(req)
             .await
             .map_err(BoxedError::new)
             .context(MetaSrvSnafu)
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self.0.as_any()
     }
 }

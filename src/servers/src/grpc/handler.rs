@@ -18,19 +18,21 @@ use std::time::Instant;
 use api::helper::request_type;
 use api::v1::auth_header::AuthScheme;
 use api::v1::{Basic, GreptimeRequest, RequestHeader};
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_query::Output;
 use common_runtime::Runtime;
 use common_telemetry::logging;
 use metrics::{histogram, increment_counter};
-use session::context::{QueryContext, QueryContextRef};
+use session::context::{QueryContextBuilder, QueryContextRef};
 use snafu::{OptionExt, ResultExt};
-use tonic::Status;
 
 use crate::auth::{Identity, Password, UserProviderRef};
 use crate::error::Error::UnsupportedAuthScheme;
-use crate::error::{AuthSnafu, InvalidQuerySnafu, JoinTaskSnafu, NotFoundAuthHeaderSnafu};
+use crate::error::{
+    AuthSnafu, InvalidQuerySnafu, JoinTaskSnafu, NotFoundAuthHeaderSnafu, Result as InternalResult,
+};
 use crate::grpc::TonicResult;
 use crate::metrics::{
     METRIC_AUTH_FAILURE, METRIC_CODE_LABEL, METRIC_SERVER_GRPC_DB_REQUEST_TIMER,
@@ -57,7 +59,10 @@ impl GreptimeRequestHandler {
         }
     }
 
-    pub(crate) async fn handle_request(&self, request: GreptimeRequest) -> TonicResult<Output> {
+    pub(crate) async fn handle_request(
+        &self,
+        request: GreptimeRequest,
+    ) -> TonicResult<InternalResult<Output>> {
         let query = request.request.context(InvalidQuerySnafu {
             reason: "Expecting non-empty GreptimeRequest.",
         })?;
@@ -65,8 +70,7 @@ impl GreptimeRequestHandler {
         let header = request.header.as_ref();
         let query_ctx = create_query_context(header);
 
-        self.auth(header, &query_ctx).await?;
-
+        let _ = self.auth(header, &query_ctx).await?;
         let handler = self.handler.clone();
         let request_type = request_type(&query);
         let db = query_ctx.get_db_string();
@@ -94,7 +98,7 @@ impl GreptimeRequestHandler {
         let output = handle.await.context(JoinTaskSnafu).map_err(|e| {
             timer.record(e.status_code());
             e
-        })??;
+        })?;
         Ok(output)
     }
 
@@ -102,8 +106,8 @@ impl GreptimeRequestHandler {
         &self,
         header: Option<&RequestHeader>,
         query_ctx: &QueryContextRef,
-    ) -> TonicResult<()> {
-        let Some(user_provider) = self.user_provider.as_ref() else { return Ok(()) };
+    ) -> TonicResult<InternalResult<()>> {
+        let Some(user_provider) = self.user_provider.as_ref() else { return Ok(Ok(())) };
 
         let auth_scheme = header
             .and_then(|header| {
@@ -114,7 +118,7 @@ impl GreptimeRequestHandler {
             })
             .context(NotFoundAuthHeaderSnafu)?;
 
-        let _ = match auth_scheme {
+        let res = match auth_scheme {
             AuthScheme::Basic(Basic { username, password }) => user_provider
                 .auth(
                     Identity::UserId(&username, None),
@@ -128,37 +132,47 @@ impl GreptimeRequestHandler {
                 name: "Token AuthScheme".to_string(),
             }),
         }
+        .map(|_| ())
         .map_err(|e| {
             increment_counter!(
                 METRIC_AUTH_FAILURE,
                 &[(METRIC_CODE_LABEL, format!("{}", e.status_code()))]
             );
-            Status::unauthenticated(e.to_string())
-        })?;
-        Ok(())
+            e
+        });
+        Ok(res)
     }
 }
 
 pub(crate) fn create_query_context(header: Option<&RequestHeader>) -> QueryContextRef {
-    let ctx = QueryContext::arc();
-    if let Some(header) = header {
-        // We provide dbname field in newer versions of protos/sdks
-        // parse dbname from header in priority
-        if !header.dbname.is_empty() {
-            let (catalog, schema) =
-                crate::parse_catalog_and_schema_from_client_database_name(&header.dbname);
-            ctx.set_current_catalog(catalog);
-            ctx.set_current_schema(schema);
-        } else {
-            if !header.catalog.is_empty() {
-                ctx.set_current_catalog(&header.catalog);
+    let (catalog, schema) = header
+        .map(|header| {
+            // We provide dbname field in newer versions of protos/sdks
+            // parse dbname from header in priority
+            if !header.dbname.is_empty() {
+                crate::parse_catalog_and_schema_from_client_database_name(&header.dbname)
+            } else {
+                (
+                    if !header.catalog.is_empty() {
+                        &header.catalog
+                    } else {
+                        DEFAULT_CATALOG_NAME
+                    },
+                    if !header.schema.is_empty() {
+                        &header.schema
+                    } else {
+                        DEFAULT_SCHEMA_NAME
+                    },
+                )
             }
-            if !header.schema.is_empty() {
-                ctx.set_current_schema(&header.schema);
-            }
-        }
-    };
-    ctx
+        })
+        .unwrap_or((DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME));
+
+    QueryContextBuilder::default()
+        .current_catalog(catalog.to_string())
+        .current_schema(schema.to_string())
+        .try_trace_id(header.and_then(|h: &RequestHeader| h.trace_id))
+        .build()
 }
 
 /// Histogram timer for handling gRPC request.

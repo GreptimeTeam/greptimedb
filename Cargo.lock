@@ -1591,8 +1591,8 @@ version = "0.3.2"
 dependencies = [
  "anymap",
  "async-trait",
- "build-data",
  "catalog",
+ "chrono",
  "clap 3.2.25",
  "client",
  "common-base",
@@ -1602,8 +1602,10 @@ dependencies = [
  "common-recordbatch",
  "common-telemetry",
  "common-test-util",
+ "common-version",
  "config",
  "datanode",
+ "datatypes",
  "either",
  "etcd-client",
  "frontend",
@@ -1614,6 +1616,7 @@ dependencies = [
  "nu-ansi-term",
  "partition",
  "query",
+ "rand",
  "rexpect",
  "rustyline 10.1.1",
  "serde",
@@ -1621,6 +1624,7 @@ dependencies = [
  "session",
  "snafu",
  "substrait 0.3.2",
+ "table",
  "temp-env",
  "tikv-jemallocator",
  "tokio",
@@ -1673,8 +1677,6 @@ dependencies = [
  "common-error",
  "common-telemetry",
  "datatypes",
- "lazy_static",
- "regex",
  "serde",
  "serde_json",
  "snafu",
@@ -1752,6 +1754,25 @@ dependencies = [
  "snafu",
  "static_assertions",
  "syn 1.0.109",
+]
+
+[[package]]
+name = "common-greptimedb-telemetry"
+version = "0.3.2"
+dependencies = [
+ "async-trait",
+ "common-error",
+ "common-runtime",
+ "common-telemetry",
+ "common-test-util",
+ "common-version",
+ "hyper",
+ "once_cell",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -1833,9 +1854,11 @@ dependencies = [
  "datatypes",
  "etcd-client",
  "futures",
+ "hyper",
  "lazy_static",
  "prost",
  "regex",
+ "reqwest",
  "serde",
  "serde_json",
  "snafu",
@@ -1952,6 +1975,8 @@ dependencies = [
  "opentelemetry 0.17.0",
  "opentelemetry-jaeger",
  "parking_lot 0.12.1",
+ "rand",
+ "rs-snowflake",
  "serde",
  "tokio",
  "tracing",
@@ -1984,6 +2009,13 @@ dependencies = [
  "serde",
  "serde_json",
  "snafu",
+]
+
+[[package]]
+name = "common-version"
+version = "0.3.2"
+dependencies = [
+ "build-data",
 ]
 
 [[package]]
@@ -2632,6 +2664,7 @@ dependencies = [
  "common-datasource",
  "common-error",
  "common-function",
+ "common-greptimedb-telemetry",
  "common-grpc",
  "common-grpc-expr",
  "common-meta",
@@ -2661,7 +2694,6 @@ dependencies = [
  "pin-project",
  "prost",
  "query",
- "regex",
  "secrecy",
  "serde",
  "serde_json",
@@ -2681,6 +2713,7 @@ dependencies = [
  "tower",
  "tower-http",
  "url",
+ "uuid",
 ]
 
 [[package]]
@@ -3220,6 +3253,21 @@ name = "fnv"
 version = "1.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
+
+[[package]]
+name = "foreign-types"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f6f339eb8adc052cd2ca78910fda869aefa38d22d5cb648e6485e4d3fc06f3b1"
+dependencies = [
+ "foreign-types-shared",
+]
+
+[[package]]
+name = "foreign-types-shared"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "00b0228411908ca8685dba7fc2cdd70ec9990a6e753e89b6ac91a84c40fbaf4b"
 
 [[package]]
 name = "form_urlencoded"
@@ -4140,7 +4188,7 @@ checksum = "d2fabcfbdc87f4758337ca535fb41a6d701b65693ce38287d856d1674551ec9b"
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=bec16e50c9322758111f73e42fb5d377c7235e05#bec16e50c9322758111f73e42fb5d377c7235e05"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=356694a72f12ad9e15008d4245a0b4fe48f982ad#356694a72f12ad9e15008d4245a0b4fe48f982ad"
 dependencies = [
  "prost",
  "serde",
@@ -4441,6 +4489,19 @@ dependencies = [
  "pin-project-lite",
  "tokio",
  "tokio-io-timeout",
+]
+
+[[package]]
+name = "hyper-tls"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d6183ddfa99b85da61a140bea0efc93fdf56ceaa041b37d553518030827f9905"
+dependencies = [
+ "bytes",
+ "hyper",
+ "native-tls",
+ "tokio",
+ "tokio-native-tls",
 ]
 
 [[package]]
@@ -5282,6 +5343,7 @@ dependencies = [
  "common-base",
  "common-catalog",
  "common-error",
+ "common-greptimedb-telemetry",
  "common-grpc",
  "common-grpc-expr",
  "common-meta",
@@ -5319,6 +5381,7 @@ dependencies = [
  "tracing-subscriber",
  "typetag",
  "url",
+ "uuid",
 ]
 
 [[package]]
@@ -5508,6 +5571,7 @@ dependencies = [
  "anymap",
  "aquamarine",
  "arc-swap",
+ "async-compat",
  "async-stream",
  "async-trait",
  "chrono",
@@ -5533,6 +5597,7 @@ dependencies = [
  "log-store",
  "metrics",
  "object-store",
+ "parquet",
  "regex",
  "serde",
  "serde_json",
@@ -5541,6 +5606,7 @@ dependencies = [
  "store-api",
  "table",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -5729,6 +5795,24 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 1.0.109",
+]
+
+[[package]]
+name = "native-tls"
+version = "0.2.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "07226173c32f2926027b63cce4bcd8076c3552846cbe7925f3aaffeac0a3b92e"
+dependencies = [
+ "lazy_static",
+ "libc",
+ "log",
+ "openssl",
+ "openssl-probe",
+ "openssl-sys",
+ "schannel",
+ "security-framework",
+ "security-framework-sys",
+ "tempfile",
 ]
 
 [[package]]
@@ -6091,10 +6175,48 @@ dependencies = [
 ]
 
 [[package]]
+name = "openssl"
+version = "0.10.54"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69b3f656a17a6cbc115b5c7a40c616947d213ba182135b014d6051b73ab6f019"
+dependencies = [
+ "bitflags 1.3.2",
+ "cfg-if 1.0.0",
+ "foreign-types",
+ "libc",
+ "once_cell",
+ "openssl-macros",
+ "openssl-sys",
+]
+
+[[package]]
+name = "openssl-macros"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a948666b637a0f465e8564c73e89d4dde00d72d4d473cc972f390fc3dcee7d9c"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.18",
+]
+
+[[package]]
 name = "openssl-probe"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ff011a302c396a5197692431fc1948019154afc178baf7d8e37367442a4601cf"
+
+[[package]]
+name = "openssl-sys"
+version = "0.9.88"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c2ce0f250f34a308dcfdbb351f511359857d4ed2134ba715a4eadd46e1ffd617"
+dependencies = [
+ "cc",
+ "libc",
+ "pkg-config",
+ "vcpkg",
+]
 
 [[package]]
 name = "opentelemetry"
@@ -7029,6 +7151,7 @@ dependencies = [
  "common-catalog",
  "common-error",
  "common-function-macro",
+ "common-telemetry",
  "datafusion",
  "datatypes",
  "futures",
@@ -7633,11 +7756,13 @@ dependencies = [
  "http-body",
  "hyper",
  "hyper-rustls",
+ "hyper-tls",
  "ipnet",
  "js-sys",
  "log",
  "mime",
  "mime_guess",
+ "native-tls",
  "once_cell",
  "percent-encoding",
  "pin-project-lite",
@@ -7648,6 +7773,7 @@ dependencies = [
  "serde_json",
  "serde_urlencoded",
  "tokio",
+ "tokio-native-tls",
  "tokio-rustls 0.24.0",
  "tokio-util",
  "tower-service",
@@ -7765,6 +7891,12 @@ dependencies = [
  "bitflags 1.3.2",
  "serde",
 ]
+
+[[package]]
+name = "rs-snowflake"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e60ef3b82994702bbe4e134d98aadca4b49ed04440148985678d415c68127666"
 
 [[package]]
 name = "rsa"
@@ -8861,6 +8993,7 @@ dependencies = [
  "common-catalog",
  "common-telemetry",
  "common-time",
+ "derive_builder 0.12.0",
  "sql",
 ]
 
@@ -9423,7 +9556,7 @@ dependencies = [
  "common-recordbatch",
  "common-time",
  "datatypes",
- "derive_builder 0.11.2",
+ "derive_builder 0.12.0",
  "futures",
  "serde",
  "serde_json",
@@ -9703,7 +9836,7 @@ dependencies = [
  "datafusion-expr",
  "datafusion-physical-expr",
  "datatypes",
- "derive_builder 0.11.2",
+ "derive_builder 0.12.0",
  "futures",
  "humantime",
  "humantime-serde",
@@ -9846,6 +9979,7 @@ dependencies = [
  "mito",
  "object-store",
  "once_cell",
+ "opentelemetry-proto",
  "partition",
  "paste",
  "prost",
@@ -10115,6 +10249,16 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.18",
+]
+
+[[package]]
+name = "tokio-native-tls"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbae76ab933c85776efabc971569dd6119c580d8f5d448769dec1764bf796ef2"
+dependencies = [
+ "native-tls",
+ "tokio",
 ]
 
 [[package]]

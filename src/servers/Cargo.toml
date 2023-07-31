@@ -37,7 +37,7 @@ datafusion-common.workspace = true
 datafusion-expr.workspace = true
 
 datatypes = { path = "../datatypes" }
-derive_builder = "0.12"
+derive_builder.workspace = true
 digest = "0.10"
 futures = "0.3"
 headers = "0.3"
@@ -53,7 +53,7 @@ metrics.workspace = true
 metrics-process = { version = "<1.0.10", optional = true }
 mime_guess = "2.0"
 num_cpus = "1.13"
-once_cell = "1.16"
+once_cell.workspace = true
 openmetrics-parser = "0.4"
 opensrv-mysql = "0.4"
 opentelemetry-proto.workspace = true
@@ -103,6 +103,7 @@ rand.workspace = true
 rustls = { version = "0.21", features = ["dangerous_configuration"] }
 script = { path = "../script", features = ["python"] }
 serde_json = "1.0"
+session = { path = "../session", features = ["testing"] }
 table = { path = "../table" }
 tokio-postgres = "0.7"
 tokio-postgres-rustls = "0.10"

@@ -28,6 +28,7 @@ use crate::service_config::{
 #[serde(default)]
 pub struct FrontendOptions {
     pub mode: Mode,
+    pub node_id: Option<String>,
     pub heartbeat: HeartbeatOptions,
     pub http_options: Option<HttpOptions>,
     pub grpc_options: Option<GrpcOptions>,
@@ -46,6 +47,7 @@ impl Default for FrontendOptions {
     fn default() -> Self {
         Self {
             mode: Mode::Standalone,
+            node_id: None,
             heartbeat: HeartbeatOptions::default(),
             http_options: Some(HttpOptions::default()),
             grpc_options: Some(GrpcOptions::default()),

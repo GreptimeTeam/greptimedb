@@ -260,34 +260,39 @@ mod test {
     use crate::test_util::TestEnv;
 
     fn basic_region_metadata() -> RegionMetadata {
-        let builder = RegionMetadataBuilder::new(RegionId::new(23, 33), 0);
-        let builder = builder.add_column_metadata(ColumnMetadata {
-            column_schema: ColumnSchema::new(
-                "ts",
-                ConcreteDataType::timestamp_millisecond_datatype(),
-                false,
-            ),
-            semantic_type: SemanticType::Timestamp,
-            column_id: 45,
-        });
-        let builder = builder.add_column_metadata(ColumnMetadata {
-            column_schema: ColumnSchema::new("pk", ConcreteDataType::string_datatype(), false),
-            semantic_type: SemanticType::Tag,
-            column_id: 36,
-        });
-        let builder = builder.add_column_metadata(ColumnMetadata {
-            column_schema: ColumnSchema::new("val", ConcreteDataType::float64_datatype(), false),
-            semantic_type: SemanticType::Field,
-            column_id: 251,
-        });
-        builder.build()
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(23, 33), 0);
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 45,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("pk", ConcreteDataType::string_datatype(), false),
+                semantic_type: SemanticType::Tag,
+                column_id: 36,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "val",
+                    ConcreteDataType::float64_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id: 251,
+            });
+        builder.build().unwrap()
     }
 
     #[tokio::test]
     async fn create_region_without_initial_metadata() {
         let env = TestEnv::new("");
         let result = env
-            .create_manifest_manager(CompressionType::Uncompressed, None, None)
+            .create_manifest_manager(CompressionType::Uncompressed, 10, None)
             .await;
         assert!(matches!(
             result.err().unwrap(),
@@ -300,7 +305,7 @@ mod test {
         let metadata = basic_region_metadata();
         let env = TestEnv::new("");
         let manager = env
-            .create_manifest_manager(CompressionType::Uncompressed, None, Some(metadata.clone()))
+            .create_manifest_manager(CompressionType::Uncompressed, 10, Some(metadata.clone()))
             .await
             .unwrap();
 
@@ -313,17 +318,17 @@ mod test {
         let metadata = basic_region_metadata();
         let env = TestEnv::new("");
         let manager = env
-            .create_manifest_manager(CompressionType::Uncompressed, None, Some(metadata.clone()))
+            .create_manifest_manager(CompressionType::Uncompressed, 10, Some(metadata.clone()))
             .await
             .unwrap();
 
-        let new_metadata_builder = RegionMetadataBuilder::from_existing(metadata, 1);
-        let new_metadata_builder = new_metadata_builder.add_column_metadata(ColumnMetadata {
+        let mut new_metadata_builder = RegionMetadataBuilder::from_existing(metadata, 1);
+        new_metadata_builder.push_column_metadata(ColumnMetadata {
             column_schema: ColumnSchema::new("val2", ConcreteDataType::float64_datatype(), false),
             semantic_type: SemanticType::Field,
             column_id: 252,
         });
-        let new_metadata = new_metadata_builder.build();
+        let new_metadata = new_metadata_builder.build().unwrap();
 
         let mut action_list =
             RegionMetaActionList::with_action(RegionMetaAction::Change(RegionChange {

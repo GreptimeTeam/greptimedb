@@ -111,7 +111,8 @@ impl TryFrom<ConcreteDataType> for ColumnDataTypeWrapper {
                 TimeType::Microsecond(_) => ColumnDataType::TimeMicrosecond,
                 TimeType::Nanosecond(_) => ColumnDataType::TimeNanosecond,
             },
-            ConcreteDataType::Null(_)
+            ConcreteDataType::Interval(_)
+            | ConcreteDataType::Null(_)
             | ConcreteDataType::List(_)
             | ConcreteDataType::Dictionary(_) => {
                 return error::IntoColumnDataTypeSnafu { from: datatype }.fail()
@@ -255,7 +256,7 @@ pub fn push_vals(column: &mut Column, origin_count: usize, vector: VectorRef) {
             TimeUnit::Microsecond => values.time_microsecond_values.push(val.value()),
             TimeUnit::Nanosecond => values.time_nanosecond_values.push(val.value()),
         },
-        Value::List(_) => unreachable!(),
+        Value::Interval(_) | Value::List(_) => unreachable!(),
     });
     column.null_mask = null_mask.into_vec();
 }
@@ -289,6 +290,7 @@ fn ddl_request_type(request: &DdlRequest) -> &'static str {
         Some(Expr::DropTable(_)) => "ddl.drop_table",
         Some(Expr::FlushTable(_)) => "ddl.flush_table",
         Some(Expr::CompactTable(_)) => "ddl.compact_table",
+        Some(Expr::TruncateTable(_)) => "ddl.truncate_table",
         None => "ddl.empty",
     }
 }

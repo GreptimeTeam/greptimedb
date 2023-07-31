@@ -1,0 +1,43 @@
+CREATE TABLE test(i BIGINT TIME INDEX, j INTEGER, k INTEGER NOT NULL);
+
+Affected Rows: 0
+
+INSERT INTO test VALUES (1, 1, 11), (2, 2, 12);
+
+Affected Rows: 2
+
+SELECT * FROM test;
+
++---+---+----+
+| i | j | k  |
++---+---+----+
+| 1 | 1 | 11 |
+| 2 | 2 | 12 |
++---+---+----+
+
+ALTER TABLE test DROP COLUMN j;
+
+Affected Rows: 0
+
+INSERT INTO test VALUES (3, NULL);
+
+Error: 1004(InvalidArguments), Failed to insert value to table: greptime.public.test, source: Failed to operate table, source: Column k is not null but input has null
+
+INSERT INTO test VALUES (3, 13);
+
+Affected Rows: 1
+
+SELECT * FROM test;
+
++---+----+
+| i | k  |
++---+----+
+| 1 | 11 |
+| 2 | 12 |
+| 3 | 13 |
++---+----+
+
+DROP TABLE test;
+
+Affected Rows: 1
+

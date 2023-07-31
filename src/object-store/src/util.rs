@@ -39,9 +39,17 @@ pub fn normalize_dir(dir: &str) -> String {
 pub fn join_dir(parent: &str, child: &str) -> String {
     // Always adds a `/` to the output path.
     let output = format!("{parent}/{child}/");
-    // We call opendal's normalize_dir which doesn't push `/` to
-    // the end of path.
+    // We call opendal's normalize_root which keep the last `/`.
     opendal::raw::normalize_root(&output)
+}
+
+/// Push `child` to `parent` dir and normalize the output path.
+///
+/// - Path endswith `/` means it's a dir path.
+/// - Otherwise, it's a file path.
+pub fn join_path(parent: &str, child: &str) -> String {
+    let output = format!("{parent}/{child}");
+    opendal::raw::normalize_path(&output)
 }
 
 #[cfg(test)]
@@ -56,7 +64,7 @@ mod tests {
     }
 
     #[test]
-    fn test_join_paths() {
+    fn test_join_dir() {
         assert_eq!("/", join_dir("", ""));
         assert_eq!("/", join_dir("/", ""));
         assert_eq!("/", join_dir("", "/"));
@@ -67,5 +75,19 @@ mod tests {
         assert_eq!("/a/b/c/", join_dir("/a/b", "c/"));
         assert_eq!("/a/b/c/", join_dir("/a/b", "/c/"));
         assert_eq!("/a/b/c/", join_dir("/a/b", "//c"));
+    }
+
+    #[test]
+    fn test_join_path() {
+        assert_eq!("/", join_path("", ""));
+        assert_eq!("/", join_path("/", ""));
+        assert_eq!("/", join_path("", "/"));
+        assert_eq!("/", join_path("/", "/"));
+        assert_eq!("a/", join_path("a", ""));
+        assert_eq!("a/b/c.txt", join_path("a/b", "c.txt"));
+        assert_eq!("a/b/c.txt", join_path("/a/b", "c.txt"));
+        assert_eq!("a/b/c/", join_path("/a/b", "c/"));
+        assert_eq!("a/b/c/", join_path("/a/b", "/c/"));
+        assert_eq!("a/b/c.txt", join_path("/a/b", "//c.txt"));
     }
 }

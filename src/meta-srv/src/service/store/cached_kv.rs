@@ -120,6 +120,10 @@ impl KvBackend for LeaderCachedKvStore {
         &self.name
     }
 
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
     async fn range(&self, req: RangeRequest) -> Result<RangeResponse> {
         if !self.is_leader() {
             return self.store.range(req).await;
@@ -173,6 +177,24 @@ impl KvBackend for LeaderCachedKvStore {
         Ok(res)
     }
 
+    async fn batch_put(&self, req: BatchPutRequest) -> Result<BatchPutResponse> {
+        if !self.is_leader() {
+            return self.store.batch_put(req).await;
+        }
+
+        let ver = self.create_new_version();
+
+        let res = self.store.batch_put(req.clone()).await?;
+        let _ = self.cache.batch_put(req.clone()).await?;
+
+        if !self.validate_version(ver) {
+            let keys = req.kvs.into_iter().map(|kv| kv.key).collect::<Vec<_>>();
+            self.invalid_keys(keys).await?;
+        }
+
+        Ok(res)
+    }
+
     async fn batch_get(&self, req: BatchGetRequest) -> Result<BatchGetResponse> {
         if !self.is_leader() {
             return self.store.batch_get(req).await;
@@ -220,36 +242,6 @@ impl KvBackend for LeaderCachedKvStore {
         Ok(merged_res)
     }
 
-    async fn batch_put(&self, req: BatchPutRequest) -> Result<BatchPutResponse> {
-        if !self.is_leader() {
-            return self.store.batch_put(req).await;
-        }
-
-        let ver = self.create_new_version();
-
-        let res = self.store.batch_put(req.clone()).await?;
-        let _ = self.cache.batch_put(req.clone()).await?;
-
-        if !self.validate_version(ver) {
-            let keys = req.kvs.into_iter().map(|kv| kv.key).collect::<Vec<_>>();
-            self.invalid_keys(keys).await?;
-        }
-
-        Ok(res)
-    }
-
-    async fn batch_delete(&self, req: BatchDeleteRequest) -> Result<BatchDeleteResponse> {
-        if !self.is_leader() {
-            return self.store.batch_delete(req).await;
-        }
-
-        let _ = self.create_new_version();
-
-        let res = self.store.batch_delete(req.clone()).await?;
-        let _ = self.cache.batch_delete(req).await?;
-        Ok(res)
-    }
-
     async fn compare_and_put(&self, req: CompareAndPutRequest) -> Result<CompareAndPutResponse> {
         if !self.is_leader() {
             return self.store.compare_and_put(req).await;
@@ -279,6 +271,18 @@ impl KvBackend for LeaderCachedKvStore {
         Ok(res)
     }
 
+    async fn batch_delete(&self, req: BatchDeleteRequest) -> Result<BatchDeleteResponse> {
+        if !self.is_leader() {
+            return self.store.batch_delete(req).await;
+        }
+
+        let _ = self.create_new_version();
+
+        let res = self.store.batch_delete(req.clone()).await?;
+        let _ = self.cache.batch_delete(req).await?;
+        Ok(res)
+    }
+
     async fn move_value(&self, req: MoveValueRequest) -> Result<MoveValueResponse> {
         if !self.is_leader() {
             return self.store.move_value(req).await;
@@ -296,10 +300,6 @@ impl KvBackend for LeaderCachedKvStore {
         // not contain full data, so we need to delete both keys.
         self.invalid_keys(vec![from_key, to_key]).await?;
         Ok(res)
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 }
 

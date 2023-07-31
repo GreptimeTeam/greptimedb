@@ -28,9 +28,14 @@ pub mod error;
 #[allow(unused_variables)]
 pub mod manifest;
 #[allow(dead_code)]
+pub mod memtable;
+#[allow(dead_code)]
 pub mod metadata;
+pub mod read;
 #[allow(dead_code)]
 mod region;
+#[allow(dead_code)]
+pub mod sst;
 #[allow(dead_code)]
 mod worker;
 
@@ -108,7 +113,7 @@ mod worker;
 /// class Version {
 ///     -RegionMetadataRef metadata
 ///     -MemtableVersionRef memtables
-///     -LevelMetasRef ssts
+///     -SstVersionRef ssts
 ///     -SequenceNumber flushed_sequence
 ///     -ManifestVersion manifest_version
 /// }
@@ -119,7 +124,7 @@ mod worker;
 ///     +immutable_memtables() &[MemtableRef]
 ///     +freeze_mutable(MemtableRef new_mutable) MemtableVersion
 /// }
-/// class LevelMetas {
+/// class SstVersion {
 ///     -LevelMetaVec levels
 ///     -AccessLayerRef sst_layer
 ///     -FilePurgerRef file_purger
@@ -146,8 +151,8 @@ mod worker;
 /// VersionControl o-- Version
 /// Version o-- RegionMetadata
 /// Version o-- MemtableVersion
-/// Version o-- LevelMetas
-/// LevelMetas o-- LevelMeta
+/// Version o-- SstVersion
+/// SstVersion o-- LevelMeta
 /// LevelMeta o-- FileHandle
 /// FileHandle o-- FileMeta
 /// class RegionMetadata

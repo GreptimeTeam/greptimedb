@@ -22,11 +22,12 @@ use common_meta::heartbeat::handler::{
     HandlerGroupExecutor, HeartbeatResponseHandlerContext, HeartbeatResponseHandlerExecutor,
 };
 use common_meta::heartbeat::mailbox::{HeartbeatMailbox, MessageMeta};
-use common_meta::helper::TableGlobalKey;
 use common_meta::ident::TableIdent;
 use common_meta::instruction::{Instruction, InstructionReply, SimpleReply};
-use common_meta::table_name::TableName;
+use common_meta::key::table_region::TableRegionKey;
+use common_meta::key::TableMetaKey;
 use partition::manager::TableRouteCacheInvalidator;
+use table::metadata::TableId;
 use tokio::sync::mpsc;
 
 use super::invalidate_table_cache::InvalidateTableCacheHandler;
@@ -44,30 +45,26 @@ impl KvCacheInvalidator for MockKvCacheInvalidator {
 }
 
 pub struct MockTableRouteCacheInvalidator {
-    inner: Mutex<HashMap<String, i32>>,
+    inner: Mutex<HashMap<TableId, i32>>,
 }
 
 #[async_trait::async_trait]
 impl TableRouteCacheInvalidator for MockTableRouteCacheInvalidator {
-    async fn invalidate_table_route(&self, table: &TableName) {
-        let _ = self.inner.lock().unwrap().remove(&table.to_string());
+    async fn invalidate_table_route(&self, table_id: TableId) {
+        let _ = self.inner.lock().unwrap().remove(&table_id);
     }
 }
 
 #[tokio::test]
 async fn test_invalidate_table_cache_handler() {
-    let table_key = TableGlobalKey {
-        catalog_name: "test".to_string(),
-        schema_name: "greptime".to_string(),
-        table_name: "foo_table".to_string(),
-    };
-
-    let inner = HashMap::from([(table_key.to_string().as_bytes().to_vec(), 1)]);
+    let table_id = 1;
+    let table_region_key = TableRegionKey::new(table_id);
+    let inner = HashMap::from([(table_region_key.as_raw_key(), 1)]);
     let backend = Arc::new(MockKvCacheInvalidator {
         inner: Mutex::new(inner),
     });
 
-    let inner = HashMap::from([(table_key.to_string(), 1)]);
+    let inner = HashMap::from([(table_id, 1)]);
     let table_route = Arc::new(MockTableRouteCacheInvalidator {
         inner: Mutex::new(inner),
     });
@@ -87,7 +84,7 @@ async fn test_invalidate_table_cache_handler() {
             catalog: "test".to_string(),
             schema: "greptime".to_string(),
             table: "foo_table".to_string(),
-            table_id: 0,
+            table_id,
             engine: "mito".to_string(),
         }),
     )
@@ -102,19 +99,9 @@ async fn test_invalidate_table_cache_handler() {
         .inner
         .lock()
         .unwrap()
-        .contains_key(table_key.to_string().as_bytes()));
+        .contains_key(&table_region_key.as_raw_key()));
 
-    let table_name = TableName {
-        catalog_name: "test".to_string(),
-        schema_name: "greptime".to_string(),
-        table_name: "foo_table".to_string(),
-    };
-
-    assert!(!table_route
-        .inner
-        .lock()
-        .unwrap()
-        .contains_key(&table_name.to_string()));
+    assert!(!table_route.inner.lock().unwrap().contains_key(&table_id));
 
     // removes a invalid key
     handle_instruction(

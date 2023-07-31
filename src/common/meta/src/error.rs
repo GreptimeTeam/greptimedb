@@ -59,8 +59,23 @@ pub enum Error {
     #[snafu(display("Invalid protobuf message, err: {}", err_msg))]
     InvalidProtoMsg { err_msg: String, location: Location },
 
-    #[snafu(display("Concurrent modify regions placement: {err_msg}"))]
-    ConcurrentModifyRegionsPlacement { err_msg: String, location: Location },
+    #[snafu(display("Unexpected: {err_msg}"))]
+    Unexpected { err_msg: String, location: Location },
+
+    #[snafu(display("Table already exists, table_id: {}", table_id))]
+    TableAlreadyExists {
+        table_id: TableId,
+        location: Location,
+    },
+
+    #[snafu(display("Table does not exist, table_name: {}", table_name))]
+    TableNotExist {
+        table_name: String,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to rename table, reason: {}", reason))]
+    RenameTable { reason: String, location: Location },
 
     #[snafu(display("Invalid table metadata, err: {}", err_msg))]
     InvalidTableMetadata { err_msg: String, location: Location },
@@ -112,12 +127,15 @@ impl ErrorExt for Error {
             | RouteInfoCorrupted { .. }
             | InvalidProtoMsg { .. }
             | InvalidTableMetadata { .. }
-            | MoveRegion { .. } => StatusCode::Unexpected,
+            | MoveRegion { .. }
+            | Unexpected { .. } => StatusCode::Unexpected,
 
             SendMessage { .. }
             | GetKvCache { .. }
             | CacheNotGet { .. }
-            | ConcurrentModifyRegionsPlacement { .. } => StatusCode::Internal,
+            | TableAlreadyExists { .. }
+            | TableNotExist { .. }
+            | RenameTable { .. } => StatusCode::Internal,
 
             EncodeJson { .. } | DecodeJson { .. } | PayloadNotExist { .. } => {
                 StatusCode::Unexpected

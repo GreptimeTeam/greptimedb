@@ -12,18 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::meta::Peer;
 use catalog::remote::CachedMetaKvBackend;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO_ENGINE};
-use common_meta::helper::TableGlobalKey;
 use common_meta::ident::TableIdent;
+use common_meta::key::table_name::{TableNameKey, TableNameValue};
+use common_meta::key::table_region::RegionDistribution;
+use common_meta::key::TableMetaKey;
 use common_meta::rpc::router::TableRoute;
 use common_meta::rpc::KeyValue;
-use common_meta::table_name::TableName;
 use common_meta::RegionIdent;
 use common_procedure::{watcher, ProcedureWithId};
 use common_query::Output;
@@ -35,9 +35,9 @@ use meta_srv::error::Result as MetaResult;
 use meta_srv::metasrv::{SelectorContext, SelectorRef};
 use meta_srv::procedure::region_failover::{RegionFailoverContext, RegionFailoverProcedure};
 use meta_srv::selector::{Namespace, Selector};
-use meta_srv::table_routes;
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::{QueryContext, QueryContextRef};
+use table::metadata::TableId;
 use tests_integration::cluster::{GreptimeDbCluster, GreptimeDbClusterBuilder};
 use tests_integration::test_util::{check_output_stream, get_test_store_config, StorageType};
 use tokio::time;
@@ -104,25 +104,14 @@ pub async fn test_region_failover(store_type: StorageType) {
         assert!(matches!(result.unwrap(), Output::AffectedRows(1)));
     }
 
-    let cache_key = TableGlobalKey {
-        catalog_name: "greptime".to_string(),
-        schema_name: "public".to_string(),
-        table_name: "my_table".to_string(),
-    }
-    .to_string();
-
-    let table_name = TableName {
-        catalog_name: "greptime".to_string(),
-        schema_name: "public".to_string(),
-        table_name: "my_table".to_string(),
-    };
+    let cache_key = TableNameKey::new("greptime", "public", "my_table").as_raw_key();
 
     let cache = get_table_cache(&frontend, &cache_key).unwrap();
-    let _ = cache.unwrap();
-    let route_cache = get_route_cache(&frontend, &table_name);
-    let _ = route_cache.unwrap();
+    let table_name_value = TableNameValue::try_from_raw_value(cache.unwrap().value).unwrap();
+    let table_id = table_name_value.table_id();
+    assert!(get_route_cache(&frontend, table_id).is_some());
 
-    let distribution = find_region_distribution(&cluster).await;
+    let distribution = find_region_distribution(&cluster, table_id).await;
     info!("Find region distribution: {distribution:?}");
 
     let mut foreign = 0;
@@ -145,15 +134,13 @@ pub async fn test_region_failover(store_type: StorageType) {
 
     run_region_failover_procedure(&cluster, failed_region.clone(), selector).await;
 
-    let distribution = find_region_distribution(&cluster).await;
+    let distribution = find_region_distribution(&cluster, table_id).await;
     info!("Find region distribution again: {distribution:?}");
 
     // Waits for invalidating table cache
     time::sleep(Duration::from_millis(100)).await;
 
-    let cache = get_table_cache(&frontend, &cache_key);
-    assert!(cache.unwrap().is_none());
-    let route_cache = get_route_cache(&frontend, &table_name);
+    let route_cache = get_route_cache(&frontend, table_id);
     assert!(route_cache.is_none());
 
     // Inserts data to each datanode after failover
@@ -175,7 +162,7 @@ pub async fn test_region_failover(store_type: StorageType) {
     assert!(success)
 }
 
-fn get_table_cache(instance: &Arc<Instance>, key: &str) -> Option<Option<KeyValue>> {
+fn get_table_cache(instance: &Arc<Instance>, key: &[u8]) -> Option<Option<KeyValue>> {
     let catalog_manager = instance
         .catalog_manager()
         .as_any()
@@ -190,10 +177,10 @@ fn get_table_cache(instance: &Arc<Instance>, key: &str) -> Option<Option<KeyValu
         .unwrap();
     let cache = kvbackend.cache();
 
-    Some(cache.get(key.as_bytes()))
+    Some(cache.get(key))
 }
 
-fn get_route_cache(instance: &Arc<Instance>, table_name: &TableName) -> Option<Arc<TableRoute>> {
+fn get_route_cache(instance: &Arc<Instance>, table_id: TableId) -> Option<Arc<TableRoute>> {
     let catalog_manager = instance
         .catalog_manager()
         .as_any()
@@ -201,7 +188,7 @@ fn get_route_cache(instance: &Arc<Instance>, table_name: &TableName) -> Option<A
         .unwrap();
     let pm = catalog_manager.partition_manager();
     let cache = pm.table_routes().cache();
-    cache.get(table_name)
+    cache.get(&table_id)
 }
 
 async fn write_datas(instance: &Arc<Instance>, ts: u64) -> Vec<FrontendResult<Output>> {
@@ -268,20 +255,50 @@ CREATE TABLE my_table (
     result.get(0).unwrap().as_ref().unwrap();
 }
 
-async fn find_region_distribution(cluster: &GreptimeDbCluster) -> HashMap<u64, Vec<u32>> {
-    let key = TableGlobalKey {
-        catalog_name: DEFAULT_CATALOG_NAME.to_string(),
-        schema_name: DEFAULT_SCHEMA_NAME.to_string(),
-        table_name: "my_table".to_string(),
-    };
-    let value = table_routes::get_table_global_value(&cluster.kv_store, &key)
+async fn find_region_distribution(
+    cluster: &GreptimeDbCluster,
+    table_id: TableId,
+) -> RegionDistribution {
+    let manager = cluster.meta_srv.table_metadata_manager();
+    let region_distribution = manager
+        .table_region_manager()
+        .get(table_id)
         .await
         .unwrap()
-        .unwrap();
-    value.regions_id_map
+        .unwrap()
+        .region_distribution;
+
+    // test DatanodeTableValues match the table region distribution
+    for datanode_id in cluster.datanode_instances.keys() {
+        let mut actual = manager
+            .datanode_table_manager()
+            .tables(*datanode_id)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter_map(|x| {
+                if x.table_id == table_id {
+                    Some(x.regions)
+                } else {
+                    None
+                }
+            })
+            .flatten()
+            .collect::<Vec<_>>();
+        actual.sort();
+
+        if let Some(mut expected) = region_distribution.get(datanode_id).cloned() {
+            expected.sort();
+            assert_eq!(expected, actual);
+        } else {
+            assert!(actual.is_empty());
+        }
+    }
+
+    region_distribution
 }
 
-fn choose_failed_region(distribution: HashMap<u64, Vec<u32>>) -> RegionIdent {
+fn choose_failed_region(distribution: RegionDistribution) -> RegionIdent {
     let (failed_datanode, failed_region) = distribution
         .iter()
         .filter_map(|(datanode_id, regions)| {
@@ -332,6 +349,7 @@ async fn run_region_failover_procedure(
     let procedure = RegionFailoverProcedure::new(
         failed_region.clone(),
         RegionFailoverContext {
+            in_memory: meta_srv.in_memory().clone(),
             mailbox: meta_srv.mailbox().clone(),
             selector,
             selector_ctx: SelectorContext {

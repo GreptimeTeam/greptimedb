@@ -4,8 +4,7 @@ Affected Rows: 1
 
 use upper_case_table_name;
 
-++
-++
+Affected Rows: 0
 
 create table system_Metric(ts timestamp time index);
 
@@ -34,6 +33,5 @@ Affected Rows: 1
 
 use public;
 
-++
-++
+Affected Rows: 0
 

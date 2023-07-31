@@ -16,14 +16,16 @@
 #[macro_export]
 macro_rules! log {
     // log!(target: "my_target", Level::INFO, "a {} event", "log");
-    (target: $target:expr, $lvl:expr, $($arg:tt)+) => {
-        $crate::logging::event!(target: $target, $lvl, $($arg)+)
-    };
+    (target: $target:expr, $lvl:expr, $($arg:tt)+) => {{
+        let _trace_id = $crate::trace_id();
+        $crate::logging::event!(target: $target, $lvl, trace_id = _trace_id, $($arg)+)
+    }};
 
     // log!(Level::INFO, "a log event")
-    ($lvl:expr, $($arg:tt)+) => {
-        $crate::logging::event!($lvl, $($arg)+)
-    };
+    ($lvl:expr, $($arg:tt)+) => {{
+        let _trace_id = $crate::trace_id();
+        $crate::logging::event!($lvl, trace_id = _trace_id, $($arg)+)
+    }};
 }
 
 /// Logs a message at the error level.

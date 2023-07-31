@@ -23,4 +23,5 @@ pub const METRIC_GRPC_ALTER: &str = "grpc.alter";
 pub const METRIC_GRPC_DROP_TABLE: &str = "grpc.drop_table";
 pub const METRIC_GRPC_FLUSH_TABLE: &str = "grpc.flush_table";
 pub const METRIC_GRPC_COMPACT_TABLE: &str = "grpc.compact_table";
+pub const METRIC_GRPC_TRUNCATE_TABLE: &str = "grpc.truncate_table";
 pub const METRIC_GRPC_DO_GET: &str = "grpc.do_get";

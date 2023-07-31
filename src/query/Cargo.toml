@@ -36,7 +36,7 @@ greptime-proto.workspace = true
 humantime = "2.1"
 metrics.workspace = true
 object-store = { path = "../object-store" }
-once_cell = "1.10"
+once_cell.workspace = true
 partition = { path = "../partition" }
 promql = { path = "../promql" }
 promql-parser = "0.1.1"
@@ -59,6 +59,7 @@ num = "0.4"
 num-traits = "0.2"
 paste = "1.0"
 rand.workspace = true
+session = { path = "../session", features = ["testing"] }
 statrs = "0.16"
 stats-cli = "3.0"
 store-api = { path = "../store-api" }

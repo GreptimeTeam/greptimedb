@@ -25,7 +25,6 @@ use std::str::FromStr;
 use catalog::CatalogManagerRef;
 use common_error::ext::BoxedError;
 use common_query::Output;
-use common_recordbatch::RecordBatches;
 use common_time::range::TimestampRange;
 use common_time::Timestamp;
 use datanode::instance::sql::{idents_to_full_database_name, table_idents_to_full_name};
@@ -33,7 +32,7 @@ use query::parser::QueryStatement;
 use query::query_engine::SqlStatementExecutorRef;
 use query::QueryEngineRef;
 use session::context::QueryContextRef;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt};
 use sql::statements::copy::{CopyDatabaseArgument, CopyTable, CopyTableArgument};
 use sql::statements::statement::Statement;
 use table::engine::TableReference;
@@ -43,7 +42,7 @@ use table::TableRef;
 use crate::error;
 use crate::error::{
     CatalogSnafu, ExecLogicalPlanSnafu, ExecuteStatementSnafu, ExternalSnafu, PlanStatementSnafu,
-    Result, SchemaNotFoundSnafu, TableNotFoundSnafu,
+    Result, TableNotFoundSnafu,
 };
 use crate::statement::backup::{COPY_DATABASE_TIME_END_KEY, COPY_DATABASE_TIME_START_KEY};
 
@@ -102,8 +101,6 @@ impl StatementExecutor {
 
             Statement::DescribeTable(stmt) => self.describe_table(stmt, query_ctx).await,
 
-            Statement::Use(db) => self.handle_use(db, query_ctx).await,
-
             Statement::ShowDatabases(stmt) => self.show_databases(stmt, query_ctx).await,
 
             Statement::ShowTables(stmt) => self.show_tables(stmt, query_ctx).await,
@@ -149,21 +146,6 @@ impl StatementExecutor {
             .execute(plan, query_ctx)
             .await
             .context(ExecLogicalPlanSnafu)
-    }
-
-    async fn handle_use(&self, db: String, query_ctx: QueryContextRef) -> Result<Output> {
-        let catalog = &query_ctx.current_catalog();
-        ensure!(
-            self.catalog_manager
-                .schema_exist(catalog, &db)
-                .await
-                .context(CatalogSnafu)?,
-            SchemaNotFoundSnafu { schema_info: &db }
-        );
-
-        query_ctx.set_current_schema(&db);
-
-        Ok(Output::RecordBatches(RecordBatches::empty()))
     }
 
     async fn get_table(&self, table_ref: &TableReference<'_>) -> Result<TableRef> {

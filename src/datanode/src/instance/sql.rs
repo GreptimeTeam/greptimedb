@@ -27,7 +27,7 @@ use snafu::prelude::*;
 use sql::ast::ObjectName;
 use sql::statements::statement::Statement;
 use table::engine::TableReference;
-use table::requests::{CreateDatabaseRequest, DropTableRequest};
+use table::requests::{CreateDatabaseRequest, DropTableRequest, TruncateTableRequest};
 
 use crate::error::{
     self, BumpTableIdSnafu, ExecuteSqlSnafu, ExecuteStatementSnafu, NotSupportSqlSnafu,
@@ -142,6 +142,21 @@ impl Instance {
                 let table = self.sql_handler.get_table(&table_ref).await?;
 
                 query::sql::show_create_table(table, None).context(ExecuteStatementSnafu)
+            }
+            Statement::TruncateTable(truncate_table) => {
+                let (catalog_name, schema_name, table_name) =
+                    table_idents_to_full_name(truncate_table.table_name(), query_ctx.clone())?;
+                let table_ref = TableReference::full(&catalog_name, &schema_name, &table_name);
+                let table = self.sql_handler.get_table(&table_ref).await?;
+                let req = TruncateTableRequest {
+                    catalog_name,
+                    schema_name,
+                    table_name,
+                    table_id: table.table_info().ident.table_id,
+                };
+                self.sql_handler
+                    .execute(SqlRequest::TruncateTable(req), query_ctx)
+                    .await
             }
             _ => NotSupportSqlSnafu {
                 msg: format!("not supported to execute {stmt:?}"),
@@ -272,7 +287,6 @@ impl SqlStatementExecutor for Instance {
 
 #[cfg(test)]
 mod test {
-    use std::sync::Arc;
 
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use session::context::QueryContext;
@@ -290,8 +304,8 @@ mod test {
         let bare = ObjectName(vec![my_table.into()]);
 
         let using_schema = "foo";
-        let query_ctx = Arc::new(QueryContext::with(DEFAULT_CATALOG_NAME, using_schema));
-        let empty_ctx = Arc::new(QueryContext::new());
+        let query_ctx = QueryContext::with(DEFAULT_CATALOG_NAME, using_schema);
+        let empty_ctx = QueryContext::arc();
 
         assert_eq!(
             table_idents_to_full_name(&full, query_ctx.clone()).unwrap(),

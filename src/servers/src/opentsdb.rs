@@ -115,7 +115,7 @@ impl Server for OpentsdbServer {
         let (stream, addr) = self.base_server.bind(listening).await?;
 
         let io_runtime = self.base_server.io_runtime();
-        let join_handle = tokio::spawn(self.accept(io_runtime, stream));
+        let join_handle = common_runtime::spawn_read(self.accept(io_runtime, stream));
         self.base_server.start_with(join_handle).await?;
         Ok(addr)
     }

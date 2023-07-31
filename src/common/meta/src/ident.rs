@@ -20,7 +20,7 @@ use snafu::OptionExt;
 
 use crate::error::{Error, InvalidProtoMsgSnafu};
 
-#[derive(Eq, Hash, PartialEq, Clone, Debug, Serialize, Deserialize)]
+#[derive(Eq, Hash, PartialEq, Clone, Debug, Default, Serialize, Deserialize)]
 pub struct TableIdent {
     pub catalog: String,
     pub schema: String,

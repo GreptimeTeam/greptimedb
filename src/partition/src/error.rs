@@ -20,6 +20,7 @@ use common_query::prelude::Expr;
 use datafusion_common::ScalarValue;
 use snafu::{Location, Snafu};
 use store_api::storage::{RegionId, RegionNumber};
+use table::metadata::TableId;
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
@@ -33,26 +34,26 @@ pub enum Error {
         source: meta_client::error::Error,
     },
 
-    #[snafu(display("Failed to find Datanode, table: {} region: {:?}", table, region))]
+    #[snafu(display("Failed to find Datanode, table id: {}, region: {}", table_id, region))]
     FindDatanode {
-        table: String,
+        table_id: TableId,
         region: RegionNumber,
         location: Location,
     },
 
-    #[snafu(display("Failed to find table routes for table {}", table_name))]
+    #[snafu(display("Failed to find table routes for table id {}", table_id))]
     FindTableRoutes {
-        table_name: String,
+        table_id: TableId,
         location: Location,
     },
 
     #[snafu(display(
         "Failed to find region routes for table {}, region id: {}",
-        table_name,
+        table_id,
         region_id
     ))]
     FindRegionRoutes {
-        table_name: String,
+        table_id: TableId,
         region_id: u64,
         location: Location,
     },
@@ -111,13 +112,9 @@ pub enum Error {
     #[snafu(display("Invalid DeleteRequest, reason: {}", reason))]
     InvalidDeleteRequest { reason: String, location: Location },
 
-    #[snafu(display(
-        "Invalid table route data in meta, table name: {}, msg: {}",
-        table_name,
-        err_msg
-    ))]
+    #[snafu(display("Invalid table route data, table id: {}, msg: {}", table_id, err_msg))]
     InvalidTableRouteData {
-        table_name: String,
+        table_id: TableId,
         err_msg: String,
         location: Location,
     },
@@ -133,9 +130,9 @@ pub enum Error {
         source: datatypes::error::Error,
     },
 
-    #[snafu(display("Failed to find leader of table {} region {}", table_name, region_id))]
+    #[snafu(display("Failed to find leader of table id {} region {}", table_id, region_id))]
     FindLeader {
-        table_name: String,
+        table_id: TableId,
         region_id: RegionId,
         location: Location,
     },

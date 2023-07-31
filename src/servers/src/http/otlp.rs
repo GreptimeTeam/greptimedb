@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
-
 use axum::extract::{RawBody, State};
 use axum::http::header;
 use axum::response::IntoResponse;
@@ -40,7 +38,7 @@ pub async fn metrics(
 ) -> Result<OtlpResponse> {
     let ctx = if let Some(db) = db.value() {
         let (catalog, schema) = parse_catalog_and_schema_from_client_database_name(db);
-        Arc::new(QueryContext::with(catalog, schema))
+        QueryContext::with(catalog, schema)
     } else {
         QueryContext::arc()
     };

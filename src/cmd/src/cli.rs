@@ -12,12 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod bench;
 mod cmd;
 mod helper;
 mod repl;
 mod upgrade;
 
 use async_trait::async_trait;
+use bench::BenchTableMetadataCommand;
 use clap::Parser;
 use common_telemetry::logging::LoggingOptions;
 pub use repl::Repl;
@@ -76,6 +78,7 @@ impl Command {
 enum SubCommand {
     Attach(AttachCommand),
     Upgrade(UpgradeCommand),
+    Bench(BenchTableMetadataCommand),
 }
 
 impl SubCommand {
@@ -83,6 +86,7 @@ impl SubCommand {
         match self {
             SubCommand::Attach(cmd) => cmd.build().await,
             SubCommand::Upgrade(cmd) => cmd.build().await,
+            SubCommand::Bench(cmd) => cmd.build().await,
         }
     }
 }

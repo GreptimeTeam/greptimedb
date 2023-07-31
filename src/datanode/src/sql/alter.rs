@@ -23,7 +23,7 @@ use table::metadata::TableId;
 use table::requests::{AddColumnRequest, AlterKind, AlterTableRequest};
 use table_procedure::AlterTableProcedure;
 
-use crate::error::{self, Result};
+use crate::error::{self, Result, UnexpectedSnafu};
 use crate::sql::SqlHandler;
 
 impl SqlHandler {
@@ -35,25 +35,54 @@ impl SqlHandler {
             table: &table_name,
         };
 
-        let table = self.get_table(&table_ref).await?;
-        let engine_procedure = self.engine_procedure(table)?;
+        match self.get_table(&table_ref).await {
+            Ok(table) => {
+                let engine_procedure = self.engine_procedure(table)?;
 
-        let procedure =
-            AlterTableProcedure::new(req, self.catalog_manager.clone(), engine_procedure);
-        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
-        let procedure_id = procedure_with_id.id;
+                let procedure =
+                    AlterTableProcedure::new(req, self.catalog_manager.clone(), engine_procedure);
+                let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+                let procedure_id = procedure_with_id.id;
 
-        info!("Alter table {} by procedure {}", table_name, procedure_id);
+                info!("Alter table {} by procedure {}", table_name, procedure_id);
 
-        let mut watcher = self
-            .procedure_manager
-            .submit(procedure_with_id)
-            .await
-            .context(error::SubmitProcedureSnafu { procedure_id })?;
+                let mut watcher = self
+                    .procedure_manager
+                    .submit(procedure_with_id)
+                    .await
+                    .context(error::SubmitProcedureSnafu { procedure_id })?;
 
-        watcher::wait(&mut watcher)
-            .await
-            .context(error::WaitProcedureSnafu { procedure_id })?;
+                watcher::wait(&mut watcher)
+                    .await
+                    .context(error::WaitProcedureSnafu { procedure_id })?;
+            }
+            Err(err) => {
+                // TODO(weny): Retrieves table by table_id
+                if let AlterKind::RenameTable { new_table_name } = req.alter_kind {
+                    let new_table_ref = TableReference {
+                        catalog: &req.catalog_name,
+                        schema: &req.schema_name,
+                        table: &new_table_name,
+                    };
+
+                    let table = self.get_table(&new_table_ref).await?;
+
+                    ensure!(
+                        table.table_info().table_id() == req.table_id,
+                        UnexpectedSnafu {
+                            violated: format!(
+                                "expected table id: {}, actual: {}",
+                                req.table_id,
+                                table.table_info().table_id()
+                            )
+                        }
+                    )
+                } else {
+                    return Err(err);
+                }
+            }
+        }
+
         // Tried in MySQL, it really prints "Affected Rows: 0".
         Ok(Output::AffectedRows(0))
     }

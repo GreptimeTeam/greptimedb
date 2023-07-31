@@ -17,9 +17,10 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use catalog::CatalogManagerRef;
 use client::client_manager::DatanodeClients;
 use common_base::bytes::Bytes;
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME};
 use common_meta::peer::Peer;
 use common_meta::table_name::TableName;
 use datafusion::common::Result;
@@ -31,27 +32,31 @@ use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeVisitor, Visit
 use datafusion_common::{DataFusionError, TableReference};
 use datafusion_expr::{LogicalPlan, UserDefinedLogicalNode};
 use partition::manager::PartitionRuleManager;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 pub use table::metadata::TableType;
 use table::table::adapter::DfTableProviderAdapter;
 
 use crate::dist_plan::merge_scan::{MergeScanExec, MergeScanLogicalPlan};
 use crate::error;
+use crate::error::{CatalogSnafu, TableNotFoundSnafu};
 
 pub struct DistExtensionPlanner {
     partition_manager: Arc<PartitionRuleManager>,
     clients: Arc<DatanodeClients>,
+    catalog_manager: CatalogManagerRef,
 }
 
 impl DistExtensionPlanner {
     pub fn new(
         partition_manager: Arc<PartitionRuleManager>,
         clients: Arc<DatanodeClients>,
+        catalog_manager: CatalogManagerRef,
     ) -> Self {
         Self {
             partition_manager,
             clients,
+            catalog_manager,
         }
     }
 }
@@ -84,6 +89,14 @@ impl ExtensionPlanner for DistExtensionPlanner {
                     // no relation found in input plan, going to execute them locally 
                     return Ok(Some(input_physical_plan));
                 };
+
+                if table_name.schema_name == INFORMATION_SCHEMA_NAME {
+                    return planner
+                        .create_physical_plan(input_plan, session_state)
+                        .await
+                        .map(Some);
+                }
+
                 let input_schema = input_physical_plan.schema().clone();
                 let input_plan = self.set_table_name(&table_name, input_plan.clone())?;
                 let substrait_plan: Bytes = DFLogicalSubstraitConvertor
@@ -130,8 +143,22 @@ impl DistExtensionPlanner {
     }
 
     async fn get_peers(&self, table_name: &TableName) -> Result<Vec<Peer>> {
+        let table = self
+            .catalog_manager
+            .table(
+                &table_name.catalog_name,
+                &table_name.schema_name,
+                &table_name.table_name,
+            )
+            .await
+            .context(CatalogSnafu)?
+            .with_context(|| TableNotFoundSnafu {
+                table: table_name.to_string(),
+            })?;
+        let table_id = table.table_info().table_id();
+
         self.partition_manager
-            .find_table_region_leaders(table_name)
+            .find_table_region_leaders(table_id)
             .await
             .with_context(|_| error::RoutePartitionSnafu {
                 table: table_name.clone(),
