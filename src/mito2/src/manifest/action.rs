@@ -14,48 +14,44 @@
 
 use std::collections::HashMap;
 
+use common_telemetry::info;
 use serde::{Deserialize, Serialize};
-use storage::metadata::{ColumnFamilyMetadata, ColumnMetadata, VersionNumber};
+use snafu::{OptionExt, ResultExt};
+use storage::metadata::VersionNumber;
 use storage::sst::{FileId, FileMeta};
 use store_api::manifest::action::{ProtocolAction, ProtocolVersion};
 use store_api::manifest::ManifestVersion;
 use store_api::storage::{RegionId, SequenceNumber};
 
-use crate::manifest::helper;
+use crate::error::{RegionMetadataNotFoundSnafu, Result, SerdeJsonSnafu, Utf8Snafu};
+use crate::metadata::RegionMetadata;
 
-/// Minimal data that could be used to persist and recover [RegionMetadata](crate::metadata::RegionMetadata).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-pub struct RawRegionMetadata {
-    pub id: RegionId,
-    pub name: String,
-    pub columns: RawColumnsMetadata,
-    pub column_families: RawColumnFamiliesMetadata,
-    pub version: VersionNumber,
-}
-
-/// Minimal data that could be used to persist and recover [ColumnsMetadata](crate::metadata::ColumnsMetadata).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct RawColumnsMetadata {
-    pub columns: Vec<ColumnMetadata>,
-    pub row_key_end: usize,
-    pub timestamp_key_index: usize,
-    pub user_column_end: usize,
-}
-
-/// Minimal data that could be used to persist and recover [ColumnFamiliesMetadata](crate::metadata::ColumnFamiliesMetadata).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct RawColumnFamiliesMetadata {
-    pub column_families: Vec<ColumnFamilyMetadata>,
+/// Actions that can be applied to region manifest.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum RegionMetaAction {
+    /// Set the min/max supported protocol version
+    Protocol(ProtocolAction),
+    /// Change region's metadata for request like ALTER
+    Change(RegionChange),
+    /// Edit region's state for changing options or file list.
+    Edit(RegionEdit),
+    /// Remove the region.
+    Remove(RegionRemove),
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct RegionChange {
-    /// The committed sequence of the region when this change happens. So the
-    /// data with sequence **greater than** this sequence would use the new
-    /// metadata.
-    pub committed_sequence: SequenceNumber,
     /// The metadata after changed.
-    pub metadata: RawRegionMetadata,
+    pub metadata: RegionMetadata,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct RegionEdit {
+    pub region_version: VersionNumber,
+    pub files_to_add: Vec<FileMeta>,
+    pub files_to_remove: Vec<FileMeta>,
+    pub compaction_time_window: Option<i64>,
+    pub flushed_sequence: Option<SequenceNumber>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -63,45 +59,26 @@ pub struct RegionRemove {
     pub region_id: RegionId,
 }
 
+/// The region manifest data
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct RegionEdit {
-    pub region_version: VersionNumber,
-    pub flushed_sequence: Option<SequenceNumber>,
-    pub files_to_add: Vec<FileMeta>,
-    pub files_to_remove: Vec<FileMeta>,
-    pub compaction_time_window: Option<i64>,
-}
-
-/// The region version checkpoint
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct RegionVersion {
-    pub manifest_version: ManifestVersion,
-    pub flushed_sequence: Option<SequenceNumber>,
-    pub files: HashMap<FileId, FileMeta>,
-}
-
-/// The region manifest data checkpoint
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
-pub struct RegionManifestData {
-    pub committed_sequence: SequenceNumber,
-    pub metadata: RawRegionMetadata,
-    pub version: Option<RegionVersion>,
+pub struct RegionManifest {
+    pub metadata: RegionMetadata,
+    pub version: RegionVersion,
 }
 
 #[derive(Debug, Default)]
-pub struct RegionManifestDataBuilder {
-    committed_sequence: SequenceNumber,
-    metadata: RawRegionMetadata,
+pub struct RegionManifestBuilder {
+    metadata: Option<RegionMetadata>,
     version: Option<RegionVersion>,
 }
 
-impl RegionManifestDataBuilder {
-    pub fn with_checkpoint(checkpoint: Option<RegionManifestData>) -> Self {
+impl RegionManifestBuilder {
+    /// Start with a checkpoint
+    pub fn with_checkpoint(checkpoint: Option<RegionManifest>) -> Self {
         if let Some(s) = checkpoint {
             Self {
-                metadata: s.metadata,
-                version: s.version,
-                committed_sequence: s.committed_sequence,
+                metadata: Some(s.metadata),
+                version: Some(s.version),
             }
         } else {
             Default::default()
@@ -109,14 +86,12 @@ impl RegionManifestDataBuilder {
     }
 
     pub fn apply_change(&mut self, change: RegionChange) {
-        self.metadata = change.metadata;
-        self.committed_sequence = change.committed_sequence;
+        self.metadata = Some(change.metadata);
     }
 
     pub fn apply_edit(&mut self, manifest_version: ManifestVersion, edit: RegionEdit) {
         if let Some(version) = &mut self.version {
             version.manifest_version = manifest_version;
-            version.flushed_sequence = edit.flushed_sequence;
             for file in edit.files_to_add {
                 let _ = version.files.insert(file.file_id, file);
             }
@@ -126,7 +101,6 @@ impl RegionManifestDataBuilder {
         } else {
             self.version = Some(RegionVersion {
                 manifest_version,
-                flushed_sequence: edit.flushed_sequence,
                 files: edit
                     .files_to_add
                     .into_iter()
@@ -135,16 +109,33 @@ impl RegionManifestDataBuilder {
             });
         }
     }
-    pub fn build(self) -> RegionManifestData {
-        RegionManifestData {
-            metadata: self.metadata,
-            version: self.version,
-            committed_sequence: self.committed_sequence,
-        }
+
+    /// Check if the builder keeps a [RegionMetadata]
+    pub fn contains_metadata(&self) -> bool {
+        self.metadata.is_some()
+    }
+
+    pub fn try_build(self) -> Result<RegionManifest> {
+        let metadata = self.metadata.context(RegionMetadataNotFoundSnafu)?;
+        let version = self.version.unwrap_or_else(|| {
+            info!(
+                "Create new default region version for region {:?}",
+                metadata.region_id
+            );
+            RegionVersion::default()
+        });
+        Ok(RegionManifest { metadata, version })
     }
 }
 
-// The checkpoint of region manifest, generated by checkpoint.
+/// The region version checkpoint
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
+pub struct RegionVersion {
+    pub manifest_version: ManifestVersion,
+    pub files: HashMap<FileId, FileMeta>,
+}
+
+// The checkpoint of region manifest, generated by checkpointer.
 #[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq)]
 pub struct RegionCheckpoint {
     /// The snasphot protocol
@@ -154,33 +145,26 @@ pub struct RegionCheckpoint {
     // The number of manifest actions that this checkpoint compacts.
     pub compacted_actions: usize,
     // The checkpoint data
-    pub checkpoint: Option<RegionManifestData>,
+    pub checkpoint: Option<RegionManifest>,
 }
 
 impl RegionCheckpoint {
-    fn set_protocol(&mut self, action: ProtocolAction) {
+    pub fn set_protocol(&mut self, action: ProtocolAction) {
         self.protocol = action;
     }
 
-    fn last_version(&self) -> ManifestVersion {
+    pub fn last_version(&self) -> ManifestVersion {
         self.last_version
     }
 
-    fn encode(&self) -> Result<Vec<u8>, ()> {
+    pub fn encode(&self) -> Result<Vec<u8>> {
         todo!()
     }
 
-    fn decode(bs: &[u8], reader_version: ProtocolVersion) -> Result<Self, ()> {
-        helper::decode_checkpoint(bs, reader_version)
+    pub fn decode(bs: &[u8]) -> Result<Self> {
+        // helper::decode_checkpoint(bs, reader_version)
+        todo!()
     }
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub enum RegionMetaAction {
-    Protocol(ProtocolAction),
-    Change(RegionChange),
-    Remove(RegionRemove),
-    Edit(RegionEdit),
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -211,35 +195,36 @@ impl RegionMetaActionList {
         self.actions.insert(0, RegionMetaAction::Protocol(action));
     }
 
-    fn set_prev_version(&mut self, version: ManifestVersion) {
+    pub fn set_prev_version(&mut self, version: ManifestVersion) {
         self.prev_version = version;
     }
 
     /// Encode self into json in the form of string lines, starts with prev_version and then action json list.
-    fn encode(&self) -> Result<Vec<u8>, ()> {
-        helper::encode_actions(self.prev_version, &self.actions)
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        let json = serde_json::to_string(&self).context(SerdeJsonSnafu)?;
+
+        Ok(json.into_bytes())
     }
 
-    fn decode(
-        _bs: &[u8],
-        _reader_version: ProtocolVersion,
-    ) -> Result<(Self, Option<ProtocolAction>), ()> {
-        todo!()
+    pub fn decode(bytes: &[u8]) -> Result<Self> {
+        let data = std::str::from_utf8(bytes).context(Utf8Snafu)?;
+
+        serde_json::from_str(data).context(SerdeJsonSnafu)
     }
 }
 
-pub struct MetaActionIteratorImpl {
+pub struct RegionMetaActionIter {
     // log_iter: ObjectStoreLogIterator,
     reader_version: ProtocolVersion,
     last_protocol: Option<ProtocolAction>,
 }
 
-impl MetaActionIteratorImpl {
+impl RegionMetaActionIter {
     pub fn last_protocol(&self) -> Option<ProtocolAction> {
         self.last_protocol.clone()
     }
 
-    async fn next_action(&mut self) -> Result<Option<(ManifestVersion, RegionMetaActionList)>, ()> {
+    async fn next_action(&mut self) -> Result<Option<(ManifestVersion, RegionMetaActionList)>> {
         todo!()
     }
 }
@@ -263,7 +248,7 @@ mod tests {
         let region_edit = r#"{"region_version":0,"flushed_sequence":null,"files_to_add":[{"region_id":4402341478400,"file_name":"4b220a70-2b03-4641-9687-b65d94641208.parquet","time_range":[{"value":1451609210000,"unit":"Millisecond"},{"value":1451609520000,"unit":"Millisecond"}],"level":1}],"files_to_remove":[{"region_id":4402341478400,"file_name":"34b6ebb9-b8a5-4a4b-b744-56f67defad02.parquet","time_range":[{"value":1451609210000,"unit":"Millisecond"},{"value":1451609520000,"unit":"Millisecond"}],"level":0}]}"#;
         let _ = serde_json::from_str::<RegionEdit>(region_edit).unwrap();
 
-        let region_change = r#" {"committed_sequence":42,"metadata":{"id":0,"name":"region-0","columns":{"columns":[{"cf_id":0,"desc":{"id":2,"name":"k1","data_type":{"Int32":{}},"is_nullable":false,"is_time_index":false,"default_constraint":null,"comment":""}},{"cf_id":0,"desc":{"id":1,"name":"timestamp","data_type":{"Timestamp":{"Millisecond":null}},"is_nullable":false,"is_time_index":true,"default_constraint":null,"comment":""}},{"cf_id":1,"desc":{"id":3,"name":"v1","data_type":{"Float32":{}},"is_nullable":true,"is_time_index":false,"default_constraint":null,"comment":""}},{"cf_id":1,"desc":{"id":2147483649,"name":"__sequence","data_type":{"UInt64":{}},"is_nullable":false,"is_time_index":false,"default_constraint":null,"comment":""}},{"cf_id":1,"desc":{"id":2147483650,"name":"__op_type","data_type":{"UInt8":{}},"is_nullable":false,"is_time_index":false,"default_constraint":null,"comment":""}}],"row_key_end":2,"timestamp_key_index":1,"enable_version_column":false,"user_column_end":3},"column_families":{"column_families":[{"name":"default","cf_id":1,"column_index_start":2,"column_index_end":3}]},"version":0}}"#;
+        let region_change = r#" {"committed_sequence":42,"metadata":{"column_metadatas":[{"column_schema":{"name":"a","data_type":{"Int64":{}},"is_nullable":false,"is_time_index":false,"default_constraint":null,"metadata":{}},"semantic_type":"Tag","column_id":1},{"column_schema":{"name":"b","data_type":{"Float64":{}},"is_nullable":false,"is_time_index":false,"default_constraint":null,"metadata":{}},"semantic_type":"Field","column_id":2},{"column_schema":{"name":"c","data_type":{"Timestamp":{"Millisecond":null}},"is_nullable":false,"is_time_index":false,"default_constraint":null,"metadata":{}},"semantic_type":"Timestamp","column_id":3}],"version":9,"primary_key":[1],"region_id":5299989648942}}"#;
         let _ = serde_json::from_str::<RegionChange>(region_change).unwrap();
 
         let region_remove = r#"{"region_id":42}"#;

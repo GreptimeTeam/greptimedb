@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
-
 use api::prom_store::remote::{ReadRequest, WriteRequest};
 use axum::extract::{Query, RawBody, State};
 use axum::http::{header, StatusCode};
@@ -62,7 +60,7 @@ pub async fn remote_write(
     );
     let ctx = if let Some(db) = params.db {
         let (catalog, schema) = parse_catalog_and_schema_from_client_database_name(&db);
-        Arc::new(QueryContext::with(catalog, schema))
+        QueryContext::with(catalog, schema)
     } else {
         QueryContext::arc()
     };
@@ -102,7 +100,7 @@ pub async fn remote_read(
     );
     let ctx = if let Some(db) = params.db {
         let (catalog, schema) = parse_catalog_and_schema_from_client_database_name(&db);
-        Arc::new(QueryContext::with(catalog, schema))
+        QueryContext::with(catalog, schema)
     } else {
         QueryContext::arc()
     };

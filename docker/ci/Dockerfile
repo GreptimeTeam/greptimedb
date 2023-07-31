@@ -7,7 +7,7 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
     python3-pip \
     curl
 
-COPY requirements.txt /etc/greptime/requirements.txt
+COPY ./docker/python/requirements.txt /etc/greptime/requirements.txt
 
 RUN python3 -m pip install -r /etc/greptime/requirements.txt
 

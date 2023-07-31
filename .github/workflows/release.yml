@@ -1,3 +1,8 @@
+name: Release
+
+# There are two kinds of formal release:
+# 1. The tag('v*.*.*') push release: the release workflow will be triggered by the tag push event.
+# 2. The scheduled release(the version will be '${{ env.NEXT_RELEASE_VERSION }}-nightly-YYYYMMDD'): the release workflow will be triggered by the schedule event.
 on:
   push:
     tags:
@@ -5,506 +10,386 @@ on:
   schedule:
     # At 00:00 on Monday.
     - cron: '0 0 * * 1'
-  # Manually trigger only builds binaries.
-  workflow_dispatch:
+  workflow_dispatch: # Allows you to run this workflow manually.
+    # Notes: The GitHub Actions ONLY support 10 inputs, and it's already used up.
     inputs:
-      dry_run:
-        description: 'Skip docker push and release steps'
+      linux_amd64_runner:
+        type: choice
+        description: The runner uses to build linux-amd64 artifacts
+        default: ec2-c6i.4xlarge-amd64
+        options:
+          - ubuntu-latest
+          - ubuntu-latest-8-cores
+          - ubuntu-latest-16-cores
+          - ubuntu-latest-32-cores
+          - ubuntu-latest-64-cores
+          - ec2-c6i.xlarge-amd64 # 4C8G
+          - ec2-c6i.2xlarge-amd64 # 8C16G
+          - ec2-c6i.4xlarge-amd64 # 16C32G
+          - ec2-c6i.8xlarge-amd64 # 32C64G
+          - ec2-c6i.16xlarge-amd64 # 64C128G
+      linux_arm64_runner:
+        type: choice
+        description: The runner uses to build linux-arm64 artifacts
+        default: ec2-c6g.4xlarge-arm64
+        options:
+          - ec2-c6g.xlarge-arm64 # 4C8G
+          - ec2-c6g.2xlarge-arm64 # 8C16G
+          - ec2-c6g.4xlarge-arm64 # 16C32G
+          - ec2-c6g.8xlarge-arm64 # 32C64G
+          - ec2-c6g.16xlarge-arm64 # 64C128G
+      macos_runner:
+        type: choice
+        description: The runner uses to build macOS artifacts
+        default: macos-latest
+        options:
+          - macos-latest
+      skip_test:
+        description: Do not run integration tests during the build
         type: boolean
         default: true
-      skip_test:
-        description: 'Do not run tests during build'
+      build_linux_amd64_artifacts:
         type: boolean
+        description: Build linux-amd64 artifacts
+        required: false
+        default: false
+      build_linux_arm64_artifacts:
+        type: boolean
+        description: Build linux-arm64 artifacts
+        required: false
+        default: false
+      build_macos_artifacts:
+        type: boolean
+        description: Build macos artifacts
+        required: false
+        default: false
+      release_artifacts:
+        type: boolean
+        description: Create GitHub release and upload artifacts
+        required: false
+        default: false
+      release_images:
+        type: boolean
+        description: Build and push images to DockerHub and ACR
+        required: false
+        default: false
+      release_dev_builder_image:
+        type: boolean
+        description: Release dev-builder image
+        required: false
         default: false
 
-name: Release
-
+# Use env variables to control all the release process.
 env:
+  # The arguments of building greptime.
   RUST_TOOLCHAIN: nightly-2023-05-03
-
-  SCHEDULED_BUILD_VERSION_PREFIX: v0.4.0
-
-  SCHEDULED_PERIOD: nightly
-
   CARGO_PROFILE: nightly
 
   # Controls whether to run tests, include unit-test, integration-test and sqlness.
-  DISABLE_RUN_TESTS: ${{ inputs.skip_test || false }}
+  DISABLE_RUN_TESTS: ${{ inputs.skip_test || vars.DEFAULT_SKIP_TEST }}
+
+  # The scheduled version is '${{ env.NEXT_RELEASE_VERSION }}-nightly-YYYYMMDD', like v0.2.0-nigthly-20230313;
+  NIGHTLY_RELEASE_PREFIX: nightly
+  # Note: The NEXT_RELEASE_VERSION should be modified manually by every formal release.
+  NEXT_RELEASE_VERSION: v0.4.0
 
 jobs:
-  build-macos:
-    name: Build macOS binary
+  allocate-runners:
+    name: Allocate runners
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
+    runs-on: ubuntu-latest
+    outputs:
+      linux-amd64-runner: ${{ steps.start-linux-amd64-runner.outputs.label }}
+      linux-arm64-runner: ${{ steps.start-linux-arm64-runner.outputs.label }}
+      macos-runner: ${{ inputs.macos_runner || vars.DEFAULT_MACOS_RUNNER }}
+
+      # The following EC2 resource id will be used for resource releasing.
+      linux-amd64-ec2-runner-label: ${{ steps.start-linux-amd64-runner.outputs.label }}
+      linux-amd64-ec2-runner-instance-id: ${{ steps.start-linux-amd64-runner.outputs.ec2-instance-id }}
+      linux-arm64-ec2-runner-label: ${{ steps.start-linux-arm64-runner.outputs.label }}
+      linux-arm64-ec2-runner-instance-id: ${{ steps.start-linux-arm64-runner.outputs.ec2-instance-id }}
+
+      # The 'version' use as the global tag name of the release workflow.
+      version: ${{ steps.create-version.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      # The create-version will create a global variable named 'version' in the global workflows.
+      # - If it's a tag push release, the version is the tag name(${{ github.ref_name }});
+      # - If it's a scheduled release, the version is '${{ env.NEXT_RELEASE_VERSION }}-nightly-$buildTime', like v0.2.0-nigthly-20230313;
+      # - If it's a manual release, the version is '${{ env.NEXT_RELEASE_VERSION }}-<short-git-sha>-YYYYMMDDSS', like v0.2.0-e5b243c-2023071245;
+      - name: Create version
+        id: create-version
+        run: |
+          echo "version=$(./.github/scripts/create-version.sh)" >> $GITHUB_OUTPUT
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+          NEXT_RELEASE_VERSION: ${{ env.NEXT_RELEASE_VERSION }}
+          NIGHTLY_RELEASE_PREFIX: ${{ env.NIGHTLY_RELEASE_PREFIX }}
+
+      - name: Allocate linux-amd64 runner
+        if: ${{ inputs.build_linux_amd64_artifacts || github.event_name == 'push' || github.event_name == 'schedule' }}
+        uses: ./.github/actions/start-runner
+        id: start-linux-amd64-runner
+        with:
+          runner: ${{ inputs.linux_amd64_runner || vars.DEFAULT_AMD64_RUNNER }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.EC2_RUNNER_REGION }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          image-id: ${{ vars.EC2_RUNNER_LINUX_AMD64_IMAGE_ID }}
+          security-group-id: ${{ vars.EC2_RUNNER_SECURITY_GROUP_ID }}
+          subnet-id: ${{ vars.EC2_RUNNER_SUBNET_ID }}
+
+      - name: Allocate linux-arm64 runner
+        if: ${{ inputs.build_linux_arm64_artifacts || github.event_name == 'push' || github.event_name == 'schedule' }}
+        uses: ./.github/actions/start-runner
+        id: start-linux-arm64-runner
+        with:
+          runner: ${{ inputs.linux_arm64_runner || vars.DEFAULT_ARM64_RUNNER }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.EC2_RUNNER_REGION }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          image-id: ${{ vars.EC2_RUNNER_LINUX_ARM64_IMAGE_ID }}
+          security-group-id: ${{ vars.EC2_RUNNER_SECURITY_GROUP_ID }}
+          subnet-id: ${{ vars.EC2_RUNNER_SUBNET_ID }}
+
+  build-linux-amd64-artifacts:
+    name: Build linux-amd64 artifacts
+    if: ${{ inputs.build_linux_amd64_artifacts || github.event_name == 'push' || github.event_name == 'schedule' }}
+    needs: [
+      allocate-runners,
+    ]
+    runs-on: ${{ needs.allocate-runners.outputs.linux-amd64-runner }}
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - uses: ./.github/actions/build-linux-artifacts
+        with:
+          arch: amd64
+          cargo-profile: ${{ env.CARGO_PROFILE }}
+          version: ${{ needs.allocate-runners.outputs.version }}
+          disable-run-tests: ${{ env.DISABLE_RUN_TESTS }}
+          release-to-s3-bucket: ${{ vars.AWS_RELEASE_BUCKET }}
+          aws-access-key-id: ${{ secrets.AWS_CN_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_CN_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_RELEASE_BUCKET_REGION }}
+
+  build-linux-arm64-artifacts:
+    name: Build linux-arm64 artifacts
+    if: ${{ inputs.build_linux_arm64_artifacts || github.event_name == 'push' || github.event_name == 'schedule' }}
+    needs: [
+      allocate-runners,
+    ]
+    runs-on: ${{ needs.allocate-runners.outputs.linux-arm64-runner }}
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - uses: ./.github/actions/build-linux-artifacts
+        with:
+          arch: arm64
+          cargo-profile: ${{ env.CARGO_PROFILE }}
+          version: ${{ needs.allocate-runners.outputs.version }}
+          disable-run-tests: ${{ env.DISABLE_RUN_TESTS }}
+          release-to-s3-bucket: ${{ vars.AWS_RELEASE_BUCKET }}
+          aws-access-key-id: ${{ secrets.AWS_CN_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_CN_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_RELEASE_BUCKET_REGION }}
+
+  build-macos-artifacts:
+    name: Build macOS artifacts
     strategy:
       fail-fast: false
       matrix:
-        # The file format is greptime-<os>-<arch>
         include:
-          - arch: aarch64-apple-darwin
-            os: macos-latest
-            file: greptime-darwin-arm64
-            continue-on-error: false
-            opts: "-F servers/dashboard"
-          - arch: x86_64-apple-darwin
-            os: macos-latest
-            file: greptime-darwin-amd64
-            continue-on-error: false
-            opts: "-F servers/dashboard"
-          - arch: aarch64-apple-darwin
-            os: macos-latest
-            file: greptime-darwin-arm64-pyo3
-            continue-on-error: false
-            opts: "-F pyo3_backend,servers/dashboard"
-          - arch: x86_64-apple-darwin
-            os: macos-latest
-            file: greptime-darwin-amd64-pyo3
-            continue-on-error: false
-            opts: "-F pyo3_backend,servers/dashboard"
+          - os: ${{ needs.allocate-runners.outputs.macos-runner }}
+            arch: aarch64-apple-darwin
+            features: servers/dashboard
+            artifacts-dir-prefix: greptime-darwin-arm64
+          - os: ${{ needs.allocate-runners.outputs.macos-runner }}
+            arch: aarch64-apple-darwin
+            features: pyo3_backend,servers/dashboard
+            artifacts-dir-prefix: greptime-darwin-arm64-pyo3
+          - os: ${{ needs.allocate-runners.outputs.macos-runner }}
+            features: servers/dashboard
+            arch: x86_64-apple-darwin
+            artifacts-dir-prefix: greptime-darwin-amd64
+          - os: ${{ needs.allocate-runners.outputs.macos-runner }}
+            features: pyo3_backend,servers/dashboard
+            arch: x86_64-apple-darwin
+            artifacts-dir-prefix: greptime-darwin-amd64-pyo3
     runs-on: ${{ matrix.os }}
-    continue-on-error: ${{ matrix.continue-on-error }}
-    if: github.repository == 'GreptimeTeam/greptimedb'
+    needs: [
+      allocate-runners,
+    ]
+    if: ${{ inputs.build_macos_artifacts || github.event_name == 'push' || github.event_name == 'schedule' }}
     steps:
-      - name: Checkout sources
-        uses: actions/checkout@v3
-
-      - name: Cache cargo assets
-        id: cache
-        uses: actions/cache@v3
+      - uses: actions/checkout@v3
         with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ matrix.arch }}-build-cargo-${{ hashFiles('**/Cargo.lock') }}
+          fetch-depth: 0
 
-      - name: Install Protoc for macos
-        if: contains(matrix.arch, 'darwin')
-        run: |
-          brew install protobuf
-
-      - name: Install etcd for macos
-        if: contains(matrix.arch, 'darwin')
-        run: |
-          brew install etcd
-          brew services start etcd
-
-      - name: Install rust toolchain
-        uses: dtolnay/rust-toolchain@master
+      - uses: ./.github/actions/build-macos-artifacts
         with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-          targets: ${{ matrix.arch }}
-      - name: Install latest nextest release
-        uses: taiki-e/install-action@nextest
-      - name: Output package versions
-        run: protoc --version ; cargo version ; rustc --version ; gcc --version ; g++ --version
+          arch: ${{ matrix.arch }}
+          rust-toolchain: ${{ env.RUST_TOOLCHAIN }}
+          cargo-profile: ${{ env.CARGO_PROFILE }}
+          features: ${{ matrix.features }}
+          version: ${{ needs.allocate-runners.outputs.version }}
+          disable-run-tests: ${{ env.DISABLE_RUN_TESTS }}
+          release-to-s3-bucket: ${{ vars.AWS_RELEASE_BUCKET }}
+          artifacts-dir: ${{ matrix.artifacts-dir-prefix }}-${{ needs.allocate-runners.outputs.version }}
+          aws-access-key-id: ${{ secrets.AWS_CN_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_CN_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_RELEASE_BUCKET_REGION }}
 
-      - name: Run tests
-        if: env.DISABLE_RUN_TESTS == 'false'
-        run: make test sqlness-test
-
-      - name: Run cargo build
-        if: contains(matrix.arch, 'darwin') || contains(matrix.opts, 'pyo3_backend') == false
-        run: cargo build --profile ${{ env.CARGO_PROFILE }} --locked --target ${{ matrix.arch }} ${{ matrix.opts }}
-
-      - name: Calculate checksum and rename binary
-        shell: bash
-        run: |
-          cd target/${{ matrix.arch }}/${{ env.CARGO_PROFILE }}
-          chmod +x greptime
-          tar -zcvf ${{ matrix.file }}.tgz greptime
-          echo $(shasum -a 256 ${{ matrix.file }}.tgz | cut -f1 -d' ') > ${{ matrix.file }}.sha256sum
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v3
-        with:
-          name: ${{ matrix.file }}
-          path: target/${{ matrix.arch }}/${{ env.CARGO_PROFILE }}/${{ matrix.file }}.tgz
-
-      - name: Upload checksum of artifacts
-        uses: actions/upload-artifact@v3
-        with:
-          name: ${{ matrix.file }}.sha256sum
-          path: target/${{ matrix.arch }}/${{ env.CARGO_PROFILE }}/${{ matrix.file }}.sha256sum
-
-      - name: Configure tag
-        shell: bash
-        if: github.event_name == 'push'
-        run: |
-          VERSION=${{ github.ref_name }}
-          echo "TAG=${VERSION:1}" >> $GITHUB_ENV
-
-      - name: Upload to S3
-        run: |
-          aws s3 cp target/${{ matrix.arch }}/${{ env.CARGO_PROFILE }} s3://${{ secrets.GREPTIMEDB_RELEASE_BUCKET_NAME }}/releases/${TAG} --recursive --exclude "*" --include "*.tgz"
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_CN_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_CN_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: ${{ secrets.AWS_CN_REGION }}
-
-  build-linux:
-    name: Build linux binary
-    strategy:
-      fail-fast: false
-      matrix:
-        # The file format is greptime-<os>-<arch>
-        include:
-          - arch: x86_64-unknown-linux-gnu
-            os: ubuntu-2004-16-cores
-            file: greptime-linux-amd64
-            continue-on-error: false
-            opts: "-F servers/dashboard"
-          - arch: aarch64-unknown-linux-gnu
-            os: ubuntu-2004-16-cores
-            file: greptime-linux-arm64
-            continue-on-error: false
-            opts: "-F servers/dashboard"
-          - arch: x86_64-unknown-linux-gnu
-            os: ubuntu-2004-16-cores
-            file: greptime-linux-amd64-pyo3
-            continue-on-error: false
-            opts: "-F pyo3_backend,servers/dashboard"
-          - arch: aarch64-unknown-linux-gnu
-            os: ubuntu-2004-16-cores
-            file: greptime-linux-arm64-pyo3
-            continue-on-error: false
-            opts: "-F pyo3_backend,servers/dashboard"
-    runs-on: ${{ matrix.os }}
-    continue-on-error: ${{ matrix.continue-on-error }}
-    if: github.repository == 'GreptimeTeam/greptimedb'
+  release-images-to-dockerhub:
+    name: Build and push images to DockerHub
+    if: ${{ inputs.release_images || github.event_name == 'push' || github.event_name == 'schedule' }}
+    needs: [
+      allocate-runners,
+      build-linux-amd64-artifacts,
+      build-linux-arm64-artifacts,
+    ]
+    runs-on: ubuntu-2004-16-cores
     steps:
-      - name: Checkout sources
-        uses: actions/checkout@v3
-
-      - name: Cache cargo assets
-        id: cache
-        uses: actions/cache@v3
+      - uses: actions/checkout@v3
         with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ matrix.arch }}-build-cargo-${{ hashFiles('**/Cargo.lock') }}
+          fetch-depth: 0
 
-      - name: Install Protoc for linux
-        if: contains(matrix.arch, 'linux') && endsWith(matrix.arch, '-gnu')
-        run: | # Make sure the protoc is >= 3.15
-          wget https://github.com/protocolbuffers/protobuf/releases/download/v21.9/protoc-21.9-linux-x86_64.zip
-          unzip protoc-21.9-linux-x86_64.zip -d protoc
-          sudo cp protoc/bin/protoc /usr/local/bin/
-          sudo cp -r protoc/include/google /usr/local/include/
-
-      - name: Install etcd for linux
-        if: contains(matrix.arch, 'linux') && endsWith(matrix.arch, '-gnu')
-        run: |
-          ETCD_VER=v3.5.7
-          DOWNLOAD_URL=https://github.com/etcd-io/etcd/releases/download
-          curl -L ${DOWNLOAD_URL}/${ETCD_VER}/etcd-${ETCD_VER}-linux-amd64.tar.gz -o /tmp/etcd-${ETCD_VER}-linux-amd64.tar.gz
-          mkdir -p /tmp/etcd-download
-          tar xzvf /tmp/etcd-${ETCD_VER}-linux-amd64.tar.gz -C /tmp/etcd-download --strip-components=1
-          rm -f /tmp/etcd-${ETCD_VER}-linux-amd64.tar.gz
-
-          sudo cp -a /tmp/etcd-download/etcd* /usr/local/bin/
-          nohup etcd >/tmp/etcd.log 2>&1 &
-
-      - name: Install dependencies for linux
-        if: contains(matrix.arch, 'linux') && endsWith(matrix.arch, '-gnu')
-        run: |
-          sudo apt-get -y update
-          sudo apt-get -y install libssl-dev pkg-config g++-aarch64-linux-gnu gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu wget
-
-      # FIXME(zyy17): Should we specify the version of python when building binary for darwin?
-      - name: Compile Python 3.10.10 from source for linux
-        if: contains(matrix.arch, 'linux') && contains(matrix.opts, 'pyo3_backend')
-        run: |
-          sudo chmod +x ./docker/aarch64/compile-python.sh
-          sudo ./docker/aarch64/compile-python.sh ${{ matrix.arch }}
-
-      - name: Install rust toolchain
-        uses: dtolnay/rust-toolchain@master
+      - name: Build and push images to dockerhub
+        uses: ./.github/actions/build-images
         with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-          targets: ${{ matrix.arch }}
-      - name: Install latest nextest release
-        uses: taiki-e/install-action@nextest
-      - name: Output package versions
-        run: protoc --version ; cargo version ; rustc --version ; gcc --version ; g++ --version
+          image-registry: docker.io
+          image-namespace: ${{ vars.IMAGE_NAMESPACE }}
+          image-registry-username: ${{ secrets.DOCKERHUB_USERNAME }}
+          image-registry-password: ${{ secrets.DOCKERHUB_TOKEN }}
+          version: ${{ needs.allocate-runners.outputs.version }}
 
-      - name: Run tests
-        if: env.DISABLE_RUN_TESTS == 'false'
-        run: make test sqlness-test
-
-      - name: Run cargo build
-        if: contains(matrix.arch, 'darwin') || contains(matrix.opts, 'pyo3_backend') == false
-        run: cargo build --profile ${{ env.CARGO_PROFILE }} --locked --target ${{ matrix.arch }} ${{ matrix.opts }}
-
-      - name: Run cargo build with pyo3 for aarch64-linux
-        if: contains(matrix.arch, 'aarch64-unknown-linux-gnu') && contains(matrix.opts, 'pyo3_backend')
-        run: |
-          # TODO(zyy17): We should make PYO3_CROSS_LIB_DIR configurable.
-          export PYTHON_INSTALL_PATH_AMD64=${PWD}/python-3.10.10/amd64
-          export LD_LIBRARY_PATH=$PYTHON_INSTALL_PATH_AMD64/lib:$LD_LIBRARY_PATH
-          export LIBRARY_PATH=$PYTHON_INSTALL_PATH_AMD64/lib:$LIBRARY_PATH
-          export PATH=$PYTHON_INSTALL_PATH_AMD64/bin:$PATH
-
-          export PYO3_CROSS_LIB_DIR=${PWD}/python-3.10.10/aarch64
-          echo "PYO3_CROSS_LIB_DIR: $PYO3_CROSS_LIB_DIR"
-          alias python=$PYTHON_INSTALL_PATH_AMD64/bin/python3
-          alias pip=$PYTHON_INSTALL_PATH_AMD64/bin/python3-pip
-
-          cargo build --profile ${{ env.CARGO_PROFILE }} --locked --target ${{ matrix.arch }} ${{ matrix.opts }}
-
-      - name: Run cargo build with pyo3 for amd64-linux
-        if: contains(matrix.arch, 'x86_64-unknown-linux-gnu') && contains(matrix.opts, 'pyo3_backend')
-        run: |
-          export PYTHON_INSTALL_PATH_AMD64=${PWD}/python-3.10.10/amd64
-          export LD_LIBRARY_PATH=$PYTHON_INSTALL_PATH_AMD64/lib:$LD_LIBRARY_PATH
-          export LIBRARY_PATH=$PYTHON_INSTALL_PATH_AMD64/lib:$LIBRARY_PATH
-          export PATH=$PYTHON_INSTALL_PATH_AMD64/bin:$PATH
-
-          echo "implementation=CPython" >> pyo3.config
-          echo "version=3.10" >> pyo3.config
-          echo "implementation=CPython" >> pyo3.config
-          echo "shared=true" >> pyo3.config
-          echo "abi3=true" >> pyo3.config
-          echo "lib_name=python3.10" >> pyo3.config
-          echo "lib_dir=$PYTHON_INSTALL_PATH_AMD64/lib" >> pyo3.config
-          echo "executable=$PYTHON_INSTALL_PATH_AMD64/bin/python3" >> pyo3.config
-          echo "pointer_width=64" >> pyo3.config
-          echo "build_flags=" >> pyo3.config
-          echo "suppress_build_script_link_lines=false" >> pyo3.config
-
-          cat pyo3.config
-          export PYO3_CONFIG_FILE=${PWD}/pyo3.config
-          alias python=$PYTHON_INSTALL_PATH_AMD64/bin/python3
-          alias pip=$PYTHON_INSTALL_PATH_AMD64/bin/python3-pip
-
-          cargo build --profile ${{ env.CARGO_PROFILE }} --locked --target ${{ matrix.arch }} ${{ matrix.opts }}
-
-      - name: Calculate checksum and rename binary
-        shell: bash
-        run: |
-          cd target/${{ matrix.arch }}/${{ env.CARGO_PROFILE }}
-          chmod +x greptime
-          tar -zcvf ${{ matrix.file }}.tgz greptime
-          echo $(shasum -a 256 ${{ matrix.file }}.tgz | cut -f1 -d' ') > ${{ matrix.file }}.sha256sum
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v3
-        with:
-          name: ${{ matrix.file }}
-          path: target/${{ matrix.arch }}/${{ env.CARGO_PROFILE }}/${{ matrix.file }}.tgz
-
-      - name: Upload checksum of artifacts
-        uses: actions/upload-artifact@v3
-        with:
-          name: ${{ matrix.file }}.sha256sum
-          path: target/${{ matrix.arch }}/${{ env.CARGO_PROFILE }}/${{ matrix.file }}.sha256sum
-
-      - name: Configure tag
-        shell: bash
-        if: github.event_name == 'push'
-        run: |
-          VERSION=${{ github.ref_name }}
-          echo "TAG=${VERSION:1}" >> $GITHUB_ENV
-
-      - name: Upload to S3
-        run: |
-          aws s3 cp target/${{ matrix.arch }}/${{ env.CARGO_PROFILE }} s3://${{ secrets.GREPTIMEDB_RELEASE_BUCKET_NAME }}/releases/${TAG} --recursive --exclude "*" --include "*.tgz"
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_CN_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_CN_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: ${{ secrets.AWS_CN_REGION }}
-
-  docker:
-    name: Build docker image
-    needs: [build-linux, build-macos]
-    runs-on: ubuntu-latest
-    if: github.repository == 'GreptimeTeam/greptimedb' && !(inputs.dry_run || false)
-    steps:
-      - name: Checkout sources
-        uses: actions/checkout@v3
-
-      - name: Login to Dockerhub
-        uses: docker/login-action@v2
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Configure scheduled build image tag # the tag would be ${SCHEDULED_BUILD_VERSION_PREFIX}-YYYYMMDD-${SCHEDULED_PERIOD}
-        shell: bash
-        if: github.event_name != 'push'
-        run: |
-          buildTime=`date "+%Y%m%d"`
-          SCHEDULED_BUILD_VERSION=${{ env.SCHEDULED_BUILD_VERSION_PREFIX }}-$buildTime-${{ env.SCHEDULED_PERIOD }}
-          echo "IMAGE_TAG=${SCHEDULED_BUILD_VERSION:1}" >> $GITHUB_ENV
-
-      - name: Configure tag # If the release tag is v0.1.0, then the image version tag will be 0.1.0.
-        shell: bash
-        if: github.event_name == 'push'
-        run: |
-          VERSION=${{ github.ref_name }}
-          echo "IMAGE_TAG=${VERSION:1}" >> $GITHUB_ENV
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v2
-
-      - name: Set up buildx
-        uses: docker/setup-buildx-action@v2
-
-      - name: Download amd64 binary
-        uses: actions/download-artifact@v3
-        with:
-          name: greptime-linux-amd64-pyo3
-          path: amd64
-
-      - name: Unzip the amd64 artifacts
-        run: |
-          tar xvf amd64/greptime-linux-amd64-pyo3.tgz -C amd64/ && rm amd64/greptime-linux-amd64-pyo3.tgz
-          cp -r amd64 docker/ci
-
-      - name: Download arm64 binary
-        id: download-arm64
-        uses: actions/download-artifact@v3
-        with:
-          name: greptime-linux-arm64-pyo3
-          path: arm64
-
-      - name: Unzip the arm64 artifacts
-        id: unzip-arm64
-        if: success() || steps.download-arm64.conclusion == 'success'
-        run: |
-          tar xvf arm64/greptime-linux-arm64-pyo3.tgz -C arm64/ && rm arm64/greptime-linux-arm64-pyo3.tgz
-          cp -r arm64 docker/ci
-
-      - name: Build and push all
-        uses: docker/build-push-action@v3
-        if: success() || steps.unzip-arm64.conclusion == 'success' # Build and push all platform if unzip-arm64 succeeds
-        with:
-          context: ./docker/ci/
-          file: ./docker/ci/Dockerfile
-          push: true
-          platforms: linux/amd64,linux/arm64
-          tags: |
-            greptime/greptimedb:latest
-            greptime/greptimedb:${{ env.IMAGE_TAG }}
-
-      - name: Build and push amd64 only
-        uses: docker/build-push-action@v3
-        if: success() || steps.download-arm64.conclusion == 'failure' # Only build and push amd64 platform if download-arm64 fails
-        with:
-          context: ./docker/ci/
-          file: ./docker/ci/Dockerfile
-          push: true
-          platforms: linux/amd64
-          tags: |
-            greptime/greptimedb:latest
-            greptime/greptimedb:${{ env.IMAGE_TAG }}
-
-  release:
-    name: Release artifacts
-    # Release artifacts only when all the artifacts are built successfully.
-    needs: [build-linux, build-macos, docker]
-    runs-on: ubuntu-latest
-    if: github.repository == 'GreptimeTeam/greptimedb' && !(inputs.dry_run || false)
-    steps:
-      - name: Checkout sources
-        uses: actions/checkout@v3
-
-      - name: Download artifacts
-        uses: actions/download-artifact@v3
-
-      - name: Configure scheduled build version # the version would be ${SCHEDULED_BUILD_VERSION_PREFIX}-${SCHEDULED_PERIOD}-YYYYMMDD, like v0.2.0-nigthly-20230313.
-        shell: bash
-        if: github.event_name != 'push'
-        run: |
-          buildTime=`date "+%Y%m%d"`
-          SCHEDULED_BUILD_VERSION=${{ env.SCHEDULED_BUILD_VERSION_PREFIX }}-${{ env.SCHEDULED_PERIOD }}-$buildTime
-          echo "SCHEDULED_BUILD_VERSION=${SCHEDULED_BUILD_VERSION}" >> $GITHUB_ENV
-
-      # Only publish release when the release tag is like v1.0.0, v1.0.1, v1.0.2, etc.
-      - name: Set whether it is the latest release
-        run: |
-          if [[ "${{ github.ref_name }}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "prerelease=false" >> $GITHUB_ENV
-            echo "makeLatest=true" >> $GITHUB_ENV
-          else
-            echo "prerelease=true" >> $GITHUB_ENV
-            echo "makeLatest=false" >> $GITHUB_ENV
-          fi
-
-      - name: Create scheduled build git tag
-        if: github.event_name != 'push'
-        run: |
-          git tag ${{ env.SCHEDULED_BUILD_VERSION }}
-
-      - name: Publish scheduled release # configure the different release title and tags.
-        uses: ncipollo/release-action@v1
-        if: github.event_name != 'push'
-        with:
-          name: "Release ${{ env.SCHEDULED_BUILD_VERSION }}"
-          prerelease: ${{ env.prerelease }}
-          makeLatest: ${{ env.makeLatest }}
-          tag: ${{ env.SCHEDULED_BUILD_VERSION }}
-          generateReleaseNotes: true
-          artifacts: |
-            **/greptime-*
-
-      - name: Publish release
-        uses: ncipollo/release-action@v1
-        if: github.event_name == 'push'
-        with:
-          name: "${{ github.ref_name }}"
-          prerelease: ${{ env.prerelease }}
-          makeLatest: ${{ env.makeLatest }}
-          generateReleaseNotes: false
-          allowUpdates: true
-          artifacts: |
-            **/greptime-*
-
-  docker-push-acr:
-    name: Push docker image to alibaba cloud container registry
-    needs: [docker]
-    runs-on: ubuntu-latest
-    if: github.repository == 'GreptimeTeam/greptimedb' && !(inputs.dry_run || false)
+  release-images-to-acr:
+    name: Build and push images to ACR
+    if: ${{ inputs.release_images || github.event_name == 'push' || github.event_name == 'schedule' }}
+    needs: [
+      allocate-runners,
+      build-linux-amd64-artifacts,
+      build-linux-arm64-artifacts,
+    ]
+    runs-on: ubuntu-2004-16-cores
+    # When we push to ACR, it's easy to fail due to some unknown network issues.
+    # However, we don't want to fail the whole workflow because of this.
+    # The ACR have daily sync with DockerHub, so don't worry about the image not being updated.
     continue-on-error: true
     steps:
-      - name: Checkout sources
-        uses: actions/checkout@v3
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v2
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
-
-      - name: Login to alibaba cloud container registry
-        uses: docker/login-action@v2
+      - uses: actions/checkout@v3
         with:
-          registry: greptime-registry.cn-hangzhou.cr.aliyuncs.com
-          username: ${{ secrets.ALICLOUD_USERNAME }}
-          password: ${{ secrets.ALICLOUD_PASSWORD }}
+          fetch-depth: 0
 
-      - name: Configure scheduled build image tag # the tag would be ${SCHEDULED_BUILD_VERSION_PREFIX}-YYYYMMDD-${SCHEDULED_PERIOD}
-        shell: bash
-        if: github.event_name != 'push'
-        run: |
-          buildTime=`date "+%Y%m%d"`
-          SCHEDULED_BUILD_VERSION=${{ env.SCHEDULED_BUILD_VERSION_PREFIX }}-$buildTime-${{ env.SCHEDULED_PERIOD }}
-          echo "IMAGE_TAG=${SCHEDULED_BUILD_VERSION:1}" >> $GITHUB_ENV
+      - name: Build and push images to ACR
+        uses: ./.github/actions/build-images
+        with:
+          image-registry: ${{ vars.ACR_IMAGE_REGISTRY }}
+          image-namespace: ${{ vars.IMAGE_NAMESPACE }}
+          image-registry-username: ${{ secrets.ALICLOUD_USERNAME }}
+          image-registry-password: ${{ secrets.ALICLOUD_PASSWORD }}
+          version: ${{ needs.allocate-runners.outputs.version }}
 
-      - name: Configure tag # If the release tag is v0.1.0, then the image version tag will be 0.1.0.
-        shell: bash
-        if: github.event_name == 'push'
-        run: |
-          VERSION=${{ github.ref_name }}
-          echo "IMAGE_TAG=${VERSION:1}" >> $GITHUB_ENV
+  release-artifacts:
+    name: Create GitHub release and upload artifacts
+    if: ${{ inputs.release_artifacts || github.event_name == 'push' || github.event_name == 'schedule' }}
+    needs: [
+      allocate-runners,
+      build-linux-amd64-artifacts,
+      build-linux-arm64-artifacts,
+      build-macos-artifacts,
+      release-images-to-dockerhub,
+    ]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
 
-      - name: Push image to alibaba cloud container registry # Use 'docker buildx imagetools create' to create a new image base on source image.
-        run: |
-          docker buildx imagetools create \
-            --tag greptime-registry.cn-hangzhou.cr.aliyuncs.com/greptime/greptimedb:latest \
-            --tag greptime-registry.cn-hangzhou.cr.aliyuncs.com/greptime/greptimedb:${{ env.IMAGE_TAG }} \
-            greptime/greptimedb:${{ env.IMAGE_TAG }}
+      - name: Release artifacts
+        uses: ./.github/actions/release-artifacts
+        with:
+          version: ${{ needs.allocate-runners.outputs.version }}
+
+  release-dev-builder-image:
+    name: Release dev builder image
+    if: ${{ inputs.release_dev_builder_image }} # Only manually trigger this job.
+    runs-on: ubuntu-latest-16-cores
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Build and push dev builder image
+        uses: ./.github/actions/build-dev-builder-image
+        with:
+          dockerhub-image-registry-username: ${{ secrets.DOCKERHUB_USERNAME }}
+          dockerhub-image-registry-password: ${{ secrets.DOCKERHUB_TOKEN }}
+          acr-image-registry: ${{ vars.ACR_IMAGE_REGISTRY }}
+          acr-image-registry-username: ${{ secrets.ALICLOUD_USERNAME }}
+          acr-image-registry-password: ${{ secrets.ALICLOUD_PASSWORD }}
+
+  ### Stop runners ###
+  # It's very necessary to split the job of releasing runners into 'stop-linux-amd64-runner' and 'stop-linux-arm64-runner'.
+  # Because we can terminate the specified EC2 instance immediately after the job is finished without uncessary waiting.
+  stop-linux-amd64-runner: # It's always run as the last job in the workflow to make sure that the runner is released.
+    name: Stop linux-amd64 runner
+    # Only run this job when the runner is allocated.
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    needs: [
+      allocate-runners,
+      build-linux-amd64-artifacts,
+    ]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Stop EC2 runner
+        uses: ./.github/actions/stop-runner
+        with:
+          label: ${{ needs.allocate-runners.outputs.linux-amd64-ec2-runner-label }}
+          ec2-instance-id: ${{ needs.allocate-runners.outputs.linux-amd64-ec2-runner-instance-id }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.EC2_RUNNER_REGION }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+  stop-linux-arm64-runner: # It's always run as the last job in the workflow to make sure that the runner is released.
+    name: Stop linux-arm64 runner
+    # Only run this job when the runner is allocated.
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    needs: [
+      allocate-runners,
+      build-linux-arm64-artifacts,
+    ]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Stop EC2 runner
+        uses: ./.github/actions/stop-runner
+        with:
+          label: ${{ needs.allocate-runners.outputs.linux-arm64-ec2-runner-label }}
+          ec2-instance-id: ${{ needs.allocate-runners.outputs.linux-arm64-ec2-runner-instance-id }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.EC2_RUNNER_REGION }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}

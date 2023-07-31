@@ -585,6 +585,86 @@ async fn test_execute_query_external_table_parquet(instance: Arc<dyn MockInstanc
 }
 
 #[apply(both_instances_cases)]
+async fn test_execute_query_external_table_orc(instance: Arc<dyn MockInstance>) {
+    let instance = instance.frontend();
+    let format = "orc";
+    let location = get_data_dir("../src/common/datasource/tests/orc/test.orc")
+        .canonicalize()
+        .unwrap()
+        .display()
+        .to_string();
+
+    let table_name = "various_type_orc";
+
+    let output = execute_sql(
+        &instance,
+        &format!(
+            r#"create external table {table_name} with (location='{location}', format='{format}');"#,
+        ),
+    )
+        .await;
+    assert!(matches!(output, Output::AffectedRows(0)));
+
+    let output = execute_sql(&instance, &format!("desc table {table_name};")).await;
+    let expect = "\
++------------------------+---------------------+------+---------+---------------+
+| Field                  | Type                | Null | Default | Semantic Type |
++------------------------+---------------------+------+---------+---------------+
+| double_a               | Float64             | YES  |         | FIELD         |
+| a                      | Float32             | YES  |         | FIELD         |
+| b                      | Boolean             | YES  |         | FIELD         |
+| str_direct             | String              | YES  |         | FIELD         |
+| d                      | String              | YES  |         | FIELD         |
+| e                      | String              | YES  |         | FIELD         |
+| f                      | String              | YES  |         | FIELD         |
+| int_short_repeated     | Int32               | YES  |         | FIELD         |
+| int_neg_short_repeated | Int32               | YES  |         | FIELD         |
+| int_delta              | Int32               | YES  |         | FIELD         |
+| int_neg_delta          | Int32               | YES  |         | FIELD         |
+| int_direct             | Int32               | YES  |         | FIELD         |
+| int_neg_direct         | Int32               | YES  |         | FIELD         |
+| bigint_direct          | Int64               | YES  |         | FIELD         |
+| bigint_neg_direct      | Int64               | YES  |         | FIELD         |
+| bigint_other           | Int64               | YES  |         | FIELD         |
+| utf8_increase          | String              | YES  |         | FIELD         |
+| utf8_decrease          | String              | YES  |         | FIELD         |
+| timestamp_simple       | TimestampNanosecond | YES  |         | FIELD         |
+| date_simple            | Date                | YES  |         | FIELD         |
++------------------------+---------------------+------+---------+---------------+";
+    check_output_stream(output, expect).await;
+
+    let output = execute_sql(&instance, &format!("select * from {table_name};")).await;
+    let expect = "\
++----------+-----+-------+------------+-----+-----+-------+--------------------+------------------------+-----------+---------------+------------+----------------+---------------+-------------------+--------------+---------------+---------------+----------------------------+-------------+
+| double_a | a   | b     | str_direct | d   | e   | f     | int_short_repeated | int_neg_short_repeated | int_delta | int_neg_delta | int_direct | int_neg_direct | bigint_direct | bigint_neg_direct | bigint_other | utf8_increase | utf8_decrease | timestamp_simple           | date_simple |
++----------+-----+-------+------------+-----+-----+-------+--------------------+------------------------+-----------+---------------+------------+----------------+---------------+-------------------+--------------+---------------+---------------+----------------------------+-------------+
+| 1.0      | 1.0 | true  | a          | a   | ddd | aaaaa | 5                  | -5                     | 1         | 5             | 1          | -1             | 1             | -1                | 5            | a             | eeeee         | 2023-04-01T20:15:30.002    | 2023-04-01  |
+| 2.0      | 2.0 | false | cccccc     | bb  | cc  | bbbbb | 5                  | -5                     | 2         | 4             | 6          | -6             | 6             | -6                | -5           | bb            | dddd          | 2021-08-22T07:26:44.525777 | 2023-03-01  |
+| 3.0      |     |       |            |     |     |       |                    |                        |           |               |            |                |               |                   | 1            | ccc           | ccc           | 2023-01-01T00:00:00        | 2023-01-01  |
+| 4.0      | 4.0 | true  | ddd        | ccc | bb  | ccccc | 5                  | -5                     | 4         | 2             | 3          | -3             | 3             | -3                | 5            | dddd          | bb            | 2023-02-01T00:00:00        | 2023-02-01  |
+| 5.0      | 5.0 | false | ee         | ddd | a   | ddddd | 5                  | -5                     | 5         | 1             | 2          | -2             | 2             | -2                | 5            | eeeee         | a             | 2023-03-01T00:00:00        | 2023-03-01  |
++----------+-----+-------+------------+-----+-----+-------+--------------------+------------------------+-----------+---------------+------------+----------------+---------------+-------------------+--------------+---------------+---------------+----------------------------+-------------+";
+    check_output_stream(output, expect).await;
+
+    let output = execute_sql(
+        &instance,
+        &format!("select double_a,a, str_direct as c, a as another_a from {table_name};"),
+    )
+    .await;
+    let expect = "\
++----------+-----+--------+-----------+
+| double_a | a   | c      | another_a |
++----------+-----+--------+-----------+
+| 1.0      | 1.0 | a      | 1.0       |
+| 2.0      | 2.0 | cccccc | 2.0       |
+| 3.0      |     |        |           |
+| 4.0      | 4.0 | ddd    | 4.0       |
+| 5.0      | 5.0 | ee     | 5.0       |
++----------+-----+--------+-----------+";
+    check_output_stream(output, expect).await;
+}
+
+#[apply(both_instances_cases)]
 async fn test_execute_query_external_table_csv(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
     let format = "csv";
@@ -764,7 +844,7 @@ async fn test_rename_table(instance: Arc<dyn MockInstance>) {
     let output = execute_sql(&instance, "create database db").await;
     assert!(matches!(output, Output::AffectedRows(1)));
 
-    let query_ctx = Arc::new(QueryContext::with(DEFAULT_CATALOG_NAME, "db"));
+    let query_ctx = QueryContext::with(DEFAULT_CATALOG_NAME, "db");
     let output = execute_sql_with(
         &instance,
         "create table demo(host string, cpu double, memory double, ts timestamp, time index(ts))",
@@ -832,7 +912,7 @@ async fn test_create_table_after_rename_table(instance: Arc<dyn MockInstance>) {
 
     // create test table
     let table_name = "demo";
-    let query_ctx = Arc::new(QueryContext::with(DEFAULT_CATALOG_NAME, "db"));
+    let query_ctx = QueryContext::with(DEFAULT_CATALOG_NAME, "db");
     let output = execute_sql_with(
         &instance,
         &format!("create table {table_name}(host string, cpu double, memory double, ts timestamp, time index(ts))"),
@@ -1016,7 +1096,7 @@ async fn test_use_database(instance: Arc<dyn MockInstance>) {
     let output = execute_sql(&instance, "create database db1").await;
     assert!(matches!(output, Output::AffectedRows(1)));
 
-    let query_ctx = Arc::new(QueryContext::with(DEFAULT_CATALOG_NAME, "db1"));
+    let query_ctx = QueryContext::with(DEFAULT_CATALOG_NAME, "db1");
     let output = execute_sql_with(
         &instance,
         "create table tb1(col_i32 int, ts bigint, TIME INDEX(ts))",
@@ -1330,7 +1410,7 @@ async fn test_information_schema_dot_tables(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
 
     let sql = "create table another_table(i bigint time index)";
-    let query_ctx = Arc::new(QueryContext::with("another_catalog", "another_schema"));
+    let query_ctx = QueryContext::with("another_catalog", "another_schema");
     let output = execute_sql_with(&instance, sql, query_ctx.clone()).await;
     assert!(matches!(output, Output::AffectedRows(0)));
 
@@ -1389,7 +1469,7 @@ async fn test_information_schema_dot_columns(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
 
     let sql = "create table another_table(i bigint time index)";
-    let query_ctx = Arc::new(QueryContext::with("another_catalog", "another_schema"));
+    let query_ctx = QueryContext::with("another_catalog", "another_schema");
     let output = execute_sql_with(&instance, sql, query_ctx.clone()).await;
     assert!(matches!(output, Output::AffectedRows(0)));
 

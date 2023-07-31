@@ -114,6 +114,7 @@ impl PromPlanner {
             table_provider,
             ctx: PromPlannerContext::from_eval_stmt(&stmt),
         };
+
         planner.prom_expr_to_plan(stmt.expr).await
     }
 
@@ -1401,7 +1402,7 @@ mod test {
             })
             .await
             .is_ok());
-        DfTableSourceProvider::new(catalog_list, false, &QueryContext::new())
+        DfTableSourceProvider::new(catalog_list, false, QueryContext::arc().as_ref())
     }
 
     // {

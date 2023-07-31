@@ -18,15 +18,18 @@ use std::sync::Arc;
 
 use arrow::array::{
     Array, ArrayBuilder, ArrayData, ArrayIter, ArrayRef, PrimitiveArray, PrimitiveBuilder,
+    Time32MillisecondArray as TimeMillisecondArray, Time32SecondArray as TimeSecondArray,
+    Time64MicrosecondArray as TimeMicrosecondArray, Time64NanosecondArray as TimeNanosecondArray,
     TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
     TimestampSecondArray,
 };
+use arrow_array::{IntervalDayTimeArray, IntervalMonthDayNanoArray, IntervalYearMonthArray};
 use arrow_schema::DataType;
 use serde_json::Value as JsonValue;
 use snafu::OptionExt;
 
 use crate::data_type::ConcreteDataType;
-use crate::error::{self, Result};
+use crate::error::{self, CastTypeSnafu, Result};
 use crate::scalars::{Scalar, ScalarRef, ScalarVector, ScalarVectorBuilder};
 use crate::serialize::Serializable;
 use crate::types::{
@@ -106,8 +109,89 @@ impl<T: LogicalPrimitiveType> PrimitiveVector<T> {
                     .with_timezone_opt(None::<String>)
                     .to_data(),
             },
-            _ => {
-                unreachable!()
+            arrow_type => {
+                return CastTypeSnafu {
+                    msg: format!(
+                        "Failed to cast arrow array {:?} to timestamp vector",
+                        arrow_type,
+                    ),
+                }
+                .fail()?;
+            }
+        };
+        let concrete_array = PrimitiveArray::<T::ArrowPrimitive>::from(array_data);
+        Ok(Self::new(concrete_array))
+    }
+
+    /// Converts arrow time array to vectors
+    pub fn try_from_arrow_time_array(array: impl AsRef<dyn Array>) -> Result<Self> {
+        let array = array.as_ref();
+        let array_data = match array.data_type() {
+            DataType::Time32(unit) => match unit {
+                arrow_schema::TimeUnit::Second => array
+                    .as_any()
+                    .downcast_ref::<TimeSecondArray>()
+                    .unwrap()
+                    .to_data(),
+                arrow_schema::TimeUnit::Millisecond => array
+                    .as_any()
+                    .downcast_ref::<TimeMillisecondArray>()
+                    .unwrap()
+                    .to_data(),
+                _ => unreachable!(),
+            },
+            DataType::Time64(unit) => match unit {
+                arrow_schema::TimeUnit::Microsecond => array
+                    .as_any()
+                    .downcast_ref::<TimeMicrosecondArray>()
+                    .unwrap()
+                    .to_data(),
+                arrow_schema::TimeUnit::Nanosecond => array
+                    .as_any()
+                    .downcast_ref::<TimeNanosecondArray>()
+                    .unwrap()
+                    .to_data(),
+                _ => unreachable!(),
+            },
+            arrow_type => {
+                return CastTypeSnafu {
+                    msg: format!("Failed to cast arrow array {:?} to time vector", arrow_type,),
+                }
+                .fail()?;
+            }
+        };
+        let concrete_array = PrimitiveArray::<T::ArrowPrimitive>::from(array_data);
+        Ok(Self::new(concrete_array))
+    }
+
+    pub fn try_from_arrow_interval_array(array: impl AsRef<dyn Array>) -> Result<Self> {
+        let array = array.as_ref();
+        let array_data = match array.data_type() {
+            DataType::Interval(unit) => match unit {
+                arrow_schema::IntervalUnit::YearMonth => array
+                    .as_any()
+                    .downcast_ref::<IntervalYearMonthArray>()
+                    .unwrap()
+                    .to_data(),
+                arrow_schema::IntervalUnit::DayTime => array
+                    .as_any()
+                    .downcast_ref::<IntervalDayTimeArray>()
+                    .unwrap()
+                    .to_data(),
+                arrow_schema::IntervalUnit::MonthDayNano => array
+                    .as_any()
+                    .downcast_ref::<IntervalMonthDayNanoArray>()
+                    .unwrap()
+                    .to_data(),
+            },
+            arrow_type => {
+                return CastTypeSnafu {
+                    msg: format!(
+                        "Failed to cast arrow array {:?} to interval vector",
+                        arrow_type,
+                    ),
+                }
+                .fail()?;
             }
         };
         let concrete_array = PrimitiveArray::<T::ArrowPrimitive>::from(array_data);
@@ -445,14 +529,23 @@ pub(crate) fn replicate_primitive<T: LogicalPrimitiveType>(
 
 #[cfg(test)]
 mod tests {
-    use arrow::array::Int32Array;
+    use arrow::array::{
+        Int32Array, Time32MillisecondArray, Time32SecondArray, Time64MicrosecondArray,
+        Time64NanosecondArray,
+    };
     use arrow::datatypes::DataType as ArrowDataType;
+    use arrow_array::{IntervalDayTimeArray, IntervalYearMonthArray};
     use serde_json;
 
     use super::*;
     use crate::data_type::DataType;
     use crate::serialize::Serializable;
     use crate::types::Int64Type;
+    use crate::vectors::{
+        IntervalDayTimeVector, IntervalYearMonthVector, TimeMicrosecondVector,
+        TimeMillisecondVector, TimeNanosecondVector, TimeSecondVector, TimestampMicrosecondVector,
+        TimestampMillisecondVector, TimestampNanosecondVector, TimestampSecondVector,
+    };
 
     fn check_vec(v: Int32Vector) {
         assert_eq!(4, v.len());
@@ -602,5 +695,84 @@ mod tests {
         test_from_wrapper_slice!(Int64Vector, i64);
         test_from_wrapper_slice!(Float32Vector, f32);
         test_from_wrapper_slice!(Float64Vector, f64);
+    }
+
+    #[test]
+    fn test_try_from_arrow_time_array() {
+        let array: ArrayRef = Arc::new(Time32SecondArray::from(vec![1i32, 2, 3]));
+        let vector = TimeSecondVector::try_from_arrow_time_array(array).unwrap();
+        assert_eq!(TimeSecondVector::from_values(vec![1, 2, 3]), vector);
+
+        let array: ArrayRef = Arc::new(Time32MillisecondArray::from(vec![1i32, 2, 3]));
+        let vector = TimeMillisecondVector::try_from_arrow_time_array(array).unwrap();
+        assert_eq!(TimeMillisecondVector::from_values(vec![1, 2, 3]), vector);
+
+        let array: ArrayRef = Arc::new(Time64MicrosecondArray::from(vec![1i64, 2, 3]));
+        let vector = TimeMicrosecondVector::try_from_arrow_time_array(array).unwrap();
+        assert_eq!(TimeMicrosecondVector::from_values(vec![1, 2, 3]), vector);
+
+        let array: ArrayRef = Arc::new(Time64NanosecondArray::from(vec![1i64, 2, 3]));
+        let vector = TimeNanosecondVector::try_from_arrow_time_array(array).unwrap();
+        assert_eq!(TimeNanosecondVector::from_values(vec![1, 2, 3]), vector);
+
+        // Test convert error
+        let array: ArrayRef = Arc::new(Int32Array::from(vec![1i32, 2, 3]));
+        assert!(TimeSecondVector::try_from_arrow_time_array(array).is_err());
+    }
+
+    #[test]
+    fn test_try_from_arrow_timestamp_array() {
+        let array: ArrayRef = Arc::new(TimestampSecondArray::from(vec![1i64, 2, 3]));
+        let vector = TimestampSecondVector::try_from_arrow_timestamp_array(array).unwrap();
+        assert_eq!(TimestampSecondVector::from_values(vec![1, 2, 3]), vector);
+
+        let array: ArrayRef = Arc::new(TimestampMillisecondArray::from(vec![1i64, 2, 3]));
+        let vector = TimestampMillisecondVector::try_from_arrow_timestamp_array(array).unwrap();
+        assert_eq!(
+            TimestampMillisecondVector::from_values(vec![1, 2, 3]),
+            vector
+        );
+
+        let array: ArrayRef = Arc::new(TimestampMicrosecondArray::from(vec![1i64, 2, 3]));
+        let vector = TimestampMicrosecondVector::try_from_arrow_timestamp_array(array).unwrap();
+        assert_eq!(
+            TimestampMicrosecondVector::from_values(vec![1, 2, 3]),
+            vector
+        );
+
+        let array: ArrayRef = Arc::new(TimestampNanosecondArray::from(vec![1i64, 2, 3]));
+        let vector = TimestampNanosecondVector::try_from_arrow_timestamp_array(array).unwrap();
+        assert_eq!(
+            TimestampNanosecondVector::from_values(vec![1, 2, 3]),
+            vector
+        );
+
+        // Test convert error
+        let array: ArrayRef = Arc::new(Int32Array::from(vec![1i32, 2, 3]));
+        assert!(TimestampSecondVector::try_from_arrow_timestamp_array(array).is_err());
+    }
+
+    #[test]
+    fn test_try_from_arrow_interval_array() {
+        let array: ArrayRef = Arc::new(IntervalYearMonthArray::from(vec![1000, 2000, 3000]));
+        let vector = IntervalYearMonthVector::try_from_arrow_interval_array(array).unwrap();
+        assert_eq!(
+            IntervalYearMonthVector::from_values(vec![1000, 2000, 3000]),
+            vector
+        );
+
+        let array: ArrayRef = Arc::new(IntervalDayTimeArray::from(vec![1000, 2000, 3000]));
+        let vector = IntervalDayTimeVector::try_from_arrow_interval_array(array).unwrap();
+        assert_eq!(
+            IntervalDayTimeVector::from_values(vec![1000, 2000, 3000]),
+            vector
+        );
+
+        let array: ArrayRef = Arc::new(IntervalYearMonthArray::from(vec![1000, 2000, 3000]));
+        let vector = IntervalYearMonthVector::try_from_arrow_interval_array(array).unwrap();
+        assert_eq!(
+            IntervalYearMonthVector::from_values(vec![1000, 2000, 3000]),
+            vector
+        );
     }
 }

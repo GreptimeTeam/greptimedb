@@ -13,6 +13,7 @@
 // limitations under the License.
 
 pub(crate) const METRIC_HANDLE_SQL_ELAPSED: &str = "frontend.handle_sql_elapsed";
+pub(crate) const METRIC_HANDLE_PROMQL_ELAPSED: &str = "frontend.handle_promql_elapsed";
 pub(crate) const METRIC_EXEC_PLAN_ELAPSED: &str = "frontend.exec_plan_elapsed";
 pub(crate) const METRIC_HANDLE_SCRIPTS_ELAPSED: &str = "frontend.handle_scripts_elapsed";
 pub(crate) const METRIC_RUN_SCRIPT_ELAPSED: &str = "frontend.run_script_elapsed";
@@ -24,3 +25,5 @@ pub const DIST_INGEST_ROW_COUNT: &str = "frontend.dist.ingest_rows";
 
 /// The samples count of Prometheus remote write.
 pub const PROM_STORE_REMOTE_WRITE_SAMPLES: &str = "frontend.prometheus.remote_write.samples";
+
+pub const OTLP_METRICS_ROWS: &str = "frontend.otlp.metrics.rows";

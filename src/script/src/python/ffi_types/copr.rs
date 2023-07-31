@@ -34,7 +34,7 @@ use rustpython_compiler_core::CodeObject;
 use rustpython_vm as vm;
 #[cfg(test)]
 use serde::Deserialize;
-use session::context::QueryContext;
+use session::context::{QueryContext, QueryContextBuilder};
 use snafu::{OptionExt, ResultExt};
 use vm::convert::ToPyObject;
 use vm::{pyclass as rspyclass, PyObjectRef, PyPayload, PyResult, VirtualMachine};
@@ -381,7 +381,7 @@ impl PyQueryEngine {
                 let res = handle.block_on(async {
                     let plan = engine
                         .planner()
-                        .plan(stmt, Default::default())
+                        .plan(stmt, QueryContextBuilder::default().build())
                         .await
                         .map_err(|e| e.to_string())?;
                     let res = engine

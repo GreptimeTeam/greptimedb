@@ -103,13 +103,14 @@ impl DistInserter {
             let table_info = self.find_table_info(&request.table_name).await?;
             let table_meta = &table_info.meta;
 
+            let table_id = table_info.table_id();
             let split = partition_manager
-                .split_insert_request(&table_name, request, table_meta.schema.as_ref())
+                .split_insert_request(table_id, request, table_meta.schema.as_ref())
                 .await
                 .context(SplitInsertSnafu)?;
 
             let table_route = partition_manager
-                .find_table_route(&table_name)
+                .find_table_route(table_id)
                 .await
                 .with_context(|_| FindTableRouteSnafu {
                     table_name: table_name.to_string(),
@@ -176,19 +177,19 @@ impl DistInserter {
 mod tests {
     use api::v1::column::{SemanticType, Values};
     use api::v1::{Column, ColumnDataType, InsertRequest as GrpcInsertRequest};
-    use catalog::helper::{
-        CatalogKey, CatalogValue, SchemaKey, SchemaValue, TableGlobalKey, TableGlobalValue,
-    };
     use client::client_manager::DatanodeClients;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-    use common_meta::key::TableMetadataManager;
+    use common_meta::helper::{CatalogKey, CatalogValue, SchemaKey, SchemaValue};
+    use common_meta::key::table_name::TableNameKey;
+    use common_meta::key::table_region::RegionDistribution;
+    use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_meta::kv_backend::{KvBackend, KvBackendRef};
     use common_meta::rpc::store::PutRequest;
     use datatypes::prelude::{ConcreteDataType, VectorRef};
     use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, Schema};
     use datatypes::vectors::Int32Vector;
-    use table::metadata::{TableInfoBuilder, TableMetaBuilder};
+    use table::metadata::{RawTableInfo, TableInfoBuilder, TableMetaBuilder};
 
     use super::*;
     use crate::heartbeat::handler::tests::MockKvCacheInvalidator;
@@ -219,13 +220,10 @@ mod tests {
         backend
     }
 
-    async fn create_testing_table(backend: &KvBackendRef, table_name: &str) {
-        let table_global_key = TableGlobalKey {
-            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
-            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
-            table_name: table_name.to_string(),
-        };
-
+    async fn create_testing_table(
+        table_name: &str,
+        table_metadata_manager: &TableMetadataManagerRef,
+    ) {
         let schema = Arc::new(Schema::new(vec![
             ColumnSchema::new("ts", ConcreteDataType::int64_datatype(), false)
                 .with_time_index(true)
@@ -243,20 +241,35 @@ mod tests {
             .build()
             .unwrap();
 
-        let table_info = TableInfoBuilder::new(table_name, table_meta)
+        let table_id = 1;
+        let table_info: RawTableInfo = TableInfoBuilder::new(table_name, table_meta)
+            .table_id(table_id)
             .build()
+            .unwrap()
+            .into();
+
+        let key = TableNameKey::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, table_name);
+        assert!(table_metadata_manager
+            .table_name_manager()
+            .create(&key, table_id)
+            .await
+            .is_ok());
+
+        assert!(table_metadata_manager
+            .table_info_manager()
+            .compare_and_put(table_id, None, table_info)
+            .await
+            .is_ok());
+
+        let _ = table_metadata_manager
+            .table_region_manager()
+            .compare_and_put(
+                1,
+                None,
+                RegionDistribution::from([(1, vec![1]), (2, vec![2]), (3, vec![3])]),
+            )
+            .await
             .unwrap();
-
-        let table_global_value = TableGlobalValue {
-            node_id: 1,
-            regions_id_map: HashMap::from([(1, vec![1]), (2, vec![2]), (3, vec![3])]),
-            table_info: table_info.into(),
-        };
-
-        let req = PutRequest::new()
-            .with_key(table_global_key.to_string().as_bytes())
-            .with_value(table_global_value.as_bytes().unwrap());
-        backend.put(req).await.unwrap();
     }
 
     #[tokio::test]
@@ -265,7 +278,7 @@ mod tests {
 
         let table_metadata_manager = Arc::new(TableMetadataManager::new(backend.clone()));
         let table_name = "one_column_partitioning_table";
-        create_testing_table(&backend, table_name).await;
+        create_testing_table(table_name, &table_metadata_manager).await;
 
         let catalog_manager = Arc::new(FrontendCatalogManager::new(
             backend,

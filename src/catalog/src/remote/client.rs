@@ -58,35 +58,12 @@ impl KvBackend for CachedMetaKvBackend {
         &self.name
     }
 
-    async fn range(&self, req: RangeRequest) -> Result<RangeResponse> {
-        self.kv_backend.range(req).await
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 
-    async fn get(&self, key: &[u8]) -> Result<Option<KeyValue>> {
-        let _timer = timer!(METRIC_CATALOG_KV_GET);
-
-        let init = async {
-            let _timer = timer!(METRIC_CATALOG_KV_REMOTE_GET);
-            self.kv_backend.get(key).await.map(|val| {
-                val.with_context(|| CacheNotGetSnafu {
-                    key: String::from_utf8_lossy(key),
-                })
-            })?
-        };
-
-        // currently moka doesn't have `optionally_try_get_with_by_ref`
-        // TODO(fys): change to moka method when available
-        // https://github.com/moka-rs/moka/issues/254
-        match self.cache.try_get_with_by_ref(key, init).await {
-            Ok(val) => Ok(Some(val)),
-            Err(e) => match e.as_ref() {
-                CacheNotGet { .. } => Ok(None),
-                _ => Err(e),
-            },
-        }
-        .map_err(|e| GetKvCache {
-            err_msg: e.to_string(),
-        })
+    async fn range(&self, req: RangeRequest) -> Result<RangeResponse> {
+        self.kv_backend.range(req).await
     }
 
     async fn put(&self, req: PutRequest) -> Result<PutResponse> {
@@ -117,6 +94,22 @@ impl KvBackend for CachedMetaKvBackend {
         }
 
         resp
+    }
+
+    async fn batch_get(&self, req: BatchGetRequest) -> Result<BatchGetResponse> {
+        self.kv_backend.batch_get(req).await
+    }
+
+    async fn compare_and_put(&self, req: CompareAndPutRequest) -> Result<CompareAndPutResponse> {
+        let key = &req.key.clone();
+
+        let ret = self.kv_backend.compare_and_put(req).await;
+
+        if ret.is_ok() {
+            self.invalidate_key(key).await;
+        }
+
+        ret
     }
 
     async fn delete_range(&self, mut req: DeleteRangeRequest) -> Result<DeleteRangeResponse> {
@@ -159,22 +152,6 @@ impl KvBackend for CachedMetaKvBackend {
         }
     }
 
-    async fn batch_get(&self, req: BatchGetRequest) -> Result<BatchGetResponse> {
-        self.kv_backend.batch_get(req).await
-    }
-
-    async fn compare_and_put(&self, req: CompareAndPutRequest) -> Result<CompareAndPutResponse> {
-        let key = &req.key.clone();
-
-        let ret = self.kv_backend.compare_and_put(req).await;
-
-        if ret.is_ok() {
-            self.invalidate_key(key).await;
-        }
-
-        ret
-    }
-
     async fn move_value(&self, req: MoveValueRequest) -> Result<MoveValueResponse> {
         let from_key = &req.from_key.clone();
         let to_key = &req.to_key.clone();
@@ -189,8 +166,31 @@ impl KvBackend for CachedMetaKvBackend {
         ret
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
+    async fn get(&self, key: &[u8]) -> Result<Option<KeyValue>> {
+        let _timer = timer!(METRIC_CATALOG_KV_GET);
+
+        let init = async {
+            let _timer = timer!(METRIC_CATALOG_KV_REMOTE_GET);
+            self.kv_backend.get(key).await.map(|val| {
+                val.with_context(|| CacheNotGetSnafu {
+                    key: String::from_utf8_lossy(key),
+                })
+            })?
+        };
+
+        // currently moka doesn't have `optionally_try_get_with_by_ref`
+        // TODO(fys): change to moka method when available
+        // https://github.com/moka-rs/moka/issues/254
+        match self.cache.try_get_with_by_ref(key, init).await {
+            Ok(val) => Ok(Some(val)),
+            Err(e) => match e.as_ref() {
+                CacheNotGet { .. } => Ok(None),
+                _ => Err(e),
+            },
+        }
+        .map_err(|e| GetKvCache {
+            err_msg: e.to_string(),
+        })
     }
 }
 

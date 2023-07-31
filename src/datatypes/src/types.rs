@@ -17,10 +17,12 @@ mod boolean_type;
 mod date_type;
 mod datetime_type;
 mod dictionary_type;
+mod interval_type;
 mod list_type;
 mod null_type;
 mod primitive_type;
 mod string_type;
+mod time_type;
 mod timestamp_type;
 
 pub use binary_type::BinaryType;
@@ -28,6 +30,9 @@ pub use boolean_type::BooleanType;
 pub use date_type::DateType;
 pub use datetime_type::DateTimeType;
 pub use dictionary_type::DictionaryType;
+pub use interval_type::{
+    IntervalDayTimeType, IntervalMonthDayNanoType, IntervalType, IntervalYearMonthType,
+};
 pub use list_type::ListType;
 pub use null_type::NullType;
 pub use primitive_type::{
@@ -35,6 +40,9 @@ pub use primitive_type::{
     NativeType, OrdPrimitive, UInt16Type, UInt32Type, UInt64Type, UInt8Type, WrapperType,
 };
 pub use string_type::StringType;
+pub use time_type::{
+    TimeMicrosecondType, TimeMillisecondType, TimeNanosecondType, TimeSecondType, TimeType,
+};
 pub use timestamp_type::{
     TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType,
     TimestampSecondType, TimestampType,

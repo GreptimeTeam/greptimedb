@@ -14,13 +14,16 @@
 
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::time::Duration;
 
 use client::client_manager::DatanodeClients;
-use common_meta::key::TableMetadataManager;
+use common_grpc::channel_manager::ChannelConfig;
+use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_procedure::local::{LocalManager, ManagerConfig};
+use common_procedure::ProcedureManagerRef;
 
 use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
-use crate::ddl::DdlManager;
+use crate::ddl::{DdlManager, DdlManagerRef};
 use crate::error::Result;
 use crate::handler::mailbox_handler::MailboxHandler;
 use crate::handler::region_lease_handler::RegionLeaseHandler;
@@ -39,9 +42,11 @@ use crate::procedure::region_failover::RegionFailoverManager;
 use crate::procedure::state_store::MetaStateStore;
 use crate::selector::lease_based::LeaseBasedSelector;
 use crate::sequence::Sequence;
+use crate::service::mailbox::MailboxRef;
 use crate::service::store::cached_kv::{CheckLeader, LeaderCachedKvStore};
 use crate::service::store::kv::{KvBackendAdapter, KvStoreRef, ResettableKvStoreRef};
 use crate::service::store::memory::MemStore;
+use crate::telemetry::get_greptimedb_telemetry_task;
 
 // TODO(fys): try use derive_builder macro
 pub struct MetaSrvBuilder {
@@ -143,51 +148,26 @@ impl MetaSrvBuilder {
 
         let kv_store = kv_store.unwrap_or_else(|| Arc::new(MemStore::default()));
         let in_memory = in_memory.unwrap_or_else(|| Arc::new(MemStore::default()));
-        let leader_cached_kv_store = Arc::new(LeaderCachedKvStore::new(
-            Arc::new(CheckLeaderByElection(election.clone())),
-            kv_store.clone(),
-        ));
-        let meta_peer_client = meta_peer_client.unwrap_or_else(|| {
-            MetaPeerClientBuilder::default()
-                .election(election.clone())
-                .in_memory(in_memory.clone())
-                .build()
-                .map(Arc::new)
-                // Safety: all required fields set at initialization
-                .unwrap()
-        });
+        let leader_cached_kv_store = build_leader_cached_kv_store(&election, &kv_store);
+        let meta_peer_client = meta_peer_client
+            .unwrap_or_else(|| build_default_meta_peer_client(&election, &in_memory));
         let selector = selector.unwrap_or_else(|| Arc::new(LeaseBasedSelector));
         let pushers = Pushers::default();
-        let mailbox_sequence = Sequence::new("heartbeat_mailbox", 1, 100, kv_store.clone());
-        let mailbox = HeartbeatMailbox::create(pushers.clone(), mailbox_sequence);
-        let state_store = Arc::new(MetaStateStore::new(kv_store.clone()));
-
-        let manager_config = ManagerConfig {
-            max_retry_times: options.procedure.max_retry_times,
-            retry_delay: options.procedure.retry_delay,
-            ..Default::default()
-        };
-
-        let procedure_manager = Arc::new(LocalManager::new(manager_config, state_store));
+        let mailbox = build_mailbox(&kv_store, &pushers);
+        let procedure_manager = build_procedure_manager(&options, &kv_store);
         let table_id_sequence = Arc::new(Sequence::new(TABLE_ID_SEQ, 1024, 10, kv_store.clone()));
         let metadata_service = metadata_service
             .unwrap_or_else(|| Arc::new(DefaultMetadataService::new(kv_store.clone())));
         let lock = lock.unwrap_or_else(|| Arc::new(MemLock::default()));
-
-        let table_metadata_manager = Arc::new(TableMetadataManager::new(KvBackendAdapter::wrap(
-            kv_store.clone(),
-        )));
-
-        // TODO(weny): considers to modify the default config of procedure manager
-        let ddl_manager = Arc::new(DdlManager::new(
-            procedure_manager.clone(),
-            kv_store.clone(),
-            datanode_clients.unwrap_or_else(|| Arc::new(DatanodeClients::default())),
-            mailbox.clone(),
-            options.server_addr.clone(),
-            table_metadata_manager.clone(),
-        ));
-
+        let table_metadata_manager = build_table_metadata_manager(&kv_store);
+        let ddl_manager = build_ddl_manager(
+            &options,
+            datanode_clients,
+            &procedure_manager,
+            &kv_store,
+            &mailbox,
+            &table_metadata_manager,
+        );
         let _ = ddl_manager.try_start();
 
         let handler_group = match handler_group {
@@ -196,36 +176,29 @@ impl MetaSrvBuilder {
                 let region_failover_handler = if options.disable_region_failover {
                     None
                 } else {
+                    let select_ctx = SelectorContext {
+                        server_addr: options.server_addr.clone(),
+                        datanode_lease_secs: options.datanode_lease_secs,
+                        kv_store: kv_store.clone(),
+                        meta_peer_client: meta_peer_client.clone(),
+                        catalog: None,
+                        schema: None,
+                        table: None,
+                    };
                     let region_failover_manager = Arc::new(RegionFailoverManager::new(
+                        in_memory.clone(),
                         mailbox.clone(),
                         procedure_manager.clone(),
                         selector.clone(),
-                        SelectorContext {
-                            server_addr: options.server_addr.clone(),
-                            datanode_lease_secs: options.datanode_lease_secs,
-                            kv_store: kv_store.clone(),
-                            meta_peer_client: meta_peer_client.clone(),
-                            catalog: None,
-                            schema: None,
-                            table: None,
-                        },
+                        select_ctx,
                         lock.clone(),
                         table_metadata_manager.clone(),
                     ));
-
                     Some(
                         RegionFailureHandler::try_new(election.clone(), region_failover_manager)
                             .await?,
                     )
                 };
-
-                let region_lease_handler = RegionLeaseHandler::new(
-                    kv_store.clone(),
-                    region_failover_handler
-                        .as_ref()
-                        .map(|x| x.region_failover_manager().clone()),
-                    table_metadata_manager.clone(),
-                );
 
                 let group = HeartbeatHandlerGroup::new(pushers);
                 group.add_handler(ResponseHeaderHandler::default()).await;
@@ -240,7 +213,7 @@ impl MetaSrvBuilder {
                 if let Some(region_failover_handler) = region_failover_handler {
                     group.add_handler(region_failover_handler).await;
                 }
-                group.add_handler(region_lease_handler).await;
+                group.add_handler(RegionLeaseHandler::default()).await;
                 group.add_handler(PersistStatsHandler::default()).await;
                 group
             }
@@ -252,7 +225,7 @@ impl MetaSrvBuilder {
             in_memory,
             kv_store,
             leader_cached_kv_store,
-            meta_peer_client,
+            meta_peer_client: meta_peer_client.clone(),
             table_id_sequence,
             selector,
             handler_group,
@@ -263,8 +236,83 @@ impl MetaSrvBuilder {
             mailbox,
             ddl_manager,
             table_metadata_manager,
+            greptimedb_telemerty_task: get_greptimedb_telemetry_task(meta_peer_client).await,
         })
     }
+}
+
+fn build_leader_cached_kv_store(
+    election: &Option<ElectionRef>,
+    kv_store: &KvStoreRef,
+) -> Arc<LeaderCachedKvStore> {
+    Arc::new(LeaderCachedKvStore::new(
+        Arc::new(CheckLeaderByElection(election.clone())),
+        kv_store.clone(),
+    ))
+}
+
+fn build_default_meta_peer_client(
+    election: &Option<ElectionRef>,
+    in_memory: &ResettableKvStoreRef,
+) -> MetaPeerClientRef {
+    MetaPeerClientBuilder::default()
+        .election(election.clone())
+        .in_memory(in_memory.clone())
+        .build()
+        .map(Arc::new)
+        // Safety: all required fields set at initialization
+        .unwrap()
+}
+
+fn build_mailbox(kv_store: &KvStoreRef, pushers: &Pushers) -> MailboxRef {
+    let mailbox_sequence = Sequence::new("heartbeat_mailbox", 1, 100, kv_store.clone());
+    HeartbeatMailbox::create(pushers.clone(), mailbox_sequence)
+}
+
+fn build_procedure_manager(options: &MetaSrvOptions, kv_store: &KvStoreRef) -> ProcedureManagerRef {
+    let manager_config = ManagerConfig {
+        max_retry_times: options.procedure.max_retry_times,
+        retry_delay: options.procedure.retry_delay,
+        ..Default::default()
+    };
+    let state_store = Arc::new(MetaStateStore::new(kv_store.clone()));
+    Arc::new(LocalManager::new(manager_config, state_store))
+}
+
+fn build_table_metadata_manager(kv_store: &KvStoreRef) -> TableMetadataManagerRef {
+    Arc::new(TableMetadataManager::new(KvBackendAdapter::wrap(
+        kv_store.clone(),
+    )))
+}
+
+fn build_ddl_manager(
+    options: &MetaSrvOptions,
+    datanode_clients: Option<Arc<DatanodeClients>>,
+    procedure_manager: &ProcedureManagerRef,
+    kv_store: &KvStoreRef,
+    mailbox: &MailboxRef,
+    table_metadata_manager: &TableMetadataManagerRef,
+) -> DdlManagerRef {
+    let datanode_clients = datanode_clients.unwrap_or_else(|| {
+        let datanode_client_channel_config = ChannelConfig::new()
+            .timeout(Duration::from_millis(
+                options.datanode.client_options.timeout_millis,
+            ))
+            .connect_timeout(Duration::from_millis(
+                options.datanode.client_options.connect_timeout_millis,
+            ))
+            .tcp_nodelay(options.datanode.client_options.tcp_nodelay);
+        Arc::new(DatanodeClients::new(datanode_client_channel_config))
+    });
+    // TODO(weny): considers to modify the default config of procedure manager
+    Arc::new(DdlManager::new(
+        procedure_manager.clone(),
+        kv_store.clone(),
+        datanode_clients,
+        mailbox.clone(),
+        options.server_addr.clone(),
+        table_metadata_manager.clone(),
+    ))
 }
 
 impl Default for MetaSrvBuilder {

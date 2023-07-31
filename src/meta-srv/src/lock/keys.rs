@@ -15,7 +15,6 @@
 //! All keys used for distributed locking in the Metasrv.
 //! Place them in this unified module for better maintenance.
 
-use common_meta::table_name::TableName;
 use common_meta::RegionIdent;
 
 use crate::lock::Key;
@@ -30,8 +29,4 @@ pub(crate) fn table_metadata_lock_key(region: &RegionIdent) -> Key {
         region.table_ident.table_id,
     )
     .into_bytes()
-}
-
-pub(crate) fn table_creation_lock_key(table_name: &TableName) -> Key {
-    format!("table_creation_lock_({})", table_name).into_bytes()
 }

@@ -6,6 +6,7 @@ license.workspace = true
 
 [features]
 mock = []
+greptimedb-telemetry = []
 
 [dependencies]
 anymap = "1.0.0-beta.2"
@@ -24,16 +25,17 @@ common-procedure = { path = "../common/procedure" }
 common-runtime = { path = "../common/runtime" }
 common-telemetry = { path = "../common/telemetry" }
 common-time = { path = "../common/time" }
+common-greptimedb-telemetry = { path = "../common/greptimedb-telemetry" }
 dashmap = "5.4"
 datatypes = { path = "../datatypes" }
-derive_builder = "0.12"
+derive_builder.workspace = true
 etcd-client.workspace = true
 futures.workspace = true
 h2 = "0.3"
 http-body = "0.4"
 lazy_static.workspace = true
 metrics.workspace = true
-once_cell = "1.17"
+once_cell.workspace = true
 parking_lot = "0.12"
 prost.workspace = true
 rand.workspace = true
@@ -51,6 +53,7 @@ tower = "0.4"
 typetag = "0.2"
 url = "2.3"
 servers = { path = "../servers" }
+uuid.workspace = true
 
 [dev-dependencies]
 chrono.workspace = true

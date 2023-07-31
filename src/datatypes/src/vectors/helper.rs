@@ -21,17 +21,20 @@ use arrow::array::{Array, ArrayRef, StringArray};
 use arrow::compute;
 use arrow::compute::kernels::comparison;
 use arrow::datatypes::{DataType as ArrowDataType, TimeUnit};
+use arrow_schema::IntervalUnit;
 use datafusion_common::ScalarValue;
 use snafu::{OptionExt, ResultExt};
 
+use super::{IntervalDayTimeVector, IntervalYearMonthVector};
 use crate::data_type::ConcreteDataType;
 use crate::error::{self, Result};
 use crate::scalars::{Scalar, ScalarVectorBuilder};
 use crate::value::{ListValue, ListValueRef};
 use crate::vectors::{
     BinaryVector, BooleanVector, ConstantVector, DateTimeVector, DateVector, Float32Vector,
-    Float64Vector, Int16Vector, Int32Vector, Int64Vector, Int8Vector, ListVector,
-    ListVectorBuilder, MutableVector, NullVector, StringVector, TimestampMicrosecondVector,
+    Float64Vector, Int16Vector, Int32Vector, Int64Vector, Int8Vector, IntervalMonthDayNanoVector,
+    ListVector, ListVectorBuilder, MutableVector, NullVector, StringVector, TimeMicrosecondVector,
+    TimeMillisecondVector, TimeNanosecondVector, TimeSecondVector, TimestampMicrosecondVector,
     TimestampMillisecondVector, TimestampNanosecondVector, TimestampSecondVector, UInt16Vector,
     UInt32Vector, UInt64Vector, UInt8Vector, Vector, VectorRef,
 };
@@ -194,20 +197,34 @@ impl Helper {
                 // Timezone is unimplemented now.
                 ConstantVector::new(Arc::new(TimestampNanosecondVector::from(vec![v])), length)
             }
+            ScalarValue::Time32Second(v) => {
+                ConstantVector::new(Arc::new(TimeSecondVector::from(vec![v])), length)
+            }
+            ScalarValue::Time32Millisecond(v) => {
+                ConstantVector::new(Arc::new(TimeMillisecondVector::from(vec![v])), length)
+            }
+            ScalarValue::Time64Microsecond(v) => {
+                ConstantVector::new(Arc::new(TimeMicrosecondVector::from(vec![v])), length)
+            }
+            ScalarValue::Time64Nanosecond(v) => {
+                ConstantVector::new(Arc::new(TimeNanosecondVector::from(vec![v])), length)
+            }
+            ScalarValue::IntervalYearMonth(v) => {
+                ConstantVector::new(Arc::new(IntervalYearMonthVector::from(vec![v])), length)
+            }
+            ScalarValue::IntervalDayTime(v) => {
+                ConstantVector::new(Arc::new(IntervalDayTimeVector::from(vec![v])), length)
+            }
+            ScalarValue::IntervalMonthDayNano(v) => {
+                ConstantVector::new(Arc::new(IntervalMonthDayNanoVector::from(vec![v])), length)
+            }
             ScalarValue::Decimal128(_, _, _)
-            | ScalarValue::IntervalYearMonth(_)
-            | ScalarValue::IntervalDayTime(_)
-            | ScalarValue::IntervalMonthDayNano(_)
-            | ScalarValue::Struct(_, _)
-            | ScalarValue::Dictionary(_, _)
-            | ScalarValue::Time32Second(_)
-            | ScalarValue::Time32Millisecond(_)
-            | ScalarValue::Time64Microsecond(_)
-            | ScalarValue::Time64Nanosecond(_)
             | ScalarValue::DurationSecond(_)
             | ScalarValue::DurationMillisecond(_)
             | ScalarValue::DurationMicrosecond(_)
-            | ScalarValue::DurationNanosecond(_) => {
+            | ScalarValue::DurationNanosecond(_)
+            | ScalarValue::Struct(_, _)
+            | ScalarValue::Dictionary(_, _) => {
                 return error::ConversionSnafu {
                     from: format!("Unsupported scalar value: {value}"),
                 }
@@ -265,11 +282,35 @@ impl Helper {
                     TimestampNanosecondVector::try_from_arrow_timestamp_array(array)?,
                 ),
             },
+            ArrowDataType::Time32(unit) => match unit {
+                TimeUnit::Second => Arc::new(TimeSecondVector::try_from_arrow_time_array(array)?),
+                TimeUnit::Millisecond => {
+                    Arc::new(TimeMillisecondVector::try_from_arrow_time_array(array)?)
+                }
+                _ => unimplemented!("Arrow array datatype: {:?}", array.as_ref().data_type()),
+            },
+            ArrowDataType::Time64(unit) => match unit {
+                TimeUnit::Microsecond => {
+                    Arc::new(TimeMicrosecondVector::try_from_arrow_time_array(array)?)
+                }
+                TimeUnit::Nanosecond => {
+                    Arc::new(TimeNanosecondVector::try_from_arrow_time_array(array)?)
+                }
+                _ => unimplemented!("Arrow array datatype: {:?}", array.as_ref().data_type()),
+            },
+            ArrowDataType::Interval(unit) => match unit {
+                IntervalUnit::YearMonth => Arc::new(
+                    IntervalYearMonthVector::try_from_arrow_interval_array(array)?,
+                ),
+                IntervalUnit::DayTime => {
+                    Arc::new(IntervalDayTimeVector::try_from_arrow_interval_array(array)?)
+                }
+                IntervalUnit::MonthDayNano => Arc::new(
+                    IntervalMonthDayNanoVector::try_from_arrow_interval_array(array)?,
+                ),
+            },
             ArrowDataType::Float16
-            | ArrowDataType::Time32(_)
-            | ArrowDataType::Time64(_)
             | ArrowDataType::Duration(_)
-            | ArrowDataType::Interval(_)
             | ArrowDataType::LargeList(_)
             | ArrowDataType::FixedSizeList(_, _)
             | ArrowDataType::Struct(_)
@@ -305,11 +346,13 @@ mod tests {
     use arrow::array::{
         ArrayRef, BooleanArray, Date32Array, Date64Array, Float32Array, Float64Array, Int16Array,
         Int32Array, Int64Array, Int8Array, LargeBinaryArray, ListArray, NullArray,
+        Time32MillisecondArray, Time32SecondArray, Time64MicrosecondArray, Time64NanosecondArray,
         TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
         TimestampSecondArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
     };
     use arrow::datatypes::{Field, Int32Type};
-    use common_time::{Date, DateTime};
+    use common_time::time::Time;
+    use common_time::{Date, DateTime, Interval};
 
     use super::*;
     use crate::value::Value;
@@ -442,5 +485,35 @@ mod tests {
         check_try_into_vector(TimestampMillisecondArray::from(vec![1, 2, 3]));
         check_try_into_vector(TimestampMicrosecondArray::from(vec![1, 2, 3]));
         check_try_into_vector(TimestampNanosecondArray::from(vec![1, 2, 3]));
+        check_try_into_vector(Time32SecondArray::from(vec![1, 2, 3]));
+        check_try_into_vector(Time32MillisecondArray::from(vec![1, 2, 3]));
+        check_try_into_vector(Time64MicrosecondArray::from(vec![1, 2, 3]));
+        check_try_into_vector(Time64NanosecondArray::from(vec![1, 2, 3]));
+    }
+
+    #[test]
+    fn test_try_from_scalar_time_value() {
+        let vector = Helper::try_from_scalar_value(ScalarValue::Time32Second(Some(42)), 3).unwrap();
+        assert_eq!(ConcreteDataType::time_second_datatype(), vector.data_type());
+        assert_eq!(3, vector.len());
+        for i in 0..vector.len() {
+            assert_eq!(Value::Time(Time::new_second(42)), vector.get(i));
+        }
+    }
+
+    #[test]
+    fn test_try_from_scalar_interval_value() {
+        let vector =
+            Helper::try_from_scalar_value(ScalarValue::IntervalMonthDayNano(Some(2000)), 3)
+                .unwrap();
+
+        assert_eq!(
+            ConcreteDataType::interval_month_day_nano_datatype(),
+            vector.data_type()
+        );
+        assert_eq!(3, vector.len());
+        for i in 0..vector.len() {
+            assert_eq!(Value::Interval(Interval::from_i128(2000)), vector.get(i));
+        }
     }
 }

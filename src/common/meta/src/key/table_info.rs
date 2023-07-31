@@ -13,10 +13,11 @@
 // limitations under the License.
 
 use serde::{Deserialize, Serialize};
+use snafu::ensure;
 use table::metadata::{RawTableInfo, TableId};
 
 use super::TABLE_INFO_KEY_PREFIX;
-use crate::error::Result;
+use crate::error::{Result, UnexpectedSnafu};
 use crate::key::{to_removed_key, TableMetaKey};
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::store::{CompareAndPutRequest, MoveValueRequest};
@@ -43,6 +44,15 @@ pub struct TableInfoValue {
     version: u64,
 }
 
+impl TableInfoValue {
+    pub fn new(table_info: RawTableInfo) -> Self {
+        Self {
+            table_info,
+            version: 0,
+        }
+    }
+}
+
 pub struct TableInfoManager {
     kv_backend: KvBackendRef,
 }
@@ -62,19 +72,43 @@ impl TableInfoManager {
             .transpose()
     }
 
+    /// Create TableInfo key and value. If the key already exists, check if the value is the same.
+    pub async fn create(&self, table_id: TableId, table_info: &RawTableInfo) -> Result<()> {
+        let result = self
+            .compare_and_put(table_id, None, table_info.clone())
+            .await?;
+        if let Err(curr) = result {
+            let Some(curr) = curr else {
+                return UnexpectedSnafu {
+                    err_msg: format!("compare_and_put expect None but failed with current value None, table_id: {table_id}, table_info: {table_info:?}"),
+                }.fail()
+            };
+            ensure!(
+                &curr.table_info == table_info,
+                UnexpectedSnafu {
+                    err_msg: format!(
+                        "TableInfoValue for table {table_id} is updated before it is created!"
+                    )
+                }
+            )
+        }
+        Ok(())
+    }
+
     /// Compare and put value of key. `expect` is the expected value, if backend's current value associated
     /// with key is the same as `expect`, the value will be updated to `val`.
     ///
     /// - If the compare-and-set operation successfully updated value, this method will return an `Ok(Ok())`
-    /// - If associated value is not the same as `expect`, no value will be updated and an `Ok(Err(Vec<u8>))`
-    /// will be returned, the `Err(Vec<u8>)` indicates the current associated value of key.
+    /// - If associated value is not the same as `expect`, no value will be updated and an
+    ///   `Ok(Err(Option<TableInfoValue>))` will be returned. The `Option<TableInfoValue>` indicates
+    ///   the current associated value of key.
     /// - If any error happens during operation, an `Err(Error)` will be returned.
     pub async fn compare_and_put(
         &self,
         table_id: TableId,
         expect: Option<TableInfoValue>,
         table_info: RawTableInfo,
-    ) -> Result<std::result::Result<(), Option<Vec<u8>>>> {
+    ) -> Result<std::result::Result<(), Option<TableInfoValue>>> {
         let key = TableInfoKey::new(table_id);
         let raw_key = key.as_raw_key();
 
@@ -98,7 +132,10 @@ impl TableInfoManager {
         Ok(if resp.success {
             Ok(())
         } else {
-            Err(resp.prev_kv.map(|x| x.value))
+            Err(resp
+                .prev_kv
+                .map(|x| TableInfoValue::try_from_raw_value(x.value))
+                .transpose()?)
         })
     }
 
@@ -141,6 +178,13 @@ mod tests {
         }
 
         let manager = TableInfoManager::new(backend.clone());
+        assert!(manager.create(99, &new_table_info(99)).await.is_ok());
+        assert!(manager.create(99, &new_table_info(99)).await.is_ok());
+
+        let result = manager.create(99, &new_table_info(88)).await;
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg
+            .contains("Unexpected: TableInfoValue for table 99 is updated before it is created!"));
 
         let val = manager.get(1).await.unwrap().unwrap();
         assert_eq!(
@@ -152,7 +196,21 @@ mod tests {
         );
         assert!(manager.get(4).await.unwrap().is_none());
 
+        // test cas failed, current value is not set
         let table_info = new_table_info(4);
+        let result = manager
+            .compare_and_put(
+                4,
+                Some(TableInfoValue {
+                    table_info: table_info.clone(),
+                    version: 0,
+                }),
+                table_info.clone(),
+            )
+            .await
+            .unwrap();
+        assert!(result.unwrap_err().is_none());
+
         let result = manager
             .compare_and_put(4, None, table_info.clone())
             .await
@@ -165,7 +223,7 @@ mod tests {
             .compare_and_put(4, None, new_table_info.clone())
             .await
             .unwrap();
-        let actual = TableInfoValue::try_from_raw_value(result.unwrap_err().unwrap()).unwrap();
+        let actual = result.unwrap_err().unwrap();
         assert_eq!(
             actual,
             TableInfoValue {

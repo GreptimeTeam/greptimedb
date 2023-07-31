@@ -57,11 +57,11 @@ impl EtcdStore {
             .await
             .context(error::ConnectEtcdSnafu)?;
 
-        Self::with_etcd_client(client)
+        Ok(Self::with_etcd_client(client))
     }
 
-    pub fn with_etcd_client(client: Client) -> Result<KvStoreRef> {
-        Ok(Arc::new(Self { client }))
+    pub fn with_etcd_client(client: Client) -> KvStoreRef {
+        Arc::new(Self { client })
     }
 
     async fn do_multi_txn(&self, txn_ops: Vec<TxnOp>) -> Result<Vec<TxnResponse>> {
@@ -95,6 +95,10 @@ impl EtcdStore {
 impl KvBackend for EtcdStore {
     fn name(&self) -> &str {
         "Etcd"
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 
     async fn range(&self, req: RangeRequest) -> Result<RangeResponse> {
@@ -137,31 +141,6 @@ impl KvBackend for EtcdStore {
         Ok(PutResponse { prev_kv })
     }
 
-    async fn batch_get(&self, req: BatchGetRequest) -> Result<BatchGetResponse> {
-        let BatchGet { keys, options } = req.try_into()?;
-
-        let get_ops: Vec<_> = keys
-            .into_iter()
-            .map(|k| TxnOp::get(k, options.clone()))
-            .collect();
-
-        let txn_responses = self.do_multi_txn(get_ops).await?;
-
-        let mut kvs = vec![];
-        for txn_res in txn_responses {
-            for op_res in txn_res.op_responses() {
-                let get_res = match op_res {
-                    TxnOpResponse::Get(get_res) => get_res,
-                    _ => unreachable!(),
-                };
-
-                kvs.extend(get_res.kvs().iter().map(KvPair::from_etcd_kv));
-            }
-        }
-
-        Ok(BatchGetResponse { kvs })
-    }
-
     async fn batch_put(&self, req: BatchPutRequest) -> Result<BatchPutResponse> {
         let BatchPut { kvs, options } = req.try_into()?;
 
@@ -189,32 +168,29 @@ impl KvBackend for EtcdStore {
         Ok(BatchPutResponse { prev_kvs })
     }
 
-    async fn batch_delete(&self, req: BatchDeleteRequest) -> Result<BatchDeleteResponse> {
-        let BatchDelete { keys, options } = req.try_into()?;
+    async fn batch_get(&self, req: BatchGetRequest) -> Result<BatchGetResponse> {
+        let BatchGet { keys, options } = req.try_into()?;
 
-        let mut prev_kvs = Vec::with_capacity(keys.len());
-
-        let delete_ops = keys
+        let get_ops: Vec<_> = keys
             .into_iter()
-            .map(|k| TxnOp::delete(k, options.clone()))
-            .collect::<Vec<_>>();
+            .map(|k| TxnOp::get(k, options.clone()))
+            .collect();
 
-        let txn_responses = self.do_multi_txn(delete_ops).await?;
+        let txn_responses = self.do_multi_txn(get_ops).await?;
 
+        let mut kvs = vec![];
         for txn_res in txn_responses {
             for op_res in txn_res.op_responses() {
-                match op_res {
-                    TxnOpResponse::Delete(delete_res) => {
-                        delete_res.prev_kvs().iter().for_each(|kv| {
-                            prev_kvs.push(KvPair::from_etcd_kv(kv));
-                        });
-                    }
+                let get_res = match op_res {
+                    TxnOpResponse::Get(get_res) => get_res,
                     _ => unreachable!(),
-                }
+                };
+
+                kvs.extend(get_res.kvs().iter().map(KvPair::from_etcd_kv));
             }
         }
 
-        Ok(BatchDeleteResponse { prev_kvs })
+        Ok(BatchGetResponse { kvs })
     }
 
     async fn compare_and_put(&self, req: CompareAndPutRequest) -> Result<CompareAndPutResponse> {
@@ -284,6 +260,34 @@ impl KvBackend for EtcdStore {
             deleted: res.deleted(),
             prev_kvs,
         })
+    }
+
+    async fn batch_delete(&self, req: BatchDeleteRequest) -> Result<BatchDeleteResponse> {
+        let BatchDelete { keys, options } = req.try_into()?;
+
+        let mut prev_kvs = Vec::with_capacity(keys.len());
+
+        let delete_ops = keys
+            .into_iter()
+            .map(|k| TxnOp::delete(k, options.clone()))
+            .collect::<Vec<_>>();
+
+        let txn_responses = self.do_multi_txn(delete_ops).await?;
+
+        for txn_res in txn_responses {
+            for op_res in txn_res.op_responses() {
+                match op_res {
+                    TxnOpResponse::Delete(delete_res) => {
+                        delete_res.prev_kvs().iter().for_each(|kv| {
+                            prev_kvs.push(KvPair::from_etcd_kv(kv));
+                        });
+                    }
+                    _ => unreachable!(),
+                }
+            }
+        }
+
+        Ok(BatchDeleteResponse { prev_kvs })
     }
 
     async fn move_value(&self, req: MoveValueRequest) -> Result<MoveValueResponse> {
@@ -357,10 +361,6 @@ impl KvBackend for EtcdStore {
             key: String::from_utf8_lossy(&from_key),
         }
         .fail()
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 }
 

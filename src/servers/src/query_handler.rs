@@ -31,6 +31,9 @@ use std::sync::Arc;
 use api::prom_store::remote::{ReadRequest, WriteRequest};
 use async_trait::async_trait;
 use common_query::Output;
+use opentelemetry_proto::tonic::collector::metrics::v1::{
+    ExportMetricsServiceRequest, ExportMetricsServiceResponse,
+};
 use session::context::QueryContextRef;
 
 use crate::error::Result;
@@ -41,6 +44,7 @@ use crate::prom_store::Metrics;
 pub type OpentsdbProtocolHandlerRef = Arc<dyn OpentsdbProtocolHandler + Send + Sync>;
 pub type InfluxdbLineProtocolHandlerRef = Arc<dyn InfluxdbLineProtocolHandler + Send + Sync>;
 pub type PromStoreProtocolHandlerRef = Arc<dyn PromStoreProtocolHandler + Send + Sync>;
+pub type OpenTelemetryProtocolHandlerRef = Arc<dyn OpenTelemetryProtocolHandler + Send + Sync>;
 pub type ScriptHandlerRef = Arc<dyn ScriptHandler + Send + Sync>;
 
 #[async_trait]
@@ -82,4 +86,14 @@ pub trait PromStoreProtocolHandler {
     async fn read(&self, request: ReadRequest, ctx: QueryContextRef) -> Result<PromStoreResponse>;
     /// Handling push gateway requests
     async fn ingest_metrics(&self, metrics: Metrics) -> Result<()>;
+}
+
+#[async_trait]
+pub trait OpenTelemetryProtocolHandler {
+    /// Handling opentelemetry metrics request
+    async fn metrics(
+        &self,
+        request: ExportMetricsServiceRequest,
+        ctx: QueryContextRef,
+    ) -> Result<ExportMetricsServiceResponse>;
 }

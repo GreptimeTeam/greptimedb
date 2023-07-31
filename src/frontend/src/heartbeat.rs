@@ -22,6 +22,7 @@ use common_meta::heartbeat::mailbox::{HeartbeatMailbox, MailboxRef, OutgoingMess
 use common_meta::heartbeat::utils::outgoing_message_to_mailbox_message;
 use common_telemetry::{debug, error, info};
 use meta_client::client::{HeartbeatSender, HeartbeatStream, MetaClient};
+use servers::heartbeat_options::HeartbeatOptions;
 use snafu::ResultExt;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Receiver;
@@ -43,14 +44,13 @@ pub struct HeartbeatTask {
 impl HeartbeatTask {
     pub fn new(
         meta_client: Arc<MetaClient>,
-        heartbeat_interval_millis: u64,
-        retry_interval_millis: u64,
+        heartbeat: HeartbeatOptions,
         resp_handler_executor: HeartbeatResponseHandlerExecutorRef,
     ) -> Self {
         HeartbeatTask {
             meta_client,
-            report_interval: heartbeat_interval_millis,
-            retry_interval: retry_interval_millis,
+            report_interval: heartbeat.interval_millis,
+            retry_interval: heartbeat.retry_interval_millis,
             resp_handler_executor,
         }
     }

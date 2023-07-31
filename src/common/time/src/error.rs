@@ -32,6 +32,9 @@ pub enum Error {
     #[snafu(display("Failed to parse a string into Timestamp, raw string: {}", raw))]
     ParseTimestamp { raw: String, location: Location },
 
+    #[snafu(display("Failed to parse a string into Interval, raw string: {}", raw))]
+    ParseInterval { raw: String, location: Location },
+
     #[snafu(display("Current timestamp overflow, source: {}", source))]
     TimestampOverflow {
         source: TryFromIntError,
@@ -71,6 +74,7 @@ impl ErrorExt for Error {
             Error::InvalidDateStr { .. } | Error::ArithmeticOverflow { .. } => {
                 StatusCode::InvalidArguments
             }
+            Error::ParseInterval { .. } => StatusCode::InvalidArguments,
         }
     }
 
@@ -88,6 +92,7 @@ impl ErrorExt for Error {
             | Error::ParseOffsetStr { .. }
             | Error::ParseTimeZoneName { .. } => None,
             Error::InvalidDateStr { location, .. } => Some(*location),
+            Error::ParseInterval { location, .. } => Some(*location),
         }
     }
 }

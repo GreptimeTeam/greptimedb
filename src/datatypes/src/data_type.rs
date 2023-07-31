@@ -15,7 +15,10 @@
 use std::fmt;
 use std::sync::Arc;
 
-use arrow::datatypes::{DataType as ArrowDataType, TimeUnit as ArrowTimeUnit};
+use arrow::datatypes::{
+    DataType as ArrowDataType, IntervalUnit as ArrowIntervalUnit, TimeUnit as ArrowTimeUnit,
+};
+use common_time::interval::IntervalUnit;
 use common_time::timestamp::TimeUnit;
 use paste::paste;
 use serde::{Deserialize, Serialize};
@@ -24,8 +27,9 @@ use crate::error::{self, Error, Result};
 use crate::type_id::LogicalTypeId;
 use crate::types::{
     BinaryType, BooleanType, DateTimeType, DateType, DictionaryType, Float32Type, Float64Type,
-    Int16Type, Int32Type, Int64Type, Int8Type, ListType, NullType, StringType,
-    TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType,
+    Int16Type, Int32Type, Int64Type, Int8Type, IntervalDayTimeType, IntervalMonthDayNanoType,
+    IntervalType, IntervalYearMonthType, ListType, NullType, StringType, TimeMillisecondType,
+    TimeType, TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType,
     TimestampSecondType, TimestampType, UInt16Type, UInt32Type, UInt64Type, UInt8Type,
 };
 use crate::value::Value;
@@ -53,10 +57,14 @@ pub enum ConcreteDataType {
     Binary(BinaryType),
     String(StringType),
 
-    // Date types:
+    // Date and time types:
     Date(DateType),
     DateTime(DateTimeType),
     Timestamp(TimestampType),
+    Time(TimeType),
+
+    // Interval types:
+    Interval(IntervalType),
 
     // Compound types:
     List(ListType),
@@ -83,8 +91,10 @@ impl fmt::Display for ConcreteDataType {
             ConcreteDataType::Date(_) => write!(f, "Date"),
             ConcreteDataType::DateTime(_) => write!(f, "DateTime"),
             ConcreteDataType::Timestamp(_) => write!(f, "Timestamp"),
+            ConcreteDataType::Time(_) => write!(f, "Time"),
             ConcreteDataType::List(_) => write!(f, "List"),
             ConcreteDataType::Dictionary(_) => write!(f, "Dictionary"),
+            ConcreteDataType::Interval(_) => write!(f, "Interval"),
         }
     }
 }
@@ -110,6 +120,8 @@ impl ConcreteDataType {
                 | ConcreteDataType::Date(_)
                 | ConcreteDataType::DateTime(_)
                 | ConcreteDataType::Timestamp(_)
+                | ConcreteDataType::Time(_)
+                | ConcreteDataType::Interval(_)
         )
     }
 
@@ -123,6 +135,8 @@ impl ConcreteDataType {
                 | ConcreteDataType::Date(_)
                 | ConcreteDataType::DateTime(_)
                 | ConcreteDataType::Timestamp(_)
+                | ConcreteDataType::Time(_)
+                | ConcreteDataType::Interval(_)
         )
     }
 
@@ -181,6 +195,15 @@ impl ConcreteDataType {
             _ => None,
         }
     }
+
+    /// Try to cast data type as a [`TimeType`].
+    pub fn as_time(&self) -> Option<TimeType> {
+        match self {
+            ConcreteDataType::Int64(_) => Some(TimeType::Millisecond(TimeMillisecondType)),
+            ConcreteDataType::Time(t) => Some(*t),
+            _ => None,
+        }
+    }
 }
 
 impl From<&ConcreteDataType> for ConcreteDataType {
@@ -209,6 +232,7 @@ impl TryFrom<&ArrowDataType> for ConcreteDataType {
             ArrowDataType::Date32 => Self::date_datatype(),
             ArrowDataType::Date64 => Self::datetime_datatype(),
             ArrowDataType::Timestamp(u, _) => ConcreteDataType::from_arrow_time_unit(u),
+            ArrowDataType::Interval(u) => ConcreteDataType::from_arrow_interval_unit(u),
             ArrowDataType::Binary | ArrowDataType::LargeBinary => Self::binary_datatype(),
             ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 => Self::string_datatype(),
             ArrowDataType::List(field) => Self::List(ListType::new(
@@ -219,6 +243,8 @@ impl TryFrom<&ArrowDataType> for ConcreteDataType {
                 let value_type = ConcreteDataType::from_arrow_type(value_type);
                 Self::Dictionary(DictionaryType::new(key_type, value_type))
             }
+            ArrowDataType::Time32(u) => ConcreteDataType::Time(TimeType::from_unit(u.into())),
+            ArrowDataType::Time64(u) => ConcreteDataType::Time(TimeType::from_unit(u.into())),
             _ => {
                 return error::UnsupportedArrowTypeSnafu {
                     arrow_type: dt.clone(),
@@ -271,6 +297,45 @@ impl ConcreteDataType {
         ConcreteDataType::Timestamp(TimestampType::Nanosecond(TimestampNanosecondType::default()))
     }
 
+    /// Returns the time data type with `TimeUnit`.
+    pub fn time_datatype(unit: TimeUnit) -> Self {
+        ConcreteDataType::Time(TimeType::from_unit(unit))
+    }
+
+    /// Creates a [Time(TimeSecondType)] datatype.
+    pub fn time_second_datatype() -> Self {
+        Self::time_datatype(TimeUnit::Second)
+    }
+
+    /// Creates a [Time(TimeMillisecondType)] datatype.
+    pub fn time_millisecond_datatype() -> Self {
+        Self::time_datatype(TimeUnit::Millisecond)
+    }
+
+    /// Creates a [Time(TimeMicrosecond)] datatype.
+    pub fn time_microsecond_datatype() -> Self {
+        Self::time_datatype(TimeUnit::Microsecond)
+    }
+
+    /// Creates a [Time(TimeNanosecond)] datatype.
+    pub fn time_nanosecond_datatype() -> Self {
+        Self::time_datatype(TimeUnit::Nanosecond)
+    }
+
+    pub fn interval_month_day_nano_datatype() -> Self {
+        ConcreteDataType::Interval(IntervalType::MonthDayNano(
+            IntervalMonthDayNanoType::default(),
+        ))
+    }
+
+    pub fn interval_year_month_datatype() -> Self {
+        ConcreteDataType::Interval(IntervalType::YearMonth(IntervalYearMonthType::default()))
+    }
+
+    pub fn interval_day_time_datatype() -> Self {
+        ConcreteDataType::Interval(IntervalType::DayTime(IntervalDayTimeType::default()))
+    }
+
     pub fn timestamp_datatype(unit: TimeUnit) -> Self {
         match unit {
             TimeUnit::Second => Self::timestamp_second_datatype(),
@@ -287,6 +352,22 @@ impl ConcreteDataType {
             ArrowTimeUnit::Millisecond => Self::timestamp_millisecond_datatype(),
             ArrowTimeUnit::Microsecond => Self::timestamp_microsecond_datatype(),
             ArrowTimeUnit::Nanosecond => Self::timestamp_nanosecond_datatype(),
+        }
+    }
+
+    pub fn interval_datatype(unit: IntervalUnit) -> Self {
+        match unit {
+            IntervalUnit::YearMonth => Self::interval_year_month_datatype(),
+            IntervalUnit::DayTime => Self::interval_day_time_datatype(),
+            IntervalUnit::MonthDayNano => Self::interval_month_day_nano_datatype(),
+        }
+    }
+
+    pub fn from_arrow_interval_unit(u: &ArrowIntervalUnit) -> Self {
+        match u {
+            ArrowIntervalUnit::YearMonth => Self::interval_year_month_datatype(),
+            ArrowIntervalUnit::DayTime => Self::interval_day_time_datatype(),
+            ArrowIntervalUnit::MonthDayNano => Self::interval_month_day_nano_datatype(),
         }
     }
 
@@ -464,6 +545,10 @@ mod tests {
         assert!(!ConcreteDataType::string_datatype().is_timestamp_compatible());
         assert!(!ConcreteDataType::int32_datatype().is_timestamp_compatible());
         assert!(!ConcreteDataType::uint64_datatype().is_timestamp_compatible());
+        assert!(!ConcreteDataType::time_second_datatype().is_timestamp_compatible());
+        assert!(!ConcreteDataType::time_millisecond_datatype().is_timestamp_compatible());
+        assert!(!ConcreteDataType::time_microsecond_datatype().is_timestamp_compatible());
+        assert!(!ConcreteDataType::time_nanosecond_datatype().is_timestamp_compatible());
     }
 
     #[test]
@@ -497,6 +582,14 @@ mod tests {
         assert!(ConcreteDataType::timestamp_millisecond_datatype().is_stringifiable());
         assert!(ConcreteDataType::timestamp_microsecond_datatype().is_stringifiable());
         assert!(ConcreteDataType::timestamp_nanosecond_datatype().is_stringifiable());
+        assert!(ConcreteDataType::time_second_datatype().is_stringifiable());
+        assert!(ConcreteDataType::time_millisecond_datatype().is_stringifiable());
+        assert!(ConcreteDataType::time_microsecond_datatype().is_stringifiable());
+        assert!(ConcreteDataType::time_nanosecond_datatype().is_stringifiable());
+
+        assert!(ConcreteDataType::interval_year_month_datatype().is_stringifiable());
+        assert!(ConcreteDataType::interval_day_time_datatype().is_stringifiable());
+        assert!(ConcreteDataType::interval_month_day_nano_datatype().is_stringifiable());
     }
 
     #[test]
@@ -511,6 +604,13 @@ mod tests {
         assert!(ConcreteDataType::timestamp_millisecond_datatype().is_signed());
         assert!(ConcreteDataType::timestamp_microsecond_datatype().is_signed());
         assert!(ConcreteDataType::timestamp_nanosecond_datatype().is_signed());
+        assert!(ConcreteDataType::time_second_datatype().is_signed());
+        assert!(ConcreteDataType::time_millisecond_datatype().is_signed());
+        assert!(ConcreteDataType::time_microsecond_datatype().is_signed());
+        assert!(ConcreteDataType::time_nanosecond_datatype().is_signed());
+        assert!(ConcreteDataType::interval_year_month_datatype().is_signed());
+        assert!(ConcreteDataType::interval_day_time_datatype().is_signed());
+        assert!(ConcreteDataType::interval_month_day_nano_datatype().is_signed());
 
         assert!(!ConcreteDataType::uint8_datatype().is_signed());
         assert!(!ConcreteDataType::uint16_datatype().is_signed());
@@ -533,6 +633,13 @@ mod tests {
         assert!(!ConcreteDataType::timestamp_millisecond_datatype().is_unsigned());
         assert!(!ConcreteDataType::timestamp_microsecond_datatype().is_unsigned());
         assert!(!ConcreteDataType::timestamp_nanosecond_datatype().is_unsigned());
+        assert!(!ConcreteDataType::time_second_datatype().is_unsigned());
+        assert!(!ConcreteDataType::time_millisecond_datatype().is_unsigned());
+        assert!(!ConcreteDataType::time_microsecond_datatype().is_unsigned());
+        assert!(!ConcreteDataType::time_nanosecond_datatype().is_unsigned());
+        assert!(!ConcreteDataType::interval_year_month_datatype().is_unsigned());
+        assert!(!ConcreteDataType::interval_day_time_datatype().is_unsigned());
+        assert!(!ConcreteDataType::interval_month_day_nano_datatype().is_unsigned());
 
         assert!(ConcreteDataType::uint8_datatype().is_unsigned());
         assert!(ConcreteDataType::uint16_datatype().is_unsigned());
@@ -634,5 +741,13 @@ mod tests {
             ConcreteDataType::from_arrow_type(&ArrowDataType::Date32).to_string(),
             "Date"
         );
+        assert_eq!(ConcreteDataType::time_second_datatype().to_string(), "Time");
+        assert_eq!(
+            ConcreteDataType::from_arrow_type(&ArrowDataType::Interval(
+                arrow_schema::IntervalUnit::MonthDayNano,
+            ))
+            .to_string(),
+            "Interval"
+        )
     }
 }

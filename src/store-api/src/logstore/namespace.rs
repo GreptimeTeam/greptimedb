@@ -16,6 +16,6 @@ use std::hash::Hash;
 
 pub type Id = u64;
 
-pub trait Namespace: Send + Sync + Clone + std::fmt::Debug + Hash + PartialEq {
+pub trait Namespace: Send + Sync + Clone + std::fmt::Debug + Hash + PartialEq + Eq {
     fn id(&self) -> Id;
 }

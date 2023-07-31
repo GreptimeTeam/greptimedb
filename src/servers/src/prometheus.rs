@@ -26,7 +26,7 @@ use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
-use common_telemetry::info;
+use common_telemetry::{info, timer};
 use common_time::util::{current_time_rfc3339, yesterday_rfc3339};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::scalars::ScalarVector;
@@ -91,7 +91,7 @@ impl PrometheusServer {
     }
 
     pub fn make_app(&self) -> Router {
-        // TODO(ruihang): implement format_query, series, values, query_examplars and targets methods
+        // TODO(ruihang): implement format_query, series, values, query_exemplars and targets methods
 
         let router = Router::new()
             .route("/query", routing::post(instant_query).get(instant_query))
@@ -428,6 +428,7 @@ pub async fn instant_query(
     Query(params): Query<InstantQuery>,
     Form(form_params): Form<InstantQuery>,
 ) -> Json<PrometheusJsonResponse> {
+    let _timer = timer!(crate::metrics::METRIC_HTTP_PROMQL_INSTANT_QUERY_ELAPSED);
     // Extract time from query string, or use current server time if not specified.
     let time = params
         .time
@@ -445,7 +446,7 @@ pub async fn instant_query(
 
     let query_ctx = QueryContext::with(catalog, schema);
 
-    let result = handler.do_query(&prom_query, Arc::new(query_ctx)).await;
+    let result = handler.do_query(&prom_query, query_ctx).await;
     let (metric_name, result_type) = match retrieve_metric_name_and_result_type(&prom_query.query) {
         Ok((metric_name, result_type)) => (metric_name.unwrap_or_default(), result_type),
         Err(err) => {
@@ -471,6 +472,7 @@ pub async fn range_query(
     Query(params): Query<RangeQuery>,
     Form(form_params): Form<RangeQuery>,
 ) -> Json<PrometheusJsonResponse> {
+    let _timer = timer!(crate::metrics::METRIC_HTTP_PROMQL_RANGE_QUERY_ELAPSED);
     let prom_query = PromQuery {
         query: params.query.or(form_params.query).unwrap_or_default(),
         start: params.start.or(form_params.start).unwrap_or_default(),
@@ -483,7 +485,7 @@ pub async fn range_query(
 
     let query_ctx = QueryContext::with(catalog, schema);
 
-    let result = handler.do_query(&prom_query, Arc::new(query_ctx)).await;
+    let result = handler.do_query(&prom_query, query_ctx).await;
     let metric_name = match retrieve_metric_name_and_result_type(&prom_query.query) {
         Err(err) => {
             return PrometheusJsonResponse::error(err.status_code().to_string(), err.to_string())
@@ -543,6 +545,7 @@ pub async fn labels_query(
     Query(params): Query<LabelsQuery>,
     Form(form_params): Form<LabelsQuery>,
 ) -> Json<PrometheusJsonResponse> {
+    let _timer = timer!(crate::metrics::METRIC_HTTP_PROMQL_LABEL_QUERY_ELAPSED);
     let mut queries = params.matches.0;
     if queries.is_empty() {
         queries = form_params.matches.0;
@@ -562,7 +565,7 @@ pub async fn labels_query(
 
     let db = &params.db.unwrap_or(DEFAULT_SCHEMA_NAME.to_string());
     let (catalog, schema) = crate::parse_catalog_and_schema_from_client_database_name(db);
-    let query_ctx = Arc::new(QueryContext::with(catalog, schema));
+    let query_ctx = QueryContext::with(catalog, schema);
 
     let mut labels = HashSet::new();
     let _ = labels.insert(METRIC_NAME.to_string());
@@ -779,6 +782,7 @@ pub async fn label_values_query(
     Path(label_name): Path<String>,
     Query(params): Query<LabelValueQuery>,
 ) -> Json<PrometheusJsonResponse> {
+    let _timer = timer!(crate::metrics::METRIC_HTTP_PROMQL_LABEL_VALUE_QUERY_ELAPSED);
     let queries = params.matches.0;
     if queries.is_empty() {
         return PrometheusJsonResponse::error("Invalid argument", "match[] parameter is required");
@@ -788,7 +792,7 @@ pub async fn label_values_query(
     let end = params.end.unwrap_or_else(current_time_rfc3339);
     let db = &params.db.unwrap_or(DEFAULT_SCHEMA_NAME.to_string());
     let (catalog, schema) = crate::parse_catalog_and_schema_from_client_database_name(db);
-    let query_ctx = Arc::new(QueryContext::with(catalog, schema));
+    let query_ctx = QueryContext::with(catalog, schema);
 
     let mut label_values = HashSet::new();
 
@@ -891,6 +895,7 @@ pub async fn series_query(
     Query(params): Query<SeriesQuery>,
     Form(form_params): Form<SeriesQuery>,
 ) -> Json<PrometheusJsonResponse> {
+    let _timer = timer!(crate::metrics::METRIC_HTTP_PROMQL_SERIES_QUERY_ELAPSED);
     let mut queries: Vec<String> = params.matches.0;
     if queries.is_empty() {
         queries = form_params.matches.0;
@@ -909,7 +914,7 @@ pub async fn series_query(
 
     let db = &params.db.unwrap_or(DEFAULT_SCHEMA_NAME.to_string());
     let (catalog, schema) = super::parse_catalog_and_schema_from_client_database_name(db);
-    let query_ctx = Arc::new(QueryContext::with(catalog, schema));
+    let query_ctx = QueryContext::with(catalog, schema);
 
     let mut series = Vec::new();
     for query in queries {

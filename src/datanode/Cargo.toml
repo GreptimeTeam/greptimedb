@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+greptimedb-telemetry = []
+
 [dependencies]
 async-compat = "0.2"
 async-stream.workspace = true
@@ -27,6 +30,7 @@ common-recordbatch = { path = "../common/recordbatch" }
 common-runtime = { path = "../common/runtime" }
 common-telemetry = { path = "../common/telemetry" }
 common-time = { path = "../common/time" }
+common-greptimedb-telemetry = { path = "../common/greptimedb-telemetry" }
 datafusion.workspace = true
 datafusion-common.workspace = true
 datafusion-expr.workspace = true
@@ -46,7 +50,6 @@ object-store = { path = "../object-store" }
 pin-project = "1.0"
 prost.workspace = true
 query = { path = "../query" }
-regex = "1.6"
 secrecy = { version = "0.8", features = ["serde", "alloc"] }
 serde = "1.0"
 serde_json = "1.0"
@@ -66,6 +69,7 @@ tonic.workspace = true
 tower = { version = "0.4", features = ["full"] }
 tower-http = { version = "0.3", features = ["full"] }
 url = "2.3.1"
+uuid.workspace = true
 
 [dev-dependencies]
 axum-test-helper = { git = "https://github.com/sunng87/axum-test-helper.git", branch = "patch-1" }

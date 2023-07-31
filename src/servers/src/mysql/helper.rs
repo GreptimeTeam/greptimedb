@@ -153,7 +153,7 @@ pub fn convert_value(param: &ParamValue, t: &ConcreteDataType) -> Result<ScalarV
             }
             .fail(),
         },
-        ValueInner::NULL => Ok(value::to_null_scalar_value(t)),
+        ValueInner::NULL => value::to_null_scalar_value(t).context(error::ConvertScalarValueSnafu),
         ValueInner::Bytes(b) => match t {
             ConcreteDataType::String(_) => Ok(ScalarValue::Utf8(Some(
                 String::from_utf8_lossy(b).to_string(),

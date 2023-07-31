@@ -18,22 +18,21 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
-use api::v1::ddl_request::{Expr as DdlExpr, Expr};
+use api::v1::ddl_request::Expr as DdlExpr;
 use api::v1::greptime_request::Request;
 use api::v1::{
     column_def, AlterExpr, CompactTableExpr, CreateDatabaseExpr, CreateTableExpr, DeleteRequest,
-    FlushTableExpr, InsertRequests,
+    FlushTableExpr, InsertRequests, TruncateTableExpr,
 };
 use async_trait::async_trait;
-use catalog::helper::{SchemaKey, SchemaValue};
-use catalog::{CatalogManager, RegisterTableRequest};
+use catalog::{CatalogManager, DeregisterTableRequest, RegisterTableRequest};
 use chrono::DateTime;
 use client::client_manager::DatanodeClients;
 use client::Database;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::format_full_table_name;
 use common_error::ext::BoxedError;
-use common_meta::key::TableMetadataManagerRef;
+use common_meta::helper::{SchemaKey, SchemaValue};
 use common_meta::peer::Peer;
 use common_meta::rpc::ddl::{DdlTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse};
 use common_meta::rpc::router::{Partition as MetaPartition, RouteRequest};
@@ -82,7 +81,6 @@ pub struct DistInstance {
     meta_client: Arc<MetaClient>,
     catalog_manager: Arc<FrontendCatalogManager>,
     datanode_clients: Arc<DatanodeClients>,
-    table_metadata_manager: TableMetadataManagerRef,
 }
 
 impl DistInstance {
@@ -90,13 +88,11 @@ impl DistInstance {
         meta_client: Arc<MetaClient>,
         catalog_manager: Arc<FrontendCatalogManager>,
         datanode_clients: Arc<DatanodeClients>,
-        table_metadata_manager: TableMetadataManagerRef,
     ) -> Self {
         Self {
             meta_client,
             catalog_manager,
             datanode_clients,
-            table_metadata_manager,
         }
     }
 
@@ -132,7 +128,6 @@ impl DistInstance {
             table_name.clone(),
             table_info,
             self.catalog_manager.clone(),
-            self.table_metadata_manager.clone(),
         ));
 
         let request = RegisterTableRequest {
@@ -161,6 +156,7 @@ impl DistInstance {
                 &table_name.catalog_name,
                 &table_name.schema_name,
                 &table_name.table_name,
+                table_id,
             )
             .await;
 
@@ -180,10 +176,19 @@ impl DistInstance {
             .with_context(|| TableNotFoundSnafu {
                 table_name: table_name.to_string(),
             })?;
-
-        let table_id = table.table_info().ident.table_id;
+        let table_id = table.table_info().table_id();
 
         self.drop_table_procedure(&table_name, table_id).await?;
+
+        let request = DeregisterTableRequest {
+            catalog: table_name.catalog_name.clone(),
+            schema: table_name.schema_name.clone(),
+            table_name: table_name.table_name.clone(),
+        };
+        self.catalog_manager
+            .deregister_table(request)
+            .await
+            .context(CatalogSnafu)?;
 
         // Since the table information dropped on meta does not go through KvBackend, so we
         // manually invalidate the cache here.
@@ -194,6 +199,7 @@ impl DistInstance {
                 &table_name.catalog_name,
                 &table_name.schema_name,
                 &table_name.table_name,
+                table_id,
             )
             .await;
 
@@ -265,7 +271,7 @@ impl DistInstance {
         table_name: &TableName,
         region_number: Option<RegionNumber>,
     ) -> Result<Vec<Peer>> {
-        let _ = self
+        let table = self
             .catalog_manager
             .table(
                 &table_name.catalog_name,
@@ -277,11 +283,12 @@ impl DistInstance {
             .with_context(|| TableNotFoundSnafu {
                 table_name: table_name.to_string(),
             })?;
+        let table_id = table.table_info().table_id();
 
         let route_response = self
             .meta_client
             .route(RouteRequest {
-                table_names: vec![table_name.clone()],
+                table_ids: vec![table_id],
             })
             .await
             .context(RequestMetaSnafu)?;
@@ -298,6 +305,32 @@ impl DistInstance {
             .flat_map(|route| route.find_leaders().into_iter())
             .collect::<Vec<_>>();
         Ok(res)
+    }
+
+    async fn truncate_table(&self, table_name: TableName) -> Result<Output> {
+        let table = self
+            .catalog_manager
+            .table(
+                &table_name.catalog_name,
+                &table_name.schema_name,
+                &table_name.table_name,
+            )
+            .await
+            .context(CatalogSnafu)?
+            .with_context(|| TableNotFoundSnafu {
+                table_name: table_name.to_string(),
+            })?;
+        let table_id = table.table_info().ident.table_id;
+
+        let expr = TruncateTableExpr {
+            catalog_name: table_name.catalog_name.clone(),
+            schema_name: table_name.schema_name.clone(),
+            table_name: table_name.table_name.clone(),
+            table_id: Some(api::v1::TableId { id: table_id }),
+        };
+        self.truncate_table_procedure(&expr).await?;
+
+        Ok(Output::AffectedRows(0))
     }
 
     async fn handle_statement(
@@ -373,6 +406,14 @@ impl DistInstance {
 
                 self.show_create_table(table_name, table_ref).await
             }
+            Statement::TruncateTable(stmt) => {
+                let (catalog, schema, table) =
+                    table_idents_to_full_name(stmt.table_name(), query_ctx)
+                        .map_err(BoxedError::new)
+                        .context(error::ExternalSnafu)?;
+                let table_name = TableName::new(catalog, schema, table);
+                self.truncate_table(table_name).await
+            }
             _ => error::NotSupportedSnafu {
                 feat: format!("{stmt:?}"),
             }
@@ -384,7 +425,7 @@ impl DistInstance {
         let partitions = self
             .catalog_manager
             .partition_manager()
-            .find_table_partitions(&table_name)
+            .find_table_partitions(table.table_info().table_id())
             .await
             .context(error::FindTablePartitionRuleSnafu {
                 table_name: &table_name.table_name,
@@ -515,15 +556,6 @@ impl DistInstance {
             .await
             .context(error::RequestMetaSnafu)?;
 
-        let table_info = table.table_info();
-        self.catalog_manager
-            .invalidate_table(
-                &table_info.catalog_name,
-                &table_info.schema_name,
-                &table_info.name,
-            )
-            .await;
-
         Ok(Output::AffectedRows(0))
     }
 
@@ -558,6 +590,20 @@ impl DistInstance {
                 table_name.table_name.to_string(),
                 table_id,
             ),
+        };
+
+        self.meta_client
+            .submit_ddl_task(request)
+            .await
+            .context(error::RequestMetaSnafu)
+    }
+
+    async fn truncate_table_procedure(
+        &self,
+        truncate_table: &TruncateTableExpr,
+    ) -> Result<SubmitDdlTaskResponse> {
+        let request = SubmitDdlTaskRequest {
+            task: DdlTask::new_truncate_table(truncate_table.clone()),
         };
 
         self.meta_client
@@ -657,10 +703,15 @@ impl GrpcQueryHandler for DistInstance {
                             TableName::new(&expr.catalog_name, &expr.schema_name, &expr.table_name);
                         self.flush_table(table_name, expr.region_number).await
                     }
-                    Expr::CompactTable(expr) => {
+                    DdlExpr::CompactTable(expr) => {
                         let table_name =
                             TableName::new(&expr.catalog_name, &expr.schema_name, &expr.table_name);
                         self.compact_table(table_name, expr.region_number).await
+                    }
+                    DdlExpr::TruncateTable(expr) => {
+                        let table_name =
+                            TableName::new(&expr.catalog_name, &expr.schema_name, &expr.table_name);
+                        self.truncate_table(table_name).await
                     }
                 }
             }

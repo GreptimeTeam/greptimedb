@@ -21,10 +21,6 @@ use catalog::error::{
     self as catalog_err, InternalSnafu, InvalidCatalogValueSnafu, InvalidSystemTableDefSnafu,
     Result as CatalogResult, TableMetadataManagerSnafu, UnimplementedSnafu,
 };
-use catalog::helper::{
-    build_catalog_prefix, build_schema_prefix, build_table_global_prefix, CatalogKey, SchemaKey,
-    TableGlobalKey, TableGlobalValue,
-};
 use catalog::information_schema::InformationSchemaProvider;
 use catalog::remote::KvCacheInvalidatorRef;
 use catalog::{
@@ -34,14 +30,19 @@ use catalog::{
 use client::client_manager::DatanodeClients;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME};
 use common_error::ext::BoxedError;
-use common_meta::key::TableMetadataManagerRef;
+use common_meta::helper::{build_catalog_prefix, build_schema_prefix, CatalogKey, SchemaKey};
+use common_meta::key::table_info::TableInfoKey;
+use common_meta::key::table_name::TableNameKey;
+use common_meta::key::table_region::TableRegionKey;
+use common_meta::key::{TableMetaKey, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::rpc::store::RangeRequest;
 use common_meta::rpc::KeyValue;
 use common_meta::table_name::TableName;
-use common_telemetry::warn;
+use common_telemetry::{debug, warn};
 use partition::manager::PartitionRuleManagerRef;
 use snafu::prelude::*;
+use table::metadata::TableId;
 use table::table::numbers::NumbersTable;
 use table::TableRef;
 
@@ -110,17 +111,44 @@ impl FrontendCatalogManager {
         self.backend_cache_invalidator.invalidate_key(key).await;
     }
 
-    pub async fn invalidate_table(&self, catalog: &str, schema: &str, table: &str) {
-        let tg_key = TableGlobalKey {
-            catalog_name: catalog.into(),
-            schema_name: schema.into(),
-            table_name: table.into(),
-        }
-        .to_string();
+    pub async fn invalidate_table(
+        &self,
+        catalog: &str,
+        schema: &str,
+        table: &str,
+        table_id: TableId,
+    ) {
+        let key = TableNameKey::new(catalog, schema, table);
+        self.backend_cache_invalidator
+            .invalidate_key(&key.as_raw_key())
+            .await;
+        debug!(
+            "invalidated cache key: {}",
+            String::from_utf8_lossy(&key.as_raw_key())
+        );
 
-        let tg_key = tg_key.as_bytes();
+        let key = TableInfoKey::new(table_id);
+        self.backend_cache_invalidator
+            .invalidate_key(&key.as_raw_key())
+            .await;
+        debug!(
+            "invalidated cache key: {}",
+            String::from_utf8_lossy(&key.as_raw_key())
+        );
 
-        self.backend_cache_invalidator.invalidate_key(tg_key).await;
+        let key = TableRegionKey::new(table_id);
+        self.backend_cache_invalidator
+            .invalidate_key(&key.as_raw_key())
+            .await;
+        debug!(
+            "invalidated cache key: {}",
+            String::from_utf8_lossy(&key.as_raw_key())
+        );
+
+        self.partition_manager
+            .table_routes()
+            .invalidate_table_route(table_id)
+            .await;
     }
 }
 
@@ -141,12 +169,7 @@ impl CatalogManager for FrontendCatalogManager {
         Ok(true)
     }
 
-    async fn deregister_table(&self, request: DeregisterTableRequest) -> CatalogResult<()> {
-        let table_name = TableName::new(request.catalog, request.schema, request.table_name);
-        self.partition_manager
-            .table_routes()
-            .invalidate_table_route(&table_name)
-            .await;
+    async fn deregister_table(&self, _request: DeregisterTableRequest) -> CatalogResult<()> {
         Ok(())
     }
 
@@ -304,29 +327,19 @@ impl CatalogManager for FrontendCatalogManager {
     }
 
     async fn table_names(&self, catalog: &str, schema: &str) -> CatalogResult<Vec<String>> {
-        let mut tables = vec![];
+        let mut tables = self
+            .table_metadata_manager
+            .table_name_manager()
+            .tables(catalog, schema)
+            .await
+            .context(TableMetadataManagerSnafu)?
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect::<Vec<String>>();
         if catalog == DEFAULT_CATALOG_NAME && schema == DEFAULT_SCHEMA_NAME {
             tables.push("numbers".to_string());
         }
-        let key = build_table_global_prefix(catalog, schema);
-        let req = RangeRequest::new().with_prefix(key.as_bytes());
 
-        let iter = self
-            .backend
-            .range(req)
-            .await
-            .context(TableMetadataManagerSnafu)?
-            .kvs
-            .into_iter();
-
-        let result = iter
-            .map(|KeyValue { key: k, value: _ }| {
-                let key = TableGlobalKey::parse(String::from_utf8_lossy(&k))
-                    .context(InvalidCatalogValueSnafu)?;
-                Ok(key.table_name)
-            })
-            .collect::<CatalogResult<Vec<_>>>()?;
-        tables.extend(result);
         Ok(tables)
     }
 
@@ -335,13 +348,11 @@ impl CatalogManager for FrontendCatalogManager {
             catalog_name: catalog.to_string(),
         }
         .to_string();
-
-        Ok(self
-            .backend
+        self.backend
             .get(key.as_bytes())
             .await
-            .context(TableMetadataManagerSnafu)?
-            .is_some())
+            .context(TableMetadataManagerSnafu)
+            .map(|x| x.is_some())
     }
 
     async fn schema_exist(&self, catalog: &str, schema: &str) -> CatalogResult<bool> {
@@ -350,7 +361,6 @@ impl CatalogManager for FrontendCatalogManager {
             schema_name: schema.to_string(),
         }
         .to_string();
-
         Ok(self
             .backend()
             .get(schema_key.as_bytes())
@@ -360,17 +370,13 @@ impl CatalogManager for FrontendCatalogManager {
     }
 
     async fn table_exist(&self, catalog: &str, schema: &str, table: &str) -> CatalogResult<bool> {
-        let table_global_key = TableGlobalKey {
-            catalog_name: catalog.to_string(),
-            schema_name: schema.to_string(),
-            table_name: table.to_string(),
-        };
-        Ok(self
-            .backend()
-            .get(table_global_key.to_string().as_bytes())
+        let key = TableNameKey::new(catalog, schema, table);
+        self.table_metadata_manager
+            .table_name_manager()
+            .get(key)
             .await
-            .context(TableMetadataManagerSnafu)?
-            .is_some())
+            .context(TableMetadataManagerSnafu)
+            .map(|x| x.is_some())
     }
 
     async fn table(
@@ -400,17 +406,22 @@ impl CatalogManager for FrontendCatalogManager {
             return provider.table(table_name);
         }
 
-        let table_global_key = TableGlobalKey {
-            catalog_name: catalog.to_string(),
-            schema_name: schema.to_string(),
-            table_name: table_name.to_string(),
-        };
-        let Some(kv) = self.backend().get(table_global_key.to_string().as_bytes()).await.context(TableMetadataManagerSnafu)? else {
-            return Ok(None);
-        };
-        let v = TableGlobalValue::from_bytes(kv.value).context(InvalidCatalogValueSnafu)?;
+        let key = TableNameKey::new(catalog, schema, table_name);
+        let Some(table_name_value) = self.table_metadata_manager
+            .table_name_manager()
+            .get(key)
+            .await
+            .context(TableMetadataManagerSnafu)? else { return Ok(None) };
+        let table_id = table_name_value.table_id();
+
+        let Some(table_info_value) = self.table_metadata_manager
+            .table_info_manager()
+            .get(table_id)
+            .await
+            .context(TableMetadataManagerSnafu)? else { return Ok(None) };
         let table_info = Arc::new(
-            v.table_info
+            table_info_value
+                .table_info
                 .try_into()
                 .context(catalog_err::InvalidTableInfoInCatalogSnafu)?,
         );
@@ -418,7 +429,6 @@ impl CatalogManager for FrontendCatalogManager {
             TableName::new(catalog, schema, table_name),
             table_info,
             Arc::new(self.clone()),
-            self.table_metadata_manager.clone(),
         ));
         Ok(Some(table))
     }

@@ -32,11 +32,13 @@ mod date;
 mod datetime;
 mod eq;
 mod helper;
+mod interval;
 mod list;
 mod null;
-mod operations;
+pub(crate) mod operations;
 mod primitive;
 mod string;
+mod time;
 mod timestamp;
 mod validity;
 
@@ -46,6 +48,10 @@ pub use constant::ConstantVector;
 pub use date::{DateVector, DateVectorBuilder};
 pub use datetime::{DateTimeVector, DateTimeVectorBuilder};
 pub use helper::Helper;
+pub use interval::{
+    IntervalDayTimeVector, IntervalDayTimeVectorBuilder, IntervalMonthDayNanoVector,
+    IntervalMonthDayNanoVectorBuilder, IntervalYearMonthVector, IntervalYearMonthVectorBuilder,
+};
 pub use list::{ListIter, ListVector, ListVectorBuilder};
 pub use null::{NullVector, NullVectorBuilder};
 pub use primitive::{
@@ -56,6 +62,11 @@ pub use primitive::{
     UInt64VectorBuilder, UInt8Vector, UInt8VectorBuilder,
 };
 pub use string::{StringVector, StringVectorBuilder};
+pub use time::{
+    TimeMicrosecondVector, TimeMicrosecondVectorBuilder, TimeMillisecondVector,
+    TimeMillisecondVectorBuilder, TimeNanosecondVector, TimeNanosecondVectorBuilder,
+    TimeSecondVector, TimeSecondVectorBuilder,
+};
 pub use timestamp::{
     TimestampMicrosecondVector, TimestampMicrosecondVectorBuilder, TimestampMillisecondVector,
     TimestampMillisecondVectorBuilder, TimestampNanosecondVector, TimestampNanosecondVectorBuilder,

@@ -14,13 +14,17 @@
 
 use std::sync::Arc;
 
+use common_time::interval::IntervalUnit;
+
 use crate::data_type::DataType;
-use crate::types::TimestampType;
+use crate::types::{TimeType, TimestampType};
 use crate::vectors::constant::ConstantVector;
 use crate::vectors::{
-    BinaryVector, BooleanVector, DateTimeVector, DateVector, ListVector, PrimitiveVector,
-    StringVector, TimestampMicrosecondVector, TimestampMillisecondVector,
-    TimestampNanosecondVector, TimestampSecondVector, Vector,
+    BinaryVector, BooleanVector, DateTimeVector, DateVector, IntervalDayTimeVector,
+    IntervalMonthDayNanoVector, IntervalYearMonthVector, ListVector, PrimitiveVector, StringVector,
+    TimeMicrosecondVector, TimeMillisecondVector, TimeNanosecondVector, TimeSecondVector,
+    TimestampMicrosecondVector, TimestampMillisecondVector, TimestampNanosecondVector,
+    TimestampSecondVector, Vector,
 };
 use crate::with_match_primitive_type_id;
 
@@ -93,6 +97,17 @@ fn equal(lhs: &dyn Vector, rhs: &dyn Vector) -> bool {
                 is_vector_eq!(TimestampNanosecondVector, lhs, rhs)
             }
         },
+        Interval(v) => match v.unit() {
+            IntervalUnit::YearMonth => {
+                is_vector_eq!(IntervalYearMonthVector, lhs, rhs)
+            }
+            IntervalUnit::DayTime => {
+                is_vector_eq!(IntervalDayTimeVector, lhs, rhs)
+            }
+            IntervalUnit::MonthDayNano => {
+                is_vector_eq!(IntervalMonthDayNanoVector, lhs, rhs)
+            }
+        },
         List(_) => is_vector_eq!(ListVector, lhs, rhs),
         UInt8(_) | UInt16(_) | UInt32(_) | UInt64(_) | Int8(_) | Int16(_) | Int32(_) | Int64(_)
         | Float32(_) | Float64(_) | Dictionary(_) => {
@@ -106,6 +121,21 @@ fn equal(lhs: &dyn Vector, rhs: &dyn Vector) -> bool {
                 unreachable!("should not compare {} with {}", lhs.vector_type_name(), rhs.vector_type_name())
             })
         }
+
+        Time(t) => match t {
+            TimeType::Second(_) => {
+                is_vector_eq!(TimeSecondVector, lhs, rhs)
+            }
+            TimeType::Millisecond(_) => {
+                is_vector_eq!(TimeMillisecondVector, lhs, rhs)
+            }
+            TimeType::Microsecond(_) => {
+                is_vector_eq!(TimeMicrosecondVector, lhs, rhs)
+            }
+            TimeType::Nanosecond(_) => {
+                is_vector_eq!(TimeNanosecondVector, lhs, rhs)
+            }
+        },
     }
 }
 
@@ -177,6 +207,21 @@ mod tests {
         assert_vector_ref_eq(Arc::new(UInt64Vector::from_slice([1, 2, 3, 4])));
         assert_vector_ref_eq(Arc::new(Float32Vector::from_slice([1.0, 2.0, 3.0, 4.0])));
         assert_vector_ref_eq(Arc::new(Float64Vector::from_slice([1.0, 2.0, 3.0, 4.0])));
+
+        assert_vector_ref_eq(Arc::new(TimeSecondVector::from_values([100, 120])));
+        assert_vector_ref_eq(Arc::new(TimeMillisecondVector::from_values([100, 120])));
+        assert_vector_ref_eq(Arc::new(TimeMicrosecondVector::from_values([100, 120])));
+        assert_vector_ref_eq(Arc::new(TimeNanosecondVector::from_values([100, 120])));
+
+        assert_vector_ref_eq(Arc::new(IntervalYearMonthVector::from_values([
+            1000, 2000, 3000, 4000,
+        ])));
+        assert_vector_ref_eq(Arc::new(IntervalDayTimeVector::from_values([
+            1000, 2000, 3000, 4000,
+        ])));
+        assert_vector_ref_eq(Arc::new(IntervalMonthDayNanoVector::from_values([
+            1000, 2000, 3000, 4000,
+        ])));
     }
 
     #[test]
@@ -224,5 +269,23 @@ mod tests {
             )),
         );
         assert_vector_ref_ne(Arc::new(NullVector::new(5)), Arc::new(NullVector::new(8)));
+
+        assert_vector_ref_ne(
+            Arc::new(TimeMicrosecondVector::from_values([100, 120])),
+            Arc::new(TimeMicrosecondVector::from_values([200, 220])),
+        );
+
+        assert_vector_ref_ne(
+            Arc::new(IntervalDayTimeVector::from_values([1000, 2000])),
+            Arc::new(IntervalDayTimeVector::from_values([2100, 1200])),
+        );
+        assert_vector_ref_ne(
+            Arc::new(IntervalMonthDayNanoVector::from_values([1000, 2000])),
+            Arc::new(IntervalMonthDayNanoVector::from_values([2100, 1200])),
+        );
+        assert_vector_ref_ne(
+            Arc::new(IntervalYearMonthVector::from_values([1000, 2000])),
+            Arc::new(IntervalYearMonthVector::from_values([2100, 1200])),
+        );
     }
 }

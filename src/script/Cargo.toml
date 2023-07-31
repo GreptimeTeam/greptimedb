@@ -44,7 +44,7 @@ datafusion-physical-expr = { workspace = true, optional = true }
 datatypes = { path = "../datatypes" }
 futures.workspace = true
 futures-util.workspace = true
-once_cell = "1.17.0"
+once_cell.workspace = true
 paste = { workspace = true, optional = true }
 query = { path = "../query" }
 # TODO(discord9): This is a forked and tweaked version of RustPython, please update it to newest original RustPython After RustPython support GC

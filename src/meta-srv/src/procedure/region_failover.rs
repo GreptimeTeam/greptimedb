@@ -25,7 +25,6 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use catalog::helper::TableGlobalKey;
 use common_meta::ident::TableIdent;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::{ClusterId, RegionIdent};
@@ -42,10 +41,11 @@ use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 use store_api::storage::RegionNumber;
 
-use crate::error::{Error, RegisterProcedureLoaderSnafu, Result};
+use crate::error::{Error, RegisterProcedureLoaderSnafu, Result, TableMetadataManagerSnafu};
 use crate::lock::DistLockRef;
 use crate::metasrv::{SelectorContext, SelectorRef};
 use crate::service::mailbox::MailboxRef;
+use crate::service::store::kv::ResettableKvStoreRef;
 
 const OPEN_REGION_MESSAGE_TIMEOUT: Duration = Duration::from_secs(30);
 const CLOSE_REGION_MESSAGE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -69,6 +69,7 @@ impl From<RegionIdent> for RegionFailoverKey {
 }
 
 pub(crate) struct RegionFailoverManager {
+    in_memory: ResettableKvStoreRef,
     mailbox: MailboxRef,
     procedure_manager: ProcedureManagerRef,
     selector: SelectorRef,
@@ -91,6 +92,7 @@ impl Drop for FailoverProcedureGuard {
 
 impl RegionFailoverManager {
     pub(crate) fn new(
+        in_memory: ResettableKvStoreRef,
         mailbox: MailboxRef,
         procedure_manager: ProcedureManagerRef,
         selector: SelectorRef,
@@ -99,6 +101,7 @@ impl RegionFailoverManager {
         table_metadata_manager: TableMetadataManagerRef,
     ) -> Self {
         Self {
+            in_memory,
             mailbox,
             procedure_manager,
             selector,
@@ -111,6 +114,7 @@ impl RegionFailoverManager {
 
     pub(crate) fn create_context(&self) -> RegionFailoverContext {
         RegionFailoverContext {
+            in_memory: self.in_memory.clone(),
             mailbox: self.mailbox.clone(),
             selector: self.selector.clone(),
             selector_ctx: self.selector_ctx.clone(),
@@ -134,10 +138,6 @@ impl RegionFailoverManager {
             })
     }
 
-    pub(crate) fn is_region_failover_running(&self, key: &RegionFailoverKey) -> bool {
-        self.running_procedures.read().unwrap().contains(key)
-    }
-
     fn insert_running_procedures(
         &self,
         failed_region: &RegionIdent,
@@ -152,11 +152,6 @@ impl RegionFailoverManager {
         } else {
             None
         }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn running_procedures(&self) -> Arc<RwLock<HashSet<RegionFailoverKey>>> {
-        self.running_procedures.clone()
     }
 
     pub(crate) async fn do_region_failover(&self, failed_region: &RegionIdent) -> Result<()> {
@@ -204,17 +199,13 @@ impl RegionFailoverManager {
 
     async fn table_exists(&self, failed_region: &RegionIdent) -> Result<bool> {
         let table_ident = &failed_region.table_ident;
-        let table_global_key = TableGlobalKey {
-            catalog_name: table_ident.catalog.clone(),
-            schema_name: table_ident.schema.clone(),
-            table_name: table_ident.table.clone(),
-        };
-        let table_global_value = self
-            .selector_ctx
-            .kv_store
-            .get(&table_global_key.to_raw_key())
-            .await?;
-        Ok(table_global_value.is_some())
+        Ok(self
+            .table_metadata_manager
+            .table_region_manager()
+            .get(table_ident.table_id)
+            .await
+            .context(TableMetadataManagerSnafu)?
+            .is_some())
     }
 }
 
@@ -229,6 +220,7 @@ struct Node {
 /// The "Context" of region failover procedure state machine.
 #[derive(Clone)]
 pub struct RegionFailoverContext {
+    pub in_memory: ResettableKvStoreRef,
     pub mailbox: MailboxRef,
     pub selector: SelectorRef,
     pub selector_ctx: SelectorContext,
@@ -357,16 +349,13 @@ impl Procedure for RegionFailoverProcedure {
 
     fn lock_key(&self) -> LockKey {
         let region_ident = &self.node.failed_region;
-        let key = format!(
-            "{}/region-{}",
-            common_catalog::format_full_table_name(
-                &region_ident.table_ident.catalog,
-                &region_ident.table_ident.schema,
-                &region_ident.table_ident.table
-            ),
-            region_ident.region_number
+        let table_key = common_catalog::format_full_table_name(
+            &region_ident.table_ident.catalog,
+            &region_ident.table_ident.schema,
+            &region_ident.table_ident.table,
         );
-        LockKey::single(key)
+        let region_key = format!("{}/region-{}", table_key, region_ident.region_number);
+        LockKey::new(vec![table_key, region_key])
     }
 }
 
@@ -376,7 +365,6 @@ mod tests {
 
     use api::v1::meta::mailbox_message::Payload;
     use api::v1::meta::{HeartbeatResponse, MailboxMessage, Peer, RequestHeader};
-    use catalog::helper::TableGlobalKey;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO_ENGINE};
     use common_meta::ident::TableIdent;
     use common_meta::instruction::{Instruction, InstructionReply, SimpleReply};
@@ -422,20 +410,16 @@ mod tests {
 
     impl TestingEnv {
         pub async fn failed_region(&self, region_number: u32) -> RegionIdent {
-            let table = "my_table";
-            let key = TableGlobalKey {
-                catalog_name: DEFAULT_CATALOG_NAME.to_string(),
-                schema_name: DEFAULT_SCHEMA_NAME.to_string(),
-                table_name: table.to_string(),
-            };
-            let value =
-                table_routes::get_table_global_value(&self.context.selector_ctx.kv_store, &key)
-                    .await
-                    .unwrap()
-                    .unwrap();
-
+            let value = self
+                .context
+                .table_metadata_manager
+                .table_region_manager()
+                .get(1)
+                .await
+                .unwrap()
+                .unwrap();
             let failed_datanode = value
-                .regions_id_map
+                .region_distribution
                 .iter()
                 .find_map(|(&datanode_id, regions)| {
                     if regions.contains(&region_number) {
@@ -454,7 +438,7 @@ mod tests {
                     engine: MITO_ENGINE.to_string(),
                     catalog: DEFAULT_CATALOG_NAME.to_string(),
                     schema: DEFAULT_SCHEMA_NAME.to_string(),
-                    table: table.to_string(),
+                    table: "my_table".to_string(),
                 },
             }
         }
@@ -476,6 +460,7 @@ mod tests {
         }
 
         pub async fn build(self) -> TestingEnv {
+            let in_memory = Arc::new(MemStore::new());
             let kv_store: KvStoreRef = Arc::new(MemStore::new());
             let meta_peer_client = MetaPeerClientBuilder::default()
                 .election(None)
@@ -489,8 +474,17 @@ mod tests {
             let table_metadata_manager = Arc::new(TableMetadataManager::new(
                 KvBackendAdapter::wrap(kv_store.clone()),
             ));
-            let (_, table_global_value) =
-                table_routes::tests::prepare_table_global_value(&kv_store, table).await;
+            table_routes::tests::prepare_table_region_and_info_value(
+                &table_metadata_manager,
+                table,
+            )
+            .await;
+            let table_region_value = table_metadata_manager
+                .table_region_manager()
+                .get(1)
+                .await
+                .unwrap()
+                .unwrap();
 
             let _ = table_routes::tests::prepare_table_route_value(&kv_store, table).await;
 
@@ -511,7 +505,7 @@ mod tests {
             let mailbox = HeartbeatMailbox::create(pushers.clone(), mailbox_sequence);
 
             let selector = self.selector.unwrap_or_else(|| {
-                let nodes = (1..=table_global_value.regions_id_map.len())
+                let nodes = (1..=table_region_value.region_distribution.len())
                     .map(|id| Peer {
                         id: id as u64,
                         addr: "".to_string(),
@@ -522,7 +516,7 @@ mod tests {
             let selector_ctx = SelectorContext {
                 datanode_lease_secs: 10,
                 server_addr: "127.0.0.1:3002".to_string(),
-                kv_store,
+                kv_store: kv_store.clone(),
                 meta_peer_client,
                 catalog: Some(DEFAULT_CATALOG_NAME.to_string()),
                 schema: Some(DEFAULT_SCHEMA_NAME.to_string()),
@@ -531,6 +525,7 @@ mod tests {
 
             TestingEnv {
                 context: RegionFailoverContext {
+                    in_memory,
                     mailbox,
                     selector,
                     selector_ctx,
@@ -650,24 +645,23 @@ mod tests {
         );
 
         // Verifies that the failed region (region 1) is moved from failed datanode (datanode 1) to the candidate datanode.
-        let key = TableGlobalKey {
-            catalog_name: failed_region.table_ident.catalog.clone(),
-            schema_name: failed_region.table_ident.schema.clone(),
-            table_name: failed_region.table_ident.table.clone(),
-        };
-        let value = table_routes::get_table_global_value(&env.context.selector_ctx.kv_store, &key)
+        let value = env
+            .context
+            .table_metadata_manager
+            .table_region_manager()
+            .get(1)
             .await
             .unwrap()
             .unwrap();
         assert_eq!(
             value
-                .regions_id_map
+                .region_distribution
                 .get(&failed_region.datanode_id)
                 .unwrap(),
             &vec![2]
         );
         assert!(value
-            .regions_id_map
+            .region_distribution
             .get(&candidate_rx.recv().await.unwrap())
             .unwrap()
             .contains(&1));

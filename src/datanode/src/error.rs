@@ -476,6 +476,12 @@ pub enum Error {
         source: common_runtime::JoinError,
         location: Location,
     },
+
+    #[snafu(display("Unexpected, violated: {}", violated))]
+    Unexpected {
+        violated: String,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -530,7 +536,7 @@ impl ErrorExt for Error {
             | MissingWalDirConfig { .. }
             | PrepareImmutableTable { .. } => StatusCode::InvalidArguments,
 
-            EncodeJson { .. } | DecodeJson { .. } | PayloadNotExist { .. } => {
+            EncodeJson { .. } | DecodeJson { .. } | PayloadNotExist { .. } | Unexpected { .. } => {
                 StatusCode::Unexpected
             }
 

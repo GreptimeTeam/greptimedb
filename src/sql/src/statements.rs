@@ -369,6 +369,7 @@ pub fn sql_data_type_to_concrete_data_type(data_type: &SqlDataType) -> Result<Co
             })?
             .map(|t| ConcreteDataType::timestamp_datatype(t.unit()))
             .unwrap_or(ConcreteDataType::timestamp_millisecond_datatype())),
+        SqlDataType::Interval => Ok(ConcreteDataType::interval_month_day_nano_datatype()),
         _ => error::SqlTypeNotSupportedSnafu {
             t: data_type.clone(),
         }
@@ -396,10 +397,15 @@ pub fn concrete_data_type_to_sql_data_type(data_type: &ConcreteDataType) -> Resu
             Some(ts_type.precision()),
             TimezoneInfo::None,
         )),
+        ConcreteDataType::Time(time_type) => Ok(SqlDataType::Time(
+            Some(time_type.precision()),
+            TimezoneInfo::None,
+        )),
         ConcreteDataType::Binary(_) => Ok(SqlDataType::Varbinary(None)),
         ConcreteDataType::Null(_) | ConcreteDataType::List(_) | ConcreteDataType::Dictionary(_) => {
             unreachable!()
         }
+        ConcreteDataType::Interval(_) => Ok(SqlDataType::Interval),
     }
 }
 
@@ -495,7 +501,11 @@ mod tests {
         check_type(
             SqlDataType::Datetime(None),
             ConcreteDataType::datetime_datatype(),
-        )
+        );
+        check_type(
+            SqlDataType::Interval,
+            ConcreteDataType::interval_month_day_nano_datatype(),
+        );
     }
 
     #[test]

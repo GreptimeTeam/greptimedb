@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use async_trait::async_trait;
-use catalog::helper::TableGlobalKey;
 use catalog::remote::KvCacheInvalidatorRef;
 use common_meta::error::Result as MetaResult;
 use common_meta::heartbeat::handler::{
@@ -21,8 +20,11 @@ use common_meta::heartbeat::handler::{
 };
 use common_meta::ident::TableIdent;
 use common_meta::instruction::{Instruction, InstructionReply, SimpleReply};
-use common_meta::table_name::TableName;
-use common_telemetry::{error, info};
+use common_meta::key::table_info::TableInfoKey;
+use common_meta::key::table_name::TableNameKey;
+use common_meta::key::table_region::TableRegionKey;
+use common_meta::key::TableMetaKey;
+use common_telemetry::error;
 use partition::manager::TableRouteCacheInvalidatorRef;
 
 #[derive(Clone)]
@@ -48,15 +50,8 @@ impl HeartbeatResponseHandler for InvalidateTableCacheHandler {
 
         let mailbox = ctx.mailbox.clone();
         let self_ref = self.clone();
-        let TableIdent {
-            catalog,
-            schema,
-            table,
-            ..
-        } = table_ident;
-
         let _handle = common_runtime::spawn_bg(async move {
-            self_ref.invalidate_table(&catalog, &schema, &table).await;
+            self_ref.invalidate_table_cache(table_ident).await;
 
             if let Err(e) = mailbox
                 .send((
@@ -87,26 +82,29 @@ impl InvalidateTableCacheHandler {
         }
     }
 
-    async fn invalidate_table(&self, catalog_name: &str, schema_name: &str, table_name: &str) {
-        let tg_key = TableGlobalKey {
-            catalog_name: catalog_name.to_string(),
-            schema_name: schema_name.to_string(),
-            table_name: table_name.to_string(),
-        }
-        .to_string();
-        info!("invalidate table cache: {}", tg_key);
-        let tg_key = tg_key.as_bytes();
+    async fn invalidate_table_cache(&self, table_ident: TableIdent) {
+        let table_id = table_ident.table_id;
+        self.backend_cache_invalidator
+            .invalidate_key(&TableInfoKey::new(table_id).as_raw_key())
+            .await;
 
-        self.backend_cache_invalidator.invalidate_key(tg_key).await;
+        self.backend_cache_invalidator
+            .invalidate_key(&TableRegionKey::new(table_id).as_raw_key())
+            .await;
 
-        let table = &TableName {
-            catalog_name: catalog_name.to_string(),
-            schema_name: schema_name.to_string(),
-            table_name: table_name.to_string(),
-        };
+        self.backend_cache_invalidator
+            .invalidate_key(
+                &TableNameKey::new(
+                    &table_ident.catalog,
+                    &table_ident.schema,
+                    &table_ident.table,
+                )
+                .as_raw_key(),
+            )
+            .await;
 
         self.table_route_cache_invalidator
-            .invalidate_table_route(table)
+            .invalidate_table_route(table_id)
             .await;
     }
 }

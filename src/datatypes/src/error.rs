@@ -77,6 +77,12 @@ pub enum Error {
     #[snafu(display("{}", msg))]
     CastType { msg: String, location: Location },
 
+    #[snafu(display("Failed to cast arrow time i32 type into i64"))]
+    CastTimeType {
+        source: std::num::TryFromIntError,
+        location: Location,
+    },
+
     #[snafu(display("Arrow failed to compute, source: {}", source))]
     ArrowCompute {
         source: arrow::error::ArrowError,
@@ -106,6 +112,9 @@ pub enum Error {
 
     #[snafu(display("Invalid timestamp precision: {}", precision))]
     InvalidTimestampPrecision { precision: u64, location: Location },
+
+    #[snafu(display("Column {} already exists", column))]
+    DuplicateColumn { column: String, location: Location },
 }
 
 impl ErrorExt for Error {

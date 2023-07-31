@@ -59,6 +59,7 @@ macro_rules! http_tests {
                 test_metrics_api,
                 test_scripts_api,
                 test_health_api,
+                test_status_api,
                 test_config_api,
                 test_dashboard_path,
             );
@@ -498,6 +499,23 @@ pub async fn test_health_api(store_type: StorageType) {
     assert_eq!(body, HealthResponse {});
 }
 
+pub async fn test_status_api(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, _guard) = setup_test_http_app_with_frontend(store_type, "status_api").await;
+    let client = TestClient::new(app);
+
+    let res_get = client.get("/status").send().await;
+    assert_eq!(res_get.status(), StatusCode::OK);
+
+    let res_body = res_get.text().await;
+    assert!(res_body.contains("{\"source_time\""));
+    assert!(res_body.contains("\"commit\":"));
+    assert!(res_body.contains("\"branch\":"));
+    assert!(res_body.contains("\"rustc_version\":"));
+    assert!(res_body.contains("\"hostname\":"));
+    assert!(res_body.contains("\"version\":"));
+}
+
 pub async fn test_config_api(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
     let (app, _guard) = setup_test_http_app_with_frontend(store_type, "config_api").await;
@@ -511,7 +529,10 @@ pub async fn test_config_api(store_type: StorageType) {
     enable_memory_catalog = false
     rpc_addr = "127.0.0.1:3001"
     rpc_runtime_size = 8
-    heartbeat_interval_millis = 5000
+
+    [heartbeat]
+    interval_millis = 5000
+    retry_interval_millis = 5000
 
     [http_opts]
     addr = "127.0.0.1:4000"

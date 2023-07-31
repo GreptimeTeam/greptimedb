@@ -14,13 +14,13 @@
 
 use api::v1::meta::{
     ddl_task_server, Partition, Region, RegionRoute, SubmitDdlTaskRequest, SubmitDdlTaskResponse,
-    Table, TableRoute,
+    Table, TableId, TableRoute,
 };
-use api::v1::TableId;
-use catalog::helper::TableGlobalKey;
 use common_grpc_expr::alter_expr_to_request;
 use common_meta::key::TableRouteKey;
-use common_meta::rpc::ddl::{AlterTableTask, CreateTableTask, DdlTask, DropTableTask};
+use common_meta::rpc::ddl::{
+    AlterTableTask, CreateTableTask, DdlTask, DropTableTask, TruncateTableTask,
+};
 use common_meta::rpc::router;
 use common_meta::table_name::TableName;
 use common_telemetry::{info, warn};
@@ -31,10 +31,10 @@ use tonic::{Request, Response};
 use super::store::kv::KvStoreRef;
 use super::GrpcResult;
 use crate::ddl::DdlManagerRef;
-use crate::error::{self, Result};
+use crate::error::{self, Result, TableMetadataManagerSnafu};
 use crate::metasrv::{MetaSrv, SelectorContext, SelectorRef};
 use crate::sequence::SequenceRef;
-use crate::table_routes::{get_table_global_value, get_table_route_value};
+use crate::table_routes::get_table_route_value;
 
 #[async_trait::async_trait]
 impl ddl_task_server::DdlTask for MetaSrv {
@@ -85,6 +85,14 @@ impl ddl_task_server::DdlTask for MetaSrv {
                 handle_alter_table_task(
                     header.cluster_id,
                     alter_table_task,
+                    self.ddl_manager().clone(),
+                )
+                .await?
+            }
+            DdlTask::TruncateTable(truncate_table_task) => {
+                handle_truncate_table_task(
+                    header.cluster_id,
+                    truncate_table_task,
                     self.kv_store().clone(),
                     self.ddl_manager().clone(),
                 )
@@ -249,7 +257,6 @@ async fn handle_drop_table_task(
 async fn handle_alter_table_task(
     cluster_id: u64,
     mut alter_table_task: AlterTableTask,
-    kv_store: KvStoreRef,
     ddl_manager: DdlManagerRef,
 ) -> Result<SubmitDdlTaskResponse> {
     let table_id = alter_table_task
@@ -267,19 +274,16 @@ async fn handle_alter_table_task(
 
     let table_ref = alter_table_task.table_ref();
 
-    let table_global_key = TableGlobalKey {
-        catalog_name: table_ref.catalog.to_string(),
-        schema_name: table_ref.schema.to_string(),
-        table_name: table_ref.table.to_string(),
-    };
-
-    let table_global_value = get_table_global_value(&kv_store, &table_global_key)
-        .await?
+    let table_info_value = ddl_manager
+        .table_metadata_manager
+        .table_info_manager()
+        .get(table_id)
+        .await
+        .context(TableMetadataManagerSnafu)?
         .with_context(|| error::TableNotFoundSnafu {
             name: table_ref.to_string(),
         })?;
-
-    let table_info = table_global_value.table_info;
+    let table_info = table_info_value.table_info;
 
     // Sets alter_table's table_version
     alter_table_task.alter_table.table_version = table_info.ident.version;
@@ -295,6 +299,50 @@ async fn handle_alter_table_task(
         .await?;
 
     info!("Table: {table_id} is altering via procedure_id {id:?}");
+
+    Ok(SubmitDdlTaskResponse {
+        key: id.to_string().into(),
+        ..Default::default()
+    })
+}
+
+async fn handle_truncate_table_task(
+    cluster_id: u64,
+    truncate_table_task: TruncateTableTask,
+    kv_store: KvStoreRef,
+    ddl_manager: DdlManagerRef,
+) -> Result<SubmitDdlTaskResponse> {
+    let truncate_table = &truncate_table_task.truncate_table;
+    let table_id = truncate_table
+        .table_id
+        .as_ref()
+        .context(error::UnexpectedSnafu {
+            violated: "expected table id ",
+        })?
+        .id;
+
+    let table_route_key = TableRouteKey {
+        table_id,
+        catalog_name: &truncate_table.catalog_name,
+        schema_name: &truncate_table.schema_name,
+        table_name: &truncate_table.table_name,
+    };
+
+    let table_route_value = get_table_route_value(&kv_store, &table_route_key).await?;
+
+    let table_route = router::TableRoute::try_from_raw(
+        &table_route_value.peers,
+        table_route_value
+            .table_route
+            .context(error::UnexpectedSnafu {
+                violated: "expected table_route",
+            })?,
+    )
+    .context(error::TableRouteConversionSnafu)?;
+
+    let id = ddl_manager
+        .submit_truncate_table_task(cluster_id, truncate_table_task, table_route)
+        .await?;
 
     Ok(SubmitDdlTaskResponse {
         key: id.to_string().into(),

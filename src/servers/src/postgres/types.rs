@@ -88,12 +88,23 @@ pub(super) fn encode_value(value: &Value, builder: &mut DataRowEncoder) -> PgWir
                 })))
             }
         }
-        Value::List(_) => Err(PgWireError::ApiError(Box::new(Error::Internal {
-            err_msg: format!(
-                "cannot write value {:?} in postgres protocol: unimplemented",
-                &value
-            ),
-        }))),
+        Value::Time(v) => {
+            if let Some(time) = v.to_chrono_time() {
+                builder.encode_field(&time)
+            } else {
+                Err(PgWireError::ApiError(Box::new(Error::Internal {
+                    err_msg: format!("Failed to convert time to postgres type {v:?}",),
+                })))
+            }
+        }
+        Value::Interval(_) | Value::List(_) => {
+            Err(PgWireError::ApiError(Box::new(Error::Internal {
+                err_msg: format!(
+                    "cannot write value {:?} in postgres protocol: unimplemented",
+                    &value
+                ),
+            })))
+        }
     }
 }
 
@@ -112,6 +123,8 @@ pub(super) fn type_gt_to_pg(origin: &ConcreteDataType) -> Result<Type> {
         &ConcreteDataType::Date(_) => Ok(Type::DATE),
         &ConcreteDataType::DateTime(_) => Ok(Type::TIMESTAMP),
         &ConcreteDataType::Timestamp(_) => Ok(Type::TIMESTAMP),
+        &ConcreteDataType::Time(_) => Ok(Type::TIME),
+        &ConcreteDataType::Interval(_) => Ok(Type::INTERVAL),
         &ConcreteDataType::List(_) | &ConcreteDataType::Dictionary(_) => error::InternalSnafu {
             err_msg: format!("not implemented for column datatype {origin:?}"),
         }
@@ -516,6 +529,7 @@ mod test {
                 true,
             ),
             ColumnSchema::new("dates", ConcreteDataType::date_datatype(), true),
+            ColumnSchema::new("times", ConcreteDataType::time_second_datatype(), true),
         ];
         let pg_field_info = vec![
             FieldInfo::new("nulls".into(), None, None, Type::UNKNOWN, FieldFormat::Text),
@@ -564,6 +578,7 @@ mod test {
                 FieldFormat::Text,
             ),
             FieldInfo::new("dates".into(), None, None, Type::DATE, FieldFormat::Text),
+            FieldInfo::new("times".into(), None, None, Type::TIME, FieldFormat::Text),
         ];
         let schema = Schema::new(column_schemas);
         let fs = schema_to_pg(&schema, &Format::UnifiedText).unwrap();
@@ -644,6 +659,7 @@ mod test {
                 FieldFormat::Text,
             ),
             FieldInfo::new("dates".into(), None, None, Type::DATE, FieldFormat::Text),
+            FieldInfo::new("times".into(), None, None, Type::TIME, FieldFormat::Text),
             FieldInfo::new(
                 "datetimes".into(),
                 None,
@@ -684,6 +700,7 @@ mod test {
             Value::String("greptime".into()),
             Value::Binary("greptime".as_bytes().into()),
             Value::Date(1001i32.into()),
+            Value::Time(1001i64.into()),
             Value::DateTime(1000001i64.into()),
             Value::Timestamp(1000001i64.into()),
         ];

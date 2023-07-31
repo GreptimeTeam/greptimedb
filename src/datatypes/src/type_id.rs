@@ -46,6 +46,17 @@ pub enum LogicalTypeId {
     TimestampMillisecond,
     TimestampMicrosecond,
     TimestampNanosecond,
+    /// A 64-bit time representing the elapsed time since midnight in the unit of `TimeUnit`.
+    TimeSecond,
+    TimeMillisecond,
+    TimeMicrosecond,
+    TimeNanosecond,
+    /// A 32-bit interval representing the elapsed time in months.
+    IntervalYearMonth,
+    /// A 64-bit interval representing the elapsed time in days and milliseconds.
+    IntervalDayTime,
+    /// A 128-bit interval representing the elapsed time in months, days and nanoseconds.
+    IntervalMonthDayNano,
 
     List,
     Dictionary,
@@ -93,6 +104,15 @@ impl LogicalTypeId {
                 ConcreteDataType::null_datatype(),
                 ConcreteDataType::null_datatype(),
             ),
+            LogicalTypeId::TimeSecond => ConcreteDataType::time_second_datatype(),
+            LogicalTypeId::TimeMillisecond => ConcreteDataType::time_millisecond_datatype(),
+            LogicalTypeId::TimeMicrosecond => ConcreteDataType::time_microsecond_datatype(),
+            LogicalTypeId::TimeNanosecond => ConcreteDataType::time_nanosecond_datatype(),
+            LogicalTypeId::IntervalYearMonth => ConcreteDataType::interval_year_month_datatype(),
+            LogicalTypeId::IntervalDayTime => ConcreteDataType::interval_day_time_datatype(),
+            LogicalTypeId::IntervalMonthDayNano => {
+                ConcreteDataType::interval_month_day_nano_datatype()
+            }
         }
     }
 }

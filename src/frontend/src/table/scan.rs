@@ -60,7 +60,7 @@ impl DatanodeInstance {
 
         let result = self
             .db
-            .logical_plan(substrait_plan.to_vec())
+            .logical_plan(substrait_plan.to_vec(), None)
             .await
             .context(error::RequestDatanodeSnafu)?;
         let Output::RecordBatches(record_batches) = result else { unreachable!() };

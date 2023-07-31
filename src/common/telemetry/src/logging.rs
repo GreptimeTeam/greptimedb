@@ -32,6 +32,30 @@ use tracing_subscriber::{filter, EnvFilter, Registry};
 
 pub use crate::{debug, error, info, log, trace, warn};
 
+tokio::task_local! {
+    /// Task local trace id. See [trace_id](crate::trace_id) for more details.
+    pub static TRACE_ID: u64;
+}
+
+/// Get current [TRACE_ID] from tokio [task_local](tokio::task_local) storage.
+///
+/// # Usage
+/// To set current trace id, wrap your async code like this:
+/// ```rust, no_run
+/// common_telemetry::TRACE_ID
+///     .scope(id, async move {
+///         query_handler
+///             .do_query(query, self.session.context())
+///             .await
+///     })
+///     .await
+/// ```
+/// Then all functions called from this stack will be able to retrieve the trace id
+/// via this method.
+pub fn trace_id() -> Option<u64> {
+    TRACE_ID.try_with(|id| Some(*id)).unwrap_or(None)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LoggingOptions {

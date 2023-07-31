@@ -113,6 +113,7 @@ impl QueryEngineState {
         .with_query_planner(Arc::new(DfQueryPlanner::new(
             partition_manager,
             datanode_clients,
+            catalog_list.clone(),
         )))
         .with_optimizer_rules(optimizer.rules)
         .with_physical_optimizer_rules(physical_optimizers);
@@ -221,12 +222,13 @@ impl DfQueryPlanner {
     fn new(
         partition_manager: Option<Arc<PartitionRuleManager>>,
         datanode_clients: Option<Arc<DatanodeClients>>,
+        catalog_manager: CatalogManagerRef,
     ) -> Self {
         let mut planners: Vec<Arc<dyn ExtensionPlanner + Send + Sync>> =
             vec![Arc::new(PromExtensionPlanner)];
         if let Some(partition_manager) = partition_manager
          && let Some(datanode_clients) = datanode_clients {
-            planners.push(Arc::new(DistExtensionPlanner::new(partition_manager, datanode_clients)));
+            planners.push(Arc::new(DistExtensionPlanner::new(partition_manager, datanode_clients, catalog_manager)));
         }
         Self {
             physical_planner: DefaultPhysicalPlanner::with_extension_planners(planners),

@@ -14,9 +14,10 @@
 
 //! manifest storage
 
-mod action;
-mod gc_task;
-mod helper;
+pub mod action;
+pub mod gc_task;
+pub mod helper;
 #[allow(unused_variables)]
-mod impl_;
-mod storage;
+pub mod manager;
+pub mod options;
+pub mod storage;

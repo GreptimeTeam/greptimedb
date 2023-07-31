@@ -16,6 +16,7 @@ pub mod distributed;
 mod grpc;
 mod influxdb;
 mod opentsdb;
+mod otlp;
 mod prom_store;
 mod script;
 mod standalone;
@@ -65,7 +66,8 @@ use servers::prometheus::PrometheusHandler;
 use servers::query_handler::grpc::{GrpcQueryHandler, GrpcQueryHandlerRef};
 use servers::query_handler::sql::SqlQueryHandler;
 use servers::query_handler::{
-    InfluxdbLineProtocolHandler, OpentsdbProtocolHandler, PromStoreProtocolHandler, ScriptHandler,
+    InfluxdbLineProtocolHandler, OpenTelemetryProtocolHandler, OpentsdbProtocolHandler,
+    PromStoreProtocolHandler, ScriptHandler,
 };
 use session::context::QueryContextRef;
 use snafu::prelude::*;
@@ -97,6 +99,7 @@ pub trait FrontendInstance:
     + OpentsdbProtocolHandler
     + InfluxdbLineProtocolHandler
     + PromStoreProtocolHandler
+    + OpenTelemetryProtocolHandler
     + ScriptHandler
     + PrometheusHandler
     + Send
@@ -163,7 +166,6 @@ impl Instance {
             meta_client.clone(),
             Arc::new(catalog_manager.clone()),
             datanode_clients.clone(),
-            table_metadata_manager.clone(),
         );
         let dist_instance = Arc::new(dist_instance);
 
@@ -200,10 +202,11 @@ impl Instance {
 
         let heartbeat_task = Some(HeartbeatTask::new(
             meta_client,
-            opts.heartbeat_interval_millis,
-            opts.retry_interval_millis,
+            opts.heartbeat.clone(),
             Arc::new(handlers_executor),
         ));
+
+        common_telemetry::init_node_id(opts.node_id.clone());
 
         Ok(Instance {
             catalog_manager,
@@ -579,6 +582,7 @@ impl PrometheusHandler for Instance {
         query: &PromQuery,
         query_ctx: QueryContextRef,
     ) -> server_error::Result<Output> {
+        let _timer = timer!(metrics::METRIC_HANDLE_PROMQL_ELAPSED);
         let interceptor = self
             .plugins
             .get::<PromQueryInterceptorRef<server_error::Error>>();
@@ -619,7 +623,7 @@ pub fn check_permission(
         // These are executed by query engine, and will be checked there.
         Statement::Query(_) | Statement::Explain(_) | Statement::Tql(_) | Statement::Delete(_) => {}
         // database ops won't be checked
-        Statement::CreateDatabase(_) | Statement::ShowDatabases(_) | Statement::Use(_) => {}
+        Statement::CreateDatabase(_) | Statement::ShowDatabases(_) => {}
         // show create table and alter are not supported yet
         Statement::ShowCreateTable(_) | Statement::CreateExternalTable(_) | Statement::Alter(_) => {
         }
@@ -773,7 +777,7 @@ mod tests {
 
     #[test]
     fn test_exec_validation() {
-        let query_ctx = Arc::new(QueryContext::new());
+        let query_ctx = QueryContext::arc();
         let plugins = Plugins::new();
         plugins.insert(QueryOptions {
             disallow_cross_schema_query: true,
@@ -803,11 +807,6 @@ mod tests {
             let re = check_permission(plugins.clone(), &stmt, &query_ctx);
             re.unwrap();
         }
-
-        let sql = "USE randomschema";
-        let stmts = parse_stmt(sql, &GreptimeDbDialect {}).unwrap();
-        let re = check_permission(plugins.clone(), &stmts[0], &query_ctx);
-        re.unwrap();
 
         fn replace_test(template_sql: &str, plugins: Arc<Plugins>, query_ctx: &QueryContextRef) {
             // test right

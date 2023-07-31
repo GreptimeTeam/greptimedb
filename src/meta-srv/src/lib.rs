@@ -39,5 +39,9 @@ pub mod table_routes;
 
 pub use crate::error::Result;
 
+mod inactive_node_manager;
 #[cfg(test)]
 mod test_util;
+
+mod greptimedb_telemetry;
+use greptimedb_telemetry::telemetry;

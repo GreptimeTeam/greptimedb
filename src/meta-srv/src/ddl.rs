@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use client::client_manager::DatanodeClients;
 use common_meta::key::TableMetadataManagerRef;
-use common_meta::rpc::ddl::{AlterTableTask, CreateTableTask, DropTableTask};
+use common_meta::rpc::ddl::{AlterTableTask, CreateTableTask, DropTableTask, TruncateTableTask};
 use common_meta::rpc::router::TableRoute;
 use common_procedure::{watcher, ProcedureId, ProcedureManagerRef, ProcedureWithId};
 use snafu::ResultExt;
@@ -38,7 +38,7 @@ pub struct DdlManager {
     datanode_clients: Arc<DatanodeClients>,
     pub(crate) mailbox: MailboxRef,
     pub(crate) server_addr: String,
-    table_metadata_manager: TableMetadataManagerRef,
+    pub(crate) table_metadata_manager: TableMetadataManagerRef,
 }
 
 #[derive(Clone)]
@@ -175,6 +175,16 @@ impl DdlManager {
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
         self.submit_procedure(procedure_with_id).await
+    }
+
+    pub async fn submit_truncate_table_task(
+        &self,
+        cluster_id: u64,
+        truncate_table_task: TruncateTableTask,
+        table_route: TableRoute,
+    ) -> Result<ProcedureId> {
+        todo!("implement truncate table procedure, cluster_id = {}, truncate_table_task = {:?}, table_route = {:?}",
+            cluster_id, truncate_table_task, table_route);
     }
 
     async fn submit_procedure(&self, procedure_with_id: ProcedureWithId) -> Result<ProcedureId> {

@@ -58,7 +58,6 @@ pub enum Statement {
     DescribeTable(DescribeTable),
     // EXPLAIN QUERY
     Explain(Explain),
-    Use(String),
     // COPY
     Copy(crate::statements::copy::Copy),
     Tql(Tql),

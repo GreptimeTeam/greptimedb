@@ -1,0 +1,67 @@
+name: Start EC2 runner
+description: Start EC2 runner
+inputs:
+  runner:
+    description: The linux runner name
+    required: true
+  aws-access-key-id:
+    description: AWS access key id
+    required: true
+  aws-secret-access-key:
+    description: AWS secret access key
+    required: true
+  aws-region:
+    description: AWS region
+    required: true
+  github-token:
+    description: The GitHub token to clone private repository
+    required: false
+    default: ""
+  image-id:
+    description: The EC2 image id
+    required: true
+  security-group-id:
+    description: The EC2 security group id
+    required: true
+  subnet-id:
+    description: The EC2 subnet id
+    required: true
+outputs:
+  label:
+    description: "label"
+    value: ${{ steps.start-linux-arm64-ec2-runner.outputs.label || inputs.runner }}
+  ec2-instance-id:
+    description: "ec2-instance-id"
+    value: ${{ steps.start-linux-arm64-ec2-runner.outputs.ec2-instance-id }}
+runs:
+  using: composite
+  steps:
+    - name: Configure AWS credentials
+      if: startsWith(inputs.runner, 'ec2')
+      uses: aws-actions/configure-aws-credentials@v2
+      with:
+        aws-access-key-id: ${{ inputs.aws-access-key-id }}
+        aws-secret-access-key: ${{ inputs.aws-secret-access-key }}
+        aws-region: ${{ inputs.aws-region }}
+
+    # The EC2 runner will use the following format:
+    # <vm-type>-<instance-type>-<arch>
+    # like 'ec2-c6a.4xlarge-amd64'.
+    - name: Get EC2 instance type
+      if: startsWith(inputs.runner, 'ec2')
+      id: get-ec2-instance-type
+      shell: bash
+      run: |
+        echo "instance-type=$(echo ${{ inputs.runner }} | cut -d'-' -f2)" >> $GITHUB_OUTPUT
+
+    - name: Start EC2 runner
+      if: startsWith(inputs.runner, 'ec2')
+      uses: machulav/ec2-github-runner@v2
+      id: start-linux-arm64-ec2-runner
+      with:
+        mode: start
+        ec2-image-id: ${{ inputs.image-id }}
+        ec2-instance-type: ${{ steps.get-ec2-instance-type.outputs.instance-type }}
+        subnet-id: ${{ inputs.subnet-id }}
+        security-group-id: ${{ inputs.security-group-id }}
+        github-token: ${{ inputs.github-token }}

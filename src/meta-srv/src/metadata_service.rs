@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use catalog::helper::{CatalogKey, CatalogValue, SchemaKey, SchemaValue};
+use common_meta::helper::{CatalogKey, CatalogValue, SchemaKey, SchemaValue};
 use common_meta::rpc::store::CompareAndPutRequest;
 use common_telemetry::{info, timer};
 use metrics::increment_counter;
@@ -119,7 +119,7 @@ impl MetadataService for DefaultMetadataService {
 mod tests {
     use std::sync::Arc;
 
-    use catalog::helper::{CatalogKey, SchemaKey};
+    use common_meta::helper::{CatalogKey, SchemaKey};
 
     use super::{DefaultMetadataService, MetadataService};
     use crate::service::store::kv::KvStoreRef;

@@ -19,6 +19,7 @@ use axum::response::Response;
 use common_error::ext::ErrorExt;
 use common_telemetry::warn;
 use futures::future::BoxFuture;
+use headers::Header;
 use http_body::Body;
 use metrics::increment_counter;
 use secrecy::SecretString;
@@ -26,6 +27,7 @@ use session::context::UserInfo;
 use snafu::{ensure, IntoError, OptionExt, ResultExt};
 use tower_http::auth::AsyncAuthorizeRequest;
 
+use super::header::GreptimeDbName;
 use super::PUBLIC_APIS;
 use crate::auth::Error::IllegalParam;
 use crate::auth::{Identity, IllegalParamSnafu, UserProviderRef};
@@ -141,14 +143,22 @@ where
 fn extract_catalog_and_schema<B: Send + Sync + 'static>(
     request: &Request<B>,
 ) -> crate::auth::Result<(&str, &str)> {
-    // try get database name
-    let query = request.uri().query().unwrap_or_default();
-    let input_database = extract_db_from_query(query).context(IllegalParamSnafu {
-        msg: "db not provided or corrupted",
-    })?;
+    // parse database from header
+    let dbname = request
+        .headers()
+        .get(GreptimeDbName::name())
+        // eat this invalid ascii error and give user the final IllegalParam error
+        .and_then(|header| header.to_str().ok())
+        .or_else(|| {
+            let query = request.uri().query().unwrap_or_default();
+            extract_db_from_query(query)
+        })
+        .context(IllegalParamSnafu {
+            msg: "db not provided or corrupted",
+        })?;
 
     Ok(crate::parse_catalog_and_schema_from_client_database_name(
-        input_database,
+        dbname,
     ))
 }
 
@@ -389,6 +399,19 @@ mod tests {
         }
 
         Ok(req.body(()).unwrap())
+    }
+
+    #[test]
+    fn test_db_name_header() {
+        let http_api_version = crate::http::HTTP_API_VERSION;
+        let req = Request::builder()
+            .uri(format!("http://localhost/{http_api_version}/sql").as_str())
+            .header(GreptimeDbName::name(), "greptime-tomcat")
+            .body(())
+            .unwrap();
+
+        let db = extract_catalog_and_schema(&req).unwrap();
+        assert_eq!(db, ("greptime", "tomcat"));
     }
 
     #[test]

@@ -21,6 +21,8 @@ use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_meta::ident::TableIdent;
 use common_meta::instruction::Instruction;
+use common_meta::key::table_name::TableNameKey;
+use common_meta::key::TableRouteKey;
 use common_meta::kv_backend::txn::{Compare, CompareOp, Txn, TxnOp};
 use common_meta::rpc::ddl::DropTableTask;
 use common_meta::rpc::router::TableRoute;
@@ -29,19 +31,18 @@ use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{
     Context as ProcedureContext, LockKey, Procedure, Result as ProcedureResult, Status,
 };
-use common_telemetry::debug;
+use common_telemetry::{debug, info};
 use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
 use table::engine::TableReference;
 
-use super::utils::{build_table_metadata_key, handle_retry_error};
+use super::utils::handle_retry_error;
 use crate::ddl::DdlContext;
 use crate::error;
-use crate::error::Result;
+use crate::error::{Result, TableMetadataManagerSnafu};
 use crate::procedure::utils::{build_table_route_value, handle_request_datanode_error};
 use crate::service::mailbox::BroadcastChannel;
-use crate::table_routes::fetch_table;
 pub struct DropTableProcedure {
     context: DdlContext,
     data: DropTableData,
@@ -70,21 +71,51 @@ impl DropTableProcedure {
     /// Removes the table metadata.
     async fn on_remove_metadata(&mut self) -> Result<Status> {
         let table_ref = self.data.table_ref();
-
-        // If metadata not exists (might have already been removed).
-        if fetch_table(&self.context.kv_store, table_ref)
-            .await?
-            .is_none()
-        {
-            self.data.state = DropTableState::InvalidateTableCache;
-
-            return Ok(Status::executing(true));
-        }
-
-        let table_ref = self.data.table_ref();
         let table_id = self.data.task.table_id;
 
-        let (table_global_key, table_route_key) = build_table_metadata_key(table_ref, table_id);
+        let manager = &self.context.table_metadata_manager;
+        manager
+            .table_info_manager()
+            .remove(table_id)
+            .await
+            .context(TableMetadataManagerSnafu)?;
+        info!("Removed TableInfoValue for table: {table_id}");
+
+        let table_region_value = manager
+            .table_region_manager()
+            .remove(table_id)
+            .await
+            .context(TableMetadataManagerSnafu)?;
+        info!("Removed TableRegionValue for table: {table_id}");
+
+        if let Some(table_region_value) = table_region_value {
+            for datanode_id in table_region_value.region_distribution.keys() {
+                manager
+                    .datanode_table_manager()
+                    .remove(*datanode_id, table_id)
+                    .await
+                    .context(TableMetadataManagerSnafu)?;
+                info!("Removed DatanodeTableValue for table: {table_id} on Datanode {datanode_id}");
+            }
+        }
+
+        manager
+            .table_name_manager()
+            .remove(TableNameKey::new(
+                table_ref.catalog,
+                table_ref.schema,
+                table_ref.table,
+            ))
+            .await
+            .context(TableMetadataManagerSnafu)?;
+        info!("Removed TableNameValue for table: {table_id}");
+
+        let table_route_key = TableRouteKey {
+            table_id,
+            catalog_name: table_ref.catalog,
+            schema_name: table_ref.schema,
+            table_name: table_ref.table,
+        };
         let table_route_value = build_table_route_value(self.data.table_route.clone())?;
 
         // To protect the potential resource leak issues.
@@ -95,10 +126,9 @@ impl DropTableProcedure {
                 CompareOp::Equal,
                 table_route_value.into(),
             )])
-            .and_then(vec![
-                TxnOp::Delete(table_route_key.to_string().into_bytes()),
-                TxnOp::Delete(table_global_key.to_string().into_bytes()),
-            ]);
+            .and_then(vec![TxnOp::Delete(
+                table_route_key.to_string().into_bytes(),
+            )]);
         let resp = self.context.kv_store.txn(txn).await?;
 
         ensure!(
@@ -107,6 +137,7 @@ impl DropTableProcedure {
                 msg: "table_route_value changed"
             }
         );
+        info!("Removed TableRouteValue for table: {table_id}");
 
         self.data.state = DropTableState::InvalidateTableCache;
 

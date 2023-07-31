@@ -16,20 +16,19 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common_meta::rpc::router::{RouteRequest, TableRoute};
-use common_meta::table_name::TableName;
 use common_telemetry::timer;
 use meta_client::client::MetaClient;
 use moka::future::{Cache, CacheBuilder};
 use snafu::{ensure, ResultExt};
+use table::metadata::TableId;
 
 use crate::error::{self, Result};
 use crate::metrics;
 
-type TableRouteCache = Cache<TableName, Arc<TableRoute>>;
+type TableRouteCache = Cache<TableId, Arc<TableRoute>>;
 
 pub struct TableRoutes {
     meta_client: Arc<MetaClient>,
-    // TODO(LFC): Use table id as cache key, then remove all the manually invoked cache invalidations.
     cache: TableRouteCache,
 }
 
@@ -45,11 +44,11 @@ impl TableRoutes {
         }
     }
 
-    pub async fn get_route(&self, table_name: &TableName) -> Result<Arc<TableRoute>> {
+    pub async fn get_route(&self, table_id: TableId) -> Result<Arc<TableRoute>> {
         let _timer = timer!(metrics::METRIC_TABLE_ROUTE_GET);
 
         self.cache
-            .try_get_with_by_ref(table_name, self.get_from_meta(table_name))
+            .try_get_with_by_ref(&table_id, self.get_from_meta(table_id))
             .await
             .map_err(|e| {
                 error::GetCacheSnafu {
@@ -59,32 +58,30 @@ impl TableRoutes {
             })
     }
 
-    async fn get_from_meta(&self, table_name: &TableName) -> Result<Arc<TableRoute>> {
+    async fn get_from_meta(&self, table_id: TableId) -> Result<Arc<TableRoute>> {
         let _timer = timer!(metrics::METRIC_TABLE_ROUTE_GET_REMOTE);
 
         let mut resp = self
             .meta_client
             .route(RouteRequest {
-                table_names: vec![table_name.clone()],
+                table_ids: vec![table_id],
             })
             .await
             .context(error::RequestMetaSnafu)?;
         ensure!(
             !resp.table_routes.is_empty(),
-            error::FindTableRoutesSnafu {
-                table_name: table_name.to_string()
-            }
+            error::FindTableRoutesSnafu { table_id }
         );
         let route = resp.table_routes.swap_remove(0);
         Ok(Arc::new(route))
     }
 
-    pub async fn insert_table_route(&self, table_name: TableName, table_route: Arc<TableRoute>) {
-        self.cache.insert(table_name, table_route).await
+    pub async fn insert_table_route(&self, table_id: TableId, table_route: Arc<TableRoute>) {
+        self.cache.insert(table_id, table_route).await
     }
 
-    pub async fn invalidate_table_route(&self, table_name: &TableName) {
-        self.cache.invalidate(table_name).await
+    pub async fn invalidate_table_route(&self, table_id: TableId) {
+        self.cache.invalidate(&table_id).await
     }
 
     pub fn cache(&self) -> &TableRouteCache {

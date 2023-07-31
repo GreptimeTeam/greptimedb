@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::borrow::Cow;
-use std::sync::Arc;
 
 use api::v1::greptime_request::Request;
 use api::v1::{InsertRequest, InsertRequests};
@@ -38,7 +37,7 @@ impl SqlQueryInterceptor for NoopInterceptor {
 #[test]
 fn test_default_interceptor_behaviour() {
     let di = NoopInterceptor;
-    let ctx = Arc::new(QueryContext::new());
+    let ctx = QueryContext::arc();
 
     let query = "SELECT 1";
     assert_eq!("SELECT 1;", di.pre_parsing(query, ctx).unwrap());
@@ -72,7 +71,7 @@ impl GrpcQueryInterceptor for NoopInterceptor {
 #[test]
 fn test_grpc_interceptor() {
     let di = NoopInterceptor;
-    let ctx = Arc::new(QueryContext::new());
+    let ctx = QueryContext::arc();
 
     let req = Request::Inserts(InsertRequests {
         inserts: vec![InsertRequest {
@@ -117,7 +116,7 @@ impl PromQueryInterceptor for NoopInterceptor {
 #[test]
 fn test_prom_interceptor() {
     let di = NoopInterceptor;
-    let ctx = Arc::new(QueryContext::new());
+    let ctx = QueryContext::arc();
 
     let query = PromQuery {
         query: "up".to_string(),

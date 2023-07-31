@@ -12,11 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Mito region engine.
+
+#[cfg(test)]
+mod tests;
+
 use std::sync::Arc;
 
 use object_store::ObjectStore;
+use snafu::ResultExt;
+use store_api::logstore::LogStore;
+use store_api::storage::RegionId;
 
 use crate::config::MitoConfig;
+use crate::error::{RecvSnafu, Result};
+pub use crate::worker::request::CreateRequest;
+use crate::worker::request::{RegionRequest, RequestBody};
 use crate::worker::WorkerGroup;
 
 /// Region engine implementation for timeseries data.
@@ -27,10 +38,31 @@ pub struct MitoEngine {
 
 impl MitoEngine {
     /// Returns a new [MitoEngine] with specific `config`, `log_store` and `object_store`.
-    pub fn new<S>(config: MitoConfig, log_store: S, object_store: ObjectStore) -> MitoEngine {
+    pub fn new<S: LogStore>(
+        mut config: MitoConfig,
+        log_store: Arc<S>,
+        object_store: ObjectStore,
+    ) -> MitoEngine {
+        config.sanitize();
+
         MitoEngine {
             inner: Arc::new(EngineInner::new(config, log_store, object_store)),
         }
+    }
+
+    /// Stop the engine.
+    pub async fn stop(&self) -> Result<()> {
+        self.inner.stop().await
+    }
+
+    /// Creates a new region.
+    pub async fn create_region(&self, request: CreateRequest) -> Result<()> {
+        self.inner.create_region(request).await
+    }
+
+    /// Returns true if the specific region exists.
+    pub fn is_region_exists(&self, region_id: RegionId) -> bool {
+        self.inner.workers.is_region_exists(region_id)
     }
 }
 
@@ -42,9 +74,26 @@ struct EngineInner {
 
 impl EngineInner {
     /// Returns a new [EngineInner] with specific `config`, `log_store` and `object_store`.
-    fn new<S>(_config: MitoConfig, _log_store: S, _object_store: ObjectStore) -> EngineInner {
+    fn new<S: LogStore>(
+        config: MitoConfig,
+        log_store: Arc<S>,
+        object_store: ObjectStore,
+    ) -> EngineInner {
         EngineInner {
-            workers: WorkerGroup::default(),
+            workers: WorkerGroup::start(config, log_store, object_store),
         }
+    }
+
+    /// Stop the inner engine.
+    async fn stop(&self) -> Result<()> {
+        self.workers.stop().await
+    }
+
+    /// Creates a new region.
+    async fn create_region(&self, create_request: CreateRequest) -> Result<()> {
+        let (request, receiver) = RegionRequest::from_body(RequestBody::Create(create_request));
+        self.workers.submit_to_worker(request).await?;
+
+        receiver.await.context(RecvSnafu)?
     }
 }

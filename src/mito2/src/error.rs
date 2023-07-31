@@ -17,8 +17,12 @@ use std::any::Any;
 use common_datasource::compression::CompressionType;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
+use datatypes::arrow::error::ArrowError;
 use snafu::{Location, Snafu};
 use store_api::manifest::ManifestVersion;
+use store_api::storage::RegionId;
+
+use crate::worker::WorkerId;
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
@@ -75,15 +79,115 @@ pub enum Error {
         location: Location,
         source: std::str::Utf8Error,
     },
+
+    #[snafu(display("Cannot find RegionMetadata. Location: {}", location))]
+    RegionMetadataNotFound { location: Location },
+
+    #[snafu(display("Failed to join handle, location: {}, source: {}", location, source))]
+    Join {
+        source: common_runtime::JoinError,
+        location: Location,
+    },
+
+    #[snafu(display("Worker {} is stopped, location: {}", id, location))]
+    WorkerStopped { id: WorkerId, location: Location },
+
+    #[snafu(display("Failed to recv result, location: {}, source: {}", location, source))]
+    Recv {
+        source: tokio::sync::oneshot::error::RecvError,
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Expect initial region metadata on creating/opening a new region, location: {}",
+        location
+    ))]
+    InitialMetadata { location: Location },
+
+    #[snafu(display("Invalid metadata, {}, location: {}", reason, location))]
+    InvalidMeta { reason: String, location: Location },
+
+    #[snafu(display("Invalid schema, source: {}, location: {}", source, location))]
+    InvalidSchema {
+        source: datatypes::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Region {} already exists, location: {}", region_id, location))]
+    RegionExists {
+        region_id: RegionId,
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Failed to create RecordBatch from vectors, location: {}, source: {}",
+        location,
+        source
+    ))]
+    NewRecordBatch {
+        location: Location,
+        source: ArrowError,
+    },
+
+    #[snafu(display(
+        "Failed to write to buffer, location: {}, source: {}",
+        location,
+        source
+    ))]
+    WriteBuffer {
+        location: Location,
+        source: common_datasource::error::Error,
+    },
+
+    #[snafu(display(
+        "Failed to write parquet file, path: {}, location: {}, source: {}",
+        path,
+        location,
+        source
+    ))]
+    WriteParquet {
+        path: String,
+        location: Location,
+        source: parquet::errors::ParquetError,
+    },
+
+    #[snafu(display(
+        "Failed to read parquet file, path: {}, location: {}, source: {}",
+        path,
+        location,
+        source
+    ))]
+    ReadParquet {
+        path: String,
+        source: parquet::errors::ParquetError,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
 
 impl ErrorExt for Error {
-    #[allow(clippy::match_single_binding)]
     fn status_code(&self) -> StatusCode {
+        use Error::*;
+
         match self {
-            _ => todo!(),
+            OpenDal { .. } | WriteParquet { .. } | ReadParquet { .. } => {
+                StatusCode::StorageUnavailable
+            }
+            CompressObject { .. }
+            | DecompressObject { .. }
+            | SerdeJson { .. }
+            | Utf8 { .. }
+            | RegionExists { .. }
+            | NewRecordBatch { .. } => StatusCode::Unexpected,
+            InvalidScanIndex { .. }
+            | InitialMetadata { .. }
+            | InvalidMeta { .. }
+            | InvalidSchema { .. } => StatusCode::InvalidArguments,
+            RegionMetadataNotFound { .. } | Join { .. } | WorkerStopped { .. } | Recv { .. } => {
+                StatusCode::Internal
+            }
+            WriteBuffer { source, .. } => source.status_code(),
         }
     }
 

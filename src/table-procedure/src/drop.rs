@@ -189,6 +189,7 @@ impl DropTableProcedure {
 
             // If the subprocedure is not found, we create a new subprocedure with the same id.
             let engine_ctx = EngineContext::default();
+
             let procedure = self
                 .engine_procedure
                 .drop_table_procedure(&engine_ctx, self.data.request.clone())

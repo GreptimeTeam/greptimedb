@@ -82,7 +82,7 @@ impl DatafusionQueryEngine {
         plan: LogicalPlan,
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
-        let mut ctx = QueryEngineContext::new(self.state.session_state());
+        let mut ctx = QueryEngineContext::new(self.state.session_state(), query_ctx.clone());
 
         // `create_physical_plan` will optimize logical plan internally
         let physical_plan = self.create_physical_plan(&mut ctx, &plan).await?;
@@ -363,10 +363,12 @@ impl QueryExecutor for DatafusionQueryEngine {
         plan: &Arc<dyn PhysicalPlan>,
     ) -> Result<SendableRecordBatchStream> {
         let _timer = timer!(metrics::METRIC_EXEC_PLAN_ELAPSED);
+        let task_ctx = ctx.build_task_ctx();
+
         match plan.output_partitioning().partition_count() {
             0 => Ok(Box::pin(EmptyRecordBatchStream::new(plan.schema()))),
             1 => Ok(plan
-                .execute(0, ctx.state().task_ctx())
+                .execute(0, task_ctx)
                 .context(error::ExecutePhysicalPlanSnafu)
                 .map_err(BoxedError::new)
                 .context(QueryExecutionSnafu))?,
@@ -377,7 +379,7 @@ impl QueryExecutor for DatafusionQueryEngine {
                 // CoalescePartitionsExec must produce a single partition
                 assert_eq!(1, plan.output_partitioning().partition_count());
                 let df_stream = plan
-                    .execute(0, ctx.state().task_ctx())
+                    .execute(0, task_ctx)
                     .context(error::DatafusionSnafu {
                         msg: "Failed to execute DataFusion merge exec",
                     })

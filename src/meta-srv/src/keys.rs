@@ -19,14 +19,15 @@ use lazy_static::lazy_static;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
+use store_api::storage::RegionNumber;
 
 use crate::error;
 use crate::error::Result;
 use crate::handler::node_stat::Stat;
 
-pub(crate) const REMOVED_PREFIX: &str = "__removed";
 pub(crate) const DN_LEASE_PREFIX: &str = "__meta_dnlease";
 pub(crate) const SEQ_PREFIX: &str = "__meta_seq";
+pub(crate) const INACTIVE_NODE_PREFIX: &str = "__meta_inactive_node";
 
 pub const DN_STAT_PREFIX: &str = "__meta_dnstat";
 
@@ -128,10 +129,6 @@ impl TryFrom<LeaseValue> for Vec<u8> {
     }
 }
 
-pub(crate) fn to_removed_key(key: &str) -> String {
-    format!("{REMOVED_PREFIX}-{key}")
-}
-
 pub fn build_table_route_prefix(catalog: impl AsRef<str>, schema: impl AsRef<str>) -> String {
     format!(
         "{}-{}-{}-",
@@ -141,7 +138,7 @@ pub fn build_table_route_prefix(catalog: impl AsRef<str>, schema: impl AsRef<str
     )
 }
 
-#[derive(Eq, PartialEq, Debug, Clone, Hash, Copy)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
 pub struct StatKey {
     pub cluster_id: u64,
     pub node_id: u64,
@@ -244,6 +241,28 @@ impl TryFrom<Vec<u8>> for StatValue {
         String::from_utf8(value)
             .context(error::StatValueFromUtf8Snafu {})
             .map(|x| x.parse())?
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
+pub struct InactiveNodeKey {
+    pub cluster_id: u64,
+    pub node_id: u64,
+    pub table_id: u32,
+    pub region_number: RegionNumber,
+}
+
+impl From<InactiveNodeKey> for Vec<u8> {
+    fn from(value: InactiveNodeKey) -> Self {
+        format!(
+            "{}-{}-{}-{}-{}",
+            INACTIVE_NODE_PREFIX,
+            value.cluster_id,
+            value.node_id,
+            value.table_id,
+            value.region_number
+        )
+        .into_bytes()
     }
 }
 

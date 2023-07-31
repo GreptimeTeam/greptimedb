@@ -14,9 +14,8 @@
 
 use std::collections::HashMap;
 
-use catalog::helper::{
-    build_catalog_prefix, build_schema_prefix, build_table_global_prefix, TABLE_GLOBAL_KEY_PREFIX,
-};
+use common_meta::helper::{build_catalog_prefix, build_schema_prefix};
+use common_meta::key::table_name::TableNameKey;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::rpc::store::{RangeRequest, RangeResponse};
 use common_meta::util;
@@ -24,7 +23,7 @@ use snafu::{OptionExt, ResultExt};
 use tonic::codegen::http;
 
 use crate::error;
-use crate::error::Result;
+use crate::error::{Result, TableMetadataManagerSnafu};
 use crate::service::admin::HttpHandler;
 use crate::service::store::kv::KvStoreRef;
 
@@ -37,12 +36,10 @@ pub struct SchemasHandler {
 }
 
 pub struct TablesHandler {
-    pub kv_store: KvStoreRef,
     pub table_metadata_manager: TableMetadataManagerRef,
 }
 
 pub struct TableHandler {
-    pub kv_store: KvStoreRef,
     pub table_metadata_manager: TableMetadataManagerRef,
 }
 
@@ -87,8 +84,18 @@ impl HttpHandler for TablesHandler {
             .context(error::MissingRequiredParameterSnafu {
                 param: "schema_name",
             })?;
-        get_http_response_by_prefix(build_table_global_prefix(catalog, schema), &self.kv_store)
+
+        let tables = self
+            .table_metadata_manager
+            .table_name_manager()
+            .tables(catalog, schema)
             .await
+            .context(TableMetadataManagerSnafu)?
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect();
+
+        to_http_response(tables)
     }
 }
 
@@ -99,22 +106,56 @@ impl HttpHandler for TableHandler {
         _: &str,
         params: &HashMap<String, String>,
     ) -> Result<http::Response<String>> {
-        let table_name = params
-            .get("full_table_name")
-            .map(|full_table_name| full_table_name.replace('.', "-"))
-            .context(error::MissingRequiredParameterSnafu {
-                param: "full_table_name",
-            })?;
-        let table_key = format!("{TABLE_GLOBAL_KEY_PREFIX}-{table_name}");
+        let table_name =
+            params
+                .get("full_table_name")
+                .context(error::MissingRequiredParameterSnafu {
+                    param: "full_table_name",
+                })?;
 
-        let response = self.kv_store.get(table_key.as_bytes()).await?;
-        let mut value: String = "Not found result".to_string();
-        if let Some(key_value) = response {
-            value = String::from_utf8(key_value.value).context(error::InvalidUtf8ValueSnafu)?;
+        let key: TableNameKey = table_name
+            .as_str()
+            .try_into()
+            .context(TableMetadataManagerSnafu)?;
+
+        let mut result = HashMap::with_capacity(2);
+
+        let table_id = self
+            .table_metadata_manager
+            .table_name_manager()
+            .get(key)
+            .await
+            .context(TableMetadataManagerSnafu)?
+            .map(|x| x.table_id());
+
+        if let Some(table_id) = table_id {
+            let table_info_value = self
+                .table_metadata_manager
+                .table_info_manager()
+                .get(table_id)
+                .await
+                .context(TableMetadataManagerSnafu)?
+                .map(|x| format!("{x:?}"))
+                .unwrap_or_else(|| "Not Found".to_string());
+            result.insert("table_info_value", table_info_value);
         }
+
+        if let Some(table_id) = table_id {
+            let table_region_value = self
+                .table_metadata_manager
+                .table_region_manager()
+                .get(table_id)
+                .await
+                .context(TableMetadataManagerSnafu)?
+                .map(|x| format!("{x:?}"))
+                .unwrap_or_else(|| "Not Found".to_string());
+            result.insert("table_region_value", table_region_value);
+        }
+
         http::Response::builder()
             .status(http::StatusCode::OK)
-            .body(value)
+            // Safety: HashMap<String, String> is definitely "serde-json"-able.
+            .body(serde_json::to_string(&result).unwrap())
             .context(error::InvalidHttpBodySnafu)
     }
 }
@@ -125,6 +166,10 @@ async fn get_http_response_by_prefix(
     kv_store: &KvStoreRef,
 ) -> Result<http::Response<String>> {
     let keys = get_keys_by_prefix(key_prefix, kv_store).await?;
+    to_http_response(keys)
+}
+
+fn to_http_response(keys: Vec<String>) -> Result<http::Response<String>> {
     let body = serde_json::to_string(&keys).context(error::SerializeToJsonSnafu {
         input: format!("{keys:?}"),
     })?;
@@ -164,10 +209,9 @@ async fn get_keys_by_prefix(key_prefix: String, kv_store: &KvStoreRef) -> Result
 mod tests {
     use std::sync::Arc;
 
-    use catalog::helper::{
-        build_catalog_prefix, build_schema_prefix, build_table_global_prefix, CatalogKey,
-        SchemaKey, TableGlobalKey,
-    };
+    use common_meta::helper::{build_catalog_prefix, build_schema_prefix, CatalogKey, SchemaKey};
+    use common_meta::key::table_name::TableNameKey;
+    use common_meta::key::TableMetaKey;
     use common_meta::rpc::store::PutRequest;
 
     use crate::service::admin::meta::get_keys_by_prefix;
@@ -205,19 +249,11 @@ mod tests {
             .await
             .is_ok());
 
-        let table1 = TableGlobalKey {
-            catalog_name: catalog_name.to_string(),
-            schema_name: schema_name.to_string(),
-            table_name: table_name.to_string(),
-        };
-        let table2 = TableGlobalKey {
-            catalog_name: catalog_name.to_string(),
-            schema_name: schema_name.to_string(),
-            table_name: "test_table1".to_string(),
-        };
+        let table1 = TableNameKey::new(catalog_name, schema_name, table_name);
+        let table2 = TableNameKey::new(catalog_name, schema_name, "test_table1");
         assert!(in_mem
             .put(PutRequest {
-                key: table1.to_string().as_bytes().to_vec(),
+                key: table1.as_raw_key(),
                 value: "".as_bytes().to_vec(),
                 prev_kv: false,
             })
@@ -225,7 +261,7 @@ mod tests {
             .is_ok());
         assert!(in_mem
             .put(PutRequest {
-                key: table2.to_string().as_bytes().to_vec(),
+                key: table2.as_raw_key(),
                 value: "".as_bytes().to_vec(),
                 prev_kv: false,
             })
@@ -239,7 +275,10 @@ mod tests {
             .await
             .unwrap();
         let table_key = get_keys_by_prefix(
-            build_table_global_prefix(table1.catalog_name, table1.schema_name),
+            format!(
+                "{}/",
+                TableNameKey::prefix_to_table(table1.catalog, table1.schema)
+            ),
             &in_mem,
         )
         .await

@@ -19,13 +19,13 @@ mod tests {
     use std::sync::atomic::AtomicU32;
     use std::sync::Arc;
 
-    use catalog::helper::{TableGlobalKey, TableGlobalValue};
     use common_base::Plugins;
+    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+    use common_meta::key::table_name::TableNameKey;
     use common_query::Output;
     use common_recordbatch::RecordBatches;
     use frontend::error::{self, Error, Result};
     use frontend::instance::Instance;
-    use frontend::table::DistTable;
     use query::parser::QueryLanguageParser;
     use servers::interceptor::{SqlQueryInterceptor, SqlQueryInterceptorRef};
     use servers::query_handler::sql::SqlQueryHandler;
@@ -177,25 +177,27 @@ mod tests {
         instance: &MockDistributedInstance,
         expected_distribution: HashMap<u32, &str>,
     ) {
-        let table = instance
-            .frontend()
-            .catalog_manager()
-            .table("greptime", "public", "demo")
+        let manager = instance.table_metadata_manager();
+        let table_id = manager
+            .table_name_manager()
+            .get(TableNameKey::new(
+                DEFAULT_CATALOG_NAME,
+                DEFAULT_SCHEMA_NAME,
+                "demo",
+            ))
             .await
             .unwrap()
-            .unwrap();
-        let table = table.as_any().downcast_ref::<DistTable>().unwrap();
+            .unwrap()
+            .table_id();
 
-        let TableGlobalValue { regions_id_map, .. } = table
-            .table_global_value(&TableGlobalKey {
-                catalog_name: "greptime".to_string(),
-                schema_name: "public".to_string(),
-                table_name: "demo".to_string(),
-            })
+        let table_region_value = manager
+            .table_region_manager()
+            .get(table_id)
             .await
             .unwrap()
             .unwrap();
-        let region_to_dn_map = regions_id_map
+        let region_to_dn_map = table_region_value
+            .region_distribution
             .iter()
             .map(|(k, v)| (v[0], *k))
             .collect::<HashMap<u32, u64>>();
@@ -354,7 +356,7 @@ mod tests {
             }
         }
 
-        let query_ctx = Arc::new(QueryContext::new());
+        let query_ctx = QueryContext::arc();
 
         let standalone = tests::create_standalone_instance("test_db_hook").await;
         let mut instance = standalone.instance;

@@ -13,10 +13,16 @@ path = "src/bin/greptime.rs"
 default = ["metrics-process"]
 tokio-console = ["common-telemetry/tokio-console"]
 metrics-process = ["servers/metrics-process"]
+greptimedb-telemetry = [
+    "datanode/greptimedb-telemetry",
+    "meta-srv/greptimedb-telemetry",
+]
 
 [dependencies]
 anymap = "1.0.0-beta.2"
+async-trait.workspace = true
 catalog = { path = "../catalog" }
+chrono.workspace = true
 clap = { version = "3.1", features = ["derive"] }
 client = { path = "../client" }
 common-base = { path = "../common/base" }
@@ -29,7 +35,9 @@ common-telemetry = { path = "../common/telemetry", features = [
 ] }
 config = "0.13"
 datanode = { path = "../datanode" }
+datatypes = { path = "../datatypes" }
 either = "1.8"
+etcd-client.workspace = true
 frontend = { path = "../frontend" }
 futures.workspace = true
 meta-client = { path = "../meta-client" }
@@ -38,12 +46,14 @@ metrics.workspace = true
 nu-ansi-term = "0.46"
 partition = { path = "../partition" }
 query = { path = "../query" }
+rand.workspace = true
 rustyline = "10.1"
 serde.workspace = true
 servers = { path = "../servers" }
 session = { path = "../session" }
 snafu.workspace = true
 substrait = { path = "../common/substrait" }
+table = { path = "../table" }
 tikv-jemallocator = "0.5"
 tokio.workspace = true
 
@@ -55,4 +65,4 @@ serde.workspace = true
 toml.workspace = true
 
 [build-dependencies]
-build-data = "0.1.4"
+common-version = { path = "../common/version" }
