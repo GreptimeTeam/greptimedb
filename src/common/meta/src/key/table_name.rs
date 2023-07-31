@@ -265,13 +265,6 @@ impl TableNameManager {
             ))
         }
         Ok(res)
-
-        // let table_names = resp
-        //     .kvs
-        //     .into_iter()
-        //     .map(|kv| TableNameKey::strip_table_name(kv.key()))
-        //     .collect::<Result<Vec<_>>>()?;
-        // Ok(table_names)
     }
 
     pub async fn remove(&self, key: TableNameKey<'_>) -> Result<()> {
