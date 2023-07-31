@@ -13,5 +13,5 @@
 // limitations under the License.
 
 fn main() {
-    common_version::set_git_version();
+    common_version::setup_git_versions();
 }

@@ -15,7 +15,7 @@
 const DEFAULT_VALUE: &str = "unknown";
 
 #[allow(clippy::print_stdout)]
-pub fn set_git_version() {
+pub fn setup_git_versions() {
     println!(
         "cargo:rustc-env=GIT_COMMIT={}",
         build_data::get_git_commit().unwrap_or_else(|_| DEFAULT_VALUE.to_string())
