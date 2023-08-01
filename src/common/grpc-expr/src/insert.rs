@@ -631,6 +631,7 @@ mod tests {
     use api::v1::{Column, ColumnDataType, IntervalMonthDayNano, SemanticType};
     use common_base::BitVec;
     use common_catalog::consts::MITO_ENGINE;
+    use common_time::interval::IntervalUnit;
     use common_time::timestamp::{TimeUnit, Timestamp};
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, SchemaBuilder};
@@ -694,8 +695,8 @@ mod tests {
         );
 
         let column_defs = create_expr.column_defs;
-        assert_eq!(column_defs[4].name, create_expr.time_index);
-        assert_eq!(5, column_defs.len());
+        assert_eq!(column_defs[5].name, create_expr.time_index);
+        assert_eq!(6, column_defs.len());
 
         assert_eq!(
             ConcreteDataType::string_datatype(),
@@ -754,6 +755,20 @@ mod tests {
         );
 
         assert_eq!(
+            ConcreteDataType::interval_datatype(IntervalUnit::MonthDayNano),
+            ConcreteDataType::from(
+                ColumnDataTypeWrapper::try_new(
+                    column_defs
+                        .iter()
+                        .find(|c| c.name == "interval")
+                        .unwrap()
+                        .datatype
+                )
+                .unwrap()
+            )
+        );
+
+        assert_eq!(
             ConcreteDataType::timestamp_millisecond_datatype(),
             ConcreteDataType::from(
                 ColumnDataTypeWrapper::try_new(
@@ -786,7 +801,7 @@ mod tests {
 
         let add_columns = find_new_columns(&schema, &insert_batch.0).unwrap().unwrap();
 
-        assert_eq!(3, add_columns.add_columns.len());
+        assert_eq!(4, add_columns.add_columns.len());
         let host_column = &add_columns.add_columns[0];
         assert!(host_column.is_key);
 
@@ -817,6 +832,19 @@ mod tests {
             ConcreteDataType::from(
                 ColumnDataTypeWrapper::try_new(time_column.column_def.as_ref().unwrap().datatype)
                     .unwrap()
+            )
+        );
+
+        let interval_column = &add_columns.add_columns[3];
+        assert!(!interval_column.is_key);
+
+        assert_eq!(
+            ConcreteDataType::interval_datatype(IntervalUnit::MonthDayNano),
+            ConcreteDataType::from(
+                ColumnDataTypeWrapper::try_new(
+                    interval_column.column_def.as_ref().unwrap().datatype
+                )
+                .unwrap()
             )
         );
     }
@@ -1192,7 +1220,29 @@ mod tests {
             datatype: ColumnDataType::TimeMillisecond as i32,
         };
 
-        let ts_vals = Values {
+        let interval1 = IntervalMonthDayNano {
+            months: 1,
+            days: 2,
+            nanoseconds: 3,
+        };
+        let interval2 = IntervalMonthDayNano {
+            months: 4,
+            days: 5,
+            nanoseconds: 6,
+        };
+        let interval_vals = column::Values {
+            interval_month_day_nano_values: vec![interval1, interval2],
+            ..Default::default()
+        };
+        let interval_column = Column {
+            column_name: "interval".to_string(),
+            semantic_type: SemanticType::Field as i32,
+            values: Some(interval_vals),
+            null_mask: vec![0],
+            datatype: ColumnDataType::IntervalMonthDayNano as i32,
+        };
+
+        let ts_vals = column::Values {
             ts_millisecond_values: vec![100, 101],
             ..Default::default()
         };
@@ -1205,7 +1255,14 @@ mod tests {
         };
 
         (
-            vec![host_column, cpu_column, mem_column, time_column, ts_column],
+            vec![
+                host_column,
+                cpu_column,
+                mem_column,
+                time_column,
+                interval_column,
+                ts_column,
+            ],
             row_count,
         )
     }

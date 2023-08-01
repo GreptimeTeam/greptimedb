@@ -396,6 +396,14 @@ mod tests {
         let values = values_with_capacity(ColumnDataType::TimeMillisecond, 2);
         let values = values.time_millisecond_values;
         assert_eq!(2, values.capacity());
+
+        let values = values_with_capacity(ColumnDataType::IntervalDayTime, 2);
+        let values = values.interval_day_time_values;
+        assert_eq!(2, values.capacity());
+
+        let values = values_with_capacity(ColumnDataType::IntervalMonthDayNano, 2);
+        let values = values.interval_month_day_nano_values;
+        assert_eq!(2, values.capacity());
     }
 
     #[test]
@@ -468,6 +476,18 @@ mod tests {
             ConcreteDataType::time_datatype(TimeUnit::Millisecond),
             ColumnDataTypeWrapper(ColumnDataType::TimeMillisecond).into()
         );
+        assert_eq!(
+            ConcreteDataType::interval_datatype(IntervalUnit::DayTime),
+            ColumnDataTypeWrapper(ColumnDataType::IntervalDayTime).into()
+        );
+        assert_eq!(
+            ConcreteDataType::interval_datatype(IntervalUnit::YearMonth),
+            ColumnDataTypeWrapper(ColumnDataType::IntervalYearMonth).into()
+        );
+        assert_eq!(
+            ConcreteDataType::interval_datatype(IntervalUnit::MonthDayNano),
+            ColumnDataTypeWrapper(ColumnDataType::IntervalMonthDayNano).into()
+        );
     }
 
     #[test]
@@ -535,6 +555,24 @@ mod tests {
         assert_eq!(
             ColumnDataTypeWrapper(ColumnDataType::TimestampMillisecond),
             ConcreteDataType::timestamp_millisecond_datatype()
+                .try_into()
+                .unwrap()
+        );
+        assert_eq!(
+            ColumnDataTypeWrapper(ColumnDataType::IntervalYearMonth),
+            ConcreteDataType::interval_datatype(IntervalUnit::YearMonth)
+                .try_into()
+                .unwrap()
+        );
+        assert_eq!(
+            ColumnDataTypeWrapper(ColumnDataType::IntervalDayTime),
+            ConcreteDataType::interval_datatype(IntervalUnit::DayTime)
+                .try_into()
+                .unwrap()
+        );
+        assert_eq!(
+            ColumnDataTypeWrapper(ColumnDataType::IntervalMonthDayNano),
+            ConcreteDataType::interval_datatype(IntervalUnit::MonthDayNano)
                 .try_into()
                 .unwrap()
         );
@@ -635,27 +673,40 @@ mod tests {
             vec![10, 11, 12],
             column.values.as_ref().unwrap().time_second_values
         );
+    }
 
-        let vector = Arc::new(IntervalYearMonthVector::from_vec(vec![13, 14, 15]));
+    #[test]
+    fn test_column_put_interval_values() {
+        let mut column = Column {
+            column_name: "test".to_string(),
+            semantic_type: 0,
+            values: Some(Values {
+                ..Default::default()
+            }),
+            null_mask: vec![],
+            datatype: 0,
+        };
+
+        let vector = Arc::new(IntervalYearMonthVector::from_vec(vec![1, 2, 3]));
         push_vals(&mut column, 3, vector);
         assert_eq!(
-            vec![13, 14, 15],
+            vec![1, 2, 3],
             column.values.as_ref().unwrap().interval_year_month_values
         );
 
-        let vector = Arc::new(IntervalDayTimeVector::from_vec(vec![16, 17, 18]));
+        let vector = Arc::new(IntervalDayTimeVector::from_vec(vec![4, 5, 6]));
         push_vals(&mut column, 3, vector);
         assert_eq!(
-            vec![16, 17, 18],
+            vec![4, 5, 6],
             column.values.as_ref().unwrap().interval_day_time_values
         );
 
-        let vector = Arc::new(IntervalMonthDayNanoVector::from_vec(vec![19, 20, 21]));
+        let vector = Arc::new(IntervalMonthDayNanoVector::from_vec(vec![7, 8, 9]));
         let len = vector.len();
         push_vals(&mut column, 3, vector);
         (0..len).for_each(|i| {
             assert_eq!(
-                19 + i as i64,
+                7 + i as i64,
                 column
                     .values
                     .as_ref()
