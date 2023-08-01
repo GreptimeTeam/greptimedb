@@ -613,6 +613,14 @@ pub async fn setup_mysql_server(
     store_type: StorageType,
     name: &str,
 ) -> (String, TestGuard, Arc<Box<dyn Server>>) {
+    setup_mysql_server_with_user_provider(store_type, name, None).await
+}
+
+pub async fn setup_mysql_server_with_user_provider(
+    store_type: StorageType,
+    name: &str,
+    user_provider: Option<UserProviderRef>,
+) -> (String, TestGuard, Arc<Box<dyn Server>>) {
     common_telemetry::init_default_ut_logging();
 
     let (opts, guard) = create_tmp_dir_and_datanode_opts(store_type, name);
@@ -644,7 +652,7 @@ pub async fn setup_mysql_server(
         runtime,
         Arc::new(MysqlSpawnRef::new(
             ServerSqlQueryHandlerAdaptor::arc(fe_instance_ref),
-            None,
+            user_provider,
         )),
         Arc::new(MysqlSpawnConfig::new(
             false,
@@ -668,6 +676,14 @@ pub async fn setup_mysql_server(
 pub async fn setup_pg_server(
     store_type: StorageType,
     name: &str,
+) -> (String, TestGuard, Arc<Box<dyn Server>>) {
+    setup_pg_server_with_user_provider(store_type, name, None).await
+}
+
+pub async fn setup_pg_server_with_user_provider(
+    store_type: StorageType,
+    name: &str,
+    user_provider: Option<UserProviderRef>,
 ) -> (String, TestGuard, Arc<Box<dyn Server>>) {
     common_telemetry::init_default_ut_logging();
 
@@ -700,7 +716,7 @@ pub async fn setup_pg_server(
         ServerSqlQueryHandlerAdaptor::arc(fe_instance_ref),
         opts.tls.clone(),
         runtime,
-        None,
+        user_provider,
     )) as Box<dyn Server>);
 
     let fe_pg_addr_clone = fe_pg_addr.clone();
