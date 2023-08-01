@@ -207,7 +207,6 @@ checksum = "8f1f8f5a6f3d50d89e3797d7593a50f96bb2aaa20ca0cc7be1fb673232c91d72"
 name = "api"
 version = "0.3.2"
 dependencies = [
- "arrow-flight",
  "common-base",
  "common-error",
  "common-time",
@@ -253,12 +252,6 @@ name = "arc-swap"
 version = "1.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bddcadddf5e9015d310179a59bb28c4d4b9920ad0f11e8e14dbadf654890c9a6"
-
-[[package]]
-name = "array-init-cursor"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bf7d0a018de4f6aa429b9d33d69edf69072b1c5b1cb8d3e4a5f7ef898fc3eb76"
 
 [[package]]
 name = "arrayref"
@@ -525,17 +518,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "async-channel"
-version = "1.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "81953c529336010edd6d8e358f886d9581267795c61b19475b71314bffa46d35"
-dependencies = [
- "concurrent-queue",
- "event-listener",
- "futures-core",
-]
-
-[[package]]
 name = "async-compat"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -779,32 +761,6 @@ dependencies = [
  "tokio",
  "tower",
  "tower-service",
-]
-
-[[package]]
-name = "backoff"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b62ddb9cb1ec0a098ad4bbf9344d0713fa193ae1a80af55febcff2627b6a00c1"
-dependencies = [
- "futures-core",
- "getrandom",
- "instant",
- "pin-project-lite",
- "rand",
- "tokio",
-]
-
-[[package]]
-name = "backon"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6cd1a59bc091e593ee9ed62df4e4a07115e00a0e0a52fd7e0e04540773939b80"
-dependencies = [
- "futures",
- "pin-project",
- "rand",
- "tokio",
 ]
 
 [[package]]
@@ -1252,7 +1208,6 @@ dependencies = [
  "arrow-schema",
  "async-stream",
  "async-trait",
- "backoff",
  "catalog",
  "chrono",
  "common-catalog",
@@ -1270,7 +1225,6 @@ dependencies = [
  "datatypes",
  "futures",
  "futures-util",
- "key-lock",
  "lazy_static",
  "log-store",
  "meta-client",
@@ -1677,11 +1631,8 @@ dependencies = [
 name = "common-catalog"
 version = "0.3.2"
 dependencies = [
- "async-trait",
  "chrono",
  "common-error",
- "common-telemetry",
- "datatypes",
  "serde",
  "serde_json",
  "snafu",
@@ -1697,7 +1648,6 @@ dependencies = [
  "async-compression 0.3.15",
  "async-trait",
  "bytes",
- "common-base",
  "common-error",
  "common-runtime",
  "common-test-util",
@@ -1790,9 +1740,6 @@ dependencies = [
  "backtrace",
  "common-base",
  "common-error",
- "common-function-macro",
- "common-meta",
- "common-query",
  "common-recordbatch",
  "common-runtime",
  "common-telemetry",
@@ -1820,7 +1767,6 @@ dependencies = [
  "common-base",
  "common-catalog",
  "common-error",
- "common-grpc",
  "common-query",
  "common-telemetry",
  "common-time",
@@ -1839,7 +1785,6 @@ dependencies = [
  "tempfile",
  "tikv-jemalloc-ctl",
  "tikv-jemalloc-sys",
- "tikv-jemallocator",
  "tokio",
 ]
 
@@ -1889,7 +1834,7 @@ version = "0.3.2"
 dependencies = [
  "async-stream",
  "async-trait",
- "backon 0.4.1",
+ "backon",
  "common-error",
  "common-runtime",
  "common-telemetry",
@@ -2665,7 +2610,6 @@ dependencies = [
  "axum",
  "axum-macros",
  "axum-test-helper",
- "backon 0.2.0",
  "catalog",
  "client",
  "common-base",
@@ -3206,7 +3150,6 @@ dependencies = [
  "serde",
  "serde_json",
  "snafu",
- "storage",
  "store-api",
  "table",
  "tokio",
@@ -4656,10 +4599,6 @@ name = "integer-encoding"
 version = "3.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8bb03732005da905c88227371639bf1ad885cc712789c011c31c5fb3ab3ccf02"
-dependencies = [
- "async-trait",
- "futures-util",
-]
 
 [[package]]
 name = "inventory"
@@ -5043,7 +4982,6 @@ checksum = "b06a4cde4c0f271a446782e3eff8de789548ce57dbc8eca9292c27f4a42004b4"
 name = "log-store"
 version = "0.3.2"
 dependencies = [
- "arc-swap",
  "async-stream",
  "async-trait",
  "base64 0.13.1",
@@ -5054,10 +4992,8 @@ dependencies = [
  "common-runtime",
  "common-telemetry",
  "common-test-util",
- "crc",
  "futures",
  "futures-util",
- "hex",
  "protobuf",
  "protobuf-build",
  "raft-engine",
@@ -5589,7 +5525,6 @@ dependencies = [
  "datafusion-common",
  "datatypes",
  "futures",
- "key-lock",
  "lazy_static",
  "log-store",
  "metrics",
@@ -6118,7 +6053,7 @@ dependencies = [
  "anyhow",
  "async-compat",
  "async-trait",
- "backon 0.4.1",
+ "backon",
  "base64 0.21.2",
  "bytes",
  "chrono",
@@ -6529,19 +6464,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "parquet-format-async-temp"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "03abc2f9c83fe9ceec83f47c76cc071bfd56caba33794340330f35623ab1f544"
-dependencies = [
- "async-trait",
- "byteorder",
- "futures",
- "integer-encoding",
- "ordered-float 1.1.1",
-]
-
-[[package]]
 name = "parse-zoneinfo"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6845,15 +6767,6 @@ name = "pkg-config"
 version = "0.3.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "26072860ba924cbfa98ea39c8c19b4dd6a4a25423dbdf219c1eca91aa0cf6964"
-
-[[package]]
-name = "planus"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bffebaf174d6cad46a5f0f1bb1c45c6eb509571688bcb18dfab217f3c9f9b151"
-dependencies = [
- "array-init-cursor",
-]
 
 [[package]]
 name = "plotters"
@@ -9190,17 +9103,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sluice"
-version = "0.5.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6d7400c0eff44aa2fcb5e31a5f24ba9716ed90138769e4977a2ba6014ae63eb5"
-dependencies = [
- "async-channel",
- "futures-core",
- "futures-io",
-]
-
-[[package]]
 name = "smallvec"
 version = "1.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9558,13 +9460,11 @@ dependencies = [
  "object-store",
  "parquet",
  "paste",
- "planus",
  "prost",
  "rand",
  "regex",
  "serde",
  "serde_json",
- "sluice",
  "snafu",
  "store-api",
  "table",
@@ -9895,7 +9795,6 @@ dependencies = [
  "humantime",
  "humantime-serde",
  "parquet",
- "parquet-format-async-temp",
  "paste",
  "serde",
  "serde_json",

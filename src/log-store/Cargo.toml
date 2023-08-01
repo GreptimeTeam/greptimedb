@@ -10,7 +10,6 @@ protobuf-build = { version = "0.14", default-features = false, features = [
 ] }
 
 [dependencies]
-arc-swap = "1.5"
 async-stream.workspace = true
 async-trait.workspace = true
 base64 = "0.13"
@@ -20,10 +19,8 @@ common-base = { path = "../common/base" }
 common-error = { path = "../common/error" }
 common-runtime = { path = "../common/runtime" }
 common-telemetry = { path = "../common/telemetry" }
-crc = "3.0"
 futures.workspace = true
 futures-util.workspace = true
-hex = "0.4"
 protobuf = { version = "2", features = ["bytes"] }
 raft-engine = "0.3"
 snafu = { version = "0.7", features = ["backtraces"] }

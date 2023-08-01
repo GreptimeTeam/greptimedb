@@ -15,7 +15,6 @@ common-base = { path = "../common/base" }
 common-catalog = { path = "../common/catalog" }
 common-error = { path = "../common/error" }
 common-grpc = { path = "../common/grpc" }
-common-grpc-expr = { path = "../common/grpc-expr" }
 common-query = { path = "../common/query" }
 common-recordbatch = { path = "../common/recordbatch" }
 common-time = { path = "../common/time" }
@@ -35,6 +34,7 @@ tokio.workspace = true
 tonic.workspace = true
 
 [dev-dependencies]
+common-grpc-expr = { path = "../common/grpc-expr" }
 datanode = { path = "../datanode" }
 derive-new = "0.5"
 substrait = { path = "../common/substrait" }

@@ -14,7 +14,6 @@ common-catalog = { path = "../common/catalog" }
 common-datasource = { path = "../common/datasource" }
 common-error = { path = "../common/error" }
 common-procedure = { path = "../common/procedure" }
-common-procedure-test = { path = "../common/procedure-test" }
 common-query = { path = "../common/query" }
 common-recordbatch = { path = "../common/recordbatch" }
 common-telemetry = { path = "../common/telemetry" }
@@ -26,11 +25,11 @@ object-store = { path = "../object-store" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 snafu.workspace = true
-storage = { path = "../storage" }
 store-api = { path = "../store-api" }
 table = { path = "../table" }
 common-test-util = { path = "../common/test-util", optional = true }
 tokio.workspace = true
 
 [dev-dependencies]
+common-procedure-test = { path = "../common/procedure-test" }
 common-test-util = { path = "../common/test-util" }

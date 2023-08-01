@@ -40,7 +40,6 @@ futures = "0.3"
 futures-util.workspace = true
 itertools.workspace = true
 meta-client = { path = "../meta-client" }
-meter-core.workspace = true
 meter-macros.workspace = true
 metrics.workspace = true
 mito = { path = "../mito", features = ["test"] }
@@ -72,6 +71,7 @@ catalog = { path = "../catalog", features = ["testing"] }
 common-test-util = { path = "../common/test-util" }
 datanode = { path = "../datanode" }
 futures = "0.3"
+meter-core.workspace = true
 meta-srv = { path = "../meta-srv", features = ["mock"] }
 strfmt = "0.2"
 tower = "0.4"

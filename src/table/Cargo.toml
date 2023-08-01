@@ -28,7 +28,6 @@ derive_builder.workspace = true
 futures.workspace = true
 humantime = "2.1"
 humantime-serde = "1.1"
-parquet-format-async-temp = "0.2"
 paste = "1.0"
 serde = "1.0.136"
 snafu = { version = "0.7", features = ["backtraces"] }
