@@ -14,15 +14,56 @@
 
 //! functions registry
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::{Arc, RwLock};
 
+use common_query::error::Result;
+use common_query::prelude::Signature;
+use datafusion::logical_expr::Volatility;
+use datatypes::prelude::ConcreteDataType;
+use datatypes::vectors::VectorRef;
 use once_cell::sync::Lazy;
 
+use super::function::FunctionContext;
+use super::Function;
 use crate::scalars::aggregate::{AggregateFunctionMetaRef, AggregateFunctions};
 use crate::scalars::function::FunctionRef;
 use crate::scalars::math::MathFunction;
 use crate::scalars::numpy::NumpyFunction;
 use crate::scalars::timestamp::TimestampFunction;
+
+/// `RangeFunction` will never be used as a normal function,
+/// just for datafusion to generate logical plan for RangeSelect
+#[derive(Clone, Debug, Default)]
+pub struct RangeFunction;
+
+impl fmt::Display for RangeFunction {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "RANGE_FN")
+    }
+}
+
+impl Function for RangeFunction {
+    fn name(&self) -> &str {
+        "range_fn"
+    }
+
+    fn return_type(&self, input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
+        Ok(input_types
+            .get(1)
+            .cloned()
+            .unwrap_or(ConcreteDataType::float64_datatype()))
+    }
+
+    /// `range_fn(func_name, args, range, fill, by, align)`
+    fn signature(&self) -> Signature {
+        Signature::any(6, Volatility::Immutable)
+    }
+
+    fn eval(&self, _func_ctx: FunctionContext, _columns: &[VectorRef]) -> Result<VectorRef> {
+        unimplemented!()
+    }
+}
 
 #[derive(Default)]
 pub struct FunctionRegistry {
@@ -77,7 +118,7 @@ pub static FUNCTION_REGISTRY: Lazy<Arc<FunctionRegistry>> = Lazy::new(|| {
     TimestampFunction::register(&function_registry);
 
     AggregateFunctions::register(&function_registry);
-
+    function_registry.register(Arc::new(RangeFunction));
     Arc::new(function_registry)
 });
 
