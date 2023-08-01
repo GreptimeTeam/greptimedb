@@ -22,7 +22,7 @@ use crate::error::Result;
 use crate::pubsub::{Message, Subscriber, SubscriberRef, Topic, Transport};
 
 pub trait SubscribeQuery<T>: Send + Sync {
-    fn subscriber_list_by_topic(&self, topic: &Topic) -> Vec<SubscriberRef<T>>;
+    fn subscribers_by_topic(&self, topic: &Topic) -> Vec<SubscriberRef<T>>;
 }
 
 pub trait SubscribeManager<T>: SubscribeQuery<T> {
@@ -60,7 +60,7 @@ impl<T> SubscribeQuery<T> for DefaultSubscribeManager<T>
 where
     T: Transport,
 {
-    fn subscriber_list_by_topic(&self, topic: &Topic) -> Vec<SubscriberRef<T>> {
+    fn subscribers_by_topic(&self, topic: &Topic) -> Vec<SubscriberRef<T>> {
         self.topic2sub
             .get(topic)
             .map(|list_ref| list_ref.clone())
@@ -100,8 +100,7 @@ where
 
         info!("Add a un_subscription, subscriber_id: {}", subscriber_id);
 
-        for entry in self.topic2sub.iter_mut() {
-            let mut sub_list = entry;
+        for mut sub_list in self.topic2sub.iter_mut() {
             sub_list.retain(|subscriber| subscriber.id() != subscriber_id)
         }
 

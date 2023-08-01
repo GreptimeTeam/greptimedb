@@ -54,8 +54,8 @@ pub mod mailbox_handler;
 pub mod node_stat;
 mod on_leader_start_handler;
 mod persist_stats_handler;
+pub mod publish_heartbeat_handler;
 pub(crate) mod region_lease_handler;
-pub mod report_handler;
 mod response_header_handler;
 
 #[async_trait::async_trait]

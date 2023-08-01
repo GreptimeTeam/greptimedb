@@ -20,9 +20,12 @@ mod subscriber;
 #[cfg(test)]
 mod tests;
 
-pub use publish::*;
-pub use subscribe_manager::*;
-pub use subscriber::*;
+pub use publish::{DefaultPublish, Publish, PublishRef};
+pub use subscribe_manager::{
+    AddSubRequest, DefaultSubscribeManager, SubscribeManager, SubscribeManagerRef, SubscribeQuery,
+    UnSubRequest,
+};
+pub use subscriber::{Subscriber, SubscriberRef, Transport};
 
 /// Subscribed topic type, determined by the ability of meta.
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]

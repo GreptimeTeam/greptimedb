@@ -18,12 +18,20 @@ use async_trait::async_trait;
 use crate::error::Result;
 use crate::handler::{HeartbeatAccumulator, HeartbeatHandler};
 use crate::metasrv::Context;
-use crate::pubsub::Message;
+use crate::pubsub::{Message, PublishRef};
 
-pub struct ReportHandler;
+pub struct PublishHeartbeatHandler {
+    publish: PublishRef,
+}
+
+impl PublishHeartbeatHandler {
+    pub fn new(publish: PublishRef) -> PublishHeartbeatHandler {
+        PublishHeartbeatHandler { publish }
+    }
+}
 
 #[async_trait]
-impl HeartbeatHandler for ReportHandler {
+impl HeartbeatHandler for PublishHeartbeatHandler {
     fn is_acceptable(&self, role: Role) -> bool {
         role == Role::Datanode
     }
@@ -31,14 +39,11 @@ impl HeartbeatHandler for ReportHandler {
     async fn handle(
         &self,
         req: &HeartbeatRequest,
-        ctx: &mut Context,
+        _: &mut Context,
         _: &mut HeartbeatAccumulator,
     ) -> Result<()> {
-        let req = Box::new(req.clone());
-
-        if let Some(publish) = ctx.publish.as_ref() {
-            publish.send_msg(Message::Heartbeat(req)).await;
-        }
+        let msg = Message::Heartbeat(Box::new(req.clone()));
+        self.publish.send_msg(msg).await;
 
         Ok(())
     }

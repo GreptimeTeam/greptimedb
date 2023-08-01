@@ -89,7 +89,6 @@ mod tests {
             table_metadata_manager: Arc::new(TableMetadataManager::new(KvBackendAdapter::wrap(
                 kv_store.clone(),
             ))),
-            publish: None,
         };
 
         let req = HeartbeatRequest {

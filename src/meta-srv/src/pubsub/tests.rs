@@ -103,7 +103,7 @@ async fn test_subscriber_disconnect() {
 
     join.await.unwrap();
 
-    let subscriber_list = manager.subscriber_list_by_topic(&Topic::Heartbeat);
+    let subscriber_list = manager.subscribers_by_topic(&Topic::Heartbeat);
     assert!(subscriber_list.is_empty());
 }
 
@@ -123,7 +123,7 @@ fn test_sub_manager() {
         subscriber,
     };
     manager.subscribe(req).unwrap();
-    let ret = manager.subscriber_list_by_topic(&Topic::Heartbeat);
+    let ret = manager.subscribers_by_topic(&Topic::Heartbeat);
     assert_eq!(1, ret.len());
 
     let subscriber = mock_subscriber(2, "gcrm").0;
@@ -132,17 +132,17 @@ fn test_sub_manager() {
         subscriber,
     };
     manager.subscribe(req).unwrap();
-    let ret = manager.subscriber_list_by_topic(&Topic::Heartbeat);
+    let ret = manager.subscribers_by_topic(&Topic::Heartbeat);
     assert_eq!(2, ret.len());
 
     let req = UnSubRequest { subscriber_id: 1 };
     manager.un_subscribe(req).unwrap();
-    let ret = manager.subscriber_list_by_topic(&Topic::Heartbeat);
+    let ret = manager.subscribers_by_topic(&Topic::Heartbeat);
     assert_eq!(1, ret.len());
 
     let req = UnSubRequest { subscriber_id: 2 };
     manager.un_subscribe(req).unwrap();
-    let ret = manager.subscriber_list_by_topic(&Topic::Heartbeat);
+    let ret = manager.subscribers_by_topic(&Topic::Heartbeat);
     assert_eq!(0, ret.len());
 }
 

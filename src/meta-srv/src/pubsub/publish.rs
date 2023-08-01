@@ -53,7 +53,7 @@ where
     async fn send_msg(&self, message: Message) {
         let sub_list = self
             .subscribe_manager
-            .subscriber_list_by_topic(&message.topic());
+            .subscribers_by_topic(&message.topic());
 
         for sub in sub_list {
             if sub.transport_msg(message.clone()).await.is_err() {
@@ -64,7 +64,7 @@ where
                 };
 
                 if let Err(e) = self.subscribe_manager.un_subscribe(req.clone()) {
-                    error!("failed to un_subscribe, req: {:?}, error: {:?}", req, e);
+                    error!(e; "failed to un_subscribe, req: {:?}", req);
                 }
             }
         }

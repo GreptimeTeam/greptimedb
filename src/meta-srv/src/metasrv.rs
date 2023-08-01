@@ -118,7 +118,6 @@ pub struct Context {
     pub meta_peer_client: MetaPeerClientRef,
     pub mailbox: MailboxRef,
     pub election: Option<ElectionRef>,
-    pub publish: Option<PublishRef>,
     pub skip_all: Arc<AtomicBool>,
     pub is_infancy: bool,
     pub table_metadata_manager: TableMetadataManagerRef,
@@ -179,8 +178,7 @@ pub struct MetaSrv {
     ddl_manager: DdlManagerRef,
     table_metadata_manager: TableMetadataManagerRef,
     greptimedb_telemerty_task: Arc<GreptimeDBTelemetryTask>,
-    publish: Option<PublishRef>,
-    subscribe_manager: Option<SubscribeManagerRef>,
+    pubsub: Option<(PublishRef, SubscribeManagerRef)>,
 }
 
 impl MetaSrv {
@@ -200,7 +198,7 @@ impl MetaSrv {
             let procedure_manager = self.procedure_manager.clone();
             let in_memory = self.in_memory.clone();
             let leader_cached_kv_store = self.leader_cached_kv_store.clone();
-            let subscribe_manager = self.subscribe_manager.clone();
+            let subscribe_manager = self.subscribe_manager().cloned();
             let mut rx = election.subscribe_leader_change();
             let task_handler = self.greptimedb_telemerty_task.clone();
             let _handle = common_runtime::spawn_bg(async move {
@@ -341,11 +339,11 @@ impl MetaSrv {
     }
 
     pub fn publish(&self) -> Option<&PublishRef> {
-        self.publish.as_ref()
+        self.pubsub.as_ref().map(|suite| &suite.0)
     }
 
     pub fn subscribe_manager(&self) -> Option<&SubscribeManagerRef> {
-        self.subscribe_manager.as_ref()
+        self.pubsub.as_ref().map(|suite| &suite.1)
     }
 
     #[inline]
@@ -358,7 +356,6 @@ impl MetaSrv {
         let mailbox = self.mailbox.clone();
         let election = self.election.clone();
         let skip_all = Arc::new(AtomicBool::new(false));
-        let publish = self.publish.clone();
 
         Context {
             server_addr,
@@ -371,7 +368,6 @@ impl MetaSrv {
             skip_all,
             is_infancy: false,
             table_metadata_manager: self.table_metadata_manager.clone(),
-            publish,
         }
     }
 }

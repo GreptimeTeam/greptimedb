@@ -27,8 +27,8 @@ use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
 use crate::ddl::{DdlManager, DdlManagerRef};
 use crate::error::Result;
 use crate::handler::mailbox_handler::MailboxHandler;
+use crate::handler::publish_heartbeat_handler::PublishHeartbeatHandler;
 use crate::handler::region_lease_handler::RegionLeaseHandler;
-use crate::handler::report_handler::ReportHandler;
 use crate::handler::{
     CheckLeaderHandler, CollectStatsHandler, HeartbeatHandlerGroup, HeartbeatMailbox,
     KeepLeaseHandler, OnLeaderStartHandler, PersistStatsHandler, Pushers, RegionFailureHandler,
@@ -221,7 +221,9 @@ impl MetaSrvBuilder {
                 }
                 group.add_handler(RegionLeaseHandler::default()).await;
                 group.add_handler(PersistStatsHandler::default()).await;
-                group.add_handler(ReportHandler).await;
+                group
+                    .add_handler(PublishHeartbeatHandler::new(publish.clone()))
+                    .await;
                 group
             }
         };
@@ -244,8 +246,7 @@ impl MetaSrvBuilder {
             ddl_manager,
             table_metadata_manager,
             greptimedb_telemerty_task: get_greptimedb_telemetry_task(meta_peer_client).await,
-            publish: Some(publish),
-            subscribe_manager: Some(sub_manager),
+            pubsub: Some((publish, sub_manager)),
         })
     }
 }
