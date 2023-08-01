@@ -155,7 +155,13 @@ Another point is region id. Since the region id is used widely from meta server 
 
 This preserves the first 8 bits of the `u32` region number for grouping. Each group has one main id (the first one) and other sub ids (the rest non-zero ids). All components other than the region implementation itself doesn't aware of the existence of region id group. They only see the main id. The region implementation is in response of managing and using the region id group.
 
-todo: chart
+```plaintext
+63                                  31         23                  0
+┌────────────────────────────────────┬──────────┬──────────────────┐
+│          Table Id(32)              │ Group(8) │ Region Number(24)│
+└────────────────────────────────────┴──────────┴──────────────────┘
+                                            Region Id(32)
+```
 
 ## Routing in meta server
 
