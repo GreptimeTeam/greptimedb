@@ -15,7 +15,7 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use arrow_schema::SchemaRef as ArrowSchemaRef;
+use arrow_schema::{Schema as ArrowSchema, SchemaRef as ArrowSchemaRef};
 use async_stream::try_stream;
 use client::client_manager::DatanodeClients;
 use client::Database;
@@ -28,12 +28,13 @@ use common_query::Output;
 use common_recordbatch::adapter::DfRecordBatchStreamAdapter;
 use common_recordbatch::error::ExternalSnafu;
 use common_recordbatch::{
-    DfSendableRecordBatchStream, RecordBatchStreamAdaptor, SendableRecordBatchStream,
+    DfSendableRecordBatchStream, RecordBatch, RecordBatchStreamAdaptor, SendableRecordBatchStream,
 };
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning};
 use datafusion_common::{DataFusionError, Result, Statistics};
 use datafusion_expr::{Extension, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion_physical_expr::PhysicalSortExpr;
+use datatypes::schema::Schema;
 use futures_util::StreamExt;
 use snafu::ResultExt;
 
@@ -123,6 +124,8 @@ impl MergeScanExec {
         arrow_schema: ArrowSchemaRef,
         clients: Arc<DatanodeClients>,
     ) -> Self {
+        // remove all metadata
+        let arrow_schema = Arc::new(ArrowSchema::new(arrow_schema.fields().to_vec()));
         Self {
             table,
             peers,
@@ -163,12 +166,12 @@ impl MergeScanExec {
                     }
                     Output::RecordBatches(record_batches) => {
                         for batch in record_batches.into_iter() {
-                            yield batch;
+                            yield Self::remove_metadata_from_record_batch(batch);
                         }
                     }
                     Output::Stream(mut stream) => {
                         while let Some(batch) = stream.next().await {
-                            yield batch?;
+                            yield Self::remove_metadata_from_record_batch(batch?);
                         }
                     }
                 }
@@ -185,6 +188,15 @@ impl MergeScanExec {
             stream: Box::pin(stream),
             output_ordering: None,
         }))
+    }
+
+    fn remove_metadata_from_record_batch(batch: RecordBatch) -> RecordBatch {
+        let schema = ArrowSchema::new(batch.schema.arrow_schema().fields().to_vec());
+        RecordBatch::new(
+            Arc::new(Schema::try_from(schema).unwrap()),
+            batch.columns().iter().cloned(),
+        )
+        .unwrap()
     }
 }
 

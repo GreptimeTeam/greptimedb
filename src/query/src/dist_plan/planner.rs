@@ -82,12 +82,12 @@ impl ExtensionPlanner for DistExtensionPlanner {
             } else {
                 // TODO(ruihang): generate different execution plans for different variant merge operation
                 let input_plan = merge_scan.input();
+                let input_physical_plan = planner
+                    .create_physical_plan(input_plan, session_state)
+                    .await?;
                 let Some(table_name) = self.get_table_name(input_plan)? else {
                     // no relation found in input plan, going to execute them locally 
-                    return planner
-                        .create_physical_plan(input_plan, session_state)
-                        .await
-                        .map(Some);
+                    return Ok(Some(input_physical_plan));
                 };
 
                 if table_name.schema_name == INFORMATION_SCHEMA_NAME {
@@ -97,10 +97,10 @@ impl ExtensionPlanner for DistExtensionPlanner {
                         .map(Some);
                 }
 
-                let input_schema = input_plan.schema().clone();
+                let input_schema = input_physical_plan.schema().clone();
                 let input_plan = self.set_table_name(&table_name, input_plan.clone())?;
                 let substrait_plan: Bytes = DFLogicalSubstraitConvertor
-                    .encode(input_plan.clone())
+                    .encode(&input_plan)
                     .context(error::EncodeSubstraitLogicalPlanSnafu)?
                     .into();
                 let peers = self.get_peers(&table_name).await;
@@ -110,7 +110,7 @@ impl ExtensionPlanner for DistExtensionPlanner {
                             table_name,
                             peers,
                             substrait_plan,
-                            Arc::new(input_schema.as_ref().into()),
+                            input_schema,
                             self.clients.clone(),
                         );
 

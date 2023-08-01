@@ -110,7 +110,12 @@ SELECT * FROM integers WHERE i NOT IN ((SELECT i FROM integers WHERE i=1)) ORDER
 
 SELECT * FROM integers WHERE i IN ((SELECT i FROM integers)) AND i<3 ORDER BY i;
 
-Error: 3001(EngineExecuteQuery), No field named __correlated_sq_1.i. Valid fields are integers.i, integers.j.
++---+---+
+| i | j |
++---+---+
+| 1 | 1 |
+| 2 | 2 |
++---+---+
 
 SELECT i1.i,i2.i FROM integers i1, integers i2 WHERE i IN ((SELECT i FROM integers)) AND i1.i=i2.i ORDER BY 1;
 

@@ -14,10 +14,14 @@
 
 use std::sync::{Arc, Mutex};
 
+use datafusion::datasource::DefaultTableSource;
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeVisitor, VisitRecursion};
 use datafusion_expr::{Extension, LogicalPlan};
 use datafusion_optimizer::analyzer::AnalyzerRule;
+use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
+use table::metadata::TableType;
+use table::table::adapter::DfTableProviderAdapter;
 
 use crate::dist_plan::commutativity::{
     partial_commutative_transformer, Categorizer, Commutativity,
@@ -161,6 +165,8 @@ struct CommutativeVisitor {
     next_stage: Vec<LogicalPlan>,
     // hash of the stop node
     stop_node: Option<u64>,
+    /// Partition columns of current visiting table
+    current_partition_cols: Option<Vec<String>>,
 }
 
 impl TreeNodeVisitor for CommutativeVisitor {
@@ -170,18 +176,46 @@ impl TreeNodeVisitor for CommutativeVisitor {
         // find the first merge scan and stop traversing down
         // todo: check if it works for join
         Ok(match plan {
-            LogicalPlan::Extension(ext) => {
-                if ext.node.name() == MergeScanLogicalPlan::name() {
-                    VisitRecursion::Skip
-                } else {
-                    VisitRecursion::Continue
+            LogicalPlan::TableScan(table_scan) => {
+                // TODO(ruihang): spawn a sub visitor to retrieve partition columns
+                if let Some(source) = table_scan
+                    .source
+                    .as_any()
+                    .downcast_ref::<DefaultTableSource>()
+                {
+                    if let Some(provider) = source
+                        .table_provider
+                        .as_any()
+                        .downcast_ref::<DfTableProviderAdapter>()
+                    {
+                        if provider.table().table_type() == TableType::Base {
+                            let info = provider.table().table_info();
+                            let partition_key_indices = info.meta.partition_key_indices.clone();
+                            let schema = info.meta.schema.clone();
+                            let partition_cols = partition_key_indices
+                                .into_iter()
+                                .map(|index| schema.column_name_by_index(index).to_string())
+                                .collect::<Vec<String>>();
+                            self.current_partition_cols = Some(partition_cols);
+                        }
+                    }
                 }
+                VisitRecursion::Continue
             }
             _ => VisitRecursion::Continue,
         })
     }
 
     fn post_visit(&mut self, plan: &LogicalPlan) -> datafusion_common::Result<VisitRecursion> {
+        if DFLogicalSubstraitConvertor.encode(plan).is_err() {
+            common_telemetry::info!(
+                "substrait error: {:?}",
+                DFLogicalSubstraitConvertor.encode(plan)
+            );
+            self.stop_node = Some(utils::hash_plan(plan));
+            return Ok(VisitRecursion::Stop);
+        }
+
         match Categorizer::check_plan(plan) {
             Commutativity::Commutative => {}
             Commutativity::PartialCommutative => {
@@ -201,6 +235,16 @@ impl TreeNodeVisitor for CommutativeVisitor {
                     self.next_stage.push(plan)
                 }
             },
+            Commutativity::CheckPartition => {
+                if let Some(partition_cols) = &self.current_partition_cols
+                    && partition_cols.is_empty() {
+                    // no partition columns, and can be encoded skip
+                    return Ok(VisitRecursion::Continue);
+                } else {
+                    self.stop_node = Some(utils::hash_plan(plan));
+                    return Ok(VisitRecursion::Stop);
+                }
+            },
             Commutativity::NonCommutative
             | Commutativity::Unimplemented
             | Commutativity::Unsupported => {
@@ -218,6 +262,7 @@ impl CommutativeVisitor {
         Self {
             next_stage: vec![],
             stop_node: None,
+            current_partition_cols: None,
         }
     }
 }

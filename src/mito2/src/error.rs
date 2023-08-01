@@ -98,12 +98,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display(
-        "Expect initial region metadata on creating/opening a new region, location: {}",
-        location
-    ))]
-    InitialMetadata { location: Location },
-
     #[snafu(display("Invalid metadata, {}, location: {}", reason, location))]
     InvalidMeta { reason: String, location: Location },
 
@@ -180,10 +174,9 @@ impl ErrorExt for Error {
             | Utf8 { .. }
             | RegionExists { .. }
             | NewRecordBatch { .. } => StatusCode::Unexpected,
-            InvalidScanIndex { .. }
-            | InitialMetadata { .. }
-            | InvalidMeta { .. }
-            | InvalidSchema { .. } => StatusCode::InvalidArguments,
+            InvalidScanIndex { .. } | InvalidMeta { .. } | InvalidSchema { .. } => {
+                StatusCode::InvalidArguments
+            }
             RegionMetadataNotFound { .. } | Join { .. } | WorkerStopped { .. } | Recv { .. } => {
                 StatusCode::Internal
             }

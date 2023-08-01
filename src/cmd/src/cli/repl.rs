@@ -177,7 +177,7 @@ impl Repl {
                 query_engine.optimize(&plan).context(PlanStatementSnafu)?;
 
             let plan = DFLogicalSubstraitConvertor {}
-                .encode(plan)
+                .encode(&plan)
                 .context(SubstraitEncodeLogicalPlanSnafu)?;
 
             self.database.logical_plan(plan.to_vec(), None).await

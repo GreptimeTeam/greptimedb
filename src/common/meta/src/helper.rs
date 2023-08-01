@@ -154,6 +154,7 @@ define_catalog_value!(TableGlobalValue, CatalogValue, SchemaValue);
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     #[test]

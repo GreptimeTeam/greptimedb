@@ -32,7 +32,7 @@ use crate::engine::MitoEngine;
 use crate::error::Result;
 use crate::manifest::manager::RegionManifestManager;
 use crate::manifest::options::RegionManifestOptions;
-use crate::metadata::{ColumnMetadata, RegionMetadata, SemanticType};
+use crate::metadata::{ColumnMetadata, RegionMetadataRef, SemanticType};
 use crate::worker::request::{CreateRequest, RegionOptions};
 use crate::worker::WorkerGroup;
 
@@ -77,17 +77,19 @@ impl TestEnv {
         (log_store, object_store)
     }
 
+    /// If `initial_metadata` is `Some`, creates a new manifest. If `initial_metadata`
+    /// is `None`, opens an existing manifest and returns `None` if no such manifest.
     pub async fn create_manifest_manager(
         &self,
         compress_type: CompressionType,
         checkpoint_interval: u64,
-        initial_metadata: Option<RegionMetadata>,
-    ) -> Result<RegionManifestManager> {
+        initial_metadata: Option<RegionMetadataRef>,
+    ) -> Result<Option<RegionManifestManager>> {
         let data_home = self.data_home.path().to_str().unwrap();
         let manifest_dir = join_dir(data_home, "manifest");
 
         let mut builder = Fs::default();
-        let _ = builder.root(&manifest_dir);
+        builder.root(&manifest_dir);
         let object_store = ObjectStore::new(builder).unwrap().finish();
 
         let manifest_opts = RegionManifestOptions {
@@ -95,10 +97,15 @@ impl TestEnv {
             object_store,
             compress_type,
             checkpoint_interval,
-            initial_metadata,
         };
 
-        RegionManifestManager::new(manifest_opts).await
+        if let Some(metadata) = initial_metadata {
+            RegionManifestManager::new(metadata, manifest_opts)
+                .await
+                .map(Some)
+        } else {
+            RegionManifestManager::open(manifest_opts).await
+        }
     }
 }
 
