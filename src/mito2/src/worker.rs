@@ -17,6 +17,7 @@
 mod handle_close;
 mod handle_create;
 mod handle_open;
+mod handle_write;
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
