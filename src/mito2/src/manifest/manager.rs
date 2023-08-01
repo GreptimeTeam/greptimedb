@@ -33,8 +33,67 @@ use crate::metadata::RegionMetadataRef;
 // trait MetaAction -> struct RegionMetaActionList
 // trait MetaActionIterator -> struct MetaActionIteratorImpl
 
+#[cfg_attr(doc, aquamarine::aquamarine)]
 /// Manage region's manifest. Provide APIs to access (create/modify/recover) region's persisted
 /// metadata.
+///
+/// ```mermaid
+/// classDiagram
+/// class RegionManifestManager {
+///     -ManifestObjectStore store
+///     -RegionManifestOptions options
+///     -RegionManifest manifest
+///     +new() RegionManifestManager
+///     +open() Option~RegionManifestManager~
+///     +stop()
+///     +update(RegionMetaActionList action_list) ManifestVersion
+///     +manifest() RegionManifest
+/// }
+/// class ManifestObjectStore {
+///     -ObjectStore object_store
+/// }
+/// class RegionChange {
+///     -RegionMetadataRef metadata
+/// }
+/// class RegionEdit {
+///     -VersionNumber regoin_version
+///     -Vec~FileMeta~ files_to_add
+///     -Vec~FileMeta~ files_to_remove
+///     -SequenceNumber flushed_sequence
+/// }
+/// class RegionRemove {
+///     -RegionId region_id
+/// }
+/// RegionManifestManager o-- ManifestObjectStore
+/// RegionManifestManager o-- RegionManifest
+/// RegionManifestManager o-- RegionManifestOptions
+/// RegionManifestManager -- RegionMetaActionList
+/// RegionManifestManager -- RegionCheckpoint
+/// ManifestObjectStore o-- ObjectStore
+/// RegionMetaActionList o-- RegionMetaAction
+/// RegionMetaAction o-- ProtocolAction
+/// RegionMetaAction o-- RegionChange
+/// RegionMetaAction o-- RegionEdit
+/// RegionMetaAction o-- RegionRemove
+/// RegionChange o-- RegionMetadata
+/// RegionEdit o-- FileMeta
+///
+/// class RegionManifest {
+///     -RegionMetadataRef metadata
+///     -HashMap&lt;FileId, FileMeta&gt; files
+///     -ManifestVersion manifest_version
+/// }
+/// class RegionMetadata
+/// class FileMeta
+/// RegionManifest o-- RegionMetadata
+/// RegionManifest o-- FileMeta
+///
+/// class RegionCheckpoint {
+///     -ManifestVersion last_version
+///     -Option~RegionManifest~ checkpoint
+/// }
+/// RegionCheckpoint o-- RegionManifest
+/// ```
 #[derive(Debug)]
 pub struct RegionManifestManager {
     inner: RwLock<RegionManifestManagerInner>,
