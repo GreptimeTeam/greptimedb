@@ -43,6 +43,7 @@ use crate::worker::request::{RegionRequest, RequestBody, WorkerRequest};
 /// Identifier for a worker.
 pub(crate) type WorkerId = u32;
 
+#[cfg_attr(doc, aquamarine::aquamarine)]
 /// A fixed size group of [RegionWorkers](RegionWorker).
 ///
 /// A worker group binds each region to a specific [RegionWorker] and sends
