@@ -175,8 +175,8 @@ impl DistInserter {
 
 #[cfg(test)]
 mod tests {
-    use api::v1::column::{SemanticType, Values};
-    use api::v1::{Column, ColumnDataType, InsertRequest as GrpcInsertRequest};
+    use api::v1::column::Values;
+    use api::v1::{Column, ColumnDataType, InsertRequest as GrpcInsertRequest, SemanticType};
     use client::client_manager::DatanodeClients;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_meta::helper::{CatalogKey, CatalogValue, SchemaKey, SchemaValue};

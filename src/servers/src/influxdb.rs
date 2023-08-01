@@ -151,8 +151,8 @@ fn unwarp_or_default_precision(precision: Option<Precision>) -> Precision {
 
 #[cfg(test)]
 mod tests {
-    use api::v1::column::{SemanticType, Values};
-    use api::v1::{Column, ColumnDataType};
+    use api::v1::column::Values;
+    use api::v1::{Column, ColumnDataType, SemanticType};
     use common_base::BitVec;
 
     use super::*;

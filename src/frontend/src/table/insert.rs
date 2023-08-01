@@ -15,8 +15,8 @@
 use std::collections::HashMap;
 
 use api::helper::{push_vals, ColumnDataTypeWrapper};
-use api::v1::column::{SemanticType, Values};
-use api::v1::{Column, InsertRequest as GrpcInsertRequest};
+use api::v1::column::Values;
+use api::v1::{Column, InsertRequest as GrpcInsertRequest, SemanticType};
 use datatypes::prelude::*;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::RegionNumber;
