@@ -178,24 +178,24 @@ coprocessor = copr
 /// 4. a single constant, will be expanded to a PyVector of length of `col_len`
 fn py_any_to_vec(obj: &PyAny, col_len: usize) -> PyResult<Vec<VectorRef>> {
     let is_literal = |obj: &PyAny| -> PyResult<bool> {
-        Ok(obj.is_instance_of::<PyInt>()?
-            || obj.is_instance_of::<PyFloat>()?
-            || obj.is_instance_of::<PyString>()?
-            || obj.is_instance_of::<PyBool>()?)
+        Ok(obj.is_instance_of::<PyInt>()
+            || obj.is_instance_of::<PyFloat>()
+            || obj.is_instance_of::<PyString>()
+            || obj.is_instance_of::<PyBool>())
     };
-    let check = if obj.is_instance_of::<PyTuple>()? {
+    let check = if obj.is_instance_of::<PyTuple>() {
         let tuple = obj.downcast::<PyTuple>()?;
         (0..tuple.len())
             .map(|idx| {
                 tuple.get_item(idx).map(|i| -> PyResult<bool> {
-                    Ok(i.is_instance_of::<PyVector>()?
-                        || i.is_instance_of::<PyList>()?
+                    Ok(i.is_instance_of::<PyVector>()
+                        || i.is_instance_of::<PyList>()
                         || is_literal(i)?)
                 })
             })
             .all(|i| matches!(i, Ok(Ok(true))))
     } else {
-        obj.is_instance_of::<PyVector>()? || obj.is_instance_of::<PyList>()? || is_literal(obj)?
+        obj.is_instance_of::<PyVector>() || obj.is_instance_of::<PyList>() || is_literal(obj)?
     };
     if !check {
         return Err(PyRuntimeError::new_err(format!(
@@ -241,13 +241,13 @@ fn py_list_to_vec(list: &PyList) -> PyResult<VectorRef> {
     let mut expected_type = None;
     let mut v = Vec::with_capacity(list.len());
     for (idx, elem) in list.iter().enumerate() {
-        let (elem_ty, con_type) = if elem.is_instance_of::<PyBool>()? {
+        let (elem_ty, con_type) = if elem.is_instance_of::<PyBool>() {
             (ExpectType::Bool, ConcreteDataType::boolean_datatype())
-        } else if elem.is_instance_of::<PyInt>()? {
+        } else if elem.is_instance_of::<PyInt>() {
             (ExpectType::Int, ConcreteDataType::int64_datatype())
-        } else if elem.is_instance_of::<PyFloat>()? {
+        } else if elem.is_instance_of::<PyFloat>() {
             (ExpectType::Float, ConcreteDataType::float64_datatype())
-        } else if elem.is_instance_of::<PyString>()? {
+        } else if elem.is_instance_of::<PyString>() {
             (ExpectType::String, ConcreteDataType::string_datatype())
         } else {
             return Err(PyRuntimeError::new_err(format!(

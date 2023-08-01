@@ -159,7 +159,7 @@ impl Helper {
             | ScalarValue::FixedSizeBinary(_, v) => {
                 ConstantVector::new(Arc::new(BinaryVector::from(vec![v])), length)
             }
-            ScalarValue::List(v, field) => {
+            ScalarValue::List(v, field) | ScalarValue::Fixedsizelist(v, field, _) => {
                 let item_type = ConcreteDataType::try_from(field.data_type())?;
                 let mut builder = ListVectorBuilder::with_type_capacity(item_type.clone(), 1);
                 if let Some(values) = v {
@@ -219,6 +219,10 @@ impl Helper {
                 ConstantVector::new(Arc::new(IntervalMonthDayNanoVector::from(vec![v])), length)
             }
             ScalarValue::Decimal128(_, _, _)
+            | ScalarValue::DurationSecond(_)
+            | ScalarValue::DurationMillisecond(_)
+            | ScalarValue::DurationMicrosecond(_)
+            | ScalarValue::DurationNanosecond(_)
             | ScalarValue::Struct(_, _)
             | ScalarValue::Dictionary(_, _) => {
                 return error::ConversionSnafu {

@@ -113,6 +113,12 @@ pub enum Error {
 
     #[snafu(display("Cannot find column {col}, location: {}", location))]
     ColumnNotFound { col: String, location: Location },
+
+    #[snafu(display("Found multiple metric matchers in selector, location: {}", location))]
+    MultipleMetricMatchers { location: Location },
+
+    #[snafu(display("Expect a metric matcher, but not found, location: {}", location))]
+    NoMetricMatcher { location: Location },
 }
 
 impl ErrorExt for Error {
@@ -137,6 +143,8 @@ impl ErrorExt for Error {
             | EmptyRange { .. } => StatusCode::Internal,
 
             TableNameNotFound { .. } => StatusCode::TableNotFound,
+
+            MultipleMetricMatchers { .. } | NoMetricMatcher { .. } => StatusCode::InvalidSyntax,
 
             Catalog { source, .. } => source.status_code(),
         }
