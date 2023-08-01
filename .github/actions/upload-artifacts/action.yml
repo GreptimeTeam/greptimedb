@@ -66,7 +66,7 @@ runs:
     - name: Upload artifacts to S3
       shell: bash
       # The bucket layout will be:
-      # releases
+      # releases/greptimedb
       # ├── v0.1.0
       # │   ├── greptime-darwin-amd64-pyo3-v0.1.0.sha256sum
       # │   └── greptime-darwin-amd64-pyo3-v0.1.0.tar.gz
@@ -76,7 +76,7 @@ runs:
       run: |
         aws s3 cp \
           ${{ inputs.artifacts-dir }}.tar.gz \
-          s3://${{ inputs.release-to-s3-bucket }}/releases/${{ inputs.version }}/${{ inputs.artifacts-dir }}.tar.gz && \
+          s3://${{ inputs.release-to-s3-bucket }}/releases/greptimedb/${{ inputs.version }}/${{ inputs.artifacts-dir }}.tar.gz && \
         aws s3 cp \
           ${{ inputs.artifacts-dir }}.sha256sum \
-          s3://${{ inputs.release-to-s3-bucket }}/releases/${{ inputs.version }}/${{ inputs.artifacts-dir }}.sha256sum
+          s3://${{ inputs.release-to-s3-bucket }}/releases/greptimedb/${{ inputs.version }}/${{ inputs.artifacts-dir }}.sha256sum
