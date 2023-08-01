@@ -38,6 +38,7 @@ datatypes = { path = "../datatypes" }
 file-table-engine = { path = "../file-table-engine" }
 futures = "0.3"
 futures-util.workspace = true
+humantime-serde = "1.1"
 itertools.workspace = true
 meta-client = { path = "../meta-client" }
 meter-macros.workspace = true
