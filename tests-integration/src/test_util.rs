@@ -406,6 +406,14 @@ pub async fn setup_test_http_app_with_frontend(
     store_type: StorageType,
     name: &str,
 ) -> (Router, TestGuard) {
+    setup_test_http_app_with_frontend_and_user_provider(store_type, name, None).await
+}
+
+pub async fn setup_test_http_app_with_frontend_and_user_provider(
+    store_type: StorageType,
+    name: &str,
+    user_provider: Option<UserProviderRef>,
+) -> (Router, TestGuard) {
     let (opts, guard) = create_tmp_dir_and_datanode_opts(store_type, name);
     let (instance, heartbeat) = Instance::with_mock_meta_client(&opts).await.unwrap();
     let frontend = FeInstance::try_new_standalone(instance.clone())
@@ -430,12 +438,20 @@ pub async fn setup_test_http_app_with_frontend(
     };
 
     let frontend_ref = Arc::new(frontend);
-    let http_server = HttpServerBuilder::new(http_opts)
+    let mut http_server = HttpServerBuilder::new(http_opts);
+
+    http_server
         .with_sql_handler(ServerSqlQueryHandlerAdaptor::arc(frontend_ref.clone()))
         .with_grpc_handler(ServerGrpcQueryHandlerAdaptor::arc(frontend_ref.clone()))
         .with_script_handler(frontend_ref)
-        .with_greptime_config_options(opts.to_toml_string())
-        .build();
+        .with_greptime_config_options(opts.to_toml_string());
+
+    if let Some(user_provider) = user_provider {
+        http_server.with_user_provider(user_provider);
+    }
+
+    let http_server = http_server.build();
+
     let app = http_server.build(http_server.make_app());
     (app, guard)
 }

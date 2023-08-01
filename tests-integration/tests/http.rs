@@ -12,15 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use axum::http::StatusCode;
 use axum_test_helper::TestClient;
 use common_error::status_code::StatusCode as ErrorCode;
 use serde_json::json;
+use servers::auth::user_provider::StaticUserProvider;
 use servers::http::handler::HealthResponse;
 use servers::http::{JsonOutput, JsonResponse};
 use servers::prometheus::{PrometheusJsonResponse, PrometheusResponse};
 use tests_integration::test_util::{
-    setup_test_http_app, setup_test_http_app_with_frontend, setup_test_prom_app_with_frontend,
+    setup_test_http_app, setup_test_http_app_with_frontend,
+    setup_test_http_app_with_frontend_and_user_provider, setup_test_prom_app_with_frontend,
     StorageType,
 };
 
@@ -53,6 +57,7 @@ macro_rules! http_tests {
             http_test!(
                 $service,
 
+                test_http_auth,
                 test_sql_api,
                 test_prometheus_promql_api,
                 test_prom_http_api,
@@ -65,6 +70,47 @@ macro_rules! http_tests {
             );
         )*
     };
+}
+
+pub async fn test_http_auth(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+
+    let user_provider = StaticUserProvider::try_from("cmd:greptime_user=greptime_pwd").unwrap();
+
+    let (app, mut guard) = setup_test_http_app_with_frontend_and_user_provider(
+        store_type,
+        "sql_api",
+        Some(Arc::new(user_provider)),
+    )
+    .await;
+    let client = TestClient::new(app);
+
+    // 1. no auth
+    let res = client
+        .get("/v1/sql?db=public&sql=show tables;")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+
+    // 2. wrong auth
+    let res = client
+        .get("/v1/sql?db=public&sql=show tables;")
+        .header("Authorization", "basic Z3JlcHRpbWVfdXNlcjp3cm9uZ19wd2Q=")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+
+    // 3. right auth
+    let res = client
+        .get("/v1/sql?db=public&sql=show tables;")
+        .header(
+            "Authorization",
+            "basic Z3JlcHRpbWVfdXNlcjpncmVwdGltZV9wd2Q=",
+        )
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    guard.remove_all().await;
 }
 
 pub async fn test_sql_api(store_type: StorageType) {
