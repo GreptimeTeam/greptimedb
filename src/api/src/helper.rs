@@ -298,6 +298,8 @@ pub fn request_type(request: &Request) -> &'static str {
         Request::Query(query_req) => query_request_type(query_req),
         Request::Ddl(ddl_req) => ddl_request_type(ddl_req),
         Request::Delete(_) => "delete",
+        Request::RowInserts(_) => "row_inserts",
+        Request::RowDelete(_) => "row_delete",
     }
 }
 
