@@ -48,6 +48,7 @@ use object_store::services::{Azblob, Gcs, Oss, S3};
 use object_store::test_util::TempFolder;
 use object_store::ObjectStore;
 use secrecy::ExposeSecret;
+use servers::auth::UserProviderRef;
 use servers::grpc::GrpcServer;
 use servers::http::{HttpOptions, HttpServerBuilder};
 use servers::metrics_handler::MetricsHandler;
@@ -405,6 +406,14 @@ pub async fn setup_test_http_app_with_frontend(
     store_type: StorageType,
     name: &str,
 ) -> (Router, TestGuard) {
+    setup_test_http_app_with_frontend_and_user_provider(store_type, name, None).await
+}
+
+pub async fn setup_test_http_app_with_frontend_and_user_provider(
+    store_type: StorageType,
+    name: &str,
+    user_provider: Option<UserProviderRef>,
+) -> (Router, TestGuard) {
     let (opts, guard) = create_tmp_dir_and_datanode_opts(store_type, name);
     let (instance, heartbeat) = Instance::with_mock_meta_client(&opts).await.unwrap();
     let frontend = FeInstance::try_new_standalone(instance.clone())
@@ -429,12 +438,20 @@ pub async fn setup_test_http_app_with_frontend(
     };
 
     let frontend_ref = Arc::new(frontend);
-    let http_server = HttpServerBuilder::new(http_opts)
+    let mut http_server = HttpServerBuilder::new(http_opts);
+
+    http_server
         .with_sql_handler(ServerSqlQueryHandlerAdaptor::arc(frontend_ref.clone()))
         .with_grpc_handler(ServerGrpcQueryHandlerAdaptor::arc(frontend_ref.clone()))
         .with_script_handler(frontend_ref)
-        .with_greptime_config_options(opts.to_toml_string())
-        .build();
+        .with_greptime_config_options(opts.to_toml_string());
+
+    if let Some(user_provider) = user_provider {
+        http_server.with_user_provider(user_provider);
+    }
+
+    let http_server = http_server.build();
+
     let app = http_server.build(http_server.make_app());
     (app, guard)
 }
@@ -533,6 +550,14 @@ pub async fn setup_grpc_server(
     store_type: StorageType,
     name: &str,
 ) -> (String, TestGuard, Arc<GrpcServer>) {
+    setup_grpc_server_with_user_provider(store_type, name, None).await
+}
+
+pub async fn setup_grpc_server_with_user_provider(
+    store_type: StorageType,
+    name: &str,
+    user_provider: Option<UserProviderRef>,
+) -> (String, TestGuard, Arc<GrpcServer>) {
     common_telemetry::init_default_ut_logging();
 
     let (opts, guard) = create_tmp_dir_and_datanode_opts(store_type, name);
@@ -557,7 +582,7 @@ pub async fn setup_grpc_server(
     let fe_grpc_server = Arc::new(GrpcServer::new(
         ServerGrpcQueryHandlerAdaptor::arc(fe_instance_ref.clone()),
         Some(fe_instance_ref.clone()),
-        None,
+        user_provider,
         runtime,
     ));
 
@@ -587,6 +612,14 @@ pub async fn check_output_stream(output: Output, expected: &str) {
 pub async fn setup_mysql_server(
     store_type: StorageType,
     name: &str,
+) -> (String, TestGuard, Arc<Box<dyn Server>>) {
+    setup_mysql_server_with_user_provider(store_type, name, None).await
+}
+
+pub async fn setup_mysql_server_with_user_provider(
+    store_type: StorageType,
+    name: &str,
+    user_provider: Option<UserProviderRef>,
 ) -> (String, TestGuard, Arc<Box<dyn Server>>) {
     common_telemetry::init_default_ut_logging();
 
@@ -619,7 +652,7 @@ pub async fn setup_mysql_server(
         runtime,
         Arc::new(MysqlSpawnRef::new(
             ServerSqlQueryHandlerAdaptor::arc(fe_instance_ref),
-            None,
+            user_provider,
         )),
         Arc::new(MysqlSpawnConfig::new(
             false,
@@ -643,6 +676,14 @@ pub async fn setup_mysql_server(
 pub async fn setup_pg_server(
     store_type: StorageType,
     name: &str,
+) -> (String, TestGuard, Arc<Box<dyn Server>>) {
+    setup_pg_server_with_user_provider(store_type, name, None).await
+}
+
+pub async fn setup_pg_server_with_user_provider(
+    store_type: StorageType,
+    name: &str,
+    user_provider: Option<UserProviderRef>,
 ) -> (String, TestGuard, Arc<Box<dyn Server>>) {
     common_telemetry::init_default_ut_logging();
 
@@ -675,7 +716,7 @@ pub async fn setup_pg_server(
         ServerSqlQueryHandlerAdaptor::arc(fe_instance_ref),
         opts.tls.clone(),
         runtime,
-        None,
+        user_provider,
     )) as Box<dyn Server>);
 
     let fe_pg_addr_clone = fe_pg_addr.clone();

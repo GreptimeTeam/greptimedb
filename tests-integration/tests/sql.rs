@@ -11,11 +11,17 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+use std::sync::Arc;
+
 use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
-use sqlx::mysql::MySqlPoolOptions;
-use sqlx::postgres::PgPoolOptions;
+use servers::auth::user_provider::StaticUserProvider;
+use sqlx::mysql::{MySqlDatabaseError, MySqlPoolOptions};
+use sqlx::postgres::{PgDatabaseError, PgPoolOptions};
 use sqlx::Row;
-use tests_integration::test_util::{setup_mysql_server, setup_pg_server, StorageType};
+use tests_integration::test_util::{
+    setup_mysql_server, setup_mysql_server_with_user_provider, setup_pg_server,
+    setup_pg_server_with_user_provider, StorageType,
+};
 
 #[macro_export]
 macro_rules! sql_test {
@@ -47,11 +53,70 @@ macro_rules! sql_tests {
             sql_test!(
                 $service,
 
+                test_mysql_auth,
                 test_mysql_crud,
+                test_postgres_auth,
                 test_postgres_crud,
             );
         )*
     };
+}
+
+pub async fn test_mysql_auth(store_type: StorageType) {
+    let user_provider = StaticUserProvider::try_from("cmd:greptime_user=greptime_pwd").unwrap();
+    let (addr, mut guard, fe_mysql_server) = setup_mysql_server_with_user_provider(
+        store_type,
+        "sql_crud",
+        Some(Arc::new(user_provider)),
+    )
+    .await;
+
+    // 1. no auth
+    let conn_re = MySqlPoolOptions::new()
+        .max_connections(2)
+        .connect(&format!("mysql://{addr}/public"))
+        .await;
+
+    assert!(conn_re.is_err());
+    assert_eq!(
+        conn_re
+            .err()
+            .unwrap()
+            .into_database_error()
+            .unwrap()
+            .downcast::<MySqlDatabaseError>()
+            .code(),
+        Some("28000")
+    );
+
+    // 2. wrong pwd
+    let conn_re = MySqlPoolOptions::new()
+        .max_connections(2)
+        .connect(&format!("mysql://greptime_user:wrong_pwd@{addr}/public"))
+        .await;
+
+    assert!(conn_re.is_err());
+    assert_eq!(
+        conn_re
+            .err()
+            .unwrap()
+            .into_database_error()
+            .unwrap()
+            .downcast::<MySqlDatabaseError>()
+            .code(),
+        Some("28000")
+    );
+
+    // 3. right pwd
+    let conn_re = MySqlPoolOptions::new()
+        .max_connections(2)
+        .connect(&format!("mysql://greptime_user:greptime_pwd@{addr}/public"))
+        .await;
+
+    assert!(conn_re.is_ok());
+
+    let _ = fe_mysql_server.shutdown().await;
+    guard.remove_all().await;
 }
 
 pub async fn test_mysql_crud(store_type: StorageType) {
@@ -133,6 +198,62 @@ pub async fn test_mysql_crud(store_type: StorageType) {
     assert_eq!(rows.len(), 0);
 
     let _ = fe_mysql_server.shutdown().await;
+    guard.remove_all().await;
+}
+
+pub async fn test_postgres_auth(store_type: StorageType) {
+    let user_provider = StaticUserProvider::try_from("cmd:greptime_user=greptime_pwd").unwrap();
+    let (addr, mut guard, fe_pg_server) =
+        setup_pg_server_with_user_provider(store_type, "sql_crud", Some(Arc::new(user_provider)))
+            .await;
+
+    // 1. no auth
+    let conn_re = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&format!("postgres://{addr}/public"))
+        .await;
+
+    assert!(conn_re.is_err());
+    assert_eq!(
+        conn_re
+            .err()
+            .unwrap()
+            .into_database_error()
+            .unwrap()
+            .downcast::<PgDatabaseError>()
+            .code(),
+        "28P01"
+    );
+
+    // 2. wrong pwd
+    let conn_re = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&format!("postgres://greptime_user:wrong_pwd@{addr}/public"))
+        .await;
+
+    assert!(conn_re.is_err());
+    assert_eq!(
+        conn_re
+            .err()
+            .unwrap()
+            .into_database_error()
+            .unwrap()
+            .downcast::<PgDatabaseError>()
+            .code(),
+        "28P01"
+    );
+
+    // 2. right pwd
+    let conn_re = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&format!(
+            "postgres://greptime_user:greptime_pwd@{addr}/public"
+        ))
+        .await;
+
+    assert!(conn_re.is_ok());
+
+    let _ = fe_pg_server.shutdown().await;
     guard.remove_all().await;
 }
 
