@@ -16,7 +16,7 @@
 
 use common_base::readable_size::ReadableSize;
 use common_datasource::compression::CompressionType;
-use common_telemetry::logging;
+use common_telemetry::warn;
 
 /// Default region worker num.
 const DEFAULT_NUM_WORKERS: usize = 1;
@@ -64,16 +64,15 @@ impl MitoConfig {
         }
         self.num_workers = self.num_workers.next_power_of_two();
         if num_workers_before != self.num_workers {
-            logging::warn!(
+            warn!(
                 "Sanitize worker num {} to {}",
-                num_workers_before,
-                self.num_workers
+                num_workers_before, self.num_workers
             );
         }
 
         // Sanitize channel size.
         if self.worker_channel_size == 0 {
-            logging::warn!("Sanitize channel size 0 to 1");
+            warn!("Sanitize channel size 0 to 1");
             self.worker_channel_size = 1;
         }
     }

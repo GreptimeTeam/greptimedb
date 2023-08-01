@@ -20,7 +20,7 @@ mod version;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-use common_telemetry::logging;
+use common_telemetry::info;
 use store_api::storage::RegionId;
 
 use crate::error::Result;
@@ -52,7 +52,7 @@ impl MitoRegion {
     pub(crate) async fn stop(&self) -> Result<()> {
         self.manifest_manager.stop().await?;
 
-        logging::info!("Stopped region, region_id: {}", self.region_id);
+        info!("Stopped region, region_id: {}", self.region_id);
 
         Ok(())
     }

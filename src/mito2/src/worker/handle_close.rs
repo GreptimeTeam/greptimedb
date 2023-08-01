@@ -14,7 +14,7 @@
 
 //! Handling close request.
 
-use common_telemetry::logging;
+use common_telemetry::info;
 
 use crate::error::Result;
 use crate::worker::request::CloseRequest;
@@ -26,13 +26,12 @@ impl<S> RegionWorkerLoop<S> {
             return Ok(());
         };
 
-        logging::info!("Try to close region {}", request.region_id);
+        info!("Try to close region {}", request.region_id);
 
         region.stop().await?;
-
         self.regions.remove_region(request.region_id);
 
-        logging::info!("Region {} closed", request.region_id);
+        info!("Region {} closed", request.region_id);
 
         Ok(())
     }

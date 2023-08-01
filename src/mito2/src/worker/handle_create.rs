@@ -16,7 +16,7 @@
 
 use std::sync::Arc;
 
-use common_telemetry::logging;
+use common_telemetry::info;
 use snafu::ensure;
 
 use crate::error::{RegionExistsSnafu, Result};
@@ -60,7 +60,7 @@ impl<S> RegionWorkerLoop<S> {
         .await?;
 
         // TODO(yingwen): Custom the Debug format for the metadata and also print it.
-        logging::info!("A new region created, region_id: {}", region.region_id);
+        info!("A new region created, region_id: {}", region.region_id);
 
         // TODO(yingwen): Metrics.
 

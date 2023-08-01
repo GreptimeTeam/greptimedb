@@ -25,7 +25,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use common_runtime::JoinHandle;
-use common_telemetry::logging;
+use common_telemetry::{error, info, warn};
 use futures::future::try_join_all;
 use object_store::ObjectStore;
 use snafu::{ensure, ResultExt};
@@ -112,7 +112,7 @@ impl WorkerGroup {
 
     /// Stop the worker group.
     pub(crate) async fn stop(&self) -> Result<()> {
-        logging::info!("Stop region worker group");
+        info!("Stop region worker group");
 
         try_join_all(self.workers.iter().map(|worker| worker.stop())).await?;
 
@@ -205,7 +205,7 @@ impl RegionWorker {
             .await
             .is_err()
         {
-            logging::warn!(
+            warn!(
                 "Worker {} is already exited but the running flag is still true",
                 self.id
             );
@@ -223,11 +223,11 @@ impl RegionWorker {
     async fn stop(&self) -> Result<()> {
         let handle = self.handle.lock().await.take();
         if let Some(handle) = handle {
-            logging::info!("Stop region worker {}", self.id);
+            info!("Stop region worker {}", self.id);
 
             self.set_running(false);
             if self.sender.send(WorkerRequest::Stop).await.is_err() {
-                logging::warn!("Worker {} is already exited before stop", self.id);
+                warn!("Worker {} is already exited before stop", self.id);
             }
 
             handle.await.context(JoinSnafu)?;
@@ -286,7 +286,7 @@ struct RegionWorkerLoop<S> {
 impl<S> RegionWorkerLoop<S> {
     /// Starts the worker loop.
     async fn run(&mut self) {
-        logging::info!("Start region worker thread {}", self.id);
+        info!("Start region worker thread {}", self.id);
 
         // Buffer to retrieve requests from receiver.
         let mut buffer = RequestBuffer::with_capacity(self.config.worker_request_batch_size);
@@ -315,7 +315,7 @@ impl<S> RegionWorkerLoop<S> {
 
         self.clean().await;
 
-        logging::info!("Exit region worker thread {}", self.id);
+        info!("Exit region worker thread {}", self.id);
     }
 
     /// Dispatches and processes requests.
@@ -387,7 +387,7 @@ impl<S> RegionWorkerLoop<S> {
         let regions = self.regions.list_regions();
         for region in regions {
             if let Err(e) = region.stop().await {
-                logging::error!(e; "Failed to stop region {}", region.region_id);
+                error!(e; "Failed to stop region {}", region.region_id);
             }
         }
 
