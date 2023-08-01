@@ -13,9 +13,10 @@
 // limitations under the License.
 
 use common_base::BitVec;
+use common_time::interval::IntervalUnit;
 use common_time::timestamp::TimeUnit;
 use datatypes::prelude::ConcreteDataType;
-use datatypes::types::{TimeType, TimestampType};
+use datatypes::types::{IntervalType, TimeType, TimestampType};
 use datatypes::value::Value;
 use datatypes::vectors::VectorRef;
 use greptime_proto::v1::ddl_request::Expr;
@@ -75,6 +76,11 @@ impl From<ColumnDataTypeWrapper> for ConcreteDataType {
             ColumnDataType::TimeMillisecond => ConcreteDataType::time_millisecond_datatype(),
             ColumnDataType::TimeMicrosecond => ConcreteDataType::time_microsecond_datatype(),
             ColumnDataType::TimeNanosecond => ConcreteDataType::time_nanosecond_datatype(),
+            ColumnDataType::IntervalYearMonth => ConcreteDataType::interval_year_month_datatype(),
+            ColumnDataType::IntervalDayTime => ConcreteDataType::interval_day_time_datatype(),
+            ColumnDataType::IntervalMonthDayNano => {
+                ConcreteDataType::interval_month_day_nano_datatype()
+            }
         }
     }
 }
@@ -111,8 +117,12 @@ impl TryFrom<ConcreteDataType> for ColumnDataTypeWrapper {
                 TimeType::Microsecond(_) => ColumnDataType::TimeMicrosecond,
                 TimeType::Nanosecond(_) => ColumnDataType::TimeNanosecond,
             },
-            ConcreteDataType::Interval(_)
-            | ConcreteDataType::Null(_)
+            ConcreteDataType::Interval(i) => match i {
+                IntervalType::YearMonth(_) => ColumnDataType::IntervalYearMonth,
+                IntervalType::DayTime(_) => ColumnDataType::IntervalDayTime,
+                IntervalType::MonthDayNano(_) => ColumnDataType::IntervalMonthDayNano,
+            },
+            ConcreteDataType::Null(_)
             | ConcreteDataType::List(_)
             | ConcreteDataType::Dictionary(_) => {
                 return error::IntoColumnDataTypeSnafu { from: datatype }.fail()
@@ -216,6 +226,18 @@ pub fn values_with_capacity(datatype: ColumnDataType, capacity: usize) -> Values
             time_nanosecond_values: Vec::with_capacity(capacity),
             ..Default::default()
         },
+        ColumnDataType::IntervalDayTime => Values {
+            interval_day_time_values: Vec::with_capacity(capacity),
+            ..Default::default()
+        },
+        ColumnDataType::IntervalYearMonth => Values {
+            interval_year_month_values: Vec::with_capacity(capacity),
+            ..Default::default()
+        },
+        ColumnDataType::IntervalMonthDayNano => Values {
+            interval_month_day_nano_values: Vec::with_capacity(capacity),
+            ..Default::default()
+        },
     }
 }
 
@@ -256,7 +278,12 @@ pub fn push_vals(column: &mut Column, origin_count: usize, vector: VectorRef) {
             TimeUnit::Microsecond => values.time_microsecond_values.push(val.value()),
             TimeUnit::Nanosecond => values.time_nanosecond_values.push(val.value()),
         },
-        Value::Interval(_) | Value::List(_) => unreachable!(),
+        Value::Interval(val) => match val.unit() {
+            IntervalUnit::YearMonth => values.interval_year_month_values.push(val.to_i32()),
+            IntervalUnit::DayTime => values.interval_day_time_values.push(val.to_i64()),
+            IntervalUnit::MonthDayNano => values.interval_month_day_nano_values.push(val.into()),
+        },
+        Value::List(_) => unreachable!(),
     });
     column.null_mask = null_mask.into_vec();
 }
@@ -300,9 +327,10 @@ mod tests {
     use std::sync::Arc;
 
     use datatypes::vectors::{
-        BooleanVector, TimeMicrosecondVector, TimeMillisecondVector, TimeNanosecondVector,
-        TimeSecondVector, TimestampMicrosecondVector, TimestampMillisecondVector,
-        TimestampNanosecondVector, TimestampSecondVector,
+        BooleanVector, IntervalDayTimeVector, IntervalMonthDayNanoVector, IntervalYearMonthVector,
+        TimeMicrosecondVector, TimeMillisecondVector, TimeNanosecondVector, TimeSecondVector,
+        TimestampMicrosecondVector, TimestampMillisecondVector, TimestampNanosecondVector,
+        TimestampSecondVector, Vector,
     };
 
     use super::*;
@@ -607,6 +635,37 @@ mod tests {
             vec![10, 11, 12],
             column.values.as_ref().unwrap().time_second_values
         );
+
+        let vector = Arc::new(IntervalYearMonthVector::from_vec(vec![13, 14, 15]));
+        push_vals(&mut column, 3, vector);
+        assert_eq!(
+            vec![13, 14, 15],
+            column.values.as_ref().unwrap().interval_year_month_values
+        );
+
+        let vector = Arc::new(IntervalDayTimeVector::from_vec(vec![16, 17, 18]));
+        push_vals(&mut column, 3, vector);
+        assert_eq!(
+            vec![16, 17, 18],
+            column.values.as_ref().unwrap().interval_day_time_values
+        );
+
+        let vector = Arc::new(IntervalMonthDayNanoVector::from_vec(vec![19, 20, 21]));
+        let len = vector.len();
+        push_vals(&mut column, 3, vector);
+        (0..len).for_each(|i| {
+            assert_eq!(
+                19 + i as i64,
+                column
+                    .values
+                    .as_ref()
+                    .unwrap()
+                    .interval_month_day_nano_values
+                    .get(i)
+                    .unwrap()
+                    .nanoseconds
+            );
+        });
     }
 
     #[test]

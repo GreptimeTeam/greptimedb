@@ -12,7 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_time::greptime_proto;
 use common_time::interval::Interval;
+use greptime_proto::v1::IntervalMonthDayNano as PbIntervalMonthDayNano;
 use paste::paste;
 use serde::{Deserialize, Serialize};
 
@@ -114,6 +116,11 @@ define_interval_with_unit!(YearMonth, i32);
 define_interval_with_unit!(DayTime, i64);
 define_interval_with_unit!(MonthDayNano, i128);
 
+impl From<IntervalMonthDayNano> for PbIntervalMonthDayNano {
+    fn from(interval: IntervalMonthDayNano) -> Self {
+        interval.0.into()
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;

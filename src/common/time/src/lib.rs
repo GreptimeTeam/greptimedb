@@ -25,6 +25,7 @@ pub mod util;
 
 pub use date::Date;
 pub use datetime::DateTime;
+pub use greptime_proto;
 pub use interval::Interval;
 pub use range::RangeMillis;
 pub use timestamp::Timestamp;

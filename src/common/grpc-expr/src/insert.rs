@@ -24,16 +24,19 @@ use api::v1::{
 use common_base::BitVec;
 use common_time::time::Time;
 use common_time::timestamp::Timestamp;
-use common_time::{Date, DateTime};
+use common_time::{Date, DateTime, Interval};
 use datatypes::data_type::{ConcreteDataType, DataType};
 use datatypes::prelude::{ValueRef, VectorRef};
 use datatypes::scalars::ScalarVector;
 use datatypes::schema::SchemaRef;
-use datatypes::types::{Int16Type, Int8Type, TimeType, TimestampType, UInt16Type, UInt8Type};
+use datatypes::types::{
+    Int16Type, Int8Type, IntervalType, TimeType, TimestampType, UInt16Type, UInt8Type,
+};
 use datatypes::value::Value;
 use datatypes::vectors::{
     BinaryVector, BooleanVector, DateTimeVector, DateVector, Float32Vector, Float64Vector,
-    Int32Vector, Int64Vector, PrimitiveVector, StringVector, TimeMicrosecondVector,
+    Int32Vector, Int64Vector, IntervalDayTimeVector, IntervalMonthDayNanoVector,
+    IntervalYearMonthVector, PrimitiveVector, StringVector, TimeMicrosecondVector,
     TimeMillisecondVector, TimeNanosecondVector, TimeSecondVector, TimestampMicrosecondVector,
     TimestampMillisecondVector, TimestampNanosecondVector, TimestampSecondVector, UInt32Vector,
     UInt64Vector,
@@ -215,6 +218,25 @@ fn collect_column_values(column_datatype: ColumnDataType, values: &Values) -> Ve
             collect_values!(values.time_millisecond_values, |v| ValueRef::Time(
                 Time::new_nanosecond(*v)
             ))
+        }
+        ColumnDataType::IntervalYearMonth => {
+            collect_values!(values.interval_year_month_values, |v| {
+                ValueRef::Interval(Interval::from_year_month(*v))
+            })
+        }
+        ColumnDataType::IntervalDayTime => {
+            collect_values!(values.interval_day_time_values, |v| {
+                ValueRef::Interval(Interval::from_i64(*v))
+            })
+        }
+        ColumnDataType::IntervalMonthDayNano => {
+            collect_values!(values.interval_month_day_nano_values, |v| {
+                ValueRef::Interval(Interval::from_month_day_nano(
+                    v.months,
+                    v.days,
+                    v.nanoseconds,
+                ))
+            })
         }
     }
 }
@@ -424,10 +446,22 @@ fn values_to_vector(data_type: &ConcreteDataType, values: Values) -> VectorRef {
             )),
         },
 
-        ConcreteDataType::Interval(_)
-        | ConcreteDataType::Null(_)
-        | ConcreteDataType::List(_)
-        | ConcreteDataType::Dictionary(_) => {
+        ConcreteDataType::Interval(unit) => match unit {
+            IntervalType::YearMonth(_) => Arc::new(IntervalYearMonthVector::from_vec(
+                values.interval_year_month_values,
+            )),
+            IntervalType::DayTime(_) => Arc::new(IntervalDayTimeVector::from_vec(
+                values.interval_day_time_values,
+            )),
+            IntervalType::MonthDayNano(_) => {
+                Arc::new(IntervalMonthDayNanoVector::from_iter_values(
+                    values.interval_month_day_nano_values.iter().map(|x| {
+                        (x.months as i128) << 96 | (x.days as i128) << 64 | (x.nanoseconds as i128)
+                    }),
+                ))
+            }
+        },
+        ConcreteDataType::Null(_) | ConcreteDataType::List(_) | ConcreteDataType::Dictionary(_) => {
             unreachable!()
         }
     }
@@ -556,10 +590,28 @@ fn convert_values(data_type: &ConcreteDataType, values: Values) -> Vec<Value> {
             .map(|v| Value::Time(Time::new_nanosecond(v)))
             .collect(),
 
-        ConcreteDataType::Interval(_)
-        | ConcreteDataType::Null(_)
-        | ConcreteDataType::List(_)
-        | ConcreteDataType::Dictionary(_) => {
+        ConcreteDataType::Interval(IntervalType::YearMonth(_)) => values
+            .interval_year_month_values
+            .into_iter()
+            .map(|v| Value::Interval(Interval::from_i32(v)))
+            .collect(),
+        ConcreteDataType::Interval(IntervalType::DayTime(_)) => values
+            .interval_day_time_values
+            .into_iter()
+            .map(|v| Value::Interval(Interval::from_i64(v)))
+            .collect(),
+        ConcreteDataType::Interval(IntervalType::MonthDayNano(_)) => values
+            .interval_month_day_nano_values
+            .into_iter()
+            .map(|v| {
+                Value::Interval(Interval::from_month_day_nano(
+                    v.months,
+                    v.days,
+                    v.nanoseconds,
+                ))
+            })
+            .collect(),
+        ConcreteDataType::Null(_) | ConcreteDataType::List(_) | ConcreteDataType::Dictionary(_) => {
             unreachable!()
         }
     }
@@ -576,15 +628,15 @@ mod tests {
 
     use api::helper::ColumnDataTypeWrapper;
     use api::v1::column::Values;
-    use api::v1::{Column, ColumnDataType, SemanticType};
+    use api::v1::{Column, ColumnDataType, IntervalMonthDayNano, SemanticType};
     use common_base::BitVec;
     use common_catalog::consts::MITO_ENGINE;
     use common_time::timestamp::{TimeUnit, Timestamp};
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, SchemaBuilder};
     use datatypes::types::{
-        TimeMillisecondType, TimeSecondType, TimeType, TimestampMillisecondType,
-        TimestampSecondType, TimestampType,
+        IntervalDayTimeType, IntervalMonthDayNanoType, IntervalYearMonthType, TimeMillisecondType,
+        TimeSecondType, TimeType, TimestampMillisecondType, TimestampSecondType, TimestampType,
     };
     use datatypes::value::Value;
     use paste::paste;
@@ -1007,6 +1059,70 @@ mod tests {
             Value::Time(Time::new_millisecond(1_i64)),
             Value::Time(Time::new_millisecond(2_i64)),
             Value::Time(Time::new_millisecond(3_i64)),
+        ];
+        assert_eq!(expect, actual);
+    }
+
+    #[test]
+    fn test_convert_interval_values() {
+        // year_month
+        let actual = convert_values(
+            &ConcreteDataType::Interval(IntervalType::YearMonth(IntervalYearMonthType)),
+            Values {
+                interval_year_month_values: vec![1_i32, 2_i32, 3_i32],
+                ..Default::default()
+            },
+        );
+        let expect = vec![
+            Value::Interval(Interval::from_year_month(1_i32)),
+            Value::Interval(Interval::from_year_month(2_i32)),
+            Value::Interval(Interval::from_year_month(3_i32)),
+        ];
+        assert_eq!(expect, actual);
+
+        // day_time
+        let actual = convert_values(
+            &ConcreteDataType::Interval(IntervalType::DayTime(IntervalDayTimeType)),
+            Values {
+                interval_day_time_values: vec![1_i64, 2_i64, 3_i64],
+                ..Default::default()
+            },
+        );
+        let expect = vec![
+            Value::Interval(Interval::from_i64(1_i64)),
+            Value::Interval(Interval::from_i64(2_i64)),
+            Value::Interval(Interval::from_i64(3_i64)),
+        ];
+        assert_eq!(expect, actual);
+
+        // month_day_nano
+        let actual = convert_values(
+            &ConcreteDataType::Interval(IntervalType::MonthDayNano(IntervalMonthDayNanoType)),
+            Values {
+                interval_month_day_nano_values: vec![
+                    IntervalMonthDayNano {
+                        months: 1,
+                        days: 2,
+                        nanoseconds: 3,
+                    },
+                    IntervalMonthDayNano {
+                        months: 5,
+                        days: 6,
+                        nanoseconds: 7,
+                    },
+                    IntervalMonthDayNano {
+                        months: 9,
+                        days: 10,
+                        nanoseconds: 11,
+                    },
+                ],
+                ..Default::default()
+            },
+        );
+        let expect = vec![
+            Value::Interval(Interval::from_month_day_nano(1, 2, 3)),
+            Value::Interval(Interval::from_month_day_nano(5, 6, 7)),
+            Value::Interval(Interval::from_month_day_nano(9, 10, 11)),
         ];
         assert_eq!(expect, actual);
     }

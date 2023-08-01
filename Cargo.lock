@@ -211,7 +211,7 @@ dependencies = [
  "common-error",
  "common-time",
  "datatypes",
- "greptime-proto 0.1.0 (git+https://github.com/GreptimeTeam/greptime-proto.git?rev=eeae2d0dfa8ee320a7b9e987b4631a6c1c732ebd)",
+ "greptime-proto 0.1.0 (git+https://github.com/QuenKar/greptime-proto.git?branch=quenkar-dev)",
  "prost",
  "snafu",
  "tonic 0.9.2",
@@ -1954,6 +1954,7 @@ dependencies = [
  "chrono",
  "chrono-tz 0.8.3",
  "common-error",
+ "greptime-proto 0.1.0 (git+https://github.com/QuenKar/greptime-proto.git?branch=quenkar-dev)",
  "rand",
  "serde",
  "serde_json",
@@ -4126,7 +4127,19 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=eeae2d0dfa8ee320a7b9e987b4631a6c1c732ebd#eeae2d0dfa8ee320a7b9e987b4631a6c1c732ebd"
+source = "git+https://github.com/QuenKar/greptime-proto.git?branch=quenkar-dev#c659ae328a910331423a3e9cca51e4ad3ad9019f"
+dependencies = [
+ "prost",
+ "serde",
+ "serde_json",
+ "tonic 0.9.2",
+ "tonic-build",
+]
+
+[[package]]
+name = "greptime-proto"
+version = "0.1.0"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=ec4b84931378004db60d168e2604bc3fb9735e9c#ec4b84931378004db60d168e2604bc3fb9735e9c"
 dependencies = [
  "prost",
  "serde",
@@ -6996,7 +7009,7 @@ dependencies = [
  "datafusion",
  "datatypes",
  "futures",
- "greptime-proto 0.1.0 (git+https://github.com/GreptimeTeam/greptime-proto.git?rev=eeae2d0dfa8ee320a7b9e987b4631a6c1c732ebd)",
+ "greptime-proto 0.1.0 (git+https://github.com/QuenKar/greptime-proto.git?branch=quenkar-dev)",
  "promql-parser",
  "prost",
  "query",
@@ -7267,7 +7280,7 @@ dependencies = [
  "format_num",
  "futures",
  "futures-util",
- "greptime-proto 0.1.0 (git+https://github.com/GreptimeTeam/greptime-proto.git?rev=eeae2d0dfa8ee320a7b9e987b4631a6c1c732ebd)",
+ "greptime-proto 0.1.0 (git+https://github.com/QuenKar/greptime-proto.git?branch=quenkar-dev)",
  "humantime",
  "metrics",
  "num",
