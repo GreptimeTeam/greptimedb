@@ -39,6 +39,7 @@ mod region;
 pub mod request;
 #[allow(dead_code)]
 pub mod sst;
+pub mod wal;
 #[allow(dead_code)]
 mod worker;
 

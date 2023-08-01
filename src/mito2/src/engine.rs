@@ -52,6 +52,9 @@ impl MitoEngine {
     }
 
     /// Stop the engine.
+    ///
+    /// Stopping the engine doesn't stop the underlying log store as other components might
+    /// still use it.
     pub async fn stop(&self) -> Result<()> {
         self.inner.stop().await
     }
