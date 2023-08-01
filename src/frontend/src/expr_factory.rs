@@ -52,7 +52,7 @@ pub trait CreateExprFactory {
         table_name: &str,
         columns: &[Column],
         engine: &str,
-    ) -> crate::error::Result<CreateTableExpr>;
+    ) -> Result<CreateTableExpr>;
 }
 
 #[derive(Debug)]
