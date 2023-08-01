@@ -24,14 +24,14 @@ use datatypes::schema::Schema;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::TableId;
-use table::requests::InsertRequest;
+use table::requests::{DeleteRequest, InsertRequest};
 
 use crate::columns::RangeColumnsPartitionRule;
 use crate::error::{FindLeaderSnafu, Result};
 use crate::partition::{PartitionBound, PartitionDef, PartitionExpr};
 use crate::range::RangePartitionRule;
 use crate::route::TableRoutes;
-use crate::splitter::{InsertRequestSplit, WriteSplitter};
+use crate::splitter::{DeleteRequestSplit, InsertRequestSplit, WriteSplitter};
 use crate::{error, PartitionRuleRef};
 
 #[async_trait::async_trait]
@@ -245,6 +245,17 @@ impl PartitionRuleManager {
         let partition_rule = self.find_table_partition_rule(table).await.unwrap();
         let splitter = WriteSplitter::with_partition_rule(partition_rule);
         splitter.split_insert(req, schema)
+    }
+
+    pub async fn split_delete_request(
+        &self,
+        table: TableId,
+        req: DeleteRequest,
+        primary_key_column_names: Vec<&String>,
+    ) -> Result<DeleteRequestSplit> {
+        let partition_rule = self.find_table_partition_rule(table).await.unwrap();
+        let splitter = WriteSplitter::with_partition_rule(partition_rule);
+        splitter.split_delete(req, primary_key_column_names)
     }
 }
 

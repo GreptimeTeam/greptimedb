@@ -146,6 +146,9 @@ impl DatafusionQueryEngine {
         table: &TableRef,
         column_vectors: HashMap<String, VectorRef>,
     ) -> Result<usize> {
+        let catalog_name = table_name.catalog.to_string();
+        let schema_name = table_name.schema.to_string();
+        let table_name = table_name.table.to_string();
         let table_schema = table.schema();
         let ts_column = table_schema
             .timestamp_column()
@@ -165,6 +168,9 @@ impl DatafusionQueryEngine {
             .collect::<HashMap<_, _>>();
 
         let request = DeleteRequest {
+            catalog_name,
+            schema_name,
+            table_name,
             key_column_values: column_vectors,
         };
 

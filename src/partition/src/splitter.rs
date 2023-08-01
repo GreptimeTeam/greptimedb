@@ -121,7 +121,15 @@ impl WriteSplitter {
                         (column_name.to_string(), builder.to_vector())
                     })
                     .collect();
-                (region_id, DeleteRequest { key_column_values })
+                (
+                    region_id,
+                    DeleteRequest {
+                        catalog_name: request.catalog_name.clone(),
+                        schema_name: request.schema_name.clone(),
+                        table_name: request.table_name.clone(),
+                        key_column_values,
+                    },
+                )
             })
             .collect();
         Ok(requests)
@@ -439,7 +447,12 @@ mod tests {
             "host".to_string(),
             Arc::new(StringVector::from(vec!["localhost"])) as _,
         );
-        let delete = DeleteRequest { key_column_values };
+        let delete = DeleteRequest {
+            catalog_name: "foo_catalog".to_string(),
+            schema_name: "foo_schema".to_string(),
+            table_name: "foo_table".to_string(),
+            key_column_values,
+        };
         let rule = Arc::new(EmptyPartitionRule) as PartitionRuleRef;
         let spliter = WriteSplitter::with_partition_rule(rule);
         let ret = spliter

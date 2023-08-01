@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::any::Any;
-use std::iter;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -24,7 +23,6 @@ use common_meta::table_name::TableName;
 use common_query::error::Result as QueryResult;
 use common_query::logical_plan::Expr;
 use common_query::physical_plan::{PhysicalPlan, PhysicalPlanRef};
-use common_query::Output;
 use common_recordbatch::adapter::AsyncRecordBatchStreamAdapter;
 use common_recordbatch::error::{
     InitRecordbatchStreamSnafu, PollStreamSnafu, Result as RecordBatchResult,
@@ -39,9 +37,8 @@ use datafusion::physical_plan::{
 use datafusion_common::DataFusionError;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use futures_util::{Stream, StreamExt};
-use partition::splitter::WriteSplitter;
 use snafu::prelude::*;
-use store_api::storage::{RegionNumber, ScanRequest};
+use store_api::storage::ScanRequest;
 use table::error::TableOperationSnafu;
 use table::metadata::{FilterPushDownType, TableInfoRef, TableType};
 use table::requests::{DeleteRequest, InsertRequest};
@@ -49,12 +46,12 @@ use table::Table;
 use tokio::sync::RwLock;
 
 use crate::catalog::FrontendCatalogManager;
-use crate::error::{FindDatanodeSnafu, FindTableRouteSnafu, Result};
+use crate::error::Result;
+use crate::instance::distributed::deleter::DistDeleter;
 use crate::instance::distributed::inserter::DistInserter;
-use crate::table::delete::to_grpc_delete_request;
 use crate::table::scan::{DatanodeInstance, TableScanPlan};
 
-mod delete;
+pub mod delete;
 pub mod insert;
 pub(crate) mod scan;
 
@@ -174,58 +171,17 @@ impl Table for DistTable {
     }
 
     async fn delete(&self, request: DeleteRequest) -> table::Result<usize> {
-        let partition_manager = self.catalog_manager.partition_manager();
-
-        let table_id = self.table_info.table_id();
-        let partition_rule = partition_manager
-            .find_table_partition_rule(table_id)
+        let deleter = DistDeleter::new(
+            request.catalog_name.clone(),
+            request.schema_name.clone(),
+            self.catalog_manager.clone(),
+        );
+        let affected_rows = deleter
+            .delete(vec![request])
             .await
             .map_err(BoxedError::new)
             .context(TableOperationSnafu)?;
-
-        let schema = self.schema();
-        let time_index = &schema
-            .timestamp_column()
-            .with_context(|| table::error::MissingTimeIndexColumnSnafu {
-                table_name: self.table_name.to_string(),
-            })?
-            .name;
-
-        let table_info = self.table_info();
-        let key_column_names = table_info
-            .meta
-            .row_key_column_names()
-            .chain(iter::once(time_index))
-            .collect::<Vec<_>>();
-
-        let requests = WriteSplitter::with_partition_rule(partition_rule)
-            .split_delete(request, key_column_names)
-            .map_err(BoxedError::new)
-            .and_then(|requests| {
-                requests
-                    .into_iter()
-                    .map(|(region_number, request)| {
-                        to_grpc_delete_request(
-                            &table_info.meta,
-                            &self.table_name,
-                            region_number,
-                            request,
-                        )
-                    })
-                    .collect::<Result<Vec<_>>>()
-                    .map_err(BoxedError::new)
-            })
-            .context(TableOperationSnafu)?;
-
-        let output = self
-            .dist_delete(requests)
-            .await
-            .map_err(BoxedError::new)
-            .context(TableOperationSnafu)?;
-        let Output::AffectedRows(rows) = output else {
-            unreachable!()
-        };
-        Ok(rows)
+        Ok(affected_rows as usize)
     }
 }
 
@@ -240,39 +196,6 @@ impl DistTable {
             table_info,
             catalog_manager,
         }
-    }
-
-    async fn find_datanode_instances(
-        &self,
-        regions: &[RegionNumber],
-    ) -> Result<Vec<DatanodeInstance>> {
-        let table_name = &self.table_name;
-        let route = self
-            .catalog_manager
-            .partition_manager()
-            .find_table_route(self.table_info.table_id())
-            .await
-            .with_context(|_| FindTableRouteSnafu {
-                table_name: table_name.to_string(),
-            })?;
-
-        let datanodes = regions
-            .iter()
-            .map(|&n| {
-                route
-                    .find_region_leader(n)
-                    .context(FindDatanodeSnafu { region: n })
-            })
-            .collect::<Result<Vec<_>>>()?;
-
-        let datanode_clients = self.catalog_manager.datanode_clients();
-        let mut instances = Vec::with_capacity(datanodes.len());
-        for datanode in datanodes {
-            let client = datanode_clients.get_client(datanode).await;
-            let db = Database::new(&table_name.catalog_name, &table_name.schema_name, client);
-            instances.push(DatanodeInstance::new(Arc::new(self.clone()) as _, db));
-        }
-        Ok(instances)
     }
 }
 

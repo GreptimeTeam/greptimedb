@@ -251,6 +251,9 @@ pub struct InsertRequest {
 /// Delete (by primary key) request
 #[derive(Debug)]
 pub struct DeleteRequest {
+    pub catalog_name: String,
+    pub schema_name: String,
+    pub table_name: String,
     /// Values of each column in this table's primary key and time index.
     ///
     /// The key is the column name, and the value is the column value.

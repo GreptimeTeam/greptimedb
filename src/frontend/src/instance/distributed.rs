@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod deleter;
 pub(crate) mod inserter;
 
 use std::collections::HashMap;
@@ -21,7 +22,7 @@ use api::helper::ColumnDataTypeWrapper;
 use api::v1::ddl_request::Expr as DdlExpr;
 use api::v1::greptime_request::Request;
 use api::v1::{
-    column_def, AlterExpr, CompactTableExpr, CreateDatabaseExpr, CreateTableExpr, DeleteRequest,
+    column_def, AlterExpr, CompactTableExpr, CreateDatabaseExpr, CreateTableExpr, DeleteRequests,
     FlushTableExpr, InsertRequests, TruncateTableExpr,
 };
 use async_trait::async_trait;
@@ -56,7 +57,6 @@ use sql::statements::create::{PartitionEntry, Partitions};
 use sql::statements::statement::Statement;
 use sql::statements::{self, sql_value_to_value};
 use store_api::storage::RegionNumber;
-use table::engine::TableReference;
 use table::metadata::{RawTableInfo, RawTableMeta, TableId, TableIdent, TableInfo, TableType};
 use table::requests::{AlterTableRequest, TableOptions};
 use table::TableRef;
@@ -66,9 +66,10 @@ use crate::error::{
     self, AlterExprToRequestSnafu, CatalogSnafu, ColumnDataTypeSnafu, ColumnNotFoundSnafu,
     DeserializePartitionSnafu, InvokeDatanodeSnafu, NotSupportedSnafu, ParseSqlSnafu,
     RequestDatanodeSnafu, RequestMetaSnafu, Result, SchemaExistsSnafu, TableAlreadyExistSnafu,
-    TableNotFoundSnafu, TableSnafu, ToTableDeleteRequestSnafu, UnrecognizedTableOptionSnafu,
+    TableNotFoundSnafu, TableSnafu, UnrecognizedTableOptionSnafu,
 };
 use crate::expr_factory;
+use crate::instance::distributed::deleter::DistDeleter;
 use crate::instance::distributed::inserter::DistInserter;
 use crate::table::DistTable;
 
@@ -626,28 +627,16 @@ impl DistInstance {
 
     async fn handle_dist_delete(
         &self,
-        request: DeleteRequest,
+        request: DeleteRequests,
         ctx: QueryContextRef,
     ) -> Result<Output> {
-        let catalog = ctx.current_catalog();
-        let schema = ctx.current_schema();
-        let table_name = &request.table_name;
-        let table_ref = TableReference::full(catalog, schema, table_name);
-
-        let table = self
-            .catalog_manager
-            .table(catalog, schema, table_name)
-            .await
-            .context(CatalogSnafu)?
-            .with_context(|| TableNotFoundSnafu {
-                table_name: table_ref.to_string(),
-            })?;
-
-        let request = common_grpc_expr::delete::to_table_delete_request(request)
-            .context(ToTableDeleteRequestSnafu)?;
-
-        let affected_rows = table.delete(request).await.context(TableSnafu)?;
-        Ok(Output::AffectedRows(affected_rows))
+        let deleter = DistDeleter::new(
+            ctx.current_catalog().to_string(),
+            ctx.current_schema().to_string(),
+            self.catalog_manager(),
+        );
+        let affected_rows = deleter.grpc_delete(request).await?;
+        Ok(Output::AffectedRows(affected_rows as usize))
     }
 
     pub fn catalog_manager(&self) -> Arc<FrontendCatalogManager> {
@@ -676,11 +665,11 @@ impl GrpcQueryHandler for DistInstance {
     async fn do_query(&self, request: Request, ctx: QueryContextRef) -> Result<Output> {
         match request {
             Request::Inserts(requests) => self.handle_dist_insert(requests, ctx).await,
-            Request::Delete(request) => self.handle_dist_delete(request, ctx).await,
             Request::RowInserts(_) | Request::RowDelete(_) => NotSupportedSnafu {
                 feat: "row insert/delete",
             }
             .fail(),
+            Request::Deletes(requests) => self.handle_dist_delete(requests, ctx).await,
             Request::Query(_) => {
                 unreachable!("Query should have been handled directly in Frontend Instance!")
             }
