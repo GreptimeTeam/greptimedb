@@ -16,7 +16,7 @@
 
 use std::sync::Arc;
 
-use common_telemetry::logging;
+use common_telemetry::info;
 use snafu::ensure;
 
 use crate::error::{RegionExistsSnafu, Result};
@@ -50,16 +50,19 @@ impl<S> RegionWorkerLoop<S> {
 
         // Create a MitoRegion from the RegionMetadata.
         let region = RegionOpener::new(
-            metadata,
+            request.region_id,
             self.memtable_builder.clone(),
             self.object_store.clone(),
         )
+        .metadata(metadata)
         .region_dir(&request.region_dir)
         .create(&self.config)
         .await?;
 
         // TODO(yingwen): Custom the Debug format for the metadata and also print it.
-        logging::info!("A new region created, region_id: {}", region.region_id);
+        info!("A new region created, region_id: {}", region.region_id);
+
+        // TODO(yingwen): Metrics.
 
         // Insert the MitoRegion into the RegionMap.
         self.regions.insert_region(Arc::new(region));

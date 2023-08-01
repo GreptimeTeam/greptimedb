@@ -14,12 +14,38 @@
 
 //! Handling open request.
 
+use std::sync::Arc;
+
+use common_telemetry::info;
+
 use crate::error::Result;
+use crate::region::opener::RegionOpener;
 use crate::worker::request::OpenRequest;
 use crate::worker::RegionWorkerLoop;
 
 impl<S> RegionWorkerLoop<S> {
-    pub(crate) async fn handle_open_request(&mut self, _request: OpenRequest) -> Result<()> {
-        unimplemented!()
+    pub(crate) async fn handle_open_request(&mut self, request: OpenRequest) -> Result<()> {
+        if self.regions.is_region_exists(request.region_id) {
+            return Ok(());
+        }
+
+        info!("Try to open region {}", request.region_id);
+
+        // Open region from specific region dir.
+        let region = RegionOpener::new(
+            request.region_id,
+            self.memtable_builder.clone(),
+            self.object_store.clone(),
+        )
+        .region_dir(&request.region_dir)
+        .open(&self.config)
+        .await?;
+
+        info!("Region {} is opened", request.region_id);
+
+        // Insert the MitoRegion into the RegionMap.
+        self.regions.insert_region(Arc::new(region));
+
+        Ok(())
     }
 }

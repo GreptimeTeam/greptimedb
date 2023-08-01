@@ -14,6 +14,7 @@
 
 //! Structs and utilities for writing regions.
 
+mod handle_close;
 mod handle_create;
 mod handle_open;
 pub(crate) mod request;
@@ -24,7 +25,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use common_runtime::JoinHandle;
-use common_telemetry::logging;
+use common_telemetry::{error, info, warn};
 use futures::future::try_join_all;
 use object_store::ObjectStore;
 use snafu::{ensure, ResultExt};
@@ -42,6 +43,7 @@ use crate::worker::request::{RegionRequest, RequestBody, WorkerRequest};
 /// Identifier for a worker.
 pub(crate) type WorkerId = u32;
 
+#[cfg_attr(doc, aquamarine::aquamarine)]
 /// A fixed size group of [RegionWorkers](RegionWorker).
 ///
 /// A worker group binds each region to a specific [RegionWorker] and sends
@@ -111,7 +113,7 @@ impl WorkerGroup {
 
     /// Stop the worker group.
     pub(crate) async fn stop(&self) -> Result<()> {
-        logging::info!("Stop region worker group");
+        info!("Stop region worker group");
 
         try_join_all(self.workers.iter().map(|worker| worker.stop())).await?;
 
@@ -204,7 +206,7 @@ impl RegionWorker {
             .await
             .is_err()
         {
-            logging::warn!(
+            warn!(
                 "Worker {} is already exited but the running flag is still true",
                 self.id
             );
@@ -222,11 +224,11 @@ impl RegionWorker {
     async fn stop(&self) -> Result<()> {
         let handle = self.handle.lock().await.take();
         if let Some(handle) = handle {
-            logging::info!("Stop region worker {}", self.id);
+            info!("Stop region worker {}", self.id);
 
             self.set_running(false);
             if self.sender.send(WorkerRequest::Stop).await.is_err() {
-                logging::warn!("Worker {} is already exited before stop", self.id);
+                warn!("Worker {} is already exited before stop", self.id);
             }
 
             handle.await.context(JoinSnafu)?;
@@ -285,7 +287,7 @@ struct RegionWorkerLoop<S> {
 impl<S> RegionWorkerLoop<S> {
     /// Starts the worker loop.
     async fn run(&mut self) {
-        logging::info!("Start region worker thread {}", self.id);
+        info!("Start region worker thread {}", self.id);
 
         // Buffer to retrieve requests from receiver.
         let mut buffer = RequestBuffer::with_capacity(self.config.worker_request_batch_size);
@@ -312,7 +314,9 @@ impl<S> RegionWorkerLoop<S> {
             self.handle_requests(&mut buffer).await;
         }
 
-        logging::info!("Exit region worker thread {}", self.id);
+        self.clean().await;
+
+        info!("Exit region worker thread {}", self.id);
     }
 
     /// Dispatches and processes requests.
@@ -367,6 +371,7 @@ impl<S> RegionWorkerLoop<S> {
             let res = match request.body {
                 RequestBody::Create(req) => self.handle_create_request(req).await,
                 RequestBody::Open(req) => self.handle_open_request(req).await,
+                RequestBody::Close(req) => self.handle_close_request(req).await,
                 RequestBody::Write(_) => unreachable!(),
             };
 
@@ -375,6 +380,19 @@ impl<S> RegionWorkerLoop<S> {
                 let _ = sender.send(res);
             }
         }
+    }
+
+    // Clean up the worker.
+    async fn clean(&self) {
+        // Closes remaining regions.
+        let regions = self.regions.list_regions();
+        for region in regions {
+            if let Err(e) = region.stop().await {
+                error!(e; "Failed to stop region {}", region.region_id);
+            }
+        }
+
+        self.regions.clear();
     }
 }
 
@@ -398,7 +416,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_worker_group_start_stop() {
-        let env = TestEnv::new("group-stop");
+        let env = TestEnv::with_prefix("group-stop");
         let group = env
             .create_worker_group(MitoConfig {
                 num_workers: 4,

@@ -42,9 +42,22 @@ pub struct TestEnv {
     data_home: TempDir,
 }
 
+impl Default for TestEnv {
+    fn default() -> Self {
+        TestEnv::new()
+    }
+}
+
 impl TestEnv {
+    /// Returns a new env with empty prefix for test.
+    pub fn new() -> TestEnv {
+        TestEnv {
+            data_home: create_temp_dir(""),
+        }
+    }
+
     /// Returns a new env with specific `prefix` for test.
-    pub fn new(prefix: &str) -> TestEnv {
+    pub fn with_prefix(prefix: &str) -> TestEnv {
         TestEnv {
             data_home: create_temp_dir(prefix),
         }

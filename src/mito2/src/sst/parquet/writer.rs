@@ -14,7 +14,7 @@
 
 //! Parquet writer.
 
-use common_telemetry::logging;
+use common_telemetry::debug;
 use object_store::ObjectStore;
 use parquet::basic::{Compression, Encoding, ZstdLevel};
 use parquet::file::metadata::KeyValue;
@@ -80,7 +80,7 @@ impl<'a> ParquetWriter<'a> {
         let stats = self.source.stats();
 
         if stats.num_rows == 0 {
-            logging::debug!(
+            debug!(
                 "No data written, try to stop the writer: {}",
                 self.file_path
             );

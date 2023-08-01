@@ -69,8 +69,17 @@ pub struct CreateRequest {
 pub struct OpenRequest {
     /// Region to open.
     pub region_id: RegionId,
+    /// Data directory of the region.
+    pub region_dir: String,
     /// Options of the created region.
     pub options: RegionOptions,
+}
+
+/// Close region request.
+#[derive(Debug)]
+pub struct CloseRequest {
+    /// Region to close.
+    pub region_id: RegionId,
 }
 
 /// Request to write a region.
@@ -93,6 +102,9 @@ pub(crate) enum WorkerRequest {
 #[derive(Debug)]
 pub(crate) struct RegionRequest {
     /// Sender to send result.
+    ///
+    /// Now the result is a `Result<()>`, but we could replace the empty tuple
+    /// with an enum if we need to carry more information.
     pub(crate) sender: Option<Sender<Result<()>>>,
     /// Request body.
     pub(crate) body: RequestBody,
@@ -124,6 +136,8 @@ pub(crate) enum RequestBody {
     Create(CreateRequest),
     /// Opens an existing region.
     Open(OpenRequest),
+    /// Closes a region.
+    Close(CloseRequest),
 }
 
 impl RequestBody {
@@ -133,6 +147,7 @@ impl RequestBody {
             RequestBody::Write(req) => req.region_id,
             RequestBody::Create(req) => req.region_id,
             RequestBody::Open(req) => req.region_id,
+            RequestBody::Close(req) => req.region_id,
         }
     }
 
@@ -142,6 +157,7 @@ impl RequestBody {
             RequestBody::Write(_) => false,
             RequestBody::Create(_) => true,
             RequestBody::Open(_) => true,
+            RequestBody::Close(_) => true,
         }
     }
 }

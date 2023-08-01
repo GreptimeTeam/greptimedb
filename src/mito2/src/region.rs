@@ -20,8 +20,10 @@ mod version;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
+use common_telemetry::info;
 use store_api::storage::RegionId;
 
+use crate::error::Result;
 use crate::manifest::manager::RegionManifestManager;
 use crate::region::version::VersionControlRef;
 
@@ -45,6 +47,17 @@ pub(crate) struct MitoRegion {
 
 pub(crate) type MitoRegionRef = Arc<MitoRegion>;
 
+impl MitoRegion {
+    /// Stop background tasks for this region.
+    pub(crate) async fn stop(&self) -> Result<()> {
+        self.manifest_manager.stop().await?;
+
+        info!("Stopped region, region_id: {}", self.region_id);
+
+        Ok(())
+    }
+}
+
 /// Regions indexed by ids.
 #[derive(Debug, Default)]
 pub(crate) struct RegionMap {
@@ -62,6 +75,29 @@ impl RegionMap {
     pub(crate) fn insert_region(&self, region: MitoRegionRef) {
         let mut regions = self.regions.write().unwrap();
         regions.insert(region.region_id, region);
+    }
+
+    /// Get region by region id.
+    pub(crate) fn get_region(&self, region_id: RegionId) -> Option<MitoRegionRef> {
+        let regions = self.regions.read().unwrap();
+        regions.get(&region_id).cloned()
+    }
+
+    /// Remove region by id.
+    pub(crate) fn remove_region(&self, region_id: RegionId) {
+        let mut regions = self.regions.write().unwrap();
+        regions.remove(&region_id);
+    }
+
+    /// List all regions.
+    pub(crate) fn list_regions(&self) -> Vec<MitoRegionRef> {
+        let regions = self.regions.read().unwrap();
+        regions.values().cloned().collect()
+    }
+
+    /// Clear the map.
+    pub(crate) fn clear(&self) {
+        self.regions.write().unwrap().clear();
     }
 }
 

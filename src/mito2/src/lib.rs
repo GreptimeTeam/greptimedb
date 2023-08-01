@@ -162,4 +162,8 @@ mod worker;
 ///
 /// The engine handles DMLs and DDLs in dedicated [workers](crate::worker::WorkerGroup).
 ///
+/// ## Region manifest
+///
+/// The [RegionManifestManager](crate::manifest::manager::RegionManifestManager) manages metadata of the engine.
+///
 mod docs {}

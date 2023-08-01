@@ -17,7 +17,7 @@ use std::iter::Iterator;
 use std::str::FromStr;
 
 use common_datasource::compression::CompressionType;
-use common_telemetry::logging;
+use common_telemetry::{debug, info};
 use futures::TryStreamExt;
 use lazy_static::lazy_static;
 use object_store::{raw_normalize_path, util, Entry, ErrorKind, ObjectStore};
@@ -267,7 +267,7 @@ impl ManifestObjectStore {
             .collect();
         let ret = paths.len();
 
-        logging::debug!(
+        debug!(
             "Deleting {} logs from manifest storage path {} until {}, checkpoint: {:?}, paths: {:?}",
             ret,
             self.path,
@@ -300,7 +300,7 @@ impl ManifestObjectStore {
             .map(|e| e.path().to_string())
             .collect();
 
-        logging::info!(
+        info!(
             "Deleting {} from manifest storage path {} paths: {:?}",
             paths.len(),
             self.path,
@@ -318,14 +318,14 @@ impl ManifestObjectStore {
             .remove_all(&self.path)
             .await
             .context(OpenDalSnafu)?;
-        logging::info!("Deleted manifest storage path {}", self.path);
+        info!("Deleted manifest storage path {}", self.path);
 
         Ok(())
     }
 
     pub async fn save(&self, version: ManifestVersion, bytes: &[u8]) -> Result<()> {
         let path = self.delta_file_path(version);
-        logging::debug!("Save log to manifest storage, version: {}", version);
+        debug!("Save log to manifest storage, version: {}", version);
         let data = self
             .compress_type
             .encode(bytes)
@@ -357,10 +357,9 @@ impl ManifestObjectStore {
             }
         }
 
-        logging::debug!(
+        debug!(
             "Deleting logs from manifest storage, start: {}, end: {}",
-            start,
-            end
+            start, end
         );
 
         self.object_store
@@ -396,10 +395,9 @@ impl ManifestObjectStore {
             extend_metadata: HashMap::new(),
         };
 
-        logging::debug!(
+        debug!(
             "Save checkpoint in path: {},  metadata: {:?}",
-            last_checkpoint_path,
-            checkpoint_metadata
+            last_checkpoint_path, checkpoint_metadata
         );
 
         let bytes = checkpoint_metadata.encode()?;
@@ -437,10 +435,9 @@ impl ManifestObjectStore {
                                 &checkpoint_file(version),
                                 FALL_BACK_COMPRESS_TYPE,
                             );
-                            logging::debug!(
+                            debug!(
                                 "Failed to load checkpoint from path: {}, fall back to path: {}",
-                                path,
-                                fall_back_path
+                                path, fall_back_path
                             );
                             match self.object_store.read(&fall_back_path).await {
                                 Ok(checkpoint) => {
@@ -506,10 +503,9 @@ impl ManifestObjectStore {
 
         let checkpoint_metadata = CheckpointMetadata::decode(&last_checkpoint_data)?;
 
-        logging::debug!(
+        debug!(
             "Load checkpoint in path: {}, metadata: {:?}",
-            last_checkpoint_path,
-            checkpoint_metadata
+            last_checkpoint_path, checkpoint_metadata
         );
 
         self.load_checkpoint(checkpoint_metadata.version).await

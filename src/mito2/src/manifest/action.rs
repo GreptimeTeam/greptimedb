@@ -105,7 +105,7 @@ impl RegionManifestBuilder {
         }
     }
 
-    /// Check if the builder keeps a [RegionMetadata]
+    /// Check if the builder keeps a [RegionMetadata](crate::metadata::RegionMetadata).
     pub fn contains_metadata(&self) -> bool {
         self.metadata.is_some()
     }
