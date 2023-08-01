@@ -170,13 +170,13 @@ From previous sections, we can conclude the following points about routing:
 - Logical table doesn't have physical region, they share the same physical region with other logical tables.
 - Route rule of logical table's is a strict subset of physical table's.
 
-To associate the logical table with physical region, we need to specify necessary informations in the create table request. Specificly, the table type and its parent table. This require to change our gRPC proto's definition. And once meta recognize the table to create is a logical table, it will use the parent table's region to create route entry.
+To associate the logical table with physical region, we need to specify necessary information in the create table request. Specifically, the table type and its parent table. This require to change our gRPC proto's definition. And once meta recognize the table to create is a logical table, it will use the parent table's region to create route entry.
 
 And to reduce the consumption of region failover (which need to update the physical table route info), we'd better to split the current route table structure into two parts:
 
 ```rust
 region_route: Map<TableName, [RegionId]>,
-node_route: Map<RegionId, [NodeId]>,
+node_route: Map<RegionId, NodeId>,
 ```
 
 By doing this on each failover the meta server only needs to update the second `node_route` map and leave the first one untouched.
