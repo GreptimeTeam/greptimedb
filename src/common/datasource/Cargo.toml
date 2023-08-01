@@ -17,7 +17,6 @@ async-compression = { version = "0.3", features = [
 ] }
 async-trait.workspace = true
 bytes = "1.1"
-common-base = { path = "../base" }
 common-error = { path = "../error" }
 common-runtime = { path = "../runtime" }
 datafusion.workspace = true

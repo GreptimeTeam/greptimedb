@@ -33,12 +33,10 @@ metrics.workspace = true
 object-store = { path = "../object-store" }
 parquet = { workspace = true, features = ["async"] }
 paste.workspace = true
-planus = "0.2"
 prost.workspace = true
 regex = "1.5"
 serde.workspace = true
 serde_json = "1.0"
-sluice = "0.5"
 snafu = { version = "0.7", features = ["backtraces"] }
 store-api = { path = "../store-api" }
 table = { path = "../table" }

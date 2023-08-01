@@ -10,7 +10,6 @@ async-trait.workspace = true
 common-base = { path = "../base" }
 common-catalog = { path = "../catalog" }
 common-error = { path = "../error" }
-common-grpc = { path = "../grpc" }
 common-query = { path = "../query" }
 common-telemetry = { path = "../telemetry" }
 common-time = { path = "../time" }

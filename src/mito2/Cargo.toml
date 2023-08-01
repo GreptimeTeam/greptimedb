@@ -32,7 +32,6 @@ datafusion.workspace = true
 datafusion-common.workspace = true
 datatypes = { path = "../datatypes" }
 futures.workspace = true
-key-lock = "0.1"
 lazy_static = "1.4"
 log-store = { path = "../log-store" }
 metrics.workspace = true

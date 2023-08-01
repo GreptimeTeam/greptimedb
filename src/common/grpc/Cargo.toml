@@ -11,9 +11,6 @@ async-trait = "0.1"
 backtrace = "0.3"
 common-base = { path = "../base" }
 common-error = { path = "../error" }
-common-function-macro = { path = "../function-macro" }
-common-query = { path = "../query" }
-common-meta = { path = "../meta" }
 common-recordbatch = { path = "../recordbatch" }
 common-runtime = { path = "../runtime" }
 common-telemetry = { path = "../telemetry" }

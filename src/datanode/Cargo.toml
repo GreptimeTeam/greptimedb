@@ -14,7 +14,6 @@ async-trait.workspace = true
 api = { path = "../api" }
 axum = "0.6"
 axum-macros = "0.3"
-backon = "0.2"
 catalog = { path = "../catalog" }
 common-base = { path = "../common/base" }
 common-catalog = { path = "../common/catalog" }
