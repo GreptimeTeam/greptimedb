@@ -48,6 +48,7 @@ use object_store::services::{Azblob, Gcs, Oss, S3};
 use object_store::test_util::TempFolder;
 use object_store::ObjectStore;
 use secrecy::ExposeSecret;
+use servers::auth::UserProviderRef;
 use servers::grpc::GrpcServer;
 use servers::http::{HttpOptions, HttpServerBuilder};
 use servers::metrics_handler::MetricsHandler;
@@ -533,6 +534,14 @@ pub async fn setup_grpc_server(
     store_type: StorageType,
     name: &str,
 ) -> (String, TestGuard, Arc<GrpcServer>) {
+    setup_grpc_server_with_user_provider(store_type, name, None).await
+}
+
+pub async fn setup_grpc_server_with_user_provider(
+    store_type: StorageType,
+    name: &str,
+    user_provider: Option<UserProviderRef>,
+) -> (String, TestGuard, Arc<GrpcServer>) {
     common_telemetry::init_default_ut_logging();
 
     let (opts, guard) = create_tmp_dir_and_datanode_opts(store_type, name);
@@ -557,7 +566,7 @@ pub async fn setup_grpc_server(
     let fe_grpc_server = Arc::new(GrpcServer::new(
         ServerGrpcQueryHandlerAdaptor::arc(fe_instance_ref.clone()),
         Some(fe_instance_ref.clone()),
-        None,
+        user_provider,
         runtime,
     ));
 
