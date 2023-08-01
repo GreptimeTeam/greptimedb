@@ -118,7 +118,6 @@ impl Categorizer {
             | Expr::Exists(_) => Commutativity::Commutative,
 
             Expr::Like(_)
-            | Expr::ILike(_)
             | Expr::SimilarTo(_)
             | Expr::IsUnknown(_)
             | Expr::IsNotUnknown(_)
@@ -136,7 +135,7 @@ impl Categorizer {
             | Expr::ScalarSubquery(_)
             | Expr::Wildcard => Commutativity::Unimplemented,
 
-            Expr::Alias(_, _)
+            Expr::Alias(_)
             | Expr::QualifiedWildcard { .. }
             | Expr::GroupingSet(_)
             | Expr::Placeholder(_)

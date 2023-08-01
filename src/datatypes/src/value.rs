@@ -635,7 +635,7 @@ impl TryFrom<ScalarValue> for Value {
             ScalarValue::Binary(b)
             | ScalarValue::LargeBinary(b)
             | ScalarValue::FixedSizeBinary(_, b) => Value::from(b.map(Bytes::from)),
-            ScalarValue::List(vs, field) => {
+            ScalarValue::List(vs, field) | ScalarValue::Fixedsizelist(vs, field, _) => {
                 let items = if let Some(vs) = vs {
                     let vs = vs
                         .into_iter()
@@ -687,6 +687,10 @@ impl TryFrom<ScalarValue> for Value {
                 .map(|x| Value::Interval(Interval::from_i128(x)))
                 .unwrap_or(Value::Null),
             ScalarValue::Decimal128(_, _, _)
+            | ScalarValue::DurationSecond(_)
+            | ScalarValue::DurationMillisecond(_)
+            | ScalarValue::DurationMicrosecond(_)
+            | ScalarValue::DurationNanosecond(_)
             | ScalarValue::Struct(_, _)
             | ScalarValue::Dictionary(_, _) => {
                 return error::UnsupportedArrowTypeSnafu {

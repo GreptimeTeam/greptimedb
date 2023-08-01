@@ -19,7 +19,7 @@ use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
 use datafusion::datasource::listing::PartitionedFile;
 use datafusion::datasource::object_store::ObjectStoreUrl;
-use datafusion::physical_plan::file_format::{FileScanConfig, FileStream};
+use datafusion::datasource::physical_plan::{FileScanConfig, FileStream};
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use object_store::services::Fs;
 use object_store::ObjectStore;
@@ -86,7 +86,7 @@ pub fn scan_config(file_schema: SchemaRef, limit: Option<usize>, filename: &str)
         projection: None,
         limit,
         table_partition_cols: vec![],
-        output_ordering: None,
+        output_ordering: vec![],
         infinite_source: false,
     }
 }

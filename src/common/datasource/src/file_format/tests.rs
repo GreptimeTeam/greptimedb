@@ -18,8 +18,8 @@ use std::sync::Arc;
 use std::vec;
 
 use datafusion::assert_batches_eq;
+use datafusion::datasource::physical_plan::{FileOpener, FileScanConfig, FileStream, ParquetExec};
 use datafusion::execution::context::TaskContext;
-use datafusion::physical_plan::file_format::{FileOpener, FileScanConfig, FileStream, ParquetExec};
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::prelude::SessionContext;

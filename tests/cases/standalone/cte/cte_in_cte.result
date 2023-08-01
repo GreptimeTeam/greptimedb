@@ -54,7 +54,11 @@ with cte1 as (Select i as j from a) select * from (with cte2 as (select max(j) a
 -- this feature is not implemented in datafusion
 with cte1 as (Select i as j from a) select * from cte1 where j = (with cte2 as (select max(j) as j from cte1) select j from cte2);
 
-Error: 3001(EngineExecuteQuery), This feature is not implemented: Physical plan does not support logical expression (<subquery>)
++----+
+| j  |
++----+
+| 42 |
++----+
 
 -- Refer to same-named CTE in a subquery expression
 -- this feature is not implemented in datafusion

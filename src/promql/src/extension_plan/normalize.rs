@@ -26,7 +26,8 @@ use datafusion::logical_expr::{EmptyRelation, Expr, LogicalPlan, UserDefinedLogi
 use datafusion::physical_expr::PhysicalSortExpr;
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
-    DisplayFormatType, ExecutionPlan, Partitioning, RecordBatchStream, SendableRecordBatchStream,
+    DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, RecordBatchStream,
+    SendableRecordBatchStream,
 };
 use datatypes::arrow::array::TimestampMillisecondArray;
 use datatypes::arrow::datatypes::SchemaRef;
@@ -214,9 +215,19 @@ impl ExecutionPlan for SeriesNormalizeExec {
         }))
     }
 
+    fn metrics(&self) -> Option<MetricsSet> {
+        Some(self.metric.clone_inner())
+    }
+
+    fn statistics(&self) -> Statistics {
+        self.input.statistics()
+    }
+}
+
+impl DisplayAs for SeriesNormalizeExec {
     fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match t {
-            DisplayFormatType::Default => {
+            DisplayFormatType::Default | DisplayFormatType::Verbose => {
                 write!(
                     f,
                     "PromSeriesNormalizeExec: offset=[{}], time index=[{}], filter NaN: [{}]",
@@ -224,14 +235,6 @@ impl ExecutionPlan for SeriesNormalizeExec {
                 )
             }
         }
-    }
-
-    fn metrics(&self) -> Option<MetricsSet> {
-        Some(self.metric.clone_inner())
-    }
-
-    fn statistics(&self) -> Statistics {
-        self.input.statistics()
     }
 }
 
@@ -324,7 +327,6 @@ mod test {
     use datafusion::arrow::datatypes::{
         ArrowPrimitiveType, DataType, Field, Schema, TimestampMillisecondType,
     };
-    use datafusion::from_slice::FromSlice;
     use datafusion::physical_plan::memory::MemoryExec;
     use datafusion::prelude::SessionContext;
     use datatypes::arrow::array::TimestampMillisecondArray;
@@ -340,12 +342,11 @@ mod test {
             Field::new("value", DataType::Float64, true),
             Field::new("path", DataType::Utf8, true),
         ]));
-        let timestamp_column = Arc::new(TimestampMillisecondArray::from_slice([
+        let timestamp_column = Arc::new(TimestampMillisecondArray::from(vec![
             60_000, 120_000, 0, 30_000, 90_000,
         ])) as _;
-        let field_column = Arc::new(Float64Array::from_slice([0.0, 1.0, 10.0, 100.0, 1000.0])) as _;
-        let path_column =
-            Arc::new(StringArray::from_slice(["foo", "foo", "foo", "foo", "foo"])) as _;
+        let field_column = Arc::new(Float64Array::from(vec![0.0, 1.0, 10.0, 100.0, 1000.0])) as _;
+        let path_column = Arc::new(StringArray::from(vec!["foo", "foo", "foo", "foo", "foo"])) as _;
         let data = RecordBatch::try_new(
             schema.clone(),
             vec![timestamp_column, field_column, path_column],

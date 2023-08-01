@@ -26,10 +26,10 @@ use common_recordbatch::SendableRecordBatchStream;
 use datafusion::common::ToDFSchema;
 use datafusion::datasource::listing::PartitionedFile;
 use datafusion::datasource::object_store::ObjectStoreUrl;
+use datafusion::datasource::physical_plan::{FileOpener, FileScanConfig, FileStream, ParquetExec};
 use datafusion::optimizer::utils::conjunction;
 use datafusion::physical_expr::create_physical_expr;
 use datafusion::physical_expr::execution_props::ExecutionProps;
-use datafusion::physical_plan::file_format::{FileOpener, FileScanConfig, FileStream, ParquetExec};
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion::prelude::SessionContext;
 use datatypes::arrow::datatypes::Schema as ArrowSchema;
@@ -113,7 +113,7 @@ fn build_record_batch_stream<T: FileOpener + Send + 'static>(
             projection: projection.cloned(),
             limit,
             table_partition_cols: vec![],
-            output_ordering: None,
+            output_ordering: vec![],
             infinite_source: false,
         },
         0, // partition: hard-code
@@ -185,7 +185,7 @@ fn new_parquet_stream_with_exec_plan(
         projection: projection.cloned(),
         limit: *limit,
         table_partition_cols: vec![],
-        output_ordering: None,
+        output_ordering: vec![],
         infinite_source: false,
     };
 

@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::ops::Not;
+
 use arrow::compute;
 use common_recordbatch::{DfRecordBatch, RecordBatch};
 use datafusion::dataframe::DataFrame as DfDataFrame;
