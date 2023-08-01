@@ -17,7 +17,8 @@
 use std::time::Duration;
 
 use common_base::readable_size::ReadableSize;
-use store_api::storage::{ColumnId, CompactionStrategy, RegionId};
+use greptime_proto::v1::Rows;
+use store_api::storage::{ColumnId, CompactionStrategy, OpType, RegionId};
 use tokio::sync::oneshot::{self, Receiver, Sender};
 
 use crate::config::DEFAULT_WRITE_BUFFER_SIZE;
@@ -82,11 +83,22 @@ pub struct CloseRequest {
     pub region_id: RegionId,
 }
 
+/// Mutation to apply to a set of rows.
+#[derive(Debug)]
+pub struct Mutation {
+    /// Type of the mutation.
+    pub op_type: OpType,
+    /// Rows to write.
+    pub rows: Rows,
+}
+
 /// Request to write a region.
 #[derive(Debug)]
 pub(crate) struct WriteRequest {
     /// Region to write.
     pub region_id: RegionId,
+    /// Mutations to the region.
+    pub mutations: Vec<Mutation>,
 }
 
 /// Request sent to a worker

@@ -211,7 +211,7 @@ dependencies = [
  "common-error",
  "common-time",
  "datatypes",
- "greptime-proto",
+ "greptime-proto 0.1.0 (git+https://github.com/GreptimeTeam/greptime-proto.git?rev=3d8ac534a0c8fd1c6ec66d129345b44c95665ebc)",
  "prost",
  "snafu",
  "tonic 0.9.2",
@@ -4124,6 +4124,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "greptime-proto"
+version = "0.1.0"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=5e422e518b6755c46ec8e6f26233c433ff016558#5e422e518b6755c46ec8e6f26233c433ff016558"
+dependencies = [
+ "prost",
+ "serde",
+ "serde_json",
+ "tonic 0.9.2",
+ "tonic-build",
+]
+
+[[package]]
 name = "h2"
 version = "0.3.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5498,6 +5510,7 @@ dependencies = [
  "datafusion-common",
  "datatypes",
  "futures",
+ "greptime-proto 0.1.0 (git+https://github.com/GreptimeTeam/greptime-proto.git?rev=5e422e518b6755c46ec8e6f26233c433ff016558)",
  "lazy_static",
  "log-store",
  "metrics",
@@ -6982,7 +6995,7 @@ dependencies = [
  "datafusion",
  "datatypes",
  "futures",
- "greptime-proto",
+ "greptime-proto 0.1.0 (git+https://github.com/GreptimeTeam/greptime-proto.git?rev=3d8ac534a0c8fd1c6ec66d129345b44c95665ebc)",
  "promql-parser",
  "prost",
  "query",
@@ -7252,7 +7265,7 @@ dependencies = [
  "format_num",
  "futures",
  "futures-util",
- "greptime-proto",
+ "greptime-proto 0.1.0 (git+https://github.com/GreptimeTeam/greptime-proto.git?rev=3d8ac534a0c8fd1c6ec66d129345b44c95665ebc)",
  "humantime",
  "metrics",
  "num",

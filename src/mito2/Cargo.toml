@@ -32,6 +32,8 @@ datafusion.workspace = true
 datafusion-common.workspace = true
 datatypes = { path = "../datatypes" }
 futures.workspace = true
+# TODO(yingwen): Update and use api crate once https://github.com/GreptimeTeam/greptime-proto/pull/72 is merged.
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "5e422e518b6755c46ec8e6f26233c433ff016558" }
 lazy_static = "1.4"
 log-store = { path = "../log-store" }
 metrics.workspace = true
