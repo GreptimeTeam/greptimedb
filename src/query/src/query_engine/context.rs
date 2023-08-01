@@ -47,6 +47,7 @@ impl QueryEngineContext {
             state.config().clone(),
             state.scalar_functions().clone(),
             state.aggregate_functions().clone(),
+            state.window_functions().clone(),
             state.runtime_env().clone(),
         ))
     }

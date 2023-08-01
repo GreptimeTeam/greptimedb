@@ -163,13 +163,6 @@ impl PartitionRuleManager {
         let partitions = self.find_table_partitions(table_id).await?;
 
         let partition_columns = partitions[0].partition.partition_columns();
-        ensure!(
-            !partition_columns.is_empty(),
-            error::InvalidTableRouteDataSnafu {
-                table_id,
-                err_msg: "no partition columns found"
-            }
-        );
 
         let regions = partitions
             .iter()

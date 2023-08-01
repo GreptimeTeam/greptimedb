@@ -7,7 +7,8 @@ ENV LANG en_US.utf8
 WORKDIR /greptimedb
 
 # Install dependencies.
-RUN apt-get update && apt-get install -y \
+RUN --mount=type=cache,target=/var/cache/apt \
+    apt-get update && apt-get install -y \
     libssl-dev \
     protobuf-compiler \
     curl \
@@ -25,7 +26,7 @@ ENV PATH /root/.cargo/bin/:$PATH
 
 # Build the project in release mode.
 RUN --mount=target=.,rw \
-    --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/root/.cargo/registry \
     make build \
     CARGO_PROFILE=${CARGO_PROFILE} \
     FEATURES=${FEATURES} \

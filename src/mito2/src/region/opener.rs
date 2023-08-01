@@ -60,19 +60,18 @@ impl RegionOpener {
     /// Writes region manifest and creates a new region.
     pub(crate) async fn create(self, config: &MitoConfig) -> Result<MitoRegion> {
         let region_id = self.metadata.region_id;
+        let metadata = Arc::new(self.metadata);
+
         // Create a manifest manager for this region.
         let options = RegionManifestOptions {
             manifest_dir: new_manifest_dir(&self.region_dir),
             object_store: self.object_store,
             compress_type: config.manifest_compress_type,
             checkpoint_interval: config.manifest_checkpoint_interval,
-            // We are creating a new region, so we need to set this field.
-            initial_metadata: Some(self.metadata.clone()),
         };
         // Writes regions to the manifest file.
-        let manifest_manager = RegionManifestManager::new(options).await?;
+        let manifest_manager = RegionManifestManager::new(metadata.clone(), options).await?;
 
-        let metadata = Arc::new(self.metadata);
         let mutable = self.memtable_builder.build(&metadata);
 
         let version = VersionBuilder::new(metadata, mutable).build();

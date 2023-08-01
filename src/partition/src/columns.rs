@@ -167,45 +167,46 @@ impl PartitionRule for RangeColumnsPartitionRule {
     }
 
     fn find_regions_by_exprs(&self, exprs: &[PartitionExpr]) -> Result<Vec<RegionNumber>> {
-        let regions = if exprs.iter().all(|x| self.column_list.contains(&x.column)) {
-            let PartitionExpr {
-                column: _,
-                op,
-                value,
-            } = exprs
-                .iter()
-                .find(|x| x.column == self.column_list[0])
-                // "unwrap" is safe because we have checked that "self.column_list" contains all columns in "exprs"
-                .unwrap();
+        let regions =
+            if !exprs.is_empty() && exprs.iter().all(|x| self.column_list.contains(&x.column)) {
+                let PartitionExpr {
+                    column: _,
+                    op,
+                    value,
+                } = exprs
+                    .iter()
+                    .find(|x| x.column == self.column_list[0])
+                    // "unwrap" is safe because we have checked that "self.column_list" contains all columns in "exprs"
+                    .unwrap();
 
-            let regions = &self.first_column_regions;
-            match self
-                .first_column_bounds
-                .binary_search(&PartitionBound::Value(value.clone()))
-            {
-                Ok(i) => match op {
-                    Operator::Lt => &regions[..=i],
-                    Operator::LtEq => &regions[..=(i + 1)],
-                    Operator::Eq => &regions[(i + 1)..=(i + 1)],
-                    Operator::Gt | Operator::GtEq => &regions[(i + 1)..],
-                    Operator::NotEq => &regions[..],
-                    _ => unimplemented!(),
-                },
-                Err(i) => match op {
-                    Operator::Lt | Operator::LtEq => &regions[..=i],
-                    Operator::Eq => &regions[i..=i],
-                    Operator::Gt | Operator::GtEq => &regions[i..],
-                    Operator::NotEq => &regions[..],
-                    _ => unimplemented!(),
-                },
-            }
-            .iter()
-            .flatten()
-            .cloned()
-            .collect::<Vec<RegionNumber>>()
-        } else {
-            self.regions.clone()
-        };
+                let regions = &self.first_column_regions;
+                match self
+                    .first_column_bounds
+                    .binary_search(&PartitionBound::Value(value.clone()))
+                {
+                    Ok(i) => match op {
+                        Operator::Lt => &regions[..=i],
+                        Operator::LtEq => &regions[..=(i + 1)],
+                        Operator::Eq => &regions[(i + 1)..=(i + 1)],
+                        Operator::Gt | Operator::GtEq => &regions[(i + 1)..],
+                        Operator::NotEq => &regions[..],
+                        _ => unimplemented!(),
+                    },
+                    Err(i) => match op {
+                        Operator::Lt | Operator::LtEq => &regions[..=i],
+                        Operator::Eq => &regions[i..=i],
+                        Operator::Gt | Operator::GtEq => &regions[i..],
+                        Operator::NotEq => &regions[..],
+                        _ => unimplemented!(),
+                    },
+                }
+                .iter()
+                .flatten()
+                .cloned()
+                .collect::<Vec<RegionNumber>>()
+            } else {
+                self.regions.clone()
+            };
         Ok(regions)
     }
 }

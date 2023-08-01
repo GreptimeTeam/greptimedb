@@ -44,7 +44,7 @@ where
     let key = get_lease_prefix(cluster_id);
     let range_end = util::get_prefix_end_key(&key);
 
-    let kvs = meta_peer_client.range(key, range_end).await?;
+    let kvs = meta_peer_client.range(key, range_end, false).await?;
     let mut lease_kvs = HashMap::new();
     for kv in kvs {
         let lease_key: LeaseKey = kv.key.try_into()?;

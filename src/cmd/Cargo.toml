@@ -13,6 +13,10 @@ path = "src/bin/greptime.rs"
 default = ["metrics-process"]
 tokio-console = ["common-telemetry/tokio-console"]
 metrics-process = ["servers/metrics-process"]
+greptimedb-telemetry = [
+    "datanode/greptimedb-telemetry",
+    "meta-srv/greptimedb-telemetry",
+]
 
 [dependencies]
 anymap = "1.0.0-beta.2"
@@ -61,4 +65,4 @@ serde.workspace = true
 toml.workspace = true
 
 [build-dependencies]
-build-data = "0.1.4"
+common-version = { path = "../common/version" }

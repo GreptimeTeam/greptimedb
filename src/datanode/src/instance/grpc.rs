@@ -23,10 +23,8 @@ use async_trait::async_trait;
 use catalog::CatalogManagerRef;
 use common_grpc_expr::insert::to_table_insert_request;
 use common_query::Output;
-use datafusion::catalog::catalog::{
-    CatalogList, CatalogProvider, MemoryCatalogList, MemoryCatalogProvider,
-};
 use datafusion::catalog::schema::SchemaProvider;
+use datafusion::catalog::{CatalogList, CatalogProvider, MemoryCatalogList, MemoryCatalogProvider};
 use datafusion::datasource::TableProvider;
 use futures::future;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};

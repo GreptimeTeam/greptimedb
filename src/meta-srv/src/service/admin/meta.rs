@@ -90,7 +90,10 @@ impl HttpHandler for TablesHandler {
             .table_name_manager()
             .tables(catalog, schema)
             .await
-            .context(TableMetadataManagerSnafu)?;
+            .context(TableMetadataManagerSnafu)?
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect();
 
         to_http_response(tables)
     }

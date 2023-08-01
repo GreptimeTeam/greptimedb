@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use api::v1::{AffectedRows, FlightMetadata};
 use arrow_flight::utils::flight_data_to_arrow_batch;
-use arrow_flight::{FlightData, IpcMessage, SchemaAsIpc};
+use arrow_flight::{FlightData, SchemaAsIpc};
 use common_base::bytes::Bytes;
 use common_recordbatch::{RecordBatch, RecordBatches};
 use datatypes::arrow;
@@ -25,6 +25,7 @@ use datatypes::arrow::datatypes::Schema as ArrowSchema;
 use datatypes::arrow::ipc::{root_as_message, writer, MessageHeader};
 use datatypes::schema::{Schema, SchemaRef};
 use flatbuffers::FlatBufferBuilder;
+use prost::bytes::Bytes as ProstBytes;
 use prost::Message;
 use snafu::{OptionExt, ResultExt};
 
@@ -86,12 +87,12 @@ impl FlightEncoder {
                     affected_rows: Some(AffectedRows { value: rows as _ }),
                 }
                 .encode_to_vec();
-                FlightData::new(
-                    None,
-                    IpcMessage(build_none_flight_msg().into()),
-                    metadata,
-                    vec![],
-                )
+                FlightData {
+                    flight_descriptor: None,
+                    data_header: build_none_flight_msg().into(),
+                    app_metadata: metadata.into(),
+                    data_body: ProstBytes::default(),
+                }
             }
         }
     }

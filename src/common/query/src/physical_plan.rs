@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::any::Any;
-use std::fmt::Debug;
+use std::fmt::{self, Debug};
 use std::sync::Arc;
 
 use common_recordbatch::adapter::{DfRecordBatchStreamAdapter, RecordBatchStreamAdapter};
@@ -24,7 +24,7 @@ pub use datafusion::execution::context::{SessionContext, TaskContext};
 use datafusion::physical_plan::expressions::PhysicalSortExpr;
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 pub use datafusion::physical_plan::Partitioning;
-use datafusion::physical_plan::Statistics;
+use datafusion::physical_plan::{DisplayAs, DisplayFormatType, Statistics};
 use datatypes::schema::SchemaRef;
 use snafu::ResultExt;
 
@@ -215,6 +215,12 @@ impl DfPhysicalPlan for DfPhysicalPlanAdapter {
 
     fn metrics(&self) -> Option<MetricsSet> {
         self.0.metrics()
+    }
+}
+
+impl DisplayAs for DfPhysicalPlanAdapter {
+    fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{:?}", self.0)
     }
 }
 

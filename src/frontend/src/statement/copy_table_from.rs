@@ -31,8 +31,8 @@ use common_recordbatch::adapter::ParquetRecordBatchStreamAdapter;
 use common_recordbatch::DfSendableRecordBatchStream;
 use datafusion::datasource::listing::PartitionedFile;
 use datafusion::datasource::object_store::ObjectStoreUrl;
+use datafusion::datasource::physical_plan::{FileOpener, FileScanConfig, FileStream};
 use datafusion::parquet::arrow::ParquetRecordBatchStreamBuilder;
-use datafusion::physical_plan::file_format::{FileOpener, FileScanConfig, FileStream};
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datatypes::arrow::compute::can_cast_types;
 use datatypes::arrow::datatypes::{Schema, SchemaRef};
@@ -143,7 +143,7 @@ impl StatementExecutor {
                 projection: None,
                 limit: None,
                 table_partition_cols: vec![],
-                output_ordering: None,
+                output_ordering: vec![],
                 infinite_source: false,
             },
             0,
