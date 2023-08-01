@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::time::Duration;
+
 use common_grpc::channel_manager;
 use serde::{Deserialize, Serialize};
 
@@ -22,16 +24,20 @@ pub struct DatanodeOptions {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DatanodeClientOptions {
-    pub timeout_millis: u64,
-    pub connect_timeout_millis: u64,
+    #[serde(with = "humantime_serde")]
+    pub timeout: Duration,
+    #[serde(with = "humantime_serde")]
+    pub connect_timeout: Duration,
     pub tcp_nodelay: bool,
 }
 
 impl Default for DatanodeClientOptions {
     fn default() -> Self {
         Self {
-            timeout_millis: channel_manager::DEFAULT_GRPC_REQUEST_TIMEOUT_SECS * 1000,
-            connect_timeout_millis: channel_manager::DEFAULT_GRPC_CONNECT_TIMEOUT_SECS * 1000,
+            timeout: Duration::from_secs(channel_manager::DEFAULT_GRPC_REQUEST_TIMEOUT_SECS),
+            connect_timeout: Duration::from_secs(
+                channel_manager::DEFAULT_GRPC_CONNECT_TIMEOUT_SECS,
+            ),
             tcp_nodelay: true,
         }
     }

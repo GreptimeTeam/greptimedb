@@ -3275,6 +3275,7 @@ dependencies = [
  "file-table-engine",
  "futures",
  "futures-util",
+ "humantime-serde",
  "itertools",
  "meta-client",
  "meta-srv",

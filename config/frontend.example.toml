@@ -74,7 +74,7 @@ tcp_nodelay = true
 # Datanode options.
 [datanode]
 # Datanode client options.
-[datanode.client_options]
-timeout_millis = 10000
-connect_timeout_millis = 10000
+[datanode.client]
+timeout = "10s"
+connect_timeout = "10s"
 tcp_nodelay = true
