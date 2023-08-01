@@ -24,7 +24,7 @@ use crate::error::{self, Error, InvalidTableMetadataSnafu, Result};
 use crate::key::{TableMetaKey, SCHEMA_NAME_KEY_PATTERN, SCHEMA_NAME_KEY_PREFIX};
 use crate::kv_backend::KvBackendRef;
 use crate::range_stream::{PaginationStream, DEFAULT_PAGE_SIZE};
-use crate::rpc::store::{CompareAndPutRequest, RangeRequest};
+use crate::rpc::store::{PutRequest, RangeRequest};
 use crate::rpc::KeyValue;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -97,41 +97,16 @@ impl SchemaManager {
         Self { kv_backend }
     }
 
-    /// Creates `SchemaNameKey`, throws an error if key exists.
+    /// Creates `SchemaNameKey`.
     pub async fn create(&self, schema: SchemaNameKey<'_>) -> Result<()> {
-        let resp = self
-            .kv_backend
-            .compare_and_put(Self::build_create_req(schema)?)
-            .await?;
-
-        resp.handle(|resp| {
-            if resp.is_success() {
-                Ok(())
-            } else {
-                error::SchemaAlreadyExistsSnafu {
-                    catalog: schema.catalog,
-                    schema: schema.schema,
-                }
-                .fail()
-            }
-        })
-    }
-
-    /// Creates `SchemaNameKey` if key not exists.
-    pub async fn create_if_not_exists(&self, schema: SchemaNameKey<'_>) -> Result<()> {
-        let resp = self
-            .kv_backend
-            .compare_and_put(Self::build_create_req(schema)?)
-            .await?;
-        resp.handle(|_| Ok(()))
-    }
-
-    fn build_create_req(schema: SchemaNameKey<'_>) -> Result<CompareAndPutRequest> {
         let raw_key = schema.as_raw_key();
-
-        Ok(CompareAndPutRequest::new()
+        let req = PutRequest::new()
             .with_key(raw_key)
-            .with_expect(SchemaNameValue.try_as_raw_value()?))
+            .with_value(SchemaNameValue.try_as_raw_value()?);
+
+        self.kv_backend.put(req).await?;
+
+        Ok(())
     }
 
     /// Returns a schema stream, it lists all schemas belong to the target `catalog`.

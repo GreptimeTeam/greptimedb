@@ -24,9 +24,8 @@ use crate::error::{self, Error, InvalidTableMetadataSnafu, Result};
 use crate::key::{TableMetaKey, CATALOG_NAME_KEY_PATTERN, CATALOG_NAME_KEY_PREFIX};
 use crate::kv_backend::KvBackendRef;
 use crate::range_stream::{PaginationStream, DEFAULT_PAGE_SIZE};
-use crate::rpc::store::{CompareAndPutRequest, RangeRequest};
+use crate::rpc::store::{PutRequest, RangeRequest};
 use crate::rpc::KeyValue;
-use crate::table_name::TableName;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CatalogNameKey<'a> {
@@ -43,14 +42,6 @@ impl<'a> CatalogNameKey<'a> {
 
     pub fn range_start_key() -> String {
         format!("{}/", CATALOG_NAME_KEY_PREFIX)
-    }
-}
-
-impl<'a> From<&'a TableName> for CatalogNameKey<'a> {
-    fn from(value: &'a TableName) -> Self {
-        Self {
-            catalog: &value.catalog_name,
-        }
     }
 }
 
@@ -100,40 +91,16 @@ impl CatalogManager {
         Self { kv_backend }
     }
 
-    /// Creates `CatalogNameKey`, throws an error if key exists.
+    /// Creates `CatalogNameKey`.
     pub async fn create(&self, catalog: CatalogNameKey<'_>) -> Result<()> {
-        let resp = self
-            .kv_backend
-            .compare_and_put(Self::build_create_req(catalog)?)
-            .await?;
+        let raw_key = catalog.as_raw_key();
 
-        resp.handle(|resp| {
-            if resp.is_success() {
-                Ok(())
-            } else {
-                error::CatalogAlreadyExistsSnafu {
-                    catalog: catalog.to_string(),
-                }
-                .fail()
-            }
-        })
-    }
-
-    /// Creates `CatalogNameKey`, if key not exists.
-    pub async fn create_if_not_exists(&self, catalog: CatalogNameKey<'_>) -> Result<()> {
-        let resp = self
-            .kv_backend
-            .compare_and_put(Self::build_create_req(catalog)?)
-            .await?;
-        resp.handle(|_| Ok(()))
-    }
-
-    fn build_create_req(schema: CatalogNameKey<'_>) -> Result<CompareAndPutRequest> {
-        let raw_key = schema.as_raw_key();
-
-        Ok(CompareAndPutRequest::new()
+        let req = PutRequest::new()
             .with_key(raw_key)
-            .with_expect(CatalogNameValue.try_as_raw_value()?))
+            .with_value(CatalogNameValue.try_as_raw_value()?);
+        self.kv_backend.put(req).await?;
+
+        Ok(())
     }
 
     pub async fn catalog_names(&self) -> BoxStream<'static, Result<String>> {
