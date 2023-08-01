@@ -69,6 +69,44 @@ async fn test_pubsub() {
     assert!(may_msg.is_none());
 }
 
+#[tokio::test]
+async fn test_subscriber_disconnect() {
+    let manager = Arc::new(DefaultSubscribeManager::default());
+
+    let (subscriber1, rx1) = mock_subscriber(1, "tidigong");
+    let req = AddSubRequest {
+        topic_list: vec![Topic::Heartbeat],
+        subscriber: subscriber1,
+    };
+    manager.subscribe(req).unwrap();
+
+    let (subscriber2, rx2) = mock_subscriber(2, "gcrm");
+    let req = AddSubRequest {
+        topic_list: vec![Topic::Heartbeat],
+        subscriber: subscriber2,
+    };
+    manager.subscribe(req).unwrap();
+
+    let manager_clone = manager.clone();
+    let message_number: usize = 5;
+    let join = tokio::spawn(async move {
+        let publisher: DefaultPublish<DefaultSubscribeManager<Sender<Message>>, Sender<Message>> =
+            DefaultPublish::new(manager_clone);
+        for _ in 0..message_number {
+            publisher.send_msg(mock_message()).await;
+        }
+    });
+
+    // Simulate subscriber disconnection.
+    std::mem::drop(rx1);
+    std::mem::drop(rx2);
+
+    join.await.unwrap();
+
+    let subscriber_list = manager.subscriber_list_by_topic(&Topic::Heartbeat);
+    assert!(subscriber_list.is_empty());
+}
+
 #[test]
 fn test_message() {
     let msg = Message::Heartbeat(Box::default());
