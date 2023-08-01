@@ -133,6 +133,48 @@ The `ts` field is just a placeholder -- for the constraints that a mito region m
     - `__table_<TABLE_NAME>` is used for marking table existence. It doesn't have value.
     - `__column_<TABLE_NAME>_<COLUMN_NAME>` is used for marking table existence, the value is column's semantic type.
 
+## Physical region implementation
+
+This RFC proposes to add a new region implementation named "MetricRegion". As showed in the first chart, it's wrapped over the existing mito region. This section will describe the implementation details. Firstly, here is a chart shows how the region hierarchy looks like:
+
+```plaintext
+ ┌───────────────────────┐
+ │ Metric Region         │
+ │                       │
+ │   ┌────────┬──────────┤
+ │   │ Mito   │ Mito     │
+ │   │ Region │ Region   │
+ │   │ for    │ for      │
+ │   │ Data   │ Metadata │
+ └───┴────────┴──────────┘
+```
+
+All upper levels only see the Metric Region. E.g., Meta Server schedules on this region, or Frontend routes requests to this Metrics Region's id. To be scheduled (open or close etc.), Metric Region needs to implement its own procedures. Most of those procedures can be simply assembled from underlying Mito Regions', but those related to data like alter or drop will have its own new logic.
+
+Another point is region id. Since the region id is used widely from meta server to persisted state, it's better to keep it unchanged. This means we can't use the same id for two regions, but one for each. To achieve this, this RFC proposes a concept named "region id group". A region id group is a group of region ids that are bound for different purposes. Like the two underlying regions here. 
+
+This preserves the first 8 bits of the `u32` region number for grouping. Each group has one main id (the first one) and other sub ids (the rest non-zero ids). All components other than the region implementation itself doesn't aware of the existence of region id group. They only see the main id. The region implementation is in response of managing and using the region id group.
+
+todo: chart
+
+## Routing in meta server
+
+From previous sections, we can conclude the following points about routing:
+- Each "logical table" has its own, universe unique table id.
+- Logical table doesn't have physical region, they share the same physical region with other logical tables.
+- Route rule of logical table's is a strict subset of physical table's.
+
+To associate the logical table with physical region, we need to specify necessary informations in the create table request. Specificly, the table type and its parent table. This require to change our gRPC proto's definition. And once meta recognize the table to create is a logical table, it will use the parent table's region to create route entry.
+
+And to reduce the consumption of region failover (which need to update the physical table route info), we'd better to split the current route table structure into two parts:
+
+```rust
+region_route: Map<TableName, [RegionId]>,
+node_route: Map<RegionId, [NodeId]>,
+```
+
+By doing this on each failover the meta server only needs to update the second `node_route` map and leave the first one untouched.
+
 ## Query
 
 Like other existing components, a user query always starts in the frontend. In the planning phase, frontend needs to fetch related schemas of the queried table. This part is the same. I.e., changes in this RFC don't affect components above the `Table` abstraction.
