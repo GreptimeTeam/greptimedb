@@ -79,6 +79,12 @@ pub struct RegionEdit {
     pub compaction_time_window: Option<i64>,
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct RegionTruncate {
+    pub region_id: RegionId,
+    pub files_to_remove: Vec<FileMeta>,
+}
+
 /// The region version checkpoint
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct RegionVersion {
@@ -190,6 +196,7 @@ pub enum RegionMetaAction {
     Change(RegionChange),
     Remove(RegionRemove),
     Edit(RegionEdit),
+    Truncate(RegionTruncate),
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]

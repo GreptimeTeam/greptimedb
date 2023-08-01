@@ -50,13 +50,13 @@ use crate::manifest::region::RegionManifest;
 use crate::memtable::MemtableBuilderRef;
 use crate::metadata::{RegionMetaImpl, RegionMetadata, RegionMetadataRef};
 pub(crate) use crate::region::writer::schedule_compaction;
-use crate::region::writer::DropContext;
 pub use crate::region::writer::{
     AlterContext, RegionWriter, RegionWriterRef, WriterCompactRequest, WriterContext,
 };
+use crate::region::writer::{DropContext, TruncateContext};
 use crate::schema::compat::CompatWrite;
 use crate::snapshot::SnapshotImpl;
-use crate::sst::AccessLayerRef;
+use crate::sst::{AccessLayerRef, FileId};
 use crate::version::{
     Version, VersionControl, VersionControlRef, VersionEdit, INIT_COMMITTED_SEQUENCE,
 };
@@ -153,6 +153,10 @@ impl<S: LogStore> Region for RegionImpl<S> {
 
     async fn compact(&self, ctx: &CompactContext) -> std::result::Result<(), Self::Error> {
         self.inner.compact(ctx).await
+    }
+
+    async fn truncate(&self) -> Result<()> {
+        self.inner.truncate().await
     }
 }
 
@@ -489,11 +493,16 @@ impl<S: LogStore> RegionImpl<S> {
                     (RegionMetaAction::Remove(r), Some(v)) => {
                         manifest.stop().await?;
 
-                        let files = v.ssts().mark_all_files_deleted();
+                        let files = v
+                            .ssts()
+                            .mark_all_files_deleted()
+                            .iter()
+                            .map(|f| f.file_id)
+                            .collect::<Vec<FileId>>();
                         logging::info!(
                             "Try to remove all SSTs, region: {}, files: {:?}",
                             r.region_id,
-                            files
+                            files,
                         );
 
                         manifest
@@ -501,6 +510,20 @@ impl<S: LogStore> RegionImpl<S> {
                             .delete_all(v.manifest_version())
                             .await?;
                         return Ok((None, recovered_metadata));
+                    }
+                    (RegionMetaAction::Truncate(r), Some(v)) => {
+                        let files = v
+                            .ssts()
+                            .mark_all_files_deleted()
+                            .iter()
+                            .map(|f| f.file_id)
+                            .collect::<Vec<FileId>>();
+                        logging::info!(
+                            "Try to remove all SSTs, region: {}, files: {:?}",
+                            r.region_id,
+                            files,
+                        );
+                        version = Some(v);
                     }
                     (action, None) => {
                         actions.push((manifest_version, action));
@@ -768,5 +791,37 @@ impl<S: LogStore> RegionInner<S> {
                 compact_ctx: *compact_ctx,
             })
             .await
+    }
+
+    async fn truncate(&self) -> Result<()> {
+        logging::info!(
+            "Truncate region {}, name: {}",
+            self.shared.id,
+            self.shared.name
+        );
+
+        let writer_ctx = WriterContext {
+            shared: &self.shared,
+            flush_strategy: &self.flush_strategy,
+            flush_scheduler: &self.flush_scheduler,
+            compaction_scheduler: &self.compaction_scheduler,
+            sst_layer: &self.sst_layer,
+            wal: &self.wal,
+            writer: &self.writer,
+            manifest: &self.manifest,
+            compaction_picker: self.compaction_picker.clone(),
+        };
+
+        let ctx = TruncateContext {
+            shared: &self.shared,
+            wal: &self.wal,
+            manifest: &self.manifest,
+            flush_scheduler: &self.flush_scheduler,
+            compaction_scheduler: &self.compaction_scheduler,
+            sst_layer: &self.sst_layer,
+        };
+
+        self.writer.truncate(&ctx, writer_ctx).await?;
+        Ok(())
     }
 }

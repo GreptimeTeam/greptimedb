@@ -85,6 +85,9 @@ pub trait StorageEngine: Send + Sync + Clone + 'static {
 
     /// Close the engine.
     async fn close(&self, ctx: &EngineContext) -> Result<(), Self::Error>;
+
+    /// Truncate region by region name.
+    async fn truncate_region(&self, ctx: &EngineContext, name: &str) -> Result<(), Self::Error>;
 }
 
 /// Storage engine context.

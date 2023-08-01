@@ -137,11 +137,11 @@ impl LevelMetas {
         merged
     }
 
-    pub fn mark_all_files_deleted(&self) -> Vec<FileId> {
+    pub fn mark_all_files_deleted(&self) -> Vec<FileMeta> {
         self.levels().iter().fold(vec![], |mut files, level| {
             files.extend(level.files().map(|f| {
                 f.mark_deleted();
-                f.file_id()
+                f.meta()
             }));
             files
         })

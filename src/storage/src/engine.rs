@@ -106,6 +106,10 @@ impl<S: LogStore> StorageEngine for EngineImpl<S> {
 
         Ok(())
     }
+
+    async fn truncate_region(&self, _ctx: &EngineContext, name: &str) -> Result<()> {
+        self.inner.truncate_region(name).await
+    }
 }
 
 impl<S: LogStore> EngineImpl<S> {
@@ -525,6 +529,13 @@ impl<S: LogStore> EngineInner<S> {
         self.compaction_scheduler.stop(true).await?;
         self.flush_scheduler.stop().await?;
         self.file_purger.stop(true).await
+    }
+
+    async fn truncate_region(&self, name: &str) -> Result<()> {
+        if let Some(region) = self.get_region(name) {
+            region.truncate().await?;
+        }
+        Ok(())
     }
 }
 

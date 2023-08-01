@@ -35,7 +35,7 @@ use crate::flush::{
 };
 use crate::manifest::action::{
     RawRegionMetadata, RegionChange, RegionEdit, RegionMetaAction, RegionMetaActionList,
-    RegionRemove,
+    RegionRemove, RegionTruncate,
 };
 use crate::memtable::{Inserter, MemtableBuilderRef, MemtableId, MemtableRef};
 use crate::metadata::RegionMetadataRef;
@@ -45,7 +45,7 @@ use crate::region::{
     CompactContext, RecoveredMetadata, RecoveredMetadataMap, RegionManifest, SharedDataRef,
 };
 use crate::schema::compat::CompatWrite;
-use crate::sst::AccessLayerRef;
+use crate::sst::{AccessLayerRef, FileId};
 use crate::version::{VersionControl, VersionControlRef, VersionEdit};
 use crate::wal::Wal;
 use crate::write_batch::WriteBatch;
@@ -336,7 +336,12 @@ where
         );
 
         // Mark all SSTs deleted
-        let files = current_version.ssts().mark_all_files_deleted();
+        let files = current_version
+            .ssts()
+            .mark_all_files_deleted()
+            .iter()
+            .map(|f| f.file_id)
+            .collect::<Vec<FileId>>();
         logging::info!(
             "Try to remove all SSTs, region: {}, files: {:?}",
             drop_ctx.shared.id(),
@@ -394,6 +399,63 @@ where
         if let Some(handle) = inner.flush_handle.take() {
             handle.wait().await?;
         }
+
+        Ok(())
+    }
+
+    pub async fn truncate(
+        &self,
+        ctx: &TruncateContext<'_, S>,
+        writer_ctx: WriterContext<'_, S>,
+    ) -> Result<()> {
+        // Acquires the write lock.
+        let mut inner = self.inner.lock().await;
+        ensure!(!inner.is_closed(), error::ClosedRegionSnafu);
+
+        // Manual flush to clear Memtable.
+        inner
+            .manual_flush(writer_ctx, FlushReason::Manually)
+            .await?;
+
+        if let Some(handle) = inner.flush_handle.take() {
+            handle.wait().await?;
+        }
+
+        let version_control = ctx.version_control();
+
+        let _lock = self.version_mutex.lock().await;
+        let committed_sequence = version_control.committed_sequence();
+        // Mark all data obsolete
+        ctx.wal.obsolete(committed_sequence).await?;
+
+        // Mark all SSTs deleted
+        let current_version = version_control.current();
+        let files = current_version.ssts().mark_all_files_deleted();
+
+        logging::info!(
+            "Try to truncate all SSTs, region: {}, files: {:?}",
+            ctx.shared.id(),
+            files.iter().map(|f| f.file_id).collect::<Vec<FileId>>(),
+        );
+
+        // Add `RegionMetaAction::Truncate` to recover from manifest in case of failure.
+        let mut action_list =
+            RegionMetaActionList::with_action(RegionMetaAction::Truncate(RegionTruncate {
+                region_id: ctx.shared.id,
+                files_to_remove: files,
+            }));
+
+        // Persist the meta action.
+        let prev_version = version_control.current_manifest_version();
+        action_list.set_prev_version(prev_version);
+
+        logging::info!(
+            "Try to remove region {}, action_list: {:?}",
+            ctx.shared.id(),
+            action_list
+        );
+
+        let _ = ctx.manifest.update(action_list).await?;
 
         Ok(())
     }
@@ -462,6 +524,22 @@ pub struct DropContext<'a, S: LogStore> {
 }
 
 impl<'a, S: LogStore> DropContext<'a, S> {
+    #[inline]
+    fn version_control(&self) -> &VersionControlRef {
+        &self.shared.version_control
+    }
+}
+
+pub struct TruncateContext<'a, S: LogStore> {
+    pub shared: &'a SharedDataRef,
+    pub wal: &'a Wal<S>,
+    pub manifest: &'a RegionManifest,
+    pub flush_scheduler: &'a FlushSchedulerRef<S>,
+    pub compaction_scheduler: &'a CompactionSchedulerRef<S>,
+    pub sst_layer: &'a AccessLayerRef,
+}
+
+impl<'a, S: LogStore> TruncateContext<'a, S> {
     #[inline]
     fn version_control(&self) -> &VersionControlRef {
         &self.shared.version_control

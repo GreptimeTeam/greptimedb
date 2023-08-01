@@ -209,6 +209,10 @@ impl Region for MockRegion {
     async fn compact(&self, _ctx: &CompactContext) -> std::result::Result<(), Self::Error> {
         unimplemented!()
     }
+
+    async fn truncate(&self) -> Result<()> {
+        unimplemented!()
+    }
 }
 
 impl MockRegionInner {
@@ -346,6 +350,10 @@ impl StorageEngine for MockEngine {
     }
 
     async fn close(&self, _ctx: &EngineContext) -> Result<()> {
+        Ok(())
+    }
+
+    async fn truncate_region(&self, _ctx: &EngineContext, _name: &str) -> Result<()> {
         Ok(())
     }
 }

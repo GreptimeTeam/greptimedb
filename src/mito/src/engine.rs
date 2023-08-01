@@ -184,6 +184,14 @@ impl<S: StorageEngine> TableEngine for MitoEngine<S> {
     async fn close(&self) -> TableResult<()> {
         self.inner.close().await
     }
+
+    async fn truncate_table(
+        &self,
+        _ctx: &EngineContext,
+        request: TruncateTableRequest,
+    ) -> TableResult<bool> {
+        self.inner.truncate_table(request).await
+    }
 }
 
 impl<S: StorageEngine> TableEngineProcedure for MitoEngine<S> {
@@ -703,6 +711,30 @@ impl<S: StorageEngine> MitoEngineInner<S> {
 
         // Partial closed
         Ok(CloseTableResult::PartialClosed(removed_regions))
+    }
+
+    async fn truncate_table(&self, request: TruncateTableRequest) -> TableResult<bool> {
+        let _lock = self.table_mutex.lock(request.table_id).await;
+
+        let table_id = request.table_id;
+        if let Some(table) = self.get_mito_table(table_id) {
+            let all_regions = table.region_ids();
+            let ctx = StorageEngineContext::default();
+
+            let opts = CloseOptions { flush: false };
+
+            for region_number in all_regions {
+                self.storage_engine
+                    .close_region(&ctx, &region_name(table_id, region_number), &opts)
+                    .await
+                    .map_err(BoxedError::new)
+                    .context(table_error::TableOperationSnafu)?;
+            }
+
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 }
 

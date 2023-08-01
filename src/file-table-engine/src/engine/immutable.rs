@@ -111,6 +111,14 @@ impl TableEngine for ImmutableFileTableEngine {
     async fn close(&self) -> TableResult<()> {
         self.inner.close().await
     }
+
+    async fn truncate_table(
+        &self,
+        _ctx: &EngineContext,
+        _requets: TruncateTableRequest,
+    ) -> TableResult<bool> {
+        Ok(true)
+    }
 }
 
 #[async_trait]

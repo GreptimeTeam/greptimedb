@@ -103,6 +103,14 @@ impl TableEngine for MockTableEngine {
     async fn close(&self) -> Result<()> {
         Ok(())
     }
+
+    async fn truncate_table(
+        &self,
+        _ctx: &EngineContext,
+        _request: TruncateTableRequest,
+    ) -> Result<bool> {
+        Ok(true)
+    }
 }
 
 impl TableEngineProcedure for MockTableEngine {

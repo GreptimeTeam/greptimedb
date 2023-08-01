@@ -74,3 +74,19 @@ pub fn build_region_edit(
         compaction_time_window: None,
     }
 }
+
+pub fn build_region_truncate(files_to_remove: &[FileId]) -> RegionTruncate {
+    RegionTruncate {
+        region_id: 0.into(),
+        files_to_remove: files_to_remove
+            .iter()
+            .map(|f| FileMeta {
+                region_id: 0.into(),
+                file_id: *f,
+                time_range: None,
+                level: 0,
+                file_size: DEFAULT_TEST_FILE_SIZE,
+            })
+            .collect(),
+    }
+}

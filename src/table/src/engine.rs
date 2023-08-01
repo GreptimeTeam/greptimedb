@@ -132,6 +132,12 @@ pub trait TableEngine: Send + Sync {
 
     /// Close the engine.
     async fn close(&self) -> Result<()>;
+
+    async fn truncate_table(
+        &self,
+        _ctx: &EngineContext,
+        _request: TruncateTableRequest,
+    ) -> Result<bool>;
 }
 
 pub type TableEngineRef = Arc<dyn TableEngine>;
