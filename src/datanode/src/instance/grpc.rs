@@ -301,11 +301,11 @@ async fn new_dummy_catalog_list(
 mod test {
     use api::v1::add_column::location::LocationType;
     use api::v1::add_column::Location;
-    use api::v1::column::{SemanticType, Values};
+    use api::v1::column::Values;
     use api::v1::{
         alter_expr, AddColumn, AddColumns, AlterExpr, Column, ColumnDataType, ColumnDef,
         CreateDatabaseExpr, CreateTableExpr, DropTableExpr, InsertRequest, InsertRequests,
-        QueryRequest, RenameTable, TableId, TruncateTableExpr,
+        QueryRequest, RenameTable, SemanticType, TableId, TruncateTableExpr,
     };
     use common_catalog::consts::MITO_ENGINE;
     use common_error::ext::ErrorExt;

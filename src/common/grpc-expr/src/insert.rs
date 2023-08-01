@@ -16,10 +16,10 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
-use api::v1::column::{SemanticType, Values};
+use api::v1::column::Values;
 use api::v1::{
     AddColumn, AddColumns, Column, ColumnDataType, ColumnDef, CreateTableExpr,
-    InsertRequest as GrpcInsertRequest,
+    InsertRequest as GrpcInsertRequest, SemanticType,
 };
 use common_base::BitVec;
 use common_time::time::Time;
@@ -575,8 +575,8 @@ mod tests {
     use std::{assert_eq, vec};
 
     use api::helper::ColumnDataTypeWrapper;
-    use api::v1::column::{self, SemanticType, Values};
-    use api::v1::{Column, ColumnDataType};
+    use api::v1::column::Values;
+    use api::v1::{Column, ColumnDataType, SemanticType};
     use common_base::BitVec;
     use common_catalog::consts::MITO_ENGINE;
     use common_time::timestamp::{TimeUnit, Timestamp};
@@ -1028,7 +1028,7 @@ mod tests {
     fn mock_insert_batch() -> (Vec<Column>, u32) {
         let row_count = 2;
 
-        let host_vals = column::Values {
+        let host_vals = Values {
             string_values: vec!["host1".to_string(), "host2".to_string()],
             ..Default::default()
         };
@@ -1040,7 +1040,7 @@ mod tests {
             datatype: ColumnDataType::String as i32,
         };
 
-        let cpu_vals = column::Values {
+        let cpu_vals = Values {
             f64_values: vec![0.31],
             ..Default::default()
         };
@@ -1052,7 +1052,7 @@ mod tests {
             datatype: ColumnDataType::Float64 as i32,
         };
 
-        let mem_vals = column::Values {
+        let mem_vals = Values {
             f64_values: vec![0.1],
             ..Default::default()
         };
@@ -1064,7 +1064,7 @@ mod tests {
             datatype: ColumnDataType::Float64 as i32,
         };
 
-        let time_vals = column::Values {
+        let time_vals = Values {
             time_millisecond_values: vec![100, 101],
             ..Default::default()
         };
@@ -1076,7 +1076,7 @@ mod tests {
             datatype: ColumnDataType::TimeMillisecond as i32,
         };
 
-        let ts_vals = column::Values {
+        let ts_vals = Values {
             ts_millisecond_values: vec![100, 101],
             ..Default::default()
         };

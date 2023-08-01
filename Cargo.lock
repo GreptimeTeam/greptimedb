@@ -4129,7 +4129,7 @@ checksum = "d2fabcfbdc87f4758337ca535fb41a6d701b65693ce38287d856d1674551ec9b"
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=356694a72f12ad9e15008d4245a0b4fe48f982ad#356694a72f12ad9e15008d4245a0b4fe48f982ad"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=3d8ac534a0c8fd1c6ec66d129345b44c95665ebc#3d8ac534a0c8fd1c6ec66d129345b44c95665ebc"
 dependencies = [
  "prost",
  "serde",
@@ -9210,7 +9210,6 @@ dependencies = [
  "datatypes",
  "hex",
  "itertools 0.10.5",
- "mito",
  "once_cell",
  "snafu",
  "sqlparser",

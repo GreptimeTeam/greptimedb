@@ -16,8 +16,7 @@ use std::collections::HashMap;
 use std::fmt::Display;
 
 use api::helper::values_with_capacity;
-use api::v1::column::SemanticType;
-use api::v1::{Column, ColumnDataType};
+use api::v1::{Column, ColumnDataType, SemanticType};
 use common_base::BitVec;
 use snafu::ensure;
 
@@ -262,8 +261,7 @@ impl Display for Precision {
 
 #[cfg(test)]
 mod tests {
-    use api::v1::column::SemanticType;
-    use api::v1::ColumnDataType;
+    use api::v1::{ColumnDataType, SemanticType};
     use common_base::BitVec;
 
     use super::LinesWriter;

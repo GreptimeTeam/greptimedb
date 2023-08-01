@@ -611,7 +611,7 @@ mod tests {
 
     #[test]
     fn test_column_put_vector() {
-        use crate::v1::column::SemanticType;
+        use crate::v1::SemanticType;
         // Some(false), None, Some(true), Some(true)
         let mut column = Column {
             column_name: "test".to_string(),
