@@ -72,7 +72,7 @@ runs:
       uses: taiki-e/install-action@nextest
 
     - name: Run integration tests
-      if: ${{ inputs.disable_run_tests == 'false' }}
+      if: ${{ inputs.disable-run-tests == 'false' }}
       shell: bash
       run: |
         make test sqlness-test
