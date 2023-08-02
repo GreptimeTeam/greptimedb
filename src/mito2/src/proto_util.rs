@@ -19,6 +19,7 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::types::{TimeType, TimestampType};
 use datatypes::value::Value;
 use greptime_proto::v1::{self, ColumnDataType};
+use store_api::storage::OpType;
 
 use crate::metadata::SemanticType;
 
@@ -166,6 +167,14 @@ pub(crate) fn to_proto_semantic_type(semantic_type: SemanticType) -> v1::Semanti
         SemanticType::Tag => v1::SemanticType::Tag,
         SemanticType::Field => v1::SemanticType::Field,
         SemanticType::Timestamp => v1::SemanticType::Timestamp,
+    }
+}
+
+/// Convert op type to proto's op type.
+pub(crate) fn to_proto_op_type(op_type: OpType) -> v1::mito::OpType {
+    match op_type {
+        OpType::Delete => v1::mito::OpType::Delete,
+        OpType::Put => v1::mito::OpType::Put,
     }
 }
 

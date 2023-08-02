@@ -20,6 +20,7 @@ use greptime_proto::v1::mito::Mutation;
 use tokio::sync::oneshot::Sender;
 
 use crate::error::{RegionNotFoundSnafu, Result};
+use crate::proto_util::to_proto_op_type;
 use crate::region::version::VersionRef;
 use crate::region::MitoRegionRef;
 use crate::request::SenderWriteRequest;
@@ -53,7 +54,7 @@ impl<S> RegionWorkerLoop<S> {
             // Safety: Now we ensure the region exists.
             let region_ctx = region_ctxs.get_mut(&region_id).unwrap();
 
-            // Checks request schema.
+            // Checks whether request schema is compatible with region schema.
             if let Err(e) = sender_req
                 .request
                 .check_schema(&region_ctx.version.metadata)
@@ -63,18 +64,9 @@ impl<S> RegionWorkerLoop<S> {
                 continue;
             }
 
-            //
+            // Collect requests by region.
+            region_ctx.push_sender_request(sender_req);
         }
-        // We need to check:
-        // - region exists, if not, return error
-        // - check whether the schema is compatible with region schema. We should fill default value at this time.
-        // - collect rows by region
-        // - get sequence for each row
-
-        // problem:
-        // - column order in request may be different from table column order
-        // - need to add missing column
-        // - memtable may need a new struct for sequence and op type.
 
         todo!()
     }
@@ -88,7 +80,7 @@ fn send_result(sender: Option<Sender<Result<()>>>, res: Result<()>) {
     }
 }
 
-/// Context to write to a region.
+/// Context to keep region metadata and buffer write requests.
 struct RegionWriteCtx {
     /// Region to write.
     region: MitoRegionRef,
@@ -112,5 +104,15 @@ impl RegionWriteCtx {
             mutations: Vec::new(),
             senders: Vec::new(),
         }
+    }
+
+    /// Push [SenderWriteRequest] to the context.
+    fn push_sender_request(&mut self, sender_req: SenderWriteRequest) {
+        self.mutations.push(Mutation {
+            op_type: to_proto_op_type(sender_req.request.op_type) as i32,
+            sequence: 0, // TODO(yingwen): Set sequence.
+            rows: Some(sender_req.request.rows),
+        });
+        self.senders.push(sender_req.sender);
     }
 }
