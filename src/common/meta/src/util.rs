@@ -27,9 +27,27 @@ pub fn get_prefix_end_key(key: &[u8]) -> Vec<u8> {
     vec![0]
 }
 
+/// Get next prefix key of `key`.
+#[inline]
+pub fn get_next_prefix_key(key: &[u8]) -> Vec<u8> {
+    let mut next = Vec::with_capacity(key.len() + 1);
+    next.extend_from_slice(key);
+    next.push(0);
+
+    next
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_get_next_prefix() {
+        let key = b"testa";
+        let mut expected = b"testa".to_vec();
+        expected.push(0);
+        assert_eq!(expected, get_next_prefix_key(key));
+    }
 
     #[test]
     fn test_get_prefix() {

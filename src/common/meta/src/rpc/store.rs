@@ -612,6 +612,13 @@ impl TryFrom<PbCompareAndPutResponse> for CompareAndPutResponse {
 }
 
 impl CompareAndPutResponse {
+    pub fn handle<R, E, F>(&self, f: F) -> std::result::Result<R, E>
+    where
+        F: FnOnce(&Self) -> std::result::Result<R, E>,
+    {
+        f(self)
+    }
+
     pub fn to_proto_resp(self, header: PbResponseHeader) -> PbCompareAndPutResponse {
         PbCompareAndPutResponse {
             header: Some(header),
