@@ -14,9 +14,11 @@
 
 //! Utilities to process protobuf messages.
 
+use common_time::timestamp::TimeUnit;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::types::{TimeType, TimestampType};
-use greptime_proto::v1::ColumnDataType;
+use datatypes::value::Value;
+use greptime_proto::v1::{self, ColumnDataType};
 
 use crate::metadata::SemanticType;
 
@@ -32,6 +34,89 @@ pub(crate) fn check_column_type(type_value: i32, expect_type: &ConcreteDataType)
     };
 
     is_column_type_eq(column_type, expect_type)
+}
+
+/// Convert value into proto's value.
+pub(crate) fn to_proto_value(value: Value) -> Option<v1::Value> {
+    let proto_value = match value {
+        Value::Null => v1::Value { value: None },
+        Value::Boolean(v) => v1::Value {
+            value: Some(v1::value::Value::BoolValue(v)),
+        },
+        Value::UInt8(v) => v1::Value {
+            value: Some(v1::value::Value::U8Value(v.into())),
+        },
+        Value::UInt16(v) => v1::Value {
+            value: Some(v1::value::Value::U16Value(v.into())),
+        },
+        Value::UInt32(v) => v1::Value {
+            value: Some(v1::value::Value::U32Value(v)),
+        },
+        Value::UInt64(v) => v1::Value {
+            value: Some(v1::value::Value::U64Value(v)),
+        },
+        Value::Int8(v) => v1::Value {
+            value: Some(v1::value::Value::I8Value(v.into())),
+        },
+        Value::Int16(v) => v1::Value {
+            value: Some(v1::value::Value::I16Value(v.into())),
+        },
+        Value::Int32(v) => v1::Value {
+            value: Some(v1::value::Value::I32Value(v)),
+        },
+        Value::Int64(v) => v1::Value {
+            value: Some(v1::value::Value::I64Value(v)),
+        },
+        Value::Float32(v) => v1::Value {
+            value: Some(v1::value::Value::F32Value(*v)),
+        },
+        Value::Float64(v) => v1::Value {
+            value: Some(v1::value::Value::F64Value(*v)),
+        },
+        Value::String(v) => v1::Value {
+            value: Some(v1::value::Value::StringValue(v.as_utf8().to_string())),
+        },
+        Value::Binary(v) => v1::Value {
+            value: Some(v1::value::Value::BinaryValue(v.to_vec())),
+        },
+        Value::Date(v) => v1::Value {
+            value: Some(v1::value::Value::DateValue(v.val())),
+        },
+        Value::DateTime(v) => v1::Value {
+            value: Some(v1::value::Value::DatetimeValue(v.val())),
+        },
+        Value::Timestamp(v) => match v.unit() {
+            TimeUnit::Second => v1::Value {
+                value: Some(v1::value::Value::TsSecondValue(v.value())),
+            },
+            TimeUnit::Millisecond => v1::Value {
+                value: Some(v1::value::Value::TsMillisecondValue(v.value())),
+            },
+            TimeUnit::Microsecond => v1::Value {
+                value: Some(v1::value::Value::TsMicrosecondValue(v.value())),
+            },
+            TimeUnit::Nanosecond => v1::Value {
+                value: Some(v1::value::Value::TsNanosecondValue(v.value())),
+            },
+        },
+        Value::Time(v) => match v.unit() {
+            TimeUnit::Second => v1::Value {
+                value: Some(v1::value::Value::TimeSecondValue(v.value())),
+            },
+            TimeUnit::Millisecond => v1::Value {
+                value: Some(v1::value::Value::TimeMillisecondValue(v.value())),
+            },
+            TimeUnit::Microsecond => v1::Value {
+                value: Some(v1::value::Value::TimeMicrosecondValue(v.value())),
+            },
+            TimeUnit::Nanosecond => v1::Value {
+                value: Some(v1::value::Value::TimeNanosecondValue(v.value())),
+            },
+        },
+        Value::Interval(_) | Value::List(_) => return None,
+    };
+
+    Some(proto_value)
 }
 
 /// Returns true if the column type is equal to exepcted type.
