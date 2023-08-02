@@ -2,6 +2,7 @@
 CARGO_PROFILE ?=
 FEATURES ?=
 TARGET_DIR ?=
+TARGET ?=
 CARGO_BUILD_OPTS := --locked
 IMAGE_REGISTRY ?= docker.io
 IMAGE_NAMESPACE ?= greptime
@@ -36,6 +37,10 @@ endif
 
 ifneq ($(strip $(TARGET_DIR)),)
 	CARGO_BUILD_OPTS += --target-dir ${TARGET_DIR}
+endif
+
+ifneq ($(strip $(TARGET)),)
+	CARGO_BUILD_OPTS += --target ${TARGET}
 endif
 
 ifeq ($(BUILDX_MULTI_PLATFORM_BUILD), true)
