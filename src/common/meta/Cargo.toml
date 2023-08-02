@@ -24,7 +24,6 @@ snafu.workspace = true
 store-api = { path = "../../store-api" }
 table = { path = "../../table" }
 tokio.workspace = true
-reqwest = { version = "0.11", features = ["json"] }
 
 [dev-dependencies]
 chrono.workspace = true
