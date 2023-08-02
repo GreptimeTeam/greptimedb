@@ -1230,7 +1230,7 @@ mod tests {
             days: 5,
             nanoseconds: 6,
         };
-        let interval_vals = column::Values {
+        let interval_vals = Values {
             interval_month_day_nano_values: vec![interval1, interval2],
             ..Default::default()
         };
@@ -1242,7 +1242,7 @@ mod tests {
             datatype: ColumnDataType::IntervalMonthDayNano as i32,
         };
 
-        let ts_vals = column::Values {
+        let ts_vals = Values {
             ts_millisecond_values: vec![100, 101],
             ..Default::default()
         };
