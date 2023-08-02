@@ -47,11 +47,15 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Duplicated column name in gRPC requests, name: {}", name,))]
+    DuplicatedColumnName { name: String, location: Location },
+
     #[snafu(display("Missing timestamp column, msg: {}", msg))]
     MissingTimestampColumn { msg: String, location: Location },
 
     #[snafu(display("Invalid column proto: {}", err_msg))]
     InvalidColumnProto { err_msg: String, location: Location },
+
     #[snafu(display("Failed to create vector, source: {}", source))]
     CreateVector {
         location: Location,
@@ -101,9 +105,9 @@ impl ErrorExt for Error {
             Error::IllegalDeleteRequest { .. } => StatusCode::InvalidArguments,
 
             Error::ColumnDataType { .. } => StatusCode::Internal,
-            Error::DuplicatedTimestampColumn { .. } | Error::MissingTimestampColumn { .. } => {
-                StatusCode::InvalidArguments
-            }
+            Error::DuplicatedTimestampColumn { .. }
+            | Error::MissingTimestampColumn { .. }
+            | Error::DuplicatedColumnName { .. } => StatusCode::InvalidArguments,
             Error::InvalidColumnProto { .. } => StatusCode::InvalidArguments,
             Error::CreateVector { .. } => StatusCode::InvalidArguments,
             Error::MissingField { .. } => StatusCode::InvalidArguments,

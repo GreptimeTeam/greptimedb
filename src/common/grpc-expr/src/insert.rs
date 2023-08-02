@@ -46,12 +46,10 @@ use table::metadata::TableId;
 use table::requests::InsertRequest;
 
 use crate::error::{
-    ColumnAlreadyExistsSnafu, ColumnDataTypeSnafu, CreateVectorSnafu,
-    DuplicatedTimestampColumnSnafu, InvalidColumnProtoSnafu, MissingTimestampColumnSnafu, Result,
-    UnexpectedValuesLengthSnafu,
+    ColumnAlreadyExistsSnafu, ColumnDataTypeSnafu, CreateVectorSnafu, InvalidColumnProtoSnafu,
+    Result, UnexpectedValuesLengthSnafu,
 };
-const TAG_SEMANTIC_TYPE: i32 = SemanticType::Tag as i32;
-const TIMESTAMP_SEMANTIC_TYPE: i32 = SemanticType::Timestamp as i32;
+use crate::{build_create_table_expr, ColumnExpr};
 
 #[inline]
 fn build_column_def(column_name: &str, datatype: i32, nullable: bool) -> ColumnDef {
@@ -79,7 +77,7 @@ pub fn find_new_columns(schema: &SchemaRef, columns: &[Column]) -> Result<Option
             let column_def = Some(build_column_def(column_name, *datatype, true));
             columns_to_add.push(AddColumn {
                 column_def,
-                is_key: *semantic_type == TAG_SEMANTIC_TYPE,
+                is_key: *semantic_type == SemanticType::Tag as i32,
                 location: None,
             });
             let _ = new_columns.insert(column_name.to_string());
@@ -250,70 +248,16 @@ pub fn build_create_expr_from_insertion(
     columns: &[Column],
     engine: &str,
 ) -> Result<CreateTableExpr> {
-    let mut new_columns: HashSet<String> = HashSet::default();
-    let mut column_defs = Vec::default();
-    let mut primary_key_indices = Vec::default();
-    let mut timestamp_index = usize::MAX;
-
-    for Column {
-        column_name,
-        semantic_type,
-        datatype,
-        ..
-    } in columns
-    {
-        if !new_columns.contains(column_name) {
-            let mut is_nullable = true;
-            match *semantic_type {
-                TAG_SEMANTIC_TYPE => primary_key_indices.push(column_defs.len()),
-                TIMESTAMP_SEMANTIC_TYPE => {
-                    ensure!(
-                        timestamp_index == usize::MAX,
-                        DuplicatedTimestampColumnSnafu {
-                            exists: &columns[timestamp_index].column_name,
-                            duplicated: column_name,
-                        }
-                    );
-                    timestamp_index = column_defs.len();
-                    // Timestamp column must not be null.
-                    is_nullable = false;
-                }
-                _ => {}
-            }
-
-            let column_def = build_column_def(column_name, *datatype, is_nullable);
-            column_defs.push(column_def);
-            let _ = new_columns.insert(column_name.to_string());
-        }
-    }
-
-    ensure!(
-        timestamp_index != usize::MAX,
-        MissingTimestampColumnSnafu { msg: table_name }
-    );
-    let timestamp_field_name = columns[timestamp_index].column_name.clone();
-
-    let primary_keys = primary_key_indices
-        .iter()
-        .map(|idx| columns[*idx].column_name.clone())
-        .collect::<Vec<_>>();
-
-    let expr = CreateTableExpr {
-        catalog_name: catalog_name.to_string(),
-        schema_name: schema_name.to_string(),
-        table_name: table_name.to_string(),
-        desc: "Created on insertion".to_string(),
-        column_defs,
-        time_index: timestamp_field_name,
-        primary_keys,
-        create_if_not_exists: true,
-        table_options: Default::default(),
-        table_id: table_id.map(|id| api::v1::TableId { id }),
-        region_numbers: vec![0], // TODO:(hl): region number should be allocated by frontend
-        engine: engine.to_string(),
-    };
-
-    Ok(expr)
+    let column_exprs = ColumnExpr::from_columns(columns);
+    build_create_table_expr(
+        catalog_name,
+        schema_name,
+        table_id,
+        table_name,
+        column_exprs,
+        engine,
+        "Created on insertion",
+    )
 }
 
 pub fn to_table_insert_request(
@@ -644,7 +588,6 @@ mod tests {
     use snafu::ResultExt;
 
     use super::*;
-    use crate::error;
     use crate::error::ColumnDataTypeSnafu;
     use crate::insert::find_new_columns;
 
@@ -653,7 +596,7 @@ mod tests {
         column_name: &str,
         datatype: i32,
         nullable: bool,
-    ) -> error::Result<ColumnSchema> {
+    ) -> Result<ColumnSchema> {
         let datatype_wrapper =
             ColumnDataTypeWrapper::try_new(datatype).context(ColumnDataTypeSnafu)?;
 
@@ -1178,7 +1121,7 @@ mod tests {
         };
         let host_column = Column {
             column_name: "host".to_string(),
-            semantic_type: TAG_SEMANTIC_TYPE,
+            semantic_type: SemanticType::Tag as i32,
             values: Some(host_vals),
             null_mask: vec![0],
             datatype: ColumnDataType::String as i32,
@@ -1248,7 +1191,7 @@ mod tests {
         };
         let ts_column = Column {
             column_name: "ts".to_string(),
-            semantic_type: TIMESTAMP_SEMANTIC_TYPE,
+            semantic_type: SemanticType::Timestamp as i32,
             values: Some(ts_vals),
             null_mask: vec![0],
             datatype: ColumnDataType::TimestampMillisecond as i32,

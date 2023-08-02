@@ -26,7 +26,9 @@ pub use insert::{build_create_expr_from_insertion, column_to_vector, find_new_co
 use snafu::{ensure, OptionExt};
 use table::metadata::TableId;
 
-use crate::error::{DuplicatedTimestampColumnSnafu, MissingTimestampColumnSnafu};
+use crate::error::{
+    DuplicatedColumnNameSnafu, DuplicatedTimestampColumnSnafu, MissingTimestampColumnSnafu,
+};
 
 pub struct ColumnExpr {
     pub column_name: String,
@@ -75,7 +77,21 @@ pub fn build_create_table_expr(
     engine: &str,
     desc: &str,
 ) -> Result<CreateTableExpr> {
-    let mut new_columns = HashSet::with_capacity(column_exprs.len());
+    // Check for duplicate names. If found, raise an error.
+    //
+    // The introduction of hashset incurs additional memory overhead
+    // but achieves a time complexity of O(1).
+    //
+    // The separate iteration over `column_exprs` is because the CPU prefers
+    // smaller loops, and avoid cloning String.
+    let mut distinct_names = HashSet::with_capacity(column_exprs.len());
+    for ColumnExpr { column_name, .. } in &column_exprs {
+        ensure!(
+            distinct_names.insert(column_name),
+            DuplicatedColumnNameSnafu { name: column_name }
+        );
+    }
+
     let mut column_defs = Vec::with_capacity(column_exprs.len());
     let mut primary_keys = Vec::default();
     let mut time_index = None;
@@ -86,33 +102,31 @@ pub fn build_create_table_expr(
         semantic_type,
     } in column_exprs
     {
-        if new_columns.insert(column_name.clone()) {
-            let mut is_nullable = true;
-            match semantic_type {
-                v if v == SemanticType::Tag as i32 => primary_keys.push(column_name.clone()),
-                v if v == SemanticType::Timestamp as i32 => {
-                    ensure!(
-                        time_index.is_none(),
-                        DuplicatedTimestampColumnSnafu {
-                            exists: time_index.unwrap(),
-                            duplicated: &column_name,
-                        }
-                    );
-                    time_index = Some(column_name.clone());
-                    // Timestamp column must not be null.
-                    is_nullable = false;
-                }
-                _ => {}
+        let mut is_nullable = true;
+        match semantic_type {
+            v if v == SemanticType::Tag as i32 => primary_keys.push(column_name.clone()),
+            v if v == SemanticType::Timestamp as i32 => {
+                ensure!(
+                    time_index.is_none(),
+                    DuplicatedTimestampColumnSnafu {
+                        exists: time_index.unwrap(),
+                        duplicated: &column_name,
+                    }
+                );
+                time_index = Some(column_name.clone());
+                // Timestamp column must not be null.
+                is_nullable = false;
             }
-
-            let column_def = ColumnDef {
-                name: column_name,
-                datatype,
-                is_nullable,
-                default_constraint: vec![],
-            };
-            column_defs.push(column_def);
+            _ => {}
         }
+
+        let column_def = ColumnDef {
+            name: column_name,
+            datatype,
+            is_nullable,
+            default_constraint: vec![],
+        };
+        column_defs.push(column_def);
     }
 
     let time_index = time_index.context(MissingTimestampColumnSnafu {
