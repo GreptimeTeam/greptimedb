@@ -97,8 +97,8 @@ pub struct Mutation {
 pub(crate) struct WriteRequest {
     /// Region to write.
     pub region_id: RegionId,
-    /// Mutations to the region.
-    pub mutations: Vec<Mutation>,
+    /// Mutation to the region.
+    pub mutation: Mutation,
 }
 
 /// Request sent to a worker
