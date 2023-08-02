@@ -178,7 +178,7 @@ pub(crate) fn to_proto_op_type(op_type: OpType) -> v1::mito::OpType {
     }
 }
 
-/// Returns true if the column type is equal to exepcted type.
+/// Returns true if the column type is equal to expected type.
 fn is_column_type_eq(column_type: ColumnDataType, expect_type: &ConcreteDataType) -> bool {
     if let Some(expect) = to_column_data_type(expect_type) {
         column_type == expect

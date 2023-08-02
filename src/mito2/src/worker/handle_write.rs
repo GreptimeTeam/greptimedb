@@ -14,7 +14,7 @@
 
 //! Handling write requests.
 
-use std::collections::HashMap;
+use std::collections::{hash_map, HashMap};
 
 use greptime_proto::v1::mito::Mutation;
 use tokio::sync::oneshot::Sender;
@@ -37,7 +37,7 @@ impl<S> RegionWorkerLoop<S> {
         for sender_req in write_requests {
             let region_id = sender_req.request.region_id;
             // Checks whether the region exists.
-            if !region_ctxs.contains_key(&region_id) {
+            if let hash_map::Entry::Vacant(e) = region_ctxs.entry(region_id) {
                 let Some(region) = self.regions.get_region(region_id) else {
                     // No such region.
                     send_result(sender_req.sender, RegionNotFoundSnafu {
@@ -48,7 +48,7 @@ impl<S> RegionWorkerLoop<S> {
                 };
 
                 // Initialize the context.
-                region_ctxs.insert(region_id, RegionWriteCtx::new(region));
+                e.insert(RegionWriteCtx::new(region));
             }
 
             // Safety: Now we ensure the region exists.

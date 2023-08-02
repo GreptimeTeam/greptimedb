@@ -181,7 +181,7 @@ impl WriteRequest {
     pub(crate) fn fill_missing_columns(&mut self, metadata: &RegionMetadata) -> Result<()> {
         for column in &metadata.column_metadatas {
             if !self.name_to_index.contains_key(&column.column_schema.name) {
-                self.fill_column(metadata.region_id, &column)?;
+                self.fill_column(metadata.region_id, column)?;
             }
         }
 
