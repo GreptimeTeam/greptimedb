@@ -73,18 +73,22 @@ impl<'a> TreeNodeRewriter for RangeRewriter<'a> {
             if func.fun.name == "range_fn" {
                 let func_name = match &func.args[0] {
                     Expr::Literal(ScalarValue::Utf8(Some(agg_str))) => agg_str,
-                    _ => "",
+                    _ => {
+                        return Err(DataFusionError::Internal(
+                            "Function name not find in range_fn".into(),
+                        ))
+                    }
                 };
-                let mut index = 1;
                 let mut args = vec![];
                 let mut by = vec![];
                 let mut have_args = false;
+                let mut have_fill = false;
                 let mut range_fn = RangeFn {
                     expr: Expr::Wildcard,
                     range: Duration::default(),
                     fill: String::new(),
                 };
-                while index < func.args.len() {
+                for index in 1..func.args.len() {
                     match &func.args[index] {
                         Expr::Column(_) => {
                             if !have_args {
@@ -98,12 +102,11 @@ impl<'a> TreeNodeRewriter for RangeRewriter<'a> {
                             if range_fn.range == Duration::default() {
                                 range_fn.range = parse_duration(str.as_str())
                                     .map_err(DataFusionError::Internal)?;
-                                index += 1;
                                 continue;
                             }
-                            if range_fn.fill.is_empty() {
+                            if !have_fill {
                                 range_fn.fill = str.clone();
-                                index += 1;
+                                have_fill = true;
                                 continue;
                             }
                             let align =
@@ -122,7 +125,6 @@ impl<'a> TreeNodeRewriter for RangeRewriter<'a> {
                             ))
                         }
                     }
-                    index += 1
                 }
                 if !self.by.is_empty() && self.by != by {
                     return Err(DataFusionError::Internal(
@@ -231,6 +233,10 @@ impl RangePlanRewriter {
         }
     }
 
+    /// this function use to find the time_index column and row columns from input schema,
+    /// return `(time_index, [row_columns])` to the rewriter.
+    /// If the user does not explicitly use the `by` keyword to indicate time series,
+    /// `[row_columns]` will be use as default time series
     async fn get_index_by(&mut self, schema: Arc<DFSchema>) -> Result<(Expr, Vec<Expr>)> {
         let mut time_index_expr = Expr::Wildcard;
         let mut default_by = vec![];
