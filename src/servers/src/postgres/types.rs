@@ -246,21 +246,23 @@ pub(super) fn parameters_to_scalar_values(
             )),
         ));
     }
-    if client_param_types.len() != param_count {
-        return Err(invalid_parameter_error(
-            "invalid_parameter_count",
-            Some(&format!(
-                "Expected: {}, found: {}",
-                client_param_types.len(),
-                param_count
-            )),
-        ));
-    }
 
-    // TODO(sunng87): when client parameters are not provided, use inferenced types
-    for (idx, client_type) in client_param_types.iter().enumerate() {
-        let Some(Some(server_type)) = param_types.get(&format!("${}", idx + 1)) else { continue };
-        let value = match client_type {
+    for idx in 0..param_count {
+        let server_type =
+            if let Some(Some(server_infer_type)) = param_types.get(&format!("${}", idx + 1)) {
+                server_infer_type
+            } else {
+                // return error if server cannot inference the type of parameter
+                return Err(invalid_parameter_error("unknown_parameter_type", None));
+            };
+
+        let client_type = if let Some(client_given_type) = client_param_types.get(idx) {
+            client_given_type.clone()
+        } else {
+            type_gt_to_pg(server_type).map_err(|e| PgWireError::ApiError(Box::new(e)))?
+        };
+
+        let value = match &client_type {
             &Type::VARCHAR | &Type::TEXT => {
                 let data = portal.parameter::<String>(idx)?;
                 match server_type {
@@ -303,7 +305,7 @@ pub(super) fn parameters_to_scalar_values(
                     ConcreteDataType::UInt32(_) => ScalarValue::UInt32(data.map(|n| n as u32)),
                     ConcreteDataType::UInt64(_) => ScalarValue::UInt64(data.map(|n| n as u64)),
                     ConcreteDataType::Timestamp(unit) => {
-                        to_timestamp_scalar_value(data, unit, server_type)?
+                        to_timestamp_scalar_value(data, &unit, server_type)?
                     }
                     ConcreteDataType::DateTime(_) => ScalarValue::Date64(data.map(|d| d as i64)),
                     _ => {
@@ -329,7 +331,7 @@ pub(super) fn parameters_to_scalar_values(
                     ConcreteDataType::UInt32(_) => ScalarValue::UInt32(data.map(|n| n as u32)),
                     ConcreteDataType::UInt64(_) => ScalarValue::UInt64(data.map(|n| n as u64)),
                     ConcreteDataType::Timestamp(unit) => {
-                        to_timestamp_scalar_value(data, unit, server_type)?
+                        to_timestamp_scalar_value(data, &unit, server_type)?
                     }
                     ConcreteDataType::DateTime(_) => ScalarValue::Date64(data.map(|d| d as i64)),
                     _ => {
@@ -355,7 +357,7 @@ pub(super) fn parameters_to_scalar_values(
                     ConcreteDataType::UInt32(_) => ScalarValue::UInt32(data.map(|n| n as u32)),
                     ConcreteDataType::UInt64(_) => ScalarValue::UInt64(data.map(|n| n as u64)),
                     ConcreteDataType::Timestamp(unit) => {
-                        to_timestamp_scalar_value(data, unit, server_type)?
+                        to_timestamp_scalar_value(data, &unit, server_type)?
                     }
                     ConcreteDataType::DateTime(_) => ScalarValue::Date64(data),
                     _ => {
@@ -491,6 +493,7 @@ pub(super) fn parameters_to_scalar_values(
                 Some(&format!("Found type: {}", client_type)),
             ))?,
         };
+
         results.push(value);
     }
 
