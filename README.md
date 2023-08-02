@@ -129,8 +129,12 @@ To write and query data, GreptimeDB is compatible with multiple [protocols and c
 
 ### SDK
 
-- [GreptimeDB Java
-  Client](https://github.com/GreptimeTeam/greptimedb-client-java)
+- [GreptimeDB C++ Client](https://github.com/GreptimeTeam/greptimedb-client-cpp)
+- [GreptimeDB Erlang Client](https://github.com/GreptimeTeam/greptimedb-client-erl)
+- [GreptimeDB Go Client](https://github.com/GreptimeTeam/greptimedb-client-go)
+- [GreptimeDB Java Client](https://github.com/GreptimeTeam/greptimedb-client-java)
+- [GreptimeDB Python Client](https://github.com/GreptimeTeam/greptimedb-client-python) (WIP)
+- [GreptimeDB Rust Client](https://github.com/GreptimeTeam/greptimedb-client-rust)
 
 ## Project Status
 
