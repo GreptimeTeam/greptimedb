@@ -31,6 +31,7 @@ pub mod manifest;
 pub mod memtable;
 #[allow(dead_code)]
 pub mod metadata;
+pub(crate) mod proto_util;
 pub mod read;
 #[allow(dead_code)]
 mod region;

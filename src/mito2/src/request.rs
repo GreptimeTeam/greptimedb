@@ -14,16 +14,19 @@
 
 //! Worker requests.
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use common_base::readable_size::ReadableSize;
-use greptime_proto::v1::Rows;
+use greptime_proto::v1::{ColumnDataType, Rows};
+use snafu::ensure;
 use store_api::storage::{ColumnId, CompactionStrategy, OpType, RegionId};
 use tokio::sync::oneshot::{self, Receiver, Sender};
 
 use crate::config::DEFAULT_WRITE_BUFFER_SIZE;
-use crate::error::Result;
-use crate::metadata::ColumnMetadata;
+use crate::error::{InvalidRequestSnafu, Result};
+use crate::metadata::{ColumnMetadata, RegionMetadata};
+use crate::proto_util::{check_column_type, check_semantic_type};
 
 /// Options that affect the entire region.
 ///
@@ -101,6 +104,75 @@ impl WriteRequest {
         // - checks whether each row in rows has the same schema.
         // - checks rows don't have duplicate columns.
         unimplemented!()
+    }
+
+    /// Checks schema of rows.
+    pub(crate) fn check_schema(&self, metadata: &RegionMetadata) -> Result<()> {
+        let region_id = self.region_id;
+        // Index all columns in rows.
+        let mut rows_columns: HashMap<_, _> = self
+            .rows
+            .schema
+            .iter()
+            .map(|column| (&column.column_name, column))
+            .collect();
+
+        // Checks all columns in this region.
+        for column in &metadata.column_metadatas {
+            if let Some(input_col) = rows_columns.remove(&column.column_schema.name) {
+                // Check data type.
+                ensure!(
+                    check_column_type(input_col.datatype, &column.column_schema.data_type),
+                    InvalidRequestSnafu {
+                        region_id,
+                        reason: format!(
+                            "Column {} expect type {:?}, given: {:?}({})",
+                            column.column_schema.name,
+                            column.column_schema.data_type,
+                            ColumnDataType::from_i32(input_col.datatype),
+                            input_col.datatype,
+                        )
+                    }
+                );
+
+                // Check semantic type.
+                ensure!(
+                    check_semantic_type(input_col.semantic_type, column.semantic_type),
+                    InvalidRequestSnafu {
+                        region_id,
+                        reason: format!(
+                            "Column {} has semantic type {:?}, given: {:?}({})",
+                            column.column_schema.name,
+                            column.semantic_type,
+                            greptime_proto::v1::SemanticType::from_i32(input_col.semantic_type),
+                            input_col.semantic_type
+                        ),
+                    }
+                );
+            } else {
+                // For columns not in rows, checks whether they are nullable.
+                ensure!(
+                    column.column_schema.is_nullable()
+                        || column.column_schema.default_constraint().is_some(),
+                    InvalidRequestSnafu {
+                        region_id,
+                        reason: format!("Missing column {}", column.column_schema.name),
+                    }
+                );
+            }
+        }
+
+        // Checks all columns in rows exist in the regino.
+        if !rows_columns.is_empty() {
+            let names: Vec<_> = rows_columns.into_keys().collect();
+            return InvalidRequestSnafu {
+                region_id,
+                reason: format!("Unknown columns: {:?}", names),
+            }
+            .fail();
+        }
+
+        Ok(())
     }
 }
 

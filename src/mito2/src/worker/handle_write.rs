@@ -16,15 +16,10 @@
 
 use std::collections::HashMap;
 
-use datatypes::prelude::ConcreteDataType;
-use datatypes::types::{TimeType, TimestampType};
 use greptime_proto::v1::mito::Mutation;
-use greptime_proto::v1::{ColumnDataType, Rows};
-use snafu::ensure;
 use tokio::sync::oneshot::Sender;
 
-use crate::error::{InvalidRequestSnafu, RegionNotFoundSnafu, Result};
-use crate::metadata::SemanticType;
+use crate::error::{RegionNotFoundSnafu, Result};
 use crate::region::version::VersionRef;
 use crate::region::MitoRegionRef;
 use crate::request::SenderWriteRequest;
@@ -59,17 +54,20 @@ impl<S> RegionWorkerLoop<S> {
             let region_ctx = region_ctxs.get_mut(&region_id).unwrap();
 
             // Checks request schema.
-            if let Err(e) = region_ctx.check_schema(&sender_req.request.rows) {
+            if let Err(e) = sender_req
+                .request
+                .check_schema(&region_ctx.version.metadata)
+            {
                 send_result(sender_req.sender, Err(e));
 
                 continue;
             }
 
-            // Push request.
+            //
         }
         // We need to check:
         // - region exists, if not, return error
-        // - check whether the schema is compatible with region schema
+        // - check whether the schema is compatible with region schema. We should fill default value at this time.
         // - collect rows by region
         // - get sequence for each row
 
@@ -114,130 +112,6 @@ impl RegionWriteCtx {
             mutations: Vec::new(),
             senders: Vec::new(),
         }
-    }
-
-    /// Checks schema of rows.
-    fn check_schema(&self, rows: &Rows) -> Result<()> {
-        let region_id = self.region.region_id;
-        // Index all columns in rows.
-        let mut rows_columns: HashMap<_, _> = rows
-            .schema
-            .iter()
-            .map(|column| (&column.column_name, column))
-            .collect();
-
-        // Checks all columns in this region.
-        for column in &self.version.metadata.column_metadatas {
-            if let Some(input_col) = rows_columns.remove(&column.column_schema.name) {
-                // Check data type.
-                ensure!(
-                    check_column_type(input_col.datatype, &column.column_schema.data_type),
-                    InvalidRequestSnafu {
-                        region_id,
-                        reason: format!(
-                            "Column {} expect type {:?}, given: {:?}({})",
-                            column.column_schema.name,
-                            column.column_schema.data_type,
-                            ColumnDataType::from_i32(input_col.datatype),
-                            input_col.datatype,
-                        )
-                    }
-                );
-
-                // Check semantic type.
-                ensure!(
-                    check_semantic_type(input_col.semantic_type, column.semantic_type),
-                    InvalidRequestSnafu {
-                        region_id,
-                        reason: format!(
-                            "Column {} has semantic type {:?}, given: {:?}({})",
-                            column.column_schema.name,
-                            column.semantic_type,
-                            greptime_proto::v1::SemanticType::from_i32(input_col.semantic_type),
-                            input_col.semantic_type
-                        ),
-                    }
-                );
-            } else {
-                // For columns not in rows, checks whether they are nullable.
-                ensure!(
-                    column.column_schema.is_nullable()
-                        || column.column_schema.default_constraint().is_some(),
-                    InvalidRequestSnafu {
-                        region_id,
-                        reason: format!("Missing column {}", column.column_schema.name),
-                    }
-                );
-            }
-        }
-
-        // Checks all columns in rows exist in the regino.
-        if !rows_columns.is_empty() {
-            let names: Vec<_> = rows_columns.into_keys().collect();
-            return InvalidRequestSnafu {
-                region_id,
-                reason: format!("Unknown columns: {:?}", names),
-            }
-            .fail();
-        }
-
-        Ok(())
-    }
-}
-
-/// Returns true if the pb semantic type is valid.
-fn check_semantic_type(type_value: i32, semantic_type: SemanticType) -> bool {
-    type_value == semantic_type as i32
-}
-
-/// Returns true if the pb type value is valid.
-fn check_column_type(type_value: i32, expect_type: &ConcreteDataType) -> bool {
-    let Some(column_type) = ColumnDataType::from_i32(type_value) else {
-        return false;
-    };
-
-    is_column_type_eq(column_type, expect_type)
-}
-
-/// Returns true if the column type is equal to exepcted type.
-fn is_column_type_eq(column_type: ColumnDataType, expect_type: &ConcreteDataType) -> bool {
-    match (column_type, expect_type) {
-        (ColumnDataType::Boolean, ConcreteDataType::Boolean(_))
-        | (ColumnDataType::Int8, ConcreteDataType::Int8(_))
-        | (ColumnDataType::Int16, ConcreteDataType::Int16(_))
-        | (ColumnDataType::Int32, ConcreteDataType::Int32(_))
-        | (ColumnDataType::Int64, ConcreteDataType::Int64(_))
-        | (ColumnDataType::Uint8, ConcreteDataType::UInt8(_))
-        | (ColumnDataType::Uint16, ConcreteDataType::UInt16(_))
-        | (ColumnDataType::Uint32, ConcreteDataType::UInt32(_))
-        | (ColumnDataType::Uint64, ConcreteDataType::UInt64(_))
-        | (ColumnDataType::Float32, ConcreteDataType::Float32(_))
-        | (ColumnDataType::Float64, ConcreteDataType::Float64(_))
-        | (ColumnDataType::Binary, ConcreteDataType::Binary(_))
-        | (ColumnDataType::String, ConcreteDataType::String(_))
-        | (ColumnDataType::Date, ConcreteDataType::Date(_))
-        | (ColumnDataType::Datetime, ConcreteDataType::DateTime(_))
-        | (
-            ColumnDataType::TimestampSecond,
-            ConcreteDataType::Timestamp(TimestampType::Second(_)),
-        )
-        | (
-            ColumnDataType::TimestampMillisecond,
-            ConcreteDataType::Timestamp(TimestampType::Millisecond(_)),
-        )
-        | (
-            ColumnDataType::TimestampMicrosecond,
-            ConcreteDataType::Timestamp(TimestampType::Microsecond(_)),
-        )
-        | (
-            ColumnDataType::TimestampNanosecond,
-            ConcreteDataType::Timestamp(TimestampType::Nanosecond(_)),
-        )
-        | (ColumnDataType::TimeSecond, ConcreteDataType::Time(TimeType::Second(_)))
-        | (ColumnDataType::TimeMillisecond, ConcreteDataType::Time(TimeType::Millisecond(_)))
-        | (ColumnDataType::TimeMicrosecond, ConcreteDataType::Time(TimeType::Microsecond(_)))
-        | (ColumnDataType::TimeNanosecond, ConcreteDataType::Time(TimeType::Nanosecond(_))) => true,
-        _ => false,
     }
 }
 
