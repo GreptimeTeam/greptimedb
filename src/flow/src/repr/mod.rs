@@ -12,12 +12,15 @@ pub type Diff = i64;
 /// TODO(discord9): use a more efficient representation
 ///i.e. more compact like raw u8 of \[tag0, value0, tag1, value1, ...\]
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub struct Row {
     inner: Vec<Value>,
 }
 
 impl Row {
+    pub fn clear(&mut self) {
+        self.inner.clear();
+    }
     pub fn pack<I>(iter: I) -> Row
     where
         I: IntoIterator<Item = Value>,
@@ -28,6 +31,15 @@ impl Row {
     }
     pub fn unpack(&self) -> Vec<Value> {
         self.inner.clone()
+    }
+    pub fn extend<I>(&mut self, iter: I)
+    where
+        I: IntoIterator<Item = Value>,
+    {
+        self.inner.extend(iter);
+    }
+    pub fn into_iter(self) -> impl Iterator<Item = Value> {
+        self.inner.into_iter()
     }
 }
 

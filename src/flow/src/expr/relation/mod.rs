@@ -1,7 +1,9 @@
+pub(crate) use func::AggregateFunc;
 use serde::{Deserialize, Serialize};
 
-use crate::expr::func::AggregateFunc;
 use crate::expr::ScalarExpr;
+
+mod func;
 
 /// function that might emit multiple output record for one input row
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize, Hash)]

@@ -16,7 +16,42 @@ use crate::expr::Id;
 use crate::repr::{self, Row};
 use crate::storage::errors::DataflowError;
 
-pub trait RenderTimestamp: Timestamp + Lattice + Refines<repr::Timestamp> {}
+mod reduce;
+
+pub trait RenderTimestamp: Timestamp + Lattice + Refines<repr::Timestamp> {
+    /// The system timestamp component of the timestamp.
+    ///
+    /// This is useful for manipulating the system time, as when delaying
+    /// updates for subsequent cancellation, as with monotonic reduction.
+    fn system_time(&mut self) -> &mut repr::Timestamp;
+    /// Effects a system delay in terms of the timestamp summary.
+    fn system_delay(delay: repr::Timestamp) -> <Self as Timestamp>::Summary;
+    /// The event timestamp component of the timestamp.
+    fn event_time(&mut self) -> &mut repr::Timestamp;
+    /// Effects an event delay in terms of the timestamp summary.
+    fn event_delay(delay: repr::Timestamp) -> <Self as Timestamp>::Summary;
+    /// Steps the timestamp back so that logical compaction to the output will
+    /// not conflate `self` with any historical times.
+    fn step_back(&self) -> Self;
+}
+
+impl RenderTimestamp for repr::Timestamp {
+    fn system_time(&mut self) -> &mut repr::Timestamp {
+        self
+    }
+    fn system_delay(delay: repr::Timestamp) -> <Self as Timestamp>::Summary {
+        delay
+    }
+    fn event_time(&mut self) -> &mut repr::Timestamp {
+        self
+    }
+    fn event_delay(delay: repr::Timestamp) -> <Self as Timestamp>::Summary {
+        delay
+    }
+    fn step_back(&self) -> Self {
+        self.saturating_sub(1)
+    }
+}
 
 impl<S> Context<S, Row>
 where
@@ -139,6 +174,15 @@ where
                         input.as_collection_core(mfp, input_key_val, self.until_frontier.clone());
                     CollectionBundle::from_collections(oks, errs)
                 }
+            }
+            Plan::Reduce {
+                input,
+                key_val_plan,
+                plan,
+                input_key,
+            } => {
+                let input = self.render_plan(*input);
+                self.render_reduce(input, key_val_plan, plan, input_key)
             }
             _ => todo!(),
         }
