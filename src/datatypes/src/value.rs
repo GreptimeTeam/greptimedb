@@ -44,7 +44,7 @@ pub type OrderedF64 = OrderedFloat<f64>;
 /// Value holds a single arbitrary value of any [DataType](crate::data_type::DataType).
 ///
 /// Comparison between values with different types (expect Null) is not allowed.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Value {
     Null,
 
@@ -535,7 +535,7 @@ impl TryFrom<Value> for serde_json::Value {
 
 // TODO(yingwen): Consider removing the `datatype` field from `ListValue`.
 /// List value.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Hash, Serialize, Deserialize)]
 pub struct ListValue {
     /// List of nested Values (boxed to reduce size_of(Value))
     #[allow(clippy::box_collection)]

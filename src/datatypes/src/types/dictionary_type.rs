@@ -21,7 +21,7 @@ use crate::value::Value;
 use crate::vectors::MutableVector;
 
 /// Used to represent the Dictionary datatype.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct DictionaryType {
     // Use Box to avoid recursive dependency, as enum ConcreteDataType depends on DictionaryType.
     /// The type of Dictionary key.

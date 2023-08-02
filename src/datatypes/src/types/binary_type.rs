@@ -24,7 +24,7 @@ use crate::type_id::LogicalTypeId;
 use crate::value::Value;
 use crate::vectors::{BinaryVectorBuilder, MutableVector};
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct BinaryType;
 
 impl BinaryType {
