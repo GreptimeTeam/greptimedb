@@ -70,9 +70,7 @@ impl GreptimeRequestHandler {
         let header = request.header.as_ref();
         let query_ctx = create_query_context(header);
 
-        if let Err(e) = self.auth(header, &query_ctx).await? {
-            return Ok(Err(e));
-        }
+        self.auth(header, &query_ctx).await??;
 
         let handler = self.handler.clone();
         let request_type = request_type(&query);
