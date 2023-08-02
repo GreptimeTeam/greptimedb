@@ -125,7 +125,7 @@ impl WriteRequest {
         // - checks whether each row in rows has the same schema.
         // - checks whether each column match the schema in Rows.
         // - checks rows don't have duplicate columns.
-        unimplemented!()
+        todo!()
     }
 
     /// Checks schema of rows.
@@ -222,54 +222,7 @@ impl WriteRequest {
 
     /// Fill default value for specific `column`.
     fn fill_column(&mut self, region_id: RegionId, column: &ColumnMetadata) -> Result<()> {
-        // Need to add a default value for this column.
-        let default_value = column
-            .column_schema
-            .create_default()
-            .context(CreateDefaultSnafu {
-                region_id,
-                column: &column.column_schema.name,
-            })?
-            // This column doesn't have default value.
-            .with_context(|| InvalidRequestSnafu {
-                region_id,
-                reason: format!(
-                    "column {} does not have default value",
-                    column.column_schema.name
-                ),
-            })?;
-
-        // Convert default value into proto's value.
-        let proto_value = to_proto_value(default_value).with_context(|| InvalidRequestSnafu {
-            region_id,
-            reason: format!(
-                "no protobuf type for default value of column {} ({:?})",
-                column.column_schema.name, column.column_schema.data_type
-            ),
-        })?;
-
-        // Insert default value to each row.
-        for row in &mut self.rows.rows {
-            row.values.push(proto_value.clone());
-        }
-
-        // Insert column schema.
-        let datatype = to_column_data_type(&column.column_schema.data_type).with_context(|| {
-            InvalidRequestSnafu {
-                region_id,
-                reason: format!(
-                    "no protobuf type for column {} ({:?})",
-                    column.column_schema.name, column.column_schema.data_type
-                ),
-            }
-        })?;
-        self.rows.schema.push(ColumnSchema {
-            column_name: column.column_schema.name.clone(),
-            datatype: datatype as i32,
-            semantic_type: to_proto_semantic_type(column.semantic_type) as i32,
-        });
-
-        Ok(())
+        todo!()
     }
 }
 
