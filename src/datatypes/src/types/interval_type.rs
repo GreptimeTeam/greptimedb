@@ -40,7 +40,7 @@ use crate::vectors::{
 /// The "calendar" interval is a type of time interval that does not
 /// have a precise duration without taking into account a specific
 /// base timestamp.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[enum_dispatch(DataType)]
 pub enum IntervalType {
     YearMonth(IntervalYearMonthType),
@@ -62,7 +62,7 @@ impl IntervalType {
 macro_rules! impl_data_type_for_interval {
     ($unit: ident, $type: ty) => {
         paste! {
-            #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+            #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
             pub struct [<Interval $unit Type>];
 
             impl DataType for [<Interval $unit Type>] {
