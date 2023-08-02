@@ -76,6 +76,7 @@ log-store = { path = "../log-store" }
 mito = { path = "../mito", features = ["test"] }
 ron = "0.7"
 serde = { version = "1.0", features = ["derive"] }
+session = { path = "../session", features = ["testing"] }
 storage = { path = "../storage" }
 tokio-test = "0.4"
 criterion = { version = "0.4", features = ["html_reports", "async_tokio"] }
