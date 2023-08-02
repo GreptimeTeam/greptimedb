@@ -455,6 +455,14 @@ pub async fn test_prom_http_api(store_type: StorageType) {
     assert!(prom_resp.error.is_none());
     assert!(prom_resp.error_type.is_none());
 
+    // query `__name__` without match[]
+    let res = client.get("/api/v1/label/__name__/values").send().await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let prom_resp = res.json::<PrometheusJsonResponse>().await;
+    assert_eq!(prom_resp.status, "success");
+    assert!(prom_resp.error.is_none());
+    assert!(prom_resp.error_type.is_none());
+
     guard.remove_all().await;
 }
 

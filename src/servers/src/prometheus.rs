@@ -21,6 +21,7 @@ use async_trait::async_trait;
 use axum::body::BoxBody;
 use axum::extract::{Path, Query, State};
 use axum::{middleware, routing, Form, Json, Router};
+use catalog::CatalogManagerRef;
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
@@ -57,7 +58,7 @@ use crate::error::{
 };
 use crate::http::authorize::HttpAuth;
 use crate::http::track_metrics;
-use crate::prom_store::{FIELD_COLUMN_NAME, TIMESTAMP_COLUMN_NAME};
+use crate::prom_store::{FIELD_COLUMN_NAME, METRIC_NAME_LABEL, TIMESTAMP_COLUMN_NAME};
 use crate::server::Server;
 
 pub const PROMETHEUS_API_VERSION: &str = "v1";
@@ -67,6 +68,8 @@ pub type PrometheusHandlerRef = Arc<dyn PrometheusHandler + Send + Sync>;
 #[async_trait]
 pub trait PrometheusHandler {
     async fn do_query(&self, query: &PromQuery, query_ctx: QueryContextRef) -> Result<Output>;
+
+    fn catalog_manager(&self) -> CatalogManagerRef;
 }
 
 /// PromServer represents PrometheusServer which handles the compliance with prometheus HTTP API
@@ -781,6 +784,21 @@ pub async fn label_values_query(
     Query(params): Query<LabelValueQuery>,
 ) -> Json<PrometheusJsonResponse> {
     let _timer = timer!(crate::metrics::METRIC_HTTP_PROMQL_LABEL_VALUE_QUERY_ELAPSED);
+
+    let db = &params.db.unwrap_or(DEFAULT_SCHEMA_NAME.to_string());
+    let (catalog, schema) = crate::parse_catalog_and_schema_from_client_database_name(db);
+
+    if &label_name == METRIC_NAME_LABEL {
+        let mut table_names = match handler.catalog_manager().table_names(catalog, schema).await {
+            Ok(table_names) => table_names,
+            Err(e) => {
+                return PrometheusJsonResponse::error(e.status_code().to_string(), e.to_string());
+            }
+        };
+        table_names.sort();
+        return PrometheusJsonResponse::success(PrometheusResponse::LabelValues(table_names));
+    }
+
     let queries = params.matches.0;
     if queries.is_empty() {
         return PrometheusJsonResponse::error("Invalid argument", "match[] parameter is required");
@@ -788,8 +806,6 @@ pub async fn label_values_query(
 
     let start = params.start.unwrap_or_else(yesterday_rfc3339);
     let end = params.end.unwrap_or_else(current_time_rfc3339);
-    let db = &params.db.unwrap_or(DEFAULT_SCHEMA_NAME.to_string());
-    let (catalog, schema) = crate::parse_catalog_and_schema_from_client_database_name(db);
     let query_ctx = QueryContext::with(catalog, schema);
 
     let mut label_values = HashSet::new();
