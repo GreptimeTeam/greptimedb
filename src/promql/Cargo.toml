@@ -26,3 +26,4 @@ common-telemetry = { path = "../common/telemetry" }
 [dev-dependencies]
 tokio.workspace = true
 query = { path = "../query" }
+session = { path = "../session", features = ["testing"] }

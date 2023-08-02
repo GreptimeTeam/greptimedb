@@ -76,3 +76,4 @@ client = { path = "../client" }
 common-test-util = { path = "../common/test-util" }
 common-query = { path = "../common/query" }
 datafusion-common.workspace = true
+session = { path = "../session", features = ["testing"] }
