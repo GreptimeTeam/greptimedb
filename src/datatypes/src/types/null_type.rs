@@ -22,7 +22,7 @@ use crate::type_id::LogicalTypeId;
 use crate::value::Value;
 use crate::vectors::{MutableVector, NullVectorBuilder};
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct NullType;
 
 impl NullType {
