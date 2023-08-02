@@ -323,15 +323,15 @@ impl<S> RegionWorkerLoop<S> {
     ///
     /// `buffer` should be empty.
     async fn handle_requests(&mut self, buffer: &mut RequestBuffer) {
-        let mut dml_requests = Vec::with_capacity(buffer.len());
+        let mut write_requests = Vec::with_capacity(buffer.len());
         let mut ddl_requests = Vec::with_capacity(buffer.len());
         for worker_req in buffer.drain(..) {
             match worker_req {
                 WorkerRequest::Region(req) => {
-                    if req.body.is_ddl() {
-                        ddl_requests.push(req);
+                    if req.body.is_write() {
+                        write_requests.push(req);
                     } else {
-                        dml_requests.push(req);
+                        ddl_requests.push(req);
                     }
                 }
                 // We receive a stop signal, but we still want to process remaining
@@ -343,22 +343,11 @@ impl<S> RegionWorkerLoop<S> {
             }
         }
 
-        // Handles all dml requests first. So we can alter regions without
-        // considering existing dml requests.
-        self.handle_dml_requests(dml_requests).await;
+        // Handles all write requests first. So we can alter regions without
+        // considering existing write requests.
+        self.handle_write_requests(write_requests).await;
 
         self.handle_ddl_requests(ddl_requests).await;
-    }
-
-    /// Takes and handles all dml requests.
-    async fn handle_dml_requests(&mut self, write_requests: Vec<RegionRequest>) {
-        if write_requests.is_empty() {
-            return;
-        }
-
-        // Create a write context that holds meta and sequence.
-
-        unimplemented!()
     }
 
     /// Takes and handles all ddl requests.

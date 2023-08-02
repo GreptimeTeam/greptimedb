@@ -94,11 +94,20 @@ pub struct Mutation {
 
 /// Request to write a region.
 #[derive(Debug)]
-pub(crate) struct WriteRequest {
+pub struct WriteRequest {
     /// Region to write.
     pub region_id: RegionId,
     /// Mutation to the region.
     pub mutation: Mutation,
+}
+
+impl WriteRequest {
+    /// Validate the request.
+    pub(crate) fn validate(&self) -> Result<()> {
+        // 1. checks whether the request is too large.
+        // 2. checks whether each row in rows has the same schema.
+        unimplemented!()
+    }
 }
 
 /// Request sent to a worker
@@ -139,7 +148,6 @@ impl RegionRequest {
 /// Body to carry actual region request.
 #[derive(Debug)]
 pub(crate) enum RequestBody {
-    // DML:
     /// Write to a region.
     Write(WriteRequest),
 
@@ -163,13 +171,8 @@ impl RequestBody {
         }
     }
 
-    /// Returns whether the request is a DDL (e.g. CREATE/OPEN/ALTER).
-    pub(crate) fn is_ddl(&self) -> bool {
-        match self {
-            RequestBody::Write(_) => false,
-            RequestBody::Create(_) => true,
-            RequestBody::Open(_) => true,
-            RequestBody::Close(_) => true,
-        }
+    /// Returns whether the request is a write request.
+    pub(crate) fn is_write(&self) -> bool {
+        matches!(self, RequestBody::Write(_))
     }
 }

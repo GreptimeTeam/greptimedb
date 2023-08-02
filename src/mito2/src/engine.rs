@@ -26,7 +26,7 @@ use store_api::storage::RegionId;
 
 use crate::config::MitoConfig;
 use crate::error::{RecvSnafu, Result};
-use crate::request::{CloseRequest, CreateRequest, OpenRequest, RegionRequest, RequestBody};
+use crate::request::{CloseRequest, CreateRequest, OpenRequest, RegionRequest, RequestBody, WriteRequest};
 use crate::worker::WorkerGroup;
 
 /// Region engine implementation for timeseries data.
@@ -82,6 +82,14 @@ impl MitoEngine {
     /// Returns true if the specific region exists.
     pub fn is_region_exists(&self, region_id: RegionId) -> bool {
         self.inner.workers.is_region_exists(region_id)
+    }
+
+    /// Write to a region.
+    pub async fn write_region(&self, write_request: WriteRequest) -> Result<()> {
+        write_request.validate()?;
+
+        self.inner.handle_request_body(RequestBody::Write(write_request))
+            .await
     }
 }
 
