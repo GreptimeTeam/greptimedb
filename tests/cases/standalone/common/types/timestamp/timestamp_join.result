@@ -1,0 +1,32 @@
+CREATE TABLE timestamp1(i TIMESTAMP time index);
+
+Affected Rows: 0
+
+CREATE TABLE timestamp2(i TIMESTAMP time index);
+
+Affected Rows: 0
+
+INSERT INTO timestamp1 VALUES ('1993-08-14 00:00:01');
+
+Affected Rows: 1
+
+INSERT INTO timestamp2 VALUES ('1993-08-14 00:00:01');
+
+Affected Rows: 1
+
+select count(*) from timestamp2 inner join timestamp1 on (timestamp1.i = timestamp2.i);
+
++-----------------+
+| COUNT(UInt8(1)) |
++-----------------+
+| 1               |
++-----------------+
+
+DROP TABLE timestamp1;
+
+Affected Rows: 1
+
+DROP TABLE timestamp2;
+
+Affected Rows: 1
+
