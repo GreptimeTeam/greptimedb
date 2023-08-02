@@ -90,6 +90,10 @@ impl MitoEngine {
     pub async fn write_region(&self, write_request: WriteRequest) -> Result<()> {
         write_request.validate()?;
 
+        // TODO(yingwen): Fill default values.
+        // We need to fill default values before writing it to WAL so we can get
+        // the same default value after reopening the region.
+
         self.inner
             .handle_request_body(RequestBody::Write(write_request))
             .await

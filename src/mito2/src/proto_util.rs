@@ -119,44 +119,61 @@ pub(crate) fn to_proto_value(value: Value) -> Option<v1::Value> {
     Some(proto_value)
 }
 
+/// Convert [ConcreteDataType] to [ColumnDataType].
+pub(crate) fn to_column_data_type(data_type: &ConcreteDataType) -> Option<ColumnDataType> {
+    let column_data_type = match data_type {
+        ConcreteDataType::Boolean(_) => ColumnDataType::Boolean,
+        ConcreteDataType::Int8(_) => ColumnDataType::Int8,
+        ConcreteDataType::Int16(_) => ColumnDataType::Int16,
+        ConcreteDataType::Int32(_) => ColumnDataType::Int32,
+        ConcreteDataType::Int64(_) => ColumnDataType::Int64,
+        ConcreteDataType::UInt8(_) => ColumnDataType::Uint8,
+        ConcreteDataType::UInt16(_) => ColumnDataType::Uint16,
+        ConcreteDataType::UInt32(_) => ColumnDataType::Uint32,
+        ConcreteDataType::UInt64(_) => ColumnDataType::Uint64,
+        ConcreteDataType::Float32(_) => ColumnDataType::Float32,
+        ConcreteDataType::Float64(_) => ColumnDataType::Float64,
+        ConcreteDataType::Binary(_) => ColumnDataType::Binary,
+        ConcreteDataType::String(_) => ColumnDataType::String,
+        ConcreteDataType::Date(_) => ColumnDataType::Date,
+        ConcreteDataType::DateTime(_) => ColumnDataType::Datetime,
+        ConcreteDataType::Timestamp(TimestampType::Second(_)) => ColumnDataType::TimestampSecond,
+        ConcreteDataType::Timestamp(TimestampType::Millisecond(_)) => {
+            ColumnDataType::TimestampMillisecond
+        }
+        ConcreteDataType::Timestamp(TimestampType::Microsecond(_)) => {
+            ColumnDataType::TimestampMicrosecond
+        }
+        ConcreteDataType::Timestamp(TimestampType::Nanosecond(_)) => {
+            ColumnDataType::TimestampNanosecond
+        }
+        ConcreteDataType::Time(TimeType::Second(_)) => ColumnDataType::TimeSecond,
+        ConcreteDataType::Time(TimeType::Millisecond(_)) => ColumnDataType::TimeMillisecond,
+        ConcreteDataType::Time(TimeType::Microsecond(_)) => ColumnDataType::TimeMicrosecond,
+        ConcreteDataType::Time(TimeType::Nanosecond(_)) => ColumnDataType::TimeNanosecond,
+        ConcreteDataType::Null(_)
+        | ConcreteDataType::Interval(_)
+        | ConcreteDataType::List(_)
+        | ConcreteDataType::Dictionary(_) => return None,
+    };
+
+    Some(column_data_type)
+}
+
+/// Convert semantic type to proto's semantic type
+pub(crate) fn to_proto_semantic_type(semantic_type: SemanticType) -> v1::SemanticType {
+    match semantic_type {
+        SemanticType::Tag => v1::SemanticType::Tag,
+        SemanticType::Field => v1::SemanticType::Field,
+        SemanticType::Timestamp => v1::SemanticType::Timestamp,
+    }
+}
+
 /// Returns true if the column type is equal to exepcted type.
 fn is_column_type_eq(column_type: ColumnDataType, expect_type: &ConcreteDataType) -> bool {
-    match (column_type, expect_type) {
-        (ColumnDataType::Boolean, ConcreteDataType::Boolean(_))
-        | (ColumnDataType::Int8, ConcreteDataType::Int8(_))
-        | (ColumnDataType::Int16, ConcreteDataType::Int16(_))
-        | (ColumnDataType::Int32, ConcreteDataType::Int32(_))
-        | (ColumnDataType::Int64, ConcreteDataType::Int64(_))
-        | (ColumnDataType::Uint8, ConcreteDataType::UInt8(_))
-        | (ColumnDataType::Uint16, ConcreteDataType::UInt16(_))
-        | (ColumnDataType::Uint32, ConcreteDataType::UInt32(_))
-        | (ColumnDataType::Uint64, ConcreteDataType::UInt64(_))
-        | (ColumnDataType::Float32, ConcreteDataType::Float32(_))
-        | (ColumnDataType::Float64, ConcreteDataType::Float64(_))
-        | (ColumnDataType::Binary, ConcreteDataType::Binary(_))
-        | (ColumnDataType::String, ConcreteDataType::String(_))
-        | (ColumnDataType::Date, ConcreteDataType::Date(_))
-        | (ColumnDataType::Datetime, ConcreteDataType::DateTime(_))
-        | (
-            ColumnDataType::TimestampSecond,
-            ConcreteDataType::Timestamp(TimestampType::Second(_)),
-        )
-        | (
-            ColumnDataType::TimestampMillisecond,
-            ConcreteDataType::Timestamp(TimestampType::Millisecond(_)),
-        )
-        | (
-            ColumnDataType::TimestampMicrosecond,
-            ConcreteDataType::Timestamp(TimestampType::Microsecond(_)),
-        )
-        | (
-            ColumnDataType::TimestampNanosecond,
-            ConcreteDataType::Timestamp(TimestampType::Nanosecond(_)),
-        )
-        | (ColumnDataType::TimeSecond, ConcreteDataType::Time(TimeType::Second(_)))
-        | (ColumnDataType::TimeMillisecond, ConcreteDataType::Time(TimeType::Millisecond(_)))
-        | (ColumnDataType::TimeMicrosecond, ConcreteDataType::Time(TimeType::Microsecond(_)))
-        | (ColumnDataType::TimeNanosecond, ConcreteDataType::Time(TimeType::Nanosecond(_))) => true,
-        _ => false,
+    if let Some(expect) = to_column_data_type(expect_type) {
+        column_type == expect
+    } else {
+        false
     }
 }

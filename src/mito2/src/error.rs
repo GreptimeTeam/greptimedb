@@ -181,6 +181,30 @@ pub enum Error {
         reason: String,
         location: Location,
     },
+
+    /// An error type to indicate that schema is changed and we need
+    /// to fill default values again.
+    #[snafu(display(
+        "Need to fill default value to column {} of region {}",
+        column,
+        region_id
+    ))]
+    FillDefault {
+        region_id: RegionId,
+        column: String,
+        // The error is for retry purpose so we don't need a location.
+    },
+
+    #[snafu(display(
+        "Failed to create default value for column {} of region {}",
+        column,
+        region_id
+    ))]
+    CreateDefault {
+        region_id: RegionId,
+        column: String,
+        source: datatypes::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -200,11 +224,13 @@ impl ErrorExt for Error {
             | RegionExists { .. }
             | NewRecordBatch { .. }
             | RegionNotFound { .. }
-            | RegionCorrupted { .. } => StatusCode::Unexpected,
+            | RegionCorrupted { .. }
+            | CreateDefault { .. } => StatusCode::Unexpected,
             InvalidScanIndex { .. }
             | InvalidMeta { .. }
             | InvalidSchema { .. }
-            | InvalidRequest { .. } => StatusCode::InvalidArguments,
+            | InvalidRequest { .. }
+            | FillDefault { .. } => StatusCode::InvalidArguments,
             RegionMetadataNotFound { .. } | Join { .. } | WorkerStopped { .. } | Recv { .. } => {
                 StatusCode::Internal
             }

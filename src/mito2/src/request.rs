@@ -18,15 +18,18 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use common_base::readable_size::ReadableSize;
-use greptime_proto::v1::{ColumnDataType, Rows};
-use snafu::ensure;
+use greptime_proto::v1::{ColumnDataType, ColumnSchema, Rows};
+use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::{ColumnId, CompactionStrategy, OpType, RegionId};
 use tokio::sync::oneshot::{self, Receiver, Sender};
 
 use crate::config::DEFAULT_WRITE_BUFFER_SIZE;
-use crate::error::{InvalidRequestSnafu, Result};
+use crate::error::{CreateDefaultSnafu, FillDefaultSnafu, InvalidRequestSnafu, Result};
 use crate::metadata::{ColumnMetadata, RegionMetadata};
-use crate::proto_util::{check_column_type, check_semantic_type};
+use crate::proto_util::{
+    check_column_type, check_semantic_type, to_column_data_type, to_proto_semantic_type,
+    to_proto_value,
+};
 
 /// Options that affect the entire region.
 ///
@@ -95,18 +98,40 @@ pub struct WriteRequest {
     pub op_type: OpType,
     /// Rows to write.
     pub rows: Rows,
+    /// Map column name to column index in `rows`.
+    name_to_index: HashMap<String, usize>,
 }
 
 impl WriteRequest {
+    /// Returns a new request.
+    pub fn new(region_id: RegionId, op_type: OpType, rows: Rows) -> WriteRequest {
+        let name_to_index = rows
+            .schema
+            .iter()
+            .enumerate()
+            .map(|(index, column)| (column.column_name.clone(), index))
+            .collect();
+        WriteRequest {
+            region_id,
+            op_type,
+            rows,
+            name_to_index,
+        }
+    }
+
     /// Validate the request.
     pub(crate) fn validate(&self) -> Result<()> {
         // - checks whether the request is too large.
         // - checks whether each row in rows has the same schema.
+        // - checks whether each column match the schema in Rows.
         // - checks rows don't have duplicate columns.
         unimplemented!()
     }
 
     /// Checks schema of rows.
+    ///
+    /// If column with default value is missing, it returns a special [FillDefault](crate::error::Error::FillDefault)
+    /// error.
     pub(crate) fn check_schema(&self, metadata: &RegionMetadata) -> Result<()> {
         let region_id = self.region_id;
         // Index all columns in rows.
@@ -126,7 +151,7 @@ impl WriteRequest {
                     InvalidRequestSnafu {
                         region_id,
                         reason: format!(
-                            "Column {} expect type {:?}, given: {:?}({})",
+                            "column {} expect type {:?}, given: {:?}({})",
                             column.column_schema.name,
                             column.column_schema.data_type,
                             ColumnDataType::from_i32(input_col.datatype),
@@ -141,7 +166,7 @@ impl WriteRequest {
                     InvalidRequestSnafu {
                         region_id,
                         reason: format!(
-                            "Column {} has semantic type {:?}, given: {:?}({})",
+                            "column {} has semantic type {:?}, given: {:?}({})",
                             column.column_schema.name,
                             column.semantic_type,
                             greptime_proto::v1::SemanticType::from_i32(input_col.semantic_type),
@@ -150,15 +175,21 @@ impl WriteRequest {
                     }
                 );
             } else {
-                // For columns not in rows, checks whether they are nullable.
+                // For columns not in rows, checks whether they have default value.
                 ensure!(
                     column.column_schema.is_nullable()
                         || column.column_schema.default_constraint().is_some(),
                     InvalidRequestSnafu {
                         region_id,
-                        reason: format!("Missing column {}", column.column_schema.name),
+                        reason: format!("missing column {}", column.column_schema.name),
                     }
                 );
+
+                return FillDefaultSnafu {
+                    region_id,
+                    column: &column.column_schema.name,
+                }
+                .fail();
             }
         }
 
@@ -167,10 +198,76 @@ impl WriteRequest {
             let names: Vec<_> = rows_columns.into_keys().collect();
             return InvalidRequestSnafu {
                 region_id,
-                reason: format!("Unknown columns: {:?}", names),
+                reason: format!("unknown columns: {:?}", names),
             }
             .fail();
         }
+
+        Ok(())
+    }
+
+    /// Try to fill missing columns.
+    ///
+    /// Currently, our protobuf format might be inefficient when we need to fill lots of null
+    /// values.
+    pub(crate) fn fill_missing_columns(&mut self, metadata: &RegionMetadata) -> Result<()> {
+        for column in &metadata.column_metadatas {
+            if !self.name_to_index.contains_key(&column.column_schema.name) {
+                self.fill_column(metadata.region_id, &column)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Fill default value for specific `column`.
+    fn fill_column(&mut self, region_id: RegionId, column: &ColumnMetadata) -> Result<()> {
+        // Need to add a default value for this column.
+        let default_value = column
+            .column_schema
+            .create_default()
+            .context(CreateDefaultSnafu {
+                region_id,
+                column: &column.column_schema.name,
+            })?
+            // This column doesn't have default value.
+            .with_context(|| InvalidRequestSnafu {
+                region_id,
+                reason: format!(
+                    "column {} does not have default value",
+                    column.column_schema.name
+                ),
+            })?;
+
+        // Convert default value into proto's value.
+        let proto_value = to_proto_value(default_value).with_context(|| InvalidRequestSnafu {
+            region_id,
+            reason: format!(
+                "no protobuf type for default value of column {} ({:?})",
+                column.column_schema.name, column.column_schema.data_type
+            ),
+        })?;
+
+        // Insert default value to each row.
+        for row in &mut self.rows.rows {
+            row.values.push(proto_value.clone());
+        }
+
+        // Insert column schema.
+        let datatype = to_column_data_type(&column.column_schema.data_type).with_context(|| {
+            InvalidRequestSnafu {
+                region_id,
+                reason: format!(
+                    "no protobuf type for column {} ({:?})",
+                    column.column_schema.name, column.column_schema.data_type
+                ),
+            }
+        })?;
+        self.rows.schema.push(ColumnSchema {
+            column_name: column.column_schema.name.clone(),
+            datatype: datatype as i32,
+            semantic_type: to_proto_semantic_type(column.semantic_type) as i32,
+        });
 
         Ok(())
     }
