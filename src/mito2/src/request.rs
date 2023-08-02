@@ -83,31 +83,32 @@ pub struct CloseRequest {
     pub region_id: RegionId,
 }
 
-/// Mutation to apply to a set of rows.
-#[derive(Debug)]
-pub struct Mutation {
-    /// Type of the mutation.
-    pub op_type: OpType,
-    /// Rows to write.
-    pub rows: Rows,
-}
-
 /// Request to write a region.
 #[derive(Debug)]
 pub struct WriteRequest {
     /// Region to write.
     pub region_id: RegionId,
-    /// Mutation to the region.
-    pub mutation: Mutation,
+    /// Type of the write request.
+    pub op_type: OpType,
+    /// Rows to write.
+    pub rows: Rows,
 }
 
 impl WriteRequest {
     /// Validate the request.
     pub(crate) fn validate(&self) -> Result<()> {
-        // 1. checks whether the request is too large.
-        // 2. checks whether each row in rows has the same schema.
+        // - checks whether the request is too large.
+        // - checks whether each row in rows has the same schema.
+        // - checks rows don't have duplicate columns.
         unimplemented!()
     }
+}
+
+/// Sender and write request.
+pub(crate) struct SenderWriteRequest {
+    /// Result sender.
+    pub(crate) sender: Option<Sender<Result<()>>>,
+    pub(crate) request: WriteRequest,
 }
 
 /// Request sent to a worker
@@ -174,5 +175,16 @@ impl RequestBody {
     /// Returns whether the request is a write request.
     pub(crate) fn is_write(&self) -> bool {
         matches!(self, RequestBody::Write(_))
+    }
+
+    /// Converts the request into a [WriteRequest].
+    ///
+    /// # Panics
+    /// Panics if it isn't a [WriteRequest].
+    pub(crate) fn into_write_request(self) -> WriteRequest {
+        match self {
+            RequestBody::Write(req) => req,
+            other => panic!("expect write request, found {other:?}"),
+        }
     }
 }

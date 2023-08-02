@@ -38,7 +38,7 @@ use crate::config::MitoConfig;
 use crate::error::{JoinSnafu, Result, WorkerStoppedSnafu};
 use crate::memtable::{DefaultMemtableBuilder, MemtableBuilderRef};
 use crate::region::{RegionMap, RegionMapRef};
-use crate::request::{RegionRequest, RequestBody, WorkerRequest};
+use crate::request::{RegionRequest, RequestBody, SenderWriteRequest, WorkerRequest};
 
 /// Identifier for a worker.
 pub(crate) type WorkerId = u32;
@@ -329,7 +329,10 @@ impl<S> RegionWorkerLoop<S> {
             match worker_req {
                 WorkerRequest::Region(req) => {
                     if req.body.is_write() {
-                        write_requests.push(req);
+                        write_requests.push(SenderWriteRequest {
+                            sender: req.sender,
+                            request: req.body.into_write_request(),
+                        });
                     } else {
                         ddl_requests.push(req);
                     }

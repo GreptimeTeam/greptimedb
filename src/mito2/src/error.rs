@@ -174,6 +174,13 @@ pub enum Error {
         reason: String,
         location: Location,
     },
+
+    #[snafu(display("Invalid request to region {}, reason: {}", region_id, reason))]
+    InvalidRequest {
+        region_id: RegionId,
+        reason: String,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -194,9 +201,10 @@ impl ErrorExt for Error {
             | NewRecordBatch { .. }
             | RegionNotFound { .. }
             | RegionCorrupted { .. } => StatusCode::Unexpected,
-            InvalidScanIndex { .. } | InvalidMeta { .. } | InvalidSchema { .. } => {
-                StatusCode::InvalidArguments
-            }
+            InvalidScanIndex { .. }
+            | InvalidMeta { .. }
+            | InvalidSchema { .. }
+            | InvalidRequest { .. } => StatusCode::InvalidArguments,
             RegionMetadataNotFound { .. } | Join { .. } | WorkerStopped { .. } | Recv { .. } => {
                 StatusCode::Internal
             }
