@@ -19,6 +19,7 @@ use api::helper::request_type;
 use api::v1::auth_header::AuthScheme;
 use api::v1::{Basic, GreptimeRequest, RequestHeader};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_query::Output;
@@ -153,7 +154,7 @@ pub(crate) fn create_query_context(header: Option<&RequestHeader>) -> QueryConte
             // We provide dbname field in newer versions of protos/sdks
             // parse dbname from header in priority
             if !header.dbname.is_empty() {
-                crate::parse_catalog_and_schema_from_client_database_name(&header.dbname)
+                parse_catalog_and_schema_from_db_string(&header.dbname)
             } else {
                 (
                     if !header.catalog.is_empty() {

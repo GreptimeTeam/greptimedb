@@ -23,6 +23,7 @@ use axum::extract::{Path, Query, State};
 use axum::{middleware, routing, Form, Json, Router};
 use catalog::CatalogManagerRef;
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
+use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_query::Output;
@@ -444,10 +445,7 @@ pub async fn instant_query(
         step: "1s".to_string(),
     };
 
-    let db = &params.db.unwrap_or(DEFAULT_SCHEMA_NAME.to_string());
-    let (catalog, schema) = crate::parse_catalog_and_schema_from_client_database_name(db);
-
-    let query_ctx = QueryContext::with(catalog, schema);
+    let query_ctx = QueryContext::with_db_name(params.db.as_ref());
 
     let result = handler.do_query(&prom_query, query_ctx).await;
     let (metric_name, result_type) = match retrieve_metric_name_and_result_type(&prom_query.query) {
@@ -483,10 +481,7 @@ pub async fn range_query(
         step: params.step.or(form_params.step).unwrap_or_default(),
     };
 
-    let db = &params.db.unwrap_or(DEFAULT_SCHEMA_NAME.to_string());
-    let (catalog, schema) = crate::parse_catalog_and_schema_from_client_database_name(db);
-
-    let query_ctx = QueryContext::with(catalog, schema);
+    let query_ctx = QueryContext::with_db_name(params.db.as_ref());
 
     let result = handler.do_query(&prom_query, query_ctx).await;
     let metric_name = match retrieve_metric_name_and_result_type(&prom_query.query) {
@@ -551,7 +546,7 @@ pub async fn labels_query(
     let _timer = timer!(crate::metrics::METRIC_HTTP_PROMQL_LABEL_QUERY_ELAPSED);
 
     let db = &params.db.unwrap_or(DEFAULT_SCHEMA_NAME.to_string());
-    let (catalog, schema) = crate::parse_catalog_and_schema_from_client_database_name(db);
+    let (catalog, schema) = parse_catalog_and_schema_from_db_string(db);
     let query_ctx = QueryContext::with(catalog, schema);
 
     let mut queries = params.matches.0;
@@ -815,7 +810,7 @@ pub async fn label_values_query(
     let _timer = timer!(crate::metrics::METRIC_HTTP_PROMQL_LABEL_VALUE_QUERY_ELAPSED);
 
     let db = &params.db.unwrap_or(DEFAULT_SCHEMA_NAME.to_string());
-    let (catalog, schema) = crate::parse_catalog_and_schema_from_client_database_name(db);
+    let (catalog, schema) = parse_catalog_and_schema_from_db_string(db);
 
     if label_name == METRIC_NAME_LABEL {
         let mut table_names = match handler.catalog_manager().table_names(catalog, schema).await {
@@ -955,9 +950,7 @@ pub async fn series_query(
         .or(form_params.end)
         .unwrap_or_else(current_time_rfc3339);
 
-    let db = &params.db.unwrap_or(DEFAULT_SCHEMA_NAME.to_string());
-    let (catalog, schema) = super::parse_catalog_and_schema_from_client_database_name(db);
-    let query_ctx = QueryContext::with(catalog, schema);
+    let query_ctx = QueryContext::with_db_name(params.db.as_ref());
 
     let mut series = Vec::new();
     for query in queries {

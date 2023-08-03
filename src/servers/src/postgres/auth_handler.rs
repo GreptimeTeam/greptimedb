@@ -15,6 +15,7 @@
 use std::fmt::Debug;
 
 use async_trait::async_trait;
+use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
 use futures::{Sink, SinkExt};
 use metrics::increment_counter;
@@ -233,7 +234,7 @@ where
 {
     let db_ref = client.metadata().get(super::METADATA_DATABASE);
     if let Some(db) = db_ref {
-        let (catalog, schema) = crate::parse_catalog_and_schema_from_client_database_name(db);
+        let (catalog, schema) = parse_catalog_and_schema_from_db_string(db);
         if query_handler
             .is_valid_schema(catalog, schema)
             .await

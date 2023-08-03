@@ -18,13 +18,13 @@ use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
+use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_grpc::writer::Precision;
 use common_telemetry::timer;
 use session::context::QueryContext;
 
 use crate::error::{Result, TimePrecisionSnafu};
 use crate::influxdb::InfluxdbRequest;
-use crate::parse_catalog_and_schema_from_client_database_name;
 use crate::query_handler::InfluxdbLineProtocolHandlerRef;
 
 // https://docs.influxdata.com/influxdb/v1.8/tools/api/#ping-http-endpoint
@@ -86,7 +86,7 @@ pub async fn influxdb_write(
         &[(crate::metrics::METRIC_DB_LABEL, db.to_string())]
     );
 
-    let (catalog, schema) = parse_catalog_and_schema_from_client_database_name(db);
+    let (catalog, schema) = parse_catalog_and_schema_from_db_string(db);
     let ctx = QueryContext::with(catalog, schema);
 
     let request = InfluxdbRequest { precision, lines };

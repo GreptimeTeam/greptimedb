@@ -64,7 +64,9 @@ pub async fn flush(
         })),
     });
 
-    grpc_handler.do_query(request, QueryContext::arc()).await?;
+    grpc_handler
+        .do_query(request, QueryContext::with(&catalog_name, &schema_name))
+        .await?;
     Ok((StatusCode::NO_CONTENT, ()))
 }
 
@@ -104,6 +106,8 @@ pub async fn compact(
         })),
     });
 
-    grpc_handler.do_query(request, QueryContext::arc()).await?;
+    grpc_handler
+        .do_query(request, QueryContext::with(&catalog_name, &schema_name))
+        .await?;
     Ok((StatusCode::NO_CONTENT, ()))
 }

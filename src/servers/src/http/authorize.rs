@@ -16,6 +16,7 @@ use std::marker::PhantomData;
 
 use axum::http::{self, Request, StatusCode};
 use axum::response::Response;
+use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
 use common_telemetry::warn;
 use futures::future::BoxFuture;
@@ -157,9 +158,7 @@ fn extract_catalog_and_schema<B: Send + Sync + 'static>(
             msg: "db not provided or corrupted",
         })?;
 
-    Ok(crate::parse_catalog_and_schema_from_client_database_name(
-        dbname,
-    ))
+    Ok(parse_catalog_and_schema_from_db_string(dbname))
 }
 
 fn get_influxdb_credentials<B: Send + Sync + 'static>(
