@@ -34,14 +34,14 @@ use crate::error::{
 };
 use crate::expr_factory::CreateExprFactoryRef;
 
-pub struct RowsInserter {
+pub struct RowInserter {
     engine_name: String,
     catalog_manager: CatalogManagerRef,
     create_expr_factory: CreateExprFactoryRef,
     grpc_query_handler: GrpcQueryHandlerRef<Error>,
 }
 
-impl RowsInserter {
+impl RowInserter {
     pub fn new(
         engine_name: String,
         catalog_manager: CatalogManagerRef,
@@ -318,7 +318,7 @@ mod tests {
         // case 1
         let rows = vec![];
         let req = create_req(data_schema.clone(), rows);
-        let res = RowsInserter::validate_insert_request(&schema, &req);
+        let res = RowInserter::validate_insert_request(&schema, &req);
         assert_matches!(res, Err(Error::EmptyData { .. }));
 
         // case 2
@@ -334,7 +334,7 @@ mod tests {
             ],
         }];
         let req = create_req(data_schema.clone(), rows);
-        let res = RowsInserter::validate_insert_request(&schema, &req);
+        let res = RowInserter::validate_insert_request(&schema, &req);
         assert_matches!(res, Err(Error::InvalidInsertRequest { .. }));
 
         // case 3
@@ -349,7 +349,7 @@ mod tests {
             ],
         }];
         let req = create_req(data_schema.clone(), rows);
-        let res = RowsInserter::validate_insert_request(&schema, &req);
+        let res = RowInserter::validate_insert_request(&schema, &req);
         assert_matches!(res, Err(Error::InvalidInsertRequest { .. }));
 
         // case 4
@@ -365,7 +365,7 @@ mod tests {
             ],
         }];
         let req = create_req(data_schema.clone(), rows);
-        let res = RowsInserter::validate_insert_request(&schema, &req);
+        let res = RowInserter::validate_insert_request(&schema, &req);
         assert_matches!(res, Ok(_));
 
         // case 5
@@ -379,7 +379,7 @@ mod tests {
             ],
         }];
         let req = create_req(data_schema.clone(), rows);
-        let res = RowsInserter::validate_insert_request(&schema, &req);
+        let res = RowInserter::validate_insert_request(&schema, &req);
         assert_matches!(res, Ok(_));
 
         // case 6
@@ -405,7 +405,7 @@ mod tests {
             },
         ];
         let req = create_req(data_schema.clone(), rows);
-        let res = RowsInserter::validate_insert_request(&schema, &req);
+        let res = RowInserter::validate_insert_request(&schema, &req);
         assert_matches!(res, Err(Error::InvalidInsertRequest { .. }));
 
         // case 7
@@ -432,7 +432,7 @@ mod tests {
             },
         ];
         let req = create_req(data_schema, rows);
-        let res = RowsInserter::validate_insert_request(&schema, &req);
+        let res = RowInserter::validate_insert_request(&schema, &req);
         assert_matches!(res, Ok(_));
     }
 }

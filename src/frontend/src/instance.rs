@@ -92,7 +92,7 @@ use crate::heartbeat::handler::invalidate_table_cache::InvalidateTableCacheHandl
 use crate::heartbeat::HeartbeatTask;
 use crate::instance::standalone::StandaloneGrpcQueryHandler;
 use crate::metrics;
-use crate::rows_inserter::RowsInserter;
+use crate::row_inserter::RowInserter;
 use crate::script::ScriptExecutor;
 use crate::server::{start_server, ServerHandlers, Services};
 use crate::statement::StatementExecutor;
@@ -135,7 +135,7 @@ pub struct Instance {
 
     heartbeat_task: Option<HeartbeatTask>,
 
-    rows_inserter: Arc<RowsInserter>,
+    row_inserter: Arc<RowInserter>,
 }
 
 impl Instance {
@@ -217,7 +217,7 @@ impl Instance {
 
         let create_expr_factory = Arc::new(DefaultCreateExprFactory);
 
-        let rows_inserter = Arc::new(RowsInserter::new(
+        let row_inserter = Arc::new(RowInserter::new(
             MITO_ENGINE.to_string(),
             catalog_manager.clone(),
             create_expr_factory.clone(),
@@ -234,7 +234,7 @@ impl Instance {
             plugins: plugins.clone(),
             servers: Arc::new(HashMap::new()),
             heartbeat_task,
-            rows_inserter,
+            row_inserter,
         })
     }
 
@@ -290,7 +290,7 @@ impl Instance {
         let create_expr_factory = Arc::new(DefaultCreateExprFactory);
         let grpc_query_handler = StandaloneGrpcQueryHandler::arc(dn_instance.clone());
 
-        let rows_inserter = Arc::new(RowsInserter::new(
+        let row_inserter = Arc::new(RowInserter::new(
             MITO_ENGINE.to_string(),
             catalog_manager.clone(),
             create_expr_factory.clone(),
@@ -307,7 +307,7 @@ impl Instance {
             plugins: Default::default(),
             servers: Arc::new(HashMap::new()),
             heartbeat_task: None,
-            rows_inserter,
+            row_inserter,
         })
     }
 
@@ -328,7 +328,7 @@ impl Instance {
         requests: RowInsertRequests,
         ctx: QueryContextRef,
     ) -> Result<Output> {
-        self.rows_inserter.handle_inserts(requests, ctx).await
+        self.row_inserter.handle_inserts(requests, ctx).await
     }
 
     /// Handle batch inserts

@@ -68,6 +68,7 @@ use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
 use crate::heartbeat::handler::close_region::CloseRegionHandler;
 use crate::heartbeat::handler::open_region::OpenRegionHandler;
 use crate::heartbeat::HeartbeatTask;
+use crate::row_inserter::RowInserter;
 use crate::sql::{SqlHandler, SqlRequest};
 use crate::store;
 
@@ -82,6 +83,7 @@ pub struct Instance {
     pub(crate) sql_handler: SqlHandler,
     pub(crate) catalog_manager: CatalogManagerRef,
     pub(crate) table_id_provider: Option<TableIdProviderRef>,
+    row_inserter: Arc<RowInserter>,
     procedure_manager: ProcedureManagerRef,
     greptimedb_telemetry_task: Arc<GreptimeDBTelemetryTask>,
 }
@@ -296,6 +298,7 @@ impl Instance {
             mito_engine.clone(),
             &*procedure_manager,
         );
+        let row_inserter = Arc::new(RowInserter::new(catalog_manager.clone()));
 
         let instance = Arc::new(Self {
             query_engine: query_engine.clone(),
@@ -306,6 +309,7 @@ impl Instance {
             ),
             catalog_manager: catalog_manager.clone(),
             table_id_provider,
+            row_inserter,
             procedure_manager,
             greptimedb_telemetry_task: get_greptimedb_telemetry_task(
                 Some(opts.storage.data_home.clone()),

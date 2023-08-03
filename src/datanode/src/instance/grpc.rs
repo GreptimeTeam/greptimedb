@@ -18,7 +18,7 @@ use std::sync::Arc;
 use api::v1::ddl_request::Expr as DdlExpr;
 use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
-use api::v1::{CreateDatabaseExpr, DdlRequest, DeleteRequest, InsertRequests};
+use api::v1::{CreateDatabaseExpr, DdlRequest, DeleteRequest, InsertRequests, RowInsertRequests};
 use async_trait::async_trait;
 use catalog::CatalogManagerRef;
 use common_grpc_expr::insert::to_table_insert_request;
@@ -129,7 +129,7 @@ impl Instance {
     pub async fn handle_inserts(
         &self,
         requests: InsertRequests,
-        ctx: &QueryContextRef,
+        ctx: QueryContextRef,
     ) -> Result<Output> {
         let results = future::try_join_all(requests.inserts.into_iter().map(|insert| {
             let catalog_manager = self.catalog_manager.clone();
@@ -162,6 +162,14 @@ impl Instance {
         .context(JoinTaskSnafu)?;
         let affected_rows = results.into_iter().sum::<Result<usize>>()?;
         Ok(Output::AffectedRows(affected_rows))
+    }
+
+    pub async fn handle_row_inserts(
+        &self,
+        requests: RowInsertRequests,
+        ctx: QueryContextRef,
+    ) -> Result<Output> {
+        self.row_inserter.handle_inserts(requests, ctx).await
     }
 
     async fn handle_delete(&self, request: DeleteRequest, ctx: QueryContextRef) -> Result<Output> {
@@ -210,7 +218,7 @@ impl GrpcQueryHandler for Instance {
 
     async fn do_query(&self, request: Request, ctx: QueryContextRef) -> Result<Output> {
         match request {
-            Request::Inserts(requests) => self.handle_inserts(requests, &ctx).await,
+            Request::Inserts(requests) => self.handle_inserts(requests, ctx).await,
             Request::Delete(request) => self.handle_delete(request, ctx).await,
             Request::Query(query_request) => {
                 let query = query_request
@@ -221,7 +229,7 @@ impl GrpcQueryHandler for Instance {
                 self.handle_query(query, ctx).await
             }
             Request::Ddl(request) => self.handle_ddl(request, ctx).await,
-            Request::RowInserts(_) => todo!("jeremy"),
+            Request::RowInserts(requests) => self.handle_row_inserts(requests, ctx).await,
             Request::RowDelete(_) => todo!("jeremy"),
         }
     }
