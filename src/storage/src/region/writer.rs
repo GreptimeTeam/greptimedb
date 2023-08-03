@@ -400,8 +400,12 @@ where
 
     pub async fn truncate(&self, ctx: &TruncateContext<'_, S>) -> Result<()> {
         // Acquires the write lock.
-        let inner = self.inner.lock().await;
+        let mut inner = self.inner.lock().await;
         ensure!(!inner.is_closed(), error::ClosedRegionSnafu);
+
+        if let Some(handle) = inner.flush_handle.take() {
+            handle.wait().await?;
+        }
 
         let version_control = ctx.version_control();
         let _lock = self.version_mutex.lock().await;
