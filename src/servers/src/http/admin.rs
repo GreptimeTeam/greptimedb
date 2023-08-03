@@ -20,7 +20,7 @@ use api::v1::{CompactTableExpr, DdlRequest, FlushTableExpr};
 use axum::extract::{Query, RawBody, State};
 use axum::http::StatusCode;
 use common_catalog::consts::DEFAULT_CATALOG_NAME;
-use session::context::QueryContextBuilder;
+use session::context::QueryContext;
 use snafu::OptionExt;
 
 use crate::error;
@@ -65,7 +65,7 @@ pub async fn flush(
     });
 
     grpc_handler
-        .do_query(request, QueryContextBuilder::default().build())
+        .do_query(request, QueryContext::with(&catalog_name, &schema_name))
         .await?;
     Ok((StatusCode::NO_CONTENT, ()))
 }
@@ -107,7 +107,7 @@ pub async fn compact(
     });
 
     grpc_handler
-        .do_query(request, QueryContextBuilder::default().build())
+        .do_query(request, QueryContext::with(&catalog_name, &schema_name))
         .await?;
     Ok((StatusCode::NO_CONTENT, ()))
 }

@@ -17,8 +17,6 @@ use std::collections::HashMap;
 use axum::extract::{Query, RawBody, State};
 use axum::http::StatusCode as HttpStatusCode;
 use axum::Json;
-use common_catalog::consts::DEFAULT_SCHEMA_NAME;
-use common_catalog::parse_catalog_and_schema_from_db_string;
 use hyper::Body;
 use serde::{Deserialize, Serialize};
 use session::context::QueryContext;
@@ -84,13 +82,7 @@ pub async fn put(
     let summary = params.contains_key("summary");
     let details = params.contains_key("details");
 
-    let db = params
-        .get("db")
-        .map(|v| v.as_str())
-        .unwrap_or(DEFAULT_SCHEMA_NAME);
-
-    let (catalog, schema) = parse_catalog_and_schema_from_db_string(db);
-    let ctx = QueryContext::with(catalog, schema);
+    let ctx = QueryContext::with_db_name(params.get("db"));
 
     let data_points = parse_data_points(body).await?;
 

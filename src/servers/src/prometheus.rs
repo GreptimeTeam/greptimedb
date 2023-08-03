@@ -445,10 +445,7 @@ pub async fn instant_query(
         step: "1s".to_string(),
     };
 
-    let db = &params.db.unwrap_or(DEFAULT_SCHEMA_NAME.to_string());
-    let (catalog, schema) = parse_catalog_and_schema_from_db_string(db);
-
-    let query_ctx = QueryContext::with(catalog, schema);
+    let query_ctx = QueryContext::with_db_name(params.db.as_ref());
 
     let result = handler.do_query(&prom_query, query_ctx).await;
     let (metric_name, result_type) = match retrieve_metric_name_and_result_type(&prom_query.query) {
@@ -484,10 +481,7 @@ pub async fn range_query(
         step: params.step.or(form_params.step).unwrap_or_default(),
     };
 
-    let db = &params.db.unwrap_or(DEFAULT_SCHEMA_NAME.to_string());
-    let (catalog, schema) = parse_catalog_and_schema_from_db_string(db);
-
-    let query_ctx = QueryContext::with(catalog, schema);
+    let query_ctx = QueryContext::with_db_name(params.db.as_ref());
 
     let result = handler.do_query(&prom_query, query_ctx).await;
     let metric_name = match retrieve_metric_name_and_result_type(&prom_query.query) {
@@ -956,9 +950,7 @@ pub async fn series_query(
         .or(form_params.end)
         .unwrap_or_else(current_time_rfc3339);
 
-    let db = &params.db.unwrap_or(DEFAULT_SCHEMA_NAME.to_string());
-    let (catalog, schema) = parse_catalog_and_schema_from_db_string(db);
-    let query_ctx = QueryContext::with(catalog, schema);
+    let query_ctx = QueryContext::with_db_name(params.db.as_ref());
 
     let mut series = Vec::new();
     for query in queries {
