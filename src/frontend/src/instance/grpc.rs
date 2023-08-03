@@ -88,7 +88,7 @@ impl GrpcQueryHandler for Instance {
                 GrpcQueryHandler::do_query(self.grpc_query_handler.as_ref(), request, ctx.clone())
                     .await?
             }
-            Request::RowInserts(_) => todo!("jeremy"),
+            Request::RowInserts(requests) => self.handle_row_inserts(requests, ctx.clone()).await?,
             Request::RowDelete(_) => todo!("jeremy"),
         };
 

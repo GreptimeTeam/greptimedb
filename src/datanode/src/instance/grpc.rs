@@ -221,7 +221,7 @@ impl GrpcQueryHandler for Instance {
                 self.handle_query(query, ctx).await
             }
             Request::Ddl(request) => self.handle_ddl(request, ctx).await,
-            Request::RowInserts(_) => todo!("jeremy"),
+            Request::RowInserts(requests) => self.handle_row_inserts(requests, ctx.clone()).await?,
             Request::RowDelete(_) => todo!("jeremy"),
         }
     }
