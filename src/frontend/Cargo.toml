@@ -41,6 +41,8 @@ futures-util.workspace = true
 humantime-serde = "1.1"
 itertools.workspace = true
 meta-client = { path = "../meta-client" }
+# Although it is not used, please do not delete it.
+meter-core.workspace = true
 meter-macros.workspace = true
 metrics.workspace = true
 mito = { path = "../mito", features = ["test"] }
@@ -72,7 +74,6 @@ catalog = { path = "../catalog", features = ["testing"] }
 common-test-util = { path = "../common/test-util" }
 datanode = { path = "../datanode" }
 futures = "0.3"
-meter-core.workspace = true
 meta-srv = { path = "../meta-srv", features = ["mock"] }
 strfmt = "0.2"
 tower = "0.4"
