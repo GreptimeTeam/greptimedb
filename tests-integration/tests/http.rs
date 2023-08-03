@@ -386,6 +386,10 @@ pub async fn test_prom_http_api(store_type: StorageType) {
         .unwrap()
     );
 
+    // labels without match[] param
+    let res = client.get("/api/v1/labels").send().await;
+    assert_eq!(res.status(), StatusCode::OK);
+
     // labels query with multiple match[] params
     let res = client
         .get("/api/v1/labels?match[]=up&match[]=down")
@@ -449,6 +453,14 @@ pub async fn test_prom_http_api(store_type: StorageType) {
         .get("/api/v1/label/instance/values?match[]=up&match[]=system_metrics")
         .send()
         .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let prom_resp = res.json::<PrometheusJsonResponse>().await;
+    assert_eq!(prom_resp.status, "success");
+    assert!(prom_resp.error.is_none());
+    assert!(prom_resp.error_type.is_none());
+
+    // query `__name__` without match[]
+    let res = client.get("/api/v1/label/__name__/values").send().await;
     assert_eq!(res.status(), StatusCode::OK);
     let prom_resp = res.json::<PrometheusJsonResponse>().await;
     assert_eq!(prom_resp.status, "success");

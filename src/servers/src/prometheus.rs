@@ -21,6 +21,7 @@ use async_trait::async_trait;
 use axum::body::BoxBody;
 use axum::extract::{Path, Query, State};
 use axum::{middleware, routing, Form, Json, Router};
+use catalog::CatalogManagerRef;
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
@@ -57,7 +58,7 @@ use crate::error::{
 };
 use crate::http::authorize::HttpAuth;
 use crate::http::track_metrics;
-use crate::prom_store::{FIELD_COLUMN_NAME, TIMESTAMP_COLUMN_NAME};
+use crate::prom_store::{FIELD_COLUMN_NAME, METRIC_NAME_LABEL, TIMESTAMP_COLUMN_NAME};
 use crate::server::Server;
 
 pub const PROMETHEUS_API_VERSION: &str = "v1";
@@ -67,6 +68,8 @@ pub type PrometheusHandlerRef = Arc<dyn PrometheusHandler + Send + Sync>;
 #[async_trait]
 pub trait PrometheusHandler {
     async fn do_query(&self, query: &PromQuery, query_ctx: QueryContextRef) -> Result<Output>;
+
+    fn catalog_manager(&self) -> CatalogManagerRef;
 }
 
 /// PromServer represents PrometheusServer which handles the compliance with prometheus HTTP API
@@ -546,12 +549,24 @@ pub async fn labels_query(
     Form(form_params): Form<LabelsQuery>,
 ) -> Json<PrometheusJsonResponse> {
     let _timer = timer!(crate::metrics::METRIC_HTTP_PROMQL_LABEL_QUERY_ELAPSED);
+
+    let db = &params.db.unwrap_or(DEFAULT_SCHEMA_NAME.to_string());
+    let (catalog, schema) = crate::parse_catalog_and_schema_from_client_database_name(db);
+    let query_ctx = QueryContext::with(catalog, schema);
+
     let mut queries = params.matches.0;
     if queries.is_empty() {
         queries = form_params.matches.0;
     }
     if queries.is_empty() {
-        return PrometheusJsonResponse::error("Unsupported", "match[] parameter is required");
+        match get_all_column_names(catalog, schema, &handler.catalog_manager()).await {
+            Ok(labels) => {
+                return PrometheusJsonResponse::success(PrometheusResponse::Labels(labels))
+            }
+            Err(e) => {
+                return PrometheusJsonResponse::error(e.status_code().to_string(), e.to_string())
+            }
+        }
     }
 
     let start = params
@@ -562,10 +577,6 @@ pub async fn labels_query(
         .end
         .or(form_params.end)
         .unwrap_or_else(current_time_rfc3339);
-
-    let db = &params.db.unwrap_or(DEFAULT_SCHEMA_NAME.to_string());
-    let (catalog, schema) = crate::parse_catalog_and_schema_from_client_database_name(db);
-    let query_ctx = QueryContext::with(catalog, schema);
 
     let mut labels = HashSet::new();
     let _ = labels.insert(METRIC_NAME.to_string());
@@ -601,6 +612,27 @@ pub async fn labels_query(
     let mut sorted_labels: Vec<String> = labels.into_iter().collect();
     sorted_labels.sort();
     PrometheusJsonResponse::success(PrometheusResponse::Labels(sorted_labels))
+}
+
+async fn get_all_column_names(
+    catalog: &str,
+    schema: &str,
+    manager: &CatalogManagerRef,
+) -> std::result::Result<Vec<String>, catalog::error::Error> {
+    let table_names = manager.table_names(catalog, schema).await?;
+
+    let mut labels = HashSet::new();
+    for table_name in table_names {
+        let Some(table) = manager.table(catalog, schema, &table_name).await? else { continue };
+        let schema = table.schema();
+        for column in schema.column_schemas() {
+            labels.insert(column.name.to_string());
+        }
+    }
+
+    let mut labels_vec = labels.into_iter().collect::<Vec<_>>();
+    labels_vec.sort_unstable();
+    Ok(labels_vec)
 }
 
 async fn retrieve_series_from_query_result(
@@ -781,6 +813,21 @@ pub async fn label_values_query(
     Query(params): Query<LabelValueQuery>,
 ) -> Json<PrometheusJsonResponse> {
     let _timer = timer!(crate::metrics::METRIC_HTTP_PROMQL_LABEL_VALUE_QUERY_ELAPSED);
+
+    let db = &params.db.unwrap_or(DEFAULT_SCHEMA_NAME.to_string());
+    let (catalog, schema) = crate::parse_catalog_and_schema_from_client_database_name(db);
+
+    if label_name == METRIC_NAME_LABEL {
+        let mut table_names = match handler.catalog_manager().table_names(catalog, schema).await {
+            Ok(table_names) => table_names,
+            Err(e) => {
+                return PrometheusJsonResponse::error(e.status_code().to_string(), e.to_string());
+            }
+        };
+        table_names.sort_unstable();
+        return PrometheusJsonResponse::success(PrometheusResponse::LabelValues(table_names));
+    }
+
     let queries = params.matches.0;
     if queries.is_empty() {
         return PrometheusJsonResponse::error("Invalid argument", "match[] parameter is required");
@@ -788,8 +835,6 @@ pub async fn label_values_query(
 
     let start = params.start.unwrap_or_else(yesterday_rfc3339);
     let end = params.end.unwrap_or_else(current_time_rfc3339);
-    let db = &params.db.unwrap_or(DEFAULT_SCHEMA_NAME.to_string());
-    let (catalog, schema) = crate::parse_catalog_and_schema_from_client_database_name(db);
     let query_ctx = QueryContext::with(catalog, schema);
 
     let mut label_values = HashSet::new();
