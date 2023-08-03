@@ -1,5 +1,7 @@
 SELECT timestamp '    2017-07-23    13:10:11   ';
 
+SELECT timestamp '    2017-07-23 13:10:11    ';
+
 CREATE TABLE timestamp_with_precision (ts TIMESTAMP(6) TIME INDEX, cnt INT);
 
 INSERT INTO timestamp_with_precision(ts,cnt) VALUES ('2023-04-04 08:00:00.0052+0000', 1);

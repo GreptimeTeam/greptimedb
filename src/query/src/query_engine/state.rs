@@ -85,7 +85,7 @@ impl QueryEngineState {
             analyzer.rules.insert(0, Arc::new(DistPlannerAnalyzer));
         }
         analyzer.rules.insert(0, Arc::new(TypeConversionRule));
-        analyzer.rules.insert(1, Arc::new(StringNormalizationRule));
+        analyzer.rules.insert(0, Arc::new(StringNormalizationRule));
         let mut optimizer = Optimizer::new();
         optimizer.rules.push(Arc::new(OrderHintRule));
 
