@@ -37,7 +37,7 @@ use crate::manifest::action::{
     RawRegionMetadata, RegionChange, RegionEdit, RegionMetaAction, RegionMetaActionList,
     RegionRemove, RegionTruncate,
 };
-use crate::memtable::{Inserter, MemtableBuilderRef, MemtableId, MemtableRef};
+use crate::memtable::{Inserter, MemtableBuilderRef, MemtableId, MemtableRef, MemtableVersion};
 use crate::metadata::RegionMetadataRef;
 use crate::metrics::{FLUSH_REASON, FLUSH_REQUESTS_TOTAL, PREPROCESS_ELAPSED};
 use crate::proto::wal::WalHeader;
@@ -45,7 +45,7 @@ use crate::region::{
     CompactContext, RecoveredMetadata, RecoveredMetadataMap, RegionManifest, SharedDataRef,
 };
 use crate::schema::compat::CompatWrite;
-use crate::sst::{AccessLayerRef, FileId};
+use crate::sst::{AccessLayerRef, LevelMetas};
 use crate::version::{VersionControl, VersionControlRef, VersionEdit};
 use crate::wal::Wal;
 use crate::write_batch::WriteBatch;
@@ -398,64 +398,47 @@ where
         Ok(())
     }
 
-    pub async fn truncate(
-        &self,
-        ctx: &TruncateContext<'_, S>,
-        writer_ctx: WriterContext<'_, S>,
-    ) -> Result<()> {
+    pub async fn truncate(&self, ctx: &TruncateContext<'_, S>) -> Result<()> {
         // Acquires the write lock.
-        let mut inner = self.inner.lock().await;
+        let inner = self.inner.lock().await;
         ensure!(!inner.is_closed(), error::ClosedRegionSnafu);
-
-        // Manual flush to clear Memtable.
-        inner
-            .manual_flush(writer_ctx, FlushReason::Manually)
-            .await?;
-
-        if let Some(handle) = inner.flush_handle.take() {
-            handle.wait().await?;
-        }
 
         let version_control = ctx.version_control();
         let _lock = self.version_mutex.lock().await;
-
-        // Mark all data obsolete
         let committed_sequence = version_control.committed_sequence();
-        ctx.wal.obsolete(committed_sequence).await?;
-
-        // Collect the `FileMeta` of all SST.
-        let current_version = version_control.current();
-        let files = current_version.ssts().collect_all_files();
-        let manifest_version = version_control.current_manifest_version();
-
-        logging::info!(
-            "Try to truncate all SSTs, region: {}, files: {:?}",
-            ctx.shared.id(),
-            files.iter().map(|f| f.file_id).collect::<Vec<FileId>>(),
-        );
 
         // Add `RegionMetaAction::Truncate` to recover from manifest in case of failure.
         let mut action_list =
             RegionMetaActionList::with_action(RegionMetaAction::Truncate(RegionTruncate {
                 region_id: ctx.shared.id,
-                files_to_remove: files.clone(),
+                committed_sequence,
             }));
 
         // Persist the meta action.
+        let current_version = version_control.current();
+        let manifest_version = version_control.current_manifest_version();
         let prev_version = manifest_version;
         action_list.set_prev_version(prev_version);
         let _ = ctx.manifest.update(action_list).await?;
 
-        // Apply VersionEdit
-        let edit = VersionEdit {
-            files_to_add: vec![],
-            files_to_remove: files,
-            flushed_sequence: Some(committed_sequence),
-            manifest_version: manifest_version + 1,
-            compaction_time_window: None,
-            max_memtable_id: None,
-        };
-        version_control.apply_edit(edit);
+        // Mark all data obsolete
+        ctx.wal.obsolete(committed_sequence).await?;
+
+        // Mark all SSTs deleted
+        let files = current_version.ssts().mark_all_files_deleted();
+        logging::info!(
+            "Try to remove all SSTs, region: {}, files: {:?}",
+            ctx.shared.id(),
+            files
+        );
+
+        // Reset version
+        let memtables = Arc::new(MemtableVersion::new(inner.alloc_memtable(version_control)));
+        let ssts = Arc::new(LevelMetas::new(
+            ctx.sst_layer.clone(),
+            current_version.ssts().file_purger(),
+        ));
+        version_control.reset_version(manifest_version + 1, memtables, ssts);
 
         Ok(())
     }
@@ -534,6 +517,7 @@ pub struct TruncateContext<'a, S: LogStore> {
     pub shared: &'a SharedDataRef,
     pub wal: &'a Wal<S>,
     pub manifest: &'a RegionManifest,
+    pub sst_layer: &'a AccessLayerRef,
 }
 
 impl<'a, S: LogStore> TruncateContext<'a, S> {

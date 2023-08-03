@@ -82,7 +82,7 @@ pub struct RegionEdit {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct RegionTruncate {
     pub region_id: RegionId,
-    pub files_to_remove: Vec<FileMeta>,
+    pub committed_sequence: SequenceNumber,
 }
 
 /// The region version checkpoint

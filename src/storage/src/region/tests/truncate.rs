@@ -27,7 +27,6 @@ use crate::flush::FlushStrategyRef;
 use crate::manifest::action::{RegionMetaAction, RegionMetaActionList, RegionTruncate};
 use crate::region::tests::{self, FileTesterBase};
 use crate::region::RegionImpl;
-use crate::sst::FileMeta;
 use crate::test_util::config_util;
 use crate::test_util::flush_switch::{has_parquet_file, FlushSwitch};
 
@@ -101,18 +100,6 @@ impl TruncateTester {
 
         self.base = Some(FileTesterBase::with_region(region));
     }
-
-    fn collect_file_metas(&self) -> Vec<FileMeta> {
-        let version = self.base().region.version_control().current();
-        version
-            .ssts()
-            .levels()
-            .iter()
-            .fold(vec![], |mut files, level| {
-                files.extend(level.files().map(|f| f.meta()));
-                files
-            })
-    }
 }
 
 #[tokio::test]
@@ -131,6 +118,7 @@ async fn test_truncate_basic() {
         (1003, Some("1003".to_string())),
     ];
 
+    // Data in Memtable
     let _ = tester.base().put(&data).await;
     let res = tester.base().full_scan().await;
     assert_eq!(4, res.len());
@@ -148,6 +136,7 @@ async fn test_put_data_after_truncate() {
     common_telemetry::init_default_ut_logging();
     let store_dir = dir.path().to_str().unwrap();
 
+    let sst_dir = format!("{}/{}", store_dir, engine::region_sst_dir("", REGION_NAME));
     let flush_switch = Arc::new(FlushSwitch::default());
     let tester = TruncateTester::new(store_dir, flush_switch.clone()).await;
 
@@ -157,8 +146,19 @@ async fn test_put_data_after_truncate() {
         (1002, None),
         (1003, Some("1003".to_string())),
     ];
-
     let _ = tester.base().put(&data).await;
+
+    // Manually trigger flush.
+    tester.flush().await;
+    assert!(has_parquet_file(&sst_dir));
+
+    let data = [
+        (1002, Some("1002".to_string())),
+        (1004, Some("1004".to_string())),
+        (1005, Some("1005".to_string())),
+    ];
+    let _ = tester.base().put(&data).await;
+
     // Truncate region.
     tester.truncate().await;
     let res = tester.base().full_scan().await;
@@ -170,7 +170,6 @@ async fn test_put_data_after_truncate() {
         (1002, Some("2".to_string())),
         (1003, Some("3".to_string())),
     ];
-
     let _ = tester.base().put(&new_data).await;
     let res = tester.base().full_scan().await;
     assert_eq!(new_data, res.as_slice());
@@ -182,7 +181,6 @@ async fn test_truncate_reopen() {
     common_telemetry::init_default_ut_logging();
     let store_dir = dir.path().to_str().unwrap();
 
-    let sst_dir = format!("{}/{}", store_dir, engine::region_sst_dir("", REGION_NAME));
     let flush_switch = Arc::new(FlushSwitch::default());
     let mut tester = TruncateTester::new(store_dir, flush_switch.clone()).await;
 
@@ -197,9 +195,14 @@ async fn test_truncate_reopen() {
 
     // Manually trigger flush.
     tester.flush().await;
-    assert!(has_parquet_file(&sst_dir));
 
-    let files = tester.collect_file_metas();
+    let data = [
+        (1002, Some("1002".to_string())),
+        (1004, Some("1004".to_string())),
+        (1005, Some("1005".to_string())),
+    ];
+    let _ = tester.base().put(&data).await;
+
     let manifest = &tester.base().region.inner.manifest;
     let manifest_version = tester
         .base()
@@ -207,10 +210,11 @@ async fn test_truncate_reopen() {
         .version_control()
         .current_manifest_version();
 
+    let committed_sequence = tester.base().committed_sequence();
     let mut action_list =
         RegionMetaActionList::with_action(RegionMetaAction::Truncate(RegionTruncate {
             region_id: 0.into(),
-            files_to_remove: files.clone(),
+            committed_sequence,
         }));
 
     // Persist the meta action.

@@ -336,7 +336,7 @@ mod tests {
 
         assert!(manifest
             .update(RegionMetaActionList::new(vec![RegionMetaAction::Truncate(
-                build_region_truncate(&[FileId::random(), FileId::random(), FileId::random()])
+                build_region_truncate(3)
             ),]))
             .await
             .is_ok());
@@ -376,7 +376,7 @@ mod tests {
 
         match action {
             RegionMetaAction::Truncate(t) => {
-                assert_eq!(3, t.files_to_remove.len())
+                assert_eq!(3, t.committed_sequence)
             }
             _ => unreachable!(),
         }

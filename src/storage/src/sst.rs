@@ -157,6 +157,10 @@ impl LevelMetas {
     pub fn levels(&self) -> &[LevelMeta] {
         &self.levels
     }
+
+    pub fn file_purger(&self) -> FilePurgerRef {
+        self.file_purger.clone()
+    }
 }
 
 /// Metadata of files in same SST level.
