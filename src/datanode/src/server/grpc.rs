@@ -20,7 +20,7 @@ use common_catalog::format_full_table_name;
 use common_grpc_expr::{alter_expr_to_request, create_expr_to_request};
 use common_query::Output;
 use common_telemetry::info;
-use session::context::{QueryContext, QueryContextRef};
+use session::context::QueryContextRef;
 use snafu::prelude::*;
 use table::requests::{
     CompactTableRequest, DropTableRequest, FlushTableRequest, TruncateTableRequest,

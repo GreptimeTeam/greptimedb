@@ -44,7 +44,7 @@ use mito::engine::MitoEngine;
 use object_store::{util, ObjectStore};
 use query::query_engine::{QueryEngineFactory, QueryEngineRef};
 use servers::Mode;
-use session::context::{QueryContext, QueryContextBuilder};
+use session::context::QueryContextBuilder;
 use snafu::prelude::*;
 use storage::compaction::{CompactionHandler, CompactionSchedulerRef};
 use storage::config::EngineConfig as StorageEngineConfig;
