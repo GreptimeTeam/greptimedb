@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use common_base::readable_size::ReadableSize;
-use greptime_proto::v1::{ColumnSchema, Rows};
+use greptime_proto::v1::{ColumnDataType, ColumnSchema, Rows};
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::{ColumnId, CompactionStrategy, OpType, RegionId};
 use tokio::sync::oneshot::{self, Receiver, Sender};
@@ -26,7 +26,10 @@ use tokio::sync::oneshot::{self, Receiver, Sender};
 use crate::config::DEFAULT_WRITE_BUFFER_SIZE;
 use crate::error::{CreateDefaultSnafu, FillDefaultSnafu, InvalidRequestSnafu, Result};
 use crate::metadata::{ColumnMetadata, RegionMetadata};
-use crate::proto_util::{to_column_data_type, to_proto_semantic_type, to_proto_value};
+use crate::proto_util::{
+    is_column_type_value_eq, is_semantic_type_eq, to_column_data_type, to_proto_semantic_type,
+    to_proto_value,
+};
 
 /// Options that affect the entire region.
 ///
@@ -141,8 +144,36 @@ impl WriteRequest {
 
         // Checks all columns in this region.
         for column in &metadata.column_metadatas {
-            if let Some(_input_col) = rows_columns.remove(&column.column_schema.name) {
-                todo!("Check data type and semantic type");
+            if let Some(input_col) = rows_columns.remove(&column.column_schema.name) {
+                // Check data type.
+                ensure!(
+                    is_column_type_value_eq(input_col.datatype, &column.column_schema.data_type),
+                    InvalidRequestSnafu {
+                        region_id,
+                        reason: format!(
+                            "column {} expect type {:?}, given: {:?}({})",
+                            column.column_schema.name,
+                            column.column_schema.data_type,
+                            ColumnDataType::from_i32(input_col.datatype),
+                            input_col.datatype,
+                        )
+                    }
+                );
+
+                // Check semantic type.
+                ensure!(
+                    is_semantic_type_eq(input_col.semantic_type, column.semantic_type),
+                    InvalidRequestSnafu {
+                        region_id,
+                        reason: format!(
+                            "column {} has semantic type {:?}, given: {:?}({})",
+                            column.column_schema.name,
+                            column.semantic_type,
+                            greptime_proto::v1::SemanticType::from_i32(input_col.semantic_type),
+                            input_col.semantic_type
+                        ),
+                    }
+                );
             } else {
                 // For columns not in rows, checks whether they have default value.
                 ensure!(
