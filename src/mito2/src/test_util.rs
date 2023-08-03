@@ -33,7 +33,7 @@ use crate::error::Result;
 use crate::manifest::manager::RegionManifestManager;
 use crate::manifest::options::RegionManifestOptions;
 use crate::metadata::{ColumnMetadata, RegionMetadataRef, SemanticType};
-use crate::worker::request::{CreateRequest, RegionOptions};
+use crate::request::{CreateRequest, RegionOptions};
 use crate::worker::WorkerGroup;
 
 /// Env to test mito engine.

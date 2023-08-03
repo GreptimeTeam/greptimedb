@@ -17,7 +17,6 @@
 mod handle_close;
 mod handle_create;
 mod handle_open;
-pub(crate) mod request;
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -38,7 +37,7 @@ use crate::config::MitoConfig;
 use crate::error::{JoinSnafu, Result, WorkerStoppedSnafu};
 use crate::memtable::{DefaultMemtableBuilder, MemtableBuilderRef};
 use crate::region::{RegionMap, RegionMapRef};
-use crate::worker::request::{RegionRequest, RequestBody, WorkerRequest};
+use crate::request::{RegionRequest, RequestBody, WorkerRequest};
 
 /// Identifier for a worker.
 pub(crate) type WorkerId = u32;

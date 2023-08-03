@@ -22,7 +22,7 @@ use snafu::ensure;
 use crate::error::{RegionExistsSnafu, Result};
 use crate::metadata::{RegionMetadataBuilder, INIT_REGION_VERSION};
 use crate::region::opener::RegionOpener;
-use crate::worker::request::CreateRequest;
+use crate::request::CreateRequest;
 use crate::worker::RegionWorkerLoop;
 
 impl<S> RegionWorkerLoop<S> {

@@ -26,8 +26,8 @@ use store_api::storage::RegionId;
 
 use crate::config::MitoConfig;
 use crate::error::{RecvSnafu, Result};
-pub use crate::worker::request::CreateRequest;
-use crate::worker::request::{CloseRequest, OpenRequest, RegionRequest, RequestBody};
+pub use crate::request::CreateRequest;
+use crate::request::{CloseRequest, OpenRequest, RegionRequest, RequestBody};
 use crate::worker::WorkerGroup;
 
 /// Region engine implementation for timeseries data.
