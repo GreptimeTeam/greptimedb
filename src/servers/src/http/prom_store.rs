@@ -17,7 +17,6 @@ use axum::extract::{Query, RawBody, State};
 use axum::http::{header, StatusCode};
 use axum::response::IntoResponse;
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
-use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_telemetry::timer;
 use hyper::Body;
 use prost::Message;
@@ -58,14 +57,8 @@ pub async fn remote_write(
             params.db.clone().unwrap_or_default()
         )]
     );
-    let ctx = if let Some(db) = params.db {
-        let (catalog, schema) = parse_catalog_and_schema_from_db_string(&db);
-        QueryContext::with(catalog, schema)
-    } else {
-        QueryContext::arc()
-    };
 
-    // TODO(shuiyisong): add more error log
+    let ctx = QueryContext::with_db_name(params.db.as_ref());
     handler.write(request, ctx).await?;
     Ok((StatusCode::NO_CONTENT, ()))
 }
@@ -98,14 +91,8 @@ pub async fn remote_read(
             params.db.clone().unwrap_or_default()
         )]
     );
-    let ctx = if let Some(db) = params.db {
-        let (catalog, schema) = parse_catalog_and_schema_from_db_string(&db);
-        QueryContext::with(catalog, schema)
-    } else {
-        QueryContext::arc()
-    };
 
-    // TODO(shuiyisong): add more error log
+    let ctx = QueryContext::with_db_name(params.db.as_ref());
     handler.read(request, ctx).await
 }
 

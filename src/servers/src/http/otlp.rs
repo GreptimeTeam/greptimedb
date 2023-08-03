@@ -16,7 +16,6 @@ use axum::extract::{RawBody, State};
 use axum::http::header;
 use axum::response::IntoResponse;
 use axum::TypedHeader;
-use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_telemetry::timer;
 use hyper::Body;
 use opentelemetry_proto::tonic::collector::metrics::v1::{
@@ -36,12 +35,7 @@ pub async fn metrics(
     TypedHeader(db): TypedHeader<GreptimeDbName>,
     RawBody(body): RawBody,
 ) -> Result<OtlpResponse> {
-    let ctx = if let Some(db) = db.value() {
-        let (catalog, schema) = parse_catalog_and_schema_from_db_string(db);
-        QueryContext::with(catalog, schema)
-    } else {
-        QueryContext::arc()
-    };
+    let ctx = QueryContext::with_db_name(db.value());
     let _timer = timer!(
         crate::metrics::METRIC_HTTP_OPENTELEMETRY_ELAPSED,
         &[(crate::metrics::METRIC_DB_LABEL, ctx.get_db_string())]
