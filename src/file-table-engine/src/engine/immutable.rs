@@ -117,7 +117,7 @@ impl TableEngine for ImmutableFileTableEngine {
     async fn truncate_table(
         &self,
         _ctx: &EngineContext,
-        _requets: TruncateTableRequest,
+        _request: TruncateTableRequest,
     ) -> TableResult<bool> {
         Ok(true)
     }
