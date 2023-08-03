@@ -4114,7 +4114,7 @@ checksum = "d2fabcfbdc87f4758337ca535fb41a6d701b65693ce38287d856d1674551ec9b"
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=7855e1fcc806a795e5e714297fa65083b1110dce#7855e1fcc806a795e5e714297fa65083b1110dce"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=ec4b84931378004db60d168e2604bc3fb9735e9c#ec4b84931378004db60d168e2604bc3fb9735e9c"
 dependencies = [
  "prost",
  "serde",
@@ -5510,7 +5510,7 @@ dependencies = [
  "datafusion-common",
  "datatypes",
  "futures",
- "greptime-proto 0.1.0 (git+https://github.com/GreptimeTeam/greptime-proto.git?rev=7855e1fcc806a795e5e714297fa65083b1110dce)",
+ "greptime-proto 0.1.0 (git+https://github.com/GreptimeTeam/greptime-proto.git?rev=ec4b84931378004db60d168e2604bc3fb9735e9c)",
  "lazy_static",
  "log-store",
  "metrics",
