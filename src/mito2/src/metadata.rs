@@ -221,50 +221,6 @@ impl RegionMetadata {
     }
 }
 
-/// Fields skipped in serialization.
-struct SkippedFields {
-    /// Last schema.
-    schema: SchemaRef,
-    /// Id of the time index column.
-    time_index: ColumnId,
-    /// Map column id to column's index in [column_metadatas](RegionMetadata::column_metadatas).
-    id_to_index: HashMap<ColumnId, usize>,
-}
-
-impl SkippedFields {
-    /// Constructs skipped fields from `column_metadatas`.
-    fn new(column_metadatas: &[ColumnMetadata]) -> Result<SkippedFields> {
-        let column_schemas = column_metadatas
-            .iter()
-            .map(|column_metadata| column_metadata.column_schema.clone())
-            .collect();
-        let schema = Arc::new(Schema::try_new(column_schemas).context(InvalidSchemaSnafu)?);
-        let time_index = column_metadatas
-            .iter()
-            .find_map(|col| {
-                if col.semantic_type == SemanticType::Timestamp {
-                    Some(col.column_id)
-                } else {
-                    None
-                }
-            })
-            .context(InvalidMetaSnafu {
-                reason: "time index not found",
-            })?;
-        let id_to_index = column_metadatas
-            .iter()
-            .enumerate()
-            .map(|(idx, col)| (col.column_id, idx))
-            .collect();
-
-        Ok(SkippedFields {
-            schema,
-            time_index,
-            id_to_index,
-        })
-    }
-}
-
 /// Builder to build [RegionMetadata].
 pub struct RegionMetadataBuilder {
     region_id: RegionId,
