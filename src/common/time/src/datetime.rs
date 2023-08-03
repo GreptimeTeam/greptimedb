@@ -55,6 +55,7 @@ impl FromStr for DateTime {
     type Err = Error;
 
     fn from_str(s: &str) -> Result<Self> {
+        let s = s.trim();
         let local = Local {};
         let timestamp = if let Ok(d) = NaiveDateTime::parse_from_str(s, DATETIME_FORMAT) {
             match local.from_local_datetime(&d) {
@@ -110,6 +111,8 @@ mod tests {
         std::env::set_var("TZ", "Asia/Shanghai");
         let time = "1970-01-01 00:00:00+0800";
         let dt = DateTime::from_str(time).unwrap();
+        assert_eq!(time, &dt.to_string());
+        let dt = DateTime::from_str("      1970-01-01       00:00:00+0800       ").unwrap();
         assert_eq!(time, &dt.to_string());
     }
 
