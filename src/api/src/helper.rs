@@ -755,7 +755,7 @@ mod tests {
     }
 
     #[test]
-    fn test_convert_i128_to_interval(){
+    fn test_convert_i128_to_interval() {
         let i128_val = 3000;
         let interval = convert_i128_to_interval(i128_val);
         assert_eq!(interval.months, 0);
