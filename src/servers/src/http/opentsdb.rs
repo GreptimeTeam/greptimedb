@@ -18,6 +18,7 @@ use axum::extract::{Query, RawBody, State};
 use axum::http::StatusCode as HttpStatusCode;
 use axum::Json;
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
+use common_catalog::parse_catalog_and_schema_from_db_string;
 use hyper::Body;
 use serde::{Deserialize, Serialize};
 use session::context::QueryContext;
@@ -25,7 +26,6 @@ use snafu::ResultExt;
 
 use crate::error::{self, Error, Result};
 use crate::opentsdb::codec::DataPoint;
-use crate::parse_catalog_and_schema_from_client_database_name;
 use crate::query_handler::OpentsdbProtocolHandlerRef;
 
 #[derive(Serialize, Deserialize)]
@@ -89,7 +89,7 @@ pub async fn put(
         .map(|v| v.as_str())
         .unwrap_or(DEFAULT_SCHEMA_NAME);
 
-    let (catalog, schema) = parse_catalog_and_schema_from_client_database_name(db);
+    let (catalog, schema) = parse_catalog_and_schema_from_db_string(db);
     let ctx = QueryContext::with(catalog, schema);
 
     let data_points = parse_data_points(body).await?;

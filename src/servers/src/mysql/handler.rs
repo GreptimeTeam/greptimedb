@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use chrono::{NaiveDate, NaiveDateTime};
+use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
 use common_query::Output;
 use common_telemetry::{error, info, logging, timer, warn};
@@ -351,7 +352,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
     }
 
     async fn on_init<'a>(&'a mut self, database: &'a str, w: InitWriter<'a, W>) -> Result<()> {
-        let (catalog, schema) = crate::parse_catalog_and_schema_from_client_database_name(database);
+        let (catalog, schema) = parse_catalog_and_schema_from_db_string(database);
 
         if !self.query_handler.is_valid_schema(catalog, schema).await? {
             return w

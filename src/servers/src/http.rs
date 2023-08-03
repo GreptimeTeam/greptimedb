@@ -42,6 +42,7 @@ use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Json};
 use axum::{routing, BoxError, Extension, Router};
 use common_base::readable_size::ReadableSize;
+use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_query::Output;
@@ -87,7 +88,7 @@ pub(crate) async fn query_context_from_db(
     db: Option<String>,
 ) -> std::result::Result<Arc<QueryContext>, JsonResponse> {
     if let Some(db) = &db {
-        let (catalog, schema) = super::parse_catalog_and_schema_from_client_database_name(db);
+        let (catalog, schema) = parse_catalog_and_schema_from_db_string(db);
 
         match query_handler.is_valid_schema(catalog, schema).await {
             Ok(true) => Ok(QueryContext::with(catalog, schema)),

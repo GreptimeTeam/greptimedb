@@ -23,6 +23,7 @@ use axum::extract::{Path, Query, State};
 use axum::{middleware, routing, Form, Json, Router};
 use catalog::CatalogManagerRef;
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
+use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_query::Output;
@@ -445,7 +446,7 @@ pub async fn instant_query(
     };
 
     let db = &params.db.unwrap_or(DEFAULT_SCHEMA_NAME.to_string());
-    let (catalog, schema) = crate::parse_catalog_and_schema_from_client_database_name(db);
+    let (catalog, schema) = parse_catalog_and_schema_from_db_string(db);
 
     let query_ctx = QueryContext::with(catalog, schema);
 
@@ -484,7 +485,7 @@ pub async fn range_query(
     };
 
     let db = &params.db.unwrap_or(DEFAULT_SCHEMA_NAME.to_string());
-    let (catalog, schema) = crate::parse_catalog_and_schema_from_client_database_name(db);
+    let (catalog, schema) = parse_catalog_and_schema_from_db_string(db);
 
     let query_ctx = QueryContext::with(catalog, schema);
 
@@ -956,7 +957,7 @@ pub async fn series_query(
         .unwrap_or_else(current_time_rfc3339);
 
     let db = &params.db.unwrap_or(DEFAULT_SCHEMA_NAME.to_string());
-    let (catalog, schema) = super::parse_catalog_and_schema_from_client_database_name(db);
+    let (catalog, schema) = parse_catalog_and_schema_from_db_string(db);
     let query_ctx = QueryContext::with(catalog, schema);
 
     let mut series = Vec::new();
