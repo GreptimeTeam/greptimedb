@@ -386,6 +386,10 @@ pub async fn test_prom_http_api(store_type: StorageType) {
         .unwrap()
     );
 
+    // labels without match[] param
+    let res = client.get("/api/v1/labels").send().await;
+    assert_eq!(res.status(), StatusCode::OK);
+
     // labels query with multiple match[] params
     let res = client
         .get("/api/v1/labels?match[]=up&match[]=down")
