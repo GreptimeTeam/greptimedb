@@ -191,13 +191,13 @@ impl Instance {
             name: "DdlRequest.expr",
         })?;
         match expr {
-            DdlExpr::CreateTable(expr) => self.handle_create(expr).await,
-            DdlExpr::Alter(expr) => self.handle_alter(expr).await,
+            DdlExpr::CreateTable(expr) => self.handle_create(expr, query_ctx).await,
+            DdlExpr::Alter(expr) => self.handle_alter(expr, query_ctx).await,
             DdlExpr::CreateDatabase(expr) => self.handle_create_database(expr, query_ctx).await,
-            DdlExpr::DropTable(expr) => self.handle_drop_table(expr).await,
-            DdlExpr::FlushTable(expr) => self.handle_flush_table(expr).await,
-            DdlExpr::CompactTable(expr) => self.handle_compact_table(expr).await,
-            DdlExpr::TruncateTable(expr) => self.handle_truncate_table(expr).await,
+            DdlExpr::DropTable(expr) => self.handle_drop_table(expr, query_ctx).await,
+            DdlExpr::FlushTable(expr) => self.handle_flush_table(expr, query_ctx).await,
+            DdlExpr::CompactTable(expr) => self.handle_compact_table(expr, query_ctx).await,
+            DdlExpr::TruncateTable(expr) => self.handle_truncate_table(expr, query_ctx).await,
         }
     }
 }

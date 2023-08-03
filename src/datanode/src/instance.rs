@@ -44,7 +44,7 @@ use mito::engine::MitoEngine;
 use object_store::{util, ObjectStore};
 use query::query_engine::{QueryEngineFactory, QueryEngineRef};
 use servers::Mode;
-use session::context::QueryContext;
+use session::context::{QueryContext, QueryContextBuilder};
 use snafu::prelude::*;
 use storage::compaction::{CompactionHandler, CompactionSchedulerRef};
 use storage::config::EngineConfig as StorageEngineConfig;
@@ -379,14 +379,14 @@ impl Instance {
                 })
             })
             .collect::<Vec<_>>();
-        let flush_result = futures::future::try_join_all(
-            flush_requests
-                .into_iter()
-                .map(|request| self.sql_handler.execute(request, QueryContext::arc())),
-        )
-        .await
-        .map_err(BoxedError::new)
-        .context(ShutdownInstanceSnafu);
+        let flush_result =
+            futures::future::try_join_all(flush_requests.into_iter().map(|request| {
+                self.sql_handler
+                    .execute(request, QueryContextBuilder::default().build())
+            }))
+            .await
+            .map_err(BoxedError::new)
+            .context(ShutdownInstanceSnafu);
         info!("Flushed all tables result: {}", flush_result.is_ok());
         let _ = flush_result?;
 
