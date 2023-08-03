@@ -20,7 +20,10 @@ pub mod insert;
 use std::collections::HashSet;
 
 pub use alter::{alter_expr_to_request, create_expr_to_request, create_table_schema};
-use api::v1::{Column, ColumnDef, ColumnSchema, CreateTableExpr, SemanticType};
+use api::v1::{
+    AddColumn, AddColumns, Column, ColumnDef, ColumnSchema, CreateTableExpr, SemanticType,
+};
+use datatypes::schema::Schema;
 use error::Result;
 pub use insert::{build_create_expr_from_insertion, column_to_vector, find_new_columns};
 use snafu::{ensure, OptionExt};
@@ -149,4 +152,45 @@ pub fn build_create_table_expr(
     };
 
     Ok(expr)
+}
+
+pub fn extract_new_columns(
+    schema: &Schema,
+    column_exprs: Vec<ColumnExpr>,
+) -> Result<Option<AddColumns>> {
+    let columns_to_add = column_exprs
+        .into_iter()
+        .filter(|expr| schema.column_schema_by_name(&expr.column_name).is_none())
+        .map(|expr| {
+            let is_key = expr.semantic_type == SemanticType::Tag as i32;
+            let column_def = Some(ColumnDef {
+                name: expr.column_name,
+                datatype: expr.datatype,
+                is_nullable: true,
+                default_constraint: vec![],
+            });
+            AddColumn {
+                column_def,
+                is_key,
+                location: None,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    if columns_to_add.is_empty() {
+        Ok(None)
+    } else {
+        let mut distinct_names = HashSet::with_capacity(columns_to_add.len());
+        for add_column in &columns_to_add {
+            let name = &add_column.column_def.as_ref().unwrap().name;
+            ensure!(
+                distinct_names.insert(name),
+                DuplicatedColumnNameSnafu { name }
+            );
+        }
+
+        Ok(Some(AddColumns {
+            add_columns: columns_to_add,
+        }))
+    }
 }

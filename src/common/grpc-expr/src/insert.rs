@@ -12,14 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::column::Values;
 use api::v1::{
-    AddColumn, AddColumns, Column, ColumnDataType, ColumnDef, CreateTableExpr,
-    InsertRequest as GrpcInsertRequest, SemanticType,
+    AddColumns, Column, ColumnDataType, CreateTableExpr, InsertRequest as GrpcInsertRequest,
 };
 use common_base::BitVec;
 use common_time::time::Time;
@@ -49,48 +48,11 @@ use crate::error::{
     ColumnAlreadyExistsSnafu, ColumnDataTypeSnafu, CreateVectorSnafu, InvalidColumnProtoSnafu,
     Result, UnexpectedValuesLengthSnafu,
 };
-use crate::{build_create_table_expr, ColumnExpr};
-
-#[inline]
-fn build_column_def(column_name: &str, datatype: i32, nullable: bool) -> ColumnDef {
-    ColumnDef {
-        name: column_name.to_string(),
-        datatype,
-        is_nullable: nullable,
-        default_constraint: vec![],
-    }
-}
+use crate::{build_create_table_expr, extract_new_columns, ColumnExpr};
 
 pub fn find_new_columns(schema: &SchemaRef, columns: &[Column]) -> Result<Option<AddColumns>> {
-    let mut columns_to_add = Vec::default();
-    let mut new_columns: HashSet<String> = HashSet::default();
-
-    for Column {
-        column_name,
-        semantic_type,
-        datatype,
-        ..
-    } in columns
-    {
-        if schema.column_schema_by_name(column_name).is_none() && !new_columns.contains(column_name)
-        {
-            let column_def = Some(build_column_def(column_name, *datatype, true));
-            columns_to_add.push(AddColumn {
-                column_def,
-                is_key: *semantic_type == SemanticType::Tag as i32,
-                location: None,
-            });
-            let _ = new_columns.insert(column_name.to_string());
-        }
-    }
-
-    if columns_to_add.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(AddColumns {
-            add_columns: columns_to_add,
-        }))
-    }
+    let column_exprs = ColumnExpr::from_columns(columns);
+    extract_new_columns(schema, column_exprs)
 }
 
 pub fn column_to_vector(column: &Column, rows: u32) -> Result<VectorRef> {

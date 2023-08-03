@@ -14,19 +14,24 @@
 
 use std::collections::HashMap;
 
+use api::v1::alter_expr::Kind;
 use api::v1::ddl_request::Expr;
 use api::v1::greptime_request::Request;
-use api::v1::{ColumnSchema, DdlRequest, Row, RowInsertRequest, RowInsertRequests};
+use api::v1::{AlterExpr, ColumnSchema, DdlRequest, Row, RowInsertRequest, RowInsertRequests};
 use catalog::CatalogManagerRef;
-use common_grpc_expr::ColumnExpr;
+use common_grpc_expr::{extract_new_columns, ColumnExpr};
 use common_query::Output;
+use common_telemetry::info;
 use datatypes::schema::Schema;
 use servers::query_handler::grpc::GrpcQueryHandlerRef;
 use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
 use table::TableRef;
 
-use crate::error::{CatalogSnafu, EmptyDataSnafu, Error, InvalidInsertRequestSnafu, Result};
+use crate::error::{
+    CatalogSnafu, EmptyDataSnafu, Error, FindNewColumnsOnInsertionSnafu, InvalidInsertRequestSnafu,
+    Result,
+};
 use crate::expr_factory::CreateExprFactoryRef;
 
 pub struct RowsInserter {
@@ -136,20 +141,51 @@ impl RowsInserter {
 
     async fn alter_tables_on_demand(
         &self,
-        _catalog_name: &str,
-        _schema_name: &str,
+        catalog_name: &str,
+        schema_name: &str,
         tables: Vec<(TableRef, &RowInsertRequest)>,
-        _ctx: QueryContextRef,
+        ctx: QueryContextRef,
     ) -> Result<()> {
+        let mut alter_table_exprs = Vec::new();
         for (table, req) in &tables {
-            Self::validate_insert_request(&table.schema(), req)?;
+            let (rows_schema, _) = Self::validate_insert_request(&table.schema(), req)?;
+            let column_exprs = ColumnExpr::from_column_schemas(rows_schema);
+            let add_columns = extract_new_columns(&table.schema(), column_exprs)
+                .context(FindNewColumnsOnInsertionSnafu)?;
+            let Some(add_columns) = add_columns else {
+                continue;
+            };
+            let table_name = table.table_info().name.clone();
+
+            info!(
+                "Adding new columns: {:?} to table: {}.{}.{}",
+                add_columns, catalog_name, schema_name, table_name
+            );
+
+            alter_table_exprs.push(AlterExpr {
+                catalog_name: catalog_name.to_string(),
+                schema_name: schema_name.to_string(),
+                table_name,
+                kind: Some(Kind::AddColumns(add_columns)),
+                ..Default::default()
+            });
         }
 
         // TODO(jeremy): alter tables in batch
+        for alter_table_expr in alter_table_exprs {
+            let req = Request::Ddl(DdlRequest {
+                expr: Some(Expr::Alter(alter_table_expr)),
+            });
+            self.grpc_query_handler.do_query(req, ctx.clone()).await?;
+        }
+
         Ok(())
     }
 
-    fn validate_insert_request(schema: &Schema, req: &RowInsertRequest) -> Result<()> {
+    fn validate_insert_request<'a>(
+        schema: &Schema,
+        req: &'a RowInsertRequest,
+    ) -> Result<(&'a [ColumnSchema], &'a [Row])> {
         let (rows_schema, rows) = Self::extract_schema_and_rows(req)?;
         let mut not_nulls = schema
             .column_schemas()
@@ -200,10 +236,10 @@ impl RowsInserter {
             );
         }
 
-        Ok(())
+        Ok((rows_schema, rows))
     }
 
-    fn extract_schema_and_rows(req: &RowInsertRequest) -> Result<(&Vec<ColumnSchema>, &Vec<Row>)> {
+    fn extract_schema_and_rows(req: &RowInsertRequest) -> Result<(&[ColumnSchema], &[Row])> {
         let rows = req.rows.as_ref().context(EmptyDataSnafu {
             msg: format!("insert to table: {:?}", &req.table_name),
         })?;
