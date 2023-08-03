@@ -32,6 +32,10 @@ inputs:
   platforms:
     description: The supported platforms to build the image
     required: true
+  push-latest-tag:
+    description: Whether to push the latest tag
+    required: false
+    default: 'true'
 runs:
   using: composite
   steps:
@@ -76,7 +80,19 @@ runs:
         rm -rf arm64 && \
         mv ${{ inputs.arm64-artifact-name }} arm64
 
+    - name: Build and push images(without latest) for amd64 and arm64
+      if: ${{ inputs.push-latest-tag == 'false' }}
+      uses: docker/build-push-action@v3
+      with:
+        context: .
+        file: ${{ inputs.docker-file }}
+        push: true
+        platforms: ${{ inputs.platforms }}
+        tags: |
+          ${{ inputs.image-registry }}/${{ inputs.image-namespace }}/${{ inputs.image-name }}:${{ inputs.image-tag }}
+
     - name: Build and push images for amd64 and arm64
+      if: ${{ inputs.push-latest-tag == 'true' }}
       uses: docker/build-push-action@v3
       with:
         context: .
