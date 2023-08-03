@@ -51,6 +51,7 @@ table = { path = "../table" }
 tokio.workspace = true
 
 [dev-dependencies]
+arrow.workspace = true
 approx_eq = "0.1"
 catalog = { path = "../catalog", features = ["testing"] }
 common-function-macro = { path = "../common/function-macro" }
