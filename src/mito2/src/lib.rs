@@ -35,6 +35,8 @@ pub mod read;
 #[allow(dead_code)]
 mod region;
 #[allow(dead_code)]
+pub mod request;
+#[allow(dead_code)]
 pub mod sst;
 #[allow(dead_code)]
 mod worker;

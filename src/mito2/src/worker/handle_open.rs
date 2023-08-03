@@ -20,7 +20,7 @@ use common_telemetry::info;
 
 use crate::error::Result;
 use crate::region::opener::RegionOpener;
-use crate::worker::request::OpenRequest;
+use crate::request::OpenRequest;
 use crate::worker::RegionWorkerLoop;
 
 impl<S> RegionWorkerLoop<S> {
