@@ -559,7 +559,6 @@ pub async fn labels_query(
         queries = form_params.matches.0;
     }
     if queries.is_empty() {
-        // return PrometheusJsonResponse::error("Unsupported", "match[] parameter is required");
         match get_all_column_names(catalog, schema, &handler.catalog_manager()).await {
             Ok(labels) => {
                 return PrometheusJsonResponse::success(PrometheusResponse::Labels(labels))
@@ -626,7 +625,7 @@ async fn get_all_column_names(
     for table_name in table_names {
         let Some(table) = manager.table(catalog, schema, &table_name).await? else { continue };
         let schema = table.schema();
-        for column in schema.column_schemas().iter() {
+        for column in schema.column_schemas() {
             labels.insert(column.name.to_string());
         }
     }
@@ -825,7 +824,7 @@ pub async fn label_values_query(
                 return PrometheusJsonResponse::error(e.status_code().to_string(), e.to_string());
             }
         };
-        table_names.sort();
+        table_names.sort_unstable();
         return PrometheusJsonResponse::success(PrometheusResponse::LabelValues(table_names));
     }
 
