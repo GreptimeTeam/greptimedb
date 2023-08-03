@@ -719,19 +719,11 @@ impl<S: StorageEngine> MitoEngineInner<S> {
 
         let table_id = request.table_id;
         if let Some(table) = self.get_mito_table(table_id) {
-            let all_regions = table.region_ids();
-            let ctx = StorageEngineContext::default();
-
-            let opts = CloseOptions { flush: false };
-
-            for region_number in all_regions {
-                self.storage_engine
-                    .close_region(&ctx, &region_name(table_id, region_number), &opts)
-                    .await
-                    .map_err(BoxedError::new)
-                    .context(table_error::TableOperationSnafu)?;
-            }
-
+            table
+                .truncate()
+                .await
+                .map_err(BoxedError::new)
+                .context(table_error::TableOperationSnafu)?;
             Ok(true)
         } else {
             Ok(false)

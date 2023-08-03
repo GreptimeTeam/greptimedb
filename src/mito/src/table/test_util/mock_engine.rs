@@ -352,8 +352,4 @@ impl StorageEngine for MockEngine {
     async fn close(&self, _ctx: &EngineContext) -> Result<()> {
         Ok(())
     }
-
-    async fn truncate_region(&self, _ctx: &EngineContext, _name: &str) -> Result<()> {
-        Ok(())
-    }
 }
