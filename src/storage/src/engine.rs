@@ -729,19 +729,15 @@ mod tests {
         ]);
         wb.put(put_data).unwrap();
 
+        // Insert data.
         let _ = region.write(&WriteContext::default(), wb).await.unwrap();
         let ctx = EngineContext::default();
 
+        // Truncate region.
         let _ = region.truncate().await;
         assert!(engine.get_region(&ctx, region.name()).unwrap().is_some());
 
-        let version = region.version_control().current();
-        for level in version.ssts().levels() {
-            for file in level.files() {
-                logging::info!("file name: {:?}", file.file_name());
-            }
-        }
-        // Scan
+        // Scan to verify the region is empty.
         let read_ctx = ReadContext::default();
         let snapshot = region.snapshot(&read_ctx).unwrap();
         let resp = snapshot

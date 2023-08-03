@@ -77,6 +77,12 @@ impl TruncateTester {
     }
 
     async fn reopen(&mut self) {
+        // Close the old region.
+        if let Some(base) = self.base.as_ref() {
+            base.close().await;
+        }
+        self.base = None;
+        // Reopen the region.
         let store_config = config_util::new_store_config(
             REGION_NAME,
             &self.store_dir,
@@ -94,12 +100,6 @@ impl TruncateTester {
             .unwrap();
 
         self.base = Some(FileTesterBase::with_region(region));
-    }
-
-    async fn close(&mut self) {
-        if let Some(base) = self.base.take() {
-            base.close().await;
-        }
     }
 
     fn collect_file_metas(&self) -> Vec<FileMeta> {
@@ -121,7 +121,6 @@ async fn test_truncate_basic() {
     common_telemetry::init_default_ut_logging();
     let store_dir = dir.path().to_str().unwrap();
 
-    // let sst_dir = format!("{}/{}", store_dir, engine::region_sst_dir("", REGION_NAME));
     let flush_switch = Arc::new(FlushSwitch::default());
     let tester = TruncateTester::new(store_dir, flush_switch.clone()).await;
 
@@ -149,7 +148,6 @@ async fn test_put_data_after_truncate() {
     common_telemetry::init_default_ut_logging();
     let store_dir = dir.path().to_str().unwrap();
 
-    // let sst_dir = format!("{}/{}", store_dir, engine::region_sst_dir("", REGION_NAME));
     let flush_switch = Arc::new(FlushSwitch::default());
     let tester = TruncateTester::new(store_dir, flush_switch.clone()).await;
 
@@ -219,7 +217,6 @@ async fn test_truncate_reopen() {
     let prev_version = manifest_version;
     action_list.set_prev_version(prev_version);
     let _ = manifest.update(action_list).await.unwrap();
-    tester.close().await;
 
     // Reopen and put data.
     tester.reopen().await;

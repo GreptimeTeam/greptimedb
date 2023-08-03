@@ -56,7 +56,7 @@ pub use crate::region::writer::{
 use crate::region::writer::{DropContext, TruncateContext};
 use crate::schema::compat::CompatWrite;
 use crate::snapshot::SnapshotImpl;
-use crate::sst::{AccessLayerRef, FileId};
+use crate::sst::AccessLayerRef;
 use crate::version::{
     Version, VersionControl, VersionControlRef, VersionEdit, INIT_COMMITTED_SEQUENCE,
 };
@@ -493,16 +493,11 @@ impl<S: LogStore> RegionImpl<S> {
                     (RegionMetaAction::Remove(r), Some(v)) => {
                         manifest.stop().await?;
 
-                        let files = v
-                            .ssts()
-                            .mark_all_files_deleted()
-                            .iter()
-                            .map(|f| f.file_id)
-                            .collect::<Vec<FileId>>();
+                        let files = v.ssts().mark_all_files_deleted();
                         logging::info!(
                             "Try to remove all SSTs, region: {}, files: {:?}",
                             r.region_id,
-                            files,
+                            files
                         );
 
                         manifest
@@ -818,9 +813,6 @@ impl<S: LogStore> RegionInner<S> {
             shared: &self.shared,
             wal: &self.wal,
             manifest: &self.manifest,
-            flush_scheduler: &self.flush_scheduler,
-            compaction_scheduler: &self.compaction_scheduler,
-            sst_layer: &self.sst_layer,
         };
 
         self.writer.truncate(&ctx, writer_ctx).await?;

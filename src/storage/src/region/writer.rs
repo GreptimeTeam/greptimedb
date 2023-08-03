@@ -336,12 +336,7 @@ where
         );
 
         // Mark all SSTs deleted
-        let files = current_version
-            .ssts()
-            .mark_all_files_deleted()
-            .iter()
-            .map(|f| f.file_id)
-            .collect::<Vec<FileId>>();
+        let files = current_version.ssts().mark_all_files_deleted();
         logging::info!(
             "Try to remove all SSTs, region: {}, files: {:?}",
             drop_ctx.shared.id(),
@@ -428,9 +423,9 @@ where
         let committed_sequence = version_control.committed_sequence();
         ctx.wal.obsolete(committed_sequence).await?;
 
-        // Mark all SSTs deleted
+        // Collect the `FileMeta` of all SST.
         let current_version = version_control.current();
-        let files = current_version.ssts().mark_all_files_deleted();
+        let files = current_version.ssts().collect_all_files();
         let manifest_version = version_control.current_manifest_version();
 
         logging::info!(
@@ -539,9 +534,6 @@ pub struct TruncateContext<'a, S: LogStore> {
     pub shared: &'a SharedDataRef,
     pub wal: &'a Wal<S>,
     pub manifest: &'a RegionManifest,
-    pub flush_scheduler: &'a FlushSchedulerRef<S>,
-    pub compaction_scheduler: &'a CompactionSchedulerRef<S>,
-    pub sst_layer: &'a AccessLayerRef,
 }
 
 impl<'a, S: LogStore> TruncateContext<'a, S> {
