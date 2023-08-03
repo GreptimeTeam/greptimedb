@@ -552,7 +552,7 @@ pub async fn labels_query(
     let _timer = timer!(crate::metrics::METRIC_HTTP_PROMQL_LABEL_QUERY_ELAPSED);
 
     let db = &params.db.unwrap_or(DEFAULT_SCHEMA_NAME.to_string());
-    let (catalog, schema) = crate::parse_catalog_and_schema_from_client_database_name(db);
+    let (catalog, schema) = parse_catalog_and_schema_from_db_string(db);
     let query_ctx = QueryContext::with(catalog, schema);
 
     let mut queries = params.matches.0;
@@ -816,7 +816,7 @@ pub async fn label_values_query(
     let _timer = timer!(crate::metrics::METRIC_HTTP_PROMQL_LABEL_VALUE_QUERY_ELAPSED);
 
     let db = &params.db.unwrap_or(DEFAULT_SCHEMA_NAME.to_string());
-    let (catalog, schema) = crate::parse_catalog_and_schema_from_client_database_name(db);
+    let (catalog, schema) = parse_catalog_and_schema_from_db_string(db);
 
     if label_name == METRIC_NAME_LABEL {
         let mut table_names = match handler.catalog_manager().table_names(catalog, schema).await {
