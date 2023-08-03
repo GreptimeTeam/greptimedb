@@ -24,12 +24,12 @@ use store_api::storage::OpType;
 use crate::metadata::SemanticType;
 
 /// Returns true if the pb semantic type is valid.
-pub(crate) fn check_semantic_type(type_value: i32, semantic_type: SemanticType) -> bool {
+pub(crate) fn is_semantic_type_eq(type_value: i32, semantic_type: SemanticType) -> bool {
     type_value == semantic_type as i32
 }
 
 /// Returns true if the pb type value is valid.
-pub(crate) fn check_column_type(type_value: i32, expect_type: &ConcreteDataType) -> bool {
+pub(crate) fn is_column_type_value_eq(type_value: i32, expect_type: &ConcreteDataType) -> bool {
     let Some(column_type) = ColumnDataType::from_i32(type_value) else {
         return false;
     };
