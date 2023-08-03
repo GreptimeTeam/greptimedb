@@ -21,6 +21,8 @@ use tokio::sync::mpsc::error::SendError;
 use tonic::codegen::http;
 use tonic::Code;
 
+use crate::pubsub::Message;
+
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
@@ -461,6 +463,12 @@ pub enum Error {
 
     #[snafu(display("Invalid heartbeat request: {}", err_msg))]
     InvalidHeartbeatRequest { err_msg: String, location: Location },
+
+    #[snafu(display("Failed to publish message: {:?}", source))]
+    PublishMessage {
+        source: SendError<Message>,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -506,6 +514,7 @@ impl ErrorExt for Error {
             | Error::UpdateTableMetadata { .. }
             | Error::NoEnoughAvailableDatanode { .. }
             | Error::ConvertGrpcExpr { .. }
+            | Error::PublishMessage { .. }
             | Error::Join { .. } => StatusCode::Internal,
             Error::EmptyKey { .. }
             | Error::MissingRequiredParameter { .. }

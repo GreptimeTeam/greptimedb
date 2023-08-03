@@ -26,6 +26,7 @@ use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
 use crate::ddl::{DdlManager, DdlManagerRef};
 use crate::error::Result;
 use crate::handler::mailbox_handler::MailboxHandler;
+use crate::handler::publish_heartbeat_handler::PublishHeartbeatHandler;
 use crate::handler::region_lease_handler::RegionLeaseHandler;
 use crate::handler::{
     CheckLeaderHandler, CollectStatsHandler, HeartbeatHandlerGroup, HeartbeatMailbox,
@@ -40,6 +41,7 @@ use crate::metasrv::{
 };
 use crate::procedure::region_failover::RegionFailoverManager;
 use crate::procedure::state_store::MetaStateStore;
+use crate::pubsub::{PublishRef, SubscribeManagerRef};
 use crate::selector::lease_based::LeaseBasedSelector;
 use crate::sequence::Sequence;
 use crate::service::mailbox::MailboxRef;
@@ -60,6 +62,7 @@ pub struct MetaSrvBuilder {
     lock: Option<DistLockRef>,
     metadata_service: Option<MetadataServiceRef>,
     datanode_clients: Option<Arc<DatanodeClients>>,
+    pubsub: Option<(PublishRef, SubscribeManagerRef)>,
 }
 
 impl MetaSrvBuilder {
@@ -75,6 +78,7 @@ impl MetaSrvBuilder {
             lock: None,
             metadata_service: None,
             datanode_clients: None,
+            pubsub: None,
         }
     }
 
@@ -128,6 +132,11 @@ impl MetaSrvBuilder {
         self
     }
 
+    pub fn pubsub(mut self, publish: PublishRef, subscribe_manager: SubscribeManagerRef) -> Self {
+        self.pubsub = Some((publish, subscribe_manager));
+        self
+    }
+
     pub async fn build(self) -> Result<MetaSrv> {
         let started = Arc::new(AtomicBool::new(false));
 
@@ -142,6 +151,7 @@ impl MetaSrvBuilder {
             lock,
             metadata_service,
             datanode_clients,
+            pubsub,
         } = self;
 
         let options = options.unwrap_or_default();
@@ -215,6 +225,11 @@ impl MetaSrvBuilder {
                 }
                 group.add_handler(RegionLeaseHandler::default()).await;
                 group.add_handler(PersistStatsHandler::default()).await;
+                if let Some((publish, _)) = pubsub.as_ref() {
+                    group
+                        .add_handler(PublishHeartbeatHandler::new(publish.clone()))
+                        .await;
+                }
                 group
             }
         };
@@ -237,6 +252,7 @@ impl MetaSrvBuilder {
             ddl_manager,
             table_metadata_manager,
             greptimedb_telemerty_task: get_greptimedb_telemetry_task(meta_peer_client).await,
+            pubsub,
         })
     }
 }
