@@ -18,7 +18,6 @@ use std::fmt::{self, Display, Formatter, Write};
 use std::hash::{Hash, Hasher};
 
 use arrow::datatypes::IntervalUnit as ArrowIntervalUnit;
-use greptime_proto::v1::IntervalMonthDayNano as PbIntervalMonthDayNano;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -279,28 +278,6 @@ impl From<Interval> for i128 {
 impl From<Interval> for serde_json::Value {
     fn from(v: Interval) -> Self {
         Value::String(v.to_string())
-    }
-}
-
-/// Interval convert with IntervalYearMonth grpc
-impl From<PbIntervalMonthDayNano> for Interval {
-    fn from(value: PbIntervalMonthDayNano) -> Self {
-        Interval {
-            months: value.months,
-            days: value.days,
-            nsecs: value.nanoseconds,
-            unit: IntervalUnit::MonthDayNano,
-        }
-    }
-}
-
-impl From<Interval> for PbIntervalMonthDayNano {
-    fn from(value: Interval) -> Self {
-        PbIntervalMonthDayNano {
-            months: value.months,
-            days: value.days,
-            nanoseconds: value.nsecs,
-        }
     }
 }
 

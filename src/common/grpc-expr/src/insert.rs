@@ -221,7 +221,7 @@ fn collect_column_values(column_datatype: ColumnDataType, values: &Values) -> Ve
         }
         ColumnDataType::IntervalYearMonth => {
             collect_values!(values.interval_year_month_values, |v| {
-                ValueRef::Interval(Interval::from_year_month(*v))
+                ValueRef::Interval(Interval::from_i32(*v))
             })
         }
         ColumnDataType::IntervalDayTime => {
@@ -456,7 +456,7 @@ fn values_to_vector(data_type: &ConcreteDataType, values: Values) -> VectorRef {
             IntervalType::MonthDayNano(_) => {
                 Arc::new(IntervalMonthDayNanoVector::from_iter_values(
                     values.interval_month_day_nano_values.iter().map(|x| {
-                        (x.months as i128) << 96 | (x.days as i128) << 64 | (x.nanoseconds as i128)
+                        Interval::from_month_day_nano(x.months, x.days, x.nanoseconds).to_i128()
                     }),
                 ))
             }

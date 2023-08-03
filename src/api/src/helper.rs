@@ -22,7 +22,7 @@ use datatypes::vectors::VectorRef;
 use greptime_proto::v1::ddl_request::Expr;
 use greptime_proto::v1::greptime_request::Request;
 use greptime_proto::v1::query_request::Query;
-use greptime_proto::v1::{DdlRequest, QueryRequest};
+use greptime_proto::v1::{DdlRequest, IntervalMonthDayNano, QueryRequest};
 use snafu::prelude::*;
 
 use crate::error::{self, Result};
@@ -281,7 +281,9 @@ pub fn push_vals(column: &mut Column, origin_count: usize, vector: VectorRef) {
         Value::Interval(val) => match val.unit() {
             IntervalUnit::YearMonth => values.interval_year_month_values.push(val.to_i32()),
             IntervalUnit::DayTime => values.interval_day_time_values.push(val.to_i64()),
-            IntervalUnit::MonthDayNano => values.interval_month_day_nano_values.push(val.into()),
+            IntervalUnit::MonthDayNano => values
+                .interval_month_day_nano_values
+                .push(convert_i128_to_interval(val.to_i128())),
         },
         Value::List(_) => unreachable!(),
     });
@@ -319,6 +321,14 @@ fn ddl_request_type(request: &DdlRequest) -> &'static str {
         Some(Expr::CompactTable(_)) => "ddl.compact_table",
         Some(Expr::TruncateTable(_)) => "ddl.truncate_table",
         None => "ddl.empty",
+    }
+}
+
+pub fn convert_i128_to_interval(v: i128) -> IntervalMonthDayNano {
+    IntervalMonthDayNano {
+        months: (v >> 96) as i32,
+        days: (v >> 64) as i32,
+        nanoseconds: v as i64,
     }
 }
 
@@ -742,5 +752,14 @@ mod tests {
         assert_eq!(vec![false, true, true, true, false], bool_values);
         let null_mask = column.null_mask;
         assert_eq!(34, null_mask[0]);
+    }
+
+    #[test]
+    fn test_convert_i128_to_interval(){
+        let i128_val = 3000;
+        let interval = convert_i128_to_interval(i128_val);
+        assert_eq!(interval.months, 0);
+        assert_eq!(interval.days, 0);
+        assert_eq!(interval.nanoseconds, 3000);
     }
 }

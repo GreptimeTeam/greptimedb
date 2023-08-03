@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use api::helper::convert_i128_to_interval;
 use api::v1::column::Values;
 use common_base::BitVec;
 use datatypes::types::{IntervalType, TimeType, TimestampType, WrapperType};
@@ -210,7 +211,7 @@ pub fn values(arrays: &[VectorRef]) -> Result<Values> {
             ConcreteDataType::Interval(IntervalType::MonthDayNano(_)),
             IntervalMonthDayNanoVector,
             interval_month_day_nano_values,
-            |x| { x.into() }
+            |x| { convert_i128_to_interval(x.into_native()) }
         )
     )
 }
