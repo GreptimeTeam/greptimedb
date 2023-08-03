@@ -177,7 +177,7 @@ pub struct MetaSrv {
     mailbox: MailboxRef,
     ddl_manager: DdlManagerRef,
     table_metadata_manager: TableMetadataManagerRef,
-    greptimedb_telemerty_task: Arc<GreptimeDBTelemetryTask>,
+    greptimedb_telemetry_task: Arc<GreptimeDBTelemetryTask>,
     pubsub: Option<(PublishRef, SubscribeManagerRef)>,
 }
 
@@ -200,7 +200,7 @@ impl MetaSrv {
             let leader_cached_kv_store = self.leader_cached_kv_store.clone();
             let subscribe_manager = self.subscribe_manager().cloned();
             let mut rx = election.subscribe_leader_change();
-            let task_handler = self.greptimedb_telemerty_task.clone();
+            let task_handler = self.greptimedb_telemetry_task.clone();
             let _handle = common_runtime::spawn_bg(async move {
                 loop {
                     match rx.recv().await {
