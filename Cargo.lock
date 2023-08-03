@@ -211,7 +211,7 @@ dependencies = [
  "common-error",
  "common-time",
  "datatypes",
- "greptime-proto 0.1.0 (git+https://github.com/QuenKar/greptime-proto.git?branch=feat/add-interval-type)",
+ "greptime-proto 0.1.0 (git+https://github.com/GreptimeTeam/greptime-proto.git?rev=940694cfd05c1e93c1dd7aab486184c9e2853098)",
  "prost",
  "snafu",
  "tonic 0.9.2",
@@ -1954,7 +1954,7 @@ dependencies = [
  "chrono",
  "chrono-tz 0.8.3",
  "common-error",
- "greptime-proto 0.1.0 (git+https://github.com/QuenKar/greptime-proto.git?branch=feat/add-interval-type)",
+ "greptime-proto 0.1.0 (git+https://github.com/GreptimeTeam/greptime-proto.git?rev=940694cfd05c1e93c1dd7aab486184c9e2853098)",
  "rand",
  "serde",
  "serde_json",
@@ -4115,7 +4115,7 @@ checksum = "d2fabcfbdc87f4758337ca535fb41a6d701b65693ce38287d856d1674551ec9b"
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/QuenKar/greptime-proto.git?branch=feat/add-interval-type#e35d558c7dc91e33f329fb5ea31f3d0434955b8f"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=10c349c033dded29097d0dc933fbc2f89f658032#10c349c033dded29097d0dc933fbc2f89f658032"
 dependencies = [
  "prost",
  "serde",
@@ -4127,7 +4127,7 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=10c349c033dded29097d0dc933fbc2f89f658032#10c349c033dded29097d0dc933fbc2f89f658032"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=940694cfd05c1e93c1dd7aab486184c9e2853098#940694cfd05c1e93c1dd7aab486184c9e2853098"
 dependencies = [
  "prost",
  "serde",
@@ -6997,7 +6997,7 @@ dependencies = [
  "datafusion",
  "datatypes",
  "futures",
- "greptime-proto 0.1.0 (git+https://github.com/QuenKar/greptime-proto.git?branch=feat/add-interval-type)",
+ "greptime-proto 0.1.0 (git+https://github.com/GreptimeTeam/greptime-proto.git?rev=940694cfd05c1e93c1dd7aab486184c9e2853098)",
  "promql-parser",
  "prost",
  "query",
@@ -7268,7 +7268,7 @@ dependencies = [
  "format_num",
  "futures",
  "futures-util",
- "greptime-proto 0.1.0 (git+https://github.com/QuenKar/greptime-proto.git?branch=feat/add-interval-type)",
+ "greptime-proto 0.1.0 (git+https://github.com/GreptimeTeam/greptime-proto.git?rev=940694cfd05c1e93c1dd7aab486184c9e2853098)",
  "humantime",
  "metrics",
  "num",
