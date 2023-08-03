@@ -16,7 +16,7 @@ use std::collections::HashMap;
 
 use api::v1::ddl_request::Expr;
 use api::v1::greptime_request::Request;
-use api::v1::{DdlRequest, RowInsertRequest, RowInsertRequests};
+use api::v1::{ColumnSchema, DdlRequest, Row, RowInsertRequest, RowInsertRequests};
 use catalog::CatalogManagerRef;
 use common_grpc_expr::ColumnExpr;
 use common_query::Output;
@@ -111,10 +111,8 @@ impl RowsInserter {
     ) -> Result<()> {
         let mut create_table_exprs = Vec::with_capacity(tables.len());
         for (table_name, req) in tables {
-            // If there is no data, leave it to the data verification process to handle,
-            // it is more inclined to first complete the table creation.
-            let Some(rows) = &req.rows else { continue; };
-            let column_exprs = ColumnExpr::from_column_schemas(&rows.schema);
+            let (rows_schema, _) = Self::extract_schema_and_rows(req)?;
+            let column_exprs = ColumnExpr::from_column_schemas(rows_schema);
             let create_table_expr = self.create_expr_factory.create_table_expr(
                 catalog_name,
                 schema_name,
@@ -152,17 +150,12 @@ impl RowsInserter {
     }
 
     fn validate_insert_request(schema: &Schema, req: &RowInsertRequest) -> Result<()> {
-        let rows = req.rows.as_ref().context(EmptyDataSnafu {
-            msg: format!("insert to table: {:?}", &req.table_name),
-        })?;
-        let rows_schema = &rows.schema;
-        let rows = &rows.rows;
-
+        let (rows_schema, rows) = Self::extract_schema_and_rows(req)?;
         let mut not_nulls = schema
             .column_schemas()
             .iter()
             .filter(|column_schema| {
-                !column_schema.is_nullable() || column_schema.default_constraint().is_none()
+                !column_schema.is_nullable() && column_schema.default_constraint().is_none()
             })
             .map(|column_schema| (&column_schema.name, rows.len()))
             .collect::<HashMap<_, _>>();
@@ -208,5 +201,202 @@ impl RowsInserter {
         }
 
         Ok(())
+    }
+
+    fn extract_schema_and_rows(req: &RowInsertRequest) -> Result<(&Vec<ColumnSchema>, &Vec<Row>)> {
+        let rows = req.rows.as_ref().context(EmptyDataSnafu {
+            msg: format!("insert to table: {:?}", &req.table_name),
+        })?;
+        let schema = &rows.schema;
+        let rows = &rows.rows;
+
+        ensure!(
+            !rows.is_empty(),
+            EmptyDataSnafu {
+                msg: format!("insert to table: {:?}", &req.table_name),
+            }
+        );
+
+        Ok((schema, rows))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::assert_matches::assert_matches;
+
+    use api::v1::value::Value as RpcValueUnion;
+    use api::v1::{
+        ColumnDataType as RpcColumnDataType, ColumnSchema as RpcColumnSchema, Row, Rows,
+        SemanticType, Value as RpcValue,
+    };
+    use datatypes::prelude::*;
+    use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema};
+
+    use super::*;
+
+    fn gen_column_schema(
+        name: &str,
+        is_nullable: bool,
+        default_constraint: Option<ColumnDefaultConstraint>,
+    ) -> ColumnSchema {
+        ColumnSchema::new(name, ConcreteDataType::int32_datatype(), is_nullable)
+            .with_default_constraint(default_constraint)
+            .unwrap()
+    }
+
+    fn gen_rpc_column_schema(name: &str, semantic_type: SemanticType) -> RpcColumnSchema {
+        RpcColumnSchema {
+            column_name: name.to_string(),
+            datatype: RpcColumnDataType::Int32 as i32,
+            semantic_type: semantic_type as i32,
+        }
+    }
+
+    fn create_req(schema: Vec<RpcColumnSchema>, rows: Vec<Row>) -> RowInsertRequest {
+        RowInsertRequest {
+            table_name: "test_table".to_string(),
+            rows: Some(Rows { schema, rows }),
+            region_number: 0,
+        }
+    }
+
+    #[test]
+    fn test_validate_insert_request() {
+        let schema = Schema::new(vec![
+            gen_column_schema("col_0", true, None),
+            gen_column_schema("col_1", false, None),
+            gen_column_schema(
+                "col_2",
+                false,
+                Some(ColumnDefaultConstraint::Value(Value::Int32(100))),
+            ),
+        ]);
+
+        let data_schema = vec![
+            gen_rpc_column_schema("col_0", SemanticType::Tag),
+            gen_rpc_column_schema("col_1", SemanticType::Field),
+            gen_rpc_column_schema("col_2", SemanticType::Field),
+        ];
+
+        // case 1
+        let rows = vec![];
+        let req = create_req(data_schema.clone(), rows);
+        let res = RowsInserter::validate_insert_request(&schema, &req);
+        assert_matches!(res, Err(Error::EmptyData { .. }));
+
+        // case 2
+        let rows = vec![Row {
+            values: vec![
+                RpcValue {
+                    value: Some(RpcValueUnion::I32Value(1)),
+                },
+                RpcValue { value: None },
+                RpcValue {
+                    value: Some(RpcValueUnion::I32Value(1)),
+                },
+            ],
+        }];
+        let req = create_req(data_schema.clone(), rows);
+        let res = RowsInserter::validate_insert_request(&schema, &req);
+        assert_matches!(res, Err(Error::InvalidInsertRequest { .. }));
+
+        // case 3
+        let rows = vec![Row {
+            values: vec![
+                RpcValue {
+                    value: Some(RpcValueUnion::I32Value(1)),
+                },
+                RpcValue {
+                    value: Some(RpcValueUnion::I32Value(1)),
+                },
+            ],
+        }];
+        let req = create_req(data_schema.clone(), rows);
+        let res = RowsInserter::validate_insert_request(&schema, &req);
+        assert_matches!(res, Err(Error::InvalidInsertRequest { .. }));
+
+        // case 4
+        let rows = vec![Row {
+            values: vec![
+                RpcValue { value: None },
+                RpcValue {
+                    value: Some(RpcValueUnion::I32Value(1)),
+                },
+                RpcValue {
+                    value: Some(RpcValueUnion::I32Value(1)),
+                },
+            ],
+        }];
+        let req = create_req(data_schema.clone(), rows);
+        let res = RowsInserter::validate_insert_request(&schema, &req);
+        assert_matches!(res, Ok(_));
+
+        // case 5
+        let rows = vec![Row {
+            values: vec![
+                RpcValue { value: None },
+                RpcValue {
+                    value: Some(RpcValueUnion::I32Value(1)),
+                },
+                RpcValue { value: None },
+            ],
+        }];
+        let req = create_req(data_schema.clone(), rows);
+        let res = RowsInserter::validate_insert_request(&schema, &req);
+        assert_matches!(res, Ok(_));
+
+        // case 6
+        let rows = vec![
+            Row {
+                values: vec![
+                    RpcValue { value: None },
+                    RpcValue {
+                        value: Some(RpcValueUnion::I32Value(1)),
+                    },
+                    RpcValue { value: None },
+                ],
+            },
+            Row {
+                values: vec![
+                    RpcValue {
+                        value: Some(RpcValueUnion::I32Value(1)),
+                    },
+                    RpcValue {
+                        value: Some(RpcValueUnion::I32Value(1)),
+                    },
+                ],
+            },
+        ];
+        let req = create_req(data_schema.clone(), rows);
+        let res = RowsInserter::validate_insert_request(&schema, &req);
+        assert_matches!(res, Err(Error::InvalidInsertRequest { .. }));
+
+        // case 7
+        let rows = vec![
+            Row {
+                values: vec![
+                    RpcValue { value: None },
+                    RpcValue {
+                        value: Some(RpcValueUnion::I32Value(1)),
+                    },
+                    RpcValue {
+                        value: Some(RpcValueUnion::I32Value(1)),
+                    },
+                ],
+            },
+            Row {
+                values: vec![
+                    RpcValue { value: None },
+                    RpcValue {
+                        value: Some(RpcValueUnion::I32Value(1)),
+                    },
+                    RpcValue { value: None },
+                ],
+            },
+        ];
+        let req = create_req(data_schema, rows);
+        let res = RowsInserter::validate_insert_request(&schema, &req);
+        assert_matches!(res, Ok(_));
     }
 }
