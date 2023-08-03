@@ -248,6 +248,18 @@ pub enum Error {
         location: Location,
         source: DecodeError,
     },
+
+    #[snafu(display(
+        "Failed to delete WAL, region_id: {}, location: {}, source: {}",
+        region_id,
+        location,
+        source
+    ))]
+    DeleteWal {
+        region_id: RegionId,
+        location: Location,
+        source: BoxedError,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -261,7 +273,8 @@ impl ErrorExt for Error {
             | WriteParquet { .. }
             | ReadParquet { .. }
             | WriteWal { .. }
-            | ReadWal { .. } => StatusCode::StorageUnavailable,
+            | ReadWal { .. }
+            | DeleteWal { .. } => StatusCode::StorageUnavailable,
             CompressObject { .. }
             | DecompressObject { .. }
             | SerdeJson { .. }

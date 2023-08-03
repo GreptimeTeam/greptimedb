@@ -27,7 +27,9 @@ use store_api::logstore::entry::Entry;
 use store_api::logstore::LogStore;
 use store_api::storage::RegionId;
 
-use crate::error::{DecodeWalSnafu, EncodeWalSnafu, ReadWalSnafu, Result, WriteWalSnafu};
+use crate::error::{
+    DecodeWalSnafu, DeleteWalSnafu, EncodeWalSnafu, ReadWalSnafu, Result, WriteWalSnafu,
+};
 
 /// WAL entry id.
 pub type EntryId = store_api::logstore::entry::Id;
@@ -61,11 +63,7 @@ impl<S: LogStore> Wal<S> {
     }
 
     /// Scan entries of specific region starting from `start_id` (inclusive).
-    pub async fn scan_region(
-        &self,
-        region_id: RegionId,
-        start_id: EntryId,
-    ) -> Result<WalEntryStream> {
+    pub async fn scan(&self, region_id: RegionId, start_id: EntryId) -> Result<WalEntryStream> {
         let namespace = self.store.namespace(region_id.into());
         let stream = self
             .store
@@ -91,6 +89,16 @@ impl<S: LogStore> Wal<S> {
             .try_flatten();
 
         Ok(Box::pin(stream))
+    }
+
+    /// Mark entries whose ids `<= last_id` as deleted.
+    pub async fn obsolete(&self, region_id: RegionId, last_id: EntryId) -> Result<()> {
+        let namespace = self.store.namespace(region_id.into());
+        self.store
+            .obsolete(namespace, last_id)
+            .await
+            .map_err(BoxedError::new)
+            .context(DeleteWalSnafu { region_id })
     }
 }
 
