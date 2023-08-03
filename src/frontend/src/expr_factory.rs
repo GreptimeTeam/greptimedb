@@ -18,10 +18,11 @@ use std::sync::Arc;
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::alter_expr::Kind;
 use api::v1::{
-    AddColumn, AddColumns, AlterExpr, Column, ColumnDataType, CreateTableExpr, DropColumn,
-    DropColumns, RenameTable,
+    AddColumn, AddColumns, AlterExpr, ColumnDataType, CreateTableExpr, DropColumn, DropColumns,
+    RenameTable,
 };
 use common_error::ext::BoxedError;
+use common_grpc_expr::ColumnExpr;
 use datanode::instance::sql::table_idents_to_full_name;
 use datatypes::schema::ColumnSchema;
 use file_table_engine::table::immutable::ImmutableFileTableOptions;
@@ -45,14 +46,14 @@ pub type CreateExprFactoryRef = Arc<dyn CreateExprFactory + Send + Sync>;
 
 #[async_trait::async_trait]
 pub trait CreateExprFactory {
-    async fn create_expr_by_columns(
+    fn create_table_expr(
         &self,
         catalog_name: &str,
         schema_name: &str,
         table_name: &str,
-        columns: &[Column],
+        column_exprs: Vec<ColumnExpr>,
         engine: &str,
-    ) -> crate::error::Result<CreateTableExpr>;
+    ) -> Result<CreateTableExpr>;
 }
 
 #[derive(Debug)]
@@ -60,26 +61,24 @@ pub struct DefaultCreateExprFactory;
 
 #[async_trait::async_trait]
 impl CreateExprFactory for DefaultCreateExprFactory {
-    async fn create_expr_by_columns(
+    fn create_table_expr(
         &self,
         catalog_name: &str,
         schema_name: &str,
         table_name: &str,
-        columns: &[Column],
+        column_exprs: Vec<ColumnExpr>,
         engine: &str,
     ) -> Result<CreateTableExpr> {
-        let table_id = None;
-        let create_expr = common_grpc_expr::build_create_expr_from_insertion(
+        common_grpc_expr::build_create_table_expr(
             catalog_name,
             schema_name,
-            table_id,
+            None,
             table_name,
-            columns,
+            column_exprs,
             engine,
+            "Created on insertion",
         )
-        .context(BuildCreateExprOnInsertionSnafu)?;
-
-        Ok(create_expr)
+        .context(BuildCreateExprOnInsertionSnafu)
     }
 }
 
@@ -90,7 +89,7 @@ pub(crate) async fn create_external_expr(
     let (catalog_name, schema_name, table_name) =
         table_idents_to_full_name(&create.name, query_ctx)
             .map_err(BoxedError::new)
-            .context(error::ExternalSnafu)?;
+            .context(ExternalSnafu)?;
 
     let mut options = create.options;
 
@@ -126,7 +125,7 @@ pub fn create_to_expr(create: &CreateTable, query_ctx: QueryContextRef) -> Resul
     let (catalog_name, schema_name, table_name) =
         table_idents_to_full_name(&create.name, query_ctx)
             .map_err(BoxedError::new)
-            .context(error::ExternalSnafu)?;
+            .context(ExternalSnafu)?;
 
     let time_index = find_time_index(&create.constraints)?;
     let table_options = HashMap::from(
@@ -201,7 +200,7 @@ fn find_primary_keys(
     Ok(primary_keys)
 }
 
-pub fn find_time_index(constraints: &[TableConstraint]) -> crate::error::Result<String> {
+pub fn find_time_index(constraints: &[TableConstraint]) -> Result<String> {
     let time_index = constraints
         .iter()
         .filter_map(|constraint| match constraint {
@@ -229,10 +228,7 @@ pub fn find_time_index(constraints: &[TableConstraint]) -> crate::error::Result<
     Ok(time_index.first().unwrap().to_string())
 }
 
-fn columns_to_expr(
-    column_defs: &[ColumnDef],
-    time_index: &str,
-) -> crate::error::Result<Vec<api::v1::ColumnDef>> {
+fn columns_to_expr(column_defs: &[ColumnDef], time_index: &str) -> Result<Vec<api::v1::ColumnDef>> {
     let column_schemas = column_defs
         .iter()
         .map(|c| column_def_to_schema(c, c.name.to_string() == time_index).context(ParseSqlSnafu))

@@ -39,6 +39,7 @@ use common_base::Plugins;
 use common_catalog::consts::MITO_ENGINE;
 use common_error::ext::BoxedError;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
+use common_grpc_expr::ColumnExpr;
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
 use common_meta::heartbeat::handler::HandlerGroupExecutor;
 use common_meta::key::TableMetadataManager;
@@ -379,10 +380,14 @@ impl Instance {
         let schema_name = ctx.current_schema();
 
         // Create table automatically, build schema from data.
-        let create_expr = self
-            .create_expr_factory
-            .create_expr_by_columns(catalog_name, schema_name, table_name, columns, engine)
-            .await?;
+        let column_exprs = ColumnExpr::from_columns(columns);
+        let create_expr = self.create_expr_factory.create_table_expr(
+            catalog_name,
+            schema_name,
+            table_name,
+            column_exprs,
+            engine,
+        )?;
 
         info!(
             "Try to create table: {} automatically with request: {:?}",
