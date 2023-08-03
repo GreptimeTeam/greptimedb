@@ -58,5 +58,6 @@ uuid.workspace = true
 [dev-dependencies]
 chrono.workspace = true
 common-procedure-test = { path = "../common/procedure-test" }
+session = { path = "../session", features = ["testing"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

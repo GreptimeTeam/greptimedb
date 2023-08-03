@@ -73,7 +73,7 @@ schemars = "0.8"
 secrecy = { version = "0.8", features = ["serde", "alloc"] }
 serde.workspace = true
 serde_json = "1.0"
-session = { path = "../session", features = ["testing"] }
+session = { path = "../session" }
 sha1 = "0.10"
 snafu = { version = "0.7", features = ["backtraces"] }
 snap = "1"

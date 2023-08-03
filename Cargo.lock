@@ -5375,6 +5375,7 @@ dependencies = [
  "serde",
  "serde_json",
  "servers",
+ "session",
  "snafu",
  "store-api",
  "table",
