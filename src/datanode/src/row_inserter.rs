@@ -28,10 +28,7 @@ use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
 use table::requests::InsertRequest;
 
-use crate::error::{
-    CatalogSnafu, ColumnDataTypeSnafu, CreateVectorSnafu, EmptyDataSnafu, InsertSnafu,
-    InvalidInsertRowLenSnafu, JoinTaskSnafu, Result,
-};
+use crate::error::{CatalogSnafu, ColumnDataTypeSnafu, CreateVectorSnafu, EmptyDataSnafu, InsertSnafu, InvalidInsertRowLenSnafu, JoinTaskSnafu, Result, TableNotFoundSnafu};
 
 pub struct RowInserter {
     catalog_manager: CatalogManagerRef,
@@ -58,7 +55,7 @@ impl RowInserter {
                     .table(&catalog_name, &schema_name, &table_name)
                     .await
                     .context(CatalogSnafu)?
-                    .with_context(|| crate::error::TableNotFoundSnafu {
+                    .with_context(|| TableNotFoundSnafu {
                         table_name: format!("{catalog_name}.{schema_name}.{table_name}"),
                     })?;
                 let request =
