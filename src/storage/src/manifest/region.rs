@@ -617,7 +617,7 @@ mod tests {
         ];
 
         for action in actions {
-            assert!(manifest.update(action).await.is_ok());
+            manifest.update(action).await.unwrap();
         }
 
         // Scan manifest.
