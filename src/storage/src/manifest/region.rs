@@ -374,11 +374,10 @@ mod tests {
         assert_eq!(1, action_list.actions.len());
         let action = &action_list.actions[0];
 
-        match action {
-            RegionMetaAction::Truncate(t) => {
-                assert_eq!(3, t.committed_sequence)
-            }
-            _ => unreachable!(),
+        if let RegionMetaAction::Truncate(t) = action {
+            assert_eq!(3, t.committed_sequence)
+        } else {
+            unreachable!()
         }
         // Reach end
         assert!(iter.next_action().await.unwrap().is_none());
