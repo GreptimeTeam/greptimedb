@@ -304,4 +304,4 @@ jobs:
         if: ${{ needs.release-images-to-dockerhub.outputs.nightly-build-result != 'success' }}
         with:
           payload: |
-            {"text": "GreptimeDB nightly build failed, please check 'https://github.com/GreptimeTeam/greptimedb/actions/workflows/nightly-build.yaml'"}
+            {"text": "GreptimeDB nightly build failed, please check 'https://github.com/GreptimeTeam/greptimedb/actions/workflows/nightly-build.yml'"}
