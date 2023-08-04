@@ -193,7 +193,10 @@ async fn handle_create_table_route(
         ..Default::default()
     };
 
-    ensure!(partition.len() <= MAX_REGION_SEQ, TooManyPartitionsSnafu);
+    ensure!(
+        partitions.len() <= MAX_REGION_SEQ as usize,
+        TooManyPartitionsSnafu
+    );
     let region_routes = partitions
         .into_iter()
         .enumerate()
