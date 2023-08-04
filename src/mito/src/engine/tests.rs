@@ -38,7 +38,7 @@ use table::Table;
 
 use super::*;
 use crate::table::test_util::{
-    self, new_insert_request, setup_table, TestEngineComponents, TABLE_NAME,
+    self, new_insert_request, new_truncate_request, setup_table, TestEngineComponents, TABLE_NAME,
 };
 
 pub fn has_parquet_file(sst_dir: &str) -> bool {
