@@ -158,4 +158,196 @@ impl<S: LogStore> WalWriter<S> {
     }
 }
 
-// TODO(yingwen): Tests.
+#[cfg(test)]
+mod tests {
+    use common_test_util::temp_dir::{create_temp_dir, TempDir};
+    use greptime_proto::v1::mito::{Mutation, OpType};
+    use greptime_proto::v1::{value, ColumnDataType, ColumnSchema, Row, Rows, SemanticType, Value};
+    use log_store::raft_engine::log_store::RaftEngineLogStore;
+    use log_store::test_util::log_store_util;
+    use store_api::storage::SequenceNumber;
+
+    use super::*;
+
+    struct WalEnv {
+        _wal_dir: TempDir,
+        log_store: Option<Arc<RaftEngineLogStore>>,
+    }
+
+    impl WalEnv {
+        async fn new() -> WalEnv {
+            let wal_dir = create_temp_dir("");
+            let log_store =
+                log_store_util::create_tmp_local_file_log_store(wal_dir.path().to_str().unwrap())
+                    .await;
+            WalEnv {
+                _wal_dir: wal_dir,
+                log_store: Some(Arc::new(log_store)),
+            }
+        }
+
+        fn new_wal(&self) -> Wal<RaftEngineLogStore> {
+            let log_store = self.log_store.clone().unwrap();
+            Wal::new(log_store)
+        }
+    }
+
+    /// Create a new mutation from rows.
+    ///
+    /// The row format is (string, i64).
+    fn new_mutation(op_type: OpType, sequence: SequenceNumber, rows: &[(&str, i64)]) -> Mutation {
+        let rows = rows
+            .iter()
+            .map(|(str_col, int_col)| {
+                let values = vec![
+                    Value {
+                        value: Some(value::Value::StringValue(str_col.to_string())),
+                    },
+                    Value {
+                        value: Some(value::Value::TsMillisecondValue(*int_col)),
+                    },
+                ];
+                Row { values }
+            })
+            .collect();
+        let schema = vec![
+            ColumnSchema {
+                column_name: "tag".to_string(),
+                datatype: ColumnDataType::String as i32,
+                semantic_type: SemanticType::Tag as i32,
+            },
+            ColumnSchema {
+                column_name: "ts".to_string(),
+                datatype: ColumnDataType::TimestampMillisecond as i32,
+                semantic_type: SemanticType::Timestamp as i32,
+            },
+        ];
+
+        Mutation {
+            op_type: op_type as i32,
+            sequence,
+            rows: Some(Rows { schema, rows }),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_write_wal() {
+        let env = WalEnv::new().await;
+        let wal = env.new_wal();
+
+        let entry = WalEntry {
+            mutations: vec![
+                new_mutation(OpType::Put, 1, &[("k1", 1), ("k2", 2)]),
+                new_mutation(OpType::Put, 2, &[("k3", 3), ("k4", 4)]),
+            ],
+        };
+        let mut writer = wal.writer();
+        // Region 1 entry 1.
+        writer.add_entry(RegionId::new(1, 1), 1, &entry).unwrap();
+        // Region 2 entry 1.
+        writer.add_entry(RegionId::new(1, 2), 1, &entry).unwrap();
+        // Region 1 entry 2.
+        writer.add_entry(RegionId::new(1, 1), 2, &entry).unwrap();
+
+        // Test writing multiple region to wal.
+        writer.write_to_wal().await.unwrap();
+    }
+
+    fn sample_entries() -> Vec<WalEntry> {
+        vec![
+            WalEntry {
+                mutations: vec![
+                    new_mutation(OpType::Put, 1, &[("k1", 1), ("k2", 2)]),
+                    new_mutation(OpType::Put, 2, &[("k3", 3), ("k4", 4)]),
+                ],
+            },
+            WalEntry {
+                mutations: vec![new_mutation(OpType::Put, 3, &[("k1", 1), ("k2", 2)])],
+            },
+            WalEntry {
+                mutations: vec![
+                    new_mutation(OpType::Put, 4, &[("k1", 1), ("k2", 2)]),
+                    new_mutation(OpType::Put, 5, &[("k3", 3), ("k4", 4)]),
+                ],
+            },
+            WalEntry {
+                mutations: vec![new_mutation(OpType::Put, 6, &[("k1", 1), ("k2", 2)])],
+            },
+        ]
+    }
+
+    fn check_entries(
+        expect: &[WalEntry],
+        expect_start_id: EntryId,
+        actual: &[(EntryId, WalEntry)],
+    ) {
+        for (idx, (expect_entry, (actual_id, actual_entry))) in
+            expect.iter().zip(actual.iter()).enumerate()
+        {
+            let expect_id_entry = (expect_start_id + idx as u64, expect_entry);
+            assert_eq!(expect_id_entry, (*actual_id, actual_entry));
+        }
+        assert_eq!(expect.len(), actual.len());
+    }
+
+    #[tokio::test]
+    async fn test_scan_wal() {
+        let env = WalEnv::new().await;
+        let wal = env.new_wal();
+
+        let entries = sample_entries();
+        let (id1, id2) = (RegionId::new(1, 1), RegionId::new(1, 2));
+        let mut writer = wal.writer();
+        writer.add_entry(id1, 1, &entries[0]).unwrap();
+        // Insert one entry into region2. Scan should not return this entry.
+        writer.add_entry(id2, 1, &entries[0]).unwrap();
+        writer.add_entry(id1, 2, &entries[1]).unwrap();
+        writer.add_entry(id1, 3, &entries[2]).unwrap();
+        writer.add_entry(id1, 4, &entries[3]).unwrap();
+
+        writer.write_to_wal().await.unwrap();
+
+        // Scan all contents region1
+        let stream = wal.scan(id1, 1).await.unwrap();
+        let actual: Vec<_> = stream.try_collect().await.unwrap();
+        check_entries(&entries, 1, &actual);
+
+        // Scan parts of contents
+        let stream = wal.scan(id1, 2).await.unwrap();
+        let actual: Vec<_> = stream.try_collect().await.unwrap();
+        check_entries(&entries[1..], 2, &actual);
+
+        // Scan out of range
+        let stream = wal.scan(id1, 5).await.unwrap();
+        let actual: Vec<_> = stream.try_collect().await.unwrap();
+        assert!(actual.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_obsolete_wal() {
+        let env = WalEnv::new().await;
+        let wal = env.new_wal();
+
+        let entries = sample_entries();
+        let mut writer = wal.writer();
+        let region_id = RegionId::new(1, 1);
+        writer.add_entry(region_id, 1, &entries[0]).unwrap();
+        writer.add_entry(region_id, 2, &entries[1]).unwrap();
+        writer.add_entry(region_id, 3, &entries[2]).unwrap();
+
+        writer.write_to_wal().await.unwrap();
+
+        // Delete 1, 2.
+        wal.obsolete(region_id, 2).await.unwrap();
+
+        // Put 4.
+        let mut writer = wal.writer();
+        writer.add_entry(region_id, 4, &entries[3]).unwrap();
+        writer.write_to_wal().await.unwrap();
+
+        // Scan all
+        let stream = wal.scan(region_id, 1).await.unwrap();
+        let actual: Vec<_> = stream.try_collect().await.unwrap();
+        check_entries(&entries[2..], 3, &actual);
+    }
+}
