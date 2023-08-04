@@ -23,6 +23,7 @@ use crate::error::{self, Result};
 use crate::metadata::TableId;
 use crate::requests::{
     AlterTableRequest, CloseTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest,
+    TruncateTableRequest,
 };
 use crate::TableRef;
 pub mod manager;

@@ -26,7 +26,9 @@ use snafu::ResultExt;
 use table::engine::{table_dir, EngineContext, TableEngine, TableEngineProcedure, TableReference};
 use table::error::TableOperationSnafu;
 use table::metadata::{TableId, TableInfo, TableInfoBuilder, TableMetaBuilder, TableType};
-use table::requests::{AlterTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest};
+use table::requests::{
+    AlterTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest, TruncateTableRequest,
+};
 use table::{error as table_error, Result as TableResult, Table, TableRef};
 use tokio::sync::Mutex;
 

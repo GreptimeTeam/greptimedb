@@ -511,20 +511,6 @@ impl<S: LogStore> RegionImpl<S> {
                             .await?;
                         return Ok((None, recovered_metadata));
                     }
-                    (RegionMetaAction::Truncate(r), Some(v)) => {
-                        let files = v
-                            .ssts()
-                            .mark_all_files_deleted()
-                            .iter()
-                            .map(|f| f.file_id)
-                            .collect::<Vec<FileId>>();
-                        logging::info!(
-                            "Try to remove all SSTs, region: {}, files: {:?}",
-                            r.region_id,
-                            files,
-                        );
-                        version = Some(v);
-                    }
                     (action, None) => {
                         actions.push((manifest_version, action));
                         version = None;
@@ -553,21 +539,37 @@ impl<S: LogStore> RegionImpl<S> {
         action: RegionMetaAction,
         version: Option<Version>,
     ) -> Option<Version> {
-        if let RegionMetaAction::Edit(e) = action {
-            let edit = VersionEdit {
-                files_to_add: e.files_to_add,
-                files_to_remove: e.files_to_remove,
-                flushed_sequence: e.flushed_sequence,
-                manifest_version,
-                max_memtable_id: None,
-                compaction_time_window: e.compaction_time_window,
-            };
-            version.map(|mut v| {
-                v.apply_edit(edit);
-                v
-            })
-        } else {
-            version
+        match action {
+            RegionMetaAction::Edit(e) => {
+                let edit = VersionEdit {
+                    files_to_add: e.files_to_add,
+                    files_to_remove: e.files_to_remove,
+                    flushed_sequence: e.flushed_sequence,
+                    manifest_version,
+                    max_memtable_id: None,
+                    compaction_time_window: e.compaction_time_window,
+                };
+                version.map(|mut v| {
+                    v.apply_edit(edit);
+                    v
+                })
+            }
+            RegionMetaAction::Truncate(t) => {
+                info!("Truncate region: {}", t.region_id);
+                let edit = VersionEdit {
+                    files_to_add: vec![],
+                    files_to_remove: t.files_to_remove,
+                    flushed_sequence: None,
+                    manifest_version,
+                    max_memtable_id: None,
+                    compaction_time_window: None,
+                };
+                version.map(|mut v| {
+                    v.apply_edit(edit);
+                    v
+                })
+            }
+            _ => version,
         }
     }
 

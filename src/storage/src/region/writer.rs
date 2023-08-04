@@ -422,15 +422,16 @@ where
         }
 
         let version_control = ctx.version_control();
-
         let _lock = self.version_mutex.lock().await;
-        let committed_sequence = version_control.committed_sequence();
+
         // Mark all data obsolete
+        let committed_sequence = version_control.committed_sequence();
         ctx.wal.obsolete(committed_sequence).await?;
 
         // Mark all SSTs deleted
         let current_version = version_control.current();
         let files = current_version.ssts().mark_all_files_deleted();
+        let manifest_version = version_control.current_manifest_version();
 
         logging::info!(
             "Try to truncate all SSTs, region: {}, files: {:?}",
@@ -442,20 +443,24 @@ where
         let mut action_list =
             RegionMetaActionList::with_action(RegionMetaAction::Truncate(RegionTruncate {
                 region_id: ctx.shared.id,
-                files_to_remove: files,
+                files_to_remove: files.clone(),
             }));
 
         // Persist the meta action.
-        let prev_version = version_control.current_manifest_version();
+        let prev_version = manifest_version;
         action_list.set_prev_version(prev_version);
-
-        logging::info!(
-            "Try to remove region {}, action_list: {:?}",
-            ctx.shared.id(),
-            action_list
-        );
-
         let _ = ctx.manifest.update(action_list).await?;
+
+        // Apply VersionEdit
+        let edit = VersionEdit {
+            files_to_add: vec![],
+            files_to_remove: files,
+            flushed_sequence: Some(committed_sequence),
+            manifest_version: manifest_version + 1,
+            compaction_time_window: None,
+            max_memtable_id: None,
+        };
+        version_control.apply_edit(edit);
 
         Ok(())
     }

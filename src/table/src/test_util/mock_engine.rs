@@ -21,7 +21,9 @@ use tokio::sync::Mutex;
 
 use crate::engine::{EngineContext, TableEngine, TableEngineProcedure};
 use crate::metadata::TableId;
-use crate::requests::{AlterTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest};
+use crate::requests::{
+    AlterTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest, TruncateTableRequest,
+};
 use crate::test_util::EmptyTable;
 use crate::{Result, TableRef};
 

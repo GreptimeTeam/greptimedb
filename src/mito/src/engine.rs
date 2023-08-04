@@ -43,6 +43,7 @@ use table::engine::{
 use table::metadata::{TableId, TableInfo, TableVersion};
 use table::requests::{
     AlterTableRequest, CloseTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest,
+    TruncateTableRequest,
 };
 use table::{error as table_error, Result as TableResult, Table, TableRef};
 
