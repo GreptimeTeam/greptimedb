@@ -17,9 +17,10 @@
 use std::mem;
 use std::sync::Arc;
 
+use async_stream::try_stream;
 use common_error::ext::BoxedError;
 use futures::stream::BoxStream;
-use futures::{stream, StreamExt, TryStreamExt};
+use futures::StreamExt;
 use greptime_proto::v1::mito::WalEntry;
 use prost::Message;
 use snafu::ResultExt;
@@ -63,30 +64,26 @@ impl<S: LogStore> Wal<S> {
     }
 
     /// Scan entries of specific region starting from `start_id` (inclusive).
-    pub async fn scan(&self, region_id: RegionId, start_id: EntryId) -> Result<WalEntryStream> {
-        let namespace = self.store.namespace(region_id.into());
-        let stream = self
-            .store
-            .read(&namespace, start_id)
-            .await
-            .map_err(BoxedError::new)
-            .context(ReadWalSnafu { region_id })?;
+    pub fn scan(&self, region_id: RegionId, start_id: EntryId) -> Result<WalEntryStream> {
+        let stream = try_stream!({
+            let namespace = self.store.namespace(region_id.into());
+            let mut stream = self
+                .store
+                .read(&namespace, start_id)
+                .await
+                .map_err(BoxedError::new)
+                .context(ReadWalSnafu { region_id })?;
 
-        let stream = stream
-            .map(move |entries_ret| {
-                // Maps results from the WAL stream to our results.
-                entries_ret
+            while let Some(entries) = stream.next().await {
+                let entries = entries
                     .map_err(BoxedError::new)
-                    .context(ReadWalSnafu { region_id })
-            })
-            .and_then(move |entries| async move {
-                let iter = entries
-                    .into_iter()
-                    .map(move |entry| decode_entry(region_id, entry));
+                    .context(ReadWalSnafu { region_id })?;
 
-                Ok(stream::iter(iter))
-            })
-            .try_flatten();
+                for entry in entries {
+                    yield decode_entry(region_id, entry)?;
+                }
+            }
+        });
 
         Ok(Box::pin(stream))
     }
@@ -161,6 +158,7 @@ impl<S: LogStore> WalWriter<S> {
 #[cfg(test)]
 mod tests {
     use common_test_util::temp_dir::{create_temp_dir, TempDir};
+    use futures::TryStreamExt;
     use greptime_proto::v1::mito::{Mutation, OpType};
     use greptime_proto::v1::{value, ColumnDataType, ColumnSchema, Row, Rows, SemanticType, Value};
     use log_store::raft_engine::log_store::RaftEngineLogStore;
@@ -308,17 +306,17 @@ mod tests {
         writer.write_to_wal().await.unwrap();
 
         // Scan all contents region1
-        let stream = wal.scan(id1, 1).await.unwrap();
+        let stream = wal.scan(id1, 1).unwrap();
         let actual: Vec<_> = stream.try_collect().await.unwrap();
         check_entries(&entries, 1, &actual);
 
         // Scan parts of contents
-        let stream = wal.scan(id1, 2).await.unwrap();
+        let stream = wal.scan(id1, 2).unwrap();
         let actual: Vec<_> = stream.try_collect().await.unwrap();
         check_entries(&entries[1..], 2, &actual);
 
         // Scan out of range
-        let stream = wal.scan(id1, 5).await.unwrap();
+        let stream = wal.scan(id1, 5).unwrap();
         let actual: Vec<_> = stream.try_collect().await.unwrap();
         assert!(actual.is_empty());
     }
@@ -346,7 +344,7 @@ mod tests {
         writer.write_to_wal().await.unwrap();
 
         // Scan all
-        let stream = wal.scan(region_id, 1).await.unwrap();
+        let stream = wal.scan(region_id, 1).unwrap();
         let actual: Vec<_> = stream.try_collect().await.unwrap();
         check_entries(&entries[2..], 3, &actual);
     }
