@@ -47,16 +47,16 @@ use crate::manifest::action::{
     RawRegionMetadata, RegionChange, RegionCheckpoint, RegionMetaAction, RegionMetaActionList,
 };
 use crate::manifest::region::RegionManifest;
-use crate::memtable::MemtableBuilderRef;
+use crate::memtable::{MemtableBuilderRef, MemtableVersion};
 use crate::metadata::{RegionMetaImpl, RegionMetadata, RegionMetadataRef};
 pub(crate) use crate::region::writer::schedule_compaction;
-use crate::region::writer::DropContext;
 pub use crate::region::writer::{
     AlterContext, RegionWriter, RegionWriterRef, WriterCompactRequest, WriterContext,
 };
+use crate::region::writer::{DropContext, TruncateContext};
 use crate::schema::compat::CompatWrite;
 use crate::snapshot::SnapshotImpl;
-use crate::sst::AccessLayerRef;
+use crate::sst::{AccessLayerRef, LevelMetas};
 use crate::version::{
     Version, VersionControl, VersionControlRef, VersionEdit, INIT_COMMITTED_SEQUENCE,
 };
@@ -153,6 +153,10 @@ impl<S: LogStore> Region for RegionImpl<S> {
 
     async fn compact(&self, ctx: &CompactContext) -> std::result::Result<(), Self::Error> {
         self.inner.compact(ctx).await
+    }
+
+    async fn truncate(&self) -> Result<()> {
+        self.inner.truncate().await
     }
 }
 
@@ -502,6 +506,27 @@ impl<S: LogStore> RegionImpl<S> {
                             .await?;
                         return Ok((None, recovered_metadata));
                     }
+                    (RegionMetaAction::Truncate(t), Some(mut v)) => {
+                        let files = v.ssts().mark_all_files_deleted();
+                        logging::info!(
+                            "Try to remove all SSTs on truncate, region: {}, files: {:?}",
+                            t.region_id,
+                            files
+                        );
+                        let region_metadata = v.metadata().clone();
+                        let memtables = Arc::new(MemtableVersion::new(
+                            memtable_builder.build(region_metadata.schema().clone()),
+                        ));
+                        let ssts =
+                            Arc::new(LevelMetas::new(sst_layer.clone(), file_purger.clone()));
+                        v.reset(
+                            v.manifest_version() + 1,
+                            memtables,
+                            ssts,
+                            t.committed_sequence,
+                        );
+                        version = Some(v);
+                    }
                     (action, None) => {
                         actions.push((manifest_version, action));
                         version = None;
@@ -768,5 +793,23 @@ impl<S: LogStore> RegionInner<S> {
                 compact_ctx: *compact_ctx,
             })
             .await
+    }
+
+    async fn truncate(&self) -> Result<()> {
+        logging::info!(
+            "Truncate region {}, name: {}",
+            self.shared.id,
+            self.shared.name
+        );
+
+        let ctx = TruncateContext {
+            shared: &self.shared,
+            wal: &self.wal,
+            manifest: &self.manifest,
+            sst_layer: &self.sst_layer,
+        };
+
+        self.writer.truncate(&ctx).await?;
+        Ok(())
     }
 }

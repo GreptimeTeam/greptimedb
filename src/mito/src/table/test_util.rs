@@ -30,7 +30,8 @@ use storage::EngineImpl;
 use table::engine::{EngineContext, TableEngine};
 use table::metadata::{TableId, TableInfo, TableInfoBuilder, TableMetaBuilder, TableType};
 use table::requests::{
-    AlterKind, AlterTableRequest, CreateTableRequest, DropTableRequest, InsertRequest, TableOptions,
+    AlterKind, AlterTableRequest, CreateTableRequest, DropTableRequest, InsertRequest,
+    TableOptions, TruncateTableRequest,
 };
 use table::{Table, TableRef};
 
@@ -135,6 +136,15 @@ pub fn new_alter_request(alter_kind: AlterKind) -> AlterTableRequest {
 
 pub fn new_drop_request() -> DropTableRequest {
     DropTableRequest {
+        catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+        schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+        table_name: TABLE_NAME.to_string(),
+        table_id: TABLE_ID,
+    }
+}
+
+pub fn new_truncate_request() -> TruncateTableRequest {
+    TruncateTableRequest {
         catalog_name: DEFAULT_CATALOG_NAME.to_string(),
         schema_name: DEFAULT_SCHEMA_NAME.to_string(),
         table_name: TABLE_NAME.to_string(),

@@ -539,7 +539,10 @@ mod tests {
     use log_store::raft_engine::log_store::RaftEngineLogStore;
     use log_store::test_util::log_store_util;
     use object_store::services::Fs;
-    use store_api::storage::{FlushContext, Region, WriteContext, WriteRequest};
+    use store_api::storage::{
+        ChunkReader, FlushContext, ReadContext, Region, ScanRequest, Snapshot, WriteContext,
+        WriteRequest,
+    };
 
     use super::*;
     use crate::compaction::noop::NoopCompactionScheduler;
@@ -697,5 +700,51 @@ mod tests {
         // Wait for gc
         tokio::time::sleep(Duration::from_millis(60)).await;
         assert_eq!(0, parquet_file_num(&dir_path));
+    }
+
+    #[tokio::test]
+    async fn test_truncate_region() {
+        common_telemetry::init_default_ut_logging();
+        let dir = create_temp_dir("test_truncate_region");
+        let log_file_dir = create_temp_dir("test_engine_wal");
+
+        let region_name = "test_region";
+        let region_id = 123456;
+        let config = EngineConfig::default();
+
+        let (engine, region) =
+            create_engine_and_region(&dir, &log_file_dir, region_name, region_id, config).await;
+
+        assert_eq!(region_name, region.name());
+
+        let mut wb = region.write_request();
+        let k1 = Arc::new(Int32Vector::from_slice([1, 2, 3])) as VectorRef;
+        let v1 = Arc::new(Float32Vector::from_slice([0.1, 0.2, 0.3])) as VectorRef;
+        let tsv = Arc::new(TimestampMillisecondVector::from_slice([0, 0, 0])) as VectorRef;
+
+        let put_data = HashMap::from([
+            ("k1".to_string(), k1),
+            ("v1".to_string(), v1),
+            ("ts".to_string(), tsv),
+        ]);
+        wb.put(put_data).unwrap();
+
+        // Insert data.
+        region.write(&WriteContext::default(), wb).await.unwrap();
+        let ctx = EngineContext::default();
+
+        // Truncate region.
+        region.truncate().await.unwrap();
+        assert!(engine.get_region(&ctx, region.name()).unwrap().is_some());
+
+        // Scan to verify the region is empty.
+        let read_ctx = ReadContext::default();
+        let snapshot = region.snapshot(&read_ctx).unwrap();
+        let resp = snapshot
+            .scan(&read_ctx, ScanRequest::default())
+            .await
+            .unwrap();
+        let mut reader = resp.reader;
+        assert!(reader.next_chunk().await.unwrap().is_none());
     }
 }

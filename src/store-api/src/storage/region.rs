@@ -88,6 +88,8 @@ pub trait Region: Send + Sync + Clone + std::fmt::Debug + 'static {
     async fn flush(&self, ctx: &FlushContext) -> Result<(), Self::Error>;
 
     async fn compact(&self, ctx: &CompactContext) -> Result<(), Self::Error>;
+
+    async fn truncate(&self) -> Result<(), Self::Error>;
 }
 
 #[derive(Default, Debug)]

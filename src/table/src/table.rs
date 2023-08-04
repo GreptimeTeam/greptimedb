@@ -130,6 +130,13 @@ pub trait Table: Send + Sync {
         }
         .fail()?
     }
+
+    async fn truncate(&self) -> Result<()> {
+        UnsupportedSnafu {
+            operation: "TRUNCATE",
+        }
+        .fail()?
+    }
 }
 
 pub type TableRef = Arc<dyn Table>;

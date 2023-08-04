@@ -63,6 +63,7 @@ mod compact;
 mod drop;
 mod flush;
 mod projection;
+mod truncate;
 
 /// Create metadata of a region with schema: (timestamp, v0).
 pub fn new_metadata(region_name: &str) -> RegionMetadata {

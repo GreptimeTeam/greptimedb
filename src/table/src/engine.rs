@@ -23,6 +23,7 @@ use crate::error::{self, Result};
 use crate::metadata::TableId;
 use crate::requests::{
     AlterTableRequest, CloseTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest,
+    TruncateTableRequest,
 };
 use crate::TableRef;
 pub mod manager;
@@ -132,6 +133,12 @@ pub trait TableEngine: Send + Sync {
 
     /// Close the engine.
     async fn close(&self) -> Result<()>;
+
+    async fn truncate_table(
+        &self,
+        _ctx: &EngineContext,
+        _request: TruncateTableRequest,
+    ) -> Result<bool>;
 }
 
 pub type TableEngineRef = Arc<dyn TableEngine>;

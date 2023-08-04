@@ -38,7 +38,7 @@ use table::Table;
 
 use super::*;
 use crate::table::test_util::{
-    self, new_insert_request, setup_table, TestEngineComponents, TABLE_NAME,
+    self, new_insert_request, new_truncate_request, setup_table, TestEngineComponents, TABLE_NAME,
 };
 
 pub fn has_parquet_file(sst_dir: &str) -> bool {
@@ -932,4 +932,64 @@ async fn test_flush_table_with_region_id() {
     table.flush(req.region_number, Some(true)).await.unwrap();
 
     assert!(has_parquet_file(&region_dir));
+}
+
+#[tokio::test]
+async fn test_truncate_table() {
+    common_telemetry::init_default_ut_logging();
+    let ctx = EngineContext::default();
+    let TestEngineComponents {
+        table_engine,
+        table_ref: table,
+        dir: _dir,
+        ..
+    } = test_util::setup_test_engine_and_table().await;
+
+    let hosts: VectorRef = Arc::new(StringVector::from(vec!["host1", "host2", "host3", "host4"]));
+    let cpus: VectorRef = Arc::new(Float64Vector::from_vec(vec![1.0, 2.0, 3.0, 4.0]));
+    let memories: VectorRef = Arc::new(Float64Vector::from_vec(vec![1.0, 2.0, 3.0, 4.0]));
+    let tss: VectorRef = Arc::new(TimestampMillisecondVector::from_vec(vec![1, 2, 2, 1]));
+    let columns_values = HashMap::from([
+        ("host".to_string(), hosts.clone()),
+        ("cpu".to_string(), cpus.clone()),
+        ("memory".to_string(), memories.clone()),
+        ("ts".to_string(), tss.clone()),
+    ]);
+
+    // Insert data.
+    let insert_req = new_insert_request("demo".to_string(), columns_values.clone());
+    assert_eq!(4, table.insert(insert_req).await.unwrap());
+
+    // truncate table.
+    let truncate_req = new_truncate_request();
+    let res = table_engine
+        .truncate_table(&ctx, truncate_req)
+        .await
+        .unwrap();
+    assert!(res);
+
+    // Verify table is empty.
+    let stream = table.scan_to_stream(ScanRequest::default()).await.unwrap();
+    let batches = util::collect(stream).await.unwrap();
+    assert!(batches.is_empty());
+
+    // Validate the data insertion again.
+    let insert_req = new_insert_request("demo".to_string(), columns_values);
+    assert_eq!(4, table.insert(insert_req).await.unwrap());
+
+    let stream = table.scan_to_stream(ScanRequest::default()).await.unwrap();
+    let batches = util::collect_batches(stream).await.unwrap();
+
+    assert_eq!(
+        batches.pretty_print().unwrap(),
+        "\
++-------+-----+--------+-------------------------+
+| host  | cpu | memory | ts                      |
++-------+-----+--------+-------------------------+
+| host1 | 1.0 | 1.0    | 1970-01-01T00:00:00.001 |
+| host2 | 2.0 | 2.0    | 1970-01-01T00:00:00.002 |
+| host3 | 3.0 | 3.0    | 1970-01-01T00:00:00.002 |
+| host4 | 4.0 | 4.0    | 1970-01-01T00:00:00.001 |
++-------+-----+--------+-------------------------+"
+    );
 }

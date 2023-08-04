@@ -21,7 +21,9 @@ use tokio::sync::Mutex;
 
 use crate::engine::{EngineContext, TableEngine, TableEngineProcedure};
 use crate::metadata::TableId;
-use crate::requests::{AlterTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest};
+use crate::requests::{
+    AlterTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest, TruncateTableRequest,
+};
 use crate::test_util::EmptyTable;
 use crate::{Result, TableRef};
 
@@ -102,6 +104,14 @@ impl TableEngine for MockTableEngine {
 
     async fn close(&self) -> Result<()> {
         Ok(())
+    }
+
+    async fn truncate_table(
+        &self,
+        _ctx: &EngineContext,
+        _request: TruncateTableRequest,
+    ) -> Result<bool> {
+        Ok(true)
     }
 }
 

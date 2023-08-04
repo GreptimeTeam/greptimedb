@@ -43,6 +43,7 @@ use table::engine::{
 use table::metadata::{TableId, TableInfo, TableVersion};
 use table::requests::{
     AlterTableRequest, CloseTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest,
+    TruncateTableRequest,
 };
 use table::{error as table_error, Result as TableResult, Table, TableRef};
 
@@ -183,6 +184,14 @@ impl<S: StorageEngine> TableEngine for MitoEngine<S> {
 
     async fn close(&self) -> TableResult<()> {
         self.inner.close().await
+    }
+
+    async fn truncate_table(
+        &self,
+        _ctx: &EngineContext,
+        request: TruncateTableRequest,
+    ) -> TableResult<bool> {
+        self.inner.truncate_table(request).await
     }
 }
 
@@ -703,6 +712,22 @@ impl<S: StorageEngine> MitoEngineInner<S> {
 
         // Partial closed
         Ok(CloseTableResult::PartialClosed(removed_regions))
+    }
+
+    async fn truncate_table(&self, request: TruncateTableRequest) -> TableResult<bool> {
+        let _lock = self.table_mutex.lock(request.table_id).await;
+
+        let table_id = request.table_id;
+        if let Some(table) = self.get_mito_table(table_id) {
+            table
+                .truncate()
+                .await
+                .map_err(BoxedError::new)
+                .context(table_error::TableOperationSnafu)?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 }
 
