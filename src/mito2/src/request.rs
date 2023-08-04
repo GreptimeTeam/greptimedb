@@ -193,7 +193,7 @@ impl WriteRequest {
             }
         }
 
-        // Checks all columns in rows exist in the regino.
+        // Checks all columns in rows exist in the region.
         if !rows_columns.is_empty() {
             let names: Vec<_> = rows_columns.into_keys().collect();
             return InvalidRequestSnafu {
