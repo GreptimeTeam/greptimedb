@@ -960,7 +960,6 @@ async fn test_truncate_table() {
     let insert_req = new_insert_request("demo".to_string(), columns_values.clone());
     assert_eq!(4, table.insert(insert_req).await.unwrap());
 
-
     // truncate table.
     let truncate_req = new_truncate_request();
     let res = table_engine

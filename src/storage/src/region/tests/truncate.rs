@@ -146,7 +146,8 @@ async fn test_put_data_after_truncate() {
         (1002, None),
         (1003, Some("1003".to_string())),
     ];
-    let _ = tester.base().put(&data).await;
+
+    tester.base().put(&data).await;
 
     // Manually trigger flush.
     tester.flush().await;
@@ -157,7 +158,7 @@ async fn test_put_data_after_truncate() {
         (1004, Some("1004".to_string())),
         (1005, Some("1005".to_string())),
     ];
-    let _ = tester.base().put(&data).await;
+    tester.base().put(&data).await;
 
     // Truncate region.
     tester.truncate().await;
@@ -170,7 +171,8 @@ async fn test_put_data_after_truncate() {
         (1012, Some("2".to_string())),
         (1013, Some("3".to_string())),
     ];
-    let _ = tester.base().put(&new_data).await;
+    tester.base().put(&new_data).await;
+
     let res = tester.base().full_scan().await;
     assert_eq!(new_data, res.as_slice());
 }
@@ -201,7 +203,7 @@ async fn test_truncate_reopen() {
         (1004, Some("1004".to_string())),
         (1005, Some("1005".to_string())),
     ];
-    let _ = tester.base().put(&data).await;
+    tester.base().put(&data).await;
 
     let manifest = &tester.base().region.inner.manifest;
     let manifest_version = tester
@@ -220,7 +222,7 @@ async fn test_truncate_reopen() {
     // Persist the meta action.
     let prev_version = manifest_version;
     action_list.set_prev_version(prev_version);
-    let _ = manifest.update(action_list).await.unwrap();
+    assert!(manifest.update(action_list).await.is_ok());
 
     // Reopen and put data.
     tester.reopen().await;
@@ -234,7 +236,7 @@ async fn test_truncate_reopen() {
         (3, Some("3".to_string())),
     ];
 
-    let _ = tester.base().put(&new_data).await;
+    tester.base().put(&new_data).await;
     let res = tester.base().full_scan().await;
     assert_eq!(new_data, res.as_slice());
 }
