@@ -6,11 +6,11 @@ license.workspace = true
 
 [dependencies]
 arc-swap = "1.0"
+arrow-array.workspace = true
+arrow.workspace = true
 async-compat = "0.2"
 async-stream.workspace = true
 async-trait = "0.1"
-arrow.workspace = true
-arrow-array.workspace = true
 bytes = "1.1"
 common-base = { path = "../common/base" }
 common-datasource = { path = "../common/datasource" }
@@ -20,13 +20,13 @@ common-recordbatch = { path = "../common/recordbatch" }
 common-runtime = { path = "../common/runtime" }
 common-telemetry = { path = "../common/telemetry" }
 common-time = { path = "../common/time" }
-datatypes = { path = "../datatypes" }
 datafusion-common.workspace = true
 datafusion-expr.workspace = true
 datafusion-physical-expr.workspace = true
 datafusion.workspace = true
-futures.workspace = true
+datatypes = { path = "../datatypes" }
 futures-util.workspace = true
+futures.workspace = true
 itertools.workspace = true
 lazy_static.workspace = true
 metrics.workspace = true
@@ -40,15 +40,15 @@ serde_json = "1.0"
 snafu = { version = "0.7", features = ["backtraces"] }
 store-api = { path = "../store-api" }
 table = { path = "../table" }
-tokio.workspace = true
 tokio-util.workspace = true
+tokio.workspace = true
 tonic.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
 atomic_float = "0.1"
-criterion = "0.3"
 common-test-util = { path = "../common/test-util" }
+criterion = "0.3"
 datatypes = { path = "../datatypes", features = ["test"] }
 log-store = { path = "../log-store" }
 rand.workspace = true

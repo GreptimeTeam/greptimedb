@@ -32,9 +32,9 @@ common-recordbatch = { path = "../common/recordbatch" }
 common-runtime = { path = "../common/runtime" }
 common-telemetry = { path = "../common/telemetry" }
 common-time = { path = "../common/time" }
-datafusion.workspace = true
 datafusion-common.workspace = true
 datafusion-expr.workspace = true
+datafusion.workspace = true
 
 datatypes = { path = "../datatypes" }
 derive_builder.workspace = true
@@ -66,9 +66,9 @@ prost.workspace = true
 query = { path = "../query" }
 rand.workspace = true
 regex.workspace = true
+rust-embed = { version = "6.6", features = ["debug-embed"] }
 rustls = "0.21"
 rustls-pemfile = "1.0"
-rust-embed = { version = "6.6", features = ["debug-embed"] }
 schemars = "0.8"
 secrecy = { version = "0.8", features = ["serde", "alloc"] }
 serde.workspace = true
@@ -84,11 +84,10 @@ tikv-jemalloc-ctl = { version = "0.5", features = ["use_std"] }
 tokio-rustls = "0.24"
 tokio-stream = { version = "0.1", features = ["net"] }
 tokio.workspace = true
-tonic.workspace = true
 tonic-reflection = "0.9"
+tonic.workspace = true
 tower = { version = "0.4", features = ["full"] }
 tower-http = { version = "0.3", features = ["full"] }
-
 
 [dev-dependencies]
 axum-test-helper = { git = "https://github.com/sunng87/axum-test-helper.git", branch = "patch-1" }

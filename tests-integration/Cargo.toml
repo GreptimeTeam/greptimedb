@@ -9,9 +9,9 @@ dashboard = []
 
 [dependencies]
 api = { path = "../src/api" }
+async-trait = "0.1"
 axum = "0.6"
 axum-test-helper = { git = "https://github.com/sunng87/axum-test-helper.git", branch = "patch-1" }
-async-trait = "0.1"
 catalog = { path = "../src/catalog" }
 chrono.workspace = true
 client = { path = "../src/client", features = ["testing"] }
@@ -61,13 +61,13 @@ uuid.workspace = true
 
 [dev-dependencies]
 common-procedure = { path = "../src/common/procedure" }
-datafusion.workspace = true
 datafusion-expr.workspace = true
+datafusion.workspace = true
 itertools.workspace = true
+opentelemetry-proto.workspace = true
 partition = { path = "../src/partition" }
 paste.workspace = true
 prost.workspace = true
 script = { path = "../src/script" }
 session = { path = "../src/session", features = ["testing"] }
 store-api = { path = "../src/store-api" }
-opentelemetry-proto.workspace = true

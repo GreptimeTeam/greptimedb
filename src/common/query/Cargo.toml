@@ -10,9 +10,9 @@ async-trait.workspace = true
 common-error = { path = "../error" }
 common-recordbatch = { path = "../recordbatch" }
 common-time = { path = "../time" }
-datafusion.workspace = true
 datafusion-common.workspace = true
 datafusion-expr.workspace = true
+datafusion.workspace = true
 datatypes = { path = "../../datatypes" }
 serde.workspace = true
 snafu.workspace = true

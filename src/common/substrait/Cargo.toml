@@ -12,10 +12,10 @@ catalog = { path = "../../catalog" }
 common-catalog = { path = "../catalog" }
 common-error = { path = "../error" }
 common-telemetry = { path = "../telemetry" }
-datafusion.workspace = true
 datafusion-common.workspace = true
 datafusion-expr.workspace = true
 datafusion-substrait.workspace = true
+datafusion.workspace = true
 datatypes = { path = "../../datatypes" }
 futures = "0.3"
 promql = { path = "../../promql" }

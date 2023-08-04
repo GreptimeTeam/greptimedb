@@ -9,27 +9,27 @@ default = []
 test = ["common-test-util"]
 
 [dependencies]
-aquamarine = "0.3"
 anymap = "1.0.0-beta.2"
+aquamarine = "0.3"
 arc-swap = "1.0"
 async-compat = "0.2"
 async-stream.workspace = true
 async-trait = "0.1"
 chrono.workspace = true
-common-catalog = { path = "../common/catalog" }
 common-base = { path = "../common/base" }
+common-catalog = { path = "../common/catalog" }
+common-datasource = { path = "../common/datasource" }
 common-error = { path = "../common/error" }
 common-procedure = { path = "../common/procedure" }
 common-query = { path = "../common/query" }
 common-recordbatch = { path = "../common/recordbatch" }
 common-runtime = { path = "../common/runtime" }
-common-datasource = { path = "../common/datasource" }
 common-telemetry = { path = "../common/telemetry" }
 common-test-util = { path = "../common/test-util", optional = true }
 common-time = { path = "../common/time" }
 dashmap = "5.4"
-datafusion.workspace = true
 datafusion-common.workspace = true
+datafusion.workspace = true
 datatypes = { path = "../datatypes" }
 futures.workspace = true
 # TODO(yingwen): Update and use api crate once https://github.com/GreptimeTeam/greptime-proto/pull/75 is merged.
@@ -50,5 +50,5 @@ tokio.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-common-test-util = { path = "../common/test-util" }
 common-procedure-test = { path = "../common/procedure-test" }
+common-test-util = { path = "../common/test-util" }

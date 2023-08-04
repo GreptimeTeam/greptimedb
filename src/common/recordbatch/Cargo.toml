@@ -6,8 +6,8 @@ license.workspace = true
 
 [dependencies]
 common-error = { path = "../error" }
-datafusion.workspace = true
 datafusion-common.workspace = true
+datafusion.workspace = true
 datatypes = { path = "../../datatypes" }
 futures.workspace = true
 paste = "1.0"

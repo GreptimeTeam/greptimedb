@@ -17,6 +17,7 @@ common-procedure = { path = "../common/procedure" }
 common-query = { path = "../common/query" }
 common-recordbatch = { path = "../common/recordbatch" }
 common-telemetry = { path = "../common/telemetry" }
+common-test-util = { path = "../common/test-util", optional = true }
 common-time = { path = "../common/time" }
 datafusion.workspace = true
 datatypes = { path = "../datatypes" }
@@ -27,7 +28,6 @@ serde_json = "1.0"
 snafu.workspace = true
 store-api = { path = "../store-api" }
 table = { path = "../table" }
-common-test-util = { path = "../common/test-util", optional = true }
 tokio.workspace = true
 
 [dev-dependencies]

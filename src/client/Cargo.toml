@@ -15,11 +15,11 @@ common-base = { path = "../common/base" }
 common-catalog = { path = "../common/catalog" }
 common-error = { path = "../common/error" }
 common-grpc = { path = "../common/grpc" }
+common-meta = { path = "../common/meta" }
 common-query = { path = "../common/query" }
 common-recordbatch = { path = "../common/recordbatch" }
-common-time = { path = "../common/time" }
-common-meta = { path = "../common/meta" }
 common-telemetry = { path = "../common/telemetry" }
+common-time = { path = "../common/time" }
 datafusion.workspace = true
 datatypes = { path = "../datatypes" }
 enum_dispatch = "0.3"
@@ -37,10 +37,10 @@ tonic.workspace = true
 common-grpc-expr = { path = "../common/grpc-expr" }
 datanode = { path = "../datanode" }
 derive-new = "0.5"
+prost.workspace = true
 substrait = { path = "../common/substrait" }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-prost.workspace = true
 
 [dev-dependencies.substrait_proto]
 package = "substrait"

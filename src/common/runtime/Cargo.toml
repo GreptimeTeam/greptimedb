@@ -12,8 +12,8 @@ metrics.workspace = true
 once_cell.workspace = true
 paste.workspace = true
 snafu.workspace = true
-tokio.workspace = true
 tokio-util.workspace = true
+tokio.workspace = true
 
 [dev-dependencies]
 tokio-test = "0.4"
