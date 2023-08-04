@@ -24,14 +24,15 @@ use common_meta::rpc::ddl::{
 use common_meta::rpc::router;
 use common_meta::table_name::TableName;
 use common_telemetry::{info, warn};
-use snafu::{OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
+use store_api::storage::MAX_REGION_SEQ;
 use table::metadata::RawTableInfo;
 use tonic::{Request, Response};
 
 use super::store::kv::KvStoreRef;
 use super::GrpcResult;
 use crate::ddl::DdlManagerRef;
-use crate::error::{self, Result, TableMetadataManagerSnafu};
+use crate::error::{self, Result, TableMetadataManagerSnafu, TooManyPartitionsSnafu};
 use crate::metasrv::{MetaSrv, SelectorContext, SelectorRef};
 use crate::sequence::SequenceRef;
 use crate::table_routes::get_table_route_value;
@@ -192,6 +193,7 @@ async fn handle_create_table_route(
         ..Default::default()
     };
 
+    ensure!(partition.len() <= MAX_REGION_SEQ, TooManyPartitionsSnafu);
     let region_routes = partitions
         .into_iter()
         .enumerate()

@@ -469,6 +469,9 @@ pub enum Error {
         source: SendError<Message>,
         location: Location,
     },
+
+    #[snafu(display("Too many partitions, location: {}", location))]
+    TooManyPartitions { location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -525,7 +528,8 @@ impl ErrorExt for Error {
             | Error::ParseNum { .. }
             | Error::UnsupportedSelectorType { .. }
             | Error::InvalidArguments { .. }
-            | Error::InvalidHeartbeatRequest { .. } => StatusCode::InvalidArguments,
+            | Error::InvalidHeartbeatRequest { .. }
+            | TooManyPartitions { .. } => StatusCode::InvalidArguments,
             Error::LeaseKeyFromUtf8 { .. }
             | Error::LeaseValueFromUtf8 { .. }
             | Error::StatKeyFromUtf8 { .. }
