@@ -70,7 +70,7 @@ impl RegionId {
 
     /// Returns the group number of the region
     pub const fn region_group(&self) -> RegionGroup {
-        (self.region_number() & REGION_GROUP_MASK) as RegionGroup
+        ((self.region_number() & REGION_GROUP_MASK) >> 24) as RegionGroup
     }
 
     /// Return the sequence number of the region
@@ -86,6 +86,19 @@ impl RegionId {
     /// Construct a new [RegionId] from u64.
     pub const fn from_u64(id: u64) -> RegionId {
         RegionId(id)
+    }
+
+    #[cfg(test)]
+    pub const fn with_group_and_seq(
+        table_id: TableId,
+        group: RegionGroup,
+        seq: RegionSeq,
+    ) -> RegionId {
+        RegionId(
+            ((table_id as u64) << 32)
+                | ((group as u32) << 24) as u64
+                | (seq & REGION_SEQ_MASK) as u64,
+        )
     }
 }
 
@@ -440,5 +453,23 @@ mod tests {
 
         let parsed: RegionId = serde_json::from_str(&json).unwrap();
         assert_eq!(region_id, parsed);
+    }
+
+    #[test]
+    fn test_retrieve_region_group_and_seq() {
+        let region_id = RegionId::with_group_and_seq(111, 222, 333);
+        assert_eq!(111, region_id.table_id());
+        assert_eq!(222, region_id.region_group());
+        assert_eq!(333, region_id.region_sequence());
+
+        let expected_region_number = 222 << 24 | 333;
+        assert_eq!(expected_region_number, region_id.region_number());
+    }
+
+    #[test]
+    fn test_invalid_large_region_sequence() {
+        // region sequence larger than `MAX_REGION_SEQ` will be masked into valid range
+        let region_id = RegionId::with_group_and_seq(111, 222, u32::MAX);
+        assert_eq!(MAX_REGION_SEQ, region_id.region_sequence());
     }
 }
