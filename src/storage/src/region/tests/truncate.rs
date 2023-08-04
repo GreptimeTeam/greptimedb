@@ -119,7 +119,7 @@ async fn test_truncate_basic() {
     ];
 
     // Data in Memtable
-    let _ = tester.base().put(&data).await;
+    tester.base().put(&data).await;
     let res = tester.base().full_scan().await;
     assert_eq!(4, res.len());
 
