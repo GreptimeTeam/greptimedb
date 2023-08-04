@@ -15,9 +15,10 @@
 use std::any::Any;
 
 use common_datasource::compression::CompressionType;
-use common_error::ext::ErrorExt;
+use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use datatypes::arrow::error::ArrowError;
+use prost::{DecodeError, EncodeError};
 use snafu::{Location, Snafu};
 use store_api::manifest::ManifestVersion;
 use store_api::storage::RegionId;
@@ -205,6 +206,60 @@ pub enum Error {
         column: String,
         source: datatypes::Error,
     },
+
+    #[snafu(display(
+        "Failed to encode WAL entry, region_id: {}, location: {}, source: {}",
+        region_id,
+        location,
+        source
+    ))]
+    EncodeWal {
+        region_id: RegionId,
+        location: Location,
+        source: EncodeError,
+    },
+
+    #[snafu(display("Failed to write WAL, location: {}, source: {}", location, source))]
+    WriteWal {
+        location: Location,
+        source: BoxedError,
+    },
+
+    #[snafu(display(
+        "Failed to read WAL, region_id: {}, location: {}, source: {}",
+        region_id,
+        location,
+        source
+    ))]
+    ReadWal {
+        region_id: RegionId,
+        location: Location,
+        source: BoxedError,
+    },
+
+    #[snafu(display(
+        "Failed to decode WAL entry, region_id: {}, location: {}, source: {}",
+        region_id,
+        location,
+        source
+    ))]
+    DecodeWal {
+        region_id: RegionId,
+        location: Location,
+        source: DecodeError,
+    },
+
+    #[snafu(display(
+        "Failed to delete WAL, region_id: {}, location: {}, source: {}",
+        region_id,
+        location,
+        source
+    ))]
+    DeleteWal {
+        region_id: RegionId,
+        location: Location,
+        source: BoxedError,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -214,9 +269,12 @@ impl ErrorExt for Error {
         use Error::*;
 
         match self {
-            OpenDal { .. } | WriteParquet { .. } | ReadParquet { .. } => {
-                StatusCode::StorageUnavailable
-            }
+            OpenDal { .. }
+            | WriteParquet { .. }
+            | ReadParquet { .. }
+            | WriteWal { .. }
+            | ReadWal { .. }
+            | DeleteWal { .. } => StatusCode::StorageUnavailable,
             CompressObject { .. }
             | DecompressObject { .. }
             | SerdeJson { .. }
@@ -231,9 +289,12 @@ impl ErrorExt for Error {
             | InvalidSchema { .. }
             | InvalidRequest { .. }
             | FillDefault { .. } => StatusCode::InvalidArguments,
-            RegionMetadataNotFound { .. } | Join { .. } | WorkerStopped { .. } | Recv { .. } => {
-                StatusCode::Internal
-            }
+            RegionMetadataNotFound { .. }
+            | Join { .. }
+            | WorkerStopped { .. }
+            | Recv { .. }
+            | EncodeWal { .. }
+            | DecodeWal { .. } => StatusCode::Internal,
             WriteBuffer { source, .. } => source.status_code(),
         }
     }
