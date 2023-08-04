@@ -251,7 +251,7 @@ impl MetaSrvBuilder {
             mailbox,
             ddl_manager,
             table_metadata_manager,
-            greptimedb_telemerty_task: get_greptimedb_telemetry_task(meta_peer_client).await,
+            greptimedb_telemetry_task: get_greptimedb_telemetry_task(meta_peer_client).await,
             pubsub,
         })
     }
