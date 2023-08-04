@@ -92,7 +92,9 @@ jobs:
       - name: Create version
         id: create-version
         run: |
-          version=$(./.github/scripts/create-version.sh) && echo "version=$version" >> $GITHUB_ENV
+          version=$(./.github/scripts/create-version.sh) && \
+          echo $version && \
+          echo "version=$version" >> $GITHUB_OUTPUT
         env:
           GITHUB_EVENT_NAME: ${{ github.event_name }}
           GITHUB_REF_NAME: ${{ github.ref_name }}
