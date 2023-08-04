@@ -9193,13 +9193,13 @@ dependencies = [
 [[package]]
 name = "sqlparser"
 version = "0.34.0"
-source = "git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=d7de09eb9c9e8b0bf20aaef499d380464d2a88d8#d7de09eb9c9e8b0bf20aaef499d380464d2a88d8"
+source = "git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=c3814f08afa19786b13d72b1731a1e8b3cac4ab9#c3814f08afa19786b13d72b1731a1e8b3cac4ab9"
 dependencies = [
  "lazy_static",
  "log",
  "regex",
  "sqlparser 0.35.0",
- "sqlparser_derive 0.1.1 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=d7de09eb9c9e8b0bf20aaef499d380464d2a88d8)",
+ "sqlparser_derive 0.1.1 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=c3814f08afa19786b13d72b1731a1e8b3cac4ab9)",
 ]
 
 [[package]]
@@ -9226,7 +9226,7 @@ dependencies = [
 [[package]]
 name = "sqlparser_derive"
 version = "0.1.1"
-source = "git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=d7de09eb9c9e8b0bf20aaef499d380464d2a88d8#d7de09eb9c9e8b0bf20aaef499d380464d2a88d8"
+source = "git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=c3814f08afa19786b13d72b1731a1e8b3cac4ab9#c3814f08afa19786b13d72b1731a1e8b3cac4ab9"
 dependencies = [
  "proc-macro2",
  "quote",

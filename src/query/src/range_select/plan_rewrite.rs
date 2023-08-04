@@ -65,73 +65,62 @@ impl<'a> RangeRewriter<'a> {
     }
 }
 
+fn parse_str_expr(args: &[Expr], i: usize) -> DFResult<&str> {
+    match args.get(i) {
+        Some(Expr::Literal(ScalarValue::Utf8(Some(str)))) => Ok(str.as_str()),
+        _ => Err(DataFusionError::Internal(
+            "Illegal str expr in range_fn".into(),
+        )),
+    }
+}
+
+fn parse_expr_list(args: &[Expr], start: usize, len: usize) -> DFResult<Vec<Expr>> {
+    let mut outs = Vec::with_capacity(len);
+    for i in start..start + len {
+        outs.push(match &args.get(i) {
+            Some(Expr::Column(_)) | Some(Expr::BinaryExpr(_)) => args[i].clone(),
+            _ => return Err(DataFusionError::Internal("Illegal expr in range_fn".into())),
+        });
+    }
+    Ok(outs)
+}
+
 impl<'a> TreeNodeRewriter for RangeRewriter<'a> {
     type N = Expr;
 
     fn mutate(&mut self, node: Expr) -> DFResult<Expr> {
         if let Expr::ScalarUDF(func) = &node {
             if func.fun.name == "range_fn" {
-                let func_name = match &func.args[0] {
-                    Expr::Literal(ScalarValue::Utf8(Some(agg_str))) => agg_str,
-                    _ => {
-                        return Err(DataFusionError::Internal(
-                            "Function name not find in range_fn".into(),
-                        ))
-                    }
-                };
-                let mut args = vec![];
-                let mut by = vec![];
-                let mut have_args = false;
-                let mut have_fill = false;
+                // `range_fn(func_name, argc, [argv], range, fill, byc, [byv], align)`
+                // `argsv` and `byv` are variadic arguments, argc/byc indicate the length of arguments
+                let func_name = parse_str_expr(&func.args, 0)?;
+                let argc = str::parse::<usize>(parse_str_expr(&func.args, 1)?)
+                    .map_err(|e| DataFusionError::Internal(e.to_string()))?;
+                let byc = str::parse::<usize>(parse_str_expr(&func.args, argc + 4)?)
+                    .map_err(|e| DataFusionError::Internal(e.to_string()))?;
                 let mut range_fn = RangeFn {
                     expr: Expr::Wildcard,
-                    range: Duration::default(),
-                    fill: String::new(),
+                    range: parse_duration(parse_str_expr(&func.args, argc + 2)?)
+                        .map_err(DataFusionError::Internal)?,
+                    fill: parse_str_expr(&func.args, argc + 3)?.to_string(),
                 };
-                for index in 1..func.args.len() {
-                    match &func.args[index] {
-                        Expr::Column(_) => {
-                            if !have_args {
-                                args.push(func.args[index].clone());
-                            } else {
-                                by.push(func.args[index].clone());
-                            }
-                        }
-                        Expr::Literal(ScalarValue::Utf8(Some(str))) => {
-                            have_args = true;
-                            if range_fn.range == Duration::default() {
-                                range_fn.range = parse_duration(str.as_str())
-                                    .map_err(DataFusionError::Internal)?;
-                                continue;
-                            }
-                            if !have_fill {
-                                range_fn.fill = str.clone();
-                                have_fill = true;
-                                continue;
-                            }
-                            let align =
-                                parse_duration(str.as_str()).map_err(DataFusionError::Internal)?;
-                            if self.align != Duration::default() && self.align != align {
-                                return Err(DataFusionError::Internal(
-                                    "Inconsistent align given in Range Function Rewrite".into(),
-                                ));
-                            } else {
-                                self.align = align
-                            }
-                        }
-                        _ => {
-                            return Err(DataFusionError::Internal(
-                                "Unexpected param in range_fn args".into(),
-                            ))
-                        }
-                    }
-                }
+                let args = parse_expr_list(&func.args, 2, argc)?;
+                let by = parse_expr_list(&func.args, argc + 5, byc)?;
+                let align = parse_duration(parse_str_expr(&func.args, argc + byc + 5)?)
+                    .map_err(DataFusionError::Internal)?;
                 if !self.by.is_empty() && self.by != by {
                     return Err(DataFusionError::Internal(
                         "Inconsistent by given in Range Function Rewrite".into(),
                     ));
                 } else {
-                    self.by = by.clone();
+                    self.by = by;
+                }
+                if self.align != Duration::default() && self.align != align {
+                    return Err(DataFusionError::Internal(
+                        "Inconsistent align given in Range Function Rewrite".into(),
+                    ));
+                } else {
+                    self.align = align;
                 }
                 range_fn.expr = self.gen_range_expr(func_name, args)?;
                 let alias = Expr::Column(Column::from_name(range_fn.expr.display_name()?));
@@ -389,6 +378,30 @@ mod test {
             .await
             .unwrap();
         assert_eq!(plan.display_indent_schema().to_string(), expected);
+    }
+
+    #[tokio::test]
+    async fn range_expr_calculation() {
+        let query =
+            r#"SELECT avg(field_0 + field_1)/4 RANGE '5m' FROM test ALIGN '1h' by (tag_0,tag_1);"#;
+        let expected = String::from(
+            "Projection: AVG(test.field_0 + test.field_1) / Int64(4) [AVG(test.field_0 + test.field_1) / Int64(4):Float64;N]\
+            \n  RangeSelect: range_exprs=[RangeFn { expr:AVG(test.field_0 + test.field_1) range:300s fill: }], algin=3600s time_index=timestamp [AVG(test.field_0 + test.field_1):Float64;N, timestamp:Timestamp(Millisecond, None), tag_0:Utf8, tag_1:Utf8]\
+            \n    TableScan: test [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, tag_4:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N, field_1:Float64;N, field_2:Float64;N, field_3:Float64;N, field_4:Float64;N]"
+        );
+        query_plan_compare(query, expected).await;
+    }
+
+    #[tokio::test]
+    async fn range_multi_args() {
+        let query =
+            r#"SELECT covar(field_0 + field_1, field_1)/4 RANGE '5m' FROM test ALIGN '1h';"#;
+        let expected = String::from(
+            "Projection: COVARIANCE(test.field_0 + test.field_1,test.field_1) / Int64(4) [COVARIANCE(test.field_0 + test.field_1,test.field_1) / Int64(4):Float64;N]\
+            \n  RangeSelect: range_exprs=[RangeFn { expr:COVARIANCE(test.field_0 + test.field_1,test.field_1) range:300s fill: }], algin=3600s time_index=timestamp [COVARIANCE(test.field_0 + test.field_1,test.field_1):Float64;N, timestamp:Timestamp(Millisecond, None), tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, tag_4:Utf8]\
+            \n    TableScan: test [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, tag_4:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N, field_1:Float64;N, field_2:Float64;N, field_3:Float64;N, field_4:Float64;N]"
+        );
+        query_plan_compare(query, expected).await;
     }
 
     #[tokio::test]

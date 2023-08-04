@@ -63,9 +63,7 @@ impl Function for RangeFunction {
         Ok(ConcreteDataType::float64_datatype())
     }
 
-    /// `range_fn(func_name, [args], range, fill, [by], align)`
-    /// `args` and `by` are variadic arguments, so in the end how many arguments `range_fn` has is uncertain
-    /// but `range_fn` will never been used, signature is not important.
+    /// `range_fn` will never been used, signature is not important.
     /// In fact, the arguments loaded by `range_fn` are very complicated, and it is difficult to use `Signature` to describe
     fn signature(&self) -> Signature {
         Signature::any(6, Volatility::Immutable)
