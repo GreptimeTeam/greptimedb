@@ -423,7 +423,7 @@ where
         let manifest_version = version_control.current_manifest_version();
         let prev_version = manifest_version;
         action_list.set_prev_version(prev_version);
-        let _ = ctx.manifest.update(action_list).await?;
+        ctx.manifest.update(action_list).await?;
 
         // Mark all data obsolete
         ctx.wal.obsolete(committed_sequence).await?;
