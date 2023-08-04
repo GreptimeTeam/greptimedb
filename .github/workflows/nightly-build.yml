@@ -1,7 +1,7 @@
 # Nightly build only do the following things:
 # 1. Run integration tests;
 # 2. Build binaries and images for linux-amd64 and linux-arm64 platform;
-name: GreptimeDB Nightly build
+name: GreptimeDB Nightly Build
 
 on:
   schedule:
@@ -64,6 +64,8 @@ env:
   # Always use 'dev' to indicate it's the nightly build.
   NEXT_RELEASE_VERSION: dev
 
+  NIGHTLY_RELEASE_PREFIX: nightly
+
 jobs:
   allocate-runners:
     name: Allocate runners
@@ -90,7 +92,7 @@ jobs:
       - name: Create version
         id: create-version
         run: |
-          echo "version=$(./.github/scripts/create-version.sh)" >> $GITHUB_OUTPUT
+          version=$(./.github/scripts/create-version.sh) && echo "version=$version" >> $GITHUB_ENV
         env:
           GITHUB_EVENT_NAME: ${{ github.event_name }}
           GITHUB_REF_NAME: ${{ github.ref_name }}
