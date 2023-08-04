@@ -734,7 +734,7 @@ mod tests {
         let ctx = EngineContext::default();
 
         // Truncate region.
-        let _ = region.truncate().await;
+        assert!(region.truncate().await.unwrap());
         assert!(engine.get_region(&ctx, region.name()).unwrap().is_some());
 
         // Scan to verify the region is empty.
