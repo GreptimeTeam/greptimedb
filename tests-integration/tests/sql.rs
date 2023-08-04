@@ -22,6 +22,7 @@ use tests_integration::test_util::{
     setup_mysql_server, setup_mysql_server_with_user_provider, setup_pg_server,
     setup_pg_server_with_user_provider, StorageType,
 };
+use tokio_postgres::NoTls;
 
 #[macro_export]
 macro_rules! sql_test {
@@ -57,6 +58,7 @@ macro_rules! sql_tests {
                 test_mysql_crud,
                 test_postgres_auth,
                 test_postgres_crud,
+                test_postgres_parameter_inference,
             );
         )*
     };
@@ -328,6 +330,49 @@ pub async fn test_postgres_crud(store_type: StorageType) {
         .await
         .unwrap();
     assert_eq!(rows.len(), 0);
+
+    let _ = fe_pg_server.shutdown().await;
+    guard.remove_all().await;
+}
+
+pub async fn test_postgres_parameter_inference(store_type: StorageType) {
+    let (addr, mut guard, fe_pg_server) = setup_pg_server(store_type, "sql_inference").await;
+
+    let (client, connection) = tokio_postgres::connect(&format!("postgres://{addr}/public"), NoTls)
+        .await
+        .unwrap();
+
+    // The connection object performs the actual communication with the database,
+    // so spawn it off to run on its own.
+    tokio::spawn(async move {
+        if let Err(e) = connection.await {
+            eprintln!("connection error: {}", e);
+        }
+    });
+
+    // Create demo table
+    let _ = client
+        .simple_query("create table demo(i bigint, ts timestamp time index, d date, dt datetime)")
+        .await
+        .unwrap();
+
+    let d = NaiveDate::from_yo_opt(2015, 100).unwrap();
+    let dt = d.and_hms_opt(0, 0, 0).unwrap();
+    let _ = client
+        .execute(
+            "INSERT INTO demo VALUES($1, $2, $3, $4)",
+            &[&0i64, &dt, &d, &dt],
+        )
+        .await
+        .unwrap();
+
+    // Now we can execute a simple statement that just returns its parameter.
+    let rows = client
+        .query("SELECT * FROM demo WHERE i = $1", &[&0i64])
+        .await
+        .unwrap();
+
+    assert_eq!(1, rows.len());
 
     let _ = fe_pg_server.shutdown().await;
     guard.remove_all().await;

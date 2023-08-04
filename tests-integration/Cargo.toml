@@ -70,4 +70,5 @@ prost.workspace = true
 script = { path = "../src/script" }
 session = { path = "../src/session", features = ["testing"] }
 store-api = { path = "../src/store-api" }
+tokio-postgres = "0.7"
 opentelemetry-proto.workspace = true

@@ -162,34 +162,37 @@ pub(super) fn parameter_to_string(portal: &Portal<SqlPlan>, idx: usize) -> PgWir
     match param_type {
         &Type::VARCHAR | &Type::TEXT => Ok(format!(
             "'{}'",
-            portal.parameter::<String>(idx)?.as_deref().unwrap_or("")
+            portal
+                .parameter::<String>(idx, param_type)?
+                .as_deref()
+                .unwrap_or("")
         )),
         &Type::BOOL => Ok(portal
-            .parameter::<bool>(idx)?
+            .parameter::<bool>(idx, param_type)?
             .map(|v| v.to_string())
             .unwrap_or_else(|| "".to_owned())),
         &Type::INT4 => Ok(portal
-            .parameter::<i32>(idx)?
+            .parameter::<i32>(idx, param_type)?
             .map(|v| v.to_string())
             .unwrap_or_else(|| "".to_owned())),
         &Type::INT8 => Ok(portal
-            .parameter::<i64>(idx)?
+            .parameter::<i64>(idx, param_type)?
             .map(|v| v.to_string())
             .unwrap_or_else(|| "".to_owned())),
         &Type::FLOAT4 => Ok(portal
-            .parameter::<f32>(idx)?
+            .parameter::<f32>(idx, param_type)?
             .map(|v| v.to_string())
             .unwrap_or_else(|| "".to_owned())),
         &Type::FLOAT8 => Ok(portal
-            .parameter::<f64>(idx)?
+            .parameter::<f64>(idx, param_type)?
             .map(|v| v.to_string())
             .unwrap_or_else(|| "".to_owned())),
         &Type::DATE => Ok(portal
-            .parameter::<NaiveDate>(idx)?
+            .parameter::<NaiveDate>(idx, param_type)?
             .map(|v| v.format("%Y-%m-%d").to_string())
             .unwrap_or_else(|| "".to_owned())),
         &Type::TIMESTAMP => Ok(portal
-            .parameter::<NaiveDateTime>(idx)?
+            .parameter::<NaiveDateTime>(idx, param_type)?
             .map(|v| v.format("%Y-%m-%d %H:%M:%S%.6f").to_string())
             .unwrap_or_else(|| "".to_owned())),
         _ => Err(invalid_parameter_error(
@@ -264,7 +267,7 @@ pub(super) fn parameters_to_scalar_values(
 
         let value = match &client_type {
             &Type::VARCHAR | &Type::TEXT => {
-                let data = portal.parameter::<String>(idx)?;
+                let data = portal.parameter::<String>(idx, &client_type)?;
                 match server_type {
                     ConcreteDataType::String(_) => ScalarValue::Utf8(data),
                     _ => {
@@ -279,7 +282,7 @@ pub(super) fn parameters_to_scalar_values(
                 }
             }
             &Type::BOOL => {
-                let data = portal.parameter::<bool>(idx)?;
+                let data = portal.parameter::<bool>(idx, &client_type)?;
                 match server_type {
                     ConcreteDataType::Boolean(_) => ScalarValue::Boolean(data),
                     _ => {
@@ -294,7 +297,7 @@ pub(super) fn parameters_to_scalar_values(
                 }
             }
             &Type::INT2 => {
-                let data = portal.parameter::<i16>(idx)?;
+                let data = portal.parameter::<i16>(idx, &client_type)?;
                 match server_type {
                     ConcreteDataType::Int8(_) => ScalarValue::Int8(data.map(|n| n as i8)),
                     ConcreteDataType::Int16(_) => ScalarValue::Int16(data),
@@ -320,7 +323,7 @@ pub(super) fn parameters_to_scalar_values(
                 }
             }
             &Type::INT4 => {
-                let data = portal.parameter::<i32>(idx)?;
+                let data = portal.parameter::<i32>(idx, &client_type)?;
                 match server_type {
                     ConcreteDataType::Int8(_) => ScalarValue::Int8(data.map(|n| n as i8)),
                     ConcreteDataType::Int16(_) => ScalarValue::Int16(data.map(|n| n as i16)),
@@ -346,7 +349,7 @@ pub(super) fn parameters_to_scalar_values(
                 }
             }
             &Type::INT8 => {
-                let data = portal.parameter::<i64>(idx)?;
+                let data = portal.parameter::<i64>(idx, &client_type)?;
                 match server_type {
                     ConcreteDataType::Int8(_) => ScalarValue::Int8(data.map(|n| n as i8)),
                     ConcreteDataType::Int16(_) => ScalarValue::Int16(data.map(|n| n as i16)),
@@ -372,7 +375,7 @@ pub(super) fn parameters_to_scalar_values(
                 }
             }
             &Type::FLOAT4 => {
-                let data = portal.parameter::<f32>(idx)?;
+                let data = portal.parameter::<f32>(idx, &client_type)?;
                 match server_type {
                     ConcreteDataType::Int8(_) => ScalarValue::Int8(data.map(|n| n as i8)),
                     ConcreteDataType::Int16(_) => ScalarValue::Int16(data.map(|n| n as i16)),
@@ -396,7 +399,7 @@ pub(super) fn parameters_to_scalar_values(
                 }
             }
             &Type::FLOAT8 => {
-                let data = portal.parameter::<f64>(idx)?;
+                let data = portal.parameter::<f64>(idx, &client_type)?;
                 match server_type {
                     ConcreteDataType::Int8(_) => ScalarValue::Int8(data.map(|n| n as i8)),
                     ConcreteDataType::Int16(_) => ScalarValue::Int16(data.map(|n| n as i16)),
@@ -420,7 +423,7 @@ pub(super) fn parameters_to_scalar_values(
                 }
             }
             &Type::TIMESTAMP => {
-                let data = portal.parameter::<NaiveDateTime>(idx)?;
+                let data = portal.parameter::<NaiveDateTime>(idx, &client_type)?;
                 match server_type {
                     ConcreteDataType::Timestamp(unit) => match *unit {
                         TimestampType::Second(_) => {
@@ -454,7 +457,7 @@ pub(super) fn parameters_to_scalar_values(
                 }
             }
             &Type::DATE => {
-                let data = portal.parameter::<NaiveDate>(idx)?;
+                let data = portal.parameter::<NaiveDate>(idx, &client_type)?;
                 match server_type {
                     ConcreteDataType::Date(_) => ScalarValue::Date32(data.map(|d| {
                         (d - NaiveDate::from_ymd_opt(1970, 1, 1).unwrap()).num_days() as i32
@@ -471,7 +474,7 @@ pub(super) fn parameters_to_scalar_values(
                 }
             }
             &Type::BYTEA => {
-                let data = portal.parameter::<Vec<u8>>(idx)?;
+                let data = portal.parameter::<Vec<u8>>(idx, &client_type)?;
                 match server_type {
                     ConcreteDataType::String(_) => {
                         ScalarValue::Utf8(data.map(|d| String::from_utf8_lossy(&d).to_string()))
