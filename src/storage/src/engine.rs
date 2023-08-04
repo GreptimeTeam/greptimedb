@@ -730,7 +730,7 @@ mod tests {
         wb.put(put_data).unwrap();
 
         // Insert data.
-        let _ = region.write(&WriteContext::default(), wb).await.unwrap();
+        region.write(&WriteContext::default(), wb).await.unwrap();
         let ctx = EngineContext::default();
 
         // Truncate region.
