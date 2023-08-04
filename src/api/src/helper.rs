@@ -15,6 +15,7 @@
 use common_base::BitVec;
 use common_time::interval::IntervalUnit;
 use common_time::timestamp::TimeUnit;
+use common_time::Interval;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::types::{IntervalType, TimeType, TimestampType};
 use datatypes::value::Value;
@@ -324,11 +325,14 @@ fn ddl_request_type(request: &DdlRequest) -> &'static str {
     }
 }
 
+/// Converts an i128 value to google protobuf type [IntervalMonthDayNano].
 pub fn convert_i128_to_interval(v: i128) -> IntervalMonthDayNano {
+    let interval = Interval::from_i128(v);
+    let (months, days, nanoseconds) = interval.to_month_day_nano();
     IntervalMonthDayNano {
-        months: (v >> 96) as i32,
-        days: (v >> 64) as i32,
-        nanoseconds: v as i64,
+        months,
+        days,
+        nanoseconds,
     }
 }
 
