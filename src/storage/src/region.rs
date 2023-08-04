@@ -509,7 +509,7 @@ impl<S: LogStore> RegionImpl<S> {
                     (RegionMetaAction::Truncate(t), Some(mut v)) => {
                         let files = v.ssts().mark_all_files_deleted();
                         logging::info!(
-                            "Try to remove all SSTs, region: {}, files: {:?}",
+                            "Try to remove all SSTs on truncate, region: {}, files: {:?}",
                             t.region_id,
                             files
                         );
