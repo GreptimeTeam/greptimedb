@@ -310,14 +310,14 @@ impl ColumnMetadata {
 }
 
 /// The semantic type of one column
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum SemanticType {
     /// Tag column, also is a part of primary key.
-    Tag,
+    Tag = 0,
     /// A column that isn't a time index or part of primary key.
-    Field,
+    Field = 1,
     /// Time index column.
-    Timestamp,
+    Timestamp = 2,
 }
 
 /// Fields skipped in serialization.

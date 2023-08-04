@@ -14,15 +14,22 @@
 
 //! Worker requests.
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use common_base::readable_size::ReadableSize;
-use store_api::storage::{ColumnId, CompactionStrategy, RegionId};
+use greptime_proto::v1::{ColumnDataType, ColumnSchema, Rows};
+use snafu::{ensure, OptionExt, ResultExt};
+use store_api::storage::{ColumnId, CompactionStrategy, OpType, RegionId};
 use tokio::sync::oneshot::{self, Receiver, Sender};
 
 use crate::config::DEFAULT_WRITE_BUFFER_SIZE;
-use crate::error::Result;
-use crate::metadata::ColumnMetadata;
+use crate::error::{CreateDefaultSnafu, FillDefaultSnafu, InvalidRequestSnafu, Result};
+use crate::metadata::{ColumnMetadata, RegionMetadata};
+use crate::proto_util::{
+    is_column_type_value_eq, is_semantic_type_eq, to_column_data_type, to_proto_semantic_type,
+    to_proto_value,
+};
 
 /// Options that affect the entire region.
 ///
@@ -84,9 +91,193 @@ pub struct CloseRequest {
 
 /// Request to write a region.
 #[derive(Debug)]
-pub(crate) struct WriteRequest {
+pub struct WriteRequest {
     /// Region to write.
     pub region_id: RegionId,
+    /// Type of the write request.
+    pub op_type: OpType,
+    /// Rows to write.
+    pub rows: Rows,
+    /// Map column name to column index in `rows`.
+    name_to_index: HashMap<String, usize>,
+}
+
+impl WriteRequest {
+    /// Returns a new request.
+    pub fn new(region_id: RegionId, op_type: OpType, rows: Rows) -> WriteRequest {
+        let name_to_index = rows
+            .schema
+            .iter()
+            .enumerate()
+            .map(|(index, column)| (column.column_name.clone(), index))
+            .collect();
+        WriteRequest {
+            region_id,
+            op_type,
+            rows,
+            name_to_index,
+        }
+    }
+
+    /// Validate the request.
+    pub(crate) fn validate(&self) -> Result<()> {
+        // - checks whether the request is too large.
+        // - checks whether each row in rows has the same schema.
+        // - checks whether each column match the schema in Rows.
+        // - checks rows don't have duplicate columns.
+        unimplemented!()
+    }
+
+    /// Checks schema of rows.
+    ///
+    /// If column with default value is missing, it returns a special [FillDefault](crate::error::Error::FillDefault)
+    /// error.
+    pub(crate) fn check_schema(&self, metadata: &RegionMetadata) -> Result<()> {
+        let region_id = self.region_id;
+        // Index all columns in rows.
+        let mut rows_columns: HashMap<_, _> = self
+            .rows
+            .schema
+            .iter()
+            .map(|column| (&column.column_name, column))
+            .collect();
+
+        // Checks all columns in this region.
+        for column in &metadata.column_metadatas {
+            if let Some(input_col) = rows_columns.remove(&column.column_schema.name) {
+                // Check data type.
+                ensure!(
+                    is_column_type_value_eq(input_col.datatype, &column.column_schema.data_type),
+                    InvalidRequestSnafu {
+                        region_id,
+                        reason: format!(
+                            "column {} expect type {:?}, given: {:?}({})",
+                            column.column_schema.name,
+                            column.column_schema.data_type,
+                            ColumnDataType::from_i32(input_col.datatype),
+                            input_col.datatype,
+                        )
+                    }
+                );
+
+                // Check semantic type.
+                ensure!(
+                    is_semantic_type_eq(input_col.semantic_type, column.semantic_type),
+                    InvalidRequestSnafu {
+                        region_id,
+                        reason: format!(
+                            "column {} has semantic type {:?}, given: {:?}({})",
+                            column.column_schema.name,
+                            column.semantic_type,
+                            greptime_proto::v1::SemanticType::from_i32(input_col.semantic_type),
+                            input_col.semantic_type
+                        ),
+                    }
+                );
+            } else {
+                // For columns not in rows, checks whether they have default value.
+                ensure!(
+                    column.column_schema.is_nullable()
+                        || column.column_schema.default_constraint().is_some(),
+                    InvalidRequestSnafu {
+                        region_id,
+                        reason: format!("missing column {}", column.column_schema.name),
+                    }
+                );
+
+                return FillDefaultSnafu {
+                    region_id,
+                    column: &column.column_schema.name,
+                }
+                .fail();
+            }
+        }
+
+        // Checks all columns in rows exist in the region.
+        if !rows_columns.is_empty() {
+            let names: Vec<_> = rows_columns.into_keys().collect();
+            return InvalidRequestSnafu {
+                region_id,
+                reason: format!("unknown columns: {:?}", names),
+            }
+            .fail();
+        }
+
+        Ok(())
+    }
+
+    /// Try to fill missing columns.
+    ///
+    /// Currently, our protobuf format might be inefficient when we need to fill lots of null
+    /// values.
+    pub(crate) fn fill_missing_columns(&mut self, metadata: &RegionMetadata) -> Result<()> {
+        for column in &metadata.column_metadatas {
+            if !self.name_to_index.contains_key(&column.column_schema.name) {
+                self.fill_column(metadata.region_id, column)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Fill default value for specific `column`.
+    fn fill_column(&mut self, region_id: RegionId, column: &ColumnMetadata) -> Result<()> {
+        // Need to add a default value for this column.
+        let default_value = column
+            .column_schema
+            .create_default()
+            .context(CreateDefaultSnafu {
+                region_id,
+                column: &column.column_schema.name,
+            })?
+            // This column doesn't have default value.
+            .with_context(|| InvalidRequestSnafu {
+                region_id,
+                reason: format!(
+                    "column {} does not have default value",
+                    column.column_schema.name
+                ),
+            })?;
+
+        // Convert default value into proto's value.
+        let proto_value = to_proto_value(default_value).with_context(|| InvalidRequestSnafu {
+            region_id,
+            reason: format!(
+                "no protobuf type for default value of column {} ({:?})",
+                column.column_schema.name, column.column_schema.data_type
+            ),
+        })?;
+
+        // Insert default value to each row.
+        for row in &mut self.rows.rows {
+            row.values.push(proto_value.clone());
+        }
+
+        // Insert column schema.
+        let datatype = to_column_data_type(&column.column_schema.data_type).with_context(|| {
+            InvalidRequestSnafu {
+                region_id,
+                reason: format!(
+                    "no protobuf type for column {} ({:?})",
+                    column.column_schema.name, column.column_schema.data_type
+                ),
+            }
+        })?;
+        self.rows.schema.push(ColumnSchema {
+            column_name: column.column_schema.name.clone(),
+            datatype: datatype as i32,
+            semantic_type: to_proto_semantic_type(column.semantic_type) as i32,
+        });
+
+        Ok(())
+    }
+}
+
+/// Sender and write request.
+pub(crate) struct SenderWriteRequest {
+    /// Result sender.
+    pub(crate) sender: Option<Sender<Result<()>>>,
+    pub(crate) request: WriteRequest,
 }
 
 /// Request sent to a worker
@@ -127,7 +318,6 @@ impl RegionRequest {
 /// Body to carry actual region request.
 #[derive(Debug)]
 pub(crate) enum RequestBody {
-    // DML:
     /// Write to a region.
     Write(WriteRequest),
 
@@ -151,13 +341,19 @@ impl RequestBody {
         }
     }
 
-    /// Returns whether the request is a DDL (e.g. CREATE/OPEN/ALTER).
-    pub(crate) fn is_ddl(&self) -> bool {
+    /// Returns whether the request is a write request.
+    pub(crate) fn is_write(&self) -> bool {
+        matches!(self, RequestBody::Write(_))
+    }
+
+    /// Converts the request into a [WriteRequest].
+    ///
+    /// # Panics
+    /// Panics if it isn't a [WriteRequest].
+    pub(crate) fn into_write_request(self) -> WriteRequest {
         match self {
-            RequestBody::Write(_) => false,
-            RequestBody::Create(_) => true,
-            RequestBody::Open(_) => true,
-            RequestBody::Close(_) => true,
+            RequestBody::Write(req) => req,
+            other => panic!("expect write request, found {other:?}"),
         }
     }
 }

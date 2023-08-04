@@ -211,7 +211,7 @@ dependencies = [
  "common-error",
  "common-time",
  "datatypes",
- "greptime-proto",
+ "greptime-proto 0.1.0 (git+https://github.com/GreptimeTeam/greptime-proto.git?rev=eeae2d0dfa8ee320a7b9e987b4631a6c1c732ebd)",
  "prost",
  "snafu",
  "tonic 0.9.2",
@@ -4114,6 +4114,18 @@ checksum = "d2fabcfbdc87f4758337ca535fb41a6d701b65693ce38287d856d1674551ec9b"
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=ec4b84931378004db60d168e2604bc3fb9735e9c#ec4b84931378004db60d168e2604bc3fb9735e9c"
+dependencies = [
+ "prost",
+ "serde",
+ "serde_json",
+ "tonic 0.9.2",
+ "tonic-build",
+]
+
+[[package]]
+name = "greptime-proto"
+version = "0.1.0"
 source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=eeae2d0dfa8ee320a7b9e987b4631a6c1c732ebd#eeae2d0dfa8ee320a7b9e987b4631a6c1c732ebd"
 dependencies = [
  "prost",
@@ -5498,6 +5510,7 @@ dependencies = [
  "datafusion-common",
  "datatypes",
  "futures",
+ "greptime-proto 0.1.0 (git+https://github.com/GreptimeTeam/greptime-proto.git?rev=ec4b84931378004db60d168e2604bc3fb9735e9c)",
  "lazy_static",
  "log-store",
  "metrics",
@@ -6982,7 +6995,7 @@ dependencies = [
  "datafusion",
  "datatypes",
  "futures",
- "greptime-proto",
+ "greptime-proto 0.1.0 (git+https://github.com/GreptimeTeam/greptime-proto.git?rev=eeae2d0dfa8ee320a7b9e987b4631a6c1c732ebd)",
  "promql-parser",
  "prost",
  "query",
@@ -7252,7 +7265,7 @@ dependencies = [
  "format_num",
  "futures",
  "futures-util",
- "greptime-proto",
+ "greptime-proto 0.1.0 (git+https://github.com/GreptimeTeam/greptime-proto.git?rev=eeae2d0dfa8ee320a7b9e987b4631a6c1c732ebd)",
  "humantime",
  "metrics",
  "num",
