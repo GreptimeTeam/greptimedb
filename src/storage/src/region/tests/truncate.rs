@@ -165,10 +165,10 @@ async fn test_put_data_after_truncate() {
     assert_eq!(0, res.len());
 
     let new_data = [
-        (1000, Some("0".to_string())),
-        (1001, Some("1".to_string())),
-        (1002, Some("2".to_string())),
-        (1003, Some("3".to_string())),
+        (1010, Some("0".to_string())),
+        (1011, Some("1".to_string())),
+        (1012, Some("2".to_string())),
+        (1013, Some("3".to_string())),
     ];
     let _ = tester.base().put(&new_data).await;
     let res = tester.base().full_scan().await;
