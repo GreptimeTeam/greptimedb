@@ -26,7 +26,6 @@
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
-use store_api::manifest::ManifestVersion;
 use store_api::storage::SequenceNumber;
 
 use crate::memtable::version::{MemtableVersion, MemtableVersionRef};
@@ -48,6 +47,11 @@ impl VersionControl {
             version: ArcSwap::new(Arc::new(version)),
         }
     }
+
+    /// Returns current [Version].
+    pub(crate) fn current(&self) -> VersionRef {
+        self.version.load_full()
+    }
 }
 
 pub(crate) type VersionControlRef = Arc<VersionControl>;
@@ -59,20 +63,19 @@ pub(crate) struct Version {
     ///
     /// Altering metadata isn't frequent, storing metadata in Arc to allow sharing
     /// metadata and reuse metadata when creating a new `Version`.
-    metadata: RegionMetadataRef,
+    pub(crate) metadata: RegionMetadataRef,
     /// Mutable and immutable memtables.
     ///
     /// Wrapped in Arc to make clone of `Version` much cheaper.
-    memtables: MemtableVersionRef,
+    pub(crate) memtables: MemtableVersionRef,
     /// SSTs of the region.
-    ssts: SstVersionRef,
+    pub(crate) ssts: SstVersionRef,
     /// Inclusive max sequence of flushed data.
-    flushed_sequence: SequenceNumber,
-    // TODO(yingwen): Remove this.
-    /// Current version of region manifest.
-    manifest_version: ManifestVersion,
+    pub(crate) flushed_sequence: SequenceNumber,
     // TODO(yingwen): RegionOptions.
 }
+
+pub(crate) type VersionRef = Arc<Version>;
 
 /// Version builder.
 pub(crate) struct VersionBuilder {
@@ -94,7 +97,6 @@ impl VersionBuilder {
             memtables: Arc::new(MemtableVersion::new(self.mutable)),
             ssts: Arc::new(SstVersion::new()),
             flushed_sequence: 0,
-            manifest_version: 0,
         }
     }
 }

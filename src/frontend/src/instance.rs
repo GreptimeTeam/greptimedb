@@ -603,6 +603,10 @@ impl PrometheusHandler for Instance {
 
         Ok(interceptor.post_execute(output, query_ctx)?)
     }
+
+    fn catalog_manager(&self) -> CatalogManagerRef {
+        self.catalog_manager.clone()
+    }
 }
 
 pub fn check_permission(

@@ -32,6 +32,7 @@ mod metrics;
 #[cfg(feature = "mock")]
 pub mod mocks;
 pub mod procedure;
+pub mod pubsub;
 pub mod selector;
 mod sequence;
 pub mod service;

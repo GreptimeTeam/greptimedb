@@ -32,7 +32,7 @@ use datatypes::schema::{ColumnSchema, RawSchema};
 use datatypes::vectors::{StringVector, TimestampMillisecondVector, Vector, VectorRef};
 use query::parser::QueryLanguageParser;
 use query::QueryEngineRef;
-use session::context::QueryContext;
+use session::context::QueryContextBuilder;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::ScanRequest;
 use table::requests::{CreateTableRequest, InsertRequest, TableOptions};
@@ -246,17 +246,18 @@ impl ScriptsTable {
             name
         );
         let stmt = QueryLanguageParser::parse_sql(&sql).unwrap();
+        let ctx = QueryContextBuilder::default().build();
 
         let plan = self
             .query_engine
             .planner()
-            .plan(stmt, QueryContext::arc())
+            .plan(stmt, ctx.clone())
             .await
             .unwrap();
 
         let stream = match self
             .query_engine
-            .execute(plan, QueryContext::arc())
+            .execute(plan, ctx)
             .await
             .context(FindScriptSnafu { name })?
         {

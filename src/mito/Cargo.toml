@@ -15,17 +15,17 @@ async-stream.workspace = true
 async-trait = "0.1"
 chrono.workspace = true
 common-catalog = { path = "../common/catalog" }
+common-datasource = { path = "../common/datasource" }
 common-error = { path = "../common/error" }
 common-procedure = { path = "../common/procedure" }
 common-query = { path = "../common/query" }
 common-recordbatch = { path = "../common/recordbatch" }
-common-datasource = { path = "../common/datasource" }
 common-telemetry = { path = "../common/telemetry" }
 common-test-util = { path = "../common/test-util", optional = true }
 common-time = { path = "../common/time" }
 dashmap = "5.4"
-datafusion.workspace = true
 datafusion-common.workspace = true
+datafusion.workspace = true
 datatypes = { path = "../datatypes" }
 futures.workspace = true
 key-lock = "0.1"
@@ -41,5 +41,5 @@ table = { path = "../table" }
 tokio.workspace = true
 
 [dev-dependencies]
-common-test-util = { path = "../common/test-util" }
 common-procedure-test = { path = "../common/procedure-test" }
+common-test-util = { path = "../common/test-util" }

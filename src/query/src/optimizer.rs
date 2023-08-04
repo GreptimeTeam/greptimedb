@@ -13,4 +13,5 @@
 // limitations under the License.
 
 pub mod order_hint;
+pub mod string_normalization;
 pub mod type_conversion;

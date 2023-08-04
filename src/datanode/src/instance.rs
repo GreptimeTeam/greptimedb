@@ -44,7 +44,7 @@ use mito::engine::MitoEngine;
 use object_store::{util, ObjectStore};
 use query::query_engine::{QueryEngineFactory, QueryEngineRef};
 use servers::Mode;
-use session::context::QueryContext;
+use session::context::QueryContextBuilder;
 use snafu::prelude::*;
 use storage::compaction::{CompactionHandler, CompactionSchedulerRef};
 use storage::config::EngineConfig as StorageEngineConfig;
@@ -83,7 +83,7 @@ pub struct Instance {
     pub(crate) catalog_manager: CatalogManagerRef,
     pub(crate) table_id_provider: Option<TableIdProviderRef>,
     procedure_manager: ProcedureManagerRef,
-    greptimedb_telemerty_task: Arc<GreptimeDBTelemetryTask>,
+    greptimedb_telemetry_task: Arc<GreptimeDBTelemetryTask>,
 }
 
 pub type InstanceRef = Arc<Instance>;
@@ -305,7 +305,7 @@ impl Instance {
             catalog_manager: catalog_manager.clone(),
             table_id_provider,
             procedure_manager,
-            greptimedb_telemerty_task: get_greptimedb_telemetry_task(&opts.mode).await,
+            greptimedb_telemetry_task: get_greptimedb_telemetry_task(&opts.mode).await,
         });
 
         let heartbeat_task = Instance::build_heartbeat_task(
@@ -335,7 +335,7 @@ impl Instance {
             .start()
             .context(StartProcedureManagerSnafu)?;
         let _ = self
-            .greptimedb_telemerty_task
+            .greptimedb_telemetry_task
             .start(common_runtime::bg_runtime())
             .map_err(|e| {
                 debug!("Failed to start greptimedb telemetry task: {}", e);
@@ -379,14 +379,14 @@ impl Instance {
                 })
             })
             .collect::<Vec<_>>();
-        let flush_result = futures::future::try_join_all(
-            flush_requests
-                .into_iter()
-                .map(|request| self.sql_handler.execute(request, QueryContext::arc())),
-        )
-        .await
-        .map_err(BoxedError::new)
-        .context(ShutdownInstanceSnafu);
+        let flush_result =
+            futures::future::try_join_all(flush_requests.into_iter().map(|request| {
+                self.sql_handler
+                    .execute(request, QueryContextBuilder::default().build())
+            }))
+            .await
+            .map_err(BoxedError::new)
+            .context(ShutdownInstanceSnafu);
         info!("Flushed all tables result: {}", flush_result.is_ok());
         let _ = flush_result?;
 

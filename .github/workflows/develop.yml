@@ -51,7 +51,7 @@ jobs:
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
       - name: Run cargo check
-        run: cargo check --workspace --all-targets
+        run: cargo check --locked --workspace --all-targets
 
   toml:
     name: Toml Check
@@ -68,7 +68,7 @@ jobs:
       - name: Install taplo
         run: cargo install taplo-cli --version ^0.8 --locked
       - name: Run taplo
-        run: taplo format --check --option "indent_string=    "
+        run: taplo format --check
 
   # Use coverage to run test.
   # test:

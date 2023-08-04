@@ -19,12 +19,12 @@ use std::time::Duration;
 
 use common_runtime::error::{Error, Result};
 use common_runtime::{BoxedTaskFunction, RepeatedTask, Runtime, TaskFunction};
-use common_telemetry::debug;
+use common_telemetry::{debug, info};
 use once_cell::sync::Lazy;
 use reqwest::{Client, Response};
 use serde::{Deserialize, Serialize};
 
-pub const TELEMETRY_URL: &str = "https://api-preview.greptime.cloud/db/otel/statistics";
+pub const TELEMETRY_URL: &str = "https://api.greptime.cloud/db/otel/statistics";
 
 // Getting the right path when running on windows
 static TELEMETRY_UUID_FILE_NAME: Lazy<PathBuf> = Lazy::new(|| {
@@ -206,7 +206,7 @@ impl GreptimeDBTelemetry {
                 };
 
                 if let Some(client) = self.client.as_ref() {
-                    debug!("report version: {:?}", data);
+                    info!("reporting greptimedb version: {:?}", data);
                     let result = client.post(self.telemetry_url).json(&data).send().await;
                     debug!("report version result: {:?}", result);
                     result.ok()

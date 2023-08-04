@@ -26,7 +26,7 @@ use crate::value::{Value, ValueRef};
 use crate::vectors::{DateVector, DateVectorBuilder, MutableVector, Vector};
 
 /// Data type for Date (YYYY-MM-DD).
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct DateType;
 
 impl DataType for DateType {

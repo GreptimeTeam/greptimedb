@@ -38,6 +38,7 @@ use crate::error::{RecoverProcedureSnafu, Result};
 use crate::handler::HeartbeatHandlerGroup;
 use crate::lock::DistLockRef;
 use crate::metadata_service::MetadataServiceRef;
+use crate::pubsub::{PublishRef, SubscribeManagerRef};
 use crate::selector::{Selector, SelectorType};
 use crate::sequence::SequenceRef;
 use crate::service::mailbox::MailboxRef;
@@ -176,7 +177,8 @@ pub struct MetaSrv {
     mailbox: MailboxRef,
     ddl_manager: DdlManagerRef,
     table_metadata_manager: TableMetadataManagerRef,
-    greptimedb_telemerty_task: Arc<GreptimeDBTelemetryTask>,
+    greptimedb_telemetry_task: Arc<GreptimeDBTelemetryTask>,
+    pubsub: Option<(PublishRef, SubscribeManagerRef)>,
 }
 
 impl MetaSrv {
@@ -196,8 +198,9 @@ impl MetaSrv {
             let procedure_manager = self.procedure_manager.clone();
             let in_memory = self.in_memory.clone();
             let leader_cached_kv_store = self.leader_cached_kv_store.clone();
+            let subscribe_manager = self.subscribe_manager().cloned();
             let mut rx = election.subscribe_leader_change();
-            let task_handler = self.greptimedb_telemerty_task.clone();
+            let task_handler = self.greptimedb_telemetry_task.clone();
             let _handle = common_runtime::spawn_bg(async move {
                 loop {
                     match rx.recv().await {
@@ -219,6 +222,12 @@ impl MetaSrv {
                                     });
                                 }
                                 LeaderChangeMessage::StepDown(leader) => {
+                                    if let Some(sub_manager) = subscribe_manager.clone() {
+                                        info!("Leader changed, un_subscribe all");
+                                        if let Err(e) = sub_manager.un_subscribe_all() {
+                                            error!("Failed to un_subscribe all, error: {}", e);
+                                        }
+                                    }
                                     error!("Leader :{:?} step down", leader);
                                     let _ = task_handler.stop().await.map_err(|e| {
                                         debug!(
@@ -329,6 +338,14 @@ impl MetaSrv {
         &self.table_metadata_manager
     }
 
+    pub fn publish(&self) -> Option<&PublishRef> {
+        self.pubsub.as_ref().map(|suite| &suite.0)
+    }
+
+    pub fn subscribe_manager(&self) -> Option<&SubscribeManagerRef> {
+        self.pubsub.as_ref().map(|suite| &suite.1)
+    }
+
     #[inline]
     pub fn new_ctx(&self) -> Context {
         let server_addr = self.options().server_addr.clone();
@@ -339,6 +356,7 @@ impl MetaSrv {
         let mailbox = self.mailbox.clone();
         let election = self.election.clone();
         let skip_all = Arc::new(AtomicBool::new(false));
+
         Context {
             server_addr,
             in_memory,

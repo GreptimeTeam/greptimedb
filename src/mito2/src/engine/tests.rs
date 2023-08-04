@@ -18,8 +18,8 @@ use store_api::storage::RegionId;
 
 use super::*;
 use crate::error::Error;
+use crate::request::RegionOptions;
 use crate::test_util::{CreateRequestBuilder, TestEnv};
-use crate::worker::request::RegionOptions;
 
 #[tokio::test]
 async fn test_engine_new_stop() {

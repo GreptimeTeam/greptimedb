@@ -3,8 +3,9 @@
 set -e
 
 # - If it's a tag push release, the version is the tag name(${{ github.ref_name }});
-# - If it's a scheduled release, the version is '${{ env.NEXT_RELEASE_VERSION }}-nightly-$buildTime', like v0.2.0-nigthly-20230313;
-# - If it's a manual release, the version is '${{ env.NEXT_RELEASE_VERSION }}-$(git rev-parse --short HEAD)-YYYYMMDDSS', like v0.2.0-e5b243c-2023071245;
+# - If it's a scheduled release, the version is '${{ env.NEXT_RELEASE_VERSION }}-nightly-$buildTime', like 'v0.2.0-nightly-20230313';
+# - If it's a manual release, the version is '${{ env.NEXT_RELEASE_VERSION }}-$(git rev-parse --short HEAD)-YYYYMMDDSS', like 'v0.2.0-e5b243c-2023071245';
+# - If it's a nightly build, the version is 'nightly-YYYYMMDD-$(git rev-parse --short HEAD)', like 'nightly-20230712-e5b243c'.
 # create_version ${GIHUB_EVENT_NAME} ${NEXT_RELEASE_VERSION} ${NIGHTLY_RELEASE_PREFIX}
 function create_version() {
   # Read from envrionment variables.
@@ -21,6 +22,12 @@ function create_version() {
   if [ -z "$NIGHTLY_RELEASE_PREFIX" ]; then
       echo "NIGHTLY_RELEASE_PREFIX is empty"
       exit 1
+  fi
+
+  # Reuse $NEXT_RELEASE_VERSION to identify whether it's a nightly build.
+  if [ "$NEXT_RELEASE_VERSION" = dev ]; then
+    echo "$NIGHTLY_RELEASE_PREFIX-$(date "+%Y%m%d")-$(git rev-parse --short HEAD)"
+    exit 0
   fi
 
   # Note: Only output 'version=xxx' to stdout when everything is ok, so that it can be used in GitHub Actions Outputs.
@@ -40,5 +47,9 @@ function create_version() {
   fi
 }
 
-# You can run as: GITHUB_EVENT_NAME=push NEXT_RELEASE_VERSION=v0.4.0 NIGHTLY_RELEASE_PREFIX=nigthly GITHUB_REF_NAME=v0.3.0 ./create-version.sh
+# You can run as following examples:
+#  GITHUB_EVENT_NAME=push NEXT_RELEASE_VERSION=v0.4.0 NIGHTLY_RELEASE_PREFIX=nigtly GITHUB_REF_NAME=v0.3.0 ./create-version.sh
+#  GITHUB_EVENT_NAME=workflow_dispatch NEXT_RELEASE_VERSION=v0.4.0 NIGHTLY_RELEASE_PREFIX=nigtly ./create-version.sh
+#  GITHUB_EVENT_NAME=schedule NEXT_RELEASE_VERSION=v0.4.0 NIGHTLY_RELEASE_PREFIX=nigtly ./create-version.sh
+#  GITHUB_EVENT_NAME=schedule NEXT_RELEASE_VERSION=dev NIGHTLY_RELEASE_PREFIX=nigtly ./create-version.sh
 create_version

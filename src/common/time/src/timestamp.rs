@@ -227,6 +227,7 @@ impl FromStr for Timestamp {
     /// - `2022-09-20 14:16:43.012345` (local timezone, without T)
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         // RFC3339 timestamp (with a T)
+        let s = s.trim();
         if let Ok(ts) = DateTime::parse_from_rfc3339(s) {
             return Ok(Timestamp::new(ts.timestamp_nanos(), TimeUnit::Nanosecond));
         }
@@ -952,6 +953,11 @@ mod tests {
         assert_eq!(
             Timestamp::new(0, TimeUnit::Second),
             Timestamp::from_str("1970-01-01 08:00:00").unwrap()
+        );
+
+        assert_eq!(
+            Timestamp::new(0, TimeUnit::Second),
+            Timestamp::from_str("      1970-01-01        08:00:00    ").unwrap()
         );
     }
 

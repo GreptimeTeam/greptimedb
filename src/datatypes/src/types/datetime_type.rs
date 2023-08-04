@@ -24,7 +24,7 @@ use crate::types::LogicalPrimitiveType;
 use crate::vectors::{DateTimeVector, DateTimeVectorBuilder, PrimitiveVector};
 
 /// Data type for [`DateTime`].
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct DateTimeType;
 
 impl DataType for DateTimeType {

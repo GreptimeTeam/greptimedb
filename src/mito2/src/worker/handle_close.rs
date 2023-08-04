@@ -17,7 +17,7 @@
 use common_telemetry::info;
 
 use crate::error::Result;
-use crate::worker::request::CloseRequest;
+use crate::request::CloseRequest;
 use crate::worker::RegionWorkerLoop;
 
 impl<S> RegionWorkerLoop<S> {

@@ -17,8 +17,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
-use common_catalog::build_db_string;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_catalog::{build_db_string, parse_catalog_and_schema_from_db_string};
 use common_time::TimeZone;
 use derive_builder::Builder;
 use sql::dialect::{Dialect, GreptimeDbDialect, MySqlDialect, PostgreSqlDialect};
@@ -58,6 +58,24 @@ impl QueryContext {
         QueryContextBuilder::default()
             .current_catalog(catalog.to_string())
             .current_schema(schema.to_string())
+            .build()
+    }
+
+    pub fn with_db_name(db_name: Option<&String>) -> QueryContextRef {
+        let (catalog, schema) = db_name
+            .map(|db| {
+                let (catalog, schema) = parse_catalog_and_schema_from_db_string(db);
+                (catalog.to_string(), schema.to_string())
+            })
+            .unwrap_or_else(|| {
+                (
+                    DEFAULT_CATALOG_NAME.to_string(),
+                    DEFAULT_SCHEMA_NAME.to_string(),
+                )
+            });
+        QueryContextBuilder::default()
+            .current_catalog(catalog)
+            .current_schema(schema)
             .build()
     }
 

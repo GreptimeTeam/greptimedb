@@ -27,7 +27,6 @@ use snafu::prelude::*;
 
 use crate::error::{self, Result};
 use crate::http::header::GreptimeDbName;
-use crate::parse_catalog_and_schema_from_client_database_name;
 use crate::query_handler::OpenTelemetryProtocolHandlerRef;
 
 #[axum_macros::debug_handler]
@@ -36,12 +35,7 @@ pub async fn metrics(
     TypedHeader(db): TypedHeader<GreptimeDbName>,
     RawBody(body): RawBody,
 ) -> Result<OtlpResponse> {
-    let ctx = if let Some(db) = db.value() {
-        let (catalog, schema) = parse_catalog_and_schema_from_client_database_name(db);
-        QueryContext::with(catalog, schema)
-    } else {
-        QueryContext::arc()
-    };
+    let ctx = QueryContext::with_db_name(db.value());
     let _timer = timer!(
         crate::metrics::METRIC_HTTP_OPENTELEMETRY_ELAPSED,
         &[(crate::metrics::METRIC_DB_LABEL, ctx.get_db_string())]

@@ -15,9 +15,7 @@
 use std::fmt::Display;
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
-// use tokio::process::{Child, Command};
-use std::process::{Child, Command};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -177,6 +175,7 @@ impl Env {
                     "start".to_string(),
                     "--use-memory-store".to_string(),
                     "--http-addr=0.0.0.0:5001".to_string(),
+                    "--disable-region-failover".to_string(),
                 ];
                 (args, METASRV_ADDR.to_string())
             }

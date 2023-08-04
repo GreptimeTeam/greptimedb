@@ -15,7 +15,7 @@
 //! Mito region.
 
 pub(crate) mod opener;
-mod version;
+pub(crate) mod version;
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -25,7 +25,7 @@ use store_api::storage::RegionId;
 
 use crate::error::Result;
 use crate::manifest::manager::RegionManifestManager;
-use crate::region::version::VersionControlRef;
+use crate::region::version::{VersionControlRef, VersionRef};
 
 /// Type to store region version.
 pub type VersionNumber = u32;
@@ -55,6 +55,11 @@ impl MitoRegion {
         info!("Stopped region, region_id: {}", self.region_id);
 
         Ok(())
+    }
+
+    /// Returns current version of the region.
+    pub(crate) fn version(&self) -> VersionRef {
+        self.version_control.current()
     }
 }
 

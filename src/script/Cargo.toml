@@ -32,9 +32,9 @@ common-error = { path = "../common/error" }
 common-function = { path = "../common/function" }
 common-query = { path = "../common/query" }
 common-recordbatch = { path = "../common/recordbatch" }
+common-runtime = { path = "../common/runtime" }
 common-telemetry = { path = "../common/telemetry" }
 common-time = { path = "../common/time" }
-common-runtime = { path = "../common/runtime" }
 console = "0.15"
 crossbeam-utils = "0.8.14"
 datafusion = { workspace = true, optional = true }
@@ -42,12 +42,13 @@ datafusion-common = { workspace = true, optional = true }
 datafusion-expr = { workspace = true, optional = true }
 datafusion-physical-expr = { workspace = true, optional = true }
 datatypes = { path = "../datatypes" }
-futures.workspace = true
 futures-util.workspace = true
+futures.workspace = true
 once_cell.workspace = true
 paste = { workspace = true, optional = true }
 query = { path = "../query" }
 # TODO(discord9): This is a forked and tweaked version of RustPython, please update it to newest original RustPython After RustPython support GC
+pyo3 = { version = "0.19", optional = true, features = ["abi3", "abi3-py37"] }
 rustpython-ast = { git = "https://github.com/discord9/RustPython", optional = true, rev = "9ed5137412" }
 rustpython-codegen = { git = "https://github.com/discord9/RustPython", optional = true, rev = "9ed5137412" }
 rustpython-compiler = { git = "https://github.com/discord9/RustPython", optional = true, rev = "9ed5137412" }
@@ -61,7 +62,6 @@ rustpython-vm = { git = "https://github.com/discord9/RustPython", optional = tru
     "default",
     "codegen",
 ] }
-pyo3 = { version = "0.19", optional = true, features = ["abi3", "abi3-py37"] }
 session = { path = "../session" }
 snafu = { version = "0.7", features = ["backtraces"] }
 sql = { path = "../sql" }
@@ -72,14 +72,15 @@ tokio.workspace = true
 [dev-dependencies]
 catalog = { path = "../catalog", features = ["testing"] }
 common-test-util = { path = "../common/test-util" }
+criterion = { version = "0.4", features = ["html_reports", "async_tokio"] }
 log-store = { path = "../log-store" }
 mito = { path = "../mito", features = ["test"] }
+rayon = "1.0"
 ron = "0.7"
 serde = { version = "1.0", features = ["derive"] }
+session = { path = "../session", features = ["testing"] }
 storage = { path = "../storage" }
 tokio-test = "0.4"
-criterion = { version = "0.4", features = ["html_reports", "async_tokio"] }
-rayon = "1.0"
 
 [[bench]]
 name = "py_benchmark"

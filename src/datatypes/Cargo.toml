@@ -9,13 +9,13 @@ default = []
 test = []
 
 [dependencies]
-arrow.workspace = true
 arrow-array.workspace = true
 arrow-schema.workspace = true
+arrow.workspace = true
 common-base = { path = "../common/base" }
 common-error = { path = "../common/error" }
-common-time = { path = "../common/time" }
 common-telemetry = { path = "../common/telemetry" }
+common-time = { path = "../common/time" }
 datafusion-common.workspace = true
 enum_dispatch = "0.3"
 num = "0.4"

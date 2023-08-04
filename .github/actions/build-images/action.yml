@@ -16,6 +16,10 @@ inputs:
   version:
     description: Version of the artifact
     required: true
+  push-latest-tag:
+    description: Whether to push the latest tag
+    required: false
+    default: 'true'
 runs:
   using: composite
   steps:
@@ -32,6 +36,7 @@ runs:
         amd64-artifact-name: greptime-linux-amd64-pyo3-${{ inputs.version }}
         arm64-artifact-name: greptime-linux-arm64-pyo3-${{ inputs.version }}
         platforms: linux/amd64,linux/arm64
+        push-latest-tag: ${{ inputs.push-latest-tag }}
 
     - name: Build and push centos images to dockerhub
       uses: ./.github/actions/build-greptime-images
@@ -45,3 +50,4 @@ runs:
         docker-file: docker/ci/Dockerfile-centos
         amd64-artifact-name: greptime-linux-amd64-centos-${{ inputs.version }}
         platforms: linux/amd64
+        push-latest-tag: ${{ inputs.push-latest-tag }}
