@@ -4,7 +4,7 @@ mod reduce;
 use std::collections::BTreeMap;
 
 use join::JoinPlan;
-pub(crate) use reduce::{convert_indexes_to_skips, KeyValPlan, ReducePlan};
+pub(crate) use reduce::{convert_indexes_to_skips, AccumulablePlan, KeyValPlan, ReducePlan};
 use serde::{Deserialize, Serialize};
 
 use crate::expr::{Id, LocalId, MapFilterProject, ScalarExpr, TableFunc};

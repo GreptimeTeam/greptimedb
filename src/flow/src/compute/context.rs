@@ -281,6 +281,10 @@ where
 
 type ResultCollection<S, V> = (Collection<S, V, Diff>, Collection<S, DataflowError, Diff>);
 
+/// A bundle of the various ways a collection can be represented.
+///
+/// This type maintains the invariant that it does contain at least one valid
+/// source of data, either a collection or at least one arrangement.
 #[derive(Clone)]
 pub struct CollectionBundle<S, V, T = repr::Timestamp>
 where
@@ -321,6 +325,18 @@ where
             collection: None,
             arranged,
         }
+    }
+
+    /// Inserts arrangements by the columns on which they are keyed.
+    pub fn from_columns<I: IntoIterator<Item = usize>>(
+        columns: I,
+        arrangements: ArrangementFlavor<S, V, T>,
+    ) -> Self {
+        let mut keys = Vec::new();
+        for column in columns {
+            keys.push(ScalarExpr::Column(column));
+        }
+        Self::from_expressions(keys, arrangements)
     }
 
     /// The scope containing the collection bundle.
@@ -630,6 +646,13 @@ where
     batch: C::Storage,
 }
 
+/// Handle specialized to `Vec`-based container.
+type PendingOutputHandle<'a, C, I> = OutputHandle<
+    'a,
+    <C as Cursor>::Time,
+    <I as IntoIterator>::Item,
+    timely::dataflow::channels::pushers::Tee<<C as Cursor>::Time, <I as IntoIterator>::Item>,
+>;
 impl<C: Cursor> PendingWork<C>
 where
     C::Key: PartialEq,
@@ -649,12 +672,7 @@ where
         key: &Option<C::Key>,
         logic: &mut L,
         fuel: &mut usize,
-        output: &mut OutputHandle<
-            '_,
-            C::Time,
-            I::Item,
-            timely::dataflow::channels::pushers::Tee<C::Time, I::Item>,
-        >,
+        output: &mut PendingOutputHandle<'_, C, I>,
     ) where
         I: IntoIterator,
         I::Item: Data,

@@ -2860,7 +2860,7 @@ checksum = "56254986775e3233ffa9c4d7d3faaf6d36a2c09d30b20687e9f88bc8bafc16c8"
 [[package]]
 name = "differential-dataflow"
 version = "0.12.0"
-source = "git+https://github.com/TimelyDataflow/differential-dataflow?rev=99fa67db#99fa67db2b92d2ee938c6ffef0912908de3ef288"
+source = "git+https://github.com/TimelyDataflow/differential-dataflow#2b9ac68aab9a1bf3fc3e4c12fcabea9c9d1ecc6a"
 dependencies = [
  "abomonation",
  "abomonation_derive",
@@ -3292,6 +3292,7 @@ dependencies = [
 name = "flow"
 version = "0.1.0"
 dependencies = [
+ "common-telemetry",
  "datafusion-expr",
  "datafusion-substrait",
  "datatypes",
@@ -10261,6 +10262,7 @@ source = "git+https://github.com/TimelyDataflow/timely-dataflow#b990faba8ea59ec2
 dependencies = [
  "abomonation",
  "abomonation_derive",
+ "bincode",
  "crossbeam-channel",
  "getopts",
  "serde",

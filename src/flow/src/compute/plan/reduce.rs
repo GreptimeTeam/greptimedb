@@ -111,8 +111,63 @@ pub struct AccumulablePlan {
 
 // TODO(discord9): others
 
+/// Plan for computing a set of hierarchical aggregations.
+///
+/// In the append-only setting we can render them in-place
+/// with monotonic plans, but otherwise, we need to render
+/// them with a reduction tree that splits the inputs into
+/// small, and then progressively larger, buckets
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
-pub enum HierarchicalPlan {}
+pub enum HierarchicalPlan {
+    /// Plan hierarchical aggregations under monotonic inputs.
+    Monotonic(MonotonicPlan),
+    /// Plan for hierarchical aggregations under non-monotonic inputs.
+    Bucketed(BucketedPlan),
+}
+
+/// Plan for computing a set of hierarchical aggregations with a
+/// monotonic input.
+///
+/// Here, the aggregations will be rendered in place. We don't
+/// need to worry about retractions because the inputs are
+/// append only, so we can change our computation to
+/// only retain the "best" value in the diff field, instead
+/// of holding onto all values.
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+pub struct MonotonicPlan {
+    /// All of the aggregations we were asked to compute.
+    pub aggr_funcs: Vec<AggregateFunc>,
+    /// Set of "skips" or calls to `nth()` an iterator needs to do over
+    /// the input to extract the relevant datums.
+    pub skips: Vec<usize>,
+    /// True if the input is logically but not physically monotonic,
+    /// and the operator must first consolidate the inputs to remove
+    /// potential negations.
+    pub must_consolidate: bool,
+}
+
+/// Plan for computing a set of hierarchical aggregations
+/// with non-monotonic inputs.
+///
+/// To perform hierarchical aggregations with stable runtimes
+/// under updates we'll subdivide the group key into buckets, compute
+/// the reduction in each of those subdivided buckets and then combine
+/// the results into a coarser bucket (one that represents a larger
+/// fraction of the original input) and redo the reduction in another
+/// layer. Effectively, we'll construct a min / max heap out of a series
+/// of reduce operators (each one is a separate layer).
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+pub struct BucketedPlan {
+    /// All of the aggregations we were asked to compute.
+    pub aggr_funcs: Vec<AggregateFunc>,
+    /// Set of "skips" or calls to `nth()` an iterator needs to do over
+    /// the input to extract the relevant datums.
+    pub skips: Vec<usize>,
+    /// The number of buckets in each layer of the reduction tree. Should
+    /// be decreasing, and ideally, a power of two so that we can easily
+    /// distribute values to buckets with `value.hashed() % buckets[layer]`.
+    pub buckets: Vec<u64>,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub enum BasicPlan {}

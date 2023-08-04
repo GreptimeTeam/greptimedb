@@ -1,13 +1,14 @@
 use serde::{Deserialize, Serialize};
 
+// TODO(discord9): more error types
 #[derive(Ord, PartialOrd, Clone, Debug, Eq, Deserialize, Serialize, PartialEq, Hash)]
 pub enum DataflowError {
-    EvalError(EvalError),
+    EvalError(Box<EvalError>),
 }
 
 impl From<EvalError> for DataflowError {
     fn from(e: EvalError) -> Self {
-        DataflowError::EvalError(e)
+        DataflowError::EvalError(Box::new(e))
     }
 }
 
@@ -15,4 +16,12 @@ impl From<EvalError> for DataflowError {
 pub enum EvalError {
     DivisionByZero,
     InvalidArgument(String),
+    Internal(String),
+}
+
+#[test]
+fn tell_goal() {
+    use differential_dataflow::ExchangeData;
+    fn a<T: ExchangeData>(_: T) {}
+    a(DataflowError::from(EvalError::DivisionByZero));
 }
