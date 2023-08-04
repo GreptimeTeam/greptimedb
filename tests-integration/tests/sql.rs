@@ -342,8 +342,6 @@ pub async fn test_postgres_parameter_inference(store_type: StorageType) {
         .await
         .unwrap();
 
-    // The connection object performs the actual communication with the database,
-    // so spawn it off to run on its own.
     tokio::spawn(async move {
         if let Err(e) = connection.await {
             eprintln!("connection error: {}", e);
@@ -366,7 +364,6 @@ pub async fn test_postgres_parameter_inference(store_type: StorageType) {
         .await
         .unwrap();
 
-    // Now we can execute a simple statement that just returns its parameter.
     let rows = client
         .query("SELECT * FROM demo WHERE i = $1", &[&0i64])
         .await

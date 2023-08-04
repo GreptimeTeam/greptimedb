@@ -255,7 +255,12 @@ pub(super) fn parameters_to_scalar_values(
             if let Some(Some(server_infer_type)) = param_types.get(&format!("${}", idx + 1)) {
                 server_infer_type
             } else {
-                // return error if server cannot inference the type of parameter
+                // at the moment we require type information inferenced by
+                // server so here we return error if the type in unknown from
+                // server-side.
+                //
+                // It might be possible to parse the parameter just using client
+                // specified type, we will implement that if there is a case.
                 return Err(invalid_parameter_error("unknown_parameter_type", None));
             };
 
