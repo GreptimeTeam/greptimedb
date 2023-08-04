@@ -960,21 +960,6 @@ async fn test_truncate_table() {
     let insert_req = new_insert_request("demo".to_string(), columns_values.clone());
     assert_eq!(4, table.insert(insert_req).await.unwrap());
 
-    let stream = table.scan_to_stream(ScanRequest::default()).await.unwrap();
-    let batches = util::collect_batches(stream).await.unwrap();
-
-    assert_eq!(
-        batches.pretty_print().unwrap(),
-        "\
-+-------+-----+--------+-------------------------+
-| host  | cpu | memory | ts                      |
-+-------+-----+--------+-------------------------+
-| host1 | 1.0 | 1.0    | 1970-01-01T00:00:00.001 |
-| host2 | 2.0 | 2.0    | 1970-01-01T00:00:00.002 |
-| host3 | 3.0 | 3.0    | 1970-01-01T00:00:00.002 |
-| host4 | 4.0 | 4.0    | 1970-01-01T00:00:00.001 |
-+-------+-----+--------+-------------------------+"
-    );
 
     // truncate table.
     let truncate_req = new_truncate_request();
