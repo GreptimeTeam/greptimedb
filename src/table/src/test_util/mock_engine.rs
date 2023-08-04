@@ -111,7 +111,7 @@ impl TableEngine for MockTableEngine {
         _ctx: &EngineContext,
         _request: TruncateTableRequest,
     ) -> Result<bool> {
-        Ok(true)
+        unimplemented!()
     }
 }
 

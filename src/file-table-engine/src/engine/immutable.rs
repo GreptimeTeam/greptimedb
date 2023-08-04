@@ -119,7 +119,10 @@ impl TableEngine for ImmutableFileTableEngine {
         _ctx: &EngineContext,
         _request: TruncateTableRequest,
     ) -> TableResult<bool> {
-        Ok(true)
+        table_error::UnsupportedSnafu {
+            operation: "TRUNCATE TABLE",
+        }
+        .fail()
     }
 }
 
