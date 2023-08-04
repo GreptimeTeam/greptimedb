@@ -27,8 +27,8 @@ clap = { version = "3.1", features = ["derive"] }
 client = { path = "../client" }
 common-base = { path = "../common/base" }
 common-error = { path = "../common/error" }
-common-query = { path = "../common/query" }
 common-meta = { path = "../common/meta" }
+common-query = { path = "../common/query" }
 common-recordbatch = { path = "../common/recordbatch" }
 common-telemetry = { path = "../common/telemetry", features = [
     "deadlock_detection",
@@ -60,8 +60,8 @@ tokio.workspace = true
 [dev-dependencies]
 common-test-util = { path = "../common/test-util" }
 rexpect = "0.5"
-temp-env = "0.3"
 serde.workspace = true
+temp-env = "0.3"
 toml.workspace = true
 
 [build-dependencies]

@@ -9,6 +9,7 @@ async-trait.workspace = true
 common-error = { path = "../error" }
 common-runtime = { path = "../runtime" }
 common-telemetry = { path = "../telemetry" }
+once_cell = "1.17.0"
 reqwest = { version = "0.11", features = [
     "json",
     "rustls-tls",
@@ -17,11 +18,10 @@ serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 uuid.workspace = true
-once_cell = "1.17.0"
 
 [dev-dependencies]
-hyper = { version = "0.14", features = ["full"] }
 common-test-util = { path = "../test-util" }
+hyper = { version = "0.14", features = ["full"] }
 
 [build-dependencies]
 common-version = { path = "../version" }

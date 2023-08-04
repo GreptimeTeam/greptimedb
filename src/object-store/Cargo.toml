@@ -5,10 +5,10 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-lru = "0.9"
 async-trait = "0.1"
 bytes = "1.4"
 futures = { version = "0.3" }
+lru = "0.9"
 md5 = "0.7"
 metrics.workspace = true
 opendal = { version = "0.36", features = ["layers-tracing", "layers-metrics"] }

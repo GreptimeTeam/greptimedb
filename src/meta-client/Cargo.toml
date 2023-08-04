@@ -10,16 +10,16 @@ async-trait = "0.1"
 chrono.workspace = true
 common-error = { path = "../common/error" }
 common-grpc = { path = "../common/grpc" }
-common-telemetry = { path = "../common/telemetry" }
 common-meta = { path = "../common/meta" }
+common-telemetry = { path = "../common/telemetry" }
 etcd-client.workspace = true
 rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 snafu.workspace = true
 table = { path = "../table" }
-tokio.workspace = true
 tokio-stream = { version = "0.1", features = ["net"] }
+tokio.workspace = true
 tonic.workspace = true
 
 [dev-dependencies]

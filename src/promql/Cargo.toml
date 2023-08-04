@@ -9,9 +9,10 @@ async-recursion = "1.0"
 async-trait.workspace = true
 bytemuck = "1.12"
 catalog = { path = "../catalog" }
-common-error = { path = "../common/error" }
 common-catalog = { path = "../common/catalog" }
+common-error = { path = "../common/error" }
 common-function-macro = { path = "../common/function-macro" }
+common-telemetry = { path = "../common/telemetry" }
 datafusion.workspace = true
 datatypes = { path = "../datatypes" }
 futures = "0.3"
@@ -21,9 +22,8 @@ prost.workspace = true
 session = { path = "../session" }
 snafu = { version = "0.7", features = ["backtraces"] }
 table = { path = "../table" }
-common-telemetry = { path = "../common/telemetry" }
 
 [dev-dependencies]
-tokio.workspace = true
 query = { path = "../query" }
 session = { path = "../session", features = ["testing"] }
+tokio.workspace = true

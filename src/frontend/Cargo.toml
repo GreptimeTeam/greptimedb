@@ -24,15 +24,15 @@ common-error = { path = "../common/error" }
 common-function = { path = "../common/function" }
 common-grpc = { path = "../common/grpc" }
 common-grpc-expr = { path = "../common/grpc-expr" }
-common-query = { path = "../common/query" }
 common-meta = { path = "../common/meta" }
+common-query = { path = "../common/query" }
 common-recordbatch = { path = "../common/recordbatch" }
 common-runtime = { path = "../common/runtime" }
 common-telemetry = { path = "../common/telemetry" }
 common-time = { path = "../common/time" }
-datafusion.workspace = true
 datafusion-common.workspace = true
 datafusion-expr.workspace = true
+datafusion.workspace = true
 datanode = { path = "../datanode" }
 datatypes = { path = "../datatypes" }
 file-table-engine = { path = "../file-table-engine" }
