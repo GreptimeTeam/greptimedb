@@ -14,14 +14,22 @@
 
 use std::collections::HashMap;
 
-use api::v1::{InsertRequest as GrpcInsertRequest, InsertRequests};
+use api::v1::value::Value;
+use api::v1::{
+    ColumnDataType, ColumnSchema, InsertRequest as GrpcInsertRequest, InsertRequests, Row,
+    RowInsertRequest, RowInsertRequests, Rows, SemanticType,
+};
+use common_grpc::writer;
 use common_grpc::writer::{LinesWriter, Precision};
 use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
-use influxdb_line_protocol::{parse_lines, FieldValue};
-use snafu::{OptionExt, ResultExt};
+use influxdb_line_protocol::{parse_lines, FieldSet, FieldValue, TagSet};
+use snafu::{ensure, OptionExt, ResultExt};
 
-use crate::error::{Error, InfluxdbLineProtocolSnafu, InfluxdbLinesWriteSnafu, TimePrecisionSnafu};
+use crate::error::{
+    Error, IncompatibleSchemaSnafu, InfluxdbLineProtocolSnafu, InfluxdbLinesWriteSnafu,
+    TimePrecisionSnafu,
+};
 
 pub const INFLUXDB_TIMESTAMP_COLUMN_NAME: &str = "ts";
 pub const DEFAULT_TIME_PRECISION: Precision = Precision::Nanosecond;
@@ -99,17 +107,7 @@ impl TryFrom<&InfluxdbRequest> for InsertRequests {
             } else {
                 let precision = unwrap_or_default_precision(value.precision);
                 let timestamp = Timestamp::current_millis();
-                let unit = match precision {
-                    Precision::Second => TimeUnit::Second,
-                    Precision::Millisecond => TimeUnit::Millisecond,
-                    Precision::Microsecond => TimeUnit::Microsecond,
-                    Precision::Nanosecond => TimeUnit::Nanosecond,
-                    _ => {
-                        return Err(Error::NotSupported {
-                            feat: format!("convert {precision} into TimeUnit"),
-                        })
-                    }
-                };
+                let unit = get_time_unit(precision)?;
                 let timestamp = timestamp
                     .convert_to(unit)
                     .with_context(|| TimePrecisionSnafu {
@@ -141,12 +139,229 @@ impl TryFrom<&InfluxdbRequest> for InsertRequests {
     }
 }
 
+impl TryFrom<&InfluxdbRequest> for RowInsertRequests {
+    type Error = Error;
+
+    fn try_from(value: &InfluxdbRequest) -> Result<Self, Self::Error> {
+        let lines = parse_lines(&value.lines)
+            .collect::<influxdb_line_protocol::Result<Vec<_>>>()
+            .context(InfluxdbLineProtocolSnafu)?;
+
+        let mut table_schemas = HashMap::with_capacity(lines.len());
+        let mut table_rows = HashMap::with_capacity(lines.len());
+
+        for line in lines {
+            let table_name = line.series.measurement.as_str();
+            let tags = line.series.tag_set;
+            let fields = line.field_set;
+            let timestamp = line.timestamp;
+            let len = tags.as_ref().map(|x| x.len()).unwrap_or(0) + fields.len();
+
+            let schema = table_schemas
+                .entry(table_name.to_string())
+                .or_insert_with(|| HashMap::with_capacity(len));
+            let values_list = table_rows
+                .entry(table_name.to_string())
+                .or_insert_with(Vec::new);
+
+            // tags
+            parse_tags(tags, schema, values_list)?;
+            // fields
+            parse_fields(fields, schema, values_list)?;
+            // timestamp
+            parse_ts(timestamp, value.precision, schema, values_list)?;
+        }
+
+        let mut inserts = Vec::with_capacity(table_schemas.len());
+        for (table_name, schema) in table_schemas {
+            let Some(table_data) = table_rows
+                .remove(&table_name) else {
+                continue
+            };
+            let schema = schema.into_values().collect::<Vec<_>>();
+            let rows = table_data
+                .into_iter()
+                .map(|mut r| Row {
+                    values: schema
+                        .iter()
+                        .map(|col| {
+                            r.remove(&col.column_name)
+                                .unwrap_or(api::v1::Value { value: None })
+                        })
+                        .collect::<Vec<_>>(),
+                })
+                .collect::<Vec<_>>();
+
+            inserts.push(RowInsertRequest {
+                table_name,
+                rows: Some(Rows { schema, rows }),
+                ..Default::default()
+            });
+        }
+
+        Ok(RowInsertRequests { inserts })
+    }
+}
+
+fn parse_tags(
+    tags: Option<TagSet>,
+    schema: &mut HashMap<String, ColumnSchema>,
+    values_list: &mut Vec<HashMap<String, api::v1::Value>>,
+) -> Result<(), Error> {
+    let Some(tags) = tags else { return Ok(()); };
+    let mut values = HashMap::with_capacity(tags.len());
+    for (k, v) in tags {
+        let current = schema.entry(k.to_string()).or_insert_with(|| ColumnSchema {
+            column_name: k.to_string(),
+            datatype: ColumnDataType::String as i32,
+            semantic_type: SemanticType::Tag as i32,
+        });
+
+        check_schema(ColumnDataType::String, SemanticType::Tag, current)?;
+
+        let v = wrap_value(Value::StringValue(v.to_string()));
+        values.insert(k.to_string(), v);
+    }
+
+    values_list.push(values);
+
+    Ok(())
+}
+
+fn parse_fields(
+    fields: FieldSet,
+    schema: &mut HashMap<String, ColumnSchema>,
+    values_list: &mut Vec<HashMap<String, api::v1::Value>>,
+) -> Result<(), Error> {
+    let mut values = HashMap::with_capacity(fields.len());
+    for (k, v) in fields {
+        let (datatype, value) = match v {
+            FieldValue::I64(v) => (ColumnDataType::Int64, wrap_value(Value::I64Value(v))),
+            FieldValue::U64(v) => (ColumnDataType::Uint64, wrap_value(Value::U64Value(v))),
+            FieldValue::F64(v) => (ColumnDataType::Float64, wrap_value(Value::F64Value(v))),
+            FieldValue::String(v) => (
+                ColumnDataType::String,
+                wrap_value(Value::StringValue(v.to_string())),
+            ),
+            FieldValue::Boolean(v) => (ColumnDataType::Boolean, wrap_value(Value::BoolValue(v))),
+        };
+
+        let current = schema.entry(k.to_string()).or_insert_with(|| ColumnSchema {
+            column_name: k.to_string(),
+            datatype: datatype as i32,
+            semantic_type: SemanticType::Field as i32,
+        });
+
+        check_schema(datatype, SemanticType::Field, current)?;
+
+        values.insert(k.to_string(), value);
+    }
+
+    values_list.push(values);
+
+    Ok(())
+}
+
+fn parse_ts(
+    ts: Option<i64>,
+    precision: Option<Precision>,
+    schema: &mut HashMap<String, ColumnSchema>,
+    values_list: &mut Vec<HashMap<String, api::v1::Value>>,
+) -> Result<(), Error> {
+    let mut values = HashMap::with_capacity(1);
+    let column_name = INFLUXDB_TIMESTAMP_COLUMN_NAME;
+    let current = schema
+        .entry(column_name.to_string())
+        .or_insert_with(|| ColumnSchema {
+            column_name: column_name.to_string(),
+            datatype: ColumnDataType::TimestampMillisecond as i32,
+            semantic_type: SemanticType::Timestamp as i32,
+        });
+
+    check_schema(
+        ColumnDataType::TimestampMillisecond,
+        SemanticType::Timestamp,
+        current,
+    )?;
+
+    let precision = unwrap_or_default_precision(precision);
+    let ts = match ts {
+        Some(timestamp) => writer::to_ms_ts(precision, timestamp),
+        None => {
+            let timestamp = Timestamp::current_millis();
+            let unit = get_time_unit(precision)?;
+            let timestamp = timestamp
+                .convert_to(unit)
+                .with_context(|| TimePrecisionSnafu {
+                    name: precision.to_string(),
+                })?;
+            writer::to_ms_ts(precision, timestamp.into())
+        }
+    };
+
+    values.insert(
+        column_name.to_string(),
+        wrap_value(Value::TsMillisecondValue(ts)),
+    );
+
+    values_list.push(values);
+
+    Ok(())
+}
+
+#[inline]
+fn check_schema(
+    datatype: ColumnDataType,
+    semantic_type: SemanticType,
+    schema: &ColumnSchema,
+) -> Result<(), Error> {
+    ensure!(
+        schema.datatype == datatype as i32,
+        IncompatibleSchemaSnafu {
+            err_msg: format!(
+                "column {} datatype incompatible, expected {:?}, found {:?}",
+                schema.column_name, schema.datatype, datatype
+            )
+        }
+    );
+
+    ensure!(
+        schema.semantic_type == semantic_type as i32,
+        IncompatibleSchemaSnafu {
+            err_msg: format!(
+                "column {} semantic type incompatible, expected {:?}, found {:?}",
+                schema.column_name, schema.semantic_type, semantic_type
+            )
+        }
+    );
+
+    Ok(())
+}
+
+fn wrap_value(value: Value) -> api::v1::Value {
+    api::v1::Value { value: Some(value) }
+}
+
 fn unwrap_or_default_precision(precision: Option<Precision>) -> Precision {
     if let Some(val) = precision {
         val
     } else {
         DEFAULT_TIME_PRECISION
     }
+}
+
+fn get_time_unit(precision: Precision) -> Result<TimeUnit, Error> {
+    Ok(match precision {
+        Precision::Second => TimeUnit::Second,
+        Precision::Millisecond => TimeUnit::Millisecond,
+        Precision::Microsecond => TimeUnit::Microsecond,
+        Precision::Nanosecond => TimeUnit::Nanosecond,
+        _ => {
+            return Err(Error::NotSupported {
+                feat: format!("convert {precision} into TimeUnit"),
+            })
+        }
+    })
 }
 
 #[cfg(test)]
