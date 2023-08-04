@@ -343,9 +343,7 @@ pub async fn test_postgres_parameter_inference(store_type: StorageType) {
         .unwrap();
 
     tokio::spawn(async move {
-        if let Err(e) = connection.await {
-            eprintln!("connection error: {}", e);
-        }
+        connection.await.unwrap();
     });
 
     // Create demo table

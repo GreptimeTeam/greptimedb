@@ -313,7 +313,7 @@ pub(super) fn parameters_to_scalar_values(
                     ConcreteDataType::UInt32(_) => ScalarValue::UInt32(data.map(|n| n as u32)),
                     ConcreteDataType::UInt64(_) => ScalarValue::UInt64(data.map(|n| n as u64)),
                     ConcreteDataType::Timestamp(unit) => {
-                        to_timestamp_scalar_value(data, &unit, server_type)?
+                        to_timestamp_scalar_value(data, unit, server_type)?
                     }
                     ConcreteDataType::DateTime(_) => ScalarValue::Date64(data.map(|d| d as i64)),
                     _ => {
@@ -339,7 +339,7 @@ pub(super) fn parameters_to_scalar_values(
                     ConcreteDataType::UInt32(_) => ScalarValue::UInt32(data.map(|n| n as u32)),
                     ConcreteDataType::UInt64(_) => ScalarValue::UInt64(data.map(|n| n as u64)),
                     ConcreteDataType::Timestamp(unit) => {
-                        to_timestamp_scalar_value(data, &unit, server_type)?
+                        to_timestamp_scalar_value(data, unit, server_type)?
                     }
                     ConcreteDataType::DateTime(_) => ScalarValue::Date64(data.map(|d| d as i64)),
                     _ => {
@@ -365,7 +365,7 @@ pub(super) fn parameters_to_scalar_values(
                     ConcreteDataType::UInt32(_) => ScalarValue::UInt32(data.map(|n| n as u32)),
                     ConcreteDataType::UInt64(_) => ScalarValue::UInt64(data.map(|n| n as u64)),
                     ConcreteDataType::Timestamp(unit) => {
-                        to_timestamp_scalar_value(data, &unit, server_type)?
+                        to_timestamp_scalar_value(data, unit, server_type)?
                     }
                     ConcreteDataType::DateTime(_) => ScalarValue::Date64(data),
                     _ => {
