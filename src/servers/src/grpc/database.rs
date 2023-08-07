@@ -44,7 +44,7 @@ impl GreptimeDatabase for DatabaseService {
         request: Request<GreptimeRequest>,
     ) -> TonicResult<Response<GreptimeResponse>> {
         let request = request.into_inner();
-        let output = self.handler.handle_request(request).await?;
+        let output = self.handler.handle_request(request).await;
         let response = match output {
             Ok(Output::AffectedRows(rows)) => GreptimeResponse {
                 header: Some(ResponseHeader {
@@ -80,7 +80,7 @@ impl GreptimeDatabase for DatabaseService {
         let mut stream = request.into_inner();
         while let Some(request) = stream.next().await {
             let request = request?;
-            let output = self.handler.handle_request(request).await?;
+            let output = self.handler.handle_request(request).await;
             match output {
                 Ok(Output::AffectedRows(rows)) => affected_rows += rows,
                 Ok(Output::Stream(_)) | Ok(Output::RecordBatches(_)) => {
