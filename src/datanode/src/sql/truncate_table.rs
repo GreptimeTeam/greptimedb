@@ -35,15 +35,18 @@ impl SqlHandler {
         let table = self.get_table(&table_ref).await?;
         let engine_procedure = self.engine_procedure(table)?;
 
-        let procedure =
-            TruncateTableProcedure::new(req, self.catalog_manager.clone(), engine_procedure);
+        let procedure = TruncateTableProcedure::new(
+            req.clone(),
+            self.catalog_manager.clone(),
+            engine_procedure,
+        );
 
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
         let procedure_id = procedure_with_id.id;
 
         info!(
-            "Truncate table {} by procedure {}",
-            table_name, procedure_id
+            "Truncate table {}, table-id {} by procedure {}",
+            table_ref, req.table_id, procedure_id
         );
 
         let mut watcher = self
