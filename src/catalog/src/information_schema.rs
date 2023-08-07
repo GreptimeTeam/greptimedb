@@ -73,24 +73,22 @@ impl InformationSchemaProvider {
     }
 
     pub fn table_factory(&self, name: &str) -> Result<Option<TableFactory>> {
-        let stream_builder: Arc<dyn InformationStreamBuilder> =
-            match name.to_ascii_lowercase().as_ref() {
-                TABLES => Arc::new(InformationSchemaTables::new(
-                    self.catalog_name.clone(),
-                    self.catalog_manager.clone(),
-                )) as _,
-                COLUMNS => Arc::new(InformationSchemaColumns::new(
-                    self.catalog_name.clone(),
-                    self.catalog_manager.clone(),
-                )) as _,
-                _ => {
-                    return Ok(None);
-                }
-            };
+        let stream_builder = match name.to_ascii_lowercase().as_ref() {
+            TABLES => Arc::new(InformationSchemaTables::new(
+                self.catalog_name.clone(),
+                self.catalog_manager.clone(),
+            )) as _,
+            COLUMNS => Arc::new(InformationSchemaColumns::new(
+                self.catalog_name.clone(),
+                self.catalog_manager.clone(),
+            )) as _,
+            _ => {
+                return Ok(None);
+            }
+        };
+        let data_source = Arc::new(InformationTable::new(stream_builder));
 
-        Ok(Some(Arc::new(move || {
-            Arc::new(InformationTable::new(stream_builder.clone()))
-        })))
+        Ok(Some(Arc::new(move || data_source.clone())))
     }
 }
 
