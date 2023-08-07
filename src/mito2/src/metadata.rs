@@ -194,11 +194,27 @@ impl RegionMetadata {
                     }
                 );
 
+                // Checks semantic type.
+                // Safety: Column with specific id must exist.
+                let column = self.column_by_id(*column_id).unwrap();
+                ensure!(
+                    column.semantic_type == SemanticType::Tag,
+                    InvalidMetaSnafu {
+                        reason: format!(
+                            "semantic type {:?} of column {} should be a tag",
+                            column.semantic_type, column.column_schema.name
+                        ),
+                    }
+                );
+
                 // Checks duplicate.
                 ensure!(
                     !pk_ids.contains(&column_id),
                     InvalidMetaSnafu {
-                        reason: format!("duplicate column {} in primary key", id_names[column_id]),
+                        reason: format!(
+                            "duplicate column {} in primary key",
+                            column.column_schema.name
+                        ),
                     }
                 );
 
@@ -208,7 +224,7 @@ impl RegionMetadata {
                     InvalidMetaSnafu {
                         reason: format!(
                             "column {} is already a time index column",
-                            id_names[column_id]
+                            column.column_schema.name,
                         ),
                     }
                 );
@@ -216,6 +232,23 @@ impl RegionMetadata {
                 pk_ids.insert(column_id);
             }
         }
+
+        // Checks tag semantic type.
+        let num_tag = self
+            .column_metadatas
+            .iter()
+            .filter(|col| col.semantic_type == SemanticType::Tag)
+            .count();
+        ensure!(
+            num_tag == self.primary_key.len(),
+            InvalidMetaSnafu {
+                reason: format!(
+                    "number of primary key columns: {} not equal to tag columns {}",
+                    self.primary_key.len(),
+                    num_tag
+                ),
+            }
+        );
 
         Ok(())
     }
@@ -597,4 +630,6 @@ mod test {
             "unexpected err: {err}",
         );
     }
+
+    // TODO(yingwen): Test semantic type.
 }
