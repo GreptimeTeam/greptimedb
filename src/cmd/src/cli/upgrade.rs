@@ -69,6 +69,7 @@ struct MigrateTableMetadata {
 
 #[async_trait]
 impl Tool for MigrateTableMetadata {
+    // migrates database's metadata from 0.3 to 0.4.
     async fn do_work(&self) -> Result<()> {
         self.migrate_table_global_values().await?;
         self.migrate_catalog_keys().await?;
