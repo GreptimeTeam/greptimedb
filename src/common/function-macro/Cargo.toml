@@ -10,10 +10,9 @@ proc-macro = true
 [dependencies]
 backtrace = "0.3"
 common-telemetry = { path = "../telemetry" }
-proc-macro2 = "1.0"
+proc-macro2 = "1.0.66"
 quote = "1.0"
 syn = "1.0"
-proc-macro2 = "1.0.66"
 
 [dev-dependencies]
 arc-swap = "1.0"

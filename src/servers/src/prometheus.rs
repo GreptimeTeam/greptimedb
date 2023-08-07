@@ -618,7 +618,9 @@ async fn get_all_column_names(
 
     let mut labels = HashSet::new();
     for table_name in table_names {
-        let Some(table) = manager.table(catalog, schema, &table_name).await? else { continue };
+        let Some(table) = manager.table(catalog, schema, &table_name).await? else {
+            continue;
+        };
         let schema = table.schema();
         for column in schema.column_schemas() {
             labels.insert(column.name.to_string());
