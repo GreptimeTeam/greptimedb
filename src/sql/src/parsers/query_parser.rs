@@ -45,6 +45,40 @@ mod tests {
 
         let _ = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap();
     }
+    
+    #[test]
+    pub fn test_parse_cte_query() {
+        // let sql = "with beta_users as ( \
+        // select * \
+        // from users \
+        // where beta is true \
+        // ) \
+        // select events.* \
+        // from events \
+        // inner join beta_users on beta_users.id = events.user_id";
+
+        // let sql = "select * \
+        //     from users \
+        //     where beta is true";
+
+        let sql = "
+        WITH prom_result AS ( \
+            TQL EVAL (0, 100, '10s') sum(rate(http_requests_total[5m])) BY (job) \
+        ) \
+        SELECT * FROM prom_result WHERE id IN ('a','b') \
+        ORDER BY sum_rate_http_requests_total_5m \
+        LIMIT 10 \
+        ";
+
+        // let sql = "
+        // SELECT * FROM prom_result WHERE id IN ('a','b') \
+        // ORDER BY sum_rate_http_requests_total_5m \
+        // LIMIT 10 \
+        // ";
+        let _k = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap();
+        // dbg!(k);
+        println!("end");
+    }
 
     #[test]
     pub fn test_parse_invalid_query() {

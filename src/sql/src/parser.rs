@@ -101,7 +101,20 @@ impl<'a> ParserContext<'a> {
 
                     Keyword::INSERT => self.parse_insert(),
 
-                    Keyword::SELECT | Keyword::WITH | Keyword::VALUES => self.parse_query(),
+                    Keyword::SELECT | Keyword::VALUES => self.parse_query(),
+
+                    Keyword::WITH => {
+                        let is_tql = self.parser.peek_nth_token(4);
+                        if is_tql.token.to_string().to_uppercase() == tql_parser::TQL {
+                            let parse_tql = self.parse_tql();
+                            dbg!(parse_tql.as_ref().clone());
+                            let parse_query = self.parse_query();
+                            dbg!(parse_query);
+                            parse_tql
+                        } else {
+                            self.parse_query()
+                        }
+                    }
 
                     Keyword::ALTER => self.parse_alter(),
 

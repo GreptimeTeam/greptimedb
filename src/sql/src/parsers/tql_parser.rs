@@ -34,8 +34,8 @@ use sqlparser::parser::Parser;
 /// - TQL ANALYZE <query>
 impl<'a> ParserContext<'a> {
     pub(crate) fn parse_tql(&mut self) -> Result<Statement> {
-        let _ = self.parser.next_token();
-
+        let start_token = self.parser.next_token();
+        let is_cte = Self::is_cte(start_token.token);
         match self.parser.peek_token().token {
             Token::Word(w) => {
                 let uppercase = w.value.to_uppercase();
@@ -48,7 +48,7 @@ impl<'a> ParserContext<'a> {
                         self.parse_tql_eval()
                             .context(error::SyntaxSnafu { sql: self.sql })
                     }
-
+                    Keyword::NoKeyword if is_cte => self.parse_tql_cte(),
                     Keyword::EXPLAIN => {
                         let _ = self.parser.next_token();
                         self.parse_tql_explain()
@@ -63,6 +63,25 @@ impl<'a> ParserContext<'a> {
                 }
             }
             unexpected => self.unsupported(unexpected.to_string()),
+        }
+    }
+
+    fn is_cte(token: Token) -> bool {
+        match token {
+            Token::Word(w) => w.keyword == Keyword::WITH,
+            _ => false,
+        }
+    }
+
+    /// Parse a CTE (`alias [( col1, col2, ... )] AS (subquery)`)
+    /// sample: WITH prom_result AS ( TQL EVAL (0, 100, '10s') sum(rate(http_requests_total[5m])) BY (job) )
+    fn parse_tql_cte(&mut self) -> Result<Statement> {
+        let _name = self.parser.parse_identifier().unwrap();
+        if self.parser.parse_keyword(Keyword::AS) {
+            self.parser.expect_token(&Token::LParen).unwrap();
+            self.parse_tql()
+        } else {
+            self.unsupported("TODO(etolbakov): implementation is missing".to_string())
         }
     }
 
@@ -112,19 +131,60 @@ impl<'a> ParserContext<'a> {
             if index >= sql.len() {
                 return Err(ParserError::ParserError("empty TQL query".to_string()));
             }
-
-            let query = &sql[index..];
-
-            while parser.next_token() != Token::EOF {
-                // consume all tokens
-                // TODO(dennis): supports multi TQL statements separated by ';'?
-            }
+            let query = if sql.contains("WITH") {
+                let sql_slice = match Self::find_last_balanced_bracket(sql) {
+                    Some(to) => {
+                        Self::rewind_to_sql_query_part(parser, &sql[to + 1..]);
+                        &sql[index..to]
+                    }
+                    None => &sql[index..],
+                };
+                sql_slice
+            } else {
+                while parser.next_token() != Token::EOF {
+                    // consume all tokens
+                    // TODO(dennis): supports multi TQL statements separated by ';'?
+                }
+                &sql[index..]
+            };
 
             // remove the last ';' or tailing space if exists
             Ok(query.trim().trim_end_matches(';').to_string())
         } else {
             Err(ParserError::ParserError(format!("{delimiter} not found",)))
         }
+    }
+
+    fn rewind_to_sql_query_part(parser: &mut Parser, sql: &str) {
+        let keyword_str = sql.trim().split_whitespace().nth(0).unwrap().to_lowercase();
+        loop {
+            match parser.peek_token().token {
+                Token::Word(w) if w.value.to_lowercase() == keyword_str => {
+                    break;
+                }
+                _ => parser.next_token(),
+            };
+        }
+    }
+
+    //TODO better name
+    // we are looking for the last index of a CTE query
+    fn find_last_balanced_bracket(sql: &str) -> Option<usize> {
+        let mut balance = 0;
+        for (index, c) in sql.char_indices() {
+            match c {
+                '(' => balance += 1,
+                ')' => {
+                    balance -= 1;
+                    if balance == 0 {
+                        dbg!(index);
+                        return Some(index);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
     }
 
     fn parse_tql_explain(&mut self) -> Result<Statement> {
