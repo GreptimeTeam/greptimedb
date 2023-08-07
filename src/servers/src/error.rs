@@ -22,7 +22,7 @@ use base64::DecodeError;
 use catalog;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
-use common_error::{INNER_ERROR_CODE, INNER_ERROR_MSG};
+use common_error::{GREPTIME_ERROR_CODE, GREPTIME_ERROR_MSG};
 use common_telemetry::logging;
 use datatypes::prelude::ConcreteDataType;
 use query::parser::PromQuery;
@@ -463,11 +463,11 @@ impl From<Error> for tonic::Status {
         // (which is a very rare case), just ignore. Client will use Tonic status code and message.
         let status_code = err.status_code();
         if let Ok(code) = HeaderValue::from_bytes(status_code.to_string().as_bytes()) {
-            let _ = headers.insert(INNER_ERROR_CODE, code);
+            let _ = headers.insert(GREPTIME_ERROR_CODE, code);
         }
         let root_error = err.iter_chain().last().unwrap();
         if let Ok(err_msg) = HeaderValue::from_bytes(root_error.to_string().as_bytes()) {
-            let _ = headers.insert(INNER_ERROR_MSG, err_msg);
+            let _ = headers.insert(GREPTIME_ERROR_MSG, err_msg);
         }
 
         let metadata = MetadataMap::from_headers(headers);

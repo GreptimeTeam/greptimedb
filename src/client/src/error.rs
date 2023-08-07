@@ -17,7 +17,7 @@ use std::str::FromStr;
 
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
-use common_error::{INNER_ERROR_CODE, INNER_ERROR_MSG};
+use common_error::{GREPTIME_ERROR_CODE, GREPTIME_ERROR_MSG};
 use snafu::{Location, Snafu};
 use tonic::{Code, Status};
 
@@ -107,11 +107,11 @@ impl From<Status> for Error {
                 .and_then(|v| String::from_utf8(v.as_bytes().to_vec()).ok())
         }
 
-        let code = get_metadata_value(&e, INNER_ERROR_CODE)
+        let code = get_metadata_value(&e, GREPTIME_ERROR_CODE)
             .and_then(|s| StatusCode::from_str(&s).ok())
             .unwrap_or(StatusCode::Unknown);
 
-        let msg = get_metadata_value(&e, INNER_ERROR_MSG).unwrap_or(e.to_string());
+        let msg = get_metadata_value(&e, GREPTIME_ERROR_MSG).unwrap_or(e.to_string());
 
         Self::Server { code, msg }
     }
