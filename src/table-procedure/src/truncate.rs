@@ -239,7 +239,7 @@ mod tests {
     use crate::test_util::TestEnv;
 
     #[tokio::test]
-    async fn test_drop_table_procedure() {
+    async fn test_truncate_table_procedure() {
         let env = TestEnv::new("truncate");
         let table_name = "test_truncate";
         let table_id = env.create_table(table_name).await;
