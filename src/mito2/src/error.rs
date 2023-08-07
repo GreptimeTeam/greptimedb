@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::any::Any;
+use std::sync::Arc;
 
 use common_datasource::compression::CompressionType;
 use common_error::ext::{BoxedError, ErrorExt};
@@ -260,6 +261,10 @@ pub enum Error {
         location: Location,
         source: BoxedError,
     },
+
+    // Shared error for each writer in the write group.
+    #[snafu(display("Failed to write region, source: {}", source))]
+    WriteGroup { source: Arc<Error> },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -296,6 +301,7 @@ impl ErrorExt for Error {
             | EncodeWal { .. }
             | DecodeWal { .. } => StatusCode::Internal,
             WriteBuffer { source, .. } => source.status_code(),
+            WriteGroup { source, .. } => source.status_code(),
         }
     }
 

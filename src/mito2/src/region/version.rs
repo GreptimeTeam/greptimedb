@@ -39,41 +39,39 @@ use crate::wal::EntryId;
 /// will generate a new [Version].
 #[derive(Debug)]
 pub(crate) struct VersionControl {
-    /// Latest version.
-    version: VersionRef,
-    /// Sequence number of last committed data.
-    committed_sequence: SequenceNumber,
-    /// Last WAL entry Id.
-    last_entry_id: EntryId,
+    data: RwLock<VersionControlData>,
 }
 
 impl VersionControl {
     /// Returns a new [VersionControl] with specific `version`.
     pub(crate) fn new(version: Version) -> VersionControl {
         VersionControl {
-            version: Arc::new(version),
-            committed_sequence: 0,
-            last_entry_id: 0,
+            data: RwLock::new(VersionControlData {
+                version: Arc::new(version),
+                committed_sequence: 0,
+                last_entry_id: 0,
+            }),
         }
     }
 
-    /// Returns current [Version].
-    pub(crate) fn version(&self) -> VersionRef {
-        self.version.clone()
-    }
-
-    /// Returns last committed sequence.
-    pub(crate) fn committed_sequence(&self) -> SequenceNumber {
-        self.committed_sequence
-    }
-
-    /// Returns last entry id.
-    pub(crate) fn last_entry_id(&self) -> EntryId {
-        self.last_entry_id
+    /// Returns current copy of data.
+    pub(crate) fn current(&self) -> VersionControlData {
+        self.data.read().unwrap().clone()
     }
 }
 
-pub(crate) type VersionControlRef = Arc<RwLock<VersionControl>>;
+pub(crate) type VersionControlRef = Arc<VersionControl>;
+
+/// Data of [VersionControl].
+#[derive(Debug, Clone)]
+pub(crate) struct VersionControlData {
+    /// Latest version.
+    pub(crate) version: VersionRef,
+    /// Sequence number of last committed data.
+    pub(crate) committed_sequence: SequenceNumber,
+    /// Last WAL entry Id.
+    pub(crate) last_entry_id: EntryId,
+}
 
 /// Static metadata of a region.
 #[derive(Clone, Debug)]

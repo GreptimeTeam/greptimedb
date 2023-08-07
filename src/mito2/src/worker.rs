@@ -285,7 +285,7 @@ struct RegionWorkerLoop<S> {
     memtable_builder: MemtableBuilderRef,
 }
 
-impl<S> RegionWorkerLoop<S> {
+impl<S: LogStore> RegionWorkerLoop<S> {
     /// Starts the worker loop.
     async fn run(&mut self) {
         info!("Start region worker thread {}", self.id);
@@ -353,7 +353,9 @@ impl<S> RegionWorkerLoop<S> {
 
         self.handle_ddl_requests(ddl_requests).await;
     }
+}
 
+impl<S> RegionWorkerLoop<S> {
     /// Takes and handles all ddl requests.
     async fn handle_ddl_requests(&mut self, ddl_requests: Vec<RegionRequest>) {
         if ddl_requests.is_empty() {
