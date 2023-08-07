@@ -25,6 +25,7 @@ use datatypes::schema::SchemaRef;
 use futures_util::StreamExt;
 use snafu::ResultExt;
 use store_api::storage::ScanRequest;
+use table::data_source::DataSource;
 use table::error::{SchemaConversionSnafu, TablesRecordBatchSnafu};
 use table::metadata::TableType;
 use table::{Result as TableResult, Table, TableRef};
@@ -32,6 +33,7 @@ use table::{Result as TableResult, Table, TableRef};
 use self::columns::InformationSchemaColumns;
 use crate::error::Result;
 use crate::information_schema::tables::InformationSchemaTables;
+use crate::table_factory::TableFactory;
 use crate::CatalogManager;
 
 const TABLES: &str = "tables";
@@ -68,6 +70,27 @@ impl InformationSchemaProvider {
         };
 
         Ok(Some(Arc::new(InformationTable::new(stream_builder))))
+    }
+
+    pub fn table_factory(&self, name: &str) -> Result<Option<TableFactory>> {
+        let stream_builder: Arc<dyn InformationStreamBuilder> =
+            match name.to_ascii_lowercase().as_ref() {
+                TABLES => Arc::new(InformationSchemaTables::new(
+                    self.catalog_name.clone(),
+                    self.catalog_manager.clone(),
+                )) as _,
+                COLUMNS => Arc::new(InformationSchemaColumns::new(
+                    self.catalog_name.clone(),
+                    self.catalog_manager.clone(),
+                )) as _,
+                _ => {
+                    return Ok(None);
+                }
+            };
+
+        Ok(Some(Arc::new(move || {
+            Arc::new(InformationTable::new(stream_builder.clone()))
+        })))
     }
 }
 
@@ -108,6 +131,12 @@ impl Table for InformationTable {
     }
 
     async fn scan_to_stream(&self, request: ScanRequest) -> TableResult<SendableRecordBatchStream> {
+        self.get_stream(request)
+    }
+}
+
+impl DataSource for InformationTable {
+    fn get_stream(&self, request: ScanRequest) -> TableResult<SendableRecordBatchStream> {
         let projection = request.projection;
         let projected_schema = if let Some(projection) = &projection {
             Arc::new(

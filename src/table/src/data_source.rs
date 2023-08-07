@@ -11,20 +11,19 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-#![feature(assert_matches)]
 
-pub mod data_source;
-pub mod engine;
-pub mod error;
-pub mod metadata;
-pub mod predicate;
-pub mod requests;
-pub mod stats;
-pub mod table;
-pub mod test_util;
+use std::sync::Arc;
 
-pub use store_api::storage::RegionStat;
+use common_recordbatch::SendableRecordBatchStream;
+use store_api::storage::ScanRequest;
 
-pub use crate::error::{Error, Result};
-pub use crate::stats::{ColumnStatistics, TableStatistics};
-pub use crate::table::{Table, TableRef};
+use crate::error::Result;
+
+// This trait represents a common data source abstraction which provides an interface
+// for retrieving data in the form of a stream of record batches.
+pub trait DataSource {
+    // Retrieves a stream of record batches based on the provided scan request.
+    fn get_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream>;
+}
+
+pub type DataSourceRef = Arc<dyn DataSource>;
