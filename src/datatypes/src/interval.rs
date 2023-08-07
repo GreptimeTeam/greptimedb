@@ -135,4 +135,19 @@ mod tests {
         assert_eq!(interval, interval.to_owned_scalar());
         assert_eq!(1000, interval.into_native());
     }
+
+    #[test]
+    fn test_interval_convert_to_native_type() {
+        let interval = IntervalMonthDayNano::new(1000);
+        let native_value: i128 = interval.into();
+        assert_eq!(native_value, 1000);
+
+        let interval = IntervalDayTime::new(1000);
+        let native_interval: i64 = interval.into();
+        assert_eq!(native_interval, 1000);
+
+        let interval = IntervalYearMonth::new(1000);
+        let native_interval: i32 = interval.into();
+        assert_eq!(native_interval, 1000);
+    }
 }

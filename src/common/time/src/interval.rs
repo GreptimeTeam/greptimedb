@@ -114,6 +114,11 @@ impl Interval {
         }
     }
 
+    /// Return a tuple(months, days, nanoseconds) from the interval.
+    pub fn to_month_day_nano(&self) -> (i32, i32, i64) {
+        (self.months, self.days, self.nsecs)
+    }
+
     /// Converts the interval to nanoseconds.
     pub fn to_nanosecond(&self) -> i128 {
         let days = (self.days as i64) + DAYS_PER_MONTH * (self.months as i64);
