@@ -19,10 +19,10 @@ use store_api::storage::ScanRequest;
 
 use crate::error::Result;
 
-// This trait represents a common data source abstraction which provides an interface
-// for retrieving data in the form of a stream of record batches.
+/// This trait represents a common data source abstraction which provides an interface
+/// for retrieving data in the form of a stream of record batches.
 pub trait DataSource {
-    // Retrieves a stream of record batches based on the provided scan request.
+    /// Retrieves a stream of record batches based on the provided scan request.
     fn get_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream>;
 }
 
