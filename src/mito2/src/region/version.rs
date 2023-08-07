@@ -23,38 +23,57 @@
 //! Reason: data may be flushed/compacted and some data with old sequence may be removed
 //! and became invisible between step 1 and 2, so need to acquire version at first.
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
-use arc_swap::ArcSwap;
 use store_api::storage::SequenceNumber;
 
 use crate::memtable::version::{MemtableVersion, MemtableVersionRef};
 use crate::memtable::MemtableRef;
 use crate::metadata::RegionMetadataRef;
 use crate::sst::version::{SstVersion, SstVersionRef};
+use crate::wal::EntryId;
 
-/// Controls version of in memory metadata for a region.
+/// Controls metadata and sequence numbers for a region.
+///
+/// It manages metadata in a copy-on-write fashion. Any modification to a region's metadata
+/// will generate a new [Version].
 #[derive(Debug)]
 pub(crate) struct VersionControl {
     /// Latest version.
-    version: ArcSwap<Version>,
+    version: VersionRef,
+    /// Sequence number of last committed data.
+    committed_sequence: SequenceNumber,
+    /// Last WAL entry Id.
+    last_entry_id: EntryId,
 }
 
 impl VersionControl {
     /// Returns a new [VersionControl] with specific `version`.
     pub(crate) fn new(version: Version) -> VersionControl {
         VersionControl {
-            version: ArcSwap::new(Arc::new(version)),
+            version: Arc::new(version),
+            committed_sequence: 0,
+            last_entry_id: 0,
         }
     }
 
     /// Returns current [Version].
-    pub(crate) fn current(&self) -> VersionRef {
-        self.version.load_full()
+    pub(crate) fn version(&self) -> VersionRef {
+        self.version.clone()
+    }
+
+    /// Returns last committed sequence.
+    pub(crate) fn committed_sequence(&self) -> SequenceNumber {
+        self.committed_sequence
+    }
+
+    /// Returns last entry id.
+    pub(crate) fn last_entry_id(&self) -> EntryId {
+        self.last_entry_id
     }
 }
 
-pub(crate) type VersionControlRef = Arc<VersionControl>;
+pub(crate) type VersionControlRef = Arc<RwLock<VersionControl>>;
 
 /// Static metadata of a region.
 #[derive(Clone, Debug)]
