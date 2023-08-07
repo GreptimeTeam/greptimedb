@@ -107,7 +107,7 @@ impl Client {
         inner.start(urls).await
     }
 
-    pub async fn ask_leader(&mut self) -> Result<()> {
+    pub async fn ask_leader(&mut self) -> Result<String> {
         let inner = self.inner.read().await;
         inner.ask_leader().await
     }
@@ -169,7 +169,7 @@ impl Inner {
         Ok(())
     }
 
-    async fn ask_leader(&self) -> Result<()> {
+    async fn ask_leader(&self) -> Result<String> {
         ensure!(
             self.is_started(),
             error::IllegalGrpcClientStateSnafu {
@@ -177,8 +177,7 @@ impl Inner {
             }
         );
 
-        let _ = self.ask_leader.as_ref().unwrap().ask_leader().await;
-        Ok(())
+        self.ask_leader.as_ref().unwrap().ask_leader().await
     }
 
     async fn heartbeat(&self) -> Result<(HeartbeatSender, HeartbeatStream)> {

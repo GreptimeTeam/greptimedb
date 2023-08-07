@@ -210,7 +210,7 @@ impl MetaClient {
 
     /// Ask the leader address of `metasrv`, and the heartbeat component
     /// needs to create a bidirectional streaming to the leader.
-    pub async fn ask_leader(&self) -> Result<()> {
+    pub async fn ask_leader(&self) -> Result<String> {
         self.heartbeat_client()?.ask_leader().await
     }
 
