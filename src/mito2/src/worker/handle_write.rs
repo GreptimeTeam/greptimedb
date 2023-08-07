@@ -16,7 +16,8 @@
 
 use std::collections::{hash_map, HashMap};
 
-use greptime_proto::v1::mito::Mutation;
+use greptime_proto::v1::mito::{Mutation, WalEntry};
+use store_api::storage::RegionId;
 use tokio::sync::oneshot::Sender;
 
 use crate::error::{RegionNotFoundSnafu, Result};
@@ -33,6 +34,16 @@ impl<S> RegionWorkerLoop<S> {
             return;
         }
 
+        let region_ctxs = self.prepare_region_write_ctx(write_requests);
+
+        todo!()
+    }
+
+    /// Validates and groups requests by region.
+    fn prepare_region_write_ctx(
+        &self,
+        write_requests: Vec<SenderWriteRequest>,
+    ) -> HashMap<RegionId, RegionWriteCtx> {
         let mut region_ctxs = HashMap::new();
         for sender_req in write_requests {
             let region_id = sender_req.request.region_id;
@@ -66,7 +77,7 @@ impl<S> RegionWorkerLoop<S> {
             region_ctx.push_sender_request(sender_req);
         }
 
-        todo!()
+        region_ctxs
     }
 }
 
@@ -84,8 +95,8 @@ struct RegionWriteCtx {
     region: MitoRegionRef,
     /// Version of the region while creating the context.
     version: VersionRef,
-    /// Valid mutations.
-    mutations: Vec<Mutation>,
+    /// Valid WAL entry to write.
+    wal_entry: WalEntry,
     /// Result senders.
     ///
     /// The sender is 1:1 map to the mutation in `mutations`.
@@ -99,14 +110,14 @@ impl RegionWriteCtx {
         RegionWriteCtx {
             region,
             version,
-            mutations: Vec::new(),
+            wal_entry: WalEntry::default(),
             senders: Vec::new(),
         }
     }
 
     /// Push [SenderWriteRequest] to the context.
     fn push_sender_request(&mut self, sender_req: SenderWriteRequest) {
-        self.mutations.push(Mutation {
+        self.wal_entry.mutations.push(Mutation {
             op_type: to_proto_op_type(sender_req.request.op_type) as i32,
             sequence: 0, // TODO(yingwen): Set sequence.
             rows: Some(sender_req.request.rows),
