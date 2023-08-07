@@ -14,6 +14,7 @@
 
 //! Memtables are write buffers for regions.
 
+pub mod key_values;
 pub(crate) mod version;
 
 use std::fmt;
