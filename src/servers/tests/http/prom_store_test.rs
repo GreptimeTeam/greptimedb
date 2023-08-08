@@ -59,7 +59,7 @@ impl PromStoreProtocolHandler for DummyInstance {
     async fn write(&self, request: WriteRequest, ctx: QueryContextRef) -> Result<()> {
         let _ = self
             .tx
-            .send((ctx.current_schema(), request.encode_to_vec()))
+            .send((ctx.current_schema().to_owned(), request.encode_to_vec()))
             .await;
 
         Ok(())
@@ -67,7 +67,7 @@ impl PromStoreProtocolHandler for DummyInstance {
     async fn read(&self, request: ReadRequest, ctx: QueryContextRef) -> Result<PromStoreResponse> {
         let _ = self
             .tx
-            .send((ctx.current_schema(), request.encode_to_vec()))
+            .send((ctx.current_schema().to_owned(), request.encode_to_vec()))
             .await;
 
         let response = ReadResponse {

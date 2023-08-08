@@ -132,7 +132,7 @@ impl Instance {
             let table_name = prom_store::table_name(query)?;
 
             let output = self
-                .handle_remote_query(&ctx, &catalog_name, &schema_name, &table_name, query)
+                .handle_remote_query(&ctx, catalog_name, schema_name, &table_name, query)
                 .await
                 .map_err(BoxedError::new)
                 .with_context(|_| error::ExecuteQuerySnafu {
