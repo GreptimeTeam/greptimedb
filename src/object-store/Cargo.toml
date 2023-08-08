@@ -18,5 +18,5 @@ uuid.workspace = true
 
 [dev-dependencies]
 anyhow = "1.0"
-common-telemetry = { path = "../common/telemetry" }
-common-test-util = { path = "../common/test-util" }
+common-telemetry = { workspace = true }
+common-test-util = { workspace = true }

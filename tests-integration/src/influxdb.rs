@@ -73,7 +73,9 @@ monitor1,host=host2 memory=1027";
             )
             .await;
         let output = output.remove(0).unwrap();
-        let Output::Stream(stream) = output else { unreachable!() };
+        let Output::Stream(stream) = output else {
+            unreachable!()
+        };
 
         let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
         let recordbatches: Vec<_> = recordbatches.iter().collect();
@@ -100,7 +102,9 @@ monitor1,host=host2 memory=1027 1663840496400340001";
             )
             .await;
         let output = output.remove(0).unwrap();
-        let Output::Stream(stream) = output else { unreachable!() };
+        let Output::Stream(stream) = output else {
+            unreachable!()
+        };
         let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
         assert_eq!(
             recordbatches.pretty_print().unwrap(),

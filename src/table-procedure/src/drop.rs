@@ -303,4 +303,27 @@ mod tests {
         let ctx = EngineContext::default();
         assert!(!table_engine.table_exists(&ctx, table_id,));
     }
+
+    #[tokio::test]
+    async fn test_drop_not_exists_table() {
+        common_telemetry::init_default_ut_logging();
+        let TestEnv {
+            dir: _,
+            table_engine,
+            procedure_manager: _,
+            catalog_manager,
+        } = TestEnv::new("drop");
+        let table_name = "test_drop";
+
+        let request = DropTableRequest {
+            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+            table_name: table_name.to_string(),
+            table_id: 0,
+        };
+
+        let mut procedure =
+            DropTableProcedure::new(request, catalog_manager.clone(), table_engine.clone());
+        assert!(procedure.on_prepare().await.is_err());
+    }
 }

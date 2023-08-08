@@ -360,6 +360,15 @@ impl<R: Region> Table for MitoTable<R> {
         Ok(())
     }
 
+    async fn truncate(&self) -> TableResult<()> {
+        let regions = self.regions.load();
+        let _ = futures::future::try_join_all(regions.values().map(|region| region.truncate()))
+            .await
+            .map_err(BoxedError::new)
+            .context(TableOperationSnafu)?;
+        Ok(())
+    }
+
     fn region_stats(&self) -> TableResult<Vec<RegionStat>> {
         let regions = self.regions.load();
 

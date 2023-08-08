@@ -50,7 +50,8 @@ impl HeartbeatResponseHandler for OpenRegionHandler {
     }
 
     async fn handle(&self, ctx: &mut HeartbeatResponseHandlerContext) -> MetaResult<HandleControl> {
-        let Some((meta, Instruction::OpenRegion(region_ident))) = ctx.incoming_message.take() else {
+        let Some((meta, Instruction::OpenRegion(region_ident))) = ctx.incoming_message.take()
+        else {
             unreachable!("OpenRegionHandler: should be guarded by 'is_acceptable'");
         };
 

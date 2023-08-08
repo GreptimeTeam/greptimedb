@@ -57,7 +57,9 @@ where
         function::get_numbers_from_table::<T>(column_name, table_name, engine.clone()).await;
     let numbers = numbers.iter().map(|&n| n.as_()).collect::<Vec<f64>>();
     let expected = numbers.iter().sum::<f64>() / (numbers.len() as f64);
-    let Value::Float64(OrderedFloat(value)) = value else { unreachable!() };
+    let Value::Float64(OrderedFloat(value)) = value else {
+        unreachable!()
+    };
     assert!(
         (value - expected).abs() < 1e-3,
         "expected {expected}, actual {value}"

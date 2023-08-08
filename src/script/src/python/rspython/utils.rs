@@ -136,8 +136,8 @@ pub fn py_obj_to_vec(
         match columnar_value {
             DFColValue::Scalar(ScalarValue::List(scalars, _datatype)) => match scalars {
                 Some(scalars) => {
-                    let array = ScalarValue::iter_to_array(scalars.into_iter())
-                        .context(error::DataFusionSnafu)?;
+                    let array =
+                        ScalarValue::iter_to_array(scalars).context(error::DataFusionSnafu)?;
 
                     Helper::try_into_vector(array).context(error::TypeCastSnafu)
                 }

@@ -15,19 +15,19 @@ async-trait.workspace = true
 base64 = "0.13"
 byteorder = "1.4"
 bytes = "1.1"
-common-base = { path = "../common/base" }
-common-error = { path = "../common/error" }
-common-runtime = { path = "../common/runtime" }
-common-telemetry = { path = "../common/telemetry" }
+common-base = { workspace = true }
+common-error = { workspace = true }
+common-runtime = { workspace = true }
+common-telemetry = { workspace = true }
 futures-util.workspace = true
 futures.workspace = true
 protobuf = { version = "2", features = ["bytes"] }
 raft-engine = "0.3"
 snafu = { version = "0.7", features = ["backtraces"] }
-store-api = { path = "../store-api" }
+store-api = { workspace = true }
 tokio-util.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
-common-test-util = { path = "../common/test-util" }
+common-test-util = { workspace = true }
 rand.workspace = true

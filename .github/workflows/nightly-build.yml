@@ -61,8 +61,8 @@ env:
   # Controls whether to run tests, include unit-test, integration-test and sqlness.
   DISABLE_RUN_TESTS: ${{ inputs.skip_test || vars.DEFAULT_SKIP_TEST }}
 
-  # Always use 'dev' to indicate it's the nightly build.
-  NEXT_RELEASE_VERSION: dev
+  # Always use 'nightly' to indicate it's the nightly build.
+  NEXT_RELEASE_VERSION: nightly
 
   NIGHTLY_RELEASE_PREFIX: nightly
 

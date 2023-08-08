@@ -187,8 +187,10 @@ mod tests {
             ..Default::default()
         };
 
-        let Options::Metasrv(options) =
-        cmd.load_options(TopLevelOptions::default()).unwrap() else { unreachable!() };
+        let Options::Metasrv(options) = cmd.load_options(TopLevelOptions::default()).unwrap()
+        else {
+            unreachable!()
+        };
         assert_eq!("127.0.0.1:3002".to_string(), options.bind_addr);
         assert_eq!("127.0.0.1:2380".to_string(), options.store_addr);
         assert_eq!(SelectorType::LoadBased, options.selector);
@@ -216,8 +218,10 @@ mod tests {
             ..Default::default()
         };
 
-        let Options::Metasrv(options) =
-            cmd.load_options(TopLevelOptions::default()).unwrap() else { unreachable!() };
+        let Options::Metasrv(options) = cmd.load_options(TopLevelOptions::default()).unwrap()
+        else {
+            unreachable!()
+        };
         assert_eq!("127.0.0.1:3002".to_string(), options.bind_addr);
         assert_eq!("127.0.0.1:3002".to_string(), options.server_addr);
         assert_eq!("127.0.0.1:2379".to_string(), options.store_addr);
@@ -269,20 +273,20 @@ mod tests {
 
         let env_prefix = "METASRV_UT";
         temp_env::with_vars(
-            vec![
+            [
                 (
                     // bind_addr = 127.0.0.1:14002
-                    vec![env_prefix.to_string(), "bind_addr".to_uppercase()].join(ENV_VAR_SEP),
+                    [env_prefix.to_string(), "bind_addr".to_uppercase()].join(ENV_VAR_SEP),
                     Some("127.0.0.1:14002"),
                 ),
                 (
                     // server_addr = 127.0.0.1:13002
-                    vec![env_prefix.to_string(), "server_addr".to_uppercase()].join(ENV_VAR_SEP),
+                    [env_prefix.to_string(), "server_addr".to_uppercase()].join(ENV_VAR_SEP),
                     Some("127.0.0.1:13002"),
                 ),
                 (
                     // http_options.addr = 127.0.0.1:24000
-                    vec![
+                    [
                         env_prefix.to_string(),
                         "http_options".to_uppercase(),
                         "addr".to_uppercase(),
@@ -300,7 +304,10 @@ mod tests {
                 };
 
                 let Options::Metasrv(opts) =
-                    command.load_options(TopLevelOptions::default()).unwrap() else {unreachable!()};
+                    command.load_options(TopLevelOptions::default()).unwrap()
+                else {
+                    unreachable!()
+                };
 
                 // Should be read from env, env > default values.
                 assert_eq!(opts.bind_addr, "127.0.0.1:14002");

@@ -138,7 +138,9 @@ mod test {
             )),
         });
         let output = query(instance, request).await;
-        let Output::Stream(stream) = output else { unreachable!() };
+        let Output::Stream(stream) = output else {
+            unreachable!()
+        };
         let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
         let expected = "\
 +---------------------+---+---+
@@ -498,7 +500,9 @@ CREATE TABLE {table_name} (
             ))),
         });
         let output = query(instance, request.clone()).await;
-        let Output::Stream(stream) = output else { unreachable!() };
+        let Output::Stream(stream) = output else {
+            unreachable!()
+        };
         let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
         let expected = "\
 +---------------------+----+-------------------+
@@ -574,7 +578,9 @@ CREATE TABLE {table_name} (
         assert!(matches!(output, Output::AffectedRows(4)));
 
         let output = query(instance, request).await;
-        let Output::Stream(stream) = output else { unreachable!() };
+        let Output::Stream(stream) = output else {
+            unreachable!()
+        };
         let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
         let expected = "\
 +---------------------+----+-------------------+
@@ -638,7 +644,9 @@ CREATE TABLE {table_name} (
                 .await
                 .unwrap();
             let output = engine.execute(plan, QueryContext::arc()).await.unwrap();
-            let Output::Stream(stream) = output else { unreachable!() };
+            let Output::Stream(stream) = output else {
+                unreachable!()
+            };
             let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
             let actual = recordbatches.pretty_print().unwrap();
 
@@ -724,7 +732,9 @@ CREATE TABLE {table_name} (
             )),
         });
         let output = query(instance, request.clone()).await;
-        let Output::Stream(stream) = output else { unreachable!() };
+        let Output::Stream(stream) = output else {
+            unreachable!()
+        };
         let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
         let expected = "\
 +---------------------+---+---+
@@ -759,7 +769,9 @@ CREATE TABLE {table_name} (
         assert!(matches!(output, Output::AffectedRows(2)));
 
         let output = query(instance, request).await;
-        let Output::Stream(stream) = output else { unreachable!() };
+        let Output::Stream(stream) = output else {
+            unreachable!()
+        };
         let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
         let expected = "\
 +---------------------+---+---+
@@ -855,7 +867,9 @@ CREATE TABLE {table_name} (
             })),
         });
         let output = query(instance, request).await;
-        let Output::Stream(stream) = output else { unreachable!() };
+        let Output::Stream(stream) = output else {
+            unreachable!()
+        };
         let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
         let expected = "\
 +---+------+---------------------+

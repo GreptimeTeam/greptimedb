@@ -74,3 +74,10 @@ pub fn build_region_edit(
         compaction_time_window: None,
     }
 }
+
+pub fn build_region_truncate(committed_sequence: u64) -> RegionTruncate {
+    RegionTruncate {
+        region_id: 0.into(),
+        committed_sequence,
+    }
+}

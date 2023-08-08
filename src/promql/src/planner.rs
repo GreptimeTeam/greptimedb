@@ -604,7 +604,7 @@ impl PromPlanner {
             let exprs = result_set
                 .into_iter()
                 .map(|col| DfExpr::Column(col.into()))
-                .chain(self.create_tag_column_exprs()?.into_iter())
+                .chain(self.create_tag_column_exprs()?)
                 .chain(Some(self.create_time_index_column_expr()?))
                 .collect::<Vec<_>>();
             // reuse this variable for simplicity
@@ -1040,7 +1040,7 @@ impl PromPlanner {
             exprs.push(expr);
         }
 
-        utils::conjunction(exprs.into_iter()).context(ValueNotFoundSnafu {
+        utils::conjunction(exprs).context(ValueNotFoundSnafu {
             table: self.ctx.table_name.clone().unwrap(),
         })
     }

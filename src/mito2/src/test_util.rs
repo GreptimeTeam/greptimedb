@@ -40,6 +40,7 @@ use crate::worker::WorkerGroup;
 pub struct TestEnv {
     /// Path to store data.
     data_home: TempDir,
+    // TODO(yingwen): Maybe provide a way to close the log store.
 }
 
 impl Default for TestEnv {

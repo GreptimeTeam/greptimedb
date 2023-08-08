@@ -25,6 +25,7 @@ use common_grpc::writer::{LinesWriter, Precision};
 use common_recordbatch::{RecordBatch, RecordBatches};
 use common_time::timestamp::TimeUnit;
 use datafusion::prelude::{col, lit, regexp_match, Expr};
+use datafusion_common::ScalarValue;
 use datatypes::prelude::{ConcreteDataType, Value};
 use openmetrics_parser::{MetricsExposition, PrometheusType, PrometheusValue};
 use query::dataframe::DataFrame;
@@ -72,8 +73,9 @@ pub fn query_to_plan(dataframe: DataFrame, q: &Query) -> Result<LogicalPlan> {
 
     let mut conditions = Vec::with_capacity(label_matches.len() + 1);
 
-    conditions.push(col(TIMESTAMP_COLUMN_NAME).gt_eq(lit(start_timestamp_ms)));
-    conditions.push(col(TIMESTAMP_COLUMN_NAME).lt_eq(lit(end_timestamp_ms)));
+    conditions
+        .push(col(TIMESTAMP_COLUMN_NAME).gt_eq(lit_timestamp_millisecond(start_timestamp_ms)));
+    conditions.push(col(TIMESTAMP_COLUMN_NAME).lt_eq(lit_timestamp_millisecond(end_timestamp_ms)));
 
     for m in label_matches {
         let name = &m.name;
@@ -119,6 +121,10 @@ pub fn query_to_plan(dataframe: DataFrame, q: &Query) -> Result<LogicalPlan> {
 #[inline]
 fn new_label(name: String, value: String) -> Label {
     Label { name, value }
+}
+
+fn lit_timestamp_millisecond(ts: i64) -> Expr {
+    Expr::Literal(ScalarValue::TimestampMillisecond(Some(ts), None))
 }
 
 // A timeseries id
@@ -526,7 +532,7 @@ mod tests {
         let plan = query_to_plan(DataFrame::DataFusion(dataframe), &q).unwrap();
         let display_string = format!("{}", plan.display_indent());
 
-        assert_eq!("Filter: ?table?.greptime_timestamp >= Int64(1000) AND ?table?.greptime_timestamp <= Int64(2000)\n  TableScan: ?table?", display_string);
+        assert_eq!("Filter: ?table?.greptime_timestamp >= TimestampMillisecond(1000, None) AND ?table?.greptime_timestamp <= TimestampMillisecond(2000, None)\n  TableScan: ?table?", display_string);
 
         let q = Query {
             start_timestamp_ms: 1000,
@@ -555,7 +561,7 @@ mod tests {
         let plan = query_to_plan(DataFrame::DataFusion(dataframe), &q).unwrap();
         let display_string = format!("{}", plan.display_indent());
 
-        assert_eq!("Filter: ?table?.greptime_timestamp >= Int64(1000) AND ?table?.greptime_timestamp <= Int64(2000) AND regexp_match(?table?.job, Utf8(\"*prom*\")) IS NOT NULL AND ?table?.instance != Utf8(\"localhost\")\n  TableScan: ?table?", display_string);
+        assert_eq!("Filter: ?table?.greptime_timestamp >= TimestampMillisecond(1000, None) AND ?table?.greptime_timestamp <= TimestampMillisecond(2000, None) AND regexp_match(?table?.job, Utf8(\"*prom*\")) IS NOT NULL AND ?table?.instance != Utf8(\"localhost\")\n  TableScan: ?table?", display_string);
     }
 
     #[test]

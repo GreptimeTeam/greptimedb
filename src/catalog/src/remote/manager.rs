@@ -254,7 +254,10 @@ impl CatalogManager for RemoteCatalogManager {
         let Some(table) = self
             .memory_catalog_manager
             .table(&request.catalog, &request.schema, &request.table_name)
-            .await? else { return Ok(()) };
+            .await?
+        else {
+            return Ok(());
+        };
 
         let table_info = table.table_info();
         let table_ident = TableIdent {

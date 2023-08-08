@@ -5,17 +5,17 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-api = { path = "../../api" }
+api = { workspace = true }
 async-trait.workspace = true
-common-base = { path = "../base" }
-common-catalog = { path = "../catalog" }
-common-error = { path = "../error" }
-common-query = { path = "../query" }
-common-telemetry = { path = "../telemetry" }
-common-time = { path = "../time" }
-datatypes = { path = "../../datatypes" }
+common-base = { workspace = true }
+common-catalog = { workspace = true }
+common-error = { workspace = true }
+common-query = { workspace = true }
+common-telemetry = { workspace = true }
+common-time = { workspace = true }
+datatypes = { workspace = true }
 snafu = { version = "0.7", features = ["backtraces"] }
-table = { path = "../../table" }
+table = { workspace = true }
 
 [dev-dependencies]
 paste = "1.0"

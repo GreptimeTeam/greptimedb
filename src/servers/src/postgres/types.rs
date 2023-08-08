@@ -271,6 +271,7 @@ pub(super) fn parameters_to_scalar_values(
         };
 
         let value = match &client_type {
+
             &Type::VARCHAR | &Type::TEXT => {
                 let data = portal.parameter::<String>(idx, &client_type)?;
                 match server_type {

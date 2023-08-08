@@ -153,7 +153,12 @@ impl InformationSchemaColumnsBuilder {
                 .table_names(&catalog_name, &schema_name)
                 .await?
             {
-                let Some(table) = catalog_manager.table(&catalog_name, &schema_name, &table_name).await? else { continue };
+                let Some(table) = catalog_manager
+                    .table(&catalog_name, &schema_name, &table_name)
+                    .await?
+                else {
+                    continue;
+                };
                 let keys = &table.table_info().meta.primary_key_indices;
                 let schema = table.schema();
                 for (idx, column) in schema.column_schemas().iter().enumerate() {

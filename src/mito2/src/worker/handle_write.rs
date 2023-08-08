@@ -40,9 +40,7 @@ impl<S> RegionWorkerLoop<S> {
             if let hash_map::Entry::Vacant(e) = region_ctxs.entry(region_id) {
                 let Some(region) = self.regions.get_region(region_id) else {
                     // No such region.
-                    send_result(sender_req.sender, RegionNotFoundSnafu {
-                        region_id,
-                    }.fail());
+                    send_result(sender_req.sender, RegionNotFoundSnafu { region_id }.fail());
 
                     continue;
                 };

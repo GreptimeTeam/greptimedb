@@ -198,9 +198,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_orc_infer_schema() {
-        let orc = OrcFormat::default();
         let store = test_store(&test_data_root());
-        let schema = orc.infer_schema(&store, "test.orc").await.unwrap();
+        let schema = OrcFormat.infer_schema(&store, "test.orc").await.unwrap();
         let formatted: Vec<_> = format_schema(schema);
 
         assert_eq!(

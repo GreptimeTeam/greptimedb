@@ -13,15 +13,17 @@
 // limitations under the License.
 
 use common_base::BitVec;
+use common_time::interval::IntervalUnit;
 use common_time::timestamp::TimeUnit;
+use common_time::Interval;
 use datatypes::prelude::ConcreteDataType;
-use datatypes::types::{TimeType, TimestampType};
+use datatypes::types::{IntervalType, TimeType, TimestampType};
 use datatypes::value::Value;
 use datatypes::vectors::VectorRef;
 use greptime_proto::v1::ddl_request::Expr;
 use greptime_proto::v1::greptime_request::Request;
 use greptime_proto::v1::query_request::Query;
-use greptime_proto::v1::{DdlRequest, QueryRequest};
+use greptime_proto::v1::{DdlRequest, IntervalMonthDayNano, QueryRequest};
 use snafu::prelude::*;
 
 use crate::error::{self, Result};
@@ -75,6 +77,11 @@ impl From<ColumnDataTypeWrapper> for ConcreteDataType {
             ColumnDataType::TimeMillisecond => ConcreteDataType::time_millisecond_datatype(),
             ColumnDataType::TimeMicrosecond => ConcreteDataType::time_microsecond_datatype(),
             ColumnDataType::TimeNanosecond => ConcreteDataType::time_nanosecond_datatype(),
+            ColumnDataType::IntervalYearMonth => ConcreteDataType::interval_year_month_datatype(),
+            ColumnDataType::IntervalDayTime => ConcreteDataType::interval_day_time_datatype(),
+            ColumnDataType::IntervalMonthDayNano => {
+                ConcreteDataType::interval_month_day_nano_datatype()
+            }
         }
     }
 }
@@ -111,8 +118,12 @@ impl TryFrom<ConcreteDataType> for ColumnDataTypeWrapper {
                 TimeType::Microsecond(_) => ColumnDataType::TimeMicrosecond,
                 TimeType::Nanosecond(_) => ColumnDataType::TimeNanosecond,
             },
-            ConcreteDataType::Interval(_)
-            | ConcreteDataType::Null(_)
+            ConcreteDataType::Interval(i) => match i {
+                IntervalType::YearMonth(_) => ColumnDataType::IntervalYearMonth,
+                IntervalType::DayTime(_) => ColumnDataType::IntervalDayTime,
+                IntervalType::MonthDayNano(_) => ColumnDataType::IntervalMonthDayNano,
+            },
+            ConcreteDataType::Null(_)
             | ConcreteDataType::List(_)
             | ConcreteDataType::Dictionary(_) => {
                 return error::IntoColumnDataTypeSnafu { from: datatype }.fail()
@@ -216,6 +227,18 @@ pub fn values_with_capacity(datatype: ColumnDataType, capacity: usize) -> Values
             time_nanosecond_values: Vec::with_capacity(capacity),
             ..Default::default()
         },
+        ColumnDataType::IntervalDayTime => Values {
+            interval_day_time_values: Vec::with_capacity(capacity),
+            ..Default::default()
+        },
+        ColumnDataType::IntervalYearMonth => Values {
+            interval_year_month_values: Vec::with_capacity(capacity),
+            ..Default::default()
+        },
+        ColumnDataType::IntervalMonthDayNano => Values {
+            interval_month_day_nano_values: Vec::with_capacity(capacity),
+            ..Default::default()
+        },
     }
 }
 
@@ -256,7 +279,14 @@ pub fn push_vals(column: &mut Column, origin_count: usize, vector: VectorRef) {
             TimeUnit::Microsecond => values.time_microsecond_values.push(val.value()),
             TimeUnit::Nanosecond => values.time_nanosecond_values.push(val.value()),
         },
-        Value::Interval(_) | Value::List(_) => unreachable!(),
+        Value::Interval(val) => match val.unit() {
+            IntervalUnit::YearMonth => values.interval_year_month_values.push(val.to_i32()),
+            IntervalUnit::DayTime => values.interval_day_time_values.push(val.to_i64()),
+            IntervalUnit::MonthDayNano => values
+                .interval_month_day_nano_values
+                .push(convert_i128_to_interval(val.to_i128())),
+        },
+        Value::List(_) => unreachable!(),
     });
     column.null_mask = null_mask.into_vec();
 }
@@ -295,14 +325,26 @@ fn ddl_request_type(request: &DdlRequest) -> &'static str {
     }
 }
 
+/// Converts an i128 value to google protobuf type [IntervalMonthDayNano].
+pub fn convert_i128_to_interval(v: i128) -> IntervalMonthDayNano {
+    let interval = Interval::from_i128(v);
+    let (months, days, nanoseconds) = interval.to_month_day_nano();
+    IntervalMonthDayNano {
+        months,
+        days,
+        nanoseconds,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
     use datatypes::vectors::{
-        BooleanVector, TimeMicrosecondVector, TimeMillisecondVector, TimeNanosecondVector,
-        TimeSecondVector, TimestampMicrosecondVector, TimestampMillisecondVector,
-        TimestampNanosecondVector, TimestampSecondVector,
+        BooleanVector, IntervalDayTimeVector, IntervalMonthDayNanoVector, IntervalYearMonthVector,
+        TimeMicrosecondVector, TimeMillisecondVector, TimeNanosecondVector, TimeSecondVector,
+        TimestampMicrosecondVector, TimestampMillisecondVector, TimestampNanosecondVector,
+        TimestampSecondVector, Vector,
     };
 
     use super::*;
@@ -367,6 +409,14 @@ mod tests {
 
         let values = values_with_capacity(ColumnDataType::TimeMillisecond, 2);
         let values = values.time_millisecond_values;
+        assert_eq!(2, values.capacity());
+
+        let values = values_with_capacity(ColumnDataType::IntervalDayTime, 2);
+        let values = values.interval_day_time_values;
+        assert_eq!(2, values.capacity());
+
+        let values = values_with_capacity(ColumnDataType::IntervalMonthDayNano, 2);
+        let values = values.interval_month_day_nano_values;
         assert_eq!(2, values.capacity());
     }
 
@@ -440,6 +490,18 @@ mod tests {
             ConcreteDataType::time_datatype(TimeUnit::Millisecond),
             ColumnDataTypeWrapper(ColumnDataType::TimeMillisecond).into()
         );
+        assert_eq!(
+            ConcreteDataType::interval_datatype(IntervalUnit::DayTime),
+            ColumnDataTypeWrapper(ColumnDataType::IntervalDayTime).into()
+        );
+        assert_eq!(
+            ConcreteDataType::interval_datatype(IntervalUnit::YearMonth),
+            ColumnDataTypeWrapper(ColumnDataType::IntervalYearMonth).into()
+        );
+        assert_eq!(
+            ConcreteDataType::interval_datatype(IntervalUnit::MonthDayNano),
+            ColumnDataTypeWrapper(ColumnDataType::IntervalMonthDayNano).into()
+        );
     }
 
     #[test]
@@ -507,6 +569,24 @@ mod tests {
         assert_eq!(
             ColumnDataTypeWrapper(ColumnDataType::TimestampMillisecond),
             ConcreteDataType::timestamp_millisecond_datatype()
+                .try_into()
+                .unwrap()
+        );
+        assert_eq!(
+            ColumnDataTypeWrapper(ColumnDataType::IntervalYearMonth),
+            ConcreteDataType::interval_datatype(IntervalUnit::YearMonth)
+                .try_into()
+                .unwrap()
+        );
+        assert_eq!(
+            ColumnDataTypeWrapper(ColumnDataType::IntervalDayTime),
+            ConcreteDataType::interval_datatype(IntervalUnit::DayTime)
+                .try_into()
+                .unwrap()
+        );
+        assert_eq!(
+            ColumnDataTypeWrapper(ColumnDataType::IntervalMonthDayNano),
+            ConcreteDataType::interval_datatype(IntervalUnit::MonthDayNano)
                 .try_into()
                 .unwrap()
         );
@@ -610,6 +690,50 @@ mod tests {
     }
 
     #[test]
+    fn test_column_put_interval_values() {
+        let mut column = Column {
+            column_name: "test".to_string(),
+            semantic_type: 0,
+            values: Some(Values {
+                ..Default::default()
+            }),
+            null_mask: vec![],
+            datatype: 0,
+        };
+
+        let vector = Arc::new(IntervalYearMonthVector::from_vec(vec![1, 2, 3]));
+        push_vals(&mut column, 3, vector);
+        assert_eq!(
+            vec![1, 2, 3],
+            column.values.as_ref().unwrap().interval_year_month_values
+        );
+
+        let vector = Arc::new(IntervalDayTimeVector::from_vec(vec![4, 5, 6]));
+        push_vals(&mut column, 3, vector);
+        assert_eq!(
+            vec![4, 5, 6],
+            column.values.as_ref().unwrap().interval_day_time_values
+        );
+
+        let vector = Arc::new(IntervalMonthDayNanoVector::from_vec(vec![7, 8, 9]));
+        let len = vector.len();
+        push_vals(&mut column, 3, vector);
+        (0..len).for_each(|i| {
+            assert_eq!(
+                7 + i as i64,
+                column
+                    .values
+                    .as_ref()
+                    .unwrap()
+                    .interval_month_day_nano_values
+                    .get(i)
+                    .unwrap()
+                    .nanoseconds
+            );
+        });
+    }
+
+    #[test]
     fn test_column_put_vector() {
         use crate::v1::SemanticType;
         // Some(false), None, Some(true), Some(true)
@@ -632,5 +756,14 @@ mod tests {
         assert_eq!(vec![false, true, true, true, false], bool_values);
         let null_mask = column.null_mask;
         assert_eq!(34, null_mask[0]);
+    }
+
+    #[test]
+    fn test_convert_i128_to_interval() {
+        let i128_val = 3000;
+        let interval = convert_i128_to_interval(i128_val);
+        assert_eq!(interval.months, 0);
+        assert_eq!(interval.days, 0);
+        assert_eq!(interval.nanoseconds, 3000);
     }
 }

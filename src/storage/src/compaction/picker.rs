@@ -46,7 +46,9 @@ pub(crate) fn get_expired_ssts(
     ttl: Option<Duration>,
     now: Timestamp,
 ) -> Result<Vec<FileHandle>> {
-    let Some(ttl) = ttl else { return Ok(vec![]); };
+    let Some(ttl) = ttl else {
+        return Ok(vec![]);
+    };
 
     let expire_time = now.sub_duration(ttl).context(TtlCalculationSnafu)?;
 

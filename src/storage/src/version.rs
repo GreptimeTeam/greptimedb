@@ -125,6 +125,17 @@ impl VersionControl {
         version_to_update.apply_metadata(metadata, manifest_version);
         version_to_update.commit();
     }
+
+    pub fn reset_version(
+        &self,
+        manifest_version: ManifestVersion,
+        memtables: MemtableVersionRef,
+        ssts: LevelMetasRef,
+    ) {
+        let mut version_to_update = self.version.lock();
+        version_to_update.reset(manifest_version, memtables, ssts, 0);
+        version_to_update.commit();
+    }
 }
 
 #[derive(Debug)]
@@ -306,6 +317,19 @@ impl Version {
     #[inline]
     pub fn manifest_version(&self) -> ManifestVersion {
         self.manifest_version
+    }
+
+    pub fn reset(
+        &mut self,
+        manifest_version: ManifestVersion,
+        memtables: MemtableVersionRef,
+        ssts: LevelMetasRef,
+        flushed_sequence: SequenceNumber,
+    ) {
+        self.memtables = memtables;
+        self.ssts = ssts;
+        self.manifest_version = manifest_version;
+        self.flushed_sequence = flushed_sequence;
     }
 }
 

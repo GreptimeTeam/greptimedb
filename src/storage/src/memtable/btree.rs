@@ -162,7 +162,10 @@ impl Memtable for BTreeMemtable {
 
         let Some(timestamp_type) = ts_meta.desc.data_type.as_timestamp() else {
             // safety: timestamp column always has timestamp type, otherwise it's a bug.
-            panic!("Timestamp column is not a valid timestamp type: {:?}", self.schema);
+            panic!(
+                "Timestamp column is not a valid timestamp type: {:?}",
+                self.schema
+            );
         };
 
         MemtableStats {
@@ -472,7 +475,9 @@ impl InnerKey {
 
     #[inline]
     fn is_in_time_range(&self, range: &Option<TimestampRange>) -> bool {
-        let Some(range) = range else { return true; };
+        let Some(range) = range else {
+            return true;
+        };
         range.contains(
             &self
                 .timestamp()

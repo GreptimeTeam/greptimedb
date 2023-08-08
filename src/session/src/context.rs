@@ -49,7 +49,6 @@ impl Display for QueryContext {
 }
 
 impl QueryContext {
-    #[cfg(any(test, feature = "testing"))]
     pub fn arc() -> QueryContextRef {
         QueryContextBuilder::default().build()
     }

@@ -481,11 +481,11 @@ mod tests {
     #[tokio::test]
     async fn test_handler_name() {
         let group = HeartbeatHandlerGroup::default();
-        group.add_handler(ResponseHeaderHandler::default()).await;
-        group.add_handler(CheckLeaderHandler::default()).await;
-        group.add_handler(OnLeaderStartHandler::default()).await;
-        group.add_handler(CollectStatsHandler::default()).await;
-        group.add_handler(MailboxHandler::default()).await;
+        group.add_handler(ResponseHeaderHandler).await;
+        group.add_handler(CheckLeaderHandler).await;
+        group.add_handler(OnLeaderStartHandler).await;
+        group.add_handler(CollectStatsHandler).await;
+        group.add_handler(MailboxHandler).await;
         group.add_handler(PersistStatsHandler::default()).await;
 
         let handlers = group.handlers.read().await;

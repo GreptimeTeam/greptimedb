@@ -654,7 +654,7 @@ pub(crate) mod greptime_builtin {
     ) -> PyResult<PyObjectRef> {
         let percent =
             expressions::Literal::new(datafusion_common::ScalarValue::Float64(Some(percent)));
-        return eval_aggr_fn(
+        eval_aggr_fn(
             expressions::ApproxPercentileCont::new(
                 vec![
                     Arc::new(expressions::Column::new("expr0", 0)) as _,
@@ -666,7 +666,7 @@ pub(crate) mod greptime_builtin {
             .map_err(|err| from_df_err(err, vm))?,
             &[values.to_arrow_array()],
             vm,
-        );
+        )
     }
 
     /// effectively equals to `list(vector)`
@@ -857,7 +857,7 @@ pub(crate) mod greptime_builtin {
         // pyfunction can return PyResult<...>, args can be like PyObjectRef or anything
         // impl IntoPyNativeFunc, see rustpython-vm function for more details
         let args = vec![base.as_vector_ref(), arg_pow];
-        let res = PowFunction::default()
+        let res = PowFunction
             .eval(FunctionContext::default(), &args)
             .map_err(|err| {
                 vm.new_runtime_error(format!(

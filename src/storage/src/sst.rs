@@ -150,6 +150,10 @@ impl LevelMetas {
     pub fn levels(&self) -> &[LevelMeta] {
         &self.levels
     }
+
+    pub fn file_purger(&self) -> FilePurgerRef {
+        self.file_purger.clone()
+    }
 }
 
 /// Metadata of files in same SST level.
@@ -204,7 +208,9 @@ impl LevelMeta {
         self.files
             .iter()
             .filter_map(|(_, v)| {
-                let Some((_, end)) = v.time_range() else { return None; };
+                let Some((_, end)) = v.time_range() else {
+                    return None;
+                };
                 if end < expire_time {
                     Some(v.clone())
                 } else {

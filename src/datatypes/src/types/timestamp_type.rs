@@ -66,16 +66,10 @@ impl TryFrom<u64> for TimestampType {
     /// - 9: nanosecond
     fn try_from(value: u64) -> Result<Self, Self::Error> {
         match value {
-            SECOND_VARIATION => Ok(TimestampType::Second(TimestampSecondType::default())),
-            MILLISECOND_VARIATION => Ok(TimestampType::Millisecond(
-                TimestampMillisecondType::default(),
-            )),
-            MICROSECOND_VARIATION => Ok(TimestampType::Microsecond(
-                TimestampMicrosecondType::default(),
-            )),
-            NANOSECOND_VARIATION => {
-                Ok(TimestampType::Nanosecond(TimestampNanosecondType::default()))
-            }
+            SECOND_VARIATION => Ok(TimestampType::Second(TimestampSecondType)),
+            MILLISECOND_VARIATION => Ok(TimestampType::Millisecond(TimestampMillisecondType)),
+            MICROSECOND_VARIATION => Ok(TimestampType::Microsecond(TimestampMicrosecondType)),
+            NANOSECOND_VARIATION => Ok(TimestampType::Nanosecond(TimestampNanosecondType)),
             _ => InvalidTimestampPrecisionSnafu { precision: value }.fail(),
         }
     }

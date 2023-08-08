@@ -30,7 +30,8 @@ use storage::EngineImpl;
 use table::engine::{EngineContext, TableEngine};
 use table::metadata::{TableId, TableInfo, TableInfoBuilder, TableMetaBuilder, TableType};
 use table::requests::{
-    AlterKind, AlterTableRequest, CreateTableRequest, DropTableRequest, InsertRequest, TableOptions,
+    AlterKind, AlterTableRequest, CreateTableRequest, DropTableRequest, InsertRequest,
+    TableOptions, TruncateTableRequest,
 };
 use table::{Table, TableRef};
 
@@ -142,6 +143,15 @@ pub fn new_drop_request() -> DropTableRequest {
     }
 }
 
+pub fn new_truncate_request() -> TruncateTableRequest {
+    TruncateTableRequest {
+        catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+        schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+        table_name: TABLE_NAME.to_string(),
+        table_id: TABLE_ID,
+    }
+}
+
 pub struct TestEngineComponents {
     pub table_engine: MitoEngine<EngineImpl<NoopLogStore>>,
     pub storage_engine: EngineImpl<NoopLogStore>,
@@ -156,7 +166,7 @@ pub async fn setup_test_engine_and_table() -> TestEngineComponents {
     let compaction_scheduler = Arc::new(NoopCompactionScheduler::default());
     let storage_engine = EngineImpl::new(
         StorageEngineConfig::default(),
-        Arc::new(NoopLogStore::default()),
+        Arc::new(NoopLogStore),
         object_store.clone(),
         compaction_scheduler,
     )

@@ -72,7 +72,9 @@ mod test {
             )
             .await;
         let output = output.remove(0).unwrap();
-        let Output::Stream(stream) = output else { unreachable!() };
+        let Output::Stream(stream) = output else {
+            unreachable!()
+        };
         let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
         assert_eq!(
             recordbatches.pretty_print().unwrap(),

@@ -223,7 +223,7 @@ impl AlterTableProcedure {
             .context(error::TableSnafu)?
             .build()
             .with_context(|_| error::BuildTableMetaSnafu {
-                table_name: table_ref.table.clone(),
+                table_name: table_ref.table,
             })?;
 
         let mut new_info = table_info.clone();

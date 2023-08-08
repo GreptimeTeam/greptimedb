@@ -236,7 +236,7 @@ impl<T: ErrorExt + Send + Sync + 'static> KvBackend for MemoryKvBackend<T> {
                 start: key,
                 end: range_end,
             };
-            kvs.drain_filter(|key, _| range.contains(key))
+            kvs.extract_if(|key, _| range.contains(key))
                 .map(Into::into)
                 .collect::<Vec<_>>()
         };

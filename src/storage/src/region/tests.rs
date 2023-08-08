@@ -63,6 +63,7 @@ mod compact;
 mod drop;
 mod flush;
 mod projection;
+mod truncate;
 
 /// Create metadata of a region with schema: (timestamp, v0).
 pub fn new_metadata(region_name: &str) -> RegionMetadata {
@@ -541,7 +542,7 @@ async fn create_store_config(region_name: &str, root: &str) -> StoreConfig<NoopL
         .unwrap(),
     );
 
-    let log_store = Arc::new(NoopLogStore::default());
+    let log_store = Arc::new(NoopLogStore);
 
     let file_purger = Arc::new(LocalScheduler::new(
         SchedulerConfig::default(),

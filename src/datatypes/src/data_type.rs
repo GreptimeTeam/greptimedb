@@ -278,23 +278,19 @@ impl_new_concrete_type_functions!(
 
 impl ConcreteDataType {
     pub fn timestamp_second_datatype() -> Self {
-        ConcreteDataType::Timestamp(TimestampType::Second(TimestampSecondType::default()))
+        ConcreteDataType::Timestamp(TimestampType::Second(TimestampSecondType))
     }
 
     pub fn timestamp_millisecond_datatype() -> Self {
-        ConcreteDataType::Timestamp(TimestampType::Millisecond(
-            TimestampMillisecondType::default(),
-        ))
+        ConcreteDataType::Timestamp(TimestampType::Millisecond(TimestampMillisecondType))
     }
 
     pub fn timestamp_microsecond_datatype() -> Self {
-        ConcreteDataType::Timestamp(TimestampType::Microsecond(
-            TimestampMicrosecondType::default(),
-        ))
+        ConcreteDataType::Timestamp(TimestampType::Microsecond(TimestampMicrosecondType))
     }
 
     pub fn timestamp_nanosecond_datatype() -> Self {
-        ConcreteDataType::Timestamp(TimestampType::Nanosecond(TimestampNanosecondType::default()))
+        ConcreteDataType::Timestamp(TimestampType::Nanosecond(TimestampNanosecondType))
     }
 
     /// Returns the time data type with `TimeUnit`.
@@ -323,17 +319,15 @@ impl ConcreteDataType {
     }
 
     pub fn interval_month_day_nano_datatype() -> Self {
-        ConcreteDataType::Interval(IntervalType::MonthDayNano(
-            IntervalMonthDayNanoType::default(),
-        ))
+        ConcreteDataType::Interval(IntervalType::MonthDayNano(IntervalMonthDayNanoType))
     }
 
     pub fn interval_year_month_datatype() -> Self {
-        ConcreteDataType::Interval(IntervalType::YearMonth(IntervalYearMonthType::default()))
+        ConcreteDataType::Interval(IntervalType::YearMonth(IntervalYearMonthType))
     }
 
     pub fn interval_day_time_datatype() -> Self {
-        ConcreteDataType::Interval(IntervalType::DayTime(IntervalDayTimeType::default()))
+        ConcreteDataType::Interval(IntervalType::DayTime(IntervalDayTimeType))
     }
 
     pub fn timestamp_datatype(unit: TimeUnit) -> Self {

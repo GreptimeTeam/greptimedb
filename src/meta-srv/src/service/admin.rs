@@ -145,7 +145,7 @@ where
                     .into_owned()
                     .collect()
             })
-            .unwrap_or_else(HashMap::new);
+            .unwrap_or_default();
         let path = req.uri().path().to_owned();
         Box::pin(async move { router.call(&path, query_params).await })
     }

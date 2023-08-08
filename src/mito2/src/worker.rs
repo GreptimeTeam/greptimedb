@@ -39,6 +39,7 @@ use crate::error::{JoinSnafu, Result, WorkerStoppedSnafu};
 use crate::memtable::{DefaultMemtableBuilder, MemtableBuilderRef};
 use crate::region::{RegionMap, RegionMapRef};
 use crate::request::{RegionRequest, RequestBody, SenderWriteRequest, WorkerRequest};
+use crate::wal::Wal;
 
 /// Identifier for a worker.
 pub(crate) type WorkerId = u32;
@@ -179,7 +180,7 @@ impl RegionWorker {
             config,
             regions: regions.clone(),
             receiver,
-            log_store,
+            wal: Wal::new(log_store),
             object_store,
             running: running.clone(),
             memtable_builder: Arc::new(DefaultMemtableBuilder::default()),
@@ -274,8 +275,8 @@ struct RegionWorkerLoop<S> {
     regions: RegionMapRef,
     /// Request receiver.
     receiver: Receiver<WorkerRequest>,
-    // TODO(yingwen): Replaced by Wal.
-    log_store: Arc<S>,
+    /// WAL of the engine.
+    wal: Wal<S>,
     /// Object store for manifest and SSTs.
     object_store: ObjectStore,
     /// Whether the worker thread is still running.

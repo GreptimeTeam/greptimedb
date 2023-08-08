@@ -157,7 +157,9 @@ impl Default for TwcsOptions {
 
 impl From<&HashMap<String, String>> for CompactionStrategy {
     fn from(opts: &HashMap<String, String>) -> Self {
-        let Some(strategy_name) = opts.get(COMPACTION_STRATEGY_KEY) else { return CompactionStrategy::default() };
+        let Some(strategy_name) = opts.get(COMPACTION_STRATEGY_KEY) else {
+            return CompactionStrategy::default();
+        };
         if strategy_name.eq_ignore_ascii_case(COMPACTION_STRATEGY_LEVELED_TIME_WINDOW_VALUE) {
             CompactionStrategy::LeveledTimeWindow
         } else if strategy_name.eq_ignore_ascii_case(COMPACTION_STRATEGY_TWCS_VALUE) {

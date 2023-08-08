@@ -184,7 +184,9 @@ fn get_influxdb_credentials<B: Send + Sync + 'static>(
         Ok(Some((username.to_string(), password.to_string().into())))
     } else {
         // try v1
-        let Some(query_str) = request.uri().query() else { return Ok(None) };
+        let Some(query_str) = request.uri().query() else {
+            return Ok(None);
+        };
 
         match extract_influxdb_user_from_query(query_str) {
             (None, None) => Ok(None),

@@ -721,7 +721,9 @@ mod test {
 
         let Ok(QueryStatement::Sql(stmt)) = QueryLanguageParser::parse_sql(
             "INSERT INTO my_database.my_table (a, b, ts) VALUES ('s', 1, 1672384140000)",
-        ) else { unreachable!() };
+        ) else {
+            unreachable!()
+        };
         let output = instance
             .execute_sql(stmt, QueryContext::arc())
             .await
@@ -729,7 +731,9 @@ mod test {
         assert!(matches!(output, Output::AffectedRows(1)));
 
         let output = exec_selection(instance, "SELECT * FROM my_database.my_table").await;
-        let Output::Stream(stream) = output else { unreachable!() };
+        let Output::Stream(stream) = output else {
+            unreachable!()
+        };
         let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
         let expected = "\
 +---+---+---+---------------------+---+
@@ -855,7 +859,9 @@ mod test {
         assert!(matches!(output, Output::AffectedRows(3)));
 
         let output = exec_selection(instance, "SELECT ts, host, cpu FROM demo").await;
-        let Output::Stream(stream) = output else { unreachable!() };
+        let Output::Stream(stream) = output else {
+            unreachable!()
+        };
         let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
         let expected = "\
 +---------------------+-------+-----+
@@ -925,7 +931,9 @@ mod test {
         assert!(matches!(output, Output::AffectedRows(1)));
 
         let output = exec_selection(instance, "SELECT ts, host, cpu FROM demo").await;
-        let Output::Stream(stream) = output else { unreachable!() };
+        let Output::Stream(stream) = output else {
+            unreachable!()
+        };
         let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
         let expected = "\
 +---------------------+-------+------+
@@ -965,7 +973,9 @@ mod test {
             )),
         });
         let output = instance.do_query(query, QueryContext::arc()).await.unwrap();
-        let Output::Stream(stream) = output else { unreachable!() };
+        let Output::Stream(stream) = output else {
+            unreachable!()
+        };
         let recordbatch = RecordBatches::try_collect(stream).await.unwrap();
         let expected = "\
 +---------------------+-------+------+--------+

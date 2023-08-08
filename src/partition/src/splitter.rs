@@ -175,10 +175,7 @@ impl WriteSplitter {
                     return FindRegionSnafu { reason }.fail();
                 }
             };
-            region_map
-                .entry(region_id)
-                .or_insert_with(Vec::default)
-                .push(idx);
+            region_map.entry(region_id).or_default().push(idx);
         }
         Ok(region_map)
     }
