@@ -76,7 +76,7 @@ runs:
 
     - name: Build greptime on centos base image
       uses: ./.github/actions/build-greptime-binary
-      if: ${{ inputs.arch == 'amd64' && inputs.dev-mode = 'false' }} # Only build centos7 base image for amd64.
+      if: ${{ inputs.arch == 'amd64' && inputs.dev-mode == 'false' }} # Only build centos7 base image for amd64.
       with:
         base-image: centos
         features: servers/dashboard
