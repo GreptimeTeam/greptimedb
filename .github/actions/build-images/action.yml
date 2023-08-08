@@ -20,6 +20,10 @@ inputs:
     description: Whether to push the latest tag
     required: false
     default: 'true'
+  dev-mode:
+    description: Enable dev mode, only build standard greptime
+    required: false
+    default: 'false'
 runs:
   using: composite
   steps:
@@ -39,6 +43,7 @@ runs:
         push-latest-tag: ${{ inputs.push-latest-tag }}
 
     - name: Build and push centos images to dockerhub
+      if: ${{ inputs.dev-mode == 'false' }}
       uses: ./.github/actions/build-greptime-images
       with:
         image-registry: ${{ inputs.image-registry }}

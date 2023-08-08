@@ -1,18 +1,20 @@
-# Nightly build only do the following things:
-# 1. Run integration tests;
-# 2. Build binaries and images for linux-amd64 and linux-arm64 platform;
-name: GreptimeDB Nightly Build
+# Development build only build the debug version of the artifacts manually.
+name: GreptimeDB Development Build
 
 on:
-  schedule:
-    # Trigger at 00:00(UTC) on every day-of-week from Monday through Friday.
-    - cron: '0 0 * * 1-5'
   workflow_dispatch: # Allows you to run this workflow manually.
     inputs:
+      repository:
+        description: The public repository to build
+        required: false
+        default: GreptimeTeam/greptimedb
+      commit: # Note: We only pull the source code and use the current workflow to build the artifacts.
+        description: The commit to build
+        required: true
       linux_amd64_runner:
         type: choice
         description: The runner uses to build linux-amd64 artifacts
-        default: ec2-c6i.2xlarge-amd64
+        default: ec2-c6i.4xlarge-amd64
         options:
           - ubuntu-latest
           - ubuntu-latest-8-cores
@@ -27,7 +29,7 @@ on:
       linux_arm64_runner:
         type: choice
         description: The runner uses to build linux-arm64 artifacts
-        default: ec2-c6g.2xlarge-arm64
+        default: ec2-c6g.4xlarge-arm64
         options:
           - ec2-c6g.xlarge-arm64 # 4C8G
           - ec2-c6g.2xlarge-arm64 # 8C16G
@@ -42,17 +44,17 @@ on:
         type: boolean
         description: Build linux-amd64 artifacts
         required: false
-        default: false
+        default: true
       build_linux_arm64_artifacts:
         type: boolean
         description: Build linux-arm64 artifacts
         required: false
-        default: false
+        default: true
       release_images:
         type: boolean
         description: Build and push images to DockerHub and ACR
         required: false
-        default: false
+        default: true
 
 # Use env variables to control all the release process.
 env:
@@ -61,10 +63,13 @@ env:
   # Controls whether to run tests, include unit-test, integration-test and sqlness.
   DISABLE_RUN_TESTS: ${{ inputs.skip_test || vars.DEFAULT_SKIP_TEST }}
 
-  # Always use 'nightly' to indicate it's the nightly build.
-  NEXT_RELEASE_VERSION: nightly
+  # Always use 'dev' to indicate it's the dev build.
+  NEXT_RELEASE_VERSION: dev
 
   NIGHTLY_RELEASE_PREFIX: nightly
+
+  # Use the different image namespace to avoid conflict with the release images.
+  IMAGE_NAMESPACE: greptime-dev
 
 jobs:
   allocate-runners:
@@ -98,6 +103,7 @@ jobs:
         env:
           GITHUB_EVENT_NAME: ${{ github.event_name }}
           GITHUB_REF_NAME: ${{ github.ref_name }}
+          COMMIT_SHA: ${{ inputs.commit }}
           NEXT_RELEASE_VERSION: ${{ env.NEXT_RELEASE_VERSION }}
           NIGHTLY_RELEASE_PREFIX: ${{ env.NIGHTLY_RELEASE_PREFIX }}
 
@@ -137,11 +143,23 @@ jobs:
     ]
     runs-on: ${{ needs.allocate-runners.outputs.linux-amd64-runner }}
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout
+        uses: actions/checkout@v3
         with:
           fetch-depth: 0
 
-      - uses: ./.github/actions/build-linux-artifacts
+      - name: Checkout greptimedb
+        uses: actions/checkout@v3
+        with:
+          repository: ${{ inputs.repository }}
+          ref: ${{ inputs.commit }}
+          path: dev/greptimedb
+
+      - name: Enter greptimedb
+        run: |
+          cd dev/greptimedb
+
+      - uses: ../.github/actions/build-linux-artifacts
         with:
           arch: amd64
           cargo-profile: ${{ env.CARGO_PROFILE }}
@@ -151,6 +169,7 @@ jobs:
           aws-access-key-id: ${{ secrets.AWS_CN_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_CN_SECRET_ACCESS_KEY }}
           aws-region: ${{ vars.AWS_RELEASE_BUCKET_REGION }}
+          dev-mode: true # Only build the standard greptime binary.
 
   build-linux-arm64-artifacts:
     name: Build linux-arm64 artifacts
@@ -160,11 +179,23 @@ jobs:
     ]
     runs-on: ${{ needs.allocate-runners.outputs.linux-arm64-runner }}
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout
+        uses: actions/checkout@v3
         with:
           fetch-depth: 0
 
-      - uses: ./.github/actions/build-linux-artifacts
+      - name: Checkout greptimedb
+        uses: actions/checkout@v3
+        with:
+          repository: ${{ inputs.repository }}
+          ref: ${{ inputs.commit }}
+          path: dev/greptimedb
+
+      - name: Enter greptimedb
+        run: |
+          cd dev/greptimedb
+
+      - uses: ../.github/actions/build-linux-artifacts
         with:
           arch: arm64
           cargo-profile: ${{ env.CARGO_PROFILE }}
@@ -174,6 +205,7 @@ jobs:
           aws-access-key-id: ${{ secrets.AWS_CN_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_CN_SECRET_ACCESS_KEY }}
           aws-region: ${{ vars.AWS_RELEASE_BUCKET_REGION }}
+          dev-mode: true # Only build the standard greptime binary.
 
   release-images-to-dockerhub:
     name: Build and push images to DockerHub
@@ -185,7 +217,7 @@ jobs:
     ]
     runs-on: ubuntu-latest
     outputs:
-      nightly-build-result: ${{ steps.set-nightly-build-result.outputs.nightly-build-result }}
+      build-result: ${{ steps.set-build-result.outputs.build-result }}
     steps:
       - uses: actions/checkout@v3
         with:
@@ -195,16 +227,17 @@ jobs:
         uses: ./.github/actions/build-images
         with:
           image-registry: docker.io
-          image-namespace: ${{ vars.IMAGE_NAMESPACE }}
+          image-namespace: ${{ env.IMAGE_NAMESPACE }}
           image-registry-username: ${{ secrets.DOCKERHUB_USERNAME }}
           image-registry-password: ${{ secrets.DOCKERHUB_TOKEN }}
           version: ${{ needs.allocate-runners.outputs.version }}
           push-latest-tag: false # Don't push the latest tag to registry.
+          dev-mode: true # Only build the standard images.
 
-      - name: Set nightly build result
-        id: set-nightly-build-result
+      - name: Set build result
+        id: set-build-result
         run: |
-          echo "nightly-build-result=success" >> $GITHUB_OUTPUT
+          echo "build-result=success" >> $GITHUB_OUTPUT
 
   release-images-to-acr:
     name: Build and push images to ACR
@@ -228,11 +261,12 @@ jobs:
         uses: ./.github/actions/build-images
         with:
           image-registry: ${{ vars.ACR_IMAGE_REGISTRY }}
-          image-namespace: ${{ vars.IMAGE_NAMESPACE }}
+          image-namespace: ${{ env.IMAGE_NAMESPACE }}
           image-registry-username: ${{ secrets.ALICLOUD_USERNAME }}
           image-registry-password: ${{ secrets.ALICLOUD_PASSWORD }}
           version: ${{ needs.allocate-runners.outputs.version }}
           push-latest-tag: false # Don't push the latest tag to registry.
+          dev-mode: true # Only build the standard images.
 
   stop-linux-amd64-runner: # It's always run as the last job in the workflow to make sure that the runner is released.
     name: Stop linux-amd64 runner
@@ -296,14 +330,14 @@ jobs:
     steps:
       - name: Notifiy nightly build successful result
         uses: slackapi/slack-github-action@v1.23.0
-        if: ${{ needs.release-images-to-dockerhub.outputs.nightly-build-result == 'success' }}
+        if: ${{ needs.release-images-to-dockerhub.outputs.build-result == 'success' }}
         with:
           payload: |
-            {"text": "GreptimeDB nightly build successful"}
+            {"text": "GreptimeDB ${{ NEXT_RELEASE_VERSION }} build successful"}
 
       - name: Notifiy nightly build failed result
         uses: slackapi/slack-github-action@v1.23.0
-        if: ${{ needs.release-images-to-dockerhub.outputs.nightly-build-result != 'success' }}
+        if: ${{ needs.release-images-to-dockerhub.outputs.build-result != 'success' }}
         with:
           payload: |
-            {"text": "GreptimeDB nightly build failed, please check 'https://github.com/GreptimeTeam/greptimedb/actions/workflows/nightly-build.yml'"}
+            {"text": "GreptimeDB ${{ NEXT_RELEASE_VERSION }} build failed, please check 'https://github.com/GreptimeTeam/greptimedb/actions/workflows/${{ NEXT_RELEASE_VERSION }}-build.yml'"}

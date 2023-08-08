@@ -25,6 +25,10 @@ inputs:
   aws-region:
     description: AWS region
     required: true
+  dev-mode:
+    description: Enable dev mode, only build standard greptime
+    required: false
+    default: 'false'
 runs:
   using: composite
   steps:
@@ -57,6 +61,7 @@ runs:
         aws-region: ${{ inputs.aws-region }}
 
     - name: Build greptime without pyo3
+      if: ${{ inputs.dev-mode == 'false' }}
       uses: ./.github/actions/build-greptime-binary
       with:
         base-image: ubuntu
@@ -71,7 +76,7 @@ runs:
 
     - name: Build greptime on centos base image
       uses: ./.github/actions/build-greptime-binary
-      if: ${{ inputs.arch == 'amd64' }} # Only build centos7 base image for amd64.
+      if: ${{ inputs.arch == 'amd64' && inputs.dev-mode = 'false' }} # Only build centos7 base image for amd64.
       with:
         base-image: centos
         features: servers/dashboard
