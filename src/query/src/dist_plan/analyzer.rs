@@ -41,16 +41,13 @@ impl AnalyzerRule for DistPlannerAnalyzer {
         plan: LogicalPlan,
         _config: &ConfigOptions,
     ) -> datafusion_common::Result<LogicalPlan> {
-        // (1) add merge scan
-        let plan = plan.transform(&Self::add_merge_scan)?;
-
-        // (2) transform up merge scan
+        // (1) transform up merge scan
         let mut visitor = CommutativeVisitor::new();
         let _ = plan.visit(&mut visitor)?;
         let state = ExpandState::new();
         let plan = plan.transform_down(&|plan| Self::expand(plan, &visitor, &state))?;
 
-        // (3) remove placeholder merge scan
+        // (2) remove placeholder merge scan
         let plan = plan.transform(&Self::remove_placeholder_merge_scan)?;
 
         Ok(plan)
@@ -59,6 +56,7 @@ impl AnalyzerRule for DistPlannerAnalyzer {
 
 impl DistPlannerAnalyzer {
     /// Add [MergeScanLogicalPlan] before the table scan
+    #[allow(dead_code)]
     fn add_merge_scan(plan: LogicalPlan) -> datafusion_common::Result<Transformed<LogicalPlan>> {
         Ok(match plan {
             LogicalPlan::TableScan(table_scan) => {
@@ -326,8 +324,7 @@ mod test {
         let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
         let expected = String::from(
             "Aggregate: groupBy=[[]], aggr=[[AVG(t.number)]]\
-            \n  MergeScan [is_placeholder=false]\
-            \n    TableScan: t",
+            \n  MergeScan [is_placeholder=false]",
         );
         assert_eq!(expected, format!("{:?}", result));
     }
@@ -353,9 +350,7 @@ mod test {
         let expected = String::from(
             "Sort: t.number ASC NULLS LAST\
             \n  Distinct:\
-            \n    MergeScan [is_placeholder=false]\
-            \n      Distinct:\
-            \n        TableScan: t",
+            \n    MergeScan [is_placeholder=false]",
         );
         assert_eq!(expected, format!("{:?}", result));
     }
@@ -378,9 +373,7 @@ mod test {
         let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
         let expected = String::from(
             "Limit: skip=0, fetch=1\
-            \n  MergeScan [is_placeholder=false]\
-            \n    Limit: skip=0, fetch=1\
-            \n      TableScan: t",
+            \n  MergeScan [is_placeholder=false]",
         );
         assert_eq!(expected, format!("{:?}", result));
     }
