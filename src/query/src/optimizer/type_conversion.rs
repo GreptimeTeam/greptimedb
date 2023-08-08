@@ -171,7 +171,7 @@ impl TypeConverter {
 
         // only try to convert timestamp or boolean types
         if !matches!(left_type, DataType::Timestamp(_, _))
-            || !matches!(left_type, DataType::Boolean)
+            && !matches!(left_type, DataType::Boolean)
         {
             return Ok((left.clone(), right.clone()));
         }

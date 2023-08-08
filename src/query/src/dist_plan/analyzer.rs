@@ -327,8 +327,7 @@ mod test {
         let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
         let expected = String::from(
             "Aggregate: groupBy=[[]], aggr=[[AVG(t.number)]]\
-            \n  MergeScan [is_placeholder=false]\
-            \n    TableScan: t",
+            \n  MergeScan [is_placeholder=false]",
         );
         assert_eq!(expected, format!("{:?}", result));
     }
@@ -354,9 +353,7 @@ mod test {
         let expected = String::from(
             "Sort: t.number ASC NULLS LAST\
             \n  Distinct:\
-            \n    MergeScan [is_placeholder=false]\
-            \n      Distinct:\
-            \n        TableScan: t",
+            \n    MergeScan [is_placeholder=false]",
         );
         assert_eq!(expected, format!("{:?}", result));
     }
@@ -379,9 +376,7 @@ mod test {
         let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
         let expected = String::from(
             "Limit: skip=0, fetch=1\
-            \n  MergeScan [is_placeholder=false]\
-            \n    Limit: skip=0, fetch=1\
-            \n      TableScan: t",
+            \n  MergeScan [is_placeholder=false]",
         );
         assert_eq!(expected, format!("{:?}", result));
     }
