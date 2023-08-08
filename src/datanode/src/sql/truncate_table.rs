@@ -45,7 +45,7 @@ impl SqlHandler {
         let procedure_id = procedure_with_id.id;
 
         info!(
-            "Truncate table {}, table-id {} by procedure {}",
+            "Truncate table {}, table_id {} by procedure {}",
             table_ref, req.table_id, procedure_id
         );
 
