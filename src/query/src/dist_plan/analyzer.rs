@@ -41,16 +41,13 @@ impl AnalyzerRule for DistPlannerAnalyzer {
         plan: LogicalPlan,
         _config: &ConfigOptions,
     ) -> datafusion_common::Result<LogicalPlan> {
-        // (1) add merge scan
-        // let plan = plan.transform(&Self::add_merge_scan)?;
-
-        // (2) transform up merge scan
+        // (1) transform up merge scan
         let mut visitor = CommutativeVisitor::new();
         let _ = plan.visit(&mut visitor)?;
         let state = ExpandState::new();
         let plan = plan.transform_down(&|plan| Self::expand(plan, &visitor, &state))?;
 
-        // (3) remove placeholder merge scan
+        // (2) remove placeholder merge scan
         let plan = plan.transform(&Self::remove_placeholder_merge_scan)?;
 
         Ok(plan)
