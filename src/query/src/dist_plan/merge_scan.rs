@@ -53,6 +53,8 @@ impl UserDefinedLogicalNodeCore for MergeScanLogicalPlan {
         Self::name()
     }
 
+    // Prevent further optimization.
+    // The input can be retrieved by `self.input()`
     fn inputs(&self) -> Vec<&LogicalPlan> {
         vec![]
     }
@@ -61,6 +63,7 @@ impl UserDefinedLogicalNodeCore for MergeScanLogicalPlan {
         self.input.schema()
     }
 
+    // Prevent further optimization
     fn expressions(&self) -> Vec<datafusion_expr::Expr> {
         vec![]
     }
