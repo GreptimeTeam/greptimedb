@@ -181,7 +181,7 @@ impl TypeConverter {
                 let casted_right = Self::cast_scalar_value(value, left_type)?;
                 if casted_right.is_null() {
                     return Err(DataFusionError::Plan(format!(
-                        "column:{col:?}. Cast value:{value:?} to {left_type:?} is invalid",
+                        "column:{col:?}. Casting value:{value:?} to {left_type:?} is invalid",
                     )));
                 }
                 if reverse {
