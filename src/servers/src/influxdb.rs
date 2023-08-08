@@ -160,23 +160,25 @@ impl TryFrom<InfluxdbRequest> for RowInsertRequests {
             let schema = table_schemas
                 .entry(table_name.to_string())
                 .or_insert_with(|| HashMap::with_capacity(len));
-            let values_list = table_rows
+            let rows = table_rows
                 .entry(table_name.to_string())
                 .or_insert_with(Vec::new);
+            let mut one_row = HashMap::with_capacity(len);
 
             // tags
-            parse_tags(tags, schema, values_list)?;
+            parse_tags(tags, schema, &mut one_row)?;
             // fields
-            parse_fields(fields, schema, values_list)?;
+            parse_fields(fields, schema, &mut one_row)?;
             // timestamp
-            parse_ts(timestamp, value.precision, schema, values_list)?;
+            parse_ts(timestamp, value.precision, schema, &mut one_row)?;
+
+            rows.push(one_row);
         }
 
         let mut inserts = Vec::with_capacity(table_schemas.len());
         for (table_name, schema) in table_schemas {
-            let Some(table_data) = table_rows
-                .remove(&table_name) else {
-                continue
+            let Some(table_data) = table_rows.remove(&table_name) else {
+                continue;
             };
             let schema = schema.into_values().collect::<Vec<_>>();
             let rows = table_data
@@ -206,10 +208,11 @@ impl TryFrom<InfluxdbRequest> for RowInsertRequests {
 fn parse_tags(
     tags: Option<TagSet>,
     schema: &mut HashMap<String, ColumnSchema>,
-    values_list: &mut Vec<HashMap<String, api::v1::Value>>,
+    one_row: &mut HashMap<String, api::v1::Value>,
 ) -> Result<(), Error> {
-    let Some(tags) = tags else { return Ok(()); };
-    let mut values = HashMap::with_capacity(tags.len());
+    let Some(tags) = tags else {
+        return Ok(());
+    };
     for (k, v) in tags {
         let current = schema.entry(k.to_string()).or_insert_with(|| ColumnSchema {
             column_name: k.to_string(),
@@ -220,10 +223,8 @@ fn parse_tags(
         check_schema(ColumnDataType::String, SemanticType::Tag, current)?;
 
         let v = wrap_value(Value::StringValue(v.to_string()));
-        values.insert(k.to_string(), v);
+        one_row.insert(k.to_string(), v);
     }
-
-    values_list.push(values);
 
     Ok(())
 }
@@ -231,9 +232,8 @@ fn parse_tags(
 fn parse_fields(
     fields: FieldSet,
     schema: &mut HashMap<String, ColumnSchema>,
-    values_list: &mut Vec<HashMap<String, api::v1::Value>>,
+    one_row: &mut HashMap<String, api::v1::Value>,
 ) -> Result<(), Error> {
-    let mut values = HashMap::with_capacity(fields.len());
     for (k, v) in fields {
         let (datatype, value) = match v {
             FieldValue::I64(v) => (ColumnDataType::Int64, wrap_value(Value::I64Value(v))),
@@ -254,10 +254,8 @@ fn parse_fields(
 
         check_schema(datatype, SemanticType::Field, current)?;
 
-        values.insert(k.to_string(), value);
+        one_row.insert(k.to_string(), value);
     }
-
-    values_list.push(values);
 
     Ok(())
 }
@@ -266,9 +264,8 @@ fn parse_ts(
     ts: Option<i64>,
     precision: Option<Precision>,
     schema: &mut HashMap<String, ColumnSchema>,
-    values_list: &mut Vec<HashMap<String, api::v1::Value>>,
+    one_row: &mut HashMap<String, api::v1::Value>,
 ) -> Result<(), Error> {
-    let mut values = HashMap::with_capacity(1);
     let column_name = INFLUXDB_TIMESTAMP_COLUMN_NAME;
     let current = schema
         .entry(column_name.to_string())
@@ -299,12 +296,10 @@ fn parse_ts(
         }
     };
 
-    values.insert(
+    one_row.insert(
         column_name.to_string(),
         wrap_value(Value::TsMillisecondValue(ts)),
     );
-
-    values_list.push(values);
 
     Ok(())
 }
@@ -519,6 +514,202 @@ monitor2,host=host4 cpu=66.3,memory=1029 1663840496400340003";
         let bitvec = BitVec::from_slice(data);
         for (idx, b) in expected.iter().enumerate() {
             assert_eq!(b, bitvec.get(idx).unwrap())
+        }
+    }
+
+    #[test]
+    fn test_convert_influxdb_lines_to_rows() {
+        let lines = r"
+monitor1,host=host1 cpu=66.6,memory=1024 1663840496100023100
+monitor1,host=host2 memory=1027 1663840496400340001
+monitor2,host=host3 cpu=66.5 1663840496100023102
+monitor2,host=host4 cpu=66.3,memory=1029 1663840496400340003";
+
+        let influxdb_req = InfluxdbRequest {
+            precision: None,
+            lines: lines.to_string(),
+        };
+
+        let requests: RowInsertRequests = influxdb_req.try_into().unwrap();
+        assert_eq!(2, requests.inserts.len());
+
+        for request in requests.inserts {
+            match &request.table_name[..] {
+                "monitor1" => assert_monitor1_rows(&request.rows),
+                "monitor2" => assert_monitor2_rows(&request.rows),
+                _ => panic!(),
+            }
+        }
+    }
+
+    fn assert_monitor1_rows(rows: &Option<Rows>) {
+        let rows = rows.as_ref().unwrap();
+        let schema = &rows.schema;
+        let rows = &rows.rows;
+        assert_eq!(4, schema.len());
+        assert_eq!(2, rows.len());
+
+        for (i, column_schema) in schema.iter().enumerate() {
+            match &column_schema.column_name[..] {
+                "host" => {
+                    assert_eq!(ColumnDataType::String as i32, column_schema.datatype);
+                    assert_eq!(SemanticType::Tag as i32, column_schema.semantic_type);
+
+                    for (j, row) in rows.iter().enumerate() {
+                        let v = row.values[i].value.as_ref().unwrap();
+                        match j {
+                            0 => assert_eq!("host1", extract_string_value(v)),
+                            1 => assert_eq!("host2", extract_string_value(v)),
+                            _ => panic!(),
+                        }
+                    }
+                }
+                "cpu" => {
+                    assert_eq!(ColumnDataType::Float64 as i32, column_schema.datatype);
+                    assert_eq!(SemanticType::Field as i32, column_schema.semantic_type);
+
+                    for (j, row) in rows.iter().enumerate() {
+                        let v = row.values[i].value.as_ref();
+                        match j {
+                            0 => assert_eq!(66.6f64, extract_f64_value(v.as_ref().unwrap())),
+                            1 => assert_eq!(None, v),
+                            _ => panic!(),
+                        }
+                    }
+                }
+                "memory" => {
+                    assert_eq!(ColumnDataType::Float64 as i32, column_schema.datatype);
+                    assert_eq!(SemanticType::Field as i32, column_schema.semantic_type);
+
+                    for (j, row) in rows.iter().enumerate() {
+                        let v = row.values[i].value.as_ref();
+                        match j {
+                            0 => assert_eq!(1024f64, extract_f64_value(v.as_ref().unwrap())),
+                            1 => assert_eq!(1027f64, extract_f64_value(v.as_ref().unwrap())),
+                            _ => panic!(),
+                        }
+                    }
+                }
+                "ts" => {
+                    assert_eq!(
+                        ColumnDataType::TimestampMillisecond as i32,
+                        column_schema.datatype
+                    );
+                    assert_eq!(SemanticType::Timestamp as i32, column_schema.semantic_type);
+
+                    for (j, row) in rows.iter().enumerate() {
+                        let v = row.values[i].value.as_ref();
+                        match j {
+                            0 => assert_eq!(
+                                1663840496100023100 / 1_000_000,
+                                extract_ts_millis_value(v.as_ref().unwrap())
+                            ),
+                            1 => assert_eq!(
+                                1663840496400340001 / 1_000_000,
+                                extract_ts_millis_value(v.as_ref().unwrap())
+                            ),
+                            _ => panic!(),
+                        }
+                    }
+                }
+                _ => panic!(),
+            }
+        }
+    }
+
+    fn assert_monitor2_rows(rows: &Option<Rows>) {
+        let rows = rows.as_ref().unwrap();
+        let schema = &rows.schema;
+        let rows = &rows.rows;
+        assert_eq!(4, schema.len());
+        assert_eq!(2, rows.len());
+
+        for (i, column_schema) in schema.iter().enumerate() {
+            match &column_schema.column_name[..] {
+                "host" => {
+                    assert_eq!(ColumnDataType::String as i32, column_schema.datatype);
+                    assert_eq!(SemanticType::Tag as i32, column_schema.semantic_type);
+
+                    for (j, row) in rows.iter().enumerate() {
+                        let v = row.values[i].value.as_ref().unwrap();
+                        match j {
+                            0 => assert_eq!("host3", extract_string_value(v)),
+                            1 => assert_eq!("host4", extract_string_value(v)),
+                            _ => panic!(),
+                        }
+                    }
+                }
+                "cpu" => {
+                    assert_eq!(ColumnDataType::Float64 as i32, column_schema.datatype);
+                    assert_eq!(SemanticType::Field as i32, column_schema.semantic_type);
+
+                    for (j, row) in rows.iter().enumerate() {
+                        let v = row.values[i].value.as_ref();
+                        match j {
+                            0 => assert_eq!(66.5f64, extract_f64_value(v.as_ref().unwrap())),
+                            1 => assert_eq!(66.3f64, extract_f64_value(v.as_ref().unwrap())),
+                            _ => panic!(),
+                        }
+                    }
+                }
+                "memory" => {
+                    assert_eq!(ColumnDataType::Float64 as i32, column_schema.datatype);
+                    assert_eq!(SemanticType::Field as i32, column_schema.semantic_type);
+
+                    for (j, row) in rows.iter().enumerate() {
+                        let v = row.values[i].value.as_ref();
+                        match j {
+                            0 => assert_eq!(None, v),
+                            1 => assert_eq!(1029f64, extract_f64_value(v.as_ref().unwrap())),
+                            _ => panic!(),
+                        }
+                    }
+                }
+                "ts" => {
+                    assert_eq!(
+                        ColumnDataType::TimestampMillisecond as i32,
+                        column_schema.datatype
+                    );
+                    assert_eq!(SemanticType::Timestamp as i32, column_schema.semantic_type);
+
+                    for (j, row) in rows.iter().enumerate() {
+                        let v = row.values[i].value.as_ref();
+                        match j {
+                            0 => assert_eq!(
+                                1663840496100023102 / 1_000_000,
+                                extract_ts_millis_value(v.as_ref().unwrap())
+                            ),
+                            1 => assert_eq!(
+                                1663840496400340003 / 1_000_000,
+                                extract_ts_millis_value(v.as_ref().unwrap())
+                            ),
+                            _ => panic!(),
+                        }
+                    }
+                }
+                _ => panic!(),
+            }
+        }
+    }
+
+    fn extract_string_value(value: &Value) -> &str {
+        match value {
+            Value::StringValue(v) => v,
+            _ => panic!(),
+        }
+    }
+
+    fn extract_f64_value(value: &Value) -> f64 {
+        match value {
+            Value::F64Value(v) => *v,
+            _ => panic!(),
+        }
+    }
+
+    fn extract_ts_millis_value(value: &Value) -> i64 {
+        match value {
+            Value::TsMillisecondValue(v) => *v,
+            _ => panic!(),
         }
     }
 }
