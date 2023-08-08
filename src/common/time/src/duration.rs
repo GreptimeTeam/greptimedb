@@ -89,8 +89,8 @@ impl Duration {
     }
 }
 
-// Convert i64 to Duration Type.
-// Default TimeUnit is Millisecond.
+/// Convert i64 to Duration Type.
+/// Default TimeUnit is Millisecond.
 impl From<i64> for Duration {
     fn from(v: i64) -> Self {
         Self {
@@ -100,10 +100,59 @@ impl From<i64> for Duration {
     }
 }
 
-// return i64 value of Duration.
+/// return i64 value of Duration.
 impl From<Duration> for i64 {
     fn from(d: Duration) -> Self {
         d.value
+    }
+}
+
+/// Convert from std::time::Duration to common_time::Duration Type.
+/// Because std::time::Duration consists of [u64+u32], it could be
+/// overflow when convert to common_time::Duration.
+/// If overflow, return the max value of common_time::Duration.
+impl From<std::time::Duration> for Duration {
+    fn from(d: std::time::Duration) -> Self {
+        const MAX_I64_U128: u128 = i64::MAX as u128;
+        let nanos = d.as_nanos();
+
+        // Convert as high-precision as possible
+        if nanos <= MAX_I64_U128 {
+            // Nanoseconds
+            return Duration::new_nanosecond(nanos as i64);
+        }
+
+        if nanos <= MAX_I64_U128 * 1000 {
+            // Microseconds
+            return Duration::new_microsecond((nanos / 1000) as i64);
+        }
+
+        if nanos <= MAX_I64_U128 * 1_000_000 {
+            // Milliseconds
+            return Duration::new_millisecond((nanos / 1_000_000) as i64);
+        }
+
+        // Seconds
+        let secs = d.as_secs();
+        if secs >= i64::MAX as u64 {
+            return Duration::new(i64::MAX, TimeUnit::Second);
+        }
+
+        Duration::new_second(secs as i64)
+    }
+}
+
+impl From<Duration> for std::time::Duration {
+    fn from(d: Duration) -> Self {
+        if d.value < 0 {
+            return std::time::Duration::new(0, 0);
+        }
+        match d.unit {
+            TimeUnit::Nanosecond => std::time::Duration::from_nanos(d.value as u64),
+            TimeUnit::Microsecond => std::time::Duration::from_micros(d.value as u64),
+            TimeUnit::Millisecond => std::time::Duration::from_millis(d.value as u64),
+            TimeUnit::Second => std::time::Duration::from_secs(d.value as u64),
+        }
     }
 }
 
@@ -119,7 +168,7 @@ impl PartialOrd for Duration {
     }
 }
 
-// Duration is ordable.
+/// Duration is ordable.
 impl Ord for Duration {
     fn cmp(&self, other: &Self) -> Ordering {
         // fast path: most comparisons use the same unit.
@@ -288,5 +337,57 @@ mod tests {
             json_value,
             serde_json::json!({"value": 1, "unit": "Millisecond"})
         );
+    }
+
+    #[test]
+    fn test_convert_with_std_duration() {
+        // normal test
+        let std_duration = std::time::Duration::new(0, 0);
+        let duration = Duration::from(std_duration);
+        assert_eq!(duration, Duration::new(0, TimeUnit::Nanosecond));
+
+        let std_duration = std::time::Duration::new(1, 0);
+        let duration = Duration::from(std_duration);
+        assert_eq!(duration, Duration::new(1_000_000_000, TimeUnit::Nanosecond));
+
+        let std_duration = std::time::Duration::from_nanos(i64::MAX as u64);
+        let duration = Duration::from(std_duration);
+        assert_eq!(duration, Duration::new(i64::MAX, TimeUnit::Nanosecond));
+
+        let std_duration = std::time::Duration::from_nanos(i64::MAX as u64 + 1);
+        let duration = Duration::from(std_duration);
+        assert_eq!(
+            duration,
+            Duration::new(i64::MAX / 1000, TimeUnit::Microsecond)
+        );
+
+        let std_duration = std::time::Duration::from_nanos(u64::MAX);
+        let duration = Duration::from(std_duration);
+        assert_eq!(
+            duration,
+            Duration::new(18446744073709551, TimeUnit::Microsecond)
+        );
+
+        let std_duration =
+            std::time::Duration::new(i64::MAX as u64 / 1_000, (i64::MAX % 1_000 * 1_000) as u32);
+        let duration = Duration::from(std_duration);
+        assert_eq!(
+            duration,
+            Duration::new(9223372036854775000, TimeUnit::Millisecond)
+        );
+
+        let std_duration = std::time::Duration::new(i64::MAX as u64, 0);
+        let duration = Duration::from(std_duration);
+        assert_eq!(duration, Duration::new(i64::MAX, TimeUnit::Second));
+
+        // overflow test
+        let std_duration = std::time::Duration::new(i64::MAX as u64, 1);
+        let duration = Duration::from(std_duration);
+        assert_eq!(duration, Duration::new(i64::MAX, TimeUnit::Second));
+
+        // convert back to std::time::Duration
+        let duration = Duration::new(0, TimeUnit::Nanosecond);
+        let std_duration = std::time::Duration::from(duration);
+        assert_eq!(std_duration, std::time::Duration::new(0, 0));
     }
 }
