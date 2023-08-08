@@ -194,19 +194,8 @@ impl RegionMetadata {
                     }
                 );
 
-                // Checks semantic type.
                 // Safety: Column with specific id must exist.
                 let column = self.column_by_id(*column_id).unwrap();
-                ensure!(
-                    column.semantic_type == SemanticType::Tag,
-                    InvalidMetaSnafu {
-                        reason: format!(
-                            "semantic type {:?} of column {} should be a tag",
-                            column.semantic_type, column.column_schema.name
-                        ),
-                    }
-                );
-
                 // Checks duplicate.
                 ensure!(
                     !pk_ids.contains(&column_id),
@@ -229,6 +218,17 @@ impl RegionMetadata {
                     }
                 );
 
+                // Checks semantic type.
+                ensure!(
+                    column.semantic_type == SemanticType::Tag,
+                    InvalidMetaSnafu {
+                        reason: format!(
+                            "semantic type of column {} should be Tag, not {:?}",
+                            column.column_schema.name, column.semantic_type
+                        ),
+                    }
+                );
+
                 pk_ids.insert(column_id);
             }
         }
@@ -243,7 +243,7 @@ impl RegionMetadata {
             num_tag == self.primary_key.len(),
             InvalidMetaSnafu {
                 reason: format!(
-                    "number of primary key columns: {} not equal to tag columns {}",
+                    "number of primary key columns {} not equal to tag columns {}",
                     self.primary_key.len(),
                     num_tag
                 ),
@@ -631,5 +631,62 @@ mod test {
         );
     }
 
-    // TODO(yingwen): Test semantic type.
+    #[test]
+    fn test_primary_key_semantic_type() {
+        let mut builder = create_builder();
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("a", ConcreteDataType::float64_datatype(), true),
+                semantic_type: SemanticType::Field,
+                column_id: 2,
+            })
+            .primary_key(vec![2]);
+        let err = builder.build().unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("semantic type of column a should be Tag, not Field"),
+            "unexpected err: {err}",
+        );
+    }
+
+    #[test]
+    fn test_primary_key_tag_num() {
+        let mut builder = create_builder();
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("a", ConcreteDataType::string_datatype(), true),
+                semantic_type: SemanticType::Tag,
+                column_id: 2,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("b", ConcreteDataType::string_datatype(), true),
+                semantic_type: SemanticType::Tag,
+                column_id: 3,
+            })
+            .primary_key(vec![2]);
+        let err = builder.build().unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("number of primary key columns 1 not equal to tag columns 2"),
+            "unexpected err: {err}",
+        );
+    }
 }
