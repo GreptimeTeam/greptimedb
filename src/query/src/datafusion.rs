@@ -109,9 +109,9 @@ impl DatafusionQueryEngine {
             }
         );
 
-        let default_catalog = query_ctx.current_catalog();
-        let default_schema = query_ctx.current_schema();
-        let table_name = dml.table_name.resolve(&default_catalog, &default_schema);
+        let default_catalog = &query_ctx.current_catalog().to_owned();
+        let default_schema = &query_ctx.current_schema().to_owned();
+        let table_name = dml.table_name.resolve(default_catalog, default_schema);
         let table = self.find_table(&table_name).await?;
 
         let output = self

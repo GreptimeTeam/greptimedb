@@ -48,7 +48,7 @@ impl SqlHandler {
         let schema = req.db_name;
         if self
             .catalog_manager
-            .schema_exist(&catalog, &schema)
+            .schema_exist(catalog, &schema)
             .await
             .context(CatalogSnafu)?
         {
@@ -60,7 +60,7 @@ impl SqlHandler {
         }
 
         let reg_req = RegisterSchemaRequest {
-            catalog,
+            catalog: catalog.to_owned(),
             schema: schema.clone(),
         };
         let _ = self

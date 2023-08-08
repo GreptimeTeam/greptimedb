@@ -99,7 +99,7 @@ pub async fn show_databases(
     query_ctx: QueryContextRef,
 ) -> Result<Output> {
     let mut databases = catalog_manager
-        .schema_names(&query_ctx.current_catalog())
+        .schema_names(query_ctx.current_catalog())
         .await
         .context(error::CatalogSnafu)?;
 
@@ -143,11 +143,11 @@ pub async fn show_tables(
     let schema = if let Some(database) = stmt.database {
         database
     } else {
-        query_ctx.current_schema()
+        query_ctx.current_schema().to_owned()
     };
     // TODO(sunng87): move this function into query_ctx
     let mut tables = catalog_manager
-        .table_names(&query_ctx.current_catalog(), &schema)
+        .table_names(query_ctx.current_catalog(), &schema)
         .await
         .context(error::CatalogSnafu)?;
 
