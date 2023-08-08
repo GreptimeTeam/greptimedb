@@ -333,11 +333,11 @@ jobs:
         if: ${{ needs.release-images-to-dockerhub.outputs.build-result == 'success' }}
         with:
           payload: |
-            {"text": "GreptimeDB ${{ NEXT_RELEASE_VERSION }} build successful"}
+            {"text": "GreptimeDB ${{ env.NEXT_RELEASE_VERSION }} build successful"}
 
       - name: Notifiy nightly build failed result
         uses: slackapi/slack-github-action@v1.23.0
         if: ${{ needs.release-images-to-dockerhub.outputs.build-result != 'success' }}
         with:
           payload: |
-            {"text": "GreptimeDB ${{ NEXT_RELEASE_VERSION }} build failed, please check 'https://github.com/GreptimeTeam/greptimedb/actions/workflows/${{ NEXT_RELEASE_VERSION }}-build.yml'"}
+            {"text": "GreptimeDB ${{ env.NEXT_RELEASE_VERSION }} build failed, please check 'https://github.com/GreptimeTeam/greptimedb/actions/workflows/${{ env.NEXT_RELEASE_VERSION }}-build.yml'"}
