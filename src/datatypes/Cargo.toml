@@ -12,10 +12,10 @@ test = []
 arrow-array.workspace = true
 arrow-schema.workspace = true
 arrow.workspace = true
-common-base = { path = "../common/base" }
-common-error = { path = "../common/error" }
-common-telemetry = { path = "../common/telemetry" }
-common-time = { path = "../common/time" }
+common-base = { workspace = true }
+common-error = { workspace = true }
+common-telemetry = { workspace = true }
+common-time = { workspace = true }
 datafusion-common.workspace = true
 enum_dispatch = "0.3"
 num = "0.4"

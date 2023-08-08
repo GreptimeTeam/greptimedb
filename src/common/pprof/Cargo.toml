@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-common-error = { path = "../error" }
+common-error = { workspace = true }
 pprof = { version = "0.11", features = [
     "flamegraph",
     "prost-codec",
