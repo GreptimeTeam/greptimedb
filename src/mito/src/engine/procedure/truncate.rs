@@ -54,7 +54,9 @@ impl<S: StorageEngine> Procedure for TruncateMitoTable<S> {
 
     fn lock_key(&self) -> LockKey {
         let table_ref = self.data.table_ref();
-        let Some(table) = &self.table else { return LockKey::default() };
+        let Some(table) = &self.table else {
+            return LockKey::default();
+        };
         let info = table.table_info();
         let keys = info
             .meta

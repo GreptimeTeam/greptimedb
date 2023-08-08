@@ -152,25 +152,26 @@ impl TruncateTableProcedure {
 
         // Query subprocedure state.
         let Some(sub_state) = ctx.provider.procedure_state(sub_id).await? else {
-                logging::info!("On engine truncate table {}, subprocedure not found, sub_id: {}",
-                    self.data.request.table_name,
-                    sub_id,
-                );
-                // If the subprocedure is not found, we create a new subprocedure with the same id.
-                let engine_ctx = EngineContext::default();
+            logging::info!(
+                "On engine truncate table {}, subprocedure not found, sub_id: {}",
+                self.data.request.table_name,
+                sub_id,
+            );
+            // If the subprocedure is not found, we create a new subprocedure with the same id.
+            let engine_ctx = EngineContext::default();
 
-                let procedure = self
-                    .engine_procedure
-                    .truncate_table_procedure(&engine_ctx, self.data.request.clone())
-                    .map_err(Error::from_error_ext)?;
+            let procedure = self
+                .engine_procedure
+                .truncate_table_procedure(&engine_ctx, self.data.request.clone())
+                .map_err(Error::from_error_ext)?;
 
-                return Ok(Status::Suspended {
-                    subprocedures: vec![ProcedureWithId {
-                        id: sub_id,
-                        procedure,
-                    }],
-                    persist: true,
-                })
+            return Ok(Status::Suspended {
+                subprocedures: vec![ProcedureWithId {
+                    id: sub_id,
+                    procedure,
+                }],
+                persist: true,
+            });
         };
 
         match sub_state {
