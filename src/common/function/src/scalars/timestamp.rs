@@ -22,6 +22,6 @@ pub(crate) struct TimestampFunction;
 
 impl TimestampFunction {
     pub fn register(registry: &FunctionRegistry) {
-        registry.register(Arc::new(ToUnixtimeFunction::default()));
+        registry.register(Arc::new(ToUnixtimeFunction));
     }
 }

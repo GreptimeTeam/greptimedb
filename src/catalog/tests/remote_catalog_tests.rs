@@ -313,17 +313,11 @@ mod tests {
             .await
             .is_ok());
         assert_eq!(
-            HashSet::<String>::from_iter(
-                vec![DEFAULT_CATALOG_NAME.to_string(), catalog_name.clone()].into_iter()
-            ),
-            HashSet::from_iter(
-                components
-                    .catalog_manager
-                    .catalog_names()
-                    .await
-                    .unwrap()
-                    .into_iter()
-            )
+            HashSet::<String>::from_iter(vec![
+                DEFAULT_CATALOG_NAME.to_string(),
+                catalog_name.clone()
+            ]),
+            HashSet::from_iter(components.catalog_manager.catalog_names().await.unwrap())
         );
 
         let table_to_register = components

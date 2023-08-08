@@ -211,19 +211,19 @@ impl MetaSrvBuilder {
                 };
 
                 let group = HeartbeatHandlerGroup::new(pushers);
-                group.add_handler(ResponseHeaderHandler::default()).await;
+                group.add_handler(ResponseHeaderHandler).await;
                 // `KeepLeaseHandler` should preferably be in front of `CheckLeaderHandler`,
                 // because even if the current meta-server node is no longer the leader it can
                 // still help the datanode to keep lease.
-                group.add_handler(KeepLeaseHandler::default()).await;
-                group.add_handler(CheckLeaderHandler::default()).await;
-                group.add_handler(OnLeaderStartHandler::default()).await;
-                group.add_handler(CollectStatsHandler::default()).await;
-                group.add_handler(MailboxHandler::default()).await;
+                group.add_handler(KeepLeaseHandler).await;
+                group.add_handler(CheckLeaderHandler).await;
+                group.add_handler(OnLeaderStartHandler).await;
+                group.add_handler(CollectStatsHandler).await;
+                group.add_handler(MailboxHandler).await;
                 if let Some(region_failover_handler) = region_failover_handler {
                     group.add_handler(region_failover_handler).await;
                 }
-                group.add_handler(RegionLeaseHandler::default()).await;
+                group.add_handler(RegionLeaseHandler).await;
                 group.add_handler(PersistStatsHandler::default()).await;
                 if let Some((publish, _)) = pubsub.as_ref() {
                     group

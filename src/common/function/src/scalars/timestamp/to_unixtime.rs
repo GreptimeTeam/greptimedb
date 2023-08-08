@@ -162,7 +162,7 @@ mod tests {
 
     #[test]
     fn test_string_to_unixtime() {
-        let f = ToUnixtimeFunction::default();
+        let f = ToUnixtimeFunction;
         assert_eq!("to_unixtime", f.name());
         assert_eq!(
             ConcreteDataType::int64_datatype(),
@@ -190,7 +190,7 @@ mod tests {
             Some("2022-06-30T23:59:60Z"),
             Some("invalid_time_stamp"),
         ];
-        let results = vec![Some(1677652502), None, Some(1656633600), None];
+        let results = [Some(1677652502), None, Some(1656633600), None];
         let args: Vec<VectorRef> = vec![Arc::new(StringVector::from(times.clone()))];
         let vector = f.eval(FunctionContext::default(), &args).unwrap();
         assert_eq!(4, vector.len());
@@ -211,7 +211,7 @@ mod tests {
 
     #[test]
     fn test_int_to_unixtime() {
-        let f = ToUnixtimeFunction::default();
+        let f = ToUnixtimeFunction;
         assert_eq!("to_unixtime", f.name());
         assert_eq!(
             ConcreteDataType::int64_datatype(),
@@ -234,7 +234,7 @@ mod tests {
         ));
 
         let times = vec![Some(3_i64), None, Some(5_i64), None];
-        let results = vec![Some(3), None, Some(5), None];
+        let results = [Some(3), None, Some(5), None];
         let args: Vec<VectorRef> = vec![Arc::new(Int64Vector::from(times.clone()))];
         let vector = f.eval(FunctionContext::default(), &args).unwrap();
         assert_eq!(4, vector.len());
@@ -255,7 +255,7 @@ mod tests {
 
     #[test]
     fn test_timestamp_to_unixtime() {
-        let f = ToUnixtimeFunction::default();
+        let f = ToUnixtimeFunction;
         assert_eq!("to_unixtime", f.name());
         assert_eq!(
             ConcreteDataType::int64_datatype(),
@@ -283,7 +283,7 @@ mod tests {
             Some(TimestampSecond::new(42)),
             None,
         ];
-        let results = vec![Some(123), None, Some(42), None];
+        let results = [Some(123), None, Some(42), None];
         let ts_vector: TimestampSecondVector = build_vector_from_slice(&times);
         let args: Vec<VectorRef> = vec![Arc::new(ts_vector)];
         let vector = f.eval(FunctionContext::default(), &args).unwrap();

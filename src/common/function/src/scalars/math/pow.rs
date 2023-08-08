@@ -85,7 +85,7 @@ mod tests {
     use super::*;
     #[test]
     fn test_pow_function() {
-        let pow = PowFunction::default();
+        let pow = PowFunction;
 
         assert_eq!("pow", pow.name());
         assert_eq!(

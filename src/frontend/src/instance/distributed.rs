@@ -300,7 +300,9 @@ impl DistInstance {
             .iter()
             .filter(|route| {
                 route.region_routes.iter().any(|r| {
-                    let Some(n) = region_number else { return true; };
+                    let Some(n) = region_number else {
+                        return true;
+                    };
                     n == r.region.id.region_number()
                 })
             })

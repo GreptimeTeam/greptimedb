@@ -78,7 +78,7 @@ async fn setup_table_with_column_default_constraint() -> (TempDir, String, Table
         EngineConfig::default(),
         EngineImpl::new(
             StorageEngineConfig::default(),
-            Arc::new(NoopLogStore::default()),
+            Arc::new(NoopLogStore),
             object_store.clone(),
             compaction_scheduler,
         )

@@ -67,7 +67,9 @@ fn negotiate_response_type(accepted_response_types: &[i32]) -> ServerResult<Resp
 }
 
 async fn to_query_result(table_name: &str, output: Output) -> ServerResult<QueryResult> {
-    let Output::Stream(stream) = output else { unreachable!() };
+    let Output::Stream(stream) = output else {
+        unreachable!()
+    };
     let recordbatches = RecordBatches::try_collect(stream)
         .await
         .context(error::CollectRecordbatchSnafu)?;

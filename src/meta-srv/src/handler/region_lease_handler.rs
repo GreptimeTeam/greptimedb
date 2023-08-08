@@ -43,7 +43,9 @@ impl HeartbeatHandler for RegionLeaseHandler {
         ctx: &mut Context,
         acc: &mut HeartbeatAccumulator,
     ) -> Result<()> {
-        let Some(stat) = acc.stat.as_ref() else { return Ok(()) };
+        let Some(stat) = acc.stat.as_ref() else {
+            return Ok(());
+        };
 
         let mut table_region_leases = HashMap::new();
         stat.region_stats.iter().for_each(|region_stat| {
@@ -133,7 +135,6 @@ mod test {
         let builder = MetaSrvBuilder::new();
         let metasrv = builder.build().await.unwrap();
         let ctx = &mut metasrv.new_ctx();
-        let handler = RegionLeaseHandler::default();
 
         let acc = &mut HeartbeatAccumulator::default();
         let new_region_stat = |region_number: RegionNumber| -> RegionStat {
@@ -183,7 +184,7 @@ mod test {
             .await
             .unwrap();
 
-        handler.handle(&req, ctx, acc).await.unwrap();
+        RegionLeaseHandler.handle(&req, ctx, acc).await.unwrap();
 
         assert_eq!(acc.region_leases.len(), 1);
         let lease = acc.region_leases.remove(0);

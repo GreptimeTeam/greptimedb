@@ -202,9 +202,8 @@ impl<S: StorageEngine> AlterMitoTable<S> {
     /// Alter regions.
     async fn alter_regions(&mut self) -> Result<()> {
         let Some(alter_op) = &self.alter_op else {
-                // Don't need to alter the region.
-                return Ok(());
-            };
+            return Ok(());
+        };
 
         let table_name = &self.data.request.table_name;
         let table_version = self.data.table_version;

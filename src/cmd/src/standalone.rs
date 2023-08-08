@@ -423,7 +423,10 @@ mod tests {
             ..Default::default()
         };
 
-        let Options::Standalone(options) = cmd.load_options(TopLevelOptions::default()).unwrap() else {unreachable!()};
+        let Options::Standalone(options) = cmd.load_options(TopLevelOptions::default()).unwrap()
+        else {
+            unreachable!()
+        };
         let fe_opts = options.fe_opts;
         let dn_opts = options.dn_opts;
         let logging_opts = options.logging;
@@ -484,7 +487,8 @@ mod tests {
                 log_dir: Some("/tmp/greptimedb/test/logs".to_string()),
                 log_level: Some("debug".to_string()),
             })
-            .unwrap() else {
+            .unwrap()
+        else {
             unreachable!()
         };
 
@@ -508,10 +512,10 @@ mod tests {
 
         let env_prefix = "STANDALONE_UT";
         temp_env::with_vars(
-            vec![
+            [
                 (
                     // logging.dir = /other/log/dir
-                    vec![
+                    [
                         env_prefix.to_string(),
                         "logging".to_uppercase(),
                         "dir".to_uppercase(),
@@ -521,7 +525,7 @@ mod tests {
                 ),
                 (
                     // logging.level = info
-                    vec![
+                    [
                         env_prefix.to_string(),
                         "logging".to_uppercase(),
                         "level".to_uppercase(),
@@ -531,7 +535,7 @@ mod tests {
                 ),
                 (
                     // http_options.addr = 127.0.0.1:24000
-                    vec![
+                    [
                         env_prefix.to_string(),
                         "http_options".to_uppercase(),
                         "addr".to_uppercase(),
@@ -552,8 +556,10 @@ mod tests {
                     log_dir: None,
                     log_level: None,
                 };
-                let Options::Standalone(opts) =
-                    command.load_options(top_level_opts).unwrap() else {unreachable!()};
+                let Options::Standalone(opts) = command.load_options(top_level_opts).unwrap()
+                else {
+                    unreachable!()
+                };
 
                 // Should be read from env, env > default values.
                 assert_eq!(opts.logging.dir, "/other/log/dir");

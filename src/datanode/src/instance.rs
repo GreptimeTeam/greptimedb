@@ -131,7 +131,7 @@ impl Instance {
                         state: "region_alive_keepers is not provided when building heartbeat task",
                     })?;
                 let handlers_executor = HandlerGroupExecutor::new(vec![
-                    Arc::new(ParseMailboxMessageHandler::default()),
+                    Arc::new(ParseMailboxMessageHandler),
                     Arc::new(OpenRegionHandler::new(
                         catalog_manager.clone(),
                         engine_manager.clone(),

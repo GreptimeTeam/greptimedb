@@ -14,8 +14,8 @@
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 use std::result::Result as StdResult;
-use std::sync::Arc;
 
 use common_recordbatch::RecordBatch;
 use common_telemetry::{info, timer};
@@ -37,7 +37,7 @@ use crate::python::rspython::dataframe_impl::data_frame::set_dataframe_in_scope;
 use crate::python::rspython::dataframe_impl::init_data_frame;
 use crate::python::rspython::utils::{format_py_error, is_instance, py_obj_to_vec};
 
-thread_local!(static INTERPRETER: RefCell<Option<Arc<Interpreter>>> = RefCell::new(None));
+thread_local!(static INTERPRETER: RefCell<Option<Rc<Interpreter>>> = RefCell::new(None));
 
 /// Using `RustPython` to run a parsed `Coprocessor` struct as input to execute python code
 pub(crate) fn rspy_exec_parsed(
@@ -48,7 +48,7 @@ pub(crate) fn rspy_exec_parsed(
     let _t = timer!(metric::METRIC_RSPY_EXEC_TOTAL_ELAPSED);
     // 3. get args from `rb`, and cast them into PyVector
     let args: Vec<PyVector> = if let Some(rb) = rb {
-        let arg_names = copr.deco_args.arg_names.clone().unwrap_or(vec![]);
+        let arg_names = copr.deco_args.arg_names.clone().unwrap_or_default();
         let args = select_from_rb(rb, &arg_names)?;
         check_args_anno_real_type(&arg_names, &args, copr, rb)?;
         args
@@ -99,7 +99,7 @@ pub(crate) fn exec_with_cached_vm(
     rb: &Option<RecordBatch>,
     args: Vec<PyVector>,
     params: &HashMap<String, String>,
-    vm: &Arc<Interpreter>,
+    vm: &Rc<Interpreter>,
 ) -> Result<RecordBatch> {
     vm.enter(|vm| -> Result<RecordBatch> {
         let _t = timer!(metric::METRIC_RSPY_EXEC_ELAPSED);
@@ -188,7 +188,7 @@ fn try_into_columns(
 }
 
 /// init interpreter with type PyVector and Module: greptime
-pub(crate) fn init_interpreter() -> Arc<Interpreter> {
+pub(crate) fn init_interpreter() -> Rc<Interpreter> {
     let _t = timer!(metric::METRIC_RSPY_INIT_ELAPSED);
     INTERPRETER.with(|i| {
         i.borrow_mut()
@@ -202,7 +202,7 @@ pub(crate) fn init_interpreter() -> Arc<Interpreter> {
                 let mut settings = vm::Settings::default();
                 // disable SIG_INT handler so our own binary can take ctrl_c handler
                 settings.no_sig_int = true;
-                let interpreter = Arc::new(vm::Interpreter::with_init(settings, |vm| {
+                let interpreter = Rc::new(vm::Interpreter::with_init(settings, |vm| {
                     // not using full stdlib to prevent security issue, instead filter out a few simple util module
                     vm.add_native_modules(
                         rustpython_stdlib::get_module_inits()

@@ -98,7 +98,8 @@ impl ActivateRegion {
                     return UnexpectedInstructionReplySnafu {
                         mailbox_message: msg.to_string(),
                         reason: "expect open region reply",
-                    }.fail();
+                    }
+                    .fail();
                 };
                 if result {
                     Ok(Box::new(UpdateRegionMetadata::new(self.candidate)))
@@ -114,7 +115,7 @@ impl ActivateRegion {
                     RetryLaterSnafu { reason }.fail()
                 }
             }
-            Err(e) if matches!(e, Error::MailboxTimeout { .. }) => {
+            Err(Error::MailboxTimeout { .. }) => {
                 let reason = format!(
                     "Mailbox received timeout for activate failed region {failed_region:?} on Datanode {:?}", 
                     self.candidate,

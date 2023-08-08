@@ -191,14 +191,17 @@ mod tests {
         let result0 = ParserContext::create_with_dialect(sql0, &GreptimeDbDialect {}).unwrap();
         let result1 = ParserContext::create_with_dialect(sql1, &GreptimeDbDialect {}).unwrap();
 
-        for mut result in vec![result0, result1] {
+        for mut result in [result0, result1] {
             assert_eq!(1, result.len());
 
             let statement = result.remove(0);
             assert_matches!(statement, Statement::Copy { .. });
             match statement {
                 Copy(copy) => {
-                    let crate::statements::copy::Copy::CopyTable(CopyTable::To(copy_table)) = copy else { unreachable!() };
+                    let crate::statements::copy::Copy::CopyTable(CopyTable::To(copy_table)) = copy
+                    else {
+                        unreachable!()
+                    };
                     let (catalog, schema, table) =
                         if let [catalog, schema, table] = &copy_table.table_name.0[..] {
                             (
@@ -360,7 +363,9 @@ mod tests {
             .pop()
             .unwrap();
 
-        let Statement::Copy(crate::statements::copy::Copy::CopyDatabase(stmt)) = stmt else { unreachable!() };
+        let Copy(crate::statements::copy::Copy::CopyDatabase(stmt)) = stmt else {
+            unreachable!()
+        };
         assert_eq!(
             ObjectName(vec![Ident::new("catalog0"), Ident::new("schema0")]),
             stmt.database_name

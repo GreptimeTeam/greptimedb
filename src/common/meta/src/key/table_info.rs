@@ -81,7 +81,7 @@ impl TableInfoManager {
             let Some(curr) = curr else {
                 return UnexpectedSnafu {
                     err_msg: format!("compare_and_put expect None but failed with current value None, table_id: {table_id}, table_info: {table_info:?}"),
-                }.fail()
+                }.fail();
             };
             ensure!(
                 &curr.table_info == table_info,

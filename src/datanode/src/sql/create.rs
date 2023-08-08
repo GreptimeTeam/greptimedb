@@ -474,7 +474,9 @@ mod tests {
                             TIME INDEX (ts),
                             PRIMARY KEY(host)
                         ) engine=mito with(regions=1);"#;
-        let Ok(QueryStatement::Sql(stmt)) = QueryLanguageParser::parse_sql(sql) else { unreachable!() };
+        let Ok(QueryStatement::Sql(stmt)) = QueryLanguageParser::parse_sql(sql) else {
+            unreachable!()
+        };
         let output = instance
             .inner()
             .execute_sql(stmt, QueryContext::arc())
@@ -491,7 +493,9 @@ mod tests {
                             TIME INDEX (ts),
                             PRIMARY KEY(host)
                         ) engine=mito with(regions=1);"#;
-        let Ok(QueryStatement::Sql(stmt)) = QueryLanguageParser::parse_sql(sql) else { unreachable!() };
+        let Ok(QueryStatement::Sql(stmt)) = QueryLanguageParser::parse_sql(sql) else {
+            unreachable!()
+        };
         let output = instance
             .inner()
             .execute_sql(stmt, QueryContext::arc())

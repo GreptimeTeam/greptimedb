@@ -15,7 +15,7 @@ api = { path = "../api" }
 arrow-flight.workspace = true
 async-trait = "0.1"
 axum = { version = "0.6", features = ["headers"] }
-axum-macros = "0.3"
+axum-macros = "0.3.8"
 base64 = "0.13"
 bytes = "1.2"
 catalog = { path = "../catalog" }
@@ -102,7 +102,6 @@ rand.workspace = true
 rustls = { version = "0.21", features = ["dangerous_configuration"] }
 script = { path = "../script", features = ["python"] }
 serde_json = "1.0"
-session = { path = "../session", features = ["testing"] }
 table = { path = "../table" }
 tokio-postgres = "0.7"
 tokio-postgres-rustls = "0.10"

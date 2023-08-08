@@ -407,18 +407,26 @@ impl CatalogManager for FrontendCatalogManager {
         }
 
         let key = TableNameKey::new(catalog, schema, table_name);
-        let Some(table_name_value) = self.table_metadata_manager
+        let Some(table_name_value) = self
+            .table_metadata_manager
             .table_name_manager()
             .get(key)
             .await
-            .context(TableMetadataManagerSnafu)? else { return Ok(None) };
+            .context(TableMetadataManagerSnafu)?
+        else {
+            return Ok(None);
+        };
         let table_id = table_name_value.table_id();
 
-        let Some(table_info_value) = self.table_metadata_manager
+        let Some(table_info_value) = self
+            .table_metadata_manager
             .table_info_manager()
             .get(table_id)
             .await
-            .context(TableMetadataManagerSnafu)? else { return Ok(None) };
+            .context(TableMetadataManagerSnafu)?
+        else {
+            return Ok(None);
+        };
         let table_info = Arc::new(
             table_info_value
                 .table_info

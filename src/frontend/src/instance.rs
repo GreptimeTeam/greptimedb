@@ -193,7 +193,7 @@ impl Instance {
         plugins.insert::<StatementExecutorRef>(statement_executor.clone());
 
         let handlers_executor = HandlerGroupExecutor::new(vec![
-            Arc::new(ParseMailboxMessageHandler::default()),
+            Arc::new(ParseMailboxMessageHandler),
             Arc::new(InvalidateTableCacheHandler::new(
                 meta_backend,
                 partition_manager,

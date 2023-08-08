@@ -44,7 +44,9 @@ impl HeartbeatResponseHandler for InvalidateTableCacheHandler {
 
     async fn handle(&self, ctx: &mut HeartbeatResponseHandlerContext) -> MetaResult<HandleControl> {
         // TODO(weny): considers introducing a macro
-        let Some((meta, Instruction::InvalidateTableCache(table_ident))) = ctx.incoming_message.take() else {
+        let Some((meta, Instruction::InvalidateTableCache(table_ident))) =
+            ctx.incoming_message.take()
+        else {
             unreachable!("InvalidateTableCacheHandler: should be guarded by 'is_acceptable'");
         };
 

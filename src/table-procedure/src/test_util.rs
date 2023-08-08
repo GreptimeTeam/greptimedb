@@ -59,7 +59,7 @@ impl TestEnv {
         let compaction_scheduler = Arc::new(NoopCompactionScheduler::default());
         let storage_engine = EngineImpl::new(
             StorageEngineConfig::default(),
-            Arc::new(NoopLogStore::default()),
+            Arc::new(NoopLogStore),
             object_store.clone(),
             compaction_scheduler,
         )

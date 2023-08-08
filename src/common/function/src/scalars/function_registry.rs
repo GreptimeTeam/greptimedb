@@ -89,7 +89,7 @@ mod tests {
     #[test]
     fn test_function_registry() {
         let registry = FunctionRegistry::default();
-        let func = Arc::new(TestAndFunction::default());
+        let func = Arc::new(TestAndFunction);
 
         assert!(registry.get_function("test_and").is_none());
         assert!(registry.functions().is_empty());

@@ -208,7 +208,9 @@ impl LevelMeta {
         self.files
             .iter()
             .filter_map(|(_, v)| {
-                let Some((_, end)) = v.time_range() else { return None; };
+                let Some((_, end)) = v.time_range() else {
+                    return None;
+                };
                 if end < expire_time {
                     Some(v.clone())
                 } else {

@@ -422,9 +422,13 @@ impl<S: StorageEngine> MitoEngineInner<S> {
         let table_dir = table_dir(catalog_name, schema_name, table_id);
 
         let Some((manifest, table_info)) = self
-                            .recover_table_manifest_and_info(table_name, &table_dir)
-                            .await.map_err(BoxedError::new)
-                            .context(table_error::TableOperationSnafu)? else { return Ok(None) };
+            .recover_table_manifest_and_info(table_name, &table_dir)
+            .await
+            .map_err(BoxedError::new)
+            .context(table_error::TableOperationSnafu)?
+        else {
+            return Ok(None);
+        };
 
         let compaction_strategy = CompactionStrategy::from(&table_info.meta.options.extra_options);
         let opts = OpenOptions {
@@ -628,9 +632,12 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             self.object_store.clone(),
             self.compress_type,
         );
-        let  Some(table_info) =
+        let Some(table_info) =
             MitoTable::<<S as StorageEngine>::Region>::recover_table_info(table_name, &manifest)
-                .await? else { return Ok(None) };
+                .await?
+        else {
+            return Ok(None);
+        };
 
         Ok(Some((manifest, table_info)))
     }

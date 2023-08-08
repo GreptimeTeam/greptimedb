@@ -243,8 +243,10 @@ mod tests {
             ..Default::default()
         };
 
-        let Options::Datanode(options) =
-            cmd.load_options(TopLevelOptions::default()).unwrap() else { unreachable!() };
+        let Options::Datanode(options) = cmd.load_options(TopLevelOptions::default()).unwrap()
+        else {
+            unreachable!()
+        };
 
         assert_eq!("127.0.0.1:3001".to_string(), options.rpc_addr);
         assert_eq!(Some(42), options.node_id);
@@ -397,10 +399,10 @@ mod tests {
 
         let env_prefix = "DATANODE_UT";
         temp_env::with_vars(
-            vec![
+            [
                 (
                     // storage.manifest.gc_duration = 9s
-                    vec![
+                    [
                         env_prefix.to_string(),
                         "storage".to_uppercase(),
                         "manifest".to_uppercase(),
@@ -411,7 +413,7 @@ mod tests {
                 ),
                 (
                     // storage.compaction.max_purge_tasks = 99
-                    vec![
+                    [
                         env_prefix.to_string(),
                         "storage".to_uppercase(),
                         "compaction".to_uppercase(),
@@ -422,7 +424,7 @@ mod tests {
                 ),
                 (
                     // meta_client_options.metasrv_addrs = 127.0.0.1:3001,127.0.0.1:3002,127.0.0.1:3003
-                    vec![
+                    [
                         env_prefix.to_string(),
                         "meta_client_options".to_uppercase(),
                         "metasrv_addrs".to_uppercase(),
@@ -440,7 +442,10 @@ mod tests {
                 };
 
                 let Options::Datanode(opts) =
-                    command.load_options(TopLevelOptions::default()).unwrap() else {unreachable!()};
+                    command.load_options(TopLevelOptions::default()).unwrap()
+                else {
+                    unreachable!()
+                };
 
                 // Should be read from env, env > default values.
                 assert_eq!(
