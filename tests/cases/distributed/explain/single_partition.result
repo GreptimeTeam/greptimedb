@@ -15,7 +15,6 @@ EXPLAIN SELECT COUNT(*) FROM single_partition;
 | logical_plan_| Aggregate: groupBy=[[]], aggr=[[COUNT(UInt8(1))]]_|
 |_|_Projection:_|
 |_|_MergeScan [is_placeholder=false]_|
-|_|_TableScan: single_partition projection=[i, j, k]_|
 | physical_plan | AggregateExec: mode=Final, gby=[], aggr=[COUNT(UInt8(1))]_|
 |_|_CoalescePartitionsExec_|
 |_|_AggregateExec: mode=Partial, gby=[], aggr=[COUNT(UInt8(1))]_|
@@ -38,7 +37,6 @@ EXPLAIN SELECT SUM(i) FROM single_partition;
 | logical_plan_| Aggregate: groupBy=[[]], aggr=[[SUM(single_partition.i)]]_|
 |_|_Projection: single_partition.i_|
 |_|_MergeScan [is_placeholder=false]_|
-|_|_TableScan: single_partition projection=[i, j, k]_|
 | physical_plan | AggregateExec: mode=Final, gby=[], aggr=[SUM(single_partition.i)]_|
 |_|_CoalescePartitionsExec_|
 |_|_AggregateExec: mode=Partial, gby=[], aggr=[SUM(single_partition.i)]_|
@@ -60,7 +58,6 @@ EXPLAIN SELECT * FROM single_partition ORDER BY i DESC;
 +-+-+
 | logical_plan_| Sort: single_partition.i DESC NULLS FIRST_|
 |_|_MergeScan [is_placeholder=false]_|
-|_|_TableScan: single_partition projection=[i, j, k] |
 | physical_plan | SortExec: expr=[i@0 DESC]_|
 |_|_MergeScanExec: peers=[REDACTED
 |_|_|

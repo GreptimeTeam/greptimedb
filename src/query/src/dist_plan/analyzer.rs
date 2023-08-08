@@ -42,7 +42,7 @@ impl AnalyzerRule for DistPlannerAnalyzer {
         _config: &ConfigOptions,
     ) -> datafusion_common::Result<LogicalPlan> {
         // (1) add merge scan
-        let plan = plan.transform(&Self::add_merge_scan)?;
+        // let plan = plan.transform(&Self::add_merge_scan)?;
 
         // (2) transform up merge scan
         let mut visitor = CommutativeVisitor::new();
@@ -59,6 +59,7 @@ impl AnalyzerRule for DistPlannerAnalyzer {
 
 impl DistPlannerAnalyzer {
     /// Add [MergeScanLogicalPlan] before the table scan
+    #[allow(dead_code)]
     fn add_merge_scan(plan: LogicalPlan) -> datafusion_common::Result<Transformed<LogicalPlan>> {
         Ok(match plan {
             LogicalPlan::TableScan(table_scan) => {
