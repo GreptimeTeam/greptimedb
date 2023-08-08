@@ -67,6 +67,9 @@ impl KeyValues {
 /// Key value view of a row.
 ///
 /// A key value view divides primary key columns and field (value) columns.
+/// Primary key columns have the same order as region's primary key. Field
+/// columns are ordered by their position in the region schema (The same order
+/// as users defined while creating the region).
 #[derive(Debug)]
 pub struct KeyValue<'a> {
     row: &'a Row,
