@@ -56,6 +56,12 @@ impl KeyValues {
             }
         })
     }
+
+    /// Returns number of rows.
+    pub fn num_rows(&self) -> usize {
+        // Safety: rows is not None.
+        self.mutation.rows.as_ref().unwrap().rows.len()
+    }
 }
 
 /// Key value view of a row.
@@ -82,6 +88,23 @@ impl<'a> KeyValue<'a> {
         self.helper.indices[self.helper.num_primary_key_column + 1..]
             .iter()
             .map(|idx| &self.row.values[*idx])
+    }
+
+    /// Get timestamp.
+    pub fn timestamp(&self) -> Value {
+        // Timestamp is primitive, we clone it.
+        let index = self.helper.indices[self.helper.num_primary_key_column];
+        self.row.values[index].clone()
+    }
+
+    /// Get number of primary key columns.
+    pub fn num_primary_keys(&self) -> usize {
+        self.helper.num_primary_key_column
+    }
+
+    /// Get number of field columns.
+    pub fn num_fields(&self) -> usize {
+        self.row.values.len() - self.helper.num_primary_key_column - 1
     }
 
     /// Get sequence.
@@ -159,7 +182,6 @@ impl ReadRowHelper {
     }
 }
 
-// TODO(yingwen): Test key values.
 #[cfg(test)]
 mod tests {
     use datatypes::prelude::ConcreteDataType;
@@ -172,6 +194,7 @@ mod tests {
     use crate::metadata::{ColumnMetadata, RegionMetadataBuilder};
 
     const TS_NAME: &str = "ts";
+    const START_SEQ: SequenceNumber = 100;
 
     /// Creates a region: `ts, k0, k1, ..., v0, v1, ...`
     fn new_region_metadata(num_tag: usize, num_field: usize) -> RegionMetadata {
@@ -225,9 +248,7 @@ mod tests {
             // but it's acceptable for tests.
             let values: Vec<_> = (0..column_names.len())
                 .into_iter()
-                .map(|idx| Value {
-                    value: Some(value::Value::I64Value(idx as i64)),
-                })
+                .map(|idx| i64_value(idx as i64))
                 .collect();
             rows.push(Row { values });
         }
@@ -262,8 +283,35 @@ mod tests {
         let rows = new_rows(column_names, num_rows);
         Mutation {
             op_type: OpType::Put as i32,
-            sequence: 100,
+            sequence: START_SEQ,
             rows: Some(rows),
+        }
+    }
+
+    fn i64_value(data: i64) -> Value {
+        Value {
+            value: Some(value::Value::I64Value(data)),
+        }
+    }
+
+    fn check_key_values(kvs: &KeyValues, num_rows: usize, keys: &[i64], ts: i64, values: &[i64]) {
+        assert_eq!(num_rows, kvs.num_rows());
+        let mut expect_seq = START_SEQ;
+        let expect_ts = i64_value(ts);
+        for kv in kvs.iter() {
+            assert_eq!(expect_seq, kv.sequence());
+            expect_seq += 1;
+            assert_eq!(OpType::Put, kv.op_type);
+            assert_eq!(keys.len(), kv.num_primary_keys());
+            assert_eq!(values.len(), kv.num_fields());
+
+            assert_eq!(expect_ts, kv.timestamp());
+            let expect_keys: Vec<_> = keys.iter().map(|k| i64_value(*k)).collect();
+            let actual_keys: Vec<_> = kv.primary_keys().cloned().collect();
+            assert_eq!(expect_keys, actual_keys);
+            let expect_values: Vec<_> = values.iter().map(|v| i64_value(*v)).collect();
+            let actual_values: Vec<_> = kv.fields().cloned().collect();
+            assert_eq!(expect_values, actual_values);
         }
     }
 
@@ -275,7 +323,55 @@ mod tests {
             sequence: 100,
             rows: None,
         };
-        let key_values = KeyValues::new(&meta, mutation);
-        assert!(key_values.is_none());
+        let kvs = KeyValues::new(&meta, mutation);
+        assert!(kvs.is_none());
+    }
+
+    #[test]
+    fn test_ts_only() {
+        let meta = new_region_metadata(0, 0);
+        let mutation = new_mutation(&["ts"], 2);
+        let kvs = KeyValues::new(&meta, mutation).unwrap();
+        check_key_values(&kvs, 2, &[], 0, &[]);
+    }
+
+    #[test]
+    fn test_no_field() {
+        let meta = new_region_metadata(2, 0);
+        // The value of each row:
+        // k1=0, ts=1, k0=2,
+        let mutation = new_mutation(&["k1", "ts", "k0"], 3);
+        let kvs = KeyValues::new(&meta, mutation).unwrap();
+        // KeyValues
+        // keys: [k0=2, k1=0]
+        // ts: 1,
+        check_key_values(&kvs, 3, &[2, 0], 1, &[]);
+    }
+
+    #[test]
+    fn test_no_tag() {
+        let meta = new_region_metadata(0, 2);
+        // The value of each row:
+        // v1=0, v0=1, ts=2,
+        let mutation = new_mutation(&["v1", "v0", "ts"], 3);
+        let kvs = KeyValues::new(&meta, mutation).unwrap();
+        // KeyValues (note that v0 is in front of v1 in region schema)
+        // ts: 2,
+        // fields: [v0=1, v1=0]
+        check_key_values(&kvs, 3, &[], 2, &[1, 0]);
+    }
+
+    #[test]
+    fn test_tag_field() {
+        let meta = new_region_metadata(2, 2);
+        // The value of each row:
+        // k0=0, v0=1, ts=2, k1=3, v1=4,
+        let mutation = new_mutation(&["k0", "v0", "ts", "k1", "v1"], 3);
+        let kvs = KeyValues::new(&meta, mutation).unwrap();
+        // KeyValues
+        // keys: [k0=0, k1=3]
+        // ts: 2,
+        // fields: [v0=1, v1=4]
+        check_key_values(&kvs, 3, &[0, 3], 2, &[1, 4]);
     }
 }
