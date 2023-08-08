@@ -14,6 +14,7 @@
 
 use std::fmt::Debug;
 
+use ::auth::UserInfo;
 use async_trait::async_trait;
 use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
@@ -25,7 +26,6 @@ use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 use pgwire::messages::response::ErrorResponse;
 use pgwire::messages::startup::Authentication;
 use pgwire::messages::{PgWireBackendMessage, PgWireFrontendMessage};
-use session::context::UserInfo;
 use session::Session;
 use snafu::IntoError;
 

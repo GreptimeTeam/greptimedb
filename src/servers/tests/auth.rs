@@ -12,13 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use auth::UserInfo;
 use secrecy::ExposeSecret;
 use servers::auth::user_provider::auth_mysql;
 use servers::auth::{
     AccessDeniedSnafu, Identity, Password, UnsupportedPasswordTypeSnafu, UserNotFoundSnafu,
     UserPasswordMismatchSnafu, UserProvider,
 };
-use session::context::UserInfo;
 
 pub struct DatabaseAuthInfo<'a> {
     pub catalog: &'a str,

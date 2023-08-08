@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 
+use auth::UserInfo;
 use axum::body::{Body, Bytes};
 use axum::extract::{Json, Query, RawBody, State};
 use axum::Form;
@@ -26,7 +27,6 @@ use servers::http::{
     JsonOutput,
 };
 use servers::metrics_handler::MetricsHandler;
-use session::context::UserInfo;
 use table::test_util::MemTable;
 
 use crate::{

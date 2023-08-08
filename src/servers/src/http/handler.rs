@@ -17,6 +17,7 @@ use std::env;
 use std::time::Instant;
 
 use aide::transform::TransformOperation;
+use auth::UserInfo;
 use axum::extract::{Json, Query, State};
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Form};
@@ -25,7 +26,6 @@ use common_telemetry::{error, timer};
 use query::parser::PromQuery;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use session::context::UserInfo;
 
 use crate::http::{ApiState, GreptimeOptionsConfigState, JsonResponse};
 use crate::metrics::JEMALLOC_COLLECTOR;

@@ -19,10 +19,10 @@ use std::io::BufRead;
 use std::path::Path;
 
 use async_trait::async_trait;
+use auth::UserInfo;
 use digest;
 use digest::Digest;
 use secrecy::ExposeSecret;
-use session::context::UserInfo;
 use sha1::Sha1;
 use snafu::{ensure, OptionExt, ResultExt};
 
@@ -207,8 +207,8 @@ pub mod test {
     use std::fs::File;
     use std::io::{LineWriter, Write};
 
+    use auth::UserInfo;
     use common_test_util::temp_dir::create_temp_dir;
-    use session::context::UserInfo;
 
     use crate::auth::user_provider::{double_sha1, sha1_one, sha1_two, StaticUserProvider};
     use crate::auth::{Identity, Password, UserProvider};

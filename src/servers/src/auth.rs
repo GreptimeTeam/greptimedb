@@ -14,10 +14,10 @@
 
 use std::sync::Arc;
 
+use auth::UserInfo;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use secrecy::SecretString;
-use session::context::UserInfo;
 use snafu::{Location, OptionExt, Snafu};
 
 use crate::auth::user_provider::StaticUserProvider;

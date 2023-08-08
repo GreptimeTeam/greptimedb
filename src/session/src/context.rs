@@ -140,33 +140,6 @@ impl QueryContextBuilder {
     }
 }
 
-pub const DEFAULT_USERNAME: &str = "greptime";
-
-#[derive(Clone, Debug)]
-pub struct UserInfo {
-    username: String,
-}
-
-impl Default for UserInfo {
-    fn default() -> Self {
-        Self {
-            username: DEFAULT_USERNAME.to_string(),
-        }
-    }
-}
-
-impl UserInfo {
-    pub fn username(&self) -> &str {
-        self.username.as_str()
-    }
-
-    pub fn new(username: impl Into<String>) -> Self {
-        Self {
-            username: username.into(),
-        }
-    }
-}
-
 #[derive(Debug)]
 pub struct ConnInfo {
     pub client_addr: Option<SocketAddr>,
@@ -222,10 +195,11 @@ impl Display for Channel {
 
 #[cfg(test)]
 mod test {
+    use auth::UserInfo;
     use common_catalog::consts::DEFAULT_CATALOG_NAME;
 
     use super::*;
-    use crate::context::{Channel, UserInfo};
+    use crate::context::Channel;
     use crate::Session;
 
     #[test]

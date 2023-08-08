@@ -18,11 +18,12 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
+use auth::UserInfo;
 use common_catalog::build_db_string;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use context::QueryContextBuilder;
 
-use crate::context::{Channel, ConnInfo, QueryContextRef, UserInfo};
+use crate::context::{Channel, ConnInfo, QueryContextRef};
 
 /// Session for persistent connection such as MySQL, PostgreSQL etc.
 #[derive(Debug)]

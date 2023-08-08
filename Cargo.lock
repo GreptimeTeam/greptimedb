@@ -673,6 +673,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "auth"
+version = "0.3.2"
+
+[[package]]
 name = "auto_ops"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8777,6 +8781,7 @@ dependencies = [
  "api",
  "arrow-flight",
  "async-trait",
+ "auth",
  "axum",
  "axum-macros",
  "axum-test-helper",
@@ -8865,6 +8870,7 @@ name = "session"
 version = "0.3.2"
 dependencies = [
  "arc-swap",
+ "auth",
  "common-catalog",
  "common-telemetry",
  "common-time",

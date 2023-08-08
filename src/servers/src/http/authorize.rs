@@ -14,6 +14,7 @@
 
 use std::marker::PhantomData;
 
+use auth::UserInfo;
 use axum::http::{self, Request, StatusCode};
 use axum::response::Response;
 use common_catalog::parse_catalog_and_schema_from_db_string;
@@ -24,7 +25,6 @@ use headers::Header;
 use http_body::Body;
 use metrics::increment_counter;
 use secrecy::SecretString;
-use session::context::UserInfo;
 use snafu::{ensure, IntoError, OptionExt, ResultExt};
 use tower_http::auth::AsyncAuthorizeRequest;
 

@@ -14,12 +14,12 @@
 
 use std::sync::Arc;
 
+use auth::UserInfo;
 use axum::body::BoxBody;
 use axum::http;
 use hyper::Request;
 use servers::auth::UserProvider;
 use servers::http::authorize::HttpAuth;
-use session::context::UserInfo;
 use tower_http::auth::AsyncAuthorizeRequest;
 
 use crate::auth::MockUserProvider;
