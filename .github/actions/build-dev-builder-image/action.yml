@@ -8,8 +8,8 @@ inputs:
   dockerhub-image-registry-username:
     description: The dockerhub username to login to the image registry
     required: true
-  dockerhub-image-registry-password:
-    description: The dockerhub password to login to the image registry
+  dockerhub-image-registry-token:
+    description: The dockerhub token to login to the image registry
     required: true
   dockerhub-image-namespace:
     description: The dockerhub namespace of the image registry to store the images
@@ -40,7 +40,7 @@ runs:
       with:
         registry: ${{ inputs.dockerhub-image-registry }}
         username: ${{ inputs.dockerhub-image-registry-username }}
-        password: ${{ inputs.dockerhub-image-registry-password }}
+        password: ${{ inputs.dockerhub-image-registry-token }}
 
     - name: Build and push dev builder image to dockerhub
       shell: bash

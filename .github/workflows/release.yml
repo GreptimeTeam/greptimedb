@@ -336,7 +336,7 @@ jobs:
         uses: ./.github/actions/build-dev-builder-image
         with:
           dockerhub-image-registry-username: ${{ secrets.DOCKERHUB_USERNAME }}
-          dockerhub-image-registry-password: ${{ secrets.DOCKERHUB_TOKEN }}
+          dockerhub-image-registry-token: ${{ secrets.DOCKERHUB_TOKEN }}
           acr-image-registry: ${{ vars.ACR_IMAGE_REGISTRY }}
           acr-image-registry-username: ${{ secrets.ALICLOUD_USERNAME }}
           acr-image-registry-password: ${{ secrets.ALICLOUD_PASSWORD }}
