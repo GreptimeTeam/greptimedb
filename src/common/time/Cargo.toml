@@ -8,7 +8,7 @@ license.workspace = true
 arrow.workspace = true
 chrono-tz = "0.8"
 chrono.workspace = true
-common-error = { path = "../error" }
+common-error = { workspace = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 snafu = { version = "0.7", features = ["backtraces"] }

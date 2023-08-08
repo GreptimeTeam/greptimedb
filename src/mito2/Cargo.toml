@@ -16,40 +16,40 @@ async-compat = "0.2"
 async-stream.workspace = true
 async-trait = "0.1"
 chrono.workspace = true
-common-base = { path = "../common/base" }
-common-catalog = { path = "../common/catalog" }
-common-datasource = { path = "../common/datasource" }
-common-error = { path = "../common/error" }
-common-procedure = { path = "../common/procedure" }
-common-query = { path = "../common/query" }
-common-recordbatch = { path = "../common/recordbatch" }
-common-runtime = { path = "../common/runtime" }
-common-telemetry = { path = "../common/telemetry" }
-common-test-util = { path = "../common/test-util", optional = true }
-common-time = { path = "../common/time" }
+common-base = { workspace = true }
+common-catalog = { workspace = true }
+common-datasource = { workspace = true }
+common-error = { workspace = true }
+common-procedure = { workspace = true }
+common-query = { workspace = true }
+common-recordbatch = { workspace = true }
+common-runtime = { workspace = true }
+common-telemetry = { workspace = true }
+common-test-util = { workspace = true, optional = true }
+common-time = { workspace = true }
 dashmap = "5.4"
 datafusion-common.workspace = true
 datafusion.workspace = true
-datatypes = { path = "../datatypes" }
+datatypes = { workspace = true }
 futures.workspace = true
 # TODO(yingwen): Update and use api crate once https://github.com/GreptimeTeam/greptime-proto/pull/75 is merged.
 greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "10c349c033dded29097d0dc933fbc2f89f658032" }
 lazy_static = "1.4"
-log-store = { path = "../log-store" }
+log-store = { workspace = true }
 metrics.workspace = true
-object-store = { path = "../object-store" }
+object-store = { workspace = true }
 parquet = { workspace = true, features = ["async"] }
 prost.workspace = true
 regex = "1.5"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 snafu.workspace = true
-storage = { path = "../storage" }
-store-api = { path = "../store-api" }
-table = { path = "../table" }
+storage = { workspace = true }
+store-api = { workspace = true }
+table = { workspace = true }
 tokio.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-common-procedure-test = { path = "../common/procedure-test" }
-common-test-util = { path = "../common/test-util" }
+common-procedure-test = { workspace = true }
+common-test-util = { workspace = true }

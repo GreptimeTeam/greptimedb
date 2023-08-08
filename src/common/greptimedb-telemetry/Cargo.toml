@@ -6,9 +6,9 @@ license.workspace = true
 
 [dependencies]
 async-trait.workspace = true
-common-error = { path = "../error" }
-common-runtime = { path = "../runtime" }
-common-telemetry = { path = "../telemetry" }
+common-error = { workspace = true }
+common-runtime = { workspace = true }
+common-telemetry = { workspace = true }
 once_cell = "1.17.0"
 reqwest = { version = "0.11", features = [
     "json",
@@ -20,8 +20,8 @@ tokio.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-common-test-util = { path = "../test-util" }
+common-test-util = { workspace = true }
 hyper = { version = "0.14", features = ["full"] }
 
 [build-dependencies]
-common-version = { path = "../version" }
+common-version = { workspace = true }

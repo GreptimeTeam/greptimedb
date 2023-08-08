@@ -6,22 +6,22 @@ license.workspace = true
 
 [dependencies]
 async-trait.workspace = true
-catalog = { path = "../catalog" }
-common-error = { path = "../common/error" }
-common-procedure = { path = "../common/procedure" }
-common-telemetry = { path = "../common/telemetry" }
-datatypes = { path = "../datatypes" }
+catalog = { workspace = true }
+common-error = { workspace = true }
+common-procedure = { workspace = true }
+common-telemetry = { workspace = true }
+datatypes = { workspace = true }
 serde.workspace = true
 serde_json.workspace = true
 snafu.workspace = true
-table = { path = "../table" }
+table = { workspace = true }
 
 [dev-dependencies]
-common-catalog = { path = "../common/catalog" }
-common-procedure-test = { path = "../common/procedure-test" }
-common-test-util = { path = "../common/test-util" }
-log-store = { path = "../log-store" }
-mito = { path = "../mito" }
-object-store = { path = "../object-store" }
-storage = { path = "../storage" }
+common-catalog = { workspace = true }
+common-procedure-test = { workspace = true }
+common-test-util = { workspace = true }
+log-store = { workspace = true }
+mito = { workspace = true }
+object-store = { workspace = true }
+storage = { workspace = true }
 tokio.workspace = true
