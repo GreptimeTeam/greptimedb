@@ -69,7 +69,7 @@ env:
   NIGHTLY_RELEASE_PREFIX: nightly
 
   # Use the different image namespace to avoid conflict with the release images.
-  IMAGE_NAMESPACE: greptime-dev
+  IMAGE_NAMESPACE: greptimedb-dev
 
 jobs:
   allocate-runners:
@@ -159,7 +159,7 @@ jobs:
         run: |
           cd dev/greptimedb
 
-      - uses: ../.github/actions/build-linux-artifacts
+      - uses: ./.github/actions/build-linux-artifacts
         with:
           arch: amd64
           cargo-profile: ${{ env.CARGO_PROFILE }}
@@ -195,7 +195,7 @@ jobs:
         run: |
           cd dev/greptimedb
 
-      - uses: ../.github/actions/build-linux-artifacts
+      - uses: ./.github/actions/build-linux-artifacts
         with:
           arch: arm64
           cargo-profile: ${{ env.CARGO_PROFILE }}
