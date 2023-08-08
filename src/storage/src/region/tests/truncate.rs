@@ -222,7 +222,7 @@ async fn test_truncate_reopen() {
     // Persist the meta action.
     let prev_version = manifest_version;
     action_list.set_prev_version(prev_version);
-    assert!(manifest.update(action_list).await.is_ok());
+    manifest.update(action_list).await.unwrap();
 
     // Reopen and put data.
     tester.reopen().await;

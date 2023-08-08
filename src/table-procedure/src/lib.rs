@@ -18,6 +18,7 @@ mod alter;
 mod create;
 mod drop;
 pub mod error;
+mod truncate;
 
 pub use alter::AlterTableProcedure;
 use catalog::CatalogManagerRef;
@@ -25,6 +26,7 @@ use common_procedure::ProcedureManager;
 pub use create::CreateTableProcedure;
 pub use drop::DropTableProcedure;
 use table::engine::{TableEngineProcedureRef, TableEngineRef};
+pub use truncate::TruncateTableProcedure;
 
 /// Register all procedure loaders to the procedure manager.
 ///
@@ -48,7 +50,12 @@ pub fn register_procedure_loaders(
         engine_procedure.clone(),
         procedure_manager,
     );
-    DropTableProcedure::register_loader(catalog_manager, engine_procedure, procedure_manager);
+    DropTableProcedure::register_loader(
+        catalog_manager.clone(),
+        engine_procedure.clone(),
+        procedure_manager,
+    );
+    TruncateTableProcedure::register_loader(catalog_manager, engine_procedure, procedure_manager)
 }
 
 #[cfg(test)]
