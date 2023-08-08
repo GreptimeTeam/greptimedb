@@ -68,8 +68,8 @@ env:
 
   NIGHTLY_RELEASE_PREFIX: nightly
 
-  # Use the different image namespace to avoid conflict with the release images.
-  IMAGE_NAMESPACE: greptimedb-dev
+  # Use the different image name to avoid conflict with the release images.
+  IMAGE_NAME: greptimedb-dev
 
 jobs:
   allocate-runners:
@@ -229,7 +229,8 @@ jobs:
         uses: ./.github/actions/build-images
         with:
           image-registry: docker.io
-          image-namespace: ${{ env.IMAGE_NAMESPACE }}
+          image-namespace: ${{ vars.IMAGE_NAMESPACE }}
+          image-name: ${{ env.IMAGE_NAME }}
           image-registry-username: ${{ secrets.DOCKERHUB_USERNAME }}
           image-registry-password: ${{ secrets.DOCKERHUB_TOKEN }}
           version: ${{ needs.allocate-runners.outputs.version }}
@@ -263,7 +264,8 @@ jobs:
         uses: ./.github/actions/build-images
         with:
           image-registry: ${{ vars.ACR_IMAGE_REGISTRY }}
-          image-namespace: ${{ env.IMAGE_NAMESPACE }}
+          image-namespace: ${{ vars.IMAGE_NAMESPACE }}
+          image-name: ${{ env.IMAGE_NAME }}
           image-registry-username: ${{ secrets.ALICLOUD_USERNAME }}
           image-registry-password: ${{ secrets.ALICLOUD_PASSWORD }}
           version: ${{ needs.allocate-runners.outputs.version }}
