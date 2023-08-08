@@ -28,7 +28,10 @@ use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
 use table::requests::InsertRequest;
 
-use crate::error::{CatalogSnafu, ColumnDataTypeSnafu, CreateVectorSnafu, EmptyDataSnafu, InsertSnafu, InvalidInsertRowLenSnafu, JoinTaskSnafu, Result, TableNotFoundSnafu};
+use crate::error::{
+    CatalogSnafu, ColumnDataTypeSnafu, CreateVectorSnafu, EmptyDataSnafu, InsertSnafu,
+    InvalidInsertRowLenSnafu, JoinTaskSnafu, Result, TableNotFoundSnafu,
+};
 
 pub struct RowInserter {
     catalog_manager: CatalogManagerRef,

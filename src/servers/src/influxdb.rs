@@ -42,10 +42,10 @@ pub struct InfluxdbRequest {
 
 type TableName = String;
 
-impl TryFrom<&InfluxdbRequest> for InsertRequests {
+impl TryFrom<InfluxdbRequest> for InsertRequests {
     type Error = Error;
 
-    fn try_from(value: &InfluxdbRequest) -> Result<Self, Self::Error> {
+    fn try_from(value: InfluxdbRequest) -> Result<Self, Self::Error> {
         let mut writers: HashMap<TableName, LinesWriter> = HashMap::new();
         let lines = parse_lines(&value.lines)
             .collect::<influxdb_line_protocol::Result<Vec<_>>>()
@@ -139,10 +139,10 @@ impl TryFrom<&InfluxdbRequest> for InsertRequests {
     }
 }
 
-impl TryFrom<&InfluxdbRequest> for RowInsertRequests {
+impl TryFrom<InfluxdbRequest> for RowInsertRequests {
     type Error = Error;
 
-    fn try_from(value: &InfluxdbRequest) -> Result<Self, Self::Error> {
+    fn try_from(value: InfluxdbRequest) -> Result<Self, Self::Error> {
         let lines = parse_lines(&value.lines)
             .collect::<influxdb_line_protocol::Result<Vec<_>>>()
             .context(InfluxdbLineProtocolSnafu)?;
@@ -381,7 +381,7 @@ monitor1,host=host2 memory=1027 1663840496400340001
 monitor2,host=host3 cpu=66.5 1663840496100023102
 monitor2,host=host4 cpu=66.3,memory=1029 1663840496400340003";
 
-        let influxdb_req = &InfluxdbRequest {
+        let influxdb_req = InfluxdbRequest {
             precision: None,
             lines: lines.to_string(),
         };
