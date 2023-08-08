@@ -6,6 +6,7 @@ license.workspace = true
 
 [features]
 greptimedb-telemetry = []
+testing = ["meta-srv/mock"]
 
 [dependencies]
 api = { workspace = true }
@@ -76,6 +77,5 @@ client = { workspace = true }
 common-query = { workspace = true }
 common-test-util = { workspace = true }
 datafusion-common.workspace = true
-meta-srv = { workspace = true, features = ["mock"] }
 mito = { workspace = true, features = ["test"] }
 session = { workspace = true }

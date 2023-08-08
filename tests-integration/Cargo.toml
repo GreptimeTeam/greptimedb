@@ -25,7 +25,7 @@ common-recordbatch = { path = "../src/common/recordbatch" }
 common-runtime = { path = "../src/common/runtime" }
 common-telemetry = { path = "../src/common/telemetry" }
 common-test-util = { path = "../src/common/test-util" }
-datanode = { path = "../src/datanode" }
+datanode = { path = "../src/datanode", features = ["testing"] }
 datatypes = { path = "../src/datatypes" }
 dotenv = "0.15"
 frontend = { path = "../src/frontend", features = ["testing"] }
