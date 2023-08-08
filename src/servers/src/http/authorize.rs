@@ -14,6 +14,7 @@
 
 use std::marker::PhantomData;
 
+use ::auth::UserProviderRef;
 use auth::UserInfo;
 use axum::http::{self, Request, StatusCode};
 use axum::response::Response;
@@ -25,16 +26,15 @@ use headers::Header;
 use http_body::Body;
 use metrics::increment_counter;
 use secrecy::SecretString;
-use snafu::{ensure, IntoError, OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use tower_http::auth::AsyncAuthorizeRequest;
 
 use super::header::GreptimeDbName;
 use super::PUBLIC_APIS;
-use crate::auth::Error::IllegalParam;
-use crate::auth::{Identity, IllegalParamSnafu, UserProviderRef};
+use crate::error::Error::NotSupported;
 use crate::error::{
-    self, AuthSnafu, InvalidAuthorizationHeaderSnafu, InvisibleASCIISnafu, NotFoundInfluxAuthSnafu,
-    Result, UnsupportedAuthSchemeSnafu,
+    self, InvalidAuthorizationHeaderSnafu, InvisibleASCIISnafu, NotFoundInfluxAuthSnafu,
+    NotSupportedSnafu, Result, UnsupportedAuthSchemeSnafu,
 };
 use crate::http::HTTP_API_PREFIX;
 
@@ -114,8 +114,8 @@ where
 
             match user_provider
                 .auth(
-                    Identity::UserId(username.as_str(), None),
-                    crate::auth::Password::PlainText(password),
+                    ::auth::Identity::UserId(username.as_str(), None),
+                    ::auth::Password::PlainText(password),
                     catalog,
                     schema,
                 )
@@ -143,7 +143,7 @@ where
 
 fn extract_catalog_and_schema<B: Send + Sync + 'static>(
     request: &Request<B>,
-) -> crate::auth::Result<(&str, &str)> {
+) -> Result<(&str, &str)> {
     // parse database from header
     let dbname = request
         .headers()
@@ -154,8 +154,9 @@ fn extract_catalog_and_schema<B: Send + Sync + 'static>(
             let query = request.uri().query().unwrap_or_default();
             extract_db_from_query(query)
         })
-        .context(IllegalParamSnafu {
-            msg: "db not provided or corrupted",
+        // TODO(shuiyisong): change to invalid input
+        .context(NotSupportedSnafu {
+            feat: "`db` must be provided in query string",
         })?;
 
     Ok(parse_catalog_and_schema_from_db_string(dbname))
@@ -193,9 +194,10 @@ fn get_influxdb_credentials<B: Send + Sync + 'static>(
             (Some(username), Some(password)) => {
                 Ok(Some((username.to_string(), password.to_string().into())))
             }
-            _ => Err(AuthSnafu.into_error(IllegalParam {
-                msg: "influxdb auth: username and password must be provided together".to_string(),
-            })),
+            // TODO(shuiyisong): change to invalid input too
+            _ => Err(NotSupported {
+                feat: "influxdb auth: username and password must be provided together".to_string(),
+            }),
         }
     }
 }

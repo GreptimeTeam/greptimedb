@@ -32,8 +32,6 @@ use tonic::codegen::http::{HeaderMap, HeaderValue};
 use tonic::metadata::MetadataMap;
 use tonic::Code;
 
-use crate::auth;
-
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {

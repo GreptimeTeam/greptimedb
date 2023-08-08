@@ -17,6 +17,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use ::auth::UserProviderRef;
 use async_trait::async_trait;
 use axum::body::BoxBody;
 use axum::extract::{Path, Query, State};
@@ -52,7 +53,6 @@ use tower_http::auth::AsyncRequireAuthorizationLayer;
 use tower_http::compression::CompressionLayer;
 use tower_http::trace::TraceLayer;
 
-use crate::auth::UserProviderRef;
 use crate::error::{
     AlreadyStartedSnafu, CollectRecordbatchSnafu, Error, InternalSnafu, InvalidQuerySnafu, Result,
     StartHttpSnafu, UnexpectedResultSnafu,

@@ -19,20 +19,20 @@ use std::io::BufRead;
 use std::path::Path;
 
 use async_trait::async_trait;
-use auth::UserInfo;
 use digest;
 use digest::Digest;
 use secrecy::ExposeSecret;
 use sha1::Sha1;
 use snafu::{ensure, OptionExt, ResultExt};
 
-use crate::auth::{
-    Error, HashedPassword, Identity, IllegalParamSnafu, InvalidConfigSnafu, IoSnafu, Password,
-    Result, Salt, UnsupportedPasswordTypeSnafu, UserNotFoundSnafu, UserPasswordMismatchSnafu,
-    UserProvider,
+use super::{HashedPassword, Identity, Password, Salt};
+use crate::error::{
+    Error, IllegalParamSnafu, InvalidConfigSnafu, IoSnafu, Result, UnsupportedPasswordTypeSnafu,
+    UserNotFoundSnafu, UserPasswordMismatchSnafu,
 };
+use crate::{UserInfo, UserProvider};
 
-pub const STATIC_USER_PROVIDER: &str = "static_user_provider";
+pub(crate) const STATIC_USER_PROVIDER: &str = "static_user_provider";
 
 impl TryFrom<&str> for StaticUserProvider {
     type Error = Error;
@@ -91,7 +91,7 @@ impl TryFrom<&str> for StaticUserProvider {
     }
 }
 
-pub struct StaticUserProvider {
+pub(crate) struct StaticUserProvider {
     users: HashMap<String, Vec<u8>>,
 }
 
@@ -207,11 +207,13 @@ pub mod test {
     use std::fs::File;
     use std::io::{LineWriter, Write};
 
-    use auth::UserInfo;
     use common_test_util::temp_dir::create_temp_dir;
 
-    use crate::auth::user_provider::{double_sha1, sha1_one, sha1_two, StaticUserProvider};
-    use crate::auth::{Identity, Password, UserProvider};
+    use crate::user_provider::static_user_provider::{
+        double_sha1, sha1_one, sha1_two, StaticUserProvider,
+    };
+    use crate::user_provider::{Identity, Password};
+    use crate::{UserInfo, UserProvider};
 
     #[test]
     fn test_sha() {

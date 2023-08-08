@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use ::auth::{Identity, Password, UserProviderRef};
 use async_trait::async_trait;
 use chrono::{NaiveDate, NaiveDateTime};
 use common_catalog::parse_catalog_and_schema_from_db_string;
@@ -41,7 +42,6 @@ use sql::parser::ParserContext;
 use sql::statements::statement::Statement;
 use tokio::io::AsyncWrite;
 
-use crate::auth::{Identity, Password, UserProviderRef};
 use crate::error::{self, InvalidPrepareStatementSnafu, Result};
 use crate::mysql::helper::{
     self, format_placeholder, replace_placeholders, transform_placeholders,

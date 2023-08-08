@@ -18,6 +18,7 @@ use std::time::Instant;
 use api::helper::request_type;
 use api::v1::auth_header::AuthScheme;
 use api::v1::{Basic, GreptimeRequest, RequestHeader};
+use auth::{Identity, Password, UserProviderRef};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
@@ -29,7 +30,6 @@ use metrics::{histogram, increment_counter};
 use session::context::{QueryContextBuilder, QueryContextRef};
 use snafu::{OptionExt, ResultExt};
 
-use crate::auth::{Identity, Password, UserProviderRef};
 use crate::error::Error::UnsupportedAuthScheme;
 use crate::error::{
     AuthSnafu, InvalidQuerySnafu, JoinTaskSnafu, NotFoundAuthHeaderSnafu, Result as InternalResult,

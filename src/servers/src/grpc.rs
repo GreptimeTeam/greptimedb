@@ -26,6 +26,7 @@ use api::v1::prometheus_gateway_server::{PrometheusGateway, PrometheusGatewaySer
 use api::v1::{HealthCheckRequest, HealthCheckResponse};
 use arrow_flight::flight_service_server::{FlightService, FlightServiceServer};
 use async_trait::async_trait;
+use auth::UserProviderRef;
 use common_runtime::Runtime;
 use common_telemetry::logging::info;
 use common_telemetry::{error, warn};
@@ -38,7 +39,6 @@ use tokio_stream::wrappers::TcpListenerStream;
 use tonic::{Request, Response, Status};
 
 use self::prom_query_gateway::PrometheusGatewayService;
-use crate::auth::UserProviderRef;
 use crate::error::{
     AlreadyStartedSnafu, GrpcReflectionServiceSnafu, InternalSnafu, Result, StartGrpcSnafu,
     TcpBindSnafu,

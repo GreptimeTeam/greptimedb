@@ -14,7 +14,7 @@
 
 use std::fmt::Debug;
 
-use ::auth::UserInfo;
+use ::auth::{Identity, Password, UserInfo, UserProviderRef};
 use async_trait::async_trait;
 use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
@@ -30,7 +30,6 @@ use session::Session;
 use snafu::IntoError;
 
 use super::PostgresServerHandler;
-use crate::auth::{Identity, Password, UserProviderRef};
 use crate::error::{AuthSnafu, Result};
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 

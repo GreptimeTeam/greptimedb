@@ -36,7 +36,6 @@ common-time = { workspace = true }
 datafusion-common.workspace = true
 datafusion-expr.workspace = true
 datafusion.workspace = true
-
 datatypes = { workspace = true }
 derive_builder.workspace = true
 digest = "0.10"
@@ -76,7 +75,7 @@ serde.workspace = true
 serde_json = "1.0"
 session = { workspace = true }
 sha1 = "0.10"
-snafu = { version = "0.7", features = ["backtraces"] }
+snafu.workspace = true
 snap = "1"
 sql = { workspace = true }
 strum = { version = "0.24", features = ["derive"] }

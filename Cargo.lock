@@ -675,6 +675,17 @@ dependencies = [
 [[package]]
 name = "auth"
 version = "0.3.2"
+dependencies = [
+ "async-trait",
+ "common-error",
+ "common-test-util",
+ "digest",
+ "hex",
+ "secrecy",
+ "sha1",
+ "snafu",
+ "tokio",
+]
 
 [[package]]
 name = "auto_ops"
@@ -3247,6 +3258,7 @@ dependencies = [
  "async-compat",
  "async-stream",
  "async-trait",
+ "auth",
  "catalog",
  "chrono",
  "client",
