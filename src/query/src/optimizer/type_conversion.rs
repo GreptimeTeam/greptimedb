@@ -169,12 +169,19 @@ impl TypeConverter {
             _ => return Ok((left.clone(), right.clone())),
         };
 
+        // only try to convert timestamp or boolean types
+        if !matches!(left_type, DataType::Timestamp(_, _))
+            || !matches!(left_type, DataType::Boolean)
+        {
+            return Ok((left.clone(), right.clone()));
+        }
+
         match (left, right) {
             (Expr::Column(col), Expr::Literal(value)) => {
                 let casted_right = Self::cast_scalar_value(value, left_type)?;
                 if casted_right.is_null() {
                     return Err(DataFusionError::Plan(format!(
-                        "column:{col:?} value:{value:?} is invalid",
+                        "column:{col:?}. Cast value:{value:?} to {left_type:?} is invalid",
                     )));
                 }
                 if reverse {
