@@ -33,7 +33,7 @@ use crate::error::{
 };
 use crate::raft_engine::protos::logstore::{EntryImpl, NamespaceImpl as Namespace};
 
-const NAMESPACE_PREFIX: &str = "$sys_namespace$";
+const NAMESPACE_PREFIX: &str = "$sys/";
 const SYSTEM_NAMESPACE: u64 = 0;
 
 pub struct RaftEngineLogStore {
