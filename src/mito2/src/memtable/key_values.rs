@@ -247,7 +247,6 @@ mod tests {
             // For simplicity, we use i64 for timestamp millisecond type. This violates the column schema
             // but it's acceptable for tests.
             let values: Vec<_> = (0..column_names.len())
-                .into_iter()
                 .map(|idx| i64_value(idx as i64))
                 .collect();
             rows.push(Row { values });
@@ -261,9 +260,9 @@ mod tests {
                 } else {
                     ColumnDataType::Int64 as i32
                 };
-                let semantic_type = if column_name.starts_with("k") {
+                let semantic_type = if column_name.starts_with('k') {
                     SemanticType::Tag as i32
-                } else if column_name.starts_with("v") {
+                } else if column_name.starts_with('v') {
                     SemanticType::Field as i32
                 } else {
                     SemanticType::Timestamp as i32
