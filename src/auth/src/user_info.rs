@@ -12,29 +12,28 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-const DEFAULT_USERNAME: &str = "greptime";
+use std::fmt::Debug;
+use std::sync::Arc;
 
-#[derive(Clone, Debug)]
-pub struct UserInfo {
+pub trait UserInfo: Debug + Sync + Send {
+    fn username(&self) -> &str;
+}
+
+#[derive(Debug)]
+pub(crate) struct DefaultUserInfo {
     username: String,
 }
 
-impl Default for UserInfo {
-    fn default() -> Self {
-        Self {
-            username: DEFAULT_USERNAME.to_string(),
-        }
+impl DefaultUserInfo {
+    pub(crate) fn new(username: impl Into<String>) -> Arc<dyn UserInfo> {
+        Arc::new(Self {
+            username: username.into(),
+        })
     }
 }
 
-impl UserInfo {
-    pub fn username(&self) -> &str {
+impl UserInfo for DefaultUserInfo {
+    fn username(&self) -> &str {
         self.username.as_str()
-    }
-
-    pub fn new(username: impl Into<String>) -> Self {
-        Self {
-            username: username.into(),
-        }
     }
 }

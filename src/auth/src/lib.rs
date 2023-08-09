@@ -20,9 +20,11 @@ mod user_provider;
 #[cfg(feature = "testing")]
 pub mod tests;
 
-pub use common::user_provider_from_option;
+pub use common::{
+    default_user_info, user_provider_from_option, HashedPassword, Identity, Password,
+};
 pub use error::{Error, Result};
 pub use user_info::UserInfo;
-pub use user_provider::{HashedPassword, Identity, Password, UserProvider};
+pub use user_provider::UserProvider;
 
 pub type UserProviderRef = std::sync::Arc<dyn UserProvider>;

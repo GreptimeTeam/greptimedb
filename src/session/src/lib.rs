@@ -30,7 +30,7 @@ use crate::context::{Channel, ConnInfo, QueryContextRef};
 pub struct Session {
     catalog: ArcSwap<String>,
     schema: ArcSwap<String>,
-    user_info: ArcSwap<UserInfo>,
+    user_info: ArcSwap<Arc<dyn UserInfo>>,
     conn_info: ConnInfo,
 }
 
@@ -41,7 +41,7 @@ impl Session {
         Session {
             catalog: ArcSwap::new(Arc::new(DEFAULT_CATALOG_NAME.into())),
             schema: ArcSwap::new(Arc::new(DEFAULT_SCHEMA_NAME.into())),
-            user_info: ArcSwap::new(Arc::new(UserInfo::default())),
+            user_info: ArcSwap::new(Arc::new(auth::default_user_info())),
             conn_info: ConnInfo::new(addr, channel),
         }
     }
@@ -66,12 +66,12 @@ impl Session {
     }
 
     #[inline]
-    pub fn user_info(&self) -> Arc<UserInfo> {
-        self.user_info.load().clone()
+    pub fn user_info(&self) -> Arc<dyn UserInfo> {
+        self.user_info.load().clone().as_ref().clone()
     }
 
     #[inline]
-    pub fn set_user_info(&self, user_info: UserInfo) {
+    pub fn set_user_info(&self, user_info: Arc<dyn UserInfo>) {
         self.user_info.store(Arc::new(user_info));
     }
 

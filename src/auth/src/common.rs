@@ -14,11 +14,17 @@
 
 use std::sync::Arc;
 
+use secrecy::SecretString;
 use snafu::OptionExt;
 
 use crate::error::{InvalidConfigSnafu, Result};
+use crate::user_info::DefaultUserInfo;
 use crate::user_provider::static_user_provider::{StaticUserProvider, STATIC_USER_PROVIDER};
-use crate::UserProviderRef;
+use crate::{UserInfo, UserProviderRef};
+
+pub fn default_user_info() -> Arc<dyn UserInfo> {
+    DefaultUserInfo::new("greptime")
+}
 
 pub fn user_provider_from_option(opt: &String) -> Result<UserProviderRef> {
     let (name, content) = opt.split_once(':').context(InvalidConfigSnafu {
@@ -37,4 +43,21 @@ pub fn user_provider_from_option(opt: &String) -> Result<UserProviderRef> {
         }
         .fail(),
     }
+}
+type Username<'a> = &'a str;
+type HostOrIp<'a> = &'a str;
+
+#[derive(Debug, Clone)]
+pub enum Identity<'a> {
+    UserId(Username<'a>, Option<HostOrIp<'a>>),
+}
+
+pub type HashedPassword<'a> = &'a [u8];
+pub type Salt<'a> = &'a [u8];
+
+/// Authentication information sent by the client.
+pub enum Password<'a> {
+    PlainText(SecretString),
+    MysqlNativePassword(HashedPassword<'a>, Salt<'a>),
+    PgMD5(HashedPassword<'a>, Salt<'a>),
 }

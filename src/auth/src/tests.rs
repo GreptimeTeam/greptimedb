@@ -12,12 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use secrecy::ExposeSecret;
 
 use crate::error::{
     AccessDeniedSnafu, Result, UnsupportedPasswordTypeSnafu, UserNotFoundSnafu,
     UserPasswordMismatchSnafu,
 };
+use crate::user_info::DefaultUserInfo;
 use crate::user_provider::static_user_provider::auth_mysql;
 #[allow(unused_imports)]
 use crate::Error;
@@ -59,13 +62,17 @@ impl UserProvider for MockUserProvider {
         "mock_user_provider"
     }
 
-    async fn authenticate(&self, id: Identity<'_>, password: Password<'_>) -> Result<UserInfo> {
+    async fn authenticate(
+        &self,
+        id: Identity<'_>,
+        password: Password<'_>,
+    ) -> Result<Arc<dyn UserInfo>> {
         match id {
             Identity::UserId(username, _host) => match password {
                 Password::PlainText(password) => {
                     if username == "greptime" {
                         if password.expose_secret() == "greptime" {
-                            Ok(UserInfo::new("greptime"))
+                            Ok(DefaultUserInfo::new("greptime"))
                         } else {
                             UserPasswordMismatchSnafu {
                                 username: username.to_string(),
@@ -81,7 +88,7 @@ impl UserProvider for MockUserProvider {
                 }
                 Password::MysqlNativePassword(auth_data, salt) => {
                     auth_mysql(auth_data, salt, username, "greptime".as_bytes())
-                        .map(|_| UserInfo::new(username))
+                        .map(|_| DefaultUserInfo::new(username))
                 }
                 _ => UnsupportedPasswordTypeSnafu {
                     password_type: "mysql_native_password",
@@ -91,7 +98,12 @@ impl UserProvider for MockUserProvider {
         }
     }
 
-    async fn authorize(&self, catalog: &str, schema: &str, user_info: &UserInfo) -> Result<()> {
+    async fn authorize(
+        &self,
+        catalog: &str,
+        schema: &str,
+        user_info: &Arc<dyn UserInfo>,
+    ) -> Result<()> {
         if catalog == self.catalog && schema == self.schema && user_info.username() == self.username
         {
             Ok(())
@@ -170,8 +182,8 @@ async fn test_schema_validate() {
         username: "test_user",
     });
 
-    let right_user = UserInfo::new("test_user");
-    let wrong_user = UserInfo::default();
+    let right_user = DefaultUserInfo::new("test_user");
+    let wrong_user = DefaultUserInfo::new("greptime");
 
     // check catalog
     let re = validator
