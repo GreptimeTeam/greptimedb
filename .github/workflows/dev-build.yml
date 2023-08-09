@@ -71,6 +71,9 @@ env:
   # Use the different image name to avoid conflict with the release images.
   IMAGE_NAME: greptimedb-dev
 
+  # The source code will check out in the following path: '${WORKING_DIR}/dev/greptime'.
+  CHECKOUT_GREPTIMEDB_PATH: dev/greptimedb
+
 jobs:
   allocate-runners:
     name: Allocate runners
@@ -153,13 +156,10 @@ jobs:
         with:
           repository: ${{ inputs.repository }}
           ref: ${{ inputs.commit }}
-          path: dev/greptimedb
-
-      - name: Enter greptimedb
-        run: |
-          cd dev/greptimedb
+          path: ${{ env.CHECKOUT_GREPTIMEDB_PATH }}
 
       - uses: ./.github/actions/build-linux-artifacts
+        working-directory: ${{ env.CHECKOUT_GREPTIMEDB_PATH }}
         with:
           arch: amd64
           cargo-profile: ${{ env.CARGO_PROFILE }}
@@ -190,13 +190,10 @@ jobs:
         with:
           repository: ${{ inputs.repository }}
           ref: ${{ inputs.commit }}
-          path: dev/greptimedb
-
-      - name: Enter greptimedb
-        run: |
-          cd dev/greptimedb
+          path: ${{ env.CHECKOUT_GREPTIMEDB_PATH }}
 
       - uses: ./.github/actions/build-linux-artifacts
+        working-directory: ${{ env.CHECKOUT_GREPTIMEDB_PATH }}
         with:
           arch: arm64
           cargo-profile: ${{ env.CARGO_PROFILE }}
