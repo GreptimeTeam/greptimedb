@@ -32,12 +32,17 @@ inputs:
     description: Upload to S3
     required: false
     default: 'true'
+  context:
+    description: Context to build the docker image
+    required: false
+    default: .
 runs:
   using: composite
   steps:
     - name: Build greptime binary
       shell: bash
       run: |
+        cd ${{ inputs.context }} && \
         make build-greptime-by-buildx \
           CARGO_PROFILE=${{ inputs.cargo-profile }} \
           FEATURES=${{ inputs.features }} \
