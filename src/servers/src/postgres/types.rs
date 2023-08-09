@@ -256,7 +256,7 @@ pub(super) fn parameters_to_scalar_values(
                 server_infer_type
             } else {
                 // at the moment we require type information inferenced by
-                // server so here we return error if the type in unknown from
+                // server so here we return error if the type is unknown from
                 // server-side.
                 //
                 // It might be possible to parse the parameter just using client
