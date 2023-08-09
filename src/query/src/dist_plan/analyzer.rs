@@ -374,10 +374,7 @@ mod test {
 
         let config = ConfigOptions::default();
         let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
-        let expected = vec![
-            "Limit: skip=0, fetch=1",
-            "  TableScan: t",
-        ].join("\n");
+        let expected = vec!["Limit: skip=0, fetch=1", "  TableScan: t"].join("\n");
         assert_eq!(expected, format!("{:?}", result));
     }
 }
