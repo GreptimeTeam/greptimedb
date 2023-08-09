@@ -1422,21 +1422,21 @@ async fn test_information_schema_dot_tables(instance: Arc<dyn MockInstance>) {
     let expected = match is_distributed_mode {
         true => {
             "\
-+---------------+--------------+------------+------------+----------+-------------+
-| table_catalog | table_schema | table_name | table_type | table_id | engine      |
-+---------------+--------------+------------+------------+----------+-------------+
-| greptime      | public       | numbers    | BASE TABLE | 2        | test_engine |
-| greptime      | public       | scripts    | BASE TABLE | 1024     | mito        |
-+---------------+--------------+------------+------------+----------+-------------+"
++---------------+--------------+------------+-----------------+----------+-------------+
+| table_catalog | table_schema | table_name | table_type      | table_id | engine      |
++---------------+--------------+------------+-----------------+----------+-------------+
+| greptime      | public       | numbers    | LOCAL TEMPORARY | 2        | test_engine |
+| greptime      | public       | scripts    | BASE TABLE      | 1024     | mito        |
++---------------+--------------+------------+-----------------+----------+-------------+"
         }
         false => {
             "\
-+---------------+--------------+------------+------------+----------+-------------+
-| table_catalog | table_schema | table_name | table_type | table_id | engine      |
-+---------------+--------------+------------+------------+----------+-------------+
-| greptime      | public       | numbers    | BASE TABLE | 2        | test_engine |
-| greptime      | public       | scripts    | BASE TABLE | 1        | mito        |
-+---------------+--------------+------------+------------+----------+-------------+"
++---------------+--------------+------------+-----------------+----------+-------------+
+| table_catalog | table_schema | table_name | table_type      | table_id | engine      |
++---------------+--------------+------------+-----------------+----------+-------------+
+| greptime      | public       | numbers    | LOCAL TEMPORARY | 2        | test_engine |
+| greptime      | public       | scripts    | BASE TABLE      | 1        | mito        |
++---------------+--------------+------------+-----------------+----------+-------------+"
         }
     };
 

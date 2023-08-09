@@ -295,7 +295,7 @@ mod test {
 
         let config = ConfigOptions::default();
         let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
-        let expected = vec![
+        let expected = [
             "Distinct:",
             "  MergeScan [is_placeholder=false]",
             "    Distinct:",
@@ -323,7 +323,7 @@ mod test {
 
         let config = ConfigOptions::default();
         let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
-        let expected = vec![
+        let expected = [
             "Aggregate: groupBy=[[]], aggr=[[AVG(t.number)]]",
             "  TableScan: t",
         ]
@@ -349,7 +349,7 @@ mod test {
 
         let config = ConfigOptions::default();
         let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
-        let expected = vec![
+        let expected = [
             "Sort: t.number ASC NULLS LAST",
             "  Distinct:",
             "    TableScan: t",
@@ -374,7 +374,7 @@ mod test {
 
         let config = ConfigOptions::default();
         let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
-        let expected = vec!["Limit: skip=0, fetch=1", "  TableScan: t"].join("\n");
+        let expected = ["Limit: skip=0, fetch=1", "  TableScan: t"].join("\n");
         assert_eq!(expected, format!("{:?}", result));
     }
 }
