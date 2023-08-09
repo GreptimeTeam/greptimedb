@@ -133,7 +133,7 @@ impl WriteRequest {
         Ok(request)
     }
 
-    /// Initailizes and validates the request.
+    /// Initializes and validates the request.
     ///
     /// Ensures rows match the schema.
     fn init(&mut self) -> Result<()> {
