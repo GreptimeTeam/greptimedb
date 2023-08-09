@@ -108,37 +108,50 @@ impl From<Duration> for i64 {
 }
 
 /// Convert from std::time::Duration to common_time::Duration Type.
-/// Because std::time::Duration consists of [u64+u32], it could be
-/// overflow when convert to common_time::Duration.
-/// If overflow, return the max value of common_time::Duration.
+/// The range of std::time::Duration is [0, u64::MAX seconds + 999_999_999 nanoseconds]
+/// The range of common_time::Duration is [i64::MIN, i64::MAX] with TimeUnit.
+/// If the value of std::time::Duration is out of range of common_time::Duration,
+/// it will be rounded to the nearest value.
 impl From<std::time::Duration> for Duration {
     fn from(d: std::time::Duration) -> Self {
-        const MAX_I64_U128: u128 = i64::MAX as u128;
-        let nanos = d.as_nanos();
-
-        // Convert as high-precision as possible
-        if nanos <= MAX_I64_U128 {
-            // Nanoseconds
-            return Duration::new_nanosecond(nanos as i64);
+        // convert as high-precision as possible
+        let value = d.as_nanos();
+        if value <= i64::MAX as u128 {
+            return Self {
+                value: value as i64,
+                unit: TimeUnit::Nanosecond,
+            };
         }
 
-        if nanos <= MAX_I64_U128 * 1000 {
-            // Microseconds
-            return Duration::new_microsecond((nanos / 1000) as i64);
+        let value = d.as_micros();
+        if value <= i64::MAX as u128 {
+            return Self {
+                value: value as i64,
+                unit: TimeUnit::Microsecond,
+            };
         }
 
-        if nanos <= MAX_I64_U128 * 1_000_000 {
-            // Milliseconds
-            return Duration::new_millisecond((nanos / 1_000_000) as i64);
+        let value = d.as_millis();
+        if value <= i64::MAX as u128 {
+            return Self {
+                value: value as i64,
+                unit: TimeUnit::Millisecond,
+            };
         }
 
-        // Seconds
-        let secs = d.as_secs();
-        if secs >= i64::MAX as u64 {
-            return Duration::new(i64::MAX, TimeUnit::Second);
+        let value = d.as_secs();
+        if value <= i64::MAX as u64 {
+            return Self {
+                value: value as i64,
+                unit: TimeUnit::Second,
+            };
         }
 
-        Duration::new_second(secs as i64)
+        // overflow, return the max of common_time::Duration
+        Self {
+            value: i64::MAX,
+            unit: TimeUnit::Second,
+        }
     }
 }
 
@@ -379,6 +392,14 @@ mod tests {
         let std_duration = std::time::Duration::new(i64::MAX as u64, 0);
         let duration = Duration::from(std_duration);
         assert_eq!(duration, Duration::new(i64::MAX, TimeUnit::Second));
+
+        // max std::time::Duration
+        let std_duration = std::time::Duration::MAX;
+        let duration = Duration::from(std_duration);
+        assert_eq!(
+            duration,
+            Duration::new(9223372036854775807, TimeUnit::Second)
+        );
 
         // overflow test
         let std_duration = std::time::Duration::new(i64::MAX as u64, 1);
