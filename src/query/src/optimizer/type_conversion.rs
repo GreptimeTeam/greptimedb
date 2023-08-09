@@ -418,7 +418,7 @@ mod tests {
             ]])
             .unwrap()
             .filter(Expr::Column(Column::from_name("column3")).gt(Expr::Literal(
-                ScalarValue::Utf8(Some("1970-01-01 00:00:00".to_string())),
+                ScalarValue::Utf8(Some("1970-01-01 00:00:00+08:00".to_string())),
             )))
             .unwrap()
             .aggregate(
