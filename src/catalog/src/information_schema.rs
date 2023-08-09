@@ -124,8 +124,8 @@ impl Table for InformationTable {
         unreachable!("Should not call table_info() of InformationTable directly")
     }
 
-    fn table_type(&self) -> table::metadata::TableType {
-        TableType::View
+    fn table_type(&self) -> TableType {
+        TableType::Temporary
     }
 
     async fn scan_to_stream(&self, request: ScanRequest) -> TableResult<SendableRecordBatchStream> {

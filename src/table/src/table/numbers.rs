@@ -109,6 +109,10 @@ impl Table for NumbersTable {
         )
     }
 
+    fn table_type(&self) -> TableType {
+        TableType::Base
+    }
+
     async fn scan_to_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream> {
         Ok(Box::pin(NumbersStream {
             limit: request.limit.unwrap_or(100) as u32,
