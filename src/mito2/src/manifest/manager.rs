@@ -429,7 +429,8 @@ mod test {
                 ),
                 semantic_type: SemanticType::Field,
                 column_id: 251,
-            });
+            })
+            .primary_key(vec![36]);
         builder.build().unwrap()
     }
 
