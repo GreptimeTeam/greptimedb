@@ -153,6 +153,23 @@ pub(crate) fn proto_value_type(value: &v1::Value) -> Option<ColumnDataType> {
     Some(value_type)
 }
 
+// TODO(yingwen): Support conversion in greptime-proto.
+/// Creates value for i64.
+#[cfg(test)]
+pub(crate) fn i64_value(data: i64) -> v1::Value {
+    v1::Value {
+        value: Some(v1::value::Value::I64Value(data)),
+    }
+}
+
+/// Creates value for timestamp millis.
+#[cfg(test)]
+pub(crate) fn ts_ms_value(data: i64) -> v1::Value {
+    v1::Value {
+        value: Some(v1::value::Value::TsMillisecondValue(data)),
+    }
+}
+
 /// Convert [ConcreteDataType] to [ColumnDataType].
 pub(crate) fn to_column_data_type(data_type: &ConcreteDataType) -> Option<ColumnDataType> {
     let column_data_type = match data_type {

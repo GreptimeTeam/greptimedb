@@ -91,8 +91,6 @@ impl MitoEngine {
 
     /// Write to a region.
     pub async fn write_region(&self, mut write_request: WriteRequest) -> Result<()> {
-        write_request.validate()?;
-
         let region = self
             .inner
             .workers
