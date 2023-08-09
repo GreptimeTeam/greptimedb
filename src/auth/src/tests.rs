@@ -13,11 +13,15 @@
 // limitations under the License.
 
 use secrecy::ExposeSecret;
-use servers::auth::user_provider::auth_mysql;
-use servers::auth::{
-    AccessDeniedSnafu, Identity, Password, UnsupportedPasswordTypeSnafu, UserNotFoundSnafu,
-    UserPasswordMismatchSnafu, UserProvider,
+
+use crate::error::{
+    AccessDeniedSnafu, Result, UnsupportedPasswordTypeSnafu, UserNotFoundSnafu,
+    UserPasswordMismatchSnafu,
 };
+use crate::user_provider::static_user_provider::auth_mysql;
+#[allow(unused_imports)]
+use crate::Error;
+use crate::{Identity, Password, UserInfo, UserProvider};
 
 pub struct DatabaseAuthInfo<'a> {
     pub catalog: &'a str,
@@ -55,11 +59,7 @@ impl UserProvider for MockUserProvider {
         "mock_user_provider"
     }
 
-    async fn authenticate(
-        &self,
-        id: Identity<'_>,
-        password: Password<'_>,
-    ) -> servers::auth::Result<UserInfo> {
+    async fn authenticate(&self, id: Identity<'_>, password: Password<'_>) -> Result<UserInfo> {
         match id {
             Identity::UserId(username, _host) => match password {
                 Password::PlainText(password) => {
@@ -91,12 +91,7 @@ impl UserProvider for MockUserProvider {
         }
     }
 
-    async fn authorize(
-        &self,
-        catalog: &str,
-        schema: &str,
-        user_info: &UserInfo,
-    ) -> servers::auth::Result<()> {
+    async fn authorize(&self, catalog: &str, schema: &str, user_info: &UserInfo) -> Result<()> {
         if catalog == self.catalog && schema == self.schema && user_info.username() == self.username
         {
             Ok(())
@@ -136,7 +131,7 @@ async fn test_auth_by_plain_text() {
     assert!(auth_result.is_err());
     assert!(matches!(
         auth_result.err().unwrap(),
-        servers::auth::Error::UnsupportedPasswordType { .. }
+        Error::UnsupportedPasswordType { .. }
     ));
 
     // auth failed, err: user not exist.
@@ -149,7 +144,7 @@ async fn test_auth_by_plain_text() {
     assert!(auth_result.is_err());
     assert!(matches!(
         auth_result.err().unwrap(),
-        servers::auth::Error::UserNotFound { .. }
+        Error::UserNotFound { .. }
     ));
 
     // auth failed, err: wrong password
@@ -162,7 +157,7 @@ async fn test_auth_by_plain_text() {
     assert!(auth_result.is_err());
     assert!(matches!(
         auth_result.err().unwrap(),
-        servers::auth::Error::UserPasswordMismatch { .. }
+        Error::UserPasswordMismatch { .. }
     ))
 }
 

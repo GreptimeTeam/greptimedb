@@ -19,7 +19,6 @@ use std::io::BufRead;
 use std::path::Path;
 
 use async_trait::async_trait;
-use digest;
 use digest::Digest;
 use secrecy::ExposeSecret;
 use sha1::Sha1;

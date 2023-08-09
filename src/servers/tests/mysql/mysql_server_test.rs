@@ -16,6 +16,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use auth::tests::{DatabaseAuthInfo, MockUserProvider};
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use common_recordbatch::RecordBatch;
 use common_runtime::Builder as RuntimeBuilder;
@@ -32,7 +33,6 @@ use servers::server::Server;
 use servers::tls::TlsOption;
 use table::test_util::MemTable;
 
-use crate::auth::{DatabaseAuthInfo, MockUserProvider};
 use crate::create_testing_sql_query_handler;
 use crate::mysql::{all_datatype_testing_data, MysqlTextRow, TestingData};
 

@@ -31,10 +31,9 @@ use tower_http::auth::AsyncAuthorizeRequest;
 
 use super::header::GreptimeDbName;
 use super::PUBLIC_APIS;
-use crate::error::Error::NotSupported;
 use crate::error::{
-    self, InvalidAuthorizationHeaderSnafu, InvisibleASCIISnafu, NotFoundInfluxAuthSnafu,
-    NotSupportedSnafu, Result, UnsupportedAuthSchemeSnafu,
+    self, InvalidAuthorizationHeaderSnafu, InvalidParameterSnafu, InvisibleASCIISnafu,
+    NotFoundInfluxAuthSnafu, Result, UnsupportedAuthSchemeSnafu,
 };
 use crate::http::HTTP_API_PREFIX;
 
@@ -154,9 +153,8 @@ fn extract_catalog_and_schema<B: Send + Sync + 'static>(
             let query = request.uri().query().unwrap_or_default();
             extract_db_from_query(query)
         })
-        // TODO(shuiyisong): change to invalid input
-        .context(NotSupportedSnafu {
-            feat: "`db` must be provided in query string",
+        .context(InvalidParameterSnafu {
+            reason: "`db` must be provided in query string",
         })?;
 
     Ok(parse_catalog_and_schema_from_db_string(dbname))
@@ -194,10 +192,11 @@ fn get_influxdb_credentials<B: Send + Sync + 'static>(
             (Some(username), Some(password)) => {
                 Ok(Some((username.to_string(), password.to_string().into())))
             }
-            // TODO(shuiyisong): change to invalid input too
-            _ => Err(NotSupported {
-                feat: "influxdb auth: username and password must be provided together".to_string(),
-            }),
+            _ => InvalidParameterSnafu {
+                reason: "influxdb auth: username and password must be provided together"
+                    .to_string(),
+            }
+            .fail(),
         }
     }
 }

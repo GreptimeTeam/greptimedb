@@ -90,6 +90,7 @@ tower = { version = "0.4", features = ["full"] }
 tower-http = { version = "0.3", features = ["full"] }
 
 [dev-dependencies]
+auth = { workspace = true, features = ["testing"] }
 axum-test-helper = { git = "https://github.com/sunng87/axum-test-helper.git", branch = "patch-1" }
 catalog = { workspace = true, features = ["testing"] }
 client = { workspace = true }

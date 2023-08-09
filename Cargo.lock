@@ -1565,6 +1565,7 @@ version = "0.3.2"
 dependencies = [
  "anymap",
  "async-trait",
+ "auth",
  "catalog",
  "chrono",
  "clap 3.2.25",
@@ -9850,6 +9851,7 @@ version = "0.3.2"
 dependencies = [
  "api",
  "async-trait",
+ "auth",
  "axum",
  "axum-test-helper",
  "catalog",

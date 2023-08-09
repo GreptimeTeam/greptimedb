@@ -14,15 +14,13 @@
 
 use std::sync::Arc;
 
-use auth::UserInfo;
+use auth::tests::MockUserProvider;
+use auth::{UserInfo, UserProvider};
 use axum::body::BoxBody;
 use axum::http;
 use hyper::Request;
-use servers::auth::UserProvider;
 use servers::http::authorize::HttpAuth;
 use tower_http::auth::AsyncAuthorizeRequest;
-
-use crate::auth::MockUserProvider;
 
 #[tokio::test]
 async fn test_http_auth() {

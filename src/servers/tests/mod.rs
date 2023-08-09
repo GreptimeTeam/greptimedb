@@ -36,7 +36,6 @@ use snafu::ensure;
 use sql::statements::statement::Statement;
 use table::test_util::MemTable;
 
-mod auth;
 mod grpc;
 mod http;
 mod interceptor;

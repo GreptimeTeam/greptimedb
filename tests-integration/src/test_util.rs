@@ -19,6 +19,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use auth::UserProviderRef;
 use axum::Router;
 use catalog::{CatalogManagerRef, RegisterTableRequest};
 use common_catalog::consts::{
@@ -48,7 +49,6 @@ use object_store::services::{Azblob, Gcs, Oss, S3};
 use object_store::test_util::TempFolder;
 use object_store::ObjectStore;
 use secrecy::ExposeSecret;
-use servers::auth::UserProviderRef;
 use servers::grpc::GrpcServer;
 use servers::http::{HttpOptions, HttpServerBuilder};
 use servers::metrics_handler::MetricsHandler;

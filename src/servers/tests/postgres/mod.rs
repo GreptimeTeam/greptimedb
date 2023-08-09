@@ -16,6 +16,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
+use auth::tests::{DatabaseAuthInfo, MockUserProvider};
+use auth::UserProviderRef;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_runtime::Builder as RuntimeBuilder;
 use pgwire::api::Type;
@@ -23,7 +25,6 @@ use rand::rngs::StdRng;
 use rand::Rng;
 use rustls::client::{ServerCertVerified, ServerCertVerifier};
 use rustls::{Certificate, Error, ServerName};
-use servers::auth::UserProviderRef;
 use servers::error::Result;
 use servers::postgres::PostgresServer;
 use servers::server::Server;
@@ -31,7 +32,6 @@ use servers::tls::TlsOption;
 use table::test_util::MemTable;
 use tokio_postgres::{Client, Error as PgError, NoTls, SimpleQueryMessage};
 
-use crate::auth::{DatabaseAuthInfo, MockUserProvider};
 use crate::create_testing_instance;
 
 fn create_postgres_server(
