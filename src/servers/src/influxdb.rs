@@ -149,6 +149,7 @@ impl TryFrom<InfluxdbRequest> for RowInsertRequests {
 
         let mut table_schemas = HashMap::with_capacity(lines.len());
         let mut table_rows = HashMap::with_capacity(lines.len());
+        let mut table_column_indexes = HashMap::with_capacity(lines.len());
 
         for line in lines {
             let table_name = line.series.measurement.as_str();
@@ -159,40 +160,46 @@ impl TryFrom<InfluxdbRequest> for RowInsertRequests {
 
             let schema = table_schemas
                 .entry(table_name.to_string())
-                .or_insert_with(|| HashMap::with_capacity(len));
+                .or_insert_with(|| Vec::with_capacity(len));
             let rows = table_rows
                 .entry(table_name.to_string())
                 .or_insert_with(Vec::new);
-            let mut one_row = HashMap::with_capacity(len);
+            let column_indexes = table_column_indexes
+                .entry(table_name.to_string())
+                .or_insert_with(|| HashMap::with_capacity(len));
+            assert_eq!(schema.len(), column_indexes.len());
+            let mut one_row = vec![api::v1::Value { value: None }; schema.len()];
 
             // tags
-            parse_tags(tags, schema, &mut one_row)?;
+            parse_tags(tags, column_indexes, schema, &mut one_row)?;
             // fields
-            parse_fields(fields, schema, &mut one_row)?;
+            parse_fields(fields, column_indexes, schema, &mut one_row)?;
             // timestamp
-            parse_ts(timestamp, value.precision, schema, &mut one_row)?;
+            parse_ts(
+                timestamp,
+                value.precision,
+                column_indexes,
+                schema,
+                &mut one_row,
+            )?;
 
-            rows.push(one_row);
+            rows.push(Row { values: one_row });
         }
 
         let mut inserts = Vec::with_capacity(table_schemas.len());
         for (table_name, schema) in table_schemas {
-            let Some(table_data) = table_rows.remove(&table_name) else {
+            let Some(mut rows) = table_rows.remove(&table_name) else {
                 continue;
             };
-            let schema = schema.into_values().collect::<Vec<_>>();
-            let rows = table_data
-                .into_iter()
-                .map(|mut r| Row {
-                    values: schema
-                        .iter()
-                        .map(|col| {
-                            r.remove(&col.column_name)
-                                .unwrap_or(api::v1::Value { value: None })
-                        })
-                        .collect::<Vec<_>>(),
-                })
-                .collect::<Vec<_>>();
+
+            let len = schema.len();
+            for row in rows.iter_mut() {
+                let num_placeholders = len - row.values.len();
+                if num_placeholders > 0 {
+                    row.values
+                        .extend((0..num_placeholders).map(|_| api::v1::Value { value: None }));
+                }
+            }
 
             inserts.push(RowInsertRequest {
                 table_name,
@@ -207,23 +214,29 @@ impl TryFrom<InfluxdbRequest> for RowInsertRequests {
 
 fn parse_tags(
     tags: Option<TagSet>,
-    schema: &mut HashMap<String, ColumnSchema>,
-    one_row: &mut HashMap<String, api::v1::Value>,
+    column_indexes: &mut HashMap<String, usize>,
+    schema: &mut Vec<ColumnSchema>,
+    one_row: &mut Vec<api::v1::Value>,
 ) -> Result<(), Error> {
     let Some(tags) = tags else {
         return Ok(());
     };
+
     for (k, v) in tags {
-        let current = schema.entry(k.to_string()).or_insert_with(|| ColumnSchema {
-            column_name: k.to_string(),
-            datatype: ColumnDataType::String as i32,
-            semantic_type: SemanticType::Tag as i32,
-        });
-
-        check_schema(ColumnDataType::String, SemanticType::Tag, current)?;
-
-        let v = wrap_value(Value::StringValue(v.to_string()));
-        one_row.insert(k.to_string(), v);
+        let index = column_indexes.entry(k.to_string()).or_insert(schema.len());
+        if *index == schema.len() {
+            schema.push(ColumnSchema {
+                column_name: k.to_string(),
+                datatype: ColumnDataType::String as i32,
+                semantic_type: SemanticType::Tag as i32,
+            });
+            one_row.push(wrap_value(Value::StringValue(v.to_string())));
+        } else {
+            check_schema(ColumnDataType::String, SemanticType::Tag, &schema[*index])?;
+            let current = one_row.get_mut(*index).unwrap();
+            assert!(current.value.is_none());
+            *current = wrap_value(Value::StringValue(v.to_string()));
+        }
     }
 
     Ok(())
@@ -231,10 +244,12 @@ fn parse_tags(
 
 fn parse_fields(
     fields: FieldSet,
-    schema: &mut HashMap<String, ColumnSchema>,
-    one_row: &mut HashMap<String, api::v1::Value>,
+    column_indexes: &mut HashMap<String, usize>,
+    schema: &mut Vec<ColumnSchema>,
+    one_row: &mut Vec<api::v1::Value>,
 ) -> Result<(), Error> {
     for (k, v) in fields {
+        let index = column_indexes.entry(k.to_string()).or_insert(schema.len());
         let (datatype, value) = match v {
             FieldValue::I64(v) => (ColumnDataType::Int64, wrap_value(Value::I64Value(v))),
             FieldValue::U64(v) => (ColumnDataType::Uint64, wrap_value(Value::U64Value(v))),
@@ -246,15 +261,19 @@ fn parse_fields(
             FieldValue::Boolean(v) => (ColumnDataType::Boolean, wrap_value(Value::BoolValue(v))),
         };
 
-        let current = schema.entry(k.to_string()).or_insert_with(|| ColumnSchema {
-            column_name: k.to_string(),
-            datatype: datatype as i32,
-            semantic_type: SemanticType::Field as i32,
-        });
-
-        check_schema(datatype, SemanticType::Field, current)?;
-
-        one_row.insert(k.to_string(), value);
+        if *index == schema.len() {
+            schema.push(ColumnSchema {
+                column_name: k.to_string(),
+                datatype: datatype as i32,
+                semantic_type: SemanticType::Field as i32,
+            });
+            one_row.push(value);
+        } else {
+            check_schema(datatype, SemanticType::Field, &schema[*index])?;
+            let current = one_row.get_mut(*index).unwrap();
+            assert!(current.value.is_none());
+            *current = value;
+        }
     }
 
     Ok(())
@@ -263,24 +282,10 @@ fn parse_fields(
 fn parse_ts(
     ts: Option<i64>,
     precision: Option<Precision>,
-    schema: &mut HashMap<String, ColumnSchema>,
-    one_row: &mut HashMap<String, api::v1::Value>,
+    column_indexes: &mut HashMap<String, usize>,
+    schema: &mut Vec<ColumnSchema>,
+    one_row: &mut Vec<api::v1::Value>,
 ) -> Result<(), Error> {
-    let column_name = INFLUXDB_TIMESTAMP_COLUMN_NAME;
-    let current = schema
-        .entry(column_name.to_string())
-        .or_insert_with(|| ColumnSchema {
-            column_name: column_name.to_string(),
-            datatype: ColumnDataType::TimestampMillisecond as i32,
-            semantic_type: SemanticType::Timestamp as i32,
-        });
-
-    check_schema(
-        ColumnDataType::TimestampMillisecond,
-        SemanticType::Timestamp,
-        current,
-    )?;
-
     let precision = unwrap_or_default_precision(precision);
     let ts = match ts {
         Some(timestamp) => writer::to_ms_ts(precision, timestamp),
@@ -296,10 +301,27 @@ fn parse_ts(
         }
     };
 
-    one_row.insert(
-        column_name.to_string(),
-        wrap_value(Value::TsMillisecondValue(ts)),
-    );
+    let column_name = INFLUXDB_TIMESTAMP_COLUMN_NAME;
+    let index = column_indexes
+        .entry(column_name.to_string())
+        .or_insert(schema.len());
+    if *index == schema.len() {
+        schema.push(ColumnSchema {
+            column_name: column_name.to_string(),
+            datatype: ColumnDataType::TimestampMillisecond as i32,
+            semantic_type: SemanticType::Timestamp as i32,
+        });
+        one_row.push(wrap_value(Value::TsMillisecondValue(ts)))
+    } else {
+        let current = one_row.get_mut(*index).unwrap();
+        check_schema(
+            ColumnDataType::TimestampMillisecond,
+            SemanticType::Timestamp,
+            &schema[*index],
+        )?;
+        assert!(current.value.is_none());
+        *current = wrap_value(Value::TsMillisecondValue(ts));
+    }
 
     Ok(())
 }
