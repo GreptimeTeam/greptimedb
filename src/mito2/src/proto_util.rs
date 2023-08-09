@@ -120,6 +120,39 @@ pub(crate) fn to_proto_value(value: Value) -> Option<v1::Value> {
     Some(proto_value)
 }
 
+/// Returns the [ColumnDataType] of the value.
+///
+/// If value is null, returns `None`.
+pub(crate) fn proto_value_type(value: &v1::Value) -> Option<ColumnDataType> {
+    let value_data = value.value.as_ref()?;
+    let value_type = match value_data {
+        v1::value::Value::I8Value(_) => ColumnDataType::Int8,
+        v1::value::Value::I16Value(_) => ColumnDataType::Int16,
+        v1::value::Value::I32Value(_) => ColumnDataType::Int32,
+        v1::value::Value::I64Value(_) => ColumnDataType::Int64,
+        v1::value::Value::U8Value(_) => ColumnDataType::Uint8,
+        v1::value::Value::U16Value(_) => ColumnDataType::Uint16,
+        v1::value::Value::U32Value(_) => ColumnDataType::Uint32,
+        v1::value::Value::U64Value(_) => ColumnDataType::Uint64,
+        v1::value::Value::F32Value(_) => ColumnDataType::Float32,
+        v1::value::Value::F64Value(_) => ColumnDataType::Float64,
+        v1::value::Value::BoolValue(_) => ColumnDataType::Boolean,
+        v1::value::Value::BinaryValue(_) => ColumnDataType::Binary,
+        v1::value::Value::StringValue(_) => ColumnDataType::String,
+        v1::value::Value::DateValue(_) => ColumnDataType::Date,
+        v1::value::Value::DatetimeValue(_) => ColumnDataType::Datetime,
+        v1::value::Value::TsSecondValue(_) => ColumnDataType::TimestampSecond,
+        v1::value::Value::TsMillisecondValue(_) => ColumnDataType::TimestampMillisecond,
+        v1::value::Value::TsMicrosecondValue(_) => ColumnDataType::TimestampMicrosecond,
+        v1::value::Value::TsNanosecondValue(_) => ColumnDataType::TimestampNanosecond,
+        v1::value::Value::TimeSecondValue(_) => ColumnDataType::TimeSecond,
+        v1::value::Value::TimeMillisecondValue(_) => ColumnDataType::TimeMillisecond,
+        v1::value::Value::TimeMicrosecondValue(_) => ColumnDataType::TimeMicrosecond,
+        v1::value::Value::TimeNanosecondValue(_) => ColumnDataType::TimeNanosecond,
+    };
+    Some(value_type)
+}
+
 /// Convert [ConcreteDataType] to [ColumnDataType].
 pub(crate) fn to_column_data_type(data_type: &ConcreteDataType) -> Option<ColumnDataType> {
     let column_data_type = match data_type {
@@ -186,3 +219,5 @@ fn is_column_type_eq(column_type: ColumnDataType, expect_type: &ConcreteDataType
         false
     }
 }
+
+// TODO(yingwen): Tests.

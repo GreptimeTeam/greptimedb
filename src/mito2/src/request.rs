@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use common_base::readable_size::ReadableSize;
-use greptime_proto::v1::{ColumnDataType, ColumnSchema, Rows};
+use greptime_proto::v1::{ColumnDataType, ColumnSchema, Rows, Value};
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::{ColumnId, CompactionStrategy, OpType, RegionId};
 use tokio::sync::oneshot::{self, Receiver, Sender};
@@ -27,8 +27,8 @@ use crate::config::DEFAULT_WRITE_BUFFER_SIZE;
 use crate::error::{CreateDefaultSnafu, FillDefaultSnafu, InvalidRequestSnafu, Result};
 use crate::metadata::{ColumnMetadata, RegionMetadata};
 use crate::proto_util::{
-    is_column_type_value_eq, is_semantic_type_eq, to_column_data_type, to_proto_semantic_type,
-    to_proto_value,
+    is_column_type_value_eq, is_semantic_type_eq, proto_value_type, to_column_data_type,
+    to_proto_semantic_type, to_proto_value,
 };
 
 /// Options that affect the entire region.
@@ -104,28 +104,51 @@ pub struct WriteRequest {
 
 impl WriteRequest {
     /// Returns a new request.
-    pub fn new(region_id: RegionId, op_type: OpType, rows: Rows) -> WriteRequest {
-        let name_to_index = rows
-            .schema
-            .iter()
-            .enumerate()
-            .map(|(index, column)| (column.column_name.clone(), index))
-            .collect();
-        WriteRequest {
+    pub fn new(region_id: RegionId, op_type: OpType, rows: Rows) -> Result<WriteRequest> {
+        let mut name_to_index = HashMap::with_capacity(rows.schema.len());
+        for (index, column) in rows.schema.iter().enumerate() {
+            ensure!(
+                name_to_index
+                    .insert(column.column_name.clone(), index)
+                    .is_none(),
+                InvalidRequestSnafu {
+                    region_id,
+                    reason: format!("duplicate column {}", column.column_name),
+                }
+            );
+        }
+
+        Ok(WriteRequest {
             region_id,
             op_type,
             rows,
             name_to_index,
-        }
+        })
     }
 
-    /// Validate the request.
+    /// Validates the request.
+    ///
+    /// Ensures rows match the schema.
     pub(crate) fn validate(&self) -> Result<()> {
-        // - checks whether the request is too large.
-        // - checks whether each row in rows has the same schema.
-        // - checks whether each column match the schema in Rows.
-        // - checks rows don't have duplicate columns.
-        unimplemented!()
+        for row in &self.rows.rows {
+            ensure!(
+                row.values.len() == self.rows.schema.len(),
+                InvalidRequestSnafu {
+                    region_id: self.region_id,
+                    reason: format!(
+                        "row has {} columns but schema has {}",
+                        row.values.len(),
+                        self.rows.schema.len()
+                    ),
+                }
+            );
+
+            for (value, column_schema) in row.values.iter().zip(&self.rows.schema) {
+                validate_proto_value(self.region_id, value, column_schema)?;
+            }
+        }
+
+        Ok(())
     }
 
     /// Get column index by name.
@@ -272,6 +295,30 @@ impl WriteRequest {
 
         Ok(())
     }
+}
+
+/// Validate proto value schema.
+pub(crate) fn validate_proto_value(
+    region_id: RegionId,
+    value: &Value,
+    column_schema: &ColumnSchema,
+) -> Result<()> {
+    if let Some(value_type) = proto_value_type(value) {
+        ensure!(
+            value_type as i32 == column_schema.datatype,
+            InvalidRequestSnafu {
+                region_id,
+                reason: format!(
+                    "column {} has type {:?}, but schema has type {:?}",
+                    column_schema.column_name,
+                    value_type,
+                    ColumnDataType::from_i32(column_schema.datatype)
+                ),
+            }
+        );
+    }
+
+    Ok(())
 }
 
 /// Sender and write request.
