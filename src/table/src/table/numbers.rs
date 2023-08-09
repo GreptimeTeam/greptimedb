@@ -93,7 +93,7 @@ impl Table for NumbersTable {
                 .catalog_name(DEFAULT_CATALOG_NAME)
                 .schema_name(DEFAULT_SCHEMA_NAME)
                 .table_version(0)
-                .table_type(TableType::Base)
+                .table_type(TableType::Temporary)
                 .meta(
                     TableMetaBuilder::default()
                         .schema(self.schema.clone())
@@ -110,7 +110,7 @@ impl Table for NumbersTable {
     }
 
     fn table_type(&self) -> TableType {
-        TableType::Base
+        TableType::Temporary
     }
 
     async fn scan_to_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream> {
