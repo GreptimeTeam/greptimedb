@@ -14,9 +14,9 @@
 
 use std::collections::HashMap;
 
-use api::v1::value::Value;
+use api::v1::field::Value;
 use api::v1::{
-    ColumnDataType, ColumnSchema, InsertRequest as GrpcInsertRequest, InsertRequests, Row,
+    ColumnDataType, ColumnSchema, Field, InsertRequest as GrpcInsertRequest, InsertRequests, Row,
     RowInsertRequest, RowInsertRequests, Rows, SemanticType,
 };
 use common_grpc::writer;
@@ -168,7 +168,7 @@ impl TryFrom<InfluxdbRequest> for RowInsertRequests {
                 .entry(table_name.to_string())
                 .or_insert_with(|| HashMap::with_capacity(len));
             assert_eq!(schema.len(), column_indexes.len());
-            let mut one_row = vec![api::v1::Value { value: None }; schema.len()];
+            let mut one_row = vec![Field { value: None }; schema.len()];
 
             // tags
             parse_tags(tags, column_indexes, schema, &mut one_row)?;
@@ -183,7 +183,7 @@ impl TryFrom<InfluxdbRequest> for RowInsertRequests {
                 &mut one_row,
             )?;
 
-            rows.push(Row { values: one_row });
+            rows.push(Row { fields: one_row });
         }
 
         let mut inserts = Vec::with_capacity(table_schemas.len());
@@ -194,10 +194,10 @@ impl TryFrom<InfluxdbRequest> for RowInsertRequests {
 
             let len = schema.len();
             for row in rows.iter_mut() {
-                let num_placeholders = len - row.values.len();
+                let num_placeholders = len - row.fields.len();
                 if num_placeholders > 0 {
-                    row.values
-                        .extend((0..num_placeholders).map(|_| api::v1::Value { value: None }));
+                    row.fields
+                        .extend((0..num_placeholders).map(|_| Field { value: None }));
                 }
             }
 
@@ -216,7 +216,7 @@ fn parse_tags(
     tags: Option<TagSet>,
     column_indexes: &mut HashMap<String, usize>,
     schema: &mut Vec<ColumnSchema>,
-    one_row: &mut Vec<api::v1::Value>,
+    one_row: &mut Vec<Field>,
 ) -> Result<(), Error> {
     let Some(tags) = tags else {
         return Ok(());
@@ -230,12 +230,12 @@ fn parse_tags(
                 datatype: ColumnDataType::String as i32,
                 semantic_type: SemanticType::Tag as i32,
             });
-            one_row.push(wrap_value(Value::StringValue(v.to_string())));
+            one_row.push(wrap_field(Value::StringValue(v.to_string())));
         } else {
             check_schema(ColumnDataType::String, SemanticType::Tag, &schema[*index])?;
             let current = one_row.get_mut(*index).unwrap();
             assert!(current.value.is_none());
-            *current = wrap_value(Value::StringValue(v.to_string()));
+            *current = wrap_field(Value::StringValue(v.to_string()));
         }
     }
 
@@ -246,19 +246,19 @@ fn parse_fields(
     fields: FieldSet,
     column_indexes: &mut HashMap<String, usize>,
     schema: &mut Vec<ColumnSchema>,
-    one_row: &mut Vec<api::v1::Value>,
+    one_row: &mut Vec<Field>,
 ) -> Result<(), Error> {
     for (k, v) in fields {
         let index = column_indexes.entry(k.to_string()).or_insert(schema.len());
         let (datatype, value) = match v {
-            FieldValue::I64(v) => (ColumnDataType::Int64, wrap_value(Value::I64Value(v))),
-            FieldValue::U64(v) => (ColumnDataType::Uint64, wrap_value(Value::U64Value(v))),
-            FieldValue::F64(v) => (ColumnDataType::Float64, wrap_value(Value::F64Value(v))),
+            FieldValue::I64(v) => (ColumnDataType::Int64, wrap_field(Value::I64Value(v))),
+            FieldValue::U64(v) => (ColumnDataType::Uint64, wrap_field(Value::U64Value(v))),
+            FieldValue::F64(v) => (ColumnDataType::Float64, wrap_field(Value::F64Value(v))),
             FieldValue::String(v) => (
                 ColumnDataType::String,
-                wrap_value(Value::StringValue(v.to_string())),
+                wrap_field(Value::StringValue(v.to_string())),
             ),
-            FieldValue::Boolean(v) => (ColumnDataType::Boolean, wrap_value(Value::BoolValue(v))),
+            FieldValue::Boolean(v) => (ColumnDataType::Boolean, wrap_field(Value::BoolValue(v))),
         };
 
         if *index == schema.len() {
@@ -284,7 +284,7 @@ fn parse_ts(
     precision: Option<Precision>,
     column_indexes: &mut HashMap<String, usize>,
     schema: &mut Vec<ColumnSchema>,
-    one_row: &mut Vec<api::v1::Value>,
+    one_row: &mut Vec<Field>,
 ) -> Result<(), Error> {
     let precision = unwrap_or_default_precision(precision);
     let ts = match ts {
@@ -311,7 +311,7 @@ fn parse_ts(
             datatype: ColumnDataType::TimestampMillisecond as i32,
             semantic_type: SemanticType::Timestamp as i32,
         });
-        one_row.push(wrap_value(Value::TsMillisecondValue(ts)))
+        one_row.push(wrap_field(Value::TsMillisecondValue(ts)))
     } else {
         let current = one_row.get_mut(*index).unwrap();
         check_schema(
@@ -320,7 +320,7 @@ fn parse_ts(
             &schema[*index],
         )?;
         assert!(current.value.is_none());
-        *current = wrap_value(Value::TsMillisecondValue(ts));
+        *current = wrap_field(Value::TsMillisecondValue(ts));
     }
 
     Ok(())
@@ -355,8 +355,8 @@ fn check_schema(
     Ok(())
 }
 
-fn wrap_value(value: Value) -> api::v1::Value {
-    api::v1::Value { value: Some(value) }
+fn wrap_field(value: Value) -> Field {
+    Field { value: Some(value) }
 }
 
 fn unwrap_or_default_precision(precision: Option<Precision>) -> Precision {
@@ -578,7 +578,7 @@ monitor2,host=host4 cpu=66.3,memory=1029 1663840496400340003";
                     assert_eq!(SemanticType::Tag as i32, column_schema.semantic_type);
 
                     for (j, row) in rows.iter().enumerate() {
-                        let v = row.values[i].value.as_ref().unwrap();
+                        let v = row.fields[i].value.as_ref().unwrap();
                         match j {
                             0 => assert_eq!("host1", extract_string_value(v)),
                             1 => assert_eq!("host2", extract_string_value(v)),
@@ -591,7 +591,7 @@ monitor2,host=host4 cpu=66.3,memory=1029 1663840496400340003";
                     assert_eq!(SemanticType::Field as i32, column_schema.semantic_type);
 
                     for (j, row) in rows.iter().enumerate() {
-                        let v = row.values[i].value.as_ref();
+                        let v = row.fields[i].value.as_ref();
                         match j {
                             0 => assert_eq!(66.6f64, extract_f64_value(v.as_ref().unwrap())),
                             1 => assert_eq!(None, v),
@@ -604,7 +604,7 @@ monitor2,host=host4 cpu=66.3,memory=1029 1663840496400340003";
                     assert_eq!(SemanticType::Field as i32, column_schema.semantic_type);
 
                     for (j, row) in rows.iter().enumerate() {
-                        let v = row.values[i].value.as_ref();
+                        let v = row.fields[i].value.as_ref();
                         match j {
                             0 => assert_eq!(1024f64, extract_f64_value(v.as_ref().unwrap())),
                             1 => assert_eq!(1027f64, extract_f64_value(v.as_ref().unwrap())),
@@ -620,7 +620,7 @@ monitor2,host=host4 cpu=66.3,memory=1029 1663840496400340003";
                     assert_eq!(SemanticType::Timestamp as i32, column_schema.semantic_type);
 
                     for (j, row) in rows.iter().enumerate() {
-                        let v = row.values[i].value.as_ref();
+                        let v = row.fields[i].value.as_ref();
                         match j {
                             0 => assert_eq!(
                                 1663840496100023100 / 1_000_000,
@@ -653,7 +653,7 @@ monitor2,host=host4 cpu=66.3,memory=1029 1663840496400340003";
                     assert_eq!(SemanticType::Tag as i32, column_schema.semantic_type);
 
                     for (j, row) in rows.iter().enumerate() {
-                        let v = row.values[i].value.as_ref().unwrap();
+                        let v = row.fields[i].value.as_ref().unwrap();
                         match j {
                             0 => assert_eq!("host3", extract_string_value(v)),
                             1 => assert_eq!("host4", extract_string_value(v)),
@@ -666,7 +666,7 @@ monitor2,host=host4 cpu=66.3,memory=1029 1663840496400340003";
                     assert_eq!(SemanticType::Field as i32, column_schema.semantic_type);
 
                     for (j, row) in rows.iter().enumerate() {
-                        let v = row.values[i].value.as_ref();
+                        let v = row.fields[i].value.as_ref();
                         match j {
                             0 => assert_eq!(66.5f64, extract_f64_value(v.as_ref().unwrap())),
                             1 => assert_eq!(66.3f64, extract_f64_value(v.as_ref().unwrap())),
@@ -679,7 +679,7 @@ monitor2,host=host4 cpu=66.3,memory=1029 1663840496400340003";
                     assert_eq!(SemanticType::Field as i32, column_schema.semantic_type);
 
                     for (j, row) in rows.iter().enumerate() {
-                        let v = row.values[i].value.as_ref();
+                        let v = row.fields[i].value.as_ref();
                         match j {
                             0 => assert_eq!(None, v),
                             1 => assert_eq!(1029f64, extract_f64_value(v.as_ref().unwrap())),
@@ -695,7 +695,7 @@ monitor2,host=host4 cpu=66.3,memory=1029 1663840496400340003";
                     assert_eq!(SemanticType::Timestamp as i32, column_schema.semantic_type);
 
                     for (j, row) in rows.iter().enumerate() {
-                        let v = row.values[i].value.as_ref();
+                        let v = row.fields[i].value.as_ref();
                         match j {
                             0 => assert_eq!(
                                 1663840496100023102 / 1_000_000,

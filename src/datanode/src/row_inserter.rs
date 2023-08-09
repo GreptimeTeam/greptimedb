@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 
 use api::helper::ColumnDataTypeWrapper;
-use api::v1::value::Value;
+use api::v1::field::Value;
 use api::v1::{RowInsertRequest, RowInsertRequests};
 use catalog::CatalogManagerRef;
 use common_query::Output;
@@ -94,28 +94,28 @@ impl RowInserter {
 
         let mut columns_values = HashMap::with_capacity(schema.len());
         for row in rows.rows {
-            let row_values = row.values;
+            let row_fields = row.fields;
 
             ensure!(
-                row_values.len() == schema.len(),
+                row_fields.len() == schema.len(),
                 InvalidInsertRowLenSnafu {
                     table_name: format!("{catalog_name}.{schema_name}.{table_name}"),
                     expected: schema.len(),
-                    actual: row_values.len(),
+                    actual: row_fields.len(),
                 }
             );
 
-            let row_count = row_values.len();
-            for (i, value) in row_values.into_iter().enumerate() {
+            let len = schema.len();
+            for (i, field) in row_fields.into_iter().enumerate() {
                 let column_name = schema[i].column_name.clone();
                 let datatype: ConcreteDataType = ColumnDataTypeWrapper::try_new(schema[i].datatype)
                     .context(ColumnDataTypeSnafu)?
                     .into();
                 let column_values_builder = columns_values
                     .entry(column_name)
-                    .or_insert_with(|| datatype.create_mutable_vector(row_count));
+                    .or_insert_with(|| datatype.create_mutable_vector(len));
 
-                if let Some(value) = value.value {
+                if let Some(value) = field.value {
                     let value = Self::convert_value(value);
                     column_values_builder
                         .try_push_value_ref(value.as_value_ref())

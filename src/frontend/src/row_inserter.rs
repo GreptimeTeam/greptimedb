@@ -198,23 +198,23 @@ impl RowInserter {
 
         for row in rows {
             ensure!(
-                row.values.len() == rows_schema.len(),
+                row.fields.len() == rows_schema.len(),
                 InvalidInsertRequestSnafu {
                     reason: format!(
                         "insert to table: {:?}, expected column count: {}, got: {}",
                         &req.table_name,
                         rows_schema.len(),
-                        row.values.len()
+                        row.fields.len()
                     )
                 }
             );
 
-            for (i, v) in row.values.iter().enumerate() {
+            for (i, field) in row.fields.iter().enumerate() {
                 let column_name = &rows_schema[i].column_name;
                 let Some(not_null) = not_nulls.get_mut(column_name) else {
                     continue;
                 };
-                let _ = v.value.as_ref().context(InvalidInsertRequestSnafu {
+                let _ = field.value.as_ref().context(InvalidInsertRequestSnafu {
                     reason: format!(
                         "insert to table: {:?}, column: {:?}, expected not null",
                         &req.table_name, column_name,
@@ -261,10 +261,10 @@ impl RowInserter {
 mod tests {
     use std::assert_matches::assert_matches;
 
-    use api::v1::value::Value as RpcValueUnion;
+    use api::v1::field::Value as FieldValue;
     use api::v1::{
-        ColumnDataType as RpcColumnDataType, ColumnSchema as RpcColumnSchema, Row, Rows,
-        SemanticType, Value as RpcValue,
+        ColumnDataType as RpcColumnDataType, ColumnSchema as RpcColumnSchema, Field, Row, Rows,
+        SemanticType,
     };
     use datatypes::prelude::*;
     use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema};
@@ -323,13 +323,13 @@ mod tests {
 
         // case 2
         let rows = vec![Row {
-            values: vec![
-                RpcValue {
-                    value: Some(RpcValueUnion::I32Value(1)),
+            fields: vec![
+                Field {
+                    value: Some(FieldValue::I32Value(1)),
                 },
-                RpcValue { value: None },
-                RpcValue {
-                    value: Some(RpcValueUnion::I32Value(1)),
+                Field { value: None },
+                Field {
+                    value: Some(FieldValue::I32Value(1)),
                 },
             ],
         }];
@@ -339,12 +339,12 @@ mod tests {
 
         // case 3
         let rows = vec![Row {
-            values: vec![
-                RpcValue {
-                    value: Some(RpcValueUnion::I32Value(1)),
+            fields: vec![
+                Field {
+                    value: Some(FieldValue::I32Value(1)),
                 },
-                RpcValue {
-                    value: Some(RpcValueUnion::I32Value(1)),
+                Field {
+                    value: Some(FieldValue::I32Value(1)),
                 },
             ],
         }];
@@ -354,13 +354,13 @@ mod tests {
 
         // case 4
         let rows = vec![Row {
-            values: vec![
-                RpcValue { value: None },
-                RpcValue {
-                    value: Some(RpcValueUnion::I32Value(1)),
+            fields: vec![
+                Field { value: None },
+                Field {
+                    value: Some(FieldValue::I32Value(1)),
                 },
-                RpcValue {
-                    value: Some(RpcValueUnion::I32Value(1)),
+                Field {
+                    value: Some(FieldValue::I32Value(1)),
                 },
             ],
         }];
@@ -370,12 +370,12 @@ mod tests {
 
         // case 5
         let rows = vec![Row {
-            values: vec![
-                RpcValue { value: None },
-                RpcValue {
-                    value: Some(RpcValueUnion::I32Value(1)),
+            fields: vec![
+                Field { value: None },
+                Field {
+                    value: Some(FieldValue::I32Value(1)),
                 },
-                RpcValue { value: None },
+                Field { value: None },
             ],
         }];
         let req = create_req(data_schema.clone(), rows);
@@ -385,21 +385,21 @@ mod tests {
         // case 6
         let rows = vec![
             Row {
-                values: vec![
-                    RpcValue { value: None },
-                    RpcValue {
-                        value: Some(RpcValueUnion::I32Value(1)),
+                fields: vec![
+                    Field { value: None },
+                    Field {
+                        value: Some(FieldValue::I32Value(1)),
                     },
-                    RpcValue { value: None },
+                    Field { value: None },
                 ],
             },
             Row {
-                values: vec![
-                    RpcValue {
-                        value: Some(RpcValueUnion::I32Value(1)),
+                fields: vec![
+                    Field {
+                        value: Some(FieldValue::I32Value(1)),
                     },
-                    RpcValue {
-                        value: Some(RpcValueUnion::I32Value(1)),
+                    Field {
+                        value: Some(FieldValue::I32Value(1)),
                     },
                 ],
             },
@@ -411,23 +411,23 @@ mod tests {
         // case 7
         let rows = vec![
             Row {
-                values: vec![
-                    RpcValue { value: None },
-                    RpcValue {
-                        value: Some(RpcValueUnion::I32Value(1)),
+                fields: vec![
+                    Field { value: None },
+                    Field {
+                        value: Some(FieldValue::I32Value(1)),
                     },
-                    RpcValue {
-                        value: Some(RpcValueUnion::I32Value(1)),
+                    Field {
+                        value: Some(FieldValue::I32Value(1)),
                     },
                 ],
             },
             Row {
-                values: vec![
-                    RpcValue { value: None },
-                    RpcValue {
-                        value: Some(RpcValueUnion::I32Value(1)),
+                fields: vec![
+                    Field { value: None },
+                    Field {
+                        value: Some(FieldValue::I32Value(1)),
                     },
-                    RpcValue { value: None },
+                    Field { value: None },
                 ],
             },
         ];
