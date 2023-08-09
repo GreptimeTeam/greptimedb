@@ -60,7 +60,7 @@ pub struct RangeSelect {
     pub input: Arc<LogicalPlan>,
     /// all range expressions
     pub range_expr: Vec<RangeFn>,
-    pub algin: Duration,
+    pub align: Duration,
     pub time_index: String,
     pub by: Vec<Expr>,
     pub schema: DFSchemaRef,
@@ -70,7 +70,7 @@ impl RangeSelect {
     pub fn try_new(
         input: Arc<LogicalPlan>,
         range_expr: Vec<RangeFn>,
-        algin: Duration,
+        align: Duration,
         time_index: Expr,
         by: Vec<Expr>,
     ) -> Result<Self> {
@@ -100,7 +100,7 @@ impl RangeSelect {
         Ok(Self {
             input,
             range_expr,
-            algin,
+            align,
             time_index: time_index_name,
             schema: Arc::new(schema),
             by,
@@ -131,13 +131,13 @@ impl UserDefinedLogicalNodeCore for RangeSelect {
     fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(
             f,
-            "RangeSelect: range_exprs=[{}], algin={}s time_index={}",
+            "RangeSelect: range_exprs=[{}], align={}s time_index={}",
             self.range_expr
                 .iter()
                 .map(ToString::to_string)
                 .collect::<Vec<_>>()
                 .join(", "),
-            self.algin.as_secs(),
+            self.align.as_secs(),
             self.time_index
         )
     }
@@ -146,7 +146,7 @@ impl UserDefinedLogicalNodeCore for RangeSelect {
         assert!(!inputs.is_empty());
 
         Self {
-            algin: self.algin,
+            align: self.align,
             range_expr: self.range_expr.clone(),
             input: Arc::new(inputs[0].clone()),
             time_index: self.time_index.clone(),
