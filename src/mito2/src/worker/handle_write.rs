@@ -25,6 +25,7 @@ use store_api::storage::{RegionId, SequenceNumber};
 use tokio::sync::oneshot::Sender;
 
 use crate::error::{Error, RegionNotFoundSnafu, Result, WriteGroupSnafu};
+use crate::memtable::KeyValues;
 use crate::proto_util::to_proto_op_type;
 use crate::region::version::{VersionControlData, VersionRef};
 use crate::region::MitoRegionRef;
@@ -41,7 +42,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         let mut region_ctxs = self.prepare_region_write_ctx(write_requests);
 
-        // Write WAL.
+        // Write to WAL.
         let mut wal_writer = self.wal.writer();
         for region_ctx in region_ctxs.values_mut() {
             if let Err(e) = region_ctx.add_wal_entry(&mut wal_writer).map_err(Arc::new) {
@@ -56,7 +57,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return;
         }
 
-        todo!()
+        // Write to memtables.
+        for mut region_ctx in region_ctxs.into_values() {
+            region_ctx.write_memtable();
+        }
     }
 }
 
@@ -111,6 +115,41 @@ fn send_result(sender: Option<Sender<Result<()>>>, res: Result<()>) {
     }
 }
 
+/// Notifier to notify write result on drop.
+struct WriteNotify {
+    /// Error to send to the waiter.
+    err: Option<Arc<Error>>,
+    /// Sender to send write result to the waiter for this mutation.
+    sender: Option<Sender<Result<()>>>,
+}
+
+impl WriteNotify {
+    /// Creates a new notify from the `sender`.
+    fn new(sender: Option<Sender<Result<()>>>) -> WriteNotify {
+        WriteNotify { err: None, sender }
+    }
+
+    /// Send result to the waiter.
+    fn notify_result(&mut self) {
+        let Some(sender) = self.sender.take() else {
+            return;
+        };
+        if let Some(err) = &self.err {
+            // Try to send the error to waiters.
+            let _ = sender.send(Err(err.clone()).context(WriteGroupSnafu));
+        } else {
+            // Send success result.
+            let _ = sender.send(Ok(()));
+        }
+    }
+}
+
+impl Drop for WriteNotify {
+    fn drop(&mut self) {
+        self.notify_result();
+    }
+}
+
 /// Context to keep region metadata and buffer write requests.
 struct RegionWriteCtx {
     /// Region to write.
@@ -124,13 +163,14 @@ struct RegionWriteCtx {
     /// Next entry id of WAL to write.
     next_entry_id: EntryId,
     /// Valid WAL entry to write.
-    wal_entry: WalEntry,
-    /// Error during writing this region.
-    err: Option<Arc<Error>>,
-    /// Result senders.
     ///
-    /// All senders will receive the same result.
-    senders: Vec<Sender<Result<()>>>,
+    /// We keep [WalEntry] instead of mutations to avoid taking mutations
+    /// out of the context to construct the wal entry when we write to the wal.
+    wal_entry: WalEntry,
+    /// Notifiers to send write results to waiters.
+    ///
+    /// The i-th notify is for i-th mutation.
+    notifiers: Vec<WriteNotify>,
 }
 
 impl RegionWriteCtx {
@@ -147,8 +187,7 @@ impl RegionWriteCtx {
             next_sequence: committed_sequence + 1,
             next_entry_id: last_entry_id + 1,
             wal_entry: WalEntry::default(),
-            err: None,
-            senders: Vec::new(),
+            notifiers: Vec::new(),
         }
     }
 
@@ -161,9 +200,8 @@ impl RegionWriteCtx {
             sequence: self.next_sequence,
             rows: Some(sender_req.request.rows),
         });
-        if let Some(sender) = sender_req.sender {
-            self.senders.push(sender);
-        }
+        // Notifiers are 1:1 map to mutations.
+        self.notifiers.push(WriteNotify::new(sender_req.sender));
 
         // Increase sequence number.
         self.next_sequence += num_rows;
@@ -174,30 +212,29 @@ impl RegionWriteCtx {
         wal_writer.add_entry(self.region.region_id, self.next_entry_id, &self.wal_entry)
     }
 
-    /// Sets error and marks the write operation is failed.
-    ///
-    /// The context will send the error to waiters on drop.
+    /// Sets error and marks all write operations are failed.
     fn set_error(&mut self, err: Arc<Error>) {
-        self.err = Some(err);
-    }
-
-    /// Sends result to waiters.
-    fn notify_result(&mut self) {
-        let senders = mem::take(&mut self.senders);
-        for sender in senders {
-            if let Some(err) = &self.err {
-                // Try to send the error to waiters.
-                let _ = sender.send(Err(err.clone()).context(WriteGroupSnafu));
-            } else {
-                // Send success result.
-                let _ = sender.send(Ok(()));
-            }
+        // Set error for all notifiers
+        for notify in &mut self.notifiers {
+            notify.err = Some(err.clone());
         }
     }
-}
 
-impl Drop for RegionWriteCtx {
-    fn drop(&mut self) {
-        self.notify_result();
+    /// Consumes mutations and writes them into mutable memtable.
+    fn write_memtable(&mut self) {
+        debug_assert_eq!(self.notifiers.len(), self.wal_entry.mutations.len());
+
+        let mutable = self.version.memtables.mutable();
+        // Takes mutations from the wal entry.
+        let mutations = mem::take(&mut self.wal_entry.mutations);
+        for (mutation, notify) in mutations.into_iter().zip(&mut self.notifiers) {
+            // Write mutation to the memtable.
+            let Some(kvs) = KeyValues::new(&self.version.metadata, mutation) else {
+                continue;
+            };
+            if let Err(e) = mutable.write(&kvs) {
+                notify.err = Some(Arc::new(e));
+            }
+        }
     }
 }
