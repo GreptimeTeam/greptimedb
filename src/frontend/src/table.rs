@@ -43,7 +43,7 @@ use partition::splitter::WriteSplitter;
 use snafu::prelude::*;
 use store_api::storage::{RegionNumber, ScanRequest};
 use table::error::TableOperationSnafu;
-use table::metadata::{FilterPushDownType, TableInfoRef};
+use table::metadata::{FilterPushDownType, TableInfoRef, TableType};
 use table::requests::{DeleteRequest, InsertRequest};
 use table::Table;
 use tokio::sync::RwLock;
@@ -77,6 +77,10 @@ impl Table for DistTable {
 
     fn table_info(&self) -> TableInfoRef {
         self.table_info.clone()
+    }
+
+    fn table_type(&self) -> TableType {
+        self.table_info.table_type
     }
 
     async fn insert(&self, request: InsertRequest) -> table::Result<usize> {

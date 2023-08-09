@@ -27,7 +27,7 @@ use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::vectors::{Int64Vector, TimestampMillisecondVector};
 use store_api::storage::ScanRequest;
-use table::metadata::{FilterPushDownType, TableInfoRef};
+use table::metadata::{FilterPushDownType, TableInfoRef, TableType};
 use table::predicate::TimeRangePredicateBuilder;
 use table::test_util::MemTable;
 use table::Table;
@@ -59,6 +59,10 @@ impl Table for MemTableWrapper {
 
     fn table_info(&self) -> TableInfoRef {
         self.inner.table_info()
+    }
+
+    fn table_type(&self) -> TableType {
+        self.inner.table_type()
     }
 
     async fn scan_to_stream(
