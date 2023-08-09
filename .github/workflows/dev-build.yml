@@ -170,7 +170,7 @@ jobs:
           aws-region: ${{ vars.AWS_RELEASE_BUCKET_REGION }}
           dev-mode: true # Only build the standard greptime binary.
           upload-to-s3: false # No need to upload to S3.
-          context: ${{ env.CHECKOUT_GREPTIMEDB_PATH }}
+          working-dir: ${{ env.CHECKOUT_GREPTIMEDB_PATH }}
 
   build-linux-arm64-artifacts:
     name: Build linux-arm64 artifacts
@@ -204,7 +204,7 @@ jobs:
           aws-region: ${{ vars.AWS_RELEASE_BUCKET_REGION }}
           dev-mode: true # Only build the standard greptime binary.
           upload-to-s3: false # No need to upload to S3.
-          context: ${{ env.CHECKOUT_GREPTIMEDB_PATH }}
+          working-dir: ${{ env.CHECKOUT_GREPTIMEDB_PATH }}
 
   release-images-to-dockerhub:
     name: Build and push images to DockerHub
