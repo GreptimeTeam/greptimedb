@@ -128,7 +128,7 @@ impl UserProvider for StaticUserProvider {
                             }
                         );
                         return if save_pwd == pwd.expose_secret().as_bytes() {
-                            Ok(DefaultUserInfo::new(username))
+                            Ok(DefaultUserInfo::with_name(username))
                         } else {
                             UserPasswordMismatchSnafu {
                                 username: username.to_string(),
@@ -144,7 +144,7 @@ impl UserProvider for StaticUserProvider {
                             }
                         );
                         auth_mysql(auth_data, salt, username, save_pwd)
-                            .map(|_| DefaultUserInfo::new(username))
+                            .map(|_| DefaultUserInfo::with_name(username))
                     }
                     Password::PgMD5(_, _) => UnsupportedPasswordTypeSnafu {
                         password_type: "pg_md5",
@@ -258,7 +258,7 @@ pub mod test {
 
     #[tokio::test]
     async fn test_authorize() {
-        let user_info = DefaultUserInfo::new("root");
+        let user_info = DefaultUserInfo::with_name("root");
         let provider = StaticUserProvider::try_from("cmd:root=123456,admin=654321").unwrap();
         provider
             .authorize("catalog", "schema", &user_info)

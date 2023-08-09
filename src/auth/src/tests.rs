@@ -72,7 +72,7 @@ impl UserProvider for MockUserProvider {
                 Password::PlainText(password) => {
                     if username == "greptime" {
                         if password.expose_secret() == "greptime" {
-                            Ok(DefaultUserInfo::new("greptime"))
+                            Ok(DefaultUserInfo::with_name("greptime"))
                         } else {
                             UserPasswordMismatchSnafu {
                                 username: username.to_string(),
@@ -88,7 +88,7 @@ impl UserProvider for MockUserProvider {
                 }
                 Password::MysqlNativePassword(auth_data, salt) => {
                     auth_mysql(auth_data, salt, username, "greptime".as_bytes())
-                        .map(|_| DefaultUserInfo::new(username))
+                        .map(|_| DefaultUserInfo::with_name(username))
                 }
                 _ => UnsupportedPasswordTypeSnafu {
                     password_type: "mysql_native_password",
@@ -182,8 +182,8 @@ async fn test_schema_validate() {
         username: "test_user",
     });
 
-    let right_user = DefaultUserInfo::new("test_user");
-    let wrong_user = DefaultUserInfo::new("greptime");
+    let right_user = DefaultUserInfo::with_name("test_user");
+    let wrong_user = DefaultUserInfo::with_name("greptime");
 
     // check catalog
     let re = validator

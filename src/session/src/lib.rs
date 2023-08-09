@@ -41,7 +41,7 @@ impl Session {
         Session {
             catalog: ArcSwap::new(Arc::new(DEFAULT_CATALOG_NAME.into())),
             schema: ArcSwap::new(Arc::new(DEFAULT_SCHEMA_NAME.into())),
-            user_info: ArcSwap::new(Arc::new(auth::default_user_info())),
+            user_info: ArcSwap::new(Arc::new(auth::userinfo_by_name(None))),
             conn_info: ConnInfo::new(addr, channel),
         }
     }

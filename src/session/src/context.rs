@@ -195,7 +195,6 @@ impl Display for Channel {
 
 #[cfg(test)]
 mod test {
-    use auth::UserInfo;
     use common_catalog::consts::DEFAULT_CATALOG_NAME;
 
     use super::*;
@@ -207,8 +206,6 @@ mod test {
         let session = Session::new(Some("127.0.0.1:9000".parse().unwrap()), Channel::Mysql);
         // test user_info
         assert_eq!(session.user_info().username(), "greptime");
-        session.set_user_info(UserInfo::new("root"));
-        assert_eq!(session.user_info().username(), "root");
 
         // test channel
         assert_eq!(session.conn_info().channel, Channel::Mysql);

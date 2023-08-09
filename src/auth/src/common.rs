@@ -22,8 +22,8 @@ use crate::user_info::DefaultUserInfo;
 use crate::user_provider::static_user_provider::{StaticUserProvider, STATIC_USER_PROVIDER};
 use crate::{UserInfo, UserProviderRef};
 
-pub fn default_user_info() -> Arc<dyn UserInfo> {
-    DefaultUserInfo::new("greptime")
+pub fn userinfo_by_name(username: Option<String>) -> Arc<dyn UserInfo> {
+    DefaultUserInfo::with_name(username.unwrap_or_else(|| "greptime".to_string()))
 }
 
 pub fn user_provider_from_option(opt: &String) -> Result<UserProviderRef> {

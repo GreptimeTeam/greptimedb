@@ -14,7 +14,7 @@
 
 use std::fmt::Debug;
 
-use ::auth::{Identity, Password, UserInfo, UserProviderRef};
+use ::auth::{userinfo_by_name, Identity, Password, UserProviderRef};
 use async_trait::async_trait;
 use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
@@ -125,7 +125,7 @@ where
         session.set_schema(current_schema.clone());
     }
     if let Some(username) = client.metadata().get(super::METADATA_USER) {
-        session.set_user_info(UserInfo::new(username));
+        session.set_user_info(userinfo_by_name(Some(username.clone())));
     }
 }
 

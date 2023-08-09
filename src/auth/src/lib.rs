@@ -20,9 +20,7 @@ mod user_provider;
 #[cfg(feature = "testing")]
 pub mod tests;
 
-pub use common::{
-    default_user_info, user_provider_from_option, HashedPassword, Identity, Password,
-};
+pub use common::{user_provider_from_option, userinfo_by_name, HashedPassword, Identity, Password};
 pub use error::{Error, Result};
 pub use user_info::UserInfo;
 pub use user_provider::UserProvider;

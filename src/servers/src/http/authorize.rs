@@ -15,7 +15,6 @@
 use std::marker::PhantomData;
 
 use ::auth::UserProviderRef;
-use auth::UserInfo;
 use axum::http::{self, Request, StatusCode};
 use axum::response::Response;
 use common_catalog::parse_catalog_and_schema_from_db_string;
@@ -77,7 +76,9 @@ where
             let user_provider = if let Some(user_provider) = user_provider.filter(|_| need_auth) {
                 user_provider
             } else {
-                let _ = request.extensions_mut().insert(UserInfo::default());
+                let _ = request
+                    .extensions_mut()
+                    .insert(auth::userinfo_by_name(None));
                 return Ok(request);
             };
 

@@ -25,7 +25,7 @@ pub(crate) struct DefaultUserInfo {
 }
 
 impl DefaultUserInfo {
-    pub(crate) fn new(username: impl Into<String>) -> Arc<dyn UserInfo> {
+    pub(crate) fn with_name(username: impl Into<String>) -> Arc<dyn UserInfo> {
         Arc::new(Self {
             username: username.into(),
         })

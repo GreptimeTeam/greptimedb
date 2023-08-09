@@ -197,7 +197,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
                 }
             };
         }
-        let user_info = user_info.unwrap_or_default();
+        let user_info = user_info.unwrap_or_else(|| auth::userinfo_by_name(None));
 
         self.session.set_user_info(user_info);
 
