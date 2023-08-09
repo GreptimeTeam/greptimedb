@@ -58,7 +58,7 @@ openmetrics-parser = "0.4"
 opensrv-mysql = "0.4"
 opentelemetry-proto.workspace = true
 parking_lot = "0.12"
-pgwire = "0.15"
+pgwire = "0.16"
 pin-project = "1.0"
 postgres-types = { version = "0.2", features = ["with-chrono-0_4"] }
 promql-parser = "0.1.1"

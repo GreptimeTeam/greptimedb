@@ -257,10 +257,20 @@ impl ExtendedQueryHandler for PostgresServerHandler {
     {
         let (param_types, sql_plan, format) = match target {
             StatementOrPortal::Statement(stmt) => {
-                let param_types = Some(stmt.parameter_types().clone());
-                // TODO(sunng87): return server inferenced param_types if client
-                // not specified
-                (param_types, stmt.statement(), &Format::UnifiedBinary)
+                let sql_plan = stmt.statement();
+                if let Some(plan) = &sql_plan.plan {
+                    let param_types = plan
+                        .get_param_types()
+                        .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+
+                    let types = param_types_to_pg_types(&param_types)
+                        .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+
+                    (Some(types), sql_plan, &Format::UnifiedBinary)
+                } else {
+                    let param_types = Some(stmt.parameter_types().clone());
+                    (param_types, sql_plan, &Format::UnifiedBinary)
+                }
             }
             StatementOrPortal::Portal(portal) => (
                 None,

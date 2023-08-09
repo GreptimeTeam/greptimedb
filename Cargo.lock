@@ -6544,9 +6544,9 @@ dependencies = [
 
 [[package]]
 name = "pgwire"
-version = "0.15.0"
+version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e2de42ee35f9694def25c37c15f564555411d9904b48e33680618ee7359080dc"
+checksum = "593c5af58c6394873b84c6fabf31f97e49ab29a56809e7fd240c1bcc4e5d272f"
 dependencies = [
  "async-trait",
  "base64 0.21.2",
@@ -9882,6 +9882,7 @@ dependencies = [
  "table",
  "tempfile",
  "tokio",
+ "tokio-postgres",
  "tonic 0.9.2",
  "tower",
  "uuid",
@@ -11487,9 +11488,9 @@ dependencies = [
 
 [[package]]
 name = "x509-certificate"
-version = "0.20.0"
+version = "0.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2133ce6c08c050a5b368730a67c53a603ffd4a4a6c577c5218675a19f7782c05"
+checksum = "5e5d27c90840e84503cf44364de338794d5d5680bdd1da6272d13f80b0769ee0"
 dependencies = [
  "bcder",
  "bytes",
