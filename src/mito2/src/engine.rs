@@ -20,12 +20,12 @@ mod tests;
 use std::sync::Arc;
 
 use object_store::ObjectStore;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use store_api::logstore::LogStore;
 use store_api::storage::RegionId;
 
 use crate::config::MitoConfig;
-use crate::error::{RecvSnafu, Result};
+use crate::error::{RecvSnafu, RegionNotFoundSnafu, Result};
 use crate::request::{
     CloseRequest, CreateRequest, OpenRequest, RegionRequest, RequestBody, WriteRequest,
 };
@@ -90,12 +90,19 @@ impl MitoEngine {
     }
 
     /// Write to a region.
-    pub async fn write_region(&self, write_request: WriteRequest) -> Result<()> {
+    pub async fn write_region(&self, mut write_request: WriteRequest) -> Result<()> {
         write_request.validate()?;
 
-        // TODO(yingwen): Fill default values.
-        // We need to fill default values before writing it to WAL so we can get
-        // the same default value after reopening the region.
+        let region = self
+            .inner
+            .workers
+            .get_region(write_request.region_id)
+            .context(RegionNotFoundSnafu {
+                region_id: write_request.region_id,
+            })?;
+        let metadata = region.metadata();
+
+        write_request.fill_missing_columns(&metadata)?;
 
         self.inner
             .handle_request_body(RequestBody::Write(write_request))

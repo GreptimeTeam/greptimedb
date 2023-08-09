@@ -26,10 +26,11 @@ use tokio::sync::oneshot::Sender;
 
 use crate::error::{Error, RegionNotFoundSnafu, Result, WriteGroupSnafu};
 use crate::memtable::KeyValues;
+use crate::metadata::RegionMetadata;
 use crate::proto_util::to_proto_op_type;
 use crate::region::version::{VersionControlData, VersionRef};
 use crate::region::MitoRegionRef;
-use crate::request::SenderWriteRequest;
+use crate::request::{SenderWriteRequest, WriteRequest};
 use crate::wal::{EntryId, WalWriter};
 use crate::worker::RegionWorkerLoop;
 
@@ -71,7 +72,7 @@ impl<S> RegionWorkerLoop<S> {
         write_requests: Vec<SenderWriteRequest>,
     ) -> HashMap<RegionId, RegionWriteCtx> {
         let mut region_ctxs = HashMap::new();
-        for sender_req in write_requests {
+        for mut sender_req in write_requests {
             let region_id = sender_req.request.region_id;
             // Checks whether the region exists.
             if let hash_map::Entry::Vacant(e) = region_ctxs.entry(region_id) {
@@ -90,9 +91,8 @@ impl<S> RegionWorkerLoop<S> {
             let region_ctx = region_ctxs.get_mut(&region_id).unwrap();
 
             // Checks whether request schema is compatible with region schema.
-            if let Err(e) = sender_req
-                .request
-                .check_schema(&region_ctx.version.metadata)
+            if let Err(e) =
+                maybe_fill_missing_columns(&mut sender_req.request, &region_ctx.version.metadata)
             {
                 send_result(sender_req.sender, Err(e));
 
@@ -105,6 +105,22 @@ impl<S> RegionWorkerLoop<S> {
 
         region_ctxs
     }
+}
+
+/// Checks the schema and fill missing columns.
+fn maybe_fill_missing_columns(request: &mut WriteRequest, metadata: &RegionMetadata) -> Result<()> {
+    if let Err(e) = request.check_schema(metadata) {
+        if e.is_fill_default() {
+            // TODO(yingwen): Add metrics for this case.
+            // We need to fill default value again. The write request may be a request
+            // sent before changing the schema.
+            request.fill_missing_columns(metadata)?;
+        } else {
+            return Err(e);
+        }
+    }
+
+    Ok(())
 }
 
 /// Send result to the request.

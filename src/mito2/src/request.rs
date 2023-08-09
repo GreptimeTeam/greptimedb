@@ -190,11 +190,7 @@ impl WriteRequest {
                     }
                 );
 
-                return FillDefaultSnafu {
-                    region_id,
-                    column: &column.column_schema.name,
-                }
-                .fail();
+                return FillDefaultSnafu { region_id }.fail();
             }
         }
 

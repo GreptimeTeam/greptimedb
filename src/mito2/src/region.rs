@@ -25,6 +25,7 @@ use store_api::storage::RegionId;
 
 use crate::error::Result;
 use crate::manifest::manager::RegionManifestManager;
+use crate::metadata::RegionMetadataRef;
 use crate::region::version::VersionControlRef;
 
 /// Type to store region version.
@@ -55,6 +56,12 @@ impl MitoRegion {
         info!("Stopped region, region_id: {}", self.region_id);
 
         Ok(())
+    }
+
+    /// Returns current metadata of the region.
+    pub(crate) fn metadata(&self) -> RegionMetadataRef {
+        let version_data = self.version_control.current();
+        version_data.version.metadata.clone()
     }
 }
 

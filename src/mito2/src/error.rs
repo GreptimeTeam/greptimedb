@@ -186,15 +186,10 @@ pub enum Error {
 
     /// An error type to indicate that schema is changed and we need
     /// to fill default values again.
-    #[snafu(display(
-        "Need to fill default value to column {} of region {}",
-        column,
-        region_id
-    ))]
+    #[snafu(display("Need to fill default value for region {}", region_id))]
     FillDefault {
         region_id: RegionId,
-        column: String,
-        // The error is for retry purpose so we don't need a location.
+        // The error is for internal use so we don't need a location.
     },
 
     #[snafu(display(
@@ -268,6 +263,13 @@ pub enum Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+impl Error {
+    /// Returns true if we need to fill default value for a region.
+    pub(crate) fn is_fill_default(&self) -> bool {
+        matches!(self, Error::FillDefault { .. })
+    }
+}
 
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {

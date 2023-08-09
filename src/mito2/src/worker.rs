@@ -37,7 +37,7 @@ use tokio::sync::{mpsc, Mutex};
 use crate::config::MitoConfig;
 use crate::error::{JoinSnafu, Result, WorkerStoppedSnafu};
 use crate::memtable::{DefaultMemtableBuilder, MemtableBuilderRef};
-use crate::region::{RegionMap, RegionMapRef};
+use crate::region::{MitoRegionRef, RegionMap, RegionMapRef};
 use crate::request::{RegionRequest, RequestBody, SenderWriteRequest, WorkerRequest};
 use crate::wal::Wal;
 
@@ -131,6 +131,13 @@ impl WorkerGroup {
     /// Returns true if the specific region exists.
     pub(crate) fn is_region_exists(&self, region_id: RegionId) -> bool {
         self.worker(region_id).is_region_exists(region_id)
+    }
+
+    /// Returns region of specific `region_id`.
+    ///
+    /// This method should not be public.
+    pub(crate) fn get_region(&self, region_id: RegionId) -> Option<MitoRegionRef> {
+        self.worker(region_id).get_region(region_id)
     }
 
     /// Get worker for specific `region_id`.
@@ -251,6 +258,11 @@ impl RegionWorker {
     /// Returns true if the worker contains specific region.
     fn is_region_exists(&self, region_id: RegionId) -> bool {
         self.regions.is_region_exists(region_id)
+    }
+
+    /// Returns region of specific `region_id`.
+    fn get_region(&self, region_id: RegionId) -> Option<MitoRegionRef> {
+        self.regions.get_region(region_id)
     }
 }
 
