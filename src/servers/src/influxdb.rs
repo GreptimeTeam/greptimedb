@@ -155,7 +155,7 @@ impl TryFrom<InfluxdbRequest> for RowInsertRequests {
             let table_name = line.series.measurement.as_str();
             let tags = line.series.tag_set;
             let fields = line.field_set;
-            let timestamp = line.timestamp;
+            let ts = line.timestamp;
             let len = tags.as_ref().map(|x| x.len()).unwrap_or(0) + fields.len();
 
             let schema = table_schemas
@@ -175,13 +175,7 @@ impl TryFrom<InfluxdbRequest> for RowInsertRequests {
             // fields
             parse_fields(fields, column_indexes, schema, &mut one_row)?;
             // timestamp
-            parse_ts(
-                timestamp,
-                value.precision,
-                column_indexes,
-                schema,
-                &mut one_row,
-            )?;
+            parse_ts(ts, value.precision, column_indexes, schema, &mut one_row)?;
 
             rows.push(Row { fields: one_row });
         }
@@ -230,12 +224,11 @@ fn parse_tags(
                 datatype: ColumnDataType::String as i32,
                 semantic_type: SemanticType::Tag as i32,
             });
-            one_row.push(wrap_field(Value::StringValue(v.to_string())));
+            one_row.push(field(Value::StringValue(v.to_string())));
         } else {
             check_schema(ColumnDataType::String, SemanticType::Tag, &schema[*index])?;
-            let current = one_row.get_mut(*index).unwrap();
-            assert!(current.value.is_none());
-            *current = wrap_field(Value::StringValue(v.to_string()));
+            // unwrap is safe here
+            one_row.get_mut(*index).unwrap().value = Some(Value::StringValue(v.to_string()));
         }
     }
 
@@ -251,14 +244,11 @@ fn parse_fields(
     for (k, v) in fields {
         let index = column_indexes.entry(k.to_string()).or_insert(schema.len());
         let (datatype, value) = match v {
-            FieldValue::I64(v) => (ColumnDataType::Int64, wrap_field(Value::I64Value(v))),
-            FieldValue::U64(v) => (ColumnDataType::Uint64, wrap_field(Value::U64Value(v))),
-            FieldValue::F64(v) => (ColumnDataType::Float64, wrap_field(Value::F64Value(v))),
-            FieldValue::String(v) => (
-                ColumnDataType::String,
-                wrap_field(Value::StringValue(v.to_string())),
-            ),
-            FieldValue::Boolean(v) => (ColumnDataType::Boolean, wrap_field(Value::BoolValue(v))),
+            FieldValue::I64(v) => (ColumnDataType::Int64, Value::I64Value(v)),
+            FieldValue::U64(v) => (ColumnDataType::Uint64, Value::U64Value(v)),
+            FieldValue::F64(v) => (ColumnDataType::Float64, Value::F64Value(v)),
+            FieldValue::String(v) => (ColumnDataType::String, Value::StringValue(v.to_string())),
+            FieldValue::Boolean(v) => (ColumnDataType::Boolean, Value::BoolValue(v)),
         };
 
         if *index == schema.len() {
@@ -267,12 +257,11 @@ fn parse_fields(
                 datatype: datatype as i32,
                 semantic_type: SemanticType::Field as i32,
             });
-            one_row.push(value);
+            one_row.push(field(value));
         } else {
             check_schema(datatype, SemanticType::Field, &schema[*index])?;
-            let current = one_row.get_mut(*index).unwrap();
-            assert!(current.value.is_none());
-            *current = value;
+            // unwrap is safe here
+            one_row.get_mut(*index).unwrap().value = Some(value);
         }
     }
 
@@ -311,16 +300,15 @@ fn parse_ts(
             datatype: ColumnDataType::TimestampMillisecond as i32,
             semantic_type: SemanticType::Timestamp as i32,
         });
-        one_row.push(wrap_field(Value::TsMillisecondValue(ts)))
+        one_row.push(field(Value::TsMillisecondValue(ts)))
     } else {
-        let current = one_row.get_mut(*index).unwrap();
         check_schema(
             ColumnDataType::TimestampMillisecond,
             SemanticType::Timestamp,
             &schema[*index],
         )?;
-        assert!(current.value.is_none());
-        *current = wrap_field(Value::TsMillisecondValue(ts));
+        // unwrap is safe here
+        one_row.get_mut(*index).unwrap().value = Some(Value::TsMillisecondValue(ts));
     }
 
     Ok(())
@@ -355,7 +343,7 @@ fn check_schema(
     Ok(())
 }
 
-fn wrap_field(value: Value) -> Field {
+fn field(value: Value) -> Field {
     Field { value: Some(value) }
 }
 
