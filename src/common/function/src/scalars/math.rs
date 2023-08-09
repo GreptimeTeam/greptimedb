@@ -36,9 +36,9 @@ pub(crate) struct MathFunction;
 
 impl MathFunction {
     pub fn register(registry: &FunctionRegistry) {
-        registry.register(Arc::new(PowFunction::default()));
-        registry.register(Arc::new(RateFunction::default()));
-        registry.register(Arc::new(RangeFunction::default()))
+        registry.register(Arc::new(PowFunction));
+        registry.register(Arc::new(RateFunction));
+        registry.register(Arc::new(RangeFunction))
     }
 }
 
@@ -63,10 +63,10 @@ impl Function for RangeFunction {
         Ok(ConcreteDataType::float64_datatype())
     }
 
-    /// `range_fn` will never been used, signature is not important.
+    /// `range_fn` will never been used. As long as a legal signature is returned, the specific content of the signature does not matter.
     /// In fact, the arguments loaded by `range_fn` are very complicated, and it is difficult to use `Signature` to describe
     fn signature(&self) -> Signature {
-        Signature::any(6, Volatility::Immutable)
+        Signature::any(0, Volatility::Immutable)
     }
 
     fn eval(&self, _func_ctx: FunctionContext, _columns: &[VectorRef]) -> Result<VectorRef> {

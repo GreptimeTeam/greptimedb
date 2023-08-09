@@ -93,8 +93,7 @@ impl RangeSelect {
         fields.push(ts_field);
         // add by
         fields.extend(
-            exprlist_to_fields(by.iter().collect::<Vec<_>>().into_iter(), &input)
-                .context(DataFusionSnafu)?,
+            exprlist_to_fields(by.iter().collect::<Vec<_>>(), &input).context(DataFusionSnafu)?,
         );
         let schema = DFSchema::new_with_metadata(fields, input.schema().metadata().clone())
             .context(DataFusionSnafu)?;

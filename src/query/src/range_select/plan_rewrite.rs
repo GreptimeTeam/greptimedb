@@ -186,27 +186,40 @@ impl RangePlanRewriter {
                 if range_rewriter.by.is_empty() {
                     range_rewriter.by = default_by;
                 }
-                let range_plan = RangeSelect::try_new(
-                    input.clone(),
-                    range_rewriter.range_fn,
-                    range_rewriter.align,
-                    time_index,
-                    range_rewriter.by,
-                )?;
-                let project_plan = LogicalPlanBuilder::from(LogicalPlan::Extension(Extension {
-                    node: Arc::new(range_plan),
-                }))
-                .project(new_expr)
-                .context(DataFusionSnafu)?
-                .build()
-                .context(DataFusionSnafu)?;
-                Ok(Some(project_plan))
+                let range_plan = LogicalPlan::Extension(Extension {
+                    node: Arc::new(RangeSelect::try_new(
+                        input.clone(),
+                        range_rewriter.range_fn,
+                        range_rewriter.align,
+                        time_index,
+                        range_rewriter.by,
+                    )?),
+                });
+                // If the result of the project plan happens to be the schema of the range plan, no project plan is required
+                // that need project is identical to range plan schema
+                let need_project = new_expr.iter().any(|expr| {
+                    if let Expr::Column(column) = expr {
+                        !range_plan.schema().has_column(column)
+                    } else {
+                        true
+                    }
+                }) || new_expr.len() != range_plan.schema().fields().len();
+                if need_project {
+                    let project_plan = LogicalPlanBuilder::from(range_plan)
+                        .project(new_expr)
+                        .context(DataFusionSnafu)?
+                        .build()
+                        .context(DataFusionSnafu)?;
+                    Ok(Some(project_plan))
+                } else {
+                    Ok(Some(range_plan))
+                }
             }
             _ => {
                 if new_inputs.iter().any(|x| x.is_some()) {
                     let inputs: Vec<LogicalPlan> = new_inputs
                         .into_iter()
-                        .zip(inputs.into_iter())
+                        .zip(inputs)
                         .map(|(x, y)| match x {
                             Some(plan) => plan,
                             None => y.clone(),
@@ -378,6 +391,16 @@ mod test {
             .await
             .unwrap();
         assert_eq!(plan.display_indent_schema().to_string(), expected);
+    }
+
+    #[tokio::test]
+    async fn range_no_project() {
+        let query = r#"SELECT timestamp, tag_0, tag_1, avg(field_0 + field_1) RANGE '5m' FROM test ALIGN '1h' by (tag_0,tag_1);"#;
+        let expected = String::from(
+            "RangeSelect: range_exprs=[RangeFn { expr:AVG(test.field_0 + test.field_1) range:300s fill: }], algin=3600s time_index=timestamp [AVG(test.field_0 + test.field_1):Float64;N, timestamp:Timestamp(Millisecond, None), tag_0:Utf8, tag_1:Utf8]\
+            \n  TableScan: test [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, tag_4:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N, field_1:Float64;N, field_2:Float64;N, field_3:Float64;N, field_4:Float64;N]"
+        );
+        query_plan_compare(query, expected).await;
     }
 
     #[tokio::test]
