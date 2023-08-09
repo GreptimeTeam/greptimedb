@@ -49,7 +49,6 @@ impl Display for QueryContext {
 }
 
 impl QueryContext {
-    #[cfg(any(test, feature = "testing"))]
     pub fn arc() -> QueryContextRef {
         QueryContextBuilder::default().build()
     }
@@ -80,13 +79,13 @@ impl QueryContext {
     }
 
     #[inline]
-    pub fn current_schema(&self) -> String {
-        self.current_schema.clone()
+    pub fn current_schema(&self) -> &str {
+        &self.current_schema
     }
 
     #[inline]
-    pub fn current_catalog(&self) -> String {
-        self.current_catalog.clone()
+    pub fn current_catalog(&self) -> &str {
+        &self.current_catalog
     }
 
     #[inline]
@@ -97,7 +96,7 @@ impl QueryContext {
     pub fn get_db_string(&self) -> String {
         let catalog = self.current_catalog();
         let schema = self.current_schema();
-        build_db_string(&catalog, &schema)
+        build_db_string(catalog, schema)
     }
 
     #[inline]

@@ -37,7 +37,9 @@ impl MockDistributedInstance {
             .storage_guards
             .iter()
             .map(|g| {
-                let TempDirGuard::File(dir) = &g.0 else { unreachable!() };
+                let TempDirGuard::File(dir) = &g.0 else {
+                    unreachable!()
+                };
                 dir
             })
             .collect()
@@ -63,7 +65,9 @@ pub struct MockStandaloneInstance {
 
 impl MockStandaloneInstance {
     pub fn data_tmp_dir(&self) -> &TempDir {
-        let TempDirGuard::File(dir) = &self._guard.storage_guard.0 else { unreachable!() };
+        let TempDirGuard::File(dir) = &self._guard.storage_guard.0 else {
+            unreachable!()
+        };
         dir
     }
 }

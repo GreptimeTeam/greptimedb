@@ -346,7 +346,9 @@ impl ChunkReaderBuilder {
 
     /// Build time range predicate from schema and filters.
     fn build_time_range_predicate(&self) -> TimestampRange {
-        let Some(ts_col) = self.schema.user_schema().timestamp_column() else { return TimestampRange::min_to_max() };
+        let Some(ts_col) = self.schema.user_schema().timestamp_column() else {
+            return TimestampRange::min_to_max();
+        };
         let unit = ts_col
             .data_type
             .as_timestamp()
@@ -361,7 +363,9 @@ impl ChunkReaderBuilder {
             return true;
         }
         // end_timestamp of sst file is inclusive.
-        let Some((start, end)) = *file.time_range() else { return true; };
+        let Some((start, end)) = *file.time_range() else {
+            return true;
+        };
         let file_ts_range = TimestampRange::new_inclusive(Some(start), Some(end));
         file_ts_range.intersects(predicate)
     }

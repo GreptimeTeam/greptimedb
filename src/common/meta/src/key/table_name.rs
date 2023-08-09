@@ -163,10 +163,11 @@ impl TableNameManager {
             let Some(curr) = result
                 .prev_kv
                 .map(|x| TableNameValue::try_from_raw_value(x.value))
-                .transpose()? else {
+                .transpose()?
+            else {
                 return UnexpectedSnafu {
                     err_msg: format!("compare_and_put expect None but failed with current value None, key: {key}, value: {value:?}"),
-                }.fail()
+                }.fail();
             };
             ensure!(
                 curr.table_id == table_id,
@@ -226,7 +227,8 @@ impl TableNameManager {
                 // name, then the table must not exist at the first place.
                 return TableNotExistSnafu {
                     table_name: TableName::from(key).to_string(),
-                }.fail();
+                }
+                .fail();
             };
 
             ensure!(

@@ -194,11 +194,16 @@ impl RegionMetadata {
                     }
                 );
 
+                // Safety: Column with specific id must exist.
+                let column = self.column_by_id(*column_id).unwrap();
                 // Checks duplicate.
                 ensure!(
                     !pk_ids.contains(&column_id),
                     InvalidMetaSnafu {
-                        reason: format!("duplicate column {} in primary key", id_names[column_id]),
+                        reason: format!(
+                            "duplicate column {} in primary key",
+                            column.column_schema.name
+                        ),
                     }
                 );
 
@@ -208,7 +213,18 @@ impl RegionMetadata {
                     InvalidMetaSnafu {
                         reason: format!(
                             "column {} is already a time index column",
-                            id_names[column_id]
+                            column.column_schema.name,
+                        ),
+                    }
+                );
+
+                // Checks semantic type.
+                ensure!(
+                    column.semantic_type == SemanticType::Tag,
+                    InvalidMetaSnafu {
+                        reason: format!(
+                            "semantic type of column {} should be Tag, not {:?}",
+                            column.column_schema.name, column.semantic_type
                         ),
                     }
                 );
@@ -216,6 +232,23 @@ impl RegionMetadata {
                 pk_ids.insert(column_id);
             }
         }
+
+        // Checks tag semantic type.
+        let num_tag = self
+            .column_metadatas
+            .iter()
+            .filter(|col| col.semantic_type == SemanticType::Tag)
+            .count();
+        ensure!(
+            num_tag == self.primary_key.len(),
+            InvalidMetaSnafu {
+                reason: format!(
+                    "number of primary key columns {} not equal to tag columns {}",
+                    self.primary_key.len(),
+                    num_tag
+                ),
+            }
+        );
 
         Ok(())
     }
@@ -594,6 +627,65 @@ mod test {
         assert!(
             err.to_string()
                 .contains("time index column ts must be NOT NULL"),
+            "unexpected err: {err}",
+        );
+    }
+
+    #[test]
+    fn test_primary_key_semantic_type() {
+        let mut builder = create_builder();
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("a", ConcreteDataType::float64_datatype(), true),
+                semantic_type: SemanticType::Field,
+                column_id: 2,
+            })
+            .primary_key(vec![2]);
+        let err = builder.build().unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("semantic type of column a should be Tag, not Field"),
+            "unexpected err: {err}",
+        );
+    }
+
+    #[test]
+    fn test_primary_key_tag_num() {
+        let mut builder = create_builder();
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("a", ConcreteDataType::string_datatype(), true),
+                semantic_type: SemanticType::Tag,
+                column_id: 2,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("b", ConcreteDataType::string_datatype(), true),
+                semantic_type: SemanticType::Tag,
+                column_id: 3,
+            })
+            .primary_key(vec![2]);
+        let err = builder.build().unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("number of primary key columns 1 not equal to tag columns 2"),
             "unexpected err: {err}",
         );
     }

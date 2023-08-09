@@ -40,7 +40,7 @@ use snafu::ResultExt;
 
 use crate::error::{ConvertSchemaSnafu, RemoteRequestSnafu, UnexpectedOutputKindSnafu};
 
-#[derive(Debug, Hash, PartialEq, Eq)]
+#[derive(Debug, Hash, PartialEq, Eq, Clone)]
 pub struct MergeScanLogicalPlan {
     /// In logical plan phase it only contains one input
     input: LogicalPlan,
@@ -53,29 +53,27 @@ impl UserDefinedLogicalNodeCore for MergeScanLogicalPlan {
         Self::name()
     }
 
+    // Prevent further optimization.
+    // The input can be retrieved by `self.input()`
     fn inputs(&self) -> Vec<&LogicalPlan> {
-        vec![&self.input]
+        vec![]
     }
 
     fn schema(&self) -> &datafusion_common::DFSchemaRef {
         self.input.schema()
     }
 
+    // Prevent further optimization
     fn expressions(&self) -> Vec<datafusion_expr::Expr> {
-        self.input.expressions()
+        vec![]
     }
 
     fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "MergeScan [is_placeholder={}]", self.is_placeholder)
     }
 
-    // todo: maybe contains exprs will be useful
-    // todo: add check for inputs' length
-    fn from_template(&self, _exprs: &[datafusion_expr::Expr], inputs: &[LogicalPlan]) -> Self {
-        Self {
-            input: inputs[0].clone(),
-            is_placeholder: self.is_placeholder,
-        }
+    fn from_template(&self, _exprs: &[datafusion_expr::Expr], _inputs: &[LogicalPlan]) -> Self {
+        self.clone()
     }
 }
 

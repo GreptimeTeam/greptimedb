@@ -12,25 +12,25 @@ async-compat = "0.2"
 async-stream.workspace = true
 async-trait = "0.1"
 bytes = "1.1"
-common-base = { path = "../common/base" }
-common-datasource = { path = "../common/datasource" }
-common-error = { path = "../common/error" }
-common-query = { path = "../common/query" }
-common-recordbatch = { path = "../common/recordbatch" }
-common-runtime = { path = "../common/runtime" }
-common-telemetry = { path = "../common/telemetry" }
-common-time = { path = "../common/time" }
+common-base = { workspace = true }
+common-datasource = { workspace = true }
+common-error = { workspace = true }
+common-query = { workspace = true }
+common-recordbatch = { workspace = true }
+common-runtime = { workspace = true }
+common-telemetry = { workspace = true }
+common-time = { workspace = true }
 datafusion-common.workspace = true
 datafusion-expr.workspace = true
 datafusion-physical-expr.workspace = true
 datafusion.workspace = true
-datatypes = { path = "../datatypes" }
+datatypes = { workspace = true }
 futures-util.workspace = true
 futures.workspace = true
 itertools.workspace = true
 lazy_static.workspace = true
 metrics.workspace = true
-object-store = { path = "../object-store" }
+object-store = { workspace = true }
 parquet = { workspace = true, features = ["async"] }
 paste.workspace = true
 prost.workspace = true
@@ -38,8 +38,8 @@ regex = "1.5"
 serde.workspace = true
 serde_json = "1.0"
 snafu = { version = "0.7", features = ["backtraces"] }
-store-api = { path = "../store-api" }
-table = { path = "../table" }
+store-api = { workspace = true }
+table = { workspace = true }
 tokio-util.workspace = true
 tokio.workspace = true
 tonic.workspace = true
@@ -47,10 +47,10 @@ uuid.workspace = true
 
 [dev-dependencies]
 atomic_float = "0.1"
-common-test-util = { path = "../common/test-util" }
+common-test-util = { workspace = true }
 criterion = "0.3"
-datatypes = { path = "../datatypes", features = ["test"] }
-log-store = { path = "../log-store" }
+datatypes = { workspace = true, features = ["test"] }
+log-store = { workspace = true }
 rand.workspace = true
 
 [build-dependencies]

@@ -181,7 +181,7 @@ async fn test_parquet_exec() {
         .await;
 
     assert_batches_eq!(
-        vec![
+        [
             "+-----+-------+",
             "| num | str   |",
             "+-----+-------+",
@@ -198,8 +198,7 @@ async fn test_parquet_exec() {
 async fn test_orc_opener() {
     let root = test_util::get_data_dir("tests/orc").display().to_string();
     let store = test_store(&root);
-    let orc = OrcFormat::default();
-    let schema = orc.infer_schema(&store, "test.orc").await.unwrap();
+    let schema = OrcFormat.infer_schema(&store, "test.orc").await.unwrap();
     let schema = Arc::new(schema);
 
     let orc_opener = OrcOpener::new(store.clone(), schema.clone(), None);

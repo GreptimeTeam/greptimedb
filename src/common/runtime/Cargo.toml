@@ -6,8 +6,8 @@ license.workspace = true
 
 [dependencies]
 async-trait.workspace = true
-common-error = { path = "../error" }
-common-telemetry = { path = "../telemetry" }
+common-error = { workspace = true }
+common-telemetry = { workspace = true }
 metrics.workspace = true
 once_cell.workspace = true
 paste.workspace = true

@@ -64,7 +64,7 @@ SELECT DISTINCT MAX(b) FROM test GROUP BY a;
 SELECT DISTINCT CASE WHEN a > 11 THEN 11 ELSE a END FROM test;
 
 +-------------------------------------------------------------+
-| CASE WHEN test.a > Int32(11) THEN Int64(11) ELSE test.a END |
+| CASE WHEN test.a > Int64(11) THEN Int64(11) ELSE test.a END |
 +-------------------------------------------------------------+
 | 11                                                          |
 +-------------------------------------------------------------+

@@ -542,7 +542,7 @@ async fn create_store_config(region_name: &str, root: &str) -> StoreConfig<NoopL
         .unwrap(),
     );
 
-    let log_store = Arc::new(NoopLogStore::default());
+    let log_store = Arc::new(NoopLogStore);
 
     let file_purger = Arc::new(LocalScheduler::new(
         SchedulerConfig::default(),

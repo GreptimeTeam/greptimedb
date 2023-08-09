@@ -202,19 +202,19 @@ mod tests {
     fn test_as_arrow_datatype() {
         assert_eq!(
             ArrowDataType::Time32(ArrowTimeUnit::Second),
-            TimeSecondType::default().as_arrow_type()
+            TimeSecondType.as_arrow_type()
         );
         assert_eq!(
             ArrowDataType::Time32(ArrowTimeUnit::Millisecond),
-            TimeMillisecondType::default().as_arrow_type()
+            TimeMillisecondType.as_arrow_type()
         );
         assert_eq!(
             ArrowDataType::Time64(ArrowTimeUnit::Microsecond),
-            TimeMicrosecondType::default().as_arrow_type()
+            TimeMicrosecondType.as_arrow_type()
         );
         assert_eq!(
             ArrowDataType::Time64(ArrowTimeUnit::Nanosecond),
-            TimeNanosecondType::default().as_arrow_type()
+            TimeNanosecondType.as_arrow_type()
         );
     }
 }

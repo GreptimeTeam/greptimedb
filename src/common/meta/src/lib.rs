@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(btree_drain_filter)]
+#![feature(btree_extract_if)]
 
 pub mod error;
 pub mod heartbeat;

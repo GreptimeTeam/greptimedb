@@ -7,12 +7,12 @@ license.workspace = true
 [dependencies]
 arc-swap = "1.0"
 chrono-tz = "0.6"
-common-error = { path = "../error" }
-common-function-macro = { path = "../function-macro" }
-common-query = { path = "../query" }
-common-time = { path = "../time" }
+common-error = { workspace = true }
+common-function-macro = { workspace = true }
+common-query = { workspace = true }
+common-time = { workspace = true }
 datafusion.workspace = true
-datatypes = { path = "../../datatypes" }
+datatypes = { workspace = true }
 libc = "0.2"
 num = "0.4"
 num-traits = "0.2"

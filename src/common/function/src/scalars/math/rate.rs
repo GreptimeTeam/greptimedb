@@ -80,7 +80,7 @@ mod tests {
     use super::*;
     #[test]
     fn test_rate_function() {
-        let rate = RateFunction::default();
+        let rate = RateFunction;
         assert_eq!("prom_rate", rate.name());
         assert_eq!(
             ConcreteDataType::float64_datatype(),

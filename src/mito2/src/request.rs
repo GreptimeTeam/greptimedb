@@ -128,6 +128,11 @@ impl WriteRequest {
         unimplemented!()
     }
 
+    /// Get column index by name.
+    pub(crate) fn column_index_by_name(&self, name: &str) -> Option<usize> {
+        self.name_to_index.get(name).copied()
+    }
+
     /// Checks schema of rows.
     ///
     /// If column with default value is missing, it returns a special [FillDefault](crate::error::Error::FillDefault)

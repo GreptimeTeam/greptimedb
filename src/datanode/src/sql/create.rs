@@ -48,7 +48,7 @@ impl SqlHandler {
         let schema = req.db_name;
         if self
             .catalog_manager
-            .schema_exist(&catalog, &schema)
+            .schema_exist(catalog, &schema)
             .await
             .context(CatalogSnafu)?
         {
@@ -60,7 +60,7 @@ impl SqlHandler {
         }
 
         let reg_req = RegisterSchemaRequest {
-            catalog,
+            catalog: catalog.to_owned(),
             schema: schema.clone(),
         };
         let _ = self
@@ -474,7 +474,9 @@ mod tests {
                             TIME INDEX (ts),
                             PRIMARY KEY(host)
                         ) engine=mito with(regions=1);"#;
-        let Ok(QueryStatement::Sql(stmt)) = QueryLanguageParser::parse_sql(sql) else { unreachable!() };
+        let Ok(QueryStatement::Sql(stmt)) = QueryLanguageParser::parse_sql(sql) else {
+            unreachable!()
+        };
         let output = instance
             .inner()
             .execute_sql(stmt, QueryContext::arc())
@@ -491,7 +493,9 @@ mod tests {
                             TIME INDEX (ts),
                             PRIMARY KEY(host)
                         ) engine=mito with(regions=1);"#;
-        let Ok(QueryStatement::Sql(stmt)) = QueryLanguageParser::parse_sql(sql) else { unreachable!() };
+        let Ok(QueryStatement::Sql(stmt)) = QueryLanguageParser::parse_sql(sql) else {
+            unreachable!()
+        };
         let output = instance
             .inner()
             .execute_sql(stmt, QueryContext::arc())

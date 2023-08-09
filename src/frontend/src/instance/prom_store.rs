@@ -67,7 +67,9 @@ fn negotiate_response_type(accepted_response_types: &[i32]) -> ServerResult<Resp
 }
 
 async fn to_query_result(table_name: &str, output: Output) -> ServerResult<QueryResult> {
-    let Output::Stream(stream) = output else { unreachable!() };
+    let Output::Stream(stream) = output else {
+        unreachable!()
+    };
     let recordbatches = RecordBatches::try_collect(stream)
         .await
         .context(error::CollectRecordbatchSnafu)?;
@@ -130,7 +132,7 @@ impl Instance {
             let table_name = prom_store::table_name(query)?;
 
             let output = self
-                .handle_remote_query(&ctx, &catalog_name, &schema_name, &table_name, query)
+                .handle_remote_query(&ctx, catalog_name, schema_name, &table_name, query)
                 .await
                 .map_err(BoxedError::new)
                 .with_context(|_| error::ExecuteQuerySnafu {

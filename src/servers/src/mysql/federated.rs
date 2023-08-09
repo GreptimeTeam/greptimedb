@@ -239,7 +239,7 @@ fn select_variable(query: &str, query_context: QueryContextRef) -> Option<Output
 }
 
 fn check_select_variable(query: &str, query_context: QueryContextRef) -> Option<Output> {
-    if vec![&SELECT_VAR_PATTERN, &MYSQL_CONN_JAVA_PATTERN]
+    if [&SELECT_VAR_PATTERN, &MYSQL_CONN_JAVA_PATTERN]
         .iter()
         .any(|r| r.is_match(query))
     {
@@ -286,7 +286,7 @@ fn check_others(query: &str, query_ctx: QueryContextRef) -> Option<Output> {
         Some(select_function("version()", &get_version()))
     } else if SELECT_DATABASE_PATTERN.is_match(query) {
         let schema = query_ctx.current_schema();
-        Some(select_function("database()", &schema))
+        Some(select_function("database()", schema))
     } else if SELECT_TIME_DIFF_FUNC_PATTERN.is_match(query) {
         Some(select_function(
             "TIMEDIFF(NOW(), UTC_TIMESTAMP())",

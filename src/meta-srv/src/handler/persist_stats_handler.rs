@@ -82,13 +82,12 @@ impl HeartbeatHandler for PersistStatsHandler {
         ctx: &mut Context,
         acc: &mut HeartbeatAccumulator,
     ) -> Result<()> {
-        let Some(current_stat) = acc.stat.take() else { return Ok(()) };
+        let Some(current_stat) = acc.stat.take() else {
+            return Ok(());
+        };
 
         let key = current_stat.stat_key();
-        let mut entry = self
-            .stats_cache
-            .entry(key)
-            .or_insert_with(EpochStats::default);
+        let mut entry = self.stats_cache.entry(key).or_default();
 
         let key: Vec<u8> = key.into();
         let epoch_stats = entry.value_mut();

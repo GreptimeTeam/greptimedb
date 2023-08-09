@@ -61,7 +61,8 @@ pub(crate) async fn fetch_table(
         .table_info_manager()
         .get(table_id)
         .await
-        .context(TableMetadataManagerSnafu)? else {
+        .context(TableMetadataManagerSnafu)?
+    else {
         return Ok(None);
     };
 

@@ -222,7 +222,9 @@ impl Table for DistTable {
             .await
             .map_err(BoxedError::new)
             .context(TableOperationSnafu)?;
-        let Output::AffectedRows(rows) = output else { unreachable!() };
+        let Output::AffectedRows(rows) = output else {
+            unreachable!()
+        };
         Ok(rows)
     }
 }

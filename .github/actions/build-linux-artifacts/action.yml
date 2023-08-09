@@ -25,6 +25,14 @@ inputs:
   aws-region:
     description: AWS region
     required: true
+  dev-mode:
+    description: Enable dev mode, only build standard greptime
+    required: false
+    default: 'false'
+  upload-to-s3:
+    description: Upload to S3
+    required: false
+    default: 'true'
 runs:
   using: composite
   steps:
@@ -55,8 +63,10 @@ runs:
         aws-access-key-id: ${{ inputs.aws-access-key-id }}
         aws-secret-access-key: ${{ inputs.aws-secret-access-key }}
         aws-region: ${{ inputs.aws-region }}
+        upload-to-s3: ${{ inputs.upload-to-s3 }}
 
     - name: Build greptime without pyo3
+      if: ${{ inputs.dev-mode == 'false' }}
       uses: ./.github/actions/build-greptime-binary
       with:
         base-image: ubuntu
@@ -68,10 +78,11 @@ runs:
         aws-access-key-id: ${{ inputs.aws-access-key-id }}
         aws-secret-access-key: ${{ inputs.aws-secret-access-key }}
         aws-region: ${{ inputs.aws-region }}
+        upload-to-s3: ${{ inputs.upload-to-s3 }}
 
     - name: Build greptime on centos base image
       uses: ./.github/actions/build-greptime-binary
-      if: ${{ inputs.arch == 'amd64' }} # Only build centos7 base image for amd64.
+      if: ${{ inputs.arch == 'amd64' && inputs.dev-mode == 'false' }} # Only build centos7 base image for amd64.
       with:
         base-image: centos
         features: servers/dashboard
@@ -82,3 +93,4 @@ runs:
         aws-access-key-id: ${{ inputs.aws-access-key-id }}
         aws-secret-access-key: ${{ inputs.aws-secret-access-key }}
         aws-region: ${{ inputs.aws-region }}
+        upload-to-s3: ${{ inputs.upload-to-s3 }}

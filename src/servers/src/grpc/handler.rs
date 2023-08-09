@@ -111,7 +111,9 @@ impl GreptimeRequestHandler {
         header: Option<&RequestHeader>,
         query_ctx: &QueryContextRef,
     ) -> TonicResult<InternalResult<()>> {
-        let Some(user_provider) = self.user_provider.as_ref() else { return Ok(Ok(())) };
+        let Some(user_provider) = self.user_provider.as_ref() else {
+            return Ok(Ok(()));
+        };
 
         let auth_scheme = header
             .and_then(|header| {
@@ -127,8 +129,8 @@ impl GreptimeRequestHandler {
                 .auth(
                     Identity::UserId(&username, None),
                     Password::PlainText(password.into()),
-                    &query_ctx.current_catalog(),
-                    &query_ctx.current_schema(),
+                    query_ctx.current_catalog(),
+                    query_ctx.current_schema(),
                 )
                 .await
                 .context(AuthSnafu),

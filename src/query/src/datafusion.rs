@@ -109,9 +109,9 @@ impl DatafusionQueryEngine {
             }
         );
 
-        let default_catalog = query_ctx.current_catalog();
-        let default_schema = query_ctx.current_schema();
-        let table_name = dml.table_name.resolve(&default_catalog, &default_schema);
+        let default_catalog = &query_ctx.current_catalog().to_owned();
+        let default_schema = &query_ctx.current_schema().to_owned();
+        let table_name = dml.table_name.resolve(default_catalog, default_schema);
         let table = self.find_table(&table_name).await?;
 
         let output = self
@@ -654,7 +654,9 @@ mod tests {
         let columns = vec![builder.to_vector()];
         let record_batch = RecordBatch::new(schema, columns).unwrap();
         let output = execute_show_with_filter(record_batch, None).await.unwrap();
-        let Output::RecordBatches(record_batches) = output else {unreachable!()};
+        let Output::RecordBatches(record_batches) = output else {
+            unreachable!()
+        };
         let expected = "\
 +----------------+
 | Tables         |
@@ -682,12 +684,18 @@ mod tests {
         )
         .unwrap()[0]
             .clone();
-        let Statement::ShowTables(ShowTables { kind, .. }) = statement else {unreachable!()};
-        let ShowKind::Where(filter) = kind else {unreachable!()};
+        let Statement::ShowTables(ShowTables { kind, .. }) = statement else {
+            unreachable!()
+        };
+        let ShowKind::Where(filter) = kind else {
+            unreachable!()
+        };
         let output = execute_show_with_filter(record_batch, Some(filter))
             .await
             .unwrap();
-        let Output::RecordBatches(record_batches) = output else {unreachable!()};
+        let Output::RecordBatches(record_batches) = output else {
+            unreachable!()
+        };
         let expected = "\
 +---------+
 | Tables  |

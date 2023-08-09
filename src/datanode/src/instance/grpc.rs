@@ -65,8 +65,8 @@ impl Instance {
         ctx: QueryContextRef,
     ) -> Result<Output> {
         let catalog_list = new_dummy_catalog_list(
-            &ctx.current_catalog(),
-            &ctx.current_schema(),
+            ctx.current_catalog(),
+            ctx.current_schema(),
             self.catalog_manager.clone(),
         )
         .await?;
@@ -75,8 +75,8 @@ impl Instance {
             .decode(
                 plan_bytes.as_slice(),
                 Arc::new(catalog_list) as Arc<_>,
-                &ctx.current_catalog(),
-                &ctx.current_schema(),
+                ctx.current_catalog(),
+                ctx.current_schema(),
             )
             .await
             .context(DecodeLogicalPlanSnafu)?;
@@ -131,8 +131,8 @@ impl Instance {
     ) -> Result<Output> {
         let results = future::try_join_all(requests.inserts.into_iter().map(|insert| {
             let catalog_manager = self.catalog_manager.clone();
-            let catalog = ctx.current_catalog();
-            let schema = ctx.current_schema();
+            let catalog = ctx.current_catalog().to_owned();
+            let schema = ctx.current_schema().to_owned();
 
             common_runtime::spawn_write(async move {
                 let table_name = &insert.table_name.clone();
@@ -163,8 +163,8 @@ impl Instance {
     }
 
     async fn handle_delete(&self, request: DeleteRequest, ctx: QueryContextRef) -> Result<Output> {
-        let catalog = &ctx.current_catalog();
-        let schema = &ctx.current_schema();
+        let catalog = ctx.current_catalog();
+        let schema = ctx.current_schema();
         let table_name = &request.table_name.clone();
         let table_ref = TableReference::full(catalog, schema, table_name);
 
@@ -721,7 +721,9 @@ mod test {
 
         let Ok(QueryStatement::Sql(stmt)) = QueryLanguageParser::parse_sql(
             "INSERT INTO my_database.my_table (a, b, ts) VALUES ('s', 1, 1672384140000)",
-        ) else { unreachable!() };
+        ) else {
+            unreachable!()
+        };
         let output = instance
             .execute_sql(stmt, QueryContext::arc())
             .await
@@ -729,7 +731,9 @@ mod test {
         assert!(matches!(output, Output::AffectedRows(1)));
 
         let output = exec_selection(instance, "SELECT * FROM my_database.my_table").await;
-        let Output::Stream(stream) = output else { unreachable!() };
+        let Output::Stream(stream) = output else {
+            unreachable!()
+        };
         let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
         let expected = "\
 +---+---+---+---------------------+---+
@@ -855,7 +859,9 @@ mod test {
         assert!(matches!(output, Output::AffectedRows(3)));
 
         let output = exec_selection(instance, "SELECT ts, host, cpu FROM demo").await;
-        let Output::Stream(stream) = output else { unreachable!() };
+        let Output::Stream(stream) = output else {
+            unreachable!()
+        };
         let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
         let expected = "\
 +---------------------+-------+-----+
@@ -925,7 +931,9 @@ mod test {
         assert!(matches!(output, Output::AffectedRows(1)));
 
         let output = exec_selection(instance, "SELECT ts, host, cpu FROM demo").await;
-        let Output::Stream(stream) = output else { unreachable!() };
+        let Output::Stream(stream) = output else {
+            unreachable!()
+        };
         let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
         let expected = "\
 +---------------------+-------+------+
@@ -965,7 +973,9 @@ mod test {
             )),
         });
         let output = instance.do_query(query, QueryContext::arc()).await.unwrap();
-        let Output::Stream(stream) = output else { unreachable!() };
+        let Output::Stream(stream) = output else {
+            unreachable!()
+        };
         let recordbatch = RecordBatches::try_collect(stream).await.unwrap();
         let expected = "\
 +---------------------+-------+------+--------+

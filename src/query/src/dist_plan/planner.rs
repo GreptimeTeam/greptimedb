@@ -31,6 +31,7 @@ use datafusion::physical_planner::{ExtensionPlanner, PhysicalPlanner};
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeVisitor, VisitRecursion};
 use datafusion_common::{DataFusionError, TableReference};
 use datafusion_expr::{LogicalPlan, UserDefinedLogicalNode};
+use datafusion_optimizer::analyzer::Analyzer;
 use partition::manager::PartitionRuleManager;
 use snafu::{OptionExt, ResultExt};
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
@@ -82,11 +83,13 @@ impl ExtensionPlanner for DistExtensionPlanner {
             } else {
                 // TODO(ruihang): generate different execution plans for different variant merge operation
                 let input_plan = merge_scan.input();
+                let optimized_input =
+                    self.optimize_input_logical_plan(session_state, input_plan)?;
                 let input_physical_plan = planner
-                    .create_physical_plan(input_plan, session_state)
+                    .create_physical_plan(&optimized_input, session_state)
                     .await?;
                 let Some(table_name) = self.get_table_name(input_plan)? else {
-                    // no relation found in input plan, going to execute them locally 
+                    // no relation found in input plan, going to execute them locally
                     return Ok(Some(input_physical_plan));
                 };
 
@@ -116,10 +119,7 @@ impl ExtensionPlanner for DistExtensionPlanner {
 
                         Ok(Some(Arc::new(exec) as _))
                     }
-                    Err(_) => planner
-                        .create_physical_plan(&input_plan, session_state)
-                        .await
-                        .map(Some),
+                    Err(_) => Ok(Some(input_physical_plan)),
                 }
             }
         } else {
@@ -164,6 +164,18 @@ impl DistExtensionPlanner {
                 table: table_name.clone(),
             })
             .map_err(|e| DataFusionError::External(Box::new(e)))
+    }
+
+    // TODO(ruihang): find a more elegant way to optimize input logical plan
+    fn optimize_input_logical_plan(
+        &self,
+        session_state: &SessionState,
+        plan: &LogicalPlan,
+    ) -> Result<LogicalPlan> {
+        let state = session_state.clone();
+        let analyzer = Analyzer::default();
+        let state = state.with_analyzer_rules(analyzer.rules);
+        state.optimize(plan)
     }
 }
 

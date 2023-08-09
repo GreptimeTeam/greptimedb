@@ -41,16 +41,13 @@ impl AnalyzerRule for DistPlannerAnalyzer {
         plan: LogicalPlan,
         _config: &ConfigOptions,
     ) -> datafusion_common::Result<LogicalPlan> {
-        // (1) add merge scan
-        let plan = plan.transform(&Self::add_merge_scan)?;
-
-        // (2) transform up merge scan
+        // (1) transform up merge scan
         let mut visitor = CommutativeVisitor::new();
         let _ = plan.visit(&mut visitor)?;
         let state = ExpandState::new();
         let plan = plan.transform_down(&|plan| Self::expand(plan, &visitor, &state))?;
 
-        // (3) remove placeholder merge scan
+        // (2) remove placeholder merge scan
         let plan = plan.transform(&Self::remove_placeholder_merge_scan)?;
 
         Ok(plan)
@@ -59,6 +56,7 @@ impl AnalyzerRule for DistPlannerAnalyzer {
 
 impl DistPlannerAnalyzer {
     /// Add [MergeScanLogicalPlan] before the table scan
+    #[allow(dead_code)]
     fn add_merge_scan(plan: LogicalPlan) -> datafusion_common::Result<Transformed<LogicalPlan>> {
         Ok(match plan {
             LogicalPlan::TableScan(table_scan) => {
@@ -327,7 +325,7 @@ mod test {
         let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
         let expected = vec![
             "Aggregate: groupBy=[[]], aggr=[[AVG(t.number)]]",
-            "  TableScan: t",
+            "  MergeScan [is_placeholder=false]",
         ]
         .join("\n");
         assert_eq!(expected, format!("{:?}", result));
@@ -354,7 +352,7 @@ mod test {
         let expected = vec![
             "Sort: t.number ASC NULLS LAST",
             "  Distinct:",
-            "    TableScan: t",
+            "    MergeScan [is_placeholder=false]",
         ]
         .join("\n");
         assert_eq!(expected, format!("{:?}", result));
@@ -376,7 +374,10 @@ mod test {
 
         let config = ConfigOptions::default();
         let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
-        let expected = vec!["Limit: skip=0, fetch=1", "  TableScan: t"].join("\n");
+        let expected = vec![
+            "Limit: skip=0, fetch=1",
+            "  MergeScan [is_placeholder=false]",
+        ].join("\n");
         assert_eq!(expected, format!("{:?}", result));
     }
 }

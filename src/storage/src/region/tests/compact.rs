@@ -268,7 +268,13 @@ impl CompactionTester {
             MockFilePurgeHandler::default(),
         ));
 
-        let Some(region) = RegionImpl::open(REGION_NAME.to_string(), store_config, &OpenOptions::default()).await? else {
+        let Some(region) = RegionImpl::open(
+            REGION_NAME.to_string(),
+            store_config,
+            &OpenOptions::default(),
+        )
+        .await?
+        else {
             return Ok(false);
         };
         self.base = Some(FileTesterBase::with_region(region));

@@ -64,7 +64,7 @@ where
         self.topic2sub
             .get(topic)
             .map(|list_ref| list_ref.clone())
-            .unwrap_or_else(Vec::new)
+            .unwrap_or_default()
     }
 }
 
@@ -88,7 +88,7 @@ where
         let subscriber = Arc::new(subscriber);
 
         for topic in topic_list {
-            let mut entry = self.topic2sub.entry(topic).or_insert_with(Vec::new);
+            let mut entry = self.topic2sub.entry(topic).or_default();
             entry.push(subscriber.clone());
         }
 

@@ -30,7 +30,7 @@ impl DistTable {
         let regions = requests.iter().map(|x| x.region_number).collect::<Vec<_>>();
         let instances = self.find_datanode_instances(&regions).await?;
 
-        let results = future::try_join_all(instances.into_iter().zip(requests.into_iter()).map(
+        let results = future::try_join_all(instances.into_iter().zip(requests).map(
             |(instance, request)| {
                 common_runtime::spawn_write(async move {
                     instance
