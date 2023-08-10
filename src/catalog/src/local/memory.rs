@@ -245,6 +245,8 @@ impl CatalogManager for MemoryCatalogManager {
 }
 
 impl MemoryCatalogManager {
+    /// Yes this is the `default()` constructor
+    #[allow(clippy::should_implement_trait)]
     pub fn default() -> Arc<Self> {
         let manager = Arc::new(Self {
             table_id: AtomicU32::new(MIN_USER_TABLE_ID),
