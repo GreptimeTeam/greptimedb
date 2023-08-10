@@ -151,9 +151,6 @@ pub(super) fn type_pg_to_gt(origin: &Type) -> Result<ConcreteDataType> {
         )),
         &Type::DATE => Ok(ConcreteDataType::date_datatype()),
         &Type::TIME => Ok(ConcreteDataType::datetime_datatype()),
-        &Type::INTERVAL => Ok(ConcreteDataType::interval_datatype(
-            common_time::interval::IntervalUnit::MonthDayNano,
-        )),
         _ => error::InternalSnafu {
             err_msg: format!("unimplemented datatype {origin:?}"),
         }
