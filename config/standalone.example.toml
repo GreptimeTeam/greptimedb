@@ -2,6 +2,8 @@
 mode = "standalone"
 # Whether to use in-memory catalog, `false` by default.
 enable_memory_catalog = false
+# Wheter to enable greptimedb telemetry, true by default.
+enable_telemetry = true
 
 # HTTP server options.
 [http_options]

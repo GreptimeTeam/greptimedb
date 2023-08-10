@@ -59,6 +59,7 @@ pub struct MetaSrvOptions {
     pub logging: LoggingOptions,
     pub procedure: ProcedureConfig,
     pub datanode: DatanodeOptions,
+    pub enable_telemetry: bool,
 }
 
 impl Default for MetaSrvOptions {
@@ -75,6 +76,7 @@ impl Default for MetaSrvOptions {
             logging: LoggingOptions::default(),
             procedure: ProcedureConfig::default(),
             datanode: DatanodeOptions::default(),
+            enable_telemetry: true,
         }
     }
 }

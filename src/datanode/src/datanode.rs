@@ -362,6 +362,7 @@ pub struct DatanodeOptions {
     pub storage: StorageConfig,
     pub procedure: ProcedureConfig,
     pub logging: LoggingOptions,
+    pub enable_telemetry: bool,
 }
 
 impl Default for DatanodeOptions {
@@ -380,6 +381,7 @@ impl Default for DatanodeOptions {
             procedure: ProcedureConfig::default(),
             logging: LoggingOptions::default(),
             heartbeat: HeartbeatOptions::default(),
+            enable_telemetry: true,
         }
     }
 }

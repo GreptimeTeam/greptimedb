@@ -305,7 +305,11 @@ impl Instance {
             catalog_manager: catalog_manager.clone(),
             table_id_provider,
             procedure_manager,
-            greptimedb_telemetry_task: get_greptimedb_telemetry_task(&opts.mode, true).await,
+            greptimedb_telemetry_task: get_greptimedb_telemetry_task(
+                &opts.mode,
+                opts.enable_telemetry,
+            )
+            .await,
         });
 
         let heartbeat_task = Instance::build_heartbeat_task(

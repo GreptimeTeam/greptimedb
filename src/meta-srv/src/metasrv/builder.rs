@@ -234,6 +234,8 @@ impl MetaSrvBuilder {
             }
         };
 
+        let enable_telemetry = options.enable_telemetry;
+
         Ok(MetaSrv {
             started,
             options,
@@ -251,7 +253,11 @@ impl MetaSrvBuilder {
             mailbox,
             ddl_manager,
             table_metadata_manager,
-            greptimedb_telemetry_task: get_greptimedb_telemetry_task(meta_peer_client, true).await,
+            greptimedb_telemetry_task: get_greptimedb_telemetry_task(
+                meta_peer_client,
+                enable_telemetry,
+            )
+            .await,
             pubsub,
         })
     }

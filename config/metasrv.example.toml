@@ -13,6 +13,8 @@ datanode_lease_secs = 15
 selector = "LeaseBased"
 # Store data in memory, false by default.
 use_memory_store = false
+# Wheter to enable greptimedb telemetry, true by default.
+enable_telemetry = true
 
 # Log options, see `standalone.example.toml`
 # [logging]
