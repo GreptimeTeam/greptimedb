@@ -230,9 +230,8 @@ impl LocalCatalogManager {
         for entry in entries {
             match entry {
                 Entry::Catalog(c) => {
-                    let _ = self
-                        .catalogs
-                        .register_catalog_if_absent(c.catalog_name.clone());
+                    self.catalogs
+                        .register_catalog_sync(c.catalog_name.clone())?;
                     info!("Register catalog: {}", c.catalog_name);
                 }
                 Entry::Schema(s) => {
