@@ -18,7 +18,7 @@ use std::time::Instant;
 use api::helper::request_type;
 use api::v1::auth_header::AuthScheme;
 use api::v1::{Basic, GreptimeRequest, RequestHeader};
-use auth::{Identity, Password, UserProviderRef};
+use auth::{Identity, Password, UserInfoRef, UserProviderRef};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
@@ -71,9 +71,12 @@ impl GreptimeRequestHandler {
         let header = request.header.as_ref();
         let query_ctx = create_query_context(header);
 
-        if let Err(e) = self.auth(header, &query_ctx).await? {
-            return Ok(Err(e));
-        }
+        match self.auth(header, &query_ctx).await? {
+            Err(e) => return Ok(Err(e)),
+            Ok(user_info) => {
+                query_ctx.set_current_user(user_info);
+            }
+        };
 
         let handler = self.handler.clone();
         let request_type = request_type(&query);
@@ -110,9 +113,9 @@ impl GreptimeRequestHandler {
         &self,
         header: Option<&RequestHeader>,
         query_ctx: &QueryContextRef,
-    ) -> TonicResult<InternalResult<()>> {
+    ) -> TonicResult<InternalResult<Option<UserInfoRef>>> {
         let Some(user_provider) = self.user_provider.as_ref() else {
-            return Ok(Ok(()));
+            return Ok(Ok(None));
         };
 
         let auth_scheme = header
@@ -138,7 +141,7 @@ impl GreptimeRequestHandler {
                 name: "Token AuthScheme".to_string(),
             }),
         }
-        .map(|_| ())
+        .map(Some)
         .map_err(|e| {
             increment_counter!(
                 METRIC_AUTH_FAILURE,

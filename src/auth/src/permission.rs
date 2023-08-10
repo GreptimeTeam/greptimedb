@@ -21,11 +21,11 @@ use crate::error::Result;
 use crate::UserInfoRef;
 
 #[derive(Debug, Clone)]
-pub enum PermissionReq {
-    GrpcRequest(Box<Request>),
-    SqlStatement(Box<Statement>),
+pub enum PermissionReq<'a> {
+    GrpcRequest(Box<&'a Request>),
+    SqlStatement(Box<&'a Statement>),
 }
 
 pub trait PermissionChecker: Send + Sync {
-    fn check_permission(&self, user_info: UserInfoRef, req: PermissionReq) -> Result<bool>;
+    fn check_permission(&self, user_info: Option<UserInfoRef>, req: PermissionReq) -> Result<bool>;
 }

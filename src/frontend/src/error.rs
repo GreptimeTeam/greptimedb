@@ -578,6 +578,12 @@ pub enum Error {
         source: common_meta::error::Error,
         location: Location,
     },
+
+    #[snafu(display("Failed to pass permission check, source: {}", source))]
+    Permission {
+        source: auth::Error,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -602,6 +608,8 @@ impl ErrorExt for Error {
             | Error::UnsupportedFormat { .. } => StatusCode::InvalidArguments,
 
             Error::NotSupported { .. } => StatusCode::Unsupported,
+
+            Error::Permission { source, .. } => source.status_code(),
 
             Error::HandleHeartbeatResponse { source, .. }
             | Error::TableMetadataManager { source, .. } => source.status_code(),

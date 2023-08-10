@@ -15,14 +15,16 @@
 use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
 use async_trait::async_trait;
+use auth::{PermissionCheckerRef, PermissionReq};
 use common_query::Output;
 use query::parser::PromQuery;
 use servers::interceptor::{GrpcQueryInterceptor, GrpcQueryInterceptorRef};
 use servers::query_handler::grpc::GrpcQueryHandler;
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::QueryContextRef;
-use snafu::{ensure, OptionExt};
+use snafu::{ensure, location, Location, OptionExt};
 
+use crate::error::Error::Permission;
 use crate::error::{Error, IncompleteGrpcResultSnafu, NotSupportedSnafu, Result};
 use crate::instance::Instance;
 
@@ -34,6 +36,18 @@ impl GrpcQueryHandler for Instance {
         let interceptor_ref = self.plugins.get::<GrpcQueryInterceptorRef<Error>>();
         let interceptor = interceptor_ref.as_ref();
         interceptor.pre_execute(&request, ctx.clone())?;
+
+        if let Some(checker) = self.plugins.get::<PermissionCheckerRef>() {
+            checker
+                .check_permission(
+                    ctx.current_user(),
+                    PermissionReq::GrpcRequest(Box::new(&request)),
+                )
+                .map_err(|e| Permission {
+                    source: e,
+                    location: location!(),
+                })?;
+        }
 
         let output = match request {
             Request::Inserts(requests) => self.handle_inserts(requests, ctx.clone()).await?,
