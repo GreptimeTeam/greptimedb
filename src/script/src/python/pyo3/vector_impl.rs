@@ -334,7 +334,7 @@ impl PyVector {
             let ret = Self::from(ret).into_py(py);
             Ok(ret)
         } else if let Ok(slice) = needle.downcast::<PySlice>(py) {
-            let indices = slice.indices(self.len() as i64)?;
+            let indices = slice.indices(self.len() as _)?;
             let (start, stop, step, _slicelength) = (
                 indices.start,
                 indices.stop,

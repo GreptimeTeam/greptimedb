@@ -23,7 +23,6 @@ use datatypes::schema::ColumnSchema;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use log_store::test_util::log_store_util;
 use object_store::services::Fs;
-use object_store::util::join_dir;
 use object_store::ObjectStore;
 use store_api::storage::RegionId;
 
@@ -79,9 +78,9 @@ impl TestEnv {
     }
 
     async fn create_log_and_object_store(&self) -> (RaftEngineLogStore, ObjectStore) {
-        let data_home = self.data_home.path().to_str().unwrap();
-        let wal_path = join_dir(data_home, "wal");
-        let data_path = join_dir(data_home, "data");
+        let data_home = self.data_home.path();
+        let wal_path = data_home.join("wal");
+        let data_path = data_home.join("data").as_path().display().to_string();
 
         let log_store = log_store_util::create_tmp_local_file_log_store(&wal_path).await;
         let mut builder = Fs::default();
@@ -99,12 +98,19 @@ impl TestEnv {
         checkpoint_interval: u64,
         initial_metadata: Option<RegionMetadataRef>,
     ) -> Result<Option<RegionManifestManager>> {
-        let data_home = self.data_home.path().to_str().unwrap();
-        let manifest_dir = join_dir(data_home, "manifest");
+        let data_home = self.data_home.path();
+        let manifest_dir = data_home.join("manifest").as_path().display().to_string();
 
         let mut builder = Fs::default();
         builder.root(&manifest_dir);
         let object_store = ObjectStore::new(builder).unwrap().finish();
+
+        // The "manifest_dir" here should be the relative path from the `object_store`'s root.
+        // Otherwise the OpenDal's list operation would fail with "StripPrefixError". This is
+        // because the `object_store`'s root path is "canonicalize"d; and under the Windows,
+        // canonicalize a path will prepend "\\?\" to it. This behavior will cause the original
+        // happen-to-be-working list on an absolute path failed on Windows.
+        let manifest_dir = "/".to_string();
 
         let manifest_opts = RegionManifestOptions {
             manifest_dir,

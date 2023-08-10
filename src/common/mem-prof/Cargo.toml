@@ -8,9 +8,11 @@ license.workspace = true
 common-error = { workspace = true }
 snafu.workspace = true
 tempfile = "3.4"
-tikv-jemalloc-ctl = { version = "0.5", features = ["use_std"] }
 tokio.workspace = true
 
-[dependencies.tikv-jemalloc-sys]
+[target.'cfg(not(windows))'.dependencies]
+tikv-jemalloc-ctl = { version = "0.5", features = ["use_std"] }
+
+[target.'cfg(not(windows))'.dependencies.tikv-jemalloc-sys]
 features = ["stats", "profiling", "unprefixed_malloc_on_supported_platforms"]
 version = "0.5"

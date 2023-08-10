@@ -187,6 +187,7 @@ fn log_env_flags() {
     }
 }
 
+#[cfg(not(windows))]
 #[global_allocator]
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 

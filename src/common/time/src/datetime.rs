@@ -15,10 +15,11 @@
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
 
-use chrono::{Local, LocalResult, NaiveDateTime, TimeZone};
+use chrono::{LocalResult, NaiveDateTime};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, InvalidDateStrSnafu, Result};
+use crate::util::{format_utc_datetime, local_datetime_to_utc};
 
 const DATETIME_FORMAT: &str = "%F %T";
 const DATETIME_FORMAT_WITH_TZ: &str = "%F %T%z";
@@ -35,9 +36,7 @@ impl Display for DateTime {
             write!(
                 f,
                 "{}",
-                Local {}
-                    .from_utc_datetime(&abs_time)
-                    .format(DATETIME_FORMAT_WITH_TZ)
+                format_utc_datetime(&abs_time, DATETIME_FORMAT_WITH_TZ)
             )
         } else {
             write!(f, "DateTime({})", self.0)
@@ -56,13 +55,12 @@ impl FromStr for DateTime {
 
     fn from_str(s: &str) -> Result<Self> {
         let s = s.trim();
-        let local = Local {};
         let timestamp = if let Ok(d) = NaiveDateTime::parse_from_str(s, DATETIME_FORMAT) {
-            match local.from_local_datetime(&d) {
+            match local_datetime_to_utc(&d) {
                 LocalResult::None => {
                     return InvalidDateStrSnafu { raw: s }.fail();
                 }
-                LocalResult::Single(d) | LocalResult::Ambiguous(d, _) => d.naive_utc().timestamp(),
+                LocalResult::Single(d) | LocalResult::Ambiguous(d, _) => d.timestamp(),
             }
         } else if let Ok(v) = chrono::DateTime::parse_from_str(s, DATETIME_FORMAT_WITH_TZ) {
             v.timestamp()

@@ -16,29 +16,34 @@ use std::any::Any;
 
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
-use snafu::Snafu;
-
-pub type Result<T> = std::result::Result<T, Error>;
+use snafu::{Location, Snafu};
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
-    #[snafu(display("{source}"))]
-    Internal { source: BoxedError },
-
-    #[snafu(display("Memory profiling is not supported"))]
-    ProfilingNotSupported,
+    #[snafu(display("Failed to update jemalloc metrics, source: {source}, location: {location}"))]
+    UpdateJemallocMetrics {
+        source: tikv_jemalloc_ctl::Error,
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Error::Internal { source } => source.status_code(),
-            Error::ProfilingNotSupported => StatusCode::Unsupported,
+            Error::UpdateJemallocMetrics { .. } => StatusCode::Internal,
         }
     }
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+}
+
+impl From<Error> for crate::error::Error {
+    fn from(e: Error) -> Self {
+        Self::Metrics {
+            source: BoxedError::new(e),
+        }
     }
 }

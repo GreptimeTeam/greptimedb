@@ -88,7 +88,7 @@ impl MetaSrvOptions {
 // Options for datanode.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct DatanodeOptions {
-    client_options: DatanodeClientOptions,
+    pub client_options: DatanodeClientOptions,
 }
 
 // Options for datanode client.
