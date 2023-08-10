@@ -1722,10 +1722,10 @@ dependencies = [
  "common-test-util",
  "common-version",
  "hyper",
- "once_cell",
  "reqwest",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "uuid",
 ]

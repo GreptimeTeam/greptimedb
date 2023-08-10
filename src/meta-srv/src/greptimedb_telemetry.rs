@@ -56,6 +56,7 @@ impl Collector for DistributedGreptimeDBTelemetryCollector {
 }
 
 pub async fn get_greptimedb_telemetry_task(
+    working_home: Option<String>,
     meta_peer_client: MetaPeerClientRef,
     enable: bool,
 ) -> Arc<GreptimeDBTelemetryTask> {
@@ -65,12 +66,13 @@ pub async fn get_greptimedb_telemetry_task(
 
     Arc::new(GreptimeDBTelemetryTask::enable(
         TELEMETRY_INTERVAL,
-        Box::new(GreptimeDBTelemetry::new(Box::new(
-            DistributedGreptimeDBTelemetryCollector {
+        Box::new(GreptimeDBTelemetry::new(
+            working_home.clone(),
+            Box::new(DistributedGreptimeDBTelemetryCollector {
                 meta_peer_client,
-                uuid: default_get_uuid(),
+                uuid: default_get_uuid(&working_home),
                 retry: 0,
-            },
-        ))),
+            }),
+        )),
     ))
 }

@@ -309,6 +309,7 @@ impl Instance {
             table_id_provider,
             procedure_manager,
             greptimedb_telemetry_task: get_greptimedb_telemetry_task(
+                Some(opts.storage.data_home.clone()),
                 &opts.mode,
                 opts.enable_telemetry,
             )

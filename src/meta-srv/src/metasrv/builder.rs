@@ -235,6 +235,7 @@ impl MetaSrvBuilder {
         };
 
         let enable_telemetry = options.enable_telemetry;
+        let metasrv_home = options.data_home.to_string();
 
         Ok(MetaSrv {
             started,
@@ -254,6 +255,7 @@ impl MetaSrvBuilder {
             ddl_manager,
             table_metadata_manager,
             greptimedb_telemetry_task: get_greptimedb_telemetry_task(
+                Some(metasrv_home),
                 meta_peer_client,
                 enable_telemetry,
             )

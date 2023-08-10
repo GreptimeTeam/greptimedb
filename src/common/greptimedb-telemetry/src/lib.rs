@@ -14,29 +14,25 @@
 
 use std::env;
 use std::io::ErrorKind;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use common_runtime::error::{Error, Result};
 use common_runtime::{BoxedTaskFunction, RepeatedTask, Runtime, TaskFunction};
 use common_telemetry::{debug, info};
-use once_cell::sync::Lazy;
 use reqwest::{Client, Response};
 use serde::{Deserialize, Serialize};
 
+/// The URL to report telemetry data.
 pub const TELEMETRY_URL: &str = "https://api.greptime.cloud/db/otel/statistics";
+/// The local installation uuid cache file
+const UUID_FILE_NAME: &str = ".greptimedb-telemetry-uuid";
 
-// Getting the right path when running on windows
-static TELEMETRY_UUID_FILE_NAME: Lazy<PathBuf> = Lazy::new(|| {
-    let mut path = PathBuf::new();
-    path.push(env::temp_dir());
-    path.push(".greptimedb-telemetry-uuid");
-    path
-});
-
+/// The default interval of reporting telemetry data to greptime cloud
 pub static TELEMETRY_INTERVAL: Duration = Duration::from_secs(60 * 30);
-
+/// The default connect timeout to greptime cloud.
 const GREPTIMEDB_TELEMETRY_CLIENT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// The default request timeout to greptime cloud.
 const GREPTIMEDB_TELEMETRY_CLIENT_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub enum GreptimeDBTelemetryTask {
@@ -68,14 +64,22 @@ impl GreptimeDBTelemetryTask {
     }
 }
 
+/// Telemetry data to report
 #[derive(Serialize, Deserialize, Debug)]
 struct StatisticData {
+    /// Operating system name, such as `linux`, `windows` etc.
     pub os: String,
+    /// The greptimedb version
     pub version: String,
+    /// The architecture of the CPU, such as `x86`, `x86_64` etc.
     pub arch: String,
+    /// The running mode, `standalone` or `distributed`.
     pub mode: Mode,
+    /// The git commit revision of greptimedb
     pub git_commit: String,
+    /// The node number
     pub nodes: Option<i32>,
+    /// The local installation uuid
     pub uuid: String,
 }
 
@@ -116,14 +120,14 @@ pub trait Collector {
 
     async fn get_nodes(&self) -> Option<i32>;
 
-    fn get_uuid(&mut self) -> Option<String> {
+    fn get_uuid(&mut self, working_home: &Option<String>) -> Option<String> {
         match self.get_uuid_cache() {
             Some(uuid) => Some(uuid),
             None => {
                 if self.get_retry() > 3 {
                     return None;
                 }
-                match default_get_uuid() {
+                match default_get_uuid(working_home) {
                     Some(uuid) => {
                         self.set_uuid_cache(uuid.clone());
                         Some(uuid)
@@ -138,8 +142,19 @@ pub trait Collector {
     }
 }
 
-pub fn default_get_uuid() -> Option<String> {
-    let path = (*TELEMETRY_UUID_FILE_NAME).as_path();
+pub fn default_get_uuid(working_home: &Option<String>) -> Option<String> {
+    let temp_dir = env::temp_dir();
+
+    let mut path = PathBuf::new();
+    path.push(
+        working_home
+            .as_ref()
+            .map(Path::new)
+            .unwrap_or_else(|| temp_dir.as_path()),
+    );
+    path.push(UUID_FILE_NAME);
+
+    let path = path.as_path();
     match std::fs::read(path) {
         Ok(bytes) => Some(String::from_utf8_lossy(&bytes).to_string()),
         Err(e) => {
@@ -164,6 +179,7 @@ pub fn default_get_uuid() -> Option<String> {
 pub struct GreptimeDBTelemetry {
     statistics: Box<dyn Collector + Send + Sync>,
     client: Option<Client>,
+    working_home: Option<String>,
     telemetry_url: &'static str,
 }
 
@@ -180,12 +196,13 @@ impl TaskFunction<Error> for GreptimeDBTelemetry {
 }
 
 impl GreptimeDBTelemetry {
-    pub fn new(statistics: Box<dyn Collector + Send + Sync>) -> Self {
+    pub fn new(working_home: Option<String>, statistics: Box<dyn Collector + Send + Sync>) -> Self {
         let client = Client::builder()
             .connect_timeout(GREPTIMEDB_TELEMETRY_CLIENT_CONNECT_TIMEOUT)
             .timeout(GREPTIMEDB_TELEMETRY_CLIENT_TIMEOUT)
             .build();
         Self {
+            working_home,
             statistics,
             client: client.ok(),
             telemetry_url: TELEMETRY_URL,
@@ -193,7 +210,7 @@ impl GreptimeDBTelemetry {
     }
 
     pub async fn report_telemetry_info(&mut self) -> Option<Response> {
-        match self.statistics.get_uuid() {
+        match self.statistics.get_uuid(&self.working_home) {
             Some(uuid) => {
                 let data = StatisticData {
                     os: self.statistics.get_os(),
@@ -232,7 +249,7 @@ mod tests {
     use reqwest::Client;
     use tokio::spawn;
 
-    use crate::{Collector, GreptimeDBTelemetry, Mode, StatisticData};
+    use crate::{default_get_uuid, Collector, GreptimeDBTelemetry, Mode, StatisticData};
 
     static COUNT: AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
@@ -300,7 +317,7 @@ mod tests {
                 unimplemented!()
             }
 
-            fn get_uuid(&mut self) -> Option<String> {
+            fn get_uuid(&mut self, _working_home: &Option<String>) -> Option<String> {
                 Some("test".to_string())
             }
         }
@@ -331,13 +348,19 @@ mod tests {
                 unimplemented!()
             }
 
-            fn get_uuid(&mut self) -> Option<String> {
+            fn get_uuid(&mut self, _working_home: &Option<String>) -> Option<String> {
                 None
             }
         }
 
+        let working_home_temp = tempfile::Builder::new()
+            .prefix("greptimedb_telemetry")
+            .tempdir()
+            .unwrap();
+        let working_home = working_home_temp.path().to_str().unwrap().to_string();
+
         let test_statistic = Box::new(TestStatistic);
-        let mut test_report = GreptimeDBTelemetry::new(test_statistic);
+        let mut test_report = GreptimeDBTelemetry::new(Some(working_home.clone()), test_statistic);
         let url = Box::leak(format!("{}:{}", "http://localhost", port).into_boxed_str());
         test_report.telemetry_url = url;
         let response = test_report.report_telemetry_info().await.unwrap();
@@ -351,7 +374,7 @@ mod tests {
         assert_eq!(1, body.nodes.unwrap());
 
         let failed_statistic = Box::new(FailedStatistic);
-        let mut failed_report = GreptimeDBTelemetry::new(failed_statistic);
+        let mut failed_report = GreptimeDBTelemetry::new(Some(working_home), failed_statistic);
         failed_report.telemetry_url = url;
         let response = failed_report.report_telemetry_info().await;
         assert!(response.is_none());
@@ -367,5 +390,19 @@ mod tests {
         let body = response.text().await.unwrap();
         assert_eq!("1", body);
         tx.send(()).unwrap();
+    }
+
+    #[test]
+    fn test_get_uuid() {
+        let working_home_temp = tempfile::Builder::new()
+            .prefix("greptimedb_telemetry")
+            .tempdir()
+            .unwrap();
+        let working_home = working_home_temp.path().to_str().unwrap().to_string();
+
+        let uuid = default_get_uuid(&Some(working_home.clone()));
+        assert!(uuid.is_some());
+        assert_eq!(uuid, default_get_uuid(&Some(working_home.clone())));
+        assert_eq!(uuid, default_get_uuid(&Some(working_home.clone())));
     }
 }
