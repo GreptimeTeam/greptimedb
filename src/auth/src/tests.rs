@@ -11,9 +11,6 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
-use std::sync::Arc;
-
 use secrecy::ExposeSecret;
 
 use crate::error::{
@@ -24,7 +21,7 @@ use crate::user_info::DefaultUserInfo;
 use crate::user_provider::static_user_provider::auth_mysql;
 #[allow(unused_imports)]
 use crate::Error;
-use crate::{Identity, Password, UserInfo, UserProvider};
+use crate::{Identity, Password, UserInfoRef, UserProvider};
 
 pub struct DatabaseAuthInfo<'a> {
     pub catalog: &'a str,
@@ -62,11 +59,7 @@ impl UserProvider for MockUserProvider {
         "mock_user_provider"
     }
 
-    async fn authenticate(
-        &self,
-        id: Identity<'_>,
-        password: Password<'_>,
-    ) -> Result<Arc<dyn UserInfo>> {
+    async fn authenticate(&self, id: Identity<'_>, password: Password<'_>) -> Result<UserInfoRef> {
         match id {
             Identity::UserId(username, _host) => match password {
                 Password::PlainText(password) => {
@@ -98,12 +91,7 @@ impl UserProvider for MockUserProvider {
         }
     }
 
-    async fn authorize(
-        &self,
-        catalog: &str,
-        schema: &str,
-        user_info: &Arc<dyn UserInfo>,
-    ) -> Result<()> {
+    async fn authorize(&self, catalog: &str, schema: &str, user_info: &UserInfoRef) -> Result<()> {
         if catalog == self.catalog && schema == self.schema && user_info.username() == self.username
         {
             Ok(())

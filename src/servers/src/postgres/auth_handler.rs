@@ -13,9 +13,8 @@
 // limitations under the License.
 
 use std::fmt::Debug;
-use std::sync::Arc;
 
-use ::auth::{userinfo_by_name, Identity, Password, UserInfo, UserProviderRef};
+use ::auth::{userinfo_by_name, Identity, Password, UserInfoRef, UserProviderRef};
 use async_trait::async_trait;
 use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
@@ -73,7 +72,7 @@ impl LoginInfo {
 }
 
 impl PgLoginVerifier {
-    async fn auth(&self, login: &LoginInfo, password: &str) -> Result<Option<Arc<dyn UserInfo>>> {
+    async fn auth(&self, login: &LoginInfo, password: &str) -> Result<Option<UserInfoRef>> {
         let user_provider = match &self.user_provider {
             Some(provider) => provider,
             None => return Ok(None),

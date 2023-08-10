@@ -17,7 +17,6 @@ use std::fs::File;
 use std::io;
 use std::io::BufRead;
 use std::path::Path;
-use std::sync::Arc;
 
 use async_trait::async_trait;
 use digest::Digest;
@@ -31,7 +30,7 @@ use crate::error::{
     UserNotFoundSnafu, UserPasswordMismatchSnafu,
 };
 use crate::user_info::DefaultUserInfo;
-use crate::{HashedPassword, Identity, Password, UserInfo, UserProvider};
+use crate::{HashedPassword, Identity, Password, UserInfoRef, UserProvider};
 
 pub(crate) const STATIC_USER_PROVIDER: &str = "static_user_provider";
 
@@ -106,7 +105,7 @@ impl UserProvider for StaticUserProvider {
         &self,
         input_id: Identity<'_>,
         input_pwd: Password<'_>,
-    ) -> Result<Arc<dyn UserInfo>> {
+    ) -> Result<UserInfoRef> {
         match input_id {
             Identity::UserId(username, _) => {
                 ensure!(
@@ -159,7 +158,7 @@ impl UserProvider for StaticUserProvider {
         &self,
         _catalog: &str,
         _schema: &str,
-        _user_info: &Arc<dyn UserInfo>,
+        _user_info: &UserInfoRef,
     ) -> Result<()> {
         // default allow all
         Ok(())

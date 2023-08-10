@@ -14,11 +14,10 @@
 
 use std::collections::HashMap;
 use std::env;
-use std::sync::Arc;
 use std::time::Instant;
 
 use aide::transform::TransformOperation;
-use auth::UserInfo;
+use auth::UserInfoRef;
 use axum::extract::{Json, Query, State};
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Form};
@@ -44,7 +43,7 @@ pub async fn sql(
     State(state): State<ApiState>,
     Query(query_params): Query<SqlQuery>,
     // TODO(fys): pass _user_info into query context
-    _user_info: Extension<Arc<dyn UserInfo>>,
+    _user_info: Extension<UserInfoRef>,
     Form(form_params): Form<SqlQuery>,
 ) -> Json<JsonResponse> {
     let sql_handler = &state.sql_handler;
@@ -103,7 +102,7 @@ pub async fn promql(
     State(state): State<ApiState>,
     Query(params): Query<PromqlQuery>,
     // TODO(fys): pass _user_info into query context
-    _user_info: Extension<Arc<dyn UserInfo>>,
+    _user_info: Extension<UserInfoRef>,
 ) -> Json<JsonResponse> {
     let sql_handler = &state.sql_handler;
     let exec_start = Instant::now();

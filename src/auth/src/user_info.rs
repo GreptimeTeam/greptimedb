@@ -16,6 +16,8 @@ use std::any::Any;
 use std::fmt::Debug;
 use std::sync::Arc;
 
+use crate::UserInfoRef;
+
 pub trait UserInfo: Debug + Sync + Send {
     fn as_any(&self) -> &dyn Any;
     fn username(&self) -> &str;
@@ -27,7 +29,7 @@ pub(crate) struct DefaultUserInfo {
 }
 
 impl DefaultUserInfo {
-    pub(crate) fn with_name(username: impl Into<String>) -> Arc<dyn UserInfo> {
+    pub(crate) fn with_name(username: impl Into<String>) -> UserInfoRef {
         Arc::new(Self {
             username: username.into(),
         })

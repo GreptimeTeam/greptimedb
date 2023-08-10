@@ -27,4 +27,6 @@ pub use error::{Error, Result};
 pub use user_info::UserInfo;
 pub use user_provider::UserProvider;
 
+// pub type alias
+pub type UserInfoRef = std::sync::Arc<dyn UserInfo>;
 pub type UserProviderRef = std::sync::Arc<dyn UserProvider>;

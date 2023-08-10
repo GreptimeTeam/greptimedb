@@ -18,7 +18,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
-use auth::UserInfo;
+use auth::UserInfoRef;
 use common_catalog::build_db_string;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use context::QueryContextBuilder;
@@ -30,7 +30,7 @@ use crate::context::{Channel, ConnInfo, QueryContextRef};
 pub struct Session {
     catalog: ArcSwap<String>,
     schema: ArcSwap<String>,
-    user_info: ArcSwap<Arc<dyn UserInfo>>,
+    user_info: ArcSwap<UserInfoRef>,
     conn_info: ConnInfo,
 }
 
@@ -66,12 +66,12 @@ impl Session {
     }
 
     #[inline]
-    pub fn user_info(&self) -> Arc<dyn UserInfo> {
+    pub fn user_info(&self) -> UserInfoRef {
         self.user_info.load().clone().as_ref().clone()
     }
 
     #[inline]
-    pub fn set_user_info(&self, user_info: Arc<dyn UserInfo>) {
+    pub fn set_user_info(&self, user_info: UserInfoRef) {
         self.user_info.store(Arc::new(user_info));
     }
 

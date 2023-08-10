@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use auth::tests::MockUserProvider;
-use auth::{UserInfo, UserProvider};
+use auth::{UserInfoRef, UserProvider};
 use axum::body::BoxBody;
 use axum::http;
 use hyper::Request;
@@ -29,7 +29,7 @@ async fn test_http_auth() {
     // base64encode("username:password") == "dXNlcm5hbWU6cGFzc3dvcmQ="
     let req = mock_http_request(Some("Basic dXNlcm5hbWU6cGFzc3dvcmQ="), None).unwrap();
     let auth_res = http_auth.authorize(req).await.unwrap();
-    let user_info: &Arc<dyn UserInfo> = auth_res.extensions().get().unwrap();
+    let user_info: &UserInfoRef = auth_res.extensions().get().unwrap();
     let default = auth::userinfo_by_name(None);
     assert_eq!(default.username(), user_info.username());
 
@@ -40,7 +40,7 @@ async fn test_http_auth() {
     // base64encode("greptime:greptime") == "Z3JlcHRpbWU6Z3JlcHRpbWU="
     let req = mock_http_request(Some("Basic Z3JlcHRpbWU6Z3JlcHRpbWU="), None).unwrap();
     let req = http_auth.authorize(req).await.unwrap();
-    let user_info: &Arc<dyn UserInfo> = req.extensions().get().unwrap();
+    let user_info: &UserInfoRef = req.extensions().get().unwrap();
     let default = auth::userinfo_by_name(None);
     assert_eq!(default.username(), user_info.username());
 
@@ -70,7 +70,7 @@ async fn test_schema_validating() {
     )
     .unwrap();
     let req = http_auth.authorize(req).await.unwrap();
-    let user_info: &Arc<dyn UserInfo> = req.extensions().get().unwrap();
+    let user_info: &UserInfoRef = req.extensions().get().unwrap();
     let default = auth::userinfo_by_name(None);
     assert_eq!(default.username(), user_info.username());
 

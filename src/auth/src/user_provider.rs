@@ -14,32 +14,21 @@
 
 pub(crate) mod static_user_provider;
 
-use std::sync::Arc;
-
 use crate::common::{Identity, Password};
 use crate::error::Result;
-use crate::UserInfo;
+use crate::UserInfoRef;
 
 #[async_trait::async_trait]
 pub trait UserProvider: Send + Sync {
     fn name(&self) -> &str;
 
     /// [`authenticate`] checks whether a user is valid and allowed to access the database.
-    async fn authenticate(
-        &self,
-        id: Identity<'_>,
-        password: Password<'_>,
-    ) -> Result<Arc<dyn UserInfo>>;
+    async fn authenticate(&self, id: Identity<'_>, password: Password<'_>) -> Result<UserInfoRef>;
 
     /// [`authorize`] checks whether a connection request
     /// from a certain user to a certain catalog/schema is legal.
     /// This method should be called after [`authenticate`].
-    async fn authorize(
-        &self,
-        catalog: &str,
-        schema: &str,
-        user_info: &Arc<dyn UserInfo>,
-    ) -> Result<()>;
+    async fn authorize(&self, catalog: &str, schema: &str, user_info: &UserInfoRef) -> Result<()>;
 
     /// [`auth`] is a combination of [`authenticate`] and [`authorize`].
     /// In most cases it's preferred for both convenience and performance.
@@ -49,7 +38,7 @@ pub trait UserProvider: Send + Sync {
         password: Password<'_>,
         catalog: &str,
         schema: &str,
-    ) -> Result<Arc<dyn UserInfo>> {
+    ) -> Result<UserInfoRef> {
         let user_info = self.authenticate(id, password).await?;
         self.authorize(catalog, schema, &user_info).await?;
         Ok(user_info)
