@@ -6,7 +6,6 @@ license.workspace = true
 
 [features]
 mock = []
-greptimedb-telemetry = []
 
 [dependencies]
 anymap = "1.0.0-beta.2"

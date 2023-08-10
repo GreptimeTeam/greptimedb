@@ -64,12 +64,12 @@ use crate::error::{
     MissingNodeIdSnafu, NewCatalogSnafu, OpenLogStoreSnafu, RecoverProcedureSnafu, Result,
     ShutdownInstanceSnafu, StartProcedureManagerSnafu, StopProcedureManagerSnafu,
 };
+use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
 use crate::heartbeat::handler::close_region::CloseRegionHandler;
 use crate::heartbeat::handler::open_region::OpenRegionHandler;
 use crate::heartbeat::HeartbeatTask;
 use crate::sql::{SqlHandler, SqlRequest};
 use crate::store;
-use crate::telemetry::get_greptimedb_telemetry_task;
 
 mod grpc;
 pub mod sql;
@@ -305,7 +305,7 @@ impl Instance {
             catalog_manager: catalog_manager.clone(),
             table_id_provider,
             procedure_manager,
-            greptimedb_telemetry_task: get_greptimedb_telemetry_task(&opts.mode).await,
+            greptimedb_telemetry_task: get_greptimedb_telemetry_task(&opts.mode, true).await,
         });
 
         let heartbeat_task = Instance::build_heartbeat_task(
