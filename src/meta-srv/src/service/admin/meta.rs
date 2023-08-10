@@ -14,25 +14,25 @@
 
 use std::collections::HashMap;
 
-use common_meta::helper::{build_catalog_prefix, build_schema_prefix};
+use common_error::ext::BoxedError;
+use common_meta::key::catalog_name::CatalogManager;
+use common_meta::key::schema_name::SchemaManager;
 use common_meta::key::table_name::TableNameKey;
 use common_meta::key::TableMetadataManagerRef;
-use common_meta::rpc::store::{RangeRequest, RangeResponse};
-use common_meta::util;
+use futures::TryStreamExt;
 use snafu::{OptionExt, ResultExt};
 use tonic::codegen::http;
 
 use crate::error;
 use crate::error::{Result, TableMetadataManagerSnafu};
 use crate::service::admin::HttpHandler;
-use crate::service::store::kv::KvStoreRef;
 
 pub struct CatalogsHandler {
-    pub kv_store: KvStoreRef,
+    pub catalog_manager: CatalogManager,
 }
 
 pub struct SchemasHandler {
-    pub kv_store: KvStoreRef,
+    pub schema_manager: SchemaManager,
 }
 
 pub struct TablesHandler {
@@ -46,7 +46,15 @@ pub struct TableHandler {
 #[async_trait::async_trait]
 impl HttpHandler for CatalogsHandler {
     async fn handle(&self, _: &str, _: &HashMap<String, String>) -> Result<http::Response<String>> {
-        get_http_response_by_prefix(build_catalog_prefix(), &self.kv_store).await
+        let stream = self.catalog_manager.catalog_names().await;
+
+        let keys = stream
+            .try_collect::<Vec<_>>()
+            .await
+            .map_err(BoxedError::new)
+            .context(error::ListCatalogsSnafu)?;
+
+        to_http_response(keys)
     }
 }
 
@@ -62,7 +70,15 @@ impl HttpHandler for SchemasHandler {
             .context(error::MissingRequiredParameterSnafu {
                 param: "catalog_name",
             })?;
-        get_http_response_by_prefix(build_schema_prefix(catalog), &self.kv_store).await
+        let stream = self.schema_manager.schema_names(catalog).await;
+
+        let keys = stream
+            .try_collect::<Vec<_>>()
+            .await
+            .map_err(BoxedError::new)
+            .context(error::ListSchemasSnafu { catalog })?;
+
+        to_http_response(keys)
     }
 }
 
@@ -160,15 +176,6 @@ impl HttpHandler for TableHandler {
     }
 }
 
-/// Get kv_store's key list with http response format by prefix key
-async fn get_http_response_by_prefix(
-    key_prefix: String,
-    kv_store: &KvStoreRef,
-) -> Result<http::Response<String>> {
-    let keys = get_keys_by_prefix(key_prefix, kv_store).await?;
-    to_http_response(keys)
-}
-
 fn to_http_response(keys: Vec<String>) -> Result<http::Response<String>> {
     let body = serde_json::to_string(&keys).context(error::SerializeToJsonSnafu {
         input: format!("{keys:?}"),
@@ -178,115 +185,4 @@ fn to_http_response(keys: Vec<String>) -> Result<http::Response<String>> {
         .status(http::StatusCode::OK)
         .body(body)
         .context(error::InvalidHttpBodySnafu)
-}
-
-/// Get kv_store's key list by prefix key
-async fn get_keys_by_prefix(key_prefix: String, kv_store: &KvStoreRef) -> Result<Vec<String>> {
-    let key_prefix_u8 = key_prefix.clone().into_bytes();
-    let range_end = util::get_prefix_end_key(&key_prefix_u8);
-    let req = RangeRequest {
-        key: key_prefix_u8,
-        range_end,
-        keys_only: true,
-        ..Default::default()
-    };
-
-    let response: RangeResponse = kv_store.range(req).await?;
-
-    let kvs = response.kvs;
-    let mut values = Vec::with_capacity(kvs.len());
-    for kv in kvs {
-        let value = String::from_utf8(kv.key).context(error::InvalidUtf8ValueSnafu)?;
-        let split_list = value.split(&key_prefix).collect::<Vec<&str>>();
-        if let Some(v) = split_list.get(1) {
-            values.push(v.to_string());
-        }
-    }
-    Ok(values)
-}
-
-#[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-
-    use common_meta::helper::{build_catalog_prefix, build_schema_prefix, CatalogKey, SchemaKey};
-    use common_meta::key::table_name::TableNameKey;
-    use common_meta::key::TableMetaKey;
-    use common_meta::rpc::store::PutRequest;
-
-    use crate::service::admin::meta::get_keys_by_prefix;
-    use crate::service::store::kv::KvStoreRef;
-    use crate::service::store::memory::MemStore;
-
-    #[tokio::test]
-    async fn test_get_list_by_prefix() {
-        let in_mem = Arc::new(MemStore::new()) as KvStoreRef;
-        let catalog_name = "test_catalog";
-        let schema_name = "test_schema";
-        let table_name = "test_table";
-        let catalog = CatalogKey {
-            catalog_name: catalog_name.to_string(),
-        };
-        assert!(in_mem
-            .put(PutRequest {
-                key: catalog.to_string().as_bytes().to_vec(),
-                value: "".as_bytes().to_vec(),
-                prev_kv: false,
-            })
-            .await
-            .is_ok());
-
-        let schema = SchemaKey {
-            catalog_name: catalog_name.to_string(),
-            schema_name: schema_name.to_string(),
-        };
-        assert!(in_mem
-            .put(PutRequest {
-                key: schema.to_string().as_bytes().to_vec(),
-                value: "".as_bytes().to_vec(),
-                prev_kv: false,
-            })
-            .await
-            .is_ok());
-
-        let table1 = TableNameKey::new(catalog_name, schema_name, table_name);
-        let table2 = TableNameKey::new(catalog_name, schema_name, "test_table1");
-        assert!(in_mem
-            .put(PutRequest {
-                key: table1.as_raw_key(),
-                value: "".as_bytes().to_vec(),
-                prev_kv: false,
-            })
-            .await
-            .is_ok());
-        assert!(in_mem
-            .put(PutRequest {
-                key: table2.as_raw_key(),
-                value: "".as_bytes().to_vec(),
-                prev_kv: false,
-            })
-            .await
-            .is_ok());
-
-        let catalog_key = get_keys_by_prefix(build_catalog_prefix(), &in_mem)
-            .await
-            .unwrap();
-        let schema_key = get_keys_by_prefix(build_schema_prefix(schema.catalog_name), &in_mem)
-            .await
-            .unwrap();
-        let table_key = get_keys_by_prefix(
-            format!(
-                "{}/",
-                TableNameKey::prefix_to_table(table1.catalog, table1.schema)
-            ),
-            &in_mem,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(catalog_name, catalog_key[0]);
-        assert_eq!(schema_name, schema_key[0]);
-        assert_eq!(table_name, table_key[0]);
-        assert_eq!("test_table1", table_key[1]);
-    }
 }

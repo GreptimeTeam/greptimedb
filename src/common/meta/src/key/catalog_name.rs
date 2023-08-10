@@ -15,6 +15,7 @@
 use std::fmt::Display;
 use std::sync::Arc;
 
+use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use futures::stream::BoxStream;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -30,6 +31,14 @@ use crate::rpc::KeyValue;
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CatalogNameKey<'a> {
     pub catalog: &'a str,
+}
+
+impl<'a> Default for CatalogNameKey<'a> {
+    fn default() -> Self {
+        Self {
+            catalog: DEFAULT_CATALOG_NAME,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -103,6 +112,12 @@ impl CatalogManager {
         Ok(())
     }
 
+    pub async fn exist(&self, catalog: CatalogNameKey<'_>) -> Result<bool> {
+        let raw_key = catalog.as_raw_key();
+
+        Ok(self.kv_backend.get(&raw_key).await?.is_some())
+    }
+
     pub async fn catalog_names(&self) -> BoxStream<'static, Result<String>> {
         let start_key = CatalogNameKey::range_start_key();
         let req = RangeRequest::new().with_prefix(start_key.as_bytes());
@@ -121,6 +136,7 @@ impl CatalogManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kv_backend::memory::MemoryKvBackend;
 
     #[test]
     fn test_serialization() {
@@ -131,5 +147,20 @@ mod tests {
         let parsed: CatalogNameKey = "__catalog_name/my-catalog".try_into().unwrap();
 
         assert_eq!(key, parsed);
+    }
+
+    #[tokio::test]
+    async fn test_key_exist() {
+        let manager = CatalogManager::new(Arc::new(MemoryKvBackend::default()));
+
+        let catalog_key = CatalogNameKey::new("my-catalog");
+
+        manager.create(catalog_key).await.unwrap();
+
+        assert!(manager.exist(catalog_key).await.unwrap());
+
+        let wrong_catalog_key = CatalogNameKey::new("my-wrong");
+
+        assert!(!manager.exist(wrong_catalog_key).await.unwrap());
     }
 }

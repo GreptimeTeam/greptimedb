@@ -13,13 +13,12 @@
 // limitations under the License.
 
 use std::any::Any;
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use api::v1::CreateTableExpr;
 use catalog::error::{
-    self as catalog_err, InternalSnafu, InvalidCatalogValueSnafu, InvalidSystemTableDefSnafu,
-    Result as CatalogResult, TableMetadataManagerSnafu, UnimplementedSnafu,
+    self as catalog_err, InternalSnafu, InvalidSystemTableDefSnafu, ListCatalogsSnafu,
+    ListSchemasSnafu, Result as CatalogResult, TableMetadataManagerSnafu, UnimplementedSnafu,
 };
 use catalog::information_schema::InformationSchemaProvider;
 use catalog::remote::KvCacheInvalidatorRef;
@@ -30,16 +29,16 @@ use catalog::{
 use client::client_manager::DatanodeClients;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME};
 use common_error::ext::BoxedError;
-use common_meta::helper::{build_catalog_prefix, build_schema_prefix, CatalogKey, SchemaKey};
+use common_meta::key::catalog_name::CatalogNameKey;
+use common_meta::key::schema_name::SchemaNameKey;
 use common_meta::key::table_info::TableInfoKey;
 use common_meta::key::table_name::TableNameKey;
 use common_meta::key::table_region::TableRegionKey;
 use common_meta::key::{TableMetaKey, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
-use common_meta::rpc::store::RangeRequest;
-use common_meta::rpc::KeyValue;
 use common_meta::table_name::TableName;
-use common_telemetry::{debug, warn};
+use common_telemetry::debug;
+use futures_util::TryStreamExt;
 use partition::manager::PartitionRuleManagerRef;
 use snafu::prelude::*;
 use table::metadata::TableId;
@@ -100,15 +99,9 @@ impl FrontendCatalogManager {
     }
 
     pub async fn invalidate_schema(&self, catalog: &str, schema: &str) {
-        let schema_key = SchemaKey {
-            catalog_name: catalog.into(),
-            schema_name: schema.into(),
-        }
-        .to_string();
+        let key = SchemaNameKey::new(catalog, schema).as_raw_key();
 
-        let key = schema_key.as_bytes();
-
-        self.backend_cache_invalidator.invalidate_key(key).await;
+        self.backend_cache_invalidator.invalidate_key(&key).await;
     }
 
     pub async fn invalidate_table(
@@ -284,46 +277,34 @@ impl CatalogManager for FrontendCatalogManager {
     }
 
     async fn catalog_names(&self) -> CatalogResult<Vec<String>> {
-        let key = build_catalog_prefix();
-        let req = RangeRequest::new().with_prefix(key.as_bytes());
+        let stream = self
+            .table_metadata_manager
+            .catalog_manager()
+            .catalog_names()
+            .await;
 
-        let kvs = self
-            .backend
-            .range(req)
+        let keys = stream
+            .try_collect::<Vec<_>>()
             .await
-            .context(TableMetadataManagerSnafu)?
-            .kvs;
+            .map_err(BoxedError::new)
+            .context(ListCatalogsSnafu)?;
 
-        let mut res = HashSet::new();
-        for KeyValue { key: k, value: _ } in kvs {
-            let catalog_key = String::from_utf8_lossy(&k);
-            if let Ok(key) = CatalogKey::parse(catalog_key.as_ref()) {
-                let _ = res.insert(key.catalog_name);
-            } else {
-                warn!("invalid catalog key: {:?}", catalog_key);
-            }
-        }
-        Ok(res.into_iter().collect())
+        Ok(keys)
     }
 
     async fn schema_names(&self, catalog: &str) -> CatalogResult<Vec<String>> {
-        let key = build_schema_prefix(catalog);
-        let req = RangeRequest::new().with_prefix(key.as_bytes());
-
-        let kvs = self
-            .backend
-            .range(req)
+        let stream = self
+            .table_metadata_manager
+            .schema_manager()
+            .schema_names(catalog)
+            .await;
+        let keys = stream
+            .try_collect::<Vec<_>>()
             .await
-            .context(TableMetadataManagerSnafu)?
-            .kvs;
+            .map_err(BoxedError::new)
+            .context(ListSchemasSnafu { catalog })?;
 
-        let mut res = HashSet::new();
-        for KeyValue { key: k, value: _ } in kvs {
-            let key =
-                SchemaKey::parse(String::from_utf8_lossy(&k)).context(InvalidCatalogValueSnafu)?;
-            let _ = res.insert(key.schema_name);
-        }
-        Ok(res.into_iter().collect())
+        Ok(keys)
     }
 
     async fn table_names(&self, catalog: &str, schema: &str) -> CatalogResult<Vec<String>> {
@@ -344,29 +325,19 @@ impl CatalogManager for FrontendCatalogManager {
     }
 
     async fn catalog_exist(&self, catalog: &str) -> CatalogResult<bool> {
-        let key = CatalogKey {
-            catalog_name: catalog.to_string(),
-        }
-        .to_string();
-        self.backend
-            .get(key.as_bytes())
+        self.table_metadata_manager
+            .catalog_manager()
+            .exist(CatalogNameKey::new(catalog))
             .await
             .context(TableMetadataManagerSnafu)
-            .map(|x| x.is_some())
     }
 
     async fn schema_exist(&self, catalog: &str, schema: &str) -> CatalogResult<bool> {
-        let schema_key = SchemaKey {
-            catalog_name: catalog.to_string(),
-            schema_name: schema.to_string(),
-        }
-        .to_string();
-        Ok(self
-            .backend()
-            .get(schema_key.as_bytes())
+        self.table_metadata_manager
+            .schema_manager()
+            .exist(SchemaNameKey::new(catalog, schema))
             .await
-            .context(TableMetadataManagerSnafu)?
-            .is_some())
+            .context(TableMetadataManagerSnafu)
     }
 
     async fn table_exist(&self, catalog: &str, schema: &str, table: &str) -> CatalogResult<bool> {
