@@ -164,8 +164,11 @@ impl Instance {
         compaction_scheduler: CompactionSchedulerRef<RaftEngineLogStore>,
         plugins: Arc<Plugins>,
     ) -> Result<(InstanceRef, Option<HeartbeatTask>)> {
-        let object_store = store::new_object_store(&opts.storage.store).await?;
-        let log_store = Arc::new(create_log_store(&opts.storage.store, &opts.wal).await?);
+        let data_home = util::normalize_dir(&opts.storage.data_home);
+        info!("The working home directory is: {}", data_home);
+        let object_store = store::new_object_store(&data_home, &opts.storage.store).await?;
+        let log_store =
+            Arc::new(create_log_store(&data_home, &opts.storage.store, &opts.wal).await?);
 
         let mito_engine = Arc::new(DefaultEngine::new(
             TableEngineConfig {
@@ -448,13 +451,14 @@ async fn new_metasrv_client(node_id: u64, meta_config: &MetaClientOptions) -> Re
 }
 
 pub(crate) async fn create_log_store(
+    data_home: &str,
     store_config: &ObjectStoreConfig,
     wal_config: &WalConfig,
 ) -> Result<RaftEngineLogStore> {
     let wal_dir = match (&wal_config.dir, store_config) {
         (Some(dir), _) => dir.to_string(),
-        (None, ObjectStoreConfig::File(file_config)) => {
-            format!("{}{WAL_DIR}", util::normalize_dir(&file_config.data_home))
+        (None, ObjectStoreConfig::File(_file_config)) => {
+            format!("{}{WAL_DIR}", data_home)
         }
         _ => return error::MissingWalDirConfigSnafu {}.fail(),
     };

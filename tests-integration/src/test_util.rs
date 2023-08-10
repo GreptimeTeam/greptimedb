@@ -135,10 +135,7 @@ fn s3_test_config() -> S3Config {
     }
 }
 
-pub fn get_test_store_config(
-    store_type: &StorageType,
-    name: &str,
-) -> (ObjectStoreConfig, TempDirGuard) {
+pub fn get_test_store_config(store_type: &StorageType) -> (ObjectStoreConfig, TempDirGuard) {
     let _ = dotenv::dotenv();
 
     match store_type {
@@ -243,21 +240,12 @@ pub fn get_test_store_config(
 
             (config, TempDirGuard::S3(TempFolder::new(&store, "/")))
         }
-        StorageType::File => {
-            let data_tmp_dir = create_temp_dir(&format!("gt_data_{name}"));
-
-            (
-                ObjectStoreConfig::File(FileConfig {
-                    data_home: data_tmp_dir.path().to_str().unwrap().to_string(),
-                }),
-                TempDirGuard::File(data_tmp_dir),
-            )
-        }
+        StorageType::File => (ObjectStoreConfig::File(FileConfig {}), TempDirGuard::None),
     }
 }
 
 pub enum TempDirGuard {
-    File(TempDir),
+    None,
     S3(TempFolder),
     Oss(TempFolder),
     Azblob(TempFolder),
@@ -265,11 +253,21 @@ pub enum TempDirGuard {
 }
 
 pub struct TestGuard {
-    pub wal_guard: WalGuard,
+    pub home_guard: FileDirGuard,
+    pub wal_guard: FileDirGuard,
     pub storage_guard: StorageGuard,
 }
 
-pub struct WalGuard(pub TempDir);
+pub struct FileDirGuard {
+    pub temp_dir: TempDir,
+    pub is_wal: bool,
+}
+
+impl FileDirGuard {
+    pub fn new(temp_dir: TempDir, is_wal: bool) -> Self {
+        Self { temp_dir, is_wal }
+    }
+}
 
 pub struct StorageGuard(pub TempDirGuard);
 
@@ -289,28 +287,36 @@ pub fn create_tmp_dir_and_datanode_opts(
     store_type: StorageType,
     name: &str,
 ) -> (DatanodeOptions, TestGuard) {
+    let home_tmp_dir = create_temp_dir(&format!("gt_data_{name}"));
     let wal_tmp_dir = create_temp_dir(&format!("gt_wal_{name}"));
     let wal_dir = wal_tmp_dir.path().to_str().unwrap().to_string();
+    let home_dir = home_tmp_dir.path().to_str().unwrap().to_string();
 
-    let (store, data_tmp_dir) = get_test_store_config(&store_type, name);
-    let opts = create_datanode_opts(store, wal_dir);
+    let (store, data_tmp_dir) = get_test_store_config(&store_type);
+    let opts = create_datanode_opts(store, home_dir, wal_dir);
 
     (
         opts,
         TestGuard {
-            wal_guard: WalGuard(wal_tmp_dir),
+            home_guard: FileDirGuard::new(home_tmp_dir, false),
+            wal_guard: FileDirGuard::new(wal_tmp_dir, true),
             storage_guard: StorageGuard(data_tmp_dir),
         },
     )
 }
 
-pub fn create_datanode_opts(store: ObjectStoreConfig, wal_dir: String) -> DatanodeOptions {
+pub fn create_datanode_opts(
+    store: ObjectStoreConfig,
+    home_dir: String,
+    wal_dir: String,
+) -> DatanodeOptions {
     DatanodeOptions {
         wal: WalConfig {
             dir: Some(wal_dir),
             ..Default::default()
         },
         storage: StorageConfig {
+            data_home: home_dir,
             store,
             ..Default::default()
         },

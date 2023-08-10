@@ -10,7 +10,7 @@ rpc_addr = "127.0.0.1:3001"
 rpc_hostname = "127.0.0.1"
 # The number of gRPC server worker threads, 8 by default.
 rpc_runtime_size = 8
-# Wheter to enable greptimedb telemetry, true by default.
+# Whether to enable greptimedb telemetry, true by default.
 enable_telemetry = true
 
 [heartbeat]

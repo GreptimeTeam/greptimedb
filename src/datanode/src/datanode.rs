@@ -58,7 +58,7 @@ pub enum ObjectStoreConfig {
 }
 
 /// Storage engine config
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct StorageConfig {
     /// Retention period for all tables.
@@ -68,6 +68,8 @@ pub struct StorageConfig {
     /// The precedence order is: ttl in table options > global ttl.
     #[serde(with = "humantime_serde")]
     pub global_ttl: Option<Duration>,
+    /// The working directory of database
+    pub data_home: String,
     #[serde(flatten)]
     pub store: ObjectStoreConfig,
     pub compaction: CompactionConfig,
@@ -75,11 +77,22 @@ pub struct StorageConfig {
     pub flush: FlushConfig,
 }
 
+impl Default for StorageConfig {
+    fn default() -> Self {
+        Self {
+            global_ttl: None,
+            data_home: DEFAULT_DATA_HOME.to_string(),
+            store: ObjectStoreConfig::default(),
+            compaction: CompactionConfig::default(),
+            manifest: RegionManifestConfig::default(),
+            flush: FlushConfig::default(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Default, Deserialize)]
 #[serde(default)]
-pub struct FileConfig {
-    pub data_home: String,
-}
+pub struct FileConfig {}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -198,9 +211,7 @@ impl Default for GcsConfig {
 
 impl Default for ObjectStoreConfig {
     fn default() -> Self {
-        ObjectStoreConfig::File(FileConfig {
-            data_home: DEFAULT_DATA_HOME.to_string(),
-        })
+        ObjectStoreConfig::File(FileConfig {})
     }
 }
 
