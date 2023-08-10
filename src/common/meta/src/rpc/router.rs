@@ -76,20 +76,13 @@ impl TryFrom<PbRouteResponse> for RouteResponse {
 pub struct TableRoute {
     pub table: Table,
     pub region_routes: Vec<RegionRoute>,
-    region_leaders: HashMap<RegionNumber, Option<Peer>>,
 }
 
 impl TableRoute {
     pub fn new(table: Table, region_routes: Vec<RegionRoute>) -> Self {
-        let region_leaders = region_routes
-            .iter()
-            .map(|x| (x.region.id.region_number(), x.leader_peer.clone()))
-            .collect::<HashMap<_, _>>();
-
         Self {
             table,
             region_routes,
-            region_leaders,
         }
     }
 
@@ -215,9 +208,10 @@ impl TableRoute {
     }
 
     pub fn find_region_leader(&self, region_number: RegionNumber) -> Option<&Peer> {
-        self.region_leaders
-            .get(&region_number)
-            .and_then(|x| x.as_ref())
+        self.region_routes
+            .iter()
+            .find(|x| x.region.id.region_number() == region_number)
+            .and_then(|x| x.leader_peer.as_ref())
     }
 }
 
@@ -529,10 +523,6 @@ mod tests {
                     follower_peers: vec![Peer::new(2, "a2"), Peer::new(3, "a3")],
                 },
             ],
-            region_leaders: HashMap::from([
-                (2, Some(Peer::new(1, "a1"))),
-                (1, Some(Peer::new(2, "a2"))),
-            ]),
         };
 
         let from_raw = TableRoute::try_from_raw(&raw_peers, raw_table_route.clone()).unwrap();

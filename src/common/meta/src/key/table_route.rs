@@ -15,11 +15,139 @@
 use std::fmt::Display;
 
 use api::v1::meta::TableName;
+use snafu::ensure;
 use table::metadata::TableId;
 
-use crate::key::to_removed_key;
+use crate::error::{Result, UnexpectedSnafu};
+use crate::key::{to_removed_key, TableMetaKey};
+use crate::kv_backend::KvBackendRef;
+use crate::rpc::router::{RegionRoute, Table, TableRoute};
+use crate::rpc::store::{CompareAndPutRequest, MoveValueRequest};
 
 pub const TABLE_ROUTE_PREFIX: &str = "__meta_table_route";
+
+pub const NEXT_TABLE_ROUTE_PREFIX: &str = "__table_route";
+
+// TODO(weny): Renames it to TableRouteKey.
+pub struct NextTableRouteKey {
+    table_id: TableId,
+}
+
+impl NextTableRouteKey {
+    pub fn new(table_id: TableId) -> Self {
+        Self { table_id }
+    }
+}
+
+impl TableMetaKey for NextTableRouteKey {
+    fn as_raw_key(&self) -> Vec<u8> {
+        self.to_string().into_bytes()
+    }
+}
+
+impl Display for NextTableRouteKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}/{}", NEXT_TABLE_ROUTE_PREFIX, self.table_id)
+    }
+}
+
+pub struct TableRouteManager {
+    kv_backend: KvBackendRef,
+}
+
+impl TableRouteManager {
+    pub fn new(kv_backend: KvBackendRef) -> Self {
+        Self { kv_backend }
+    }
+
+    pub async fn get(&self, key: &NextTableRouteKey) -> Result<Option<TableRoute>> {
+        self.kv_backend
+            .get(&key.as_raw_key())
+            .await?
+            .map(|kv| TableRoute::try_from_raw_value(kv.value))
+            .transpose()
+    }
+
+    // Creates TableRoute key and value. If the key already exists, check whether the value is the same.
+    pub async fn create(&self, table: Table, region_routes: Vec<RegionRoute>) -> Result<()> {
+        let key = NextTableRouteKey::new(table.id as u32);
+        let val = TableRoute::new(table, region_routes);
+        let req = CompareAndPutRequest::new()
+            .with_key(key.as_raw_key())
+            .with_value(val.try_as_raw_value()?);
+
+        self.kv_backend.compare_and_put(req).await?.handle(|resp| {
+            if !resp.success {
+                let Some(cur) = resp
+                    .prev_kv
+                    .map(|kv|TableRoute::try_from_raw_value(kv.value))
+                    .transpose()?
+                else {
+                    return UnexpectedSnafu {
+                        err_msg: format!("compare_and_put expect None but failed with current value None, key: {key}, val: {val:?}"),
+                    }.fail();
+                };
+
+                ensure!(
+                    cur==val,
+                    UnexpectedSnafu {
+                        err_msg: format!("current value '{cur:?}' already existed for key '{key}', {val:?} is not set"),
+                    }
+                );
+            }
+            Ok(())
+        })
+    }
+
+    /// Compares and puts value of key. `expect` is the expected value, if backend's current value associated
+    /// with key is the same as `expect`, the value will be updated to `val`.
+    ///
+    /// - If the compare-and-set operation successfully updated value, this method will return an `Ok(Ok())`
+    /// - If associated value is not the same as `expect`, no value will be updated and an
+    ///   `Ok(Err(Option<TableRoute>))` will be returned. The `Option<TableRoute>` indicates
+    ///   the current associated value of key.
+    /// - If any error happens during operation, an `Err(Error)` will be returned.
+    pub async fn compare_and_put(
+        &self,
+        table_id: TableId,
+        expect: Option<TableRoute>,
+        table_route: TableRoute,
+    ) -> Result<std::result::Result<(), Option<TableRoute>>> {
+        let key = NextTableRouteKey::new(table_id);
+        let raw_key = key.as_raw_key();
+
+        let expect = if let Some(x) = expect {
+            x.try_as_raw_value()?
+        } else {
+            vec![]
+        };
+        let raw_value = table_route.try_as_raw_value()?;
+
+        let req = CompareAndPutRequest::new()
+            .with_key(raw_key)
+            .with_expect(expect)
+            .with_value(raw_value);
+
+        self.kv_backend.compare_and_put(req).await?.handle(|resp| {
+            Ok(if resp.success {
+                Ok(())
+            } else {
+                Err(resp
+                    .prev_kv
+                    .map(|x| TableRoute::try_from_raw_value(x.value))
+                    .transpose()?)
+            })
+        })
+    }
+
+    pub async fn remove(&self, table_id: TableId) -> Result<()> {
+        let key = NextTableRouteKey::new(table_id).as_raw_key();
+        let removed_key = to_removed_key(&String::from_utf8_lossy(&key));
+        let req = MoveValueRequest::new(key, removed_key.as_bytes());
+        self.kv_backend.move_value(req).await?;
+        Ok(())
+    }
+}
 
 #[derive(Copy, Clone)]
 pub struct TableRouteKey<'a> {

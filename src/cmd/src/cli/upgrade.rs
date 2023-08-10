@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use clap::Parser;
+use client::api::v1::meta::TableRouteValue;
 use common_meta::error as MetaError;
 use common_meta::helper::{CatalogKey as v1CatalogKey, SchemaKey as v1SchemaKey, TableGlobalValue};
 use common_meta::key::catalog_name::{CatalogNameKey, CatalogNameValue};
@@ -24,8 +25,10 @@ use common_meta::key::schema_name::{SchemaNameKey, SchemaNameValue};
 use common_meta::key::table_info::{TableInfoKey, TableInfoValue};
 use common_meta::key::table_name::{TableNameKey, TableNameValue};
 use common_meta::key::table_region::{RegionDistribution, TableRegionKey, TableRegionValue};
+use common_meta::key::table_route::NextTableRouteKey;
 use common_meta::key::TableMetaKey;
 use common_meta::range_stream::PaginationStream;
+use common_meta::rpc::router::TableRoute;
 use common_meta::rpc::store::{BatchDeleteRequest, BatchPutRequest, PutRequest, RangeRequest};
 use common_meta::rpc::KeyValue;
 use common_meta::util::get_prefix_end_key;
@@ -34,6 +37,7 @@ use etcd_client::Client;
 use futures::TryStreamExt;
 use meta_srv::service::store::etcd::EtcdStore;
 use meta_srv::service::store::kv::{KvBackendAdapter, KvStoreRef};
+use prost::Message;
 use snafu::ResultExt;
 
 use crate::cli::{Instance, Tool};
@@ -45,6 +49,15 @@ pub struct UpgradeCommand {
     etcd_addr: String,
     #[clap(long)]
     dryrun: bool,
+
+    #[clap(long)]
+    skip_table_global_keys: bool,
+    #[clap(long)]
+    skip_catalog_keys: bool,
+    #[clap(long)]
+    skip_schema_keys: bool,
+    #[clap(long)]
+    skip_table_route_keys: bool,
 }
 
 impl UpgradeCommand {
@@ -57,6 +70,10 @@ impl UpgradeCommand {
         let tool = MigrateTableMetadata {
             etcd_store: EtcdStore::with_etcd_client(client),
             dryrun: self.dryrun,
+            skip_catalog_keys: self.skip_catalog_keys,
+            skip_table_global_keys: self.skip_table_global_keys,
+            skip_schema_keys: self.skip_schema_keys,
+            skip_table_route_keys: self.skip_table_route_keys,
         };
         Ok(Instance::Tool(Box::new(tool)))
     }
@@ -65,15 +82,32 @@ impl UpgradeCommand {
 struct MigrateTableMetadata {
     etcd_store: KvStoreRef,
     dryrun: bool,
+
+    skip_table_global_keys: bool,
+
+    skip_catalog_keys: bool,
+
+    skip_schema_keys: bool,
+
+    skip_table_route_keys: bool,
 }
 
 #[async_trait]
 impl Tool for MigrateTableMetadata {
     // migrates database's metadata from 0.3 to 0.4.
     async fn do_work(&self) -> Result<()> {
-        self.migrate_table_global_values().await?;
-        self.migrate_catalog_keys().await?;
-        self.migrate_schema_keys().await?;
+        if !self.skip_table_global_keys {
+            self.migrate_table_global_values().await?;
+        }
+        if !self.skip_catalog_keys {
+            self.migrate_catalog_keys().await?;
+        }
+        if !self.skip_schema_keys {
+            self.migrate_schema_keys().await?;
+        }
+        if !self.skip_table_route_keys {
+            self.migrate_table_route_keys().await?;
+        }
         Ok(())
     }
 }
@@ -81,6 +115,60 @@ impl Tool for MigrateTableMetadata {
 const PAGE_SIZE: usize = 1000;
 
 impl MigrateTableMetadata {
+    async fn migrate_table_route_keys(&self) -> Result<()> {
+        let key = b"__meta_table_route".to_vec();
+        let range_end = get_prefix_end_key(&key);
+        let mut keys = Vec::new();
+        info!("Start scanning key from: {}", String::from_utf8_lossy(&key));
+
+        let mut stream = PaginationStream::new(
+            KvBackendAdapter::wrap(self.etcd_store.clone()),
+            RangeRequest::new().with_range(key, range_end),
+            PAGE_SIZE,
+            Arc::new(|kv: KeyValue| {
+                let value =
+                    TableRouteValue::decode(&kv.value[..]).context(MetaError::DecodeProtoSnafu)?;
+                Ok((kv.key, value))
+            }),
+        );
+
+        while let Some((key, value)) = stream.try_next().await.context(error::IterStreamSnafu)? {
+            self.migrate_table_route_key(value).await?;
+            keys.push(key);
+        }
+
+        info!("Total migrated TableRouteKeys: {}", keys.len());
+        self.delete_migrated_keys(keys).await;
+
+        Ok(())
+    }
+
+    async fn migrate_table_route_key(&self, value: TableRouteValue) -> Result<()> {
+        let table_route = TableRoute::try_from_raw(
+            &value.peers,
+            value.table_route.expect("expected table_route"),
+        )
+        .unwrap();
+
+        let new_key = NextTableRouteKey::new(table_route.table.id as u32);
+        info!("Creating '{new_key}'");
+
+        if self.dryrun {
+            info!("Dryrun: do nothing");
+        } else {
+            self.etcd_store
+                .put(
+                    PutRequest::new()
+                        .with_key(new_key.as_raw_key())
+                        .with_value(table_route.try_as_raw_value().unwrap()),
+                )
+                .await
+                .unwrap();
+        }
+
+        Ok(())
+    }
+
     async fn migrate_schema_keys(&self) -> Result<()> {
         // The schema key prefix.
         let key = b"__s".to_vec();

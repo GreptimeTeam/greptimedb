@@ -1601,6 +1601,7 @@ dependencies = [
  "metrics",
  "nu-ansi-term",
  "partition",
+ "prost",
  "query",
  "rand",
  "rexpect",

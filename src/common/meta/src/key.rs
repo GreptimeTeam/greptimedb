@@ -53,7 +53,9 @@ pub mod schema_name;
 pub mod table_info;
 pub mod table_name;
 pub mod table_region;
-mod table_route;
+// TODO(weny): removes it.
+#[allow(unused)]
+pub mod table_route;
 
 use std::sync::Arc;
 
@@ -70,6 +72,7 @@ use self::schema_name::{SchemaManager, SchemaNameValue};
 use crate::error::{InvalidTableMetadataSnafu, Result, SerdeJsonSnafu};
 pub use crate::key::table_route::{TableRouteKey, TABLE_ROUTE_PREFIX};
 use crate::kv_backend::KvBackendRef;
+use crate::rpc::router::TableRoute;
 
 pub const REMOVED_PREFIX: &str = "__removed";
 
@@ -212,7 +215,8 @@ impl_table_meta_value! {
     TableNameValue,
     TableInfoValue,
     TableRegionValue,
-    DatanodeTableValue
+    DatanodeTableValue,
+    TableRoute
 }
 
 #[cfg(test)]
