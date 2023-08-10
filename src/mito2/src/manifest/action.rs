@@ -12,18 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Defines [RegionMetaAction] related structs and [RegionCheckpoint].
+
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
-use storage::metadata::VersionNumber;
-use storage::sst::{FileId, FileMeta};
 use store_api::manifest::action::{ProtocolAction, ProtocolVersion};
 use store_api::manifest::ManifestVersion;
 use store_api::storage::{RegionId, SequenceNumber};
 
 use crate::error::{RegionMetadataNotFoundSnafu, Result, SerdeJsonSnafu, Utf8Snafu};
 use crate::metadata::RegionMetadataRef;
+use crate::sst::file::{FileId, FileMeta};
 
 /// Actions that can be applied to region manifest.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -46,7 +47,6 @@ pub struct RegionChange {
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct RegionEdit {
-    pub region_version: VersionNumber,
     pub files_to_add: Vec<FileMeta>,
     pub files_to_remove: Vec<FileMeta>,
     pub compaction_time_window: Option<i64>,
@@ -204,7 +204,6 @@ impl RegionMetaActionIter {
 
 #[cfg(test)]
 mod tests {
-    use storage::sst::FileId;
 
     use super::*;
 
@@ -235,7 +234,7 @@ mod tests {
         FileMeta {
             region_id: 0.into(),
             file_id: FileId::random(),
-            time_range: None,
+            time_range: (0.into(), 10000.into()),
             level: 0,
             file_size: 1024,
         }

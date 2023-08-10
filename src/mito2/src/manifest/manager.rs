@@ -148,6 +148,12 @@ impl RegionManifestManager {
         let inner = self.inner.read().await;
         inner.manifest.clone()
     }
+
+    #[cfg(test)]
+    pub async fn store(&self) -> ManifestObjectStore {
+        let inner = self.inner.read().await;
+        inner.store.clone()
+    }
 }
 
 #[cfg(test)]
@@ -167,7 +173,7 @@ impl RegionManifestManager {
 }
 
 #[derive(Debug)]
-struct RegionManifestManagerInner {
+pub(crate) struct RegionManifestManagerInner {
     store: ManifestObjectStore,
     options: RegionManifestOptions,
     last_version: ManifestVersion,
@@ -327,6 +333,7 @@ impl RegionManifestManagerInner {
         }
         let new_manifest = manifest_builder.try_build()?;
         self.manifest = Arc::new(new_manifest);
+        self.may_do_checkpoint(version).await?;
 
         Ok(version)
     }
@@ -343,6 +350,10 @@ impl RegionManifestManagerInner {
         if version - self.last_checkpoint_version >= self.options.checkpoint_interval
             && self.options.checkpoint_interval != 0
         {
+            info!(
+                "Going to do checkpoint for version [{} ~ {}]",
+                self.last_checkpoint_version, version
+            );
             if let Some(checkpoint) = self.do_checkpoint().await? {
                 self.last_checkpoint_version = checkpoint.last_version();
             }
@@ -413,16 +424,16 @@ impl RegionManifestManagerInner {
         self.store.delete_until(last_version, true).await?;
 
         info!(
-            "Region manifest checkpoint, start_version: {}, last_version: {}, compacted actions: {}",
-            start_version,
-            last_version,
-            compacted_actions
+            "Done manifest checkpoint, start_version: {}, last_version: {}, compacted actions: {}",
+            start_version, last_version, compacted_actions
         );
         Ok(Some(checkpoint))
     }
 
     /// Fetch the last [RegionCheckpoint] from storage.
-    async fn last_checkpoint(store: &ManifestObjectStore) -> Result<Option<RegionCheckpoint>> {
+    pub(crate) async fn last_checkpoint(
+        store: &ManifestObjectStore,
+    ) -> Result<Option<RegionCheckpoint>> {
         let last_checkpoint = store.load_last_checkpoint().await?;
 
         if let Some((version, bytes)) = last_checkpoint {
@@ -453,41 +464,12 @@ mod test {
     use common_datasource::compression::CompressionType;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
-    use store_api::storage::RegionId;
 
     use super::*;
     use crate::manifest::action::RegionChange;
-    use crate::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder, SemanticType};
+    use crate::manifest::tests::utils::basic_region_metadata;
+    use crate::metadata::{ColumnMetadata, RegionMetadataBuilder, SemanticType};
     use crate::test_util::TestEnv;
-
-    fn basic_region_metadata() -> RegionMetadata {
-        let mut builder = RegionMetadataBuilder::new(RegionId::new(23, 33), 0);
-        builder
-            .push_column_metadata(ColumnMetadata {
-                column_schema: ColumnSchema::new(
-                    "ts",
-                    ConcreteDataType::timestamp_millisecond_datatype(),
-                    false,
-                ),
-                semantic_type: SemanticType::Timestamp,
-                column_id: 45,
-            })
-            .push_column_metadata(ColumnMetadata {
-                column_schema: ColumnSchema::new("pk", ConcreteDataType::string_datatype(), false),
-                semantic_type: SemanticType::Tag,
-                column_id: 36,
-            })
-            .push_column_metadata(ColumnMetadata {
-                column_schema: ColumnSchema::new(
-                    "val",
-                    ConcreteDataType::float64_datatype(),
-                    false,
-                ),
-                semantic_type: SemanticType::Field,
-                column_id: 251,
-            });
-        builder.build().unwrap()
-    }
 
     #[tokio::test]
     async fn create_manifest_manager() {
