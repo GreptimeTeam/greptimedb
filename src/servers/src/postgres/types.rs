@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::fmt::Display;
 use std::ops::Deref;
 
 use bytes::{Buf, BufMut};
@@ -197,6 +198,10 @@ pub(super) fn parameter_to_string(portal: &Portal<SqlPlan>, idx: usize) -> PgWir
         &Type::TIMESTAMP => Ok(portal
             .parameter::<NaiveDateTime>(idx, param_type)?
             .map(|v| v.format("%Y-%m-%d %H:%M:%S%.6f").to_string())
+            .unwrap_or_else(|| "".to_owned())),
+        &Type::INTERVAL => Ok(portal
+            .parameter::<PgInterval>(idx, param_type)?
+            .map(|v| v.to_string())
             .unwrap_or_else(|| "".to_owned())),
         _ => Err(invalid_parameter_error(
             "unsupported_parameter_type",
@@ -481,6 +486,23 @@ pub(super) fn parameters_to_scalar_values(
                     }
                 }
             }
+            &Type::INTERVAL => {
+                let data = portal.parameter::<PgInterval>(idx, &client_type)?;
+                match server_type {
+                    ConcreteDataType::Interval(_) => {
+                        ScalarValue::IntervalMonthDayNano(data.map(|i| Interval::from(i).to_i128()))
+                    }
+                    _ => {
+                        return Err(invalid_parameter_error(
+                            "invalid_parameter_type",
+                            Some(&format!(
+                                "Expected: {}, found: {}",
+                                server_type, client_type
+                            )),
+                        ));
+                    }
+                }
+            }
             &Type::BYTEA => {
                 let data = portal.parameter::<Vec<u8>>(idx, &client_type)?;
                 match server_type {
@@ -562,6 +584,12 @@ impl From<PgInterval> for Interval {
     }
 }
 
+impl Display for PgInterval {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", Interval::from(*self).to_postgres_string())
+    }
+}
+
 impl ToSql for PgInterval {
     to_sql_checked!();
 
@@ -619,7 +647,7 @@ impl ToSqlText for PgInterval {
         Self: Sized,
     {
         let fmt = match ty {
-            &Type::INTERVAL => Interval::from(*self).to_postgres_string(),
+            &Type::INTERVAL => self.to_string(),
             _ => return Err("unsupported type".into()),
         };
 
