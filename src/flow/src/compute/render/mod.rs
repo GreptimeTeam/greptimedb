@@ -11,6 +11,7 @@ use timely::progress::Timestamp;
 
 use crate::compute::context::CollectionBundle;
 use crate::compute::plan::Plan;
+use crate::compute::types::BuildDesc;
 use crate::compute::Context;
 use crate::expr::Id;
 use crate::repr::{self, Row};
@@ -50,6 +51,19 @@ impl RenderTimestamp for repr::Timestamp {
     }
     fn step_back(&self) -> Self {
         self.saturating_sub(1)
+    }
+}
+
+// This implementation block allows child timestamps to vary from parent timestamps.
+impl<G> Context<G, Row>
+where
+    G: Scope,
+    G::Timestamp: RenderTimestamp,
+{
+    pub(crate) fn build_object(&mut self, object: BuildDesc<Plan>) {
+        // First, transform the relation expression into a render plan.
+        let bundle = self.render_plan(object.plan);
+        self.insert_id(Id::Global(object.id), bundle);
     }
 }
 
@@ -186,5 +200,34 @@ where
             }
             _ => todo!(),
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use differential_dataflow::input::InputSession;
+    use timely::dataflow::scopes::Child;
+
+    use super::*;
+    use crate::expr::LocalId;
+    use crate::repr::Diff;
+    #[test]
+    fn test_simple_plan_render() {
+        timely::execute_from_args(std::env::args(), move |worker| {
+            let mut input = InputSession::<repr::Timestamp, Row, Diff>::new();
+            worker.dataflow(|scope: &mut Child<'_, _, repr::Timestamp>| {
+                let mut test_ctx = Context::<_, Row, _>::for_dataflow_in(scope.clone());
+                let plan = Plan::Constant {
+                    rows: Ok(vec![(Row::default(), 0, 1)]),
+                };
+                let input_collection = input.to_collection(scope);
+                let err_collection = InputSession::new().to_collection(scope);
+                let input_collection =
+                    CollectionBundle::from_collections(input_collection, err_collection);
+                // insert collection
+                test_ctx.insert_id(Id::Local(LocalId(0)), input_collection);
+                let bundle = test_ctx.render_plan(plan);
+            });
+        });
     }
 }

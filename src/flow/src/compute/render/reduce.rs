@@ -100,11 +100,10 @@ where
                     }
                 });
 
-            // TODO(discord9): find out how to do `consolidate_stream` without Abonomation
             // Demux out the potential errors from key and value selector evaluation.
             let (ok, mut err) = key_val_input
                 .as_collection()
-                // .consolidate_stream()
+                .consolidate_stream()
                 .flat_map_fallible("OkErrDemux", Some);
 
             err = err.concat(&err_input);

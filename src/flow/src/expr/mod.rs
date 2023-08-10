@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use crate::expr::func::{BinaryFunc, UnaryFunc, VariadicFunc};
 use crate::storage::errors::EvalError;
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ScalarExpr {
     /// A column of the input row
     Column(usize),

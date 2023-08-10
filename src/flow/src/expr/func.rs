@@ -5,7 +5,7 @@ use super::ScalarExpr;
 // TODO(discord9): more function & eval
 use crate::{repr::Row, storage::errors::EvalError};
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize, Hash)]
 pub enum UnaryFunc {
     Not,
     IsNull,
@@ -19,7 +19,7 @@ impl UnaryFunc {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize, Hash)]
 pub enum BinaryFunc {}
 
 impl BinaryFunc {
@@ -33,7 +33,7 @@ impl BinaryFunc {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize, Hash)]
 pub enum VariadicFunc {}
 
 impl VariadicFunc {

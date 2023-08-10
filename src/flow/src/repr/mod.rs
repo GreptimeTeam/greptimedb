@@ -4,10 +4,13 @@ use std::borrow::Borrow;
 use std::slice::SliceIndex;
 
 use datatypes::value::Value;
+pub(crate) use relation::{RelationDesc, RelationType};
 use serde::{Deserialize, Serialize};
-
 /// System-wide Record count difference type.
 pub type Diff = i64;
+
+mod relation;
+mod timestamp;
 
 /// A row is a vector of values.
 ///
