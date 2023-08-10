@@ -14,7 +14,7 @@
 
 use common_telemetry::logging::LoggingOptions;
 use config::{Config, Environment, File, FileFormat};
-use datanode::datanode::DatanodeOptions;
+use datanode::datanode_options::DatanodeOptions;
 use frontend::frontend::FrontendOptions;
 use meta_srv::metasrv::MetaSrvOptions;
 use serde::{Deserialize, Serialize};
@@ -115,7 +115,7 @@ mod tests {
     use std::time::Duration;
 
     use common_test_util::temp_dir::create_named_temp_file;
-    use datanode::datanode::{DatanodeOptions, ObjectStoreConfig};
+    use datanode::datanode_options::{DatanodeOptions, ObjectStoreConfig};
 
     use super::*;
 

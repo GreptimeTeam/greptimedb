@@ -34,6 +34,7 @@ use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::store::state_store::ObjectStateStore;
 use common_procedure::ProcedureManagerRef;
 use common_telemetry::logging::{debug, info};
+use datanode_options::{DatanodeOptions, ObjectStoreConfig, ProcedureConfig, WalConfig};
 use file_table_engine::engine::immutable::ImmutableFileTableEngine;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use log_store::LogConfig;
@@ -58,7 +59,6 @@ use table::table::numbers::NumbersTable;
 use table::table::TableIdProviderRef;
 use table::Table;
 
-use crate::datanode::{DatanodeOptions, ObjectStoreConfig, ProcedureConfig, WalConfig};
 use crate::error::{
     self, CatalogSnafu, IncorrectInternalStateSnafu, MetaClientInitSnafu, MissingMetasrvOptsSnafu,
     MissingNodeIdSnafu, NewCatalogSnafu, OpenLogStoreSnafu, RecoverProcedureSnafu, Result,

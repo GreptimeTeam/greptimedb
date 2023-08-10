@@ -17,6 +17,9 @@ use common_catalog::consts::{
     DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID, MITO_ENGINE,
 };
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
+use datanode_options::{
+    DatanodeOptions, FileConfig, ObjectStoreConfig, ProcedureConfig, StorageConfig, WalConfig,
+};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, RawSchema};
 use servers::Mode;
@@ -25,9 +28,6 @@ use table::engine::{EngineContext, TableEngineRef};
 use table::requests::{CreateTableRequest, TableOptions};
 use table::TableRef;
 
-use crate::datanode::{
-    DatanodeOptions, FileConfig, ObjectStoreConfig, ProcedureConfig, StorageConfig, WalConfig,
-};
 use crate::error::{CreateTableSnafu, Result};
 use crate::heartbeat::HeartbeatTask;
 use crate::instance::{Instance, InstanceRef};

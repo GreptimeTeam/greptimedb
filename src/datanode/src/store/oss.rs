@@ -13,12 +13,12 @@
 // limitations under the License.
 
 use common_telemetry::logging::info;
+use datanode_options::OssConfig;
 use object_store::services::Oss as OSSBuilder;
 use object_store::{util, ObjectStore};
 use secrecy::ExposeSecret;
 use snafu::prelude::*;
 
-use crate::datanode::OssConfig;
 use crate::error::{self, Result};
 
 pub(crate) async fn new_oss_object_store(oss_config: &OssConfig) -> Result<ObjectStore> {

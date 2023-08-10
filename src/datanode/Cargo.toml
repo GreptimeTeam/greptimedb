@@ -34,6 +34,7 @@ common-time = { workspace = true }
 datafusion-common.workspace = true
 datafusion-expr.workspace = true
 datafusion.workspace = true
+datanode-options = { workspace = true }
 datatypes = { workspace = true }
 file-table-engine = { workspace = true }
 futures = "0.3"

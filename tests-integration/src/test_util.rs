@@ -29,7 +29,7 @@ use common_recordbatch::util;
 use common_runtime::Builder as RuntimeBuilder;
 use common_test_util::ports;
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
-use datanode::datanode::{
+use datanode::datanode_options::{
     AzblobConfig, DatanodeOptions, FileConfig, GcsConfig, ObjectStoreConfig, OssConfig,
     ProcedureConfig, S3Config, StorageConfig, WalConfig,
 };

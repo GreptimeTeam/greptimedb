@@ -25,7 +25,7 @@ use common_meta::peer::Peer;
 use common_meta::DatanodeId;
 use common_runtime::Builder as RuntimeBuilder;
 use common_test_util::temp_dir::create_temp_dir;
-use datanode::datanode::{DatanodeOptions, ObjectStoreConfig, ProcedureConfig};
+use datanode::datanode_options::{DatanodeOptions, ObjectStoreConfig, ProcedureConfig};
 use datanode::heartbeat::HeartbeatTask;
 use datanode::instance::Instance as DatanodeInstance;
 use frontend::frontend::FrontendOptions;

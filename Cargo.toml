@@ -28,6 +28,7 @@ members = [
     "src/common/time",
     "src/common/version",
     "src/datanode",
+    "src/datanode-options",
     "src/datatypes",
     "src/file-table-engine",
     "src/frontend",
@@ -129,6 +130,7 @@ common-test-util = { path = "src/common/test-util" }
 common-time = { path = "src/common/time" }
 common-version = { path = "src/common/version" }
 datanode = { path = "src/datanode" }
+datanode-options = { path = "src/datanode-options" }
 datatypes = { path = "src/datatypes" }
 file-table-engine = { path = "src/file-table-engine" }
 frontend = { path = "src/frontend" }

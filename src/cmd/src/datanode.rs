@@ -16,7 +16,8 @@ use std::time::Duration;
 
 use clap::Parser;
 use common_telemetry::logging;
-use datanode::datanode::{Datanode, DatanodeOptions, FileConfig, ObjectStoreConfig};
+use datanode::datanode::Datanode;
+use datanode::datanode_options::{DatanodeOptions, FileConfig, ObjectStoreConfig};
 use meta_client::MetaClientOptions;
 use servers::Mode;
 use snafu::ResultExt;
@@ -185,7 +186,7 @@ mod tests {
 
     use common_base::readable_size::ReadableSize;
     use common_test_util::temp_dir::create_named_temp_file;
-    use datanode::datanode::{CompactionConfig, ObjectStoreConfig, RegionManifestConfig};
+    use datanode::datanode_options::{CompactionConfig, ObjectStoreConfig, RegionManifestConfig};
     use servers::Mode;
 
     use super::*;

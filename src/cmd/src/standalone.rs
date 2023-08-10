@@ -18,7 +18,8 @@ use clap::Parser;
 use common_base::Plugins;
 use common_telemetry::info;
 use common_telemetry::logging::LoggingOptions;
-use datanode::datanode::{Datanode, DatanodeOptions, ProcedureConfig, StorageConfig, WalConfig};
+use datanode::datanode::Datanode;
+use datanode::datanode_options::{DatanodeOptions, ProcedureConfig, StorageConfig, WalConfig};
 use datanode::instance::InstanceRef;
 use frontend::frontend::FrontendOptions;
 use frontend::instance::{FrontendInstance, Instance as FeInstance};
@@ -460,7 +461,7 @@ mod tests {
 
         assert_eq!("/tmp/greptimedb/test/wal", dn_opts.wal.dir.unwrap());
         match &dn_opts.storage.store {
-            datanode::datanode::ObjectStoreConfig::S3(s3_config) => {
+            datanode::datanode_options::ObjectStoreConfig::S3(s3_config) => {
                 assert_eq!(
                     "Secret([REDACTED alloc::string::String])".to_string(),
                     format!("{:?}", s3_config.access_key_id)

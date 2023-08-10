@@ -13,12 +13,12 @@
 // limitations under the License.
 
 use common_telemetry::logging::info;
+use datanode_options::AzblobConfig;
 use object_store::services::Azblob as AzureBuilder;
 use object_store::{util, ObjectStore};
 use secrecy::ExposeSecret;
 use snafu::prelude::*;
 
-use crate::datanode::AzblobConfig;
 use crate::error::{self, Result};
 
 pub(crate) async fn new_azblob_object_store(azblob_config: &AzblobConfig) -> Result<ObjectStore> {

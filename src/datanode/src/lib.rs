@@ -27,6 +27,7 @@ pub mod server;
 pub mod sql;
 mod store;
 
+pub use datanode_options;
 use greptimedb_telemetry::telemetry;
 
 #[cfg(test)]

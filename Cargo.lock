@@ -2630,6 +2630,7 @@ dependencies = [
  "datafusion",
  "datafusion-common",
  "datafusion-expr",
+ "datanode-options",
  "datatypes",
  "file-table-engine",
  "futures",
@@ -2666,6 +2667,22 @@ dependencies = [
  "tower-http",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "datanode-options"
+version = "0.3.2"
+dependencies = [
+ "common-base",
+ "common-procedure",
+ "common-telemetry",
+ "humantime-serde",
+ "meta-client",
+ "secrecy",
+ "serde",
+ "servers",
+ "storage",
+ "toml 0.7.6",
 ]
 
 [[package]]
