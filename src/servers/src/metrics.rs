@@ -74,9 +74,6 @@ pub(crate) const METRIC_GRPC_REQUESTS_TOTAL: &str = "servers.grpc_requests_total
 pub(crate) const METRIC_GRPC_REQUESTS_ELAPSED: &str = "servers.grpc_requests_elapsed";
 pub(crate) const METRIC_METHOD_LABEL: &str = "method";
 pub(crate) const METRIC_PATH_LABEL: &str = "path";
-pub(crate) const METRIC_STATUS_LABEL: &str = "status";
-pub(crate) const METRIC_JEMALLOC_RESIDENT: &str = "sys.jemalloc.resident";
-pub(crate) const METRIC_JEMALLOC_ALLOCATED: &str = "sys.jemalloc.allocated";
 
 /// Prometheus style process metrics collector.
 #[cfg(feature = "metrics-process")]
