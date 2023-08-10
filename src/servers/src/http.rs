@@ -70,8 +70,8 @@ use crate::configurator::ConfiguratorRef;
 use crate::error::{AlreadyStartedSnafu, Result, StartHttpSnafu};
 use crate::http::admin::{compact, flush};
 use crate::metrics::{
-    METRIC_HTTP_REQUESTS_ELAPSED, METRIC_HTTP_REQUESTS_TOTAL, METRIC_METHOD_LABEL,
-    METRIC_PATH_LABEL, METRIC_STATUS_LABEL,
+    METRIC_CODE_LABEL, METRIC_HTTP_REQUESTS_ELAPSED, METRIC_HTTP_REQUESTS_TOTAL,
+    METRIC_METHOD_LABEL, METRIC_PATH_LABEL,
 };
 use crate::metrics_handler::MetricsHandler;
 use crate::query_handler::grpc::ServerGrpcQueryHandlerRef;
@@ -710,7 +710,7 @@ pub(crate) async fn track_metrics<B>(req: Request<B>, next: Next<B>) -> impl Int
     let labels = [
         (METRIC_METHOD_LABEL, method.to_string()),
         (METRIC_PATH_LABEL, path),
-        (METRIC_STATUS_LABEL, status),
+        (METRIC_CODE_LABEL, status),
     ];
 
     metrics::increment_counter!(METRIC_HTTP_REQUESTS_TOTAL, &labels);
