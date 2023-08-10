@@ -60,7 +60,7 @@ pub async fn get_greptimedb_telemetry_task(
     meta_peer_client: MetaPeerClientRef,
     enable: bool,
 ) -> Arc<GreptimeDBTelemetryTask> {
-    if !enable {
+    if !enable || cfg!(test) {
         return Arc::new(GreptimeDBTelemetryTask::disable());
     }
 
