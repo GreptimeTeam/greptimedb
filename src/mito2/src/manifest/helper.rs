@@ -13,24 +13,14 @@
 // limitations under the License.
 
 use serde::Serialize;
-use store_api::manifest::action::ProtocolVersion;
 use store_api::manifest::ManifestVersion;
 
 use crate::error::Result;
-use crate::manifest::action::RegionCheckpoint;
 pub const NEWLINE: &[u8] = b"\n";
 
 pub fn encode_actions<T: Serialize>(
     prev_version: ManifestVersion,
     actions: &[T],
 ) -> Result<Vec<u8>> {
-    todo!()
-}
-
-pub fn encode_checkpoint(snasphot: &RegionCheckpoint) -> Result<Vec<u8>> {
-    todo!()
-}
-
-pub fn decode_checkpoint(bs: &[u8], reader_version: ProtocolVersion) -> Result<RegionCheckpoint> {
     todo!()
 }

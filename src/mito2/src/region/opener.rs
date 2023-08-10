@@ -23,8 +23,7 @@ use store_api::storage::RegionId;
 
 use crate::config::MitoConfig;
 use crate::error::{RegionCorruptedSnafu, RegionNotFoundSnafu, Result};
-use crate::manifest::manager::RegionManifestManager;
-use crate::manifest::options::RegionManifestOptions;
+use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::memtable::MemtableBuilderRef;
 use crate::metadata::RegionMetadata;
 use crate::region::version::{VersionBuilder, VersionControl};

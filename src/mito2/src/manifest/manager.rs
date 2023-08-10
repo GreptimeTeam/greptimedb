@@ -14,7 +14,9 @@
 
 use std::sync::Arc;
 
+use common_datasource::compression::CompressionType;
 use common_telemetry::{debug, info, warn};
+use object_store::ObjectStore;
 use store_api::manifest::{ManifestVersion, MAX_VERSION, MIN_VERSION};
 use tokio::sync::RwLock;
 
@@ -23,9 +25,20 @@ use crate::manifest::action::{
     RegionChange, RegionCheckpoint, RegionManifest, RegionManifestBuilder, RegionMetaAction,
     RegionMetaActionList,
 };
-use crate::manifest::options::RegionManifestOptions;
 use crate::manifest::storage::ManifestObjectStore;
 use crate::metadata::RegionMetadataRef;
+
+/// Options for [RegionManifestManager].
+#[derive(Debug, Clone)]
+pub struct RegionManifestOptions {
+    /// Directory to store manifest.
+    pub manifest_dir: String,
+    pub object_store: ObjectStore,
+    pub compress_type: CompressionType,
+    /// Interval of version ([ManifestVersion](store_api::manifest::ManifestVersion)) between two checkpoints.
+    /// Set to 0 to disable checkpoint.
+    pub checkpoint_interval: u64,
+}
 
 // rewrite note:
 // trait Checkpoint -> struct RegionCheckpoint
@@ -327,7 +340,9 @@ impl RegionManifestManagerInner {
     }
 
     pub(crate) async fn may_do_checkpoint(&mut self, version: ManifestVersion) -> Result<()> {
-        if version - self.last_checkpoint_version >= self.options.checkpoint_interval {
+        if version - self.last_checkpoint_version >= self.options.checkpoint_interval
+            && self.options.checkpoint_interval != 0
+        {
             if let Some(checkpoint) = self.do_checkpoint().await? {
                 self.last_checkpoint_version = checkpoint.last_version();
             }
