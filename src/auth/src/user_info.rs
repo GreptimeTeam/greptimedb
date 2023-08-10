@@ -12,10 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::any::Any;
 use std::fmt::Debug;
 use std::sync::Arc;
 
 pub trait UserInfo: Debug + Sync + Send {
+    fn as_any(&self) -> &dyn Any;
     fn username(&self) -> &str;
 }
 
@@ -33,6 +35,10 @@ impl DefaultUserInfo {
 }
 
 impl UserInfo for DefaultUserInfo {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
     fn username(&self) -> &str {
         self.username.as_str()
     }

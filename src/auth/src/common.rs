@@ -46,6 +46,7 @@ pub fn user_provider_from_option(opt: &String) -> Result<UserProviderRef> {
         .fail(),
     }
 }
+
 type Username<'a> = &'a str;
 type HostOrIp<'a> = &'a str;
 
