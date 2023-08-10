@@ -94,6 +94,10 @@ impl FrontendCatalogManager {
         self.partition_manager.clone()
     }
 
+    pub fn table_metadata_manager_ref(&self) -> &TableMetadataManagerRef {
+        &self.table_metadata_manager
+    }
+
     pub fn datanode_clients(&self) -> Arc<DatanodeClients> {
         self.datanode_clients.clone()
     }

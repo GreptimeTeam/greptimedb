@@ -21,6 +21,7 @@ use client::client_manager::DatanodeClients;
 use client::Client;
 use common_base::Plugins;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
+use common_meta::key::TableMetadataManager;
 use common_meta::peer::Peer;
 use common_meta::DatanodeId;
 use common_runtime::Builder as RuntimeBuilder;
@@ -35,7 +36,7 @@ use meta_srv::cluster::MetaPeerClientRef;
 use meta_srv::metadata_service::{DefaultMetadataService, MetadataService};
 use meta_srv::metasrv::{MetaSrv, MetaSrvOptions};
 use meta_srv::mocks::MockInfo;
-use meta_srv::service::store::kv::KvStoreRef;
+use meta_srv::service::store::kv::{KvBackendAdapter, KvStoreRef};
 use meta_srv::service::store::memory::MemStore;
 use servers::grpc::GrpcServer;
 use servers::query_handler::grpc::ServerGrpcQueryHandlerAdaptor;
@@ -131,8 +132,10 @@ impl GreptimeDbClusterBuilder {
 
         let mock =
             meta_srv::mocks::mock(opt, self.kv_store.clone(), None, Some(datanode_clients)).await;
-
-        let metadata_service = DefaultMetadataService::new(mock.meta_srv.kv_store().clone());
+        let table_metadata_manager = Arc::new(TableMetadataManager::new(KvBackendAdapter::wrap(
+            mock.meta_srv.kv_store().clone(),
+        )));
+        let metadata_service = DefaultMetadataService::new(table_metadata_manager);
         metadata_service
             .create_schema("another_catalog", "another_schema", true)
             .await

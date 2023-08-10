@@ -24,13 +24,10 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use common_meta::key::catalog_name::CatalogManager;
-use common_meta::key::schema_name::SchemaManager;
 use tonic::body::BoxBody;
 use tonic::codegen::{empty_body, http, BoxFuture, Service};
 use tonic::transport::NamedService;
 
-use super::store::kv::KvBackendAdapter;
 use crate::metasrv::MetaSrv;
 
 pub fn make_admin_service(meta_srv: MetaSrv) -> Admin {
@@ -53,16 +50,14 @@ pub fn make_admin_service(meta_srv: MetaSrv) -> Admin {
     let router = router.route(
         "/catalogs",
         meta::CatalogsHandler {
-            catalog_manager: CatalogManager::new(KvBackendAdapter::wrap(
-                meta_srv.kv_store().clone(),
-            )),
+            table_metadata_manager: meta_srv.table_metadata_manager().clone(),
         },
     );
 
     let router = router.route(
         "/schemas",
         meta::SchemasHandler {
-            schema_manager: SchemaManager::new(KvBackendAdapter::wrap(meta_srv.kv_store().clone())),
+            table_metadata_manager: meta_srv.table_metadata_manager().clone(),
         },
     );
 

@@ -25,7 +25,6 @@ use api::v1::{
     FlushTableExpr, InsertRequests, TruncateTableExpr,
 };
 use async_trait::async_trait;
-use catalog::remote::CachedMetaKvBackend;
 use catalog::{CatalogManager, DeregisterTableRequest, RegisterTableRequest};
 use chrono::DateTime;
 use client::client_manager::DatanodeClients;
@@ -34,7 +33,6 @@ use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::format_full_table_name;
 use common_error::ext::BoxedError;
 use common_meta::key::schema_name::SchemaNameKey;
-use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::peer::Peer;
 use common_meta::rpc::ddl::{DdlTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse};
 use common_meta::rpc::router::{Partition, Partition as MetaPartition, RouteRequest};
@@ -80,7 +78,6 @@ const MAX_VALUE: &str = "MAXVALUE";
 pub struct DistInstance {
     meta_client: Arc<MetaClient>,
     catalog_manager: Arc<FrontendCatalogManager>,
-    table_metadata_manager: TableMetadataManagerRef,
     datanode_clients: Arc<DatanodeClients>,
 }
 
@@ -90,13 +87,9 @@ impl DistInstance {
         catalog_manager: Arc<FrontendCatalogManager>,
         datanode_clients: Arc<DatanodeClients>,
     ) -> Self {
-        let table_metadata_manager = Arc::new(TableMetadataManager::new(Arc::new(
-            CachedMetaKvBackend::new(meta_client.clone()),
-        )));
         Self {
             meta_client,
             catalog_manager,
-            table_metadata_manager,
             datanode_clients,
         }
     }
@@ -470,7 +463,8 @@ impl DistInstance {
 
         let schema = SchemaNameKey::new(catalog, &expr.database_name);
         let exist = self
-            .table_metadata_manager
+            .catalog_manager
+            .table_metadata_manager_ref()
             .schema_manager()
             .exist(schema)
             .await
@@ -483,7 +477,8 @@ impl DistInstance {
             }
         );
 
-        self.table_metadata_manager
+        self.catalog_manager
+            .table_metadata_manager_ref()
             .schema_manager()
             .create(schema)
             .await

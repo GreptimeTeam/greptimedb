@@ -15,8 +15,6 @@
 use std::collections::HashMap;
 
 use common_error::ext::BoxedError;
-use common_meta::key::catalog_name::CatalogManager;
-use common_meta::key::schema_name::SchemaManager;
 use common_meta::key::table_name::TableNameKey;
 use common_meta::key::TableMetadataManagerRef;
 use futures::TryStreamExt;
@@ -28,11 +26,11 @@ use crate::error::{Result, TableMetadataManagerSnafu};
 use crate::service::admin::HttpHandler;
 
 pub struct CatalogsHandler {
-    pub catalog_manager: CatalogManager,
+    pub table_metadata_manager: TableMetadataManagerRef,
 }
 
 pub struct SchemasHandler {
-    pub schema_manager: SchemaManager,
+    pub table_metadata_manager: TableMetadataManagerRef,
 }
 
 pub struct TablesHandler {
@@ -46,7 +44,11 @@ pub struct TableHandler {
 #[async_trait::async_trait]
 impl HttpHandler for CatalogsHandler {
     async fn handle(&self, _: &str, _: &HashMap<String, String>) -> Result<http::Response<String>> {
-        let stream = self.catalog_manager.catalog_names().await;
+        let stream = self
+            .table_metadata_manager
+            .catalog_manager()
+            .catalog_names()
+            .await;
 
         let keys = stream
             .try_collect::<Vec<_>>()
@@ -70,7 +72,11 @@ impl HttpHandler for SchemasHandler {
             .context(error::MissingRequiredParameterSnafu {
                 param: "catalog_name",
             })?;
-        let stream = self.schema_manager.schema_names(catalog).await;
+        let stream = self
+            .table_metadata_manager
+            .schema_manager()
+            .schema_names(catalog)
+            .await;
 
         let keys = stream
             .try_collect::<Vec<_>>()

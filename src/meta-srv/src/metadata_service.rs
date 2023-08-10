@@ -17,14 +17,13 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use common_meta::key::catalog_name::CatalogNameKey;
 use common_meta::key::schema_name::SchemaNameKey;
-use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
+use common_meta::key::TableMetadataManagerRef;
 use common_telemetry::{info, timer};
 use metrics::increment_counter;
 use snafu::{ensure, ResultExt};
 
 use crate::error;
 use crate::error::Result;
-use crate::service::store::kv::{KvBackendAdapter, KvStoreRef};
 
 /// This trait defines some methods of metadata
 #[async_trait]
@@ -48,9 +47,7 @@ pub struct DefaultMetadataService {
 }
 
 impl DefaultMetadataService {
-    pub fn new(kv_store: KvStoreRef) -> Self {
-        let table_metadata_manager =
-            Arc::new(TableMetadataManager::new(KvBackendAdapter::wrap(kv_store)));
+    pub fn new(table_metadata_manager: TableMetadataManagerRef) -> Self {
         Self {
             table_metadata_manager,
         }
@@ -114,16 +111,19 @@ mod tests {
 
     use common_meta::key::catalog_name::CatalogNameKey;
     use common_meta::key::schema_name::SchemaNameKey;
-    use common_meta::key::TableMetaKey;
+    use common_meta::key::{TableMetaKey, TableMetadataManager};
 
     use super::{DefaultMetadataService, MetadataService};
-    use crate::service::store::kv::KvStoreRef;
+    use crate::service::store::kv::{KvBackendAdapter, KvStoreRef};
     use crate::service::store::memory::MemStore;
 
     #[tokio::test]
     async fn test_create_schema() {
         let kv_store = Arc::new(MemStore::default());
-        let service = DefaultMetadataService::new(kv_store.clone());
+        let table_metadata_manager = Arc::new(TableMetadataManager::new(KvBackendAdapter::wrap(
+            kv_store.clone(),
+        )));
+        let service = DefaultMetadataService::new(table_metadata_manager);
 
         service
             .create_schema("catalog", "public", false)
