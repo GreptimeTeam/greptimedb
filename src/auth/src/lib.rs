@@ -20,8 +20,10 @@ mod user_provider;
 #[cfg(feature = "testing")]
 pub mod tests;
 
+// pub immutable function and struct
 pub use common::{user_provider_from_option, userinfo_by_name, HashedPassword, Identity, Password};
 pub use error::{Error, Result};
+// pub trait
 pub use user_info::UserInfo;
 pub use user_provider::UserProvider;
 

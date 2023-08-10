@@ -22,6 +22,8 @@ use crate::user_info::DefaultUserInfo;
 use crate::user_provider::static_user_provider::{StaticUserProvider, STATIC_USER_PROVIDER};
 use crate::{UserInfo, UserProviderRef};
 
+/// construct a [`UserInfo`] impl with name
+/// use default username `greptime` if None is provided
 pub fn userinfo_by_name(username: Option<String>) -> Arc<dyn UserInfo> {
     DefaultUserInfo::with_name(username.unwrap_or_else(|| "greptime".to_string()))
 }
