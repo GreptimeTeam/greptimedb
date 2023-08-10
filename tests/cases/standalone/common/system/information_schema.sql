@@ -26,3 +26,5 @@ where table_catalog = 'greptime'
 order by table_schema, table_name;
 
 use public;
+
+drop schema my_db;

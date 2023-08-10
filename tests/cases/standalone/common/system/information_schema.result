@@ -31,11 +31,13 @@ where table_catalog = 'greptime'
   and table_schema != 'public'
 order by table_schema, table_name;
 
-+---------------+--------------+------------+------------+--------+
-| table_catalog | table_schema | table_name | table_type | engine |
-+---------------+--------------+------------+------------+--------+
-| greptime      | my_db        | foo        | BASE TABLE | mito   |
-+---------------+--------------+------------+------------+--------+
++---------------+--------------------+------------+-----------------+--------+
+| table_catalog | table_schema       | table_name | table_type      | engine |
++---------------+--------------------+------------+-----------------+--------+
+| greptime      | information_schema | columns    | LOCAL TEMPORARY |        |
+| greptime      | information_schema | tables     | LOCAL TEMPORARY |        |
+| greptime      | my_db              | foo        | BASE TABLE      | mito   |
++---------------+--------------------+------------+-----------------+--------+
 
 select table_catalog, table_schema, table_name, column_name, data_type, semantic_type
 from information_schema.columns
@@ -43,13 +45,29 @@ where table_catalog = 'greptime'
   and table_schema != 'public'
 order by table_schema, table_name;
 
-+---------------+--------------+------------+-------------+-----------+---------------+
-| table_catalog | table_schema | table_name | column_name | data_type | semantic_type |
-+---------------+--------------+------------+-------------+-----------+---------------+
-| greptime      | my_db        | foo        | ts          | Int64     | TIME INDEX    |
-+---------------+--------------+------------+-------------+-----------+---------------+
++---------------+--------------------+------------+---------------+-----------+---------------+
+| table_catalog | table_schema       | table_name | column_name   | data_type | semantic_type |
++---------------+--------------------+------------+---------------+-----------+---------------+
+| greptime      | information_schema | columns    | table_catalog | String    | FIELD         |
+| greptime      | information_schema | columns    | table_schema  | String    | FIELD         |
+| greptime      | information_schema | columns    | table_name    | String    | FIELD         |
+| greptime      | information_schema | columns    | column_name   | String    | FIELD         |
+| greptime      | information_schema | columns    | data_type     | String    | FIELD         |
+| greptime      | information_schema | columns    | semantic_type | String    | FIELD         |
+| greptime      | information_schema | tables     | table_catalog | String    | FIELD         |
+| greptime      | information_schema | tables     | table_schema  | String    | FIELD         |
+| greptime      | information_schema | tables     | table_name    | String    | FIELD         |
+| greptime      | information_schema | tables     | table_type    | String    | FIELD         |
+| greptime      | information_schema | tables     | table_id      | UInt32    | FIELD         |
+| greptime      | information_schema | tables     | engine        | String    | FIELD         |
+| greptime      | my_db              | foo        | ts            | Int64     | TIME INDEX    |
++---------------+--------------------+------------+---------------+-----------+---------------+
 
 use public;
 
 Affected Rows: 0
+
+drop schema my_db;
+
+Error: 1001(Unsupported), SQL statement is not supported: drop schema my_db;, keyword: schema
 
