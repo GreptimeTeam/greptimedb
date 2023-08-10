@@ -44,7 +44,7 @@ use common_meta::heartbeat::handler::HandlerGroupExecutor;
 use common_meta::key::TableMetadataManager;
 use common_query::Output;
 use common_telemetry::logging::{debug, info};
-use common_telemetry::timer;
+use common_telemetry::{error, timer};
 use datanode::instance::sql::table_idents_to_full_name;
 use datanode::instance::InstanceRef as DnInstanceRef;
 use datatypes::schema::Schema;
@@ -524,6 +524,9 @@ impl SqlQueryHandler for Instance {
                             results.push(output_result);
                         }
                         Err(e) => {
+                            let redacted = sql::util::redact_sql_secrets(query.as_ref());
+                            error!(e; "Failed to execute query: {redacted}");
+
                             results.push(Err(e));
                             break;
                         }
