@@ -26,10 +26,15 @@ inputs:
     description: Upload to S3
     required: false
     default: 'true'
+  working-dir:
+    description: Working directory to upload the artifacts
+    required: false
+    default: .
 runs:
   using: composite
   steps:
     - name: Create artifacts directory
+      working-directory: ${{ inputs.working-dir }}
       shell: bash
       run: |
         mkdir -p ${{ inputs.artifacts-dir }} && \
@@ -41,6 +46,7 @@ runs:
     #   greptime-linux-amd64-pyo3-v0.3.0
     #   └── greptime
     - name: Compress artifacts and calculate checksum
+      working-directory: ${{ inputs.working-dir }}
       shell: bash
       run: |
         tar -zcvf ${{ inputs.artifacts-dir }}.tar.gz ${{ inputs.artifacts-dir }} && \
@@ -52,13 +58,13 @@ runs:
       uses: actions/upload-artifact@v3
       with:
         name: ${{ inputs.artifacts-dir }}
-        path: ${{ inputs.artifacts-dir }}.tar.gz
+        path: ${{ inputs.working-dir }}/${{ inputs.artifacts-dir }}.tar.gz
 
     - name: Upload checksum
       uses: actions/upload-artifact@v3
       with:
         name: ${{ inputs.artifacts-dir }}.sha256sum
-        path: ${{ inputs.artifacts-dir }}.sha256sum
+        path: ${{ inputs.working-dir }}/${{ inputs.artifacts-dir }}.sha256sum
 
     - name: Configure AWS credentials
       if: ${{ inputs.upload-to-s3 == 'true' }}
@@ -70,6 +76,7 @@ runs:
 
     - name: Upload artifacts to S3
       if: ${{ inputs.upload-to-s3 == 'true' }}
+      working-directory: ${{ inputs.working-dir }}
       shell: bash
       # The bucket layout will be:
       # releases/greptimedb
