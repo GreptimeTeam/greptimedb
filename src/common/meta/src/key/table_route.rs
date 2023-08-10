@@ -60,7 +60,8 @@ impl TableRouteManager {
         Self { kv_backend }
     }
 
-    pub async fn get(&self, key: &NextTableRouteKey) -> Result<Option<TableRoute>> {
+    pub async fn get(&self, table_id: TableId) -> Result<Option<TableRoute>> {
+        let key = NextTableRouteKey::new(table_id);
         self.kv_backend
             .get(&key.as_raw_key())
             .await?
@@ -187,9 +188,53 @@ impl<'a> Display for TableRouteKey<'a> {
 
 #[cfg(test)]
 mod tests {
-    use api::v1::meta::TableName;
+    use std::sync::Arc;
+
+    use api::v1::meta::TableName as PbTableName;
 
     use super::TableRouteKey;
+    use crate::key::table_route::TableRouteManager;
+    use crate::kv_backend::memory::MemoryKvBackend;
+    use crate::rpc::router::{RegionRoute, Table, TableRoute};
+    use crate::table_name::TableName;
+
+    #[tokio::test]
+    async fn test_table_route_manager() {
+        let mgr = TableRouteManager::new(Arc::new(MemoryKvBackend::default()));
+
+        let table = Table {
+            id: 1024,
+            table_name: TableName::new("foo", "bar", "baz"),
+            table_schema: b"mock schema".to_vec(),
+        };
+        let region_route = RegionRoute::default();
+        let region_routes = vec![region_route];
+
+        mgr.create(table.clone(), region_routes.clone())
+            .await
+            .unwrap();
+
+        let got = mgr.get(1024).await.unwrap().unwrap();
+
+        assert_eq!(got.table, table);
+        assert_eq!(got.region_routes, region_routes);
+
+        let empty = mgr.get(1023).await.unwrap();
+        assert!(empty.is_none());
+
+        let expect = TableRoute::new(table, region_routes);
+
+        let mut updated = expect.clone();
+        updated.table.table_schema = b"hi".to_vec();
+
+        mgr.compare_and_put(1024, Some(expect.clone()), updated.clone())
+            .await
+            .unwrap();
+
+        mgr.compare_and_put(1024, Some(expect.clone()), updated)
+            .await
+            .unwrap();
+    }
 
     #[test]
     fn test_table_route_key() {
@@ -215,7 +260,7 @@ mod tests {
 
     #[test]
     fn test_with_table_name() {
-        let table_name = TableName {
+        let table_name = PbTableName {
             catalog_name: "greptime".to_string(),
             schema_name: "public".to_string(),
             table_name: "demo".to_string(),

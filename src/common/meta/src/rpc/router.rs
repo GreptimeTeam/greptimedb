@@ -19,7 +19,7 @@ use api::v1::meta::{
     RouteRequest as PbRouteRequest, RouteResponse as PbRouteResponse, Table as PbTable,
     TableId as PbTableId, TableRoute as PbTableRoute, TableRouteValue as PbTableRouteValue,
 };
-use serde::{Deserialize, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use snafu::OptionExt;
 use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::TableId;
@@ -231,7 +231,7 @@ impl TryFrom<PbTableRouteValue> for TableRoute {
 pub struct Table {
     pub id: u64,
     pub table_name: TableName,
-    #[serde(serialize_with = "as_utf8")]
+    #[serde(serialize_with = "as_utf8", deserialize_with = "from_utf8")]
     pub table_schema: Vec<u8>,
 }
 
@@ -314,6 +314,15 @@ fn as_utf8<S: Serializer>(val: &[u8], serializer: S) -> std::result::Result<S::O
             .unwrap_or_else(|_| "<unknown-not-UTF8>".to_string())
             .as_str(),
     )
+}
+
+pub fn from_utf8<'de, D>(deserializer: D) -> std::result::Result<Vec<u8>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let s = String::deserialize(deserializer)?;
+
+    Ok(s.into_bytes())
 }
 
 fn as_utf8_vec<S: Serializer>(
