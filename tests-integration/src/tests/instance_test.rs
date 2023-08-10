@@ -1402,12 +1402,14 @@ async fn test_information_schema_dot_tables(instance: Arc<dyn MockInstance>) {
         }
         false => {
             "\
-+---------------+--------------+------------+-----------------+----------+-------------+
-| table_catalog | table_schema | table_name | table_type      | table_id | engine      |
-+---------------+--------------+------------+-----------------+----------+-------------+
-| greptime      | public       | numbers    | LOCAL TEMPORARY | 2        | test_engine |
-| greptime      | public       | scripts    | BASE TABLE      | 1        | mito        |
-+---------------+--------------+------------+-----------------+----------+-------------+"
++---------------+--------------------+------------+-----------------+----------+-------------+
+| table_catalog | table_schema       | table_name | table_type      | table_id | engine      |
++---------------+--------------------+------------+-----------------+----------+-------------+
+| greptime      | information_schema | columns    | LOCAL TEMPORARY | 4        |             |
+| greptime      | public             | numbers    | LOCAL TEMPORARY | 2        | test_engine |
+| greptime      | public             | scripts    | BASE TABLE      | 1        | mito        |
+| greptime      | information_schema | tables     | LOCAL TEMPORARY | 3        |             |
++---------------+--------------------+------------+-----------------+----------+-------------+"
         }
     };
 
@@ -1425,11 +1427,13 @@ async fn test_information_schema_dot_tables(instance: Arc<dyn MockInstance>) {
         }
         false => {
             "\
-+-----------------+----------------+---------------+------------+----------+--------+
-| table_catalog   | table_schema   | table_name    | table_type | table_id | engine |
-+-----------------+----------------+---------------+------------+----------+--------+
-| another_catalog | another_schema | another_table | BASE TABLE | 1024     | mito   |
-+-----------------+----------------+---------------+------------+----------+--------+"
++-----------------+--------------------+---------------+-----------------+----------+--------+
+| table_catalog   | table_schema       | table_name    | table_type      | table_id | engine |
++-----------------+--------------------+---------------+-----------------+----------+--------+
+| another_catalog | another_schema     | another_table | BASE TABLE      | 1024     | mito   |
+| another_catalog | information_schema | columns       | LOCAL TEMPORARY | 4        |        |
+| another_catalog | information_schema | tables        | LOCAL TEMPORARY | 3        |        |
++-----------------+--------------------+---------------+-----------------+----------+--------+"
         }
     };
     check_output_stream(output, expected).await;
@@ -1450,28 +1454,52 @@ async fn test_information_schema_dot_columns(instance: Arc<dyn MockInstance>) {
 
     let output = execute_sql(&instance, sql).await;
     let expected = "\
-+---------------+--------------+------------+--------------+----------------------+---------------+
-| table_catalog | table_schema | table_name | column_name  | data_type            | semantic_type |
-+---------------+--------------+------------+--------------+----------------------+---------------+
-| greptime      | public       | numbers    | number       | UInt32               | PRIMARY KEY   |
-| greptime      | public       | scripts    | schema       | String               | PRIMARY KEY   |
-| greptime      | public       | scripts    | name         | String               | PRIMARY KEY   |
-| greptime      | public       | scripts    | script       | String               | FIELD         |
-| greptime      | public       | scripts    | engine       | String               | FIELD         |
-| greptime      | public       | scripts    | timestamp    | TimestampMillisecond | TIME INDEX    |
-| greptime      | public       | scripts    | gmt_created  | TimestampMillisecond | FIELD         |
-| greptime      | public       | scripts    | gmt_modified | TimestampMillisecond | FIELD         |
-+---------------+--------------+------------+--------------+----------------------+---------------+";
++---------------+--------------------+------------+---------------+----------------------+---------------+
+| table_catalog | table_schema       | table_name | column_name   | data_type            | semantic_type |
++---------------+--------------------+------------+---------------+----------------------+---------------+
+| greptime      | information_schema | columns    | table_catalog | String               | FIELD         |
+| greptime      | information_schema | columns    | table_schema  | String               | FIELD         |
+| greptime      | information_schema | columns    | table_name    | String               | FIELD         |
+| greptime      | information_schema | columns    | column_name   | String               | FIELD         |
+| greptime      | information_schema | columns    | data_type     | String               | FIELD         |
+| greptime      | information_schema | columns    | semantic_type | String               | FIELD         |
+| greptime      | public             | numbers    | number        | UInt32               | PRIMARY KEY   |
+| greptime      | public             | scripts    | schema        | String               | PRIMARY KEY   |
+| greptime      | public             | scripts    | name          | String               | PRIMARY KEY   |
+| greptime      | public             | scripts    | script        | String               | FIELD         |
+| greptime      | public             | scripts    | engine        | String               | FIELD         |
+| greptime      | public             | scripts    | timestamp     | TimestampMillisecond | TIME INDEX    |
+| greptime      | public             | scripts    | gmt_created   | TimestampMillisecond | FIELD         |
+| greptime      | public             | scripts    | gmt_modified  | TimestampMillisecond | FIELD         |
+| greptime      | information_schema | tables     | table_catalog | String               | FIELD         |
+| greptime      | information_schema | tables     | table_schema  | String               | FIELD         |
+| greptime      | information_schema | tables     | table_name    | String               | FIELD         |
+| greptime      | information_schema | tables     | table_type    | String               | FIELD         |
+| greptime      | information_schema | tables     | table_id      | UInt32               | FIELD         |
+| greptime      | information_schema | tables     | engine        | String               | FIELD         |
++---------------+--------------------+------------+---------------+----------------------+---------------+";
 
     check_output_stream(output, expected).await;
 
     let output = execute_sql_with(&instance, sql, query_ctx).await;
     let expected = "\
-+-----------------+----------------+---------------+-------------+-----------+---------------+
-| table_catalog   | table_schema   | table_name    | column_name | data_type | semantic_type |
-+-----------------+----------------+---------------+-------------+-----------+---------------+
-| another_catalog | another_schema | another_table | i           | Int64     | TIME INDEX    |
-+-----------------+----------------+---------------+-------------+-----------+---------------+";
++-----------------+--------------------+---------------+---------------+-----------+---------------+
+| table_catalog   | table_schema       | table_name    | column_name   | data_type | semantic_type |
++-----------------+--------------------+---------------+---------------+-----------+---------------+
+| another_catalog | another_schema     | another_table | i             | Int64     | TIME INDEX    |
+| another_catalog | information_schema | columns       | table_catalog | String    | FIELD         |
+| another_catalog | information_schema | columns       | table_schema  | String    | FIELD         |
+| another_catalog | information_schema | columns       | table_name    | String    | FIELD         |
+| another_catalog | information_schema | columns       | column_name   | String    | FIELD         |
+| another_catalog | information_schema | columns       | data_type     | String    | FIELD         |
+| another_catalog | information_schema | columns       | semantic_type | String    | FIELD         |
+| another_catalog | information_schema | tables        | table_catalog | String    | FIELD         |
+| another_catalog | information_schema | tables        | table_schema  | String    | FIELD         |
+| another_catalog | information_schema | tables        | table_name    | String    | FIELD         |
+| another_catalog | information_schema | tables        | table_type    | String    | FIELD         |
+| another_catalog | information_schema | tables        | table_id      | UInt32    | FIELD         |
+| another_catalog | information_schema | tables        | engine        | String    | FIELD         |
++-----------------+--------------------+---------------+---------------+-----------+---------------+";
 
     check_output_stream(output, expected).await;
 }

@@ -15,7 +15,6 @@
 use std::sync::{Arc, Weak};
 
 use arrow_schema::SchemaRef as ArrowSchemaRef;
-use common_catalog::consts::INFORMATION_SCHEMA_NAME;
 use common_error::ext::BoxedError;
 use common_query::physical_plan::TaskContext;
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
@@ -137,9 +136,6 @@ impl InformationSchemaTablesBuilder {
             .context(UpgradeWeakCatalogManagerRefSnafu)?;
 
         for schema_name in catalog_manager.schema_names(&catalog_name).await? {
-            if schema_name == INFORMATION_SCHEMA_NAME {
-                continue;
-            }
             if !catalog_manager
                 .schema_exist(&catalog_name, &schema_name)
                 .await?
