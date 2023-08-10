@@ -14,12 +14,15 @@
 
 //! Memtables are write buffers for regions.
 
+pub mod key_values;
 pub(crate) mod version;
 
 use std::fmt;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
+use crate::error::Result;
+use crate::memtable::key_values::KeyValues;
 use crate::metadata::RegionMetadataRef;
 
 /// Id for memtables.
@@ -31,6 +34,9 @@ pub type MemtableId = u32;
 pub trait Memtable: Send + Sync + fmt::Debug {
     /// Returns the id of this memtable.
     fn id(&self) -> MemtableId;
+
+    /// Write key values into the memtable.
+    fn write(&self, kvs: &KeyValues) -> Result<()>;
 }
 
 pub type MemtableRef = Arc<dyn Memtable>;
@@ -61,6 +67,10 @@ impl EmptyMemtable {
 impl Memtable for EmptyMemtable {
     fn id(&self) -> MemtableId {
         self.id
+    }
+
+    fn write(&self, _kvs: &KeyValues) -> Result<()> {
+        Ok(())
     }
 }
 

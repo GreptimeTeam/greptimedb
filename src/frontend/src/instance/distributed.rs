@@ -449,7 +449,7 @@ impl DistInstance {
         let catalog = query_ctx.current_catalog();
         if self
             .catalog_manager
-            .schema_exist(&catalog, &expr.database_name)
+            .schema_exist(catalog, &expr.database_name)
             .await
             .context(CatalogSnafu)?
         {
@@ -464,7 +464,7 @@ impl DistInstance {
         }
 
         let key = SchemaKey {
-            catalog_name: catalog.clone(),
+            catalog_name: catalog.to_owned(),
             schema_name: expr.database_name.clone(),
         };
         let value = SchemaValue {};
@@ -494,7 +494,7 @@ impl DistInstance {
         //
         // TODO(fys): when the meta invalidation cache mechanism is established, remove it.
         self.catalog_manager()
-            .invalidate_schema(&catalog, &expr.database_name)
+            .invalidate_schema(catalog, &expr.database_name)
             .await;
 
         Ok(Output::AffectedRows(1))
@@ -621,8 +621,8 @@ impl DistInstance {
         ctx: QueryContextRef,
     ) -> Result<Output> {
         let inserter = DistInserter::new(
-            ctx.current_catalog(),
-            ctx.current_schema(),
+            ctx.current_catalog().to_owned(),
+            ctx.current_schema().to_owned(),
             self.catalog_manager.clone(),
         );
         let affected_rows = inserter.grpc_insert(requests).await?;
@@ -634,8 +634,8 @@ impl DistInstance {
         request: DeleteRequest,
         ctx: QueryContextRef,
     ) -> Result<Output> {
-        let catalog = &ctx.current_catalog();
-        let schema = &ctx.current_schema();
+        let catalog = ctx.current_catalog();
+        let schema = ctx.current_schema();
         let table_name = &request.table_name;
         let table_ref = TableReference::full(catalog, schema, table_name);
 

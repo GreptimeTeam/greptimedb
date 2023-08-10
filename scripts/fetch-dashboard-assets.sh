@@ -2,14 +2,14 @@
 
 # This script is used to download built dashboard assets from the "GreptimeTeam/dashboard" repository.
 
-set -e
+set -e -x
 
 declare -r SCRIPT_DIR=$(cd $(dirname ${0}) >/dev/null 2>&1 && pwd)
 declare -r ROOT_DIR=$(dirname ${SCRIPT_DIR})
 declare -r STATIC_DIR="$ROOT_DIR/src/servers/dashboard"
 OUT_DIR="${1:-$SCRIPT_DIR}"
 
-RELEASE_VERSION="$(cat $STATIC_DIR/VERSION)"
+RELEASE_VERSION="$(cat $STATIC_DIR/VERSION | tr -d '\t\r\n ')"
 
 echo "Downloading assets to dir: $OUT_DIR"
 cd $OUT_DIR

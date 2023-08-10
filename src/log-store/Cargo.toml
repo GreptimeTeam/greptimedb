@@ -22,7 +22,7 @@ common-telemetry = { workspace = true }
 futures-util.workspace = true
 futures.workspace = true
 protobuf = { version = "2", features = ["bytes"] }
-raft-engine = "0.3"
+raft-engine = { git = "https://github.com/tikv/raft-engine.git", rev = "2dcaf5beeea3d5de9ec9c7133a2451d00f508f52" }
 snafu = { version = "0.7", features = ["backtraces"] }
 store-api = { workspace = true }
 tokio-util.workspace = true

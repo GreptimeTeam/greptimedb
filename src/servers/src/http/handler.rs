@@ -21,14 +21,13 @@ use axum::extract::{Json, Query, State};
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Form};
 use common_error::status_code::StatusCode;
-use common_telemetry::{error, timer};
+use common_telemetry::timer;
 use query::parser::PromQuery;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use session::context::UserInfo;
 
 use crate::http::{ApiState, GreptimeOptionsConfigState, JsonResponse};
-use crate::metrics::JEMALLOC_COLLECTOR;
 use crate::metrics_handler::MetricsHandler;
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
@@ -141,9 +140,10 @@ pub async fn metrics(
     #[cfg(feature = "metrics-process")]
     crate::metrics::PROCESS_COLLECTOR.collect();
 
-    if let Some(c) = JEMALLOC_COLLECTOR.as_ref() {
+    #[cfg(not(windows))]
+    if let Some(c) = crate::metrics::jemalloc::JEMALLOC_COLLECTOR.as_ref() {
         if let Err(e) = c.update() {
-            error!(e; "Failed to update jemalloc metrics");
+            common_telemetry::error!(e; "Failed to update jemalloc metrics");
         }
     }
     state.render()

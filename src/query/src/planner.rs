@@ -29,6 +29,7 @@ use crate::error::{PlanSqlSnafu, QueryPlanSnafu, Result, SqlSnafu};
 use crate::parser::QueryStatement;
 use crate::plan::LogicalPlan;
 use crate::query_engine::QueryEngineState;
+use crate::range_select::plan_rewrite::RangePlanRewriter;
 use crate::DfContextProviderAdapter;
 
 #[async_trait]
@@ -52,6 +53,12 @@ impl DfLogicalPlanner {
 
     async fn plan_sql(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<LogicalPlan> {
         let df_stmt = (&stmt).try_into().context(SqlSnafu)?;
+
+        let table_provider = DfTableSourceProvider::new(
+            self.engine_state.catalog_manager().clone(),
+            self.engine_state.disallow_cross_schema_query(),
+            query_ctx.as_ref(),
+        );
 
         let context_provider = DfContextProviderAdapter::try_new(
             self.engine_state.clone(),
@@ -77,8 +84,10 @@ impl DfLogicalPlanner {
             };
             PlanSqlSnafu { sql }
         })?;
-
-        Ok(LogicalPlan::DfPlan(result))
+        let plan = RangePlanRewriter::new(table_provider, context_provider)
+            .rewrite(result)
+            .await?;
+        Ok(LogicalPlan::DfPlan(plan))
     }
 
     async fn plan_pql(&self, stmt: EvalStmt, query_ctx: QueryContextRef) -> Result<LogicalPlan> {

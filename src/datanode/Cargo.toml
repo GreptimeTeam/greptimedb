@@ -51,7 +51,7 @@ pin-project = "1.0"
 prost.workspace = true
 query = { workspace = true }
 secrecy = { version = "0.8", features = ["serde", "alloc"] }
-serde = "1.0"
+serde.workspace = true
 serde_json = "1.0"
 servers = { workspace = true }
 session = { workspace = true }

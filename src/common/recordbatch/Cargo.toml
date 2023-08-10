@@ -11,7 +11,7 @@ datafusion.workspace = true
 datatypes = { workspace = true }
 futures.workspace = true
 paste = "1.0"
-serde = "1.0"
+serde.workspace = true
 snafu = { version = "0.7", features = ["backtraces"] }
 
 [dev-dependencies]

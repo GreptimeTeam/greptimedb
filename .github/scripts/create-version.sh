@@ -38,7 +38,7 @@ function create_version() {
       echo "COMMIT_SHA is empty in dev build"
       exit 1
     fi
-    echo "dev-$(date "+%Y%m%d%S")-$(echo "$COMMIT_SHA" | cut -c1-8)"
+    echo "dev-$(date "+%Y%m%d-%s")-$(echo "$COMMIT_SHA" | cut -c1-8)"
     exit 0
   fi
 
@@ -50,7 +50,7 @@ function create_version() {
     fi
     echo "$GITHUB_REF_NAME"
   elif [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
-    echo "$NEXT_RELEASE_VERSION-$(git rev-parse --short HEAD)-$(date "+%Y%m%d%S")"
+    echo "$NEXT_RELEASE_VERSION-$(git rev-parse --short HEAD)-$(date "+%Y%m%d-%s")"
   elif [ "$GITHUB_EVENT_NAME" = schedule ]; then
     echo "$NEXT_RELEASE_VERSION-$NIGHTLY_RELEASE_PREFIX-$(date "+%Y%m%d")"
   else

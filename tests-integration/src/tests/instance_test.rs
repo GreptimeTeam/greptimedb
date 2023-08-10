@@ -29,8 +29,8 @@ use session::context::{QueryContext, QueryContextRef};
 
 use crate::test_util::check_output_stream;
 use crate::tests::test_util::{
-    both_instances_cases, check_unordered_output_stream, distributed, get_data_dir, standalone,
-    standalone_instance_case, MockInstance,
+    both_instances_cases, check_unordered_output_stream, distributed, find_testing_resource,
+    standalone, standalone_instance_case, MockInstance,
 };
 
 #[apply(both_instances_cases)]
@@ -518,12 +518,7 @@ async fn test_execute_external_create_without_ts_type(instance: Arc<dyn MockInst
 async fn test_execute_query_external_table_parquet(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
     let format = "parquet";
-    let location = get_data_dir("../tests/data/parquet/various_type.parquet")
-        .canonicalize()
-        .unwrap()
-        .display()
-        .to_string();
-
+    let location = find_testing_resource("/tests/data/parquet/various_type.parquet");
     let table_name = "various_type_parquet";
 
     let output = execute_sql(
@@ -588,12 +583,7 @@ async fn test_execute_query_external_table_parquet(instance: Arc<dyn MockInstanc
 async fn test_execute_query_external_table_orc(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
     let format = "orc";
-    let location = get_data_dir("../src/common/datasource/tests/orc/test.orc")
-        .canonicalize()
-        .unwrap()
-        .display()
-        .to_string();
-
+    let location = find_testing_resource("/src/common/datasource/tests/orc/test.orc");
     let table_name = "various_type_orc";
 
     let output = execute_sql(
@@ -668,12 +658,7 @@ async fn test_execute_query_external_table_orc(instance: Arc<dyn MockInstance>) 
 async fn test_execute_query_external_table_csv(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
     let format = "csv";
-    let location = get_data_dir("../tests/data/csv/various_type.csv")
-        .canonicalize()
-        .unwrap()
-        .display()
-        .to_string();
-
+    let location = find_testing_resource("/tests/data/csv/various_type.csv");
     let table_name = "various_type_csv";
 
     let output = execute_sql(
@@ -719,12 +704,7 @@ async fn test_execute_query_external_table_csv(instance: Arc<dyn MockInstance>) 
 async fn test_execute_query_external_table_json(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
     let format = "json";
-    let location = get_data_dir("../tests/data/json/various_type.json")
-        .canonicalize()
-        .unwrap()
-        .display()
-        .to_string();
-
+    let location = find_testing_resource("/tests/data/json/various_type.json");
     let table_name = "various_type_json";
 
     let output = execute_sql(
@@ -776,12 +756,7 @@ async fn test_execute_query_external_table_json(instance: Arc<dyn MockInstance>)
 async fn test_execute_query_external_table_json_with_schame(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
     let format = "json";
-    let location = get_data_dir("../tests/data/json/various_type.json")
-        .canonicalize()
-        .unwrap()
-        .display()
-        .to_string();
-
+    let location = find_testing_resource("/tests/data/json/various_type.json");
     let table_name = "various_type_json_with_schema";
 
     let output = execute_sql(
@@ -1339,11 +1314,7 @@ async fn test_execute_copy_from_orc(instance: Arc<dyn MockInstance>) {
     )
     .await, Output::AffectedRows(0)));
 
-    let filepath = get_data_dir("../src/common/datasource/tests/orc/test.orc")
-        .canonicalize()
-        .unwrap()
-        .display()
-        .to_string();
+    let filepath = find_testing_resource("/src/common/datasource/tests/orc/test.orc");
 
     let output = execute_sql(
         &instance,
@@ -1376,11 +1347,8 @@ async fn test_cast_type_issue_1594(instance: Arc<dyn MockInstance>) {
         "create table tsbs_cpu(hostname STRING, environment STRING, usage_user DOUBLE, usage_system DOUBLE, usage_idle DOUBLE, usage_nice DOUBLE, usage_iowait DOUBLE, usage_irq DOUBLE, usage_softirq DOUBLE, usage_steal DOUBLE, usage_guest DOUBLE, usage_guest_nice DOUBLE, ts TIMESTAMP TIME INDEX, PRIMARY KEY(hostname));",
     )
     .await, Output::AffectedRows(0)));
-    let filepath = get_data_dir("../src/common/datasource/tests/csv/type_cast.csv")
-        .canonicalize()
-        .unwrap()
-        .display()
-        .to_string();
+
+    let filepath = find_testing_resource("/src/common/datasource/tests/csv/type_cast.csv");
 
     let output = execute_sql(
         &instance,
@@ -1422,21 +1390,21 @@ async fn test_information_schema_dot_tables(instance: Arc<dyn MockInstance>) {
     let expected = match is_distributed_mode {
         true => {
             "\
-+---------------+--------------+------------+------------+----------+-------------+
-| table_catalog | table_schema | table_name | table_type | table_id | engine      |
-+---------------+--------------+------------+------------+----------+-------------+
-| greptime      | public       | numbers    | BASE TABLE | 2        | test_engine |
-| greptime      | public       | scripts    | BASE TABLE | 1024     | mito        |
-+---------------+--------------+------------+------------+----------+-------------+"
++---------------+--------------+------------+-----------------+----------+-------------+
+| table_catalog | table_schema | table_name | table_type      | table_id | engine      |
++---------------+--------------+------------+-----------------+----------+-------------+
+| greptime      | public       | numbers    | LOCAL TEMPORARY | 2        | test_engine |
+| greptime      | public       | scripts    | BASE TABLE      | 1024     | mito        |
++---------------+--------------+------------+-----------------+----------+-------------+"
         }
         false => {
             "\
-+---------------+--------------+------------+------------+----------+-------------+
-| table_catalog | table_schema | table_name | table_type | table_id | engine      |
-+---------------+--------------+------------+------------+----------+-------------+
-| greptime      | public       | numbers    | BASE TABLE | 2        | test_engine |
-| greptime      | public       | scripts    | BASE TABLE | 1        | mito        |
-+---------------+--------------+------------+------------+----------+-------------+"
++---------------+--------------+------------+-----------------+----------+-------------+
+| table_catalog | table_schema | table_name | table_type      | table_id | engine      |
++---------------+--------------+------------+-----------------+----------+-------------+
+| greptime      | public       | numbers    | LOCAL TEMPORARY | 2        | test_engine |
+| greptime      | public       | scripts    | BASE TABLE      | 1        | mito        |
++---------------+--------------+------------+-----------------+----------+-------------+"
         }
     };
 

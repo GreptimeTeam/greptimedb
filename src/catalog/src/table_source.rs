@@ -45,8 +45,8 @@ impl DfTableSourceProvider {
             catalog_manager,
             disallow_cross_schema_query,
             resolved_tables: HashMap::new(),
-            default_catalog: query_ctx.current_catalog(),
-            default_schema: query_ctx.current_schema(),
+            default_catalog: query_ctx.current_catalog().to_owned(),
+            default_schema: query_ctx.current_schema().to_owned(),
         }
     }
 

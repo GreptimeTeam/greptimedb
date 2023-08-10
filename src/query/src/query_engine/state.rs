@@ -48,6 +48,7 @@ use crate::optimizer::order_hint::OrderHintRule;
 use crate::optimizer::string_normalization::StringNormalizationRule;
 use crate::optimizer::type_conversion::TypeConversionRule;
 use crate::query_engine::options::QueryOptions;
+use crate::range_select::planner::RangeSelectPlanner;
 
 /// Query engine global state
 // TODO(yingwen): This QueryEngineState still relies on datafusion, maybe we can define a trait for it,
@@ -227,7 +228,7 @@ impl DfQueryPlanner {
         catalog_manager: CatalogManagerRef,
     ) -> Self {
         let mut planners: Vec<Arc<dyn ExtensionPlanner + Send + Sync>> =
-            vec![Arc::new(PromExtensionPlanner)];
+            vec![Arc::new(PromExtensionPlanner), Arc::new(RangeSelectPlanner)];
         if let Some(partition_manager) = partition_manager
          && let Some(datanode_clients) = datanode_clients {
             planners.push(Arc::new(DistExtensionPlanner::new(partition_manager, datanode_clients, catalog_manager)));

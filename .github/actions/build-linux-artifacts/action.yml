@@ -33,6 +33,10 @@ inputs:
     description: Upload to S3
     required: false
     default: 'true'
+  working-dir:
+    description: Working directory to build the artifacts
+    required: false
+    default: .
 runs:
   using: composite
   steps:
@@ -41,6 +45,7 @@ runs:
       shell: bash
       # NOTE: If the BUILD_JOBS > 4, it's always OOM in EC2 instance.
       run: |
+        cd ${{ inputs.working-dir }} && \
         make run-it-in-container BUILD_JOBS=4
 
     - name: Upload sqlness logs
@@ -64,6 +69,7 @@ runs:
         aws-secret-access-key: ${{ inputs.aws-secret-access-key }}
         aws-region: ${{ inputs.aws-region }}
         upload-to-s3: ${{ inputs.upload-to-s3 }}
+        working-dir: ${{ inputs.working-dir }}
 
     - name: Build greptime without pyo3
       if: ${{ inputs.dev-mode == 'false' }}
@@ -79,6 +85,7 @@ runs:
         aws-secret-access-key: ${{ inputs.aws-secret-access-key }}
         aws-region: ${{ inputs.aws-region }}
         upload-to-s3: ${{ inputs.upload-to-s3 }}
+        working-dir: ${{ inputs.working-dir }}
 
     - name: Build greptime on centos base image
       uses: ./.github/actions/build-greptime-binary
@@ -94,3 +101,4 @@ runs:
         aws-secret-access-key: ${{ inputs.aws-secret-access-key }}
         aws-region: ${{ inputs.aws-region }}
         upload-to-s3: ${{ inputs.upload-to-s3 }}
+        working-dir: ${{ inputs.working-dir }}

@@ -44,7 +44,6 @@ use common_meta::key::TableMetadataManager;
 use common_query::Output;
 use common_telemetry::logging::{debug, info};
 use common_telemetry::timer;
-use datafusion::sql::sqlparser::ast::ObjectName;
 use datanode::instance::sql::table_idents_to_full_name;
 use datanode::instance::InstanceRef as DnInstanceRef;
 use datatypes::schema::Schema;
@@ -75,6 +74,7 @@ use sql::dialect::Dialect;
 use sql::parser::ParserContext;
 use sql::statements::copy::CopyTable;
 use sql::statements::statement::Statement;
+use sqlparser::ast::ObjectName;
 
 use crate::catalog::FrontendCatalogManager;
 use crate::error::{
@@ -317,8 +317,8 @@ impl Instance {
         ctx: QueryContextRef,
         request: &InsertRequest,
     ) -> Result<()> {
-        let catalog_name = &ctx.current_catalog();
-        let schema_name = &ctx.current_schema();
+        let catalog_name = &ctx.current_catalog().to_owned();
+        let schema_name = &ctx.current_schema().to_owned();
         let table_name = &request.table_name;
         let columns = &request.columns;
 
@@ -374,8 +374,8 @@ impl Instance {
         columns: &[Column],
         engine: &str,
     ) -> Result<Output> {
-        let catalog_name = &ctx.current_catalog();
-        let schema_name = &ctx.current_schema();
+        let catalog_name = ctx.current_catalog();
+        let schema_name = ctx.current_schema();
 
         // Create table automatically, build schema from data.
         let create_expr = self
@@ -409,8 +409,8 @@ impl Instance {
             add_columns, table_name
         );
         let expr = AlterExpr {
-            catalog_name: ctx.current_catalog(),
-            schema_name: ctx.current_schema(),
+            catalog_name: ctx.current_catalog().to_owned(),
+            schema_name: ctx.current_schema().to_owned(),
             table_name: table_name.to_string(),
             kind: Some(Kind::AddColumns(add_columns)),
             ..Default::default()
@@ -643,7 +643,7 @@ pub fn check_permission(
         }
         Statement::ShowTables(stmt) => {
             if let Some(database) = &stmt.database {
-                validate_catalog_and_schema(&query_ctx.current_catalog(), database, query_ctx)
+                validate_catalog_and_schema(query_ctx.current_catalog(), database, query_ctx)
                     .map_err(BoxedError::new)
                     .context(SqlExecInterceptedSnafu)?;
             }

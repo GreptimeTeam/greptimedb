@@ -44,6 +44,7 @@ pub fn basic_region_metadata() -> RegionMetadata {
             column_schema: ColumnSchema::new("val", ConcreteDataType::float64_datatype(), false),
             semantic_type: SemanticType::Field,
             column_id: 251,
-        });
+        })
+        .primary_key(vec![36]);
     builder.build().unwrap()
 }

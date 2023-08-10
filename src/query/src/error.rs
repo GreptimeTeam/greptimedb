@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::any::Any;
+use std::time::Duration;
 
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
@@ -225,6 +226,21 @@ pub enum Error {
         source: datatypes::error::Error,
         location: Location,
     },
+    #[snafu(display("Unknown table type, downcast failed, location: {}", location))]
+    UnknownTable { location: Location },
+
+    #[snafu(display(
+        "Cannot find time index column in table {}, location: {}",
+        table,
+        location
+    ))]
+    TimeIndexNotFound { table: String, location: Location },
+
+    #[snafu(display("Failed to add duration '{:?}' to SystemTime, overflowed", duration))]
+    AddSystemTimeOverflow {
+        duration: Duration,
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -238,11 +254,14 @@ impl ErrorExt for Error {
             | CatalogNotFound { .. }
             | SchemaNotFound { .. }
             | TableNotFound { .. }
+            | UnknownTable { .. }
+            | TimeIndexNotFound { .. }
             | ParseTimestamp { .. }
             | ParseFloat { .. }
             | MissingRequiredField { .. }
             | BuildRegex { .. }
-            | ConvertSchema { .. } => StatusCode::InvalidArguments,
+            | ConvertSchema { .. }
+            | AddSystemTimeOverflow { .. } => StatusCode::InvalidArguments,
 
             BuildBackend { .. } | ListObjects { .. } => StatusCode::StorageUnavailable,
             EncodeSubstraitLogicalPlan { source, .. } => source.status_code(),

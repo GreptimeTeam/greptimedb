@@ -286,7 +286,7 @@ fn check_others(query: &str, query_ctx: QueryContextRef) -> Option<Output> {
         Some(select_function("version()", &get_version()))
     } else if SELECT_DATABASE_PATTERN.is_match(query) {
         let schema = query_ctx.current_schema();
-        Some(select_function("database()", &schema))
+        Some(select_function("database()", schema))
     } else if SELECT_TIME_DIFF_FUNC_PATTERN.is_match(query) {
         Some(select_function(
             "TIMEDIFF(NOW(), UTC_TIMESTAMP())",
