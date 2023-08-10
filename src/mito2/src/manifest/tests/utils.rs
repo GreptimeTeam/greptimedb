@@ -20,7 +20,7 @@ use crate::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder, Sem
 
 /// Build a basic region metadata for testing.
 /// It contains three columns:
-/// - ts: timestamp milliescond, semantic type: `Timestamp`, column id: 45
+/// - ts: timestamp millisecond, semantic type: `Timestamp`, column id: 45
 /// - pk: string, semantic type: `Tag`, column id: 36
 /// - val: float64, semantic type: `Field`, column id: 251
 pub fn basic_region_metadata() -> RegionMetadata {
