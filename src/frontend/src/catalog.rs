@@ -160,7 +160,7 @@ impl CatalogManager for FrontendCatalogManager {
         Ok(())
     }
 
-    async fn register_catalog(&self, _name: String) -> CatalogResult<bool> {
+    async fn register_catalog(self: Arc<Self>, _name: String) -> CatalogResult<bool> {
         unimplemented!("FrontendCatalogManager does not support registering catalog")
     }
 

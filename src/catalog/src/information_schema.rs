@@ -16,6 +16,7 @@ mod columns;
 mod tables;
 
 use std::any::Any;
+use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 
 use async_trait::async_trait;
@@ -51,9 +52,29 @@ impl InformationSchemaProvider {
             catalog_manager,
         }
     }
-}
 
-impl InformationSchemaProvider {
+    pub fn build_information_schema(
+        catalog_name: String,
+        catalog_manager: Weak<dyn CatalogManager>,
+    ) -> HashMap<String, TableRef> {
+        let mut schema = HashMap::new();
+
+        schema.insert(
+            TABLES.to_string(),
+            Arc::new(InformationTable::new(Arc::new(
+                InformationSchemaTables::new(catalog_name.clone(), catalog_manager.clone()),
+            ))) as _,
+        );
+        schema.insert(
+            COLUMNS.to_string(),
+            Arc::new(InformationTable::new(Arc::new(
+                InformationSchemaColumns::new(catalog_name, catalog_manager),
+            ))) as _,
+        );
+
+        schema
+    }
+
     pub fn table(&self, name: &str) -> Result<Option<TableRef>> {
         let stream_builder = match name.to_ascii_lowercase().as_ref() {
             TABLES => Arc::new(InformationSchemaTables::new(

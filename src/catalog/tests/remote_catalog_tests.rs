@@ -309,6 +309,7 @@ mod tests {
         // register catalog to catalog manager
         assert!(components
             .catalog_manager
+            .clone()
             .register_catalog(catalog_name.clone())
             .await
             .is_ok());

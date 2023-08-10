@@ -118,11 +118,20 @@ impl LocalCatalogManager {
     }
 
     async fn init_system_catalog(&self) -> Result<()> {
+        // register default catalog and default schema
+        self.catalogs
+            .clone()
+            .register_catalog_sync(DEFAULT_CATALOG_NAME.to_string())?;
+        self.catalogs.register_schema_sync(RegisterSchemaRequest {
+            catalog: DEFAULT_CATALOG_NAME.to_string(),
+            schema: DEFAULT_SCHEMA_NAME.to_string(),
+        })?;
+
         // register SystemCatalogTable
-        let _ = self
-            .catalogs
+        self.catalogs
+            .clone()
             .register_catalog_sync(SYSTEM_CATALOG_NAME.to_string())?;
-        let _ = self.catalogs.register_schema_sync(RegisterSchemaRequest {
+        self.catalogs.register_schema_sync(RegisterSchemaRequest {
             catalog: SYSTEM_CATALOG_NAME.to_string(),
             schema: INFORMATION_SCHEMA_NAME.to_string(),
         })?;
@@ -133,16 +142,7 @@ impl LocalCatalogManager {
             table_id: SYSTEM_CATALOG_TABLE_ID,
             table: self.system.information_schema.system.clone(),
         };
-        let _ = self.catalogs.register_table(register_table_req).await?;
-
-        // register default catalog and default schema
-        let _ = self
-            .catalogs
-            .register_catalog_sync(DEFAULT_CATALOG_NAME.to_string())?;
-        let _ = self.catalogs.register_schema_sync(RegisterSchemaRequest {
-            catalog: DEFAULT_CATALOG_NAME.to_string(),
-            schema: DEFAULT_SCHEMA_NAME.to_string(),
-        })?;
+        self.catalogs.register_table(register_table_req).await?;
 
         // Add numbers table for test
         let numbers_table = Arc::new(NumbersTable::default());
@@ -154,8 +154,7 @@ impl LocalCatalogManager {
             table: numbers_table,
         };
 
-        let _ = self
-            .catalogs
+        self.catalogs
             .register_table(register_number_table_req)
             .await?;
 
@@ -231,6 +230,7 @@ impl LocalCatalogManager {
             match entry {
                 Entry::Catalog(c) => {
                     self.catalogs
+                        .clone()
                         .register_catalog_sync(c.catalog_name.clone())?;
                     info!("Register catalog: {}", c.catalog_name);
                 }
@@ -583,8 +583,8 @@ impl CatalogManager for LocalCatalogManager {
         self.catalogs.table_names(catalog_name, schema_name).await
     }
 
-    async fn register_catalog(&self, name: String) -> Result<bool> {
-        self.catalogs.register_catalog(name).await
+    async fn register_catalog(self: Arc<Self>, name: String) -> Result<bool> {
+        self.catalogs.clone().register_catalog(name).await
     }
 
     fn as_any(&self) -> &dyn Any {

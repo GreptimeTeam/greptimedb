@@ -67,7 +67,7 @@ impl RemoteCatalogManager {
             backend,
             system_table_requests: Default::default(),
             region_alive_keepers,
-            memory_catalog_manager: Arc::new(MemoryCatalogManager::default()),
+            memory_catalog_manager: MemoryCatalogManager::default(),
             table_metadata_manager,
         }
     }
@@ -180,7 +180,9 @@ async fn open_and_register_table(
         .catalog_exist(&table_ident.catalog)
         .await?
     {
-        memory_catalog_manager.register_catalog_sync(table_ident.catalog.clone())?;
+        memory_catalog_manager
+            .clone()
+            .register_catalog_sync(table_ident.catalog.clone())?;
     }
 
     if !memory_catalog_manager
@@ -386,6 +388,7 @@ impl CatalogManager for RemoteCatalogManager {
         if remote_catalog_exists
             && self
                 .memory_catalog_manager
+                .clone()
                 .register_catalog(catalog.to_string())
                 .await?
         {
@@ -423,8 +426,10 @@ impl CatalogManager for RemoteCatalogManager {
             .await
     }
 
-    async fn register_catalog(&self, name: String) -> Result<bool> {
-        self.memory_catalog_manager.register_catalog_sync(name)
+    async fn register_catalog(self: Arc<Self>, name: String) -> Result<bool> {
+        self.memory_catalog_manager
+            .clone()
+            .register_catalog_sync(name)
     }
 
     fn as_any(&self) -> &dyn Any {
