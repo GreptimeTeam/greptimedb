@@ -20,8 +20,8 @@ uuid.workspace = true
 
 [dev-dependencies]
 common-test-util = { workspace = true }
-tempfile.workspace = true
 hyper = { version = "0.14", features = ["full"] }
+tempfile.workspace = true
 
 [build-dependencies]
 common-version = { workspace = true }
