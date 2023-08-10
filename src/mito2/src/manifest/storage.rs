@@ -211,7 +211,7 @@ impl ManifestObjectStore {
         })
     }
 
-    async fn delete_until(
+    pub async fn delete_until(
         &self,
         end: ManifestVersion,
         keep_last_checkpoint: bool,
@@ -370,7 +370,7 @@ impl ManifestObjectStore {
         Ok(())
     }
 
-    async fn save_checkpoint(&self, version: ManifestVersion, bytes: &[u8]) -> Result<()> {
+    pub async fn save_checkpoint(&self, version: ManifestVersion, bytes: &[u8]) -> Result<()> {
         let path = self.checkpoint_file_path(version);
         let data = self
             .compress_type
@@ -409,7 +409,7 @@ impl ManifestObjectStore {
         Ok(())
     }
 
-    async fn load_checkpoint(
+    pub async fn load_checkpoint(
         &self,
         version: ManifestVersion,
     ) -> Result<Option<(ManifestVersion, Vec<u8>)>> {

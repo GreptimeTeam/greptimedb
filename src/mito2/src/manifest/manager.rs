@@ -14,15 +14,14 @@
 
 use std::sync::Arc;
 
-use common_telemetry::{debug, info};
-use store_api::manifest::action::{ProtocolAction, ProtocolVersion};
+use common_telemetry::{debug, info, warn};
 use store_api::manifest::{ManifestVersion, MAX_VERSION, MIN_VERSION};
 use tokio::sync::RwLock;
 
 use crate::error::Result;
 use crate::manifest::action::{
     RegionChange, RegionCheckpoint, RegionManifest, RegionManifestBuilder, RegionMetaAction,
-    RegionMetaActionIter, RegionMetaActionList,
+    RegionMetaActionList,
 };
 use crate::manifest::options::RegionManifestOptions;
 use crate::manifest::storage::ManifestObjectStore;
@@ -159,6 +158,8 @@ struct RegionManifestManagerInner {
     store: ManifestObjectStore,
     options: RegionManifestOptions,
     last_version: ManifestVersion,
+    /// The last version included in checkpoint file.
+    last_checkpoint_version: ManifestVersion,
     manifest: Arc<RegionManifest>,
 }
 
@@ -198,12 +199,11 @@ impl RegionManifestManagerInner {
             RegionMetaActionList::with_action(RegionMetaAction::Change(RegionChange { metadata }));
         store.save(version, &action_list.encode()?).await?;
 
-        // todo: start gc task
-
         Ok(Self {
             store,
             options,
             last_version: version,
+            last_checkpoint_version: MIN_VERSION,
             manifest: Arc::new(manifest),
         })
     }
@@ -222,10 +222,11 @@ impl RegionManifestManagerInner {
         // recover from storage
         // construct manifest builder
         let mut version = MIN_VERSION;
-        let last_checkpoint = store.load_last_checkpoint().await?;
-        let checkpoint = last_checkpoint
-            .map(|(_, raw_checkpoint)| RegionCheckpoint::decode(&raw_checkpoint))
-            .transpose()?;
+        let checkpoint = Self::last_checkpoint(&store).await?;
+        let last_checkpoint_version = checkpoint
+            .as_ref()
+            .map(|checkpoint| checkpoint.last_version)
+            .unwrap_or(MIN_VERSION);
         let mut manifest_builder = if let Some(checkpoint) = checkpoint {
             info!(
                 "Recover region manifest {} from checkpoint version {}",
@@ -276,18 +277,16 @@ impl RegionManifestManagerInner {
         );
         let version = manifest.manifest_version;
 
-        // todo: start gc task
-
         Ok(Some(Self {
             store,
             options,
             last_version: version,
+            last_checkpoint_version,
             manifest: Arc::new(manifest),
         }))
     }
 
     async fn stop(&mut self) -> Result<()> {
-        // todo: stop gc task
         Ok(())
     }
 
@@ -327,68 +326,110 @@ impl RegionManifestManagerInner {
         self.last_version
     }
 
-    // pub (crate) fn checkpointer(&self) -> Checkpointer {
-    //     todo!()
-    // }
+    pub(crate) async fn may_do_checkpoint(&mut self, version: ManifestVersion) -> Result<()> {
+        if version - self.last_checkpoint_version >= self.options.checkpoint_interval {
+            if let Some(checkpoint) = self.do_checkpoint().await? {
+                self.last_checkpoint_version = checkpoint.last_version();
+            }
+        }
 
-    pub(crate) fn set_last_checkpoint_version(&self, _version: ManifestVersion) {
-        todo!()
+        Ok(())
     }
 
-    /// Update inner state.
-    pub fn update_state(&self, _version: ManifestVersion, _protocol: Option<ProtocolAction>) {
-        todo!()
-    }
-
-    pub(crate) async fn save_checkpoint(&self, checkpoint: &RegionCheckpoint) -> Result<()> {
-        todo!()
-    }
-
-    pub(crate) async fn may_do_checkpoint(&self, version: ManifestVersion) -> Result<()> {
-        todo!()
-    }
-
-    // pub(crate) fn manifest_store(&self) -> &Arc<ManifestObjectStore> {
-    //     todo!()
-    // }
-
-    // from Manifest
-
-    async fn scan(
-        &self,
-        start: ManifestVersion,
-        end: ManifestVersion,
-    ) -> Result<RegionMetaActionIter> {
-        todo!()
-    }
-
+    /// Make a new checkpoint. Return the fresh one if there are some actions to compact.
     async fn do_checkpoint(&self) -> Result<Option<RegionCheckpoint>> {
-        todo!()
+        let last_checkpoint = Self::last_checkpoint(&self.store).await?;
+        let current_version = self.last_version;
+
+        let (start_version, mut manifest_builder) = if let Some(checkpoint) = last_checkpoint {
+            (
+                checkpoint.last_version + 1,
+                RegionManifestBuilder::with_checkpoint(checkpoint.checkpoint),
+            )
+        } else {
+            (MIN_VERSION, RegionManifestBuilder::default())
+        };
+        let end_version = current_version;
+
+        if start_version >= end_version {
+            return Ok(None);
+        }
+
+        let mut iter = self.store.scan(start_version, end_version).await?;
+        let mut last_version = start_version;
+        let mut compacted_actions = 0;
+        while let Some((version, raw_action_list)) = iter.next_log().await? {
+            let action_list = RegionMetaActionList::decode(&raw_action_list)?;
+            for action in action_list.actions {
+                match action {
+                    RegionMetaAction::Change(action) => {
+                        manifest_builder.apply_change(version, action);
+                    }
+                    RegionMetaAction::Edit(action) => {
+                        manifest_builder.apply_edit(version, action);
+                    }
+                    RegionMetaAction::Remove(_) | RegionMetaAction::Protocol(_) => {
+                        debug!(
+                            "Unhandled action for region {}, action: {:?}",
+                            self.manifest.metadata.region_id, action
+                        );
+                    }
+                }
+            }
+            last_version = version;
+            compacted_actions += 1;
+        }
+
+        if compacted_actions == 0 {
+            return Ok(None);
+        }
+
+        let region_manifest = manifest_builder.try_build()?;
+        let checkpoint = RegionCheckpoint {
+            last_version,
+            compacted_actions,
+            checkpoint: Some(region_manifest),
+        };
+
+        self.store
+            .save_checkpoint(last_version, &checkpoint.encode()?)
+            .await?;
+        // TODO(ruihang): this task can be detached
+        self.store.delete_until(last_version, true).await?;
+
+        info!(
+            "Region manifest checkpoint, start_version: {}, last_version: {}, compacted actions: {}",
+            start_version,
+            last_version,
+            compacted_actions
+        );
+        Ok(Some(checkpoint))
     }
 
-    async fn last_checkpoint(&self) -> Result<Option<RegionCheckpoint>> {
-        todo!()
-    }
+    /// Fetch the last [RegionCheckpoint] from storage.
+    async fn last_checkpoint(store: &ManifestObjectStore) -> Result<Option<RegionCheckpoint>> {
+        let last_checkpoint = store.load_last_checkpoint().await?;
 
-    // from Checkpoint
+        if let Some((version, bytes)) = last_checkpoint {
+            let checkpoint = RegionCheckpoint::decode(&bytes)?;
+            assert!(checkpoint.last_version() >= version);
+            if checkpoint.last_version() > version {
+                // It happens when saving checkpoint successfully, but failed at saving checkpoint metadata(the "__last_checkpoint" file).
+                // Then we try to use the old checkpoint and do the checkpoint next time.
+                // If the old checkpoint was deleted, it's fine that we return the latest checkpoint.
+                // The only side effect is leaving some unused checkpoint files,
+                // and they will be purged by gc task.
+                warn!("The checkpoint manifest version {} in {} is greater than checkpoint metadata version {}.", store.path(), checkpoint.last_version(), version);
 
-    /// Set a protocol action into checkpoint
-    pub fn set_protocol(&mut self, _action: ProtocolAction) {
-        todo!()
-    }
-
-    /// The last compacted action's version of checkpoint
-    pub fn last_version(&self) -> ManifestVersion {
-        todo!()
-    }
-
-    /// Encode this checkpoint into a byte vector
-    pub fn encode(&self) -> Result<Vec<u8>> {
-        todo!()
-    }
-
-    pub fn decode(_bytes: &[u8], _reader_version: ProtocolVersion) -> Result<Self> {
-        todo!()
+                if let Some((_, bytes)) = store.load_checkpoint(version).await? {
+                    let old_checkpoint = RegionCheckpoint::decode(&bytes)?;
+                    return Ok(Some(old_checkpoint));
+                }
+            }
+            Ok(Some(checkpoint))
+        } else {
+            Ok(None)
+        }
     }
 }
 

@@ -15,7 +15,6 @@
 //! manifest storage
 
 pub mod action;
-pub mod gc_task;
 pub mod helper;
 #[allow(unused_variables)]
 pub mod manager;
