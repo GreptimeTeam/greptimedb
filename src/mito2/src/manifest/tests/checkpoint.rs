@@ -46,13 +46,10 @@ async fn reopen_manager(
     checkpoint_interval: u64,
     compress_type: CompressionType,
 ) -> RegionManifestManager {
-    let manager = env
-        .create_manifest_manager(compress_type, checkpoint_interval, None)
+    env.create_manifest_manager(compress_type, checkpoint_interval, None)
         .await
         .unwrap()
-        .unwrap();
-
-    manager
+        .unwrap()
 }
 
 fn nop_action() -> RegionMetaActionList {
