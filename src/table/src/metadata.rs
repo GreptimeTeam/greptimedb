@@ -520,6 +520,7 @@ pub struct RawTableMeta {
     pub engine_options: HashMap<String, String>,
     pub options: TableOptions,
     pub created_on: DateTime<Utc>,
+    #[serde(default)]
     pub partition_key_indices: Vec<usize>,
 }
 
