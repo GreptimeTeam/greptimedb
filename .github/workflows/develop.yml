@@ -215,7 +215,7 @@ jobs:
         with:
           distribution: Ubuntu-22.04
       - name: Running tests
-        run: cargo nextest run -P windows -F pyo3_backend,dashboard
+        run: cargo nextest run -F pyo3_backend,dashboard
         env:
           RUST_BACKTRACE: 1
           CARGO_INCREMENTAL: 0
