@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [build-dependencies]
-protobuf-build = { version = "0.15.1", default-features = false, features = [
+protobuf-build = { version = "0.15", default-features = false, features = [
     "protobuf-codec",
 ] }
 
