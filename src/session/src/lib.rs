@@ -49,6 +49,9 @@ impl Session {
     #[inline]
     pub fn new_query_context(&self) -> QueryContextRef {
         QueryContextBuilder::default()
+            .current_user(ArcSwap::new(Arc::new(Some(
+                self.user_info.load().as_ref().clone(),
+            ))))
             .current_catalog(self.catalog.load().to_string())
             .current_schema(self.schema.load().to_string())
             .sql_dialect(self.conn_info.channel.dialect())
