@@ -11,6 +11,7 @@ default = []
 testing = []
 
 [dependencies]
+api.workspace = true
 async-trait.workspace = true
 common-error.workspace = true
 digest = "0.10"
@@ -18,6 +19,7 @@ hex = { version = "0.4" }
 secrecy = { version = "0.8", features = ["serde", "alloc"] }
 sha1 = "0.10"
 snafu.workspace = true
+sql.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]

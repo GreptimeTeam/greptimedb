@@ -12,22 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod common;
-mod error;
-mod permission;
-mod user_info;
-mod user_provider;
+use std::fmt::Debug;
 
-#[cfg(feature = "testing")]
-pub mod tests;
+use api::v1::greptime_request::Request;
+use sql::statements::statement::Statement;
 
-pub use common::{user_provider_from_option, userinfo_by_name, HashedPassword, Identity, Password};
-pub use error::{Error, Result};
-pub use permission::{PermissionChecker, PermissionReq};
-pub use user_info::UserInfo;
-pub use user_provider::UserProvider;
+use crate::error::Result;
+use crate::UserInfoRef;
 
-/// pub type alias
-pub type UserInfoRef = std::sync::Arc<dyn UserInfo>;
-pub type UserProviderRef = std::sync::Arc<dyn UserProvider>;
-pub type PermissionCheckerRef = std::sync::Arc<dyn PermissionChecker>;
+#[derive(Debug, Clone)]
+pub enum PermissionReq {
+    GrpcRequest(Box<Request>),
+    SqlStatement(Box<Statement>),
+}
+
+pub trait PermissionChecker: Send + Sync {
+    fn check_permission(&self, user_info: UserInfoRef, req: PermissionReq) -> Result<bool>;
+}
