@@ -7,6 +7,10 @@ inputs:
   image-namespace:
     description: The namespace of the image registry to store the images
     required: true
+  image-name:
+    description: The name of the image to build
+    required: false
+    default: greptimedb
   image-registry-username:
     description: The username to login to the image registry
     required: true
@@ -29,12 +33,12 @@ runs:
   steps:
     - name: Build and push standard images to dockerhub
       uses: ./.github/actions/build-greptime-images
-      with:
+      with: # The image will be used as '${{ inputs.image-registry }}/${{ inputs.image-namespace }}/${{ inputs.image-name }}:${{ inputs.version }}'
         image-registry: ${{ inputs.image-registry }}
         image-namespace: ${{ inputs.image-namespace }}
         image-registry-username: ${{ inputs.image-registry-username }}
         image-registry-password: ${{ inputs.image-registry-password }}
-        image-name: greptimedb
+        image-name: ${{ inputs.image-name }}
         image-tag: ${{ inputs.version }}
         docker-file: docker/ci/Dockerfile
         amd64-artifact-name: greptime-linux-amd64-pyo3-${{ inputs.version }}
@@ -50,7 +54,7 @@ runs:
         image-namespace: ${{ inputs.image-namespace }}
         image-registry-username: ${{ inputs.image-registry-username }}
         image-registry-password: ${{ inputs.image-registry-password }}
-        image-name: greptimedb-centos
+        image-name: ${{ inputs.image-name }}-centos
         image-tag: ${{ inputs.version }}
         docker-file: docker/ci/Dockerfile-centos
         amd64-artifact-name: greptime-linux-amd64-centos-${{ inputs.version }}

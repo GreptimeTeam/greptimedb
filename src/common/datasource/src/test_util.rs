@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
@@ -30,13 +29,6 @@ use crate::file_format::json::{stream_to_json, JsonOpener};
 use crate::test_util;
 
 pub const TEST_BATCH_SIZE: usize = 100;
-
-pub fn get_data_dir(path: &str) -> PathBuf {
-    // https://doc.rust-lang.org/cargo/reference/environment-variables.html
-    let dir = env!("CARGO_MANIFEST_DIR");
-
-    PathBuf::from(dir).join(path)
-}
 
 pub fn format_schema(schema: Schema) -> Vec<String> {
     schema
@@ -78,6 +70,9 @@ pub fn test_basic_schema() -> SchemaRef {
 }
 
 pub fn scan_config(file_schema: SchemaRef, limit: Option<usize>, filename: &str) -> FileScanConfig {
+    // object_store only recognize the Unix style path, so make it happy.
+    let filename = &filename.replace('\\', "/");
+
     FileScanConfig {
         object_store_url: ObjectStoreUrl::parse("empty://").unwrap(), // won't be used
         file_schema,
@@ -124,12 +119,7 @@ pub async fn setup_stream_to_json_test(origin_path: &str, threshold: impl Fn(usi
 
     let written = tmp_store.read(&output_path).await.unwrap();
     let origin = store.read(origin_path).await.unwrap();
-
-    // ignores `\n`
-    assert_eq!(
-        String::from_utf8_lossy(&written).trim_end_matches('\n'),
-        String::from_utf8_lossy(&origin).trim_end_matches('\n'),
-    )
+    assert_eq_lines(written, origin);
 }
 
 pub async fn setup_stream_to_csv_test(origin_path: &str, threshold: impl Fn(usize) -> usize) {
@@ -166,10 +156,19 @@ pub async fn setup_stream_to_csv_test(origin_path: &str, threshold: impl Fn(usiz
 
     let written = tmp_store.read(&output_path).await.unwrap();
     let origin = store.read(origin_path).await.unwrap();
+    assert_eq_lines(written, origin);
+}
 
-    // ignores `\n`
+// Ignore the CRLF difference across operating systems.
+fn assert_eq_lines(written: Vec<u8>, origin: Vec<u8>) {
     assert_eq!(
-        String::from_utf8_lossy(&written).trim_end_matches('\n'),
-        String::from_utf8_lossy(&origin).trim_end_matches('\n'),
+        String::from_utf8(written)
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
+        String::from_utf8(origin)
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
     )
 }

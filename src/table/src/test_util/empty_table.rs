@@ -74,6 +74,10 @@ impl Table for EmptyTable {
         self.info.clone()
     }
 
+    fn table_type(&self) -> TableType {
+        self.info.table_type
+    }
+
     async fn insert(&self, _request: InsertRequest) -> Result<usize> {
         Ok(0)
     }

@@ -12,6 +12,38 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::str::FromStr;
+
+use chrono::offset::Local;
+use chrono::{LocalResult, NaiveDateTime, TimeZone};
+use chrono_tz::Tz;
+
+pub fn format_utc_datetime(utc: &NaiveDateTime, pattern: &str) -> String {
+    if let Some(tz) = find_tz_from_env() {
+        format!("{}", tz.from_utc_datetime(utc).format(pattern))
+    } else {
+        format!("{}", Local.from_utc_datetime(utc).format(pattern))
+    }
+}
+
+pub fn local_datetime_to_utc(local: &NaiveDateTime) -> LocalResult<NaiveDateTime> {
+    if let Some(tz) = find_tz_from_env() {
+        tz.from_local_datetime(local).map(|x| x.naive_utc())
+    } else {
+        Local.from_local_datetime(local).map(|x| x.naive_utc())
+    }
+}
+
+pub fn find_tz_from_env() -> Option<Tz> {
+    // Windows does not support "TZ" env variable, which is used in the `Local` timezone under Unix.
+    // However, we are used to set "TZ" env as the default timezone without actually providing a
+    // timezone argument (especially in tests), and it's very convenient to do so, we decide to make
+    // it work under Windows as well.
+    std::env::var("TZ")
+        .ok()
+        .and_then(|tz| Tz::from_str(&tz).ok())
+}
+
 /// Returns the time duration since UNIX_EPOCH in milliseconds.
 pub fn current_time_millis() -> i64 {
     chrono::Utc::now().timestamp_millis()

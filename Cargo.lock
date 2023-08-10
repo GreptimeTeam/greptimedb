@@ -1835,17 +1835,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "common-pprof"
-version = "0.3.2"
-dependencies = [
- "common-error",
- "pprof",
- "prost",
- "snafu",
- "tokio",
-]
-
-[[package]]
 name = "common-procedure"
 version = "0.3.2"
 dependencies = [
@@ -2469,7 +2458,7 @@ dependencies = [
  "pin-project-lite",
  "rand",
  "smallvec",
- "sqlparser",
+ "sqlparser 0.35.0",
  "tempfile",
  "tokio",
  "tokio-util",
@@ -2490,7 +2479,7 @@ dependencies = [
  "num_cpus",
  "object_store",
  "parquet",
- "sqlparser",
+ "sqlparser 0.35.0",
 ]
 
 [[package]]
@@ -2519,7 +2508,7 @@ dependencies = [
  "arrow",
  "datafusion-common",
  "lazy_static",
- "sqlparser",
+ "sqlparser 0.35.0",
  "strum 0.25.0",
  "strum_macros 0.25.1",
 ]
@@ -2597,7 +2586,7 @@ dependencies = [
  "datafusion-common",
  "datafusion-expr",
  "log",
- "sqlparser",
+ "sqlparser 0.35.0",
 ]
 
 [[package]]
@@ -3310,6 +3299,7 @@ dependencies = [
  "session",
  "snafu",
  "sql",
+ "sqlparser 0.34.0",
  "storage",
  "store-api",
  "strfmt",
@@ -4961,9 +4951,9 @@ checksum = "ef53942eb7bf7ff43a617b3e2c1c4a5ecf5944a7c1bc12d7ee39bbb15e5c1519"
 
 [[package]]
 name = "linux-raw-sys"
-version = "0.4.3"
+version = "0.4.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "09fc20d2ca12cb9f044c93e3bd6d32d523e6e2ec3db4f7b2939cd99026ecd3f0"
+checksum = "57bcfdad1b858c2db7c38303a6d2ad4dfaf5eb53dfeb0910128b2c26d6158503"
 
 [[package]]
 name = "lock_api"
@@ -5863,13 +5853,13 @@ dependencies = [
 
 [[package]]
 name = "num-derive"
-version = "0.3.3"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "876a53fff98e03a936a674b29568b0e605f06b29372c2489ff4de23f1949743d"
+checksum = "9e6a0fd4f737c707bd9086cc16c925f294943eb62eb71499e9fd4cf71f8b9f4e"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 1.0.109",
+ "syn 2.0.28",
 ]
 
 [[package]]
@@ -6563,9 +6553,9 @@ dependencies = [
 
 [[package]]
 name = "pgwire"
-version = "0.15.0"
+version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e2de42ee35f9694def25c37c15f564555411d9904b48e33680618ee7359080dc"
+checksum = "593c5af58c6394873b84c6fabf31f97e49ab29a56809e7fd240c1bcc4e5d272f"
 dependencies = [
  "async-trait",
  "base64 0.21.2",
@@ -7260,6 +7250,7 @@ dependencies = [
  "arc-swap",
  "arrow",
  "arrow-schema",
+ "async-recursion",
  "async-stream",
  "async-trait",
  "catalog",
@@ -7371,22 +7362,21 @@ dependencies = [
 [[package]]
 name = "raft-engine"
 version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "67b66e735395b7ff12f3ebbb4794006aecb365c4c9a82141279b58b227ac3a8b"
+source = "git+https://github.com/tikv/raft-engine.git?rev=2dcaf5beeea3d5de9ec9c7133a2451d00f508f52#2dcaf5beeea3d5de9ec9c7133a2451d00f508f52"
 dependencies = [
  "byteorder",
  "crc32fast",
  "crossbeam",
  "fail",
  "fs2",
- "hashbrown 0.12.3",
+ "hashbrown 0.14.0",
  "hex",
  "if_chain",
  "lazy_static",
  "libc",
  "log",
  "lz4-sys",
- "nix 0.25.1",
+ "nix 0.26.2",
  "num-derive",
  "num-traits",
  "parking_lot 0.12.1",
@@ -7394,10 +7384,11 @@ dependencies = [
  "prometheus-static-metric",
  "protobuf",
  "rayon",
+ "rhai",
  "scopeguard",
  "serde",
  "serde_repr",
- "strum 0.24.1",
+ "strum 0.25.0",
  "thiserror",
 ]
 
@@ -7701,6 +7692,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "rhai"
+version = "1.15.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4c2a11a646ef5d4e4a9d5cf80c7e4ecb20f9b1954292d5c5e6d6cbc8d33728ec"
+dependencies = [
+ "ahash 0.8.3",
+ "bitflags 1.3.2",
+ "instant",
+ "num-traits",
+ "rhai_codegen",
+ "smallvec",
+ "smartstring",
+]
+
+[[package]]
+name = "rhai_codegen"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "db74e3fdd29d969a0ec1f8e79171a6f0f71d0429293656901db382d248c4c021"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 1.0.109",
+]
+
+[[package]]
 name = "ring"
 version = "0.16.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7987,7 +8004,7 @@ dependencies = [
  "bitflags 2.3.3",
  "errno 0.3.2",
  "libc",
- "linux-raw-sys 0.4.3",
+ "linux-raw-sys 0.4.5",
  "windows-sys 0.48.0",
 ]
 
@@ -8660,9 +8677,9 @@ checksum = "a3f0bf26fd526d2a95683cd0f87bf103b8539e2ca1ef48ce002d67aad59aa0b4"
 
 [[package]]
 name = "serde"
-version = "1.0.179"
+version = "1.0.180"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0a5bf42b8d227d4abf38a1ddb08602e229108a517cd4e5bb28f9c7eaafdce5c0"
+checksum = "0ea67f183f058fe88a4e3ec6e2788e003840893b91bac4559cabedd00863b3ed"
 dependencies = [
  "serde_derive",
 ]
@@ -8679,9 +8696,9 @@ dependencies = [
 
 [[package]]
 name = "serde_derive"
-version = "1.0.179"
+version = "1.0.180"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "741e124f5485c7e60c03b043f79f320bff3527f4bbf12cf3831750dc46a0ec2c"
+checksum = "24e744d7782b686ab3b73267ef05697159cc0e5abbed3f47f9933165e5219036"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -8812,7 +8829,6 @@ dependencies = [
  "common-grpc",
  "common-grpc-expr",
  "common-mem-prof",
- "common-pprof",
  "common-query",
  "common-recordbatch",
  "common-runtime",
@@ -8847,6 +8863,7 @@ dependencies = [
  "pgwire",
  "pin-project",
  "postgres-types",
+ "pprof",
  "promql-parser",
  "prost",
  "query",
@@ -9060,6 +9077,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "62bb4feee49fdd9f707ef802e22365a35de4b7b299de4763d44bfea899442ff9"
 
 [[package]]
+name = "smartstring"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3fb72c633efbaa2dd666986505016c32c3044395ceaf881518399d2f4127ee29"
+dependencies = [
+ "autocfg",
+ "static_assertions",
+ "version_check",
+]
+
+[[package]]
 name = "snafu"
 version = "0.7.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9163,7 +9191,7 @@ dependencies = [
  "itertools 0.10.5",
  "once_cell",
  "snafu",
- "sqlparser",
+ "sqlparser 0.34.0",
 ]
 
 [[package]]
@@ -9211,12 +9239,24 @@ dependencies = [
 
 [[package]]
 name = "sqlparser"
+version = "0.34.0"
+source = "git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=c3814f08afa19786b13d72b1731a1e8b3cac4ab9#c3814f08afa19786b13d72b1731a1e8b3cac4ab9"
+dependencies = [
+ "lazy_static",
+ "log",
+ "regex",
+ "sqlparser 0.35.0",
+ "sqlparser_derive 0.1.1 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=c3814f08afa19786b13d72b1731a1e8b3cac4ab9)",
+]
+
+[[package]]
+name = "sqlparser"
 version = "0.35.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ca597d77c98894be1f965f2e4e2d2a61575d4998088e655476c73715c54b2b43"
 dependencies = [
  "log",
- "sqlparser_derive",
+ "sqlparser_derive 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
@@ -9224,6 +9264,16 @@ name = "sqlparser_derive"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "55fe75cb4a364c7f7ae06c7dbbc8d84bddd85d6cdf9975963c3935bc1991761e"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 1.0.109",
+]
+
+[[package]]
+name = "sqlparser_derive"
+version = "0.1.1"
+source = "git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=c3814f08afa19786b13d72b1731a1e8b3cac4ab9#c3814f08afa19786b13d72b1731a1e8b3cac4ab9"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -9792,9 +9842,9 @@ checksum = "55937e1799185b12863d447f42597ed69d9928686b8d88a1df17376a097d8369"
 
 [[package]]
 name = "target-lexicon"
-version = "0.12.10"
+version = "0.12.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1d2faeef5759ab89935255b1a4cd98e0baf99d1085e37d36599c625dac49ae8e"
+checksum = "9d0e916b1148c8e263850e1ebcbd046f333e0683c724876bb0da63ea4373dc8a"
 
 [[package]]
 name = "temp-env"
@@ -9904,6 +9954,7 @@ dependencies = [
  "table",
  "tempfile",
  "tokio",
+ "tokio-postgres",
  "tonic 0.9.2",
  "tower",
  "uuid",
@@ -11509,9 +11560,9 @@ dependencies = [
 
 [[package]]
 name = "x509-certificate"
-version = "0.20.0"
+version = "0.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2133ce6c08c050a5b368730a67c53a603ffd4a4a6c577c5218675a19f7782c05"
+checksum = "5e5d27c90840e84503cf44364de338794d5d5680bdd1da6272d13f80b0769ee0"
 dependencies = [
  "bcder",
  "bytes",

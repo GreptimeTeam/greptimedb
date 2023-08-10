@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::BTreeMap;
+
 use auth::user_provider_from_option;
 use axum::http::StatusCode;
 use axum_test_helper::TestClient;
@@ -412,13 +414,22 @@ pub async fn test_prom_http_api(store_type: StorageType) {
     assert_eq!(res.status(), StatusCode::OK);
     let body = serde_json::from_str::<PrometheusJsonResponse>(&res.text().await).unwrap();
     assert_eq!(body.status, "success");
-    assert_eq!(
-        body.data,
-        serde_json::from_value::<PrometheusResponse>(json!(
-            [{"__name__" : "demo","ts":"1970-01-01 00:00:00+0000","cpu":"1.1","host":"host1","memory":"2.2"}]
-        ))
-        .unwrap()
-    );
+
+    let PrometheusResponse::Series(mut series) = body.data else {
+        unreachable!()
+    };
+    let actual = series
+        .remove(0)
+        .into_iter()
+        .collect::<BTreeMap<String, String>>();
+    let expected = BTreeMap::from([
+        ("__name__".to_string(), "demo".to_string()),
+        ("ts".to_string(), "1970-01-01 00:00:00+0000".to_string()),
+        ("cpu".to_string(), "1.1".to_string()),
+        ("host".to_string(), "host1".to_string()),
+        ("memory".to_string(), "2.2".to_string()),
+    ]);
+    assert_eq!(actual, expected);
 
     let res = client
         .post("/api/v1/series?match[]=up&match[]=down")

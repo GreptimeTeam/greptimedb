@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::ScanRequest;
 use table::engine::{EngineContext, TableEngineRef};
-use table::metadata::{TableId, TableInfoRef};
+use table::metadata::{TableId, TableInfoRef, TableType};
 use table::requests::{
     CreateTableRequest, DeleteRequest, InsertRequest, OpenTableRequest, TableOptions,
 };
@@ -69,6 +69,10 @@ impl Table for SystemCatalogTable {
 
     fn table_info(&self) -> TableInfoRef {
         self.0.table_info()
+    }
+
+    fn table_type(&self) -> TableType {
+        self.0.table_type()
     }
 
     async fn delete(&self, request: DeleteRequest) -> TableResult<usize> {

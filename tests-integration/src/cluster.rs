@@ -20,7 +20,7 @@ use api::v1::meta::Role;
 use client::client_manager::DatanodeClients;
 use client::Client;
 use common_base::Plugins;
-use common_grpc::channel_manager::ChannelManager;
+use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_meta::peer::Peer;
 use common_meta::DatanodeId;
 use common_runtime::Builder as RuntimeBuilder;
@@ -88,7 +88,8 @@ impl GreptimeDbClusterBuilder {
     pub async fn build(self) -> GreptimeDbCluster {
         let datanodes = self.datanodes.unwrap_or(4);
 
-        let datanode_clients = Arc::new(DatanodeClients::default());
+        let channel_config = ChannelConfig::new().timeout(Duration::from_secs(20));
+        let datanode_clients = Arc::new(DatanodeClients::new(channel_config));
 
         let meta_srv = self.build_metasrv(datanode_clients.clone()).await;
 

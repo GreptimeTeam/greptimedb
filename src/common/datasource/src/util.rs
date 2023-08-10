@@ -66,6 +66,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn test_parse_path_and_dir() {
         let parsed = Url::from_file_path("/to/path/file").unwrap();
@@ -73,6 +74,16 @@ mod tests {
 
         let parsed = Url::from_directory_path("/to/path/").unwrap();
         assert_eq!(parsed.path(), "/to/path/");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_parse_path_and_dir() {
+        let parsed = Url::from_file_path("C:\\to\\path\\file").unwrap();
+        assert_eq!(parsed.path(), "/C:/to/path/file");
+
+        let parsed = Url::from_directory_path("C:\\to\\path\\").unwrap();
+        assert_eq!(parsed.path(), "/C:/to/path/");
     }
 
     #[test]

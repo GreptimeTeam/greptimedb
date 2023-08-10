@@ -44,7 +44,6 @@ use common_meta::key::TableMetadataManager;
 use common_query::Output;
 use common_telemetry::logging::{debug, info};
 use common_telemetry::timer;
-use datafusion::sql::sqlparser::ast::ObjectName;
 use datanode::instance::sql::table_idents_to_full_name;
 use datanode::instance::InstanceRef as DnInstanceRef;
 use datatypes::schema::Schema;
@@ -75,6 +74,7 @@ use sql::dialect::Dialect;
 use sql::parser::ParserContext;
 use sql::statements::copy::CopyTable;
 use sql::statements::statement::Statement;
+use sqlparser::ast::ObjectName;
 
 use crate::catalog::FrontendCatalogManager;
 use crate::error::{

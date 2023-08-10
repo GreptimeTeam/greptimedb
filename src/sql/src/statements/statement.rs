@@ -91,6 +91,6 @@ impl TryFrom<&Statement> for DfStatement {
                 .fail();
             }
         };
-        Ok(DfStatement::Statement(Box::new(s)))
+        Ok(DfStatement::Statement(Box::new(s.into())))
     }
 }

@@ -378,7 +378,7 @@ mod tests {
         assert_eq!(expected, actions);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_fs_region_manifest_checkpoint_compress() {
         let duration = Duration::from_millis(50);
         let manifest = new_fs_manifest(true, Some(duration)).await;

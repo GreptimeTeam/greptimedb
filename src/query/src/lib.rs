@@ -29,6 +29,7 @@ pub mod physical_wrapper;
 pub mod plan;
 pub mod planner;
 pub mod query_engine;
+mod range_select;
 pub mod sql;
 
 pub use crate::datafusion::DfContextProviderAdapter;

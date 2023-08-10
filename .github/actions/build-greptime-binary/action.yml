@@ -32,12 +32,17 @@ inputs:
     description: Upload to S3
     required: false
     default: 'true'
+  working-dir:
+    description: Working directory to build the artifacts
+    required: false
+    default: .
 runs:
   using: composite
   steps:
     - name: Build greptime binary
       shell: bash
       run: |
+        cd ${{ inputs.working-dir }} && \
         make build-greptime-by-buildx \
           CARGO_PROFILE=${{ inputs.cargo-profile }} \
           FEATURES=${{ inputs.features }} \
@@ -54,3 +59,4 @@ runs:
         aws-secret-access-key: ${{ inputs.aws-secret-access-key }}
         aws-region: ${{ inputs.aws-region }}
         upload-to-s3: ${{ inputs.upload-to-s3 }}
+        working-dir: ${{ inputs.working-dir }}
