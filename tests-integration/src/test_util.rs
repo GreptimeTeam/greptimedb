@@ -289,8 +289,8 @@ pub fn create_tmp_dir_and_datanode_opts(
 ) -> (DatanodeOptions, TestGuard) {
     let home_tmp_dir = create_temp_dir(&format!("gt_data_{name}"));
     let wal_tmp_dir = create_temp_dir(&format!("gt_wal_{name}"));
-    let wal_dir = wal_tmp_dir.path().to_str().unwrap().to_string();
     let home_dir = home_tmp_dir.path().to_str().unwrap().to_string();
+    let wal_dir = wal_tmp_dir.path().to_str().unwrap().to_string();
 
     let (store, data_tmp_dir) = get_test_store_config(&store_type);
     let opts = create_datanode_opts(store, home_dir, wal_dir);

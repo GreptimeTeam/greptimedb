@@ -79,7 +79,12 @@ macro_rules! region_failover_tests {
 }
 
 pub async fn test_region_failover(store_type: StorageType) {
+    if store_type == StorageType::File {
+        // Region failover doesn't make sense when using local file storage.
+        return;
+    }
     common_telemetry::init_default_ut_logging();
+    info!("Running region failover test for {}", store_type);
 
     let mut logical_timer = 1685508715000;
 
