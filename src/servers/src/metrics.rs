@@ -80,7 +80,6 @@ pub(crate) const METRIC_GRPC_REQUESTS_TOTAL: &str = "servers.grpc_requests_total
 pub(crate) const METRIC_GRPC_REQUESTS_ELAPSED: &str = "servers.grpc_requests_elapsed";
 pub(crate) const METRIC_METHOD_LABEL: &str = "method";
 pub(crate) const METRIC_PATH_LABEL: &str = "path";
-pub(crate) const METRIC_STATUS_LABEL: &str = "status";
 pub(crate) const METRIC_JEMALLOC_RESIDENT: &str = "sys.jemalloc.resident";
 pub(crate) const METRIC_JEMALLOC_ALLOCATED: &str = "sys.jemalloc.allocated";
 
@@ -185,7 +184,7 @@ where
             let latency = start.elapsed().as_secs_f64();
             let status = response.status().as_u16().to_string();
 
-            let labels = [(METRIC_PATH_LABEL, path), (METRIC_STATUS_LABEL, status)];
+            let labels = [(METRIC_PATH_LABEL, path), (METRIC_CODE_LABEL, status)];
             metrics::increment_counter!(METRIC_GRPC_REQUESTS_TOTAL, &labels);
             metrics::histogram!(METRIC_GRPC_REQUESTS_ELAPSED, latency, &labels);
 

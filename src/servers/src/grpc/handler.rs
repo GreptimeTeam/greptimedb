@@ -36,8 +36,8 @@ use crate::error::{
 };
 use crate::grpc::TonicResult;
 use crate::metrics::{
-    METRIC_AUTH_FAILURE, METRIC_CODE_LABEL, METRIC_SERVER_GRPC_DB_REQUEST_TIMER,
-    METRIC_STATUS_LABEL, METRIC_TYPE_LABEL,
+    METRIC_AUTH_FAILURE, METRIC_CODE_LABEL, METRIC_DB_LABEL, METRIC_SERVER_GRPC_DB_REQUEST_TIMER,
+    METRIC_TYPE_LABEL,
 };
 use crate::query_handler::grpc::ServerGrpcQueryHandlerRef;
 
@@ -214,9 +214,9 @@ impl Drop for RequestTimer {
             METRIC_SERVER_GRPC_DB_REQUEST_TIMER,
             self.start.elapsed(),
             &[
-                (METRIC_CODE_LABEL, std::mem::take(&mut self.db)),
+                (METRIC_DB_LABEL, std::mem::take(&mut self.db)),
                 (METRIC_TYPE_LABEL, self.request_type.to_string()),
-                (METRIC_STATUS_LABEL, self.status_code.to_string())
+                (METRIC_CODE_LABEL, self.status_code.to_string())
             ]
         );
     }
