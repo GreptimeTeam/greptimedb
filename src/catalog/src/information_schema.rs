@@ -41,8 +41,8 @@ use crate::information_schema::tables::InformationSchemaTables;
 use crate::table_factory::TableFactory;
 use crate::CatalogManager;
 
-const TABLES: &str = "tables";
-const COLUMNS: &str = "columns";
+pub const TABLES: &str = "tables";
+pub const COLUMNS: &str = "columns";
 
 pub struct InformationSchemaProvider {
     catalog_name: String,

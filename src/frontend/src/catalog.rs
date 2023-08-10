@@ -21,7 +21,7 @@ use catalog::error::{
     self as catalog_err, InternalSnafu, InvalidCatalogValueSnafu, InvalidSystemTableDefSnafu,
     Result as CatalogResult, TableMetadataManagerSnafu, UnimplementedSnafu,
 };
-use catalog::information_schema::InformationSchemaProvider;
+use catalog::information_schema::{InformationSchemaProvider, COLUMNS, TABLES};
 use catalog::remote::KvCacheInvalidatorRef;
 use catalog::{
     CatalogManager, DeregisterSchemaRequest, DeregisterTableRequest, RegisterSchemaRequest,
@@ -43,7 +43,7 @@ use common_telemetry::{debug, warn};
 use partition::manager::PartitionRuleManagerRef;
 use snafu::prelude::*;
 use table::metadata::TableId;
-use table::table::numbers::NumbersTable;
+use table::table::numbers::{NumbersTable, NUMBERS_TABLE_NAME};
 use table::TableRef;
 
 use crate::expr_factory;
@@ -318,6 +318,7 @@ impl CatalogManager for FrontendCatalogManager {
             .kvs;
 
         let mut res = HashSet::new();
+        res.insert(INFORMATION_SCHEMA_NAME.to_string());
         for KeyValue { key: k, value: _ } in kvs {
             let key =
                 SchemaKey::parse(String::from_utf8_lossy(&k)).context(InvalidCatalogValueSnafu)?;
@@ -337,7 +338,11 @@ impl CatalogManager for FrontendCatalogManager {
             .map(|(k, _)| k)
             .collect::<Vec<String>>();
         if catalog == DEFAULT_CATALOG_NAME && schema == DEFAULT_SCHEMA_NAME {
-            tables.push("numbers".to_string());
+            tables.push(NUMBERS_TABLE_NAME.to_string());
+        }
+        if schema == INFORMATION_SCHEMA_NAME {
+            tables.push(TABLES.to_string());
+            tables.push(COLUMNS.to_string());
         }
 
         Ok(tables)
@@ -356,6 +361,10 @@ impl CatalogManager for FrontendCatalogManager {
     }
 
     async fn schema_exist(&self, catalog: &str, schema: &str) -> CatalogResult<bool> {
+        if schema == INFORMATION_SCHEMA_NAME {
+            return Ok(true);
+        }
+
         let schema_key = SchemaKey {
             catalog_name: catalog.to_string(),
             schema_name: schema.to_string(),
@@ -370,6 +379,12 @@ impl CatalogManager for FrontendCatalogManager {
     }
 
     async fn table_exist(&self, catalog: &str, schema: &str, table: &str) -> CatalogResult<bool> {
+        if schema == INFORMATION_SCHEMA_NAME {
+            if table == TABLES || table == COLUMNS {
+                return Ok(true);
+            }
+        }
+
         let key = TableNameKey::new(catalog, schema, table);
         self.table_metadata_manager
             .table_name_manager()
@@ -387,7 +402,7 @@ impl CatalogManager for FrontendCatalogManager {
     ) -> CatalogResult<Option<TableRef>> {
         if catalog == DEFAULT_CATALOG_NAME
             && schema == DEFAULT_SCHEMA_NAME
-            && table_name == "numbers"
+            && table_name == NUMBERS_TABLE_NAME
         {
             return Ok(Some(Arc::new(NumbersTable::default())));
         }
@@ -395,9 +410,12 @@ impl CatalogManager for FrontendCatalogManager {
         if schema == INFORMATION_SCHEMA_NAME {
             // hack: use existing cyclin reference to get Arc<Self>.
             // This can be remove by refactoring the struct into something like Arc<Inner>
+            common_telemetry::info!("going to use dist instance");
             let manager = if let Some(instance) = self.dist_instance.as_ref() {
+                common_telemetry::info!("dist instance exist");
                 instance.catalog_manager() as _
             } else {
+                common_telemetry::info!("dist instance doesn't exist");
                 return Ok(None);
             };
 

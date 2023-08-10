@@ -1393,12 +1393,14 @@ async fn test_information_schema_dot_tables(instance: Arc<dyn MockInstance>) {
     let expected = match is_distributed_mode {
         true => {
             "\
-+---------------+--------------+------------+-----------------+----------+-------------+
-| table_catalog | table_schema | table_name | table_type      | table_id | engine      |
-+---------------+--------------+------------+-----------------+----------+-------------+
-| greptime      | public       | numbers    | LOCAL TEMPORARY | 2        | test_engine |
-| greptime      | public       | scripts    | BASE TABLE      | 1024     | mito        |
-+---------------+--------------+------------+-----------------+----------+-------------+"
++---------------+--------------------+------------+-----------------+----------+-------------+
+| table_catalog | table_schema       | table_name | table_type      | table_id | engine      |
++---------------+--------------------+------------+-----------------+----------+-------------+
+| greptime      | information_schema | columns    | LOCAL TEMPORARY | 4        |             |
+| greptime      | public             | numbers    | LOCAL TEMPORARY | 2        | test_engine |
+| greptime      | public             | scripts    | BASE TABLE      | 1024     | mito        |
+| greptime      | information_schema | tables     | LOCAL TEMPORARY | 3        |             |
++---------------+--------------------+------------+-----------------+----------+-------------+"
         }
         false => {
             "\
@@ -1419,11 +1421,13 @@ async fn test_information_schema_dot_tables(instance: Arc<dyn MockInstance>) {
     let expected = match is_distributed_mode {
         true => {
             "\
-+-----------------+----------------+---------------+------------+----------+--------+
-| table_catalog   | table_schema   | table_name    | table_type | table_id | engine |
-+-----------------+----------------+---------------+------------+----------+--------+
-| another_catalog | another_schema | another_table | BASE TABLE | 1025     | mito   |
-+-----------------+----------------+---------------+------------+----------+--------+"
++-----------------+--------------------+---------------+-----------------+----------+--------+
+| table_catalog   | table_schema       | table_name    | table_type      | table_id | engine |
++-----------------+--------------------+---------------+-----------------+----------+--------+
+| another_catalog | another_schema     | another_table | BASE TABLE      | 1025     | mito   |
+| another_catalog | information_schema | columns       | LOCAL TEMPORARY | 4        |        |
+| another_catalog | information_schema | tables        | LOCAL TEMPORARY | 3        |        |
++-----------------+--------------------+---------------+-----------------+----------+--------+"
         }
         false => {
             "\
