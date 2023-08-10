@@ -21,17 +21,16 @@ use common_meta::key::TableMetadataManagerRef;
 use common_meta::rpc::ddl::{AlterTableTask, CreateTableTask, DropTableTask, TruncateTableTask};
 use common_meta::rpc::router::RegionRoute;
 use common_procedure::{watcher, ProcedureId, ProcedureManagerRef, ProcedureWithId};
-use common_telemetry::error;
 use snafu::ResultExt;
 use table::requests::AlterTableRequest;
 
 use crate::error::{
-    RegisterProcedureLoaderSnafu, Result, SubmitProcedureSnafu, UnsupportedSnafu,
-    WaitProcedureSnafu,
+    RegisterProcedureLoaderSnafu, Result, SubmitProcedureSnafu, WaitProcedureSnafu,
 };
 use crate::procedure::alter_table::AlterTableProcedure;
 use crate::procedure::create_table::CreateTableProcedure;
 use crate::procedure::drop_table::DropTableProcedure;
+use crate::procedure::truncate_table::TruncateTableProcedure;
 use crate::service::mailbox::MailboxRef;
 
 pub type DdlManagerRef = Arc<DdlManager>;
@@ -119,6 +118,19 @@ impl DdlManager {
             )
             .context(RegisterProcedureLoaderSnafu {
                 type_name: AlterTableProcedure::TYPE_NAME,
+            })?;
+        let context = self.create_context();
+
+        self.procedure_manager
+            .register_loader(
+                TruncateTableProcedure::TYPE_NAME,
+                Box::new(move |json| {
+                    let context = context.clone();
+                    TruncateTableProcedure::from_json(json, context).map(|p| Box::new(p) as _)
+                }),
+            )
+            .context(RegisterProcedureLoaderSnafu {
+                type_name: TruncateTableProcedure::TYPE_NAME,
             })
     }
 
@@ -188,13 +200,14 @@ impl DdlManager {
         truncate_table_task: TruncateTableTask,
         region_routes: Vec<RegionRoute>,
     ) -> Result<ProcedureId> {
-        error!("truncate table procedure is not supported, cluster_id = {}, truncate_table_task = {:?}, region_routes = {:?}",
-            cluster_id, truncate_table_task, region_routes);
+        let context = self.create_context();
 
-        UnsupportedSnafu {
-            operation: "TRUNCATE TABLE",
-        }
-        .fail()
+        let procedure =
+            TruncateTableProcedure::new(cluster_id, truncate_table_task, region_routes, context);
+
+        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+
+        self.submit_procedure(procedure_with_id).await
     }
 
     async fn submit_procedure(&self, procedure_with_id: ProcedureWithId) -> Result<ProcedureId> {

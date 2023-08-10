@@ -17,4 +17,5 @@ pub mod create_table;
 pub mod drop_table;
 pub mod region_failover;
 pub(crate) mod state_store;
+pub mod truncate_table;
 mod utils;
