@@ -80,7 +80,7 @@ async fn manager_without_checkpoint() {
         .is_none());
 
     // check files
-    let expected = vec![
+    let mut expected = vec![
         "00000000000000000010.json",
         "00000000000000000009.json",
         "00000000000000000008.json",
@@ -93,15 +93,15 @@ async fn manager_without_checkpoint() {
         "00000000000000000001.json",
         "00000000000000000000.json",
     ];
-    assert_eq!(
-        expected,
-        manager
-            .store()
-            .await
-            .get_paths(|e| Some(e.name().to_string()))
-            .await
-            .unwrap()
-    );
+    expected.sort_unstable();
+    let mut paths = manager
+        .store()
+        .await
+        .get_paths(|e| Some(e.name().to_string()))
+        .await
+        .unwrap();
+    paths.sort_unstable();
+    assert_eq!(expected, paths);
 }
 
 #[tokio::test]
@@ -124,22 +124,22 @@ async fn manager_with_checkpoint_interval_1() {
         .is_some());
 
     // check files
-    let expected = vec![
+    let mut expected = vec![
         "00000000000000000009.checkpoint",
         "00000000000000000010.json",
         "00000000000000000008.checkpoint",
         "00000000000000000009.json",
         "_last_checkpoint",
     ];
-    assert_eq!(
-        expected,
-        manager
-            .store()
-            .await
-            .get_paths(|e| Some(e.name().to_string()))
-            .await
-            .unwrap()
-    );
+    expected.sort_unstable();
+    let mut paths = manager
+        .store()
+        .await
+        .get_paths(|e| Some(e.name().to_string()))
+        .await
+        .unwrap();
+    paths.sort_unstable();
+    assert_eq!(expected, paths);
 
     // check content in `_last_checkpoint`
     let raw_bytes = manager
