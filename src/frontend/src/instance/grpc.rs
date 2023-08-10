@@ -15,7 +15,7 @@
 use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
 use async_trait::async_trait;
-use auth::{PermissionCheckerRef, PermissionReq};
+use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use common_query::Output;
 use query::parser::PromQuery;
 use servers::interceptor::{GrpcQueryInterceptor, GrpcQueryInterceptorRef};
@@ -37,17 +37,17 @@ impl GrpcQueryHandler for Instance {
         let interceptor = interceptor_ref.as_ref();
         interceptor.pre_execute(&request, ctx.clone())?;
 
-        if let Some(checker) = self.plugins.get::<PermissionCheckerRef>() {
-            checker
-                .check_permission(
-                    ctx.current_user(),
-                    PermissionReq::GrpcRequest(Box::new(&request)),
-                )
-                .map_err(|e| Permission {
-                    source: e,
-                    location: location!(),
-                })?;
-        }
+        self.plugins
+            .get::<PermissionCheckerRef>()
+            .as_ref()
+            .check_permission(
+                ctx.current_user(),
+                PermissionReq::GrpcRequest(Box::new(&request)),
+            )
+            .map_err(|e| Permission {
+                source: e,
+                location: location!(),
+            })?;
 
         let output = match request {
             Request::Inserts(requests) => self.handle_inserts(requests, ctx.clone()).await?,

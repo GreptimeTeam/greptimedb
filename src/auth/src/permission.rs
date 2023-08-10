@@ -18,7 +18,7 @@ use api::v1::greptime_request::Request;
 use sql::statements::statement::Statement;
 
 use crate::error::Result;
-use crate::UserInfoRef;
+use crate::{PermissionCheckerRef, UserInfoRef};
 
 #[derive(Debug, Clone)]
 pub enum PermissionReq<'a> {
@@ -28,4 +28,13 @@ pub enum PermissionReq<'a> {
 
 pub trait PermissionChecker: Send + Sync {
     fn check_permission(&self, user_info: Option<UserInfoRef>, req: PermissionReq) -> Result<bool>;
+}
+
+impl PermissionChecker for Option<&PermissionCheckerRef> {
+    fn check_permission(&self, user_info: Option<UserInfoRef>, req: PermissionReq) -> Result<bool> {
+        match self {
+            Some(checker) => checker.check_permission(user_info, req),
+            None => Ok(true),
+        }
+    }
 }
