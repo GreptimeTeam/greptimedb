@@ -148,9 +148,8 @@ pub trait Collector {
 fn print_warning_log() {
     info!("Attention: GreptimeDB now collects anonymous usage data to help improve its roadmap and prioritize features.");
     info!(
-        "To learn more about this program and how to disable it, please visit the following URL: "
-    );
-    info!("https://docs.greptime.com/user-guide/operations/configuration#greptimedb-telemetry");
+        "To learn more about this anonymous program and how to deactivate it if you don't want to participate, please visit the following URL: ");
+    info!("https://docs.greptime.com/reference/telemetry");
 }
 
 pub fn default_get_uuid(working_home: &Option<String>) -> Option<String> {
