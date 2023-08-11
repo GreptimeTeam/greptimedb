@@ -316,9 +316,12 @@ impl Env {
             .output()
             .expect("Failed to start GreptimeDB");
         if !output.status.success() {
+            println!("Failed to build GreptimeDB, {}", output.status);
+            println!("Cargo build stdout:");
             io::stdout().write_all(&output.stdout).unwrap();
+            println!("Cargo build stderr:");
             io::stderr().write_all(&output.stderr).unwrap();
-            panic!("Failed to build GreptimeDB (`cargo build` fails)");
+            panic!();
         }
         println!("Build finished, starting...");
     }
