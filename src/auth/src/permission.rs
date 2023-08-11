@@ -26,6 +26,10 @@ pub enum PermissionReq<'a> {
     SqlStatement(Box<&'a Statement>),
     PromQuery,
     Opentsdb,
+    LineProtocol,
+    PromStoreWrite,
+    PromStoreRead,
+    Oltp,
 }
 
 pub trait PermissionChecker: Send + Sync {
