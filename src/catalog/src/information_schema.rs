@@ -57,7 +57,9 @@ impl InformationSchemaProvider {
         }
     }
 
-    pub fn build_information_schema(
+    /// Build a map of [TableRef] in information schema.
+    /// Includeing `tables` and `columns`.
+    pub fn build(
         catalog_name: String,
         catalog_manager: Weak<dyn CatalogManager>,
     ) -> HashMap<String, TableRef> {

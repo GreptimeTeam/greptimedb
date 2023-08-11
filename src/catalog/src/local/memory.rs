@@ -342,7 +342,7 @@ impl MemoryCatalogManager {
     }
 
     fn create_catalog_entry(self: Arc<Self>, catalog: String) -> SchemaEntries {
-        let information_schema = InformationSchemaProvider::build_information_schema(
+        let information_schema = InformationSchemaProvider::build(
             catalog.clone(),
             Arc::downgrade(&self) as Weak<dyn CatalogManager>,
         );
