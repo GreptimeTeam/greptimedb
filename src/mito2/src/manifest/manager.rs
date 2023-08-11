@@ -350,7 +350,7 @@ impl RegionManifestManagerInner {
         if version - self.last_checkpoint_version >= self.options.checkpoint_interval
             && self.options.checkpoint_interval != 0
         {
-            info!(
+            debug!(
                 "Going to do checkpoint for version [{} ~ {}]",
                 self.last_checkpoint_version, version
             );
@@ -423,7 +423,7 @@ impl RegionManifestManagerInner {
         // TODO(ruihang): this task can be detached
         self.store.delete_until(last_version, true).await?;
 
-        info!(
+        debug!(
             "Done manifest checkpoint, start_version: {}, last_version: {}, compacted actions: {}",
             start_version, last_version, compacted_actions
         );
