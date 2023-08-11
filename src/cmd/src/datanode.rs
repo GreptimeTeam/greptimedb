@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use clap::Parser;
 use common_telemetry::logging;
-use datanode::datanode::{Datanode, DatanodeOptions, FileConfig, ObjectStoreConfig};
+use datanode::datanode::{Datanode, DatanodeOptions};
 use meta_client::MetaClientOptions;
 use servers::Mode;
 use snafu::ResultExt;
@@ -143,9 +143,7 @@ impl StartCommand {
         }
 
         if let Some(data_home) = &self.data_home {
-            opts.storage.store = ObjectStoreConfig::File(FileConfig {
-                data_home: data_home.clone(),
-            });
+            opts.storage.data_home = data_home.clone();
         }
 
         if let Some(wal_dir) = &self.wal_dir {
@@ -185,7 +183,9 @@ mod tests {
 
     use common_base::readable_size::ReadableSize;
     use common_test_util::temp_dir::create_named_temp_file;
-    use datanode::datanode::{CompactionConfig, ObjectStoreConfig, RegionManifestConfig};
+    use datanode::datanode::{
+        CompactionConfig, FileConfig, ObjectStoreConfig, RegionManifestConfig,
+    };
     use servers::Mode;
 
     use super::*;
@@ -270,16 +270,11 @@ mod tests {
         assert_eq!(10000, ddl_timeout_millis);
         assert_eq!(3000, timeout_millis);
         assert!(tcp_nodelay);
-
-        match &options.storage.store {
-            ObjectStoreConfig::File(FileConfig { data_home, .. }) => {
-                assert_eq!("/tmp/greptimedb/", data_home)
-            }
-            ObjectStoreConfig::S3 { .. } => unreachable!(),
-            ObjectStoreConfig::Oss { .. } => unreachable!(),
-            ObjectStoreConfig::Azblob { .. } => unreachable!(),
-            ObjectStoreConfig::Gcs { .. } => unreachable!(),
-        };
+        assert_eq!("/tmp/greptimedb/", options.storage.data_home);
+        assert!(matches!(
+            &options.storage.store,
+            ObjectStoreConfig::File(FileConfig { .. })
+        ));
 
         assert_eq!(
             CompactionConfig {

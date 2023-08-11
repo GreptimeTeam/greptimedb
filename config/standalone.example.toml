@@ -2,6 +2,8 @@
 mode = "standalone"
 # Whether to use in-memory catalog, `false` by default.
 enable_memory_catalog = false
+# Whether to enable greptimedb telemetry, true by default.
+enable_telemetry = true
 
 # HTTP server options.
 [http_options]
@@ -96,10 +98,10 @@ sync_write = false
 
 # Storage options.
 [storage]
+# The working home directory.
+data_home = "/tmp/greptimedb/"
 # Storage type.
 type = "File"
-# Data directory, "/tmp/greptimedb/data" by default.
-data_home = "/tmp/greptimedb/"
 # TTL for all tables. Disabled by default.
 # global_ttl = "7d"
 

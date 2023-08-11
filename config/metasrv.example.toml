@@ -1,3 +1,5 @@
+# The working home directory.
+data_home = "/tmp/metasrv/"
 # The bind address of metasrv, "127.0.0.1:3002" by default.
 bind_addr = "127.0.0.1:3002"
 # The communication server address for frontend and datanode to connect to metasrv,  "127.0.0.1:3002" by default for localhost.
@@ -13,6 +15,8 @@ datanode_lease_secs = 15
 selector = "LeaseBased"
 # Store data in memory, false by default.
 use_memory_store = false
+# Whether to enable greptimedb telemetry, true by default.
+enable_telemetry = true
 
 # Log options, see `standalone.example.toml`
 # [logging]

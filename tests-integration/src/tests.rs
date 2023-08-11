@@ -27,21 +27,16 @@ use frontend::instance::Instance;
 use table::engine::{region_name, table_dir};
 
 use crate::cluster::{GreptimeDbCluster, GreptimeDbClusterBuilder};
-use crate::test_util::{create_tmp_dir_and_datanode_opts, StorageType, TempDirGuard, TestGuard};
+use crate::test_util::{create_tmp_dir_and_datanode_opts, StorageType, TestGuard};
 
 pub struct MockDistributedInstance(GreptimeDbCluster);
 
 impl MockDistributedInstance {
     pub fn data_tmp_dirs(&self) -> Vec<&TempDir> {
         self.0
-            .storage_guards
+            ._dir_guards
             .iter()
-            .map(|g| {
-                let TempDirGuard::File(dir) = &g.0 else {
-                    unreachable!()
-                };
-                dir
-            })
+            .filter_map(|d| if !d.is_wal { Some(&d.temp_dir) } else { None })
             .collect()
     }
 
@@ -65,10 +60,7 @@ pub struct MockStandaloneInstance {
 
 impl MockStandaloneInstance {
     pub fn data_tmp_dir(&self) -> &TempDir {
-        let TempDirGuard::File(dir) = &self._guard.storage_guard.0 else {
-            unreachable!()
-        };
-        dir
+        &self._guard.home_guard.temp_dir
     }
 }
 
