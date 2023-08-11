@@ -58,7 +58,7 @@ use query::query_engine::options::{validate_catalog_and_schema, QueryOptions};
 use query::query_engine::DescribeResult;
 use query::{QueryEngineFactory, QueryEngineRef};
 use servers::error as server_error;
-use servers::error::{ExecuteQuerySnafu, ParsePromQLSnafu};
+use servers::error::{AuthSnafu, ExecuteQuerySnafu, ParsePromQLSnafu};
 use servers::interceptor::{
     PromQueryInterceptor, PromQueryInterceptorRef, SqlQueryInterceptor, SqlQueryInterceptorRef,
 };
@@ -616,14 +616,11 @@ impl PrometheusHandler for Instance {
             .get::<PromQueryInterceptorRef<server_error::Error>>();
         interceptor.pre_execute(query, query_ctx.clone())?;
 
-        // self.plugins
-        //     .get::<PermissionCheckerRef>()
-        //     .as_ref()
-        //     .check_permission(
-        //         query_ctx.current_user(),
-        //         PermissionReq::PromQuery(Box::new(query)),
-        //     )
-        //     .context(PermissionSnafu)?;
+        self.plugins
+            .get::<PermissionCheckerRef>()
+            .as_ref()
+            .check_permission(query_ctx.current_user(), PermissionReq::PromQuery)
+            .context(AuthSnafu)?;
 
         let stmt = QueryLanguageParser::parse_promql(query).with_context(|_| ParsePromQLSnafu {
             query: query.clone(),
