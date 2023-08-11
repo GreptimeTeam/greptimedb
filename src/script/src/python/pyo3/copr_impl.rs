@@ -69,7 +69,7 @@ pub(crate) fn pyo3_exec_parsed(
 ) -> Result<RecordBatch> {
     let _t = timer!(metric::METRIC_PYO3_EXEC_TOTAL_ELAPSED);
     // i.e params or use `vector(..)` to construct a PyVector
-    let arg_names = &copr.deco_args.arg_names.clone().unwrap_or(vec![]);
+    let arg_names = &copr.deco_args.arg_names.clone().unwrap_or_default();
     let args: Vec<PyVector> = if let Some(rb) = rb {
         let args = select_from_rb(rb, arg_names)?;
         check_args_anno_real_type(arg_names, &args, copr, rb)?;
@@ -270,7 +270,7 @@ fn py_list_to_vec(list: &PyList) -> PyResult<VectorRef> {
         })?;
         v.push(scalar);
     }
-    let array = ScalarValue::iter_to_array(v.into_iter()).map_err(|err| {
+    let array = ScalarValue::iter_to_array(v).map_err(|err| {
         PyRuntimeError::new_err(format!("Can't convert scalar value list to array: {}", err))
     })?;
     let ret = Helper::try_into_vector(array).map_err(|err| {
