@@ -261,14 +261,14 @@ impl Timestamp {
             where
                 A: SeqAccess<'de>,
             {
-                let x = seq
+                let sec = seq
                     .next_element::<i64>()?
                     .ok_or_else(|| serde::de::Error::invalid_length(0, &self))?;
-                let y = seq
+                let nsec = seq
                     .next_element::<u32>()?
                     .ok_or_else(|| serde::de::Error::invalid_length(1, &self))?;
 
-                Timestamp::from_splits(x, y)
+                Timestamp::from_splits(sec, nsec)
                     .ok_or_else(|| serde::de::Error::invalid_value(Unexpected::Seq, &self))
             }
         }
@@ -1178,9 +1178,9 @@ mod tests {
 
         let mut s2 = vec![];
         let mut serializer2 = serde_json::Serializer::new(&mut s2);
-        let t2 = Timestamp::new(1001, TimeUnit::Millisecond);
+        let t2 = Timestamp::new(999, TimeUnit::Millisecond);
         t2.comparable_serialize(&mut serializer2).unwrap();
-        assert!(t2 > t1);
-        assert!(s2 > s1);
+        assert!(t2 < t1);
+        assert!(s2 < s1);
     }
 }
