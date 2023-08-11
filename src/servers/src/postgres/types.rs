@@ -12,11 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod interval;
+
 use std::collections::HashMap;
-use std::fmt::Display;
 use std::ops::Deref;
 
-use bytes::{Buf, BufMut};
 use chrono::{NaiveDate, NaiveDateTime};
 use common_time::Interval;
 use datafusion_common::ScalarValue;
@@ -27,10 +27,9 @@ use pgwire::api::portal::{Format, Portal};
 use pgwire::api::results::{DataRowEncoder, FieldInfo};
 use pgwire::api::Type;
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
-use pgwire::types::ToSqlText;
-use postgres_types::{to_sql_checked, FromSql, IsNull, ToSql};
 use query::plan::LogicalPlan;
 
+use self::interval::PgInterval;
 use crate::error::{self, Error, Result};
 use crate::SqlPlan;
 
@@ -547,113 +546,6 @@ pub(super) fn param_types_to_pg_types(
         }
     }
     Ok(types)
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct PgInterval {
-    months: i32,
-    days: i32,
-    microseconds: i64,
-}
-
-impl From<Interval> for PgInterval {
-    fn from(interval: Interval) -> Self {
-        let (months, days, nanos) = interval.to_month_day_nano();
-        Self {
-            months,
-            days,
-            microseconds: nanos / 1000,
-        }
-    }
-}
-
-impl From<PgInterval> for Interval {
-    fn from(interval: PgInterval) -> Self {
-        Interval::from_month_day_nano(
-            interval.months,
-            interval.days,
-            // Maybe overflow, but most scenarios ok.
-            interval.microseconds.checked_mul(1000).unwrap_or_else(|| {
-                if interval.microseconds.is_negative() {
-                    i64::MIN
-                } else {
-                    i64::MAX
-                }
-            }),
-        )
-    }
-}
-
-impl Display for PgInterval {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", Interval::from(*self).to_postgres_string())
-    }
-}
-
-impl ToSql for PgInterval {
-    to_sql_checked!();
-
-    fn to_sql(
-        &self,
-        _: &Type,
-        out: &mut bytes::BytesMut,
-    ) -> std::result::Result<postgres_types::IsNull, Box<dyn snafu::Error + Sync + Send>>
-    where
-        Self: Sized,
-    {
-        // https://github.com/postgres/postgres/blob/master/src/backend/utils/adt/timestamp.c#L989-L991
-        out.put_i64(self.microseconds);
-        out.put_i32(self.days);
-        out.put_i32(self.months);
-        Ok(postgres_types::IsNull::No)
-    }
-
-    fn accepts(ty: &Type) -> bool
-    where
-        Self: Sized,
-    {
-        matches!(ty, &Type::INTERVAL)
-    }
-}
-
-impl<'a> FromSql<'a> for PgInterval {
-    fn from_sql(
-        _: &Type,
-        mut raw: &'a [u8],
-    ) -> std::result::Result<Self, Box<dyn snafu::Error + Sync + Send>> {
-        // https://github.com/postgres/postgres/blob/master/src/backend/utils/adt/timestamp.c#L1007-L1010
-        let microseconds = raw.get_i64();
-        let days = raw.get_i32();
-        let months = raw.get_i32();
-        Ok(PgInterval {
-            months,
-            days,
-            microseconds,
-        })
-    }
-
-    fn accepts(ty: &Type) -> bool {
-        matches!(ty, &Type::INTERVAL)
-    }
-}
-
-impl ToSqlText for PgInterval {
-    fn to_sql_text(
-        &self,
-        ty: &Type,
-        out: &mut bytes::BytesMut,
-    ) -> std::result::Result<postgres_types::IsNull, Box<dyn snafu::Error + Sync + Send>>
-    where
-        Self: Sized,
-    {
-        let fmt = match ty {
-            &Type::INTERVAL => self.to_string(),
-            _ => return Err("unsupported type".into()),
-        };
-
-        out.put_slice(fmt.as_bytes());
-        Ok(IsNull::No)
-    }
 }
 
 #[cfg(test)]
