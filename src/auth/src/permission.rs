@@ -24,6 +24,7 @@ use crate::{PermissionCheckerRef, UserInfoRef};
 pub enum PermissionReq<'a> {
     GrpcRequest(Box<&'a Request>),
     SqlStatement(Box<&'a Statement>),
+    // PromQuery(Box<&'a PromQuery>),
 }
 
 pub trait PermissionChecker: Send + Sync {

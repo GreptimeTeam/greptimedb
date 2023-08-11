@@ -22,10 +22,9 @@ use servers::interceptor::{GrpcQueryInterceptor, GrpcQueryInterceptorRef};
 use servers::query_handler::grpc::GrpcQueryHandler;
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::QueryContextRef;
-use snafu::{ensure, location, Location, OptionExt};
+use snafu::{ensure, OptionExt, ResultExt};
 
-use crate::error::Error::Permission;
-use crate::error::{Error, IncompleteGrpcResultSnafu, NotSupportedSnafu, Result};
+use crate::error::{Error, IncompleteGrpcResultSnafu, NotSupportedSnafu, PermissionSnafu, Result};
 use crate::instance::Instance;
 
 #[async_trait]
@@ -44,10 +43,7 @@ impl GrpcQueryHandler for Instance {
                 ctx.current_user(),
                 PermissionReq::GrpcRequest(Box::new(&request)),
             )
-            .map_err(|e| Permission {
-                source: e,
-                location: location!(),
-            })?;
+            .context(PermissionSnafu)?;
 
         let output = match request {
             Request::Inserts(requests) => self.handle_inserts(requests, ctx.clone()).await?,
