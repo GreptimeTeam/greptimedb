@@ -69,10 +69,10 @@ use table_region::{TableRegionKey, TableRegionManager, TableRegionValue};
 
 use self::catalog_name::{CatalogManager, CatalogNameValue};
 use self::schema_name::{SchemaManager, SchemaNameValue};
+use self::table_route::TableRouteValue;
 use crate::error::{InvalidTableMetadataSnafu, Result, SerdeJsonSnafu};
 pub use crate::key::table_route::{TableRouteKey, TABLE_ROUTE_PREFIX};
 use crate::kv_backend::KvBackendRef;
-use crate::rpc::router::TableRoute;
 
 pub const REMOVED_PREFIX: &str = "__removed";
 
@@ -216,7 +216,7 @@ impl_table_meta_value! {
     TableInfoValue,
     TableRegionValue,
     DatanodeTableValue,
-    TableRoute
+    TableRouteValue
 }
 
 #[cfg(test)]

@@ -15,6 +15,7 @@
 use std::fmt::Display;
 
 use api::v1::meta::TableName;
+use serde::{Deserialize, Serialize};
 use snafu::ensure;
 use table::metadata::TableId;
 
@@ -39,6 +40,17 @@ impl NextTableRouteKey {
     }
 }
 
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
+pub struct TableRouteValue {
+    pub region_routes: Vec<RegionRoute>,
+}
+
+impl TableRouteValue {
+    pub fn new(region_routes: Vec<RegionRoute>) -> Self {
+        Self { region_routes }
+    }
+}
+
 impl TableMetaKey for NextTableRouteKey {
     fn as_raw_key(&self) -> Vec<u8> {
         self.to_string().into_bytes()
@@ -60,19 +72,19 @@ impl TableRouteManager {
         Self { kv_backend }
     }
 
-    pub async fn get(&self, table_id: TableId) -> Result<Option<TableRoute>> {
+    pub async fn get(&self, table_id: TableId) -> Result<Option<TableRouteValue>> {
         let key = NextTableRouteKey::new(table_id);
         self.kv_backend
             .get(&key.as_raw_key())
             .await?
-            .map(|kv| TableRoute::try_from_raw_value(kv.value))
+            .map(|kv| TableRouteValue::try_from_raw_value(kv.value))
             .transpose()
     }
 
     // Creates TableRoute key and value. If the key already exists, check whether the value is the same.
-    pub async fn create(&self, table: Table, region_routes: Vec<RegionRoute>) -> Result<()> {
-        let key = NextTableRouteKey::new(table.id as u32);
-        let val = TableRoute::new(table, region_routes);
+    pub async fn create(&self, table_id: TableId, region_routes: Vec<RegionRoute>) -> Result<()> {
+        let key = NextTableRouteKey::new(table_id);
+        let val = TableRouteValue::new(region_routes);
         let req = CompareAndPutRequest::new()
             .with_key(key.as_raw_key())
             .with_value(val.try_as_raw_value()?);
@@ -81,7 +93,7 @@ impl TableRouteManager {
             if !resp.success {
                 let Some(cur) = resp
                     .prev_kv
-                    .map(|kv|TableRoute::try_from_raw_value(kv.value))
+                    .map(|kv|TableRouteValue::try_from_raw_value(kv.value))
                     .transpose()?
                 else {
                     return UnexpectedSnafu {
@@ -111,9 +123,9 @@ impl TableRouteManager {
     pub async fn compare_and_put(
         &self,
         table_id: TableId,
-        expect: Option<TableRoute>,
-        table_route: TableRoute,
-    ) -> Result<std::result::Result<(), Option<TableRoute>>> {
+        expect: Option<TableRouteValue>,
+        table_route: TableRouteValue,
+    ) -> Result<std::result::Result<(), Option<TableRouteValue>>> {
         let key = NextTableRouteKey::new(table_id);
         let raw_key = key.as_raw_key();
 
@@ -135,7 +147,7 @@ impl TableRouteManager {
             } else {
                 Err(resp
                     .prev_kv
-                    .map(|x| TableRoute::try_from_raw_value(x.value))
+                    .map(|x| TableRouteValue::try_from_raw_value(x.value))
                     .transpose()?)
             })
         })
@@ -193,7 +205,7 @@ mod tests {
     use api::v1::meta::TableName as PbTableName;
 
     use super::TableRouteKey;
-    use crate::key::table_route::TableRouteManager;
+    use crate::key::table_route::{TableRouteManager, TableRouteValue};
     use crate::kv_backend::memory::MemoryKvBackend;
     use crate::rpc::router::{RegionRoute, Table, TableRoute};
     use crate::table_name::TableName;
@@ -202,30 +214,28 @@ mod tests {
     async fn test_table_route_manager() {
         let mgr = TableRouteManager::new(Arc::new(MemoryKvBackend::default()));
 
+        let table_id = 1024u32;
         let table = Table {
-            id: 1024,
+            id: table_id as u64,
             table_name: TableName::new("foo", "bar", "baz"),
             table_schema: b"mock schema".to_vec(),
         };
         let region_route = RegionRoute::default();
         let region_routes = vec![region_route];
 
-        mgr.create(table.clone(), region_routes.clone())
-            .await
-            .unwrap();
+        mgr.create(table_id, region_routes.clone()).await.unwrap();
 
         let got = mgr.get(1024).await.unwrap().unwrap();
 
-        assert_eq!(got.table, table);
         assert_eq!(got.region_routes, region_routes);
 
         let empty = mgr.get(1023).await.unwrap();
         assert!(empty.is_none());
 
-        let expect = TableRoute::new(table, region_routes);
+        let expect = TableRouteValue::new(region_routes);
 
         let mut updated = expect.clone();
-        updated.table.table_schema = b"hi".to_vec();
+        updated.region_routes.push(RegionRoute::default());
 
         mgr.compare_and_put(1024, Some(expect.clone()), updated.clone())
             .await
