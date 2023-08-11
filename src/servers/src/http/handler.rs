@@ -42,7 +42,7 @@ pub async fn sql(
     State(state): State<ApiState>,
     Query(query_params): Query<SqlQuery>,
     // TODO(fys): pass _user_info into query context
-    _user_info: Extension<UserInfoRef>,
+    user_info: Extension<UserInfoRef>,
     Form(form_params): Form<SqlQuery>,
 ) -> Json<JsonResponse> {
     let sql_handler = &state.sql_handler;
@@ -61,6 +61,7 @@ pub async fn sql(
     let resp = if let Some(sql) = &sql {
         match crate::http::query_context_from_db(sql_handler.clone(), db).await {
             Ok(query_ctx) => {
+                query_ctx.set_current_user(Some(user_info.0));
                 JsonResponse::from_output(sql_handler.do_query(sql, query_ctx).await).await
             }
             Err(resp) => resp,
@@ -101,7 +102,7 @@ pub async fn promql(
     State(state): State<ApiState>,
     Query(params): Query<PromqlQuery>,
     // TODO(fys): pass _user_info into query context
-    _user_info: Extension<UserInfoRef>,
+    user_info: Extension<UserInfoRef>,
 ) -> Json<JsonResponse> {
     let sql_handler = &state.sql_handler;
     let exec_start = Instant::now();
@@ -117,6 +118,7 @@ pub async fn promql(
     let prom_query = params.into();
     let resp = match super::query_context_from_db(sql_handler.clone(), db).await {
         Ok(query_ctx) => {
+            query_ctx.set_current_user(Some(user_info.0));
             JsonResponse::from_output(sql_handler.do_promql_query(&prom_query, query_ctx).await)
                 .await
         }

@@ -14,9 +14,10 @@
 
 use std::collections::HashMap;
 
+use auth::UserInfoRef;
 use axum::extract::{Query, RawBody, State};
 use axum::http::StatusCode as HttpStatusCode;
-use axum::Json;
+use axum::{Extension, Json};
 use hyper::Body;
 use serde::{Deserialize, Serialize};
 use session::context::QueryContext;
@@ -77,12 +78,14 @@ pub enum OpentsdbPutResponse {
 pub async fn put(
     State(opentsdb_handler): State<OpentsdbProtocolHandlerRef>,
     Query(params): Query<HashMap<String, String>>,
+    user_info: Extension<UserInfoRef>,
     RawBody(body): RawBody,
 ) -> Result<(HttpStatusCode, Json<OpentsdbPutResponse>)> {
     let summary = params.contains_key("summary");
     let details = params.contains_key("details");
 
     let ctx = QueryContext::with_db_name(params.get("db"));
+    ctx.set_current_user(Some(user_info.0));
 
     let data_points = parse_data_points(body).await?;
 
