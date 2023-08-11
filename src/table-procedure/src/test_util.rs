@@ -83,7 +83,7 @@ impl TestEnv {
         let state_store = Arc::new(ObjectStateStore::new(object_store));
         let procedure_manager = Arc::new(LocalManager::new(config, state_store));
 
-        let catalog_manager = MemoryCatalogManager::default();
+        let catalog_manager = MemoryCatalogManager::with_default_setup();
 
         TestEnv {
             dir,

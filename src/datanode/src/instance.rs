@@ -208,7 +208,7 @@ impl Instance {
         let (catalog_manager, table_id_provider, region_alive_keepers) = match opts.mode {
             Mode::Standalone => {
                 if opts.enable_memory_catalog {
-                    let catalog = catalog::local::MemoryCatalogManager::default();
+                    let catalog = catalog::local::MemoryCatalogManager::with_default_setup();
                     let table = NumbersTable::new(MIN_USER_TABLE_ID);
 
                     let _ = catalog

@@ -1389,7 +1389,7 @@ mod test {
             .build()
             .unwrap();
         let table = Arc::new(EmptyTable::from_table_info(&table_info));
-        let catalog_list = MemoryCatalogManager::default();
+        let catalog_list = MemoryCatalogManager::with_default_setup();
         assert!(catalog_list
             .register_table(RegisterTableRequest {
                 catalog: DEFAULT_CATALOG_NAME.to_string(),

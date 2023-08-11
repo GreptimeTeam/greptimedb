@@ -130,7 +130,7 @@ mod tests {
         let query_ctx = &QueryContext::with("greptime", "public");
 
         let table_provider =
-            DfTableSourceProvider::new(MemoryCatalogManager::default(), true, query_ctx);
+            DfTableSourceProvider::new(MemoryCatalogManager::with_default_setup(), true, query_ctx);
 
         let table_ref = TableReference::Bare {
             table: Cow::Borrowed("table_name"),

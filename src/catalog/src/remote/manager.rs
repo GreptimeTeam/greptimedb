@@ -67,7 +67,7 @@ impl RemoteCatalogManager {
             backend,
             system_table_requests: Default::default(),
             region_alive_keepers,
-            memory_catalog_manager: MemoryCatalogManager::default(),
+            memory_catalog_manager: MemoryCatalogManager::with_default_setup(),
             table_metadata_manager,
         }
     }

@@ -245,9 +245,9 @@ impl CatalogManager for MemoryCatalogManager {
 }
 
 impl MemoryCatalogManager {
-    /// Yes this is the `default()` constructor
-    #[allow(clippy::should_implement_trait)]
-    pub fn default() -> Arc<Self> {
+    /// Create a manager with some default setups
+    /// (e.g. default catalog/schema and information schema)
+    pub fn with_default_setup() -> Arc<Self> {
         let manager = Arc::new(Self {
             table_id: AtomicU32::new(MIN_USER_TABLE_ID),
             catalogs: Default::default(),
@@ -353,7 +353,7 @@ impl MemoryCatalogManager {
 
     #[cfg(any(test, feature = "testing"))]
     pub fn new_with_table(table: TableRef) -> Arc<Self> {
-        let manager = Self::default();
+        let manager = Self::with_default_setup();
         let request = RegisterTableRequest {
             catalog: DEFAULT_CATALOG_NAME.to_string(),
             schema: DEFAULT_SCHEMA_NAME.to_string(),
@@ -368,7 +368,7 @@ impl MemoryCatalogManager {
 
 /// Create a memory catalog list contains a numbers table for test
 pub fn new_memory_catalog_manager() -> Result<Arc<MemoryCatalogManager>> {
-    Ok(MemoryCatalogManager::default())
+    Ok(MemoryCatalogManager::with_default_setup())
 }
 
 #[cfg(test)]
@@ -411,7 +411,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_mem_manager_rename_table() {
-        let catalog = MemoryCatalogManager::default();
+        let catalog = MemoryCatalogManager::with_default_setup();
         let table_name = "test_table";
         assert!(!catalog
             .table_exist(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, table_name)
@@ -475,7 +475,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_catalog_rename_table() {
-        let catalog = MemoryCatalogManager::default();
+        let catalog = MemoryCatalogManager::with_default_setup();
         let table_name = "num";
         let table_id = 2333;
         let table: TableRef = Arc::new(NumbersTable::new(table_id));
@@ -526,14 +526,14 @@ mod tests {
 
     #[test]
     pub fn test_register_if_absent() {
-        let list = MemoryCatalogManager::default();
+        let list = MemoryCatalogManager::with_default_setup();
         assert!(!list.register_catalog_if_absent("test_catalog".to_string(),));
         assert!(list.register_catalog_if_absent("test_catalog".to_string()));
     }
 
     #[tokio::test]
     pub async fn test_catalog_deregister_table() {
-        let catalog = MemoryCatalogManager::default();
+        let catalog = MemoryCatalogManager::with_default_setup();
         let table_name = "foo_table";
 
         let register_table_req = RegisterTableRequest {
@@ -568,7 +568,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_catalog_deregister_schema() {
-        let catalog = MemoryCatalogManager::default();
+        let catalog = MemoryCatalogManager::with_default_setup();
 
         // Registers a catalog, a schema, and a table.
         let catalog_name = "foo_catalog".to_string();
