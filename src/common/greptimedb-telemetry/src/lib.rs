@@ -33,7 +33,7 @@ pub static TELEMETRY_INTERVAL: Duration = Duration::from_secs(60 * 30);
 /// The default connect timeout to greptime cloud.
 const GREPTIMEDB_TELEMETRY_CLIENT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// The default request timeout to greptime cloud.
-const GREPTIMEDB_TELEMETRY_CLIENT_TIMEOUT: Duration = Duration::from_secs(10);
+const GREPTIMEDB_TELEMETRY_CLIENT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub enum GreptimeDBTelemetryTask {
     Enable(RepeatedTask<Error>),
@@ -209,7 +209,7 @@ impl GreptimeDBTelemetry {
     pub fn new(working_home: Option<String>, statistics: Box<dyn Collector + Send + Sync>) -> Self {
         let client = Client::builder()
             .connect_timeout(GREPTIMEDB_TELEMETRY_CLIENT_CONNECT_TIMEOUT)
-            .timeout(GREPTIMEDB_TELEMETRY_CLIENT_TIMEOUT)
+            .timeout(GREPTIMEDB_TELEMETRY_CLIENT_REQUEST_TIMEOUT)
             .build();
         Self {
             working_home,
