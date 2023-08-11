@@ -253,7 +253,7 @@ impl MemoryCatalogManager {
             catalogs: Default::default(),
         });
 
-        // Safety: default catalog/schema is registerd in order so no CatalogNotFound error will occur
+        // Safety: default catalog/schema is registered in order so no CatalogNotFound error will occur
         manager
             .clone()
             .register_catalog_sync(DEFAULT_CATALOG_NAME.to_string())

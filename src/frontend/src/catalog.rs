@@ -379,10 +379,8 @@ impl CatalogManager for FrontendCatalogManager {
     }
 
     async fn table_exist(&self, catalog: &str, schema: &str, table: &str) -> CatalogResult<bool> {
-        if schema == INFORMATION_SCHEMA_NAME {
-            if table == TABLES || table == COLUMNS {
-                return Ok(true);
-            }
+        if schema == INFORMATION_SCHEMA_NAME && (table == TABLES || table == COLUMNS) {
+            return Ok(true);
         }
 
         let key = TableNameKey::new(catalog, schema, table);
