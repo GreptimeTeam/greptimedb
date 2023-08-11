@@ -118,7 +118,6 @@ impl LocalCatalogManager {
     async fn init_system_catalog(&self) -> Result<()> {
         // register default catalog and default schema
         self.catalogs
-            .clone()
             .register_catalog_sync(DEFAULT_CATALOG_NAME.to_string())?;
         self.catalogs.register_schema_sync(RegisterSchemaRequest {
             catalog: DEFAULT_CATALOG_NAME.to_string(),
@@ -127,7 +126,6 @@ impl LocalCatalogManager {
 
         // register SystemCatalogTable
         self.catalogs
-            .clone()
             .register_catalog_sync(SYSTEM_CATALOG_NAME.to_string())?;
         self.catalogs.register_schema_sync(RegisterSchemaRequest {
             catalog: SYSTEM_CATALOG_NAME.to_string(),
@@ -228,7 +226,6 @@ impl LocalCatalogManager {
             match entry {
                 Entry::Catalog(c) => {
                     self.catalogs
-                        .clone()
                         .register_catalog_sync(c.catalog_name.clone())?;
                     info!("Register catalog: {}", c.catalog_name);
                 }

@@ -180,9 +180,7 @@ async fn open_and_register_table(
         .catalog_exist(&table_ident.catalog)
         .await?
     {
-        memory_catalog_manager
-            .clone()
-            .register_catalog_sync(table_ident.catalog.clone())?;
+        memory_catalog_manager.register_catalog_sync(table_ident.catalog.clone())?;
     }
 
     if !memory_catalog_manager
@@ -427,9 +425,7 @@ impl CatalogManager for RemoteCatalogManager {
     }
 
     async fn register_catalog(self: Arc<Self>, name: String) -> Result<bool> {
-        self.memory_catalog_manager
-            .clone()
-            .register_catalog_sync(name)
+        self.memory_catalog_manager.register_catalog_sync(name)
     }
 
     fn as_any(&self) -> &dyn Any {

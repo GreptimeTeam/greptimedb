@@ -255,7 +255,6 @@ impl MemoryCatalogManager {
 
         // Safety: default catalog/schema is registered in order so no CatalogNotFound error will occur
         manager
-            .clone()
             .register_catalog_sync(DEFAULT_CATALOG_NAME.to_string())
             .unwrap();
         manager
@@ -281,12 +280,12 @@ impl MemoryCatalogManager {
         }
     }
 
-    pub fn register_catalog_sync(self: Arc<Self>, name: String) -> Result<bool> {
+    pub fn register_catalog_sync(self: &Arc<Self>, name: String) -> Result<bool> {
         let mut catalogs = self.catalogs.write().unwrap();
 
         match catalogs.entry(name.clone()) {
             Entry::Vacant(e) => {
-                let catalog = self.clone().create_catalog_entry(name.clone());
+                let catalog = self.create_catalog_entry(name);
                 e.insert(catalog);
                 increment_gauge!(crate::metrics::METRIC_CATALOG_MANAGER_CATALOG_COUNT, 1.0);
                 Ok(true)
@@ -341,10 +340,10 @@ impl MemoryCatalogManager {
         Ok(true)
     }
 
-    fn create_catalog_entry(self: Arc<Self>, catalog: String) -> SchemaEntries {
+    fn create_catalog_entry(self: &Arc<Self>, catalog: String) -> SchemaEntries {
         let information_schema = InformationSchemaProvider::build(
-            catalog.clone(),
-            Arc::downgrade(&self) as Weak<dyn CatalogManager>,
+            catalog,
+            Arc::downgrade(self) as Weak<dyn CatalogManager>,
         );
         let mut catalog = HashMap::new();
         catalog.insert(INFORMATION_SCHEMA_NAME.to_string(), information_schema);
