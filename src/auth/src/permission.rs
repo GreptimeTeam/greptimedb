@@ -22,8 +22,8 @@ use crate::{PermissionCheckerRef, UserInfoRef};
 
 #[derive(Debug, Clone)]
 pub enum PermissionReq<'a> {
-    GrpcRequest(Box<&'a Request>),
-    SqlStatement(Box<&'a Statement>),
+    GrpcRequest(&'a Request),
+    SqlStatement(&'a Statement),
     PromQuery,
     Opentsdb,
     LineProtocol,

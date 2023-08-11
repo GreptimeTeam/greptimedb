@@ -39,10 +39,7 @@ impl GrpcQueryHandler for Instance {
         self.plugins
             .get::<PermissionCheckerRef>()
             .as_ref()
-            .check_permission(
-                ctx.current_user(),
-                PermissionReq::GrpcRequest(Box::new(&request)),
-            )
+            .check_permission(ctx.current_user(), PermissionReq::GrpcRequest(&request))
             .context(PermissionSnafu)?;
 
         let output = match request {

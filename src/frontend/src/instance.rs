@@ -509,7 +509,7 @@ impl SqlQueryHandler for Instance {
                     if let Err(e) = checker
                         .check_permission(
                             query_ctx.current_user(),
-                            PermissionReq::SqlStatement(Box::new(&stmt)),
+                            PermissionReq::SqlStatement(&stmt),
                         )
                         .context(PermissionSnafu)
                     {
@@ -573,10 +573,7 @@ impl SqlQueryHandler for Instance {
             self.plugins
                 .get::<PermissionCheckerRef>()
                 .as_ref()
-                .check_permission(
-                    query_ctx.current_user(),
-                    PermissionReq::SqlStatement(Box::new(&stmt)),
-                )
+                .check_permission(query_ctx.current_user(), PermissionReq::SqlStatement(&stmt))
                 .context(PermissionSnafu)?;
 
             let plan = self

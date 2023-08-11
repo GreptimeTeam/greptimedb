@@ -46,15 +46,13 @@ fn test_permission_checker() {
 
     let grpc_result = checker.check_permission(
         None,
-        PermissionReq::GrpcRequest(Box::new(&Request::Query(Default::default()))),
+        PermissionReq::GrpcRequest(&Request::Query(Default::default())),
     );
     assert_matches!(grpc_result, Ok(true));
 
     let sql_result = checker.check_permission(
         None,
-        PermissionReq::SqlStatement(Box::new(&Statement::ShowDatabases(ShowDatabases::new(
-            ShowKind::All,
-        )))),
+        PermissionReq::SqlStatement(&Statement::ShowDatabases(ShowDatabases::new(ShowKind::All))),
     );
     assert_matches!(sql_result, Ok(false));
 
