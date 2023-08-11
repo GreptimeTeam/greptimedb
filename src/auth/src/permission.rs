@@ -25,6 +25,7 @@ pub enum PermissionReq<'a> {
     GrpcRequest(Box<&'a Request>),
     SqlStatement(Box<&'a Statement>),
     PromQuery,
+    Opentsdb,
 }
 
 pub trait PermissionChecker: Send + Sync {
