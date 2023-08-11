@@ -29,6 +29,10 @@ pub const SYSTEM_CATALOG_TABLE_ID: u32 = 0;
 pub const SCRIPTS_TABLE_ID: u32 = 1;
 /// numbers table id
 pub const NUMBERS_TABLE_ID: u32 = 2;
+/// id for information_schema.tables
+pub const INFORMATION_SCHEMA_TABLES_TABLE_ID: u32 = 3;
+/// id for information_schema.columns
+pub const INFORMATION_SCHEMA_COLUMNS_TABLE_ID: u32 = 4;
 
 pub const MITO_ENGINE: &str = "mito";
 pub const IMMUTABLE_FILE_ENGINE: &str = "file";

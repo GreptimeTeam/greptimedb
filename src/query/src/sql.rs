@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod show;
+mod show_create_table;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -185,7 +185,7 @@ pub async fn show_tables(
 pub fn show_create_table(table: TableRef, partitions: Option<Partitions>) -> Result<Output> {
     let table_info = table.table_info();
     let table_name = &table_info.name;
-    let mut stmt = show::create_table_stmt(&table_info)?;
+    let mut stmt = show_create_table::create_table_stmt(&table_info)?;
     stmt.partitions = partitions;
     let sql = format!("{}", stmt);
     let columns = vec![

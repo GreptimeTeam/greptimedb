@@ -86,6 +86,7 @@ pub(crate) async fn create_standalone_instance(test_name: &str) -> MockStandalon
 
     assert!(dn_instance
         .catalog_manager()
+        .clone()
         .register_catalog("another_catalog".to_string())
         .await
         .is_ok());
