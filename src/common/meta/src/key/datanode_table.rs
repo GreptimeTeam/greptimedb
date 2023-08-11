@@ -17,10 +17,11 @@ use snafu::{ensure, OptionExt};
 use store_api::storage::RegionNumber;
 use table::metadata::TableId;
 
+use super::table_region::RegionDistribution;
 use super::{DATANODE_TABLE_KEY_PATTERN, DATANODE_TABLE_KEY_PREFIX};
 use crate::error::{InvalidTableMetadataSnafu, MoveRegionSnafu, Result, UnexpectedSnafu};
 use crate::key::{to_removed_key, TableMetaKey};
-use crate::kv_backend::txn::{Compare, CompareOp, Txn, TxnOp};
+use crate::kv_backend::txn::{Compare, CompareOp, Txn, TxnOp, TxnRequest};
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::store::{BatchGetRequest, CompareAndPutRequest, MoveValueRequest, RangeRequest};
 use crate::DatanodeId;
@@ -103,6 +104,96 @@ impl DatanodeTableManager {
             .await?
             .map(|kv| DatanodeTableValue::try_from_raw_value(kv.value))
             .transpose()
+    }
+
+    /// Builds the create datanode table transactions. It only executes while the primary keys comparing successes.
+    pub fn build_create_txn(
+        &self,
+        txn: &mut TxnRequest,
+        table_id: TableId,
+        distribution: RegionDistribution,
+    ) -> Result<()> {
+        let txns = distribution
+            .into_iter()
+            .map(|(datanode_id, regions)| {
+                let key = DatanodeTableKey::new(datanode_id, table_id);
+                let val = DatanodeTableValue::new(table_id, regions);
+
+                Ok(TxnOp::Put(key.as_raw_key(), val.try_as_raw_value()?))
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        txn.success.extend(txns);
+
+        Ok(())
+    }
+
+    /// Builds the update datanode table transactions. It only executes while the primary keys comparing successes.
+    pub(crate) fn build_update_txn(
+        &self,
+        txn: &mut TxnRequest,
+        table_id: TableId,
+        current_region_distribution: RegionDistribution,
+        new_region_distribution: RegionDistribution,
+    ) -> Result<()> {
+        let mut opts = Vec::new();
+
+        // Removes the old datanode table key value pairs
+        for current_datanode in current_region_distribution.keys() {
+            if !new_region_distribution.contains_key(current_datanode) {
+                let key = DatanodeTableKey::new(*current_datanode, table_id);
+                let raw_key = key.as_raw_key();
+                opts.push(TxnOp::Delete(raw_key))
+            }
+        }
+
+        for (datanode, regions) in new_region_distribution.into_iter() {
+            if let Some(current_region) = current_region_distribution.get(&datanode) {
+                // Updates if need.
+                if *current_region != regions {
+                    let key = DatanodeTableKey::new(datanode, table_id);
+                    let raw_key = key.as_raw_key();
+                    let val = DatanodeTableValue::new(table_id, regions).try_as_raw_value()?;
+                    opts.push(TxnOp::Put(raw_key, val));
+                }
+            } else {
+                // New datanodes
+                let key = DatanodeTableKey::new(datanode, table_id);
+                let raw_key = key.as_raw_key();
+                let val = DatanodeTableValue::new(table_id, regions).try_as_raw_value()?;
+                opts.push(TxnOp::Put(raw_key, val));
+            }
+        }
+
+        txn.success.extend(opts);
+        Ok(())
+    }
+
+    /// Builds the delete datanode table transactions. It only executes while the primary keys comparing successes.
+    pub fn build_delete_txn(
+        &self,
+        txn: &mut TxnRequest,
+        table_id: TableId,
+        distribution: RegionDistribution,
+    ) -> Result<()> {
+        let txns = distribution
+            .into_iter()
+            .map(|(datanode_id, regions)| {
+                let key = DatanodeTableKey::new(datanode_id, table_id);
+                let raw_key = key.as_raw_key();
+                let removed_key = to_removed_key(&String::from_utf8_lossy(&raw_key));
+                let val = DatanodeTableValue::new(table_id, regions);
+
+                Ok(TxnOp::Put(
+                    removed_key.into_bytes(),
+                    val.try_as_raw_value()?,
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        txn.success.extend(txns);
+
+        Ok(())
     }
 
     /// Create DatanodeTable key and value. If the key already exists, check if the value is the same.

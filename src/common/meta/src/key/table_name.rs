@@ -25,7 +25,7 @@ use crate::error::{
 };
 use crate::key::{to_removed_key, TableMetaKey};
 use crate::kv_backend::memory::MemoryKvBackend;
-use crate::kv_backend::txn::{Compare, CompareOp, Txn, TxnOp};
+use crate::kv_backend::txn::{Compare, CompareOp, Txn, TxnOp, TxnRequest};
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::store::{CompareAndPutRequest, MoveValueRequest, RangeRequest};
 use crate::table_name::TableName;
@@ -148,6 +148,62 @@ impl Default for TableNameManager {
 impl TableNameManager {
     pub fn new(kv_backend: KvBackendRef) -> Self {
         Self { kv_backend }
+    }
+
+    /// Builds a create table name transaction. It only executes while the primary keys comparing successes.
+    pub(crate) fn build_create_txn(
+        &self,
+        txn: &mut TxnRequest,
+        key: &TableNameKey<'_>,
+        table_id: TableId,
+    ) -> Result<()> {
+        let raw_key = key.as_raw_key();
+        let value = TableNameValue::new(table_id);
+        let raw_value = value.try_as_raw_value()?;
+
+        txn.success.push(TxnOp::Put(raw_key, raw_value));
+
+        Ok(())
+    }
+
+    /// Builds a update table name transaction. It only executes while the primary keys comparing successes.
+    pub(crate) fn build_update_txn(
+        &self,
+        txn: &mut TxnRequest,
+        key: &TableNameKey<'_>,
+        new_key: &TableNameKey<'_>,
+        table_id: TableId,
+    ) -> Result<()> {
+        let raw_key = key.as_raw_key();
+
+        txn.success.push(TxnOp::Delete(raw_key));
+
+        let new_raw_key = new_key.as_raw_key();
+        let value = TableNameValue::new(table_id);
+        let raw_value = value.try_as_raw_value()?;
+
+        txn.success.push(TxnOp::Put(new_raw_key, raw_value));
+
+        Ok(())
+    }
+
+    /// Builds a delete table name transaction. It only executes while the primary keys comparing successes.
+    pub(crate) fn build_delete_txn(
+        &self,
+        txn: &mut TxnRequest,
+        key: &TableNameKey<'_>,
+        table_id: TableId,
+    ) -> Result<()> {
+        let raw_key = key.as_raw_key();
+        let value = TableNameValue::new(table_id);
+        let raw_value = value.try_as_raw_value()?;
+        let removed_key = to_removed_key(&String::from_utf8_lossy(&raw_key));
+
+        txn.success.push(TxnOp::Delete(raw_key));
+        txn.success
+            .push(TxnOp::Put(removed_key.into_bytes(), raw_value));
+
+        Ok(())
     }
 
     /// Create TableName key and value. If the key already exists, check if the value is the same.

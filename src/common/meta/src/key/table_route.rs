@@ -21,9 +21,11 @@ use table::metadata::TableId;
 
 use crate::error::{Result, UnexpectedSnafu};
 use crate::key::{to_removed_key, TableMetaKey};
+use crate::kv_backend::txn::{Compare, CompareOp, TxnOp, TxnRequest};
 use crate::kv_backend::KvBackendRef;
-use crate::rpc::router::{RegionRoute, Table, TableRoute};
-use crate::rpc::store::{CompareAndPutRequest, MoveValueRequest};
+use crate::rpc::router::{region_distribution, RegionRoute, Table, TableRoute};
+use crate::rpc::store::{BatchGetRequest, CompareAndPutRequest, MoveValueRequest};
+use crate::rpc::KeyValue;
 
 pub const TABLE_ROUTE_PREFIX: &str = "__meta_table_route";
 
@@ -53,6 +55,13 @@ impl TableRouteValue {
             version: 0,
         }
     }
+
+    pub fn update(&self, region_routes: Vec<RegionRoute>) -> Self {
+        Self {
+            region_routes,
+            version: self.version + 1,
+        }
+    }
 }
 
 impl TableMetaKey for NextTableRouteKey {
@@ -74,6 +83,94 @@ pub struct TableRouteManager {
 impl TableRouteManager {
     pub fn new(kv_backend: KvBackendRef) -> Self {
         Self { kv_backend }
+    }
+
+    /// Builds a create table route transaction. it expected the `__table_route/{table_id}` wasn't occupied.
+    pub(crate) fn build_create_txn(
+        &self,
+        txn: &mut TxnRequest,
+        table_id: TableId,
+        table_route_value: &TableRouteValue,
+    ) -> Result<()> {
+        let key = NextTableRouteKey::new(table_id);
+        let raw_key = key.as_raw_key();
+
+        txn.compare.push(Compare::with_not_exist_value(
+            raw_key.clone(),
+            CompareOp::Equal,
+        ));
+
+        txn.success
+            .push(TxnOp::Put(raw_key, table_route_value.try_as_raw_value()?));
+
+        Ok(())
+    }
+
+    /// Builds a delete table info transaction, it expected the remote value equals the `current_table_info_value`.
+    pub(crate) fn build_update_txn(
+        &self,
+        txn: &mut TxnRequest,
+        table_id: TableId,
+        current_table_route_value: &TableRouteValue,
+        new_table_route_value: &TableRouteValue,
+    ) -> Result<()> {
+        let key = NextTableRouteKey::new(table_id);
+        let raw_key = key.as_raw_key();
+        let raw_value = current_table_route_value.try_as_raw_value()?;
+
+        txn.compare.push(Compare::with_value(
+            raw_key.clone(),
+            CompareOp::Equal,
+            raw_value.clone(),
+        ));
+
+        let new_raw_value: Vec<u8> = new_table_route_value.try_as_raw_value()?;
+
+        txn.success.push(TxnOp::Put(raw_key, new_raw_value));
+
+        Ok(())
+    }
+
+    /// Builds a delete table info transaction, it expected the remote value equals the `table_info_value`.
+    pub(crate) fn build_delete_txn(
+        &self,
+        txn: &mut TxnRequest,
+        table_id: TableId,
+        table_route_value: &TableRouteValue,
+    ) -> Result<()> {
+        let key = NextTableRouteKey::new(table_id);
+        let raw_key = key.as_raw_key();
+        let raw_value = table_route_value.try_as_raw_value()?;
+        let removed_key = to_removed_key(&String::from_utf8_lossy(&raw_key));
+
+        txn.compare.push(Compare::with_value(
+            raw_key.clone(),
+            CompareOp::Equal,
+            raw_value.clone(),
+        ));
+
+        txn.success.push(TxnOp::Delete(raw_key));
+        txn.success
+            .push(TxnOp::Put(removed_key.into_bytes(), raw_value));
+
+        Ok(())
+    }
+
+    pub(crate) fn build_batch_get(
+        &self,
+        batch: &mut BatchGetRequest,
+        table_id: TableId,
+    ) -> impl FnOnce(&Vec<KeyValue>) -> Result<Option<TableRouteValue>> {
+        let key = NextTableRouteKey::new(table_id);
+        let raw_key = key.as_raw_key();
+        batch.keys.push(raw_key.clone());
+
+        move |kvs: &Vec<KeyValue>| {
+            kvs.iter()
+                .find(|kv| kv.key == raw_key)
+                .map(|kv| TableRouteValue::try_from_raw_value_ref(&kv.value))
+                .transpose()
+        }
     }
 
     pub async fn get(&self, table_id: TableId) -> Result<Option<TableRouteValue>> {

@@ -120,6 +120,21 @@ pub struct Txn {
     c_else: bool,
 }
 
+impl From<TxnRequest> for Txn {
+    fn from(req: TxnRequest) -> Self {
+        let c_when = !req.compare.is_empty();
+        let c_then = !req.success.is_empty();
+        let c_else = !req.failure.is_empty();
+
+        Self {
+            req,
+            c_when,
+            c_then,
+            c_else,
+        }
+    }
+}
+
 impl Txn {
     pub fn new() -> Self {
         Txn::default()
