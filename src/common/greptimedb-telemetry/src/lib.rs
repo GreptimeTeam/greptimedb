@@ -50,7 +50,7 @@ impl GreptimeDBTelemetryTask {
     }
 
     pub fn start(&self, runtime: Runtime) -> Result<()> {
-        print_warning_log();
+        print_anonymous_usage_data_disclaimer();
 
         match self {
             GreptimeDBTelemetryTask::Enable(task) => task.start(runtime),
@@ -144,8 +144,7 @@ pub trait Collector {
     }
 }
 
-/// Print warning log about telemetry
-fn print_warning_log() {
+fn print_anonymous_usage_data_disclaimer() {
     info!("Attention: GreptimeDB now collects anonymous usage data to help improve its roadmap and prioritize features.");
     info!(
         "To learn more about this anonymous program and how to deactivate it if you don't want to participate, please visit the following URL: ");
