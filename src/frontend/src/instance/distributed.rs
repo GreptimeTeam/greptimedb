@@ -79,7 +79,7 @@ const MAX_VALUE: &str = "MAXVALUE";
 #[derive(Clone)]
 pub struct DistInstance {
     meta_client: Arc<MetaClient>,
-    catalog_manager: Arc<FrontendCatalogManager>,
+    pub(crate) catalog_manager: Arc<FrontendCatalogManager>,
     datanode_clients: Arc<DatanodeClients>,
 }
 

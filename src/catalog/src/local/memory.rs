@@ -16,9 +16,11 @@ use std::any::Any;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, Weak};
 
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID};
+use common_catalog::consts::{
+    DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME, MIN_USER_TABLE_ID,
+};
 use metrics::{decrement_gauge, increment_gauge};
 use snafu::OptionExt;
 use table::metadata::TableId;
@@ -28,6 +30,7 @@ use table::TableRef;
 use crate::error::{
     CatalogNotFoundSnafu, Result, SchemaNotFoundSnafu, TableExistsSnafu, TableNotFoundSnafu,
 };
+use crate::information_schema::InformationSchemaProvider;
 use crate::{
     CatalogManager, DeregisterSchemaRequest, DeregisterTableRequest, RegisterSchemaRequest,
     RegisterSystemTableRequest, RegisterTableRequest, RenameTableRequest,
@@ -40,24 +43,6 @@ pub struct MemoryCatalogManager {
     /// Collection of catalogs containing schemas and ultimately Tables
     pub catalogs: RwLock<HashMap<String, SchemaEntries>>,
     pub table_id: AtomicU32,
-}
-
-impl Default for MemoryCatalogManager {
-    fn default() -> Self {
-        let manager = Self {
-            table_id: AtomicU32::new(MIN_USER_TABLE_ID),
-            catalogs: Default::default(),
-        };
-
-        let catalog = HashMap::from([(DEFAULT_SCHEMA_NAME.to_string(), HashMap::new())]);
-        let _ = manager
-            .catalogs
-            .write()
-            .unwrap()
-            .insert(DEFAULT_CATALOG_NAME.to_string(), catalog);
-
-        manager
-    }
 }
 
 #[async_trait::async_trait]
@@ -250,7 +235,7 @@ impl CatalogManager for MemoryCatalogManager {
             .collect())
     }
 
-    async fn register_catalog(&self, name: String) -> Result<bool> {
+    async fn register_catalog(self: Arc<Self>, name: String) -> Result<bool> {
         self.register_catalog_sync(name)
     }
 
@@ -260,6 +245,28 @@ impl CatalogManager for MemoryCatalogManager {
 }
 
 impl MemoryCatalogManager {
+    /// Create a manager with some default setups
+    /// (e.g. default catalog/schema and information schema)
+    pub fn with_default_setup() -> Arc<Self> {
+        let manager = Arc::new(Self {
+            table_id: AtomicU32::new(MIN_USER_TABLE_ID),
+            catalogs: Default::default(),
+        });
+
+        // Safety: default catalog/schema is registered in order so no CatalogNotFound error will occur
+        manager
+            .register_catalog_sync(DEFAULT_CATALOG_NAME.to_string())
+            .unwrap();
+        manager
+            .register_schema_sync(RegisterSchemaRequest {
+                catalog: DEFAULT_CATALOG_NAME.to_string(),
+                schema: DEFAULT_SCHEMA_NAME.to_string(),
+            })
+            .unwrap();
+
+        manager
+    }
+
     /// Registers a catalog and return the catalog already exist
     pub fn register_catalog_if_absent(&self, name: String) -> bool {
         let mut catalogs = self.catalogs.write().unwrap();
@@ -273,12 +280,13 @@ impl MemoryCatalogManager {
         }
     }
 
-    pub fn register_catalog_sync(&self, name: String) -> Result<bool> {
+    pub fn register_catalog_sync(self: &Arc<Self>, name: String) -> Result<bool> {
         let mut catalogs = self.catalogs.write().unwrap();
 
-        match catalogs.entry(name) {
+        match catalogs.entry(name.clone()) {
             Entry::Vacant(e) => {
-                e.insert(HashMap::new());
+                let catalog = self.create_catalog_entry(name);
+                e.insert(catalog);
                 increment_gauge!(crate::metrics::METRIC_CATALOG_MANAGER_CATALOG_COUNT, 1.0);
                 Ok(true)
             }
@@ -332,9 +340,19 @@ impl MemoryCatalogManager {
         Ok(true)
     }
 
+    fn create_catalog_entry(self: &Arc<Self>, catalog: String) -> SchemaEntries {
+        let information_schema = InformationSchemaProvider::build(
+            catalog,
+            Arc::downgrade(self) as Weak<dyn CatalogManager>,
+        );
+        let mut catalog = HashMap::new();
+        catalog.insert(INFORMATION_SCHEMA_NAME.to_string(), information_schema);
+        catalog
+    }
+
     #[cfg(any(test, feature = "testing"))]
-    pub fn new_with_table(table: TableRef) -> Self {
-        let manager = Self::default();
+    pub fn new_with_table(table: TableRef) -> Arc<Self> {
+        let manager = Self::with_default_setup();
         let request = RegisterTableRequest {
             catalog: DEFAULT_CATALOG_NAME.to_string(),
             schema: DEFAULT_SCHEMA_NAME.to_string(),
@@ -349,7 +367,7 @@ impl MemoryCatalogManager {
 
 /// Create a memory catalog list contains a numbers table for test
 pub fn new_memory_catalog_manager() -> Result<Arc<MemoryCatalogManager>> {
-    Ok(Arc::new(MemoryCatalogManager::default()))
+    Ok(MemoryCatalogManager::with_default_setup())
 }
 
 #[cfg(test)]
@@ -392,7 +410,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_mem_manager_rename_table() {
-        let catalog = MemoryCatalogManager::default();
+        let catalog = MemoryCatalogManager::with_default_setup();
         let table_name = "test_table";
         assert!(!catalog
             .table_exist(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, table_name)
@@ -456,7 +474,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_catalog_rename_table() {
-        let catalog = MemoryCatalogManager::default();
+        let catalog = MemoryCatalogManager::with_default_setup();
         let table_name = "num";
         let table_id = 2333;
         let table: TableRef = Arc::new(NumbersTable::new(table_id));
@@ -507,14 +525,14 @@ mod tests {
 
     #[test]
     pub fn test_register_if_absent() {
-        let list = MemoryCatalogManager::default();
+        let list = MemoryCatalogManager::with_default_setup();
         assert!(!list.register_catalog_if_absent("test_catalog".to_string(),));
         assert!(list.register_catalog_if_absent("test_catalog".to_string()));
     }
 
     #[tokio::test]
     pub async fn test_catalog_deregister_table() {
-        let catalog = MemoryCatalogManager::default();
+        let catalog = MemoryCatalogManager::with_default_setup();
         let table_name = "foo_table";
 
         let register_table_req = RegisterTableRequest {
@@ -549,7 +567,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_catalog_deregister_schema() {
-        let catalog = MemoryCatalogManager::default();
+        let catalog = MemoryCatalogManager::with_default_setup();
 
         // Registers a catalog, a schema, and a table.
         let catalog_name = "foo_catalog".to_string();
@@ -567,6 +585,7 @@ mod tests {
             table: Arc::new(NumbersTable::default()),
         };
         catalog
+            .clone()
             .register_catalog(catalog_name.clone())
             .await
             .unwrap();

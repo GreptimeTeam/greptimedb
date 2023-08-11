@@ -49,7 +49,7 @@ pub trait CatalogManager: Send + Sync {
     async fn start(&self) -> Result<()>;
 
     /// Registers a catalog to catalog manager, returns whether the catalog exist before.
-    async fn register_catalog(&self, name: String) -> Result<bool>;
+    async fn register_catalog(self: Arc<Self>, name: String) -> Result<bool>;
 
     /// Register a schema with catalog name and schema name. Retuens whether the
     /// schema registered.

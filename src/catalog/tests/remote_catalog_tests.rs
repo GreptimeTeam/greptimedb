@@ -26,7 +26,9 @@ mod tests {
     use catalog::remote::region_alive_keeper::RegionAliveKeepers;
     use catalog::remote::{CachedMetaKvBackend, RemoteCatalogManager};
     use catalog::{CatalogManager, RegisterSchemaRequest, RegisterTableRequest};
-    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO_ENGINE};
+    use common_catalog::consts::{
+        DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME, MITO_ENGINE,
+    };
     use common_meta::helper::{CatalogKey, CatalogValue, SchemaKey, SchemaValue};
     use common_meta::ident::TableIdent;
     use common_meta::key::TableMetadataManager;
@@ -179,12 +181,17 @@ mod tests {
             catalog_manager.catalog_names().await.unwrap()
         );
 
+        let mut schema_names = catalog_manager
+            .schema_names(DEFAULT_CATALOG_NAME)
+            .await
+            .unwrap();
+        schema_names.sort_unstable();
         assert_eq!(
-            vec![DEFAULT_SCHEMA_NAME.to_string()],
-            catalog_manager
-                .schema_names(DEFAULT_CATALOG_NAME)
-                .await
-                .unwrap()
+            vec![
+                INFORMATION_SCHEMA_NAME.to_string(),
+                DEFAULT_SCHEMA_NAME.to_string()
+            ],
+            schema_names
         );
     }
 
@@ -240,13 +247,18 @@ mod tests {
     async fn test_register_table() {
         let node_id = 42;
         let components = prepare_components(node_id).await;
+        let mut schema_names = components
+            .catalog_manager
+            .schema_names(DEFAULT_CATALOG_NAME)
+            .await
+            .unwrap();
+        schema_names.sort_unstable();
         assert_eq!(
-            vec![DEFAULT_SCHEMA_NAME.to_string()],
-            components
-                .catalog_manager
-                .schema_names(DEFAULT_CATALOG_NAME)
-                .await
-                .unwrap()
+            vec![
+                INFORMATION_SCHEMA_NAME.to_string(),
+                DEFAULT_SCHEMA_NAME.to_string(),
+            ],
+            schema_names
         );
 
         // register a new table with an nonexistent catalog
@@ -309,6 +321,7 @@ mod tests {
         // register catalog to catalog manager
         assert!(components
             .catalog_manager
+            .clone()
             .register_catalog(catalog_name.clone())
             .await
             .is_ok());
@@ -374,7 +387,7 @@ mod tests {
             .unwrap());
 
         assert_eq!(
-            HashSet::from([schema_name.clone()]),
+            HashSet::from([schema_name.clone(), INFORMATION_SCHEMA_NAME.to_string()]),
             components
                 .catalog_manager
                 .schema_names(&catalog_name)
