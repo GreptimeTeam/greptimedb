@@ -58,7 +58,7 @@ impl InformationSchemaProvider {
     }
 
     /// Build a map of [TableRef] in information schema.
-    /// Includeing `tables` and `columns`.
+    /// Including `tables` and `columns`.
     pub fn build(
         catalog_name: String,
         catalog_manager: Weak<dyn CatalogManager>,
