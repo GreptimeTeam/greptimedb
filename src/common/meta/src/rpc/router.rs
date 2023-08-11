@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use api::v1::meta::{
     Partition as PbPartition, Peer as PbPeer, Region as PbRegion, RegionRoute as PbRegionRoute,
@@ -280,7 +280,7 @@ pub struct Region {
     pub id: RegionId,
     pub name: String,
     pub partition: Option<Partition>,
-    pub attrs: HashMap<String, String>,
+    pub attrs: BTreeMap<String, String>,
 }
 
 impl From<PbRegion> for Region {
@@ -289,7 +289,7 @@ impl From<PbRegion> for Region {
             id: r.id.into(),
             name: r.name,
             partition: r.partition.map(Into::into),
-            attrs: r.attrs,
+            attrs: r.attrs.into_iter().collect::<BTreeMap<_, _>>(),
         }
     }
 }
@@ -300,7 +300,7 @@ impl From<Region> for PbRegion {
             id: region.id.into(),
             name: region.name,
             partition: region.partition.map(Into::into),
-            attrs: region.attrs,
+            attrs: region.attrs.into_iter().collect::<HashMap<_, _>>(),
         }
     }
 }
@@ -521,7 +521,7 @@ mod tests {
                         id: 1.into(),
                         name: "r1".to_string(),
                         partition: None,
-                        attrs: HashMap::new(),
+                        attrs: BTreeMap::new(),
                     },
                     leader_peer: Some(Peer::new(2, "a2")),
                     follower_peers: vec![Peer::new(1, "a1"), Peer::new(3, "a3")],
@@ -531,7 +531,7 @@ mod tests {
                         id: 2.into(),
                         name: "r2".to_string(),
                         partition: None,
-                        attrs: HashMap::new(),
+                        attrs: BTreeMap::new(),
                     },
                     leader_peer: Some(Peer::new(1, "a1")),
                     follower_peers: vec![Peer::new(2, "a2"), Peer::new(3, "a3")],
