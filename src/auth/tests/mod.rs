@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use api::v1::greptime_request::Request;
 use auth::Error::InternalState;
-use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq, UserInfoRef};
+use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq, PermissionResp, UserInfoRef};
 use sql::statements::show::{ShowDatabases, ShowKind};
 use sql::statements::statement::Statement;
 
@@ -29,10 +29,10 @@ impl PermissionChecker for DummyPermissionChecker {
         &self,
         _user_info: Option<UserInfoRef>,
         req: PermissionReq,
-    ) -> auth::Result<bool> {
+    ) -> auth::Result<PermissionResp> {
         match req {
-            PermissionReq::GrpcRequest(_) => Ok(true),
-            PermissionReq::SqlStatement(_) => Ok(false),
+            PermissionReq::GrpcRequest(_) => Ok(PermissionResp::Allow),
+            PermissionReq::SqlStatement(_) => Ok(PermissionResp::Reject),
             _ => Err(InternalState {
                 msg: "testing".to_string(),
             }),
@@ -48,13 +48,13 @@ fn test_permission_checker() {
         None,
         PermissionReq::GrpcRequest(&Request::Query(Default::default())),
     );
-    assert_matches!(grpc_result, Ok(true));
+    assert_matches!(grpc_result, Ok(PermissionResp::Allow));
 
     let sql_result = checker.check_permission(
         None,
         PermissionReq::SqlStatement(&Statement::ShowDatabases(ShowDatabases::new(ShowKind::All))),
     );
-    assert_matches!(sql_result, Ok(false));
+    assert_matches!(sql_result, Ok(PermissionResp::Reject));
 
     let err_result = checker.check_permission(None, PermissionReq::Opentsdb);
     assert_matches!(err_result, Err(InternalState { msg }) if msg == "testing");

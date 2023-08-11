@@ -32,15 +32,29 @@ pub enum PermissionReq<'a> {
     Oltp,
 }
 
+#[derive(Debug)]
+pub enum PermissionResp {
+    Allow,
+    Reject,
+}
+
 pub trait PermissionChecker: Send + Sync {
-    fn check_permission(&self, user_info: Option<UserInfoRef>, req: PermissionReq) -> Result<bool>;
+    fn check_permission(
+        &self,
+        user_info: Option<UserInfoRef>,
+        req: PermissionReq,
+    ) -> Result<PermissionResp>;
 }
 
 impl PermissionChecker for Option<&PermissionCheckerRef> {
-    fn check_permission(&self, user_info: Option<UserInfoRef>, req: PermissionReq) -> Result<bool> {
+    fn check_permission(
+        &self,
+        user_info: Option<UserInfoRef>,
+        req: PermissionReq,
+    ) -> Result<PermissionResp> {
         match self {
             Some(checker) => checker.check_permission(user_info, req),
-            None => Ok(true),
+            None => Ok(PermissionResp::Allow),
         }
     }
 }

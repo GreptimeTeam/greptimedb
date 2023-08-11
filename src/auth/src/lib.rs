@@ -23,7 +23,7 @@ pub mod tests;
 
 pub use common::{user_provider_from_option, userinfo_by_name, HashedPassword, Identity, Password};
 pub use error::{Error, Result};
-pub use permission::{PermissionChecker, PermissionReq};
+pub use permission::{PermissionChecker, PermissionReq, PermissionResp};
 pub use user_info::UserInfo;
 pub use user_provider::UserProvider;
 
