@@ -21,7 +21,9 @@ use std::time::Duration;
 
 use arrow::datatypes::TimeUnit as ArrowTimeUnit;
 use chrono::{DateTime, LocalResult, NaiveDateTime, TimeZone as ChronoTimeZone, Utc};
-use serde::{Deserialize, Serialize};
+use serde::de::{SeqAccess, Unexpected, Visitor};
+use serde::ser::SerializeTuple;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use snafu::{OptionExt, ResultExt};
 
 use crate::error;
@@ -169,6 +171,28 @@ impl Timestamp {
         (sec_div, nsec)
     }
 
+    /// Creates a new Timestamp instance from seconds and nanoseconds parts.
+    /// Returns None if overflow.
+    fn from_splits(sec: i64, nsec: u32) -> Option<Self> {
+        if nsec == 0 {
+            Some(Timestamp::new_second(sec))
+        } else if nsec % 1000000 == 0 {
+            let millis = nsec / 1000000;
+            sec.checked_mul(1000)
+                .and_then(|v| v.checked_add(millis as i64))
+                .map(Timestamp::new_millisecond)
+        } else if nsec % 1000 == 0 {
+            let micros = nsec / 1000;
+            sec.checked_mul(1000000)
+                .and_then(|v| v.checked_add(micros as i64))
+                .map(Timestamp::new_microsecond)
+        } else {
+            sec.checked_mul(1000000000)
+                .and_then(|v| v.checked_add(nsec as i64))
+                .map(Timestamp::new_nanosecond)
+        }
+    }
+
     /// Format timestamp to ISO8601 string. If the timestamp exceeds what chrono timestamp can
     /// represent, this function simply print the timestamp unit and value in plain string.
     pub fn to_iso8601_string(&self) -> String {
@@ -204,6 +228,48 @@ impl Timestamp {
     pub fn to_chrono_datetime(&self) -> Option<NaiveDateTime> {
         let (sec, nsec) = self.split();
         NaiveDateTime::from_timestamp_opt(sec, nsec)
+    }
+
+    pub fn comparable_serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let (sec, nsec) = self.split();
+        let mut tuple = serializer.serialize_tuple(2)?;
+        tuple.serialize_element(&sec)?;
+        tuple.serialize_element(&nsec)?;
+        tuple.end()
+    }
+
+    pub fn comparable_deserialize<'de, D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct TupleVisitor;
+        impl<'de> Visitor<'de> for TupleVisitor {
+            type Value = Timestamp;
+
+            fn expecting(&self, formatter: &mut Formatter) -> std::fmt::Result {
+                write!(formatter, "a tuple sequence")
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                let x = seq
+                    .next_element::<i64>()?
+                    .ok_or_else(|| serde::de::Error::invalid_length(0, &self))?;
+                let y = seq
+                    .next_element::<u32>()?
+                    .ok_or_else(|| serde::de::Error::invalid_length(1, &self))?;
+
+                Timestamp::from_splits(x, y)
+                    .ok_or_else(|| serde::de::Error::invalid_value(Unexpected::Seq, &self))
+            }
+        }
+
+        deserializer.deserialize_tuple(2, TupleVisitor)
     }
 }
 
@@ -412,6 +478,7 @@ mod tests {
 
     use chrono::{Local, Offset};
     use rand::Rng;
+    use serde_json::de::StrRead;
     use serde_json::Value;
 
     use super::*;
@@ -1048,5 +1115,61 @@ mod tests {
             TimeUnit::Nanosecond,
             TimeUnit::from(ArrowTimeUnit::Nanosecond)
         );
+    }
+
+    fn check_split_and_unsplit(t: Timestamp) {
+        let (sec, nsec) = t.split();
+        assert_eq!(Timestamp::from_splits(sec, nsec), Some(t));
+    }
+
+    #[test]
+    fn test_split_and_unsplit() {
+        check_split_and_unsplit(Timestamp::new(i64::MIN, TimeUnit::Second));
+        check_split_and_unsplit(Timestamp::new(i64::MAX, TimeUnit::Second));
+        check_split_and_unsplit(Timestamp::new(-9223372036854775000, TimeUnit::Millisecond));
+        check_split_and_unsplit(Timestamp::new(0, TimeUnit::Millisecond));
+        check_split_and_unsplit(Timestamp::new(i64::MAX, TimeUnit::Millisecond));
+        check_split_and_unsplit(Timestamp::new(-9223372036854775000, TimeUnit::Microsecond));
+        check_split_and_unsplit(Timestamp::new(0, TimeUnit::Microsecond));
+        check_split_and_unsplit(Timestamp::new(i64::MAX, TimeUnit::Microsecond));
+        check_split_and_unsplit(Timestamp::new(-9223372036854775000, TimeUnit::Nanosecond));
+        check_split_and_unsplit(Timestamp::new(0, TimeUnit::Nanosecond));
+        check_split_and_unsplit(Timestamp::new(i64::MAX, TimeUnit::Nanosecond));
+    }
+
+    #[test]
+    fn test_comparable_serialize() {
+        let mut s1 = vec![];
+        let mut serializer = serde_json::Serializer::new(&mut s1);
+        Timestamp::new(1, TimeUnit::Second)
+            .comparable_serialize(&mut serializer)
+            .unwrap();
+
+        let mut s2 = vec![];
+        let mut serializer2 = serde_json::Serializer::new(&mut s2);
+        Timestamp::new(1000, TimeUnit::Millisecond)
+            .comparable_serialize(&mut serializer2)
+            .unwrap();
+
+        assert_eq!(s2, s1);
+        let s = String::from_utf8_lossy(&s1).to_string();
+        let mut deserializer = serde_json::Deserializer::new(StrRead::new(&s));
+        let timestamp = Timestamp::comparable_deserialize(&mut deserializer).unwrap();
+        assert_eq!(Timestamp::new(1, TimeUnit::Second), timestamp);
+    }
+
+    #[test]
+    fn test_serialize_and_compare() {
+        let t1 = Timestamp::new(1, TimeUnit::Second);
+        let mut s1 = vec![];
+        let mut serializer = serde_json::Serializer::new(&mut s1);
+        t1.comparable_serialize(&mut serializer).unwrap();
+
+        let mut s2 = vec![];
+        let mut serializer2 = serde_json::Serializer::new(&mut s2);
+        let t2 = Timestamp::new(1001, TimeUnit::Millisecond);
+        t2.comparable_serialize(&mut serializer2).unwrap();
+        assert!(t2 > t1);
+        assert!(s2 > s1);
     }
 }
