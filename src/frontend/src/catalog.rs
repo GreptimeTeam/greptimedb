@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::any::Any;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use api::v1::CreateTableExpr;
@@ -20,7 +21,7 @@ use catalog::error::{
     self as catalog_err, InternalSnafu, InvalidSystemTableDefSnafu, ListCatalogsSnafu,
     ListSchemasSnafu, Result as CatalogResult, TableMetadataManagerSnafu, UnimplementedSnafu,
 };
-use catalog::information_schema::InformationSchemaProvider;
+use catalog::information_schema::{InformationSchemaProvider, COLUMNS, TABLES};
 use catalog::remote::KvCacheInvalidatorRef;
 use catalog::{
     CatalogManager, DeregisterSchemaRequest, DeregisterTableRequest, RegisterSchemaRequest,
@@ -42,7 +43,7 @@ use futures_util::TryStreamExt;
 use partition::manager::PartitionRuleManagerRef;
 use snafu::prelude::*;
 use table::metadata::TableId;
-use table::table::numbers::NumbersTable;
+use table::table::numbers::{NumbersTable, NUMBERS_TABLE_NAME};
 use table::TableRef;
 
 use crate::expr_factory;
@@ -157,7 +158,7 @@ impl CatalogManager for FrontendCatalogManager {
         Ok(())
     }
 
-    async fn register_catalog(&self, _name: String) -> CatalogResult<bool> {
+    async fn register_catalog(self: Arc<Self>, _name: String) -> CatalogResult<bool> {
         unimplemented!("FrontendCatalogManager does not support registering catalog")
     }
 
@@ -302,13 +303,15 @@ impl CatalogManager for FrontendCatalogManager {
             .schema_manager()
             .schema_names(catalog)
             .await;
-        let keys = stream
-            .try_collect::<Vec<_>>()
+        let mut keys = stream
+            .try_collect::<BTreeSet<_>>()
             .await
             .map_err(BoxedError::new)
             .context(ListSchemasSnafu { catalog })?;
 
-        Ok(keys)
+        keys.insert(INFORMATION_SCHEMA_NAME.to_string());
+
+        Ok(keys.into_iter().collect::<Vec<_>>())
     }
 
     async fn table_names(&self, catalog: &str, schema: &str) -> CatalogResult<Vec<String>> {
@@ -322,7 +325,11 @@ impl CatalogManager for FrontendCatalogManager {
             .map(|(k, _)| k)
             .collect::<Vec<String>>();
         if catalog == DEFAULT_CATALOG_NAME && schema == DEFAULT_SCHEMA_NAME {
-            tables.push("numbers".to_string());
+            tables.push(NUMBERS_TABLE_NAME.to_string());
+        }
+        if schema == INFORMATION_SCHEMA_NAME {
+            tables.push(TABLES.to_string());
+            tables.push(COLUMNS.to_string());
         }
 
         Ok(tables)
@@ -337,6 +344,9 @@ impl CatalogManager for FrontendCatalogManager {
     }
 
     async fn schema_exist(&self, catalog: &str, schema: &str) -> CatalogResult<bool> {
+        if schema == INFORMATION_SCHEMA_NAME {
+            return Ok(true);
+        }
         self.table_metadata_manager
             .schema_manager()
             .exist(SchemaNameKey::new(catalog, schema))
@@ -345,6 +355,10 @@ impl CatalogManager for FrontendCatalogManager {
     }
 
     async fn table_exist(&self, catalog: &str, schema: &str, table: &str) -> CatalogResult<bool> {
+        if schema == INFORMATION_SCHEMA_NAME && (table == TABLES || table == COLUMNS) {
+            return Ok(true);
+        }
+
         let key = TableNameKey::new(catalog, schema, table);
         self.table_metadata_manager
             .table_name_manager()
@@ -362,7 +376,7 @@ impl CatalogManager for FrontendCatalogManager {
     ) -> CatalogResult<Option<TableRef>> {
         if catalog == DEFAULT_CATALOG_NAME
             && schema == DEFAULT_SCHEMA_NAME
-            && table_name == "numbers"
+            && table_name == NUMBERS_TABLE_NAME
         {
             return Ok(Some(Arc::new(NumbersTable::default())));
         }
@@ -370,9 +384,12 @@ impl CatalogManager for FrontendCatalogManager {
         if schema == INFORMATION_SCHEMA_NAME {
             // hack: use existing cyclin reference to get Arc<Self>.
             // This can be remove by refactoring the struct into something like Arc<Inner>
+            common_telemetry::info!("going to use dist instance");
             let manager = if let Some(instance) = self.dist_instance.as_ref() {
+                common_telemetry::info!("dist instance exist");
                 instance.catalog_manager() as _
             } else {
+                common_telemetry::info!("dist instance doesn't exist");
                 return Ok(None);
             };
 

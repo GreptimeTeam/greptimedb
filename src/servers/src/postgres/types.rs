@@ -12,10 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod interval;
+
 use std::collections::HashMap;
 use std::ops::Deref;
 
 use chrono::{NaiveDate, NaiveDateTime};
+use common_time::Interval;
 use datafusion_common::ScalarValue;
 use datatypes::prelude::{ConcreteDataType, Value};
 use datatypes::schema::Schema;
@@ -26,6 +29,7 @@ use pgwire::api::Type;
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 use query::plan::LogicalPlan;
 
+use self::interval::PgInterval;
 use crate::error::{self, Error, Result};
 use crate::SqlPlan;
 
@@ -98,14 +102,13 @@ pub(super) fn encode_value(value: &Value, builder: &mut DataRowEncoder) -> PgWir
                 })))
             }
         }
-        Value::Interval(_) | Value::List(_) => {
-            Err(PgWireError::ApiError(Box::new(Error::Internal {
-                err_msg: format!(
-                    "cannot write value {:?} in postgres protocol: unimplemented",
-                    &value
-                ),
-            })))
-        }
+        Value::Interval(v) => builder.encode_field(&PgInterval::from(*v)),
+        Value::List(_) => Err(PgWireError::ApiError(Box::new(Error::Internal {
+            err_msg: format!(
+                "cannot write value {:?} in postgres protocol: unimplemented",
+                &value
+            ),
+        }))),
     }
 }
 
@@ -194,6 +197,10 @@ pub(super) fn parameter_to_string(portal: &Portal<SqlPlan>, idx: usize) -> PgWir
         &Type::TIMESTAMP => Ok(portal
             .parameter::<NaiveDateTime>(idx, param_type)?
             .map(|v| v.format("%Y-%m-%d %H:%M:%S%.6f").to_string())
+            .unwrap_or_else(|| "".to_owned())),
+        &Type::INTERVAL => Ok(portal
+            .parameter::<PgInterval>(idx, param_type)?
+            .map(|v| v.to_string())
             .unwrap_or_else(|| "".to_owned())),
         _ => Err(invalid_parameter_error(
             "unsupported_parameter_type",
@@ -478,6 +485,23 @@ pub(super) fn parameters_to_scalar_values(
                     }
                 }
             }
+            &Type::INTERVAL => {
+                let data = portal.parameter::<PgInterval>(idx, &client_type)?;
+                match server_type {
+                    ConcreteDataType::Interval(_) => {
+                        ScalarValue::IntervalMonthDayNano(data.map(|i| Interval::from(i).to_i128()))
+                    }
+                    _ => {
+                        return Err(invalid_parameter_error(
+                            "invalid_parameter_type",
+                            Some(&format!(
+                                "Expected: {}, found: {}",
+                                server_type, client_type
+                            )),
+                        ));
+                    }
+                }
+            }
             &Type::BYTEA => {
                 let data = portal.parameter::<Vec<u8>>(idx, &client_type)?;
                 match server_type {
@@ -559,6 +583,11 @@ mod test {
             ),
             ColumnSchema::new("dates", ConcreteDataType::date_datatype(), true),
             ColumnSchema::new("times", ConcreteDataType::time_second_datatype(), true),
+            ColumnSchema::new(
+                "intervals",
+                ConcreteDataType::interval_month_day_nano_datatype(),
+                true,
+            ),
         ];
         let pg_field_info = vec![
             FieldInfo::new("nulls".into(), None, None, Type::UNKNOWN, FieldFormat::Text),
@@ -608,6 +637,13 @@ mod test {
             ),
             FieldInfo::new("dates".into(), None, None, Type::DATE, FieldFormat::Text),
             FieldInfo::new("times".into(), None, None, Type::TIME, FieldFormat::Text),
+            FieldInfo::new(
+                "intervals".into(),
+                None,
+                None,
+                Type::INTERVAL,
+                FieldFormat::Text,
+            ),
         ];
         let schema = Schema::new(column_schemas);
         let fs = schema_to_pg(&schema, &Format::UnifiedText).unwrap();
@@ -703,6 +739,13 @@ mod test {
                 Type::TIMESTAMP,
                 FieldFormat::Text,
             ),
+            FieldInfo::new(
+                "intervals".into(),
+                None,
+                None,
+                Type::INTERVAL,
+                FieldFormat::Text,
+            ),
         ];
 
         let values = vec![
@@ -732,6 +775,7 @@ mod test {
             Value::Time(1001i64.into()),
             Value::DateTime(1000001i64.into()),
             Value::Timestamp(1000001i64.into()),
+            Value::Interval(1000001i128.into()),
         ];
         let mut builder = DataRowEncoder::new(Arc::new(schema));
         for i in values.iter() {

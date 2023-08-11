@@ -369,9 +369,8 @@ mod tests {
     use super::*;
 
     pub(crate) fn sample_script_engine() -> PyEngine {
-        let catalog_manager = Arc::new(MemoryCatalogManager::new_with_table(Arc::new(
-            NumbersTable::default(),
-        )));
+        let catalog_manager =
+            MemoryCatalogManager::new_with_table(Arc::new(NumbersTable::default()));
         let query_engine = QueryEngineFactory::new(catalog_manager, false).query_engine();
 
         PyEngine::new(query_engine.clone())

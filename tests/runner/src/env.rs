@@ -14,8 +14,10 @@
 
 use std::fmt::Display;
 use std::fs::OpenOptions;
+use std::io;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -308,15 +310,18 @@ impl Env {
     /// Build the DB with `cargo build --bin greptime`
     async fn build_db() {
         println!("Going to build the DB...");
-        let cargo_build_result = Command::new("cargo")
+        let output = Command::new("cargo")
             .current_dir(util::get_workspace_root())
             .args(["build", "--bin", "greptime"])
-            .stdout(Stdio::null())
             .output()
-            .expect("Failed to start GreptimeDB")
-            .status;
-        if !cargo_build_result.success() {
-            panic!("Failed to build GreptimeDB (`cargo build` fails)");
+            .expect("Failed to start GreptimeDB");
+        if !output.status.success() {
+            println!("Failed to build GreptimeDB, {}", output.status);
+            println!("Cargo build stdout:");
+            io::stdout().write_all(&output.stdout).unwrap();
+            println!("Cargo build stderr:");
+            io::stderr().write_all(&output.stderr).unwrap();
+            panic!();
         }
         println!("Build finished, starting...");
     }
