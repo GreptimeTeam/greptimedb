@@ -53,7 +53,6 @@ impl<'a> ParquetWriter<'a> {
         let json = metadata.to_json()?;
         let key_value_meta = KeyValue::new(PARQUET_METADATA_KEY.to_string(), json);
 
-        // FIXME(yingwen): encode metadata into key value.
         let props_builder = WriterProperties::builder()
             .set_key_value_metadata(Some(vec![key_value_meta]))
             .set_compression(Compression::ZSTD(ZstdLevel::default()))
