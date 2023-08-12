@@ -105,7 +105,9 @@ pub struct WriteRequest {
 }
 
 impl WriteRequest {
-    /// Returns a new request.
+    /// Creates a new request.
+    ///
+    /// Returns `Err` if `rows` are invalid.
     pub fn new(region_id: RegionId, op_type: OpType, rows: Rows) -> Result<WriteRequest> {
         let mut name_to_index = HashMap::with_capacity(rows.schema.len());
         for (index, column) in rows.schema.iter().enumerate() {
@@ -120,47 +122,36 @@ impl WriteRequest {
             );
         }
 
-        let has_null = vec![false; rows.schema.len()];
-        let mut request = WriteRequest {
+        let mut has_null = vec![false; rows.schema.len()];
+        for row in &rows.rows {
+            ensure!(
+                row.values.len() == rows.schema.len(),
+                InvalidRequestSnafu {
+                    region_id: region_id,
+                    reason: format!(
+                        "row has {} columns but schema has {}",
+                        row.values.len(),
+                        rows.schema.len()
+                    ),
+                }
+            );
+
+            for (i, (value, column_schema)) in row.values.iter().zip(&rows.schema).enumerate() {
+                validate_proto_value(region_id, value, column_schema)?;
+
+                if value.value.is_none() {
+                    has_null[i] = true;
+                }
+            }
+        }
+
+        Ok(WriteRequest {
             region_id,
             op_type,
             rows,
             name_to_index,
             has_null,
-        };
-        request.init()?;
-
-        Ok(request)
-    }
-
-    /// Initializes and validates the request.
-    ///
-    /// Ensures rows match the schema.
-    fn init(&mut self) -> Result<()> {
-        for row in &self.rows.rows {
-            ensure!(
-                row.values.len() == self.rows.schema.len(),
-                InvalidRequestSnafu {
-                    region_id: self.region_id,
-                    reason: format!(
-                        "row has {} columns but schema has {}",
-                        row.values.len(),
-                        self.rows.schema.len()
-                    ),
-                }
-            );
-
-            for (i, (value, column_schema)) in row.values.iter().zip(&self.rows.schema).enumerate()
-            {
-                validate_proto_value(self.region_id, value, column_schema)?;
-
-                if value.value.is_none() {
-                    self.has_null[i] = true;
-                }
-            }
-        }
-
-        Ok(())
+        })
     }
 
     /// Get column index by name.
@@ -168,7 +159,7 @@ impl WriteRequest {
         self.name_to_index.get(name).copied()
     }
 
-    /// Checks schema of rows.
+    /// Checks schema of rows is compatible with schema of the region.
     ///
     /// If column with default value is missing, it returns a special [FillDefault](crate::error::Error::FillDefault)
     /// error.
