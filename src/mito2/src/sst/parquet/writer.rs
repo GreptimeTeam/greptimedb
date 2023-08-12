@@ -15,12 +15,14 @@
 //! Parquet writer.
 
 use common_telemetry::debug;
+use datatypes::arrow::record_batch::RecordBatch;
 use object_store::ObjectStore;
 use parquet::basic::{Compression, Encoding, ZstdLevel};
 use parquet::file::metadata::KeyValue;
 use parquet::file::properties::WriterProperties;
+use snafu::ResultExt;
 
-use crate::error::Result;
+use crate::error::{NewRecordBatchSnafu, Result};
 use crate::read::Source;
 use crate::sst::parquet::{SstInfo, WriteOptions, PARQUET_METADATA_KEY};
 use crate::sst::stream_writer::BufferedWriter;
@@ -63,17 +65,28 @@ impl<'a> ParquetWriter<'a> {
 
         let writer_props = props_builder.build();
 
+        let arrow_schema = metadata.schema.arrow_schema();
         let mut buffered_writer = BufferedWriter::try_new(
             self.file_path.to_string(),
             self.object_store.clone(),
-            &metadata.schema,
+            arrow_schema.clone(),
             Some(writer_props),
             opts.write_buffer_size.as_bytes() as usize,
         )
         .await?;
 
         while let Some(batch) = self.source.next_batch().await? {
-            buffered_writer.write(&batch).await?;
+            let arrow_batch = RecordBatch::try_new(
+                arrow_schema.clone(),
+                batch
+                    .columns
+                    .iter()
+                    .map(|v| v.to_arrow_array())
+                    .collect::<Vec<_>>(),
+            )
+            .context(NewRecordBatchSnafu)?;
+
+            buffered_writer.write(&arrow_batch).await?;
         }
         // Get stats from the source.
         let stats = self.source.stats();
