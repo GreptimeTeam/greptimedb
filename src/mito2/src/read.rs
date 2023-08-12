@@ -16,67 +16,113 @@
 
 use async_trait::async_trait;
 use common_time::Timestamp;
+use datatypes::arrow::array::ArrayRef;
 use datatypes::vectors::VectorRef;
+use store_api::storage::ColumnId;
 
 use crate::error::Result;
 use crate::metadata::RegionMetadataRef;
 
-/// Storage internal representation of a batch of rows.
-///
-/// Now the structure of [Batch] is still unstable, all pub fields may be changed.
-#[derive(Debug, Default, PartialEq, Eq, Clone)]
+/// Storage internal representation of a batch of rows
+/// for a primary key (time series).
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub struct Batch {
+    /// Primary key encoded in a comparable form.
+    // TODO(yingwen): Maybe use `Bytes`.
+    primary_key: Vec<u8>,
+    /// Timestamps of rows, should be sorted and not null.
+    timestamps: VectorRef,
+    /// Sequences of rows, not null.
+    sequences: VectorRef,
+    /// Op types of rows, not null.
+    op_types: VectorRef,
     /// Rows organized in columnar format.
-    pub columns: Vec<VectorRef>,
+    columns: Vec<BatchColumn>,
+    /// Has delete op.
+    has_delete_op: bool,
+    /// Has duplicate keys to dedup.
+    has_duplication: bool,
 }
 
 impl Batch {
-    /// Create a new `Batch` from `columns`.
-    ///
-    /// # Panics
-    /// Panics if vectors in `columns` have different length.
-    pub fn new(columns: Vec<VectorRef>) -> Batch {
-        Self::assert_columns(&columns);
-
-        Batch { columns }
+    /// Convert columns to arrow arrays.
+    pub fn to_arrays(&self, _opts: ToArrayOptions) -> Result<Vec<ArrayRef>> {
+        todo!()
     }
+}
 
-    /// Returns number of columns in the batch.
-    pub fn num_columns(&self) -> usize {
-        self.columns.len()
-    }
+/// Options to convert [Batch] to [ArraryRef]s.
+#[derive(Debug, Clone)]
+pub struct ToArrayOptions {
+    /// Keep dictionary array.
+    pub keep_dictionary: bool,
+}
 
-    /// Returns number of rows in the batch.
-    pub fn num_rows(&self) -> usize {
-        self.columns.get(0).map(|v| v.len()).unwrap_or(0)
-    }
+// /// Storage internal representation of a batch of rows.
+// ///
+// /// Now the structure of [Batch] is still unstable, all pub fields may be changed.
+// #[derive(Debug, Default, PartialEq, Eq, Clone)]
+// pub struct Batch {
+//     /// Rows organized in columnar format.
+//     pub columns: Vec<VectorRef>,
+// }
 
-    /// Returns true if the number of rows in the batch is 0.
-    pub fn is_empty(&self) -> bool {
-        self.num_rows() == 0
-    }
+// impl Batch {
+//     /// Create a new `Batch` from `columns`.
+//     ///
+//     /// # Panics
+//     /// Panics if vectors in `columns` have different length.
+//     pub fn new(columns: Vec<VectorRef>) -> Batch {
+//         Self::assert_columns(&columns);
 
-    /// Slice the batch, returning a new batch.
-    ///
-    /// # Panics
-    /// Panics if `offset + length > self.num_rows()`.
-    pub fn slice(&self, offset: usize, length: usize) -> Batch {
-        let columns = self
-            .columns
-            .iter()
-            .map(|v| v.slice(offset, length))
-            .collect();
-        Batch { columns }
-    }
+//         Batch { columns }
+//     }
 
-    fn assert_columns(columns: &[VectorRef]) {
-        if columns.is_empty() {
-            return;
-        }
+//     /// Returns number of columns in the batch.
+//     pub fn num_columns(&self) -> usize {
+//         self.columns.len()
+//     }
 
-        let length = columns[0].len();
-        assert!(columns.iter().all(|col| col.len() == length));
-    }
+//     /// Returns number of rows in the batch.
+//     pub fn num_rows(&self) -> usize {
+//         self.columns.get(0).map(|v| v.len()).unwrap_or(0)
+//     }
+
+//     /// Returns true if the number of rows in the batch is 0.
+//     pub fn is_empty(&self) -> bool {
+//         self.num_rows() == 0
+//     }
+
+//     /// Slice the batch, returning a new batch.
+//     ///
+//     /// # Panics
+//     /// Panics if `offset + length > self.num_rows()`.
+//     pub fn slice(&self, offset: usize, length: usize) -> Batch {
+//         let columns = self
+//             .columns
+//             .iter()
+//             .map(|v| v.slice(offset, length))
+//             .collect();
+//         Batch { columns }
+//     }
+
+//     fn assert_columns(columns: &[VectorRef]) {
+//         if columns.is_empty() {
+//             return;
+//         }
+
+//         let length = columns[0].len();
+//         assert!(columns.iter().all(|col| col.len() == length));
+//     }
+// }
+
+/// A column in a [Batch].
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct BatchColumn {
+    /// Id of the column.
+    column_id: ColumnId,
+    /// Data of the column.
+    data: VectorRef,
 }
 
 /// Collected [Source] statistics.
@@ -110,6 +156,7 @@ impl Source {
         unimplemented!()
     }
 
+    // TODO(yingwen): Maybe remove this method.
     /// Returns statisics of fetched batches.
     pub(crate) fn stats(&self) -> SourceStats {
         unimplemented!()

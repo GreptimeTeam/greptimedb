@@ -23,7 +23,7 @@ use parquet::file::properties::WriterProperties;
 use snafu::ResultExt;
 
 use crate::error::{NewRecordBatchSnafu, Result};
-use crate::read::Source;
+use crate::read::{Source, ToArrayOptions};
 use crate::sst::parquet::{SstInfo, WriteOptions, PARQUET_METADATA_KEY};
 use crate::sst::stream_writer::BufferedWriter;
 
@@ -76,15 +76,12 @@ impl<'a> ParquetWriter<'a> {
         .await?;
 
         while let Some(batch) = self.source.next_batch().await? {
-            let arrow_batch = RecordBatch::try_new(
-                arrow_schema.clone(),
-                batch
-                    .columns
-                    .iter()
-                    .map(|v| v.to_arrow_array())
-                    .collect::<Vec<_>>(),
-            )
-            .context(NewRecordBatchSnafu)?;
+            let columns = batch.to_arrays(ToArrayOptions {
+                keep_dictionary: true,
+            })?;
+
+            let arrow_batch =
+                RecordBatch::try_new(arrow_schema.clone(), columns).context(NewRecordBatchSnafu)?;
 
             buffered_writer.write(&arrow_batch).await?;
         }
