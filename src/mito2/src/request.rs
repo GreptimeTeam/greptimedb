@@ -127,7 +127,7 @@ impl WriteRequest {
             ensure!(
                 row.values.len() == rows.schema.len(),
                 InvalidRequestSnafu {
-                    region_id: region_id,
+                    region_id,
                     reason: format!(
                         "row has {} columns but schema has {}",
                         row.values.len(),
