@@ -12,20 +12,27 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(assert_matches)]
-#![feature(trait_upcasting)]
+//! Region Engine's definition
 
-pub mod datanode;
-pub mod error;
-mod greptimedb_telemetry;
-pub mod heartbeat;
-pub mod instance;
-pub mod metrics;
-#[cfg(any(test, feature = "testing"))]
-mod mock;
-pub mod region_server;
-pub mod server;
-pub mod sql;
-mod store;
-#[cfg(test)]
-mod tests;
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use common_error::ext::BoxedError;
+use common_query::Output;
+
+use crate::region_request::RegionRequest;
+use crate::storage::RegionId;
+
+#[async_trait]
+pub trait RegionEngine {
+    /// Name of this engine
+    fn name(&self) -> String;
+
+    async fn handle_request(
+        &self,
+        region_id: RegionId,
+        request: RegionRequest,
+    ) -> Result<Output, BoxedError>;
+}
+
+pub type RegionEngineRef = Arc<dyn RegionEngine>;
