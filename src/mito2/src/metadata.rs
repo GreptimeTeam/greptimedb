@@ -137,6 +137,7 @@ impl RegionMetadata {
         &self.column_metadatas[index]
     }
 
+    // TODO(yingwen): Ensure column name is not internal columns.
     /// Checks whether the metadata is valid.
     fn validate(&self) -> Result<()> {
         // Id to name.

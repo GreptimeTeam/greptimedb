@@ -81,6 +81,9 @@ pub const SEQUENCE_COLUMN_NAME: &str = "__sequence";
 /// Name for reserved column: op_type
 pub const OP_TYPE_COLUMN_NAME: &str = "__op_type";
 
+/// Name for reserved column: tsid
+pub const TSID_COLUMN_NAME: &str = "__tsid";
+
 // -----------------------------------------------------------------------------
 
 // ---------- Default options --------------------------------------------------
