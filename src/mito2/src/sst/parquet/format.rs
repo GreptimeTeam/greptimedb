@@ -17,13 +17,15 @@
 use std::sync::Arc;
 
 use datatypes::arrow::datatypes::{DataType, Field, FieldRef, Fields, Schema, SchemaRef};
+use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::prelude::ConcreteDataType;
 use store_api::storage::consts::{OP_TYPE_COLUMN_NAME, SEQUENCE_COLUMN_NAME, TSID_COLUMN_NAME};
 
 use crate::metadata::{ColumnMetadata, RegionMetadata, SemanticType};
+use crate::read::Batch;
 
 /// Get the arrow schema to store in parquet.
-pub fn arrow_schema_to_store(metadata: &RegionMetadata) -> SchemaRef {
+pub fn sst_arrow_schema(metadata: &RegionMetadata) -> SchemaRef {
     let fields = Fields::from_iter(
         metadata
             .schema
@@ -31,15 +33,21 @@ pub fn arrow_schema_to_store(metadata: &RegionMetadata) -> SchemaRef {
             .fields()
             .iter()
             .zip(&metadata.column_metadatas)
-            .map(|(field, column_meta)| field_to_store(column_meta, field))
+            .map(|(field, column_meta)| sst_field(column_meta, field))
             .chain(internal_fields()),
     );
 
     Arc::new(Schema::new(fields))
 }
 
+/// Get the arrow record batch to store in parquet.
+pub fn sst_record(_batch: &Batch) -> RecordBatch {
+    //
+    todo!()
+}
+
 /// Returns the field type to store this column.
-fn field_to_store(column_meta: &ColumnMetadata, field: &FieldRef) -> FieldRef {
+fn sst_field(column_meta: &ColumnMetadata, field: &FieldRef) -> FieldRef {
     // If the column is a tag column and it has string type, store
     // it in dictionary type.
     if column_meta.semantic_type == SemanticType::Tag {
