@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use common_base::readable_size::ReadableSize;
-use greptime_proto::v1::{ColumnDataType, ColumnSchema, Rows};
+use greptime_proto::v1::{ColumnDataType, ColumnSchema, Rows, Value};
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::{ColumnId, CompactionStrategy, OpType, RegionId};
 use tokio::sync::oneshot::{self, Receiver, Sender};
@@ -27,8 +27,8 @@ use crate::config::DEFAULT_WRITE_BUFFER_SIZE;
 use crate::error::{CreateDefaultSnafu, FillDefaultSnafu, InvalidRequestSnafu, Result};
 use crate::metadata::{ColumnMetadata, RegionMetadata};
 use crate::proto_util::{
-    is_column_type_value_eq, is_semantic_type_eq, to_column_data_type, to_proto_semantic_type,
-    to_proto_value,
+    is_column_type_value_eq, is_semantic_type_eq, proto_value_type, to_column_data_type,
+    to_proto_semantic_type, to_proto_value,
 };
 
 /// Options that affect the entire region.
@@ -100,32 +100,58 @@ pub struct WriteRequest {
     pub rows: Rows,
     /// Map column name to column index in `rows`.
     name_to_index: HashMap<String, usize>,
+    /// Whether each column has null.
+    has_null: Vec<bool>,
 }
 
 impl WriteRequest {
-    /// Returns a new request.
-    pub fn new(region_id: RegionId, op_type: OpType, rows: Rows) -> WriteRequest {
-        let name_to_index = rows
-            .schema
-            .iter()
-            .enumerate()
-            .map(|(index, column)| (column.column_name.clone(), index))
-            .collect();
-        WriteRequest {
+    /// Creates a new request.
+    ///
+    /// Returns `Err` if `rows` are invalid.
+    pub fn new(region_id: RegionId, op_type: OpType, rows: Rows) -> Result<WriteRequest> {
+        let mut name_to_index = HashMap::with_capacity(rows.schema.len());
+        for (index, column) in rows.schema.iter().enumerate() {
+            ensure!(
+                name_to_index
+                    .insert(column.column_name.clone(), index)
+                    .is_none(),
+                InvalidRequestSnafu {
+                    region_id,
+                    reason: format!("duplicate column {}", column.column_name),
+                }
+            );
+        }
+
+        let mut has_null = vec![false; rows.schema.len()];
+        for row in &rows.rows {
+            ensure!(
+                row.values.len() == rows.schema.len(),
+                InvalidRequestSnafu {
+                    region_id,
+                    reason: format!(
+                        "row has {} columns but schema has {}",
+                        row.values.len(),
+                        rows.schema.len()
+                    ),
+                }
+            );
+
+            for (i, (value, column_schema)) in row.values.iter().zip(&rows.schema).enumerate() {
+                validate_proto_value(region_id, value, column_schema)?;
+
+                if value.value.is_none() {
+                    has_null[i] = true;
+                }
+            }
+        }
+
+        Ok(WriteRequest {
             region_id,
             op_type,
             rows,
             name_to_index,
-        }
-    }
-
-    /// Validate the request.
-    pub(crate) fn validate(&self) -> Result<()> {
-        // - checks whether the request is too large.
-        // - checks whether each row in rows has the same schema.
-        // - checks whether each column match the schema in Rows.
-        // - checks rows don't have duplicate columns.
-        unimplemented!()
+            has_null,
+        })
     }
 
     /// Get column index by name.
@@ -133,7 +159,7 @@ impl WriteRequest {
         self.name_to_index.get(name).copied()
     }
 
-    /// Checks schema of rows.
+    /// Checks schema of rows is compatible with schema of the region.
     ///
     /// If column with default value is missing, it returns a special [FillDefault](crate::error::Error::FillDefault)
     /// error.
@@ -156,10 +182,12 @@ impl WriteRequest {
                     InvalidRequestSnafu {
                         region_id,
                         reason: format!(
-                            "column {} expect type {:?}, given: {:?}({})",
+                            "column {} expect type {:?}, given: {}({})",
                             column.column_schema.name,
                             column.column_schema.data_type,
-                            ColumnDataType::from_i32(input_col.datatype),
+                            ColumnDataType::from_i32(input_col.datatype)
+                                .map(|v| v.as_str_name())
+                                .unwrap_or("Unknown"),
                             input_col.datatype,
                         )
                     }
@@ -171,12 +199,25 @@ impl WriteRequest {
                     InvalidRequestSnafu {
                         region_id,
                         reason: format!(
-                            "column {} has semantic type {:?}, given: {:?}({})",
+                            "column {} has semantic type {:?}, given: {}({})",
                             column.column_schema.name,
                             column.semantic_type,
-                            greptime_proto::v1::SemanticType::from_i32(input_col.semantic_type),
+                            greptime_proto::v1::SemanticType::from_i32(input_col.semantic_type)
+                                .map(|v| v.as_str_name())
+                                .unwrap_or("Unknown"),
                             input_col.semantic_type
                         ),
+                    }
+                );
+
+                // Check nullable.
+                // Safety: `rows_columns` ensures this column exists.
+                let has_null = self.has_null[self.name_to_index[&column.column_schema.name]];
+                ensure!(
+                    !has_null || column.column_schema.is_nullable(),
+                    InvalidRequestSnafu {
+                        region_id,
+                        reason: format!("column {} is not null", column.column_schema.name),
                     }
                 );
             } else {
@@ -190,11 +231,7 @@ impl WriteRequest {
                     }
                 );
 
-                return FillDefaultSnafu {
-                    region_id,
-                    column: &column.column_schema.name,
-                }
-                .fail();
+                return FillDefaultSnafu { region_id }.fail();
             }
         }
 
@@ -276,6 +313,30 @@ impl WriteRequest {
 
         Ok(())
     }
+}
+
+/// Validate proto value schema.
+pub(crate) fn validate_proto_value(
+    region_id: RegionId,
+    value: &Value,
+    column_schema: &ColumnSchema,
+) -> Result<()> {
+    if let Some(value_type) = proto_value_type(value) {
+        ensure!(
+            value_type as i32 == column_schema.datatype,
+            InvalidRequestSnafu {
+                region_id,
+                reason: format!(
+                    "column {} has type {:?}, but schema has type {:?}",
+                    column_schema.column_name,
+                    value_type,
+                    ColumnDataType::from_i32(column_schema.datatype)
+                ),
+            }
+        );
+    }
+
+    Ok(())
 }
 
 /// Sender and write request.
@@ -360,5 +421,293 @@ impl RequestBody {
             RequestBody::Write(req) => req,
             other => panic!("expect write request, found {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use datatypes::prelude::ConcreteDataType;
+    use greptime_proto::v1::{Row, SemanticType};
+
+    use super::*;
+    use crate::error::Error;
+    use crate::metadata::RegionMetadataBuilder;
+    use crate::proto_util::{i64_value, ts_ms_value};
+
+    fn new_column_schema(
+        name: &str,
+        data_type: ColumnDataType,
+        semantic_type: SemanticType,
+    ) -> ColumnSchema {
+        ColumnSchema {
+            column_name: name.to_string(),
+            datatype: data_type as i32,
+            semantic_type: semantic_type as i32,
+        }
+    }
+
+    fn check_invalid_request(err: &Error, expect: &str) {
+        if let Error::InvalidRequest {
+            region_id: _,
+            reason,
+            location: _,
+        } = err
+        {
+            assert_eq!(reason, expect);
+        } else {
+            panic!("Unexpected error {err}")
+        }
+    }
+
+    #[test]
+    fn test_write_request_duplicate_column() {
+        let rows = Rows {
+            schema: vec![
+                new_column_schema("c0", ColumnDataType::Int64, SemanticType::Tag),
+                new_column_schema("c0", ColumnDataType::Int64, SemanticType::Tag),
+            ],
+            rows: vec![],
+        };
+
+        let err = WriteRequest::new(RegionId::new(1, 1), OpType::Put, rows).unwrap_err();
+        check_invalid_request(&err, "duplicate column c0");
+    }
+
+    #[test]
+    fn test_valid_write_request() {
+        let rows = Rows {
+            schema: vec![
+                new_column_schema("c0", ColumnDataType::Int64, SemanticType::Tag),
+                new_column_schema("c1", ColumnDataType::Int64, SemanticType::Tag),
+            ],
+            rows: vec![Row {
+                values: vec![i64_value(1), i64_value(2)],
+            }],
+        };
+
+        let request = WriteRequest::new(RegionId::new(1, 1), OpType::Put, rows).unwrap();
+        assert_eq!(0, request.column_index_by_name("c0").unwrap());
+        assert_eq!(1, request.column_index_by_name("c1").unwrap());
+        assert_eq!(None, request.column_index_by_name("c2"));
+    }
+
+    #[test]
+    fn test_write_request_column_num() {
+        let rows = Rows {
+            schema: vec![
+                new_column_schema("c0", ColumnDataType::Int64, SemanticType::Tag),
+                new_column_schema("c1", ColumnDataType::Int64, SemanticType::Tag),
+            ],
+            rows: vec![Row {
+                values: vec![i64_value(1), i64_value(2), i64_value(3)],
+            }],
+        };
+
+        let err = WriteRequest::new(RegionId::new(1, 1), OpType::Put, rows).unwrap_err();
+        check_invalid_request(&err, "row has 3 columns but schema has 2");
+    }
+
+    fn new_region_metadata() -> RegionMetadata {
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 1), 1);
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: datatypes::schema::ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: crate::metadata::SemanticType::Timestamp,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: datatypes::schema::ColumnSchema::new(
+                    "k0",
+                    ConcreteDataType::int64_datatype(),
+                    true,
+                ),
+                semantic_type: crate::metadata::SemanticType::Tag,
+                column_id: 2,
+            })
+            .primary_key(vec![2]);
+        builder.build().unwrap()
+    }
+
+    #[test]
+    fn test_check_schema() {
+        let rows = Rows {
+            schema: vec![
+                new_column_schema(
+                    "ts",
+                    ColumnDataType::TimestampMillisecond,
+                    SemanticType::Timestamp,
+                ),
+                new_column_schema("k0", ColumnDataType::Int64, SemanticType::Tag),
+            ],
+            rows: vec![Row {
+                values: vec![ts_ms_value(1), i64_value(2)],
+            }],
+        };
+        let metadata = new_region_metadata();
+
+        let request = WriteRequest::new(RegionId::new(1, 1), OpType::Put, rows).unwrap();
+        request.check_schema(&metadata).unwrap();
+    }
+
+    #[test]
+    fn test_column_type() {
+        let rows = Rows {
+            schema: vec![
+                new_column_schema("ts", ColumnDataType::Int64, SemanticType::Timestamp),
+                new_column_schema("k0", ColumnDataType::Int64, SemanticType::Tag),
+            ],
+            rows: vec![Row {
+                values: vec![i64_value(1), i64_value(2)],
+            }],
+        };
+        let metadata = new_region_metadata();
+
+        let request = WriteRequest::new(RegionId::new(1, 1), OpType::Put, rows).unwrap();
+        let err = request.check_schema(&metadata).unwrap_err();
+        check_invalid_request(&err, "column ts expect type Timestamp(Millisecond(TimestampMillisecondType)), given: INT64(4)");
+    }
+
+    #[test]
+    fn test_semantic_type() {
+        let rows = Rows {
+            schema: vec![
+                new_column_schema(
+                    "ts",
+                    ColumnDataType::TimestampMillisecond,
+                    SemanticType::Tag,
+                ),
+                new_column_schema("k0", ColumnDataType::Int64, SemanticType::Tag),
+            ],
+            rows: vec![Row {
+                values: vec![ts_ms_value(1), i64_value(2)],
+            }],
+        };
+        let metadata = new_region_metadata();
+
+        let request = WriteRequest::new(RegionId::new(1, 1), OpType::Put, rows).unwrap();
+        let err = request.check_schema(&metadata).unwrap_err();
+        check_invalid_request(&err, "column ts has semantic type Timestamp, given: TAG(0)");
+    }
+
+    #[test]
+    fn test_column_nullable() {
+        let rows = Rows {
+            schema: vec![
+                new_column_schema(
+                    "ts",
+                    ColumnDataType::TimestampMillisecond,
+                    SemanticType::Timestamp,
+                ),
+                new_column_schema("k0", ColumnDataType::Int64, SemanticType::Tag),
+            ],
+            rows: vec![Row {
+                values: vec![Value { value: None }, i64_value(2)],
+            }],
+        };
+        let metadata = new_region_metadata();
+
+        let request = WriteRequest::new(RegionId::new(1, 1), OpType::Put, rows).unwrap();
+        let err = request.check_schema(&metadata).unwrap_err();
+        check_invalid_request(&err, "column ts is not null");
+    }
+
+    #[test]
+    fn test_column_default() {
+        let rows = Rows {
+            schema: vec![new_column_schema(
+                "k0",
+                ColumnDataType::Int64,
+                SemanticType::Tag,
+            )],
+            rows: vec![Row {
+                values: vec![i64_value(1)],
+            }],
+        };
+        let metadata = new_region_metadata();
+
+        let request = WriteRequest::new(RegionId::new(1, 1), OpType::Put, rows).unwrap();
+        let err = request.check_schema(&metadata).unwrap_err();
+        check_invalid_request(&err, "missing column ts");
+    }
+
+    #[test]
+    fn test_unknown_column() {
+        let rows = Rows {
+            schema: vec![
+                new_column_schema(
+                    "ts",
+                    ColumnDataType::TimestampMillisecond,
+                    SemanticType::Timestamp,
+                ),
+                new_column_schema("k0", ColumnDataType::Int64, SemanticType::Tag),
+                new_column_schema("k1", ColumnDataType::Int64, SemanticType::Tag),
+            ],
+            rows: vec![Row {
+                values: vec![ts_ms_value(1), i64_value(2), i64_value(3)],
+            }],
+        };
+        let metadata = new_region_metadata();
+
+        let request = WriteRequest::new(RegionId::new(1, 1), OpType::Put, rows).unwrap();
+        let err = request.check_schema(&metadata).unwrap_err();
+        check_invalid_request(&err, r#"unknown columns: ["k1"]"#);
+    }
+
+    #[test]
+    fn test_fill_missing_columns() {
+        let rows = Rows {
+            schema: vec![new_column_schema(
+                "ts",
+                ColumnDataType::TimestampMillisecond,
+                SemanticType::Timestamp,
+            )],
+            rows: vec![Row {
+                values: vec![ts_ms_value(1)],
+            }],
+        };
+        let metadata = new_region_metadata();
+
+        let mut request = WriteRequest::new(RegionId::new(1, 1), OpType::Put, rows).unwrap();
+        let err = request.check_schema(&metadata).unwrap_err();
+        assert!(err.is_fill_default());
+        request.fill_missing_columns(&metadata).unwrap();
+
+        let expect_rows = Rows {
+            schema: vec![
+                new_column_schema(
+                    "ts",
+                    ColumnDataType::TimestampMillisecond,
+                    SemanticType::Timestamp,
+                ),
+                new_column_schema("k0", ColumnDataType::Int64, SemanticType::Tag),
+            ],
+            rows: vec![Row {
+                values: vec![ts_ms_value(1), Value { value: None }],
+            }],
+        };
+        assert_eq!(expect_rows, request.rows);
+    }
+
+    #[test]
+    fn test_no_default() {
+        let rows = Rows {
+            schema: vec![new_column_schema(
+                "k0",
+                ColumnDataType::Int64,
+                SemanticType::Tag,
+            )],
+            rows: vec![Row {
+                values: vec![i64_value(1)],
+            }],
+        };
+        let metadata = new_region_metadata();
+
+        let mut request = WriteRequest::new(RegionId::new(1, 1), OpType::Put, rows).unwrap();
+        let err = request.fill_missing_columns(&metadata).unwrap_err();
+        check_invalid_request(&err, "column ts does not have default value");
     }
 }

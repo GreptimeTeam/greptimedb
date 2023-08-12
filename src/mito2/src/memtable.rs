@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use crate::error::Result;
-use crate::memtable::key_values::KeyValues;
+pub use crate::memtable::key_values::KeyValues;
 use crate::metadata::RegionMetadataRef;
 
 /// Id for memtables.

@@ -25,7 +25,8 @@ use store_api::storage::RegionId;
 
 use crate::error::Result;
 use crate::manifest::manager::RegionManifestManager;
-use crate::region::version::{VersionControlRef, VersionRef};
+use crate::metadata::RegionMetadataRef;
+use crate::region::version::VersionControlRef;
 
 /// Type to store region version.
 pub type VersionNumber = u32;
@@ -40,7 +41,7 @@ pub(crate) struct MitoRegion {
     pub(crate) region_id: RegionId,
 
     /// Version controller for this region.
-    version_control: VersionControlRef,
+    pub(crate) version_control: VersionControlRef,
     /// Manager to maintain manifest for this region.
     manifest_manager: RegionManifestManager,
 }
@@ -57,9 +58,10 @@ impl MitoRegion {
         Ok(())
     }
 
-    /// Returns current version of the region.
-    pub(crate) fn version(&self) -> VersionRef {
-        self.version_control.current()
+    /// Returns current metadata of the region.
+    pub(crate) fn metadata(&self) -> RegionMetadataRef {
+        let version_data = self.version_control.current();
+        version_data.version.metadata.clone()
     }
 }
 
