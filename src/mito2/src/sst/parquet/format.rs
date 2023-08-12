@@ -13,19 +13,31 @@
 // limitations under the License.
 
 //! Format to store in parquet.
+//!
+//! We append three internal columns to record batches in parquet:
+//! - `__sequence`, the sequence number of a row.
+//! - `__op_type`, the op type of the row.
+//! - `__tsid`, the time series id of the row.
 
 use std::sync::Arc;
 
+use datatypes::arrow::array::{ArrayRef, UInt64Array};
 use datatypes::arrow::datatypes::{DataType, Field, FieldRef, Fields, Schema, SchemaRef};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::prelude::ConcreteDataType;
+use snafu::ResultExt;
 use store_api::storage::consts::{OP_TYPE_COLUMN_NAME, SEQUENCE_COLUMN_NAME, TSID_COLUMN_NAME};
+use store_api::storage::Tsid;
 
+use crate::error::{NewRecordBatchSnafu, Result};
 use crate::metadata::{ColumnMetadata, RegionMetadata, SemanticType};
 use crate::read::Batch;
 
+/// Number of internal columns.
+const INTERNAL_COLUMN_NUM: usize = 3;
+
 /// Get the arrow schema to store in parquet.
-pub fn sst_arrow_schema(metadata: &RegionMetadata) -> SchemaRef {
+pub(crate) fn to_sst_arrow_schema(metadata: &RegionMetadata) -> SchemaRef {
     let fields = Fields::from_iter(
         metadata
             .schema
@@ -33,7 +45,7 @@ pub fn sst_arrow_schema(metadata: &RegionMetadata) -> SchemaRef {
             .fields()
             .iter()
             .zip(&metadata.column_metadatas)
-            .map(|(field, column_meta)| sst_field(column_meta, field))
+            .map(|(field, column_meta)| to_sst_field(column_meta, field))
             .chain(internal_fields()),
     );
 
@@ -41,13 +53,24 @@ pub fn sst_arrow_schema(metadata: &RegionMetadata) -> SchemaRef {
 }
 
 /// Get the arrow record batch to store in parquet.
-pub fn sst_record(_batch: &Batch) -> RecordBatch {
-    //
-    todo!()
+///
+/// The `arrow_schema` is constructed by [to_sst_arrow_schema].
+pub(crate) fn to_sst_record_batch(batch: &Batch, arrow_schema: &SchemaRef) -> Result<RecordBatch> {
+    let mut columns = Vec::with_capacity(batch.columns().len() + INTERNAL_COLUMN_NUM);
+    debug_assert_eq!(columns.len(), arrow_schema.fields().len());
+    for column in batch.columns() {
+        columns.push(column.data.to_arrow_array());
+    }
+    // Add internal columns.
+    columns.push(batch.sequences().to_arrow_array());
+    columns.push(batch.op_types().to_arrow_array());
+    columns.push(new_tsid_array(batch.tsid(), batch.num_rows()));
+
+    RecordBatch::try_new(arrow_schema.clone(), columns).context(NewRecordBatchSnafu)
 }
 
 /// Returns the field type to store this column.
-fn sst_field(column_meta: &ColumnMetadata, field: &FieldRef) -> FieldRef {
+fn to_sst_field(column_meta: &ColumnMetadata, field: &FieldRef) -> FieldRef {
     // If the column is a tag column and it has string type, store
     // it in dictionary type.
     if column_meta.semantic_type == SemanticType::Tag {
@@ -77,4 +100,10 @@ fn internal_fields() -> [FieldRef; 3] {
         Arc::new(Field::new(OP_TYPE_COLUMN_NAME, DataType::UInt8, false)),
         Arc::new(Field::new(TSID_COLUMN_NAME, DataType::UInt64, false)),
     ]
+}
+
+/// Returns an arrary with `count` element for the tsid.
+fn new_tsid_array(tsid: Tsid, count: usize) -> ArrayRef {
+    let tsids = UInt64Array::from_value(tsid, count);
+    Arc::new(tsids)
 }

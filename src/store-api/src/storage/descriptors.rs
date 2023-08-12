@@ -33,6 +33,8 @@ pub type RegionSeq = u32;
 pub type RegionNumber = u32;
 /// Id of table. Universal unique.
 pub type TableId = u32;
+/// Internal Id of a time series. Now it only unique in each SST.
+pub type Tsid = u64;
 
 const REGION_GROUP_MASK: u32 = 0b1111_1111 << 24;
 const REGION_SEQ_MASK: u32 = (0b1 << 24) - 1;

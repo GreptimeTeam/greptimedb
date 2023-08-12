@@ -16,9 +16,8 @@
 
 use async_trait::async_trait;
 use common_time::Timestamp;
-use datatypes::arrow::array::ArrayRef;
 use datatypes::vectors::VectorRef;
-use store_api::storage::ColumnId;
+use store_api::storage::{ColumnId, Tsid};
 
 use crate::error::Result;
 use crate::metadata::RegionMetadataRef;
@@ -27,14 +26,20 @@ use crate::metadata::RegionMetadataRef;
 /// for a primary key (time series).
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct Batch {
+    /// Tsid of the batch.
+    tsid: Tsid,
     /// Primary key encoded in a comparable form.
     // TODO(yingwen): Maybe use `Bytes`.
     primary_key: Vec<u8>,
     /// Timestamps of rows, should be sorted and not null.
     timestamps: VectorRef,
-    /// Sequences of rows, not null.
+    /// Sequences of rows
+    ///
+    /// UInt64 type, not null.
     sequences: VectorRef,
-    /// Op types of rows, not null.
+    /// Op types of rows
+    ///
+    /// UInt8 type, not null.
     op_types: VectorRef,
     /// Rows organized in columnar format.
     columns: Vec<BatchColumn>,
@@ -45,84 +50,44 @@ pub struct Batch {
 }
 
 impl Batch {
-    /// Convert columns to arrow arrays.
-    pub fn to_arrays(&self, _opts: ToArrayOptions) -> Result<Vec<ArrayRef>> {
-        todo!()
+    /// Returns columns in the batch.
+    pub fn columns(&self) -> &[BatchColumn] {
+        &self.columns
+    }
+
+    /// Returns sequences of the batch.
+    pub fn sequences(&self) -> &VectorRef {
+        &self.sequences
+    }
+
+    /// Returns op types of the batch.
+    pub fn op_types(&self) -> &VectorRef {
+        &self.op_types
+    }
+
+    /// Returns the number of rows in the batch.
+    pub fn num_rows(&self) -> usize {
+        // All vectors have the same length so we use
+        // the length of timestamps vector.
+        self.timestamps.len()
+    }
+
+    /// Returns the tsid of the batch.
+    ///
+    /// It's used to identify a time series inside a SST. So different
+    /// time series might have the same tsid.
+    pub(crate) fn tsid(&self) -> Tsid {
+        self.tsid
     }
 }
-
-/// Options to convert [Batch] to [ArraryRef]s.
-#[derive(Debug, Clone)]
-pub struct ToArrayOptions {
-    /// Keep dictionary array.
-    pub keep_dictionary: bool,
-}
-
-// /// Storage internal representation of a batch of rows.
-// ///
-// /// Now the structure of [Batch] is still unstable, all pub fields may be changed.
-// #[derive(Debug, Default, PartialEq, Eq, Clone)]
-// pub struct Batch {
-//     /// Rows organized in columnar format.
-//     pub columns: Vec<VectorRef>,
-// }
-
-// impl Batch {
-//     /// Create a new `Batch` from `columns`.
-//     ///
-//     /// # Panics
-//     /// Panics if vectors in `columns` have different length.
-//     pub fn new(columns: Vec<VectorRef>) -> Batch {
-//         Self::assert_columns(&columns);
-
-//         Batch { columns }
-//     }
-
-//     /// Returns number of columns in the batch.
-//     pub fn num_columns(&self) -> usize {
-//         self.columns.len()
-//     }
-
-//     /// Returns number of rows in the batch.
-//     pub fn num_rows(&self) -> usize {
-//         self.columns.get(0).map(|v| v.len()).unwrap_or(0)
-//     }
-
-//     /// Returns true if the number of rows in the batch is 0.
-//     pub fn is_empty(&self) -> bool {
-//         self.num_rows() == 0
-//     }
-
-//     /// Slice the batch, returning a new batch.
-//     ///
-//     /// # Panics
-//     /// Panics if `offset + length > self.num_rows()`.
-//     pub fn slice(&self, offset: usize, length: usize) -> Batch {
-//         let columns = self
-//             .columns
-//             .iter()
-//             .map(|v| v.slice(offset, length))
-//             .collect();
-//         Batch { columns }
-//     }
-
-//     fn assert_columns(columns: &[VectorRef]) {
-//         if columns.is_empty() {
-//             return;
-//         }
-
-//         let length = columns[0].len();
-//         assert!(columns.iter().all(|col| col.len() == length));
-//     }
-// }
 
 /// A column in a [Batch].
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct BatchColumn {
     /// Id of the column.
-    column_id: ColumnId,
+    pub column_id: ColumnId,
     /// Data of the column.
-    data: VectorRef,
+    pub data: VectorRef,
 }
 
 /// Collected [Source] statistics.
