@@ -17,9 +17,8 @@ use std::pin::Pin;
 
 use common_datasource::buffered_writer::LazyBufferedWriter;
 use common_datasource::share_buffer::SharedBuffer;
-use datatypes::arrow;
+use datatypes::arrow::datatypes::SchemaRef;
 use datatypes::arrow::record_batch::RecordBatch;
-use datatypes::schema::SchemaRef;
 use object_store::ObjectStore;
 use parquet::arrow::ArrowWriter;
 use parquet::file::properties::WriterProperties;
@@ -27,14 +26,13 @@ use parquet::format::FileMetaData;
 use snafu::ResultExt;
 
 use crate::error;
-use crate::error::{NewRecordBatchSnafu, WriteParquetSnafu};
-use crate::read::Batch;
+use crate::error::WriteParquetSnafu;
 
 /// Parquet writer that buffers row groups in memory and writes buffered data to an underlying
 /// storage by chunks to reduce memory consumption.
 pub struct BufferedWriter {
     inner: InnerBufferedWriter,
-    arrow_schema: arrow::datatypes::SchemaRef,
+    arrow_schema: SchemaRef,
 }
 
 type InnerBufferedWriter = LazyBufferedWriter<
@@ -56,11 +54,10 @@ impl BufferedWriter {
     pub async fn try_new(
         path: String,
         store: ObjectStore,
-        schema: &SchemaRef,
+        arrow_schema: SchemaRef,
         props: Option<WriterProperties>,
         buffer_threshold: usize,
     ) -> error::Result<Self> {
-        let arrow_schema = schema.arrow_schema();
         let buffer = SharedBuffer::with_capacity(buffer_threshold);
 
         let arrow_writer = ArrowWriter::try_new(buffer.clone(), arrow_schema.clone(), props)
@@ -82,24 +79,14 @@ impl BufferedWriter {
                     })
                 }),
             ),
-            arrow_schema: arrow_schema.clone(),
+            arrow_schema,
         })
     }
 
     /// Write a record batch to stream writer.
-    pub async fn write(&mut self, batch: &Batch) -> error::Result<()> {
-        let arrow_batch = RecordBatch::try_new(
-            self.arrow_schema.clone(),
-            batch
-                .columns
-                .iter()
-                .map(|v| v.to_arrow_array())
-                .collect::<Vec<_>>(),
-        )
-        .context(NewRecordBatchSnafu)?;
-
+    pub async fn write(&mut self, arrow_batch: &RecordBatch) -> error::Result<()> {
         self.inner
-            .write(&arrow_batch)
+            .write(arrow_batch)
             .await
             .context(error::WriteBufferSnafu)?;
         self.inner
