@@ -25,6 +25,7 @@ use common_procedure::ProcedureManagerRef;
 use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
 use crate::ddl::{DdlManager, DdlManagerRef};
 use crate::error::Result;
+use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
 use crate::handler::mailbox_handler::MailboxHandler;
 use crate::handler::publish_heartbeat_handler::PublishHeartbeatHandler;
 use crate::handler::region_lease_handler::RegionLeaseHandler;
@@ -48,7 +49,6 @@ use crate::service::mailbox::MailboxRef;
 use crate::service::store::cached_kv::{CheckLeader, LeaderCachedKvStore};
 use crate::service::store::kv::{KvBackendAdapter, KvStoreRef, ResettableKvStoreRef};
 use crate::service::store::memory::MemStore;
-use crate::telemetry::get_greptimedb_telemetry_task;
 
 // TODO(fys): try use derive_builder macro
 pub struct MetaSrvBuilder {
@@ -234,6 +234,9 @@ impl MetaSrvBuilder {
             }
         };
 
+        let enable_telemetry = options.enable_telemetry;
+        let metasrv_home = options.data_home.to_string();
+
         Ok(MetaSrv {
             started,
             options,
@@ -251,7 +254,12 @@ impl MetaSrvBuilder {
             mailbox,
             ddl_manager,
             table_metadata_manager,
-            greptimedb_telemetry_task: get_greptimedb_telemetry_task(meta_peer_client).await,
+            greptimedb_telemetry_task: get_greptimedb_telemetry_task(
+                Some(metasrv_home),
+                meta_peer_client,
+                enable_telemetry,
+            )
+            .await,
             pubsub,
         })
     }

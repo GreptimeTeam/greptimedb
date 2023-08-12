@@ -16,18 +16,23 @@ mod columns;
 mod tables;
 
 use std::any::Any;
+use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 
 use async_trait::async_trait;
+use common_catalog::consts::{
+    INFORMATION_SCHEMA_COLUMNS_TABLE_ID, INFORMATION_SCHEMA_NAME,
+    INFORMATION_SCHEMA_TABLES_TABLE_ID,
+};
 use common_error::ext::BoxedError;
 use common_recordbatch::{RecordBatchStreamAdaptor, SendableRecordBatchStream};
 use datatypes::schema::SchemaRef;
 use futures_util::StreamExt;
 use snafu::ResultExt;
-use store_api::storage::ScanRequest;
+use store_api::storage::{ScanRequest, TableId};
 use table::data_source::DataSource;
 use table::error::{SchemaConversionSnafu, TablesRecordBatchSnafu};
-use table::metadata::TableType;
+use table::metadata::{TableIdent, TableInfoBuilder, TableMetaBuilder, TableType};
 use table::{Result as TableResult, Table, TableRef};
 
 use self::columns::InformationSchemaColumns;
@@ -36,8 +41,8 @@ use crate::information_schema::tables::InformationSchemaTables;
 use crate::table_factory::TableFactory;
 use crate::CatalogManager;
 
-const TABLES: &str = "tables";
-const COLUMNS: &str = "columns";
+pub const TABLES: &str = "tables";
+pub const COLUMNS: &str = "columns";
 
 pub struct InformationSchemaProvider {
     catalog_name: String,
@@ -51,42 +56,95 @@ impl InformationSchemaProvider {
             catalog_manager,
         }
     }
-}
 
-impl InformationSchemaProvider {
+    /// Build a map of [TableRef] in information schema.
+    /// Including `tables` and `columns`.
+    pub fn build(
+        catalog_name: String,
+        catalog_manager: Weak<dyn CatalogManager>,
+    ) -> HashMap<String, TableRef> {
+        let mut schema = HashMap::new();
+
+        schema.insert(
+            TABLES.to_string(),
+            Arc::new(InformationTable::new(
+                catalog_name.clone(),
+                INFORMATION_SCHEMA_TABLES_TABLE_ID,
+                TABLES.to_string(),
+                Arc::new(InformationSchemaTables::new(
+                    catalog_name.clone(),
+                    catalog_manager.clone(),
+                )),
+            )) as _,
+        );
+        schema.insert(
+            COLUMNS.to_string(),
+            Arc::new(InformationTable::new(
+                catalog_name.clone(),
+                INFORMATION_SCHEMA_COLUMNS_TABLE_ID,
+                COLUMNS.to_string(),
+                Arc::new(InformationSchemaColumns::new(catalog_name, catalog_manager)),
+            )) as _,
+        );
+
+        schema
+    }
+
     pub fn table(&self, name: &str) -> Result<Option<TableRef>> {
-        let stream_builder = match name.to_ascii_lowercase().as_ref() {
-            TABLES => Arc::new(InformationSchemaTables::new(
-                self.catalog_name.clone(),
-                self.catalog_manager.clone(),
-            )) as _,
-            COLUMNS => Arc::new(InformationSchemaColumns::new(
-                self.catalog_name.clone(),
-                self.catalog_manager.clone(),
-            )) as _,
+        let (stream_builder, table_id) = match name.to_ascii_lowercase().as_ref() {
+            TABLES => (
+                Arc::new(InformationSchemaTables::new(
+                    self.catalog_name.clone(),
+                    self.catalog_manager.clone(),
+                )) as _,
+                INFORMATION_SCHEMA_TABLES_TABLE_ID,
+            ),
+            COLUMNS => (
+                Arc::new(InformationSchemaColumns::new(
+                    self.catalog_name.clone(),
+                    self.catalog_manager.clone(),
+                )) as _,
+                INFORMATION_SCHEMA_COLUMNS_TABLE_ID,
+            ),
             _ => {
                 return Ok(None);
             }
         };
 
-        Ok(Some(Arc::new(InformationTable::new(stream_builder))))
+        Ok(Some(Arc::new(InformationTable::new(
+            self.catalog_name.clone(),
+            table_id,
+            name.to_string(),
+            stream_builder,
+        ))))
     }
 
     pub fn table_factory(&self, name: &str) -> Result<Option<TableFactory>> {
-        let stream_builder = match name.to_ascii_lowercase().as_ref() {
-            TABLES => Arc::new(InformationSchemaTables::new(
-                self.catalog_name.clone(),
-                self.catalog_manager.clone(),
-            )) as _,
-            COLUMNS => Arc::new(InformationSchemaColumns::new(
-                self.catalog_name.clone(),
-                self.catalog_manager.clone(),
-            )) as _,
+        let (stream_builder, table_id) = match name.to_ascii_lowercase().as_ref() {
+            TABLES => (
+                Arc::new(InformationSchemaTables::new(
+                    self.catalog_name.clone(),
+                    self.catalog_manager.clone(),
+                )) as _,
+                INFORMATION_SCHEMA_TABLES_TABLE_ID,
+            ),
+            COLUMNS => (
+                Arc::new(InformationSchemaColumns::new(
+                    self.catalog_name.clone(),
+                    self.catalog_manager.clone(),
+                )) as _,
+                INFORMATION_SCHEMA_COLUMNS_TABLE_ID,
+            ),
             _ => {
                 return Ok(None);
             }
         };
-        let data_source = Arc::new(InformationTable::new(stream_builder));
+        let data_source = Arc::new(InformationTable::new(
+            self.catalog_name.clone(),
+            table_id,
+            name.to_string(),
+            stream_builder,
+        ));
 
         Ok(Some(Arc::new(move || data_source.clone())))
     }
@@ -101,12 +159,25 @@ pub trait InformationStreamBuilder: Send + Sync {
 }
 
 pub struct InformationTable {
+    catalog_name: String,
+    table_id: TableId,
+    name: String,
     stream_builder: Arc<dyn InformationStreamBuilder>,
 }
 
 impl InformationTable {
-    pub fn new(stream_builder: Arc<dyn InformationStreamBuilder>) -> Self {
-        Self { stream_builder }
+    pub fn new(
+        catalog_name: String,
+        table_id: TableId,
+        name: String,
+        stream_builder: Arc<dyn InformationStreamBuilder>,
+    ) -> Self {
+        Self {
+            catalog_name,
+            table_id,
+            name,
+            stream_builder,
+        }
     }
 }
 
@@ -121,7 +192,26 @@ impl Table for InformationTable {
     }
 
     fn table_info(&self) -> table::metadata::TableInfoRef {
-        unreachable!("Should not call table_info() of InformationTable directly")
+        let table_meta = TableMetaBuilder::default()
+            .schema(self.stream_builder.schema())
+            .primary_key_indices(vec![])
+            .next_column_id(0)
+            .build()
+            .unwrap();
+        Arc::new(
+            TableInfoBuilder::default()
+                .ident(TableIdent {
+                    table_id: self.table_id,
+                    version: 0,
+                })
+                .name(self.name.clone())
+                .catalog_name(self.catalog_name.clone())
+                .schema_name(INFORMATION_SCHEMA_NAME.to_string())
+                .meta(table_meta)
+                .table_type(TableType::Temporary)
+                .build()
+                .unwrap(),
+        )
     }
 
     fn table_type(&self) -> TableType {

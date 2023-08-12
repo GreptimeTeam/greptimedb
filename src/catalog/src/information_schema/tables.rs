@@ -15,7 +15,10 @@
 use std::sync::{Arc, Weak};
 
 use arrow_schema::SchemaRef as ArrowSchemaRef;
-use common_catalog::consts::INFORMATION_SCHEMA_NAME;
+use common_catalog::consts::{
+    INFORMATION_SCHEMA_COLUMNS_TABLE_ID, INFORMATION_SCHEMA_NAME,
+    INFORMATION_SCHEMA_TABLES_TABLE_ID,
+};
 use common_error::ext::BoxedError;
 use common_query::physical_plan::TaskContext;
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
@@ -29,6 +32,7 @@ use datatypes::vectors::{StringVectorBuilder, UInt32VectorBuilder};
 use snafu::{OptionExt, ResultExt};
 use table::metadata::TableType;
 
+use super::{COLUMNS, TABLES};
 use crate::error::{
     CreateRecordBatchSnafu, InternalSnafu, Result, UpgradeWeakCatalogManagerRefSnafu,
 };
@@ -43,19 +47,22 @@ pub(super) struct InformationSchemaTables {
 
 impl InformationSchemaTables {
     pub(super) fn new(catalog_name: String, catalog_manager: Weak<dyn CatalogManager>) -> Self {
-        let schema = Arc::new(Schema::new(vec![
+        Self {
+            schema: Self::schema(),
+            catalog_name,
+            catalog_manager,
+        }
+    }
+
+    pub(crate) fn schema() -> SchemaRef {
+        Arc::new(Schema::new(vec![
             ColumnSchema::new("table_catalog", ConcreteDataType::string_datatype(), false),
             ColumnSchema::new("table_schema", ConcreteDataType::string_datatype(), false),
             ColumnSchema::new("table_name", ConcreteDataType::string_datatype(), false),
             ColumnSchema::new("table_type", ConcreteDataType::string_datatype(), false),
             ColumnSchema::new("table_id", ConcreteDataType::uint32_datatype(), true),
             ColumnSchema::new("engine", ConcreteDataType::string_datatype(), true),
-        ]));
-        Self {
-            schema,
-            catalog_name,
-            catalog_manager,
-        }
+        ]))
     }
 
     fn builder(&self) -> InformationSchemaTablesBuilder {
@@ -137,9 +144,6 @@ impl InformationSchemaTablesBuilder {
             .context(UpgradeWeakCatalogManagerRefSnafu)?;
 
         for schema_name in catalog_manager.schema_names(&catalog_name).await? {
-            if schema_name == INFORMATION_SCHEMA_NAME {
-                continue;
-            }
             if !catalog_manager
                 .schema_exist(&catalog_name, &schema_name)
                 .await?
@@ -151,21 +155,43 @@ impl InformationSchemaTablesBuilder {
                 .table_names(&catalog_name, &schema_name)
                 .await?
             {
-                let Some(table) = catalog_manager
+                if let Some(table) = catalog_manager
                     .table(&catalog_name, &schema_name, &table_name)
                     .await?
-                else {
-                    continue;
+                {
+                    let table_info = table.table_info();
+                    self.add_table(
+                        &catalog_name,
+                        &schema_name,
+                        &table_name,
+                        table.table_type(),
+                        Some(table_info.ident.table_id),
+                        Some(&table_info.meta.engine),
+                    );
+                } else {
+                    // TODO: this specific branch is only a workaround for FrontendCatalogManager.
+                    if schema_name == INFORMATION_SCHEMA_NAME {
+                        if table_name == COLUMNS {
+                            self.add_table(
+                                &catalog_name,
+                                &schema_name,
+                                &table_name,
+                                TableType::Temporary,
+                                Some(INFORMATION_SCHEMA_COLUMNS_TABLE_ID),
+                                None,
+                            );
+                        } else if table_name == TABLES {
+                            self.add_table(
+                                &catalog_name,
+                                &schema_name,
+                                &table_name,
+                                TableType::Temporary,
+                                Some(INFORMATION_SCHEMA_TABLES_TABLE_ID),
+                                None,
+                            );
+                        }
+                    }
                 };
-                let table_info = table.table_info();
-                self.add_table(
-                    &catalog_name,
-                    &schema_name,
-                    &table_name,
-                    table.table_type(),
-                    Some(table_info.ident.table_id),
-                    Some(&table_info.meta.engine),
-                );
             }
         }
 

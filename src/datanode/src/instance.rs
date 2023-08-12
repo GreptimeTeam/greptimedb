@@ -64,12 +64,12 @@ use crate::error::{
     MissingNodeIdSnafu, NewCatalogSnafu, OpenLogStoreSnafu, RecoverProcedureSnafu, Result,
     ShutdownInstanceSnafu, StartProcedureManagerSnafu, StopProcedureManagerSnafu,
 };
+use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
 use crate::heartbeat::handler::close_region::CloseRegionHandler;
 use crate::heartbeat::handler::open_region::OpenRegionHandler;
 use crate::heartbeat::HeartbeatTask;
 use crate::sql::{SqlHandler, SqlRequest};
 use crate::store;
-use crate::telemetry::get_greptimedb_telemetry_task;
 
 mod grpc;
 pub mod sql;
@@ -164,8 +164,11 @@ impl Instance {
         compaction_scheduler: CompactionSchedulerRef<RaftEngineLogStore>,
         plugins: Arc<Plugins>,
     ) -> Result<(InstanceRef, Option<HeartbeatTask>)> {
-        let object_store = store::new_object_store(&opts.storage.store).await?;
-        let log_store = Arc::new(create_log_store(&opts.storage.store, &opts.wal).await?);
+        let data_home = util::normalize_dir(&opts.storage.data_home);
+        info!("The working home directory is: {}", data_home);
+        let object_store = store::new_object_store(&data_home, &opts.storage.store).await?;
+        let log_store =
+            Arc::new(create_log_store(&data_home, &opts.storage.store, &opts.wal).await?);
 
         let mito_engine = Arc::new(DefaultEngine::new(
             TableEngineConfig {
@@ -208,7 +211,7 @@ impl Instance {
         let (catalog_manager, table_id_provider, region_alive_keepers) = match opts.mode {
             Mode::Standalone => {
                 if opts.enable_memory_catalog {
-                    let catalog = Arc::new(catalog::local::MemoryCatalogManager::default());
+                    let catalog = catalog::local::MemoryCatalogManager::with_default_setup();
                     let table = NumbersTable::new(MIN_USER_TABLE_ID);
 
                     let _ = catalog
@@ -305,7 +308,12 @@ impl Instance {
             catalog_manager: catalog_manager.clone(),
             table_id_provider,
             procedure_manager,
-            greptimedb_telemetry_task: get_greptimedb_telemetry_task(&opts.mode).await,
+            greptimedb_telemetry_task: get_greptimedb_telemetry_task(
+                Some(opts.storage.data_home.clone()),
+                &opts.mode,
+                opts.enable_telemetry,
+            )
+            .await,
         });
 
         let heartbeat_task = Instance::build_heartbeat_task(
@@ -444,13 +452,14 @@ async fn new_metasrv_client(node_id: u64, meta_config: &MetaClientOptions) -> Re
 }
 
 pub(crate) async fn create_log_store(
+    data_home: &str,
     store_config: &ObjectStoreConfig,
     wal_config: &WalConfig,
 ) -> Result<RaftEngineLogStore> {
     let wal_dir = match (&wal_config.dir, store_config) {
         (Some(dir), _) => dir.to_string(),
-        (None, ObjectStoreConfig::File(file_config)) => {
-            format!("{}{WAL_DIR}", util::normalize_dir(&file_config.data_home))
+        (None, ObjectStoreConfig::File(_file_config)) => {
+            format!("{}{WAL_DIR}", data_home)
         }
         _ => return error::MissingWalDirConfigSnafu {}.fail(),
     };

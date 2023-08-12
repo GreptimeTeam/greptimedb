@@ -44,6 +44,7 @@ use crate::sequence::SequenceRef;
 use crate::service::mailbox::MailboxRef;
 use crate::service::store::kv::{KvStoreRef, ResettableKvStoreRef};
 pub const TABLE_ID_SEQ: &str = "table_id";
+const METASRV_HOME: &str = "/tmp/metasrv";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -59,6 +60,8 @@ pub struct MetaSrvOptions {
     pub logging: LoggingOptions,
     pub procedure: ProcedureConfig,
     pub datanode: DatanodeOptions,
+    pub enable_telemetry: bool,
+    pub data_home: String,
 }
 
 impl Default for MetaSrvOptions {
@@ -72,9 +75,14 @@ impl Default for MetaSrvOptions {
             use_memory_store: false,
             disable_region_failover: false,
             http_opts: HttpOptions::default(),
-            logging: LoggingOptions::default(),
+            logging: LoggingOptions {
+                dir: format!("{METASRV_HOME}/logs"),
+                ..Default::default()
+            },
             procedure: ProcedureConfig::default(),
             datanode: DatanodeOptions::default(),
+            enable_telemetry: true,
+            data_home: METASRV_HOME.to_string(),
         }
     }
 }

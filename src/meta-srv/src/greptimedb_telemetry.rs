@@ -12,77 +12,67 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#[cfg(feature = "greptimedb-telemetry")]
-pub mod telemetry {
-    use std::sync::Arc;
+use std::sync::Arc;
 
-    use async_trait::async_trait;
-    use common_greptimedb_telemetry::{
-        default_get_uuid, Collector, GreptimeDBTelemetry, GreptimeDBTelemetryTask,
-        Mode as VersionReporterMode, TELEMETRY_INTERVAL,
-    };
+use async_trait::async_trait;
+use common_greptimedb_telemetry::{
+    default_get_uuid, Collector, GreptimeDBTelemetry, GreptimeDBTelemetryTask,
+    Mode as VersionReporterMode, TELEMETRY_INTERVAL,
+};
 
-    use crate::cluster::MetaPeerClientRef;
+use crate::cluster::MetaPeerClientRef;
 
-    struct DistributedGreptimeDBTelemetryCollector {
-        meta_peer_client: MetaPeerClientRef,
-        uuid: Option<String>,
-        retry: i32,
+struct DistributedGreptimeDBTelemetryCollector {
+    meta_peer_client: MetaPeerClientRef,
+    uuid: Option<String>,
+    retry: i32,
+}
+
+#[async_trait]
+impl Collector for DistributedGreptimeDBTelemetryCollector {
+    fn get_mode(&self) -> VersionReporterMode {
+        VersionReporterMode::Distributed
     }
 
-    #[async_trait]
-    impl Collector for DistributedGreptimeDBTelemetryCollector {
-        fn get_mode(&self) -> VersionReporterMode {
-            VersionReporterMode::Distributed
-        }
-
-        async fn get_nodes(&self) -> Option<i32> {
-            self.meta_peer_client.get_node_cnt().await.ok()
-        }
-
-        fn get_retry(&self) -> i32 {
-            self.retry
-        }
-
-        fn inc_retry(&mut self) {
-            self.retry += 1;
-        }
-
-        fn set_uuid_cache(&mut self, uuid: String) {
-            self.uuid = Some(uuid);
-        }
-
-        fn get_uuid_cache(&self) -> Option<String> {
-            self.uuid.clone()
-        }
+    async fn get_nodes(&self) -> Option<i32> {
+        self.meta_peer_client.get_node_cnt().await.ok()
     }
 
-    pub async fn get_greptimedb_telemetry_task(
-        meta_peer_client: MetaPeerClientRef,
-    ) -> Arc<GreptimeDBTelemetryTask> {
-        Arc::new(GreptimeDBTelemetryTask::enable(
-            TELEMETRY_INTERVAL,
-            Box::new(GreptimeDBTelemetry::new(Box::new(
-                DistributedGreptimeDBTelemetryCollector {
-                    meta_peer_client,
-                    uuid: default_get_uuid(),
-                    retry: 0,
-                },
-            ))),
-        ))
+    fn get_retry(&self) -> i32 {
+        self.retry
+    }
+
+    fn inc_retry(&mut self) {
+        self.retry += 1;
+    }
+
+    fn set_uuid_cache(&mut self, uuid: String) {
+        self.uuid = Some(uuid);
+    }
+
+    fn get_uuid_cache(&self) -> Option<String> {
+        self.uuid.clone()
     }
 }
 
-#[cfg(not(feature = "greptimedb-telemetry"))]
-pub mod telemetry {
-    use std::sync::Arc;
-
-    use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
-
-    use crate::cluster::MetaPeerClientRef;
-    pub async fn get_greptimedb_telemetry_task(
-        _: MetaPeerClientRef,
-    ) -> Arc<GreptimeDBTelemetryTask> {
-        Arc::new(GreptimeDBTelemetryTask::disable())
+pub async fn get_greptimedb_telemetry_task(
+    working_home: Option<String>,
+    meta_peer_client: MetaPeerClientRef,
+    enable: bool,
+) -> Arc<GreptimeDBTelemetryTask> {
+    if !enable || cfg!(test) {
+        return Arc::new(GreptimeDBTelemetryTask::disable());
     }
+
+    Arc::new(GreptimeDBTelemetryTask::enable(
+        TELEMETRY_INTERVAL,
+        Box::new(GreptimeDBTelemetry::new(
+            working_home.clone(),
+            Box::new(DistributedGreptimeDBTelemetryCollector {
+                meta_peer_client,
+                uuid: default_get_uuid(&working_home),
+                retry: 0,
+            }),
+        )),
+    ))
 }

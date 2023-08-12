@@ -83,6 +83,7 @@ impl SubCommand {
 pub struct StandaloneOptions {
     pub mode: Mode,
     pub enable_memory_catalog: bool,
+    pub enable_telemetry: bool,
     pub http_options: Option<HttpOptions>,
     pub grpc_options: Option<GrpcOptions>,
     pub mysql_options: Option<MysqlOptions>,
@@ -102,6 +103,7 @@ impl Default for StandaloneOptions {
         Self {
             mode: Mode::Standalone,
             enable_memory_catalog: false,
+            enable_telemetry: true,
             http_options: Some(HttpOptions::default()),
             grpc_options: Some(GrpcOptions::default()),
             mysql_options: Some(MysqlOptions::default()),
@@ -139,6 +141,7 @@ impl StandaloneOptions {
     fn datanode_options(self) -> DatanodeOptions {
         DatanodeOptions {
             enable_memory_catalog: self.enable_memory_catalog,
+            enable_telemetry: self.enable_telemetry,
             wal: self.wal,
             storage: self.storage,
             procedure: self.procedure,

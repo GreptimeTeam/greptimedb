@@ -20,7 +20,7 @@ use async_trait::async_trait;
 use catalog::CatalogManagerRef;
 use client::client_manager::DatanodeClients;
 use common_base::bytes::Bytes;
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME};
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_meta::peer::Peer;
 use common_meta::table_name::TableName;
 use datafusion::common::Result;
@@ -92,13 +92,6 @@ impl ExtensionPlanner for DistExtensionPlanner {
                     // no relation found in input plan, going to execute them locally
                     return Ok(Some(input_physical_plan));
                 };
-
-                if table_name.schema_name == INFORMATION_SCHEMA_NAME {
-                    return planner
-                        .create_physical_plan(input_plan, session_state)
-                        .await
-                        .map(Some);
-                }
 
                 let input_schema = input_physical_plan.schema().clone();
                 let input_plan = self.set_table_name(&table_name, input_plan.clone())?;

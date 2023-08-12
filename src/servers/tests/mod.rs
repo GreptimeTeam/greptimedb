@@ -202,7 +202,7 @@ impl GrpcQueryHandler for DummyInstance {
 
 fn create_testing_instance(table: MemTable) -> DummyInstance {
     let table = Arc::new(table);
-    let catalog_manager = Arc::new(MemoryCatalogManager::new_with_table(table));
+    let catalog_manager = MemoryCatalogManager::new_with_table(table);
     let query_engine = QueryEngineFactory::new(catalog_manager, false).query_engine();
     DummyInstance::new(query_engine)
 }

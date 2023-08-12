@@ -137,7 +137,7 @@ check: ## Cargo check all the targets.
 
 .PHONY: clippy
 clippy: ## Check clippy rules.
-	cargo clippy --workspace --all-targets -- -D warnings
+	cargo clippy --workspace --all-targets -F pyo3_backend -- -D warnings
 
 .PHONY: fmt-check
 fmt-check: ## Check code format.

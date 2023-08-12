@@ -351,7 +351,7 @@ bind_aggr_expr!(median, Median,[v0], v0, expr0=>0);
 #[pyfunction]
 fn approx_percentile_cont(py: Python<'_>, values: &PyVector, percent: f64) -> PyResult<PyObject> {
     let percent = expressions::Literal::new(datafusion_common::ScalarValue::Float64(Some(percent)));
-    return eval_df_aggr_expr(
+    eval_df_aggr_expr(
         py,
         expressions::ApproxPercentileCont::new(
             vec![
@@ -363,7 +363,7 @@ fn approx_percentile_cont(py: Python<'_>, values: &PyVector, percent: f64) -> Py
         )
         .map_err(|e| PyValueError::new_err(format!("{e:?}")))?,
         &[values.to_arrow_array()],
-    );
+    )
 }
 
 bind_aggr_expr!(array_agg, ArrayAgg,[v0], v0, expr0=>0);
