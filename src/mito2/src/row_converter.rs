@@ -308,8 +308,8 @@ mod tests {
         let decoded = encoder.decode(&result).unwrap();
         assert_eq!(value_ref.len(), decoded.len());
 
-        for i in 0..rows.len() {
-            assert_eq!(&rows[i], decoded.get(i).unwrap() as &[Value]);
+        for (i, row) in rows.iter().enumerate() {
+            assert_eq!(row, decoded.get(i).unwrap() as &[Value]);
         }
     }
 
