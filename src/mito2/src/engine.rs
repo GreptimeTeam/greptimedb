@@ -83,6 +83,9 @@ impl MitoEngine {
     // We need to fill default values before writing it to WAL so we can get
     // the same default value after reopening the region.
 
+    // let metadata = region.metadata();
+
+    // write_request.fill_missing_columns(&metadata)?;
     //     self.inner
     //         .handle_request_body(RequestBody::Write(write_request))
     //         .await

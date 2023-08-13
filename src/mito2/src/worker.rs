@@ -38,7 +38,7 @@ use tokio::sync::{mpsc, Mutex};
 use crate::config::MitoConfig;
 use crate::error::{JoinSnafu, Result, WorkerStoppedSnafu};
 use crate::memtable::{DefaultMemtableBuilder, MemtableBuilderRef};
-use crate::region::{RegionMap, RegionMapRef};
+use crate::region::{MitoRegionRef, RegionMap, RegionMapRef};
 use crate::request::{RegionTask, WorkerRequest};
 use crate::wal::Wal;
 
@@ -130,6 +130,13 @@ impl WorkerGroup {
     /// Returns true if the specific region exists.
     pub(crate) fn is_region_exists(&self, region_id: RegionId) -> bool {
         self.worker(region_id).is_region_exists(region_id)
+    }
+
+    /// Returns region of specific `region_id`.
+    ///
+    /// This method should not be public.
+    pub(crate) fn get_region(&self, region_id: RegionId) -> Option<MitoRegionRef> {
+        self.worker(region_id).get_region(region_id)
     }
 
     /// Get worker for specific `region_id`.
@@ -251,6 +258,11 @@ impl RegionWorker {
     fn is_region_exists(&self, region_id: RegionId) -> bool {
         self.regions.is_region_exists(region_id)
     }
+
+    /// Returns region of specific `region_id`.
+    fn get_region(&self, region_id: RegionId) -> Option<MitoRegionRef> {
+        self.regions.get_region(region_id)
+    }
 }
 
 impl Drop for RegionWorker {
@@ -284,7 +296,7 @@ struct RegionWorkerLoop<S> {
     memtable_builder: MemtableBuilderRef,
 }
 
-impl<S> RegionWorkerLoop<S> {
+impl<S: LogStore> RegionWorkerLoop<S> {
     /// Starts the worker loop.
     async fn run(&mut self) {
         info!("Start region worker thread {}", self.id);
@@ -352,7 +364,9 @@ impl<S> RegionWorkerLoop<S> {
 
         self.handle_ddl_requests(ddl_requests).await;
     }
+}
 
+impl<S> RegionWorkerLoop<S> {
     /// Takes and handles all ddl requests.
     async fn handle_ddl_requests(&mut self, ddl_tasks: Vec<RegionTask>) {
         if ddl_tasks.is_empty() {

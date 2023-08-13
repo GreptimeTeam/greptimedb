@@ -191,12 +191,13 @@ mod tests {
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
     use greptime_proto::v1;
-    use greptime_proto::v1::{value, ColumnDataType, Value};
+    use greptime_proto::v1::ColumnDataType;
     use store_api::metadata::ColumnMetadata;
     use store_api::storage::RegionId;
 
     use super::*;
     use crate::metadata::RegionMetadataBuilder;
+    use crate::proto_util::i64_value;
 
     const TS_NAME: &str = "ts";
     const START_SEQ: SequenceNumber = 100;
@@ -289,12 +290,6 @@ mod tests {
             op_type: OpType::Put as i32,
             sequence: START_SEQ,
             rows: Some(rows),
-        }
-    }
-
-    fn i64_value(data: i64) -> Value {
-        Value {
-            value: Some(value::Value::I64Value(data)),
         }
     }
 
