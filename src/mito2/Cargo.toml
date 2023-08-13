@@ -46,6 +46,7 @@ serde_json = "1.0"
 snafu.workspace = true
 storage = { workspace = true }
 store-api = { workspace = true }
+strum = "0.21"
 table = { workspace = true }
 tokio.workspace = true
 uuid.workspace = true

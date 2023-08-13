@@ -29,8 +29,7 @@ use store_api::storage::RegionId;
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
 use crate::error::Result;
-use crate::manifest::manager::RegionManifestManager;
-use crate::manifest::options::RegionManifestOptions;
+use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::metadata::{ColumnMetadata, RegionMetadataRef, SemanticType};
 use crate::request::{CreateRequest, RegionOptions};
 use crate::worker::WorkerGroup;
@@ -95,7 +94,7 @@ impl TestEnv {
     pub async fn create_manifest_manager(
         &self,
         compress_type: CompressionType,
-        checkpoint_interval: u64,
+        checkpoint_distance: u64,
         initial_metadata: Option<RegionMetadataRef>,
     ) -> Result<Option<RegionManifestManager>> {
         let data_home = self.data_home.path();
@@ -116,7 +115,7 @@ impl TestEnv {
             manifest_dir,
             object_store,
             compress_type,
-            checkpoint_interval,
+            checkpoint_distance,
         };
 
         if let Some(metadata) = initial_metadata {

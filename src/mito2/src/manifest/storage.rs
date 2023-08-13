@@ -157,13 +157,13 @@ impl ManifestObjectStore {
 
     /// Returns the last checkpoint path, because the last checkpoint is not compressed,
     /// so its path name has nothing to do with the compression algorithm used by `ManifestObjectStore`
-    fn last_checkpoint_path(&self) -> String {
+    pub(crate) fn last_checkpoint_path(&self) -> String {
         format!("{}{}", self.path, LAST_CHECKPOINT_FILE)
     }
 
     /// Return all `R`s in the root directory that meet the `filter` conditions (that is, the `filter` closure returns `Some(R)`),
     /// and discard `R` that does not meet the conditions (that is, the `filter` closure returns `None`)
-    async fn get_paths<F, R>(&self, filter: F) -> Result<Vec<R>>
+    pub async fn get_paths<F, R>(&self, filter: F) -> Result<Vec<R>>
     where
         F: Fn(Entry) -> Option<R>,
     {
@@ -211,7 +211,7 @@ impl ManifestObjectStore {
         })
     }
 
-    async fn delete_until(
+    pub async fn delete_until(
         &self,
         end: ManifestVersion,
         keep_last_checkpoint: bool,
@@ -370,7 +370,7 @@ impl ManifestObjectStore {
         Ok(())
     }
 
-    async fn save_checkpoint(&self, version: ManifestVersion, bytes: &[u8]) -> Result<()> {
+    pub async fn save_checkpoint(&self, version: ManifestVersion, bytes: &[u8]) -> Result<()> {
         let path = self.checkpoint_file_path(version);
         let data = self
             .compress_type
@@ -409,7 +409,7 @@ impl ManifestObjectStore {
         Ok(())
     }
 
-    async fn load_checkpoint(
+    pub async fn load_checkpoint(
         &self,
         version: ManifestVersion,
     ) -> Result<Option<(ManifestVersion, Vec<u8>)>> {
@@ -509,6 +509,11 @@ impl ManifestObjectStore {
         );
 
         self.load_checkpoint(checkpoint_metadata.version).await
+    }
+
+    #[cfg(test)]
+    pub async fn read_file(&self, path: &str) -> Result<Vec<u8>> {
+        self.object_store.read(path).await.context(OpenDalSnafu)
     }
 }
 
