@@ -17,12 +17,14 @@
 use std::env;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::any::Any;
 
 use common_telemetry::logging;
 use common_test_util::temp_dir::create_temp_dir;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use object_store::services::{Fs, S3};
 use object_store::ObjectStore;
+use store_api::logstore::LogStore;
 use store_api::storage::{FlushContext, FlushReason, OpenOptions, Region};
 use tokio::sync::{Notify, RwLock};
 
@@ -33,7 +35,7 @@ use crate::file_purger::{FilePurgeHandler, FilePurgeRequest};
 use crate::region::tests::{self, FileTesterBase};
 use crate::region::{CompactContext, FlushStrategyRef, RegionImpl};
 use crate::scheduler::rate_limit::BoxedRateLimitToken;
-use crate::scheduler::{Handler, LocalScheduler, SchedulerConfig};
+use crate::scheduler::{Handler, LocalScheduler, SchedulerConfig, Request};
 use crate::test_util::config_util;
 use crate::test_util::flush_switch::FlushSwitch;
 
@@ -67,7 +69,7 @@ fn new_object_store(store_dir: &str, s3_bucket: Option<String>) -> ObjectStore {
 
 /// Create a new region for compaction test
 async fn create_region_for_compaction<
-    H: Handler<Request = FilePurgeRequest> + Send + Sync + 'static,
+    H: Handler + Send + Sync + 'static,
 >(
     store_dir: &str,
     engine_config: EngineConfig,
@@ -94,15 +96,15 @@ async fn create_region_for_compaction<
     store_config.flush_strategy = flush_strategy;
 
     let pending_compaction_tasks = Arc::new(RwLock::new(vec![]));
-    let handler = CompactionHandler::new_with_pending_tasks(pending_compaction_tasks.clone());
+    let handler = CompactionHandler::<RaftEngineLogStore>::new_with_pending_tasks(pending_compaction_tasks.clone());
     let config = SchedulerConfig::default();
     // Overwrite test compaction scheduler and file purger.
-    store_config.compaction_scheduler = Arc::new(LocalScheduler::new(config, handler));
+    store_config.compaction_scheduler = Arc::new(LocalScheduler::new(config, Arc::new(handler) as Arc<dyn Handler>));
     store_config.file_purger = Arc::new(LocalScheduler::new(
         SchedulerConfig {
             max_inflight_tasks: store_config.engine_config.max_purge_tasks,
         },
-        purge_handler,
+        Arc::new(purge_handler) as Arc<dyn Handler>,
     ));
 
     (
@@ -119,19 +121,21 @@ struct MockFilePurgeHandler {
 
 #[async_trait::async_trait]
 impl Handler for MockFilePurgeHandler {
-    type Request = FilePurgeRequest;
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 
     async fn handle_request(
         &self,
-        req: Self::Request,
+        req: Box<dyn Request>,
         token: BoxedRateLimitToken,
         finish_notifier: Arc<Notify>,
     ) -> Result<()> {
-        logging::info!(
-            "Try to delete file: {:?}, num_deleted: {:?}",
-            req.file_id,
-            self.num_deleted
-        );
+        // logging::info!(
+        //     "Try to delete file: {:?}, num_deleted: {:?}",
+        //     req.file_id,
+        //     self.num_deleted
+        // );
 
         let handler = FilePurgeHandler;
         handler
@@ -257,15 +261,15 @@ impl CompactionTester {
         store_config.engine_config = Arc::new(self.engine_config.clone());
         store_config.flush_strategy = self.flush_strategy.clone();
 
-        let handler = CompactionHandler::new_with_pending_tasks(Arc::new(Default::default()));
+        let handler = CompactionHandler::<RaftEngineLogStore>::new_with_pending_tasks(Arc::new(Default::default()));
         let config = SchedulerConfig::default();
         // Overwrite test compaction scheduler and file purger.
-        store_config.compaction_scheduler = Arc::new(LocalScheduler::new(config, handler));
+        store_config.compaction_scheduler = Arc::new(LocalScheduler::new(config, Arc::new(handler) as Arc<dyn Handler>));
         store_config.file_purger = Arc::new(LocalScheduler::new(
             SchedulerConfig {
                 max_inflight_tasks: store_config.engine_config.max_purge_tasks,
             },
-            MockFilePurgeHandler::default(),
+            Arc::new(MockFilePurgeHandler::default()) as Arc<dyn Handler>,
         ));
 
         let Some(region) = RegionImpl::open(

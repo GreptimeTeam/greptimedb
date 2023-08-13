@@ -44,6 +44,7 @@ use crate::proto::wal::WalHeader;
 use crate::region::{
     CompactContext, RecoveredMetadata, RecoveredMetadataMap, RegionManifest, SharedDataRef,
 };
+use crate::scheduler::Request;
 use crate::schema::compat::CompatWrite;
 use crate::sst::{AccessLayerRef, LevelMetas};
 use crate::version::{VersionControl, VersionControlRef, VersionEdit};
@@ -66,7 +67,7 @@ pub struct RegionWriter<S: LogStore> {
     /// Increasing committed sequence should be guarded by this lock.
     version_mutex: Mutex<()>,
 
-    compaction_scheduler: CompactionSchedulerRef<S>,
+    compaction_scheduler: CompactionSchedulerRef,
     compaction_picker: CompactionPickerRef<S>,
 }
 
@@ -79,7 +80,7 @@ where
         config: Arc<EngineConfig>,
         ttl: Option<Duration>,
         write_buffer_size: usize,
-        compaction_scheduler: CompactionSchedulerRef<S>,
+        compaction_scheduler: CompactionSchedulerRef,
         compaction_picker: CompactionPickerRef<S>,
     ) -> RegionWriter<S> {
         RegionWriter {
@@ -472,8 +473,8 @@ pub struct WriterCompactRequest<S: LogStore> {
 pub struct WriterContext<'a, S: LogStore> {
     pub shared: &'a SharedDataRef,
     pub flush_strategy: &'a FlushStrategyRef,
-    pub flush_scheduler: &'a FlushSchedulerRef<S>,
-    pub compaction_scheduler: &'a CompactionSchedulerRef<S>,
+    pub flush_scheduler: &'a FlushSchedulerRef,
+    pub compaction_scheduler: &'a CompactionSchedulerRef,
     pub sst_layer: &'a AccessLayerRef,
     pub wal: &'a Wal<S>,
     pub writer: &'a RegionWriterRef<S>,
@@ -505,8 +506,8 @@ pub struct DropContext<'a, S: LogStore> {
     pub shared: &'a SharedDataRef,
     pub wal: &'a Wal<S>,
     pub manifest: &'a RegionManifest,
-    pub flush_scheduler: &'a FlushSchedulerRef<S>,
-    pub compaction_scheduler: &'a CompactionSchedulerRef<S>,
+    pub flush_scheduler: &'a FlushSchedulerRef,
+    pub compaction_scheduler: &'a CompactionSchedulerRef,
     pub sst_layer: &'a AccessLayerRef,
 }
 
@@ -781,7 +782,7 @@ impl WriterInner {
                 FlushType::Engine => {
                     // Trigger engine level flush. This wakeup the flush handler
                     // to pick region to flush.
-                    writer_ctx.flush_scheduler.schedule_engine_flush()?;
+                    writer_ctx.flush_scheduler.schedule_engine_flush::<S>()?;
                 }
             }
         }
@@ -879,7 +880,7 @@ impl WriterInner {
         &mut self,
         request: WriterCompactRequest<S>,
         compaction_picker: CompactionPickerRef<S>,
-        compaction_scheduler: CompactionSchedulerRef<S>,
+        compaction_scheduler: CompactionSchedulerRef,
         sst_write_buffer_size: ReadableSize,
     ) -> Result<()> {
         let region_id = request.shared_data.id();
@@ -916,20 +917,20 @@ impl WriterInner {
             let (sender, receiver) = oneshot::channel();
             compaction_request.sender = Some(sender);
 
-            if schedule_compaction(
+            if schedule_compaction::<S>(
                 request.shared_data,
                 compaction_scheduler,
-                compaction_request,
+                Box::new(compaction_request) as Box<dyn Request>,
             ) {
                 receiver
                     .await
                     .context(error::CompactTaskCancelSnafu { region_id })??;
             }
         } else {
-            let _ = schedule_compaction(
+            let _ = schedule_compaction::<S>(
                 request.shared_data,
                 compaction_scheduler,
-                compaction_request,
+                Box::new(compaction_request) as Box<dyn Request>,
             );
         }
 
@@ -959,8 +960,8 @@ impl WriterInner {
 /// Schedule compaction task, returns whether the task is scheduled.
 pub(crate) fn schedule_compaction<S: LogStore>(
     shared_data: SharedDataRef,
-    compaction_scheduler: CompactionSchedulerRef<S>,
-    compaction_request: CompactionRequestImpl<S>,
+    compaction_scheduler: CompactionSchedulerRef,
+    compaction_request: Box<dyn Request>,
 ) -> bool {
     let region_id = shared_data.id();
 

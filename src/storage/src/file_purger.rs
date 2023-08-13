@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::sync::Arc;
+use std::any::Any;
 
 use common_telemetry::{debug, error};
 use store_api::storage::RegionId;
@@ -20,7 +21,7 @@ use tokio::sync::Notify;
 
 use crate::error::Result;
 use crate::scheduler::rate_limit::{BoxedRateLimitToken, RateLimitToken};
-use crate::scheduler::{Handler, LocalScheduler, Request};
+use crate::scheduler::{Handler, LocalScheduler, Request, Key};
 use crate::sst::{AccessLayerRef, FileId};
 
 pub struct FilePurgeRequest {
@@ -30,10 +31,16 @@ pub struct FilePurgeRequest {
 }
 
 impl Request for FilePurgeRequest {
-    type Key = String;
+    fn as_any(&self) -> Box<dyn Any + '_> {
+        Box::new(self)
+    }
 
-    fn key(&self) -> Self::Key {
-        format!("{}/{}", self.region_id, self.file_id)
+    fn into_any(self: Box<Self>) -> Box<dyn Any> {
+        self as _
+    }
+    
+    fn key(&self) -> Key {
+        Key::StringType(format!("{}/{}", self.region_id, self.file_id))
     }
 
     fn complete(self, _result: Result<()>) {}
@@ -43,14 +50,17 @@ pub struct FilePurgeHandler;
 
 #[async_trait::async_trait]
 impl Handler for FilePurgeHandler {
-    type Request = FilePurgeRequest;
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 
     async fn handle_request(
         &self,
-        req: Self::Request,
+        req: Box<dyn Request>,
         token: BoxedRateLimitToken,
         finish_notifier: Arc<Notify>,
     ) -> Result<()> {
+        let req = *req.into_any().downcast::<FilePurgeRequest>().unwrap();
         req.sst_layer.delete_sst(req.file_id).await.map_err(|e| {
             error!(e; "Failed to delete SST file, file: {}, region: {}", 
                 req.file_id.as_parquet(), req.region_id);
@@ -67,23 +77,24 @@ impl Handler for FilePurgeHandler {
     }
 }
 
-pub type FilePurgerRef = Arc<LocalScheduler<FilePurgeRequest>>;
+pub type FilePurgerRef = Arc<LocalScheduler>;
 
 #[cfg(test)]
 pub mod noop {
     use std::sync::Arc;
+    use std::any::Any;
 
     use tokio::sync::Notify;
 
     use crate::error::Result;
     use crate::file_purger::{FilePurgeRequest, FilePurgerRef};
     use crate::scheduler::rate_limit::{BoxedRateLimitToken, RateLimitToken};
-    use crate::scheduler::{Handler, LocalScheduler, SchedulerConfig};
+    use crate::scheduler::{Handler, LocalScheduler, SchedulerConfig, Request};
 
     pub fn new_noop_file_purger() -> FilePurgerRef {
         Arc::new(LocalScheduler::new(
             SchedulerConfig::default(),
-            NoopFilePurgeHandler,
+            Arc::new(NoopFilePurgeHandler) as Arc<dyn Handler>,
         ))
     }
 
@@ -92,11 +103,13 @@ pub mod noop {
 
     #[async_trait::async_trait]
     impl Handler for NoopFilePurgeHandler {
-        type Request = FilePurgeRequest;
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
 
         async fn handle_request(
             &self,
-            _req: Self::Request,
+            _req: Box<dyn Request>,
             token: BoxedRateLimitToken,
             finish_notifier: Arc<Notify>,
         ) -> Result<()> {
@@ -118,7 +131,7 @@ mod tests {
     use crate::file_purger::noop::NoopFilePurgeHandler;
     use crate::memtable::tests::{schema_for_test, write_kvs};
     use crate::memtable::{DefaultMemtableBuilder, IterContext, MemtableBuilder};
-    use crate::scheduler::{Scheduler, SchedulerConfig};
+    use crate::scheduler::{Handler, Scheduler, SchedulerConfig};
     use crate::sst::{AccessLayer, FileHandle, FileMeta, FsAccessLayer, Source, WriteOptions};
 
     struct MockRateLimitToken;
@@ -180,7 +193,7 @@ mod tests {
 
         let noop_file_purger = Arc::new(LocalScheduler::new(
             SchedulerConfig::default(),
-            NoopFilePurgeHandler,
+            Arc::new(NoopFilePurgeHandler) as Arc<dyn Handler>,
         ));
         let (_file, path, layer) =
             create_sst_file(object_store.clone(), sst_file_id, noop_file_purger).await;
@@ -193,7 +206,7 @@ mod tests {
         let handler = FilePurgeHandler;
         let notify = Arc::new(Notify::new());
         handler
-            .handle_request(request, Box::new(MockRateLimitToken {}), notify.clone())
+            .handle_request(Box::new(request) as Box<dyn Request>, Box::new(MockRateLimitToken {}), notify.clone())
             .await
             .unwrap();
 
@@ -215,7 +228,7 @@ mod tests {
         let sst_file_id = FileId::random();
         let scheduler = Arc::new(LocalScheduler::new(
             SchedulerConfig::default(),
-            FilePurgeHandler,
+            Arc::new(FilePurgeHandler) as Arc <dyn Handler>,
         ));
         let (handle, path, _layer) =
             create_sst_file(object_store.clone(), sst_file_id, scheduler.clone()).await;

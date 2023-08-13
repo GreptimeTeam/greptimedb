@@ -39,11 +39,11 @@ use crate::manifest::storage::manifest_compress_type;
 use crate::memtable::{DefaultMemtableBuilder, MemtableBuilderRef};
 use crate::metadata::RegionMetadata;
 use crate::region::{RegionImpl, StoreConfig};
-use crate::scheduler::{LocalScheduler, Scheduler, SchedulerConfig};
+use crate::scheduler::{LocalScheduler, Scheduler, SchedulerConfig, Handler};
 use crate::sst::FsAccessLayer;
 
 /// [StorageEngine] implementation.
-pub struct EngineImpl<S: LogStore> {
+pub struct EngineImpl<S: LogStore + Send + Sync> {
     inner: Arc<EngineInner<S>>,
 }
 
@@ -56,7 +56,7 @@ impl<S: LogStore> Clone for EngineImpl<S> {
 }
 
 #[async_trait]
-impl<S: LogStore> StorageEngine for EngineImpl<S> {
+impl<S: LogStore + Send + Sync> StorageEngine for EngineImpl<S> {
     type Error = Error;
     type Region = RegionImpl<S>;
 
@@ -113,7 +113,7 @@ impl<S: LogStore> EngineImpl<S> {
         config: EngineConfig,
         log_store: Arc<S>,
         object_store: ObjectStore,
-        compaction_scheduler: CompactionSchedulerRef<S>,
+        compaction_scheduler: CompactionSchedulerRef,
     ) -> Result<Self> {
         Ok(Self {
             inner: Arc::new(EngineInner::new(
@@ -310,9 +310,9 @@ struct EngineInner<S: LogStore> {
     log_store: Arc<S>,
     regions: Arc<RegionMap<S>>,
     memtable_builder: MemtableBuilderRef,
-    flush_scheduler: FlushSchedulerRef<S>,
+    flush_scheduler: FlushSchedulerRef,
     flush_strategy: FlushStrategyRef,
-    compaction_scheduler: CompactionSchedulerRef<S>,
+    compaction_scheduler: CompactionSchedulerRef,
     file_purger: FilePurgerRef,
     config: Arc<EngineConfig>,
 }
@@ -322,7 +322,7 @@ impl<S: LogStore> EngineInner<S> {
         config: EngineConfig,
         log_store: Arc<S>,
         object_store: ObjectStore,
-        compaction_scheduler: CompactionSchedulerRef<S>,
+        compaction_scheduler: CompactionSchedulerRef,
     ) -> Result<Self> {
         let regions = Arc::new(RegionMap::new());
         let flush_scheduler = Arc::new(FlushScheduler::new(
@@ -341,7 +341,7 @@ impl<S: LogStore> EngineInner<S> {
             SchedulerConfig {
                 max_inflight_tasks: config.max_purge_tasks,
             },
-            FilePurgeHandler,
+            Arc::new(FilePurgeHandler) as Arc<dyn Handler>,
         ));
         let flush_strategy = Arc::new(SizeBasedStrategy::new(
             config

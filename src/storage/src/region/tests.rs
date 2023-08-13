@@ -51,7 +51,7 @@ use crate::manifest::test_utils::*;
 use crate::memtable::DefaultMemtableBuilder;
 use crate::metadata::RegionMetadata;
 use crate::region::{RegionImpl, StoreConfig};
-use crate::scheduler::{LocalScheduler, SchedulerConfig};
+use crate::scheduler::{LocalScheduler, SchedulerConfig, Handler};
 use crate::sst::{FileId, FsAccessLayer};
 use crate::test_util::descriptor_util::RegionDescBuilder;
 use crate::test_util::{self, config_util, schema_util, write_batch_util};
@@ -368,7 +368,7 @@ async fn test_recover_region_manifets(compress: bool) {
     let sst_layer = Arc::new(FsAccessLayer::new("sst", object_store)) as _;
     let file_purger = Arc::new(LocalScheduler::new(
         SchedulerConfig::default(),
-        NoopFilePurgeHandler,
+        Arc::new(NoopFilePurgeHandler) as Arc<dyn Handler>,
     ));
     // Recover from empty
     assert!(RegionImpl::<NoopLogStore>::recover_from_manifest(
@@ -530,7 +530,7 @@ async fn create_store_config(region_name: &str, root: &str) -> StoreConfig<NoopL
 
     let compaction_scheduler = Arc::new(NoopCompactionScheduler::default());
 
-    let regions = Arc::new(RegionMap::new());
+    let regions = Arc::new(RegionMap::<NoopLogStore>::new());
 
     let flush_scheduler = Arc::new(
         FlushScheduler::new(
@@ -546,7 +546,7 @@ async fn create_store_config(region_name: &str, root: &str) -> StoreConfig<NoopL
 
     let file_purger = Arc::new(LocalScheduler::new(
         SchedulerConfig::default(),
-        NoopFilePurgeHandler,
+        Arc::new(NoopFilePurgeHandler) as Arc<dyn Handler>,
     ));
     StoreConfig {
         log_store,

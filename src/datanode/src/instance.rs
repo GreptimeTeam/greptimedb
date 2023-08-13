@@ -48,7 +48,7 @@ use session::context::QueryContextBuilder;
 use snafu::prelude::*;
 use storage::compaction::{CompactionHandler, CompactionSchedulerRef};
 use storage::config::EngineConfig as StorageEngineConfig;
-use storage::scheduler::{LocalScheduler, SchedulerConfig};
+use storage::scheduler::{LocalScheduler, SchedulerConfig, Handler};
 use storage::EngineImpl;
 use store_api::logstore::LogStore;
 use table::engine::manager::{MemoryTableEngineManager, TableEngineManagerRef};
@@ -66,7 +66,7 @@ use crate::error::{
 };
 use crate::heartbeat::handler::close_region::CloseRegionHandler;
 use crate::heartbeat::handler::open_region::OpenRegionHandler;
-use crate::heartbeat::HeartbeatTask;
+use crate::heartbeat::{HeartbeatTask};
 use crate::sql::{SqlHandler, SqlRequest};
 use crate::store;
 use crate::telemetry::get_greptimedb_telemetry_task;
@@ -89,7 +89,7 @@ pub struct Instance {
 pub type InstanceRef = Arc<Instance>;
 
 impl Instance {
-    pub async fn with_opts(
+    pub async fn with_opts<S: LogStore>(
         opts: &DatanodeOptions,
         plugins: Arc<Plugins>,
     ) -> Result<(InstanceRef, Option<HeartbeatTask>)> {
@@ -107,7 +107,7 @@ impl Instance {
             }
         };
 
-        let compaction_scheduler = create_compaction_scheduler(opts);
+        let compaction_scheduler = create_compaction_scheduler::<S>(opts);
 
         Self::new(opts, meta_client, compaction_scheduler, plugins).await
     }
@@ -161,7 +161,7 @@ impl Instance {
     pub(crate) async fn new(
         opts: &DatanodeOptions,
         meta_client: Option<Arc<MetaClient>>,
-        compaction_scheduler: CompactionSchedulerRef<RaftEngineLogStore>,
+        compaction_scheduler: CompactionSchedulerRef,
         plugins: Arc<Plugins>,
     ) -> Result<(InstanceRef, Option<HeartbeatTask>)> {
         let object_store = store::new_object_store(&opts.storage.store).await?;
@@ -406,10 +406,10 @@ impl Instance {
     }
 }
 
-fn create_compaction_scheduler<S: LogStore>(opts: &DatanodeOptions) -> CompactionSchedulerRef<S> {
+fn create_compaction_scheduler<S: LogStore>(opts: &DatanodeOptions) -> CompactionSchedulerRef {
     let config = SchedulerConfig::from(opts);
-    let handler = CompactionHandler::default();
-    let scheduler = LocalScheduler::new(config, handler);
+    let handler = CompactionHandler::<S>::default();
+    let scheduler = LocalScheduler::new(config, Arc::new(handler) as Arc<dyn Handler>);
     Arc::new(scheduler)
 }
 

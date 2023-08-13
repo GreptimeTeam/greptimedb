@@ -14,6 +14,7 @@
 
 use std::marker::PhantomData;
 use std::sync::Arc;
+use std::any::Any;
 use std::time::Duration;
 
 use common_base::readable_size::ReadableSize;
@@ -29,18 +30,26 @@ use crate::error::Result;
 use crate::manifest::region::RegionManifest;
 use crate::region::{RegionWriterRef, SharedDataRef};
 use crate::scheduler::rate_limit::BoxedRateLimitToken;
-use crate::scheduler::{Handler, Request};
+use crate::scheduler::{Handler, Request, Key};
 use crate::schema::RegionSchemaRef;
 use crate::sst::AccessLayerRef;
 use crate::version::LevelMetasRef;
 use crate::wal::Wal;
 
+
 impl<S: LogStore> Request for CompactionRequestImpl<S> {
-    type Key = RegionId;
+    
+    fn as_any(&self) -> Box<dyn Any + '_> {
+        Box::new(self)
+    }
+
+    fn into_any(self: Box<Self>) -> Box<dyn Any> {
+        self as _
+    }
 
     #[inline]
-    fn key(&self) -> RegionId {
-        self.region_id
+    fn key(&self) -> Key {
+        Key::RegionKey(self.region_id)
     }
 
     fn complete(self, result: Result<()>) {
@@ -115,14 +124,17 @@ impl<S> Handler for CompactionHandler<S>
 where
     S: LogStore,
 {
-    type Request = CompactionRequestImpl<S>;
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 
     async fn handle_request(
         &self,
-        req: Self::Request,
+        req: Box<dyn Request>,
         token: BoxedRateLimitToken,
         finish_notifier: Arc<Notify>,
     ) -> Result<()> {
+        let req = *req.into_any().downcast::<CompactionRequestImpl<S>>().unwrap();
         let region_id = req.key();
         let Some(task) = req.picker.pick(&req)? else {
             info!("No file needs compaction in region: {:?}", region_id);

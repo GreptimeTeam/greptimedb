@@ -44,7 +44,7 @@ use crate::error::{DeleteSstSnafu, Result};
 use crate::file_purger::{FilePurgeRequest, FilePurgerRef};
 use crate::memtable::BoxedBatchIterator;
 use crate::read::{Batch, BatchReader, BoxedBatchReader};
-use crate::scheduler::Scheduler;
+use crate::scheduler::{Scheduler, Request};
 use crate::schema::ProjectedSchemaRef;
 use crate::sst::parquet::{ChunkStream, ParquetReader, ParquetWriter};
 
@@ -353,7 +353,7 @@ impl Drop for FileHandleInner {
                 file_id: self.meta.file_id,
                 region_id: self.meta.region_id,
             };
-            match self.file_purger.schedule(request) {
+            match self.file_purger.schedule(Box::new(request) as Box<dyn Request>) {
                 Ok(res) => {
                     debug!(
                         "Scheduled SST purge task, region: {}, name: {}, res: {}",
@@ -657,7 +657,7 @@ mod tests {
 
     use super::*;
     use crate::file_purger::noop::NoopFilePurgeHandler;
-    use crate::scheduler::{LocalScheduler, SchedulerConfig};
+    use crate::scheduler::{LocalScheduler, SchedulerConfig, Handler};
 
     #[test]
     fn test_file_id() {
@@ -745,7 +745,7 @@ mod tests {
         let layer = Arc::new(crate::test_util::access_layer_util::MockAccessLayer {});
         let purger = Arc::new(LocalScheduler::new(
             SchedulerConfig::default(),
-            NoopFilePurgeHandler,
+            Arc::new(NoopFilePurgeHandler) as Arc<dyn Handler>,
         ));
         let file_ids = [
             FileId::random(),

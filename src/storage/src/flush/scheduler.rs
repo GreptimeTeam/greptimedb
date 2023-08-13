@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 use std::time::Duration;
+use std::any::Any;
 
 use async_trait::async_trait;
 use common_runtime::{RepeatedTask, TaskFunction};
@@ -41,6 +42,7 @@ use crate::scheduler::rate_limit::BoxedRateLimitToken;
 use crate::scheduler::{Handler, LocalScheduler, Request, Scheduler, SchedulerConfig};
 use crate::sst::AccessLayerRef;
 use crate::wal::Wal;
+use crate::scheduler::Key;
 
 /// Key for [FlushRequest].
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -63,14 +65,20 @@ pub enum FlushRequest<S: LogStore> {
 }
 
 impl<S: LogStore> Request for FlushRequest<S> {
-    type Key = FlushKey;
+    fn as_any(&self) -> Box<dyn Any + '_> {
+        Box::new(self)
+    }
+
+    fn into_any(self: Box<Self>) -> Box<dyn Any> {
+        self as _
+    }
 
     #[inline]
-    fn key(&self) -> FlushKey {
+    fn key(&self) -> Key {
         match &self {
-            FlushRequest::Engine => FlushKey::Engine,
+            FlushRequest::Engine => Key::FlushKeyType(FlushKey::Engine),
             FlushRequest::Region { req, .. } => {
-                FlushKey::Region(req.shared.id(), req.flush_sequence)
+                Key::FlushKeyType(FlushKey::Region(req.shared.id(), req.flush_sequence))
             }
         }
     }
@@ -172,22 +180,22 @@ impl FlushHandle {
 }
 
 /// Flush scheduler.
-pub struct FlushScheduler<S: LogStore> {
+pub struct FlushScheduler {
     /// Flush task scheduler.
-    scheduler: LocalScheduler<FlushRequest<S>>,
+    scheduler: LocalScheduler,
     /// Auto flush task.
     auto_flush_task: RepeatedTask<Error>,
     #[cfg(test)]
     pending_tasks: Arc<tokio::sync::RwLock<Vec<tokio::task::JoinHandle<()>>>>,
 }
 
-pub type FlushSchedulerRef<S> = Arc<FlushScheduler<S>>;
+pub type FlushSchedulerRef = Arc<FlushScheduler>;
 
-impl<S: LogStore> FlushScheduler<S> {
+impl FlushScheduler {
     /// Returns a new [FlushScheduler].
-    pub fn new(
+    pub fn new<S: LogStore>(
         config: SchedulerConfig,
-        compaction_scheduler: CompactionSchedulerRef<S>,
+        compaction_scheduler: CompactionSchedulerRef,
         regions: Arc<RegionMap<S>>,
         picker_config: PickerConfig,
     ) -> Result<Self> {
@@ -214,7 +222,7 @@ impl<S: LogStore> FlushScheduler<S> {
         };
 
         Ok(Self {
-            scheduler: LocalScheduler::new(config, handler),
+            scheduler: LocalScheduler::new(config, Arc::new(handler) as Arc<dyn Handler>),
             auto_flush_task,
             #[cfg(test)]
             pending_tasks,
@@ -222,14 +230,14 @@ impl<S: LogStore> FlushScheduler<S> {
     }
 
     /// Schedules a region flush request and return the handle to the flush task.
-    pub fn schedule_region_flush(&self, req: FlushRegionRequest<S>) -> Result<FlushHandle> {
+    pub fn schedule_region_flush<S: LogStore>(&self, req: FlushRegionRequest<S>) -> Result<FlushHandle> {
         let region_id = req.region_id();
         let sequence = req.flush_sequence;
         let (sender, receiver) = oneshot::channel();
 
         let scheduled = self
             .scheduler
-            .schedule(FlushRequest::Region { req, sender })?;
+            .schedule(Box::new(FlushRequest::Region { req, sender }) as Box<dyn Request>)?;
         // Normally we should not have duplicate flush request.
         ensure!(
             scheduled,
@@ -246,8 +254,8 @@ impl<S: LogStore> FlushScheduler<S> {
     }
 
     /// Schedules a engine flush request.
-    pub fn schedule_engine_flush(&self) -> Result<()> {
-        let _ = self.scheduler.schedule(FlushRequest::Engine)?;
+    pub fn schedule_engine_flush<S: LogStore>(&self) -> Result<()> {
+        let _ = self.scheduler.schedule(Box::new(FlushRequest::<S>::Engine) as Box<dyn Request>)?;
         Ok(())
     }
 
@@ -267,7 +275,7 @@ impl<S: LogStore> FlushScheduler<S> {
 }
 
 struct FlushHandler<S: LogStore> {
-    compaction_scheduler: CompactionSchedulerRef<S>,
+    compaction_scheduler: CompactionSchedulerRef,
     regions: Arc<RegionMap<S>>,
     picker: FlushPicker,
     #[cfg(test)]
@@ -276,17 +284,20 @@ struct FlushHandler<S: LogStore> {
 
 #[async_trait::async_trait]
 impl<S: LogStore> Handler for FlushHandler<S> {
-    type Request = FlushRequest<S>;
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 
     async fn handle_request(
         &self,
-        req: FlushRequest<S>,
+        req: Box<dyn Request>,
         token: BoxedRateLimitToken,
         finish_notifier: Arc<Notify>,
     ) -> Result<()> {
         let compaction_scheduler = self.compaction_scheduler.clone();
         let region_map = self.regions.clone();
         let picker = self.picker.clone();
+        let req = *req.into_any().downcast::<FlushRequest<S>>().unwrap(); 
         let _handle = common_runtime::spawn_bg(async move {
             match req {
                 FlushRequest::Engine => {
@@ -313,7 +324,7 @@ impl<S: LogStore> Handler for FlushHandler<S> {
 async fn execute_flush_region<S: LogStore>(
     req: FlushRegionRequest<S>,
     sender: Sender<Result<()>>,
-    compaction_scheduler: CompactionSchedulerRef<S>,
+    compaction_scheduler: CompactionSchedulerRef,
 ) {
     let mut flush_job = FlushJob::from(&req);
 
@@ -347,7 +358,7 @@ async fn execute_flush_region<S: LogStore>(
         } else {
             // If flush is success, schedule a compaction request for this region.
             let _ =
-                region::schedule_compaction(shared_data, compaction_scheduler, compaction_request);
+                region::schedule_compaction::<S>(shared_data, compaction_scheduler, Box::new(compaction_request) as Box<dyn Request>);
         }
 
         // Complete the request.

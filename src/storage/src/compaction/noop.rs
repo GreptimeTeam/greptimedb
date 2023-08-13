@@ -14,18 +14,19 @@
 
 use std::fmt::{Debug, Formatter};
 use std::marker::PhantomData;
+use std::any::Any;
 
 use store_api::storage::RegionId;
 
 use crate::compaction::{CompactionTask, Picker};
 use crate::error::Result;
-use crate::scheduler::{Request, Scheduler};
+use crate::scheduler::{Request, Scheduler, Key};
 
-pub struct NoopCompactionScheduler<R> {
-    _phantom_data: PhantomData<R>,
+pub struct NoopCompactionScheduler {
+    _phantom_data: PhantomData<dyn Request>,
 }
 
-impl<R> Default for NoopCompactionScheduler<R> {
+impl Default for NoopCompactionScheduler {
     fn default() -> Self {
         Self {
             _phantom_data: Default::default(),
@@ -33,7 +34,7 @@ impl<R> Default for NoopCompactionScheduler<R> {
     }
 }
 
-impl<R> Debug for NoopCompactionScheduler<R> {
+impl Debug for NoopCompactionScheduler {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("NoopCompactionScheduler<...>").finish()
     }
@@ -65,23 +66,25 @@ impl CompactionTask for NoopCompactionTask {
 }
 
 impl Request for NoopCompactionRequest {
-    type Key = RegionId;
+    fn as_any(&self) -> Box<dyn Any + '_> {
+        Box::new(self)
+    }
 
-    fn key(&self) -> Self::Key {
-        RegionId::from(0)
+    fn into_any(self: Box<Self>) -> Box<dyn Any> {
+        self as _
+    }
+    
+    fn key(&self) -> Key {
+        Key::RegionKey(RegionId::from(0))
     }
 
     fn complete(self, _result: Result<()>) {}
 }
 
 #[async_trait::async_trait]
-impl<R> Scheduler for NoopCompactionScheduler<R>
-where
-    R: Request<Key = RegionId>,
-{
-    type Request = R;
+impl Scheduler for NoopCompactionScheduler {
 
-    fn schedule(&self, _request: Self::Request) -> Result<bool> {
+    fn schedule(&self, _request: Box<dyn Request>) -> Result<bool> {
         Ok(true)
     }
 

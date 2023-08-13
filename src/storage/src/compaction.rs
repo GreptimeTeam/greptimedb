@@ -37,8 +37,9 @@ use crate::sst::FileHandle;
 pub type CompactionPickerRef<S> =
     Arc<dyn Picker<Request = CompactionRequestImpl<S>, Task = CompactionTaskImpl<S>> + Send + Sync>;
 
-pub type CompactionSchedulerRef<S> =
-    Arc<dyn Scheduler<Request = CompactionRequestImpl<S>> + Send + Sync>;
+
+pub type CompactionSchedulerRef =
+    Arc<dyn Scheduler + Send + Sync>;
 
 /// Infers the suitable time bucket duration.
 /// Now it simply find the max and min timestamp across all SSTs in level and fit the time span

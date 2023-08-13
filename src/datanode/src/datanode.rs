@@ -40,6 +40,7 @@ use crate::error::{Result, ShutdownInstanceSnafu};
 use crate::heartbeat::HeartbeatTask;
 use crate::instance::{Instance, InstanceRef};
 use crate::server::Services;
+use log_store::raft_engine::log_store::RaftEngineLogStore;
 
 pub const DEFAULT_OBJECT_STORE_CACHE_SIZE: ReadableSize = ReadableSize(1024);
 
@@ -404,7 +405,7 @@ pub struct Datanode {
 
 impl Datanode {
     pub async fn new(opts: DatanodeOptions, plugins: Arc<Plugins>) -> Result<Datanode> {
-        let (instance, heartbeat_task) = Instance::with_opts(&opts, plugins).await?;
+        let (instance, heartbeat_task) = Instance::with_opts::<RaftEngineLogStore>(&opts, plugins).await?;
         let services = match opts.mode {
             Mode::Distributed => Some(Services::try_new(instance.clone(), &opts).await?),
             Mode::Standalone => None,

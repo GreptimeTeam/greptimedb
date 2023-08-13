@@ -22,7 +22,7 @@ use common_telemetry::{logging, timer};
 use metrics::counter;
 pub use picker::{FlushPicker, PickerConfig};
 pub use scheduler::{
-    FlushHandle, FlushRegionRequest, FlushRequest, FlushScheduler, FlushSchedulerRef,
+    FlushHandle, FlushRegionRequest, FlushRequest, FlushScheduler, FlushSchedulerRef, FlushKey
 };
 use store_api::logstore::LogStore;
 use store_api::storage::consts::WRITE_ROW_GROUP_SIZE;
