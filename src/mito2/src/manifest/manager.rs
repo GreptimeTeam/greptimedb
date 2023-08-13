@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use common_datasource::compression::CompressionType;
-use common_telemetry::{debug, info, warn};
+use common_telemetry::{debug, info};
 use object_store::ObjectStore;
 use store_api::manifest::{ManifestVersion, MAX_VERSION, MIN_VERSION};
 use tokio::sync::RwLock;
@@ -37,7 +37,7 @@ pub struct RegionManifestOptions {
     pub compress_type: CompressionType,
     /// Interval of version ([ManifestVersion](store_api::manifest::ManifestVersion)) between two checkpoints.
     /// Set to 0 to disable checkpoint.
-    pub checkpoint_interval: u64,
+    pub checkpoint_distance: u64,
 }
 
 // rewrite note:
@@ -347,8 +347,8 @@ impl RegionManifestManagerInner {
     }
 
     pub(crate) async fn may_do_checkpoint(&mut self, version: ManifestVersion) -> Result<()> {
-        if version - self.last_checkpoint_version >= self.options.checkpoint_interval
-            && self.options.checkpoint_interval != 0
+        if version - self.last_checkpoint_version >= self.options.checkpoint_distance
+            && self.options.checkpoint_distance != 0
         {
             debug!(
                 "Going to do checkpoint for version [{} ~ {}]",
@@ -424,8 +424,8 @@ impl RegionManifestManagerInner {
         self.store.delete_until(last_version, true).await?;
 
         debug!(
-            "Done manifest checkpoint, start_version: {}, last_version: {}, compacted actions: {}",
-            start_version, last_version, compacted_actions
+            "Done manifest checkpoint, version: [{}, {}], current latest version: {}, compacted {} actions.",
+            start_version, end_version, last_version, compacted_actions
         );
         Ok(Some(checkpoint))
     }
@@ -438,20 +438,6 @@ impl RegionManifestManagerInner {
 
         if let Some((version, bytes)) = last_checkpoint {
             let checkpoint = RegionCheckpoint::decode(&bytes)?;
-            assert!(checkpoint.last_version() >= version);
-            if checkpoint.last_version() > version {
-                // It happens when saving checkpoint successfully, but failed at saving checkpoint metadata(the "__last_checkpoint" file).
-                // Then we try to use the old checkpoint and do the checkpoint next time.
-                // If the old checkpoint was deleted, it's fine that we return the latest checkpoint.
-                // The only side effect is leaving some unused checkpoint files,
-                // and they will be purged by gc task.
-                warn!("The checkpoint manifest version {} in {} is greater than checkpoint metadata version {}.", store.path(), checkpoint.last_version(), version);
-
-                if let Some((_, bytes)) = store.load_checkpoint(version).await? {
-                    let old_checkpoint = RegionCheckpoint::decode(&bytes)?;
-                    return Ok(Some(old_checkpoint));
-                }
-            }
             Ok(Some(checkpoint))
         } else {
             Ok(None)

@@ -94,7 +94,7 @@ impl TestEnv {
     pub async fn create_manifest_manager(
         &self,
         compress_type: CompressionType,
-        checkpoint_interval: u64,
+        checkpoint_distance: u64,
         initial_metadata: Option<RegionMetadataRef>,
     ) -> Result<Option<RegionManifestManager>> {
         let data_home = self.data_home.path();
@@ -115,7 +115,7 @@ impl TestEnv {
             manifest_dir,
             object_store,
             compress_type,
-            checkpoint_interval,
+            checkpoint_distance,
         };
 
         if let Some(metadata) = initial_metadata {

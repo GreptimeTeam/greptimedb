@@ -37,7 +37,7 @@ pub struct MitoConfig {
     // Manifest configs:
     /// Number of meta action updated to trigger a new checkpoint
     /// for the manifest (default 10).
-    pub manifest_checkpoint_interval: u64,
+    pub manifest_checkpoint_distance: u64,
     /// Manifest compression type (default uncompressed).
     pub manifest_compress_type: CompressionType,
 }
@@ -48,7 +48,7 @@ impl Default for MitoConfig {
             num_workers: DEFAULT_NUM_WORKERS,
             worker_channel_size: 128,
             worker_request_batch_size: 64,
-            manifest_checkpoint_interval: 10,
+            manifest_checkpoint_distance: 10,
             manifest_compress_type: CompressionType::Uncompressed,
         }
     }

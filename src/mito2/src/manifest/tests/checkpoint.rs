@@ -27,13 +27,13 @@ use crate::sst::file::{FileId, FileMeta};
 use crate::test_util::TestEnv;
 
 async fn build_manager(
-    checkpoint_interval: u64,
+    checkpoint_distance: u64,
     compress_type: CompressionType,
 ) -> (TestEnv, RegionManifestManager) {
     let metadata = Arc::new(basic_region_metadata());
     let env = TestEnv::new();
     let manager = env
-        .create_manifest_manager(compress_type, checkpoint_interval, Some(metadata.clone()))
+        .create_manifest_manager(compress_type, checkpoint_distance, Some(metadata.clone()))
         .await
         .unwrap()
         .unwrap();
@@ -43,10 +43,10 @@ async fn build_manager(
 
 async fn reopen_manager(
     env: &TestEnv,
-    checkpoint_interval: u64,
+    checkpoint_distance: u64,
     compress_type: CompressionType,
 ) -> RegionManifestManager {
-    env.create_manifest_manager(compress_type, checkpoint_interval, None)
+    env.create_manifest_manager(compress_type, checkpoint_distance, None)
         .await
         .unwrap()
         .unwrap()
@@ -105,7 +105,7 @@ async fn manager_without_checkpoint() {
 }
 
 #[tokio::test]
-async fn manager_with_checkpoint_interval_1() {
+async fn manager_with_checkpoint_distance_1() {
     common_telemetry::init_default_ut_logging();
     let (env, manager) = build_manager(1, CompressionType::Uncompressed).await;
 

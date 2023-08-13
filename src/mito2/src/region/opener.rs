@@ -79,7 +79,7 @@ impl RegionOpener {
             manifest_dir: new_manifest_dir(&self.region_dir),
             object_store: self.object_store,
             compress_type: config.manifest_compress_type,
-            checkpoint_interval: config.manifest_checkpoint_interval,
+            checkpoint_distance: config.manifest_checkpoint_distance,
         };
         // Writes regions to the manifest file.
         let manifest_manager = RegionManifestManager::new(metadata.clone(), options).await?;
@@ -104,7 +104,7 @@ impl RegionOpener {
             manifest_dir: new_manifest_dir(&self.region_dir),
             object_store: self.object_store,
             compress_type: config.manifest_compress_type,
-            checkpoint_interval: config.manifest_checkpoint_interval,
+            checkpoint_distance: config.manifest_checkpoint_distance,
         };
         let manifest_manager =
             RegionManifestManager::open(options)
