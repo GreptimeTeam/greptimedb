@@ -94,7 +94,9 @@ impl Instance {
                 match stmt {
                     // TODO(LFC): Remove SQL execution branch here.
                     // Keep this because substrait can't handle much of SQLs now.
-                    QueryStatement::Sql(Statement::Query(_)) | QueryStatement::Promql(_) => {
+                    QueryStatement::Sql(Statement::Query(_))
+                    | QueryStatement::Sql(Statement::Explain(_))
+                    | QueryStatement::Promql(_) => {
                         let plan = self
                             .query_engine
                             .planner()

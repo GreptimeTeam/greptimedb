@@ -27,7 +27,5 @@ pub mod server;
 pub mod sql;
 mod store;
 
-use greptimedb_telemetry::telemetry;
-
 #[cfg(test)]
 mod tests;
