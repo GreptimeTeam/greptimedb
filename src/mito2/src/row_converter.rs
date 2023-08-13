@@ -104,19 +104,11 @@ impl SortField {
                             .serialize($serializer)
                             .context(SerializeFieldSnafu)?;
                     }
-                    ConcreteDataType::List(item) => {
-                        return error::NotSupportedFieldSnafu{
-                            data_type: ConcreteDataType::List(item.clone())
-                        }.fail()
-                    }
-                    ConcreteDataType::Dictionary(kv) => {
-                        return error::NotSupportedFieldSnafu{
-                            data_type: ConcreteDataType::Dictionary(kv.clone())
-                        }.fail()
-                    }
-                    ConcreteDataType::Null(null) => {
-                        return error::NotSupportedFieldSnafu{
-                            data_type: ConcreteDataType::Null(null.clone())
+                    ConcreteDataType::List(_) |
+                    ConcreteDataType::Dictionary(_) |
+                    ConcreteDataType::Null(_) => {
+                        return error::NotSupportedFieldSnafu {
+                            data_type: $self.data_type.clone()
                         }.fail()
                     }
                 }
@@ -237,11 +229,11 @@ impl TryFrom<MemComparableTimestamp> for Timestamp {
 }
 
 /// A memory-comparable row [Value] encoder/decoder.
-pub struct McmpRowEncoder {
+pub struct McmpRowCodec {
     fields: Vec<SortField>,
 }
 
-impl McmpRowEncoder {
+impl McmpRowCodec {
     pub fn new(fields: Vec<SortField>) -> Self {
         Self { fields }
     }
@@ -252,7 +244,7 @@ impl McmpRowEncoder {
     }
 }
 
-impl RowCodec for McmpRowEncoder {
+impl RowCodec for McmpRowCodec {
     fn encode<'a, I>(&self, rows: I) -> error::Result<Vec<u8>>
     where
         I: Iterator<Item = &'a [ValueRef<'a>]>,
@@ -298,9 +290,32 @@ mod tests {
 
     use super::*;
 
+    fn check_encode_and_decode(data_types: &[ConcreteDataType], rows: &[Vec<Value>]) {
+        let encoder = McmpRowCodec::new(
+            data_types
+                .iter()
+                .map(|t| SortField::new(t.clone()))
+                .collect::<Vec<_>>(),
+        );
+
+        let value_ref = rows
+            .iter()
+            .map(|row| row.iter().map(|v| v.as_value_ref()).collect::<Vec<_>>())
+            .collect::<Vec<_>>();
+        let result = encoder
+            .encode(value_ref.iter().map(|r| r.as_slice()))
+            .unwrap();
+        let decoded = encoder.decode(&result).unwrap();
+        assert_eq!(value_ref.len(), decoded.len());
+
+        for i in 0..rows.len() {
+            assert_eq!(&rows[i], decoded.get(i).unwrap() as &[Value]);
+        }
+    }
+
     #[test]
     fn test_memcmp() {
-        let encoder = McmpRowEncoder::new(vec![
+        let encoder = McmpRowCodec::new(vec![
             SortField::new(ConcreteDataType::string_datatype()),
             SortField::new(ConcreteDataType::int64_datatype()),
         ]);
@@ -315,95 +330,77 @@ mod tests {
 
     #[test]
     fn test_memcmp_timestamp() {
-        let encoder = McmpRowEncoder::new(vec![
-            SortField::new(ConcreteDataType::timestamp_millisecond_datatype()),
-            SortField::new(ConcreteDataType::int64_datatype()),
-        ]);
-        let values = [
-            Value::Timestamp(Timestamp::new_millisecond(42)),
-            Value::Int64(43),
-        ];
-        let value_ref = values.iter().map(|f| f.as_value_ref()).collect::<Vec<_>>();
-        let result = encoder.encode(std::iter::once(&value_ref as _)).unwrap();
-
-        let decoded = encoder.decode(&result).unwrap();
-        assert_eq!(1, decoded.len());
-        assert_eq!(&values, decoded.get(0).unwrap() as &[Value]);
+        check_encode_and_decode(
+            &[
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                ConcreteDataType::int64_datatype(),
+            ],
+            &[vec![
+                Value::Timestamp(Timestamp::new_millisecond(42)),
+                Value::Int64(43),
+            ]],
+        );
     }
 
     #[test]
     fn test_memcmp_binary() {
-        let encoder = McmpRowEncoder::new(vec![
-            SortField::new(ConcreteDataType::binary_datatype()),
-            SortField::new(ConcreteDataType::int64_datatype()),
-        ]);
-        let values = [
-            Value::Binary(Bytes::from("hello".as_bytes())),
-            Value::Int64(43),
-        ];
-        let value_ref = values.iter().map(|f| f.as_value_ref()).collect::<Vec<_>>();
-
-        let result = encoder
-            .encode(std::iter::once(value_ref.as_slice()))
-            .unwrap();
-
-        let decoded = encoder.decode(&result).unwrap();
-        assert_eq!(1, decoded.len());
-        assert_eq!(&values, decoded.get(0).unwrap() as &[Value]);
+        check_encode_and_decode(
+            &[
+                ConcreteDataType::binary_datatype(),
+                ConcreteDataType::int64_datatype(),
+            ],
+            &[vec![
+                Value::Binary(Bytes::from("hello".as_bytes())),
+                Value::Int64(43),
+            ]],
+        );
     }
 
     #[test]
     fn test_memcmp_string() {
-        let encoder =
-            McmpRowEncoder::new(vec![SortField::new(ConcreteDataType::string_datatype())]);
-        let values = [Value::String(StringBytes::from("abcd"))];
-        let result = encoder
-            .encode(std::iter::once(
-                values
-                    .iter()
-                    .map(|f| f.as_value_ref())
-                    .collect::<Vec<_>>()
-                    .as_slice(),
-            ))
-            .unwrap();
-        let decoded = encoder.decode(&result).unwrap();
-        assert_eq!(1, decoded.len());
-        assert_eq!(&values, decoded.get(0).unwrap() as &[Value]);
+        check_encode_and_decode(
+            &[ConcreteDataType::string_datatype()],
+            &[
+                vec![Value::String(StringBytes::from("hello"))],
+                vec![Value::Null],
+                vec![Value::String("".into())],
+                vec![Value::String("world".into())],
+            ],
+        );
+    }
+
+    #[test]
+    fn test_encode_null() {
+        check_encode_and_decode(
+            &[
+                ConcreteDataType::string_datatype(),
+                ConcreteDataType::int32_datatype(),
+            ],
+            &[vec![Value::String(StringBytes::from("abcd")), Value::Null]],
+        )
     }
 
     #[test]
     fn test_encode_multiple_rows() {
-        let encoder = McmpRowEncoder::new(vec![
-            SortField::new(ConcreteDataType::string_datatype()),
-            SortField::new(ConcreteDataType::int64_datatype()),
-            SortField::new(ConcreteDataType::boolean_datatype()),
-        ]);
-        let rows = [
-            [
-                Value::String("hello".into()),
-                Value::Int64(42),
-                Value::Boolean(false),
+        check_encode_and_decode(
+            &[
+                ConcreteDataType::string_datatype(),
+                ConcreteDataType::int64_datatype(),
+                ConcreteDataType::boolean_datatype(),
             ],
-            [
-                Value::String("world".into()),
-                Value::Int64(43),
-                Value::Boolean(true),
+            &[
+                vec![
+                    Value::String("hello".into()),
+                    Value::Int64(42),
+                    Value::Boolean(false),
+                ],
+                vec![
+                    Value::String("world".into()),
+                    Value::Int64(43),
+                    Value::Boolean(true),
+                ],
+                vec![Value::Null, Value::Int64(43), Value::Boolean(true)],
             ],
-        ];
-
-        let value_refs = rows
-            .iter()
-            .map(|row| row.iter().map(|f| f.as_value_ref()).collect::<Vec<_>>())
-            .collect::<Vec<_>>();
-
-        let serialized = encoder
-            .encode(value_refs.iter().map(|row| row.as_slice()))
-            .unwrap();
-
-        let deserialized = encoder.decode(&serialized).unwrap();
-        assert_eq!(rows.len(), deserialized.len());
-        for idx in 0..rows.len() {
-            assert_eq!(&deserialized[idx], &rows[idx]);
-        }
+        );
     }
 }
