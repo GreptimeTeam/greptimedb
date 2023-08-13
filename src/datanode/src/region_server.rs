@@ -26,6 +26,7 @@ use crate::error::{
     HandleRegionRequestSnafu, RegionEngineNotFoundSnafu, RegionNotFoundSnafu, Result,
 };
 
+#[derive(Default)]
 pub struct RegionServer {
     engines: HashMap<String, RegionEngineRef>,
     region_map: DashMap<RegionId, String>,
@@ -33,10 +34,7 @@ pub struct RegionServer {
 
 impl RegionServer {
     pub fn new() -> Self {
-        Self {
-            engines: HashMap::new(),
-            region_map: DashMap::new(),
-        }
+        Self::default()
     }
 
     pub fn register_engine(&mut self, engine: RegionEngineRef) {
@@ -72,16 +70,14 @@ impl RegionServer {
                     .get(&region_id)
                     .with_context(|| RegionNotFoundSnafu { region_id })?;
                 _dashmap_guard = Some(guard);
-                _dashmap_guard.as_ref().map(|g| &*g).unwrap()
+                _dashmap_guard.as_ref().unwrap()
             }
         };
 
-        let engine =
-            self.engines
-                .get(&*engine_type)
-                .with_context(|| RegionEngineNotFoundSnafu {
-                    name: &*engine_type,
-                })?;
+        let engine = self
+            .engines
+            .get(engine_type)
+            .with_context(|| RegionEngineNotFoundSnafu { name: engine_type })?;
         let result = engine
             .handle_request(region_id, request)
             .await

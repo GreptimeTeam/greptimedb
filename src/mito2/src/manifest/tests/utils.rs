@@ -14,9 +14,10 @@
 
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
+use store_api::metadata::{ColumnMetadata, SemanticType};
 use store_api::storage::RegionId;
 
-use crate::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder, SemanticType};
+use crate::metadata::{RegionMetadata, RegionMetadataBuilder};
 
 /// Build a basic region metadata for testing.
 /// It contains three columns:

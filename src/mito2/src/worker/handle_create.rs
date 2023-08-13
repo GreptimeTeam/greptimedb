@@ -36,9 +36,7 @@ impl<S> RegionWorkerLoop<S> {
         if self.regions.is_region_exists(region_id) {
             ensure!(
                 request.create_if_not_exists,
-                RegionExistsSnafu {
-                    region_id: region_id,
-                }
+                RegionExistsSnafu { region_id }
             );
 
             // Region already exists.
