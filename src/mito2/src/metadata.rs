@@ -116,6 +116,11 @@ impl<'de> Deserialize<'de> for RegionMetadata {
 }
 
 impl RegionMetadata {
+    /// Decode the metadata from a JSON str.
+    pub fn from_json(s: &str) -> Result<Self> {
+        serde_json::from_str(s).context(SerdeJsonSnafu)
+    }
+
     /// Encode the metadata to a JSON string.
     pub fn to_json(&self) -> Result<String> {
         serde_json::to_string(&self).context(SerdeJsonSnafu)
@@ -126,6 +131,11 @@ impl RegionMetadata {
         self.id_to_index
             .get(&column_id)
             .map(|index| &self.column_metadatas[*index])
+    }
+
+    /// Find column index by id.
+    pub(crate) fn column_index_by_id(&self, column_id: ColumnId) -> Option<usize> {
+        self.id_to_index.get(&column_id).copied()
     }
 
     /// Returns the time index column

@@ -14,6 +14,8 @@
 
 //! Common structs and utilities for reading data.
 
+mod compat;
+
 use async_trait::async_trait;
 use common_time::Timestamp;
 use datatypes::vectors::VectorRef;
@@ -29,7 +31,7 @@ pub struct Batch {
     /// Tsid of the batch.
     tsid: Tsid,
     /// Primary key encoded in a comparable form.
-    // TODO(yingwen): Maybe use `Bytes`.
+    // TODO(yingwen): Maybe use `Bytes` or `Vec<Value>`.
     primary_key: Vec<u8>,
     /// Timestamps of rows, should be sorted and not null.
     timestamps: VectorRef,

@@ -302,6 +302,13 @@ pub enum Error {
         source: memcomparable::Error,
         location: Location,
     },
+
+    #[snafu(display("Failed to get metadata from file {}, reason: {}", file, reason))]
+    NoKeyValue {
+        file: String,
+        reason: String,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -332,7 +339,8 @@ impl ErrorExt for Error {
             | NewRecordBatch { .. }
             | RegionNotFound { .. }
             | RegionCorrupted { .. }
-            | CreateDefault { .. } => StatusCode::Unexpected,
+            | CreateDefault { .. }
+            | NoKeyValue { .. } => StatusCode::Unexpected,
             InvalidScanIndex { .. }
             | InvalidMeta { .. }
             | InvalidSchema { .. }

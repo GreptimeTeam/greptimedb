@@ -27,16 +27,17 @@ use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::prelude::ConcreteDataType;
 use snafu::ResultExt;
 use store_api::storage::consts::{OP_TYPE_COLUMN_NAME, SEQUENCE_COLUMN_NAME, TSID_COLUMN_NAME};
-use store_api::storage::Tsid;
+use store_api::storage::{ColumnId, Tsid};
 
 use crate::error::{NewRecordBatchSnafu, Result};
-use crate::metadata::{ColumnMetadata, RegionMetadata, SemanticType};
+use crate::metadata::{ColumnMetadata, RegionMetadata};
+use api::v1::SemanticType;
 use crate::read::Batch;
 
 /// Number of internal columns.
 const INTERNAL_COLUMN_NUM: usize = 3;
 
-/// Get the arrow schema to store in parquet.
+/// Gets the arrow schema to store in parquet.
 pub(crate) fn to_sst_arrow_schema(metadata: &RegionMetadata) -> SchemaRef {
     let fields = Fields::from_iter(
         metadata
@@ -52,7 +53,7 @@ pub(crate) fn to_sst_arrow_schema(metadata: &RegionMetadata) -> SchemaRef {
     Arc::new(Schema::new(fields))
 }
 
-/// Get the arrow record batch to store in parquet.
+/// Gets the arrow record batch to store in parquet.
 ///
 /// The `arrow_schema` is constructed by [to_sst_arrow_schema].
 pub(crate) fn to_sst_record_batch(batch: &Batch, arrow_schema: &SchemaRef) -> Result<RecordBatch> {
@@ -67,6 +68,20 @@ pub(crate) fn to_sst_record_batch(batch: &Batch, arrow_schema: &SchemaRef) -> Re
     columns.push(new_tsid_array(batch.tsid(), batch.num_rows()));
 
     RecordBatch::try_new(arrow_schema.clone(), columns).context(NewRecordBatchSnafu)
+}
+
+/// Gets projection indices to read `columns` from parquet files.
+///
+/// This function ignores columns not in `metadata` to for compatibility between
+/// different schemas.
+pub(crate) fn to_sst_projection_indices(
+    metadata: &RegionMetadata,
+    columns: impl IntoIterator<Item = ColumnId>,
+) -> Vec<usize> {
+    columns
+        .into_iter()
+        .filter_map(|column_id| metadata.column_index_by_id(column_id))
+        .collect()
 }
 
 /// Returns the field type to store this column.

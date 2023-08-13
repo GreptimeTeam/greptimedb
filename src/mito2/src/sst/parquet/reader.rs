@@ -21,15 +21,20 @@ use datatypes::arrow::record_batch::RecordBatch;
 use futures::stream::BoxStream;
 use futures::TryStreamExt;
 use object_store::ObjectStore;
-use parquet::arrow::ParquetRecordBatchStreamBuilder;
+use parquet::arrow::{ParquetRecordBatchStreamBuilder, ProjectionMask};
 use parquet::errors::ParquetError;
-use snafu::ResultExt;
+use parquet::format::KeyValue;
+use snafu::{OptionExt, ResultExt};
+use store_api::storage::ColumnId;
 use table::predicate::Predicate;
 use tokio::io::BufReader;
 
-use crate::error::{OpenDalSnafu, ReadParquetSnafu, Result};
+use crate::error::{NoKeyValueSnafu, OpenDalSnafu, ReadParquetSnafu, Result};
+use crate::metadata::RegionMetadata;
 use crate::read::{Batch, BatchReader};
 use crate::sst::file::FileHandle;
+use crate::sst::parquet::format::to_sst_projection_indices;
+use crate::sst::parquet::PARQUET_METADATA_KEY;
 
 /// Parquet SST reader builder.
 pub struct ParquetReaderBuilder {
@@ -38,6 +43,7 @@ pub struct ParquetReaderBuilder {
     object_store: ObjectStore,
     predicate: Option<Predicate>,
     time_range: Option<TimestampRange>,
+    projection: Option<Vec<ColumnId>>,
 }
 
 impl ParquetReaderBuilder {
@@ -53,6 +59,7 @@ impl ParquetReaderBuilder {
             object_store,
             predicate: None,
             time_range: None,
+            projection: None,
         }
     }
 
@@ -68,6 +75,12 @@ impl ParquetReaderBuilder {
         self
     }
 
+    /// Attaches the projection to the builder.
+    pub fn projection(mut self, projection: Vec<ColumnId>) -> ParquetReaderBuilder {
+        self.projection = Some(projection);
+        self
+    }
+
     /// Builds a [ParquetReader].
     pub fn build(self) -> ParquetReader {
         let file_path = self.file_handle.file_path(&self.file_dir);
@@ -77,6 +90,7 @@ impl ParquetReaderBuilder {
             object_store: self.object_store,
             predicate: self.predicate,
             time_range: self.time_range,
+            projection: self.projection,
             stream: None,
         }
     }
@@ -97,6 +111,10 @@ pub struct ParquetReader {
     predicate: Option<Predicate>,
     /// Time range to filter.
     time_range: Option<TimestampRange>,
+    /// Id of columns to read.
+    ///
+    /// `None` reads all columns.
+    projection: Option<Vec<ColumnId>>,
 
     /// Inner parquet record batch stream.
     stream: Option<BoxedRecordBatchStream>,
@@ -110,6 +128,7 @@ impl ParquetReader {
             return Ok(());
         }
 
+        // Creates parquet stream builder.
         let reader = self
             .object_store
             .reader(&self.file_path)
@@ -123,7 +142,9 @@ impl ParquetReader {
                 path: &self.file_path,
             })?;
 
-        // TODO(yingwen): Decode region metadata, create read adapter.
+        // Decode region metadata.
+        let key_value_meta = builder.metadata().file_metadata().key_value_metadata();
+        let region_meta = self.get_region_metadata(key_value_meta)?;
 
         // Prune row groups by metadata.
         if let Some(predicate) = &self.predicate {
@@ -136,7 +157,12 @@ impl ParquetReader {
             builder = builder.with_row_groups(pruned_row_groups);
         }
 
-        // TODO(yingwen): Projection.
+        let parquet_schema_desc = builder.metadata().file_metadata().schema_descr();
+        if let Some(column_ids) = self.projection.as_ref() {
+            let indices = to_sst_projection_indices(&region_meta, column_ids.iter().copied());
+            let projection_mask = ProjectionMask::roots(parquet_schema_desc, indices);
+            builder = builder.with_projection(projection_mask);
+        }
 
         let stream = builder.build().context(ReadParquetSnafu {
             path: &self.file_path,
@@ -144,6 +170,30 @@ impl ParquetReader {
         self.stream = Some(Box::pin(stream));
 
         Ok(())
+    }
+
+    /// Decode region metadata from key value.
+    fn get_region_metadata(
+        &self,
+        key_value_meta: Option<&Vec<KeyValue>>,
+    ) -> Result<RegionMetadata> {
+        let key_values = key_value_meta.with_context(|| NoKeyValueSnafu {
+            file: &self.file_path,
+            reason: format!("missing key value meta"),
+        })?;
+        let meta_value = key_values
+            .iter()
+            .find(|kv| kv.key == PARQUET_METADATA_KEY)
+            .with_context(|| NoKeyValueSnafu {
+                file: &self.file_path,
+                reason: format!("key {} not found", PARQUET_METADATA_KEY),
+            })?;
+        let json = meta_value.value.as_ref().with_context(|| NoKeyValueSnafu {
+            file: &self.file_path,
+            reason: format!("No value for key {}", PARQUET_METADATA_KEY),
+        })?;
+
+        RegionMetadata::from_json(json)
     }
 
     /// Converts our [Batch] from arrow's [RecordBatch].
