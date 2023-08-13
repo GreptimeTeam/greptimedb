@@ -65,6 +65,8 @@ pub struct RegionCreateRequest {
     pub primary_key: Vec<ColumnId>,
     /// Create region if not exists.
     pub create_if_not_exists: bool,
+    /// Options of the created region.
+    pub options: HashMap<String, String>,
 }
 
 #[derive(Debug)]
