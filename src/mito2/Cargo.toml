@@ -15,6 +15,7 @@ arc-swap = "1.0"
 async-compat = "0.2"
 async-stream.workspace = true
 async-trait = "0.1"
+bytes = "1.4"
 chrono.workspace = true
 common-base = { workspace = true }
 common-catalog = { workspace = true }
@@ -36,9 +37,11 @@ futures.workspace = true
 greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "10c349c033dded29097d0dc933fbc2f89f658032" }
 lazy_static = "1.4"
 log-store = { workspace = true }
+memcomparable = "0.2"
 metrics.workspace = true
 object-store = { workspace = true }
 parquet = { workspace = true, features = ["async"] }
+paste.workspace = true
 prost.workspace = true
 regex = "1.5"
 serde = { version = "1.0", features = ["derive"] }

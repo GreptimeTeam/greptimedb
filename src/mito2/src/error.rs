@@ -19,6 +19,7 @@ use common_datasource::compression::CompressionType;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use datatypes::arrow::error::ArrowError;
+use datatypes::prelude::ConcreteDataType;
 use prost::{DecodeError, EncodeError};
 use snafu::{Location, Snafu};
 use store_api::manifest::ManifestVersion;
@@ -260,6 +261,59 @@ pub enum Error {
     // Shared error for each writer in the write group.
     #[snafu(display("Failed to write region, source: {}", source))]
     WriteGroup { source: Arc<Error> },
+
+    #[snafu(display(
+        "Row length mismatch, expect: {}, actual: {}, location: {}",
+        expect,
+        actual,
+        location
+    ))]
+    RowLengthMismatch {
+        expect: usize,
+        actual: usize,
+        location: Location,
+    },
+
+    #[snafu(display("Row value mismatches field data type"))]
+    FieldTypeMismatch { source: datatypes::error::Error },
+
+    #[snafu(display("Failed to serialize field, location: {}", location))]
+    SerializeField {
+        source: memcomparable::Error,
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Data type: {} does not support serialization/deserialization, location: {}",
+        data_type,
+        location
+    ))]
+    NotSupportedField {
+        data_type: ConcreteDataType,
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Cannot deserialize timestamp from sec: {}, nsec:{}, location: {}",
+        sec,
+        nsec,
+        location
+    ))]
+    DeserializeTimestamp {
+        sec: i64,
+        nsec: u32,
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Failed to deserialize field, source: {} location: {}",
+        source,
+        location
+    ))]
+    DeserializeField {
+        source: memcomparable::Error,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -304,6 +358,12 @@ impl ErrorExt for Error {
             | DecodeWal { .. } => StatusCode::Internal,
             WriteBuffer { source, .. } => source.status_code(),
             WriteGroup { source, .. } => source.status_code(),
+            RowLengthMismatch { .. } => StatusCode::InvalidArguments,
+            FieldTypeMismatch { source, .. } => source.status_code(),
+            SerializeField { .. } => StatusCode::Internal,
+            NotSupportedField { .. } => StatusCode::Unsupported,
+            DeserializeField { .. } => StatusCode::Unexpected,
+            DeserializeTimestamp { .. } => StatusCode::Unexpected,
         }
     }
 
