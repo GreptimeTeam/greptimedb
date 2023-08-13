@@ -309,6 +309,33 @@ pub enum Error {
         reason: String,
         location: Location,
     },
+
+    #[snafu(display(
+        "Failed to create default vector for column {}, location: {}, source: {}",
+        column,
+        location,
+        source
+    ))]
+    NewDefaultVector {
+        column: String,
+        location: Location,
+        source: datatypes::error::Error,
+    },
+
+    #[snafu(display("Column {} doesn't have default value, location: {}", column, location,))]
+    NoDefault { column: String, location: Location },
+
+    #[snafu(display(
+        "Failed to convert column {} to field, location: {}, source: {}",
+        column,
+        location,
+        source
+    ))]
+    ToField {
+        column: String,
+        location: Location,
+        source: datatypes::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -340,7 +367,10 @@ impl ErrorExt for Error {
             | RegionNotFound { .. }
             | RegionCorrupted { .. }
             | CreateDefault { .. }
-            | NoKeyValue { .. } => StatusCode::Unexpected,
+            | NoKeyValue { .. }
+            | NewDefaultVector { .. }
+            | NoDefault { .. }
+            | ToField { .. } => StatusCode::Unexpected,
             InvalidScanIndex { .. }
             | InvalidMeta { .. }
             | InvalidSchema { .. }

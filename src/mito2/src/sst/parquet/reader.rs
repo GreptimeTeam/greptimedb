@@ -14,6 +14,8 @@
 
 //! Parquet reader.
 
+use std::sync::Arc;
+
 use async_compat::CompatExt;
 use async_trait::async_trait;
 use common_time::range::TimestampRange;
@@ -25,12 +27,11 @@ use parquet::arrow::{ParquetRecordBatchStreamBuilder, ProjectionMask};
 use parquet::errors::ParquetError;
 use parquet::format::KeyValue;
 use snafu::{OptionExt, ResultExt};
-use store_api::storage::ColumnId;
 use table::predicate::Predicate;
 use tokio::io::BufReader;
 
 use crate::error::{NoKeyValueSnafu, OpenDalSnafu, ReadParquetSnafu, Result};
-use crate::metadata::RegionMetadata;
+use crate::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataRef};
 use crate::read::{Batch, BatchReader};
 use crate::sst::file::FileHandle;
 use crate::sst::parquet::format::to_sst_projection_indices;
@@ -43,7 +44,7 @@ pub struct ParquetReaderBuilder {
     object_store: ObjectStore,
     predicate: Option<Predicate>,
     time_range: Option<TimestampRange>,
-    projection: Option<Vec<ColumnId>>,
+    projection: Option<Vec<ColumnMetadata>>,
 }
 
 impl ParquetReaderBuilder {
@@ -76,7 +77,7 @@ impl ParquetReaderBuilder {
     }
 
     /// Attaches the projection to the builder.
-    pub fn projection(mut self, projection: Vec<ColumnId>) -> ParquetReaderBuilder {
+    pub fn projection(mut self, projection: Vec<ColumnMetadata>) -> ParquetReaderBuilder {
         self.projection = Some(projection);
         self
     }
@@ -92,6 +93,7 @@ impl ParquetReaderBuilder {
             time_range: self.time_range,
             projection: self.projection,
             stream: None,
+            region_meta: None,
         }
     }
 }
@@ -111,13 +113,18 @@ pub struct ParquetReader {
     predicate: Option<Predicate>,
     /// Time range to filter.
     time_range: Option<TimestampRange>,
-    /// Id of columns to read.
+    /// Metadata of columns to read.
     ///
-    /// `None` reads all columns.
-    projection: Option<Vec<ColumnId>>,
+    /// `None` reads all columns. Due to schema change, the projection
+    /// can contain columns not in the parquet file.
+    projection: Option<Vec<ColumnMetadata>>,
 
     /// Inner parquet record batch stream.
     stream: Option<BoxedRecordBatchStream>,
+    /// Region metadata of the parquet file.
+    ///
+    /// Not `None` if [ParquetReader::stream] is not `None`.
+    region_meta: Option<RegionMetadataRef>,
 }
 
 impl ParquetReader {
@@ -158,8 +165,9 @@ impl ParquetReader {
         }
 
         let parquet_schema_desc = builder.metadata().file_metadata().schema_descr();
-        if let Some(column_ids) = self.projection.as_ref() {
-            let indices = to_sst_projection_indices(&region_meta, column_ids.iter().copied());
+        if let Some(columns) = self.projection.as_ref() {
+            let column_ids = columns.iter().map(|c| c.column_id);
+            let indices = to_sst_projection_indices(&region_meta, column_ids);
             let projection_mask = ProjectionMask::roots(parquet_schema_desc, indices);
             builder = builder.with_projection(projection_mask);
         }
@@ -168,6 +176,7 @@ impl ParquetReader {
             path: &self.file_path,
         })?;
         self.stream = Some(Box::pin(stream));
+        self.region_meta = Some(Arc::new(region_meta));
 
         Ok(())
     }
