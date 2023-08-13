@@ -423,9 +423,9 @@ impl RegionManifestManagerInner {
         // TODO(ruihang): this task can be detached
         self.store.delete_until(last_version, true).await?;
 
-        debug!(
-            "Done manifest checkpoint, version: [{}, {}], current latest version: {}, compacted {} actions.",
-            start_version, end_version, last_version, compacted_actions
+        info!(
+            "Done manifest checkpoint for region {}, version: [{}, {}], current latest version: {}, compacted {} actions.",
+            self.manifest.metadata.region_id, start_version, end_version, last_version, compacted_actions
         );
         Ok(Some(checkpoint))
     }
