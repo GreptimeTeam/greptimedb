@@ -16,9 +16,10 @@ use std::collections::HashMap;
 
 use greptime_proto::v1::mito::{Mutation, OpType};
 use greptime_proto::v1::{Row, Rows, Value};
+use store_api::metadata::SemanticType;
 use store_api::storage::SequenceNumber;
 
-use crate::metadata::{RegionMetadata, SemanticType};
+use crate::metadata::RegionMetadata;
 
 /// Key value view of a mutation.
 #[derive(Debug)]
@@ -191,10 +192,11 @@ mod tests {
     use datatypes::schema::ColumnSchema;
     use greptime_proto::v1;
     use greptime_proto::v1::{value, ColumnDataType, Value};
+    use store_api::metadata::ColumnMetadata;
     use store_api::storage::RegionId;
 
     use super::*;
-    use crate::metadata::{ColumnMetadata, RegionMetadataBuilder};
+    use crate::metadata::RegionMetadataBuilder;
 
     const TS_NAME: &str = "ts";
     const START_SEQ: SequenceNumber = 100;

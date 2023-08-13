@@ -397,11 +397,12 @@ mod test {
     use common_datasource::compression::CompressionType;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
+    use store_api::metadata::{ColumnMetadata, SemanticType};
     use store_api::storage::RegionId;
 
     use super::*;
     use crate::manifest::action::RegionChange;
-    use crate::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder, SemanticType};
+    use crate::metadata::{RegionMetadata, RegionMetadataBuilder};
     use crate::test_util::TestEnv;
 
     fn basic_region_metadata() -> RegionMetadata {

@@ -19,9 +19,8 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::types::{TimeType, TimestampType};
 use datatypes::value::Value;
 use greptime_proto::v1::{self, ColumnDataType};
+use store_api::metadata::SemanticType;
 use store_api::storage::OpType;
-
-use crate::metadata::SemanticType;
 
 /// Returns true if the pb semantic type is valid.
 pub(crate) fn is_semantic_type_eq(type_value: i32, semantic_type: SemanticType) -> bool {

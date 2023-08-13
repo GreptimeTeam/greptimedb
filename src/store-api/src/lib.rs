@@ -17,6 +17,7 @@
 
 pub mod logstore;
 pub mod manifest;
+pub mod metadata;
 pub mod region_engine;
 pub mod region_request;
 pub mod storage;

@@ -20,12 +20,13 @@ use std::time::Duration;
 use common_base::readable_size::ReadableSize;
 use greptime_proto::v1::{ColumnDataType, ColumnSchema, Rows};
 use snafu::{ensure, OptionExt, ResultExt};
+use store_api::metadata::ColumnMetadata;
 use store_api::storage::{ColumnId, CompactionStrategy, OpType, RegionId};
 use tokio::sync::oneshot::{self, Receiver, Sender};
 
 use crate::config::DEFAULT_WRITE_BUFFER_SIZE;
 use crate::error::{CreateDefaultSnafu, FillDefaultSnafu, InvalidRequestSnafu, Result};
-use crate::metadata::{ColumnMetadata, RegionMetadata};
+use crate::metadata::RegionMetadata;
 use crate::proto_util::{
     is_column_type_value_eq, is_semantic_type_eq, to_column_data_type, to_proto_semantic_type,
     to_proto_value,

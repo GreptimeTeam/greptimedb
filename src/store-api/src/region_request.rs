@@ -16,7 +16,8 @@ use std::collections::HashMap;
 
 use datatypes::arrow::row::Rows;
 
-use crate::storage::{OpType, RegionId, ScanRequest};
+use crate::metadata::ColumnMetadata;
+use crate::storage::{AlterRequest, ColumnId, ScanRequest};
 
 #[derive(Debug)]
 pub enum RegionRequest {
@@ -35,10 +36,6 @@ pub enum RegionRequest {
 /// Request to write a region.
 #[derive(Debug)]
 pub struct RegionWriteRequest {
-    /// Region to write.
-    pub region_id: RegionId,
-    /// Type of the write request.
-    pub op_type: OpType,
     /// Rows to write.
     pub rows: Rows,
     /// Map column name to column index in `rows`.
@@ -47,18 +44,27 @@ pub struct RegionWriteRequest {
 
 #[derive(Debug)]
 pub struct RegionReadRequest {
-    pub req: ScanRequest,
+    pub request: ScanRequest,
 }
 
 #[derive(Debug)]
 pub struct RegionDeleteRequest {
-    // todo
+    /// Rows to write.
+    pub rows: Rows,
+    /// Map column name to column index in `rows`.
+    pub name_to_index: HashMap<String, usize>,
 }
 
 #[derive(Debug)]
 pub struct RegionCreateRequest {
     /// Region engine name
     pub engine: String,
+    /// Columns in this region.
+    pub column_metadatas: Vec<ColumnMetadata>,
+    /// Columns in the primary key.
+    pub primary_key: Vec<ColumnId>,
+    /// Create region if not exists.
+    pub create_if_not_exists: bool,
 }
 
 #[derive(Debug)]
@@ -72,8 +78,6 @@ pub struct RegionDropRequest {
 pub struct RegionOpenRequest {
     /// Region engine name
     pub engine: String,
-    /// Region to open.
-    pub region_id: RegionId,
     /// Data directory of the region.
     pub region_dir: String,
     /// Options of the created region.
@@ -85,21 +89,15 @@ pub struct RegionOpenRequest {
 pub struct RegionCloseRequest {
     /// Region engine name
     pub engine: String,
-    /// Region to close.
-    pub region_id: RegionId,
 }
 
 #[derive(Debug)]
 pub struct RegionAlterRequest {
-    // todo
+    pub request: AlterRequest,
 }
 
 #[derive(Debug)]
-pub struct RegionFlushRequest {
-    // todo
-}
+pub struct RegionFlushRequest {}
 
 #[derive(Debug)]
-pub struct RegionCompactRequest {
-    // todo
-}
+pub struct RegionCompactRequest {}
