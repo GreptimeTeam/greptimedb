@@ -22,7 +22,7 @@ use common_time::{Date, DateTime, Interval, Timestamp};
 use datatypes::prelude::{ConcreteDataType, ValueRef};
 use datatypes::scalars::ScalarVector;
 use datatypes::types::{
-    Int16Type, Int8Type, IntervalType, TimeType, TimestampType, UInt16Type, UInt8Type,
+    Int16Type, Int8Type, DurationType, IntervalType, TimeType, TimestampType, UInt16Type, UInt8Type,
 };
 use datatypes::value::{OrderedF32, OrderedF64, Value};
 use datatypes::vectors::{
@@ -100,6 +100,14 @@ impl From<ColumnDataTypeWrapper> for ConcreteDataType {
             ColumnDataType::IntervalMonthDayNano => {
                 ConcreteDataType::interval_month_day_nano_datatype()
             }
+            ColumnDataType::DurationSecond => ConcreteDataType::duration_second_datatype(),
+            ColumnDataType::DurationMillisecond => {
+                ConcreteDataType::duration_millisecond_datatype()
+            }
+            ColumnDataType::DurationMicrosecond => {
+                ConcreteDataType::duration_microsecond_datatype()
+            }
+            ColumnDataType::DurationNanosecond => ConcreteDataType::duration_nanosecond_datatype(),
         }
     }
 }
@@ -146,7 +154,12 @@ impl TryFrom<ConcreteDataType> for ColumnDataTypeWrapper {
             | ConcreteDataType::Dictionary(_) => {
                 return error::IntoColumnDataTypeSnafu { from: datatype }.fail()
             }
-            ConcreteDataType::Duration(_) => todo!("duration is not supported yet"),
+            ConcreteDataType::Duration(d) => match d {
+                DurationType::Second(_) => ColumnDataType::DurationSecond,
+                DurationType::Millisecond(_) => ColumnDataType::DurationMillisecond,
+                DurationType::Microsecond(_) => ColumnDataType::DurationMicrosecond,
+                DurationType::Nanosecond(_) => ColumnDataType::DurationNanosecond,
+            },
         });
         Ok(datatype)
     }
@@ -258,6 +271,22 @@ pub fn values_with_capacity(datatype: ColumnDataType, capacity: usize) -> Values
             interval_month_day_nano_values: Vec::with_capacity(capacity),
             ..Default::default()
         },
+        ColumnDataType::DurationSecond => Values {
+            dur_second_values: Vec::with_capacity(capacity),
+            ..Default::default()
+        },
+        ColumnDataType::DurationMillisecond => Values {
+            dur_millisecond_values: Vec::with_capacity(capacity),
+            ..Default::default()
+        },
+        ColumnDataType::DurationMicrosecond => Values {
+            dur_microsecond_values: Vec::with_capacity(capacity),
+            ..Default::default()
+        },
+        ColumnDataType::DurationNanosecond => Values {
+            dur_nanosecond_values: Vec::with_capacity(capacity),
+            ..Default::default()
+        },
     }
 }
 
@@ -305,7 +334,12 @@ pub fn push_vals(column: &mut Column, origin_count: usize, vector: VectorRef) {
                 .interval_month_day_nano_values
                 .push(convert_i128_to_interval(val.to_i128())),
         },
-        Value::Duration(_) => todo!("duration is not supported yet"),
+        Value::Duration(val) => match val.unit() {
+            TimeUnit::Second => values.dur_second_values.push(val.value()),
+            TimeUnit::Millisecond => values.dur_millisecond_values.push(val.value()),
+            TimeUnit::Microsecond => values.dur_microsecond_values.push(val.value()),
+            TimeUnit::Nanosecond => values.dur_nanosecond_values.push(val.value()),
+        },
         Value::List(_) => unreachable!(),
     });
     column.null_mask = null_mask.into_vec();

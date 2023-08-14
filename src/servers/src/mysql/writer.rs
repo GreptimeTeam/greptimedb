@@ -186,7 +186,8 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
                     Value::Timestamp(v) => row_writer
                         .write_col(v.to_timezone_aware_string(query_context.time_zone()))?,
                     Value::Interval(v) => row_writer.write_col(v.to_iso8601_string())?,
-                    Value::List(_) | Value::Duration(_) => {
+                    Value::Duration(v) => row_writer.write_col(std::time::Duration::from(v))?,
+                    Value::List(_) => {
                         return Err(Error::Internal {
                             err_msg: format!(
                                 "cannot write value {:?} in mysql protocol: unimplemented",
@@ -241,6 +242,7 @@ pub(crate) fn create_mysql_column(
         ConcreteDataType::Date(_) => Ok(ColumnType::MYSQL_TYPE_DATE),
         ConcreteDataType::DateTime(_) => Ok(ColumnType::MYSQL_TYPE_DATETIME),
         ConcreteDataType::Interval(_) => Ok(ColumnType::MYSQL_TYPE_VARCHAR),
+        ConcreteDataType::Duration(_) => Ok(ColumnType::MYSQL_TYPE_TIME),
         _ => error::InternalSnafu {
             err_msg: format!("not implemented for column datatype {:?}", data_type),
         }

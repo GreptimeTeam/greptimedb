@@ -217,25 +217,25 @@ pub fn values(arrays: &[VectorRef]) -> Result<Values> {
         (
             ConcreteDataType::Duration(DurationType::Second(_)),
             DurationSecondVector,
-            ts_second_values,
+            dur_second_values,
             |x| { x.into_native() }
         ),
         (
             ConcreteDataType::Duration(DurationType::Millisecond(_)),
             DurationMillisecondVector,
-            ts_millisecond_values,
+            dur_millisecond_values,
             |x| { x.into_native() }
         ),
         (
             ConcreteDataType::Duration(DurationType::Microsecond(_)),
             DurationMicrosecondVector,
-            ts_microsecond_values,
+            dur_microsecond_values,
             |x| { x.into_native() }
         ),
         (
             ConcreteDataType::Duration(DurationType::Nanosecond(_)),
             DurationNanosecondVector,
-            ts_nanosecond_values,
+            dur_nanosecond_values,
             |x| { x.into_native() }
         )
     )

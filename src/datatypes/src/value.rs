@@ -812,6 +812,7 @@ impl From<ValueRef<'_>> for Value {
             ValueRef::Timestamp(v) => Value::Timestamp(v),
             ValueRef::Time(v) => Value::Time(v),
             ValueRef::Interval(v) => Value::Interval(v),
+            ValueRef::Duration(v) => Value::Duration(v),
             ValueRef::List(v) => v.to_value(),
         }
     }
@@ -961,6 +962,10 @@ impl<'a> ValueRef<'a> {
     /// Cast itself to [Time].
     pub fn as_time(&self) -> Result<Option<Time>> {
         impl_as_for_value_ref!(self, Time)
+    }
+
+    pub fn as_duration(&self) -> Result<Option<Duration>> {
+        impl_as_for_value_ref!(self, Duration)
     }
 
     /// Cast itself to [Interval].
