@@ -174,18 +174,18 @@ impl Timestamp {
     pub fn from_splits(sec: i64, nsec: u32) -> Option<Self> {
         if nsec == 0 {
             Some(Timestamp::new_second(sec))
-        } else if nsec % 1000000 == 0 {
-            let millis = nsec / 1000000;
+        } else if nsec % 1_000_000 == 0 {
+            let millis = nsec / 1_000_000;
             sec.checked_mul(1000)
                 .and_then(|v| v.checked_add(millis as i64))
                 .map(Timestamp::new_millisecond)
         } else if nsec % 1000 == 0 {
             let micros = nsec / 1000;
-            sec.checked_mul(1000000)
+            sec.checked_mul(1_000_000)
                 .and_then(|v| v.checked_add(micros as i64))
                 .map(Timestamp::new_microsecond)
         } else {
-            sec.checked_mul(1000000000)
+            sec.checked_mul(1_000_000_000)
                 .and_then(|v| v.checked_add(nsec as i64))
                 .map(Timestamp::new_nanosecond)
         }
