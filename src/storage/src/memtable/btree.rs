@@ -25,7 +25,7 @@ use datatypes::data_type::DataType;
 use datatypes::prelude::*;
 use datatypes::value::Value;
 use datatypes::vectors::{UInt64Vector, UInt64VectorBuilder, UInt8Vector, UInt8VectorBuilder};
-use store_api::storage::SequenceNumber;
+use store_api::storage::{SequenceNumber, MIN_OP_TYPE};
 
 use crate::error::Result;
 use crate::flush::FlushStrategyRef;
@@ -495,7 +495,7 @@ impl InnerKey {
         // to zero (Minimum value).
         self.sequence = 0;
         self.index_in_batch = 0;
-        self.op_type = OpType::Delete;
+        self.op_type = MIN_OP_TYPE;
     }
 }
 

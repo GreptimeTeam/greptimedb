@@ -9514,6 +9514,7 @@ dependencies = [
 name = "store-api"
 version = "0.3.2"
 dependencies = [
+ "api",
  "async-stream",
  "async-trait",
  "bytes",

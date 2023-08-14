@@ -45,4 +45,4 @@ pub use self::requests::{
 };
 pub use self::responses::{GetResponse, ScanResponse, WriteResponse};
 pub use self::snapshot::{ReadContext, Snapshot};
-pub use self::types::SequenceNumber;
+pub use self::types::{SequenceNumber, MIN_OP_TYPE};
