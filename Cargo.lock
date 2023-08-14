@@ -5221,6 +5221,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2dffe52ecf27772e601905b7522cb4ef790d2cc203488bbd0e2fe85fcb74566d"
 
 [[package]]
+name = "memcomparable"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "376101dbd964fc502d5902216e180f92b3d003b5cc3d2e40e044eb5470fca677"
+dependencies = [
+ "bytes",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
 name = "memmap2"
 version = "0.5.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5521,6 +5532,7 @@ dependencies = [
  "async-compat",
  "async-stream",
  "async-trait",
+ "bytes",
  "chrono",
  "common-base",
  "common-catalog",
@@ -5542,9 +5554,11 @@ dependencies = [
  "greptime-proto 0.1.0 (git+https://github.com/GreptimeTeam/greptime-proto.git?rev=10c349c033dded29097d0dc933fbc2f89f658032)",
  "lazy_static",
  "log-store",
+ "memcomparable",
  "metrics",
  "object-store",
  "parquet",
+ "paste",
  "prost",
  "regex",
  "serde",
