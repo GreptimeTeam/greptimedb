@@ -673,6 +673,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "auth"
+version = "0.3.2"
+dependencies = [
+ "api",
+ "async-trait",
+ "common-error",
+ "common-test-util",
+ "digest",
+ "hex",
+ "secrecy",
+ "sha1",
+ "snafu",
+ "sql",
+ "tokio",
+]
+
+[[package]]
 name = "auto_ops"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1559,6 +1576,7 @@ version = "0.3.2"
 dependencies = [
  "anymap",
  "async-trait",
+ "auth",
  "catalog",
  "chrono",
  "clap 3.2.25",
@@ -3242,6 +3260,7 @@ dependencies = [
  "async-compat",
  "async-stream",
  "async-trait",
+ "auth",
  "catalog",
  "chrono",
  "client",
@@ -8824,6 +8843,7 @@ dependencies = [
  "api",
  "arrow-flight",
  "async-trait",
+ "auth",
  "axum",
  "axum-macros",
  "axum-test-helper",
@@ -8912,6 +8932,7 @@ name = "session"
 version = "0.3.2"
 dependencies = [
  "arc-swap",
+ "auth",
  "common-catalog",
  "common-telemetry",
  "common-time",
@@ -9933,6 +9954,7 @@ version = "0.3.2"
 dependencies = [
  "api",
  "async-trait",
+ "auth",
  "axum",
  "axum-test-helper",
  "catalog",

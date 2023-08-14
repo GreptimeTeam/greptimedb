@@ -19,9 +19,10 @@ use api::v1::auth_header::AuthScheme;
 use api::v1::Basic;
 use arrow_flight::flight_service_server::{FlightService, FlightServiceServer};
 use async_trait::async_trait;
+use auth::tests::MockUserProvider;
+use auth::UserProviderRef;
 use client::{Client, Database, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_runtime::{Builder as RuntimeBuilder, Runtime};
-use servers::auth::UserProviderRef;
 use servers::error::{Result, StartGrpcSnafu, TcpBindSnafu};
 use servers::grpc::flight::FlightHandler;
 use servers::grpc::handler::GreptimeRequestHandler;
@@ -32,7 +33,6 @@ use table::test_util::MemTable;
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
 
-use crate::auth::MockUserProvider;
 use crate::{create_testing_grpc_query_handler, LOCALHOST_WITH_0};
 
 struct MockGrpcServer {

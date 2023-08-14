@@ -17,6 +17,7 @@ use std::sync::Arc;
 use api::v1::greptime_request::Request;
 use api::v1::InsertRequests;
 use async_trait::async_trait;
+use auth::tests::{DatabaseAuthInfo, MockUserProvider};
 use axum::{http, Router};
 use axum_test_helper::TestClient;
 use common_query::Output;
@@ -32,8 +33,6 @@ use servers::query_handler::sql::SqlQueryHandler;
 use servers::query_handler::InfluxdbLineProtocolHandler;
 use session::context::QueryContextRef;
 use tokio::sync::mpsc;
-
-use crate::auth::{DatabaseAuthInfo, MockUserProvider};
 
 struct DummyInstance {
     tx: Arc<mpsc::Sender<(String, String)>>,

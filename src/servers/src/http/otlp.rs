@@ -12,10 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use auth::UserInfoRef;
 use axum::extract::{RawBody, State};
 use axum::http::header;
 use axum::response::IntoResponse;
-use axum::TypedHeader;
+use axum::{Extension, TypedHeader};
 use common_telemetry::timer;
 use hyper::Body;
 use opentelemetry_proto::tonic::collector::metrics::v1::{
@@ -33,9 +34,11 @@ use crate::query_handler::OpenTelemetryProtocolHandlerRef;
 pub async fn metrics(
     State(handler): State<OpenTelemetryProtocolHandlerRef>,
     TypedHeader(db): TypedHeader<GreptimeDbName>,
+    user_info: Extension<UserInfoRef>,
     RawBody(body): RawBody,
 ) -> Result<OtlpResponse> {
     let ctx = QueryContext::with_db_name(db.value());
+    ctx.set_current_user(Some(user_info.0));
     let _timer = timer!(
         crate::metrics::METRIC_HTTP_OPENTELEMETRY_ELAPSED,
         &[(crate::metrics::METRIC_DB_LABEL, ctx.get_db_string())]

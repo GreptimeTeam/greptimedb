@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use auth::UserProviderRef;
 use clap::Parser;
 use common_base::Plugins;
 use common_telemetry::logging;
@@ -21,9 +22,8 @@ use frontend::frontend::FrontendOptions;
 use frontend::instance::{FrontendInstance, Instance as FeInstance};
 use frontend::service_config::{InfluxdbOptions, PrometheusOptions};
 use meta_client::MetaClientOptions;
-use servers::auth::UserProviderRef;
 use servers::tls::{TlsMode, TlsOption};
-use servers::{auth, Mode};
+use servers::Mode;
 use snafu::ResultExt;
 
 use crate::error::{self, IllegalAuthConfigSnafu, Result, StartCatalogManagerSnafu};
@@ -236,10 +236,10 @@ mod tests {
     use std::io::Write;
     use std::time::Duration;
 
+    use auth::{Identity, Password, UserProviderRef};
     use common_base::readable_size::ReadableSize;
     use common_test_util::temp_dir::create_named_temp_file;
     use frontend::service_config::GrpcOptions;
-    use servers::auth::{Identity, Password, UserProviderRef};
 
     use super::*;
     use crate::options::ENV_VAR_SEP;

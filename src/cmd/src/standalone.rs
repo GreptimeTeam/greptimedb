@@ -345,9 +345,9 @@ mod tests {
     use std::io::Write;
     use std::time::Duration;
 
+    use auth::{Identity, Password, UserProviderRef};
     use common_base::readable_size::ReadableSize;
     use common_test_util::temp_dir::create_named_temp_file;
-    use servers::auth::{Identity, Password, UserProviderRef};
     use servers::Mode;
 
     use super::*;

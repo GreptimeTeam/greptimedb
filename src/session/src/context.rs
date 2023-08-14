@@ -17,6 +17,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
+use auth::UserInfoRef;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::{build_db_string, parse_catalog_and_schema_from_db_string};
 use common_time::TimeZone;
@@ -32,6 +33,7 @@ pub type ConnInfoRef = Arc<ConnInfo>;
 pub struct QueryContext {
     current_catalog: String,
     current_schema: String,
+    current_user: ArcSwap<Option<UserInfoRef>>,
     time_zone: ArcSwap<Option<TimeZone>>,
     sql_dialect: Box<dyn Dialect + Send + Sync>,
     trace_id: u64,
@@ -110,6 +112,16 @@ impl QueryContext {
     }
 
     #[inline]
+    pub fn current_user(&self) -> Option<UserInfoRef> {
+        self.current_user.load().as_ref().clone()
+    }
+
+    #[inline]
+    pub fn set_current_user(&self, user: Option<UserInfoRef>) {
+        let _ = self.current_user.swap(Arc::new(user));
+    }
+
+    #[inline]
     pub fn trace_id(&self) -> u64 {
         self.trace_id
     }
@@ -124,6 +136,9 @@ impl QueryContextBuilder {
             current_schema: self
                 .current_schema
                 .unwrap_or_else(|| DEFAULT_SCHEMA_NAME.to_string()),
+            current_user: self
+                .current_user
+                .unwrap_or_else(|| ArcSwap::new(Arc::new(None))),
             time_zone: self
                 .time_zone
                 .unwrap_or_else(|| ArcSwap::new(Arc::new(None))),
@@ -137,33 +152,6 @@ impl QueryContextBuilder {
     pub fn try_trace_id(mut self, trace_id: Option<u64>) -> Self {
         self.trace_id = trace_id;
         self
-    }
-}
-
-pub const DEFAULT_USERNAME: &str = "greptime";
-
-#[derive(Clone, Debug)]
-pub struct UserInfo {
-    username: String,
-}
-
-impl Default for UserInfo {
-    fn default() -> Self {
-        Self {
-            username: DEFAULT_USERNAME.to_string(),
-        }
-    }
-}
-
-impl UserInfo {
-    pub fn username(&self) -> &str {
-        self.username.as_str()
-    }
-
-    pub fn new(username: impl Into<String>) -> Self {
-        Self {
-            username: username.into(),
-        }
     }
 }
 
@@ -225,7 +213,7 @@ mod test {
     use common_catalog::consts::DEFAULT_CATALOG_NAME;
 
     use super::*;
-    use crate::context::{Channel, UserInfo};
+    use crate::context::Channel;
     use crate::Session;
 
     #[test]
@@ -233,8 +221,6 @@ mod test {
         let session = Session::new(Some("127.0.0.1:9000".parse().unwrap()), Channel::Mysql);
         // test user_info
         assert_eq!(session.user_info().username(), "greptime");
-        session.set_user_info(UserInfo::new("root"));
-        assert_eq!(session.user_info().username(), "root");
 
         // test channel
         assert_eq!(session.conn_info().channel, Channel::Mysql);

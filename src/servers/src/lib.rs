@@ -20,7 +20,6 @@ use datatypes::schema::Schema;
 use query::plan::LogicalPlan;
 use serde::{Deserialize, Serialize};
 
-pub mod auth;
 pub mod configurator;
 pub mod error;
 pub mod grpc;

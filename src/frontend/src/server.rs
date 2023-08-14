@@ -16,10 +16,10 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use auth::UserProviderRef;
 use common_base::Plugins;
 use common_runtime::Builder as RuntimeBuilder;
 use common_telemetry::info;
-use servers::auth::UserProviderRef;
 use servers::configurator::ConfiguratorRef;
 use servers::error::Error::InternalIo;
 use servers::grpc::GrpcServer;

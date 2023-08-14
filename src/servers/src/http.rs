@@ -34,6 +34,7 @@ use std::time::{Duration, Instant};
 use aide::axum::{routing as apirouting, ApiRouter, IntoApiResponse};
 use aide::openapi::{Info, OpenApi, Server as OpenAPIServer};
 use async_trait::async_trait;
+use auth::UserProviderRef;
 use axum::body::BoxBody;
 use axum::error_handling::HandleErrorLayer;
 use axum::extract::{DefaultBodyLimit, MatchedPath};
@@ -65,7 +66,6 @@ use tower_http::trace::TraceLayer;
 
 use self::authorize::HttpAuth;
 use self::influxdb::{influxdb_health, influxdb_ping, influxdb_write_v1, influxdb_write_v2};
-use crate::auth::UserProviderRef;
 use crate::configurator::ConfiguratorRef;
 use crate::error::{AlreadyStartedSnafu, Result, StartHttpSnafu};
 use crate::http::admin::{compact, flush};

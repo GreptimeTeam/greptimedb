@@ -11,14 +11,17 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
 use secrecy::ExposeSecret;
-use servers::auth::user_provider::auth_mysql;
-use servers::auth::{
-    AccessDeniedSnafu, Identity, Password, UnsupportedPasswordTypeSnafu, UserNotFoundSnafu,
-    UserPasswordMismatchSnafu, UserProvider,
+
+use crate::error::{
+    AccessDeniedSnafu, Result, UnsupportedPasswordTypeSnafu, UserNotFoundSnafu,
+    UserPasswordMismatchSnafu,
 };
-use session::context::UserInfo;
+use crate::user_info::DefaultUserInfo;
+use crate::user_provider::static_user_provider::auth_mysql;
+#[allow(unused_imports)]
+use crate::Error;
+use crate::{Identity, Password, UserInfoRef, UserProvider};
 
 pub struct DatabaseAuthInfo<'a> {
     pub catalog: &'a str,
@@ -56,17 +59,13 @@ impl UserProvider for MockUserProvider {
         "mock_user_provider"
     }
 
-    async fn authenticate(
-        &self,
-        id: Identity<'_>,
-        password: Password<'_>,
-    ) -> servers::auth::Result<UserInfo> {
+    async fn authenticate(&self, id: Identity<'_>, password: Password<'_>) -> Result<UserInfoRef> {
         match id {
             Identity::UserId(username, _host) => match password {
                 Password::PlainText(password) => {
                     if username == "greptime" {
                         if password.expose_secret() == "greptime" {
-                            Ok(UserInfo::new("greptime"))
+                            Ok(DefaultUserInfo::with_name("greptime"))
                         } else {
                             UserPasswordMismatchSnafu {
                                 username: username.to_string(),
@@ -82,7 +81,7 @@ impl UserProvider for MockUserProvider {
                 }
                 Password::MysqlNativePassword(auth_data, salt) => {
                     auth_mysql(auth_data, salt, username, "greptime".as_bytes())
-                        .map(|_| UserInfo::new(username))
+                        .map(|_| DefaultUserInfo::with_name(username))
                 }
                 _ => UnsupportedPasswordTypeSnafu {
                     password_type: "mysql_native_password",
@@ -92,12 +91,7 @@ impl UserProvider for MockUserProvider {
         }
     }
 
-    async fn authorize(
-        &self,
-        catalog: &str,
-        schema: &str,
-        user_info: &UserInfo,
-    ) -> servers::auth::Result<()> {
+    async fn authorize(&self, catalog: &str, schema: &str, user_info: &UserInfoRef) -> Result<()> {
         if catalog == self.catalog && schema == self.schema && user_info.username() == self.username
         {
             Ok(())
@@ -137,7 +131,7 @@ async fn test_auth_by_plain_text() {
     assert!(auth_result.is_err());
     assert!(matches!(
         auth_result.err().unwrap(),
-        servers::auth::Error::UnsupportedPasswordType { .. }
+        Error::UnsupportedPasswordType { .. }
     ));
 
     // auth failed, err: user not exist.
@@ -150,7 +144,7 @@ async fn test_auth_by_plain_text() {
     assert!(auth_result.is_err());
     assert!(matches!(
         auth_result.err().unwrap(),
-        servers::auth::Error::UserNotFound { .. }
+        Error::UserNotFound { .. }
     ));
 
     // auth failed, err: wrong password
@@ -163,7 +157,7 @@ async fn test_auth_by_plain_text() {
     assert!(auth_result.is_err());
     assert!(matches!(
         auth_result.err().unwrap(),
-        servers::auth::Error::UserPasswordMismatch { .. }
+        Error::UserPasswordMismatch { .. }
     ))
 }
 
@@ -176,8 +170,8 @@ async fn test_schema_validate() {
         username: "test_user",
     });
 
-    let right_user = UserInfo::new("test_user");
-    let wrong_user = UserInfo::default();
+    let right_user = DefaultUserInfo::with_name("test_user");
+    let wrong_user = DefaultUserInfo::with_name("greptime");
 
     // check catalog
     let re = validator
