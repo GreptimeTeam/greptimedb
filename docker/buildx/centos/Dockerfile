@@ -13,7 +13,8 @@ RUN yum install -y epel-release  \
     openssl-devel  \
     centos-release-scl  \
     rh-python38  \
-    rh-python38-python-devel
+    rh-python38-python-devel \
+    which
 
 # Install protoc
 RUN curl -LO https://github.com/protocolbuffers/protobuf/releases/download/v3.15.8/protoc-3.15.8-linux-x86_64.zip
