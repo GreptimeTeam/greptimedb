@@ -12,18 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod auth_error;
 mod common;
+pub mod error;
 mod permission;
 mod user_info;
 mod user_provider;
 
 #[cfg(feature = "testing")]
 pub mod tests;
-
-pub mod error {
-    pub use crate::auth_error::*;
-}
 
 pub use common::{
     auth_mysql, user_provider_from_option, userinfo_by_name, HashedPassword, Identity, Password,
