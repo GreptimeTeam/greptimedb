@@ -108,7 +108,7 @@ fn write_attribute(lines: &mut LinesWriter, attr: &KeyValue) -> Result<()> {
     if let Some(val) = attr.value.as_ref().and_then(|v| v.value.as_ref()) {
         match val {
             any_value::Value::StringValue(s) => lines
-                .write_tag(&attr.key, s)
+                .write_tag(&normalize_otlp_name(&attr.key), s)
                 .context(error::OtlpMetricsWriteSnafu)?,
 
             any_value::Value::IntValue(v) => lines
