@@ -84,6 +84,8 @@ pub enum StatusCode {
     InvalidAuthHeader = 7004,
     /// Illegal request to connect catalog-schema
     AccessDenied = 7005,
+    /// User is not authorized to perform the operation
+    PermissionDenied = 7006,
     // ====== End of auth related status code =====
 }
 
@@ -120,7 +122,8 @@ impl StatusCode {
             | StatusCode::UserPasswordMismatch
             | StatusCode::AuthHeaderNotFound
             | StatusCode::InvalidAuthHeader
-            | StatusCode::AccessDenied => false,
+            | StatusCode::AccessDenied
+            | StatusCode::PermissionDenied => false,
         }
     }
 
@@ -151,7 +154,8 @@ impl StatusCode {
             | StatusCode::UserPasswordMismatch
             | StatusCode::AuthHeaderNotFound
             | StatusCode::InvalidAuthHeader
-            | StatusCode::AccessDenied => false,
+            | StatusCode::AccessDenied
+            | StatusCode::PermissionDenied => false,
         }
     }
 
