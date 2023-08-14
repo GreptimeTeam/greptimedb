@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 
-use datatypes::arrow::row::Rows;
+use api::v1::Rows;
 
 use crate::metadata::ColumnMetadata;
 use crate::storage::{AlterRequest, ColumnId, ScanRequest};
@@ -38,8 +38,6 @@ pub enum RegionRequest {
 pub struct RegionWriteRequest {
     /// Rows to write.
     pub rows: Rows,
-    /// Map column name to column index in `rows`.
-    pub name_to_index: HashMap<String, usize>,
 }
 
 #[derive(Debug)]
@@ -51,8 +49,6 @@ pub struct RegionReadRequest {
 pub struct RegionDeleteRequest {
     /// Rows to write.
     pub rows: Rows,
-    /// Map column name to column index in `rows`.
-    pub name_to_index: HashMap<String, usize>,
 }
 
 #[derive(Debug)]
