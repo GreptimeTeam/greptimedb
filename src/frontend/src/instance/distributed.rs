@@ -636,7 +636,7 @@ impl DistInstance {
             self.catalog_manager(),
         );
         let affected_rows = deleter.grpc_delete(request).await?;
-        Ok(Output::AffectedRows(affected_rows as usize))
+        Ok(Output::AffectedRows(affected_rows))
     }
 
     pub fn catalog_manager(&self) -> Arc<FrontendCatalogManager> {

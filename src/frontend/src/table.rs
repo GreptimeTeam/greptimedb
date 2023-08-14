@@ -181,7 +181,7 @@ impl Table for DistTable {
             .await
             .map_err(BoxedError::new)
             .context(TableOperationSnafu)?;
-        Ok(affected_rows as usize)
+        Ok(affected_rows)
     }
 }
 

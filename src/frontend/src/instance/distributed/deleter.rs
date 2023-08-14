@@ -61,7 +61,7 @@ impl DistDeleter {
         }
     }
 
-    pub async fn grpc_delete(&self, requests: DeleteRequests) -> Result<u32> {
+    pub async fn grpc_delete(&self, requests: DeleteRequests) -> Result<usize> {
         let deletes = requests
             .deletes
             .into_iter()
@@ -73,7 +73,7 @@ impl DistDeleter {
         self.delete(deletes).await
     }
 
-    pub(crate) async fn delete(&self, requests: Vec<DeleteRequest>) -> Result<u32> {
+    pub(crate) async fn delete(&self, requests: Vec<DeleteRequest>) -> Result<usize> {
         debug_assert!(requests
             .iter()
             .all(|x| x.catalog_name == self.catalog && x.schema_name == self.schema));
@@ -149,7 +149,7 @@ impl DistDeleter {
         Ok(deletes)
     }
 
-    async fn request_datanodes(&self, deletes: HashMap<Peer, DeleteRequests>) -> Result<u32> {
+    async fn request_datanodes(&self, deletes: HashMap<Peer, DeleteRequests>) -> Result<usize> {
         let results = future::try_join_all(deletes.into_iter().map(|(peer, deletes)| {
             let datanode_clients = self.catalog_manager.datanode_clients();
             let catalog = self.catalog.clone();
@@ -165,7 +165,7 @@ impl DistDeleter {
         .context(JoinTaskSnafu)?;
 
         let affected_rows = results.into_iter().sum::<Result<u32>>()?;
-        Ok(affected_rows)
+        Ok(affected_rows as usize)
     }
 }
 
