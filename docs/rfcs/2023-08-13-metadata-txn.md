@@ -80,8 +80,7 @@ Creates all of the above keys. `TableRoute`, `TableInfo`, should be empty.
 The **TableNameKey**'s lock will be held by the procedure framework.
 ## Drop Table DDL
 
-Delete all the above Keys. `TableRoute`, `TableInfo` should equal the Snapshot when submitting DDL.
-
+`TableInfoKey` and `NextTableRouteKey` will be added with  `__removed-` prefix, and the other above keys will be deleted.  The transaction will not compare any keys.
 ## Alter Table DDL
 
 1. Rename table, updates `TableInfo` and `TableName`. Compares `TableInfo`, and the new `TableNameKey` should be empty, and TableInfo should equal the Snapshot when submitting DDL.
