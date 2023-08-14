@@ -25,7 +25,7 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --no-mo
 ENV PATH /root/.cargo/bin/:$PATH
 
 # Build the project in release mode.
-RUN --mount=target=.,rw \
+RUN --mount=target=. \
     --mount=type=cache,target=/root/.cargo/registry \
     make build \
     CARGO_PROFILE=${CARGO_PROFILE} \

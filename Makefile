@@ -12,6 +12,7 @@ BUILDX_BUILDER_NAME ?= gtbuilder
 BASE_IMAGE ?= ubuntu
 RUST_TOOLCHAIN ?= $(shell cat rust-toolchain.toml | grep channel | cut -d'"' -f2)
 CARGO_REGISTRY_CACHE ?= ${HOME}/.cargo/registry
+IMAGE_OUTPUT_DIR ?= ./image-output
 
 # The arguments for running integration tests.
 ETCD_VERSION ?= v3.5.9
@@ -102,11 +103,9 @@ build-greptime-by-buildx: multi-platform-buildx ## Build greptime binary by dock
 	  --target=builder \
 	  --build-arg="CARGO_PROFILE=${CARGO_PROFILE}" --build-arg="FEATURES=${FEATURES}" \
 	  -f docker/${BASE_IMAGE}/Dockerfile \
-	  -t ${IMAGE_REGISTRY}/${IMAGE_NAMESPACE}/greptimedb-builder:${IMAGE_TAG} ${BUILDX_MULTI_PLATFORM_BUILD_OPTS} .
-
-	docker run --rm -v ${PWD}:/data \
-      --entrypoint cp ${IMAGE_REGISTRY}/${IMAGE_NAMESPACE}/greptimedb-builder:${IMAGE_TAG} \
-      /out/target/${CARGO_PROFILE}/greptime /data/greptime
+	  --output type=local,dest=${IMAGE_OUTPUT_DIR} . && \
+	cp ${IMAGE_OUTPUT_DIR}/out/target/${CARGO_PROFILE}/greptime . && \
+	rm -rf ${IMAGE_OUTPUT_DIR}
 
 .PHONY: dev-builder
 dev-builder: multi-platform-buildx ## Build dev-builder image.
