@@ -416,10 +416,7 @@ pub enum Error {
     },
 
     #[snafu(display("Missing time index column: {}", source))]
-    MissingTimeIndexColumn {
-        #[snafu(backtrace)]
-        source: table::error::Error,
-    },
+    MissingTimeIndexColumn { source: table::error::Error },
 
     #[snafu(display("Failed to start script manager, source: {}", source))]
     StartScriptManager {
