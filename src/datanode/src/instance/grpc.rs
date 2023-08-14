@@ -42,7 +42,7 @@ use table::table::adapter::DfTableProviderAdapter;
 use crate::error::{
     self, CatalogSnafu, DecodeLogicalPlanSnafu, DeleteExprToRequestSnafu, DeleteSnafu,
     ExecuteLogicalPlanSnafu, ExecuteSqlSnafu, InsertDataSnafu, InsertSnafu, JoinTaskSnafu,
-    PlanStatementSnafu, Result, TableNotFoundSnafu,
+    PlanStatementSnafu, Result, TableNotFoundSnafu, UnsupportedGrpcRequestSnafu,
 };
 use crate::instance::Instance;
 
@@ -221,6 +221,10 @@ impl GrpcQueryHandler for Instance {
                 self.handle_query(query, ctx).await
             }
             Request::Ddl(request) => self.handle_ddl(request, ctx).await,
+            Request::RowInserts(_) | Request::RowDelete(_) => UnsupportedGrpcRequestSnafu {
+                kind: "row insert/delete",
+            }
+            .fail(),
         }
     }
 }
