@@ -31,7 +31,7 @@ pub const NEXT_TABLE_ROUTE_PREFIX: &str = "__table_route";
 
 // TODO(weny): Renames it to TableRouteKey.
 pub struct NextTableRouteKey {
-    table_id: TableId,
+    pub table_id: TableId,
 }
 
 impl NextTableRouteKey {
@@ -43,11 +43,15 @@ impl NextTableRouteKey {
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 pub struct TableRouteValue {
     pub region_routes: Vec<RegionRoute>,
+    version: u64,
 }
 
 impl TableRouteValue {
     pub fn new(region_routes: Vec<RegionRoute>) -> Self {
-        Self { region_routes }
+        Self {
+            region_routes,
+            version: 0,
+        }
     }
 }
 
@@ -124,17 +128,21 @@ impl TableRouteManager {
         &self,
         table_id: TableId,
         expect: Option<TableRouteValue>,
-        table_route: TableRouteValue,
+        region_routes: Vec<RegionRoute>,
     ) -> Result<std::result::Result<(), Option<TableRouteValue>>> {
         let key = NextTableRouteKey::new(table_id);
         let raw_key = key.as_raw_key();
 
-        let expect = if let Some(x) = expect {
-            x.try_as_raw_value()?
+        let (expect, version) = if let Some(x) = expect {
+            (x.try_as_raw_value()?, x.version + 1)
         } else {
-            vec![]
+            (vec![], 0)
         };
-        let raw_value = table_route.try_as_raw_value()?;
+        let value = TableRouteValue {
+            region_routes,
+            version,
+        };
+        let raw_value = value.try_as_raw_value()?;
 
         let req = CompareAndPutRequest::new()
             .with_key(raw_key)
@@ -237,11 +245,11 @@ mod tests {
         let mut updated = expect.clone();
         updated.region_routes.push(RegionRoute::default());
 
-        mgr.compare_and_put(1024, Some(expect.clone()), updated.clone())
+        mgr.compare_and_put(1024, Some(expect.clone()), updated.region_routes.clone())
             .await
             .unwrap();
 
-        mgr.compare_and_put(1024, Some(expect.clone()), updated)
+        mgr.compare_and_put(1024, Some(expect.clone()), updated.region_routes)
             .await
             .unwrap();
     }
