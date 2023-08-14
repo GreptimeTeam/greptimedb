@@ -221,6 +221,8 @@ impl GrpcQueryHandler for Instance {
                 self.handle_query(query, ctx).await
             }
             Request::Ddl(request) => self.handle_ddl(request, ctx).await,
+            Request::RowInserts(_) => unreachable!(),
+            Request::RowDelete(_) => unreachable!(),
         }
     }
 }

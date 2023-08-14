@@ -109,10 +109,10 @@ pub mod noop {
 
 #[cfg(test)]
 mod tests {
+    use api::v1::OpType;
     use common_test_util::temp_dir::create_temp_dir;
     use object_store::services::Fs;
     use object_store::ObjectStore;
-    use store_api::storage::OpType;
 
     use super::*;
     use crate::file_purger::noop::NoopFilePurgeHandler;

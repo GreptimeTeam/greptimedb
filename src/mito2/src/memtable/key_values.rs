@@ -14,12 +14,11 @@
 
 use std::collections::HashMap;
 
+use api::v1::{Mutation, OpType, Row, Rows, SemanticType};
 use datatypes::value::ValueRef;
-use greptime_proto::v1::mito::{Mutation, OpType};
-use greptime_proto::v1::{Row, Rows};
 use store_api::storage::SequenceNumber;
 
-use crate::metadata::{RegionMetadata, SemanticType};
+use crate::metadata::RegionMetadata;
 
 /// Key value view of a mutation.
 #[derive(Debug)]
@@ -84,21 +83,21 @@ impl<'a> KeyValue<'a> {
     pub fn primary_keys(&self) -> impl Iterator<Item = ValueRef> {
         self.helper.indices[..self.helper.num_primary_key_column]
             .iter()
-            .map(|idx| ValueRef::from(&self.row.values[*idx]))
+            .map(|idx| api::helper::pb_value_to_value_ref(&self.row.values[*idx]))
     }
 
     /// Get field columns.
     pub fn fields(&self) -> impl Iterator<Item = ValueRef> {
         self.helper.indices[self.helper.num_primary_key_column + 1..]
             .iter()
-            .map(|idx| ValueRef::from(&self.row.values[*idx]))
+            .map(|idx| api::helper::pb_value_to_value_ref(&self.row.values[*idx]))
     }
 
     /// Get timestamp.
     pub fn timestamp(&self) -> ValueRef {
         // Timestamp is primitive, we clone it.
         let index = self.helper.indices[self.helper.num_primary_key_column];
-        ValueRef::from(&self.row.values[index])
+        api::helper::pb_value_to_value_ref(&self.row.values[index])
     }
 
     /// Get number of primary key columns.
@@ -188,15 +187,15 @@ impl ReadRowHelper {
 
 #[cfg(test)]
 mod tests {
+    use api::v1;
+    use api::v1::ColumnDataType;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
-    use greptime_proto::v1;
-    use greptime_proto::v1::ColumnDataType;
     use store_api::storage::RegionId;
 
     use super::*;
     use crate::metadata::{ColumnMetadata, RegionMetadataBuilder};
-    use crate::proto_util::i64_value;
+    use crate::test_util::i64_value;
 
     const TS_NAME: &str = "ts";
     const START_SEQ: SequenceNumber = 100;

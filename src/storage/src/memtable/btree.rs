@@ -19,12 +19,13 @@ use std::ops::Bound;
 use std::sync::atomic::{AtomicI64, Ordering as AtomicOrdering};
 use std::sync::{Arc, RwLock};
 
+use api::v1::OpType;
 use common_time::range::TimestampRange;
 use datatypes::data_type::DataType;
 use datatypes::prelude::*;
 use datatypes::value::Value;
 use datatypes::vectors::{UInt64Vector, UInt64VectorBuilder, UInt8Vector, UInt8VectorBuilder};
-use store_api::storage::{OpType, SequenceNumber};
+use store_api::storage::SequenceNumber;
 
 use crate::error::Result;
 use crate::flush::FlushStrategyRef;
@@ -300,7 +301,7 @@ fn collect_iter<'a, I: Iterator<Item = (&'a InnerKey, &'a RowValue)>>(
     for (inner_key, row_value) in iter.take(batch_size) {
         keys.push(inner_key);
         sequences.push(Some(inner_key.sequence));
-        op_types.push(Some(inner_key.op_type.as_u8()));
+        op_types.push(Some(inner_key.op_type as u8));
         values.push(row_value);
     }
 
@@ -494,7 +495,7 @@ impl InnerKey {
         // to zero (Minimum value).
         self.sequence = 0;
         self.index_in_batch = 0;
-        self.op_type = OpType::min_type();
+        self.op_type = OpType::Delete;
     }
 }
 

@@ -936,65 +936,6 @@ impl<'a> From<&'a str> for ValueRef<'a> {
     }
 }
 
-impl<'a> From<&'a greptime_proto::v1::Value> for ValueRef<'a> {
-    fn from(value: &'a greptime_proto::v1::Value) -> Self {
-        let Some(value) = &value.value else {
-            return ValueRef::Null;
-        };
-        match value {
-            greptime_proto::v1::value::Value::I8Value(v) => ValueRef::Int8(*v as i8),
-            greptime_proto::v1::value::Value::I16Value(v) => ValueRef::Int16(*v as i16),
-            greptime_proto::v1::value::Value::I32Value(v) => ValueRef::Int32(*v),
-            greptime_proto::v1::value::Value::I64Value(v) => ValueRef::Int64(*v),
-            greptime_proto::v1::value::Value::U8Value(v) => ValueRef::UInt8(*v as u8),
-            greptime_proto::v1::value::Value::U16Value(v) => ValueRef::UInt16(*v as u16),
-            greptime_proto::v1::value::Value::U32Value(v) => ValueRef::UInt32(*v),
-            greptime_proto::v1::value::Value::U64Value(v) => ValueRef::UInt64(*v),
-            greptime_proto::v1::value::Value::F32Value(f) => {
-                ValueRef::Float32(OrderedF32::from(*f))
-            }
-            greptime_proto::v1::value::Value::F64Value(f) => {
-                ValueRef::Float64(OrderedF64::from(*f))
-            }
-            greptime_proto::v1::value::Value::BoolValue(b) => ValueRef::Boolean(*b),
-            greptime_proto::v1::value::Value::BinaryValue(bytes) => {
-                ValueRef::Binary(bytes.as_slice())
-            }
-            greptime_proto::v1::value::Value::StringValue(string) => {
-                ValueRef::String(string.as_str())
-            }
-            greptime_proto::v1::value::Value::DateValue(d) => ValueRef::Date(Date::from(*d)),
-            greptime_proto::v1::value::Value::DatetimeValue(d) => {
-                ValueRef::DateTime(DateTime::new(*d))
-            }
-            greptime_proto::v1::value::Value::TsSecondValue(t) => {
-                ValueRef::Timestamp(Timestamp::new_second(*t))
-            }
-            greptime_proto::v1::value::Value::TsMillisecondValue(t) => {
-                ValueRef::Timestamp(Timestamp::new_millisecond(*t))
-            }
-            greptime_proto::v1::value::Value::TsMicrosecondValue(t) => {
-                ValueRef::Timestamp(Timestamp::new_microsecond(*t))
-            }
-            greptime_proto::v1::value::Value::TsNanosecondValue(t) => {
-                ValueRef::Timestamp(Timestamp::new_nanosecond(*t))
-            }
-            greptime_proto::v1::value::Value::TimeSecondValue(t) => {
-                ValueRef::Time(Time::new_second(*t))
-            }
-            greptime_proto::v1::value::Value::TimeMillisecondValue(t) => {
-                ValueRef::Time(Time::new_millisecond(*t))
-            }
-            greptime_proto::v1::value::Value::TimeMicrosecondValue(t) => {
-                ValueRef::Time(Time::new_microsecond(*t))
-            }
-            greptime_proto::v1::value::Value::TimeNanosecondValue(t) => {
-                ValueRef::Time(Time::new_nanosecond(*t))
-            }
-        }
-    }
-}
-
 impl<'a> From<&'a [u8]> for ValueRef<'a> {
     fn from(bytes: &'a [u8]) -> ValueRef<'a> {
         ValueRef::Binary(bytes)

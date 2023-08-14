@@ -447,6 +447,7 @@ impl RegionManifestManagerInner {
 
 #[cfg(test)]
 mod test {
+    use api::v1::SemanticType;
     use common_datasource::compression::CompressionType;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
@@ -454,7 +455,7 @@ mod test {
     use super::*;
     use crate::manifest::action::RegionChange;
     use crate::manifest::tests::utils::basic_region_metadata;
-    use crate::metadata::{ColumnMetadata, RegionMetadataBuilder, SemanticType};
+    use crate::metadata::{ColumnMetadata, RegionMetadataBuilder};
     use crate::test_util::TestEnv;
 
     #[tokio::test]

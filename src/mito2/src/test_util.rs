@@ -16,6 +16,9 @@
 
 use std::sync::Arc;
 
+use api::greptime_proto::v1;
+use api::v1::value::ValueData;
+use api::v1::SemanticType;
 use common_datasource::compression::CompressionType;
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
 use datatypes::prelude::ConcreteDataType;
@@ -30,7 +33,7 @@ use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
 use crate::error::Result;
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
-use crate::metadata::{ColumnMetadata, RegionMetadataRef, SemanticType};
+use crate::metadata::{ColumnMetadata, RegionMetadataRef};
 use crate::request::{CreateRequest, RegionOptions};
 use crate::worker::WorkerGroup;
 
@@ -224,5 +227,22 @@ impl CreateRequestBuilder {
             create_if_not_exists: self.create_if_not_exists,
             options: RegionOptions::default(),
         }
+    }
+}
+
+// TODO(yingwen): Support conversion in greptime-proto.
+/// Creates value for i64.
+#[cfg(test)]
+pub(crate) fn i64_value(data: i64) -> v1::Value {
+    v1::Value {
+        value_data: Some(ValueData::I64Value(data)),
+    }
+}
+
+/// Creates value for timestamp millis.
+#[cfg(test)]
+pub(crate) fn ts_ms_value(data: i64) -> v1::Value {
+    v1::Value {
+        value_data: Some(ValueData::TsMillisecondValue(data)),
     }
 }
