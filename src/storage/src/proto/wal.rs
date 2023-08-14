@@ -15,7 +15,7 @@
 #![allow(clippy::all)]
 tonic::include_proto!("greptime.storage.wal.v1");
 
-use store_api::storage::OpType;
+use api::v1::OpType;
 
 use crate::write_batch::Payload;
 

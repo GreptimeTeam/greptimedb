@@ -14,11 +14,11 @@
 
 use std::sync::Arc;
 
+use api::v1::OpType;
 use async_trait::async_trait;
 use datatypes::prelude::ScalarVector;
 use datatypes::type_id::LogicalTypeId;
 use datatypes::vectors::{Int64Vector, TimestampMillisecondVector, UInt64Vector, UInt8Vector};
-use store_api::storage::OpType;
 
 use crate::error::Result;
 use crate::memtable::{BatchIterator, BoxedBatchIterator, RowOrdering};
@@ -64,7 +64,7 @@ pub fn new_full_kv_batch(all_values: &[(i64, i64, u64, OpType)]) -> Batch {
     let value = Arc::new(Int64Vector::from_values(all_values.iter().map(|v| v.1)));
     let sequences = Arc::new(UInt64Vector::from_values(all_values.iter().map(|v| v.2)));
     let op_types = Arc::new(UInt8Vector::from_values(
-        all_values.iter().map(|v| v.3.as_u8()),
+        all_values.iter().map(|v| v.3 as u8),
     ));
 
     Batch::new(vec![key, value, sequences, op_types])

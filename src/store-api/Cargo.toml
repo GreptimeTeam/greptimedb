@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+api.workspace = true
 async-trait.workspace = true
 bytes = "1.1"
 common-base = { workspace = true }

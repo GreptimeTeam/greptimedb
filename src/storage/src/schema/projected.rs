@@ -16,12 +16,13 @@ use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
+use api::v1::OpType;
 use common_base::BitVec;
 use datatypes::prelude::ScalarVector;
 use datatypes::schema::{SchemaBuilder, SchemaRef};
 use datatypes::vectors::{BooleanVector, UInt8Vector};
 use snafu::{ensure, ResultExt};
-use store_api::storage::{Chunk, ColumnId, OpType};
+use store_api::storage::{Chunk, ColumnId};
 
 use crate::error;
 use crate::metadata::{self, Result};
@@ -351,7 +352,7 @@ impl BatchOp for ProjectedSchema {
             });
 
         for (i, op_type) in op_types.iter_data().enumerate() {
-            if op_type == Some(OpType::Delete.as_u8()) {
+            if op_type == Some(OpType::Delete as u8) {
                 selected.set(i, false);
             }
         }
@@ -360,10 +361,10 @@ impl BatchOp for ProjectedSchema {
 
 #[cfg(test)]
 mod tests {
+    use api::v1::OpType;
     use datatypes::prelude::ScalarVector;
     use datatypes::type_id::LogicalTypeId;
     use datatypes::vectors::{TimestampMillisecondVector, VectorRef};
-    use store_api::storage::OpType;
 
     use super::*;
     use crate::metadata::Error;

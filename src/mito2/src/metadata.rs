@@ -17,6 +17,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use api::v1::SemanticType;
 use datatypes::prelude::DataType;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use serde::de::Error;
@@ -340,17 +341,6 @@ impl ColumnMetadata {
 
         Ok(())
     }
-}
-
-/// The semantic type of one column
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-pub enum SemanticType {
-    /// Tag column, also is a part of primary key.
-    Tag = 0,
-    /// A column that isn't a time index or part of primary key.
-    Field = 1,
-    /// Time index column.
-    Timestamp = 2,
 }
 
 /// Fields skipped in serialization.

@@ -92,7 +92,7 @@ impl<R: BatchReader> BatchReader for DedupReader<R> {
 
 #[cfg(test)]
 mod tests {
-    use store_api::storage::OpType;
+    use api::v1::OpType;
 
     use super::*;
     use crate::test_util::read_util;

@@ -88,6 +88,8 @@ impl GrpcQueryHandler for Instance {
                 GrpcQueryHandler::do_query(self.grpc_query_handler.as_ref(), request, ctx.clone())
                     .await?
             }
+            Request::RowInserts(_) => unreachable!(),
+            Request::RowDelete(_) => unreachable!(),
         };
 
         let output = interceptor.post_execute(output, ctx)?;

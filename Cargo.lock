@@ -211,7 +211,7 @@ dependencies = [
  "common-error",
  "common-time",
  "datatypes",
- "greptime-proto 0.1.0 (git+https://github.com/GreptimeTeam/greptime-proto.git?rev=940694cfd05c1e93c1dd7aab486184c9e2853098)",
+ "greptime-proto",
  "prost",
  "snafu",
  "tonic 0.9.2",
@@ -4134,19 +4134,7 @@ checksum = "d2fabcfbdc87f4758337ca535fb41a6d701b65693ce38287d856d1674551ec9b"
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=10c349c033dded29097d0dc933fbc2f89f658032#10c349c033dded29097d0dc933fbc2f89f658032"
-dependencies = [
- "prost",
- "serde",
- "serde_json",
- "tonic 0.9.2",
- "tonic-build",
-]
-
-[[package]]
-name = "greptime-proto"
-version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=940694cfd05c1e93c1dd7aab486184c9e2853098#940694cfd05c1e93c1dd7aab486184c9e2853098"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=9b68af55c050a010f202fcccb22d58f080f0a868#9b68af55c050a010f202fcccb22d58f080f0a868"
 dependencies = [
  "prost",
  "serde",
@@ -5527,6 +5515,7 @@ name = "mito2"
 version = "0.3.2"
 dependencies = [
  "anymap",
+ "api",
  "aquamarine",
  "arc-swap",
  "async-compat",
@@ -5551,7 +5540,6 @@ dependencies = [
  "datafusion-common",
  "datatypes",
  "futures",
- "greptime-proto 0.1.0 (git+https://github.com/GreptimeTeam/greptime-proto.git?rev=10c349c033dded29097d0dc933fbc2f89f658032)",
  "lazy_static",
  "log-store",
  "memcomparable",
@@ -7040,7 +7028,7 @@ dependencies = [
  "datafusion",
  "datatypes",
  "futures",
- "greptime-proto 0.1.0 (git+https://github.com/GreptimeTeam/greptime-proto.git?rev=940694cfd05c1e93c1dd7aab486184c9e2853098)",
+ "greptime-proto",
  "promql-parser",
  "prost",
  "query",
@@ -7322,7 +7310,7 @@ dependencies = [
  "format_num",
  "futures",
  "futures-util",
- "greptime-proto 0.1.0 (git+https://github.com/GreptimeTeam/greptime-proto.git?rev=940694cfd05c1e93c1dd7aab486184c9e2853098)",
+ "greptime-proto",
  "humantime",
  "metrics",
  "num",
@@ -9474,6 +9462,7 @@ dependencies = [
 name = "storage"
 version = "0.3.2"
 dependencies = [
+ "api",
  "arc-swap",
  "arrow",
  "arrow-array",
@@ -9525,6 +9514,7 @@ dependencies = [
 name = "store-api"
 version = "0.3.2"
 dependencies = [
+ "api",
  "async-stream",
  "async-trait",
  "bytes",
