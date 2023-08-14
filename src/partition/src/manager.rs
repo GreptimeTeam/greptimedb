@@ -242,7 +242,7 @@ impl PartitionRuleManager {
         req: InsertRequest,
         schema: &Schema,
     ) -> Result<InsertRequestSplit> {
-        let partition_rule = self.find_table_partition_rule(table).await.unwrap();
+        let partition_rule = self.find_table_partition_rule(table).await?;
         let splitter = WriteSplitter::with_partition_rule(partition_rule);
         splitter.split_insert(req, schema)
     }
@@ -253,7 +253,7 @@ impl PartitionRuleManager {
         req: DeleteRequest,
         primary_key_column_names: Vec<&String>,
     ) -> Result<DeleteRequestSplit> {
-        let partition_rule = self.find_table_partition_rule(table).await.unwrap();
+        let partition_rule = self.find_table_partition_rule(table).await?;
         let splitter = WriteSplitter::with_partition_rule(partition_rule);
         splitter.split_delete(req, primary_key_column_names)
     }
