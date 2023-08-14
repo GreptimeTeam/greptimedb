@@ -28,6 +28,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use ::auth::UserProviderRef;
 use derive_builder::Builder;
 use pgwire::api::auth::ServerParameterProvider;
 use pgwire::api::store::MemPortalStore;
@@ -38,7 +39,6 @@ use session::Session;
 
 use self::auth_handler::PgLoginVerifier;
 use self::handler::DefaultQueryParser;
-use crate::auth::UserProviderRef;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 use crate::SqlPlan;
 

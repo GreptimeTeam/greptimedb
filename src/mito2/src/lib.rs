@@ -38,6 +38,8 @@ mod region;
 #[allow(dead_code)]
 pub mod request;
 #[allow(dead_code)]
+mod row_converter;
+#[allow(dead_code)]
 pub mod sst;
 pub mod wal;
 #[allow(dead_code)]

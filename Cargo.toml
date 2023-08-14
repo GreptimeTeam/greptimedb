@@ -2,6 +2,7 @@
 members = [
     "benchmarks",
     "src/api",
+    "src/auth",
     "src/catalog",
     "src/client",
     "src/cmd",
@@ -102,6 +103,7 @@ metrics = "0.20"
 meter-core = { git = "https://github.com/GreptimeTeam/greptime-meter.git", rev = "abbd357c1e193cd270ea65ee7652334a150b628f" }
 ## workspaces members
 api = { path = "src/api" }
+auth = { path = "src/auth" }
 catalog = { path = "src/catalog" }
 client = { path = "src/client" }
 cmd = { path = "src/cmd" }

@@ -80,7 +80,7 @@ pub enum Error {
     #[snafu(display("Illegal auth config: {}", source))]
     IllegalAuthConfig {
         location: Location,
-        source: servers::auth::Error,
+        source: auth::Error,
     },
 
     #[snafu(display("Unsupported selector type, {} source: {}", selector_type, source))]

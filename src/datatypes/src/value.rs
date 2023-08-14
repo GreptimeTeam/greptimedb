@@ -474,15 +474,11 @@ impl_value_from!(Float64, f64);
 impl_value_from!(String, StringBytes);
 impl_value_from!(Binary, Bytes);
 impl_value_from!(Date, Date);
+impl_value_from!(Time, Time);
 impl_value_from!(DateTime, DateTime);
 impl_value_from!(Timestamp, Timestamp);
 impl_value_from!(Interval, Interval);
-
-impl From<String> for Value {
-    fn from(string: String) -> Value {
-        Value::String(string.into())
-    }
-}
+impl_value_from!(String, String);
 
 impl From<&str> for Value {
     fn from(string: &str) -> Value {
@@ -703,6 +699,33 @@ impl TryFrom<ScalarValue> for Value {
     }
 }
 
+impl From<ValueRef<'_>> for Value {
+    fn from(value: ValueRef<'_>) -> Self {
+        match value {
+            ValueRef::Null => Value::Null,
+            ValueRef::Boolean(v) => Value::Boolean(v),
+            ValueRef::UInt8(v) => Value::UInt8(v),
+            ValueRef::UInt16(v) => Value::UInt16(v),
+            ValueRef::UInt32(v) => Value::UInt32(v),
+            ValueRef::UInt64(v) => Value::UInt64(v),
+            ValueRef::Int8(v) => Value::Int8(v),
+            ValueRef::Int16(v) => Value::Int16(v),
+            ValueRef::Int32(v) => Value::Int32(v),
+            ValueRef::Int64(v) => Value::Int64(v),
+            ValueRef::Float32(v) => Value::Float32(v),
+            ValueRef::Float64(v) => Value::Float64(v),
+            ValueRef::String(v) => Value::String(v.into()),
+            ValueRef::Binary(v) => Value::Binary(v.into()),
+            ValueRef::Date(v) => Value::Date(v),
+            ValueRef::DateTime(v) => Value::DateTime(v),
+            ValueRef::Timestamp(v) => Value::Timestamp(v),
+            ValueRef::Time(v) => Value::Time(v),
+            ValueRef::Interval(v) => Value::Interval(v),
+            ValueRef::List(v) => v.to_value(),
+        }
+    }
+}
+
 /// Reference to [Value].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValueRef<'a> {
@@ -772,6 +795,60 @@ impl<'a> ValueRef<'a> {
     /// Cast itself to boolean.
     pub fn as_boolean(&self) -> Result<Option<bool>> {
         impl_as_for_value_ref!(self, Boolean)
+    }
+
+    pub fn as_i8(&self) -> Result<Option<i8>> {
+        impl_as_for_value_ref!(self, Int8)
+    }
+
+    pub fn as_u8(&self) -> Result<Option<u8>> {
+        impl_as_for_value_ref!(self, UInt8)
+    }
+
+    pub fn as_i16(&self) -> Result<Option<i16>> {
+        impl_as_for_value_ref!(self, Int16)
+    }
+
+    pub fn as_u16(&self) -> Result<Option<u16>> {
+        impl_as_for_value_ref!(self, UInt16)
+    }
+
+    pub fn as_i32(&self) -> Result<Option<i32>> {
+        impl_as_for_value_ref!(self, Int32)
+    }
+
+    pub fn as_u32(&self) -> Result<Option<u32>> {
+        impl_as_for_value_ref!(self, UInt32)
+    }
+
+    pub fn as_i64(&self) -> Result<Option<i64>> {
+        impl_as_for_value_ref!(self, Int64)
+    }
+
+    pub fn as_u64(&self) -> Result<Option<u64>> {
+        impl_as_for_value_ref!(self, UInt64)
+    }
+
+    pub fn as_f32(&self) -> Result<Option<f32>> {
+        match self {
+            ValueRef::Null => Ok(None),
+            ValueRef::Float32(f) => Ok(Some(f.0)),
+            other => error::CastTypeSnafu {
+                msg: format!("Failed to cast value ref {:?} to ValueRef::Float32", other,),
+            }
+            .fail(),
+        }
+    }
+
+    pub fn as_f64(&self) -> Result<Option<f64>> {
+        match self {
+            ValueRef::Null => Ok(None),
+            ValueRef::Float64(f) => Ok(Some(f.0)),
+            other => error::CastTypeSnafu {
+                msg: format!("Failed to cast value ref {:?} to ValueRef::Float64", other,),
+            }
+            .fail(),
+        }
     }
 
     /// Cast itself to [Date].

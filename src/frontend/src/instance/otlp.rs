@@ -13,12 +13,13 @@
 // limitations under the License.
 
 use async_trait::async_trait;
+use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use common_error::ext::BoxedError;
 use metrics::counter;
 use opentelemetry_proto::tonic::collector::metrics::v1::{
     ExportMetricsServiceRequest, ExportMetricsServiceResponse,
 };
-use servers::error::{self, Result as ServerResult};
+use servers::error::{self, AuthSnafu, Result as ServerResult};
 use servers::otlp;
 use servers::query_handler::OpenTelemetryProtocolHandler;
 use session::context::QueryContextRef;
@@ -34,6 +35,11 @@ impl OpenTelemetryProtocolHandler for Instance {
         request: ExportMetricsServiceRequest,
         ctx: QueryContextRef,
     ) -> ServerResult<ExportMetricsServiceResponse> {
+        self.plugins
+            .get::<PermissionCheckerRef>()
+            .as_ref()
+            .check_permission(ctx.current_user(), PermissionReq::Otlp)
+            .context(AuthSnafu)?;
         let (requests, rows) = otlp::to_grpc_insert_requests(request)?;
         let _ = self
             .handle_inserts(requests, ctx)

@@ -673,6 +673,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "auth"
+version = "0.3.2"
+dependencies = [
+ "api",
+ "async-trait",
+ "common-error",
+ "common-test-util",
+ "digest",
+ "hex",
+ "secrecy",
+ "sha1",
+ "snafu",
+ "sql",
+ "tokio",
+]
+
+[[package]]
 name = "auto_ops"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1559,6 +1576,7 @@ version = "0.3.2"
 dependencies = [
  "anymap",
  "async-trait",
+ "auth",
  "catalog",
  "chrono",
  "clap 3.2.25",
@@ -1583,6 +1601,7 @@ dependencies = [
  "metrics",
  "nu-ansi-term",
  "partition",
+ "prost",
  "query",
  "rand",
  "rexpect",
@@ -3243,6 +3262,7 @@ dependencies = [
  "async-compat",
  "async-stream",
  "async-trait",
+ "auth",
  "catalog",
  "chrono",
  "client",
@@ -5202,6 +5222,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2dffe52ecf27772e601905b7522cb4ef790d2cc203488bbd0e2fe85fcb74566d"
 
 [[package]]
+name = "memcomparable"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "376101dbd964fc502d5902216e180f92b3d003b5cc3d2e40e044eb5470fca677"
+dependencies = [
+ "bytes",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
 name = "memmap2"
 version = "0.5.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5502,6 +5533,7 @@ dependencies = [
  "async-compat",
  "async-stream",
  "async-trait",
+ "bytes",
  "chrono",
  "common-base",
  "common-catalog",
@@ -5523,9 +5555,11 @@ dependencies = [
  "greptime-proto 0.1.0 (git+https://github.com/GreptimeTeam/greptime-proto.git?rev=10c349c033dded29097d0dc933fbc2f89f658032)",
  "lazy_static",
  "log-store",
+ "memcomparable",
  "metrics",
  "object-store",
  "parquet",
+ "paste",
  "prost",
  "regex",
  "serde",
@@ -8825,6 +8859,7 @@ dependencies = [
  "api",
  "arrow-flight",
  "async-trait",
+ "auth",
  "axum",
  "axum-macros",
  "axum-test-helper",
@@ -8913,6 +8948,7 @@ name = "session"
 version = "0.3.2"
 dependencies = [
  "arc-swap",
+ "auth",
  "common-catalog",
  "common-telemetry",
  "common-time",
@@ -9200,6 +9236,7 @@ dependencies = [
  "hex",
  "itertools 0.10.5",
  "once_cell",
+ "regex",
  "snafu",
  "sqlparser 0.34.0",
 ]
@@ -9935,6 +9972,7 @@ version = "0.3.2"
 dependencies = [
  "api",
  "async-trait",
+ "auth",
  "axum",
  "axum-test-helper",
  "catalog",

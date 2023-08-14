@@ -14,6 +14,7 @@
 
 use std::marker::PhantomData;
 
+use ::auth::UserProviderRef;
 use axum::http::{self, Request, StatusCode};
 use axum::response::Response;
 use common_catalog::parse_catalog_and_schema_from_db_string;
@@ -24,17 +25,14 @@ use headers::Header;
 use http_body::Body;
 use metrics::increment_counter;
 use secrecy::SecretString;
-use session::context::UserInfo;
-use snafu::{ensure, IntoError, OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use tower_http::auth::AsyncAuthorizeRequest;
 
 use super::header::GreptimeDbName;
 use super::PUBLIC_APIS;
-use crate::auth::Error::IllegalParam;
-use crate::auth::{Identity, IllegalParamSnafu, UserProviderRef};
 use crate::error::{
-    self, AuthSnafu, InvalidAuthorizationHeaderSnafu, InvisibleASCIISnafu, NotFoundInfluxAuthSnafu,
-    Result, UnsupportedAuthSchemeSnafu,
+    self, InvalidAuthorizationHeaderSnafu, InvalidParameterSnafu, InvisibleASCIISnafu,
+    NotFoundInfluxAuthSnafu, Result, UnsupportedAuthSchemeSnafu,
 };
 use crate::http::HTTP_API_PREFIX;
 
@@ -78,7 +76,9 @@ where
             let user_provider = if let Some(user_provider) = user_provider.filter(|_| need_auth) {
                 user_provider
             } else {
-                let _ = request.extensions_mut().insert(UserInfo::default());
+                let _ = request
+                    .extensions_mut()
+                    .insert(auth::userinfo_by_name(None));
                 return Ok(request);
             };
 
@@ -114,8 +114,8 @@ where
 
             match user_provider
                 .auth(
-                    Identity::UserId(username.as_str(), None),
-                    crate::auth::Password::PlainText(password),
+                    ::auth::Identity::UserId(username.as_str(), None),
+                    ::auth::Password::PlainText(password),
                     catalog,
                     schema,
                 )
@@ -143,7 +143,7 @@ where
 
 fn extract_catalog_and_schema<B: Send + Sync + 'static>(
     request: &Request<B>,
-) -> crate::auth::Result<(&str, &str)> {
+) -> Result<(&str, &str)> {
     // parse database from header
     let dbname = request
         .headers()
@@ -154,8 +154,8 @@ fn extract_catalog_and_schema<B: Send + Sync + 'static>(
             let query = request.uri().query().unwrap_or_default();
             extract_db_from_query(query)
         })
-        .context(IllegalParamSnafu {
-            msg: "db not provided or corrupted",
+        .context(InvalidParameterSnafu {
+            reason: "`db` must be provided in query string",
         })?;
 
     Ok(parse_catalog_and_schema_from_db_string(dbname))
@@ -193,9 +193,11 @@ fn get_influxdb_credentials<B: Send + Sync + 'static>(
             (Some(username), Some(password)) => {
                 Ok(Some((username.to_string(), password.to_string().into())))
             }
-            _ => Err(AuthSnafu.into_error(IllegalParam {
-                msg: "influxdb auth: username and password must be provided together".to_string(),
-            })),
+            _ => InvalidParameterSnafu {
+                reason: "influxdb auth: username and password must be provided together"
+                    .to_string(),
+            }
+            .fail(),
         }
     }
 }

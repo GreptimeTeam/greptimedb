@@ -26,7 +26,6 @@ use servers::http::{
     JsonOutput,
 };
 use servers::metrics_handler::MetricsHandler;
-use session::context::UserInfo;
 use table::test_util::MemTable;
 
 use crate::{
@@ -43,7 +42,7 @@ async fn test_sql_not_provided() {
             script_handler: None,
         }),
         Query(http_handler::SqlQuery::default()),
-        axum::Extension(UserInfo::default()),
+        axum::Extension(auth::userinfo_by_name(None)),
         Form(http_handler::SqlQuery::default()),
     )
     .await;
@@ -68,7 +67,7 @@ async fn test_sql_output_rows() {
             script_handler: None,
         }),
         query,
-        axum::Extension(UserInfo::default()),
+        axum::Extension(auth::userinfo_by_name(None)),
         Form(http_handler::SqlQuery::default()),
     )
     .await;
@@ -114,7 +113,7 @@ async fn test_sql_form() {
             script_handler: None,
         }),
         Query(http_handler::SqlQuery::default()),
-        axum::Extension(UserInfo::default()),
+        axum::Extension(auth::userinfo_by_name(None)),
         form,
     )
     .await;

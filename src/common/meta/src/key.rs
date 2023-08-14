@@ -53,7 +53,9 @@ pub mod schema_name;
 pub mod table_info;
 pub mod table_name;
 pub mod table_region;
-mod table_route;
+// TODO(weny): removes it.
+#[allow(unused)]
+pub mod table_route;
 
 use std::sync::Arc;
 
@@ -65,8 +67,9 @@ use table_info::{TableInfoKey, TableInfoManager, TableInfoValue};
 use table_name::{TableNameKey, TableNameManager, TableNameValue};
 use table_region::{TableRegionKey, TableRegionManager, TableRegionValue};
 
-use self::catalog_name::CatalogNameValue;
-use self::schema_name::SchemaNameValue;
+use self::catalog_name::{CatalogManager, CatalogNameValue};
+use self::schema_name::{SchemaManager, SchemaNameValue};
+use self::table_route::TableRouteValue;
 use crate::error::{InvalidTableMetadataSnafu, Result, SerdeJsonSnafu};
 pub use crate::key::table_route::{TableRouteKey, TABLE_ROUTE_PREFIX};
 use crate::kv_backend::KvBackendRef;
@@ -125,6 +128,8 @@ pub struct TableMetadataManager {
     table_info_manager: TableInfoManager,
     table_region_manager: TableRegionManager,
     datanode_table_manager: DatanodeTableManager,
+    catalog_manager: CatalogManager,
+    schema_manager: SchemaManager,
 }
 
 impl TableMetadataManager {
@@ -133,7 +138,9 @@ impl TableMetadataManager {
             table_name_manager: TableNameManager::new(kv_backend.clone()),
             table_info_manager: TableInfoManager::new(kv_backend.clone()),
             table_region_manager: TableRegionManager::new(kv_backend.clone()),
-            datanode_table_manager: DatanodeTableManager::new(kv_backend),
+            datanode_table_manager: DatanodeTableManager::new(kv_backend.clone()),
+            catalog_manager: CatalogManager::new(kv_backend.clone()),
+            schema_manager: SchemaManager::new(kv_backend),
         }
     }
 
@@ -151,6 +158,14 @@ impl TableMetadataManager {
 
     pub fn datanode_table_manager(&self) -> &DatanodeTableManager {
         &self.datanode_table_manager
+    }
+
+    pub fn catalog_manager(&self) -> &CatalogManager {
+        &self.catalog_manager
+    }
+
+    pub fn schema_manager(&self) -> &SchemaManager {
+        &self.schema_manager
     }
 }
 
@@ -200,7 +215,8 @@ impl_table_meta_value! {
     TableNameValue,
     TableInfoValue,
     TableRegionValue,
-    DatanodeTableValue
+    DatanodeTableValue,
+    TableRouteValue
 }
 
 #[cfg(test)]

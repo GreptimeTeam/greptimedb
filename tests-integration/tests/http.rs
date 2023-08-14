@@ -13,13 +13,12 @@
 // limitations under the License.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
+use auth::user_provider_from_option;
 use axum::http::StatusCode;
 use axum_test_helper::TestClient;
 use common_error::status_code::StatusCode as ErrorCode;
 use serde_json::json;
-use servers::auth::user_provider::StaticUserProvider;
 use servers::http::handler::HealthResponse;
 use servers::http::{JsonOutput, JsonResponse};
 use servers::prometheus::{PrometheusJsonResponse, PrometheusResponse};
@@ -76,12 +75,15 @@ macro_rules! http_tests {
 pub async fn test_http_auth(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
 
-    let user_provider = StaticUserProvider::try_from("cmd:greptime_user=greptime_pwd").unwrap();
+    let user_provider = user_provider_from_option(
+        &"static_user_provider:cmd:greptime_user=greptime_pwd".to_string(),
+    )
+    .unwrap();
 
     let (app, mut guard) = setup_test_http_app_with_frontend_and_user_provider(
         store_type,
         "sql_api",
-        Some(Arc::new(user_provider)),
+        Some(user_provider),
     )
     .await;
     let client = TestClient::new(app);

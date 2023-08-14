@@ -16,6 +16,8 @@ mod bench;
 mod cmd;
 mod helper;
 mod repl;
+// TODO(weny): Removes it
+#[allow(deprecated)]
 mod upgrade;
 
 use async_trait::async_trait;

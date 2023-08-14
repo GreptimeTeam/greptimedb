@@ -19,20 +19,20 @@ use std::io::BufRead;
 use std::path::Path;
 
 use async_trait::async_trait;
-use digest;
 use digest::Digest;
 use secrecy::ExposeSecret;
-use session::context::UserInfo;
 use sha1::Sha1;
 use snafu::{ensure, OptionExt, ResultExt};
 
-use crate::auth::{
-    Error, HashedPassword, Identity, IllegalParamSnafu, InvalidConfigSnafu, IoSnafu, Password,
-    Result, Salt, UnsupportedPasswordTypeSnafu, UserNotFoundSnafu, UserPasswordMismatchSnafu,
-    UserProvider,
+use crate::common::Salt;
+use crate::error::{
+    Error, IllegalParamSnafu, InvalidConfigSnafu, IoSnafu, Result, UnsupportedPasswordTypeSnafu,
+    UserNotFoundSnafu, UserPasswordMismatchSnafu,
 };
+use crate::user_info::DefaultUserInfo;
+use crate::{HashedPassword, Identity, Password, UserInfoRef, UserProvider};
 
-pub const STATIC_USER_PROVIDER: &str = "static_user_provider";
+pub(crate) const STATIC_USER_PROVIDER: &str = "static_user_provider";
 
 impl TryFrom<&str> for StaticUserProvider {
     type Error = Error;
@@ -91,7 +91,7 @@ impl TryFrom<&str> for StaticUserProvider {
     }
 }
 
-pub struct StaticUserProvider {
+pub(crate) struct StaticUserProvider {
     users: HashMap<String, Vec<u8>>,
 }
 
@@ -105,7 +105,7 @@ impl UserProvider for StaticUserProvider {
         &self,
         input_id: Identity<'_>,
         input_pwd: Password<'_>,
-    ) -> Result<UserInfo> {
+    ) -> Result<UserInfoRef> {
         match input_id {
             Identity::UserId(username, _) => {
                 ensure!(
@@ -127,7 +127,7 @@ impl UserProvider for StaticUserProvider {
                             }
                         );
                         return if save_pwd == pwd.expose_secret().as_bytes() {
-                            Ok(UserInfo::new(username))
+                            Ok(DefaultUserInfo::with_name(username))
                         } else {
                             UserPasswordMismatchSnafu {
                                 username: username.to_string(),
@@ -143,7 +143,7 @@ impl UserProvider for StaticUserProvider {
                             }
                         );
                         auth_mysql(auth_data, salt, username, save_pwd)
-                            .map(|_| UserInfo::new(username))
+                            .map(|_| DefaultUserInfo::with_name(username))
                     }
                     Password::PgMD5(_, _) => UnsupportedPasswordTypeSnafu {
                         password_type: "pg_md5",
@@ -154,7 +154,12 @@ impl UserProvider for StaticUserProvider {
         }
     }
 
-    async fn authorize(&self, _catalog: &str, _schema: &str, _user_info: &UserInfo) -> Result<()> {
+    async fn authorize(
+        &self,
+        _catalog: &str,
+        _schema: &str,
+        _user_info: &UserInfoRef,
+    ) -> Result<()> {
         // default allow all
         Ok(())
     }
@@ -208,10 +213,13 @@ pub mod test {
     use std::io::{LineWriter, Write};
 
     use common_test_util::temp_dir::create_temp_dir;
-    use session::context::UserInfo;
 
-    use crate::auth::user_provider::{double_sha1, sha1_one, sha1_two, StaticUserProvider};
-    use crate::auth::{Identity, Password, UserProvider};
+    use crate::user_info::DefaultUserInfo;
+    use crate::user_provider::static_user_provider::{
+        double_sha1, sha1_one, sha1_two, StaticUserProvider,
+    };
+    use crate::user_provider::{Identity, Password};
+    use crate::UserProvider;
 
     #[test]
     fn test_sha() {
@@ -249,9 +257,10 @@ pub mod test {
 
     #[tokio::test]
     async fn test_authorize() {
+        let user_info = DefaultUserInfo::with_name("root");
         let provider = StaticUserProvider::try_from("cmd:root=123456,admin=654321").unwrap();
         provider
-            .authorize("catalog", "schema", &UserInfo::new("root"))
+            .authorize("catalog", "schema", &user_info)
             .await
             .unwrap();
     }

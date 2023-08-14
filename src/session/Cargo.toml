@@ -9,6 +9,7 @@ testing = []
 
 [dependencies]
 arc-swap = "1.5"
+auth.workspace = true
 common-catalog = { workspace = true }
 common-telemetry = { workspace = true }
 common-time = { workspace = true }

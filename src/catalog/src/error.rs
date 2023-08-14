@@ -27,6 +27,19 @@ use crate::DeregisterTableRequest;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
+    #[snafu(display("Failed to list catalogs, source: {}", source))]
+    ListCatalogs {
+        location: Location,
+        source: BoxedError,
+    },
+
+    #[snafu(display("Failed to list {}'s schemas, source: {}", catalog, source))]
+    ListSchemas {
+        location: Location,
+        catalog: String,
+        source: BoxedError,
+    },
+
     #[snafu(display(
         "Failed to re-compile script due to internal error, source: {}",
         source
@@ -282,6 +295,10 @@ impl ErrorExt for Error {
             Error::TableNotExist { .. } => StatusCode::TableNotFound,
             Error::SchemaExists { .. } | Error::TableEngineNotFound { .. } => {
                 StatusCode::InvalidArguments
+            }
+
+            Error::ListCatalogs { source, .. } | Error::ListSchemas { source, .. } => {
+                source.status_code()
             }
 
             Error::OpenSystemCatalog { source, .. }

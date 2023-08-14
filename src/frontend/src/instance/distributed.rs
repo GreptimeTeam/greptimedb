@@ -32,11 +32,10 @@ use client::Database;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::format_full_table_name;
 use common_error::ext::BoxedError;
-use common_meta::helper::{SchemaKey, SchemaValue};
+use common_meta::key::schema_name::SchemaNameKey;
 use common_meta::peer::Peer;
 use common_meta::rpc::ddl::{DdlTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse};
 use common_meta::rpc::router::{Partition, Partition as MetaPartition, RouteRequest};
-use common_meta::rpc::store::CompareAndPutRequest;
 use common_meta::table_name::TableName;
 use common_query::Output;
 use common_telemetry::{debug, info};
@@ -64,11 +63,10 @@ use table::TableRef;
 
 use crate::catalog::FrontendCatalogManager;
 use crate::error::{
-    self, AlterExprToRequestSnafu, CatalogEntrySerdeSnafu, CatalogSnafu, ColumnDataTypeSnafu,
-    ColumnNotFoundSnafu, DeserializePartitionSnafu, InvokeDatanodeSnafu, NotSupportedSnafu,
-    ParseSqlSnafu, RequestDatanodeSnafu, RequestMetaSnafu, Result, SchemaExistsSnafu,
-    StartMetaClientSnafu, TableAlreadyExistSnafu, TableNotFoundSnafu, TableSnafu,
-    ToTableDeleteRequestSnafu, UnrecognizedTableOptionSnafu,
+    self, AlterExprToRequestSnafu, CatalogSnafu, ColumnDataTypeSnafu, ColumnNotFoundSnafu,
+    DeserializePartitionSnafu, InvokeDatanodeSnafu, NotSupportedSnafu, ParseSqlSnafu,
+    RequestDatanodeSnafu, RequestMetaSnafu, Result, SchemaExistsSnafu, TableAlreadyExistSnafu,
+    TableNotFoundSnafu, TableSnafu, ToTableDeleteRequestSnafu, UnrecognizedTableOptionSnafu,
 };
 use crate::expr_factory;
 use crate::instance::distributed::inserter::DistInserter;
@@ -463,31 +461,28 @@ impl DistInstance {
             };
         }
 
-        let key = SchemaKey {
-            catalog_name: catalog.to_owned(),
-            schema_name: expr.database_name.clone(),
-        };
-        let value = SchemaValue {};
-        let client = self
-            .meta_client
-            .store_client()
-            .context(StartMetaClientSnafu)?;
-
-        let request = CompareAndPutRequest::new()
-            .with_key(key.to_string())
-            .with_value(value.as_bytes().context(CatalogEntrySerdeSnafu)?);
-
-        let response = client
-            .compare_and_put(request.into())
+        let schema = SchemaNameKey::new(catalog, &expr.database_name);
+        let exist = self
+            .catalog_manager
+            .table_metadata_manager_ref()
+            .schema_manager()
+            .exist(schema)
             .await
-            .context(RequestMetaSnafu)?;
+            .context(error::TableMetadataManagerSnafu)?;
 
         ensure!(
-            response.success,
+            !exist,
             SchemaExistsSnafu {
-                name: key.schema_name
+                name: schema.to_string(),
             }
         );
+
+        self.catalog_manager
+            .table_metadata_manager_ref()
+            .schema_manager()
+            .create(schema)
+            .await
+            .context(error::TableMetadataManagerSnafu)?;
 
         // Since the database created on meta does not go through KvBackend, so we manually
         // invalidate the cache here.

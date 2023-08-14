@@ -377,7 +377,7 @@ impl PartitionExec {
 
 #[cfg(test)]
 pub(crate) mod test {
-    use std::collections::HashMap;
+    use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicU32, Ordering};
 
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
@@ -445,7 +445,7 @@ pub(crate) mod test {
                             .try_into()
                             .unwrap(),
                         ),
-                        attrs: HashMap::new(),
+                        attrs: BTreeMap::new(),
                     },
                     leader_peer: Some(Peer::new(3, "")),
                     follower_peers: vec![],
@@ -462,7 +462,7 @@ pub(crate) mod test {
                             .try_into()
                             .unwrap(),
                         ),
-                        attrs: HashMap::new(),
+                        attrs: BTreeMap::new(),
                     },
                     leader_peer: Some(Peer::new(2, "")),
                     follower_peers: vec![],
@@ -479,7 +479,7 @@ pub(crate) mod test {
                             .try_into()
                             .unwrap(),
                         ),
-                        attrs: HashMap::new(),
+                        attrs: BTreeMap::new(),
                     },
                     leader_peer: Some(Peer::new(1, "")),
                     follower_peers: vec![],
@@ -517,7 +517,7 @@ pub(crate) mod test {
                             .try_into()
                             .unwrap(),
                         ),
-                        attrs: HashMap::new(),
+                        attrs: BTreeMap::new(),
                     },
                     leader_peer: None,
                     follower_peers: vec![],
@@ -537,7 +537,7 @@ pub(crate) mod test {
                             .try_into()
                             .unwrap(),
                         ),
-                        attrs: HashMap::new(),
+                        attrs: BTreeMap::new(),
                     },
                     leader_peer: None,
                     follower_peers: vec![],
@@ -554,7 +554,7 @@ pub(crate) mod test {
                             .try_into()
                             .unwrap(),
                         ),
-                        attrs: HashMap::new(),
+                        attrs: BTreeMap::new(),
                     },
                     leader_peer: None,
                     follower_peers: vec![],

@@ -31,6 +31,7 @@ use api::v1::greptime_request::Request;
 use api::v1::meta::Role;
 use api::v1::{AddColumns, AlterExpr, Column, DdlRequest, InsertRequest, InsertRequests};
 use async_trait::async_trait;
+use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use catalog::remote::CachedMetaKvBackend;
 use catalog::CatalogManagerRef;
 use client::client_manager::DatanodeClients;
@@ -43,7 +44,7 @@ use common_meta::heartbeat::handler::HandlerGroupExecutor;
 use common_meta::key::TableMetadataManager;
 use common_query::Output;
 use common_telemetry::logging::{debug, info};
-use common_telemetry::timer;
+use common_telemetry::{error, timer};
 use datanode::instance::sql::table_idents_to_full_name;
 use datanode::instance::InstanceRef as DnInstanceRef;
 use datatypes::schema::Schema;
@@ -57,7 +58,7 @@ use query::query_engine::options::{validate_catalog_and_schema, QueryOptions};
 use query::query_engine::DescribeResult;
 use query::{QueryEngineFactory, QueryEngineRef};
 use servers::error as server_error;
-use servers::error::{ExecuteQuerySnafu, ParsePromQLSnafu};
+use servers::error::{AuthSnafu, ExecuteQuerySnafu, ParsePromQLSnafu};
 use servers::interceptor::{
     PromQueryInterceptor, PromQueryInterceptorRef, SqlQueryInterceptor, SqlQueryInterceptorRef,
 };
@@ -79,8 +80,8 @@ use sqlparser::ast::ObjectName;
 use crate::catalog::FrontendCatalogManager;
 use crate::error::{
     self, Error, ExecLogicalPlanSnafu, ExecutePromqlSnafu, ExternalSnafu,
-    InvalidInsertRequestSnafu, MissingMetasrvOptsSnafu, ParseSqlSnafu, PlanStatementSnafu, Result,
-    SqlExecInterceptedSnafu,
+    InvalidInsertRequestSnafu, MissingMetasrvOptsSnafu, ParseSqlSnafu, PermissionSnafu,
+    PlanStatementSnafu, Result, SqlExecInterceptedSnafu,
 };
 use crate::expr_factory::{CreateExprFactoryRef, DefaultCreateExprFactory};
 use crate::frontend::FrontendOptions;
@@ -488,6 +489,9 @@ impl SqlQueryHandler for Instance {
             Err(e) => return vec![Err(e)],
         };
 
+        let checker_ref = self.plugins.get::<PermissionCheckerRef>();
+        let checker = checker_ref.as_ref();
+
         match parse_stmt(query.as_ref(), query_ctx.sql_dialect())
             .and_then(|stmts| query_interceptor.post_parsing(stmts, query_ctx.clone()))
         {
@@ -501,6 +505,18 @@ impl SqlQueryHandler for Instance {
                         results.push(Err(e));
                         break;
                     }
+
+                    if let Err(e) = checker
+                        .check_permission(
+                            query_ctx.current_user(),
+                            PermissionReq::SqlStatement(&stmt),
+                        )
+                        .context(PermissionSnafu)
+                    {
+                        results.push(Err(e));
+                        break;
+                    }
+
                     match self.query_statement(stmt, query_ctx.clone()).await {
                         Ok(output) => {
                             let output_result =
@@ -508,6 +524,9 @@ impl SqlQueryHandler for Instance {
                             results.push(output_result);
                         }
                         Err(e) => {
+                            let redacted = sql::util::redact_sql_secrets(query.as_ref());
+                            error!(e; "Failed to execute query: {redacted}");
+
                             results.push(Err(e));
                             break;
                         }
@@ -523,6 +542,8 @@ impl SqlQueryHandler for Instance {
 
     async fn do_exec_plan(&self, plan: LogicalPlan, query_ctx: QueryContextRef) -> Result<Output> {
         let _timer = timer!(metrics::METRIC_EXEC_PLAN_ELAPSED);
+        // plan should be prepared before exec
+        // we'll do check there
         self.query_engine
             .execute(plan, query_ctx)
             .await
@@ -534,6 +555,7 @@ impl SqlQueryHandler for Instance {
         query: &PromQuery,
         query_ctx: QueryContextRef,
     ) -> Vec<Result<Output>> {
+        // check will be done in prometheus handler's do_query
         let result = PrometheusHandler::do_query(self, query, query_ctx)
             .await
             .with_context(|_| ExecutePromqlSnafu {
@@ -551,6 +573,12 @@ impl SqlQueryHandler for Instance {
             stmt,
             Statement::Insert(_) | Statement::Query(_) | Statement::Delete(_)
         ) {
+            self.plugins
+                .get::<PermissionCheckerRef>()
+                .as_ref()
+                .check_permission(query_ctx.current_user(), PermissionReq::SqlStatement(&stmt))
+                .context(PermissionSnafu)?;
+
             let plan = self
                 .query_engine
                 .planner()
@@ -587,6 +615,12 @@ impl PrometheusHandler for Instance {
             .plugins
             .get::<PromQueryInterceptorRef<server_error::Error>>();
         interceptor.pre_execute(query, query_ctx.clone())?;
+
+        self.plugins
+            .get::<PermissionCheckerRef>()
+            .as_ref()
+            .check_permission(query_ctx.current_user(), PermissionReq::PromQuery)
+            .context(AuthSnafu)?;
 
         let stmt = QueryLanguageParser::parse_promql(query).with_context(|_| ParsePromQLSnafu {
             query: query.clone(),

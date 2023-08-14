@@ -16,6 +16,7 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use ::auth::UserProviderRef;
 use async_trait::async_trait;
 use common_runtime::Runtime;
 use common_telemetry::logging::error;
@@ -26,7 +27,6 @@ use pgwire::tokio::process_socket;
 use tokio_rustls::TlsAcceptor;
 
 use super::{MakePostgresServerHandler, MakePostgresServerHandlerBuilder};
-use crate::auth::UserProviderRef;
 use crate::error::Result;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 use crate::server::{AbortableStream, BaseTcpServer, Server};

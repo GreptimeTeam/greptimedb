@@ -15,14 +15,15 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use ::auth::{Identity, Password, UserProviderRef};
 use async_trait::async_trait;
 use chrono::{NaiveDate, NaiveDateTime};
 use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
 use common_query::Output;
-use common_telemetry::{error, info, logging, timer, warn};
+use common_telemetry::{error, logging, timer, warn};
 use datatypes::prelude::ConcreteDataType;
 use metrics::increment_counter;
 use opensrv_mysql::{
@@ -41,7 +42,6 @@ use sql::parser::ParserContext;
 use sql::statements::statement::Statement;
 use tokio::io::AsyncWrite;
 
-use crate::auth::{Identity, Password, UserProviderRef};
 use crate::error::{self, InvalidPrepareStatementSnafu, Result};
 use crate::mysql::helper::{
     self, format_placeholder, replace_placeholders, transform_placeholders,
@@ -91,27 +91,16 @@ impl MysqlInstanceShim {
     }
 
     async fn do_query(&self, query: &str, query_ctx: QueryContextRef) -> Vec<Result<Output>> {
-        let trace_id = query_ctx.trace_id();
-        info!("Start executing query: '{}'", query);
-        let start = Instant::now();
-
-        let output = if let Some(output) = crate::mysql::federated::check(query, query_ctx.clone())
-        {
+        if let Some(output) = crate::mysql::federated::check(query, query_ctx.clone()) {
             vec![Ok(output)]
         } else {
+            let trace_id = query_ctx.trace_id();
             common_telemetry::TRACE_ID
                 .scope(trace_id, async move {
                     self.query_handler.do_query(query, query_ctx).await
                 })
                 .await
-        };
-
-        info!(
-            "Finished executing query: '{}', total time costs in microseconds: {}",
-            query,
-            start.elapsed().as_micros()
-        );
-        output
+        }
     }
 
     /// Execute the logical plan and return the output
@@ -197,7 +186,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
                 }
             };
         }
-        let user_info = user_info.unwrap_or_default();
+        let user_info = user_info.unwrap_or_else(|| auth::userinfo_by_name(None));
 
         self.session.set_user_info(user_info);
 
@@ -287,7 +276,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
             Some(sql_plan) => sql_plan,
         };
 
-        let (query, outputs) = match sql_plan.plan {
+        let outputs = match sql_plan.plan {
             Some(plan) => {
                 let param_types = plan
                     .get_param_types()
@@ -301,23 +290,19 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
                 }
                 let plan = replace_params_with_values(&plan, param_types, params)?;
                 logging::debug!("Mysql execute prepared plan: {}", plan.display_indent());
-                let outputs = vec![
+                vec![
                     self.do_exec_plan(&sql_plan.query, plan, query_ctx.clone())
                         .await,
-                ];
-
-                (sql_plan.query, outputs)
+                ]
             }
             None => {
                 let query = replace_params(params, sql_plan.query);
                 logging::debug!("Mysql execute replaced query: {}", query);
-                let outputs = self.do_query(&query, query_ctx.clone()).await;
-
-                (query, outputs)
+                self.do_query(&query, query_ctx.clone()).await
             }
         };
 
-        writer::write_output(w, &query, query_ctx, outputs).await?;
+        writer::write_output(w, query_ctx, outputs).await?;
 
         Ok(())
     }
@@ -347,7 +332,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
             ]
         );
         let outputs = self.do_query(query, query_ctx.clone()).await;
-        writer::write_output(writer, query, query_ctx, outputs).await?;
+        writer::write_output(writer, query_ctx, outputs).await?;
         Ok(())
     }
 

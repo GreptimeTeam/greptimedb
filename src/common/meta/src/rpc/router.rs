@@ -12,14 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use api::v1::meta::{
     Partition as PbPartition, Peer as PbPeer, Region as PbRegion, RegionRoute as PbRegionRoute,
     RouteRequest as PbRouteRequest, RouteResponse as PbRouteResponse, Table as PbTable,
     TableId as PbTableId, TableRoute as PbTableRoute, TableRouteValue as PbTableRouteValue,
 };
-use serde::{Deserialize, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use snafu::OptionExt;
 use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::TableId;
@@ -85,7 +85,6 @@ impl TableRoute {
             .iter()
             .map(|x| (x.region.id.region_number(), x.leader_peer.clone()))
             .collect::<HashMap<_, _>>();
-
         Self {
             table,
             region_routes,
@@ -237,7 +236,7 @@ impl TryFrom<PbTableRouteValue> for TableRoute {
 pub struct Table {
     pub id: u64,
     pub table_name: TableName,
-    #[serde(serialize_with = "as_utf8")]
+    #[serde(serialize_with = "as_utf8", deserialize_with = "from_utf8")]
     pub table_schema: Vec<u8>,
 }
 
@@ -281,7 +280,7 @@ pub struct Region {
     pub id: RegionId,
     pub name: String,
     pub partition: Option<Partition>,
-    pub attrs: HashMap<String, String>,
+    pub attrs: BTreeMap<String, String>,
 }
 
 impl From<PbRegion> for Region {
@@ -290,7 +289,7 @@ impl From<PbRegion> for Region {
             id: r.id.into(),
             name: r.name,
             partition: r.partition.map(Into::into),
-            attrs: r.attrs,
+            attrs: r.attrs.into_iter().collect::<BTreeMap<_, _>>(),
         }
     }
 }
@@ -301,7 +300,7 @@ impl From<Region> for PbRegion {
             id: region.id.into(),
             name: region.name,
             partition: region.partition.map(Into::into),
-            attrs: region.attrs,
+            attrs: region.attrs.into_iter().collect::<HashMap<_, _>>(),
         }
     }
 }
@@ -320,6 +319,15 @@ fn as_utf8<S: Serializer>(val: &[u8], serializer: S) -> std::result::Result<S::O
             .unwrap_or_else(|_| "<unknown-not-UTF8>".to_string())
             .as_str(),
     )
+}
+
+pub fn from_utf8<'de, D>(deserializer: D) -> std::result::Result<Vec<u8>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let s = String::deserialize(deserializer)?;
+
+    Ok(s.into_bytes())
 }
 
 fn as_utf8_vec<S: Serializer>(
@@ -513,7 +521,7 @@ mod tests {
                         id: 1.into(),
                         name: "r1".to_string(),
                         partition: None,
-                        attrs: HashMap::new(),
+                        attrs: BTreeMap::new(),
                     },
                     leader_peer: Some(Peer::new(2, "a2")),
                     follower_peers: vec![Peer::new(1, "a1"), Peer::new(3, "a3")],
@@ -523,7 +531,7 @@ mod tests {
                         id: 2.into(),
                         name: "r2".to_string(),
                         partition: None,
-                        attrs: HashMap::new(),
+                        attrs: BTreeMap::new(),
                     },
                     leader_peer: Some(Peer::new(1, "a1")),
                     follower_peers: vec![Peer::new(2, "a2"), Peer::new(3, "a3")],
