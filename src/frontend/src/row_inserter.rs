@@ -198,28 +198,31 @@ impl RowInserter {
 
         for row in rows {
             ensure!(
-                row.fields.len() == rows_schema.len(),
+                row.values.len() == rows_schema.len(),
                 InvalidInsertRequestSnafu {
                     reason: format!(
                         "insert to table: {:?}, expected column count: {}, got: {}",
                         &req.table_name,
                         rows_schema.len(),
-                        row.fields.len()
+                        row.values.len()
                     )
                 }
             );
 
-            for (i, field) in row.fields.iter().enumerate() {
+            for (i, value) in row.values.iter().enumerate() {
                 let column_name = &rows_schema[i].column_name;
                 let Some(not_null) = not_nulls.get_mut(column_name) else {
                     continue;
                 };
-                let _ = field.value.as_ref().context(InvalidInsertRequestSnafu {
-                    reason: format!(
-                        "insert to table: {:?}, column: {:?}, expected not null",
-                        &req.table_name, column_name,
-                    ),
-                })?;
+                let _ = value
+                    .value_data
+                    .as_ref()
+                    .context(InvalidInsertRequestSnafu {
+                        reason: format!(
+                            "insert to table: {:?}, column: {:?}, expected not null",
+                            &req.table_name, column_name,
+                        ),
+                    })?;
                 *not_null -= 1;
             }
         }
@@ -261,10 +264,10 @@ impl RowInserter {
 mod tests {
     use std::assert_matches::assert_matches;
 
-    use api::v1::field::Value as FieldValue;
+    use api::v1::value::ValueData;
     use api::v1::{
-        ColumnDataType as RpcColumnDataType, ColumnSchema as RpcColumnSchema, Field, Row, Rows,
-        SemanticType,
+        ColumnDataType as RpcColumnDataType, ColumnSchema as RpcColumnSchema, Row, Rows,
+        SemanticType, Value as RpcValue,
     };
     use datatypes::prelude::*;
     use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema};
@@ -323,13 +326,13 @@ mod tests {
 
         // case 2
         let rows = vec![Row {
-            fields: vec![
-                Field {
-                    value: Some(FieldValue::I32Value(1)),
+            values: vec![
+                RpcValue {
+                    value_data: Some(ValueData::I32Value(1)),
                 },
-                Field { value: None },
-                Field {
-                    value: Some(FieldValue::I32Value(1)),
+                RpcValue { value_data: None },
+                RpcValue {
+                    value_data: Some(ValueData::I32Value(1)),
                 },
             ],
         }];
@@ -339,12 +342,12 @@ mod tests {
 
         // case 3
         let rows = vec![Row {
-            fields: vec![
-                Field {
-                    value: Some(FieldValue::I32Value(1)),
+            values: vec![
+                RpcValue {
+                    value_data: Some(ValueData::I32Value(1)),
                 },
-                Field {
-                    value: Some(FieldValue::I32Value(1)),
+                RpcValue {
+                    value_data: Some(ValueData::I32Value(1)),
                 },
             ],
         }];
@@ -354,13 +357,13 @@ mod tests {
 
         // case 4
         let rows = vec![Row {
-            fields: vec![
-                Field { value: None },
-                Field {
-                    value: Some(FieldValue::I32Value(1)),
+            values: vec![
+                RpcValue { value_data: None },
+                RpcValue {
+                    value_data: Some(ValueData::I32Value(1)),
                 },
-                Field {
-                    value: Some(FieldValue::I32Value(1)),
+                RpcValue {
+                    value_data: Some(ValueData::I32Value(1)),
                 },
             ],
         }];
@@ -370,12 +373,12 @@ mod tests {
 
         // case 5
         let rows = vec![Row {
-            fields: vec![
-                Field { value: None },
-                Field {
-                    value: Some(FieldValue::I32Value(1)),
+            values: vec![
+                RpcValue { value_data: None },
+                RpcValue {
+                    value_data: Some(ValueData::I32Value(1)),
                 },
-                Field { value: None },
+                RpcValue { value_data: None },
             ],
         }];
         let req = create_req(data_schema.clone(), rows);
@@ -385,21 +388,21 @@ mod tests {
         // case 6
         let rows = vec![
             Row {
-                fields: vec![
-                    Field { value: None },
-                    Field {
-                        value: Some(FieldValue::I32Value(1)),
+                values: vec![
+                    RpcValue { value_data: None },
+                    RpcValue {
+                        value_data: Some(ValueData::I32Value(1)),
                     },
-                    Field { value: None },
+                    RpcValue { value_data: None },
                 ],
             },
             Row {
-                fields: vec![
-                    Field {
-                        value: Some(FieldValue::I32Value(1)),
+                values: vec![
+                    RpcValue {
+                        value_data: Some(ValueData::I32Value(1)),
                     },
-                    Field {
-                        value: Some(FieldValue::I32Value(1)),
+                    RpcValue {
+                        value_data: Some(ValueData::I32Value(1)),
                     },
                 ],
             },
@@ -411,23 +414,23 @@ mod tests {
         // case 7
         let rows = vec![
             Row {
-                fields: vec![
-                    Field { value: None },
-                    Field {
-                        value: Some(FieldValue::I32Value(1)),
+                values: vec![
+                    RpcValue { value_data: None },
+                    RpcValue {
+                        value_data: Some(ValueData::I32Value(1)),
                     },
-                    Field {
-                        value: Some(FieldValue::I32Value(1)),
+                    RpcValue {
+                        value_data: Some(ValueData::I32Value(1)),
                     },
                 ],
             },
             Row {
-                fields: vec![
-                    Field { value: None },
-                    Field {
-                        value: Some(FieldValue::I32Value(1)),
+                values: vec![
+                    RpcValue { value_data: None },
+                    RpcValue {
+                        value_data: Some(ValueData::I32Value(1)),
                     },
-                    Field { value: None },
+                    RpcValue { value_data: None },
                 ],
             },
         ];

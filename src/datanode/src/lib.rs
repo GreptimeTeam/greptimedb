@@ -26,7 +26,6 @@ mod mock;
 pub mod server;
 pub mod sql;
 mod store;
-use greptimedb_telemetry::telemetry;
 mod row_inserter;
 #[cfg(test)]
 mod tests;

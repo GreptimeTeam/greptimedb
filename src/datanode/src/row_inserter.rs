@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 
 use api::helper::ColumnDataTypeWrapper;
-use api::v1::field::Value;
+use api::v1::value::ValueData;
 use api::v1::{RowInsertRequest, RowInsertRequests};
 use catalog::CatalogManagerRef;
 use common_query::Output;
@@ -49,8 +49,8 @@ impl RowInserter {
     ) -> Result<Output> {
         let insert_tasks = requests.inserts.into_iter().map(|insert| {
             let catalog_manager = self.catalog_manager.clone();
-            let catalog_name = ctx.current_catalog();
-            let schema_name = ctx.current_schema();
+            let catalog_name = ctx.current_catalog().to_owned();
+            let schema_name = ctx.current_schema().to_owned();
 
             let insert_task = async move {
                 let table_name = insert.table_name.clone();
@@ -94,19 +94,19 @@ impl RowInserter {
 
         let mut columns_values = HashMap::with_capacity(schema.len());
         for row in rows.rows {
-            let row_fields = row.fields;
+            let row_values = row.values;
+            let len = schema.len();
 
             ensure!(
-                row_fields.len() == schema.len(),
+                row_values.len() == len,
                 InvalidInsertRowLenSnafu {
                     table_name: format!("{catalog_name}.{schema_name}.{table_name}"),
                     expected: schema.len(),
-                    actual: row_fields.len(),
+                    actual: row_values.len(),
                 }
             );
 
-            let len = schema.len();
-            for (i, field) in row_fields.into_iter().enumerate() {
+            for (i, value) in row_values.into_iter().enumerate() {
                 let column_name = schema[i].column_name.clone();
                 let datatype: ConcreteDataType = ColumnDataTypeWrapper::try_new(schema[i].datatype)
                     .context(ColumnDataTypeSnafu)?
@@ -115,8 +115,8 @@ impl RowInserter {
                     .entry(column_name)
                     .or_insert_with(|| datatype.create_mutable_vector(len));
 
-                if let Some(value) = field.value {
-                    let value = Self::convert_value(value);
+                if let Some(value_data) = value.value_data {
+                    let value = Self::convert_value(value_data);
                     column_values_builder
                         .try_push_value_ref(value.as_value_ref())
                         .context(CreateVectorSnafu)?;
@@ -140,31 +140,37 @@ impl RowInserter {
         })
     }
 
-    fn convert_value(value: Value) -> InternalValue {
+    fn convert_value(value: ValueData) -> InternalValue {
         match value {
-            Value::I8Value(v) => (v as i8).into(),
-            Value::I16Value(v) => (v as i16).into(),
-            Value::I32Value(v) => v.into(),
-            Value::I64Value(v) => v.into(),
-            Value::U8Value(v) => (v as u8).into(),
-            Value::U16Value(v) => (v as u16).into(),
-            Value::U32Value(v) => v.into(),
-            Value::U64Value(v) => v.into(),
-            Value::F32Value(v) => v.into(),
-            Value::F64Value(v) => v.into(),
-            Value::BoolValue(v) => v.into(),
-            Value::BinaryValue(v) => v.into(),
-            Value::StringValue(v) => v.into(),
-            Value::DateValue(v) => InternalValue::Date(v.into()),
-            Value::DatetimeValue(v) => InternalValue::DateTime(v.into()),
-            Value::TsSecondValue(v) => InternalValue::Timestamp(Timestamp::new_second(v)),
-            Value::TsMillisecondValue(v) => InternalValue::Timestamp(Timestamp::new_millisecond(v)),
-            Value::TsMicrosecondValue(v) => InternalValue::Timestamp(Timestamp::new_microsecond(v)),
-            Value::TsNanosecondValue(v) => InternalValue::Timestamp(Timestamp::new_nanosecond(v)),
-            Value::TimeSecondValue(v) => InternalValue::Time(Time::new_second(v)),
-            Value::TimeMillisecondValue(v) => InternalValue::Time(Time::new_millisecond(v)),
-            Value::TimeMicrosecondValue(v) => InternalValue::Time(Time::new_microsecond(v)),
-            Value::TimeNanosecondValue(v) => InternalValue::Time(Time::new_nanosecond(v)),
+            ValueData::I8Value(v) => (v as i8).into(),
+            ValueData::I16Value(v) => (v as i16).into(),
+            ValueData::I32Value(v) => v.into(),
+            ValueData::I64Value(v) => v.into(),
+            ValueData::U8Value(v) => (v as u8).into(),
+            ValueData::U16Value(v) => (v as u16).into(),
+            ValueData::U32Value(v) => v.into(),
+            ValueData::U64Value(v) => v.into(),
+            ValueData::F32Value(v) => v.into(),
+            ValueData::F64Value(v) => v.into(),
+            ValueData::BoolValue(v) => v.into(),
+            ValueData::BinaryValue(v) => v.into(),
+            ValueData::StringValue(v) => v.into(),
+            ValueData::DateValue(v) => InternalValue::Date(v.into()),
+            ValueData::DatetimeValue(v) => InternalValue::DateTime(v.into()),
+            ValueData::TsSecondValue(v) => InternalValue::Timestamp(Timestamp::new_second(v)),
+            ValueData::TsMillisecondValue(v) => {
+                InternalValue::Timestamp(Timestamp::new_millisecond(v))
+            }
+            ValueData::TsMicrosecondValue(v) => {
+                InternalValue::Timestamp(Timestamp::new_microsecond(v))
+            }
+            ValueData::TsNanosecondValue(v) => {
+                InternalValue::Timestamp(Timestamp::new_nanosecond(v))
+            }
+            ValueData::TimeSecondValue(v) => InternalValue::Time(Time::new_second(v)),
+            ValueData::TimeMillisecondValue(v) => InternalValue::Time(Time::new_millisecond(v)),
+            ValueData::TimeMicrosecondValue(v) => InternalValue::Time(Time::new_microsecond(v)),
+            ValueData::TimeNanosecondValue(v) => InternalValue::Time(Time::new_nanosecond(v)),
         }
     }
 }
