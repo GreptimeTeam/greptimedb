@@ -416,7 +416,10 @@ pub enum Error {
     },
 
     #[snafu(display("Missing time index column: {}", source))]
-    MissingTimeIndexColumn { source: table::error::Error },
+    MissingTimeIndexColumn {
+        location: Location,
+        source: table::error::Error,
+    },
 
     #[snafu(display("Failed to start script manager, source: {}", source))]
     StartScriptManager {
@@ -653,7 +656,7 @@ impl ErrorExt for Error {
                 source.status_code()
             }
 
-            Error::MissingTimeIndexColumn { source } => source.status_code(),
+            Error::MissingTimeIndexColumn { source, .. } => source.status_code(),
 
             Error::FindDatanode { .. }
             | Error::CreateTableRoute { .. }
