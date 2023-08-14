@@ -17,12 +17,10 @@ use api::v1::meta::{
     TableRouteValue,
 };
 use common_meta::key::table_info::TableInfoValue;
-use common_meta::key::table_region::RegionDistribution;
 use common_telemetry::timer;
-use snafu::{OptionExt, ResultExt};
+use snafu::ResultExt;
 use tonic::{Request, Response};
 
-use crate::error;
 use crate::error::{Result, TableMetadataManagerSnafu};
 use crate::metasrv::{Context, MetaSrv};
 use crate::metrics::METRIC_META_ROUTE_REQUEST;
@@ -48,33 +46,6 @@ impl router_server::Router for MetaSrv {
 
         Ok(Response::new(res))
     }
-}
-
-pub(crate) fn create_region_distribution(
-    table_route_value: &TableRouteValue,
-) -> Result<RegionDistribution> {
-    let peers = &table_route_value.peers;
-    let region_routes = &table_route_value
-        .table_route
-        .as_ref()
-        .context(error::UnexpectedSnafu {
-            violated: "table route should have been set",
-        })?
-        .region_routes;
-
-    let mut regions_id_map = RegionDistribution::new();
-    for route in region_routes.iter() {
-        let node_id = peers[route.leader_peer_index as usize].id;
-        let region_id = route
-            .region
-            .as_ref()
-            .context(error::UnexpectedSnafu {
-                violated: "region should have been set",
-            })?
-            .id as u32;
-        regions_id_map.entry(node_id).or_default().push(region_id);
-    }
-    Ok(regions_id_map)
 }
 
 async fn handle_route(req: RouteRequest, ctx: Context) -> Result<RouteResponse> {

@@ -12,11 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod datanode_table;
-mod table_info;
-mod table_name;
-mod table_region;
-
 use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -34,10 +29,6 @@ use meta_srv::service::store::kv::KvBackendAdapter;
 use rand::prelude::SliceRandom;
 use table::metadata::{RawTableInfo, RawTableMeta, TableId, TableIdent, TableType};
 
-use crate::cli::bench::datanode_table::DatanodeTableBencher;
-use crate::cli::bench::table_info::TableInfoBencher;
-use crate::cli::bench::table_name::TableNameBencher;
-use crate::cli::bench::table_region::TableRegionBencher;
 use crate::cli::{Instance, Tool};
 use crate::error::Result;
 
@@ -107,31 +98,6 @@ struct BenchTableMetadata {
 #[async_trait]
 impl Tool for BenchTableMetadata {
     async fn do_work(&self) -> Result<()> {
-        info!("Start benching table name manager ...");
-        TableNameBencher::new(self.table_metadata_manager.table_name_manager(), self.count)
-            .start()
-            .await;
-
-        info!("Start benching table info manager ...");
-        TableInfoBencher::new(self.table_metadata_manager.table_info_manager(), self.count)
-            .start()
-            .await;
-
-        info!("Start benching table region manager ...");
-        TableRegionBencher::new(
-            self.table_metadata_manager.table_region_manager(),
-            self.count,
-        )
-        .start()
-        .await;
-
-        info!("Start benching datanode table manager ...");
-        DatanodeTableBencher::new(
-            self.table_metadata_manager.datanode_table_manager(),
-            self.count,
-        )
-        .start()
-        .await;
         Ok(())
     }
 }

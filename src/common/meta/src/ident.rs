@@ -17,6 +17,7 @@ use std::fmt::{Display, Formatter};
 use api::v1::meta::{TableIdent as RawTableIdent, TableName};
 use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
+use table::engine::TableReference;
 
 use crate::error::{Error, InvalidProtoMsgSnafu};
 
@@ -27,6 +28,12 @@ pub struct TableIdent {
     pub table: String,
     pub table_id: u32,
     pub engine: String,
+}
+
+impl TableIdent {
+    pub fn table_ref(&self) -> TableReference {
+        TableReference::full(&self.catalog, &self.schema, &self.table)
+    }
 }
 
 impl Display for TableIdent {

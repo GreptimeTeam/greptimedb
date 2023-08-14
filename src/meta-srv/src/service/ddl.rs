@@ -13,29 +13,25 @@
 // limitations under the License.
 
 use api::v1::meta::{
-    ddl_task_server, Partition, Region, RegionRoute, SubmitDdlTaskRequest, SubmitDdlTaskResponse,
-    Table, TableId, TableRoute,
+    ddl_task_server, Partition, SubmitDdlTaskRequest, SubmitDdlTaskResponse, TableId,
 };
 use common_grpc_expr::alter_expr_to_request;
-use common_meta::key::TableRouteKey;
 use common_meta::rpc::ddl::{
     AlterTableTask, CreateTableTask, DdlTask, DropTableTask, TruncateTableTask,
 };
-use common_meta::rpc::router;
+use common_meta::rpc::router::{Region, RegionRoute};
 use common_meta::table_name::TableName;
 use common_telemetry::{info, warn};
 use snafu::{ensure, OptionExt, ResultExt};
-use store_api::storage::MAX_REGION_SEQ;
+use store_api::storage::{RegionId, MAX_REGION_SEQ};
 use table::metadata::RawTableInfo;
 use tonic::{Request, Response};
 
-use super::store::kv::KvStoreRef;
 use super::GrpcResult;
 use crate::ddl::DdlManagerRef;
 use crate::error::{self, Result, TableMetadataManagerSnafu, TooManyPartitionsSnafu};
 use crate::metasrv::{MetaSrv, SelectorContext, SelectorRef};
 use crate::sequence::SequenceRef;
-use crate::table_routes::get_table_route_value;
 
 #[async_trait::async_trait]
 impl ddl_task_server::DdlTask for MetaSrv {
@@ -77,7 +73,6 @@ impl ddl_task_server::DdlTask for MetaSrv {
                 handle_drop_table_task(
                     header.cluster_id,
                     drop_table_task,
-                    self.kv_store().clone(),
                     self.ddl_manager().clone(),
                 )
                 .await?
@@ -94,7 +89,6 @@ impl ddl_task_server::DdlTask for MetaSrv {
                 handle_truncate_table_task(
                     header.cluster_id,
                     truncate_table_task,
-                    self.kv_store().clone(),
                     self.ddl_manager().clone(),
                 )
                 .await?
@@ -132,7 +126,7 @@ async fn handle_create_table_task(
         .map(Into::into)
         .collect();
 
-    let table_route = handle_create_table_route(
+    let region_routes = handle_create_region_routes(
         cluster_id,
         table_name,
         partitions,
@@ -142,25 +136,25 @@ async fn handle_create_table_task(
         table_id_sequence,
     )
     .await?;
-    let table_id = table_route.table.id;
 
+    let table_id = create_table_task.table_info.ident.table_id;
+
+    // TODO(weny): refactor the table route.
     let id = ddl_manager
-        .submit_create_table_task(cluster_id, create_table_task, table_route)
+        .submit_create_table_task(cluster_id, create_table_task, region_routes)
         .await?;
 
     info!("Table: {table_id} is dropped via procedure_id {id:?}");
 
     Ok(SubmitDdlTaskResponse {
         key: id.to_string().into(),
-        table_id: Some(TableId {
-            id: table_id as u32,
-        }),
+        table_id: Some(TableId { id: table_id }),
         ..Default::default()
     })
 }
 
 /// pre-calculates create table task's metadata.
-async fn handle_create_table_route(
+async fn handle_create_region_routes(
     cluster_id: u64,
     table_name: TableName,
     partitions: Vec<Partition>,
@@ -168,7 +162,7 @@ async fn handle_create_table_route(
     ctx: SelectorContext,
     selector: SelectorRef,
     table_id_sequence: SequenceRef,
-) -> Result<router::TableRoute> {
+) -> Result<Vec<RegionRoute>> {
     let mut peers = selector.select(cluster_id, &ctx).await?;
 
     if peers.len() < partitions.len() {
@@ -187,70 +181,61 @@ async fn handle_create_table_route(
     let id = table_id_sequence.next().await?;
     table_info.ident.table_id = id as u32;
 
-    let table = Table {
-        id,
-        table_name: Some(table_name.into()),
-        ..Default::default()
-    };
-
     ensure!(
         partitions.len() <= MAX_REGION_SEQ as usize,
         TooManyPartitionsSnafu
     );
+
     let region_routes = partitions
         .into_iter()
         .enumerate()
         .map(|(i, partition)| {
             let region = Region {
-                id: i as u64,
-                partition: Some(partition),
+                id: RegionId::from_u64(i as u64),
+                partition: Some(partition.into()),
                 ..Default::default()
             };
+            let peer = peers[i % peers.len()].clone();
             RegionRoute {
-                region: Some(region),
-                leader_peer_index: (i % peers.len()) as u64,
-                follower_peer_indexes: vec![], // follower_peers is not supported at the moment
+                region,
+                leader_peer: Some(peer.into()),
+                follower_peers: vec![], // follower_peers is not supported at the moment
             }
         })
         .collect::<Vec<_>>();
 
-    let table_route = TableRoute {
-        table: Some(table),
-        region_routes,
-    };
-
-    router::TableRoute::try_from_raw(&peers, table_route).context(error::TableRouteConversionSnafu)
+    Ok(region_routes)
 }
 
 async fn handle_drop_table_task(
     cluster_id: u64,
     drop_table_task: DropTableTask,
-    kv_store: KvStoreRef,
     ddl_manager: DdlManagerRef,
 ) -> Result<SubmitDdlTaskResponse> {
     let table_id = drop_table_task.table_id;
+    let table_metadata_manager = &ddl_manager.table_metadata_manager;
+    let table_ref = drop_table_task.table_ref();
 
-    let table_route_key = TableRouteKey {
-        table_id,
-        catalog_name: &drop_table_task.catalog,
-        schema_name: &drop_table_task.schema,
-        table_name: &drop_table_task.table,
-    };
+    let (table_info_value, table_route_value) = table_metadata_manager
+        .get_full_table_info(table_id)
+        .await
+        .context(error::TableMetadataManagerSnafu)?;
 
-    let table_route_value = get_table_route_value(&kv_store, &table_route_key).await?;
+    let table_info_value = table_info_value.with_context(|| error::TableInfoNotFoundSnafu {
+        table_name: table_ref.to_string(),
+    })?;
 
-    let table_route = router::TableRoute::try_from_raw(
-        &table_route_value.peers,
-        table_route_value
-            .table_route
-            .context(error::UnexpectedSnafu {
-                violated: "expected table_route",
-            })?,
-    )
-    .context(error::TableRouteConversionSnafu)?;
+    let table_route_value = table_route_value.with_context(|| error::TableRouteNotFoundSnafu {
+        table_name: table_ref.to_string(),
+    })?;
 
     let id = ddl_manager
-        .submit_drop_table_task(cluster_id, drop_table_task, table_route)
+        .submit_drop_table_task(
+            cluster_id,
+            drop_table_task,
+            table_info_value,
+            table_route_value,
+        )
         .await?;
 
     Ok(SubmitDdlTaskResponse {
@@ -285,10 +270,11 @@ async fn handle_alter_table_task(
         .get(table_id)
         .await
         .context(TableMetadataManagerSnafu)?
-        .with_context(|| error::TableNotFoundSnafu {
-            name: table_ref.to_string(),
+        .with_context(|| error::TableInfoNotFoundSnafu {
+            table_name: table_ref.to_string(),
         })?;
-    let table_info = table_info_value.table_info;
+
+    let table_info = &table_info_value.table_info;
 
     // Sets alter_table's table_version
     alter_table_task.alter_table.table_version = table_info.ident.version;
@@ -299,7 +285,7 @@ async fn handle_alter_table_task(
             cluster_id,
             alter_table_task,
             alter_table_request,
-            table_info,
+            table_info_value,
         )
         .await?;
 
@@ -314,7 +300,6 @@ async fn handle_alter_table_task(
 async fn handle_truncate_table_task(
     cluster_id: u64,
     truncate_table_task: TruncateTableTask,
-    kv_store: KvStoreRef,
     ddl_manager: DdlManagerRef,
 ) -> Result<SubmitDdlTaskResponse> {
     let truncate_table = &truncate_table_task.truncate_table;
@@ -326,24 +311,19 @@ async fn handle_truncate_table_task(
         })?
         .id;
 
-    let table_route_key = TableRouteKey {
-        table_id,
-        catalog_name: &truncate_table.catalog_name,
-        schema_name: &truncate_table.schema_name,
-        table_name: &truncate_table.table_name,
-    };
+    let table_ref = truncate_table_task.table_ref();
 
-    let table_route_value = get_table_route_value(&kv_store, &table_route_key).await?;
+    let table_route_value = ddl_manager
+        .table_metadata_manager
+        .table_route_manager()
+        .get(table_id)
+        .await
+        .context(TableMetadataManagerSnafu)?
+        .with_context(|| error::TableRouteNotFoundSnafu {
+            table_name: table_ref.to_string(),
+        })?;
 
-    let table_route = router::TableRoute::try_from_raw(
-        &table_route_value.peers,
-        table_route_value
-            .table_route
-            .context(error::UnexpectedSnafu {
-                violated: "expected table_route",
-            })?,
-    )
-    .context(error::TableRouteConversionSnafu)?;
+    let table_route = table_route_value.region_routes;
 
     let id = ddl_manager
         .submit_truncate_table_task(cluster_id, truncate_table_task, table_route)

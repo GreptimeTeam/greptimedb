@@ -22,8 +22,10 @@ mod tests {
     use common_base::Plugins;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_meta::key::table_name::TableNameKey;
+    use common_meta::rpc::router::region_distribution;
     use common_query::Output;
     use common_recordbatch::RecordBatches;
+    use common_telemetry::debug;
     use frontend::error::{self, Error, Result};
     use frontend::instance::Instance;
     use query::parser::QueryLanguageParser;
@@ -195,15 +197,17 @@ mod tests {
             .unwrap()
             .unwrap()
             .table_id();
+        debug!("Reading table {table_id}");
 
-        let table_region_value = manager
-            .table_region_manager()
+        let table_route_value = manager
+            .table_route_manager()
             .get(table_id)
             .await
             .unwrap()
             .unwrap();
-        let region_to_dn_map = table_region_value
-            .region_distribution
+
+        let region_to_dn_map = region_distribution(&table_route_value.region_routes)
+            .unwrap()
             .iter()
             .map(|(k, v)| (v[0], *k))
             .collect::<HashMap<u32, u64>>();

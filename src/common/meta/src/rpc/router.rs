@@ -74,7 +74,7 @@ impl TryFrom<PbRouteResponse> for RouteResponse {
     }
 }
 
-pub(crate) fn region_distribution(region_routes: &[RegionRoute]) -> Result<RegionDistribution> {
+pub fn region_distribution(region_routes: &[RegionRoute]) -> Result<RegionDistribution> {
     let mut regions_id_map = RegionDistribution::new();
     for route in region_routes.iter() {
         let node_id = route
@@ -88,6 +88,10 @@ pub(crate) fn region_distribution(region_routes: &[RegionRoute]) -> Result<Regio
         let region_id = route.region.id.region_number();
         regions_id_map.entry(node_id).or_default().push(region_id);
     }
+    for (_, regions) in regions_id_map.iter_mut() {
+        // id asc
+        regions.sort()
+    }
     Ok(regions_id_map)
 }
 
@@ -96,6 +100,48 @@ pub struct TableRoute {
     pub table: Table,
     pub region_routes: Vec<RegionRoute>,
     region_leaders: HashMap<RegionNumber, Option<Peer>>,
+}
+
+pub fn find_leaders(region_routes: &[RegionRoute]) -> HashSet<Peer> {
+    region_routes
+        .iter()
+        .flat_map(|x| &x.leader_peer)
+        .cloned()
+        .collect()
+}
+
+pub fn find_leader_regions(region_routes: &[RegionRoute], datanode: &Peer) -> Vec<RegionNumber> {
+    region_routes
+        .iter()
+        .filter_map(|x| {
+            if let Some(peer) = &x.leader_peer {
+                if peer == datanode {
+                    return Some(x.region.id.region_number());
+                }
+            }
+            None
+        })
+        .collect()
+}
+
+pub fn all_peers(region_routes: &[RegionRoute]) -> Vec<Peer> {
+    let mut peers = HashSet::new();
+    region_routes
+        .iter()
+        .filter_map(|x| x.leader_peer.as_ref())
+        .for_each(|p| {
+            let _ = peers.insert(p.clone());
+        });
+    region_routes
+        .iter()
+        .flat_map(|x| x.follower_peers.iter())
+        .for_each(|p| {
+            let _ = peers.insert(p.clone());
+        });
+    let mut peers = peers.into_iter().collect::<Vec<_>>();
+    peers.sort_by_key(|x| x.id);
+
+    peers
 }
 
 impl TableRoute {
@@ -248,6 +294,18 @@ impl TryFrom<PbTableRouteValue> for TableRoute {
                 err_msg: "expected table_route",
             })?,
         )
+    }
+}
+
+impl TryFrom<TableRoute> for PbTableRouteValue {
+    type Error = error::Error;
+    fn try_from(table_route: TableRoute) -> Result<Self> {
+        let (peers, table_route) = table_route.try_into_raw()?;
+
+        Ok(PbTableRouteValue {
+            peers,
+            table_route: Some(table_route),
+        })
     }
 }
 

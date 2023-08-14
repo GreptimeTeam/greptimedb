@@ -266,12 +266,11 @@ async fn find_region_distribution(
 ) -> RegionDistribution {
     let manager = cluster.meta_srv.table_metadata_manager();
     let region_distribution = manager
-        .table_region_manager()
-        .get(table_id)
+        .table_route_manager()
+        .get_region_distribution(table_id)
         .await
         .unwrap()
-        .unwrap()
-        .region_distribution;
+        .unwrap();
 
     // test DatanodeTableValues match the table region distribution
     for datanode_id in cluster.datanode_instances.keys() {

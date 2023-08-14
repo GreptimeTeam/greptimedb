@@ -15,19 +15,16 @@
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, OptionExt};
+use snafu::OptionExt;
 use table::metadata::TableId;
 
 use super::{TABLE_NAME_KEY_PATTERN, TABLE_NAME_KEY_PREFIX};
-use crate::error::{
-    Error, InvalidTableMetadataSnafu, RenameTableSnafu, Result, TableAlreadyExistsSnafu,
-    TableNotExistSnafu, UnexpectedSnafu,
-};
+use crate::error::{Error, InvalidTableMetadataSnafu, Result};
 use crate::key::{to_removed_key, TableMetaKey};
 use crate::kv_backend::memory::MemoryKvBackend;
-use crate::kv_backend::txn::{Compare, CompareOp, Txn, TxnOp};
+use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
-use crate::rpc::store::{CompareAndPutRequest, MoveValueRequest, RangeRequest};
+use crate::rpc::store::RangeRequest;
 use crate::table_name::TableName;
 
 #[derive(Debug, Clone, Copy)]
@@ -203,97 +200,6 @@ impl TableNameManager {
         Ok(txn)
     }
 
-    /// Create TableName key and value. If the key already exists, check if the value is the same.
-    pub async fn create(&self, key: &TableNameKey<'_>, table_id: TableId) -> Result<()> {
-        let raw_key = key.as_raw_key();
-        let value = TableNameValue::new(table_id);
-        let raw_value = value.try_as_raw_value()?;
-        let req = CompareAndPutRequest::new()
-            .with_key(raw_key)
-            .with_value(raw_value);
-        let result = self.kv_backend.compare_and_put(req).await?;
-        if !result.success {
-            let Some(curr) = result
-                .prev_kv
-                .map(|x| TableNameValue::try_from_raw_value(x.value))
-                .transpose()?
-            else {
-                return UnexpectedSnafu {
-                    err_msg: format!("compare_and_put expect None but failed with current value None, key: {key}, value: {value:?}"),
-                }.fail();
-            };
-            ensure!(
-                curr.table_id == table_id,
-                TableAlreadyExistsSnafu {
-                    table_id: curr.table_id
-                }
-            );
-        }
-        Ok(())
-    }
-
-    /// Rename a TableNameKey to a new table name. Will check whether the TableNameValue matches the
-    /// `expected_table_id` first. Can be executed again if the first invocation is successful.
-    pub async fn rename(
-        &self,
-        key: TableNameKey<'_>,
-        expected_table_id: TableId,
-        new_table_name: &str,
-    ) -> Result<()> {
-        let new_key = TableNameKey::new(key.catalog, key.schema, new_table_name);
-
-        if let Some(value) = self.get(key).await? {
-            ensure!(
-                value.table_id == expected_table_id,
-                RenameTableSnafu {
-                    reason: format!(
-                        "the input table name '{}' and id '{expected_table_id}' not match",
-                        Into::<TableName>::into(key)
-                    ),
-                }
-            );
-
-            let txn = Txn::new()
-                .when(vec![
-                    Compare::with_value(
-                        key.as_raw_key(),
-                        CompareOp::Equal,
-                        value.try_as_raw_value()?,
-                    ),
-                    Compare::with_not_exist_value(new_key.as_raw_key(), CompareOp::Equal),
-                ])
-                .and_then(vec![
-                    TxnOp::Delete(key.as_raw_key()),
-                    TxnOp::Put(new_key.as_raw_key(), value.try_as_raw_value()?),
-                ]);
-
-            let resp = self.kv_backend.txn(txn).await?;
-            ensure!(
-                resp.succeeded,
-                RenameTableSnafu {
-                    reason: format!("txn failed with response: {:?}", resp.responses)
-                }
-            );
-        } else {
-            let Some(value) = self.get(new_key).await? else {
-                // If we can't get the table by its original name, nor can we get by its altered
-                // name, then the table must not exist at the first place.
-                return TableNotExistSnafu {
-                    table_name: TableName::from(key).to_string(),
-                }
-                .fail();
-            };
-
-            ensure!(
-                value.table_id == expected_table_id,
-                TableAlreadyExistsSnafu {
-                    table_id: value.table_id
-                }
-            );
-        }
-        Ok(())
-    }
-
     pub async fn get(&self, key: TableNameKey<'_>) -> Result<Option<TableNameValue>> {
         let raw_key = key.as_raw_key();
         self.kv_backend
@@ -301,6 +207,10 @@ impl TableNameManager {
             .await?
             .map(|x| TableNameValue::try_from_raw_value(x.value))
             .transpose()
+    }
+
+    pub async fn exist(&self, key: TableNameKey<'_>) -> Result<bool> {
+        Ok(self.get(key).await?.is_some())
     }
 
     pub async fn tables(
@@ -321,90 +231,12 @@ impl TableNameManager {
         }
         Ok(res)
     }
-
-    pub async fn remove(&self, key: TableNameKey<'_>) -> Result<()> {
-        let raw_key = key.as_raw_key();
-        let removed_key = to_removed_key(&String::from_utf8_lossy(&raw_key));
-        let req = MoveValueRequest::new(raw_key, removed_key.as_bytes());
-        let _ = self.kv_backend.move_value(req).await?;
-        Ok(())
-    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
 
     use super::*;
-    use crate::kv_backend::memory::MemoryKvBackend;
-    use crate::kv_backend::KvBackend;
-
-    #[tokio::test]
-    async fn test_table_name_manager() {
-        let backend = Arc::new(MemoryKvBackend::default());
-        let manager = TableNameManager::new(backend.clone());
-
-        for i in 1..=3 {
-            let table_name = format!("table_{}", i);
-            let key = TableNameKey::new("my_catalog", "my_schema", &table_name);
-            assert!(manager.create(&key, i).await.is_ok());
-        }
-
-        let key = TableNameKey::new("my_catalog", "my_schema", "my_table");
-        assert!(manager.create(&key, 99).await.is_ok());
-        assert!(manager.create(&key, 99).await.is_ok());
-
-        let result = manager.create(&key, 9).await;
-        let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("Table already exists, table_id: 99"));
-
-        let value = manager.get(key).await.unwrap().unwrap();
-        assert_eq!(value.table_id(), 99);
-        let not_existed = TableNameKey::new("x", "y", "z");
-        assert!(manager.get(not_existed).await.unwrap().is_none());
-
-        assert!(manager.remove(key).await.is_ok());
-        let kv = backend
-            .get(b"__removed-__table_name/my_catalog/my_schema/my_table")
-            .await
-            .unwrap()
-            .unwrap();
-        let value = TableNameValue::try_from_raw_value(kv.value).unwrap();
-        assert_eq!(value.table_id(), 99);
-
-        let key = TableNameKey::new("my_catalog", "my_schema", "table_1");
-        assert!(manager.rename(key, 1, "table_1_new").await.is_ok());
-        assert!(manager.rename(key, 1, "table_1_new").await.is_ok());
-
-        let result = manager.rename(key, 2, "table_1_new").await;
-        let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("Table already exists, table_id: 1"));
-
-        let result = manager
-            .rename(
-                TableNameKey::new("my_catalog", "my_schema", "table_2"),
-                22,
-                "table_2_new",
-            )
-            .await;
-        let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("Failed to rename table, reason: the input table name 'my_catalog.my_schema.table_2' and id '22' not match"));
-
-        let result = manager.rename(not_existed, 1, "zz").await;
-        let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("Table does not exist, table_name: x.y.z"));
-
-        let tables = manager.tables("my_catalog", "my_schema").await.unwrap();
-        assert_eq!(tables.len(), 3);
-        assert_eq!(
-            tables,
-            vec![
-                ("table_1_new".to_string(), TableNameValue::new(1)),
-                ("table_2".to_string(), TableNameValue::new(2)),
-                ("table_3".to_string(), TableNameValue::new(3))
-            ]
-        )
-    }
 
     #[test]
     fn test_strip_table_name() {

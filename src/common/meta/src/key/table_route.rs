@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use snafu::ensure;
 use table::metadata::TableId;
 
+use super::table_region::RegionDistribution;
 use crate::error::{Result, UnexpectedSnafu};
 use crate::key::{to_removed_key, TableMetaKey};
 use crate::kv_backend::txn::{Compare, CompareOp, Txn, TxnOp, TxnOpResponse, TxnRequest};
@@ -85,6 +86,20 @@ pub struct TableRouteManager {
 impl TableRouteManager {
     pub fn new(kv_backend: KvBackendRef) -> Self {
         Self { kv_backend }
+    }
+
+    pub(crate) fn build_get_txn(
+        &self,
+        table_id: TableId,
+    ) -> (
+        Txn,
+        impl FnOnce(&Vec<TxnOpResponse>) -> Result<Option<TableRouteValue>>,
+    ) {
+        let key = NextTableRouteKey::new(table_id);
+        let raw_key = key.as_raw_key();
+        let txn = Txn::default().and_then(vec![TxnOp::Get(raw_key.clone())]);
+
+        (txn, Self::build_decode_fn(raw_key))
     }
 
     /// Builds a create table route transaction. it expected the `__table_route/{table_id}` wasn't occupied.
@@ -189,91 +204,18 @@ impl TableRouteManager {
             .transpose()
     }
 
-    // Creates TableRoute key and value. If the key already exists, check whether the value is the same.
-    pub async fn create(&self, table_id: TableId, region_routes: Vec<RegionRoute>) -> Result<()> {
-        let key = NextTableRouteKey::new(table_id);
-        let val = TableRouteValue::new(region_routes);
-        let req = CompareAndPutRequest::new()
-            .with_key(key.as_raw_key())
-            .with_value(val.try_as_raw_value()?);
-
-        self.kv_backend.compare_and_put(req).await?.handle(|resp| {
-            if !resp.success {
-                let Some(cur) = resp
-                    .prev_kv
-                    .map(|kv|TableRouteValue::try_from_raw_value(kv.value))
-                    .transpose()?
-                else {
-                    return UnexpectedSnafu {
-                        err_msg: format!("compare_and_put expect None but failed with current value None, key: {key}, val: {val:?}"),
-                    }.fail();
-                };
-
-                ensure!(
-                    cur==val,
-                    UnexpectedSnafu {
-                        err_msg: format!("current value '{cur:?}' already existed for key '{key}', {val:?} is not set"),
-                    }
-                );
-            }
-            Ok(())
-        })
-    }
-
-    /// Compares and puts value of key. `expect` is the expected value, if backend's current value associated
-    /// with key is the same as `expect`, the value will be updated to `val`.
-    ///
-    /// - If the compare-and-set operation successfully updated value, this method will return an `Ok(Ok())`
-    /// - If associated value is not the same as `expect`, no value will be updated and an
-    ///   `Ok(Err(Option<TableRoute>))` will be returned. The `Option<TableRoute>` indicates
-    ///   the current associated value of key.
-    /// - If any error happens during operation, an `Err(Error)` will be returned.
-    pub async fn compare_and_put(
+    pub async fn get_region_distribution(
         &self,
         table_id: TableId,
-        expect: Option<TableRouteValue>,
-        region_routes: Vec<RegionRoute>,
-    ) -> Result<std::result::Result<(), Option<TableRouteValue>>> {
-        let key = NextTableRouteKey::new(table_id);
-        let raw_key = key.as_raw_key();
-
-        let (expect, version) = if let Some(x) = expect {
-            (x.try_as_raw_value()?, x.version + 1)
-        } else {
-            (vec![], 0)
-        };
-        let value = TableRouteValue {
-            region_routes,
-            version,
-        };
-        let raw_value = value.try_as_raw_value()?;
-
-        let req = CompareAndPutRequest::new()
-            .with_key(raw_key)
-            .with_expect(expect)
-            .with_value(raw_value);
-
-        self.kv_backend.compare_and_put(req).await?.handle(|resp| {
-            Ok(if resp.success {
-                Ok(())
-            } else {
-                Err(resp
-                    .prev_kv
-                    .map(|x| TableRouteValue::try_from_raw_value(x.value))
-                    .transpose()?)
-            })
-        })
-    }
-
-    pub async fn remove(&self, table_id: TableId) -> Result<()> {
-        let key = NextTableRouteKey::new(table_id).as_raw_key();
-        let removed_key = to_removed_key(&String::from_utf8_lossy(&key));
-        let req = MoveValueRequest::new(key, removed_key.as_bytes());
-        self.kv_backend.move_value(req).await?;
-        Ok(())
+    ) -> Result<Option<RegionDistribution>> {
+        self.get(table_id)
+            .await?
+            .map(|table_route| region_distribution(&table_route.region_routes))
+            .transpose()
     }
 }
 
+#[deprecated(since = "0.4.0", note = "Please use the NextTableRouteKey instead")]
 #[derive(Copy, Clone)]
 pub struct TableRouteKey<'a> {
     pub table_id: TableId,
@@ -321,42 +263,6 @@ mod tests {
     use crate::kv_backend::memory::MemoryKvBackend;
     use crate::rpc::router::{RegionRoute, Table, TableRoute};
     use crate::table_name::TableName;
-
-    #[tokio::test]
-    async fn test_table_route_manager() {
-        let mgr = TableRouteManager::new(Arc::new(MemoryKvBackend::default()));
-
-        let table_id = 1024u32;
-        let table = Table {
-            id: table_id as u64,
-            table_name: TableName::new("foo", "bar", "baz"),
-            table_schema: b"mock schema".to_vec(),
-        };
-        let region_route = RegionRoute::default();
-        let region_routes = vec![region_route];
-
-        mgr.create(table_id, region_routes.clone()).await.unwrap();
-
-        let got = mgr.get(1024).await.unwrap().unwrap();
-
-        assert_eq!(got.region_routes, region_routes);
-
-        let empty = mgr.get(1023).await.unwrap();
-        assert!(empty.is_none());
-
-        let expect = TableRouteValue::new(region_routes);
-
-        let mut updated = expect.clone();
-        updated.region_routes.push(RegionRoute::default());
-
-        mgr.compare_and_put(1024, Some(expect.clone()), updated.region_routes.clone())
-            .await
-            .unwrap();
-
-        mgr.compare_and_put(1024, Some(expect.clone()), updated.region_routes)
-            .await
-            .unwrap();
-    }
 
     #[test]
     fn test_table_route_key() {

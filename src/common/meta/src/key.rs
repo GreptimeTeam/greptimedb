@@ -48,13 +48,17 @@
 //! It's recommended to just use this manager only.
 
 pub mod catalog_name;
+#[allow(deprecated)]
 pub mod datanode_table;
 pub mod schema_name;
+#[allow(deprecated)]
 pub mod table_info;
+#[allow(deprecated)]
 pub mod table_name;
+#[allow(deprecated)]
 pub mod table_region;
 // TODO(weny): removes it.
-#[allow(unused)]
+#[allow(unused, deprecated)]
 pub mod table_route;
 
 use std::sync::Arc;
@@ -72,6 +76,7 @@ use self::catalog_name::{CatalogManager, CatalogNameValue};
 use self::schema_name::{SchemaManager, SchemaNameValue};
 use self::table_route::{TableRouteManager, TableRouteValue};
 use crate::error::{self, Error, InvalidTableMetadataSnafu, Result, SerdeJsonSnafu};
+#[allow(deprecated)]
 pub use crate::key::table_route::{TableRouteKey, TABLE_ROUTE_PREFIX};
 use crate::kv_backend::txn::Txn;
 use crate::kv_backend::KvBackendRef;
@@ -173,6 +178,7 @@ impl TableMetadataManager {
         &self.table_info_manager
     }
 
+    #[deprecated(since = "0.4.0", note = "Please use the table_route_manager instead")]
     pub fn table_region_manager(&self) -> &TableRegionManager {
         &self.table_region_manager
     }
@@ -191,6 +197,27 @@ impl TableMetadataManager {
 
     pub fn table_route_manager(&self) -> &TableRouteManager {
         &self.table_route_manager
+    }
+
+    pub async fn get_full_table_info(
+        &self,
+        table_id: TableId,
+    ) -> Result<(Option<TableInfoValue>, Option<TableRouteValue>)> {
+        let (get_table_route_txn, table_route_decoder) =
+            self.table_route_manager.build_get_txn(table_id);
+
+        let (get_table_info_txn, table_info_decoder) =
+            self.table_info_manager.build_get_txn(table_id);
+
+        let txn = Txn::merge_all(vec![get_table_route_txn, get_table_info_txn]);
+
+        let r = self.kv_backend.txn(txn).await?;
+
+        let table_info_value = table_info_decoder(&r.responses)?;
+
+        let table_route_value = table_route_decoder(&r.responses)?;
+
+        Ok((table_info_value, table_route_value))
     }
 
     /// Creates metadata for table and returns an error if different metadata exists.
@@ -263,8 +290,8 @@ impl TableMetadataManager {
     /// The caller MUST ensure it has the exclusive access to `TableNameKey`.
     pub async fn delete_table_metadata(
         &self,
-        table_info_value: TableInfoValue,
-        region_routes: Vec<RegionRoute>,
+        table_info_value: &TableInfoValue,
+        table_route_value: &TableRouteValue,
     ) -> Result<()> {
         let table_info = &table_info_value.table_info;
         let table_id = table_info.ident.table_id;
@@ -283,19 +310,18 @@ impl TableMetadataManager {
         // Deletes table info.
         let delete_table_info_txn = self
             .table_info_manager()
-            .build_delete_txn(table_id, &table_info_value)?;
+            .build_delete_txn(table_id, table_info_value)?;
 
         // Deletes datanode table key value pairs.
-        let distribution = region_distribution(&region_routes)?;
+        let distribution = region_distribution(&table_route_value.region_routes)?;
         let delete_datanode_txn = self
             .datanode_table_manager()
             .build_delete_txn(table_id, distribution)?;
 
         // Deletes table route.
-        let table_route_value = TableRouteValue::new(region_routes);
         let delete_table_route_txn = self
             .table_route_manager()
-            .build_delete_txn(table_id, &table_route_value)?;
+            .build_delete_txn(table_id, table_route_value)?;
 
         let txn = Txn::merge_all(vec![
             delete_table_name_txn,
@@ -340,8 +366,9 @@ impl TableMetadataManager {
             table_id,
         )?;
 
-        let mut new_table_info_value = current_table_info_value.clone();
-        new_table_info_value.table_info.name = new_table_name;
+        let new_table_info_value = current_table_info_value.with_update(move |table_info| {
+            table_info.name = new_table_name;
+        });
 
         // Updates table info.
         let (update_table_info_txn, on_update_table_info_failure) = self
@@ -604,6 +631,14 @@ mod tests {
             .create_table_metadata(table_info, modified_region_routes)
             .await
             .is_err());
+
+        let (info, route) = table_metadata_manager
+            .get_full_table_info(10)
+            .await
+            .unwrap();
+
+        assert!(info.is_some());
+        assert!(route.is_some());
     }
 
     #[tokio::test]
@@ -613,20 +648,23 @@ mod tests {
         let table_info: RawTableInfo = new_test_table_info().into();
         let region_route = new_test_region_route();
         let region_routes = vec![region_route.clone()];
+        let table_route_value = TableRouteValue::new(region_routes.clone());
         // creates metadata.
         table_metadata_manager
             .create_table_metadata(table_info.clone(), region_routes.clone())
             .await
             .unwrap();
         let table_info_value = TableInfoValue::new(table_info);
+
         // deletes metadata.
         table_metadata_manager
-            .delete_table_metadata(table_info_value.clone(), region_routes.clone())
+            .delete_table_metadata(&table_info_value, &table_route_value)
             .await
             .unwrap();
+
         // if metadata was already deleted, it should be ok.
         table_metadata_manager
-            .delete_table_metadata(table_info_value.clone(), region_routes.clone())
+            .delete_table_metadata(&table_info_value, &table_route_value)
             .await
             .unwrap();
     }

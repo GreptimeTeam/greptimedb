@@ -12,11 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::meta::{TableName as PbTableName, TableRouteValue};
 use async_trait::async_trait;
-use common_meta::key::TableRouteKey;
+use common_meta::key::table_route::NextTableRouteKey;
 use common_meta::peer::Peer;
-use common_meta::rpc::router::TableRoute;
+use common_meta::rpc::router::RegionRoute;
 use common_meta::RegionIdent;
 use common_telemetry::info;
 use serde::{Deserialize, Serialize};
@@ -24,13 +23,9 @@ use snafu::{OptionExt, ResultExt};
 
 use super::invalidate_cache::InvalidateCache;
 use super::{RegionFailoverContext, State};
-use crate::error::{
-    CorruptedTableRouteSnafu, Result, RetryLaterSnafu, TableMetadataManagerSnafu,
-    TableNotFoundSnafu, TableRouteConversionSnafu, UpdateTableMetadataSnafu,
-};
+use crate::error::{self, Result, RetryLaterSnafu};
 use crate::lock::keys::table_metadata_lock_key;
 use crate::lock::Opts;
-use crate::table_routes;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub(super) struct UpdateRegionMetadata {
@@ -51,78 +46,9 @@ impl UpdateRegionMetadata {
         let key = table_metadata_lock_key(failed_region);
         let key = ctx.dist_lock.lock(key, Opts::default()).await?;
 
-        self.update_table_region_value(ctx, failed_region).await?;
-
-        self.update_region_placement(ctx, failed_region).await?;
-
         self.update_table_route(ctx, failed_region).await?;
 
         ctx.dist_lock.unlock(key).await?;
-        Ok(())
-    }
-
-    async fn update_table_region_value(
-        &self,
-        ctx: &RegionFailoverContext,
-        failed_region: &RegionIdent,
-    ) -> Result<()> {
-        let table_region_manager = ctx.table_metadata_manager.table_region_manager();
-
-        let table_ident = &failed_region.table_ident;
-        let table_id = table_ident.table_id;
-        let value = table_region_manager
-            .get(table_id)
-            .await
-            .context(TableRouteConversionSnafu)?
-            .with_context(|| TableNotFoundSnafu {
-                name: table_ident.to_string(),
-            })?;
-        let mut region_distribution = value.region_distribution.clone();
-
-        if let Some(mut region_numbers) = region_distribution.remove(&failed_region.datanode_id) {
-            region_numbers.retain(|x| *x != failed_region.region_number);
-
-            if !region_numbers.is_empty() {
-                region_distribution.insert(failed_region.datanode_id, region_numbers);
-            }
-        }
-
-        let region_numbers = region_distribution
-            .entry(self.candidate.id)
-            .or_insert_with(Vec::new);
-        region_numbers.push(failed_region.region_number);
-
-        table_region_manager
-            .compare_and_put(table_id, Some(value.clone()), region_distribution.clone())
-            .await
-            .context(TableMetadataManagerSnafu)?
-            .map_err(|curr| UpdateTableMetadataSnafu {
-                err_msg: format!("region distribution is concurrently updating, expected '{value:?}' but actual: '{curr:?}'")
-            }.build())?;
-
-        info!(
-            "Region distribution of table (id = {table_id}) is updated to {:?}. \
-            Failed region {} was on Datanode {}.",
-            region_distribution, failed_region.region_number, failed_region.datanode_id,
-        );
-        Ok(())
-    }
-
-    async fn update_region_placement(
-        &self,
-        ctx: &RegionFailoverContext,
-        failed_region: &RegionIdent,
-    ) -> Result<()> {
-        ctx.table_metadata_manager
-            .datanode_table_manager()
-            .move_region(
-                failed_region.datanode_id,
-                self.candidate.id,
-                failed_region.table_ident.table_id,
-                failed_region.region_number,
-            )
-            .await
-            .context(TableMetadataManagerSnafu)?;
         Ok(())
     }
 
@@ -131,53 +57,48 @@ impl UpdateRegionMetadata {
         ctx: &RegionFailoverContext,
         failed_region: &RegionIdent,
     ) -> Result<()> {
-        let table_name = PbTableName {
-            catalog_name: failed_region.table_ident.catalog.clone(),
-            schema_name: failed_region.table_ident.schema.clone(),
-            table_name: failed_region.table_ident.table.clone(),
-        };
-        let key =
-            TableRouteKey::with_table_name(failed_region.table_ident.table_id as _, &table_name);
-        let value = table_routes::get_table_route_value(&ctx.selector_ctx.kv_store, &key).await?;
+        let table_id = failed_region.table_ident.table_id;
 
-        let table_route = value
-            .table_route
-            .with_context(|| CorruptedTableRouteSnafu {
-                key: key.to_string(),
-                reason: "'table_route' is empty",
+        let table_route_value = ctx
+            .table_metadata_manager
+            .table_route_manager()
+            .get(table_id)
+            .await
+            .context(error::TableMetadataManagerSnafu)?
+            .with_context(|| error::TableRouteNotFoundSnafu {
+                table_name: failed_region.table_ident.table_ref().to_string(),
             })?;
-        let mut table_route = TableRoute::try_from_raw(&value.peers, table_route)
-            .context(TableRouteConversionSnafu)?;
 
-        for region_route in table_route.region_routes.iter_mut() {
+        let mut new_region_routes = table_route_value.region_routes.clone();
+
+        for region_route in new_region_routes.iter_mut() {
             if region_route.region.id == failed_region.region_number as u64 {
                 region_route.leader_peer = Some(self.candidate.clone());
                 break;
             }
         }
 
-        pretty_log_table_route_change(&key, &table_route, failed_region);
+        pretty_log_table_route_change(
+            NextTableRouteKey::new(table_id).to_string(),
+            &new_region_routes,
+            failed_region,
+        );
 
-        let (peers, table_route) = table_route
-            .try_into_raw()
-            .context(TableRouteConversionSnafu)?;
+        ctx.table_metadata_manager
+            .update_table_route(table_id, table_route_value, new_region_routes)
+            .await
+            .context(error::UpdateTableRouteSnafu)?;
 
-        let value = TableRouteValue {
-            peers,
-            table_route: Some(table_route),
-        };
-        table_routes::put_table_route_value(&ctx.selector_ctx.kv_store, &key, value).await?;
         Ok(())
     }
 }
 
 fn pretty_log_table_route_change(
-    key: &TableRouteKey,
-    table_route: &TableRoute,
+    key: String,
+    region_routes: &[RegionRoute],
     failed_region: &RegionIdent,
 ) {
-    let region_routes = table_route
-        .region_routes
+    let region_routes = region_routes
         .iter()
         .map(|x| {
             format!(
@@ -199,7 +120,7 @@ fn pretty_log_table_route_change(
     info!(
         "Updating region routes in table route value (key = '{}') to [{}]. \
         Failed region {} was on Datanode {}.",
-        key.to_string(),
+        key,
         region_routes.join(", "),
         failed_region.region_number,
         failed_region.datanode_id,
@@ -231,11 +152,8 @@ impl State for UpdateRegionMetadata {
 
 #[cfg(test)]
 mod tests {
-    use api::v1::meta::TableRouteValue;
-    use common_meta::key::table_region::TableRegionValue;
-    use common_meta::key::TableRouteKey;
-    use common_meta::DatanodeId;
-    use store_api::storage::RegionNumber;
+
+    use common_meta::rpc::router::{all_peers, region_distribution};
 
     use super::super::tests::{TestingEnv, TestingEnvBuilder};
     use super::{State, *};
@@ -256,83 +174,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_update_table_region_value() {
-        common_telemetry::init_default_ut_logging();
-
-        async fn test(
-            env: TestingEnv,
-            failed_region: RegionNumber,
-            candidate: DatanodeId,
-        ) -> TableRegionValue {
-            let failed_region = env.failed_region(failed_region).await;
-
-            let state = UpdateRegionMetadata::new(Peer::new(candidate, ""));
-            state
-                .update_table_region_value(&env.context, &failed_region)
-                .await
-                .unwrap();
-
-            env.context
-                .table_metadata_manager
-                .table_region_manager()
-                .get(failed_region.table_ident.table_id)
-                .await
-                .unwrap()
-                .unwrap()
-        }
-
-        // Region distribution:
-        // Datanode => Regions
-        // 1 => 1, 2
-        // 2 => 3
-        // 3 => 4
-
-        // Testing failed region 1 moves to Datanode 2.
-        let env = TestingEnvBuilder::new().build().await;
-        let updated = test(env, 1, 2).await;
-
-        let new_region_id_map = updated.region_distribution;
-        assert_eq!(new_region_id_map.len(), 3);
-        assert_eq!(new_region_id_map.get(&1), Some(&vec![2]));
-        assert_eq!(new_region_id_map.get(&2), Some(&vec![3, 1]));
-        assert_eq!(new_region_id_map.get(&3), Some(&vec![4]));
-
-        // Testing failed region 3 moves to Datanode 3.
-        let env = TestingEnvBuilder::new().build().await;
-        let updated = test(env, 3, 3).await;
-
-        let new_region_id_map = updated.region_distribution;
-        assert_eq!(new_region_id_map.len(), 2);
-        assert_eq!(new_region_id_map.get(&1), Some(&vec![1, 2]));
-        assert_eq!(new_region_id_map.get(&3), Some(&vec![4, 3]));
-
-        // Testing failed region 1 moves to a new Datanode, 4.
-        let env = TestingEnvBuilder::new().build().await;
-        let updated = test(env, 1, 4).await;
-
-        let new_region_id_map = updated.region_distribution;
-        assert_eq!(new_region_id_map.len(), 4);
-        assert_eq!(new_region_id_map.get(&1), Some(&vec![2]));
-        assert_eq!(new_region_id_map.get(&2), Some(&vec![3]));
-        assert_eq!(new_region_id_map.get(&3), Some(&vec![4]));
-        assert_eq!(new_region_id_map.get(&4), Some(&vec![1]));
-
-        // Testing failed region 3 moves to a new Datanode, 4.
-        let env = TestingEnvBuilder::new().build().await;
-        let updated = test(env, 3, 4).await;
-
-        let new_region_id_map = updated.region_distribution;
-        assert_eq!(new_region_id_map.len(), 3);
-        assert_eq!(new_region_id_map.get(&1), Some(&vec![1, 2]));
-        assert_eq!(new_region_id_map.get(&3), Some(&vec![4]));
-        assert_eq!(new_region_id_map.get(&4), Some(&vec![3]));
-    }
-
-    #[tokio::test]
     async fn test_update_table_route() {
         common_telemetry::init_default_ut_logging();
 
-        async fn test(env: TestingEnv, failed_region: u32, candidate: u64) -> TableRouteValue {
+        async fn test(env: TestingEnv, failed_region: u32, candidate: u64) -> Vec<RegionRoute> {
             let failed_region = env.failed_region(failed_region).await;
 
             let state = UpdateRegionMetadata::new(Peer::new(candidate, ""));
@@ -341,15 +186,16 @@ mod tests {
                 .await
                 .unwrap();
 
-            let key = TableRouteKey {
-                table_id: failed_region.table_ident.table_id,
-                catalog_name: &failed_region.table_ident.catalog,
-                schema_name: &failed_region.table_ident.schema,
-                table_name: &failed_region.table_ident.table,
-            };
-            table_routes::get_table_route_value(&env.context.selector_ctx.kv_store, &key)
+            let table_id = failed_region.table_ident.table_id;
+
+            env.context
+                .table_metadata_manager
+                .table_route_manager()
+                .get(table_id)
                 .await
                 .unwrap()
+                .unwrap()
+                .region_routes
         }
 
         // Original region routes:
@@ -361,8 +207,7 @@ mod tests {
 
         // Testing failed region 1 moves to Datanode 2.
         let env = TestingEnvBuilder::new().build().await;
-        let updated = test(env, 1, 2).await;
-        let actual = &updated.table_route.as_ref().unwrap().region_routes;
+        let actual = test(env, 1, 2).await;
 
         // Expected region routes:
         // region number => leader node
@@ -370,9 +215,9 @@ mod tests {
         // 2 => 1
         // 3 => 2
         // 4 => 3
-        let peers = &updated.peers;
+        let peers = &all_peers(&actual);
         assert_eq!(peers.len(), 3);
-        let expected = &vec![
+        let expected = vec![
             new_region_route(1, peers, 2),
             new_region_route(2, peers, 1),
             new_region_route(3, peers, 2),
@@ -382,8 +227,7 @@ mod tests {
 
         // Testing failed region 3 moves to Datanode 3.
         let env = TestingEnvBuilder::new().build().await;
-        let updated = test(env, 3, 3).await;
-        let actual = &updated.table_route.as_ref().unwrap().region_routes;
+        let actual = test(env, 3, 3).await;
 
         // Expected region routes:
         // region number => leader node
@@ -391,9 +235,9 @@ mod tests {
         // 2 => 1
         // 3 => 3
         // 4 => 3
-        let peers = &updated.peers;
+        let peers = &all_peers(&actual);
         assert_eq!(peers.len(), 2);
-        let expected = &vec![
+        let expected = vec![
             new_region_route(1, peers, 1),
             new_region_route(2, peers, 1),
             new_region_route(3, peers, 3),
@@ -403,8 +247,7 @@ mod tests {
 
         // Testing failed region 1 moves to a new Datanode, 4.
         let env = TestingEnvBuilder::new().build().await;
-        let updated = test(env, 1, 4).await;
-        let actual = &updated.table_route.as_ref().unwrap().region_routes;
+        let actual = test(env, 1, 4).await;
 
         // Expected region routes:
         // region number => leader node
@@ -412,9 +255,9 @@ mod tests {
         // 2 => 1
         // 3 => 2
         // 4 => 3
-        let peers = &updated.peers;
+        let peers = &all_peers(&actual);
         assert_eq!(peers.len(), 4);
-        let expected = &vec![
+        let expected = vec![
             new_region_route(1, peers, 4),
             new_region_route(2, peers, 1),
             new_region_route(3, peers, 2),
@@ -424,8 +267,7 @@ mod tests {
 
         // Testing failed region 3 moves to a new Datanode, 4.
         let env = TestingEnvBuilder::new().build().await;
-        let updated = test(env, 3, 4).await;
-        let actual = &updated.table_route.as_ref().unwrap().region_routes;
+        let actual = test(env, 3, 4).await;
 
         // Expected region routes:
         // region number => leader node
@@ -433,9 +275,9 @@ mod tests {
         // 2 => 1
         // 3 => 4
         // 4 => 3
-        let peers = &updated.peers;
+        let peers = &all_peers(&actual);
         assert_eq!(peers.len(), 3);
-        let expected = &vec![
+        let expected = vec![
             new_region_route(1, peers, 1),
             new_region_route(2, peers, 1),
             new_region_route(3, peers, 4),
@@ -475,9 +317,6 @@ mod tests {
             let failed_region_1 = env.failed_region(1).await;
             let failed_region_2 = env.failed_region(2).await;
 
-            let catalog_name = failed_region_1.table_ident.catalog.clone();
-            let schema_name = failed_region_1.table_ident.schema.clone();
-            let table_name = failed_region_1.table_ident.table.clone();
             let table_id = failed_region_1.table_ident.table_id;
 
             let _ = futures::future::join_all(vec![
@@ -498,24 +337,17 @@ mod tests {
             ])
             .await;
 
-            let table_route_key = TableRouteKey {
-                table_id,
-                catalog_name: &catalog_name,
-                schema_name: &schema_name,
-                table_name: &table_name,
-            };
-            let table_route_value = table_routes::get_table_route_value(
-                &env.context.selector_ctx.kv_store,
-                &table_route_key,
-            )
-            .await
-            .unwrap();
-            let peers = &table_route_value.peers;
-            let actual = &table_route_value
-                .table_route
-                .as_ref()
+            let table_route_value = env
+                .context
+                .table_metadata_manager
+                .table_route_manager()
+                .get(table_id)
+                .await
                 .unwrap()
-                .region_routes;
+                .unwrap();
+
+            let peers = &all_peers(&table_route_value.region_routes);
+            let actual = &table_route_value.region_routes;
             let expected = &vec![
                 new_region_route(1, peers, 2),
                 new_region_route(2, peers, 3),
@@ -526,16 +358,17 @@ mod tests {
             assert_eq!(actual, expected);
 
             let manager = &env.context.table_metadata_manager;
-            let map = manager
-                .table_region_manager()
+            let table_route_value = manager
+                .table_route_manager()
                 .get(table_id)
                 .await
                 .unwrap()
-                .unwrap()
-                .region_distribution;
+                .unwrap();
+
+            let map = region_distribution(&table_route_value.region_routes).unwrap();
             assert_eq!(map.len(), 2);
-            assert_eq!(map.get(&2), Some(&vec![3, 1]));
-            assert_eq!(map.get(&3), Some(&vec![4, 2]));
+            assert_eq!(map.get(&2), Some(&vec![1, 3]));
+            assert_eq!(map.get(&3), Some(&vec![2, 4]));
 
             // test DatanodeTableValues matches the table region distribution
             let datanode_table_manager = manager.datanode_table_manager();
@@ -545,12 +378,12 @@ mod tests {
             let tables = datanode_table_manager.tables(2).await.unwrap();
             assert_eq!(tables.len(), 1);
             assert_eq!(tables[0].table_id, 1);
-            assert_eq!(tables[0].regions, vec![3, 1]);
+            assert_eq!(tables[0].regions, vec![1, 3]);
 
             let tables = datanode_table_manager.tables(3).await.unwrap();
             assert_eq!(tables.len(), 1);
             assert_eq!(tables[0].table_id, 1);
-            assert_eq!(tables[0].regions, vec![4, 2]);
+            assert_eq!(tables[0].regions, vec![2, 4]);
         }
     }
 }

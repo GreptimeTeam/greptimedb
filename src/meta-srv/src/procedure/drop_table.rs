@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use api::v1::meta::MailboxMessage;
-use api::v1::{DropTableExpr, TableId};
+use api::v1::DropTableExpr;
 use async_trait::async_trait;
 use client::Database;
 use common_catalog::consts::MITO_ENGINE;
@@ -21,11 +21,10 @@ use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_meta::ident::TableIdent;
 use common_meta::instruction::Instruction;
-use common_meta::key::table_name::TableNameKey;
-use common_meta::key::TableRouteKey;
-use common_meta::kv_backend::txn::{Compare, CompareOp, Txn, TxnOp};
+use common_meta::key::table_info::TableInfoValue;
+use common_meta::key::table_route::TableRouteValue;
 use common_meta::rpc::ddl::DropTableTask;
-use common_meta::rpc::router::TableRoute;
+use common_meta::rpc::router::{find_leaders, RegionRoute};
 use common_meta::table_name::TableName;
 use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{
@@ -34,14 +33,14 @@ use common_procedure::{
 use common_telemetry::{debug, info};
 use futures::future::join_all;
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, ResultExt};
+use snafu::ResultExt;
 use table::engine::TableReference;
+use table::metadata::{RawTableInfo, TableId};
 
 use super::utils::handle_retry_error;
 use crate::ddl::DdlContext;
-use crate::error;
-use crate::error::{Result, TableMetadataManagerSnafu};
-use crate::procedure::utils::{build_table_route_value, handle_request_datanode_error};
+use crate::error::{self, Result};
+use crate::procedure::utils::handle_request_datanode_error;
 use crate::service::mailbox::BroadcastChannel;
 pub struct DropTableProcedure {
     context: DdlContext,
@@ -54,12 +53,13 @@ impl DropTableProcedure {
     pub(crate) fn new(
         cluster_id: u64,
         task: DropTableTask,
-        table_route: TableRoute,
+        table_route_value: TableRouteValue,
+        table_info_value: TableInfoValue,
         context: DdlContext,
     ) -> Self {
         Self {
             context,
-            data: DropTableData::new(cluster_id, task, table_route),
+            data: DropTableData::new(cluster_id, task, table_route_value, table_info_value),
         }
     }
 
@@ -70,74 +70,17 @@ impl DropTableProcedure {
 
     /// Removes the table metadata.
     async fn on_remove_metadata(&mut self) -> Result<Status> {
-        let table_ref = self.data.table_ref();
-        let table_id = self.data.task.table_id;
+        let table_metadata_manager = &self.context.table_metadata_manager;
+        let table_info_value = &self.data.table_info_value;
+        let table_route_value = &self.data.table_route_value;
+        let table_id = self.data.table_id();
 
-        let manager = &self.context.table_metadata_manager;
-        manager
-            .table_info_manager()
-            .remove(table_id)
+        table_metadata_manager
+            .delete_table_metadata(table_info_value, table_route_value)
             .await
-            .context(TableMetadataManagerSnafu)?;
-        info!("Removed TableInfoValue for table: {table_id}");
+            .context(error::TableMetadataManagerSnafu)?;
 
-        let table_region_value = manager
-            .table_region_manager()
-            .remove(table_id)
-            .await
-            .context(TableMetadataManagerSnafu)?;
-        info!("Removed TableRegionValue for table: {table_id}");
-
-        if let Some(table_region_value) = table_region_value {
-            for datanode_id in table_region_value.region_distribution.keys() {
-                manager
-                    .datanode_table_manager()
-                    .remove(*datanode_id, table_id)
-                    .await
-                    .context(TableMetadataManagerSnafu)?;
-                info!("Removed DatanodeTableValue for table: {table_id} on Datanode {datanode_id}");
-            }
-        }
-
-        manager
-            .table_name_manager()
-            .remove(TableNameKey::new(
-                table_ref.catalog,
-                table_ref.schema,
-                table_ref.table,
-            ))
-            .await
-            .context(TableMetadataManagerSnafu)?;
-        info!("Removed TableNameValue for table: {table_id}");
-
-        let table_route_key = TableRouteKey {
-            table_id,
-            catalog_name: table_ref.catalog,
-            schema_name: table_ref.schema,
-            table_name: table_ref.table,
-        };
-        let table_route_value = build_table_route_value(self.data.table_route.clone())?;
-
-        // To protect the potential resource leak issues.
-        // We must compare the table route value, before deleting.
-        let txn = Txn::new()
-            .when(vec![Compare::with_value(
-                table_route_key.to_string().into_bytes(),
-                CompareOp::Equal,
-                table_route_value.into(),
-            )])
-            .and_then(vec![TxnOp::Delete(
-                table_route_key.to_string().into_bytes(),
-            )]);
-        let resp = self.context.kv_store.txn(txn).await?;
-
-        ensure!(
-            resp.succeeded,
-            error::TxnSnafu {
-                msg: "table_route_value changed"
-            }
-        );
-        info!("Removed TableRouteValue for table: {table_id}");
+        info!("Deleted table metadata for table {table_id}");
 
         self.data.state = DropTableState::InvalidateTableCache;
 
@@ -181,20 +124,20 @@ impl DropTableProcedure {
 
     /// Executes drop table instruction on datanode.
     async fn on_datanode_drop_table(&mut self) -> Result<Status> {
-        let table_route = &self.data.table_route;
+        let region_routes = &self.data.region_routes();
 
         let table_ref = self.data.table_ref();
         let table_id = self.data.task.table_id;
 
         let clients = self.context.datanode_clients.clone();
-        let leaders = table_route.find_leaders();
+        let leaders = find_leaders(region_routes);
         let mut joins = Vec::with_capacity(leaders.len());
 
         let expr = DropTableExpr {
             catalog_name: table_ref.catalog.to_string(),
             schema_name: table_ref.schema.to_string(),
             table_name: table_ref.table.to_string(),
-            table_id: Some(TableId { id: table_id }),
+            table_id: Some(api::v1::TableId { id: table_id }),
         };
 
         for datanode in leaders {
@@ -260,16 +203,23 @@ pub struct DropTableData {
     state: DropTableState,
     cluster_id: u64,
     task: DropTableTask,
-    table_route: TableRoute,
+    table_route_value: TableRouteValue,
+    table_info_value: TableInfoValue,
 }
 
 impl DropTableData {
-    pub fn new(cluster_id: u64, task: DropTableTask, table_route: TableRoute) -> Self {
+    pub fn new(
+        cluster_id: u64,
+        task: DropTableTask,
+        table_route_value: TableRouteValue,
+        table_info_value: TableInfoValue,
+    ) -> Self {
         Self {
             state: DropTableState::RemoveMetadata,
             cluster_id,
             task,
-            table_route,
+            table_info_value,
+            table_route_value,
         }
     }
 
@@ -279,6 +229,18 @@ impl DropTableData {
 
     fn table_name(&self) -> TableName {
         self.task.table_name()
+    }
+
+    fn region_routes(&self) -> &Vec<RegionRoute> {
+        &self.table_route_value.region_routes
+    }
+
+    fn table_info(&self) -> &RawTableInfo {
+        &self.table_info_value.table_info
+    }
+
+    fn table_id(&self) -> TableId {
+        self.table_info().ident.table_id
     }
 }
 

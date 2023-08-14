@@ -26,6 +26,7 @@ mod test {
         DropTableExpr, FlushTableExpr, InsertRequest, InsertRequests, QueryRequest, SemanticType,
     };
     use common_catalog::consts::MITO_ENGINE;
+    use common_meta::rpc::router::region_distribution;
     use common_query::Output;
     use common_recordbatch::RecordBatches;
     use frontend::instance::Instance;
@@ -334,16 +335,16 @@ CREATE TABLE {table_name} (
         let table = table.as_any().downcast_ref::<DistTable>().unwrap();
         let table_id = table.table_info().table_id();
 
-        let table_region_value = instance
+        let table_route_value = instance
             .table_metadata_manager()
-            .table_region_manager()
+            .table_route_manager()
             .get(table_id)
             .await
             .unwrap()
             .unwrap();
 
-        let region_to_dn_map = table_region_value
-            .region_distribution
+        let region_to_dn_map = region_distribution(&table_route_value.region_routes)
+            .unwrap()
             .iter()
             .map(|(k, v)| (v[0], *k))
             .collect::<HashMap<u32, u64>>();
@@ -628,16 +629,16 @@ CREATE TABLE {table_name} (
             .unwrap();
         let table = table.as_any().downcast_ref::<DistTable>().unwrap();
         let table_id = table.table_info().ident.table_id;
-        let table_region_value = instance
+        let table_route_value = instance
             .table_metadata_manager()
-            .table_region_manager()
+            .table_route_manager()
             .get(table_id)
             .await
             .unwrap()
             .unwrap();
 
-        let region_to_dn_map = table_region_value
-            .region_distribution
+        let region_to_dn_map = region_distribution(&table_route_value.region_routes)
+            .unwrap()
             .iter()
             .map(|(k, v)| (v[0], *k))
             .collect::<HashMap<u32, u64>>();
