@@ -260,7 +260,6 @@ impl Instance {
                 let catalog_manager = Arc::new(RemoteCatalogManager::new(
                     engine_manager.clone(),
                     opts.node_id.context(MissingNodeIdSnafu)?,
-                    kv_backend.clone(),
                     region_alive_keepers.clone(),
                     Arc::new(TableMetadataManager::new(kv_backend)),
                 ));

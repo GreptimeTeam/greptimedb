@@ -26,6 +26,19 @@ use crate::pubsub::Message;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
+    #[snafu(display("Failed to list catalogs: {}", source))]
+    ListCatalogs {
+        location: Location,
+        source: BoxedError,
+    },
+
+    #[snafu(display("Failed to list {}'s schemas: {}", catalog, source))]
+    ListSchemas {
+        location: Location,
+        catalog: String,
+        source: BoxedError,
+    },
+
     #[snafu(display("Failed to join a future: {}", source))]
     Join {
         location: Location,
@@ -560,6 +573,10 @@ impl ErrorExt for Error {
             | Error::SubmitProcedure { source, .. }
             | Error::WaitProcedure { source, .. } => source.status_code(),
             Error::ShutdownServer { source, .. } | Error::StartHttp { source, .. } => {
+                source.status_code()
+            }
+
+            Error::ListCatalogs { source, .. } | Error::ListSchemas { source, .. } => {
                 source.status_code()
             }
 

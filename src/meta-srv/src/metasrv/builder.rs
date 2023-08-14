@@ -166,8 +166,11 @@ impl MetaSrvBuilder {
         let mailbox = build_mailbox(&kv_store, &pushers);
         let procedure_manager = build_procedure_manager(&options, &kv_store);
         let table_id_sequence = Arc::new(Sequence::new(TABLE_ID_SEQ, 1024, 10, kv_store.clone()));
+        let table_metadata_manager = Arc::new(TableMetadataManager::new(KvBackendAdapter::wrap(
+            kv_store.clone(),
+        )));
         let metadata_service = metadata_service
-            .unwrap_or_else(|| Arc::new(DefaultMetadataService::new(kv_store.clone())));
+            .unwrap_or_else(|| Arc::new(DefaultMetadataService::new(table_metadata_manager)));
         let lock = lock.unwrap_or_else(|| Arc::new(MemLock::default()));
         let table_metadata_manager = build_table_metadata_manager(&kv_store);
         let ddl_manager = build_ddl_manager(

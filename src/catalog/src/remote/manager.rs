@@ -17,11 +17,11 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use common_catalog::consts::MITO_ENGINE;
-use common_meta::helper::{CatalogKey, SchemaKey};
 use common_meta::ident::TableIdent;
+use common_meta::key::catalog_name::CatalogNameKey;
 use common_meta::key::datanode_table::DatanodeTableValue;
+use common_meta::key::schema_name::SchemaNameKey;
 use common_meta::key::TableMetadataManagerRef;
-use common_meta::kv_backend::KvBackendRef;
 use common_telemetry::{error, info, warn};
 use metrics::increment_gauge;
 use snafu::{ensure, OptionExt, ResultExt};
@@ -45,7 +45,6 @@ use crate::{
 /// Catalog manager based on metasrv.
 pub struct RemoteCatalogManager {
     node_id: u64,
-    backend: KvBackendRef,
     engine_manager: TableEngineManagerRef,
     system_table_requests: Mutex<Vec<RegisterSystemTableRequest>>,
     region_alive_keepers: Arc<RegionAliveKeepers>,
@@ -57,14 +56,12 @@ impl RemoteCatalogManager {
     pub fn new(
         engine_manager: TableEngineManagerRef,
         node_id: u64,
-        backend: KvBackendRef,
         region_alive_keepers: Arc<RegionAliveKeepers>,
         table_metadata_manager: TableMetadataManagerRef,
     ) -> Self {
         Self {
             engine_manager,
             node_id,
-            backend,
             system_table_requests: Default::default(),
             region_alive_keepers,
             memory_catalog_manager: MemoryCatalogManager::with_default_setup(),
@@ -109,13 +106,6 @@ impl RemoteCatalogManager {
             .await
             .context(ParallelOpenTableSnafu)?;
         Ok(())
-    }
-
-    fn build_schema_key(&self, catalog_name: String, schema_name: String) -> SchemaKey {
-        SchemaKey {
-            catalog_name,
-            schema_name,
-        }
     }
 }
 
@@ -323,16 +313,12 @@ impl CatalogManager for RemoteCatalogManager {
             return Ok(true);
         }
 
-        let key = self
-            .build_schema_key(catalog.to_string(), schema.to_string())
-            .to_string();
         let remote_schema_exists = self
-            .backend
-            .get(key.as_bytes())
+            .table_metadata_manager
+            .schema_manager()
+            .exist(SchemaNameKey::new(catalog, schema))
             .await
-            .context(TableMetadataManagerSnafu)?
-            .is_some();
-
+            .context(TableMetadataManagerSnafu)?;
         // Create schema locally if remote schema exists. Since local schema is managed by memory
         // catalog manager, creating a local schema is relatively cheap (just a HashMap).
         // Besides, if this method ("schema_exist) is called, it's very likely that someone wants to
@@ -368,16 +354,13 @@ impl CatalogManager for RemoteCatalogManager {
             return Ok(true);
         }
 
-        let key = CatalogKey {
-            catalog_name: catalog.to_string(),
-        };
-
+        let key = CatalogNameKey::new(catalog);
         let remote_catalog_exists = self
-            .backend
-            .get(key.to_string().as_bytes())
+            .table_metadata_manager
+            .catalog_manager()
+            .exist(key)
             .await
-            .context(TableMetadataManagerSnafu)?
-            .is_some();
+            .context(TableMetadataManagerSnafu)?;
 
         // Create catalog locally if remote catalog exists. Since local catalog is managed by memory
         // catalog manager, creating a local catalog is relatively cheap (just a HashMap).

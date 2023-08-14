@@ -15,6 +15,7 @@
 use std::fmt::Display;
 use std::sync::Arc;
 
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use futures::stream::BoxStream;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -31,6 +32,15 @@ use crate::rpc::KeyValue;
 pub struct SchemaNameKey<'a> {
     pub catalog: &'a str,
     pub schema: &'a str,
+}
+
+impl<'a> Default for SchemaNameKey<'a> {
+    fn default() -> Self {
+        Self {
+            catalog: DEFAULT_CATALOG_NAME,
+            schema: DEFAULT_SCHEMA_NAME,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -109,6 +119,12 @@ impl SchemaManager {
         Ok(())
     }
 
+    pub async fn exist(&self, schema: SchemaNameKey<'_>) -> Result<bool> {
+        let raw_key = schema.as_raw_key();
+
+        Ok(self.kv_backend.get(&raw_key).await?.is_some())
+    }
+
     /// Returns a schema stream, it lists all schemas belong to the target `catalog`.
     pub async fn schema_names(&self, catalog: &str) -> BoxStream<'static, Result<String>> {
         let start_key = SchemaNameKey::range_start_key(catalog);
@@ -128,6 +144,7 @@ impl SchemaManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kv_backend::memory::MemoryKvBackend;
 
     #[test]
     fn test_serialization() {
@@ -138,5 +155,18 @@ mod tests {
         let parsed: SchemaNameKey<'_> = "__schema_name/my-catalog/my-schema".try_into().unwrap();
 
         assert_eq!(key, parsed);
+    }
+
+    #[tokio::test]
+    async fn test_key_exist() {
+        let manager = SchemaManager::new(Arc::new(MemoryKvBackend::default()));
+        let schema_key = SchemaNameKey::new("my-catalog", "my-schema");
+        manager.create(schema_key).await.unwrap();
+
+        assert!(manager.exist(schema_key).await.unwrap());
+
+        let wrong_schema_key = SchemaNameKey::new("my-catalog", "my-wrong");
+
+        assert!(!manager.exist(wrong_schema_key).await.unwrap());
     }
 }
