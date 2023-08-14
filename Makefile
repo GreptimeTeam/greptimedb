@@ -99,7 +99,9 @@ docker-image: build-by-dev-builder ## Build docker image.
 .PHONY: docker-image-buildx
 docker-image-buildx: multi-platform-buildx ## Build docker image by buildx.
 	docker buildx build --builder ${BUILDX_BUILDER_NAME} \
-	  --build-arg="CARGO_PROFILE=${CARGO_PROFILE}" --build-arg="FEATURES=${FEATURES}" \
+	  --build-arg="CARGO_PROFILE=${CARGO_PROFILE}" \
+	  --build-arg="FEATURES=${FEATURES}" \
+	  --build-arg="OUTPUT_DIR=${OUTPUT_DIR}" \
 	  -f docker/buildx/${BASE_IMAGE}/Dockerfile \
 	  -t ${IMAGE_REGISTRY}/${IMAGE_NAMESPACE}/greptimedb:${IMAGE_TAG} ${BUILDX_MULTI_PLATFORM_BUILD_OPTS} .
 

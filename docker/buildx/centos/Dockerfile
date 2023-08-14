@@ -2,6 +2,7 @@ FROM centos:7 as builder
 
 ARG CARGO_PROFILE
 ARG FEATURES
+ARG OUTPUT_DIR
 
 ENV LANG en_US.utf8
 WORKDIR /greptimedb
@@ -36,17 +37,18 @@ RUN --mount=target=.,rw \
 # Export the binary to the clean image.
 FROM centos:7 as base
 
-ARG CARGO_PROFILE
+ARG OUTPUT_DIR
 
 RUN yum install -y epel-release \
     openssl \
     openssl-devel  \
     centos-release-scl  \
     rh-python38  \
-    rh-python38-python-devel
+    rh-python38-python-devel \
+    which
 
 WORKDIR /greptime
-COPY --from=builder /out/target/${CARGO_PROFILE}/greptime /greptime/bin/
+COPY --from=builder /out/target/${OUTPUT_DIR}/greptime /greptime/bin/
 ENV PATH /greptime/bin/:$PATH
 
 ENTRYPOINT ["greptime"]
