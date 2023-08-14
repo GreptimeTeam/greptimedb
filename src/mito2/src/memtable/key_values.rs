@@ -14,8 +14,9 @@
 
 use std::collections::HashMap;
 
+use datatypes::value::ValueRef;
 use greptime_proto::v1::mito::{Mutation, OpType};
-use greptime_proto::v1::{Row, Rows, Value};
+use greptime_proto::v1::{Row, Rows};
 use store_api::storage::SequenceNumber;
 
 use crate::metadata::{RegionMetadata, SemanticType};
@@ -80,24 +81,24 @@ pub struct KeyValue<'a> {
 
 impl<'a> KeyValue<'a> {
     /// Get primary key columns.
-    pub fn primary_keys(&self) -> impl Iterator<Item = &Value> {
+    pub fn primary_keys(&self) -> impl Iterator<Item = ValueRef> {
         self.helper.indices[..self.helper.num_primary_key_column]
             .iter()
-            .map(|idx| &self.row.values[*idx])
+            .map(|idx| ValueRef::from(&self.row.values[*idx]))
     }
 
     /// Get field columns.
-    pub fn fields(&self) -> impl Iterator<Item = &Value> {
+    pub fn fields(&self) -> impl Iterator<Item = ValueRef> {
         self.helper.indices[self.helper.num_primary_key_column + 1..]
             .iter()
-            .map(|idx| &self.row.values[*idx])
+            .map(|idx| ValueRef::from(&self.row.values[*idx]))
     }
 
     /// Get timestamp.
-    pub fn timestamp(&self) -> Value {
+    pub fn timestamp(&self) -> ValueRef {
         // Timestamp is primitive, we clone it.
         let index = self.helper.indices[self.helper.num_primary_key_column];
-        self.row.values[index].clone()
+        ValueRef::from(&self.row.values[index])
     }
 
     /// Get number of primary key columns.
@@ -294,7 +295,7 @@ mod tests {
     fn check_key_values(kvs: &KeyValues, num_rows: usize, keys: &[i64], ts: i64, values: &[i64]) {
         assert_eq!(num_rows, kvs.num_rows());
         let mut expect_seq = START_SEQ;
-        let expect_ts = i64_value(ts);
+        let expect_ts = ValueRef::Int64(ts);
         for kv in kvs.iter() {
             assert_eq!(expect_seq, kv.sequence());
             expect_seq += 1;
@@ -303,11 +304,11 @@ mod tests {
             assert_eq!(values.len(), kv.num_fields());
 
             assert_eq!(expect_ts, kv.timestamp());
-            let expect_keys: Vec<_> = keys.iter().map(|k| i64_value(*k)).collect();
-            let actual_keys: Vec<_> = kv.primary_keys().cloned().collect();
+            let expect_keys: Vec<_> = keys.iter().map(|k| ValueRef::Int64(*k)).collect();
+            let actual_keys: Vec<_> = kv.primary_keys().collect();
             assert_eq!(expect_keys, actual_keys);
-            let expect_values: Vec<_> = values.iter().map(|v| i64_value(*v)).collect();
-            let actual_values: Vec<_> = kv.fields().cloned().collect();
+            let expect_values: Vec<_> = values.iter().map(|v| ValueRef::Int64(*v)).collect();
+            let actual_values: Vec<_> = kv.fields().collect();
             assert_eq!(expect_values, actual_values);
         }
     }

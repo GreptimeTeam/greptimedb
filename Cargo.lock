@@ -2699,6 +2699,7 @@ dependencies = [
  "common-time",
  "datafusion-common",
  "enum_dispatch",
+ "greptime-proto 0.1.0 (git+https://github.com/GreptimeTeam/greptime-proto.git?rev=10c349c033dded29097d0dc933fbc2f89f658032)",
  "num",
  "num-traits",
  "ordered-float 3.7.0",

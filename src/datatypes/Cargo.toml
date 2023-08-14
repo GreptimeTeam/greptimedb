@@ -18,6 +18,8 @@ common-telemetry = { workspace = true }
 common-time = { workspace = true }
 datafusion-common.workspace = true
 enum_dispatch = "0.3"
+# TODO(hl): Update and use api crate once https://github.com/GreptimeTeam/greptime-proto/pull/75 is merged.
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "10c349c033dded29097d0dc933fbc2f89f658032" }
 num = "0.4"
 num-traits = "0.2"
 ordered-float = { version = "3.0", features = ["serde"] }
