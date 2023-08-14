@@ -21,62 +21,69 @@ use datatypes::vectors::VectorRef;
 use crate::error::Result;
 use crate::metadata::RegionMetadataRef;
 
-/// Storage internal representation of a batch of rows.
+/// Storage internal representation of a batch of rows
+/// for a primary key (time series).
 ///
-/// Now the structure of [Batch] is still unstable, all pub fields may be changed.
-#[derive(Debug, Default, PartialEq, Eq, Clone)]
+/// Rows are sorted by primary key, timestamp, sequence desc, op_type desc.
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub struct Batch {
-    /// Rows organized in columnar format.
-    pub columns: Vec<VectorRef>,
+    /// Primary key encoded in a comparable form.
+    primary_key: Vec<u8>,
+    /// Timestamps of rows, should be sorted and not null.
+    timestamps: VectorRef,
+    /// Sequences of rows
+    ///
+    /// UInt64 type, not null.
+    sequences: VectorRef,
+    /// Op types of rows
+    ///
+    /// UInt8 type, not null.
+    op_types: VectorRef,
+    /// Fields organized in columnar format.
+    fields: Vec<BatchColumn>,
 }
 
 impl Batch {
-    /// Create a new `Batch` from `columns`.
-    ///
-    /// # Panics
-    /// Panics if vectors in `columns` have different length.
-    pub fn new(columns: Vec<VectorRef>) -> Batch {
-        Self::assert_columns(&columns);
-
-        Batch { columns }
+    /// Creates a new batch.
+    pub fn new(primary_key: Vec<u8>, timestamps: VectorRef, sequences: VectorRef, op_types: VectorRef, fields: Vec<BatchColumn>) -> Result<Batch> {
+        todo!()
     }
 
-    /// Returns number of columns in the batch.
-    pub fn num_columns(&self) -> usize {
-        self.columns.len()
+    /// Returns columns in the batch.
+    pub fn columns(&self) -> &[BatchColumn] {
+        &self.columns
     }
 
-    /// Returns number of rows in the batch.
+    /// Returns sequences of the batch.
+    pub fn sequences(&self) -> &VectorRef {
+        &self.sequences
+    }
+
+    /// Returns op types of the batch.
+    pub fn op_types(&self) -> &VectorRef {
+        &self.op_types
+    }
+
+    /// Returns the number of rows in the batch.
     pub fn num_rows(&self) -> usize {
-        self.columns.get(0).map(|v| v.len()).unwrap_or(0)
+        // All vectors have the same length so we use
+        // the length of timestamps vector.
+        self.timestamps.len()
     }
 
     /// Returns true if the number of rows in the batch is 0.
     pub fn is_empty(&self) -> bool {
         self.num_rows() == 0
     }
+}
 
-    /// Slice the batch, returning a new batch.
-    ///
-    /// # Panics
-    /// Panics if `offset + length > self.num_rows()`.
-    pub fn slice(&self, offset: usize, length: usize) -> Batch {
-        let columns = self
-            .columns
-            .iter()
-            .map(|v| v.slice(offset, length))
-            .collect();
-        Batch { columns }
-    }
-
-    fn assert_columns(columns: &[VectorRef]) {
-        if columns.is_empty() {
-            return;
-        }
-
-        let length = columns[0].len();
-        assert!(columns.iter().all(|col| col.len() == length));
-    }
+/// A column in a [Batch].
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct BatchColumn {
+    /// Id of the column.
+    pub column_id: ColumnId,
+    /// Data of the column.
+    pub data: VectorRef,
 }
 
 /// Collected [Source] statistics.
@@ -110,6 +117,7 @@ impl Source {
         unimplemented!()
     }
 
+    // TODO(yingwen): Maybe remove this method.
     /// Returns statisics of fetched batches.
     pub(crate) fn stats(&self) -> SourceStats {
         unimplemented!()
