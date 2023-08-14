@@ -9221,6 +9221,7 @@ dependencies = [
  "hex",
  "itertools 0.10.5",
  "once_cell",
+ "regex",
  "snafu",
  "sqlparser 0.34.0",
 ]

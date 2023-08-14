@@ -13,8 +13,17 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::sync::LazyLock;
 
+use regex::Regex;
 use sqlparser::ast::{SqlOption, Value};
+
+static SQL_SECRET_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+    vec![
+        Regex::new(r#"(?i)access_key_id=["'](\w*)["'].*"#).unwrap(),
+        Regex::new(r#"(?i)secret_access_key=["'](\w*)["'].*"#).unwrap(),
+    ]
+});
 
 pub fn parse_option_string(value: Value) -> Option<String> {
     match value {
@@ -35,4 +44,32 @@ pub fn to_lowercase_options_map(opts: &[SqlOption]) -> HashMap<String, String> {
         let _ = map.insert(name.value.to_lowercase().clone(), value_str);
     }
     map
+}
+
+/// Use regex to match and replace common seen secret values in SQL.
+pub fn redact_sql_secrets(sql: &str) -> String {
+    let mut s = sql.to_string();
+    for p in SQL_SECRET_PATTERNS.iter() {
+        if let Some(captures) = p.captures(&s) {
+            if let Some(m) = captures.get(1) {
+                s = s.replace(m.as_str(), "******");
+            }
+        }
+    }
+    s
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_redact_sql_secrets() {
+        assert_eq!(
+            redact_sql_secrets(
+                r#"COPY 'my_table' FROM '/test.orc' WITH (FORMAT = 'orc') CONNECTION(ENDPOINT = 's3.storage.site', REGION = 'hz', ACCESS_KEY_ID='my_key_id', SECRET_ACCESS_KEY="my_access_key");"#
+            ),
+            r#"COPY 'my_table' FROM '/test.orc' WITH (FORMAT = 'orc') CONNECTION(ENDPOINT = 's3.storage.site', REGION = 'hz', ACCESS_KEY_ID='******', SECRET_ACCESS_KEY="******");"#
+        );
+    }
 }
