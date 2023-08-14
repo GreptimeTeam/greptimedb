@@ -16,9 +16,12 @@
 
 use async_trait::async_trait;
 use common_time::Timestamp;
+use datatypes::prelude::ConcreteDataType;
 use datatypes::vectors::VectorRef;
+use snafu::ensure;
+use store_api::storage::ColumnId;
 
-use crate::error::Result;
+use crate::error::{InvalidBatchSnafu, Result};
 use crate::metadata::RegionMetadataRef;
 
 /// Storage internal representation of a batch of rows
@@ -45,13 +48,21 @@ pub struct Batch {
 
 impl Batch {
     /// Creates a new batch.
-    pub fn new(primary_key: Vec<u8>, timestamps: VectorRef, sequences: VectorRef, op_types: VectorRef, fields: Vec<BatchColumn>) -> Result<Batch> {
-        todo!()
+    pub fn new(
+        primary_key: Vec<u8>,
+        timestamps: VectorRef,
+        sequences: VectorRef,
+        op_types: VectorRef,
+        fields: Vec<BatchColumn>,
+    ) -> Result<Batch> {
+        BatchBuilder::new(primary_key, timestamps, sequences, op_types)
+            .fields(fields)
+            .build()
     }
 
-    /// Returns columns in the batch.
-    pub fn columns(&self) -> &[BatchColumn] {
-        &self.columns
+    /// Returns fields in the batch.
+    pub fn fields(&self) -> &[BatchColumn] {
+        &self.fields
     }
 
     /// Returns sequences of the batch.
@@ -84,6 +95,109 @@ pub struct BatchColumn {
     pub column_id: ColumnId,
     /// Data of the column.
     pub data: VectorRef,
+}
+
+/// Builder to build [Batch].
+pub struct BatchBuilder {
+    primary_key: Vec<u8>,
+    timestamps: VectorRef,
+    sequences: VectorRef,
+    op_types: VectorRef,
+    fields: Vec<BatchColumn>,
+}
+
+impl BatchBuilder {
+    /// Creates a new [BatchBuilder].
+    pub fn new(
+        primary_key: Vec<u8>,
+        timestamps: VectorRef,
+        sequences: VectorRef,
+        op_types: VectorRef,
+    ) -> BatchBuilder {
+        BatchBuilder {
+            primary_key,
+            timestamps,
+            sequences,
+            op_types,
+            fields: Vec::new(),
+        }
+    }
+
+    /// Set all field columns.
+    pub fn fields(&mut self, fields: Vec<BatchColumn>) -> &mut Self {
+        self.fields = fields;
+        self
+    }
+
+    /// Push a field column.
+    pub fn push_field(&mut self, column: BatchColumn) -> &mut Self {
+        self.fields.push(column);
+        self
+    }
+
+    /// Builds the [Batch].
+    pub fn build(self) -> Result<Batch> {
+        let ts_len = self.timestamps.len();
+        ensure!(
+            self.sequences.len() == ts_len,
+            InvalidBatchSnafu {
+                reason: format!(
+                    "sequence have different len {} != {}",
+                    self.sequences.len(),
+                    ts_len
+                ),
+            }
+        );
+        ensure!(
+            self.sequences.data_type() == ConcreteDataType::uint64_datatype(),
+            InvalidBatchSnafu {
+                reason: format!(
+                    "sequence must has uint64 type, given: {:?}",
+                    self.sequences.data_type()
+                ),
+            }
+        );
+        ensure!(
+            self.op_types.len() == ts_len,
+            InvalidBatchSnafu {
+                reason: format!(
+                    "op type have different len {} != {}",
+                    self.op_types.len(),
+                    ts_len
+                ),
+            }
+        );
+        ensure!(
+            self.sequences.data_type() == ConcreteDataType::uint8_datatype(),
+            InvalidBatchSnafu {
+                reason: format!(
+                    "sequence must has uint8 type, given: {:?}",
+                    self.op_types.data_type()
+                ),
+            }
+        );
+        for column in &self.fields {
+            ensure!(
+                column.data.len() == ts_len,
+                InvalidBatchSnafu {
+                    reason: format!(
+                        "column {} has different len {} != {}",
+                        column.column_id,
+                        column.data.len(),
+                        ts_len
+                    ),
+                }
+            );
+        }
+
+        Ok(Batch {
+            primary_key: self.primary_key,
+            timestamps: self.timestamps,
+            sequences: self.sequences,
+            op_types: self.op_types,
+            fields: self.fields,
+        })
+    }
 }
 
 /// Collected [Source] statistics.
