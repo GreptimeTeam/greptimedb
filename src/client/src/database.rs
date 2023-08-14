@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::pin::Pin;
+
 use api::v1::auth_header::AuthScheme;
 use api::v1::ddl_request::Expr as DdlExpr;
 use api::v1::greptime_request::Request;
@@ -21,12 +23,15 @@ use api::v1::{
     DropTableExpr, FlushTableExpr, GreptimeRequest, InsertRequests, PromRangeQuery, QueryRequest,
     RequestHeader, TruncateTableExpr,
 };
-use arrow_flight::{FlightData, Ticket};
+use arrow_flight::Ticket;
+use async_stream::stream;
 use common_error::ext::{BoxedError, ErrorExt};
-use common_grpc::flight::{flight_messages_to_recordbatches, FlightDecoder, FlightMessage};
+use common_grpc::flight::{FlightDecoder, FlightMessage};
 use common_query::Output;
+use common_recordbatch::error::{ExternalSnafu, Result as RecordBatchResult};
+use common_recordbatch::{RecordBatch, RecordBatchStreamAdaptor, RecordBatches};
 use common_telemetry::{logging, timer};
-use futures_util::{TryFutureExt, TryStreamExt};
+use futures_util::{Stream, StreamExt, TryStreamExt};
 use prost::Message;
 use snafu::{ensure, ResultExt};
 
@@ -283,55 +288,115 @@ impl Database {
 
         let mut client = self.client.make_flight_client()?;
 
-        let flight_data: Vec<FlightData> = client
-            .mut_inner()
-            .do_get(request)
-            .and_then(|response| response.into_inner().try_collect())
-            .await
-            .map_err(|e| {
-                let tonic_code = e.code();
-                let e: error::Error = e.into();
+        let response = client.mut_inner().do_get(request).await.map_err(|e| {
+            let tonic_code = e.code();
+            let e: error::Error = e.into();
+            let code = e.status_code();
+            let msg = e.to_string();
+            ServerSnafu { code, msg }
+                .fail::<()>()
+                .map_err(BoxedError::new)
+                .context(error::FlightGetSnafu {
+                    tonic_code,
+                    addr: client.addr(),
+                })
+                .map_err(|error| {
+                    logging::error!(
+                        "Failed to do Flight get, addr: {}, code: {}, source: {}",
+                        client.addr(),
+                        tonic_code,
+                        error
+                    );
+                    error
+                })
+                .unwrap_err()
+        })?;
+
+        let flight_data_stream = response.into_inner();
+        let mut decoder = FlightDecoder::default();
+
+        let mut flight_message_stream = flight_data_stream.map_ok(move |flight_data| {
+            decoder
+                .try_decode(flight_data)
+                .context(ConvertFlightDataSnafu)
+        });
+
+        let Some(first_flight_message) = flight_message_stream.next().await else {
+            return Ok(Output::RecordBatches(RecordBatches::empty()));
+        };
+
+        match first_flight_message {
+            // tonic error.
+            Err(status) => {
+                let e: error::Error = status.into();
                 let code = e.status_code();
                 let msg = e.to_string();
-                ServerSnafu { code, msg }
-                    .fail::<()>()
-                    .map_err(BoxedError::new)
-                    .context(error::FlightGetSnafu {
-                        tonic_code,
-                        addr: client.addr(),
-                    })
-                    .map_err(|error| {
-                        logging::error!(
-                            "Failed to do Flight get, addr: {}, code: {}, source: {}",
-                            client.addr(),
-                            tonic_code,
-                            error
-                        );
-                        error
-                    })
-                    .unwrap_err()
-            })?;
-
-        let decoder = &mut FlightDecoder::default();
-        let flight_messages = flight_data
-            .into_iter()
-            .map(|x| decoder.try_decode(x).context(ConvertFlightDataSnafu))
-            .collect::<Result<Vec<_>>>()?;
-
-        let output = if let Some(FlightMessage::AffectedRows(rows)) = flight_messages.get(0) {
-            ensure!(
-                flight_messages.len() == 1,
-                IllegalFlightMessagesSnafu {
-                    reason: "Expect 'AffectedRows' Flight messages to be one and only!"
+                ServerSnafu { code, msg }.fail()
+            }
+            // decode error.
+            Ok(Err(err)) => Err(err),
+            Ok(Ok(first_flight_message_raw)) => match first_flight_message_raw {
+                FlightMessage::AffectedRows(rows) => {
+                    ensure!(
+                        flight_message_stream.next().await.is_none(),
+                        IllegalFlightMessagesSnafu {
+                            reason:
+                                "Expect 'AffectedRows' Flight messages to be the one and the only!"
+                        }
+                    );
+                    Ok(Output::AffectedRows(rows))
                 }
-            );
-            Output::AffectedRows(*rows)
-        } else {
-            let recordbatches = flight_messages_to_recordbatches(flight_messages)
-                .context(ConvertFlightDataSnafu)?;
-            Output::RecordBatches(recordbatches)
-        };
-        Ok(output)
+                FlightMessage::Schema(schema) => {
+                    let stream: Pin<Box<dyn Stream<Item = RecordBatchResult<RecordBatch>> + Send>> =
+                        Box::pin(stream! {
+                            while let Some(flight_message) = flight_message_stream.next().await {
+                                match flight_message {
+                                    // tonic error.
+                                    Err(status) => {
+                                        let e: error::Error = status.into();
+                                        let code = e.status_code();
+                                        let msg = e.to_string();
+                                        yield ServerSnafu { code, msg }
+                                            .fail()
+                                            .map_err(BoxedError::new)
+                                            .context(ExternalSnafu);
+                                        break;
+                                    }
+                                    // decode error.
+                                    Ok(Err(err)) => {
+                                        yield Err(err)
+                                            .map_err(BoxedError::new)
+                                            .context(ExternalSnafu);
+                                        break;
+                                    }
+                                    Ok(Ok(FlightMessage::Recordbatch(record_batch))) => {
+                                        yield Ok(record_batch);
+                                    }
+                                    // unexpected flight message variants.
+                                    Ok(Ok(_)) => {
+                                        yield IllegalFlightMessagesSnafu {reason: "A Schema message must be succeeded exclusively by a set of RecordBatch messages"}
+                                            .fail()
+                                            .map_err(BoxedError::new)
+                                            .context(ExternalSnafu);
+                                        break;
+                                    }
+                                }
+                            }
+                        });
+
+                    let record_batch_stream = RecordBatchStreamAdaptor {
+                        schema,
+                        stream,
+                        output_ordering: None,
+                    };
+                    Ok(Output::Stream(Box::pin(record_batch_stream)))
+                }
+                FlightMessage::Recordbatch(_) => IllegalFlightMessagesSnafu {
+                    reason: "The first flight message cannot be a RecordBatch message",
+                }
+                .fail(),
+            },
+        }
     }
 }
 
