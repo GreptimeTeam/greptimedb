@@ -15,10 +15,11 @@
 use api::helper::convert_i128_to_interval;
 use api::v1::column::Values;
 use common_base::BitVec;
-use datatypes::types::{IntervalType, TimeType, TimestampType, WrapperType};
+use datatypes::types::{DurationType, IntervalType, TimeType, TimestampType, WrapperType};
 use datatypes::vectors::{
-    BinaryVector, BooleanVector, DateTimeVector, DateVector, Float32Vector, Float64Vector,
-    Int16Vector, Int32Vector, Int64Vector, Int8Vector, IntervalDayTimeVector,
+    BinaryVector, BooleanVector, DateTimeVector, DateVector, DurationMicrosecondVector,
+    DurationMillisecondVector, DurationNanosecondVector, DurationSecondVector, Float32Vector,
+    Float64Vector, Int16Vector, Int32Vector, Int64Vector, Int8Vector, IntervalDayTimeVector,
     IntervalMonthDayNanoVector, IntervalYearMonthVector, StringVector, TimeMicrosecondVector,
     TimeMillisecondVector, TimeNanosecondVector, TimeSecondVector, TimestampMicrosecondVector,
     TimestampMillisecondVector, TimestampNanosecondVector, TimestampSecondVector, UInt16Vector,
@@ -212,6 +213,30 @@ pub fn values(arrays: &[VectorRef]) -> Result<Values> {
             IntervalMonthDayNanoVector,
             interval_month_day_nano_values,
             |x| { convert_i128_to_interval(x.into_native()) }
+        ),
+        (
+            ConcreteDataType::Duration(DurationType::Second(_)),
+            DurationSecondVector,
+            ts_second_values,
+            |x| { x.into_native() }
+        ),
+        (
+            ConcreteDataType::Duration(DurationType::Millisecond(_)),
+            DurationMillisecondVector,
+            ts_millisecond_values,
+            |x| { x.into_native() }
+        ),
+        (
+            ConcreteDataType::Duration(DurationType::Microsecond(_)),
+            DurationMicrosecondVector,
+            ts_microsecond_values,
+            |x| { x.into_native() }
+        ),
+        (
+            ConcreteDataType::Duration(DurationType::Nanosecond(_)),
+            DurationNanosecondVector,
+            ts_nanosecond_values,
+            |x| { x.into_native() }
         )
     )
 }

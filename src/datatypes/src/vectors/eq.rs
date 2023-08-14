@@ -17,7 +17,7 @@ use std::sync::Arc;
 use common_time::interval::IntervalUnit;
 
 use crate::data_type::DataType;
-use crate::types::{TimeType, TimestampType};
+use crate::types::{DurationType, TimeType, TimestampType};
 use crate::vectors::constant::ConstantVector;
 use crate::vectors::{
     BinaryVector, BooleanVector, DateTimeVector, DateVector, IntervalDayTimeVector,
@@ -133,6 +133,20 @@ fn equal(lhs: &dyn Vector, rhs: &dyn Vector) -> bool {
                 is_vector_eq!(TimeMicrosecondVector, lhs, rhs)
             }
             TimeType::Nanosecond(_) => {
+                is_vector_eq!(TimeNanosecondVector, lhs, rhs)
+            }
+        },
+        Duration(d) => match d {
+            DurationType::Second(_) => {
+                is_vector_eq!(TimeSecondVector, lhs, rhs)
+            }
+            DurationType::Millisecond(_) => {
+                is_vector_eq!(TimeMillisecondVector, lhs, rhs)
+            }
+            DurationType::Microsecond(_) => {
+                is_vector_eq!(TimeMicrosecondVector, lhs, rhs)
+            }
+            DurationType::Nanosecond(_) => {
                 is_vector_eq!(TimeNanosecondVector, lhs, rhs)
             }
         },

@@ -146,6 +146,7 @@ impl TryFrom<ConcreteDataType> for ColumnDataTypeWrapper {
             | ConcreteDataType::Dictionary(_) => {
                 return error::IntoColumnDataTypeSnafu { from: datatype }.fail()
             }
+            ConcreteDataType::Duration(_) => todo!("duration is not supported yet"),
         });
         Ok(datatype)
     }
@@ -304,6 +305,7 @@ pub fn push_vals(column: &mut Column, origin_count: usize, vector: VectorRef) {
                 .interval_month_day_nano_values
                 .push(convert_i128_to_interval(val.to_i128())),
         },
+        Value::Duration(_) => todo!("duration is not supported yet"),
         Value::List(_) => unreachable!(),
     });
     column.null_mask = null_mask.into_vec();

@@ -17,6 +17,7 @@ mod boolean_type;
 mod date_type;
 mod datetime_type;
 mod dictionary_type;
+mod duration_type;
 mod interval_type;
 mod list_type;
 mod null_type;
@@ -30,6 +31,10 @@ pub use boolean_type::BooleanType;
 pub use date_type::DateType;
 pub use datetime_type::DateTimeType;
 pub use dictionary_type::DictionaryType;
+pub use duration_type::{
+    DurationMicrosecondType, DurationMillisecondType, DurationNanosecondType, DurationSecondType,
+    DurationType,
+};
 pub use interval_type::{
     IntervalDayTimeType, IntervalMonthDayNanoType, IntervalType, IntervalYearMonthType,
 };
