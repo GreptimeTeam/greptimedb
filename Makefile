@@ -92,7 +92,7 @@ check-toml: ## Check all TOML files.
 .PHONY: docker-image
 docker-image: build-by-dev-builder ## Build docker image.
 	mkdir -p ${ARCH} && \
-	cp ./target/${OUTPUT_DIR}/greptime ${ARCH}/greptimedb && \
+	cp ./target/${OUTPUT_DIR}/greptime ${ARCH}/greptime && \
 	docker build -f docker/ci/${BASE_IMAGE}/Dockerfile -t ${IMAGE_REGISTRY}/${IMAGE_NAMESPACE}/greptimedb:${IMAGE_TAG} . && \
 	rm -r ${ARCH}
 
