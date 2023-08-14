@@ -177,8 +177,10 @@ impl Env {
                     subcommand.to_string(),
                     "start".to_string(),
                     "--use-memory-store".to_string(),
+                    "true".to_string(),
                     "--http-addr=127.0.0.1:5001".to_string(),
                     "--disable-region-failover".to_string(),
+                    "true".to_string(),
                 ];
                 (args, METASRV_ADDR.to_string())
             }

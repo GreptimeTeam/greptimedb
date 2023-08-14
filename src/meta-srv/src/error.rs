@@ -106,7 +106,11 @@ pub enum Error {
     #[snafu(display("Empty key is not allowed"))]
     EmptyKey { location: Location },
 
-    #[snafu(display("Failed to execute via Etcd, source: {}", source))]
+    #[snafu(display(
+        "Failed to execute via Etcd, source: {}, location: {}",
+        source,
+        location
+    ))]
     EtcdFailed {
         source: etcd_client::Error,
         location: Location,
