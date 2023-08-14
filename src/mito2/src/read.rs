@@ -56,7 +56,7 @@ impl Batch {
         fields: Vec<BatchColumn>,
     ) -> Result<Batch> {
         BatchBuilder::new(primary_key, timestamps, sequences, op_types)
-            .fields(fields)
+            .with_fields(fields)
             .build()
     }
 
@@ -124,7 +124,7 @@ impl BatchBuilder {
     }
 
     /// Set all field columns.
-    pub fn fields(&mut self, fields: Vec<BatchColumn>) -> &mut Self {
+    pub fn with_fields(mut self, fields: Vec<BatchColumn>) -> Self {
         self.fields = fields;
         self
     }

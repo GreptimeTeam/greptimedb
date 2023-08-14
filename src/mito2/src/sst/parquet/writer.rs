@@ -80,9 +80,9 @@ impl<'a> ParquetWriter<'a> {
             let arrow_batch = RecordBatch::try_new(
                 arrow_schema.clone(),
                 batch
-                    .columns
+                    .fields()
                     .iter()
-                    .map(|v| v.to_arrow_array())
+                    .map(|v| v.data.to_arrow_array())
                     .collect::<Vec<_>>(),
             )
             .context(NewRecordBatchSnafu)?;
