@@ -38,7 +38,7 @@ impl OpenTelemetryProtocolHandler for Instance {
         self.plugins
             .get::<PermissionCheckerRef>()
             .as_ref()
-            .check_permission(ctx.current_user(), PermissionReq::Oltp)
+            .check_permission(ctx.current_user(), PermissionReq::Otlp)
             .context(AuthSnafu)?;
         let (requests, rows) = otlp::to_grpc_insert_requests(request)?;
         let _ = self
