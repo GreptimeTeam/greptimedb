@@ -18,10 +18,9 @@ use crate::error::{
     UserPasswordMismatchSnafu,
 };
 use crate::user_info::DefaultUserInfo;
-use crate::user_provider::static_user_provider::auth_mysql;
 #[allow(unused_imports)]
 use crate::Error;
-use crate::{Identity, Password, UserInfoRef, UserProvider};
+use crate::{auth_mysql, Identity, Password, UserInfoRef, UserProvider};
 
 pub struct DatabaseAuthInfo<'a> {
     pub catalog: &'a str,
