@@ -294,18 +294,6 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Cannot deserialize timestamp from sec: {}, nsec:{}, location: {}",
-        sec,
-        nsec,
-        location
-    ))]
-    DeserializeTimestamp {
-        sec: i64,
-        nsec: u32,
-        location: Location,
-    },
-
-    #[snafu(display(
         "Failed to deserialize field, source: {} location: {}",
         source,
         location
@@ -363,7 +351,6 @@ impl ErrorExt for Error {
             SerializeField { .. } => StatusCode::Internal,
             NotSupportedField { .. } => StatusCode::Unsupported,
             DeserializeField { .. } => StatusCode::Unexpected,
-            DeserializeTimestamp { .. } => StatusCode::Unexpected,
         }
     }
 
