@@ -581,7 +581,7 @@ pub enum Error {
 
     #[snafu(display("Failed to pass permission check, source: {}", source))]
     Permission {
-        source: auth::Error,
+        source: auth::error::Error,
         location: Location,
     },
 }
