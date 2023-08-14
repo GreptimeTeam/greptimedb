@@ -12,7 +12,8 @@ BUILDX_BUILDER_NAME ?= gtbuilder
 BASE_IMAGE ?= ubuntu
 RUST_TOOLCHAIN ?= $(shell cat rust-toolchain.toml | grep channel | cut -d'"' -f2)
 CARGO_REGISTRY_CACHE ?= ${HOME}/.cargo/registry
-IMAGE_OUTPUT_DIR ?= ./image-output
+ARCH := $(shell uname -m | sed 's/x86_64/amd64/' | sed 's/aarch64/arm64/')
+OUTPUT_DIR := $(shell if [ "$(RELEASE)" = "true" ]; then echo "release"; elif [ ! -z "$(CARGO_PROFILE)" ]; then echo "$(CARGO_PROFILE)" ; else echo "debug"; fi)
 
 # The arguments for running integration tests.
 ETCD_VERSION ?= v3.5.9
@@ -44,6 +45,10 @@ ifneq ($(strip $(TARGET)),)
 	CARGO_BUILD_OPTS += --target ${TARGET}
 endif
 
+ifneq ($(strip $(RELEASE)),)
+	CARGO_BUILD_OPTS += --release
+endif
+
 ifeq ($(BUILDX_MULTI_PLATFORM_BUILD), true)
 	BUILDX_MULTI_PLATFORM_BUILD_OPTS := --platform linux/amd64,linux/arm64 --push
 else
@@ -53,26 +58,20 @@ endif
 ##@ Build
 
 .PHONY: build
-build: ## Build debug version greptime. If USE_DEV_BUILDER is true, the binary will be built in dev-builder.
-ifeq ($(USE_DEV_BUILDER), true)
-	docker run --network=host \
-	-v ${PWD}:/greptimedb -v ${CARGO_REGISTRY_CACHE}:/root/.cargo/registry \
-	-w /greptimedb ${IMAGE_REGISTRY}/${IMAGE_NAMESPACE}/dev-builder:latest \
-	make build CARGO_PROFILE=${CARGO_PROFILE} FEATURES=${FEATURES} TARGET_DIR=${TARGET_DIR}
-else
+build: ## Build debug version greptime.
 	cargo build ${CARGO_BUILD_OPTS}
-endif
 
-.PHONY: release
-release:  ## Build release version greptime. If USE_DEV_BUILDER is true, the binary will be built in dev-builder.
-ifeq ($(USE_DEV_BUILDER), true)
+.POHNY: build-by-dev-builder
+build-by-dev-builder: ## Build greptime by dev-builder.
 	docker run --network=host \
 	-v ${PWD}:/greptimedb -v ${CARGO_REGISTRY_CACHE}:/root/.cargo/registry \
-	-w /greptimedb ${IMAGE_REGISTRY}/${IMAGE_NAMESPACE}/dev-builder:latest \
-	make release CARGO_PROFILE=${CARGO_PROFILE} FEATURES=${FEATURES} TARGET_DIR=${TARGET_DIR}
-else
-	cargo build --release ${CARGO_BUILD_OPTS}
-endif
+	-w /greptimedb ${IMAGE_REGISTRY}/${IMAGE_NAMESPACE}/dev-builder-${BASE_IMAGE}:latest \
+	make build \
+	CARGO_PROFILE=${CARGO_PROFILE} \
+	FEATURES=${FEATURES} \
+	TARGET_DIR=${TARGET_DIR} \
+	TARGET=${TARGET} \
+	RELEASE=${RELEASE}
 
 .PHONY: clean
 clean: ## Clean the project.
@@ -91,28 +90,25 @@ check-toml: ## Check all TOML files.
 	taplo format --check
 
 .PHONY: docker-image
-docker-image: multi-platform-buildx ## Build docker image.
-	docker buildx build --builder ${BUILDX_BUILDER_NAME} \
-	  --build-arg="CARGO_PROFILE=${CARGO_PROFILE}" --build-arg="FEATURES=${FEATURES}" \
-	  -f docker/${BASE_IMAGE}/Dockerfile \
-	  -t ${IMAGE_REGISTRY}/${IMAGE_NAMESPACE}/greptimedb:${IMAGE_TAG} ${BUILDX_MULTI_PLATFORM_BUILD_OPTS} .
+docker-image: build-by-dev-builder ## Build docker image.
+	mkdir -p ${ARCH} && \
+	cp ./target/${OUTPUT_DIR}/greptime ${ARCH}/greptimedb && \
+	docker build -f docker/ci/${BASE_IMAGE}/Dockerfile -t ${IMAGE_REGISTRY}/${IMAGE_NAMESPACE}/greptimedb:${IMAGE_TAG} . && \
+	rm -r ${ARCH}
 
-.PHONY: build-greptime-by-buildx
-build-greptime-by-buildx: multi-platform-buildx ## Build greptime binary by docker buildx. The binary will be copied to the current directory.
+.PHONY: docker-image-buildx
+docker-image-buildx: multi-platform-buildx ## Build docker image by buildx.
 	docker buildx build --builder ${BUILDX_BUILDER_NAME} \
-	  --target=builder \
 	  --build-arg="CARGO_PROFILE=${CARGO_PROFILE}" --build-arg="FEATURES=${FEATURES}" \
-	  -f docker/${BASE_IMAGE}/Dockerfile \
-	  --output type=local,dest=${IMAGE_OUTPUT_DIR} . && \
-	cp ${IMAGE_OUTPUT_DIR}/out/target/${CARGO_PROFILE}/greptime . && \
-	rm -rf ${IMAGE_OUTPUT_DIR}
+	  -f docker/buildx/${BASE_IMAGE}/Dockerfile \
+	  -t ${IMAGE_REGISTRY}/${IMAGE_NAMESPACE}/greptimedb:${IMAGE_TAG} ${BUILDX_MULTI_PLATFORM_BUILD_OPTS} .
 
 .PHONY: dev-builder
 dev-builder: multi-platform-buildx ## Build dev-builder image.
 	docker buildx build --builder ${BUILDX_BUILDER_NAME} \
 	--build-arg="RUST_TOOLCHAIN=${RUST_TOOLCHAIN}" \
-	-f docker/dev-builder/Dockerfile \
-	-t ${IMAGE_REGISTRY}/${IMAGE_NAMESPACE}/dev-builder:${IMAGE_TAG} ${BUILDX_MULTI_PLATFORM_BUILD_OPTS} .
+	-f docker/dev-builder/${BASE_IMAGE}/Dockerfile \
+	-t ${IMAGE_REGISTRY}/${IMAGE_NAMESPACE}/dev-builder-${BASE_IMAGE}:${IMAGE_TAG} ${BUILDX_MULTI_PLATFORM_BUILD_OPTS} .
 
 .PHONY: multi-platform-buildx
 multi-platform-buildx: ## Create buildx multi-platform builder.
@@ -154,7 +150,7 @@ stop-etcd: ## Stop single node etcd for testing purpose.
 run-it-in-container: start-etcd ## Run integration tests in dev-builder.
 	docker run --network=host \
 	-v ${PWD}:/greptimedb -v ${CARGO_REGISTRY_CACHE}:/root/.cargo/registry -v /tmp:/tmp \
-	-w /greptimedb ${IMAGE_REGISTRY}/${IMAGE_NAMESPACE}/dev-builder:latest \
+	-w /greptimedb ${IMAGE_REGISTRY}/${IMAGE_NAMESPACE}/dev-builder-${BASE_IMAGE}:latest \
 	make test sqlness-test BUILD_JOBS=${BUILD_JOBS}
 
 ##@ General
