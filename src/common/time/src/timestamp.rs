@@ -158,7 +158,7 @@ impl Timestamp {
 
     /// Split a [Timestamp] into seconds part and nanoseconds part.
     /// Notice the seconds part of split result is always rounded down to floor.
-    pub fn split(&self) -> (i64, u32) {
+    fn split(&self) -> (i64, u32) {
         let sec_mul = (TimeUnit::Second.factor() / self.unit.factor()) as i64;
         let nsec_mul = (self.unit.factor() / TimeUnit::Nanosecond.factor()) as i64;
 
@@ -167,28 +167,6 @@ impl Timestamp {
         // safety:  the max possible value of `sec_mod` is 999,999,999
         let nsec = u32::try_from(sec_mod * nsec_mul).unwrap();
         (sec_div, nsec)
-    }
-
-    /// Creates a new Timestamp instance from seconds and nanoseconds parts.
-    /// Returns None if overflow.
-    pub fn from_splits(sec: i64, nsec: u32) -> Option<Self> {
-        if nsec == 0 {
-            Some(Timestamp::new_second(sec))
-        } else if nsec % 1_000_000 == 0 {
-            let millis = nsec / 1_000_000;
-            sec.checked_mul(1000)
-                .and_then(|v| v.checked_add(millis as i64))
-                .map(Timestamp::new_millisecond)
-        } else if nsec % 1000 == 0 {
-            let micros = nsec / 1000;
-            sec.checked_mul(1_000_000)
-                .and_then(|v| v.checked_add(micros as i64))
-                .map(Timestamp::new_microsecond)
-        } else {
-            sec.checked_mul(1_000_000_000)
-                .and_then(|v| v.checked_add(nsec as i64))
-                .map(Timestamp::new_nanosecond)
-        }
     }
 
     /// Format timestamp to ISO8601 string. If the timestamp exceeds what chrono timestamp can
@@ -1070,33 +1048,5 @@ mod tests {
             TimeUnit::Nanosecond,
             TimeUnit::from(ArrowTimeUnit::Nanosecond)
         );
-    }
-
-    fn check_split_and_unsplit(t: Timestamp) {
-        let (sec, nsec) = t.split();
-        assert_eq!(Timestamp::from_splits(sec, nsec), Some(t));
-    }
-
-    #[test]
-    fn test_split_and_unsplit() {
-        check_split_and_unsplit(Timestamp::new(i64::MIN, TimeUnit::Second));
-        check_split_and_unsplit(Timestamp::new(i64::MAX, TimeUnit::Second));
-        let (sec, nsec) = Timestamp::new_millisecond(i64::MIN).split();
-        assert!(Timestamp::from_splits(sec, nsec).is_none());
-        check_split_and_unsplit(Timestamp::new(-9223372036854775000, TimeUnit::Millisecond));
-        check_split_and_unsplit(Timestamp::new(0, TimeUnit::Millisecond));
-        check_split_and_unsplit(Timestamp::new(i64::MAX, TimeUnit::Millisecond));
-
-        let (sec, nsec) = Timestamp::new_microsecond(i64::MIN).split();
-        assert!(Timestamp::from_splits(sec, nsec).is_none());
-        check_split_and_unsplit(Timestamp::new(-9223372036854775000, TimeUnit::Microsecond));
-        check_split_and_unsplit(Timestamp::new(0, TimeUnit::Microsecond));
-        check_split_and_unsplit(Timestamp::new(i64::MAX, TimeUnit::Microsecond));
-
-        let (sec, nsec) = Timestamp::new_nanosecond(i64::MIN).split();
-        assert!(Timestamp::from_splits(sec, nsec).is_none());
-        check_split_and_unsplit(Timestamp::new(-9223372036854775000, TimeUnit::Nanosecond));
-        check_split_and_unsplit(Timestamp::new(0, TimeUnit::Nanosecond));
-        check_split_and_unsplit(Timestamp::new(i64::MAX, TimeUnit::Nanosecond));
     }
 }

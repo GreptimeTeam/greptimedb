@@ -15,7 +15,7 @@
 use bytes::Buf;
 use common_base::bytes::Bytes;
 use common_time::time::Time;
-use common_time::{Date, Interval, Timestamp};
+use common_time::{Date, Interval};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::Value;
 use datatypes::value::ValueRef;
@@ -26,18 +26,19 @@ use snafu::{ensure, ResultExt};
 
 use crate::error;
 use crate::error::{
-    FieldTypeMismatchSnafu, NotSupportedFieldSnafu, RowLengthMismatchSnafu, SerializeFieldSnafu,
+    FieldTypeMismatchSnafu, NotSupportedFieldSnafu, Result, RowLengthMismatchSnafu,
+    SerializeFieldSnafu,
 };
 
 /// Row value encoder/decoder.
 pub trait RowCodec {
     /// Encodes rows to bytes.
-    fn encode<'a, I>(&self, rows: I) -> error::Result<Vec<u8>>
+    fn encode<'a, I>(&self, rows: I) -> Result<Vec<u8>>
     where
         I: Iterator<Item = &'a [ValueRef<'a>]>;
 
     /// Decode row values from bytes.
-    fn decode(&self, bytes: &[u8]) -> error::Result<Vec<Vec<Value>>>;
+    fn decode(&self, bytes: &[u8]) -> Result<Vec<Vec<Value>>>;
 }
 
 pub struct SortField {
@@ -73,11 +74,7 @@ impl SortField {
 }
 
 impl SortField {
-    fn serialize(
-        &self,
-        serializer: &mut Serializer<&mut Vec<u8>>,
-        value: &ValueRef,
-    ) -> error::Result<()> {
+    fn serialize(&self, serializer: &mut Serializer<&mut Vec<u8>>, value: &ValueRef) -> Result<()> {
         macro_rules! cast_value_and_serialize {
             (
                 $self: ident;
@@ -100,7 +97,8 @@ impl SortField {
                 )*
                     ConcreteDataType::Timestamp(_) => {
                         let timestamp = value.as_timestamp().context(FieldTypeMismatchSnafu)?;
-                        timestamp.map(MemComparableTimestamp::from)
+                        timestamp
+                            .map(|t|t.value())
                             .serialize($serializer)
                             .context(SerializeFieldSnafu)?;
                     }
@@ -137,7 +135,7 @@ impl SortField {
         Ok(())
     }
 
-    fn deserialize<B: Buf>(&self, deserializer: &mut Deserializer<B>) -> error::Result<Value> {
+    fn deserialize<B: Buf>(&self, deserializer: &mut Deserializer<B>) -> Result<Value> {
         use common_time::DateTime;
         macro_rules! deserialize_and_build_value {
             (
@@ -159,11 +157,10 @@ impl SortField {
                             .context(error::DeserializeFieldSnafu)?
                             .map(Bytes::from),
                     )),
-                    ConcreteDataType::Timestamp(_) => {
-                        let timestamp = Option::<MemComparableTimestamp>::deserialize(deserializer)
+                    ConcreteDataType::Timestamp(ty) => {
+                        let timestamp = Option::<i64>::deserialize(deserializer)
                             .context(error::DeserializeFieldSnafu)?
-                            .map(Timestamp::try_from)
-                            .transpose()?;
+                            .map(|t|ty.create_timestamp(t));
                         Ok(Value::from(timestamp))
                     }
                     ConcreteDataType::List(l) => NotSupportedFieldSnafu {
@@ -202,32 +199,6 @@ impl SortField {
     }
 }
 
-/// A memory-comparable representation for [Timestamp] that is used for
-/// serialization/deserialization.
-#[derive(Debug, Serialize, Deserialize)]
-struct MemComparableTimestamp {
-    sec: i64,
-    nsec: u32,
-}
-
-impl From<Timestamp> for MemComparableTimestamp {
-    fn from(value: Timestamp) -> Self {
-        let (sec, nsec) = value.split();
-        Self { sec, nsec }
-    }
-}
-
-impl TryFrom<MemComparableTimestamp> for Timestamp {
-    type Error = error::Error;
-
-    fn try_from(
-        MemComparableTimestamp { sec, nsec }: MemComparableTimestamp,
-    ) -> Result<Self, Self::Error> {
-        Timestamp::from_splits(sec, nsec)
-            .ok_or(error::DeserializeTimestampSnafu { sec, nsec }.build())
-    }
-}
-
 /// A memory-comparable row [Value] encoder/decoder.
 pub struct McmpRowCodec {
     fields: Vec<SortField>,
@@ -245,7 +216,7 @@ impl McmpRowCodec {
 }
 
 impl RowCodec for McmpRowCodec {
-    fn encode<'a, I>(&self, rows: I) -> error::Result<Vec<u8>>
+    fn encode<'a, I>(&self, rows: I) -> Result<Vec<u8>>
     where
         I: Iterator<Item = &'a [ValueRef<'a>]>,
     {
@@ -268,7 +239,7 @@ impl RowCodec for McmpRowCodec {
         Ok(bytes)
     }
 
-    fn decode(&self, bytes: &[u8]) -> error::Result<Vec<Vec<Value>>> {
+    fn decode(&self, bytes: &[u8]) -> Result<Vec<Vec<Value>>> {
         let mut deserializer = memcomparable::Deserializer::new(bytes);
         let mut res = vec![];
         while deserializer.has_remaining() {
@@ -286,6 +257,7 @@ impl RowCodec for McmpRowCodec {
 #[cfg(test)]
 mod tests {
     use common_base::bytes::StringBytes;
+    use common_time::Timestamp;
     use datatypes::value::Value;
 
     use super::*;
