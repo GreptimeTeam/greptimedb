@@ -26,8 +26,8 @@ use crate::error::{
 };
 use crate::metadata::{ColumnMetadata, RegionMetadata};
 
-/// Compatibility adapter for data with different schema.
-pub struct SchemaCompat {
+/// Compatibility adapter for record batch with different schema.
+pub struct CompatRecordBatch {
     /// Default vectors for padding.
     // TODO(yingwen): If we know the batch size, we can create a default vector
     // with that size first and reuse it.
@@ -36,9 +36,9 @@ pub struct SchemaCompat {
     fields_to_add: Vec<FieldRef>,
 }
 
-impl SchemaCompat {
-    /// Creates a [SchemaCompat] to adapts record batches from files with `old_meta`.
-    fn new(old_meta: &RegionMetadata, columns_to_read: &[ColumnMetadata]) -> Result<SchemaCompat> {
+impl CompatRecordBatch {
+    /// Creates a [CompatRecordBatch] to adapts record batches from files with `old_meta`.
+    fn new(old_meta: &RegionMetadata, columns_to_read: &[ColumnMetadata]) -> Result<CompatRecordBatch> {
         let mut default_vectors = Vec::with_capacity(columns_to_read.len());
         let mut fields_to_add = Vec::new();
         for column in columns_to_read {
@@ -66,12 +66,13 @@ impl SchemaCompat {
             }
         }
 
-        Ok(SchemaCompat {
+        Ok(CompatRecordBatch {
             default_vectors,
             fields_to_add,
         })
     }
 
+    // FIXME(yingwen): Maybe compat Batch instead of RecordBatch.
     /// Compat record batch.
     ///
     /// The `record_batch` must be read by the `old_meta`

@@ -84,6 +84,12 @@ pub(crate) fn to_sst_projection_indices(
         .collect()
 }
 
+// FIXME(yingwen): Need to split by time series.
+/// Convert the arrow record batch to a [Batch].
+pub(crate) fn from_sst_record_batch(metadata: &RegionMetadata, record_batch: &RecordBatch) -> Batch {
+    unimplemented!()
+}
+
 /// Returns the field type to store this column.
 fn to_sst_field(column_meta: &ColumnMetadata, field: &FieldRef) -> FieldRef {
     // If the column is a tag column and it has string type, store
