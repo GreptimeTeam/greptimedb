@@ -24,6 +24,12 @@ use table::metadata::TableId;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
+    #[snafu(display("Failed to decode protobuf, source: {}", source))]
+    DecodeProto {
+        location: Location,
+        source: prost::DecodeError,
+    },
+
     #[snafu(display("Failed to encode object into json, source: {}", source))]
     EncodeJson {
         location: Location,
@@ -164,7 +170,8 @@ impl ErrorExt for Error {
             EncodeJson { .. }
             | DecodeJson { .. }
             | PayloadNotExist { .. }
-            | ConvertRawKey { .. } => StatusCode::Unexpected,
+            | ConvertRawKey { .. }
+            | DecodeProto { .. } => StatusCode::Unexpected,
 
             MetaSrv { source, .. } => source.status_code(),
 

@@ -53,7 +53,9 @@ pub mod schema_name;
 pub mod table_info;
 pub mod table_name;
 pub mod table_region;
-mod table_route;
+// TODO(weny): removes it.
+#[allow(unused)]
+pub mod table_route;
 
 use std::sync::Arc;
 
@@ -67,6 +69,7 @@ use table_region::{TableRegionKey, TableRegionManager, TableRegionValue};
 
 use self::catalog_name::{CatalogManager, CatalogNameValue};
 use self::schema_name::{SchemaManager, SchemaNameValue};
+use self::table_route::TableRouteValue;
 use crate::error::{InvalidTableMetadataSnafu, Result, SerdeJsonSnafu};
 pub use crate::key::table_route::{TableRouteKey, TABLE_ROUTE_PREFIX};
 use crate::kv_backend::KvBackendRef;
@@ -212,7 +215,8 @@ impl_table_meta_value! {
     TableNameValue,
     TableInfoValue,
     TableRegionValue,
-    DatanodeTableValue
+    DatanodeTableValue,
+    TableRouteValue
 }
 
 #[cfg(test)]

@@ -612,9 +612,9 @@ impl TryFrom<PbCompareAndPutResponse> for CompareAndPutResponse {
 }
 
 impl CompareAndPutResponse {
-    pub fn handle<R, E, F>(&self, f: F) -> std::result::Result<R, E>
+    pub fn handle<R, E, F>(self, f: F) -> std::result::Result<R, E>
     where
-        F: FnOnce(&Self) -> std::result::Result<R, E>,
+        F: FnOnce(Self) -> std::result::Result<R, E>,
     {
         f(self)
     }
