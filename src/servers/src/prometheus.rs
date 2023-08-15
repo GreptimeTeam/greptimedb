@@ -44,8 +44,7 @@ use session::context::{QueryContext, QueryContextRef};
 use snafu::{Location, OptionExt, ResultExt};
 
 use crate::error::{
-    CollectRecordbatchSnafu, Error, InternalSnafu, InvalidQuerySnafu, Result,
-    UnexpectedResultSnafu,
+    CollectRecordbatchSnafu, Error, InternalSnafu, InvalidQuerySnafu, Result, UnexpectedResultSnafu,
 };
 use crate::prom_store::{FIELD_COLUMN_NAME, METRIC_NAME_LABEL, TIMESTAMP_COLUMN_NAME};
 

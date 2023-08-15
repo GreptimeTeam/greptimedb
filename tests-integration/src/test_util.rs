@@ -543,6 +543,7 @@ pub async fn setup_test_prom_app_with_frontend(
         .with_grpc_handler(ServerGrpcQueryHandlerAdaptor::arc(frontend_ref.clone()))
         .with_script_handler(frontend_ref.clone())
         .with_prom_handler(frontend_ref.clone())
+        .with_prometheus_handler(frontend_ref.clone())
         .with_greptime_config_options(opts.to_toml_string())
         .build();
     let app = http_server.build(http_server.make_app());
