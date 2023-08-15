@@ -343,7 +343,9 @@ pub async fn test_prom_http_api(store_type: StorageType) {
     let client = TestClient::new(app);
 
     // instant query
-    let res = client.get("/v1/prometheus/query?query=up&time=1").send().await;
+    let res = client
+        .get("/v1/prometheus/query?query=up&time=1")
+        .send().await;
     assert_eq!(res.status(), StatusCode::OK);
     let res = client
         .post("/v1/prometheus/query?query=up&time=1")
@@ -366,7 +368,10 @@ pub async fn test_prom_http_api(store_type: StorageType) {
     assert_eq!(res.status(), StatusCode::OK);
 
     // labels
-    let res = client.get("/v1/prometheus/labels?match[]=demo").send().await;
+    let res = client
+        .get("/v1/prometheus/labels?match[]=demo")
+        .send()
+        .await;
     assert_eq!(res.status(), StatusCode::OK);
     let res = client
         .post("/v1/prometheus/labels?match[]=up")
@@ -440,7 +445,10 @@ pub async fn test_prom_http_api(store_type: StorageType) {
 
     // label values
     // should return error if there is no match[]
-    let res = client.get("/v1/prometheus/label/instance/values").send().await;
+    let res = client
+        .get("/v1/prometheus/label/instance/values")
+        .send()
+        .await;
     assert_eq!(res.status(), StatusCode::OK);
     let prom_resp = res.json::<PrometheusJsonResponse>().await;
     assert_eq!(prom_resp.status, "error");
@@ -472,7 +480,10 @@ pub async fn test_prom_http_api(store_type: StorageType) {
     assert!(prom_resp.error_type.is_none());
 
     // query `__name__` without match[]
-    let res = client.get("/v1/prometheus/label/__name__/values").send().await;
+    let res = client
+        .get("/v1/prometheus/label/__name__/values")
+        .send()
+        .await;
     assert_eq!(res.status(), StatusCode::OK);
     let prom_resp = res.json::<PrometheusJsonResponse>().await;
     assert_eq!(prom_resp.status, "success");
