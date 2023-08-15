@@ -94,15 +94,20 @@ pub(crate) fn to_sst_record_batch(batch: &Batch, arrow_schema: &SchemaRef) -> Re
 
 /// Gets projection indices to read `columns` from parquet files.
 ///
+/// The `arrow_schema` is the schema of the parquet file.
 /// This function ignores columns not in `metadata` to for compatibility between
 /// different schemas.
 pub(crate) fn to_sst_projection_indices(
     metadata: &RegionMetadata,
+    arrow_schema: &SchemaRef,
     columns: impl IntoIterator<Item = ColumnId>,
 ) -> Vec<usize> {
     columns
         .into_iter()
-        .filter_map(|column_id| metadata.column_index_by_id(column_id))
+        .filter_map(|column_id| {
+            let column = metadata.column_by_id(column_id)?;
+            arrow_schema.index_of(&column.column_schema.name).ok()
+        })
         .collect()
 }
 

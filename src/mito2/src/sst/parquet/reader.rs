@@ -172,7 +172,11 @@ impl ParquetReader {
 
         let parquet_schema_desc = builder.metadata().file_metadata().schema_descr();
         if let Some(column_ids) = self.projection.as_ref() {
-            let indices = to_sst_projection_indices(&region_meta, column_ids.iter().copied());
+            let indices = to_sst_projection_indices(
+                &region_meta,
+                builder.schema(),
+                column_ids.iter().copied(),
+            );
             let projection_mask = ProjectionMask::roots(parquet_schema_desc, indices);
             builder = builder.with_projection(projection_mask);
         }
