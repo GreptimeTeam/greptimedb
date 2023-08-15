@@ -51,13 +51,6 @@ impl<S> RegionWorkerLoop<S> {
         builder.primary_key(request.primary_key);
         let metadata = builder.build()?;
 
-        // TODO(yingwen): Is it necessary to put this in the request option?
-        let region_dir = request
-            .options
-            .get("region_dir")
-            .cloned()
-            .unwrap_or_default();
-
         // Create a MitoRegion from the RegionMetadata.
         let region = RegionOpener::new(
             region_id,
@@ -65,7 +58,7 @@ impl<S> RegionWorkerLoop<S> {
             self.object_store.clone(),
         )
         .metadata(metadata)
-        .region_dir(&region_dir)
+        .region_dir(&request.region_dir)
         .create(&self.config)
         .await?;
 

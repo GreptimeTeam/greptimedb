@@ -63,13 +63,12 @@ pub struct RegionCreateRequest {
     pub create_if_not_exists: bool,
     /// Options of the created region.
     pub options: HashMap<String, String>,
+    /// Directory for region's data home. Usually is composed by catalog and table id
+    pub region_dir: String,
 }
 
 #[derive(Debug)]
-pub struct RegionDropRequest {
-    /// Region engine name
-    pub engine: String,
-}
+pub struct RegionDropRequest {}
 
 /// Open region request.
 #[derive(Debug)]
