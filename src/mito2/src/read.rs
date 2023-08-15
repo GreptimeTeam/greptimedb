@@ -22,7 +22,7 @@ use async_trait::async_trait;
 use common_time::Timestamp;
 use datatypes::vectors::{UInt64Vector, UInt8Vector, Vector, VectorRef};
 use snafu::ensure;
-use store_api::storage::{ColumnId, Tsid};
+use store_api::storage::ColumnId;
 
 use crate::error::{InvalidBatchSnafu, Result};
 use crate::metadata::RegionMetadataRef;

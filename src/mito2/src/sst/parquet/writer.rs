@@ -15,16 +15,14 @@
 //! Parquet writer.
 
 use common_telemetry::debug;
-use datatypes::arrow::record_batch::RecordBatch;
 use object_store::ObjectStore;
 use parquet::basic::{Compression, Encoding, ZstdLevel};
 use parquet::file::metadata::KeyValue;
 use parquet::file::properties::WriterProperties;
 use parquet::schema::types::ColumnPath;
-use snafu::ResultExt;
 use store_api::storage::consts::SEQUENCE_COLUMN_NAME;
 
-use crate::error::{NewRecordBatchSnafu, Result};
+use crate::error::Result;
 use crate::read::Source;
 use crate::sst::parquet::format::{to_sst_arrow_schema, to_sst_record_batch};
 use crate::sst::parquet::{SstInfo, WriteOptions, PARQUET_METADATA_KEY};

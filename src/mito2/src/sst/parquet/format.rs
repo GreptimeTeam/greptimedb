@@ -35,7 +35,7 @@ use snafu::ResultExt;
 use store_api::storage::consts::{
     OP_TYPE_COLUMN_NAME, PRIMARY_KEY_COLUMN_NAME, SEQUENCE_COLUMN_NAME,
 };
-use store_api::storage::{ColumnId, Tsid};
+use store_api::storage::ColumnId;
 
 use crate::error::{NewRecordBatchSnafu, Result};
 use crate::metadata::RegionMetadata;
@@ -103,12 +103,12 @@ pub(crate) fn to_sst_projection_indices(
         .collect()
 }
 
-// FIXME(yingwen): Need to split by time series.
-/// Convert the arrow record batch to a [Batch].
+/// Convert a arrow record batch into `batches`.
 pub(crate) fn from_sst_record_batch(
     metadata: &RegionMetadata,
     record_batch: &RecordBatch,
-) -> Batch {
+    batches: &mut Vec<Batch>,
+) -> Result<()> {
     unimplemented!()
 }
 

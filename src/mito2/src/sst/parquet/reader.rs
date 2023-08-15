@@ -155,6 +155,8 @@ impl ParquetReader {
 
         // Prune row groups by metadata.
         if let Some(predicate) = &self.predicate {
+            // TODO(yingwen): Now we encode tags into the full primary key so we need some approach
+            // to implement pruning.
             let pruned_row_groups = predicate
                 .prune_row_groups(builder.metadata().row_groups())
                 .into_iter()
