@@ -14,14 +14,11 @@
 
 //! prom supply the prometheus HTTP API Server compliance
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::net::SocketAddr;
 use std::sync::Arc;
 
-use ::auth::UserProviderRef;
 use async_trait::async_trait;
-use axum::body::BoxBody;
 use axum::extract::{Path, Query, State};
-use axum::{middleware, routing, Form, Json, Router};
+use axum::{Form, Json};
 use catalog::CatalogManagerRef;
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use common_catalog::parse_catalog_and_schema_from_db_string;
@@ -29,12 +26,11 @@ use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
-use common_telemetry::{info, timer};
+use common_telemetry::timer;
 use common_time::util::{current_time_rfc3339, yesterday_rfc3339};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::scalars::ScalarVector;
 use datatypes::vectors::{Float64Vector, StringVector, TimestampMillisecondVector};
-use futures::FutureExt;
 use promql_parser::label::METRIC_NAME;
 use promql_parser::parser::{
     AggregateExpr, BinaryExpr, Call, Expr as PromqlExpr, MatrixSelector, ParenExpr, SubqueryExpr,
@@ -45,22 +41,13 @@ use schemars::JsonSchema;
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use session::context::{QueryContext, QueryContextRef};
-use snafu::{ensure, Location, OptionExt, ResultExt};
-use tokio::sync::oneshot::Sender;
-use tokio::sync::{oneshot, Mutex};
-use tower::ServiceBuilder;
-use tower_http::auth::AsyncRequireAuthorizationLayer;
-use tower_http::compression::CompressionLayer;
-use tower_http::trace::TraceLayer;
+use snafu::{Location, OptionExt, ResultExt};
 
 use crate::error::{
-    AlreadyStartedSnafu, CollectRecordbatchSnafu, Error, InternalSnafu, InvalidQuerySnafu, Result,
-    StartHttpSnafu, UnexpectedResultSnafu,
+    CollectRecordbatchSnafu, Error, InternalSnafu, InvalidQuerySnafu, Result,
+    UnexpectedResultSnafu,
 };
-use crate::http::authorize::HttpAuth;
-use crate::http::track_metrics;
 use crate::prom_store::{FIELD_COLUMN_NAME, METRIC_NAME_LABEL, TIMESTAMP_COLUMN_NAME};
-use crate::server::Server;
 
 pub const PROMETHEUS_API_VERSION: &str = "v1";
 
@@ -71,28 +58,6 @@ pub trait PrometheusHandler {
     async fn do_query(&self, query: &PromQuery, query_ctx: QueryContextRef) -> Result<Output>;
 
     fn catalog_manager(&self) -> CatalogManagerRef;
-}
-
-/// PromServer represents PrometheusServer which handles the compliance with prometheus HTTP API
-pub struct PrometheusServer {
-    query_handler: PrometheusHandlerRef,
-    shutdown_tx: Mutex<Option<Sender<()>>>,
-    user_provider: Option<UserProviderRef>,
-}
-
-impl PrometheusServer {
-    pub fn create_server(query_handler: PrometheusHandlerRef) -> Box<Self> {
-        Box::new(PrometheusServer {
-            query_handler,
-            shutdown_tx: Mutex::new(None),
-            user_provider: None,
-        })
-    }
-
-    pub fn set_user_provider(&mut self, user_provider: UserProviderRef) {
-        debug_assert!(self.user_provider.is_none());
-        self.user_provider = Some(user_provider);
-    }
 }
 
 pub const PROMETHEUS_SERVER: &str = "PROMETHEUS_SERVER";
