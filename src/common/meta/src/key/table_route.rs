@@ -106,7 +106,7 @@ impl TableRouteManager {
         Ok(())
     }
 
-    /// Builds a delete table info transaction, it expected the remote value equals the `current_table_info_value`.
+    /// Builds a update table route transaction, it expected the remote value equals the `current_table_route_value`.
     pub(crate) fn build_update_txn(
         &self,
         txn: &mut TxnRequest,
@@ -131,7 +131,7 @@ impl TableRouteManager {
         Ok(())
     }
 
-    /// Builds a delete table info transaction, it expected the remote value equals the `table_info_value`.
+    /// Builds a delete table route transaction, it expected the remote value equals the `table_route_value`.
     pub(crate) fn build_delete_txn(
         &self,
         txn: &mut TxnRequest,
