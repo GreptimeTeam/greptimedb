@@ -260,6 +260,7 @@ mod tests {
     use datatypes::arrow::datatypes::TimeUnit;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
+    use datatypes::vectors::{Int64Vector, TimestampMillisecondVector, UInt64Vector, UInt8Vector};
     use store_api::metadata::ColumnMetadata;
     use store_api::storage::RegionId;
 
@@ -276,12 +277,12 @@ mod tests {
             })
             .push_column_metadata(ColumnMetadata {
                 column_schema: ColumnSchema::new(
-                    "field0",
+                    "field1",
                     ConcreteDataType::int64_datatype(),
                     true,
                 ),
                 semantic_type: SemanticType::Field,
-                column_id: 2,
+                column_id: 4, // We change the order of fields columns.
             })
             .push_column_metadata(ColumnMetadata {
                 column_schema: ColumnSchema::new("tag1", ConcreteDataType::int64_datatype(), true),
@@ -290,12 +291,12 @@ mod tests {
             })
             .push_column_metadata(ColumnMetadata {
                 column_schema: ColumnSchema::new(
-                    "field1",
+                    "field0",
                     ConcreteDataType::int64_datatype(),
                     true,
                 ),
                 semantic_type: SemanticType::Field,
-                column_id: 4,
+                column_id: 2,
             })
             .push_column_metadata(ColumnMetadata {
                 column_schema: ColumnSchema::new(
@@ -312,8 +313,8 @@ mod tests {
 
     fn build_test_arrow_schema() -> SchemaRef {
         let fields = vec![
-            Field::new("field0", DataType::Int64, true),
             Field::new("field1", DataType::Int64, true),
+            Field::new("field0", DataType::Int64, true),
             Field::new(
                 "ts",
                 DataType::Timestamp(TimeUnit::Millisecond, None),
@@ -328,6 +329,28 @@ mod tests {
             Field::new("__op_type", DataType::UInt8, false),
         ];
         Arc::new(Schema::new(fields))
+    }
+
+    fn new_batch(primary_key: &[u8], start_ts: i64, start_field: i64, num_rows: usize) -> Batch {
+        let ts_values = (0..num_rows).into_iter().map(|i| start_ts + i as i64);
+        let timestamps = Arc::new(TimestampMillisecondVector::from_values(ts_values));
+        let sequences = Arc::new(UInt64Vector::from_vec(vec![1; num_rows]));
+        let op_types = Arc::new(UInt8Vector::from_vec(vec![0; num_rows]));
+        let fields = vec![
+            BatchColumn {
+                column_id: 2,
+                data: Arc::new(Int64Vector::from_vec(vec![start_field; num_rows])),
+            },
+            BatchColumn {
+                column_id: 4,
+                data: Arc::new(Int64Vector::from_vec(vec![start_field + 1; num_rows])),
+            },
+        ];
+
+        BatchBuilder::with_required_columns(primary_key.to_vec(), timestamps, sequences, op_types)
+            .with_fields(fields)
+            .build()
+            .unwrap()
     }
 
     #[test]

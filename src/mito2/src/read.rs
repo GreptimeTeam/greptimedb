@@ -216,7 +216,7 @@ impl BatchBuilder {
     }
 
     /// Builds the [Batch].
-    pub fn build(mut self) -> Result<Batch> {
+    pub fn build(self) -> Result<Batch> {
         let timestamps = self.timestamps.context(InvalidBatchSnafu {
             reason: "missing timestamps",
         })?;
