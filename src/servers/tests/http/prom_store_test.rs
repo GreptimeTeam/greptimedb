@@ -154,7 +154,7 @@ async fn test_prometheus_remote_write_read() {
 
     // Write to public database
     let result = client
-        .post("/v1/prometheus/write")
+        .post("/v1/prom_store/write")
         .body(snappy_compress(&write_request.clone().encode_to_vec()[..]).unwrap())
         .send()
         .await;
@@ -162,7 +162,7 @@ async fn test_prometheus_remote_write_read() {
     assert!(result.text().await.is_empty());
     // Write to prometheus database
     let result = client
-        .post("/v1/prometheus/write?db=prometheus")
+        .post("/v1/prom_store/write?db=prometheus")
         .body(snappy_compress(&write_request.clone().encode_to_vec()[..]).unwrap())
         .send()
         .await;
@@ -185,7 +185,7 @@ async fn test_prometheus_remote_write_read() {
 
     // Read from prometheus database
     let mut result = client
-        .post("/v1/prometheus/read?db=prometheus")
+        .post("/v1/prom_store/read?db=prometheus")
         .body(snappy_compress(&read_request.clone().encode_to_vec()[..]).unwrap())
         .send()
         .await;
@@ -209,7 +209,7 @@ async fn test_prometheus_remote_write_read() {
 
     // Read from public database
     let result = client
-        .post("/v1/prometheus/read")
+        .post("/v1/prom_store/read")
         .body(snappy_compress(&read_request.clone().encode_to_vec()[..]).unwrap())
         .send()
         .await;

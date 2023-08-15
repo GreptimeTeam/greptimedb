@@ -89,87 +89,9 @@ impl PrometheusServer {
         debug_assert!(self.user_provider.is_none());
         self.user_provider = Some(user_provider);
     }
-
-    pub fn make_app(&self) -> Router {
-        // TODO(ruihang): implement format_query, series, values, query_exemplars and targets methods
-        // TODO(shawnh2): may finally remove this method
-
-        let router = Router::new()
-            .route("/query", routing::post(instant_query).get(instant_query))
-            .route("/query_range", routing::post(range_query).get(range_query))
-            .route("/labels", routing::post(labels_query).get(labels_query))
-            .route("/series", routing::post(series_query).get(series_query))
-            .route(
-                "/label/:label_name/values",
-                routing::get(label_values_query),
-            )
-            .with_state(self.query_handler.clone());
-
-        Router::new()
-            .nest(&format!("/api/{PROMETHEUS_API_VERSION}"), router)
-            // middlewares
-            .layer(
-                ServiceBuilder::new()
-                    .layer(TraceLayer::new_for_http())
-                    .layer(CompressionLayer::new())
-                    // custom layer
-                    .layer(AsyncRequireAuthorizationLayer::new(
-                        HttpAuth::<BoxBody>::new(self.user_provider.clone()),
-                    )),
-            )
-            // We need to register the metrics layer again since start a new http server
-            // for the PromServer.
-            .route_layer(middleware::from_fn(track_metrics))
-    }
 }
 
 pub const PROMETHEUS_SERVER: &str = "PROMETHEUS_SERVER";
-
-#[async_trait]
-impl Server for PrometheusServer {
-    async fn shutdown(&self) -> Result<()> {
-        let mut shutdown_tx = self.shutdown_tx.lock().await;
-        if let Some(tx) = shutdown_tx.take() {
-            if tx.send(()).is_err() {
-                info!("Receiver dropped, the Prometheus API server has already existed");
-            }
-        }
-        info!("Shutdown Prometheus API server");
-
-        Ok(())
-    }
-
-    async fn start(&self, listening: SocketAddr) -> Result<SocketAddr> {
-        let (tx, rx) = oneshot::channel();
-        let server = {
-            let mut shutdown_tx = self.shutdown_tx.lock().await;
-            ensure!(
-                shutdown_tx.is_none(),
-                AlreadyStartedSnafu {
-                    server: "Prometheus"
-                }
-            );
-
-            let app = self.make_app();
-            let server = axum::Server::bind(&listening).serve(app.into_make_service());
-
-            *shutdown_tx = Some(tx);
-
-            server
-        };
-        let listening = server.local_addr();
-        info!("Prometheus API server is bound to {}", listening);
-
-        let graceful = server.with_graceful_shutdown(rx.map(drop));
-        graceful.await.context(StartHttpSnafu)?;
-
-        Ok(listening)
-    }
-
-    fn name(&self) -> &str {
-        PROMETHEUS_SERVER
-    }
-}
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
 pub struct PromSeries {
