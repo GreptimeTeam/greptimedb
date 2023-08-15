@@ -61,9 +61,19 @@ impl Batch {
             .build()
     }
 
+    /// Returns primary key of the batch.
+    pub fn primary_key(&self) -> &[u8] {
+        &self.primary_key
+    }
+
     /// Returns fields in the batch.
     pub fn fields(&self) -> &[BatchColumn] {
         &self.fields
+    }
+
+    /// Returns timestamps of the batch.
+    pub fn timestamps(&self) -> &VectorRef {
+        &self.timestamps
     }
 
     /// Returns sequences of the batch.
