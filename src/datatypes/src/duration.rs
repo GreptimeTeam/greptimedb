@@ -139,4 +139,23 @@ mod tests {
         assert_eq!(d, d.as_scalar_ref());
         assert_eq!(d, d.to_owned_scalar());
     }
+
+    #[test]
+    fn test_duration_to_native_type() {
+        let duration = DurationSecond::new(456);
+        let native: i64 = duration.into_native();
+        assert_eq!(native, 456);
+
+        let duration = DurationMillisecond::new(456);
+        let native: i64 = duration.into_native();
+        assert_eq!(native, 456);
+
+        let duration = DurationMicrosecond::new(456);
+        let native: i64 = duration.into_native();
+        assert_eq!(native, 456);
+
+        let duration = DurationNanosecond::new(456);
+        let native: i64 = duration.into_native();
+        assert_eq!(native, 456);
+    }
 }

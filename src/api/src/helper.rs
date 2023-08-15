@@ -149,17 +149,17 @@ impl TryFrom<ConcreteDataType> for ColumnDataTypeWrapper {
                 IntervalType::DayTime(_) => ColumnDataType::IntervalDayTime,
                 IntervalType::MonthDayNano(_) => ColumnDataType::IntervalMonthDayNano,
             },
-            ConcreteDataType::Null(_)
-            | ConcreteDataType::List(_)
-            | ConcreteDataType::Dictionary(_) => {
-                return error::IntoColumnDataTypeSnafu { from: datatype }.fail()
-            }
             ConcreteDataType::Duration(d) => match d {
                 DurationType::Second(_) => ColumnDataType::DurationSecond,
                 DurationType::Millisecond(_) => ColumnDataType::DurationMillisecond,
                 DurationType::Microsecond(_) => ColumnDataType::DurationMicrosecond,
                 DurationType::Nanosecond(_) => ColumnDataType::DurationNanosecond,
             },
+            ConcreteDataType::Null(_)
+            | ConcreteDataType::List(_)
+            | ConcreteDataType::Dictionary(_) => {
+                return error::IntoColumnDataTypeSnafu { from: datatype }.fail()
+            }
         });
         Ok(datatype)
     }
@@ -837,6 +837,7 @@ pub fn to_column_data_type(data_type: &ConcreteDataType) -> Option<ColumnDataTyp
         ConcreteDataType::Time(TimeType::Microsecond(_)) => ColumnDataType::TimeMicrosecond,
         ConcreteDataType::Time(TimeType::Nanosecond(_)) => ColumnDataType::TimeNanosecond,
         ConcreteDataType::Null(_)
+        | ConcreteDataType::Duration(_)
         | ConcreteDataType::Interval(_)
         | ConcreteDataType::List(_)
         | ConcreteDataType::Dictionary(_) => return None,

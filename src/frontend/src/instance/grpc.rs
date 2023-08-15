@@ -49,7 +49,6 @@ impl GrpcQueryHandler for Instance {
             .context(PermissionSnafu)?;
 
         let output = match request {
-            Request::RowInserts(_) | Request::RowDelete(_) => unimplemented!(),
             Request::Inserts(requests) => self.handle_inserts(requests, ctx.clone()).await?,
             Request::RowInserts(requests) => self.handle_row_inserts(requests, ctx.clone()).await?,
             Request::Deletes(requests) => self.handle_deletes(requests, ctx.clone()).await?,

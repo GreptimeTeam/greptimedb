@@ -88,6 +88,7 @@ impl Duration {
         (sec_div, nsec)
     }
 
+    /// Convert to std::time::Duration.
     pub fn to_std_duration(self) -> std::time::Duration {
         self.into()
     }
