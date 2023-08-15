@@ -294,7 +294,7 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Failed to deserialize field, source: {} location: {}",
+        "Failed to deserialize field, source: {}, location: {}",
         source,
         location
     ))]
@@ -302,6 +302,9 @@ pub enum Error {
         source: memcomparable::Error,
         location: Location,
     },
+
+    #[snafu(display("Invalid batch, {}, location: {}", reason, location))]
+    InvalidBatch { reason: String, location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -351,6 +354,7 @@ impl ErrorExt for Error {
             SerializeField { .. } => StatusCode::Internal,
             NotSupportedField { .. } => StatusCode::Unsupported,
             DeserializeField { .. } => StatusCode::Unexpected,
+            InvalidBatch { .. } => StatusCode::InvalidArguments,
         }
     }
 
