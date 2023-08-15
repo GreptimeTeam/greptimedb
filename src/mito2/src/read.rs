@@ -20,11 +20,14 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use common_time::Timestamp;
-use datatypes::vectors::{UInt64Vector, UInt8Vector, Vector, VectorRef};
-use snafu::ensure;
+use datatypes::arrow::array::ArrayRef;
+use datatypes::arrow;
+use datatypes::prelude::DataType;
+use datatypes::vectors::{UInt64Vector, UInt8Vector, Vector, VectorRef, Helper};
+use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::ColumnId;
 
-use crate::error::{InvalidBatchSnafu, Result};
+use crate::error::{InvalidBatchSnafu, ConvertVectorSnafu, Result};
 use crate::metadata::RegionMetadataRef;
 
 /// Storage internal representation of a batch of rows
@@ -58,7 +61,7 @@ impl Batch {
         op_types: Arc<UInt8Vector>,
         fields: Vec<BatchColumn>,
     ) -> Result<Batch> {
-        BatchBuilder::new(primary_key, timestamps, sequences, op_types)
+        BatchBuilder::with_required_columns(primary_key, timestamps, sequences, op_types)
             .with_fields(fields)
             .build()
     }
@@ -113,15 +116,26 @@ pub struct BatchColumn {
 /// Builder to build [Batch].
 pub struct BatchBuilder {
     primary_key: Vec<u8>,
-    timestamps: VectorRef,
-    sequences: Arc<UInt64Vector>,
-    op_types: Arc<UInt8Vector>,
+    timestamps: Option<VectorRef>,
+    sequences: Option<Arc<UInt64Vector>>,
+    op_types: Option<Arc<UInt8Vector>>,
     fields: Vec<BatchColumn>,
 }
 
 impl BatchBuilder {
-    /// Creates a new [BatchBuilder].
-    pub fn new(
+    /// Creates a new [BatchBuilder] with primary key.
+    pub fn new(primary_key: Vec<u8>) -> BatchBuilder {
+        BatchBuilder {
+            primary_key,
+            timestamps: None,
+            sequences: None,
+            op_types: None,
+            fields: Vec::new(),
+        }
+    }
+
+    /// Creates a new [BatchBuilder] with all required columns.
+    pub fn with_required_columns(
         primary_key: Vec<u8>,
         timestamps: VectorRef,
         sequences: Arc<UInt64Vector>,
@@ -129,9 +143,9 @@ impl BatchBuilder {
     ) -> BatchBuilder {
         BatchBuilder {
             primary_key,
-            timestamps,
-            sequences,
-            op_types,
+            timestamps: Some(timestamps),
+            sequences: Some(sequences),
+            op_types: Some(op_types),
             fields: Vec::new(),
         }
     }
@@ -148,25 +162,78 @@ impl BatchBuilder {
         self
     }
 
+    /// Push an array as a field.
+    pub fn push_field_array(&mut self, column_id: ColumnId, array: ArrayRef) -> Result<&mut Self> {
+        let vector = Helper::try_into_vector(array).context(ConvertVectorSnafu)?;
+        self.fields.push(BatchColumn { column_id, data: vector });
+
+        Ok(self)
+    }
+
+    /// Try to set an array as timestamps.
+    pub fn timestamps_array(&mut self, array: ArrayRef) -> Result<&mut Self> {
+        let vector = Helper::try_into_vector(array).context(ConvertVectorSnafu)?;
+        ensure!(vector.data_type().is_timestamp_compatible(), InvalidBatchSnafu {
+            reason: format!("{:?} is a timestamp type", vector.data_type()),
+        });
+
+        self.timestamps = Some(vector);
+        Ok(self)
+    }
+
+    /// Try to set an array as sequences.
+    pub fn sequences_array(&mut self, array: ArrayRef) -> Result<&mut Self> {
+        ensure!(*array.data_type() == arrow::datatypes::DataType::UInt64, InvalidBatchSnafu {
+            reason: "sequence array is not UInt64 type",
+        });
+        // Safety: The cast must success as we have ensured it is uint64 type.
+        let vector = Arc::new(UInt64Vector::try_from_arrow_array(array).unwrap());
+        self.sequences = Some(vector);
+
+        Ok(self)
+    }
+
+    /// Try to set an array as op types.
+    pub fn op_types_array(&mut self, array: ArrayRef) -> Result<&mut Self> {
+        ensure!(*array.data_type() == arrow::datatypes::DataType::UInt8, InvalidBatchSnafu {
+            reason: "sequence array is not UInt8 type",
+        });
+        // Safety: The cast must success as we have ensured it is uint64 type.
+        let vector = Arc::new(UInt8Vector::try_from_arrow_array(array).unwrap());
+        self.op_types = Some(vector);
+
+        Ok(self)
+    }
+
     /// Builds the [Batch].
     pub fn build(self) -> Result<Batch> {
-        let ts_len = self.timestamps.len();
+        let timestamps = self.timestamps.context(InvalidBatchSnafu {
+            reason: "missing timestamps",
+        })?;
+        let sequences = self.sequences.context(InvalidBatchSnafu {
+            reason: "missing timestamps",
+        })?;
+        let op_types = self.op_types.context(InvalidBatchSnafu {
+            reason: "missing timestamps",
+        })?;
+
+        let ts_len = timestamps.len();
         ensure!(
-            self.sequences.len() == ts_len,
+            sequences.len() == ts_len,
             InvalidBatchSnafu {
                 reason: format!(
                     "sequence have different len {} != {}",
-                    self.sequences.len(),
+                    sequences.len(),
                     ts_len
                 ),
             }
         );
         ensure!(
-            self.op_types.len() == ts_len,
+            op_types.len() == ts_len,
             InvalidBatchSnafu {
                 reason: format!(
                     "op type have different len {} != {}",
-                    self.op_types.len(),
+                    op_types.len(),
                     ts_len
                 ),
             }
@@ -187,9 +254,9 @@ impl BatchBuilder {
 
         Ok(Batch {
             primary_key: self.primary_key,
-            timestamps: self.timestamps,
-            sequences: self.sequences,
-            op_types: self.op_types,
+            timestamps,
+            sequences,
+            op_types,
             fields: self.fields,
         })
     }
