@@ -26,7 +26,7 @@ use crate::storage::RegionId;
 #[async_trait]
 pub trait RegionEngine {
     /// Name of this engine
-    fn name(&self) -> String;
+    fn name(&self) -> &str;
 
     async fn handle_request(
         &self,

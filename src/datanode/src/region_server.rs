@@ -29,7 +29,7 @@ use crate::error::{
 #[derive(Default)]
 pub struct RegionServer {
     engines: HashMap<String, RegionEngineRef>,
-    region_map: DashMap<RegionId, String>,
+    region_map: DashMap<RegionId, RegionEngineRef>,
 }
 
 impl RegionServer {
@@ -39,7 +39,7 @@ impl RegionServer {
 
     pub fn register_engine(&mut self, engine: RegionEngineRef) {
         let engine_name = engine.name();
-        self.engines.insert(engine_name.clone(), engine);
+        self.engines.insert(engine_name.to_string(), engine);
     }
 
     pub async fn handle_request(
@@ -61,23 +61,20 @@ impl RegionServer {
             | RegionRequest::Compact(_) => RegionChange::None,
         };
 
-        let mut _dashmap_guard = None;
-        let engine_type = match &region_change {
-            RegionChange::Register(engine_type) => engine_type,
-            RegionChange::None | RegionChange::Deregisters => {
-                let guard = self
-                    .region_map
-                    .get(&region_id)
-                    .with_context(|| RegionNotFoundSnafu { region_id })?;
-                _dashmap_guard = Some(guard);
-                _dashmap_guard.as_ref().unwrap()
-            }
+        let engine = match &region_change {
+            RegionChange::Register(engine_type) => self
+                .engines
+                .get(engine_type)
+                .with_context(|| RegionEngineNotFoundSnafu { name: engine_type })?
+                .clone(),
+            RegionChange::None | RegionChange::Deregisters => self
+                .region_map
+                .get(&region_id)
+                .with_context(|| RegionNotFoundSnafu { region_id })?
+                .clone(),
         };
+        let engine_type = engine.name();
 
-        let engine = self
-            .engines
-            .get(engine_type)
-            .with_context(|| RegionEngineNotFoundSnafu { name: engine_type })?;
         let result = engine
             .handle_request(region_id, request)
             .await
@@ -87,7 +84,7 @@ impl RegionServer {
             RegionChange::None => {}
             RegionChange::Register(_) => {
                 info!("Region {region_id} is registered to engine {engine_type}");
-                self.region_map.insert(region_id, engine_type.to_string());
+                self.region_map.insert(region_id, engine);
             }
             RegionChange::Deregisters => {
                 info!("Region {region_id} is deregistered from engine {engine_type}");

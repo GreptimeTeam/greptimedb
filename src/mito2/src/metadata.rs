@@ -437,23 +437,22 @@ mod test {
         assert_eq!(region_metadata, deserialized);
     }
 
-    // #[test]
-    // fn test_column_metadata_validate() {
-    //     let mut builder = create_builder();
-    //     let col = ColumnMetadata {
-    //         column_schema: ColumnSchema::new("ts", ConcreteDataType::string_datatype(), false),
-    //         semantic_type: SemanticType::Timestamp,
-    //         column_id: 1,
-    //     };
-    //     col.validate().unwrap_err();
+    #[test]
+    fn test_column_metadata_validate() {
+        let mut builder = create_builder();
+        let col = ColumnMetadata {
+            column_schema: ColumnSchema::new("ts", ConcreteDataType::string_datatype(), false),
+            semantic_type: SemanticType::Timestamp,
+            column_id: 1,
+        };
 
-    //     builder.push_column_metadata(col);
-    //     let err = builder.build().unwrap_err();
-    //     assert!(
-    //         err.to_string().contains("ts is not timestamp compatible"),
-    //         "unexpected err: {err}",
-    //     );
-    // }
+        builder.push_column_metadata(col);
+        let err = builder.build().unwrap_err();
+        assert!(
+            err.to_string().contains("ts is not timestamp compatible"),
+            "unexpected err: {err}",
+        );
+    }
 
     #[test]
     fn test_empty_region_metadata() {

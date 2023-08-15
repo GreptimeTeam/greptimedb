@@ -83,10 +83,7 @@ pub struct RegionOpenRequest {
 
 /// Close region request.
 #[derive(Debug)]
-pub struct RegionCloseRequest {
-    /// Region engine name
-    pub engine: String,
-}
+pub struct RegionCloseRequest {}
 
 #[derive(Debug)]
 pub struct RegionAlterRequest {
