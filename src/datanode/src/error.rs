@@ -19,7 +19,7 @@ use common_error::status_code::StatusCode;
 use common_procedure::ProcedureId;
 use serde_json::error::Error as JsonError;
 use snafu::{Location, Snafu};
-use store_api::storage::RegionNumber;
+use store_api::storage::{RegionId, RegionNumber};
 use table::error::Error as TableError;
 
 /// Business error of datanode.
@@ -482,6 +482,30 @@ pub enum Error {
         violated: String,
         location: Location,
     },
+
+    #[snafu(display(
+        "Failed to handle request for region {}, source: {}, location: {}",
+        region_id,
+        source,
+        location
+    ))]
+    HandleRegionRequest {
+        region_id: RegionId,
+        location: Location,
+        source: BoxedError,
+    },
+
+    #[snafu(display("RegionId {} not found, location: {}", region_id, location))]
+    RegionNotFound {
+        region_id: RegionId,
+        location: Location,
+    },
+
+    #[snafu(display("Region engine {} is not registered, location: {}", name, location))]
+    RegionEngineNotFound { name: String, location: Location },
+
+    #[snafu(display("Unsupported gRPC request, kind: {}, location: {}", kind, location))]
+    UnsupportedGrpcRequest { kind: String, location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -559,7 +583,9 @@ impl ErrorExt for Error {
             | MissingInsertBody { .. }
             | ShutdownInstance { .. }
             | CloseTableEngine { .. }
-            | JoinTask { .. } => StatusCode::Internal,
+            | JoinTask { .. }
+            | RegionNotFound { .. }
+            | RegionEngineNotFound { .. } => StatusCode::Internal,
 
             StartServer { source, .. }
             | ShutdownServer { source, .. }
@@ -570,7 +596,9 @@ impl ErrorExt for Error {
             OpenLogStore { source, .. } => source.status_code(),
             RuntimeResource { .. } => StatusCode::RuntimeResourcesExhausted,
             MetaClientInit { source, .. } => source.status_code(),
-            TableIdProviderNotFound { .. } => StatusCode::Unsupported,
+            TableIdProviderNotFound { .. } | UnsupportedGrpcRequest { .. } => {
+                StatusCode::Unsupported
+            }
             BumpTableId { source, .. } => source.status_code(),
             ColumnDefaultValue { source, .. } => source.status_code(),
             UnrecognizedTableOption { .. } => StatusCode::InvalidArguments,
@@ -581,6 +609,7 @@ impl ErrorExt for Error {
             StartProcedureManager { source } | StopProcedureManager { source } => {
                 source.status_code()
             }
+            HandleRegionRequest { source, .. } => source.status_code(),
         }
     }
 

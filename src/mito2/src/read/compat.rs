@@ -38,7 +38,10 @@ pub struct CompatRecordBatch {
 
 impl CompatRecordBatch {
     /// Creates a [CompatRecordBatch] to adapts record batches from files with `old_meta`.
-    fn new(old_meta: &RegionMetadata, columns_to_read: &[ColumnMetadata]) -> Result<CompatRecordBatch> {
+    fn new(
+        old_meta: &RegionMetadata,
+        columns_to_read: &[ColumnMetadata],
+    ) -> Result<CompatRecordBatch> {
         let mut default_vectors = Vec::with_capacity(columns_to_read.len());
         let mut fields_to_add = Vec::new();
         for column in columns_to_read {

@@ -27,13 +27,14 @@ use log_store::raft_engine::log_store::RaftEngineLogStore;
 use log_store::test_util::log_store_util;
 use object_store::services::Fs;
 use object_store::ObjectStore;
+use store_api::metadata::ColumnMetadata;
 use store_api::storage::RegionId;
 
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
 use crate::error::Result;
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
-use crate::metadata::{ColumnMetadata, RegionMetadataRef};
+use crate::metadata::RegionMetadataRef;
 use crate::request::{CreateRequest, RegionOptions};
 use crate::worker::WorkerGroup;
 

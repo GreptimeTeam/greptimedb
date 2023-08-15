@@ -15,9 +15,10 @@
 use api::v1::SemanticType;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
+use store_api::metadata::ColumnMetadata;
 use store_api::storage::RegionId;
 
-use crate::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder};
+use crate::metadata::{RegionMetadata, RegionMetadataBuilder};
 
 /// Build a basic region metadata for testing.
 /// It contains three columns:

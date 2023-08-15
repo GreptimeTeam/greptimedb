@@ -20,10 +20,11 @@ use std::sync::Arc;
 use api::v1::SemanticType;
 use datatypes::arrow::datatypes::FieldRef;
 use datatypes::prelude::DataType;
-use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
+use datatypes::schema::{Schema, SchemaRef};
 use serde::de::Error;
 use serde::{Deserialize, Deserializer, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
+use store_api::metadata::ColumnMetadata;
 use store_api::storage::{ColumnId, RegionId};
 
 use crate::error::{InvalidMetaSnafu, InvalidSchemaSnafu, Result, SerdeJsonSnafu};
@@ -161,7 +162,7 @@ impl RegionMetadata {
         let mut id_names = HashMap::with_capacity(self.column_metadatas.len());
         for col in &self.column_metadatas {
             // Validate each column.
-            col.validate()?;
+            Self::validate_column_metadata(col)?;
 
             // Check whether column id is duplicated. We already check column name
             // is unique in `Schema` so we only check column id here.
@@ -271,6 +272,26 @@ impl RegionMetadata {
 
         Ok(())
     }
+
+    /// Checks whether it is a valid column.
+    fn validate_column_metadata(column_metadata: &ColumnMetadata) -> Result<()> {
+        if column_metadata.semantic_type == SemanticType::Timestamp {
+            ensure!(
+                column_metadata
+                    .column_schema
+                    .data_type
+                    .is_timestamp_compatible(),
+                InvalidMetaSnafu {
+                    reason: format!(
+                        "{} is not timestamp compatible",
+                        column_metadata.column_schema.name
+                    ),
+                }
+            );
+        }
+
+        Ok(())
+    }
 }
 
 /// Builder to build [RegionMetadata].
@@ -334,33 +355,6 @@ impl RegionMetadataBuilder {
     }
 }
 
-/// Metadata of a column.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ColumnMetadata {
-    /// Schema of this column. Is the same as `column_schema` in [SchemaRef].
-    pub column_schema: ColumnSchema,
-    /// Semantic type of this column (e.g. tag or timestamp).
-    pub semantic_type: SemanticType,
-    /// Immutable and unique id of a region.
-    pub column_id: ColumnId,
-}
-
-impl ColumnMetadata {
-    /// Checks whether it is a valid column.
-    pub fn validate(&self) -> Result<()> {
-        if self.semantic_type == SemanticType::Timestamp {
-            ensure!(
-                self.column_schema.data_type.is_timestamp_compatible(),
-                InvalidMetaSnafu {
-                    reason: format!("{} is not timestamp compatible", self.column_schema.name),
-                }
-            );
-        }
-
-        Ok(())
-    }
-}
-
 /// Fields skipped in serialization.
 struct SkippedFields {
     /// Last schema.
@@ -408,6 +402,7 @@ impl SkippedFields {
 #[cfg(test)]
 mod test {
     use datatypes::prelude::ConcreteDataType;
+    use datatypes::schema::ColumnSchema;
 
     use super::*;
 
@@ -468,7 +463,6 @@ mod test {
             semantic_type: SemanticType::Timestamp,
             column_id: 1,
         };
-        col.validate().unwrap_err();
 
         builder.push_column_metadata(col);
         let err = builder.build().unwrap_err();

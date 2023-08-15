@@ -26,17 +26,19 @@
 
 use std::sync::Arc;
 
-use datatypes::arrow::array::{ArrayRef, UInt64Array, BinaryArray, UInt16Array, DictionaryArray};
+use api::v1::SemanticType;
+use datatypes::arrow::array::{ArrayRef, BinaryArray, DictionaryArray, UInt16Array, UInt64Array};
 use datatypes::arrow::datatypes::{DataType, Field, FieldRef, Fields, Schema, SchemaRef};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::prelude::ConcreteDataType;
 use snafu::ResultExt;
-use store_api::storage::consts::{OP_TYPE_COLUMN_NAME, SEQUENCE_COLUMN_NAME, PRIMARY_KEY_COLUMN_NAME};
+use store_api::storage::consts::{
+    OP_TYPE_COLUMN_NAME, PRIMARY_KEY_COLUMN_NAME, SEQUENCE_COLUMN_NAME,
+};
 use store_api::storage::{ColumnId, Tsid};
 
 use crate::error::{NewRecordBatchSnafu, Result};
 use crate::metadata::{ColumnMetadata, RegionMetadata};
-use api::v1::SemanticType;
 use crate::read::Batch;
 
 /// Number of internal columns.
@@ -102,7 +104,10 @@ pub(crate) fn to_sst_projection_indices(
 
 // FIXME(yingwen): Need to split by time series.
 /// Convert the arrow record batch to a [Batch].
-pub(crate) fn from_sst_record_batch(metadata: &RegionMetadata, record_batch: &RecordBatch) -> Batch {
+pub(crate) fn from_sst_record_batch(
+    metadata: &RegionMetadata,
+    record_batch: &RecordBatch,
+) -> Batch {
     unimplemented!()
 }
 
@@ -126,7 +131,12 @@ const fn num_columns_to_store(num_fields: usize) -> usize {
 fn internal_fields() -> [FieldRef; 3] {
     // Internal columns are always not null.
     [
-        Arc::new(Field::new_dictionary(PRIMARY_KEY_COLUMN_NAME, dictionary_key_type(), pk_value_type(), false)),
+        Arc::new(Field::new_dictionary(
+            PRIMARY_KEY_COLUMN_NAME,
+            dictionary_key_type(),
+            pk_value_type(),
+            false,
+        )),
         Arc::new(Field::new(SEQUENCE_COLUMN_NAME, DataType::UInt64, false)),
         Arc::new(Field::new(OP_TYPE_COLUMN_NAME, DataType::UInt8, false)),
     ]

@@ -23,9 +23,9 @@ pub mod instance;
 pub mod metrics;
 #[cfg(any(test, feature = "testing"))]
 mod mock;
+pub mod region_server;
 pub mod server;
 pub mod sql;
 mod store;
-
 #[cfg(test)]
 mod tests;

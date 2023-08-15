@@ -30,6 +30,7 @@ use futures::future::try_join_all;
 use object_store::ObjectStore;
 use snafu::{ensure, ResultExt};
 use store_api::logstore::LogStore;
+use store_api::region_request::RegionRequest;
 use store_api::storage::RegionId;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{mpsc, Mutex};
@@ -38,7 +39,7 @@ use crate::config::MitoConfig;
 use crate::error::{JoinSnafu, Result, WorkerStoppedSnafu};
 use crate::memtable::{DefaultMemtableBuilder, MemtableBuilderRef};
 use crate::region::{MitoRegionRef, RegionMap, RegionMapRef};
-use crate::request::{RegionRequest, RequestBody, SenderWriteRequest, WorkerRequest};
+use crate::request::{RegionTask, WorkerRequest};
 use crate::wal::Wal;
 
 /// Identifier for a worker.
@@ -122,10 +123,8 @@ impl WorkerGroup {
     }
 
     /// Submit a request to a worker in the group.
-    pub(crate) async fn submit_to_worker(&self, request: RegionRequest) -> Result<()> {
-        self.worker(request.body.region_id())
-            .submit_request(request)
-            .await
+    pub(crate) async fn submit_to_worker(&self, task: RegionTask) -> Result<()> {
+        self.worker(task.region_id).submit_request(task).await
     }
 
     /// Returns true if the specific region exists.
@@ -206,7 +205,7 @@ impl RegionWorker {
     }
 
     /// Submit request to background worker thread.
-    async fn submit_request(&self, request: RegionRequest) -> Result<()> {
+    async fn submit_request(&self, request: RegionTask) -> Result<()> {
         ensure!(self.is_running(), WorkerStoppedSnafu { id: self.id });
         if self
             .sender
@@ -336,18 +335,18 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     ///
     /// `buffer` should be empty.
     async fn handle_requests(&mut self, buffer: &mut RequestBuffer) {
-        let mut write_requests = Vec::with_capacity(buffer.len());
+        let write_requests = Vec::with_capacity(buffer.len());
         let mut ddl_requests = Vec::with_capacity(buffer.len());
         for worker_req in buffer.drain(..) {
             match worker_req {
-                WorkerRequest::Region(req) => {
-                    if req.body.is_write() {
-                        write_requests.push(SenderWriteRequest {
-                            sender: req.sender,
-                            request: req.body.into_write_request(),
-                        });
+                WorkerRequest::Region(task) => {
+                    if matches!(task.request, RegionRequest::Write(_)) {
+                        // write_requests.push(SenderWriteRequest {
+                        //     sender: task.sender,
+                        //     request: task.request.into_write_request(),
+                        // });
                     } else {
-                        ddl_requests.push(req);
+                        ddl_requests.push(task);
                     }
                 }
                 // We receive a stop signal, but we still want to process remaining
@@ -369,20 +368,26 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
 impl<S> RegionWorkerLoop<S> {
     /// Takes and handles all ddl requests.
-    async fn handle_ddl_requests(&mut self, ddl_requests: Vec<RegionRequest>) {
-        if ddl_requests.is_empty() {
+    async fn handle_ddl_requests(&mut self, ddl_tasks: Vec<RegionTask>) {
+        if ddl_tasks.is_empty() {
             return;
         }
 
-        for request in ddl_requests {
-            let res = match request.body {
-                RequestBody::Create(req) => self.handle_create_request(req).await,
-                RequestBody::Open(req) => self.handle_open_request(req).await,
-                RequestBody::Close(req) => self.handle_close_request(req).await,
-                RequestBody::Write(_) => unreachable!(),
+        for task in ddl_tasks {
+            let res: std::result::Result<(), crate::error::Error> = match task.request {
+                RegionRequest::Create(req) => self.handle_create_request(task.region_id, req).await,
+                RegionRequest::Open(req) => self.handle_open_request(task.region_id, req).await,
+                RegionRequest::Close(_) => self.handle_close_request(task.region_id).await,
+                RegionRequest::Write(_)
+                | RegionRequest::Read(_)
+                | RegionRequest::Delete(_)
+                | RegionRequest::Drop(_)
+                | RegionRequest::Alter(_)
+                | RegionRequest::Flush(_)
+                | RegionRequest::Compact(_) => unreachable!(),
             };
 
-            if let Some(sender) = request.sender {
+            if let Some(sender) = task.sender {
                 // Ignore send result.
                 let _ = sender.send(res);
             }

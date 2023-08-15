@@ -64,9 +64,9 @@ use table::TableRef;
 use crate::catalog::FrontendCatalogManager;
 use crate::error::{
     self, AlterExprToRequestSnafu, CatalogSnafu, ColumnDataTypeSnafu, ColumnNotFoundSnafu,
-    DeserializePartitionSnafu, InvokeDatanodeSnafu, ParseSqlSnafu, RequestDatanodeSnafu,
-    RequestMetaSnafu, Result, SchemaExistsSnafu, TableAlreadyExistSnafu, TableNotFoundSnafu,
-    TableSnafu, ToTableDeleteRequestSnafu, UnrecognizedTableOptionSnafu,
+    DeserializePartitionSnafu, InvokeDatanodeSnafu, NotSupportedSnafu, ParseSqlSnafu,
+    RequestDatanodeSnafu, RequestMetaSnafu, Result, SchemaExistsSnafu, TableAlreadyExistSnafu,
+    TableNotFoundSnafu, TableSnafu, ToTableDeleteRequestSnafu, UnrecognizedTableOptionSnafu,
 };
 use crate::expr_factory;
 use crate::instance::distributed::inserter::DistInserter;
@@ -677,6 +677,10 @@ impl GrpcQueryHandler for DistInstance {
         match request {
             Request::Inserts(requests) => self.handle_dist_insert(requests, ctx).await,
             Request::Delete(request) => self.handle_dist_delete(request, ctx).await,
+            Request::RowInserts(_) | Request::RowDelete(_) => NotSupportedSnafu {
+                feat: "row insert/delete",
+            }
+            .fail(),
             Request::Query(_) => {
                 unreachable!("Query should have been handled directly in Frontend Instance!")
             }
@@ -713,8 +717,6 @@ impl GrpcQueryHandler for DistInstance {
                     }
                 }
             }
-            Request::RowInserts(_) => unreachable!(),
-            Request::RowDelete(_) => unreachable!(),
         }
     }
 }
@@ -947,7 +949,7 @@ PARTITION BY RANGE COLUMNS (b) (
   PARTITION r2 VALUES LESS THAN (MAXVALUE),
 )
 ENGINE=mito",
-                r#"[{"column_list":"b","value_list":"{\"Value\":{\"String\":\"hz\"}}"},{"column_list":"b","value_list":"{\"Value\":{\"String\":\"sh\"}}"},{"column_list":"b","value_list":"\"MaxValue\""}]"#,
+                r#"[{"column_list":["b"],"value_list":["{\"Value\":{\"String\":\"hz\"}}"]},{"column_list":["b"],"value_list":["{\"Value\":{\"String\":\"sh\"}}"]},{"column_list":["b"],"value_list":["\"MaxValue\""]}]"#,
             ),
             (
                 r"
@@ -958,7 +960,7 @@ PARTITION BY RANGE COLUMNS (b, a) (
   PARTITION r2 VALUES LESS THAN (MAXVALUE, MAXVALUE),
 )
 ENGINE=mito",
-                r#"[{"column_list":"b,a","value_list":"{\"Value\":{\"String\":\"hz\"}},{\"Value\":{\"Int32\":10}}"},{"column_list":"b,a","value_list":"{\"Value\":{\"String\":\"sh\"}},{\"Value\":{\"Int32\":20}}"},{"column_list":"b,a","value_list":"\"MaxValue\",\"MaxValue\""}]"#,
+                r#"[{"column_list":["b","a"],"value_list":["{\"Value\":{\"String\":\"hz\"}}","{\"Value\":{\"Int32\":10}}"]},{"column_list":["b","a"],"value_list":["{\"Value\":{\"String\":\"sh\"}}","{\"Value\":{\"Int32\":20}}"]},{"column_list":["b","a"],"value_list":["\"MaxValue\"","\"MaxValue\""]}]"#,
             ),
         ];
         for (sql, expected) in cases {

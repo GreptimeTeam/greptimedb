@@ -16,54 +16,75 @@
 
 mod compat;
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use common_time::Timestamp;
-use datatypes::vectors::VectorRef;
+use datatypes::vectors::{UInt64Vector, UInt8Vector, Vector, VectorRef};
+use snafu::ensure;
 use store_api::storage::{ColumnId, Tsid};
 
-use crate::error::Result;
+use crate::error::{InvalidBatchSnafu, Result};
 use crate::metadata::RegionMetadataRef;
 
 /// Storage internal representation of a batch of rows
 /// for a primary key (time series).
-#[derive(Debug, PartialEq, Eq, Clone)]
+///
+/// Rows are sorted by primary key, timestamp, sequence desc, op_type desc.
+#[derive(Debug, PartialEq, Clone)]
 pub struct Batch {
-    /// Tsid of the batch.
-    tsid: Tsid,
     /// Primary key encoded in a comparable form.
-    // TODO(yingwen): Maybe use `Bytes` or `Vec<Value>`.
     primary_key: Vec<u8>,
     /// Timestamps of rows, should be sorted and not null.
     timestamps: VectorRef,
     /// Sequences of rows
     ///
     /// UInt64 type, not null.
-    sequences: VectorRef,
+    sequences: Arc<UInt64Vector>,
     /// Op types of rows
     ///
     /// UInt8 type, not null.
-    op_types: VectorRef,
-    /// Rows organized in columnar format.
-    columns: Vec<BatchColumn>,
-    /// Has delete op.
-    has_delete_op: bool,
-    /// Has duplicate keys to dedup.
-    has_duplication: bool,
+    op_types: Arc<UInt8Vector>,
+    /// Fields organized in columnar format.
+    fields: Vec<BatchColumn>,
 }
 
 impl Batch {
-    /// Returns columns in the batch.
-    pub fn columns(&self) -> &[BatchColumn] {
-        &self.columns
+    /// Creates a new batch.
+    pub fn new(
+        primary_key: Vec<u8>,
+        timestamps: VectorRef,
+        sequences: Arc<UInt64Vector>,
+        op_types: Arc<UInt8Vector>,
+        fields: Vec<BatchColumn>,
+    ) -> Result<Batch> {
+        BatchBuilder::new(primary_key, timestamps, sequences, op_types)
+            .with_fields(fields)
+            .build()
+    }
+
+    /// Returns primary key of the batch.
+    pub fn primary_key(&self) -> &[u8] {
+        &self.primary_key
+    }
+
+    /// Returns fields in the batch.
+    pub fn fields(&self) -> &[BatchColumn] {
+        &self.fields
+    }
+
+    /// Returns timestamps of the batch.
+    pub fn timestamps(&self) -> &VectorRef {
+        &self.timestamps
     }
 
     /// Returns sequences of the batch.
-    pub fn sequences(&self) -> &VectorRef {
+    pub fn sequences(&self) -> &Arc<UInt64Vector> {
         &self.sequences
     }
 
     /// Returns op types of the batch.
-    pub fn op_types(&self) -> &VectorRef {
+    pub fn op_types(&self) -> &Arc<UInt8Vector> {
         &self.op_types
     }
 
@@ -74,12 +95,9 @@ impl Batch {
         self.timestamps.len()
     }
 
-    /// Returns the tsid of the batch.
-    ///
-    /// It's used to identify a time series inside a SST. So different
-    /// time series might have the same tsid.
-    pub(crate) fn tsid(&self) -> Tsid {
-        self.tsid
+    /// Returns true if the number of rows in the batch is 0.
+    pub fn is_empty(&self) -> bool {
+        self.num_rows() == 0
     }
 }
 
@@ -90,6 +108,91 @@ pub struct BatchColumn {
     pub column_id: ColumnId,
     /// Data of the column.
     pub data: VectorRef,
+}
+
+/// Builder to build [Batch].
+pub struct BatchBuilder {
+    primary_key: Vec<u8>,
+    timestamps: VectorRef,
+    sequences: Arc<UInt64Vector>,
+    op_types: Arc<UInt8Vector>,
+    fields: Vec<BatchColumn>,
+}
+
+impl BatchBuilder {
+    /// Creates a new [BatchBuilder].
+    pub fn new(
+        primary_key: Vec<u8>,
+        timestamps: VectorRef,
+        sequences: Arc<UInt64Vector>,
+        op_types: Arc<UInt8Vector>,
+    ) -> BatchBuilder {
+        BatchBuilder {
+            primary_key,
+            timestamps,
+            sequences,
+            op_types,
+            fields: Vec::new(),
+        }
+    }
+
+    /// Set all field columns.
+    pub fn with_fields(mut self, fields: Vec<BatchColumn>) -> Self {
+        self.fields = fields;
+        self
+    }
+
+    /// Push a field column.
+    pub fn push_field(&mut self, column: BatchColumn) -> &mut Self {
+        self.fields.push(column);
+        self
+    }
+
+    /// Builds the [Batch].
+    pub fn build(self) -> Result<Batch> {
+        let ts_len = self.timestamps.len();
+        ensure!(
+            self.sequences.len() == ts_len,
+            InvalidBatchSnafu {
+                reason: format!(
+                    "sequence have different len {} != {}",
+                    self.sequences.len(),
+                    ts_len
+                ),
+            }
+        );
+        ensure!(
+            self.op_types.len() == ts_len,
+            InvalidBatchSnafu {
+                reason: format!(
+                    "op type have different len {} != {}",
+                    self.op_types.len(),
+                    ts_len
+                ),
+            }
+        );
+        for column in &self.fields {
+            ensure!(
+                column.data.len() == ts_len,
+                InvalidBatchSnafu {
+                    reason: format!(
+                        "column {} has different len {} != {}",
+                        column.column_id,
+                        column.data.len(),
+                        ts_len
+                    ),
+                }
+            );
+        }
+
+        Ok(Batch {
+            primary_key: self.primary_key,
+            timestamps: self.timestamps,
+            sequences: self.sequences,
+            op_types: self.op_types,
+            fields: self.fields,
+        })
+    }
 }
 
 /// Collected [Source] statistics.

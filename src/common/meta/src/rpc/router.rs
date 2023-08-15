@@ -19,6 +19,7 @@ use api::v1::meta::{
     RouteRequest as PbRouteRequest, RouteResponse as PbRouteResponse, Table as PbTable,
     TableId as PbTableId, TableRoute as PbTableRoute, TableRouteValue as PbTableRouteValue,
 };
+use serde::ser::SerializeSeq;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use snafu::OptionExt;
 use store_api::storage::{RegionId, RegionNumber};
@@ -307,9 +308,9 @@ impl From<Region> for PbRegion {
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct Partition {
-    #[serde(serialize_with = "as_utf8_vec")]
+    #[serde(serialize_with = "as_utf8_vec", deserialize_with = "from_utf8_vec")]
     pub column_list: Vec<Vec<u8>>,
-    #[serde(serialize_with = "as_utf8_vec")]
+    #[serde(serialize_with = "as_utf8_vec", deserialize_with = "from_utf8_vec")]
     pub value_list: Vec<Vec<u8>>,
 }
 
@@ -334,15 +335,24 @@ fn as_utf8_vec<S: Serializer>(
     val: &[Vec<u8>],
     serializer: S,
 ) -> std::result::Result<S::Ok, S::Error> {
-    serializer.serialize_str(
-        val.iter()
-            .map(|v| {
-                String::from_utf8(v.clone()).unwrap_or_else(|_| "<unknown-not-UTF8>".to_string())
-            })
-            .collect::<Vec<String>>()
-            .join(",")
-            .as_str(),
-    )
+    let mut seq = serializer.serialize_seq(Some(val.len()))?;
+    for v in val {
+        seq.serialize_element(&String::from_utf8_lossy(v))?;
+    }
+    seq.end()
+}
+
+pub fn from_utf8_vec<'de, D>(deserializer: D) -> std::result::Result<Vec<Vec<u8>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let values = Vec::<String>::deserialize(deserializer)?;
+
+    let values = values
+        .into_iter()
+        .map(|value| value.into_bytes())
+        .collect::<Vec<_>>();
+    Ok(values)
 }
 
 impl From<Partition> for PbPartition {
@@ -372,6 +382,19 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn test_de_serialize_partition() {
+        let p = Partition {
+            column_list: vec![b"a".to_vec(), b"b".to_vec()],
+            value_list: vec![b"hi".to_vec(), b",".to_vec()],
+        };
+
+        let output = serde_json::to_string(&p).unwrap();
+        let got: Partition = serde_json::from_str(&output).unwrap();
+
+        assert_eq!(got, p);
+    }
 
     #[test]
     fn test_route_request_trans() {
