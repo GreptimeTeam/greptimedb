@@ -57,7 +57,7 @@ pub async fn get_greptimedb_telemetry_task(
     mode: &Mode,
     enable: bool,
 ) -> Arc<GreptimeDBTelemetryTask> {
-    if !enable || cfg!(test) {
+    if !enable || cfg!(test) || cfg!(debug_assertions) {
         return Arc::new(GreptimeDBTelemetryTask::disable());
     }
 
