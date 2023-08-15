@@ -14,8 +14,6 @@
 
 //! Common structs and utilities for reading data.
 
-mod compat;
-
 use std::sync::Arc;
 
 use async_trait::async_trait;
