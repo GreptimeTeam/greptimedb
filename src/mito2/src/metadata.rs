@@ -157,7 +157,8 @@ impl RegionMetadata {
 
     /// Finds a column by name.
     pub(crate) fn column_by_name(&self, name: &str) -> Option<&ColumnMetadata> {
-        self.schema.column_index_by_name(name)
+        self.schema
+            .column_index_by_name(name)
             .map(|index| &self.column_metadatas[index])
     }
 

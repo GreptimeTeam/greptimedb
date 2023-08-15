@@ -28,16 +28,18 @@ use std::sync::Arc;
 
 use api::v1::SemanticType;
 use datatypes::arrow::array::{ArrayRef, BinaryArray, DictionaryArray, UInt16Array};
-use datatypes::arrow::datatypes::{DataType, Field, FieldRef, Fields, Schema, SchemaRef, UInt16Type};
+use datatypes::arrow::datatypes::{
+    DataType, Field, FieldRef, Fields, Schema, SchemaRef, UInt16Type,
+};
 use datatypes::arrow::record_batch::RecordBatch;
-use datatypes::vectors::{Vector, Helper, UInt64Vector, UInt8Vector};
-use snafu::{ensure, ResultExt, OptionExt};
+use datatypes::vectors::{Helper, Vector};
+use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::consts::{
     OP_TYPE_COLUMN_NAME, PRIMARY_KEY_COLUMN_NAME, SEQUENCE_COLUMN_NAME,
 };
 use store_api::storage::ColumnId;
 
-use crate::error::{InvalidRecordBatchSnafu, ConvertVectorSnafu, NewRecordBatchSnafu, Result};
+use crate::error::{ConvertVectorSnafu, InvalidRecordBatchSnafu, NewRecordBatchSnafu, Result};
 use crate::metadata::RegionMetadata;
 use crate::read::{Batch, BatchBuilder, BatchColumn};
 
@@ -113,6 +115,8 @@ pub(crate) fn from_sst_record_batch(
     record_batch: &RecordBatch,
     batches: &mut Vec<Batch>,
 ) -> Result<()> {
+    debug_assert!(batches.is_empty());
+
     // The record batch must has time index and internal columns.
     ensure!(
         record_batch.num_columns() > INTERNAL_COLUMN_NUM,
@@ -124,34 +128,45 @@ pub(crate) fn from_sst_record_batch(
         }
     );
 
+    let mut fixed_pos_columns = record_batch
+        .columns()
+        .iter()
+        .rev()
+        .take(FIXED_POS_COLUMN_NUM);
+    // Safety: We have checked the column number.
+    let op_type_array = fixed_pos_columns.next().unwrap();
+    let sequence_array = fixed_pos_columns.next().unwrap();
+    let pk_array = fixed_pos_columns.next().unwrap();
+    let ts_array = fixed_pos_columns.next().unwrap();
     let num_cols = record_batch.num_columns();
-    let ts_array = record_batch.column(num_cols - FIXED_POS_COLUMN_NUM);
-    let pk_array = record_batch.column(num_cols - INTERNAL_COLUMN_NUM);
-    let sequence_array = record_batch.column(num_cols - INTERNAL_COLUMN_NUM + 1);
-    let op_type_array = record_batch.column(num_cols - INTERNAL_COLUMN_NUM + 2);
-
-    // Convert arrays to vectors, we do it before splitting batches to avoid converting
-    // them for each batch.
-    let ts_vector = Helper::try_into_vector(ts_array).context(ConvertVectorSnafu)?;
-    let sequence_vector = Arc::new(UInt64Vector::try_from_arrow_array(sequence_array).context(ConvertVectorSnafu)?);
-    let op_type_vector = Arc::new(UInt8Vector::try_from_arrow_array(op_type_array).context(ConvertVectorSnafu)?);
-    let field_vectors = record_batch.columns()[..num_cols - FIXED_POS_COLUMN_NUM].iter().zip(record_batch.schema().fields()[..num_cols - FIXED_POS_COLUMN_NUM].iter())
+    let field_vectors = record_batch
+        .columns()
+        .iter()
+        .zip(record_batch.schema().fields())
+        .take(num_cols - FIXED_POS_COLUMN_NUM) // Take all field columns.
         .map(|(array, field)| {
             let vector = Helper::try_into_vector(array.clone()).context(ConvertVectorSnafu)?;
-            let column = metadata.column_by_name(field.name()).with_context(|| InvalidRecordBatchSnafu {
-                reason: format!("column {} not found in metadata", field.name()),
-            })?;
+            let column =
+                metadata
+                    .column_by_name(field.name())
+                    .with_context(|| InvalidRecordBatchSnafu {
+                        reason: format!("column {} not found in metadata", field.name()),
+                    })?;
 
             Ok(BatchColumn {
                 column_id: column.column_id,
                 data: vector,
             })
-        }).collect::<Result<Vec<_>>>()?;
+        })
+        .collect::<Result<Vec<_>>>()?;
 
     // Compute primary key offsets.
-    let pk_dict_array = pk_array.as_any().downcast_ref::<DictionaryArray<UInt16Type>>().with_context(|| InvalidRecordBatchSnafu {
-        reason: format!("primary key array should not be {:?}", pk_array.data_type()),
-    })?;
+    let pk_dict_array = pk_array
+        .as_any()
+        .downcast_ref::<DictionaryArray<UInt16Type>>()
+        .with_context(|| InvalidRecordBatchSnafu {
+            reason: format!("primary key array should not be {:?}", pk_array.data_type()),
+        })?;
     let offsets = primary_key_offsets(pk_dict_array)?;
     if offsets.is_empty() {
         return Ok(());
@@ -159,9 +174,16 @@ pub(crate) fn from_sst_record_batch(
 
     // Split record batch according to pk offsets.
     let keys = pk_dict_array.keys();
-    let pk_values = pk_dict_array.values().as_any().downcast_ref::<BinaryArray>().with_context(|| InvalidRecordBatchSnafu {
-        reason: format!("values of primary key array should not be {:?}", pk_dict_array.values().data_type()),
-    })?;
+    let pk_values = pk_dict_array
+        .values()
+        .as_any()
+        .downcast_ref::<BinaryArray>()
+        .with_context(|| InvalidRecordBatchSnafu {
+            reason: format!(
+                "values of primary key array should not be {:?}",
+                pk_dict_array.values().data_type()
+            ),
+        })?;
     for (i, start) in offsets[..offsets.len() - 1].iter().enumerate() {
         let end = offsets[i + 1];
         let rows_in_batch = end - start;
@@ -169,15 +191,24 @@ pub(crate) fn from_sst_record_batch(
         let dict_key = keys.value(*start);
         let primary_key = pk_values.value(dict_key.into()).to_vec();
 
-        let mut builder = BatchBuilder::new(primary_key, ts_vector.slice(*start, rows_in_batch), sequence_vector.slice(*start, rows_in_batch), op_type_vector.slice(*start, rows_in_batch));
+        let mut builder = BatchBuilder::new(primary_key);
+        builder
+            .timestamps_array(ts_array.slice(*start, rows_in_batch))?
+            .sequences_array(sequence_array.slice(*start, rows_in_batch))?
+            .op_types_array(op_type_array.slice(*start, rows_in_batch))?;
         // Push all fields
         for field_vector in &field_vectors {
-            builder.push_field(BatchColumn { column_id: field_vector.column_id, data: field_vector.data.slice(*start, rows_in_batch) });
+            builder.push_field(BatchColumn {
+                column_id: field_vector.column_id,
+                data: field_vector.data.slice(*start, rows_in_batch),
+            });
         }
+
+        let batch = builder.build()?;
+        batches.push(batch);
     }
 
-
-    unimplemented!()
+    Ok(())
 }
 
 /// Compute offsets of different primary keys in the array.

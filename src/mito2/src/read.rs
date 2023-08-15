@@ -20,14 +20,14 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use common_time::Timestamp;
-use datatypes::arrow::array::ArrayRef;
 use datatypes::arrow;
+use datatypes::arrow::array::ArrayRef;
 use datatypes::prelude::DataType;
-use datatypes::vectors::{UInt64Vector, UInt8Vector, Vector, VectorRef, Helper};
+use datatypes::vectors::{Helper, UInt64Vector, UInt8Vector, Vector, VectorRef};
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::ColumnId;
 
-use crate::error::{InvalidBatchSnafu, ConvertVectorSnafu, Result};
+use crate::error::{ConvertVectorSnafu, InvalidBatchSnafu, Result};
 use crate::metadata::RegionMetadataRef;
 
 /// Storage internal representation of a batch of rows
@@ -165,7 +165,10 @@ impl BatchBuilder {
     /// Push an array as a field.
     pub fn push_field_array(&mut self, column_id: ColumnId, array: ArrayRef) -> Result<&mut Self> {
         let vector = Helper::try_into_vector(array).context(ConvertVectorSnafu)?;
-        self.fields.push(BatchColumn { column_id, data: vector });
+        self.fields.push(BatchColumn {
+            column_id,
+            data: vector,
+        });
 
         Ok(self)
     }
@@ -173,9 +176,12 @@ impl BatchBuilder {
     /// Try to set an array as timestamps.
     pub fn timestamps_array(&mut self, array: ArrayRef) -> Result<&mut Self> {
         let vector = Helper::try_into_vector(array).context(ConvertVectorSnafu)?;
-        ensure!(vector.data_type().is_timestamp_compatible(), InvalidBatchSnafu {
-            reason: format!("{:?} is a timestamp type", vector.data_type()),
-        });
+        ensure!(
+            vector.data_type().is_timestamp_compatible(),
+            InvalidBatchSnafu {
+                reason: format!("{:?} is a timestamp type", vector.data_type()),
+            }
+        );
 
         self.timestamps = Some(vector);
         Ok(self)
@@ -183,9 +189,12 @@ impl BatchBuilder {
 
     /// Try to set an array as sequences.
     pub fn sequences_array(&mut self, array: ArrayRef) -> Result<&mut Self> {
-        ensure!(*array.data_type() == arrow::datatypes::DataType::UInt64, InvalidBatchSnafu {
-            reason: "sequence array is not UInt64 type",
-        });
+        ensure!(
+            *array.data_type() == arrow::datatypes::DataType::UInt64,
+            InvalidBatchSnafu {
+                reason: "sequence array is not UInt64 type",
+            }
+        );
         // Safety: The cast must success as we have ensured it is uint64 type.
         let vector = Arc::new(UInt64Vector::try_from_arrow_array(array).unwrap());
         self.sequences = Some(vector);
@@ -195,9 +204,12 @@ impl BatchBuilder {
 
     /// Try to set an array as op types.
     pub fn op_types_array(&mut self, array: ArrayRef) -> Result<&mut Self> {
-        ensure!(*array.data_type() == arrow::datatypes::DataType::UInt8, InvalidBatchSnafu {
-            reason: "sequence array is not UInt8 type",
-        });
+        ensure!(
+            *array.data_type() == arrow::datatypes::DataType::UInt8,
+            InvalidBatchSnafu {
+                reason: "sequence array is not UInt8 type",
+            }
+        );
         // Safety: The cast must success as we have ensured it is uint64 type.
         let vector = Arc::new(UInt8Vector::try_from_arrow_array(array).unwrap());
         self.op_types = Some(vector);

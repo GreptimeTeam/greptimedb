@@ -343,7 +343,11 @@ pub enum Error {
     #[snafu(display("Invalid arrow record batch, {}, location: {}", reason, location))]
     InvalidRecordBatch { reason: String, location: Location },
 
-    #[snafu(display("Failed to convert array to vector, location: {}, source: {}", location, source))]
+    #[snafu(display(
+        "Failed to convert array to vector, location: {}, source: {}",
+        location,
+        source
+    ))]
     ConvertVector {
         location: Location,
         source: datatypes::error::Error,
