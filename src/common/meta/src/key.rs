@@ -262,7 +262,7 @@ impl TableMetadataManager {
         Ok(())
     }
 
-    /// Deletes metadata for table and returns an error if different metadata exists.
+    /// Deletes metadata for table.
     /// The caller MUST ensure it has the exclusive access to `TableNameKey`.
     pub async fn delete_table_metadata(
         &self,
@@ -296,56 +296,8 @@ impl TableMetadataManager {
         self.table_route_manager()
             .build_delete_txn(&mut txn, table_id, &table_route_value)?;
 
-        let r = self.kv_backend.txn(txn.into()).await?;
-
-        // Checks whether metadata was already deleted.
-        if !r.succeeded {
-            let mut batch = BatchGetRequest::default();
-
-            let decode_table_info_fn = self
-                .table_info_manager()
-                .build_batch_get(&mut batch, table_id);
-
-            let decode_table_route_fn = self
-                .table_route_manager()
-                .build_batch_get(&mut batch, table_id);
-
-            let r = self.kv_backend.batch_get(batch).await?;
-
-            let remote_table_info = decode_table_info_fn(&r.kvs)?;
-            let remote_table_route = decode_table_route_fn(&r.kvs)?;
-
-            // Already deleted
-            if remote_table_info.is_none() && remote_table_route.is_none() {
-                return Ok(());
-            }
-
-            return match (remote_table_info, remote_table_route) {
-                (None, None) => Ok(()),
-                (Some(remote_table_info), None) => {
-                    error::UnexpectedSnafu {
-                        err_msg: format!("Reads the different table info: {:?} during the deleting table metadata, expected: {:?}",
-                           remote_table_info.table_info, table_info_value.table_info
-                        )
-                    }.fail()
-                }
-                (None, Some(remote_table_route)) => {
-                    error::UnexpectedSnafu {
-                        err_msg: format!("Reads the different table route: {:?} during the deleting table metadata, expected: {:?}",
-                            remote_table_route.region_routes, table_route_value.region_routes
-                        )
-                    }.fail()
-                }
-                (Some(remote_table_info), Some(remote_table_route)) => {
-                    error::UnexpectedSnafu {
-                        err_msg: format!("Reads the both different table info and table route: {:?},{:?} during the deleting table metadata, expected: {:?},{:?}",
-                            remote_table_info.table_info, remote_table_route.region_routes,
-                            table_info_value.table_info, table_route_value.region_routes
-                        )
-                    }.fail()
-                }
-            };
-        }
+        // It's always successes.
+        let _ = self.kv_backend.txn(txn.into()).await?;
 
         Ok(())
     }
@@ -682,14 +634,6 @@ mod tests {
             .await
             .unwrap();
         let table_info_value = TableInfoValue::new(table_info);
-
-        // deletes modified metadata, it should return an error.
-        let mut modified_region_routes = region_routes.clone();
-        modified_region_routes.push(region_route);
-        assert!(table_metadata_manager
-            .delete_table_metadata(table_info_value.clone(), modified_region_routes)
-            .await
-            .is_err());
 
         // deletes metadata.
         table_metadata_manager
