@@ -16,13 +16,14 @@ use std::fmt::Display;
 
 use api::v1::meta::TableName;
 use futures::future::try_join_all;
+use serde::__private::de;
 use serde::{Deserialize, Serialize};
 use snafu::ensure;
 use table::metadata::TableId;
 
 use crate::error::{Result, UnexpectedSnafu};
 use crate::key::{to_removed_key, TableMetaKey};
-use crate::kv_backend::txn::{Compare, CompareOp, TxnOp, TxnOpResponse, TxnRequest};
+use crate::kv_backend::txn::{Compare, CompareOp, Txn, TxnOp, TxnOpResponse, TxnRequest};
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::router::{region_distribution, RegionRoute, Table, TableRoute};
 use crate::rpc::store::{BatchGetRequest, CompareAndPutRequest, MoveValueRequest};
@@ -92,25 +93,22 @@ impl TableRouteManager {
         table_id: TableId,
         table_route_value: &TableRouteValue,
     ) -> Result<(
-        TxnRequest,
+        Txn,
         impl FnOnce(&Vec<TxnOpResponse>) -> Result<Option<TableRouteValue>>,
     )> {
-        let mut txn = TxnRequest::default();
-
         let key = NextTableRouteKey::new(table_id);
         let raw_key = key.as_raw_key();
 
-        txn.compare.push(Compare::with_not_exist_value(
-            raw_key.clone(),
-            CompareOp::Equal,
-        ));
-
-        txn.success.push(TxnOp::Put(
-            raw_key.clone(),
-            table_route_value.try_as_raw_value()?,
-        ));
-
-        txn.failure.push(TxnOp::Get(raw_key.clone()));
+        let txn = Txn::default()
+            .when(vec![Compare::with_not_exist_value(
+                raw_key.clone(),
+                CompareOp::Equal,
+            )])
+            .and_then(vec![TxnOp::Put(
+                raw_key.clone(),
+                table_route_value.try_as_raw_value()?,
+            )])
+            .or_else(vec![TxnOp::Get(raw_key.clone())]);
 
         Ok((txn, Self::build_decode_fn(raw_key)))
     }
@@ -123,24 +121,22 @@ impl TableRouteManager {
         current_table_route_value: &TableRouteValue,
         new_table_route_value: &TableRouteValue,
     ) -> Result<(
-        TxnRequest,
+        Txn,
         impl FnOnce(&Vec<TxnOpResponse>) -> Result<Option<TableRouteValue>>,
     )> {
-        let mut txn = TxnRequest::default();
-
         let key = NextTableRouteKey::new(table_id);
         let raw_key = key.as_raw_key();
         let raw_value = current_table_route_value.try_as_raw_value()?;
-
-        txn.compare.push(Compare::with_value(
-            raw_key.clone(),
-            CompareOp::Equal,
-            raw_value.clone(),
-        ));
         let new_raw_value: Vec<u8> = new_table_route_value.try_as_raw_value()?;
-        txn.success.push(TxnOp::Put(raw_key.clone(), new_raw_value));
 
-        txn.failure.push(TxnOp::Get(raw_key.clone()));
+        let txn = Txn::default()
+            .when(vec![Compare::with_value(
+                raw_key.clone(),
+                CompareOp::Equal,
+                raw_value.clone(),
+            )])
+            .and_then(vec![TxnOp::Put(raw_key.clone(), new_raw_value)])
+            .or_else(vec![TxnOp::Get(raw_key.clone())]);
 
         Ok((txn, Self::build_decode_fn(raw_key)))
     }
@@ -150,17 +146,16 @@ impl TableRouteManager {
         &self,
         table_id: TableId,
         table_route_value: &TableRouteValue,
-    ) -> Result<TxnRequest> {
-        let mut txn = TxnRequest::default();
-
+    ) -> Result<Txn> {
         let key = NextTableRouteKey::new(table_id);
         let raw_key = key.as_raw_key();
         let raw_value = table_route_value.try_as_raw_value()?;
         let removed_key = to_removed_key(&String::from_utf8_lossy(&raw_key));
 
-        txn.success.push(TxnOp::Delete(raw_key));
-        txn.success
-            .push(TxnOp::Put(removed_key.into_bytes(), raw_value));
+        let txn = Txn::default().and_then(vec![
+            TxnOp::Delete(raw_key),
+            TxnOp::Put(removed_key.into_bytes(), raw_value),
+        ]);
 
         Ok(txn)
     }

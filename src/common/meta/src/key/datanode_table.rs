@@ -21,7 +21,7 @@ use super::table_region::RegionDistribution;
 use super::{DATANODE_TABLE_KEY_PATTERN, DATANODE_TABLE_KEY_PREFIX};
 use crate::error::{InvalidTableMetadataSnafu, MoveRegionSnafu, Result, UnexpectedSnafu};
 use crate::key::{to_removed_key, TableMetaKey};
-use crate::kv_backend::txn::{Compare, CompareOp, Txn, TxnOp, TxnRequest};
+use crate::kv_backend::txn::{Compare, CompareOp, Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::store::{BatchGetRequest, CompareAndPutRequest, MoveValueRequest, RangeRequest};
 use crate::DatanodeId;
@@ -111,8 +111,7 @@ impl DatanodeTableManager {
         &self,
         table_id: TableId,
         distribution: RegionDistribution,
-    ) -> Result<TxnRequest> {
-        let mut txn = TxnRequest::default();
+    ) -> Result<Txn> {
         let txns = distribution
             .into_iter()
             .map(|(datanode_id, regions)| {
@@ -123,7 +122,7 @@ impl DatanodeTableManager {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        txn.success.extend(txns);
+        let txn = Txn::default().and_then(txns);
 
         Ok(txn)
     }
@@ -134,8 +133,7 @@ impl DatanodeTableManager {
         table_id: TableId,
         current_region_distribution: RegionDistribution,
         new_region_distribution: RegionDistribution,
-    ) -> Result<TxnRequest> {
-        let mut txn = TxnRequest::default();
+    ) -> Result<Txn> {
         let mut opts = Vec::new();
 
         // Removes the old datanode table key value pairs
@@ -165,7 +163,7 @@ impl DatanodeTableManager {
             }
         }
 
-        txn.success.extend(opts);
+        let txn = Txn::default().and_then(opts);
         Ok(txn)
     }
 
@@ -174,8 +172,7 @@ impl DatanodeTableManager {
         &self,
         table_id: TableId,
         distribution: RegionDistribution,
-    ) -> Result<TxnRequest> {
-        let mut txn = TxnRequest::default();
+    ) -> Result<Txn> {
         let txns = distribution
             .into_keys()
             .map(|datanode_id| {
@@ -186,7 +183,7 @@ impl DatanodeTableManager {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        txn.success.extend(txns);
+        let txn = Txn::default().and_then(txns);
 
         Ok(txn)
     }
