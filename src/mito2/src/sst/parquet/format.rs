@@ -14,19 +14,24 @@
 
 //! Format to store in parquet.
 //!
-//! We append three internal columns to record batches in parquet:
+//! We store three internal columns in parquet:
+//! - `__primary_key`, the primary key of the row (tags).
 //! - `__sequence`, the sequence number of a row.
 //! - `__op_type`, the op type of the row.
-//! - `__tsid`, the time series id of the row.
+//!
+//! The schema of a parquet file is:
+//! ```text
+//! field 0, field 1, ..., field N, time index, primary key, sequence, op type
+//! ```
 
 use std::sync::Arc;
 
-use datatypes::arrow::array::{ArrayRef, UInt64Array};
+use datatypes::arrow::array::{ArrayRef, UInt64Array, BinaryArray, UInt16Array, DictionaryArray};
 use datatypes::arrow::datatypes::{DataType, Field, FieldRef, Fields, Schema, SchemaRef};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::prelude::ConcreteDataType;
 use snafu::ResultExt;
-use store_api::storage::consts::{OP_TYPE_COLUMN_NAME, SEQUENCE_COLUMN_NAME, TSID_COLUMN_NAME};
+use store_api::storage::consts::{OP_TYPE_COLUMN_NAME, SEQUENCE_COLUMN_NAME, PRIMARY_KEY_COLUMN_NAME};
 use store_api::storage::{ColumnId, Tsid};
 
 use crate::error::{NewRecordBatchSnafu, Result};
@@ -46,7 +51,16 @@ pub(crate) fn to_sst_arrow_schema(metadata: &RegionMetadata) -> SchemaRef {
             .fields()
             .iter()
             .zip(&metadata.column_metadatas)
-            .map(|(field, column_meta)| to_sst_field(column_meta, field))
+            .filter_map(|(field, column_meta)| {
+                // If the column is a tag column, we already store it in the primary key so we
+                // can ignore it.
+                if column_meta.semantic_type == SemanticType::Tag {
+                    None
+                } else {
+                    Some(field.clone())
+                }
+            })
+            .chain([metadata.time_index_field()])
             .chain(internal_fields()),
     );
 
@@ -57,11 +71,13 @@ pub(crate) fn to_sst_arrow_schema(metadata: &RegionMetadata) -> SchemaRef {
 ///
 /// The `arrow_schema` is constructed by [to_sst_arrow_schema].
 pub(crate) fn to_sst_record_batch(batch: &Batch, arrow_schema: &SchemaRef) -> Result<RecordBatch> {
-    let mut columns = Vec::with_capacity(batch.columns().len() + INTERNAL_COLUMN_NUM);
-    debug_assert_eq!(columns.len(), arrow_schema.fields().len());
+    let mut columns = Vec::with_capacity(num_columns_to_store(batch.columns().len()));
+
+    // Store all fields first.
     for column in batch.columns() {
         columns.push(column.data.to_arrow_array());
     }
+    // Add time index column.
     // Add internal columns.
     columns.push(batch.sequences().to_arrow_array());
     columns.push(batch.op_types().to_arrow_array());
@@ -90,41 +106,37 @@ pub(crate) fn from_sst_record_batch(metadata: &RegionMetadata, record_batch: &Re
     unimplemented!()
 }
 
-/// Returns the field type to store this column.
-fn to_sst_field(column_meta: &ColumnMetadata, field: &FieldRef) -> FieldRef {
-    // If the column is a tag column and it has string type, store
-    // it in dictionary type.
-    if column_meta.semantic_type == SemanticType::Tag {
-        if let ConcreteDataType::String(_) = &column_meta.column_schema.data_type {
-            return Arc::new(Field::new_dictionary(
-                field.name(),
-                dictionary_key_type(),
-                field.data_type().clone(),
-                field.is_nullable(),
-            ));
-        }
-    }
-
-    // Otherwise, store as the original type.
-    field.clone()
-}
-
 /// Key type for arrow dictionary.
 const fn dictionary_key_type() -> DataType {
     DataType::UInt16
 }
 
+/// Value type of the primary key.
+const fn pk_value_type() -> DataType {
+    DataType::Binary
+}
+
+/// Number of columns to store in parquet.
+const fn num_columns_to_store(num_fields: usize) -> usize {
+    // fields, time index and internal columns.
+    num_fields + 1 + INTERNAL_COLUMN_NUM
+}
+
 /// Fields for internal columns.
 fn internal_fields() -> [FieldRef; 3] {
+    // Internal columns are always not null.
     [
+        Arc::new(Field::new_dictionary(PRIMARY_KEY_COLUMN_NAME, dictionary_key_type(), pk_value_type(), false)),
         Arc::new(Field::new(SEQUENCE_COLUMN_NAME, DataType::UInt64, false)),
         Arc::new(Field::new(OP_TYPE_COLUMN_NAME, DataType::UInt8, false)),
-        Arc::new(Field::new(TSID_COLUMN_NAME, DataType::UInt64, false)),
     ]
 }
 
-/// Returns an arrary with `count` element for the tsid.
-fn new_tsid_array(tsid: Tsid, count: usize) -> ArrayRef {
-    let tsids = UInt64Array::from_value(tsid, count);
-    Arc::new(tsids)
+/// Creates a new array for specific `primary_key`.
+fn new_primary_key_array(primary_key: &[u8], num_rows: usize) -> ArrayRef {
+    let keys = Arc::new(BinaryArray::from_iter_values([primary_key]));
+    let values = Arc::new(UInt16Array::from_value(0, num_rows));
+
+    // Safety: The key index is valid.
+    Arc::new(DictionaryArray::new(keys, values))
 }

@@ -18,6 +18,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use api::v1::SemanticType;
+use datatypes::arrow::datatypes::FieldRef;
 use datatypes::prelude::DataType;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use serde::de::Error;
@@ -145,6 +146,12 @@ impl RegionMetadata {
     pub(crate) fn time_index_column(&self) -> &ColumnMetadata {
         let index = self.id_to_index[&self.time_index];
         &self.column_metadatas[index]
+    }
+
+    /// Returns the arrow field of the time index column.
+    pub(crate) fn time_index_field(&self) -> FieldRef {
+        let index = self.id_to_index[&self.time_index];
+        self.schema.arrow_schema().fields[index].clone()
     }
 
     // TODO(yingwen): Ensure column name is not internal columns.
