@@ -200,7 +200,7 @@ pub enum Error {
     #[snafu(display("Failed to get user info, source: {}", source))]
     Auth {
         location: Location,
-        source: auth::Error,
+        source: auth::error::Error,
     },
 
     #[snafu(display("Not found http or grpc authorization header"))]
@@ -451,7 +451,7 @@ fn status_to_tonic_code(status_code: StatusCode) -> Code {
         | StatusCode::UserPasswordMismatch
         | StatusCode::AuthHeaderNotFound
         | StatusCode::InvalidAuthHeader => Code::Unauthenticated,
-        StatusCode::AccessDenied => Code::PermissionDenied,
+        StatusCode::AccessDenied | StatusCode::PermissionDenied => Code::PermissionDenied,
     }
 }
 

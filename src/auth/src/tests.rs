@@ -18,10 +18,7 @@ use crate::error::{
     UserPasswordMismatchSnafu,
 };
 use crate::user_info::DefaultUserInfo;
-use crate::user_provider::static_user_provider::auth_mysql;
-#[allow(unused_imports)]
-use crate::Error;
-use crate::{Identity, Password, UserInfoRef, UserProvider};
+use crate::{auth_mysql, Identity, Password, UserInfoRef, UserProvider};
 
 pub struct DatabaseAuthInfo<'a> {
     pub catalog: &'a str,
@@ -108,6 +105,8 @@ impl UserProvider for MockUserProvider {
 
 #[tokio::test]
 async fn test_auth_by_plain_text() {
+    use crate::error;
+
     let user_provider = MockUserProvider::default();
     assert_eq!("mock_user_provider", user_provider.name());
 
@@ -131,7 +130,7 @@ async fn test_auth_by_plain_text() {
     assert!(auth_result.is_err());
     assert!(matches!(
         auth_result.err().unwrap(),
-        Error::UnsupportedPasswordType { .. }
+        error::Error::UnsupportedPasswordType { .. }
     ));
 
     // auth failed, err: user not exist.
@@ -144,7 +143,7 @@ async fn test_auth_by_plain_text() {
     assert!(auth_result.is_err());
     assert!(matches!(
         auth_result.err().unwrap(),
-        Error::UserNotFound { .. }
+        error::Error::UserNotFound { .. }
     ));
 
     // auth failed, err: wrong password
@@ -157,7 +156,7 @@ async fn test_auth_by_plain_text() {
     assert!(auth_result.is_err());
     assert!(matches!(
         auth_result.err().unwrap(),
-        Error::UserPasswordMismatch { .. }
+        error::Error::UserPasswordMismatch { .. }
     ))
 }
 

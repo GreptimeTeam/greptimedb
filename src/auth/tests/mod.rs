@@ -17,7 +17,7 @@ use std::assert_matches::assert_matches;
 use std::sync::Arc;
 
 use api::v1::greptime_request::Request;
-use auth::Error::InternalState;
+use auth::error::Error::InternalState;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq, PermissionResp, UserInfoRef};
 use sql::statements::show::{ShowDatabases, ShowKind};
 use sql::statements::statement::Statement;
@@ -29,7 +29,7 @@ impl PermissionChecker for DummyPermissionChecker {
         &self,
         _user_info: Option<UserInfoRef>,
         req: PermissionReq,
-    ) -> auth::Result<PermissionResp> {
+    ) -> auth::error::Result<PermissionResp> {
         match req {
             PermissionReq::GrpcRequest(_) => Ok(PermissionResp::Allow),
             PermissionReq::SqlStatement(_) => Ok(PermissionResp::Reject),
