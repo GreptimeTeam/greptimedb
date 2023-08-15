@@ -462,9 +462,7 @@ impl From<Error> for tonic::Status {
         // If either of the status_code or error msg cannot convert to valid HTTP header value
         // (which is a very rare case), just ignore. Client will use Tonic status code and message.
         let status_code = err.status_code();
-        if let Ok(code) = HeaderValue::from_bytes(status_code.to_string().as_bytes()) {
-            let _ = headers.insert(GREPTIME_ERROR_CODE, code);
-        }
+        headers.insert(GREPTIME_ERROR_CODE, HeaderValue::from(status_code as u32));
         let root_error = err.iter_chain().last().unwrap();
         if let Ok(err_msg) = HeaderValue::from_bytes(root_error.to_string().as_bytes()) {
             let _ = headers.insert(GREPTIME_ERROR_MSG, err_msg);
