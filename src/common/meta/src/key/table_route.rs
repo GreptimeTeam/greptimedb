@@ -143,12 +143,6 @@ impl TableRouteManager {
         let raw_value = table_route_value.try_as_raw_value()?;
         let removed_key = to_removed_key(&String::from_utf8_lossy(&raw_key));
 
-        txn.compare.push(Compare::with_value(
-            raw_key.clone(),
-            CompareOp::Equal,
-            raw_value.clone(),
-        ));
-
         txn.success.push(TxnOp::Delete(raw_key));
         txn.success
             .push(TxnOp::Put(removed_key.into_bytes(), raw_value));

@@ -118,7 +118,7 @@ impl TableInfoManager {
         Ok(())
     }
 
-    /// Builds a delete table info transaction, it expected the remote value equals the `table_info_value`.
+    /// Builds a delete table info transaction.
     pub(crate) fn build_delete_txn(
         &self,
         txn: &mut TxnRequest,
@@ -129,12 +129,6 @@ impl TableInfoManager {
         let raw_key = key.as_raw_key();
         let raw_value = table_info_value.try_as_raw_value()?;
         let removed_key = to_removed_key(&String::from_utf8_lossy(&raw_key));
-
-        txn.compare.push(Compare::with_value(
-            raw_key.clone(),
-            CompareOp::Equal,
-            raw_value.clone(),
-        ));
 
         txn.success.push(TxnOp::Delete(raw_key));
         txn.success
