@@ -27,11 +27,12 @@ use parquet::arrow::{ParquetRecordBatchStreamBuilder, ProjectionMask};
 use parquet::errors::ParquetError;
 use parquet::format::KeyValue;
 use snafu::{OptionExt, ResultExt};
+use store_api::storage::ColumnId;
 use table::predicate::Predicate;
 use tokio::io::BufReader;
 
 use crate::error::{NoKeyValueSnafu, OpenDalSnafu, ReadParquetSnafu, Result};
-use crate::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataRef};
+use crate::metadata::{RegionMetadata, RegionMetadataRef};
 use crate::read::{Batch, BatchReader};
 use crate::sst::file::FileHandle;
 use crate::sst::parquet::format::{from_sst_record_batch, to_sst_projection_indices};
@@ -44,7 +45,7 @@ pub struct ParquetReaderBuilder {
     object_store: ObjectStore,
     predicate: Option<Predicate>,
     time_range: Option<TimestampRange>,
-    projection: Option<Vec<ColumnMetadata>>,
+    projection: Option<Vec<ColumnId>>,
 }
 
 impl ParquetReaderBuilder {
@@ -77,7 +78,7 @@ impl ParquetReaderBuilder {
     }
 
     /// Attaches the projection to the builder.
-    pub fn projection(mut self, projection: Vec<ColumnMetadata>) -> ParquetReaderBuilder {
+    pub fn projection(mut self, projection: Vec<ColumnId>) -> ParquetReaderBuilder {
         self.projection = Some(projection);
         self
     }
@@ -118,7 +119,7 @@ pub struct ParquetReader {
     ///
     /// `None` reads all columns. Due to schema change, the projection
     /// can contain columns not in the parquet file.
-    projection: Option<Vec<ColumnMetadata>>,
+    projection: Option<Vec<ColumnId>>,
 
     /// Inner parquet record batch stream.
     stream: Option<BoxedRecordBatchStream>,
@@ -170,9 +171,8 @@ impl ParquetReader {
         }
 
         let parquet_schema_desc = builder.metadata().file_metadata().schema_descr();
-        if let Some(columns) = self.projection.as_ref() {
-            let column_ids = columns.iter().map(|c| c.column_id);
-            let indices = to_sst_projection_indices(&region_meta, column_ids);
+        if let Some(column_ids) = self.projection.as_ref() {
+            let indices = to_sst_projection_indices(&region_meta, column_ids.iter().copied());
             let projection_mask = ProjectionMask::roots(parquet_schema_desc, indices);
             builder = builder.with_projection(projection_mask);
         }
