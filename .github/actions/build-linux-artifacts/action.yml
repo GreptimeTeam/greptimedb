@@ -87,6 +87,11 @@ runs:
         upload-to-s3: ${{ inputs.upload-to-s3 }}
         working-dir: ${{ inputs.working-dir }}
 
+    - name: Clean up the target directory # Clean up the target directory for the centos7 base image, or it will still use the objects of last build.
+      shell: bash
+      run: |
+        rm -rf ./target/
+
     - name: Build greptime on centos base image
       uses: ./.github/actions/build-greptime-binary
       if: ${{ inputs.arch == 'amd64' && inputs.dev-mode == 'false' }} # Only build centos7 base image for amd64.

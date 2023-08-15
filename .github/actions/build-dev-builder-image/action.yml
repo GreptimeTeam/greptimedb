@@ -42,10 +42,21 @@ runs:
         username: ${{ inputs.dockerhub-image-registry-username }}
         password: ${{ inputs.dockerhub-image-registry-token }}
 
-    - name: Build and push dev builder image to dockerhub
+    - name: Build and push ubuntu dev builder image to dockerhub
       shell: bash
       run:
         make dev-builder \
+        BASE_IMAGE=ubuntu \
+        BUILDX_MULTI_PLATFORM_BUILD=true \
+        IMAGE_REGISTRY=${{ inputs.dockerhub-image-registry }} \
+        IMAGE_NAMESPACE=${{ inputs.dockerhub-image-namespace }} \
+        IMAGE_TAG=${{ inputs.version }}
+
+    - name: Build and push centos dev builder image to dockerhub
+      shell: bash
+      run:
+        make dev-builder \
+        BASE_IMAGE=centos \
         BUILDX_MULTI_PLATFORM_BUILD=true \
         IMAGE_REGISTRY=${{ inputs.dockerhub-image-registry }} \
         IMAGE_NAMESPACE=${{ inputs.dockerhub-image-namespace }} \
@@ -59,11 +70,23 @@ runs:
         username: ${{ inputs.acr-image-registry-username }}
         password: ${{ inputs.acr-image-registry-password }}
 
-    - name: Build and push dev builder image to ACR
+    - name: Build and push ubuntu dev builder image to ACR
       shell: bash
       continue-on-error: true
       run: # buildx will cache the images that already built, so it will not take long time to build the images again.
         make dev-builder \
+        BASE_IMAGE=ubuntu \
+        BUILDX_MULTI_PLATFORM_BUILD=true \
+        IMAGE_REGISTRY=${{ inputs.acr-image-registry }} \
+        IMAGE_NAMESPACE=${{ inputs.acr-image-namespace }} \
+        IMAGE_TAG=${{ inputs.version }}
+
+    - name: Build and push centos dev builder image to ACR
+      shell: bash
+      continue-on-error: true
+      run: # buildx will cache the images that already built, so it will not take long time to build the images again.
+        make dev-builder \
+        BASE_IMAGE=centos \
         BUILDX_MULTI_PLATFORM_BUILD=true \
         IMAGE_REGISTRY=${{ inputs.acr-image-registry }} \
         IMAGE_NAMESPACE=${{ inputs.acr-image-namespace }} \

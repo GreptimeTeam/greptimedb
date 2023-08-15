@@ -2,6 +2,7 @@ FROM ubuntu:22.04 as builder
 
 ARG CARGO_PROFILE
 ARG FEATURES
+ARG OUTPUT_DIR
 
 ENV LANG en_US.utf8
 WORKDIR /greptimedb
@@ -25,7 +26,7 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --no-mo
 ENV PATH /root/.cargo/bin/:$PATH
 
 # Build the project in release mode.
-RUN --mount=target=.,rw \
+RUN --mount=target=. \
     --mount=type=cache,target=/root/.cargo/registry \
     make build \
     CARGO_PROFILE=${CARGO_PROFILE} \
@@ -36,7 +37,7 @@ RUN --mount=target=.,rw \
 # TODO(zyy17): Maybe should use the more secure container image.
 FROM ubuntu:22.04 as base
 
-ARG CARGO_PROFILE
+ARG OUTPUT_DIR
 
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get \
     -y install ca-certificates \
@@ -50,7 +51,7 @@ COPY ./docker/python/requirements.txt /etc/greptime/requirements.txt
 RUN python3 -m pip install -r /etc/greptime/requirements.txt
 
 WORKDIR /greptime
-COPY --from=builder /out/target/${CARGO_PROFILE}/greptime /greptime/bin/
+COPY --from=builder /out/target/${OUTPUT_DIR}/greptime /greptime/bin/
 ENV PATH /greptime/bin/:$PATH
 
 ENTRYPOINT ["greptime"]
