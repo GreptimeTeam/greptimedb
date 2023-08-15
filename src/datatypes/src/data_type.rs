@@ -129,6 +129,7 @@ impl ConcreteDataType {
                 | ConcreteDataType::Timestamp(_)
                 | ConcreteDataType::Time(_)
                 | ConcreteDataType::Interval(_)
+                | ConcreteDataType::Duration(_)
         )
     }
 
@@ -144,6 +145,7 @@ impl ConcreteDataType {
                 | ConcreteDataType::Timestamp(_)
                 | ConcreteDataType::Time(_)
                 | ConcreteDataType::Interval(_)
+                | ConcreteDataType::Duration(_)
         )
     }
 
@@ -217,6 +219,15 @@ impl ConcreteDataType {
         let array = arrow_array::new_empty_array(&self.as_arrow_type());
         arrow_array_cast(array.as_ref(), &to_type.as_arrow_type()).is_ok()
     }
+
+    /// Try to cast data type as a [`DurationType`].
+    pub fn as_duration(&self) -> Option<DurationType> {
+        match self {
+            ConcreteDataType::Int64(_) => Some(DurationType::Millisecond(DurationMillisecondType)),
+            ConcreteDataType::Duration(d) => Some(*d),
+            _ => None,
+        }
+    }
 }
 
 impl From<&ConcreteDataType> for ConcreteDataType {
@@ -258,6 +269,9 @@ impl TryFrom<&ArrowDataType> for ConcreteDataType {
             }
             ArrowDataType::Time32(u) => ConcreteDataType::Time(TimeType::from_unit(u.into())),
             ArrowDataType::Time64(u) => ConcreteDataType::Time(TimeType::from_unit(u.into())),
+            ArrowDataType::Duration(u) => {
+                ConcreteDataType::Duration(DurationType::from_unit(u.into()))
+            }
             _ => {
                 return error::UnsupportedArrowTypeSnafu {
                     arrow_type: dt.clone(),
@@ -588,6 +602,10 @@ mod tests {
         assert!(!ConcreteDataType::time_millisecond_datatype().is_timestamp_compatible());
         assert!(!ConcreteDataType::time_microsecond_datatype().is_timestamp_compatible());
         assert!(!ConcreteDataType::time_nanosecond_datatype().is_timestamp_compatible());
+        assert!(!ConcreteDataType::duration_second_datatype().is_timestamp_compatible());
+        assert!(!ConcreteDataType::duration_millisecond_datatype().is_timestamp_compatible());
+        assert!(!ConcreteDataType::duration_microsecond_datatype().is_timestamp_compatible());
+        assert!(!ConcreteDataType::duration_nanosecond_datatype().is_timestamp_compatible());
     }
 
     #[test]
@@ -629,6 +647,11 @@ mod tests {
         assert!(ConcreteDataType::interval_year_month_datatype().is_stringifiable());
         assert!(ConcreteDataType::interval_day_time_datatype().is_stringifiable());
         assert!(ConcreteDataType::interval_month_day_nano_datatype().is_stringifiable());
+
+        assert!(ConcreteDataType::duration_second_datatype().is_stringifiable());
+        assert!(ConcreteDataType::duration_millisecond_datatype().is_stringifiable());
+        assert!(ConcreteDataType::duration_microsecond_datatype().is_stringifiable());
+        assert!(ConcreteDataType::duration_nanosecond_datatype().is_stringifiable());
     }
 
     #[test]
@@ -650,6 +673,10 @@ mod tests {
         assert!(ConcreteDataType::interval_year_month_datatype().is_signed());
         assert!(ConcreteDataType::interval_day_time_datatype().is_signed());
         assert!(ConcreteDataType::interval_month_day_nano_datatype().is_signed());
+        assert!(ConcreteDataType::duration_second_datatype().is_signed());
+        assert!(ConcreteDataType::duration_millisecond_datatype().is_signed());
+        assert!(ConcreteDataType::duration_microsecond_datatype().is_signed());
+        assert!(ConcreteDataType::duration_nanosecond_datatype().is_signed());
 
         assert!(!ConcreteDataType::uint8_datatype().is_signed());
         assert!(!ConcreteDataType::uint16_datatype().is_signed());
@@ -679,6 +706,10 @@ mod tests {
         assert!(!ConcreteDataType::interval_year_month_datatype().is_unsigned());
         assert!(!ConcreteDataType::interval_day_time_datatype().is_unsigned());
         assert!(!ConcreteDataType::interval_month_day_nano_datatype().is_unsigned());
+        assert!(!ConcreteDataType::duration_second_datatype().is_unsigned());
+        assert!(!ConcreteDataType::duration_millisecond_datatype().is_unsigned());
+        assert!(!ConcreteDataType::duration_microsecond_datatype().is_unsigned());
+        assert!(!ConcreteDataType::duration_nanosecond_datatype().is_unsigned());
 
         assert!(ConcreteDataType::uint8_datatype().is_unsigned());
         assert!(ConcreteDataType::uint16_datatype().is_unsigned());
@@ -787,6 +818,10 @@ mod tests {
             ))
             .to_string(),
             "Interval"
-        )
+        );
+        assert_eq!(
+            ConcreteDataType::duration_second_datatype().to_string(),
+            "Duration"
+        );
     }
 }

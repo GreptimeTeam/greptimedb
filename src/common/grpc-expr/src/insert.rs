@@ -159,8 +159,8 @@ mod tests {
         );
 
         let column_defs = create_expr.column_defs;
-        assert_eq!(column_defs[5].name, create_expr.time_index);
-        assert_eq!(6, column_defs.len());
+        assert_eq!(column_defs[6].name, create_expr.time_index);
+        assert_eq!(7, column_defs.len());
 
         assert_eq!(
             ConcreteDataType::string_datatype(),
@@ -233,6 +233,20 @@ mod tests {
         );
 
         assert_eq!(
+            ConcreteDataType::duration_millisecond_datatype(),
+            ConcreteDataType::from(
+                ColumnDataTypeWrapper::try_new(
+                    column_defs
+                        .iter()
+                        .find(|c| c.name == "duration")
+                        .unwrap()
+                        .datatype
+                )
+                .unwrap()
+            )
+        );
+
+        assert_eq!(
             ConcreteDataType::timestamp_millisecond_datatype(),
             ConcreteDataType::from(
                 ColumnDataTypeWrapper::try_new(
@@ -265,7 +279,7 @@ mod tests {
 
         let add_columns = find_new_columns(&schema, &insert_batch.0).unwrap().unwrap();
 
-        assert_eq!(4, add_columns.add_columns.len());
+        assert_eq!(5, add_columns.add_columns.len());
         let host_column = &add_columns.add_columns[0];
         assert_eq!(
             ConcreteDataType::string_datatype(),
@@ -305,6 +319,52 @@ mod tests {
                 .unwrap()
             )
         );
+
+        let duration_column = &add_columns.add_columns[4];
+        assert!(!duration_column.is_key);
+
+        assert_eq!(
+            ConcreteDataType::duration_millisecond_datatype(),
+            ConcreteDataType::from(
+                ColumnDataTypeWrapper::try_new(
+                    duration_column.column_def.as_ref().unwrap().datatype
+                )
+                .unwrap()
+            )
+        );
+    }
+
+    #[test]
+    fn test_convert_duration_values() {
+        // second
+        let actual = convert_values(
+            &ConcreteDataType::Duration(DurationType::Second(DurationSecondType)),
+            Values {
+                dur_second_values: vec![1_i64, 2_i64, 3_i64],
+                ..Default::default()
+            },
+        );
+        let expect = vec![
+            Value::Duration(Duration::new_second(1_i64)),
+            Value::Duration(Duration::new_second(2_i64)),
+            Value::Duration(Duration::new_second(3_i64)),
+        ];
+        assert_eq!(expect, actual);
+
+        // millisecond
+        let actual = convert_values(
+            &ConcreteDataType::Duration(DurationType::Millisecond(DurationMillisecondType)),
+            Values {
+                dur_millisecond_values: vec![1_i64, 2_i64, 3_i64],
+                ..Default::default()
+            },
+        );
+        let expect = vec![
+            Value::Duration(Duration::new_millisecond(1_i64)),
+            Value::Duration(Duration::new_millisecond(2_i64)),
+            Value::Duration(Duration::new_millisecond(3_i64)),
+        ];
+        assert_eq!(expect, actual);
     }
 
     #[test]
@@ -394,6 +454,18 @@ mod tests {
             datatype: ColumnDataType::IntervalMonthDayNano as i32,
         };
 
+        let duration_vals = Values {
+            dur_millisecond_values: vec![100, 101],
+            ..Default::default()
+        };
+        let duration_column = Column {
+            column_name: "duration".to_string(),
+            semantic_type: SemanticType::Field as i32,
+            values: Some(duration_vals),
+            null_mask: vec![0],
+            datatype: ColumnDataType::DurationMillisecond as i32,
+        };
+
         let ts_vals = Values {
             timestamp_millisecond_values: vec![100, 101],
             ..Default::default()
@@ -413,6 +485,7 @@ mod tests {
                 mem_column,
                 time_column,
                 interval_column,
+                duration_column,
                 ts_column,
             ],
             row_count,

@@ -50,6 +50,16 @@ pub enum DurationType {
 }
 
 impl DurationType {
+    /// Creates time type from `TimeUnit`.
+    pub fn from_unit(unit: TimeUnit) -> Self {
+        match unit {
+            TimeUnit::Second => Self::Second(DurationSecondType),
+            TimeUnit::Millisecond => Self::Millisecond(DurationMillisecondType),
+            TimeUnit::Microsecond => Self::Microsecond(DurationMicrosecondType),
+            TimeUnit::Nanosecond => Self::Nanosecond(DurationNanosecondType),
+        }
+    }
+
     /// Returns the [`TimeUnit`] of this type.
     pub fn unit(&self) -> TimeUnit {
         match self {
@@ -177,6 +187,29 @@ mod tests {
         assert_eq!(
             TimeUnit::Nanosecond,
             DurationType::Nanosecond(DurationNanosecondType).unit()
+        );
+    }
+
+    #[test]
+    fn test_from_unit() {
+        assert_eq!(
+            DurationType::Second(DurationSecondType),
+            DurationType::from_unit(TimeUnit::Second)
+        );
+
+        assert_eq!(
+            DurationType::Millisecond(DurationMillisecondType),
+            DurationType::from_unit(TimeUnit::Millisecond)
+        );
+
+        assert_eq!(
+            DurationType::Microsecond(DurationMicrosecondType),
+            DurationType::from_unit(TimeUnit::Microsecond)
+        );
+
+        assert_eq!(
+            DurationType::Nanosecond(DurationNanosecondType),
+            DurationType::from_unit(TimeUnit::Nanosecond)
         );
     }
 }

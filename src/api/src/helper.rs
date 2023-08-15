@@ -921,10 +921,11 @@ mod tests {
         UInt32Type,
     };
     use datatypes::vectors::{
-        BooleanVector, IntervalDayTimeVector, IntervalMonthDayNanoVector, IntervalYearMonthVector,
-        TimeMicrosecondVector, TimeMillisecondVector, TimeNanosecondVector, TimeSecondVector,
-        TimestampMicrosecondVector, TimestampMillisecondVector, TimestampNanosecondVector,
-        TimestampSecondVector, Vector,
+        BooleanVector, DurationMicrosecondVector, DurationMillisecondVector,
+        DurationNanosecondVector, DurationSecondVector, IntervalDayTimeVector,
+        IntervalMonthDayNanoVector, IntervalYearMonthVector, TimeMicrosecondVector,
+        TimeMillisecondVector, TimeNanosecondVector, TimeSecondVector, TimestampMicrosecondVector,
+        TimestampMillisecondVector, TimestampNanosecondVector, TimestampSecondVector, Vector,
     };
     use paste::paste;
 
@@ -998,6 +999,10 @@ mod tests {
 
         let values = values_with_capacity(ColumnDataType::IntervalMonthDayNano, 2);
         let values = values.interval_month_day_nano_values;
+        assert_eq!(2, values.capacity());
+
+        let values = values_with_capacity(ColumnDataType::DurationMillisecond, 2);
+        let values = values.dur_millisecond_values;
         assert_eq!(2, values.capacity());
     }
 
@@ -1083,6 +1088,10 @@ mod tests {
             ConcreteDataType::interval_datatype(IntervalUnit::MonthDayNano),
             ColumnDataTypeWrapper(ColumnDataType::IntervalMonthDayNano).into()
         );
+        assert_eq!(
+            ConcreteDataType::duration_millisecond_datatype(),
+            ColumnDataTypeWrapper(ColumnDataType::DurationMillisecond).into()
+        )
     }
 
     #[test]
@@ -1168,6 +1177,12 @@ mod tests {
         assert_eq!(
             ColumnDataTypeWrapper(ColumnDataType::IntervalMonthDayNano),
             ConcreteDataType::interval_datatype(IntervalUnit::MonthDayNano)
+                .try_into()
+                .unwrap()
+        );
+        assert_eq!(
+            ColumnDataTypeWrapper(ColumnDataType::DurationMillisecond),
+            ConcreteDataType::duration_millisecond_datatype()
                 .try_into()
                 .unwrap()
         );
@@ -1312,6 +1327,47 @@ mod tests {
                     .nanoseconds
             );
         });
+    }
+
+    #[test]
+    fn test_column_put_duration_values() {
+        let mut column = Column {
+            column_name: "test".to_string(),
+            semantic_type: 0,
+            values: Some(Values {
+                ..Default::default()
+            }),
+            null_mask: vec![],
+            datatype: 0,
+        };
+
+        let vector = Arc::new(DurationNanosecondVector::from_vec(vec![1, 2, 3]));
+        push_vals(&mut column, 3, vector);
+        assert_eq!(
+            vec![1, 2, 3],
+            column.values.as_ref().unwrap().dur_nanosecond_values
+        );
+
+        let vector = Arc::new(DurationMicrosecondVector::from_vec(vec![7, 8, 9]));
+        push_vals(&mut column, 3, vector);
+        assert_eq!(
+            vec![7, 8, 9],
+            column.values.as_ref().unwrap().dur_microsecond_values
+        );
+
+        let vector = Arc::new(DurationMillisecondVector::from_vec(vec![4, 5, 6]));
+        push_vals(&mut column, 3, vector);
+        assert_eq!(
+            vec![4, 5, 6],
+            column.values.as_ref().unwrap().dur_millisecond_values
+        );
+
+        let vector = Arc::new(DurationSecondVector::from_vec(vec![10, 11, 12]));
+        push_vals(&mut column, 3, vector);
+        assert_eq!(
+            vec![10, 11, 12],
+            column.values.as_ref().unwrap().dur_second_values
+        );
     }
 
     #[test]

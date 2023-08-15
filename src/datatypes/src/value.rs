@@ -380,7 +380,7 @@ pub fn duration_to_scalar_value(unit: TimeUnit, val: Option<i64>) -> ScalarValue
         TimeUnit::Second => ScalarValue::DurationSecond(val),
         TimeUnit::Millisecond => ScalarValue::DurationMillisecond(val),
         TimeUnit::Microsecond => ScalarValue::DurationMicrosecond(val),
-        TimeUnit::Nanosecond => ScalarValue::DurationMicrosecond(val),
+        TimeUnit::Nanosecond => ScalarValue::DurationNanosecond(val),
     }
 }
 
@@ -1338,6 +1338,46 @@ mod tests {
             ScalarValue::Time64Nanosecond(None).try_into().unwrap()
         );
 
+        assert_eq!(
+            Value::Duration(Duration::new_second(1)),
+            ScalarValue::DurationSecond(Some(1)).try_into().unwrap()
+        );
+        assert_eq!(
+            Value::Null,
+            ScalarValue::DurationSecond(None).try_into().unwrap()
+        );
+
+        assert_eq!(
+            Value::Duration(Duration::new_millisecond(1)),
+            ScalarValue::DurationMillisecond(Some(1))
+                .try_into()
+                .unwrap()
+        );
+        assert_eq!(
+            Value::Null,
+            ScalarValue::DurationMillisecond(None).try_into().unwrap()
+        );
+
+        assert_eq!(
+            Value::Duration(Duration::new_microsecond(1)),
+            ScalarValue::DurationMicrosecond(Some(1))
+                .try_into()
+                .unwrap()
+        );
+        assert_eq!(
+            Value::Null,
+            ScalarValue::DurationMicrosecond(None).try_into().unwrap()
+        );
+
+        assert_eq!(
+            Value::Duration(Duration::new_nanosecond(1)),
+            ScalarValue::DurationNanosecond(Some(1)).try_into().unwrap()
+        );
+        assert_eq!(
+            Value::Null,
+            ScalarValue::DurationNanosecond(None).try_into().unwrap()
+        );
+
         let result: Result<Value> = ScalarValue::Decimal128(Some(1), 0, 0).try_into();
         assert!(result
             .unwrap_err()
@@ -1490,6 +1530,22 @@ mod tests {
             &ConcreteDataType::interval_month_day_nano_datatype(),
             &Value::Interval(Interval::from_month_day_nano(1, 2, 3)),
         );
+        check_type_and_value(
+            &ConcreteDataType::duration_second_datatype(),
+            &Value::Duration(Duration::new_second(1)),
+        );
+        check_type_and_value(
+            &ConcreteDataType::duration_millisecond_datatype(),
+            &Value::Duration(Duration::new_millisecond(1)),
+        );
+        check_type_and_value(
+            &ConcreteDataType::duration_microsecond_datatype(),
+            &Value::Duration(Duration::new_microsecond(1)),
+        );
+        check_type_and_value(
+            &ConcreteDataType::duration_nanosecond_datatype(),
+            &Value::Duration(Duration::new_nanosecond(1)),
+        );
     }
 
     #[test]
@@ -1589,6 +1645,10 @@ mod tests {
             serde_json::Value::Number(1.into()),
             to_json(Value::Time(Time::new_millisecond(1)))
         );
+        assert_eq!(
+            serde_json::Value::Number(1.into()),
+            to_json(Value::Duration(Duration::new_millisecond(1)))
+        );
 
         let json_value: serde_json::Value =
             serde_json::from_str(r#"{"items":[{"Int32":123}],"datatype":{"Int32":{}}}"#).unwrap();
@@ -1648,6 +1708,7 @@ mod tests {
         check_as_value_ref!(Timestamp, Timestamp::new_millisecond(1));
         check_as_value_ref!(Time, Time::new_millisecond(1));
         check_as_value_ref!(Interval, Interval::from_month_day_nano(1, 2, 3));
+        check_as_value_ref!(Duration, Duration::new_millisecond(1));
 
         assert_eq!(
             ValueRef::String("hello"),
@@ -1698,6 +1759,7 @@ mod tests {
         check_as_correct!(Date::new(123), Date, as_date);
         check_as_correct!(DateTime::new(12), DateTime, as_datetime);
         check_as_correct!(Time::new_second(12), Time, as_time);
+        check_as_correct!(Duration::new_second(12), Duration, as_duration);
         let list = ListValue {
             items: None,
             datatype: ConcreteDataType::int32_datatype(),
@@ -1748,6 +1810,10 @@ mod tests {
         assert_eq!(
             Value::Time(Time::new(1000, TimeUnit::Millisecond)).to_string(),
             "08:00:01+0800"
+        );
+        assert_eq!(
+            Value::Duration(Duration::new_millisecond(1000)).to_string(),
+            "1000ms"
         );
         assert_eq!(
             Value::List(ListValue::new(
@@ -1984,6 +2050,31 @@ mod tests {
                 .try_to_scalar_value(&ConcreteDataType::time_nanosecond_datatype())
                 .unwrap()
         );
+
+        assert_eq!(
+            ScalarValue::DurationSecond(None),
+            Value::Null
+                .try_to_scalar_value(&ConcreteDataType::duration_second_datatype())
+                .unwrap()
+        );
+        assert_eq!(
+            ScalarValue::DurationMillisecond(None),
+            Value::Null
+                .try_to_scalar_value(&ConcreteDataType::duration_millisecond_datatype())
+                .unwrap()
+        );
+        assert_eq!(
+            ScalarValue::DurationMicrosecond(None),
+            Value::Null
+                .try_to_scalar_value(&ConcreteDataType::duration_microsecond_datatype())
+                .unwrap()
+        );
+        assert_eq!(
+            ScalarValue::DurationNanosecond(None),
+            Value::Null
+                .try_to_scalar_value(&ConcreteDataType::duration_nanosecond_datatype())
+                .unwrap()
+        );
     }
 
     #[test]
@@ -2047,6 +2138,26 @@ mod tests {
         assert_eq!(
             ScalarValue::Time64Nanosecond(Some(1)),
             time_to_scalar_value(TimeUnit::Nanosecond, Some(1)).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_duration_to_scalar_value() {
+        assert_eq!(
+            ScalarValue::DurationSecond(Some(1)),
+            duration_to_scalar_value(TimeUnit::Second, Some(1))
+        );
+        assert_eq!(
+            ScalarValue::DurationMillisecond(Some(1)),
+            duration_to_scalar_value(TimeUnit::Millisecond, Some(1))
+        );
+        assert_eq!(
+            ScalarValue::DurationMicrosecond(Some(1)),
+            duration_to_scalar_value(TimeUnit::Microsecond, Some(1))
+        );
+        assert_eq!(
+            ScalarValue::DurationNanosecond(Some(1)),
+            duration_to_scalar_value(TimeUnit::Nanosecond, Some(1))
         );
     }
 }
