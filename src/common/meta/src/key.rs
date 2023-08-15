@@ -230,7 +230,7 @@ impl TableMetadataManager {
             .table_route_manager()
             .build_create_txn(table_id, &table_route_value)?;
 
-        let txn = TxnRequest::from_iter(vec![
+        let txn = TxnRequest::merge(vec![
             create_table_name_txn,
             create_table_info_txn,
             create_datanode_table_txn,
@@ -298,7 +298,7 @@ impl TableMetadataManager {
             .table_route_manager()
             .build_delete_txn(table_id, &table_route_value)?;
 
-        let txn = TxnRequest::from_iter(vec![
+        let txn = TxnRequest::merge(vec![
             delete_table_name_txn,
             delete_table_info_txn,
             delete_datanode_txn,
@@ -350,7 +350,7 @@ impl TableMetadataManager {
             .table_info_manager()
             .build_update_txn(table_id, &current_table_info_value, &new_table_info_value)?;
 
-        let txn = TxnRequest::from_iter(vec![update_table_name_txn, update_table_info_txn]).into();
+        let txn = TxnRequest::merge(vec![update_table_name_txn, update_table_info_txn]).into();
 
         let r = self.kv_backend.txn(txn).await?;
 
@@ -422,8 +422,7 @@ impl TableMetadataManager {
             .table_route_manager()
             .build_update_txn(table_id, &current_table_route_value, &new_table_route_value)?;
 
-        let txn =
-            TxnRequest::from_iter(vec![update_datanode_table_txn, update_table_route_txn]).into();
+        let txn = TxnRequest::merge(vec![update_datanode_table_txn, update_table_route_txn]).into();
 
         let r = self.kv_backend.txn(txn).await?;
 
