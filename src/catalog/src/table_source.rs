@@ -45,8 +45,8 @@ impl DfTableSourceProvider {
             catalog_manager,
             disallow_cross_schema_query,
             resolved_tables: HashMap::new(),
-            default_catalog: query_ctx.current_catalog(),
-            default_schema: query_ctx.current_schema(),
+            default_catalog: query_ctx.current_catalog().to_owned(),
+            default_schema: query_ctx.current_schema().to_owned(),
         }
     }
 
@@ -130,7 +130,7 @@ mod tests {
         let query_ctx = &QueryContext::with("greptime", "public");
 
         let table_provider =
-            DfTableSourceProvider::new(Arc::new(MemoryCatalogManager::default()), true, query_ctx);
+            DfTableSourceProvider::new(MemoryCatalogManager::with_default_setup(), true, query_ctx);
 
         let table_ref = TableReference::Bare {
             table: Cow::Borrowed("table_name"),

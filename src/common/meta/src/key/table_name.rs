@@ -163,10 +163,11 @@ impl TableNameManager {
             let Some(curr) = result
                 .prev_kv
                 .map(|x| TableNameValue::try_from_raw_value(x.value))
-                .transpose()? else {
+                .transpose()?
+            else {
                 return UnexpectedSnafu {
                     err_msg: format!("compare_and_put expect None but failed with current value None, key: {key}, value: {value:?}"),
-                }.fail()
+                }.fail();
             };
             ensure!(
                 curr.table_id == table_id,
@@ -226,7 +227,8 @@ impl TableNameManager {
                 // name, then the table must not exist at the first place.
                 return TableNotExistSnafu {
                     table_name: TableName::from(key).to_string(),
-                }.fail();
+                }
+                .fail();
             };
 
             ensure!(
@@ -248,16 +250,23 @@ impl TableNameManager {
             .transpose()
     }
 
-    pub async fn tables(&self, catalog: &str, schema: &str) -> Result<Vec<String>> {
+    pub async fn tables(
+        &self,
+        catalog: &str,
+        schema: &str,
+    ) -> Result<Vec<(String, TableNameValue)>> {
         let key = TableNameKey::prefix_to_table(catalog, schema).into_bytes();
         let req = RangeRequest::new().with_prefix(key);
         let resp = self.kv_backend.range(req).await?;
-        let table_names = resp
-            .kvs
-            .into_iter()
-            .map(|kv| TableNameKey::strip_table_name(kv.key()))
-            .collect::<Result<Vec<_>>>()?;
-        Ok(table_names)
+
+        let mut res = Vec::with_capacity(resp.kvs.len());
+        for kv in resp.kvs {
+            res.push((
+                TableNameKey::strip_table_name(kv.key())?,
+                TableNameValue::try_from_raw_value(kv.value)?,
+            ))
+        }
+        Ok(res)
     }
 
     pub async fn remove(&self, key: TableNameKey<'_>) -> Result<()> {
@@ -334,7 +343,14 @@ mod tests {
 
         let tables = manager.tables("my_catalog", "my_schema").await.unwrap();
         assert_eq!(tables.len(), 3);
-        assert_eq!(tables, vec!["table_1_new", "table_2", "table_3"]);
+        assert_eq!(
+            tables,
+            vec![
+                ("table_1_new".to_string(), TableNameValue::new(1)),
+                ("table_2".to_string(), TableNameValue::new(2)),
+                ("table_3".to_string(), TableNameValue::new(3))
+            ]
+        )
     }
 
     #[test]

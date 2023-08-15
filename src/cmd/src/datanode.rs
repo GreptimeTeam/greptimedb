@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use clap::Parser;
 use common_telemetry::logging;
-use datanode::datanode::{Datanode, DatanodeOptions, FileConfig, ObjectStoreConfig};
+use datanode::datanode::{Datanode, DatanodeOptions};
 use meta_client::MetaClientOptions;
 use servers::Mode;
 use snafu::ResultExt;
@@ -143,9 +143,7 @@ impl StartCommand {
         }
 
         if let Some(data_home) = &self.data_home {
-            opts.storage.store = ObjectStoreConfig::File(FileConfig {
-                data_home: data_home.clone(),
-            });
+            opts.storage.data_home = data_home.clone();
         }
 
         if let Some(wal_dir) = &self.wal_dir {
@@ -185,7 +183,9 @@ mod tests {
 
     use common_base::readable_size::ReadableSize;
     use common_test_util::temp_dir::create_named_temp_file;
-    use datanode::datanode::{CompactionConfig, ObjectStoreConfig, RegionManifestConfig};
+    use datanode::datanode::{
+        CompactionConfig, FileConfig, ObjectStoreConfig, RegionManifestConfig,
+    };
     use servers::Mode;
 
     use super::*;
@@ -243,8 +243,10 @@ mod tests {
             ..Default::default()
         };
 
-        let Options::Datanode(options) =
-            cmd.load_options(TopLevelOptions::default()).unwrap() else { unreachable!() };
+        let Options::Datanode(options) = cmd.load_options(TopLevelOptions::default()).unwrap()
+        else {
+            unreachable!()
+        };
 
         assert_eq!("127.0.0.1:3001".to_string(), options.rpc_addr);
         assert_eq!(Some(42), options.node_id);
@@ -268,16 +270,11 @@ mod tests {
         assert_eq!(10000, ddl_timeout_millis);
         assert_eq!(3000, timeout_millis);
         assert!(tcp_nodelay);
-
-        match &options.storage.store {
-            ObjectStoreConfig::File(FileConfig { data_home, .. }) => {
-                assert_eq!("/tmp/greptimedb/", data_home)
-            }
-            ObjectStoreConfig::S3 { .. } => unreachable!(),
-            ObjectStoreConfig::Oss { .. } => unreachable!(),
-            ObjectStoreConfig::Azblob { .. } => unreachable!(),
-            ObjectStoreConfig::Gcs { .. } => unreachable!(),
-        };
+        assert_eq!("/tmp/greptimedb/", options.storage.data_home);
+        assert!(matches!(
+            &options.storage.store,
+            ObjectStoreConfig::File(FileConfig { .. })
+        ));
 
         assert_eq!(
             CompactionConfig {
@@ -397,10 +394,10 @@ mod tests {
 
         let env_prefix = "DATANODE_UT";
         temp_env::with_vars(
-            vec![
+            [
                 (
                     // storage.manifest.gc_duration = 9s
-                    vec![
+                    [
                         env_prefix.to_string(),
                         "storage".to_uppercase(),
                         "manifest".to_uppercase(),
@@ -411,7 +408,7 @@ mod tests {
                 ),
                 (
                     // storage.compaction.max_purge_tasks = 99
-                    vec![
+                    [
                         env_prefix.to_string(),
                         "storage".to_uppercase(),
                         "compaction".to_uppercase(),
@@ -422,7 +419,7 @@ mod tests {
                 ),
                 (
                     // meta_client_options.metasrv_addrs = 127.0.0.1:3001,127.0.0.1:3002,127.0.0.1:3003
-                    vec![
+                    [
                         env_prefix.to_string(),
                         "meta_client_options".to_uppercase(),
                         "metasrv_addrs".to_uppercase(),
@@ -440,7 +437,10 @@ mod tests {
                 };
 
                 let Options::Datanode(opts) =
-                    command.load_options(TopLevelOptions::default()).unwrap() else {unreachable!()};
+                    command.load_options(TopLevelOptions::default()).unwrap()
+                else {
+                    unreachable!()
+                };
 
                 // Should be read from env, env > default values.
                 assert_eq!(

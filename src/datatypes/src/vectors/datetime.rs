@@ -27,7 +27,6 @@ mod tests {
     use arrow::array::{Array, PrimitiveArray};
     use arrow_array::ArrayRef;
     use common_time::DateTime;
-    use datafusion_common::from_slice::FromSlice;
 
     use super::*;
     use crate::data_type::DataType;
@@ -39,7 +38,7 @@ mod tests {
     #[test]
     fn test_datetime_vector() {
         std::env::set_var("TZ", "Asia/Shanghai");
-        let v = DateTimeVector::new(PrimitiveArray::from_slice([1, 2, 3]));
+        let v = DateTimeVector::new(PrimitiveArray::from(vec![1, 2, 3]));
         assert_eq!(ConcreteDataType::datetime_datatype(), v.data_type());
         assert_eq!(3, v.len());
         assert_eq!("DateTimeVector", v.vector_type_name());
@@ -57,7 +56,7 @@ mod tests {
         assert_eq!(Some(DateTime::new(2)), iter.next().unwrap());
         assert_eq!(Some(DateTime::new(3)), iter.next().unwrap());
         assert!(!v.is_null(0));
-        assert_eq!(64, v.memory_size());
+        assert_eq!(24, v.memory_size());
 
         if let Value::DateTime(d) = v.get(0) {
             assert_eq!(1, d.val());
@@ -89,7 +88,7 @@ mod tests {
             DateTime::new(3),
         ]);
 
-        let mut builder = DateTimeType::default().create_mutable_vector(3);
+        let mut builder = DateTimeType.create_mutable_vector(3);
         builder.push_value_ref(ValueRef::DateTime(DateTime::new(5)));
         assert!(builder.try_push_value_ref(ValueRef::Int32(123)).is_err());
         builder.extend_slice_of(&input, 1, 2).unwrap();

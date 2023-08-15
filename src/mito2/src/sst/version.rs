@@ -23,7 +23,7 @@ use crate::sst::file::{FileHandle, FileId, Level, MAX_LEVEL};
 #[derive(Debug)]
 pub(crate) struct SstVersion {
     /// SST metadata organized by levels.
-    levels: LevelMetaVec,
+    levels: LevelMetaArray,
 }
 
 pub(crate) type SstVersionRef = Arc<SstVersion>;
@@ -38,8 +38,8 @@ impl SstVersion {
 }
 
 // We only has fixed number of level, so we use array to hold elements. This implementation
-// detail of LevelMetaVec should not be exposed to the user of [LevelMetas].
-type LevelMetaVec = [LevelMeta; MAX_LEVEL as usize];
+// detail of LevelMetaArray should not be exposed to users of [LevelMetas].
+type LevelMetaArray = [LevelMeta; MAX_LEVEL as usize];
 
 /// Metadata of files in the same SST level.
 pub struct LevelMeta {
@@ -68,10 +68,10 @@ impl fmt::Debug for LevelMeta {
     }
 }
 
-fn new_level_meta_vec() -> LevelMetaVec {
+fn new_level_meta_vec() -> LevelMetaArray {
     (0u8..MAX_LEVEL)
         .map(LevelMeta::new)
         .collect::<Vec<_>>()
         .try_into()
-        .unwrap() // safety: LevelMetaVec is a fixed length array with length MAX_LEVEL
+        .unwrap() // safety: LevelMetaArray is a fixed length array with length MAX_LEVEL
 }

@@ -32,8 +32,6 @@ use tonic::codegen::http::{HeaderMap, HeaderValue};
 use tonic::metadata::MetadataMap;
 use tonic::Code;
 
-use crate::auth;
-
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
@@ -114,6 +112,9 @@ pub enum Error {
 
     #[snafu(display("Not supported: {}", feat))]
     NotSupported { feat: String },
+
+    #[snafu(display("Invalid request parameter: {}", reason))]
+    InvalidParameter { reason: String, location: Location },
 
     #[snafu(display("Invalid query: {}", reason))]
     InvalidQuery { reason: String, location: Location },
@@ -297,11 +298,8 @@ pub enum Error {
     #[snafu(display("Failed to dump pprof data, source: {}", source))]
     DumpPprof { source: common_pprof::Error },
 
-    #[snafu(display("Failed to update jemalloc metrics, source: {source}, location: {location}"))]
-    UpdateJemallocMetrics {
-        source: tikv_jemalloc_ctl::Error,
-        location: Location,
-    },
+    #[snafu(display("{source}"))]
+    Metrics { source: BoxedError },
 
     #[snafu(display("DataFrame operation error, source: {source}, location: {location}"))]
     DataFrame {
@@ -362,6 +360,7 @@ impl ErrorExt for Error {
             | CheckDatabaseValidity { source, .. } => source.status_code(),
 
             NotSupported { .. }
+            | InvalidParameter { .. }
             | InvalidQuery { .. }
             | InfluxdbLineProtocol { .. }
             | ConnResetByPeer { .. }
@@ -418,7 +417,7 @@ impl ErrorExt for Error {
             #[cfg(feature = "pprof")]
             DumpPprof { source, .. } => source.status_code(),
 
-            UpdateJemallocMetrics { .. } => StatusCode::Internal,
+            Metrics { source } => source.status_code(),
 
             ConvertScalarValue { source, .. } => source.status_code(),
         }

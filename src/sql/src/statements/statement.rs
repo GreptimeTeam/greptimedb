@@ -58,7 +58,6 @@ pub enum Statement {
     DescribeTable(DescribeTable),
     // EXPLAIN QUERY
     Explain(Explain),
-    Use(String),
     // COPY
     Copy(crate::statements::copy::Copy),
     Tql(Tql),
@@ -92,6 +91,6 @@ impl TryFrom<&Statement> for DfStatement {
                 .fail();
             }
         };
-        Ok(DfStatement::Statement(Box::new(s)))
+        Ok(DfStatement::Statement(Box::new(s.into())))
     }
 }

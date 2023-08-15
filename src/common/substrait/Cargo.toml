@@ -8,25 +8,27 @@ license.workspace = true
 async-recursion = "1.0"
 async-trait.workspace = true
 bytes = "1.1"
-catalog = { path = "../../catalog" }
-common-catalog = { path = "../catalog" }
-common-error = { path = "../error" }
-common-telemetry = { path = "../telemetry" }
-datafusion.workspace = true
+catalog = { workspace = true }
+common-catalog = { workspace = true }
+common-error = { workspace = true }
+common-telemetry = { workspace = true }
+datafusion-common.workspace = true
 datafusion-expr.workspace = true
 datafusion-substrait.workspace = true
-datatypes = { path = "../../datatypes" }
+datafusion.workspace = true
+datatypes = { workspace = true }
 futures = "0.3"
+promql = { workspace = true }
 prost.workspace = true
-session = { path = "../../session" }
+session = { workspace = true }
 snafu.workspace = true
-table = { path = "../../table" }
+table = { workspace = true }
 
 [dependencies.substrait_proto]
 package = "substrait"
-version = "0.10"
+version = "0.12"
 
 [dev-dependencies]
-datatypes = { path = "../../datatypes" }
-table = { path = "../../table" }
+datatypes = { workspace = true }
+table = { workspace = true }
 tokio.workspace = true

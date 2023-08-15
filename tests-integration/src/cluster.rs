@@ -20,7 +20,8 @@ use api::v1::meta::Role;
 use client::client_manager::DatanodeClients;
 use client::Client;
 use common_base::Plugins;
-use common_grpc::channel_manager::ChannelManager;
+use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
+use common_meta::key::TableMetadataManager;
 use common_meta::peer::Peer;
 use common_meta::DatanodeId;
 use common_runtime::Builder as RuntimeBuilder;
@@ -35,7 +36,7 @@ use meta_srv::cluster::MetaPeerClientRef;
 use meta_srv::metadata_service::{DefaultMetadataService, MetadataService};
 use meta_srv::metasrv::{MetaSrv, MetaSrvOptions};
 use meta_srv::mocks::MockInfo;
-use meta_srv::service::store::kv::KvStoreRef;
+use meta_srv::service::store::kv::{KvBackendAdapter, KvStoreRef};
 use meta_srv::service::store::memory::MemStore;
 use servers::grpc::GrpcServer;
 use servers::query_handler::grpc::ServerGrpcQueryHandlerAdaptor;
@@ -44,12 +45,12 @@ use tonic::transport::Server;
 use tower::service_fn;
 
 use crate::test_util::{
-    create_datanode_opts, create_tmp_dir_and_datanode_opts, StorageGuard, StorageType, WalGuard,
+    create_datanode_opts, create_tmp_dir_and_datanode_opts, FileDirGuard, StorageGuard, StorageType,
 };
 
 pub struct GreptimeDbCluster {
     pub storage_guards: Vec<StorageGuard>,
-    _wal_guards: Vec<WalGuard>,
+    pub _dir_guards: Vec<FileDirGuard>,
 
     pub datanode_instances: HashMap<DatanodeId, Arc<DatanodeInstance>>,
     pub datanode_heartbeat_tasks: HashMap<DatanodeId, Option<HeartbeatTask>>,
@@ -88,11 +89,12 @@ impl GreptimeDbClusterBuilder {
     pub async fn build(self) -> GreptimeDbCluster {
         let datanodes = self.datanodes.unwrap_or(4);
 
-        let datanode_clients = Arc::new(DatanodeClients::default());
+        let channel_config = ChannelConfig::new().timeout(Duration::from_secs(20));
+        let datanode_clients = Arc::new(DatanodeClients::new(channel_config));
 
         let meta_srv = self.build_metasrv(datanode_clients.clone()).await;
 
-        let (datanode_instances, heartbeat_tasks, storage_guards, wal_guards) =
+        let (datanode_instances, heartbeat_tasks, storage_guards, dir_guards) =
             self.build_datanodes(meta_srv.clone(), datanodes).await;
 
         build_datanode_clients(datanode_clients.clone(), &datanode_instances, datanodes).await;
@@ -108,7 +110,7 @@ impl GreptimeDbClusterBuilder {
 
         GreptimeDbCluster {
             storage_guards,
-            _wal_guards: wal_guards,
+            _dir_guards: dir_guards,
             datanode_instances,
             datanode_heartbeat_tasks: heartbeat_tasks,
             kv_store: self.kv_store.clone(),
@@ -130,8 +132,10 @@ impl GreptimeDbClusterBuilder {
 
         let mock =
             meta_srv::mocks::mock(opt, self.kv_store.clone(), None, Some(datanode_clients)).await;
-
-        let metadata_service = DefaultMetadataService::new(mock.meta_srv.kv_store().clone());
+        let table_metadata_manager = Arc::new(TableMetadataManager::new(KvBackendAdapter::wrap(
+            mock.meta_srv.kv_store().clone(),
+        )));
+        let metadata_service = DefaultMetadataService::new(table_metadata_manager);
         metadata_service
             .create_schema("another_catalog", "another_schema", true)
             .await
@@ -148,22 +152,26 @@ impl GreptimeDbClusterBuilder {
         HashMap<DatanodeId, Arc<DatanodeInstance>>,
         HashMap<DatanodeId, Option<HeartbeatTask>>,
         Vec<StorageGuard>,
-        Vec<WalGuard>,
+        Vec<FileDirGuard>,
     ) {
         let mut instances = HashMap::with_capacity(datanodes as usize);
         let mut heartbeat_tasks = HashMap::with_capacity(datanodes as usize);
         let mut storage_guards = Vec::with_capacity(datanodes as usize);
-        let mut wal_guards = Vec::with_capacity(datanodes as usize);
+        let mut dir_guards = Vec::with_capacity(datanodes as usize);
 
         for i in 0..datanodes {
             let datanode_id = i as u64 + 1;
 
             let mut opts = if let Some(store_config) = &self.store_config {
+                let home_tmp_dir = create_temp_dir(&format!("gt_home_{}", &self.cluster_name));
+                let home_dir = home_tmp_dir.path().to_str().unwrap().to_string();
+
                 let wal_tmp_dir = create_temp_dir(&format!("gt_wal_{}", &self.cluster_name));
                 let wal_dir = wal_tmp_dir.path().to_str().unwrap().to_string();
-                wal_guards.push(WalGuard(wal_tmp_dir));
+                dir_guards.push(FileDirGuard::new(home_tmp_dir, false));
+                dir_guards.push(FileDirGuard::new(wal_tmp_dir, true));
 
-                create_datanode_opts(store_config.clone(), wal_dir)
+                create_datanode_opts(store_config.clone(), home_dir, wal_dir)
             } else {
                 let (opts, guard) = create_tmp_dir_and_datanode_opts(
                     StorageType::File,
@@ -171,7 +179,8 @@ impl GreptimeDbClusterBuilder {
                 );
 
                 storage_guards.push(guard.storage_guard);
-                wal_guards.push(guard.wal_guard);
+                dir_guards.push(guard.home_guard);
+                dir_guards.push(guard.wal_guard);
 
                 opts
             };
@@ -183,7 +192,7 @@ impl GreptimeDbClusterBuilder {
             let _ = instances.insert(datanode_id, dn_instance.0.clone());
             let _ = heartbeat_tasks.insert(datanode_id, dn_instance.1);
         }
-        (instances, heartbeat_tasks, storage_guards, wal_guards)
+        (instances, heartbeat_tasks, storage_guards, dir_guards)
     }
 
     async fn wait_datanodes_alive(

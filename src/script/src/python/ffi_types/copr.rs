@@ -34,7 +34,7 @@ use rustpython_compiler_core::CodeObject;
 use rustpython_vm as vm;
 #[cfg(test)]
 use serde::Deserialize;
-use session::context::QueryContext;
+use session::context::QueryContextBuilder;
 use snafu::{OptionExt, ResultExt};
 use vm::convert::ToPyObject;
 use vm::{pyclass as rspyclass, PyObjectRef, PyPayload, PyResult, VirtualMachine};
@@ -379,14 +379,15 @@ impl PyQueryEngine {
                 let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
                 let handle = rt.handle().clone();
                 let res = handle.block_on(async {
+                    let ctx = QueryContextBuilder::default().build();
                     let plan = engine
                         .planner()
-                        .plan(stmt, Default::default())
+                        .plan(stmt, ctx.clone())
                         .await
                         .map_err(|e| e.to_string())?;
                     let res = engine
                         .clone()
-                        .execute(plan, QueryContext::arc())
+                        .execute(plan, ctx)
                         .await
                         .map_err(|e| e.to_string());
                     match res {

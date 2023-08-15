@@ -156,7 +156,7 @@ mod tests {
 
     #[test]
     fn test_clip_signature() {
-        let clip = ClipFunction::default();
+        let clip = ClipFunction;
 
         assert_eq!("clip", clip.name());
         assert_eq!(
@@ -202,8 +202,6 @@ mod tests {
 
     #[test]
     fn test_clip_fn_signed() {
-        let clip = ClipFunction::default();
-
         // eval with signed integers
         let args: Vec<VectorRef> = vec![
             Arc::new(Int32Vector::from_values(0..10)),
@@ -217,7 +215,9 @@ mod tests {
             )),
         ];
 
-        let vector = clip.eval(FunctionContext::default(), &args).unwrap();
+        let vector = ClipFunction
+            .eval(FunctionContext::default(), &args)
+            .unwrap();
         assert_eq!(10, vector.len());
 
         // clip([0, 1, 2, 3, 4, 5, 6, 7, 8, 9], 3, 6) = [3, 3, 3, 3, 4, 5, 6, 6, 6, 6]
@@ -234,8 +234,6 @@ mod tests {
 
     #[test]
     fn test_clip_fn_unsigned() {
-        let clip = ClipFunction::default();
-
         // eval with unsigned integers
         let args: Vec<VectorRef> = vec![
             Arc::new(UInt8Vector::from_values(0..10)),
@@ -249,7 +247,9 @@ mod tests {
             )),
         ];
 
-        let vector = clip.eval(FunctionContext::default(), &args).unwrap();
+        let vector = ClipFunction
+            .eval(FunctionContext::default(), &args)
+            .unwrap();
         assert_eq!(10, vector.len());
 
         // clip([0, 1, 2, 3, 4, 5, 6, 7, 8, 9], 3, 6) = [3, 3, 3, 3, 4, 5, 6, 6, 6, 6]
@@ -266,8 +266,6 @@ mod tests {
 
     #[test]
     fn test_clip_fn_float() {
-        let clip = ClipFunction::default();
-
         // eval with floats
         let args: Vec<VectorRef> = vec![
             Arc::new(Int8Vector::from_values(0..10)),
@@ -281,7 +279,9 @@ mod tests {
             )),
         ];
 
-        let vector = clip.eval(FunctionContext::default(), &args).unwrap();
+        let vector = ClipFunction
+            .eval(FunctionContext::default(), &args)
+            .unwrap();
         assert_eq!(10, vector.len());
 
         // clip([0, 1, 2, 3, 4, 5, 6, 7, 8, 9], 3, 6) = [3, 3, 3, 3, 4, 5, 6, 6, 6, 6]

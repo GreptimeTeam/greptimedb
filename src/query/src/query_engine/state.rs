@@ -23,7 +23,7 @@ use common_base::Plugins;
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_query::physical_plan::SessionContext;
 use common_query::prelude::ScalarUdf;
-use datafusion::catalog::catalog::MemoryCatalogList;
+use datafusion::catalog::MemoryCatalogList;
 use datafusion::dataframe::DataFrame;
 use datafusion::error::Result as DfResult;
 use datafusion::execution::context::{QueryPlanner, SessionConfig, SessionState};
@@ -32,21 +32,23 @@ use datafusion::physical_optimizer::dist_enforcement::EnforceDistribution;
 use datafusion::physical_optimizer::repartition::Repartition;
 use datafusion::physical_optimizer::sort_enforcement::EnforceSorting;
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
-use datafusion::physical_plan::planner::{DefaultPhysicalPlanner, ExtensionPlanner};
-use datafusion::physical_plan::{ExecutionPlan, PhysicalPlanner};
+use datafusion::physical_plan::ExecutionPlan;
+use datafusion::physical_planner::{DefaultPhysicalPlanner, ExtensionPlanner, PhysicalPlanner};
 use datafusion_expr::LogicalPlan as DfLogicalPlan;
 use datafusion_optimizer::analyzer::Analyzer;
 use datafusion_optimizer::optimizer::Optimizer;
 use partition::manager::PartitionRuleManager;
 use promql::extension_plan::PromExtensionPlanner;
+use substrait::extension_serializer::ExtensionSerializer;
 use table::table::adapter::DfTableProviderAdapter;
 use table::TableRef;
 
 use crate::dist_plan::{DistExtensionPlanner, DistPlannerAnalyzer};
-use crate::extension_serializer::ExtensionSerializer;
 use crate::optimizer::order_hint::OrderHintRule;
+use crate::optimizer::string_normalization::StringNormalizationRule;
 use crate::optimizer::type_conversion::TypeConversionRule;
 use crate::query_engine::options::QueryOptions;
+use crate::range_select::planner::RangeSelectPlanner;
 
 /// Query engine global state
 // TODO(yingwen): This QueryEngineState still relies on datafusion, maybe we can define a trait for it,
@@ -84,6 +86,7 @@ impl QueryEngineState {
             analyzer.rules.insert(0, Arc::new(DistPlannerAnalyzer));
         }
         analyzer.rules.insert(0, Arc::new(TypeConversionRule));
+        analyzer.rules.insert(0, Arc::new(StringNormalizationRule));
         let mut optimizer = Optimizer::new();
         optimizer.rules.push(Arc::new(OrderHintRule));
 
@@ -225,7 +228,7 @@ impl DfQueryPlanner {
         catalog_manager: CatalogManagerRef,
     ) -> Self {
         let mut planners: Vec<Arc<dyn ExtensionPlanner + Send + Sync>> =
-            vec![Arc::new(PromExtensionPlanner)];
+            vec![Arc::new(PromExtensionPlanner), Arc::new(RangeSelectPlanner)];
         if let Some(partition_manager) = partition_manager
          && let Some(datanode_clients) = datanode_clients {
             planners.push(Arc::new(DistExtensionPlanner::new(partition_manager, datanode_clients, catalog_manager)));

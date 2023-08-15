@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use common_datasource::file_format::csv::{CsvConfigBuilder, CsvFormat, CsvOpener};
 use common_datasource::file_format::json::{JsonFormat, JsonOpener};
+use common_datasource::file_format::orc::{OrcFormat, OrcOpener};
 use common_datasource::file_format::parquet::{DefaultParquetFileReaderFactory, ParquetFormat};
 use common_datasource::file_format::Format;
 use common_query::prelude::Expr;
@@ -25,10 +26,10 @@ use common_recordbatch::SendableRecordBatchStream;
 use datafusion::common::ToDFSchema;
 use datafusion::datasource::listing::PartitionedFile;
 use datafusion::datasource::object_store::ObjectStoreUrl;
+use datafusion::datasource::physical_plan::{FileOpener, FileScanConfig, FileStream, ParquetExec};
 use datafusion::optimizer::utils::conjunction;
 use datafusion::physical_expr::create_physical_expr;
 use datafusion::physical_expr::execution_props::ExecutionProps;
-use datafusion::physical_plan::file_format::{FileOpener, FileScanConfig, FileStream, ParquetExec};
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion::prelude::SessionContext;
 use datatypes::arrow::datatypes::Schema as ArrowSchema;
@@ -85,6 +86,14 @@ fn build_json_opener(
     ))
 }
 
+fn build_orc_opener(output_schema: Arc<ArrowSchema>, config: &ScanPlanConfig) -> Result<OrcOpener> {
+    Ok(OrcOpener::new(
+        config.store.clone(),
+        output_schema,
+        config.projection.cloned(),
+    ))
+}
+
 fn build_record_batch_stream<T: FileOpener + Send + 'static>(
     opener: T,
     file_schema: Arc<ArrowSchema>,
@@ -104,7 +113,7 @@ fn build_record_batch_stream<T: FileOpener + Send + 'static>(
             projection: projection.cloned(),
             limit,
             table_partition_cols: vec![],
-            output_ordering: None,
+            output_ordering: vec![],
             infinite_source: false,
         },
         0, // partition: hard-code
@@ -176,7 +185,7 @@ fn new_parquet_stream_with_exec_plan(
         projection: projection.cloned(),
         limit: *limit,
         table_partition_cols: vec![],
-        output_ordering: None,
+        output_ordering: vec![],
         infinite_source: false,
     };
 
@@ -213,6 +222,22 @@ fn new_parquet_stream_with_exec_plan(
     ))
 }
 
+fn new_orc_stream(
+    _ctx: &CreateScanPlanContext,
+    config: &ScanPlanConfig,
+    _format: &OrcFormat,
+) -> Result<SendableRecordBatchStream> {
+    let file_schema = config.file_schema.arrow_schema().clone();
+    let opener = build_orc_opener(file_schema.clone(), config)?;
+    build_record_batch_stream(
+        opener,
+        file_schema,
+        config.files,
+        config.projection,
+        config.limit,
+    )
+}
+
 #[derive(Debug, Clone)]
 pub struct ScanPlanConfig<'a> {
     pub file_schema: SchemaRef,
@@ -232,6 +257,6 @@ pub fn create_stream(
         Format::Csv(format) => new_csv_stream(ctx, config, format),
         Format::Json(format) => new_json_stream(ctx, config, format),
         Format::Parquet(format) => new_parquet_stream_with_exec_plan(ctx, config, format),
-        _ => error::UnsupportedFormatSnafu { format: *format }.fail(),
+        Format::Orc(format) => new_orc_stream(ctx, config, format),
     }
 }

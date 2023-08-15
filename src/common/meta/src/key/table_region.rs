@@ -91,7 +91,7 @@ impl TableRegionManager {
             let Some(curr) = curr else {
                 return UnexpectedSnafu {
                     err_msg: format!("compare_and_put expect None but failed with current value None, table_id: {table_id}, region_distribution: {region_distribution:?}"),
-                }.fail()
+                }.fail();
             };
             ensure!(
                 &curr.region_distribution == region_distribution,

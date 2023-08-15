@@ -1,0 +1,41 @@
+name: Stop EC2 runner
+description: Stop EC2 runner
+inputs:
+  label:
+    description: The linux runner name
+    required: true
+  ec2-instance-id:
+    description: The EC2 instance id
+    required: true
+  aws-access-key-id:
+    description: AWS access key id
+    required: true
+  aws-secret-access-key:
+    description: AWS secret access key
+    required: true
+  aws-region:
+    description: AWS region
+    required: true
+  github-token:
+    description: The GitHub token to clone private repository
+    required: false
+    default: ""
+runs:
+  using: composite
+  steps:
+    - name: Configure AWS credentials
+      if: ${{ inputs.label && inputs.ec2-instance-id }}
+      uses: aws-actions/configure-aws-credentials@v2
+      with:
+        aws-access-key-id: ${{ inputs.aws-access-key-id }}
+        aws-secret-access-key: ${{ inputs.aws-secret-access-key }}
+        aws-region: ${{ inputs.aws-region }}
+
+    - name: Stop EC2 runner
+      if: ${{ inputs.label && inputs.ec2-instance-id }}
+      uses: machulav/ec2-github-runner@v2
+      with:
+        mode: stop
+        label: ${{ inputs.label }}
+        ec2-instance-id: ${{ inputs.ec2-instance-id }}
+        github-token: ${{ inputs.github-token }}

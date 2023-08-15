@@ -5,32 +5,29 @@ edition.workspace = true
 license.workspace = true
 
 [build-dependencies]
-protobuf-build = { version = "0.14", default-features = false, features = [
+protobuf-build = { version = "0.15", default-features = false, features = [
     "protobuf-codec",
 ] }
 
 [dependencies]
-arc-swap = "1.5"
 async-stream.workspace = true
 async-trait.workspace = true
 base64 = "0.13"
 byteorder = "1.4"
 bytes = "1.1"
-common-base = { path = "../common/base" }
-common-error = { path = "../common/error" }
-common-runtime = { path = "../common/runtime" }
-common-telemetry = { path = "../common/telemetry" }
-crc = "3.0"
-futures.workspace = true
+common-base = { workspace = true }
+common-error = { workspace = true }
+common-runtime = { workspace = true }
+common-telemetry = { workspace = true }
 futures-util.workspace = true
-hex = "0.4"
+futures.workspace = true
 protobuf = { version = "2", features = ["bytes"] }
-raft-engine = "0.3"
+raft-engine = { git = "https://github.com/tikv/raft-engine.git", rev = "2dcaf5beeea3d5de9ec9c7133a2451d00f508f52" }
 snafu = { version = "0.7", features = ["backtraces"] }
-store-api = { path = "../store-api" }
-tokio.workspace = true
+store-api = { workspace = true }
 tokio-util.workspace = true
+tokio.workspace = true
 
 [dev-dependencies]
-common-test-util = { path = "../common/test-util" }
+common-test-util = { workspace = true }
 rand.workspace = true

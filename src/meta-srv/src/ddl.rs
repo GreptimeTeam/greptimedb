@@ -16,14 +16,18 @@ use std::sync::Arc;
 
 use client::client_manager::DatanodeClients;
 use common_meta::key::TableMetadataManagerRef;
-use common_meta::rpc::ddl::{AlterTableTask, CreateTableTask, DropTableTask};
+use common_meta::rpc::ddl::{AlterTableTask, CreateTableTask, DropTableTask, TruncateTableTask};
 use common_meta::rpc::router::TableRoute;
 use common_procedure::{watcher, ProcedureId, ProcedureManagerRef, ProcedureWithId};
+use common_telemetry::error;
 use snafu::ResultExt;
 use table::metadata::RawTableInfo;
 use table::requests::AlterTableRequest;
 
-use crate::error::{self, Result};
+use crate::error::{
+    RegisterProcedureLoaderSnafu, Result, SubmitProcedureSnafu, UnsupportedSnafu,
+    WaitProcedureSnafu,
+};
 use crate::procedure::alter_table::AlterTableProcedure;
 use crate::procedure::create_table::CreateTableProcedure;
 use crate::procedure::drop_table::DropTableProcedure;
@@ -91,7 +95,7 @@ impl DdlManager {
                     CreateTableProcedure::from_json(json, context).map(|p| Box::new(p) as _)
                 }),
             )
-            .context(error::RegisterProcedureLoaderSnafu {
+            .context(RegisterProcedureLoaderSnafu {
                 type_name: CreateTableProcedure::TYPE_NAME,
             })?;
 
@@ -105,7 +109,7 @@ impl DdlManager {
                     DropTableProcedure::from_json(json, context).map(|p| Box::new(p) as _)
                 }),
             )
-            .context(error::RegisterProcedureLoaderSnafu {
+            .context(RegisterProcedureLoaderSnafu {
                 type_name: DropTableProcedure::TYPE_NAME,
             })?;
 
@@ -119,7 +123,7 @@ impl DdlManager {
                     AlterTableProcedure::from_json(json, context).map(|p| Box::new(p) as _)
                 }),
             )
-            .context(error::RegisterProcedureLoaderSnafu {
+            .context(RegisterProcedureLoaderSnafu {
                 type_name: AlterTableProcedure::TYPE_NAME,
             })
     }
@@ -177,6 +181,21 @@ impl DdlManager {
         self.submit_procedure(procedure_with_id).await
     }
 
+    pub async fn submit_truncate_table_task(
+        &self,
+        cluster_id: u64,
+        truncate_table_task: TruncateTableTask,
+        table_route: TableRoute,
+    ) -> Result<ProcedureId> {
+        error!("truncate table procedure is not supported, cluster_id = {}, truncate_table_task = {:?}, table_route = {:?}",
+            cluster_id, truncate_table_task, table_route);
+
+        UnsupportedSnafu {
+            operation: "TRUNCATE TABLE",
+        }
+        .fail()
+    }
+
     async fn submit_procedure(&self, procedure_with_id: ProcedureWithId) -> Result<ProcedureId> {
         let procedure_id = procedure_with_id.id;
 
@@ -184,11 +203,11 @@ impl DdlManager {
             .procedure_manager
             .submit(procedure_with_id)
             .await
-            .context(error::SubmitProcedureSnafu)?;
+            .context(SubmitProcedureSnafu)?;
 
         watcher::wait(&mut watcher)
             .await
-            .context(error::WaitProcedureSnafu)?;
+            .context(WaitProcedureSnafu)?;
 
         Ok(procedure_id)
     }

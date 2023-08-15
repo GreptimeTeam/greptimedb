@@ -15,15 +15,15 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use common_meta::helper::{CatalogKey, CatalogValue, SchemaKey, SchemaValue};
-use common_meta::rpc::store::CompareAndPutRequest;
+use common_meta::key::catalog_name::CatalogNameKey;
+use common_meta::key::schema_name::SchemaNameKey;
+use common_meta::key::TableMetadataManagerRef;
 use common_telemetry::{info, timer};
 use metrics::increment_counter;
 use snafu::{ensure, ResultExt};
 
 use crate::error;
 use crate::error::Result;
-use crate::service::store::kv::KvStoreRef;
 
 /// This trait defines some methods of metadata
 #[async_trait]
@@ -43,12 +43,14 @@ pub type MetadataServiceRef = Arc<dyn MetadataService>;
 
 #[derive(Clone)]
 pub struct DefaultMetadataService {
-    kv_store: KvStoreRef,
+    table_metadata_manager: TableMetadataManagerRef,
 }
 
 impl DefaultMetadataService {
-    pub fn new(kv_store: KvStoreRef) -> Self {
-        Self { kv_store }
+    pub fn new(table_metadata_manager: TableMetadataManagerRef) -> Self {
+        Self {
+            table_metadata_manager,
+        }
     }
 }
 
@@ -61,51 +63,39 @@ impl MetadataService for DefaultMetadataService {
         if_not_exist: bool,
     ) -> Result<()> {
         let _timer = timer!(crate::metrics::METRIC_META_CREATE_SCHEMA);
-        let kv_store = self.kv_store.clone();
 
-        let catalog_key = CatalogKey {
-            catalog_name: catalog_name.to_string(),
-        }
-        .to_string();
+        self.table_metadata_manager
+            .catalog_manager()
+            .create(CatalogNameKey::new(catalog_name))
+            .await
+            .context(error::TableMetadataManagerSnafu)?;
 
-        let schema_key = SchemaKey {
-            catalog_name: catalog_name.to_string(),
-            schema_name: schema_name.to_string(),
-        }
-        .to_string();
+        increment_counter!(crate::metrics::METRIC_META_CREATE_CATALOG);
+        info!("Successfully created a catalog: {}", catalog_name);
 
-        let req = CompareAndPutRequest {
-            key: catalog_key.into(),
-            expect: vec![],
-            value: CatalogValue {}
-                .as_bytes()
-                .context(error::InvalidCatalogValueSnafu)?,
-        };
+        let schema = SchemaNameKey::new(catalog_name, schema_name);
 
-        let resp = kv_store.compare_and_put(req).await?;
-
-        if resp.success {
-            increment_counter!(crate::metrics::METRIC_META_CREATE_CATALOG);
-            info!("Successfully created a catalog: {}", catalog_name);
-        }
-
-        let req = CompareAndPutRequest {
-            key: schema_key.into(),
-            expect: vec![],
-            value: SchemaValue {}
-                .as_bytes()
-                .context(error::InvalidCatalogValueSnafu)?,
-        };
-        let resp = kv_store.compare_and_put(req).await?;
-
-        if resp.success {
-            info!("Successfully created a schema: {}", schema_name);
-        }
+        let exist = self
+            .table_metadata_manager
+            .schema_manager()
+            .exist(schema)
+            .await
+            .context(error::TableMetadataManagerSnafu)?;
 
         ensure!(
-            resp.success || if_not_exist,
+            !exist || if_not_exist,
             error::SchemaAlreadyExistsSnafu { schema_name }
         );
+
+        if !exist {
+            self.table_metadata_manager
+                .schema_manager()
+                .create(schema)
+                .await
+                .context(error::TableMetadataManagerSnafu)?;
+
+            info!("Successfully created a schema: {}", schema_name);
+        }
 
         Ok(())
     }
@@ -119,16 +109,21 @@ impl MetadataService for DefaultMetadataService {
 mod tests {
     use std::sync::Arc;
 
-    use common_meta::helper::{CatalogKey, SchemaKey};
+    use common_meta::key::catalog_name::CatalogNameKey;
+    use common_meta::key::schema_name::SchemaNameKey;
+    use common_meta::key::{TableMetaKey, TableMetadataManager};
 
     use super::{DefaultMetadataService, MetadataService};
-    use crate::service::store::kv::KvStoreRef;
+    use crate::service::store::kv::{KvBackendAdapter, KvStoreRef};
     use crate::service::store::memory::MemStore;
 
     #[tokio::test]
     async fn test_create_schema() {
         let kv_store = Arc::new(MemStore::default());
-        let service = DefaultMetadataService::new(kv_store.clone());
+        let table_metadata_manager = Arc::new(TableMetadataManager::new(KvBackendAdapter::wrap(
+            kv_store.clone(),
+        )));
+        let service = DefaultMetadataService::new(table_metadata_manager);
 
         service
             .create_schema("catalog", "public", false)
@@ -147,22 +142,13 @@ mod tests {
     }
 
     async fn verify_result(kv_store: KvStoreRef) {
-        let key: Vec<u8> = CatalogKey {
-            catalog_name: "catalog".to_string(),
-        }
-        .to_string()
-        .into();
+        let key = CatalogNameKey::new("catalog").as_raw_key();
 
         let result = kv_store.get(&key).await.unwrap();
         let kv = result.unwrap();
         assert_eq!(key, kv.key());
 
-        let key: Vec<u8> = SchemaKey {
-            catalog_name: "catalog".to_string(),
-            schema_name: "public".to_string(),
-        }
-        .to_string()
-        .into();
+        let key = SchemaNameKey::new("catalog", "public").as_raw_key();
 
         let result = kv_store.get(&key).await.unwrap();
         let kv = result.unwrap();

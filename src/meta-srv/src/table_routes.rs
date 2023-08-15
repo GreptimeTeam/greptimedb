@@ -61,7 +61,8 @@ pub(crate) async fn fetch_table(
         .table_info_manager()
         .get(table_id)
         .await
-        .context(TableMetadataManagerSnafu)? else {
+        .context(TableMetadataManagerSnafu)?
+    else {
         return Ok(None);
     };
 
@@ -140,6 +141,7 @@ pub(crate) mod tests {
                 engine_options: HashMap::new(),
                 options: TableOptions::default(),
                 created_on: DateTime::default(),
+                partition_key_indices: vec![],
             },
             table_type: TableType::Base,
         };

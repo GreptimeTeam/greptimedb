@@ -123,7 +123,8 @@ impl DatanodeTableManager {
             let Some(curr) = resp
                 .prev_kv
                 .map(|kv| DatanodeTableValue::try_from_raw_value(kv.value))
-                .transpose()? else {
+                .transpose()?
+            else {
                 return UnexpectedSnafu {
                     err_msg: format!("compare_and_put expect None but failed with current value None, key: {key}, val: {val:?}"),
                 }.fail();

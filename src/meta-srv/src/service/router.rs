@@ -72,10 +72,7 @@ pub(crate) fn create_region_distribution(
                 violated: "region should have been set",
             })?
             .id as u32;
-        regions_id_map
-            .entry(node_id)
-            .or_insert_with(Vec::new)
-            .push(region_id);
+        regions_id_map.entry(node_id).or_default().push(region_id);
     }
     Ok(regions_id_map)
 }

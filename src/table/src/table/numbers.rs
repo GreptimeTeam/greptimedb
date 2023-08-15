@@ -20,7 +20,6 @@ use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, NUMBERS_
 use common_recordbatch::error::Result as RecordBatchResult;
 use common_recordbatch::{RecordBatch, RecordBatchStream, SendableRecordBatchStream};
 use datafusion::arrow::record_batch::RecordBatch as DfRecordBatch;
-use datafusion_common::from_slice::FromSlice;
 use datatypes::arrow::array::UInt32Array;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
@@ -94,7 +93,7 @@ impl Table for NumbersTable {
                 .catalog_name(DEFAULT_CATALOG_NAME)
                 .schema_name(DEFAULT_SCHEMA_NAME)
                 .table_version(0)
-                .table_type(TableType::Base)
+                .table_type(TableType::Temporary)
                 .meta(
                     TableMetaBuilder::default()
                         .schema(self.schema.clone())
@@ -108,6 +107,10 @@ impl Table for NumbersTable {
                 .build()
                 .unwrap(),
         )
+    }
+
+    fn table_type(&self) -> TableType {
+        TableType::Temporary
     }
 
     async fn scan_to_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream> {
@@ -147,7 +150,7 @@ impl Stream for NumbersStream {
         let numbers: Vec<u32> = (0..self.limit).collect();
         let batch = DfRecordBatch::try_new(
             self.schema.arrow_schema().clone(),
-            vec![Arc::new(UInt32Array::from_slice(numbers))],
+            vec![Arc::new(UInt32Array::from(numbers))],
         )
         .unwrap();
 

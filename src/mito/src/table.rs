@@ -278,7 +278,6 @@ impl<R: Region> Table for MitoTable<R> {
             let key_column_values = request.key_column_values.clone();
             // Safety: key_column_values isn't empty.
             let rows_num = key_column_values.values().next().unwrap().len();
-
             logging::trace!(
                 "Delete from table {} where key_columns are: {:?}",
                 self.table_info().name,
@@ -357,6 +356,15 @@ impl<R: Region> Table for MitoTable<R> {
             .map_err(BoxedError::new)
             .context(TableOperationSnafu)?;
         }
+        Ok(())
+    }
+
+    async fn truncate(&self) -> TableResult<()> {
+        let regions = self.regions.load();
+        let _ = futures::future::try_join_all(regions.values().map(|region| region.truncate()))
+            .await
+            .map_err(BoxedError::new)
+            .context(TableOperationSnafu)?;
         Ok(())
     }
 

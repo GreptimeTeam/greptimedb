@@ -15,4 +15,7 @@
 //! Sorted strings tables.
 
 pub mod file;
+pub mod file_purger;
+pub mod parquet;
+mod stream_writer;
 pub(crate) mod version;

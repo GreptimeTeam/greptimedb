@@ -22,8 +22,10 @@ use common_base::bytes::{Bytes, StringBytes};
 use common_telemetry::logging;
 use common_time::date::Date;
 use common_time::datetime::DateTime;
+use common_time::interval::IntervalUnit;
 use common_time::time::Time;
 use common_time::timestamp::{TimeUnit, Timestamp};
+use common_time::Interval;
 use datafusion_common::ScalarValue;
 pub use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize};
@@ -33,7 +35,7 @@ use crate::error;
 use crate::error::Result;
 use crate::prelude::*;
 use crate::type_id::LogicalTypeId;
-use crate::types::ListType;
+use crate::types::{IntervalType, ListType};
 use crate::vectors::ListVector;
 
 pub type OrderedF32 = OrderedFloat<f32>;
@@ -42,7 +44,7 @@ pub type OrderedF64 = OrderedFloat<f64>;
 /// Value holds a single arbitrary value of any [DataType](crate::data_type::DataType).
 ///
 /// Comparison between values with different types (expect Null) is not allowed.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Value {
     Null,
 
@@ -68,6 +70,7 @@ pub enum Value {
     DateTime(DateTime),
     Timestamp(Timestamp),
     Time(Time),
+    Interval(Interval),
 
     List(ListValue),
 }
@@ -100,6 +103,7 @@ impl Display for Value {
             Value::DateTime(v) => write!(f, "{v}"),
             Value::Timestamp(v) => write!(f, "{}", v.to_iso8601_string()),
             Value::Time(t) => write!(f, "{}", t.to_iso8601_string()),
+            Value::Interval(v) => write!(f, "{}", v.to_iso8601_string()),
             Value::List(v) => {
                 let default = Box::<Vec<Value>>::default();
                 let items = v.items().as_ref().unwrap_or(&default);
@@ -139,6 +143,7 @@ impl Value {
             Value::DateTime(_) => ConcreteDataType::datetime_datatype(),
             Value::Time(t) => ConcreteDataType::time_datatype(*t.unit()),
             Value::Timestamp(v) => ConcreteDataType::timestamp_datatype(v.unit()),
+            Value::Interval(v) => ConcreteDataType::interval_datatype(v.unit()),
             Value::List(list) => ConcreteDataType::list_datatype(list.datatype().clone()),
         }
     }
@@ -182,6 +187,7 @@ impl Value {
             Value::List(v) => ValueRef::List(ListValueRef::Ref { val: v }),
             Value::Timestamp(v) => ValueRef::Timestamp(*v),
             Value::Time(v) => ValueRef::Time(*v),
+            Value::Interval(v) => ValueRef::Interval(*v),
         }
     }
 
@@ -235,6 +241,11 @@ impl Value {
                 TimeUnit::Microsecond => LogicalTypeId::TimeMicrosecond,
                 TimeUnit::Nanosecond => LogicalTypeId::TimeNanosecond,
             },
+            Value::Interval(v) => match v.unit() {
+                IntervalUnit::YearMonth => LogicalTypeId::IntervalYearMonth,
+                IntervalUnit::DayTime => LogicalTypeId::IntervalDayTime,
+                IntervalUnit::MonthDayNano => LogicalTypeId::IntervalMonthDayNano,
+            },
         }
     }
 
@@ -276,6 +287,11 @@ impl Value {
             }
             Value::Timestamp(t) => timestamp_to_scalar_value(t.unit(), Some(t.value())),
             Value::Time(t) => time_to_scalar_value(*t.unit(), Some(t.value()))?,
+            Value::Interval(v) => match v.unit() {
+                IntervalUnit::YearMonth => ScalarValue::IntervalYearMonth(Some(v.to_i32())),
+                IntervalUnit::DayTime => ScalarValue::IntervalDayTime(Some(v.to_i64())),
+                IntervalUnit::MonthDayNano => ScalarValue::IntervalMonthDayNano(Some(v.to_i128())),
+            },
         };
 
         Ok(scalar_value)
@@ -301,6 +317,11 @@ pub fn to_null_scalar_value(output_type: &ConcreteDataType) -> Result<ScalarValu
         ConcreteDataType::Date(_) => ScalarValue::Date32(None),
         ConcreteDataType::DateTime(_) => ScalarValue::Date64(None),
         ConcreteDataType::Timestamp(t) => timestamp_to_scalar_value(t.unit(), None),
+        ConcreteDataType::Interval(v) => match v {
+            IntervalType::YearMonth(_) => ScalarValue::IntervalYearMonth(None),
+            IntervalType::DayTime(_) => ScalarValue::IntervalDayTime(None),
+            IntervalType::MonthDayNano(_) => ScalarValue::IntervalMonthDayNano(None),
+        },
         ConcreteDataType::List(_) => {
             ScalarValue::List(None, Arc::new(new_item_field(output_type.as_arrow_type())))
         }
@@ -361,6 +382,16 @@ pub fn scalar_value_to_timestamp(scalar: &ScalarValue) -> Option<Timestamp> {
     }
 }
 
+/// Convert [ScalarValue] to [Interval].
+pub fn scalar_value_to_interval(scalar: &ScalarValue) -> Option<Interval> {
+    match scalar {
+        ScalarValue::IntervalYearMonth(v) => v.map(Interval::from_i32),
+        ScalarValue::IntervalDayTime(v) => v.map(Interval::from_i64),
+        ScalarValue::IntervalMonthDayNano(v) => v.map(Interval::from_i128),
+        _ => None,
+    }
+}
+
 macro_rules! impl_ord_for_value_like {
     ($Type: ident, $left: ident, $right: ident) => {
         if $left.is_null() && !$right.is_null() {
@@ -387,6 +418,7 @@ macro_rules! impl_ord_for_value_like {
                 ($Type::DateTime(v1), $Type::DateTime(v2)) => v1.cmp(v2),
                 ($Type::Timestamp(v1), $Type::Timestamp(v2)) => v1.cmp(v2),
                 ($Type::Time(v1), $Type::Time(v2)) => v1.cmp(v2),
+                ($Type::Interval(v1), $Type::Interval(v2)) => v1.cmp(v2),
                 ($Type::List(v1), $Type::List(v2)) => v1.cmp(v2),
                 _ => panic!(
                     "Cannot compare different values {:?} and {:?}",
@@ -442,14 +474,11 @@ impl_value_from!(Float64, f64);
 impl_value_from!(String, StringBytes);
 impl_value_from!(Binary, Bytes);
 impl_value_from!(Date, Date);
+impl_value_from!(Time, Time);
 impl_value_from!(DateTime, DateTime);
 impl_value_from!(Timestamp, Timestamp);
-
-impl From<String> for Value {
-    fn from(string: String) -> Value {
-        Value::String(string.into())
-    }
-}
+impl_value_from!(Interval, Interval);
+impl_value_from!(String, String);
 
 impl From<&str> for Value {
     fn from(string: &str) -> Value {
@@ -493,6 +522,7 @@ impl TryFrom<Value> for serde_json::Value {
             Value::List(v) => serde_json::to_value(v)?,
             Value::Timestamp(v) => serde_json::to_value(v.value())?,
             Value::Time(v) => serde_json::to_value(v.value())?,
+            Value::Interval(v) => serde_json::to_value(v.to_i128())?,
         };
 
         Ok(json_value)
@@ -501,7 +531,7 @@ impl TryFrom<Value> for serde_json::Value {
 
 // TODO(yingwen): Consider removing the `datatype` field from `ListValue`.
 /// List value.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Hash, Serialize, Deserialize)]
 pub struct ListValue {
     /// List of nested Values (boxed to reduce size_of(Value))
     #[allow(clippy::box_collection)]
@@ -601,7 +631,7 @@ impl TryFrom<ScalarValue> for Value {
             ScalarValue::Binary(b)
             | ScalarValue::LargeBinary(b)
             | ScalarValue::FixedSizeBinary(_, b) => Value::from(b.map(Bytes::from)),
-            ScalarValue::List(vs, field) => {
+            ScalarValue::List(vs, field) | ScalarValue::Fixedsizelist(vs, field, _) => {
                 let items = if let Some(vs) = vs {
                     let vs = vs
                         .into_iter()
@@ -643,10 +673,20 @@ impl TryFrom<ScalarValue> for Value {
                 .map(|x| Value::Time(Time::new(x, TimeUnit::Nanosecond)))
                 .unwrap_or(Value::Null),
 
+            ScalarValue::IntervalYearMonth(t) => t
+                .map(|x| Value::Interval(Interval::from_i32(x)))
+                .unwrap_or(Value::Null),
+            ScalarValue::IntervalDayTime(t) => t
+                .map(|x| Value::Interval(Interval::from_i64(x)))
+                .unwrap_or(Value::Null),
+            ScalarValue::IntervalMonthDayNano(t) => t
+                .map(|x| Value::Interval(Interval::from_i128(x)))
+                .unwrap_or(Value::Null),
             ScalarValue::Decimal128(_, _, _)
-            | ScalarValue::IntervalYearMonth(_)
-            | ScalarValue::IntervalDayTime(_)
-            | ScalarValue::IntervalMonthDayNano(_)
+            | ScalarValue::DurationSecond(_)
+            | ScalarValue::DurationMillisecond(_)
+            | ScalarValue::DurationMicrosecond(_)
+            | ScalarValue::DurationNanosecond(_)
             | ScalarValue::Struct(_, _)
             | ScalarValue::Dictionary(_, _) => {
                 return error::UnsupportedArrowTypeSnafu {
@@ -656,6 +696,33 @@ impl TryFrom<ScalarValue> for Value {
             }
         };
         Ok(v)
+    }
+}
+
+impl From<ValueRef<'_>> for Value {
+    fn from(value: ValueRef<'_>) -> Self {
+        match value {
+            ValueRef::Null => Value::Null,
+            ValueRef::Boolean(v) => Value::Boolean(v),
+            ValueRef::UInt8(v) => Value::UInt8(v),
+            ValueRef::UInt16(v) => Value::UInt16(v),
+            ValueRef::UInt32(v) => Value::UInt32(v),
+            ValueRef::UInt64(v) => Value::UInt64(v),
+            ValueRef::Int8(v) => Value::Int8(v),
+            ValueRef::Int16(v) => Value::Int16(v),
+            ValueRef::Int32(v) => Value::Int32(v),
+            ValueRef::Int64(v) => Value::Int64(v),
+            ValueRef::Float32(v) => Value::Float32(v),
+            ValueRef::Float64(v) => Value::Float64(v),
+            ValueRef::String(v) => Value::String(v.into()),
+            ValueRef::Binary(v) => Value::Binary(v.into()),
+            ValueRef::Date(v) => Value::Date(v),
+            ValueRef::DateTime(v) => Value::DateTime(v),
+            ValueRef::Timestamp(v) => Value::Timestamp(v),
+            ValueRef::Time(v) => Value::Time(v),
+            ValueRef::Interval(v) => Value::Interval(v),
+            ValueRef::List(v) => v.to_value(),
+        }
     }
 }
 
@@ -686,6 +753,7 @@ pub enum ValueRef<'a> {
     DateTime(DateTime),
     Timestamp(Timestamp),
     Time(Time),
+    Interval(Interval),
 
     // Compound types:
     List(ListValueRef<'a>),
@@ -729,6 +797,60 @@ impl<'a> ValueRef<'a> {
         impl_as_for_value_ref!(self, Boolean)
     }
 
+    pub fn as_i8(&self) -> Result<Option<i8>> {
+        impl_as_for_value_ref!(self, Int8)
+    }
+
+    pub fn as_u8(&self) -> Result<Option<u8>> {
+        impl_as_for_value_ref!(self, UInt8)
+    }
+
+    pub fn as_i16(&self) -> Result<Option<i16>> {
+        impl_as_for_value_ref!(self, Int16)
+    }
+
+    pub fn as_u16(&self) -> Result<Option<u16>> {
+        impl_as_for_value_ref!(self, UInt16)
+    }
+
+    pub fn as_i32(&self) -> Result<Option<i32>> {
+        impl_as_for_value_ref!(self, Int32)
+    }
+
+    pub fn as_u32(&self) -> Result<Option<u32>> {
+        impl_as_for_value_ref!(self, UInt32)
+    }
+
+    pub fn as_i64(&self) -> Result<Option<i64>> {
+        impl_as_for_value_ref!(self, Int64)
+    }
+
+    pub fn as_u64(&self) -> Result<Option<u64>> {
+        impl_as_for_value_ref!(self, UInt64)
+    }
+
+    pub fn as_f32(&self) -> Result<Option<f32>> {
+        match self {
+            ValueRef::Null => Ok(None),
+            ValueRef::Float32(f) => Ok(Some(f.0)),
+            other => error::CastTypeSnafu {
+                msg: format!("Failed to cast value ref {:?} to ValueRef::Float32", other,),
+            }
+            .fail(),
+        }
+    }
+
+    pub fn as_f64(&self) -> Result<Option<f64>> {
+        match self {
+            ValueRef::Null => Ok(None),
+            ValueRef::Float64(f) => Ok(Some(f.0)),
+            other => error::CastTypeSnafu {
+                msg: format!("Failed to cast value ref {:?} to ValueRef::Float64", other,),
+            }
+            .fail(),
+        }
+    }
+
     /// Cast itself to [Date].
     pub fn as_date(&self) -> Result<Option<Date>> {
         impl_as_for_value_ref!(self, Date)
@@ -747,6 +869,11 @@ impl<'a> ValueRef<'a> {
     /// Cast itself to [Time].
     pub fn as_time(&self) -> Result<Option<Time>> {
         impl_as_for_value_ref!(self, Time)
+    }
+
+    /// Cast itself to [Interval].
+    pub fn as_interval(&self) -> Result<Option<Interval>> {
+        impl_as_for_value_ref!(self, Interval)
     }
 
     /// Cast itself to [ListValueRef].
@@ -801,6 +928,7 @@ impl_value_ref_from!(Date, Date);
 impl_value_ref_from!(DateTime, DateTime);
 impl_value_ref_from!(Timestamp, Timestamp);
 impl_value_ref_from!(Time, Time);
+impl_value_ref_from!(Interval, Interval);
 
 impl<'a> From<&'a str> for ValueRef<'a> {
     fn from(string: &'a str) -> ValueRef<'a> {
@@ -1063,6 +1191,18 @@ mod tests {
                 .try_into()
                 .unwrap()
         );
+        assert_eq!(
+            Value::Null,
+            ScalarValue::IntervalMonthDayNano(None).try_into().unwrap()
+        );
+        assert_eq!(
+            Value::Interval(Interval::from_month_day_nano(1, 1, 1)),
+            ScalarValue::IntervalMonthDayNano(Some(
+                Interval::from_month_day_nano(1, 1, 1).to_i128()
+            ))
+            .try_into()
+            .unwrap()
+        );
 
         assert_eq!(
             Value::Time(Time::new(1, TimeUnit::Second)),
@@ -1248,6 +1388,10 @@ mod tests {
             &ConcreteDataType::time_nanosecond_datatype(),
             &Value::Time(Time::new_nanosecond(1)),
         );
+        check_type_and_value(
+            &ConcreteDataType::interval_month_day_nano_datatype(),
+            &Value::Interval(Interval::from_month_day_nano(1, 2, 3)),
+        );
     }
 
     #[test]
@@ -1405,6 +1549,7 @@ mod tests {
         check_as_value_ref!(Float64, OrderedF64::from(16.0));
         check_as_value_ref!(Timestamp, Timestamp::new_millisecond(1));
         check_as_value_ref!(Time, Time::new_millisecond(1));
+        check_as_value_ref!(Interval, Interval::from_month_day_nano(1, 2, 3));
 
         assert_eq!(
             ValueRef::String("hello"),

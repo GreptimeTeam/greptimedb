@@ -80,6 +80,10 @@ impl<T: ErrorExt + Send + Sync + 'static> KvBackend for MemoryKvBackend<T> {
         "Memory"
     }
 
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
     async fn range(&self, req: RangeRequest) -> Result<RangeResponse, Self::Error> {
         let RangeRequest {
             key,
@@ -155,6 +159,23 @@ impl<T: ErrorExt + Send + Sync + 'static> KvBackend for MemoryKvBackend<T> {
         Ok(BatchPutResponse { prev_kvs })
     }
 
+    async fn batch_get(&self, req: BatchGetRequest) -> Result<BatchGetResponse, Self::Error> {
+        let kvs = self.kvs.read().unwrap();
+
+        let kvs = req
+            .keys
+            .into_iter()
+            .filter_map(|key| {
+                kvs.get_key_value(&key).map(|(k, v)| KeyValue {
+                    key: k.clone(),
+                    value: v.clone(),
+                })
+            })
+            .collect::<Vec<_>>();
+
+        Ok(BatchGetResponse { kvs })
+    }
+
     async fn compare_and_put(
         &self,
         req: CompareAndPutRequest,
@@ -215,7 +236,7 @@ impl<T: ErrorExt + Send + Sync + 'static> KvBackend for MemoryKvBackend<T> {
                 start: key,
                 end: range_end,
             };
-            kvs.drain_filter(|key, _| range.contains(key))
+            kvs.extract_if(|key, _| range.contains(key))
                 .map(Into::into)
                 .collect::<Vec<_>>()
         };
@@ -251,23 +272,6 @@ impl<T: ErrorExt + Send + Sync + 'static> KvBackend for MemoryKvBackend<T> {
         Ok(BatchDeleteResponse { prev_kvs })
     }
 
-    async fn batch_get(&self, req: BatchGetRequest) -> Result<BatchGetResponse, Self::Error> {
-        let kvs = self.kvs.read().unwrap();
-
-        let kvs = req
-            .keys
-            .into_iter()
-            .filter_map(|key| {
-                kvs.get_key_value(&key).map(|(k, v)| KeyValue {
-                    key: k.clone(),
-                    value: v.clone(),
-                })
-            })
-            .collect::<Vec<_>>();
-
-        Ok(BatchGetResponse { kvs })
-    }
-
     async fn move_value(&self, req: MoveValueRequest) -> Result<MoveValueResponse, Self::Error> {
         let MoveValueRequest { from_key, to_key } = req;
 
@@ -287,10 +291,6 @@ impl<T: ErrorExt + Send + Sync + 'static> KvBackend for MemoryKvBackend<T> {
         };
 
         Ok(MoveValueResponse(kv))
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 }
 

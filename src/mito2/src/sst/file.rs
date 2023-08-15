@@ -16,14 +16,17 @@
 
 use std::fmt;
 use std::str::FromStr;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use common_time::Timestamp;
+use object_store::util::join_path;
 use serde::{Deserialize, Serialize};
 use snafu::{ResultExt, Snafu};
 use store_api::storage::RegionId;
 use uuid::Uuid;
+
+use crate::sst::file_purger::{FilePurgerRef, PurgeRequest};
 
 /// Type to store SST level.
 pub type Level = u8;
@@ -52,7 +55,7 @@ impl FileId {
 
     /// Append `.parquet` to file id to make a complete file name
     pub fn as_parquet(&self) -> String {
-        format!("{}{}", self.0.hyphenated(), ".parquet")
+        format!("{}{}", self, ".parquet")
     }
 }
 
@@ -98,14 +101,26 @@ pub struct FileHandle {
 impl fmt::Debug for FileHandle {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("FileHandle")
-            .field("file_id", &self.inner.meta.file_id)
             .field("region_id", &self.inner.meta.region_id)
+            .field("file_id", &self.inner.meta.file_id)
             .field("time_range", &self.inner.meta.time_range)
             .field("size", &self.inner.meta.file_size)
             .field("level", &self.inner.meta.level)
             .field("compacting", &self.inner.compacting)
             .field("deleted", &self.inner.deleted)
             .finish()
+    }
+}
+
+impl FileHandle {
+    /// Returns the file id.
+    pub fn file_id(&self) -> FileId {
+        self.inner.meta.file_id
+    }
+
+    /// Returns the complete file path of the file.
+    pub fn file_path(&self, file_dir: &str) -> String {
+        join_path(file_dir, &self.file_id().as_parquet())
     }
 }
 
@@ -116,6 +131,18 @@ struct FileHandleInner {
     meta: FileMeta,
     compacting: AtomicBool,
     deleted: AtomicBool,
+    file_purger: FilePurgerRef,
+}
+
+impl Drop for FileHandleInner {
+    fn drop(&mut self) {
+        if self.deleted.load(Ordering::Relaxed) {
+            self.file_purger.send_request(PurgeRequest {
+                region_id: self.meta.region_id,
+                file_id: self.meta.file_id,
+            });
+        }
+    }
 }
 
 #[cfg(test)]

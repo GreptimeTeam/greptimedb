@@ -254,7 +254,7 @@ pub(crate) fn column_schemas_to_defs(
 
     column_schemas
         .iter()
-        .zip(column_datatypes.into_iter())
+        .zip(column_datatypes)
         .map(|(schema, datatype)| {
             Ok(api::v1::ColumnDef {
                 name: schema.name.clone(),
@@ -341,8 +341,10 @@ mod tests {
             .pop()
             .unwrap();
 
-        let Statement::CreateTable(create_table) = stmt else { unreachable!() };
-        let expr = create_to_expr(&create_table, Arc::new(QueryContext::default())).unwrap();
+        let Statement::CreateTable(create_table) = stmt else {
+            unreachable!()
+        };
+        let expr = create_to_expr(&create_table, QueryContext::arc()).unwrap();
         assert_eq!("3days", expr.table_options.get("ttl").unwrap());
         assert_eq!(
             "1.0MiB",

@@ -5,27 +5,27 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-api = { path = "../api" }
+api = { workspace = true }
 async-trait = "0.1"
 chrono.workspace = true
-common-error = { path = "../common/error" }
-common-grpc = { path = "../common/grpc" }
-common-telemetry = { path = "../common/telemetry" }
-common-meta = { path = "../common/meta" }
+common-error = { workspace = true }
+common-grpc = { workspace = true }
+common-meta = { workspace = true }
+common-telemetry = { workspace = true }
 etcd-client.workspace = true
 rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 snafu.workspace = true
-table = { path = "../table" }
-tokio.workspace = true
+table = { workspace = true }
 tokio-stream = { version = "0.1", features = ["net"] }
+tokio.workspace = true
 tonic.workspace = true
 
 [dev-dependencies]
-datatypes = { path = "../datatypes" }
+datatypes = { workspace = true }
 futures = "0.3"
-meta-srv = { path = "../meta-srv", features = ["mock"] }
+meta-srv = { workspace = true, features = ["mock"] }
 tower = "0.4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

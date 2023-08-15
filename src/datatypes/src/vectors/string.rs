@@ -312,7 +312,7 @@ mod tests {
         assert!(!v.is_const());
         assert!(v.validity().is_all_valid());
         assert!(!v.only_null());
-        assert_eq!(128, v.memory_size());
+        assert_eq!(1088, v.memory_size());
 
         for (i, s) in strs.iter().enumerate() {
             assert_eq!(Value::from(*s), v.get(i));

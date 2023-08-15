@@ -14,9 +14,9 @@
 
 use std::fmt::Display;
 use std::fs::OpenOptions;
+use std::io;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
-// use tokio::process::{Child, Command};
 use std::process::{Child, Command};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -38,13 +38,11 @@ use crate::util;
 
 const METASRV_ADDR: &str = "127.0.0.1:3002";
 const SERVER_ADDR: &str = "127.0.0.1:4001";
-const STANDALONE_LOG_FILE: &str = "/tmp/greptime-sqlness-standalone.log";
-const METASRV_LOG_FILE: &str = "/tmp/greptime-sqlness-metasrv.log";
-const FRONTEND_LOG_FILE: &str = "/tmp/greptime-sqlness-frontend.log";
-
 const DEFAULT_LOG_LEVEL: &str = "--log-level=debug,hyper=warn,tower=warn,datafusion=warn,reqwest=warn,sqlparser=warn,h2=info,opendal=info";
 
-pub struct Env {}
+pub struct Env {
+    data_home: PathBuf,
+}
 
 #[allow(clippy::print_stdout)]
 #[async_trait]
@@ -53,8 +51,8 @@ impl EnvController for Env {
 
     async fn start(&self, mode: &str, _config: Option<&Path>) -> Self::DB {
         match mode {
-            "standalone" => Self::start_standalone().await,
-            "distributed" => Self::start_distributed().await,
+            "standalone" => self.start_standalone().await,
+            "distributed" => self.start_distributed().await,
             _ => panic!("Unexpected mode: {mode}"),
         }
     }
@@ -67,14 +65,16 @@ impl EnvController for Env {
 
 #[allow(clippy::print_stdout)]
 impl Env {
-    pub async fn start_standalone() -> GreptimeDB {
+    pub fn new(data_home: PathBuf) -> Self {
+        Self { data_home }
+    }
+
+    async fn start_standalone(&self) -> GreptimeDB {
         Self::build_db().await;
 
         let db_ctx = GreptimeDBContext::new();
 
-        let server_process = Self::start_server("standalone", &db_ctx, true).await;
-
-        println!("Started, going to test. Log will be write to {STANDALONE_LOG_FILE}");
+        let server_process = self.start_server("standalone", &db_ctx, true).await;
 
         let client = Client::with_urls(vec![SERVER_ADDR]);
         let db = DB::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, client);
@@ -86,22 +86,23 @@ impl Env {
             client: TokioMutex::new(db),
             ctx: db_ctx,
             is_standalone: true,
+            env: Env::new(self.data_home.clone()),
         }
     }
 
-    pub async fn start_distributed() -> GreptimeDB {
+    async fn start_distributed(&self) -> GreptimeDB {
         Self::build_db().await;
 
         let db_ctx = GreptimeDBContext::new();
 
         // start a distributed GreptimeDB
-        let meta_server = Env::start_server("metasrv", &db_ctx, true).await;
+        let meta_server = self.start_server("metasrv", &db_ctx, true).await;
 
-        let datanode_1 = Env::start_server("datanode", &db_ctx, true).await;
-        let datanode_2 = Env::start_server("datanode", &db_ctx, true).await;
-        let datanode_3 = Env::start_server("datanode", &db_ctx, true).await;
+        let datanode_1 = self.start_server("datanode", &db_ctx, true).await;
+        let datanode_2 = self.start_server("datanode", &db_ctx, true).await;
+        let datanode_3 = self.start_server("datanode", &db_ctx, true).await;
 
-        let frontend = Env::start_server("frontend", &db_ctx, true).await;
+        let frontend = self.start_server("frontend", &db_ctx, true).await;
 
         let client = Client::with_urls(vec![SERVER_ADDR]);
         let db = DB::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, client);
@@ -113,6 +114,7 @@ impl Env {
             client: TokioMutex::new(db),
             ctx: db_ctx,
             is_standalone: false,
+            env: Env::new(self.data_home.clone()),
         }
     }
 
@@ -122,6 +124,7 @@ impl Env {
     }
 
     async fn start_server(
+        &self,
         subcommand: &str,
         db_ctx: &GreptimeDBContext,
         truncate_log: bool,
@@ -129,17 +132,15 @@ impl Env {
         let log_file_name = match subcommand {
             "datanode" => {
                 db_ctx.incr_datanode_id();
-
-                format!(
-                    "/tmp/greptime-sqlness-datanode-{}.log",
-                    db_ctx.datanode_id()
-                )
+                format!("greptime-sqlness-datanode-{}.log", db_ctx.datanode_id())
             }
-            "frontend" => FRONTEND_LOG_FILE.to_string(),
-            "metasrv" => METASRV_LOG_FILE.to_string(),
-            "standalone" => STANDALONE_LOG_FILE.to_string(),
+            "frontend" => "greptime-sqlness-frontend.log".to_string(),
+            "metasrv" => "greptime-sqlness-metasrv.log".to_string(),
+            "standalone" => "greptime-sqlness-standalone.log".to_string(),
             _ => panic!("Unexpected subcommand: {subcommand}"),
         };
+        let log_file_name = self.data_home.join(log_file_name).display().to_string();
+
         let log_file = OpenOptions::new()
             .create(true)
             .write(true)
@@ -148,15 +149,15 @@ impl Env {
             .unwrap();
 
         let (args, check_ip_addr) = match subcommand {
-            "datanode" => Self::datanode_start_args(db_ctx),
+            "datanode" => self.datanode_start_args(db_ctx),
             "standalone" => {
                 let args = vec![
                     DEFAULT_LOG_LEVEL.to_string(),
                     subcommand.to_string(),
                     "start".to_string(),
                     "-c".to_string(),
-                    Self::generate_config_file(subcommand, db_ctx),
-                    "--http-addr=0.0.0.0:5001".to_string(),
+                    self.generate_config_file(subcommand, db_ctx),
+                    "--http-addr=127.0.0.1:5001".to_string(),
                 ];
                 (args, SERVER_ADDR.to_string())
             }
@@ -165,8 +166,8 @@ impl Env {
                     DEFAULT_LOG_LEVEL.to_string(),
                     subcommand.to_string(),
                     "start".to_string(),
-                    "--metasrv-addr=0.0.0.0:3002".to_string(),
-                    "--http-addr=0.0.0.0:5003".to_string(),
+                    "--metasrv-addr=127.0.0.1:3002".to_string(),
+                    "--http-addr=127.0.0.1:5003".to_string(),
                 ];
                 (args, SERVER_ADDR.to_string())
             }
@@ -176,7 +177,10 @@ impl Env {
                     subcommand.to_string(),
                     "start".to_string(),
                     "--use-memory-store".to_string(),
-                    "--http-addr=0.0.0.0:5001".to_string(),
+                    "true".to_string(),
+                    "--http-addr=127.0.0.1:5001".to_string(),
+                    "--disable-region-failover".to_string(),
+                    "true".to_string(),
                 ];
                 (args, METASRV_ADDR.to_string())
             }
@@ -190,7 +194,12 @@ impl Env {
             );
         }
 
-        let mut process = Command::new("./greptime")
+        #[cfg(not(windows))]
+        let program = "./greptime";
+        #[cfg(windows)]
+        let program = "greptime.exe";
+
+        let mut process = Command::new(program)
             .current_dir(util::get_binary_dir("debug"))
             .args(args)
             .stdout(log_file)
@@ -207,8 +216,13 @@ impl Env {
         process
     }
 
-    fn datanode_start_args(db_ctx: &GreptimeDBContext) -> (Vec<String>, String) {
+    fn datanode_start_args(&self, db_ctx: &GreptimeDBContext) -> (Vec<String>, String) {
         let id = db_ctx.datanode_id();
+
+        let data_home = self
+            .data_home
+            .join(format!("greptimedb_datanode_{}_{id}", db_ctx.time));
+        let wal_dir = data_home.join("wal").display().to_string();
 
         let subcommand = "datanode";
         let mut args = vec![
@@ -216,23 +230,17 @@ impl Env {
             subcommand.to_string(),
             "start".to_string(),
         ];
-        args.push(format!("--rpc-addr=0.0.0.0:410{id}"));
-        args.push(format!("--http-addr=0.0.0.0:430{id}"));
-        args.push(format!(
-            "--data-home=/tmp/greptimedb_datanode_{}",
-            db_ctx.time
-        ));
-        args.push(format!(
-            "--wal-dir=/tmp/greptimedb_datanode_{}_{id}/wal",
-            db_ctx.time
-        ));
+        args.push(format!("--rpc-addr=127.0.0.1:410{id}"));
+        args.push(format!("--http-addr=127.0.0.1:430{id}"));
+        args.push(format!("--data-home={}", data_home.display()));
+        args.push(format!("--wal-dir={wal_dir}"));
         args.push(format!("--node-id={id}"));
-        args.push("--metasrv-addr=0.0.0.0:3002".to_string());
-        (args, format!("0.0.0.0:410{id}"))
+        args.push("--metasrv-addr=127.0.0.1:3002".to_string());
+        (args, format!("127.0.0.1:410{id}"))
     }
 
     /// stop and restart the server process
-    async fn restart_server(db: &GreptimeDB) {
+    async fn restart_server(&self, db: &GreptimeDB) {
         {
             let mut server_processes = db.server_processes.lock().unwrap();
             for server_process in server_processes.iter_mut() {
@@ -242,14 +250,14 @@ impl Env {
 
         // check if the server is distributed or standalone
         let new_server_processes = if db.is_standalone {
-            let new_server_process = Env::start_server("standalone", &db.ctx, false).await;
+            let new_server_process = self.start_server("standalone", &db.ctx, false).await;
             vec![new_server_process]
         } else {
             db.ctx.reset_datanode_id();
 
             let mut processes = vec![];
             for _ in 0..3 {
-                let new_server_process = Env::start_server("datanode", &db.ctx, false).await;
+                let new_server_process = self.start_server("datanode", &db.ctx, false).await;
                 processes.push(new_server_process);
             }
             processes
@@ -260,11 +268,13 @@ impl Env {
     }
 
     /// Generate config file to `/tmp/{subcommand}-{current_time}.toml`
-    fn generate_config_file(subcommand: &str, db_ctx: &GreptimeDBContext) -> String {
+    fn generate_config_file(&self, subcommand: &str, db_ctx: &GreptimeDBContext) -> String {
         let mut tt = TinyTemplate::new();
 
         let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        path.push(format!("../conf/{subcommand}-test.toml.template"));
+        path.pop();
+        path.push("conf");
+        path.push(format!("{subcommand}-test.toml.template"));
         let template = std::fs::read_to_string(path).unwrap();
         tt.add_template(subcommand, &template).unwrap();
 
@@ -275,15 +285,24 @@ impl Env {
             procedure_dir: String,
         }
 
-        let greptimedb_dir = format!("/tmp/greptimedb-{subcommand}-{}", db_ctx.time);
+        let data_home = self
+            .data_home
+            .join(format!("greptimedb-{subcommand}-{}", db_ctx.time));
+        std::fs::create_dir_all(data_home.as_path()).unwrap();
+
+        let wal_dir = data_home.join("wal").display().to_string();
+        let procedure_dir = data_home.join("procedure").display().to_string();
         let ctx = Context {
-            wal_dir: format!("{greptimedb_dir}/wal/"),
-            data_home: format!("{greptimedb_dir}/"),
-            procedure_dir: format!("{greptimedb_dir}/procedure/"),
+            wal_dir,
+            data_home: data_home.display().to_string(),
+            procedure_dir,
         };
         let rendered = tt.render(subcommand, &ctx).unwrap();
 
-        let conf_file = format!("/tmp/{subcommand}-{}.toml", db_ctx.time);
+        let conf_file = data_home
+            .join(format!("{subcommand}-{}.toml", db_ctx.time))
+            .display()
+            .to_string();
         println!("Generating {subcommand} config file in {conf_file}, full content:\n{rendered}");
         std::fs::write(&conf_file, rendered).unwrap();
 
@@ -293,15 +312,18 @@ impl Env {
     /// Build the DB with `cargo build --bin greptime`
     async fn build_db() {
         println!("Going to build the DB...");
-        let cargo_build_result = Command::new("cargo")
+        let output = Command::new("cargo")
             .current_dir(util::get_workspace_root())
             .args(["build", "--bin", "greptime"])
-            .stdout(Stdio::null())
             .output()
-            .expect("Failed to start GreptimeDB")
-            .status;
-        if !cargo_build_result.success() {
-            panic!("Failed to build GreptimeDB (`cargo build` fails)");
+            .expect("Failed to start GreptimeDB");
+        if !output.status.success() {
+            println!("Failed to build GreptimeDB, {}", output.status);
+            println!("Cargo build stdout:");
+            io::stdout().write_all(&output.stdout).unwrap();
+            println!("Cargo build stderr:");
+            io::stderr().write_all(&output.stderr).unwrap();
+            panic!();
         }
         println!("Build finished, starting...");
     }
@@ -314,13 +336,14 @@ pub struct GreptimeDB {
     client: TokioMutex<DB>,
     ctx: GreptimeDBContext,
     is_standalone: bool,
+    env: Env,
 }
 
 #[async_trait]
 impl Database for GreptimeDB {
     async fn query(&self, ctx: QueryContext, query: String) -> Box<dyn Display> {
         if ctx.context.contains_key("restart") {
-            Env::restart_server(self).await;
+            self.env.restart_server(self).await;
         }
 
         let mut client = self.client.lock().await;
@@ -331,10 +354,13 @@ impl Database for GreptimeDB {
                 .expect("Illegal `USE` statement: expecting a database.")
                 .trim_end_matches(';');
             client.set_schema(database);
+            Box::new(ResultDisplayer {
+                result: Ok(Output::AffectedRows(0)),
+            }) as _
+        } else {
+            let result = client.sql(&query).await;
+            Box::new(ResultDisplayer { result }) as _
         }
-
-        let result = client.sql(&query).await;
-        Box::new(ResultDisplayer { result }) as _
     }
 }
 

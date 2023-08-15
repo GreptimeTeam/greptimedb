@@ -14,19 +14,32 @@
 
 //! Configurations.
 
-use common_telemetry::logging;
+use common_base::readable_size::ReadableSize;
+use common_datasource::compression::CompressionType;
+use common_telemetry::warn;
 
+/// Default region worker num.
 const DEFAULT_NUM_WORKERS: usize = 1;
+/// Default region write buffer size.
+pub(crate) const DEFAULT_WRITE_BUFFER_SIZE: ReadableSize = ReadableSize::mb(32);
 
 /// Configuration for [MitoEngine](crate::engine::MitoEngine).
 #[derive(Debug)]
 pub struct MitoConfig {
-    /// Number of region workers.
+    // Worker configs:
+    /// Number of region workers (default 1).
     pub num_workers: usize,
-    /// Request channel size of each worker.
+    /// Request channel size of each worker (default 128).
     pub worker_channel_size: usize,
-    /// Max batch size for a worker to handle requests.
+    /// Max batch size for a worker to handle requests (default 64).
     pub worker_request_batch_size: usize,
+
+    // Manifest configs:
+    /// Number of meta action updated to trigger a new checkpoint
+    /// for the manifest (default 10).
+    pub manifest_checkpoint_distance: u64,
+    /// Manifest compression type (default uncompressed).
+    pub manifest_compress_type: CompressionType,
 }
 
 impl Default for MitoConfig {
@@ -35,6 +48,8 @@ impl Default for MitoConfig {
             num_workers: DEFAULT_NUM_WORKERS,
             worker_channel_size: 128,
             worker_request_batch_size: 64,
+            manifest_checkpoint_distance: 10,
+            manifest_compress_type: CompressionType::Uncompressed,
         }
     }
 }
@@ -49,16 +64,15 @@ impl MitoConfig {
         }
         self.num_workers = self.num_workers.next_power_of_two();
         if num_workers_before != self.num_workers {
-            logging::warn!(
+            warn!(
                 "Sanitize worker num {} to {}",
-                num_workers_before,
-                self.num_workers
+                num_workers_before, self.num_workers
             );
         }
 
         // Sanitize channel size.
         if self.worker_channel_size == 0 {
-            logging::warn!("Sanitize channel size 0 to 1");
+            warn!("Sanitize channel size 0 to 1");
             self.worker_channel_size = 1;
         }
     }

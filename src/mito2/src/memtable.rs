@@ -14,11 +14,15 @@
 
 //! Memtables are write buffers for regions.
 
+pub mod key_values;
 pub(crate) mod version;
 
 use std::fmt;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
+use crate::error::Result;
+pub use crate::memtable::key_values::KeyValues;
 use crate::metadata::RegionMetadataRef;
 
 /// Id for memtables.
@@ -30,6 +34,9 @@ pub type MemtableId = u32;
 pub trait Memtable: Send + Sync + fmt::Debug {
     /// Returns the id of this memtable.
     fn id(&self) -> MemtableId;
+
+    /// Write key values into the memtable.
+    fn write(&self, kvs: &KeyValues) -> Result<()>;
 }
 
 pub type MemtableRef = Arc<dyn Memtable>;
@@ -41,3 +48,43 @@ pub trait MemtableBuilder: Send + Sync + fmt::Debug {
 }
 
 pub type MemtableBuilderRef = Arc<dyn MemtableBuilder>;
+
+// TODO(yingwen): Remove it once we port the memtable.
+/// Empty memtable for test.
+#[derive(Debug, Default)]
+pub(crate) struct EmptyMemtable {
+    /// Id of this memtable.
+    id: MemtableId,
+}
+
+impl EmptyMemtable {
+    /// Returns a new memtable with specific `id`.
+    pub(crate) fn new(id: MemtableId) -> EmptyMemtable {
+        EmptyMemtable { id }
+    }
+}
+
+impl Memtable for EmptyMemtable {
+    fn id(&self) -> MemtableId {
+        self.id
+    }
+
+    fn write(&self, _kvs: &KeyValues) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// Default memtable builder.
+#[derive(Debug, Default)]
+pub(crate) struct DefaultMemtableBuilder {
+    /// Next memtable id.
+    next_id: AtomicU32,
+}
+
+impl MemtableBuilder for DefaultMemtableBuilder {
+    fn build(&self, _metadata: &RegionMetadataRef) -> MemtableRef {
+        Arc::new(EmptyMemtable::new(
+            self.next_id.fetch_add(1, Ordering::Relaxed),
+        ))
+    }
+}

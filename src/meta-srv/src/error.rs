@@ -21,9 +21,24 @@ use tokio::sync::mpsc::error::SendError;
 use tonic::codegen::http;
 use tonic::Code;
 
+use crate::pubsub::Message;
+
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
+    #[snafu(display("Failed to list catalogs: {}", source))]
+    ListCatalogs {
+        location: Location,
+        source: BoxedError,
+    },
+
+    #[snafu(display("Failed to list {}'s schemas: {}", catalog, source))]
+    ListSchemas {
+        location: Location,
+        catalog: String,
+        source: BoxedError,
+    },
+
     #[snafu(display("Failed to join a future: {}", source))]
     Join {
         location: Location,
@@ -104,7 +119,11 @@ pub enum Error {
     #[snafu(display("Empty key is not allowed"))]
     EmptyKey { location: Location },
 
-    #[snafu(display("Failed to execute via Etcd, source: {}", source))]
+    #[snafu(display(
+        "Failed to execute via Etcd, source: {}, location: {}",
+        source,
+        location
+    ))]
     EtcdFailed {
         source: etcd_client::Error,
         location: Location,
@@ -458,6 +477,24 @@ pub enum Error {
         source: common_meta::error::Error,
         location: Location,
     },
+
+    #[snafu(display("Invalid heartbeat request: {}", err_msg))]
+    InvalidHeartbeatRequest { err_msg: String, location: Location },
+
+    #[snafu(display("Failed to publish message: {:?}", source))]
+    PublishMessage {
+        source: SendError<Message>,
+        location: Location,
+    },
+
+    #[snafu(display("Too many partitions, location: {}", location))]
+    TooManyPartitions { location: Location },
+
+    #[snafu(display("Unsupported operation {}, location: {}", operation, location))]
+    Unsupported {
+        operation: String,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -469,10 +506,6 @@ impl From<Error> for tonic::Status {
 }
 
 impl ErrorExt for Error {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn status_code(&self) -> StatusCode {
         match self {
             Error::EtcdFailed { .. }
@@ -507,7 +540,9 @@ impl ErrorExt for Error {
             | Error::UpdateTableMetadata { .. }
             | Error::NoEnoughAvailableDatanode { .. }
             | Error::ConvertGrpcExpr { .. }
-            | Error::Join { .. } => StatusCode::Internal,
+            | Error::PublishMessage { .. }
+            | Error::Join { .. }
+            | Error::Unsupported { .. } => StatusCode::Internal,
             Error::EmptyKey { .. }
             | Error::MissingRequiredParameter { .. }
             | Error::MissingRequestHeader { .. }
@@ -516,7 +551,9 @@ impl ErrorExt for Error {
             | Error::InvalidStatKey { .. }
             | Error::ParseNum { .. }
             | Error::UnsupportedSelectorType { .. }
-            | Error::InvalidArguments { .. } => StatusCode::InvalidArguments,
+            | Error::InvalidArguments { .. }
+            | Error::InvalidHeartbeatRequest { .. }
+            | Error::TooManyPartitions { .. } => StatusCode::InvalidArguments,
             Error::LeaseKeyFromUtf8 { .. }
             | Error::LeaseValueFromUtf8 { .. }
             | Error::StatKeyFromUtf8 { .. }
@@ -546,6 +583,10 @@ impl ErrorExt for Error {
                 source.status_code()
             }
 
+            Error::ListCatalogs { source, .. } | Error::ListSchemas { source, .. } => {
+                source.status_code()
+            }
+
             Error::RegionFailoverCandidatesNotFound { .. } => StatusCode::RuntimeResourcesExhausted,
 
             Error::RegisterProcedureLoader { source, .. } => source.status_code(),
@@ -557,6 +598,10 @@ impl ErrorExt for Error {
 
             Error::Other { source, .. } => source.status_code(),
         }
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }
 

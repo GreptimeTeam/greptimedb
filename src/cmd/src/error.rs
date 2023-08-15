@@ -23,6 +23,12 @@ use snafu::{Location, Snafu};
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
+    #[snafu(display("Failed to iter stream, source: {}", source))]
+    IterStream {
+        location: Location,
+        source: common_meta::error::Error,
+    },
+
     #[snafu(display("Failed to start datanode, source: {}", source))]
     StartDatanode {
         location: Location,
@@ -74,7 +80,7 @@ pub enum Error {
     #[snafu(display("Illegal auth config: {}", source))]
     IllegalAuthConfig {
         location: Location,
-        source: servers::auth::Error,
+        source: auth::Error,
     },
 
     #[snafu(display("Unsupported selector type, {} source: {}", selector_type, source))]
@@ -176,6 +182,7 @@ impl ErrorExt for Error {
             Error::ShutdownMetaServer { source, .. } => source.status_code(),
             Error::BuildMetaServer { source, .. } => source.status_code(),
             Error::UnsupportedSelectorType { source, .. } => source.status_code(),
+            Error::IterStream { source, .. } => source.status_code(),
             Error::MissingConfig { .. }
             | Error::LoadLayeredConfig { .. }
             | Error::IllegalConfig { .. }

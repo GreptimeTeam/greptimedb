@@ -216,7 +216,7 @@ impl DropTableRequest {
     }
 }
 
-/// Drop table request
+/// Close table request
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CloseTableRequest {
     pub catalog_name: String,
@@ -251,6 +251,9 @@ pub struct InsertRequest {
 /// Delete (by primary key) request
 #[derive(Debug)]
 pub struct DeleteRequest {
+    pub catalog_name: String,
+    pub schema_name: String,
+    pub table_name: String,
     /// Values of each column in this table's primary key and time index.
     ///
     /// The key is the column name, and the value is the column value.
@@ -295,6 +298,25 @@ pub struct CompactTableRequest {
     pub region_number: Option<RegionNumber>,
     /// Wait until the compaction is done.
     pub wait: Option<bool>,
+}
+
+/// Truncate table request
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TruncateTableRequest {
+    pub catalog_name: String,
+    pub schema_name: String,
+    pub table_name: String,
+    pub table_id: TableId,
+}
+
+impl TruncateTableRequest {
+    pub fn table_ref(&self) -> TableReference {
+        TableReference {
+            catalog: &self.catalog_name,
+            schema: &self.schema_name,
+            table: &self.table_name,
+        }
+    }
 }
 
 #[macro_export]

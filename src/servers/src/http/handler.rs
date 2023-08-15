@@ -17,18 +17,17 @@ use std::env;
 use std::time::Instant;
 
 use aide::transform::TransformOperation;
+use auth::UserInfoRef;
 use axum::extract::{Json, Query, State};
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Form};
 use common_error::status_code::StatusCode;
-use common_telemetry::{error, timer};
+use common_telemetry::timer;
 use query::parser::PromQuery;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use session::context::UserInfo;
 
 use crate::http::{ApiState, GreptimeOptionsConfigState, JsonResponse};
-use crate::metrics::JEMALLOC_COLLECTOR;
 use crate::metrics_handler::MetricsHandler;
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
@@ -43,7 +42,7 @@ pub async fn sql(
     State(state): State<ApiState>,
     Query(query_params): Query<SqlQuery>,
     // TODO(fys): pass _user_info into query context
-    _user_info: Extension<UserInfo>,
+    user_info: Extension<UserInfoRef>,
     Form(form_params): Form<SqlQuery>,
 ) -> Json<JsonResponse> {
     let sql_handler = &state.sql_handler;
@@ -62,6 +61,7 @@ pub async fn sql(
     let resp = if let Some(sql) = &sql {
         match crate::http::query_context_from_db(sql_handler.clone(), db).await {
             Ok(query_ctx) => {
+                query_ctx.set_current_user(Some(user_info.0));
                 JsonResponse::from_output(sql_handler.do_query(sql, query_ctx).await).await
             }
             Err(resp) => resp,
@@ -102,7 +102,7 @@ pub async fn promql(
     State(state): State<ApiState>,
     Query(params): Query<PromqlQuery>,
     // TODO(fys): pass _user_info into query context
-    _user_info: Extension<UserInfo>,
+    user_info: Extension<UserInfoRef>,
 ) -> Json<JsonResponse> {
     let sql_handler = &state.sql_handler;
     let exec_start = Instant::now();
@@ -118,6 +118,7 @@ pub async fn promql(
     let prom_query = params.into();
     let resp = match super::query_context_from_db(sql_handler.clone(), db).await {
         Ok(query_ctx) => {
+            query_ctx.set_current_user(Some(user_info.0));
             JsonResponse::from_output(sql_handler.do_promql_query(&prom_query, query_ctx).await)
                 .await
         }
@@ -141,9 +142,10 @@ pub async fn metrics(
     #[cfg(feature = "metrics-process")]
     crate::metrics::PROCESS_COLLECTOR.collect();
 
-    if let Some(c) = JEMALLOC_COLLECTOR.as_ref() {
+    #[cfg(not(windows))]
+    if let Some(c) = crate::metrics::jemalloc::JEMALLOC_COLLECTOR.as_ref() {
         if let Err(e) = c.update() {
-            error!(e; "Failed to update jemalloc metrics");
+            common_telemetry::error!(e; "Failed to update jemalloc metrics");
         }
     }
     state.render()

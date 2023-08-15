@@ -17,15 +17,20 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use api::v1::SemanticType;
 use datatypes::prelude::DataType;
-use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
+use datatypes::schema::{Schema, SchemaRef};
 use serde::de::Error;
 use serde::{Deserialize, Deserializer, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
+use store_api::metadata::ColumnMetadata;
 use store_api::storage::{ColumnId, RegionId};
 
-use crate::error::{InvalidMetaSnafu, InvalidSchemaSnafu, Result};
+use crate::error::{InvalidMetaSnafu, InvalidSchemaSnafu, Result, SerdeJsonSnafu};
 use crate::region::VersionNumber;
+
+/// Initial version number of a new region.
+pub(crate) const INIT_REGION_VERSION: VersionNumber = 0;
 
 #[cfg_attr(doc, aquamarine::aquamarine)]
 /// Static metadata of a region.
@@ -57,6 +62,9 @@ pub struct RegionMetadata {
     /// Latest schema constructed from [column_metadatas](RegionMetadata::column_metadatas).
     #[serde(skip)]
     pub schema: SchemaRef,
+
+    // We don't pub `time_index` and `id_to_index` and always construct them via [SkippedFields]
+    // so we can assumes they are valid.
     /// Id of the time index column.
     #[serde(skip)]
     time_index: ColumnId,
@@ -108,58 +116,35 @@ impl<'de> Deserialize<'de> for RegionMetadata {
     }
 }
 
-/// Fields skipped in serialization.
-struct SkippedFields {
-    /// Last schema.
-    schema: SchemaRef,
-    /// Id of the time index column.
-    time_index: ColumnId,
-    /// Map column id to column's index in [column_metadatas](RegionMetadata::column_metadatas).
-    id_to_index: HashMap<ColumnId, usize>,
-}
-
-impl SkippedFields {
-    /// Constructs skipped fields from `column_metadatas`.
-    fn new(column_metadatas: &[ColumnMetadata]) -> Result<SkippedFields> {
-        let column_schemas = column_metadatas
-            .iter()
-            .map(|column_metadata| column_metadata.column_schema.clone())
-            .collect();
-        let schema = Arc::new(Schema::try_new(column_schemas).context(InvalidSchemaSnafu)?);
-        let time_index = column_metadatas
-            .iter()
-            .find_map(|col| {
-                if col.semantic_type == SemanticType::Timestamp {
-                    Some(col.column_id)
-                } else {
-                    None
-                }
-            })
-            .context(InvalidMetaSnafu {
-                reason: "time index not found",
-            })?;
-        let id_to_index = column_metadatas
-            .iter()
-            .enumerate()
-            .map(|(idx, col)| (col.column_id, idx))
-            .collect();
-
-        Ok(SkippedFields {
-            schema,
-            time_index,
-            id_to_index,
-        })
-    }
-}
-
 impl RegionMetadata {
+    /// Encode the metadata to a JSON string.
+    pub fn to_json(&self) -> Result<String> {
+        serde_json::to_string(&self).context(SerdeJsonSnafu)
+    }
+
+    /// Find column by id.
+    pub(crate) fn column_by_id(&self, column_id: ColumnId) -> Option<&ColumnMetadata> {
+        self.id_to_index
+            .get(&column_id)
+            .map(|index| &self.column_metadatas[*index])
+    }
+
+    /// Returns the time index column
+    ///
+    /// # Panics
+    /// Panics if the time index column id is invalid.
+    pub(crate) fn time_index_column(&self) -> &ColumnMetadata {
+        let index = self.id_to_index[&self.time_index];
+        &self.column_metadatas[index]
+    }
+
     /// Checks whether the metadata is valid.
     fn validate(&self) -> Result<()> {
         // Id to name.
         let mut id_names = HashMap::with_capacity(self.column_metadatas.len());
         for col in &self.column_metadatas {
             // Validate each column.
-            col.validate()?;
+            Self::validate_column_metadata(col)?;
 
             // Check whether column id is duplicated. We already check column name
             // is unique in `Schema` so we only check column id here.
@@ -188,6 +173,17 @@ impl RegionMetadata {
             }
         );
 
+        // Checks the time index column is not nullable.
+        ensure!(
+            !self.time_index_column().column_schema.is_nullable(),
+            InvalidMetaSnafu {
+                reason: format!(
+                    "time index column {} must be NOT NULL",
+                    self.time_index_column().column_schema.name
+                ),
+            }
+        );
+
         if !self.primary_key.is_empty() {
             let mut pk_ids = HashSet::with_capacity(self.primary_key.len());
             // Checks column ids in the primary key is valid.
@@ -200,11 +196,16 @@ impl RegionMetadata {
                     }
                 );
 
+                // Safety: Column with specific id must exist.
+                let column = self.column_by_id(*column_id).unwrap();
                 // Checks duplicate.
                 ensure!(
                     !pk_ids.contains(&column_id),
                     InvalidMetaSnafu {
-                        reason: format!("duplicate column {} in primary key", id_names[column_id]),
+                        reason: format!(
+                            "duplicate column {} in primary key",
+                            column.column_schema.name
+                        ),
                     }
                 );
 
@@ -214,13 +215,61 @@ impl RegionMetadata {
                     InvalidMetaSnafu {
                         reason: format!(
                             "column {} is already a time index column",
-                            id_names[column_id]
+                            column.column_schema.name,
+                        ),
+                    }
+                );
+
+                // Checks semantic type.
+                ensure!(
+                    column.semantic_type == SemanticType::Tag,
+                    InvalidMetaSnafu {
+                        reason: format!(
+                            "semantic type of column {} should be Tag, not {:?}",
+                            column.column_schema.name, column.semantic_type
                         ),
                     }
                 );
 
                 pk_ids.insert(column_id);
             }
+        }
+
+        // Checks tag semantic type.
+        let num_tag = self
+            .column_metadatas
+            .iter()
+            .filter(|col| col.semantic_type == SemanticType::Tag)
+            .count();
+        ensure!(
+            num_tag == self.primary_key.len(),
+            InvalidMetaSnafu {
+                reason: format!(
+                    "number of primary key columns {} not equal to tag columns {}",
+                    self.primary_key.len(),
+                    num_tag
+                ),
+            }
+        );
+
+        Ok(())
+    }
+
+    /// Checks whether it is a valid column.
+    fn validate_column_metadata(column_metadata: &ColumnMetadata) -> Result<()> {
+        if column_metadata.semantic_type == SemanticType::Timestamp {
+            ensure!(
+                column_metadata
+                    .column_schema
+                    .data_type
+                    .is_timestamp_compatible(),
+                InvalidMetaSnafu {
+                    reason: format!(
+                        "{} is not timestamp compatible",
+                        column_metadata.column_schema.name
+                    ),
+                }
+            );
         }
 
         Ok(())
@@ -288,47 +337,54 @@ impl RegionMetadataBuilder {
     }
 }
 
-/// Metadata of a column.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ColumnMetadata {
-    /// Schema of this column. Is the same as `column_schema` in [SchemaRef].
-    pub column_schema: ColumnSchema,
-    /// Semantic type of this column (e.g. tag or timestamp).
-    pub semantic_type: SemanticType,
-    /// Immutable and unique id of a region.
-    pub column_id: ColumnId,
+/// Fields skipped in serialization.
+struct SkippedFields {
+    /// Last schema.
+    schema: SchemaRef,
+    /// Id of the time index column.
+    time_index: ColumnId,
+    /// Map column id to column's index in [column_metadatas](RegionMetadata::column_metadatas).
+    id_to_index: HashMap<ColumnId, usize>,
 }
 
-impl ColumnMetadata {
-    /// Checks whether it is a valid column.
-    pub fn validate(&self) -> Result<()> {
-        if self.semantic_type == SemanticType::Timestamp {
-            ensure!(
-                self.column_schema.data_type.is_timestamp_compatible(),
-                InvalidMetaSnafu {
-                    reason: format!("{} is not timestamp compatible", self.column_schema.name),
+impl SkippedFields {
+    /// Constructs skipped fields from `column_metadatas`.
+    fn new(column_metadatas: &[ColumnMetadata]) -> Result<SkippedFields> {
+        let column_schemas = column_metadatas
+            .iter()
+            .map(|column_metadata| column_metadata.column_schema.clone())
+            .collect();
+        let schema = Arc::new(Schema::try_new(column_schemas).context(InvalidSchemaSnafu)?);
+        let time_index = column_metadatas
+            .iter()
+            .find_map(|col| {
+                if col.semantic_type == SemanticType::Timestamp {
+                    Some(col.column_id)
+                } else {
+                    None
                 }
-            );
-        }
+            })
+            .context(InvalidMetaSnafu {
+                reason: "time index not found",
+            })?;
+        let id_to_index = column_metadatas
+            .iter()
+            .enumerate()
+            .map(|(idx, col)| (col.column_id, idx))
+            .collect();
 
-        Ok(())
+        Ok(SkippedFields {
+            schema,
+            time_index,
+            id_to_index,
+        })
     }
-}
-
-/// The semantic type of one column
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub enum SemanticType {
-    /// Tag column, also is a part of primary key.
-    Tag,
-    /// A column that isn't a time index or part of primary key.
-    Field,
-    /// Time index column.
-    Timestamp,
 }
 
 #[cfg(test)]
 mod test {
     use datatypes::prelude::ConcreteDataType;
+    use datatypes::schema::ColumnSchema;
 
     use super::*;
 
@@ -363,6 +419,17 @@ mod test {
     }
 
     #[test]
+    fn test_region_metadata() {
+        let region_metadata = build_test_region_metadata();
+        assert_eq!("c", region_metadata.time_index_column().column_schema.name);
+        assert_eq!(
+            "a",
+            region_metadata.column_by_id(1).unwrap().column_schema.name
+        );
+        assert_eq!(None, region_metadata.column_by_id(10));
+    }
+
+    #[test]
     fn test_region_metadata_serde() {
         let region_metadata = build_test_region_metadata();
         let serialized = serde_json::to_string(&region_metadata).unwrap();
@@ -378,14 +445,12 @@ mod test {
             semantic_type: SemanticType::Timestamp,
             column_id: 1,
         };
-        col.validate().unwrap_err();
 
         builder.push_column_metadata(col);
         let err = builder.build().unwrap_err();
         assert!(
             err.to_string().contains("ts is not timestamp compatible"),
-            "unexpected err: {}",
-            err
+            "unexpected err: {err}",
         );
     }
 
@@ -396,8 +461,7 @@ mod test {
         // A region must have a time index.
         assert!(
             err.to_string().contains("time index not found"),
-            "unexpected err: {}",
-            err
+            "unexpected err: {err}",
         );
     }
 
@@ -423,8 +487,7 @@ mod test {
         assert!(
             err.to_string()
                 .contains("column a and b have the same column id"),
-            "unexpected err: {}",
-            err
+            "unexpected err: {err}",
         );
     }
 
@@ -453,8 +516,7 @@ mod test {
         let err = builder.build().unwrap_err();
         assert!(
             err.to_string().contains("expect only one time index"),
-            "unexpected err: {}",
-            err
+            "unexpected err: {err}",
         );
     }
 
@@ -480,8 +542,7 @@ mod test {
         let err = builder.build().unwrap_err();
         assert!(
             err.to_string().contains("unknown column id 3"),
-            "unexpected err: {}",
-            err
+            "unexpected err: {err}",
         );
     }
 
@@ -508,8 +569,7 @@ mod test {
         assert!(
             err.to_string()
                 .contains("duplicate column a in primary key"),
-            "unexpected err: {}",
-            err
+            "unexpected err: {err}",
         );
     }
 
@@ -531,8 +591,86 @@ mod test {
         assert!(
             err.to_string()
                 .contains("column ts is already a time index column"),
-            "unexpected err: {}",
-            err
+            "unexpected err: {err}",
+        );
+    }
+
+    #[test]
+    fn test_nullable_time_index() {
+        let mut builder = create_builder();
+        builder.push_column_metadata(ColumnMetadata {
+            column_schema: ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                true,
+            ),
+            semantic_type: SemanticType::Timestamp,
+            column_id: 1,
+        });
+        let err = builder.build().unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("time index column ts must be NOT NULL"),
+            "unexpected err: {err}",
+        );
+    }
+
+    #[test]
+    fn test_primary_key_semantic_type() {
+        let mut builder = create_builder();
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("a", ConcreteDataType::float64_datatype(), true),
+                semantic_type: SemanticType::Field,
+                column_id: 2,
+            })
+            .primary_key(vec![2]);
+        let err = builder.build().unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("semantic type of column a should be Tag, not Field"),
+            "unexpected err: {err}",
+        );
+    }
+
+    #[test]
+    fn test_primary_key_tag_num() {
+        let mut builder = create_builder();
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("a", ConcreteDataType::string_datatype(), true),
+                semantic_type: SemanticType::Tag,
+                column_id: 2,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("b", ConcreteDataType::string_datatype(), true),
+                semantic_type: SemanticType::Tag,
+                column_id: 3,
+            })
+            .primary_key(vec![2]);
+        let err = builder.build().unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("number of primary key columns 1 not equal to tag columns 2"),
+            "unexpected err: {err}",
         );
     }
 }

@@ -50,14 +50,14 @@ pub fn make_admin_service(meta_srv: MetaSrv) -> Admin {
     let router = router.route(
         "/catalogs",
         meta::CatalogsHandler {
-            kv_store: meta_srv.kv_store().clone(),
+            table_metadata_manager: meta_srv.table_metadata_manager().clone(),
         },
     );
 
     let router = router.route(
         "/schemas",
         meta::SchemasHandler {
-            kv_store: meta_srv.kv_store().clone(),
+            table_metadata_manager: meta_srv.table_metadata_manager().clone(),
         },
     );
 
@@ -145,7 +145,7 @@ where
                     .into_owned()
                     .collect()
             })
-            .unwrap_or_else(HashMap::new);
+            .unwrap_or_default();
         let path = req.uri().path().to_owned();
         Box::pin(async move { router.call(&path, query_params).await })
     }

@@ -29,6 +29,7 @@ use crate::error::{
     Error, Result, RetryLaterSnafu, SerializeToJsonSnafu, UnexpectedInstructionReplySnafu,
 };
 use crate::handler::HeartbeatMailbox;
+use crate::inactive_node_manager::InactiveNodeManager;
 use crate::procedure::region_failover::OPEN_REGION_MESSAGE_TIMEOUT;
 use crate::service::mailbox::{Channel, MailboxReceiver};
 
@@ -64,6 +65,21 @@ impl ActivateRegion {
             input: instruction.to_string(),
         })?;
 
+        // Ensure that metasrv will renew the lease for this candidate node.
+        //
+        // This operation may not be redundant, imagine the following scenario:
+        // This candidate once had the current region, and because it did not respond to the `close`
+        // command in time, it was considered an inactive node by metasrv, then it replied, and the
+        // current region failed over again, and the node was selected as a candidate, so it needs
+        // to clear its previous state first.
+        let candidate = RegionIdent {
+            datanode_id: self.candidate.id,
+            ..failed_region.clone()
+        };
+        InactiveNodeManager::new(&ctx.in_memory)
+            .deregister_inactive_region(&candidate)
+            .await?;
+
         let ch = Channel::Datanode(self.candidate.id);
         ctx.mailbox.send(&ch, msg, timeout).await
     }
@@ -82,7 +98,8 @@ impl ActivateRegion {
                     return UnexpectedInstructionReplySnafu {
                         mailbox_message: msg.to_string(),
                         reason: "expect open region reply",
-                    }.fail();
+                    }
+                    .fail();
                 };
                 if result {
                     Ok(Box::new(UpdateRegionMetadata::new(self.candidate)))
@@ -98,7 +115,7 @@ impl ActivateRegion {
                     RetryLaterSnafu { reason }.fail()
                 }
             }
-            Err(e) if matches!(e, Error::MailboxTimeout { .. }) => {
+            Err(Error::MailboxTimeout { .. }) => {
                 let reason = format!(
                     "Mailbox received timeout for activate failed region {failed_region:?} on Datanode {:?}", 
                     self.candidate,

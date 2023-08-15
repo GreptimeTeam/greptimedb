@@ -1,3 +1,44 @@
+-- scripts table has different table ids in different modes
+select *
+from information_schema.tables
+where table_name != 'scripts'
+order by table_schema, table_name;
+
++---------------+--------------------+------------+-----------------+----------+-------------+
+| table_catalog | table_schema       | table_name | table_type      | table_id | engine      |
++---------------+--------------------+------------+-----------------+----------+-------------+
+| greptime      | information_schema | columns    | LOCAL TEMPORARY | 4        |             |
+| greptime      | information_schema | tables     | LOCAL TEMPORARY | 3        |             |
+| greptime      | public             | numbers    | LOCAL TEMPORARY | 2        | test_engine |
++---------------+--------------------+------------+-----------------+----------+-------------+
+
+select * from information_schema.columns order by table_schema, table_name;
+
++---------------+--------------------+------------+---------------+----------------------+---------------+
+| table_catalog | table_schema       | table_name | column_name   | data_type            | semantic_type |
++---------------+--------------------+------------+---------------+----------------------+---------------+
+| greptime      | information_schema | columns    | table_catalog | String               | FIELD         |
+| greptime      | information_schema | columns    | table_schema  | String               | FIELD         |
+| greptime      | information_schema | columns    | table_name    | String               | FIELD         |
+| greptime      | information_schema | columns    | column_name   | String               | FIELD         |
+| greptime      | information_schema | columns    | data_type     | String               | FIELD         |
+| greptime      | information_schema | columns    | semantic_type | String               | FIELD         |
+| greptime      | information_schema | tables     | table_catalog | String               | FIELD         |
+| greptime      | information_schema | tables     | table_schema  | String               | FIELD         |
+| greptime      | information_schema | tables     | table_name    | String               | FIELD         |
+| greptime      | information_schema | tables     | table_type    | String               | FIELD         |
+| greptime      | information_schema | tables     | table_id      | UInt32               | FIELD         |
+| greptime      | information_schema | tables     | engine        | String               | FIELD         |
+| greptime      | public             | numbers    | number        | UInt32               | PRIMARY KEY   |
+| greptime      | public             | scripts    | schema        | String               | PRIMARY KEY   |
+| greptime      | public             | scripts    | name          | String               | PRIMARY KEY   |
+| greptime      | public             | scripts    | script        | String               | FIELD         |
+| greptime      | public             | scripts    | engine        | String               | FIELD         |
+| greptime      | public             | scripts    | timestamp     | TimestampMillisecond | TIME INDEX    |
+| greptime      | public             | scripts    | gmt_created   | TimestampMillisecond | FIELD         |
+| greptime      | public             | scripts    | gmt_modified  | TimestampMillisecond | FIELD         |
++---------------+--------------------+------------+---------------+----------------------+---------------+
+
 create
 database my_db;
 
@@ -5,8 +46,7 @@ Affected Rows: 1
 
 use my_db;
 
-++
-++
+Affected Rows: 0
 
 create table foo
 (
@@ -30,6 +70,7 @@ select table_catalog, table_schema, table_name, table_type, engine
 from information_schema.tables
 where table_catalog = 'greptime'
   and table_schema != 'public'
+  and table_schema != 'information_schema'
 order by table_schema, table_name;
 
 +---------------+--------------+------------+------------+--------+
@@ -42,6 +83,7 @@ select table_catalog, table_schema, table_name, column_name, data_type, semantic
 from information_schema.columns
 where table_catalog = 'greptime'
   and table_schema != 'public'
+  and table_schema != 'information_schema'
 order by table_schema, table_name;
 
 +---------------+--------------+------------+-------------+-----------+---------------+
@@ -52,6 +94,9 @@ order by table_schema, table_name;
 
 use public;
 
-++
-++
+Affected Rows: 0
+
+drop schema my_db;
+
+Error: 1001(Unsupported), SQL statement is not supported: drop schema my_db;, keyword: schema
 

@@ -17,9 +17,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::vec;
 
+use common_test_util::find_workspace_path;
 use datafusion::assert_batches_eq;
+use datafusion::datasource::physical_plan::{FileOpener, FileScanConfig, FileStream, ParquetExec};
 use datafusion::execution::context::TaskContext;
-use datafusion::physical_plan::file_format::{FileOpener, FileScanConfig, FileStream, ParquetExec};
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::prelude::SessionContext;
@@ -30,8 +31,9 @@ use crate::compression::CompressionType;
 use crate::error;
 use crate::file_format::csv::{CsvConfigBuilder, CsvOpener};
 use crate::file_format::json::JsonOpener;
+use crate::file_format::orc::{OrcFormat, OrcOpener};
 use crate::file_format::parquet::DefaultParquetFileReaderFactory;
-use crate::file_format::Format;
+use crate::file_format::{FileFormat, Format};
 use crate::test_util::{self, scan_config, test_basic_schema, test_store};
 
 struct Test<'a, T: FileOpener> {
@@ -70,7 +72,7 @@ async fn test_json_opener() {
         CompressionType::Uncompressed,
     );
 
-    let path = &test_util::get_data_dir("tests/json/basic.json")
+    let path = &find_workspace_path("/src/common/datasource/tests/json/basic.json")
         .display()
         .to_string();
     let tests = [
@@ -110,7 +112,7 @@ async fn test_csv_opener() {
     let store = test_store("/");
 
     let schema = test_basic_schema();
-    let path = &test_util::get_data_dir("tests/csv/basic.csv")
+    let path = &find_workspace_path("/src/common/datasource/tests/csv/basic.csv")
         .display()
         .to_string();
     let csv_conf = CsvConfigBuilder::default()
@@ -159,7 +161,7 @@ async fn test_parquet_exec() {
 
     let schema = test_basic_schema();
 
-    let path = &test_util::get_data_dir("tests/parquet/basic.parquet")
+    let path = &find_workspace_path("/src/common/datasource/tests/parquet/basic.parquet")
         .display()
         .to_string();
     let base_config = scan_config(schema.clone(), None, path);
@@ -180,7 +182,7 @@ async fn test_parquet_exec() {
         .await;
 
     assert_batches_eq!(
-        vec![
+        [
             "+-----+-------+",
             "| num | str   |",
             "+-----+-------+",
@@ -191,6 +193,52 @@ async fn test_parquet_exec() {
         ],
         &result
     );
+}
+
+#[tokio::test]
+async fn test_orc_opener() {
+    let root = find_workspace_path("/src/common/datasource/tests/orc")
+        .display()
+        .to_string();
+    let store = test_store(&root);
+    let schema = OrcFormat.infer_schema(&store, "test.orc").await.unwrap();
+    let schema = Arc::new(schema);
+
+    let orc_opener = OrcOpener::new(store.clone(), schema.clone(), None);
+    let path = "test.orc";
+
+    let tests = [
+        Test {
+            config: scan_config(schema.clone(), None, path),
+            opener: orc_opener.clone(),
+            expected: vec![
+            "+----------+-----+-------+------------+-----+-----+-------+--------------------+------------------------+-----------+---------------+------------+----------------+---------------+-------------------+--------------+---------------+---------------+----------------------------+-------------+",
+            "| double_a | a   | b     | str_direct | d   | e   | f     | int_short_repeated | int_neg_short_repeated | int_delta | int_neg_delta | int_direct | int_neg_direct | bigint_direct | bigint_neg_direct | bigint_other | utf8_increase | utf8_decrease | timestamp_simple           | date_simple |",
+            "+----------+-----+-------+------------+-----+-----+-------+--------------------+------------------------+-----------+---------------+------------+----------------+---------------+-------------------+--------------+---------------+---------------+----------------------------+-------------+",
+            "| 1.0      | 1.0 | true  | a          | a   | ddd | aaaaa | 5                  | -5                     | 1         | 5             | 1          | -1             | 1             | -1                | 5            | a             | eeeee         | 2023-04-01T20:15:30.002    | 2023-04-01  |",
+            "| 2.0      | 2.0 | false | cccccc     | bb  | cc  | bbbbb | 5                  | -5                     | 2         | 4             | 6          | -6             | 6             | -6                | -5           | bb            | dddd          | 2021-08-22T07:26:44.525777 | 2023-03-01  |",
+            "| 3.0      |     |       |            |     |     |       |                    |                        |           |               |            |                |               |                   | 1            | ccc           | ccc           | 2023-01-01T00:00:00        | 2023-01-01  |",
+            "| 4.0      | 4.0 | true  | ddd        | ccc | bb  | ccccc | 5                  | -5                     | 4         | 2             | 3          | -3             | 3             | -3                | 5            | dddd          | bb            | 2023-02-01T00:00:00        | 2023-02-01  |",
+            "| 5.0      | 5.0 | false | ee         | ddd | a   | ddddd | 5                  | -5                     | 5         | 1             | 2          | -2             | 2             | -2                | 5            | eeeee         | a             | 2023-03-01T00:00:00        | 2023-03-01  |",
+            "+----------+-----+-------+------------+-----+-----+-------+--------------------+------------------------+-----------+---------------+------------+----------------+---------------+-------------------+--------------+---------------+---------------+----------------------------+-------------+",
+            ],
+        },
+        Test {
+            config: scan_config(schema.clone(), Some(1), path),
+            opener: orc_opener.clone(),
+            expected: vec![
+                "+----------+-----+------+------------+---+-----+-------+--------------------+------------------------+-----------+---------------+------------+----------------+---------------+-------------------+--------------+---------------+---------------+-------------------------+-------------+",
+                "| double_a | a   | b    | str_direct | d | e   | f     | int_short_repeated | int_neg_short_repeated | int_delta | int_neg_delta | int_direct | int_neg_direct | bigint_direct | bigint_neg_direct | bigint_other | utf8_increase | utf8_decrease | timestamp_simple        | date_simple |",
+                "+----------+-----+------+------------+---+-----+-------+--------------------+------------------------+-----------+---------------+------------+----------------+---------------+-------------------+--------------+---------------+---------------+-------------------------+-------------+",
+                "| 1.0      | 1.0 | true | a          | a | ddd | aaaaa | 5                  | -5                     | 1         | 5             | 1          | -1             | 1             | -1                | 5            | a             | eeeee         | 2023-04-01T20:15:30.002 | 2023-04-01  |",
+                "+----------+-----+------+------------+---+-----+-------+--------------------+------------------------+-----------+---------------+------------+----------------+---------------+-------------------+--------------+---------------+---------------+-------------------------+-------------+",
+            ],
+        },
+    ];
+
+    for test in tests {
+        test.run().await;
+    }
 }
 
 #[test]
@@ -212,6 +260,12 @@ fn test_format() {
         .collect::<HashMap<_, _>>();
 
     assert_matches!(Format::try_from(&value).unwrap(), Format::Json(_));
+
+    let value = [(FORMAT_TYPE.to_string(), "ORC".to_string())]
+        .into_iter()
+        .collect::<HashMap<_, _>>();
+
+    assert_matches!(Format::try_from(&value).unwrap(), Format::Orc(_));
 
     let value = [(FORMAT_TYPE.to_string(), "Foobar".to_string())]
         .into_iter()

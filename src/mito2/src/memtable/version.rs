@@ -37,4 +37,9 @@ impl MemtableVersion {
             immutables: vec![],
         }
     }
+
+    /// Returns the mutable memtable.
+    pub(crate) fn mutable(&self) -> &MemtableRef {
+        &self.mutable
+    }
 }

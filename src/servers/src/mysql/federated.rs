@@ -239,7 +239,7 @@ fn select_variable(query: &str, query_context: QueryContextRef) -> Option<Output
 }
 
 fn check_select_variable(query: &str, query_context: QueryContextRef) -> Option<Output> {
-    if vec![&SELECT_VAR_PATTERN, &MYSQL_CONN_JAVA_PATTERN]
+    if [&SELECT_VAR_PATTERN, &MYSQL_CONN_JAVA_PATTERN]
         .iter()
         .any(|r| r.is_match(query))
     {
@@ -286,7 +286,7 @@ fn check_others(query: &str, query_ctx: QueryContextRef) -> Option<Output> {
         Some(select_function("version()", &get_version()))
     } else if SELECT_DATABASE_PATTERN.is_match(query) {
         let schema = query_ctx.current_schema();
-        Some(select_function("database()", &schema))
+        Some(select_function("database()", schema))
     } else if SELECT_TIME_DIFF_FUNC_PATTERN.is_match(query) {
         Some(select_function(
             "TIMEDIFF(NOW(), UTC_TIMESTAMP())",
@@ -333,15 +333,15 @@ mod test {
     #[test]
     fn test_check() {
         let query = "select 1";
-        let result = check(query, Arc::new(QueryContext::new()));
+        let result = check(query, QueryContext::arc());
         assert!(result.is_none());
 
         let query = "select versiona";
-        let output = check(query, Arc::new(QueryContext::new()));
+        let output = check(query, QueryContext::arc());
         assert!(output.is_none());
 
         fn test(query: &str, expected: &str) {
-            let output = check(query, Arc::new(QueryContext::new()));
+            let output = check(query, QueryContext::arc());
             match output.unwrap() {
                 Output::RecordBatches(r) => {
                     assert_eq!(&r.pretty_print().unwrap(), expected)
@@ -428,7 +428,7 @@ mod test {
 
     #[test]
     fn test_set_time_zone() {
-        let query_context = Arc::new(QueryContext::new());
+        let query_context = QueryContext::arc();
         let output = check("set time_zone = 'UTC'", query_context.clone());
         match output.unwrap() {
             Output::AffectedRows(rows) => {

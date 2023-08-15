@@ -17,44 +17,54 @@ metrics-process = ["servers/metrics-process"]
 [dependencies]
 anymap = "1.0.0-beta.2"
 async-trait.workspace = true
-catalog = { path = "../catalog" }
+auth.workspace = true
+catalog = { workspace = true }
+chrono.workspace = true
 clap = { version = "3.1", features = ["derive"] }
-client = { path = "../client" }
-common-base = { path = "../common/base" }
-common-error = { path = "../common/error" }
-common-query = { path = "../common/query" }
-common-meta = { path = "../common/meta" }
-common-recordbatch = { path = "../common/recordbatch" }
-common-telemetry = { path = "../common/telemetry", features = [
+client = { workspace = true }
+common-base = { workspace = true }
+common-error = { workspace = true }
+common-meta = { workspace = true }
+common-query = { workspace = true }
+common-recordbatch = { workspace = true }
+common-telemetry = { workspace = true, features = [
     "deadlock_detection",
 ] }
 config = "0.13"
-datanode = { path = "../datanode" }
+datanode = { workspace = true }
+datatypes = { workspace = true }
 either = "1.8"
 etcd-client.workspace = true
-frontend = { path = "../frontend" }
+frontend = { workspace = true }
 futures.workspace = true
-meta-client = { path = "../meta-client" }
-meta-srv = { path = "../meta-srv" }
+meta-client = { workspace = true }
+meta-srv = { workspace = true }
 metrics.workspace = true
 nu-ansi-term = "0.46"
-partition = { path = "../partition" }
-query = { path = "../query" }
+partition = { workspace = true }
+prost.workspace = true
+query = { workspace = true }
+rand.workspace = true
 rustyline = "10.1"
 serde.workspace = true
-servers = { path = "../servers" }
-session = { path = "../session" }
+servers = { workspace = true }
+session = { workspace = true }
 snafu.workspace = true
-substrait = { path = "../common/substrait" }
-tikv-jemallocator = "0.5"
+substrait = { workspace = true }
+table = { workspace = true }
 tokio.workspace = true
 
+[target.'cfg(not(windows))'.dependencies]
+tikv-jemallocator = "0.5"
+
 [dev-dependencies]
-common-test-util = { path = "../common/test-util" }
-rexpect = "0.5"
-temp-env = "0.3"
+common-test-util = { workspace = true }
 serde.workspace = true
+temp-env = "0.3"
 toml.workspace = true
 
+[target.'cfg(not(windows))'.dev-dependencies]
+rexpect = "0.5"
+
 [build-dependencies]
-build-data = "0.1.4"
+common-version = { workspace = true }

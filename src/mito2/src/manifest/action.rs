@@ -12,19 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Defines [RegionMetaAction] related structs and [RegionCheckpoint].
+
 use std::collections::HashMap;
 
-use common_telemetry::info;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
-use storage::metadata::VersionNumber;
-use storage::sst::{FileId, FileMeta};
 use store_api::manifest::action::{ProtocolAction, ProtocolVersion};
 use store_api::manifest::ManifestVersion;
 use store_api::storage::{RegionId, SequenceNumber};
 
 use crate::error::{RegionMetadataNotFoundSnafu, Result, SerdeJsonSnafu, Utf8Snafu};
-use crate::metadata::RegionMetadata;
+use crate::metadata::RegionMetadataRef;
+use crate::sst::file::{FileId, FileMeta};
 
 /// Actions that can be applied to region manifest.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -42,12 +42,11 @@ pub enum RegionMetaAction {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct RegionChange {
     /// The metadata after changed.
-    pub metadata: RegionMetadata,
+    pub metadata: RegionMetadataRef,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct RegionEdit {
-    pub region_version: VersionNumber,
     pub files_to_add: Vec<FileMeta>,
     pub files_to_remove: Vec<FileMeta>,
     pub compaction_time_window: Option<i64>,
@@ -59,87 +58,71 @@ pub struct RegionRemove {
     pub region_id: RegionId,
 }
 
-/// The region manifest data
+/// The region manifest data.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct RegionManifest {
-    pub metadata: RegionMetadata,
-    pub version: RegionVersion,
+    /// Metadata of the region.
+    pub metadata: RegionMetadataRef,
+    /// SST files.
+    pub files: HashMap<FileId, FileMeta>,
+    /// Current manifest version.
+    pub manifest_version: ManifestVersion,
 }
 
 #[derive(Debug, Default)]
 pub struct RegionManifestBuilder {
-    metadata: Option<RegionMetadata>,
-    version: Option<RegionVersion>,
+    metadata: Option<RegionMetadataRef>,
+    files: HashMap<FileId, FileMeta>,
+    manifest_version: ManifestVersion,
 }
 
 impl RegionManifestBuilder {
-    /// Start with a checkpoint
+    /// Start with a checkpoint.
     pub fn with_checkpoint(checkpoint: Option<RegionManifest>) -> Self {
         if let Some(s) = checkpoint {
             Self {
                 metadata: Some(s.metadata),
-                version: Some(s.version),
+                files: s.files,
+                manifest_version: s.manifest_version,
             }
         } else {
             Default::default()
         }
     }
 
-    pub fn apply_change(&mut self, change: RegionChange) {
+    pub fn apply_change(&mut self, manifest_version: ManifestVersion, change: RegionChange) {
         self.metadata = Some(change.metadata);
+        self.manifest_version = manifest_version;
     }
 
     pub fn apply_edit(&mut self, manifest_version: ManifestVersion, edit: RegionEdit) {
-        if let Some(version) = &mut self.version {
-            version.manifest_version = manifest_version;
-            for file in edit.files_to_add {
-                let _ = version.files.insert(file.file_id, file);
-            }
-            for file in edit.files_to_remove {
-                let _ = version.files.remove(&file.file_id);
-            }
-        } else {
-            self.version = Some(RegionVersion {
-                manifest_version,
-                files: edit
-                    .files_to_add
-                    .into_iter()
-                    .map(|f| (f.file_id, f))
-                    .collect(),
-            });
+        self.manifest_version = manifest_version;
+        for file in edit.files_to_add {
+            self.files.insert(file.file_id, file);
+        }
+        for file in edit.files_to_remove {
+            self.files.remove(&file.file_id);
         }
     }
 
-    /// Check if the builder keeps a [RegionMetadata]
+    /// Check if the builder keeps a [RegionMetadata](crate::metadata::RegionMetadata).
     pub fn contains_metadata(&self) -> bool {
         self.metadata.is_some()
     }
 
     pub fn try_build(self) -> Result<RegionManifest> {
         let metadata = self.metadata.context(RegionMetadataNotFoundSnafu)?;
-        let version = self.version.unwrap_or_else(|| {
-            info!(
-                "Create new default region version for region {:?}",
-                metadata.region_id
-            );
-            RegionVersion::default()
-        });
-        Ok(RegionManifest { metadata, version })
+        Ok(RegionManifest {
+            metadata,
+            files: self.files,
+            manifest_version: self.manifest_version,
+        })
     }
-}
-
-/// The region version checkpoint
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
-pub struct RegionVersion {
-    pub manifest_version: ManifestVersion,
-    pub files: HashMap<FileId, FileMeta>,
 }
 
 // The checkpoint of region manifest, generated by checkpointer.
 #[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq)]
 pub struct RegionCheckpoint {
-    /// The snasphot protocol
-    pub protocol: ProtocolAction,
     /// The last manifest version that this checkpoint compacts(inclusive).
     pub last_version: ManifestVersion,
     // The number of manifest actions that this checkpoint compacts.
@@ -149,43 +132,37 @@ pub struct RegionCheckpoint {
 }
 
 impl RegionCheckpoint {
-    pub fn set_protocol(&mut self, action: ProtocolAction) {
-        self.protocol = action;
-    }
-
     pub fn last_version(&self) -> ManifestVersion {
         self.last_version
     }
 
     pub fn encode(&self) -> Result<Vec<u8>> {
-        todo!()
+        let json = serde_json::to_string(&self).context(SerdeJsonSnafu)?;
+
+        Ok(json.into_bytes())
     }
 
-    pub fn decode(bs: &[u8]) -> Result<Self> {
-        // helper::decode_checkpoint(bs, reader_version)
-        todo!()
+    pub fn decode(bytes: &[u8]) -> Result<Self> {
+        let data = std::str::from_utf8(bytes).context(Utf8Snafu)?;
+
+        serde_json::from_str(data).context(SerdeJsonSnafu)
     }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct RegionMetaActionList {
     pub actions: Vec<RegionMetaAction>,
-    pub prev_version: ManifestVersion,
 }
 
 impl RegionMetaActionList {
     pub fn with_action(action: RegionMetaAction) -> Self {
         Self {
             actions: vec![action],
-            prev_version: 0,
         }
     }
 
     pub fn new(actions: Vec<RegionMetaAction>) -> Self {
-        Self {
-            actions,
-            prev_version: 0,
-        }
+        Self { actions }
     }
 }
 
@@ -195,11 +172,7 @@ impl RegionMetaActionList {
         self.actions.insert(0, RegionMetaAction::Protocol(action));
     }
 
-    pub fn set_prev_version(&mut self, version: ManifestVersion) {
-        self.prev_version = version;
-    }
-
-    /// Encode self into json in the form of string lines, starts with prev_version and then action json list.
+    /// Encode self into json in the form of string lines.
     pub fn encode(&self) -> Result<Vec<u8>> {
         let json = serde_json::to_string(&self).context(SerdeJsonSnafu)?;
 
@@ -231,7 +204,6 @@ impl RegionMetaActionIter {
 
 #[cfg(test)]
 mod tests {
-    use storage::sst::FileId;
 
     use super::*;
 
@@ -262,7 +234,7 @@ mod tests {
         FileMeta {
             region_id: 0.into(),
             file_id: FileId::random(),
-            time_range: None,
+            time_range: (0.into(), 10000.into()),
             level: 0,
             file_size: 1024,
         }

@@ -15,7 +15,7 @@
 //! Modified from Tokio's mini-redis example.
 
 use common_telemetry::timer;
-use session::context::QueryContext;
+use session::context::QueryContextBuilder;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::error::Result;
@@ -62,7 +62,7 @@ impl<S: AsyncWrite + AsyncRead + Unpin> Handler<S> {
 
     pub(crate) async fn run(&mut self) -> Result<()> {
         // TODO(shuiyisong): figure out how to auth in tcp connection.
-        let ctx = QueryContext::arc();
+        let ctx = QueryContextBuilder::default().build();
         while !self.shutdown.is_shutdown() {
             // While reading a request, also listen for the shutdown signal.
             let maybe_line = tokio::select! {
@@ -185,14 +185,14 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
-        let _handle = tokio::spawn(async move {
+        let _handle = common_runtime::spawn_read(async move {
             loop {
                 let (stream, _) = listener.accept().await.unwrap();
 
                 let query_handler = query_handler.clone();
                 let connection = Connection::new(stream);
                 let shutdown = Shutdown::new(notify_shutdown.subscribe());
-                let _handle = tokio::spawn(async move {
+                let _handle = common_runtime::spawn_read(async move {
                     Handler::new(query_handler, connection, shutdown)
                         .run()
                         .await

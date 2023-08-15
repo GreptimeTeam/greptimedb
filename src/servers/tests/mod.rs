@@ -36,7 +36,6 @@ use snafu::ensure;
 use sql::statements::statement::Statement;
 use table::test_util::MemTable;
 
-mod auth;
 mod grpc;
 mod http;
 mod interceptor;
@@ -160,7 +159,10 @@ impl GrpcQueryHandler for DummyInstance {
         ctx: QueryContextRef,
     ) -> std::result::Result<Output, Self::Error> {
         let output = match request {
-            Request::Inserts(_) | Request::Delete(_) => unimplemented!(),
+            Request::Inserts(_)
+            | Request::Deletes(_)
+            | Request::RowInserts(_)
+            | Request::RowDelete(_) => unimplemented!(),
             Request::Query(query_request) => {
                 let query = query_request.query.unwrap();
                 match query {
@@ -202,7 +204,7 @@ impl GrpcQueryHandler for DummyInstance {
 
 fn create_testing_instance(table: MemTable) -> DummyInstance {
     let table = Arc::new(table);
-    let catalog_manager = Arc::new(MemoryCatalogManager::new_with_table(table));
+    let catalog_manager = MemoryCatalogManager::new_with_table(table);
     let query_engine = QueryEngineFactory::new(catalog_manager, false).query_engine();
     DummyInstance::new(query_engine)
 }

@@ -47,7 +47,7 @@ const MILLISECOND_VARIATION: u64 = 3;
 const MICROSECOND_VARIATION: u64 = 6;
 const NANOSECOND_VARIATION: u64 = 9;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[enum_dispatch(DataType)]
 pub enum TimestampType {
     Second(TimestampSecondType),
@@ -66,16 +66,10 @@ impl TryFrom<u64> for TimestampType {
     /// - 9: nanosecond
     fn try_from(value: u64) -> Result<Self, Self::Error> {
         match value {
-            SECOND_VARIATION => Ok(TimestampType::Second(TimestampSecondType::default())),
-            MILLISECOND_VARIATION => Ok(TimestampType::Millisecond(
-                TimestampMillisecondType::default(),
-            )),
-            MICROSECOND_VARIATION => Ok(TimestampType::Microsecond(
-                TimestampMicrosecondType::default(),
-            )),
-            NANOSECOND_VARIATION => {
-                Ok(TimestampType::Nanosecond(TimestampNanosecondType::default()))
-            }
+            SECOND_VARIATION => Ok(TimestampType::Second(TimestampSecondType)),
+            MILLISECOND_VARIATION => Ok(TimestampType::Millisecond(TimestampMillisecondType)),
+            MICROSECOND_VARIATION => Ok(TimestampType::Microsecond(TimestampMicrosecondType)),
+            NANOSECOND_VARIATION => Ok(TimestampType::Nanosecond(TimestampNanosecondType)),
             _ => InvalidTimestampPrecisionSnafu { precision: value }.fail(),
         }
     }
@@ -109,7 +103,7 @@ impl TimestampType {
 macro_rules! impl_data_type_for_timestamp {
     ($unit: ident) => {
         paste! {
-            #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+            #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
             pub struct [<Timestamp $unit Type>];
 
             impl DataType for [<Timestamp $unit Type>] {

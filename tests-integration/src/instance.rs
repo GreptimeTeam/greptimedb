@@ -141,7 +141,9 @@ mod tests {
 
     async fn create_table(instance: &Instance, sql: &str) {
         let output = query(instance, sql).await;
-        let Output::AffectedRows(x) = output else { unreachable!() };
+        let Output::AffectedRows(x) = output else {
+            unreachable!()
+        };
         assert_eq!(x, 0);
     }
 
@@ -153,12 +155,16 @@ mod tests {
                                 ('MOSS', 100000000, 10000000000, 2335190400000)
                                 "#;
         let output = query(instance, sql).await;
-        let Output::AffectedRows(x) = output else { unreachable!() };
+        let Output::AffectedRows(x) = output else {
+            unreachable!()
+        };
         assert_eq!(x, 4);
 
         let sql = "SELECT * FROM demo WHERE ts > cast(1000000000 as timestamp) ORDER BY host"; // use nanoseconds as where condition
         let output = query(instance, sql).await;
-        let Output::Stream(s) = output else { unreachable!() };
+        let Output::Stream(s) = output else {
+            unreachable!()
+        };
         let batches = common_recordbatch::util::collect_batches(s).await.unwrap();
         let pretty_print = batches.pretty_print().unwrap();
         let expected = "\
@@ -213,7 +219,9 @@ mod tests {
                 .await
                 .unwrap();
             let output = engine.execute(plan, QueryContext::arc()).await.unwrap();
-            let Output::Stream(stream) = output else { unreachable!() };
+            let Output::Stream(stream) = output else {
+                unreachable!()
+            };
             let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
             let actual = recordbatches.pretty_print().unwrap();
 
@@ -225,7 +233,9 @@ mod tests {
     async fn drop_table(instance: &Instance) {
         let sql = "DROP TABLE demo";
         let output = query(instance, sql).await;
-        let Output::AffectedRows(x) = output else { unreachable!() };
+        let Output::AffectedRows(x) = output else {
+            unreachable!()
+        };
         assert_eq!(x, 1);
     }
 
@@ -356,13 +366,13 @@ mod tests {
             }
         }
 
-        let query_ctx = Arc::new(QueryContext::new());
+        let query_ctx = QueryContext::arc();
 
         let standalone = tests::create_standalone_instance("test_db_hook").await;
         let mut instance = standalone.instance;
 
         let plugins = Plugins::new();
-        let hook = Arc::new(DisableDBOpHook::default());
+        let hook = Arc::new(DisableDBOpHook);
         plugins.insert::<SqlQueryInterceptorRef<Error>>(hook.clone());
         Arc::make_mut(&mut instance).set_plugins(Arc::new(plugins));
 

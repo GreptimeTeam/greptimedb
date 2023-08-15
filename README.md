@@ -102,7 +102,7 @@ Please see [the online document site](https://docs.greptime.com/getting-started/
 
 Read the [complete getting started guide](https://docs.greptime.com/getting-started/overview#connect) on our [official document site](https://docs.greptime.com/).
 
-To write and query data, GreptimeDB is compatible with multiple [protocols and clients](https://docs.greptime.com/user-guide/client/overview).
+To write and query data, GreptimeDB is compatible with multiple [protocols and clients](https://docs.greptime.com/user-guide/clients/overview).
 
 ## Resources
 
@@ -129,8 +129,12 @@ To write and query data, GreptimeDB is compatible with multiple [protocols and c
 
 ### SDK
 
-- [GreptimeDB Java
-  Client](https://github.com/GreptimeTeam/greptimedb-client-java)
+- [GreptimeDB C++ Client](https://github.com/GreptimeTeam/greptimedb-client-cpp)
+- [GreptimeDB Erlang Client](https://github.com/GreptimeTeam/greptimedb-client-erl)
+- [GreptimeDB Go Client](https://github.com/GreptimeTeam/greptimedb-client-go)
+- [GreptimeDB Java Client](https://github.com/GreptimeTeam/greptimedb-client-java)
+- [GreptimeDB Python Client](https://github.com/GreptimeTeam/greptimedb-client-py) (WIP)
+- [GreptimeDB Rust Client](https://github.com/GreptimeTeam/greptimedb-client-rust)
 
 ## Project Status
 

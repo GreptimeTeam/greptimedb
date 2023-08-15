@@ -54,6 +54,7 @@ pub mod mailbox_handler;
 pub mod node_stat;
 mod on_leader_start_handler;
 mod persist_stats_handler;
+pub mod publish_heartbeat_handler;
 pub(crate) mod region_lease_handler;
 mod response_header_handler;
 
@@ -480,11 +481,11 @@ mod tests {
     #[tokio::test]
     async fn test_handler_name() {
         let group = HeartbeatHandlerGroup::default();
-        group.add_handler(ResponseHeaderHandler::default()).await;
-        group.add_handler(CheckLeaderHandler::default()).await;
-        group.add_handler(OnLeaderStartHandler::default()).await;
-        group.add_handler(CollectStatsHandler::default()).await;
-        group.add_handler(MailboxHandler::default()).await;
+        group.add_handler(ResponseHeaderHandler).await;
+        group.add_handler(CheckLeaderHandler).await;
+        group.add_handler(OnLeaderStartHandler).await;
+        group.add_handler(CollectStatsHandler).await;
+        group.add_handler(MailboxHandler).await;
         group.add_handler(PersistStatsHandler::default()).await;
 
         let handlers = group.handlers.read().await;

@@ -209,6 +209,10 @@ impl Region for MockRegion {
     async fn compact(&self, _ctx: &CompactContext) -> std::result::Result<(), Self::Error> {
         unimplemented!()
     }
+
+    async fn truncate(&self) -> Result<()> {
+        unimplemented!()
+    }
 }
 
 impl MockRegionInner {

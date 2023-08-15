@@ -12,15 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::{AlterExpr, CompactTableExpr, CreateTableExpr, DropTableExpr, FlushTableExpr};
+use api::v1::{
+    AlterExpr, CompactTableExpr, CreateTableExpr, DropTableExpr, FlushTableExpr, TruncateTableExpr,
+};
 use common_catalog::consts::IMMUTABLE_FILE_ENGINE;
 use common_catalog::format_full_table_name;
 use common_grpc_expr::{alter_expr_to_request, create_expr_to_request};
 use common_query::Output;
 use common_telemetry::info;
-use session::context::QueryContext;
+use session::context::QueryContextRef;
 use snafu::prelude::*;
-use table::requests::{CompactTableRequest, DropTableRequest, FlushTableRequest};
+use table::requests::{
+    CompactTableRequest, DropTableRequest, FlushTableRequest, TruncateTableRequest,
+};
 
 use crate::error::{
     AlterExprToRequestSnafu, BumpTableIdSnafu, CatalogSnafu, CreateExprToRequestSnafu,
@@ -31,7 +35,11 @@ use crate::sql::SqlRequest;
 
 impl Instance {
     /// Handle gRPC create table requests.
-    pub(crate) async fn handle_create(&self, expr: CreateTableExpr) -> Result<Output> {
+    pub(crate) async fn handle_create(
+        &self,
+        expr: CreateTableExpr,
+        ctx: QueryContextRef,
+    ) -> Result<Output> {
         let table_name = format!(
             "{}.{}.{}",
             expr.catalog_name, expr.schema_name, expr.table_name
@@ -65,11 +73,15 @@ impl Instance {
             .context(CreateExprToRequestSnafu)?;
 
         self.sql_handler()
-            .execute(SqlRequest::CreateTable(request), QueryContext::arc())
+            .execute(SqlRequest::CreateTable(request), ctx)
             .await
     }
 
-    pub(crate) async fn handle_alter(&self, expr: AlterExpr) -> Result<Output> {
+    pub(crate) async fn handle_alter(
+        &self,
+        expr: AlterExpr,
+        ctx: QueryContextRef,
+    ) -> Result<Output> {
         let table_id = match expr.table_id.as_ref() {
             None => {
                 self.catalog_manager
@@ -92,11 +104,15 @@ impl Instance {
 
         let request = alter_expr_to_request(table_id, expr).context(AlterExprToRequestSnafu)?;
         self.sql_handler()
-            .execute(SqlRequest::Alter(request), QueryContext::arc())
+            .execute(SqlRequest::Alter(request), ctx)
             .await
     }
 
-    pub(crate) async fn handle_drop_table(&self, expr: DropTableExpr) -> Result<Output> {
+    pub(crate) async fn handle_drop_table(
+        &self,
+        expr: DropTableExpr,
+        ctx: QueryContextRef,
+    ) -> Result<Output> {
         let table = self
             .catalog_manager
             .table(&expr.catalog_name, &expr.schema_name, &expr.table_name)
@@ -117,11 +133,15 @@ impl Instance {
             table_id: table.table_info().ident.table_id,
         };
         self.sql_handler()
-            .execute(SqlRequest::DropTable(req), QueryContext::arc())
+            .execute(SqlRequest::DropTable(req), ctx)
             .await
     }
 
-    pub(crate) async fn handle_flush_table(&self, expr: FlushTableExpr) -> Result<Output> {
+    pub(crate) async fn handle_flush_table(
+        &self,
+        expr: FlushTableExpr,
+        ctx: QueryContextRef,
+    ) -> Result<Output> {
         let table_name = if expr.table_name.trim().is_empty() {
             None
         } else {
@@ -136,11 +156,15 @@ impl Instance {
             wait: None,
         };
         self.sql_handler()
-            .execute(SqlRequest::FlushTable(req), QueryContext::arc())
+            .execute(SqlRequest::FlushTable(req), ctx)
             .await
     }
 
-    pub(crate) async fn handle_compact_table(&self, expr: CompactTableExpr) -> Result<Output> {
+    pub(crate) async fn handle_compact_table(
+        &self,
+        expr: CompactTableExpr,
+        ctx: QueryContextRef,
+    ) -> Result<Output> {
         let table_name = if expr.table_name.trim().is_empty() {
             None
         } else {
@@ -155,7 +179,36 @@ impl Instance {
             wait: None,
         };
         self.sql_handler()
-            .execute(SqlRequest::CompactTable(req), QueryContext::arc())
+            .execute(SqlRequest::CompactTable(req), ctx)
+            .await
+    }
+
+    pub(crate) async fn handle_truncate_table(
+        &self,
+        expr: TruncateTableExpr,
+        ctx: QueryContextRef,
+    ) -> Result<Output> {
+        let table = self
+            .catalog_manager
+            .table(&expr.catalog_name, &expr.schema_name, &expr.table_name)
+            .await
+            .context(CatalogSnafu)?
+            .with_context(|| TableNotFoundSnafu {
+                table_name: format_full_table_name(
+                    &expr.catalog_name,
+                    &expr.schema_name,
+                    &expr.table_name,
+                ),
+            })?;
+
+        let req = TruncateTableRequest {
+            catalog_name: expr.catalog_name,
+            schema_name: expr.schema_name,
+            table_name: expr.table_name,
+            table_id: table.table_info().ident.table_id,
+        };
+        self.sql_handler()
+            .execute(SqlRequest::TruncateTable(req), ctx)
             .await
     }
 }

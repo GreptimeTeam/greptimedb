@@ -82,7 +82,7 @@ impl DatafusionQueryEngine {
         plan: LogicalPlan,
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
-        let mut ctx = QueryEngineContext::new(self.state.session_state());
+        let mut ctx = QueryEngineContext::new(self.state.session_state(), query_ctx.clone());
 
         // `create_physical_plan` will optimize logical plan internally
         let physical_plan = self.create_physical_plan(&mut ctx, &plan).await?;
@@ -109,9 +109,9 @@ impl DatafusionQueryEngine {
             }
         );
 
-        let default_catalog = query_ctx.current_catalog();
-        let default_schema = query_ctx.current_schema();
-        let table_name = dml.table_name.resolve(&default_catalog, &default_schema);
+        let default_catalog = &query_ctx.current_catalog().to_owned();
+        let default_schema = &query_ctx.current_schema().to_owned();
+        let table_name = dml.table_name.resolve(default_catalog, default_schema);
         let table = self.find_table(&table_name).await?;
 
         let output = self
@@ -146,6 +146,9 @@ impl DatafusionQueryEngine {
         table: &TableRef,
         column_vectors: HashMap<String, VectorRef>,
     ) -> Result<usize> {
+        let catalog_name = table_name.catalog.to_string();
+        let schema_name = table_name.schema.to_string();
+        let table_name = table_name.table.to_string();
         let table_schema = table.schema();
         let ts_column = table_schema
             .timestamp_column()
@@ -165,6 +168,9 @@ impl DatafusionQueryEngine {
             .collect::<HashMap<_, _>>();
 
         let request = DeleteRequest {
+            catalog_name,
+            schema_name,
+            table_name,
             key_column_values: column_vectors,
         };
 
@@ -363,10 +369,12 @@ impl QueryExecutor for DatafusionQueryEngine {
         plan: &Arc<dyn PhysicalPlan>,
     ) -> Result<SendableRecordBatchStream> {
         let _timer = timer!(metrics::METRIC_EXEC_PLAN_ELAPSED);
+        let task_ctx = ctx.build_task_ctx();
+
         match plan.output_partitioning().partition_count() {
             0 => Ok(Box::pin(EmptyRecordBatchStream::new(plan.schema()))),
             1 => Ok(plan
-                .execute(0, ctx.state().task_ctx())
+                .execute(0, task_ctx)
                 .context(error::ExecutePhysicalPlanSnafu)
                 .map_err(BoxedError::new)
                 .context(QueryExecutionSnafu))?,
@@ -377,7 +385,7 @@ impl QueryExecutor for DatafusionQueryEngine {
                 // CoalescePartitionsExec must produce a single partition
                 assert_eq!(1, plan.output_partitioning().partition_count());
                 let df_stream = plan
-                    .execute(0, ctx.state().task_ctx())
+                    .execute(0, task_ctx)
                     .context(error::DatafusionSnafu {
                         msg: "Failed to execute DataFusion merge exec",
                     })
@@ -652,7 +660,9 @@ mod tests {
         let columns = vec![builder.to_vector()];
         let record_batch = RecordBatch::new(schema, columns).unwrap();
         let output = execute_show_with_filter(record_batch, None).await.unwrap();
-        let Output::RecordBatches(record_batches) = output else {unreachable!()};
+        let Output::RecordBatches(record_batches) = output else {
+            unreachable!()
+        };
         let expected = "\
 +----------------+
 | Tables         |
@@ -680,12 +690,18 @@ mod tests {
         )
         .unwrap()[0]
             .clone();
-        let Statement::ShowTables(ShowTables { kind, .. }) = statement else {unreachable!()};
-        let ShowKind::Where(filter) = kind else {unreachable!()};
+        let Statement::ShowTables(ShowTables { kind, .. }) = statement else {
+            unreachable!()
+        };
+        let ShowKind::Where(filter) = kind else {
+            unreachable!()
+        };
         let output = execute_show_with_filter(record_batch, Some(filter))
             .await
             .unwrap();
-        let Output::RecordBatches(record_batches) = output else {unreachable!()};
+        let Output::RecordBatches(record_batches) = output else {
+            unreachable!()
+        };
         let expected = "\
 +---------+
 | Tables  |

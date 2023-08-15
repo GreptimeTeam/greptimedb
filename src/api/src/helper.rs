@@ -13,15 +13,20 @@
 // limitations under the License.
 
 use common_base::BitVec;
+use common_time::interval::IntervalUnit;
+use common_time::time::Time;
 use common_time::timestamp::TimeUnit;
-use datatypes::prelude::ConcreteDataType;
-use datatypes::types::{TimeType, TimestampType};
-use datatypes::value::Value;
+use common_time::{Date, DateTime, Interval, Timestamp};
+use datatypes::prelude::{ConcreteDataType, ValueRef};
+use datatypes::types::{IntervalType, TimeType, TimestampType};
+use datatypes::value::{OrderedF32, OrderedF64, Value};
 use datatypes::vectors::VectorRef;
+use greptime_proto::v1;
 use greptime_proto::v1::ddl_request::Expr;
 use greptime_proto::v1::greptime_request::Request;
 use greptime_proto::v1::query_request::Query;
-use greptime_proto::v1::{DdlRequest, QueryRequest};
+use greptime_proto::v1::value::ValueData;
+use greptime_proto::v1::{DdlRequest, IntervalMonthDayNano, QueryRequest, SemanticType};
 use snafu::prelude::*;
 
 use crate::error::{self, Result};
@@ -75,6 +80,11 @@ impl From<ColumnDataTypeWrapper> for ConcreteDataType {
             ColumnDataType::TimeMillisecond => ConcreteDataType::time_millisecond_datatype(),
             ColumnDataType::TimeMicrosecond => ConcreteDataType::time_microsecond_datatype(),
             ColumnDataType::TimeNanosecond => ConcreteDataType::time_nanosecond_datatype(),
+            ColumnDataType::IntervalYearMonth => ConcreteDataType::interval_year_month_datatype(),
+            ColumnDataType::IntervalDayTime => ConcreteDataType::interval_day_time_datatype(),
+            ColumnDataType::IntervalMonthDayNano => {
+                ConcreteDataType::interval_month_day_nano_datatype()
+            }
         }
     }
 }
@@ -110,6 +120,11 @@ impl TryFrom<ConcreteDataType> for ColumnDataTypeWrapper {
                 TimeType::Millisecond(_) => ColumnDataType::TimeMillisecond,
                 TimeType::Microsecond(_) => ColumnDataType::TimeMicrosecond,
                 TimeType::Nanosecond(_) => ColumnDataType::TimeNanosecond,
+            },
+            ConcreteDataType::Interval(i) => match i {
+                IntervalType::YearMonth(_) => ColumnDataType::IntervalYearMonth,
+                IntervalType::DayTime(_) => ColumnDataType::IntervalDayTime,
+                IntervalType::MonthDayNano(_) => ColumnDataType::IntervalMonthDayNano,
             },
             ConcreteDataType::Null(_)
             | ConcreteDataType::List(_)
@@ -215,6 +230,18 @@ pub fn values_with_capacity(datatype: ColumnDataType, capacity: usize) -> Values
             time_nanosecond_values: Vec::with_capacity(capacity),
             ..Default::default()
         },
+        ColumnDataType::IntervalDayTime => Values {
+            interval_day_time_values: Vec::with_capacity(capacity),
+            ..Default::default()
+        },
+        ColumnDataType::IntervalYearMonth => Values {
+            interval_year_month_values: Vec::with_capacity(capacity),
+            ..Default::default()
+        },
+        ColumnDataType::IntervalMonthDayNano => Values {
+            interval_month_day_nano_values: Vec::with_capacity(capacity),
+            ..Default::default()
+        },
     }
 }
 
@@ -255,6 +282,13 @@ pub fn push_vals(column: &mut Column, origin_count: usize, vector: VectorRef) {
             TimeUnit::Microsecond => values.time_microsecond_values.push(val.value()),
             TimeUnit::Nanosecond => values.time_nanosecond_values.push(val.value()),
         },
+        Value::Interval(val) => match val.unit() {
+            IntervalUnit::YearMonth => values.interval_year_month_values.push(val.to_i32()),
+            IntervalUnit::DayTime => values.interval_day_time_values.push(val.to_i64()),
+            IntervalUnit::MonthDayNano => values
+                .interval_month_day_nano_values
+                .push(convert_i128_to_interval(val.to_i128())),
+        },
         Value::List(_) => unreachable!(),
     });
     column.null_mask = null_mask.into_vec();
@@ -266,7 +300,9 @@ pub fn request_type(request: &Request) -> &'static str {
         Request::Inserts(_) => "inserts",
         Request::Query(query_req) => query_request_type(query_req),
         Request::Ddl(ddl_req) => ddl_request_type(ddl_req),
-        Request::Delete(_) => "delete",
+        Request::RowInserts(_) => "row_inserts",
+        Request::RowDelete(_) => "row_delete",
+        Request::Deletes(_) => "deletes",
     }
 }
 
@@ -289,7 +325,257 @@ fn ddl_request_type(request: &DdlRequest) -> &'static str {
         Some(Expr::DropTable(_)) => "ddl.drop_table",
         Some(Expr::FlushTable(_)) => "ddl.flush_table",
         Some(Expr::CompactTable(_)) => "ddl.compact_table",
+        Some(Expr::TruncateTable(_)) => "ddl.truncate_table",
         None => "ddl.empty",
+    }
+}
+
+/// Converts an i128 value to google protobuf type [IntervalMonthDayNano].
+pub fn convert_i128_to_interval(v: i128) -> IntervalMonthDayNano {
+    let interval = Interval::from_i128(v);
+    let (months, days, nanoseconds) = interval.to_month_day_nano();
+    IntervalMonthDayNano {
+        months,
+        days,
+        nanoseconds,
+    }
+}
+
+pub fn pb_value_to_value_ref(value: &greptime_proto::v1::Value) -> ValueRef {
+    let Some(value) = &value.value_data else {
+        return ValueRef::Null;
+    };
+
+    match value {
+        greptime_proto::v1::value::ValueData::I8Value(v) => ValueRef::Int8(*v as i8),
+        greptime_proto::v1::value::ValueData::I16Value(v) => ValueRef::Int16(*v as i16),
+        greptime_proto::v1::value::ValueData::I32Value(v) => ValueRef::Int32(*v),
+        greptime_proto::v1::value::ValueData::I64Value(v) => ValueRef::Int64(*v),
+        greptime_proto::v1::value::ValueData::U8Value(v) => ValueRef::UInt8(*v as u8),
+        greptime_proto::v1::value::ValueData::U16Value(v) => ValueRef::UInt16(*v as u16),
+        greptime_proto::v1::value::ValueData::U32Value(v) => ValueRef::UInt32(*v),
+        greptime_proto::v1::value::ValueData::U64Value(v) => ValueRef::UInt64(*v),
+        greptime_proto::v1::value::ValueData::F32Value(f) => {
+            ValueRef::Float32(OrderedF32::from(*f))
+        }
+        greptime_proto::v1::value::ValueData::F64Value(f) => {
+            ValueRef::Float64(OrderedF64::from(*f))
+        }
+        greptime_proto::v1::value::ValueData::BoolValue(b) => ValueRef::Boolean(*b),
+        greptime_proto::v1::value::ValueData::BinaryValue(bytes) => {
+            ValueRef::Binary(bytes.as_slice())
+        }
+        greptime_proto::v1::value::ValueData::StringValue(string) => {
+            ValueRef::String(string.as_str())
+        }
+        greptime_proto::v1::value::ValueData::DateValue(d) => ValueRef::Date(Date::from(*d)),
+        greptime_proto::v1::value::ValueData::DatetimeValue(d) => {
+            ValueRef::DateTime(DateTime::new(*d))
+        }
+        greptime_proto::v1::value::ValueData::TsSecondValue(t) => {
+            ValueRef::Timestamp(Timestamp::new_second(*t))
+        }
+        greptime_proto::v1::value::ValueData::TsMillisecondValue(t) => {
+            ValueRef::Timestamp(Timestamp::new_millisecond(*t))
+        }
+        greptime_proto::v1::value::ValueData::TsMicrosecondValue(t) => {
+            ValueRef::Timestamp(Timestamp::new_microsecond(*t))
+        }
+        greptime_proto::v1::value::ValueData::TsNanosecondValue(t) => {
+            ValueRef::Timestamp(Timestamp::new_nanosecond(*t))
+        }
+        greptime_proto::v1::value::ValueData::TimeSecondValue(t) => {
+            ValueRef::Time(Time::new_second(*t))
+        }
+        greptime_proto::v1::value::ValueData::TimeMillisecondValue(t) => {
+            ValueRef::Time(Time::new_millisecond(*t))
+        }
+        greptime_proto::v1::value::ValueData::TimeMicrosecondValue(t) => {
+            ValueRef::Time(Time::new_microsecond(*t))
+        }
+        greptime_proto::v1::value::ValueData::TimeNanosecondValue(t) => {
+            ValueRef::Time(Time::new_nanosecond(*t))
+        }
+    }
+}
+
+/// Returns true if the pb semantic type is valid.
+pub fn is_semantic_type_eq(type_value: i32, semantic_type: SemanticType) -> bool {
+    type_value == semantic_type as i32
+}
+
+/// Returns true if the pb type value is valid.
+pub fn is_column_type_value_eq(type_value: i32, expect_type: &ConcreteDataType) -> bool {
+    let Some(column_type) = ColumnDataType::from_i32(type_value) else {
+        return false;
+    };
+
+    is_column_type_eq(column_type, expect_type)
+}
+
+/// Convert value into proto's value.
+pub fn to_proto_value(value: Value) -> Option<v1::Value> {
+    let proto_value = match value {
+        Value::Null => v1::Value { value_data: None },
+        Value::Boolean(v) => v1::Value {
+            value_data: Some(ValueData::BoolValue(v)),
+        },
+        Value::UInt8(v) => v1::Value {
+            value_data: Some(ValueData::U8Value(v.into())),
+        },
+        Value::UInt16(v) => v1::Value {
+            value_data: Some(ValueData::U16Value(v.into())),
+        },
+        Value::UInt32(v) => v1::Value {
+            value_data: Some(ValueData::U32Value(v)),
+        },
+        Value::UInt64(v) => v1::Value {
+            value_data: Some(ValueData::U64Value(v)),
+        },
+        Value::Int8(v) => v1::Value {
+            value_data: Some(ValueData::I8Value(v.into())),
+        },
+        Value::Int16(v) => v1::Value {
+            value_data: Some(ValueData::I16Value(v.into())),
+        },
+        Value::Int32(v) => v1::Value {
+            value_data: Some(ValueData::I32Value(v)),
+        },
+        Value::Int64(v) => v1::Value {
+            value_data: Some(ValueData::I64Value(v)),
+        },
+        Value::Float32(v) => v1::Value {
+            value_data: Some(ValueData::F32Value(*v)),
+        },
+        Value::Float64(v) => v1::Value {
+            value_data: Some(ValueData::F64Value(*v)),
+        },
+        Value::String(v) => v1::Value {
+            value_data: Some(ValueData::StringValue(v.as_utf8().to_string())),
+        },
+        Value::Binary(v) => v1::Value {
+            value_data: Some(ValueData::BinaryValue(v.to_vec())),
+        },
+        Value::Date(v) => v1::Value {
+            value_data: Some(ValueData::DateValue(v.val())),
+        },
+        Value::DateTime(v) => v1::Value {
+            value_data: Some(ValueData::DatetimeValue(v.val())),
+        },
+        Value::Timestamp(v) => match v.unit() {
+            TimeUnit::Second => v1::Value {
+                value_data: Some(ValueData::TsSecondValue(v.value())),
+            },
+            TimeUnit::Millisecond => v1::Value {
+                value_data: Some(ValueData::TsMillisecondValue(v.value())),
+            },
+            TimeUnit::Microsecond => v1::Value {
+                value_data: Some(ValueData::TsMicrosecondValue(v.value())),
+            },
+            TimeUnit::Nanosecond => v1::Value {
+                value_data: Some(ValueData::TsNanosecondValue(v.value())),
+            },
+        },
+        Value::Time(v) => match v.unit() {
+            TimeUnit::Second => v1::Value {
+                value_data: Some(v1::value::ValueData::TimeSecondValue(v.value())),
+            },
+            TimeUnit::Millisecond => v1::Value {
+                value_data: Some(v1::value::ValueData::TimeMillisecondValue(v.value())),
+            },
+            TimeUnit::Microsecond => v1::Value {
+                value_data: Some(v1::value::ValueData::TimeMicrosecondValue(v.value())),
+            },
+            TimeUnit::Nanosecond => v1::Value {
+                value_data: Some(v1::value::ValueData::TimeNanosecondValue(v.value())),
+            },
+        },
+        Value::Interval(_) | Value::List(_) => return None,
+    };
+
+    Some(proto_value)
+}
+
+/// Returns the [ColumnDataType] of the value.
+///
+/// If value is null, returns `None`.
+pub fn proto_value_type(value: &v1::Value) -> Option<ColumnDataType> {
+    let value_data = value.value_data.as_ref()?;
+    let value_type = match value_data {
+        ValueData::I8Value(_) => ColumnDataType::Int8,
+        ValueData::I16Value(_) => ColumnDataType::Int16,
+        ValueData::I32Value(_) => ColumnDataType::Int32,
+        ValueData::I64Value(_) => ColumnDataType::Int64,
+        ValueData::U8Value(_) => ColumnDataType::Uint8,
+        ValueData::U16Value(_) => ColumnDataType::Uint16,
+        ValueData::U32Value(_) => ColumnDataType::Uint32,
+        ValueData::U64Value(_) => ColumnDataType::Uint64,
+        ValueData::F32Value(_) => ColumnDataType::Float32,
+        ValueData::F64Value(_) => ColumnDataType::Float64,
+        ValueData::BoolValue(_) => ColumnDataType::Boolean,
+        ValueData::BinaryValue(_) => ColumnDataType::Binary,
+        ValueData::StringValue(_) => ColumnDataType::String,
+        ValueData::DateValue(_) => ColumnDataType::Date,
+        ValueData::DatetimeValue(_) => ColumnDataType::Datetime,
+        ValueData::TsSecondValue(_) => ColumnDataType::TimestampSecond,
+        ValueData::TsMillisecondValue(_) => ColumnDataType::TimestampMillisecond,
+        ValueData::TsMicrosecondValue(_) => ColumnDataType::TimestampMicrosecond,
+        ValueData::TsNanosecondValue(_) => ColumnDataType::TimestampNanosecond,
+        ValueData::TimeSecondValue(_) => ColumnDataType::TimeSecond,
+        ValueData::TimeMillisecondValue(_) => ColumnDataType::TimeMillisecond,
+        ValueData::TimeMicrosecondValue(_) => ColumnDataType::TimeMicrosecond,
+        ValueData::TimeNanosecondValue(_) => ColumnDataType::TimeNanosecond,
+    };
+    Some(value_type)
+}
+
+/// Convert [ConcreteDataType] to [ColumnDataType].
+pub fn to_column_data_type(data_type: &ConcreteDataType) -> Option<ColumnDataType> {
+    let column_data_type = match data_type {
+        ConcreteDataType::Boolean(_) => ColumnDataType::Boolean,
+        ConcreteDataType::Int8(_) => ColumnDataType::Int8,
+        ConcreteDataType::Int16(_) => ColumnDataType::Int16,
+        ConcreteDataType::Int32(_) => ColumnDataType::Int32,
+        ConcreteDataType::Int64(_) => ColumnDataType::Int64,
+        ConcreteDataType::UInt8(_) => ColumnDataType::Uint8,
+        ConcreteDataType::UInt16(_) => ColumnDataType::Uint16,
+        ConcreteDataType::UInt32(_) => ColumnDataType::Uint32,
+        ConcreteDataType::UInt64(_) => ColumnDataType::Uint64,
+        ConcreteDataType::Float32(_) => ColumnDataType::Float32,
+        ConcreteDataType::Float64(_) => ColumnDataType::Float64,
+        ConcreteDataType::Binary(_) => ColumnDataType::Binary,
+        ConcreteDataType::String(_) => ColumnDataType::String,
+        ConcreteDataType::Date(_) => ColumnDataType::Date,
+        ConcreteDataType::DateTime(_) => ColumnDataType::Datetime,
+        ConcreteDataType::Timestamp(TimestampType::Second(_)) => ColumnDataType::TimestampSecond,
+        ConcreteDataType::Timestamp(TimestampType::Millisecond(_)) => {
+            ColumnDataType::TimestampMillisecond
+        }
+        ConcreteDataType::Timestamp(TimestampType::Microsecond(_)) => {
+            ColumnDataType::TimestampMicrosecond
+        }
+        ConcreteDataType::Timestamp(TimestampType::Nanosecond(_)) => {
+            ColumnDataType::TimestampNanosecond
+        }
+        ConcreteDataType::Time(TimeType::Second(_)) => ColumnDataType::TimeSecond,
+        ConcreteDataType::Time(TimeType::Millisecond(_)) => ColumnDataType::TimeMillisecond,
+        ConcreteDataType::Time(TimeType::Microsecond(_)) => ColumnDataType::TimeMicrosecond,
+        ConcreteDataType::Time(TimeType::Nanosecond(_)) => ColumnDataType::TimeNanosecond,
+        ConcreteDataType::Null(_)
+        | ConcreteDataType::Interval(_)
+        | ConcreteDataType::List(_)
+        | ConcreteDataType::Dictionary(_) => return None,
+    };
+
+    Some(column_data_type)
+}
+
+/// Returns true if the column type is equal to expected type.
+fn is_column_type_eq(column_type: ColumnDataType, expect_type: &ConcreteDataType) -> bool {
+    if let Some(expect) = to_column_data_type(expect_type) {
+        column_type == expect
+    } else {
+        false
     }
 }
 
@@ -298,9 +584,10 @@ mod tests {
     use std::sync::Arc;
 
     use datatypes::vectors::{
-        BooleanVector, TimeMicrosecondVector, TimeMillisecondVector, TimeNanosecondVector,
-        TimeSecondVector, TimestampMicrosecondVector, TimestampMillisecondVector,
-        TimestampNanosecondVector, TimestampSecondVector,
+        BooleanVector, IntervalDayTimeVector, IntervalMonthDayNanoVector, IntervalYearMonthVector,
+        TimeMicrosecondVector, TimeMillisecondVector, TimeNanosecondVector, TimeSecondVector,
+        TimestampMicrosecondVector, TimestampMillisecondVector, TimestampNanosecondVector,
+        TimestampSecondVector, Vector,
     };
 
     use super::*;
@@ -365,6 +652,14 @@ mod tests {
 
         let values = values_with_capacity(ColumnDataType::TimeMillisecond, 2);
         let values = values.time_millisecond_values;
+        assert_eq!(2, values.capacity());
+
+        let values = values_with_capacity(ColumnDataType::IntervalDayTime, 2);
+        let values = values.interval_day_time_values;
+        assert_eq!(2, values.capacity());
+
+        let values = values_with_capacity(ColumnDataType::IntervalMonthDayNano, 2);
+        let values = values.interval_month_day_nano_values;
         assert_eq!(2, values.capacity());
     }
 
@@ -438,6 +733,18 @@ mod tests {
             ConcreteDataType::time_datatype(TimeUnit::Millisecond),
             ColumnDataTypeWrapper(ColumnDataType::TimeMillisecond).into()
         );
+        assert_eq!(
+            ConcreteDataType::interval_datatype(IntervalUnit::DayTime),
+            ColumnDataTypeWrapper(ColumnDataType::IntervalDayTime).into()
+        );
+        assert_eq!(
+            ConcreteDataType::interval_datatype(IntervalUnit::YearMonth),
+            ColumnDataTypeWrapper(ColumnDataType::IntervalYearMonth).into()
+        );
+        assert_eq!(
+            ConcreteDataType::interval_datatype(IntervalUnit::MonthDayNano),
+            ColumnDataTypeWrapper(ColumnDataType::IntervalMonthDayNano).into()
+        );
     }
 
     #[test]
@@ -505,6 +812,24 @@ mod tests {
         assert_eq!(
             ColumnDataTypeWrapper(ColumnDataType::TimestampMillisecond),
             ConcreteDataType::timestamp_millisecond_datatype()
+                .try_into()
+                .unwrap()
+        );
+        assert_eq!(
+            ColumnDataTypeWrapper(ColumnDataType::IntervalYearMonth),
+            ConcreteDataType::interval_datatype(IntervalUnit::YearMonth)
+                .try_into()
+                .unwrap()
+        );
+        assert_eq!(
+            ColumnDataTypeWrapper(ColumnDataType::IntervalDayTime),
+            ConcreteDataType::interval_datatype(IntervalUnit::DayTime)
+                .try_into()
+                .unwrap()
+        );
+        assert_eq!(
+            ColumnDataTypeWrapper(ColumnDataType::IntervalMonthDayNano),
+            ConcreteDataType::interval_datatype(IntervalUnit::MonthDayNano)
                 .try_into()
                 .unwrap()
         );
@@ -608,8 +933,52 @@ mod tests {
     }
 
     #[test]
+    fn test_column_put_interval_values() {
+        let mut column = Column {
+            column_name: "test".to_string(),
+            semantic_type: 0,
+            values: Some(Values {
+                ..Default::default()
+            }),
+            null_mask: vec![],
+            datatype: 0,
+        };
+
+        let vector = Arc::new(IntervalYearMonthVector::from_vec(vec![1, 2, 3]));
+        push_vals(&mut column, 3, vector);
+        assert_eq!(
+            vec![1, 2, 3],
+            column.values.as_ref().unwrap().interval_year_month_values
+        );
+
+        let vector = Arc::new(IntervalDayTimeVector::from_vec(vec![4, 5, 6]));
+        push_vals(&mut column, 3, vector);
+        assert_eq!(
+            vec![4, 5, 6],
+            column.values.as_ref().unwrap().interval_day_time_values
+        );
+
+        let vector = Arc::new(IntervalMonthDayNanoVector::from_vec(vec![7, 8, 9]));
+        let len = vector.len();
+        push_vals(&mut column, 3, vector);
+        (0..len).for_each(|i| {
+            assert_eq!(
+                7 + i as i64,
+                column
+                    .values
+                    .as_ref()
+                    .unwrap()
+                    .interval_month_day_nano_values
+                    .get(i)
+                    .unwrap()
+                    .nanoseconds
+            );
+        });
+    }
+
+    #[test]
     fn test_column_put_vector() {
-        use crate::v1::column::SemanticType;
+        use crate::v1::SemanticType;
         // Some(false), None, Some(true), Some(true)
         let mut column = Column {
             column_name: "test".to_string(),
@@ -630,5 +999,14 @@ mod tests {
         assert_eq!(vec![false, true, true, true, false], bool_values);
         let null_mask = column.null_mask;
         assert_eq!(34, null_mask[0]);
+    }
+
+    #[test]
+    fn test_convert_i128_to_interval() {
+        let i128_val = 3000;
+        let interval = convert_i128_to_interval(i128_val);
+        assert_eq!(interval.months, 0);
+        assert_eq!(interval.days, 0);
+        assert_eq!(interval.nanoseconds, 3000);
     }
 }

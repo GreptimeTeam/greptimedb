@@ -165,10 +165,7 @@ impl Repl {
             let stmt = QueryLanguageParser::parse_sql(&sql)
                 .with_context(|_| ParseSqlSnafu { sql: sql.clone() })?;
 
-            let query_ctx = Arc::new(QueryContext::with(
-                self.database.catalog(),
-                self.database.schema(),
-            ));
+            let query_ctx = QueryContext::with(self.database.catalog(), self.database.schema());
 
             let plan = query_engine
                 .planner()
@@ -180,10 +177,10 @@ impl Repl {
                 query_engine.optimize(&plan).context(PlanStatementSnafu)?;
 
             let plan = DFLogicalSubstraitConvertor {}
-                .encode(plan)
+                .encode(&plan)
                 .context(SubstraitEncodeLogicalPlanSnafu)?;
 
-            self.database.logical_plan(plan.to_vec()).await
+            self.database.logical_plan(plan.to_vec(), None).await
         } else {
             self.database.sql(&sql).await
         }

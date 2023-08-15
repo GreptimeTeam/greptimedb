@@ -19,7 +19,6 @@ pub mod datafusion;
 pub mod dist_plan;
 pub mod error;
 pub mod executor;
-pub mod extension_serializer;
 pub mod logical_optimizer;
 mod metrics;
 mod optimizer;
@@ -30,6 +29,7 @@ pub mod physical_wrapper;
 pub mod plan;
 pub mod planner;
 pub mod query_engine;
+mod range_select;
 pub mod sql;
 
 pub use crate::datafusion::DfContextProviderAdapter;

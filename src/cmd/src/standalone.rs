@@ -83,6 +83,7 @@ impl SubCommand {
 pub struct StandaloneOptions {
     pub mode: Mode,
     pub enable_memory_catalog: bool,
+    pub enable_telemetry: bool,
     pub http_options: Option<HttpOptions>,
     pub grpc_options: Option<GrpcOptions>,
     pub mysql_options: Option<MysqlOptions>,
@@ -102,6 +103,7 @@ impl Default for StandaloneOptions {
         Self {
             mode: Mode::Standalone,
             enable_memory_catalog: false,
+            enable_telemetry: true,
             http_options: Some(HttpOptions::default()),
             grpc_options: Some(GrpcOptions::default()),
             mysql_options: Some(MysqlOptions::default()),
@@ -139,6 +141,7 @@ impl StandaloneOptions {
     fn datanode_options(self) -> DatanodeOptions {
         DatanodeOptions {
             enable_memory_catalog: self.enable_memory_catalog,
+            enable_telemetry: self.enable_telemetry,
             wal: self.wal,
             storage: self.storage,
             procedure: self.procedure,
@@ -342,9 +345,9 @@ mod tests {
     use std::io::Write;
     use std::time::Duration;
 
+    use auth::{Identity, Password, UserProviderRef};
     use common_base::readable_size::ReadableSize;
     use common_test_util::temp_dir::create_named_temp_file;
-    use servers::auth::{Identity, Password, UserProviderRef};
     use servers::Mode;
 
     use super::*;
@@ -423,7 +426,10 @@ mod tests {
             ..Default::default()
         };
 
-        let Options::Standalone(options) = cmd.load_options(TopLevelOptions::default()).unwrap() else {unreachable!()};
+        let Options::Standalone(options) = cmd.load_options(TopLevelOptions::default()).unwrap()
+        else {
+            unreachable!()
+        };
         let fe_opts = options.fe_opts;
         let dn_opts = options.dn_opts;
         let logging_opts = options.logging;
@@ -484,7 +490,8 @@ mod tests {
                 log_dir: Some("/tmp/greptimedb/test/logs".to_string()),
                 log_level: Some("debug".to_string()),
             })
-            .unwrap() else {
+            .unwrap()
+        else {
             unreachable!()
         };
 
@@ -508,10 +515,10 @@ mod tests {
 
         let env_prefix = "STANDALONE_UT";
         temp_env::with_vars(
-            vec![
+            [
                 (
                     // logging.dir = /other/log/dir
-                    vec![
+                    [
                         env_prefix.to_string(),
                         "logging".to_uppercase(),
                         "dir".to_uppercase(),
@@ -521,7 +528,7 @@ mod tests {
                 ),
                 (
                     // logging.level = info
-                    vec![
+                    [
                         env_prefix.to_string(),
                         "logging".to_uppercase(),
                         "level".to_uppercase(),
@@ -531,7 +538,7 @@ mod tests {
                 ),
                 (
                     // http_options.addr = 127.0.0.1:24000
-                    vec![
+                    [
                         env_prefix.to_string(),
                         "http_options".to_uppercase(),
                         "addr".to_uppercase(),
@@ -552,8 +559,10 @@ mod tests {
                     log_dir: None,
                     log_level: None,
                 };
-                let Options::Standalone(opts) =
-                    command.load_options(top_level_opts).unwrap() else {unreachable!()};
+                let Options::Standalone(opts) = command.load_options(top_level_opts).unwrap()
+                else {
+                    unreachable!()
+                };
 
                 // Should be read from env, env > default values.
                 assert_eq!(opts.logging.dir, "/other/log/dir");

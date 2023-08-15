@@ -28,12 +28,41 @@ fn fetch_dashboard_assets() {
 
     let message = "Failed to fetch dashboard assets";
     let help = r#"
-You can manually execute './scripts/fetch-dashboard-assets.sh' to see why, 
+You can manually execute "fetch-dashboard-assets.sh" to see why, 
 or it's a network error, just try again or enable/disable some proxy."#;
+
+    // It's very unlikely to be failed to get the current dir here, see `current_dir`'s docs.
+    let mut dir = std::env::current_dir().unwrap();
+    dir.pop();
+    dir.pop();
+    dir.push("scripts");
+
     let out_dir = std::env::var("OUT_DIR").unwrap();
-    let output = Command::new("./fetch-dashboard-assets.sh")
-        .arg(&out_dir)
-        .current_dir("../../scripts")
+
+    #[cfg(windows)]
+    let (program, args) = (
+        "bash",
+        [
+            format!(
+                "/mnt/{}/fetch-dashboard-assets.sh",
+                dir.display()
+                    .to_string()
+                    .to_lowercase()
+                    .replace(':', "")
+                    .replace('\\', "/")
+            ),
+            format!(
+                "/mnt/{}",
+                out_dir.to_lowercase().replace(':', "").replace('\\', "/")
+            ),
+        ],
+    );
+    #[cfg(not(windows))]
+    let (program, args) = ("./fetch-dashboard-assets.sh", [out_dir]);
+
+    let output = Command::new(program)
+        .args(args)
+        .current_dir(dir)
         .stdout(Stdio::piped())
         .spawn()
         .and_then(|p| p.wait_with_output());

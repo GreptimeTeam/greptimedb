@@ -35,7 +35,7 @@ use datatypes::vectors::VectorRef;
 use futures::Stream;
 use query::parser::{QueryLanguageParser, QueryStatement};
 use query::QueryEngineRef;
-use session::context::QueryContext;
+use session::context::QueryContextBuilder;
 use snafu::{ensure, ResultExt};
 use sql::statements::statement::Statement;
 
@@ -286,15 +286,16 @@ impl Script for PyScript {
                 matches!(stmt, QueryStatement::Sql(Statement::Query { .. })),
                 error::UnsupportedSqlSnafu { sql }
             );
+            let ctx = QueryContextBuilder::default().build();
             let plan = self
                 .query_engine
                 .planner()
-                .plan(stmt, QueryContext::arc())
+                .plan(stmt, ctx.clone())
                 .await
                 .context(DatabaseQuerySnafu)?;
             let res = self
                 .query_engine
-                .execute(plan, QueryContext::arc())
+                .execute(plan, ctx)
                 .await
                 .context(DatabaseQuerySnafu)?;
             let copr = self.copr.clone();
@@ -368,9 +369,8 @@ mod tests {
     use super::*;
 
     pub(crate) fn sample_script_engine() -> PyEngine {
-        let catalog_manager = Arc::new(MemoryCatalogManager::new_with_table(Arc::new(
-            NumbersTable::default(),
-        )));
+        let catalog_manager =
+            MemoryCatalogManager::new_with_table(Arc::new(NumbersTable::default()));
         let query_engine = QueryEngineFactory::new(catalog_manager, false).query_engine();
 
         PyEngine::new(query_engine.clone())

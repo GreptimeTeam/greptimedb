@@ -14,41 +14,14 @@
 
 use api::v1::DeleteRequest as GrpcDeleteRequest;
 use common_meta::table_name::TableName;
-use common_query::Output;
-use futures::future;
-use snafu::ResultExt;
 use store_api::storage::RegionNumber;
 use table::metadata::TableMeta;
 use table::requests::DeleteRequest;
 
-use crate::error::{JoinTaskSnafu, RequestDatanodeSnafu, Result};
+use crate::error::Result;
 use crate::table::insert::to_grpc_columns;
-use crate::table::DistTable;
 
-impl DistTable {
-    pub(super) async fn dist_delete(&self, requests: Vec<GrpcDeleteRequest>) -> Result<Output> {
-        let regions = requests.iter().map(|x| x.region_number).collect::<Vec<_>>();
-        let instances = self.find_datanode_instances(&regions).await?;
-
-        let results = future::try_join_all(instances.into_iter().zip(requests.into_iter()).map(
-            |(instance, request)| {
-                common_runtime::spawn_write(async move {
-                    instance
-                        .grpc_delete(request)
-                        .await
-                        .context(RequestDatanodeSnafu)
-                })
-            },
-        ))
-        .await
-        .context(JoinTaskSnafu)?;
-
-        let affected_rows = results.into_iter().sum::<Result<u32>>()?;
-        Ok(Output::AffectedRows(affected_rows as _))
-    }
-}
-
-pub(super) fn to_grpc_delete_request(
+pub fn to_grpc_delete_request(
     table_meta: &TableMeta,
     table_name: &TableName,
     region_number: RegionNumber,
@@ -68,8 +41,8 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
-    use api::v1::column::{SemanticType, Values};
-    use api::v1::{Column, ColumnDataType};
+    use api::v1::column::Values;
+    use api::v1::{Column, ColumnDataType, SemanticType};
     use datatypes::prelude::{ConcreteDataType, VectorRef};
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::Int32Vector;
@@ -103,7 +76,12 @@ mod tests {
             "id".to_string(),
             Arc::new(Int32Vector::from_slice(vec![1, 2, 3])) as VectorRef,
         )]);
-        let request = DeleteRequest { key_column_values };
+        let request = DeleteRequest {
+            catalog_name: table_name.catalog_name.to_string(),
+            schema_name: table_name.schema_name.to_string(),
+            table_name: table_name.table_name.to_string(),
+            key_column_values,
+        };
 
         let result =
             to_grpc_delete_request(&table_meta, &table_name, region_number, request).unwrap();

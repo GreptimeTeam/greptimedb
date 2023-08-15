@@ -19,6 +19,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use auth::UserProviderRef;
 use axum::Router;
 use catalog::{CatalogManagerRef, RegisterTableRequest};
 use common_catalog::consts::{
@@ -134,10 +135,7 @@ fn s3_test_config() -> S3Config {
     }
 }
 
-pub fn get_test_store_config(
-    store_type: &StorageType,
-    name: &str,
-) -> (ObjectStoreConfig, TempDirGuard) {
+pub fn get_test_store_config(store_type: &StorageType) -> (ObjectStoreConfig, TempDirGuard) {
     let _ = dotenv::dotenv();
 
     match store_type {
@@ -242,21 +240,12 @@ pub fn get_test_store_config(
 
             (config, TempDirGuard::S3(TempFolder::new(&store, "/")))
         }
-        StorageType::File => {
-            let data_tmp_dir = create_temp_dir(&format!("gt_data_{name}"));
-
-            (
-                ObjectStoreConfig::File(FileConfig {
-                    data_home: data_tmp_dir.path().to_str().unwrap().to_string(),
-                }),
-                TempDirGuard::File(data_tmp_dir),
-            )
-        }
+        StorageType::File => (ObjectStoreConfig::File(FileConfig {}), TempDirGuard::None),
     }
 }
 
 pub enum TempDirGuard {
-    File(TempDir),
+    None,
     S3(TempFolder),
     Oss(TempFolder),
     Azblob(TempFolder),
@@ -264,11 +253,21 @@ pub enum TempDirGuard {
 }
 
 pub struct TestGuard {
-    pub wal_guard: WalGuard,
+    pub home_guard: FileDirGuard,
+    pub wal_guard: FileDirGuard,
     pub storage_guard: StorageGuard,
 }
 
-pub struct WalGuard(pub TempDir);
+pub struct FileDirGuard {
+    pub temp_dir: TempDir,
+    pub is_wal: bool,
+}
+
+impl FileDirGuard {
+    pub fn new(temp_dir: TempDir, is_wal: bool) -> Self {
+        Self { temp_dir, is_wal }
+    }
+}
 
 pub struct StorageGuard(pub TempDirGuard);
 
@@ -288,28 +287,36 @@ pub fn create_tmp_dir_and_datanode_opts(
     store_type: StorageType,
     name: &str,
 ) -> (DatanodeOptions, TestGuard) {
+    let home_tmp_dir = create_temp_dir(&format!("gt_data_{name}"));
     let wal_tmp_dir = create_temp_dir(&format!("gt_wal_{name}"));
+    let home_dir = home_tmp_dir.path().to_str().unwrap().to_string();
     let wal_dir = wal_tmp_dir.path().to_str().unwrap().to_string();
 
-    let (store, data_tmp_dir) = get_test_store_config(&store_type, name);
-    let opts = create_datanode_opts(store, wal_dir);
+    let (store, data_tmp_dir) = get_test_store_config(&store_type);
+    let opts = create_datanode_opts(store, home_dir, wal_dir);
 
     (
         opts,
         TestGuard {
-            wal_guard: WalGuard(wal_tmp_dir),
+            home_guard: FileDirGuard::new(home_tmp_dir, false),
+            wal_guard: FileDirGuard::new(wal_tmp_dir, true),
             storage_guard: StorageGuard(data_tmp_dir),
         },
     )
 }
 
-pub fn create_datanode_opts(store: ObjectStoreConfig, wal_dir: String) -> DatanodeOptions {
+pub fn create_datanode_opts(
+    store: ObjectStoreConfig,
+    home_dir: String,
+    wal_dir: String,
+) -> DatanodeOptions {
     DatanodeOptions {
         wal: WalConfig {
             dir: Some(wal_dir),
             ..Default::default()
         },
         storage: StorageConfig {
+            data_home: home_dir,
             store,
             ..Default::default()
         },
@@ -405,6 +412,14 @@ pub async fn setup_test_http_app_with_frontend(
     store_type: StorageType,
     name: &str,
 ) -> (Router, TestGuard) {
+    setup_test_http_app_with_frontend_and_user_provider(store_type, name, None).await
+}
+
+pub async fn setup_test_http_app_with_frontend_and_user_provider(
+    store_type: StorageType,
+    name: &str,
+    user_provider: Option<UserProviderRef>,
+) -> (Router, TestGuard) {
     let (opts, guard) = create_tmp_dir_and_datanode_opts(store_type, name);
     let (instance, heartbeat) = Instance::with_mock_meta_client(&opts).await.unwrap();
     let frontend = FeInstance::try_new_standalone(instance.clone())
@@ -429,12 +444,20 @@ pub async fn setup_test_http_app_with_frontend(
     };
 
     let frontend_ref = Arc::new(frontend);
-    let http_server = HttpServerBuilder::new(http_opts)
+    let mut http_server = HttpServerBuilder::new(http_opts);
+
+    http_server
         .with_sql_handler(ServerSqlQueryHandlerAdaptor::arc(frontend_ref.clone()))
         .with_grpc_handler(ServerGrpcQueryHandlerAdaptor::arc(frontend_ref.clone()))
         .with_script_handler(frontend_ref)
-        .with_greptime_config_options(opts.to_toml_string())
-        .build();
+        .with_greptime_config_options(opts.to_toml_string());
+
+    if let Some(user_provider) = user_provider {
+        http_server.with_user_provider(user_provider);
+    }
+
+    let http_server = http_server.build();
+
     let app = http_server.build(http_server.make_app());
     (app, guard)
 }
@@ -533,6 +556,14 @@ pub async fn setup_grpc_server(
     store_type: StorageType,
     name: &str,
 ) -> (String, TestGuard, Arc<GrpcServer>) {
+    setup_grpc_server_with_user_provider(store_type, name, None).await
+}
+
+pub async fn setup_grpc_server_with_user_provider(
+    store_type: StorageType,
+    name: &str,
+    user_provider: Option<UserProviderRef>,
+) -> (String, TestGuard, Arc<GrpcServer>) {
     common_telemetry::init_default_ut_logging();
 
     let (opts, guard) = create_tmp_dir_and_datanode_opts(store_type, name);
@@ -557,7 +588,7 @@ pub async fn setup_grpc_server(
     let fe_grpc_server = Arc::new(GrpcServer::new(
         ServerGrpcQueryHandlerAdaptor::arc(fe_instance_ref.clone()),
         Some(fe_instance_ref.clone()),
-        None,
+        user_provider,
         runtime,
     ));
 
@@ -587,6 +618,14 @@ pub async fn check_output_stream(output: Output, expected: &str) {
 pub async fn setup_mysql_server(
     store_type: StorageType,
     name: &str,
+) -> (String, TestGuard, Arc<Box<dyn Server>>) {
+    setup_mysql_server_with_user_provider(store_type, name, None).await
+}
+
+pub async fn setup_mysql_server_with_user_provider(
+    store_type: StorageType,
+    name: &str,
+    user_provider: Option<UserProviderRef>,
 ) -> (String, TestGuard, Arc<Box<dyn Server>>) {
     common_telemetry::init_default_ut_logging();
 
@@ -619,7 +658,7 @@ pub async fn setup_mysql_server(
         runtime,
         Arc::new(MysqlSpawnRef::new(
             ServerSqlQueryHandlerAdaptor::arc(fe_instance_ref),
-            None,
+            user_provider,
         )),
         Arc::new(MysqlSpawnConfig::new(
             false,
@@ -643,6 +682,14 @@ pub async fn setup_mysql_server(
 pub async fn setup_pg_server(
     store_type: StorageType,
     name: &str,
+) -> (String, TestGuard, Arc<Box<dyn Server>>) {
+    setup_pg_server_with_user_provider(store_type, name, None).await
+}
+
+pub async fn setup_pg_server_with_user_provider(
+    store_type: StorageType,
+    name: &str,
+    user_provider: Option<UserProviderRef>,
 ) -> (String, TestGuard, Arc<Box<dyn Server>>) {
     common_telemetry::init_default_ut_logging();
 
@@ -675,7 +722,7 @@ pub async fn setup_pg_server(
         ServerSqlQueryHandlerAdaptor::arc(fe_instance_ref),
         opts.tls.clone(),
         runtime,
-        None,
+        user_provider,
     )) as Box<dyn Server>);
 
     let fe_pg_addr_clone = fe_pg_addr.clone();

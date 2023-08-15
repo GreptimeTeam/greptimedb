@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod show;
+mod show_create_table;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -99,7 +99,7 @@ pub async fn show_databases(
     query_ctx: QueryContextRef,
 ) -> Result<Output> {
     let mut databases = catalog_manager
-        .schema_names(&query_ctx.current_catalog())
+        .schema_names(query_ctx.current_catalog())
         .await
         .context(error::CatalogSnafu)?;
 
@@ -143,11 +143,11 @@ pub async fn show_tables(
     let schema = if let Some(database) = stmt.database {
         database
     } else {
-        query_ctx.current_schema()
+        query_ctx.current_schema().to_owned()
     };
     // TODO(sunng87): move this function into query_ctx
     let mut tables = catalog_manager
-        .table_names(&query_ctx.current_catalog(), &schema)
+        .table_names(query_ctx.current_catalog(), &schema)
         .await
         .context(error::CatalogSnafu)?;
 
@@ -185,7 +185,7 @@ pub async fn show_tables(
 pub fn show_create_table(table: TableRef, partitions: Option<Partitions>) -> Result<Output> {
     let table_info = table.table_info();
     let table_name = &table_info.name;
-    let mut stmt = show::create_table_stmt(&table_info)?;
+    let mut stmt = show_create_table::create_table_stmt(&table_info)?;
     stmt.partitions = partitions;
     let sql = format!("{}", stmt);
     let columns = vec![

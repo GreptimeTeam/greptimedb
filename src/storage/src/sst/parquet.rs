@@ -145,7 +145,10 @@ fn decode_timestamp_range(
     file_meta: &FileMetaData,
     schema: &datatypes::schema::SchemaRef,
 ) -> Result<Option<(Timestamp, Timestamp)>> {
-    let (Some(ts_col_idx), Some(ts_col)) = (schema.timestamp_index(), schema.timestamp_column()) else { return Ok(None); };
+    let (Some(ts_col_idx), Some(ts_col)) = (schema.timestamp_index(), schema.timestamp_column())
+    else {
+        return Ok(None);
+    };
     let ts_datatype = &ts_col.data_type;
     decode_timestamp_range_inner(file_meta, ts_col_idx, ts_datatype)
 }
@@ -176,9 +179,16 @@ fn decode_timestamp_range_inner(
             .context(DecodeParquetTimeRangeSnafu {
                 msg: format!("Cannot find ts column by index: {ts_index}"),
             })?
-            .meta_data else { return Ok(None) };
-        let Some(stats) = &metadata.statistics else { return Ok(None) };
-        let (Some(min_value), Some(max_value)) = (&stats.min_value, &stats.max_value) else { return Ok(None); };
+            .meta_data
+        else {
+            return Ok(None);
+        };
+        let Some(stats) = &metadata.statistics else {
+            return Ok(None);
+        };
+        let (Some(min_value), Some(max_value)) = (&stats.min_value, &stats.max_value) else {
+            return Ok(None);
+        };
 
         // according to [parquet's spec](https://parquet.apache.org/docs/file-format/data-pages/encodings/), min/max value in stats uses plain encoding with little endian.
         // also see https://github.com/apache/arrow-rs/blob/5fb337db04a1a19f7d40da46f19b7b5fd4051593/parquet/src/file/statistics.rs#L172
@@ -345,6 +355,7 @@ mod tests {
     use std::ops::Range;
     use std::sync::Arc;
 
+    use api::v1::OpType;
     use common_base::readable_size::ReadableSize;
     use common_test_util::temp_dir::create_temp_dir;
     use datatypes::arrow::array::{Array, UInt64Array, UInt8Array};
@@ -352,7 +363,6 @@ mod tests {
     use datatypes::types::{TimestampMillisecondType, TimestampType};
     use datatypes::vectors::TimestampMillisecondVector;
     use object_store::services::Fs;
-    use store_api::storage::OpType;
 
     use super::*;
     use crate::file_purger::noop::new_noop_file_purger;

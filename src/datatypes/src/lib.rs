@@ -17,6 +17,7 @@
 pub mod arrow_array;
 pub mod data_type;
 pub mod error;
+pub mod interval;
 pub mod macros;
 pub mod prelude;
 pub mod scalars;

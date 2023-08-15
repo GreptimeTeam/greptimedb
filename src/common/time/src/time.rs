@@ -15,12 +15,12 @@
 use std::cmp::Ordering;
 use std::hash::{Hash, Hasher};
 
-use chrono::offset::Local;
 use chrono::{NaiveDateTime, NaiveTime, TimeZone as ChronoTimeZone, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::timestamp::TimeUnit;
 use crate::timezone::TimeZone;
+use crate::util::format_utc_datetime;
 
 /// Time value, represents the elapsed time since midnight in the unit of `TimeUnit`.
 #[derive(Debug, Clone, Default, Copy, Serialize, Deserialize)]
@@ -119,10 +119,7 @@ impl Time {
                 Some(TimeZone::Named(tz)) => {
                     format!("{}", tz.from_utc_datetime(&datetime).format(pattern))
                 }
-                None => {
-                    let local = Local {};
-                    format!("{}", local.from_utc_datetime(&datetime).format(pattern))
-                }
+                None => format_utc_datetime(&datetime, pattern),
             }
         } else {
             format!("[Time{}: {}]", self.unit, self.value)

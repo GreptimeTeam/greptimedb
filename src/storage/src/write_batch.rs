@@ -17,11 +17,12 @@ mod compat;
 
 use std::collections::HashMap;
 
+use api::v1::OpType;
 use common_recordbatch::RecordBatch;
 use datatypes::schema::{ColumnSchema, SchemaRef};
 use datatypes::vectors::VectorRef;
 use snafu::{ensure, OptionExt, ResultExt};
-use store_api::storage::{OpType, WriteRequest};
+use store_api::storage::WriteRequest;
 
 use crate::error::{
     BatchMissingColumnSnafu, CreateDefaultSnafu, CreateRecordBatchSnafu, Error, HasNullSnafu,

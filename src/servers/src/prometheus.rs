@@ -17,11 +17,14 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use ::auth::UserProviderRef;
 use async_trait::async_trait;
 use axum::body::BoxBody;
 use axum::extract::{Path, Query, State};
 use axum::{middleware, routing, Form, Json, Router};
+use catalog::CatalogManagerRef;
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
+use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_query::Output;
@@ -50,14 +53,13 @@ use tower_http::auth::AsyncRequireAuthorizationLayer;
 use tower_http::compression::CompressionLayer;
 use tower_http::trace::TraceLayer;
 
-use crate::auth::UserProviderRef;
 use crate::error::{
     AlreadyStartedSnafu, CollectRecordbatchSnafu, Error, InternalSnafu, InvalidQuerySnafu, Result,
     StartHttpSnafu, UnexpectedResultSnafu,
 };
 use crate::http::authorize::HttpAuth;
 use crate::http::track_metrics;
-use crate::prom_store::{FIELD_COLUMN_NAME, TIMESTAMP_COLUMN_NAME};
+use crate::prom_store::{FIELD_COLUMN_NAME, METRIC_NAME_LABEL, TIMESTAMP_COLUMN_NAME};
 use crate::server::Server;
 
 pub const PROMETHEUS_API_VERSION: &str = "v1";
@@ -67,6 +69,8 @@ pub type PrometheusHandlerRef = Arc<dyn PrometheusHandler + Send + Sync>;
 #[async_trait]
 pub trait PrometheusHandler {
     async fn do_query(&self, query: &PromQuery, query_ctx: QueryContextRef) -> Result<Output>;
+
+    fn catalog_manager(&self) -> CatalogManagerRef;
 }
 
 /// PromServer represents PrometheusServer which handles the compliance with prometheus HTTP API
@@ -364,12 +368,9 @@ pub async fn instant_query(
         step: "1s".to_string(),
     };
 
-    let db = &params.db.unwrap_or(DEFAULT_SCHEMA_NAME.to_string());
-    let (catalog, schema) = crate::parse_catalog_and_schema_from_client_database_name(db);
+    let query_ctx = QueryContext::with_db_name(params.db.as_ref());
 
-    let query_ctx = QueryContext::with(catalog, schema);
-
-    let result = handler.do_query(&prom_query, Arc::new(query_ctx)).await;
+    let result = handler.do_query(&prom_query, query_ctx).await;
     let (metric_name, result_type) = match retrieve_metric_name_and_result_type(&prom_query.query) {
         Ok((metric_name, result_type)) => (metric_name.unwrap_or_default(), result_type),
         Err(err) => {
@@ -403,12 +404,9 @@ pub async fn range_query(
         step: params.step.or(form_params.step).unwrap_or_default(),
     };
 
-    let db = &params.db.unwrap_or(DEFAULT_SCHEMA_NAME.to_string());
-    let (catalog, schema) = crate::parse_catalog_and_schema_from_client_database_name(db);
+    let query_ctx = QueryContext::with_db_name(params.db.as_ref());
 
-    let query_ctx = QueryContext::with(catalog, schema);
-
-    let result = handler.do_query(&prom_query, Arc::new(query_ctx)).await;
+    let result = handler.do_query(&prom_query, query_ctx).await;
     let metric_name = match retrieve_metric_name_and_result_type(&prom_query.query) {
         Err(err) => {
             return PrometheusJsonResponse::error(err.status_code().to_string(), err.to_string())
@@ -469,12 +467,24 @@ pub async fn labels_query(
     Form(form_params): Form<LabelsQuery>,
 ) -> Json<PrometheusJsonResponse> {
     let _timer = timer!(crate::metrics::METRIC_HTTP_PROMQL_LABEL_QUERY_ELAPSED);
+
+    let db = &params.db.unwrap_or(DEFAULT_SCHEMA_NAME.to_string());
+    let (catalog, schema) = parse_catalog_and_schema_from_db_string(db);
+    let query_ctx = QueryContext::with(catalog, schema);
+
     let mut queries = params.matches.0;
     if queries.is_empty() {
         queries = form_params.matches.0;
     }
     if queries.is_empty() {
-        return PrometheusJsonResponse::error("Unsupported", "match[] parameter is required");
+        match get_all_column_names(catalog, schema, &handler.catalog_manager()).await {
+            Ok(labels) => {
+                return PrometheusJsonResponse::success(PrometheusResponse::Labels(labels))
+            }
+            Err(e) => {
+                return PrometheusJsonResponse::error(e.status_code().to_string(), e.to_string())
+            }
+        }
     }
 
     let start = params
@@ -485,10 +495,6 @@ pub async fn labels_query(
         .end
         .or(form_params.end)
         .unwrap_or_else(current_time_rfc3339);
-
-    let db = &params.db.unwrap_or(DEFAULT_SCHEMA_NAME.to_string());
-    let (catalog, schema) = crate::parse_catalog_and_schema_from_client_database_name(db);
-    let query_ctx = Arc::new(QueryContext::with(catalog, schema));
 
     let mut labels = HashSet::new();
     let _ = labels.insert(METRIC_NAME.to_string());
@@ -524,6 +530,29 @@ pub async fn labels_query(
     let mut sorted_labels: Vec<String> = labels.into_iter().collect();
     sorted_labels.sort();
     PrometheusJsonResponse::success(PrometheusResponse::Labels(sorted_labels))
+}
+
+async fn get_all_column_names(
+    catalog: &str,
+    schema: &str,
+    manager: &CatalogManagerRef,
+) -> std::result::Result<Vec<String>, catalog::error::Error> {
+    let table_names = manager.table_names(catalog, schema).await?;
+
+    let mut labels = HashSet::new();
+    for table_name in table_names {
+        let Some(table) = manager.table(catalog, schema, &table_name).await? else {
+            continue;
+        };
+        let schema = table.schema();
+        for column in schema.column_schemas() {
+            labels.insert(column.name.to_string());
+        }
+    }
+
+    let mut labels_vec = labels.into_iter().collect::<Vec<_>>();
+    labels_vec.sort_unstable();
+    Ok(labels_vec)
 }
 
 async fn retrieve_series_from_query_result(
@@ -675,14 +704,12 @@ fn promql_expr_to_metric_name(expr: &PromqlExpr) -> Option<String> {
         PromqlExpr::NumberLiteral(_) => Some(String::new()),
         PromqlExpr::StringLiteral(_) => Some(String::new()),
         PromqlExpr::Extension(_) => None,
-        PromqlExpr::VectorSelector(VectorSelector { matchers, .. }) => {
-            matchers.find_matchers(METRIC_NAME).pop().cloned()
+        PromqlExpr::VectorSelector(VectorSelector { name, matchers, .. }) => {
+            name.clone().or(matchers.find_matcher(METRIC_NAME))
         }
-        PromqlExpr::MatrixSelector(MatrixSelector {
-            vector_selector, ..
-        }) => {
-            let VectorSelector { matchers, .. } = vector_selector;
-            matchers.find_matchers(METRIC_NAME).pop().cloned()
+        PromqlExpr::MatrixSelector(MatrixSelector { vs, .. }) => {
+            let VectorSelector { name, matchers, .. } = vs;
+            name.clone().or(matchers.find_matcher(METRIC_NAME))
         }
         PromqlExpr::Call(Call { args, .. }) => {
             args.args.iter().find_map(|e| promql_expr_to_metric_name(e))
@@ -706,6 +733,21 @@ pub async fn label_values_query(
     Query(params): Query<LabelValueQuery>,
 ) -> Json<PrometheusJsonResponse> {
     let _timer = timer!(crate::metrics::METRIC_HTTP_PROMQL_LABEL_VALUE_QUERY_ELAPSED);
+
+    let db = &params.db.unwrap_or(DEFAULT_SCHEMA_NAME.to_string());
+    let (catalog, schema) = parse_catalog_and_schema_from_db_string(db);
+
+    if label_name == METRIC_NAME_LABEL {
+        let mut table_names = match handler.catalog_manager().table_names(catalog, schema).await {
+            Ok(table_names) => table_names,
+            Err(e) => {
+                return PrometheusJsonResponse::error(e.status_code().to_string(), e.to_string());
+            }
+        };
+        table_names.sort_unstable();
+        return PrometheusJsonResponse::success(PrometheusResponse::LabelValues(table_names));
+    }
+
     let queries = params.matches.0;
     if queries.is_empty() {
         return PrometheusJsonResponse::error("Invalid argument", "match[] parameter is required");
@@ -713,9 +755,7 @@ pub async fn label_values_query(
 
     let start = params.start.unwrap_or_else(yesterday_rfc3339);
     let end = params.end.unwrap_or_else(current_time_rfc3339);
-    let db = &params.db.unwrap_or(DEFAULT_SCHEMA_NAME.to_string());
-    let (catalog, schema) = crate::parse_catalog_and_schema_from_client_database_name(db);
-    let query_ctx = Arc::new(QueryContext::with(catalog, schema));
+    let query_ctx = QueryContext::with(catalog, schema);
 
     let mut label_values = HashSet::new();
 
@@ -835,9 +875,7 @@ pub async fn series_query(
         .or(form_params.end)
         .unwrap_or_else(current_time_rfc3339);
 
-    let db = &params.db.unwrap_or(DEFAULT_SCHEMA_NAME.to_string());
-    let (catalog, schema) = super::parse_catalog_and_schema_from_client_database_name(db);
-    let query_ctx = Arc::new(QueryContext::with(catalog, schema));
+    let query_ctx = QueryContext::with_db_name(params.db.as_ref());
 
     let mut series = Vec::new();
     for query in queries {

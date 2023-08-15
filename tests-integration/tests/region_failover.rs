@@ -79,13 +79,18 @@ macro_rules! region_failover_tests {
 }
 
 pub async fn test_region_failover(store_type: StorageType) {
+    if store_type == StorageType::File {
+        // Region failover doesn't make sense when using local file storage.
+        return;
+    }
     common_telemetry::init_default_ut_logging();
+    info!("Running region failover test for {}", store_type);
 
     let mut logical_timer = 1685508715000;
 
     let cluster_name = "test_region_failover";
 
-    let (store_config, _guard) = get_test_store_config(&store_type, cluster_name);
+    let (store_config, _guard) = get_test_store_config(&store_type);
 
     let datanodes = 5u64;
     let cluster = GreptimeDbClusterBuilder::new(cluster_name)
@@ -349,6 +354,7 @@ async fn run_region_failover_procedure(
     let procedure = RegionFailoverProcedure::new(
         failed_region.clone(),
         RegionFailoverContext {
+            in_memory: meta_srv.in_memory().clone(),
             mailbox: meta_srv.mailbox().clone(),
             selector,
             selector_ctx: SelectorContext {

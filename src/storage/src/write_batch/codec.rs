@@ -15,12 +15,12 @@
 use std::io::Cursor;
 use std::sync::Arc;
 
+use api::v1::OpType;
 use common_recordbatch::RecordBatch;
 use datatypes::arrow::ipc::reader::StreamReader;
 use datatypes::arrow::ipc::writer::{IpcWriteOptions, StreamWriter};
 use datatypes::schema::Schema;
 use snafu::{ensure, ResultExt};
-use store_api::storage::OpType;
 
 use crate::codec::{Decoder, Encoder};
 use crate::error::{

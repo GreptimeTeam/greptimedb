@@ -209,6 +209,12 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to split delete request, source: {}", source))]
+    SplitDelete {
+        source: partition::error::Error,
+        location: Location,
+    },
+
     #[snafu(display("Failed to create table info, source: {}", source))]
     CreateTableInfo {
         #[snafu(backtrace)]
@@ -266,8 +272,8 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Cannot find primary key column by name: {}", msg))]
-    PrimaryKeyNotFound { msg: String, location: Location },
+    #[snafu(display("Cannot find column by name: {}", msg))]
+    ColumnNotFound { msg: String, location: Location },
 
     #[snafu(display("Failed to execute statement, source: {}", source))]
     ExecuteStatement {
@@ -406,6 +412,12 @@ pub enum Error {
     #[snafu(display("Unrecognized table option: {}", source))]
     UnrecognizedTableOption {
         #[snafu(backtrace)]
+        source: table::error::Error,
+    },
+
+    #[snafu(display("Missing time index column: {}", source))]
+    MissingTimeIndexColumn {
+        location: Location,
         source: table::error::Error,
     },
 
@@ -578,6 +590,12 @@ pub enum Error {
         source: common_meta::error::Error,
         location: Location,
     },
+
+    #[snafu(display("Failed to pass permission check, source: {}", source))]
+    Permission {
+        source: auth::Error,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -592,7 +610,7 @@ impl ErrorExt for Error {
             | Error::CatalogNotFound { .. }
             | Error::SchemaNotFound { .. }
             | Error::SchemaExists { .. }
-            | Error::PrimaryKeyNotFound { .. }
+            | Error::ColumnNotFound { .. }
             | Error::MissingMetasrvOpts { .. }
             | Error::BuildRegex { .. }
             | Error::InvalidSchema { .. }
@@ -602,6 +620,8 @@ impl ErrorExt for Error {
             | Error::UnsupportedFormat { .. } => StatusCode::InvalidArguments,
 
             Error::NotSupported { .. } => StatusCode::Unsupported,
+
+            Error::Permission { source, .. } => source.status_code(),
 
             Error::HandleHeartbeatResponse { source, .. }
             | Error::TableMetadataManager { source, .. } => source.status_code(),
@@ -635,6 +655,8 @@ impl ErrorExt for Error {
             Error::ColumnDataType { source } | Error::InvalidColumnDef { source, .. } => {
                 source.status_code()
             }
+
+            Error::MissingTimeIndexColumn { source, .. } => source.status_code(),
 
             Error::FindDatanode { .. }
             | Error::CreateTableRoute { .. }
@@ -685,7 +707,8 @@ impl ErrorExt for Error {
             Error::DeserializePartition { source, .. }
             | Error::FindTablePartitionRule { source, .. }
             | Error::FindTableRoute { source, .. }
-            | Error::SplitInsert { source, .. } => source.status_code(),
+            | Error::SplitInsert { source, .. }
+            | Error::SplitDelete { source, .. } => source.status_code(),
 
             Error::UnrecognizedTableOption { .. } => StatusCode::InvalidArguments,
 

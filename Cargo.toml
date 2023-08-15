@@ -2,6 +2,7 @@
 members = [
     "benchmarks",
     "src/api",
+    "src/auth",
     "src/catalog",
     "src/client",
     "src/cmd",
@@ -11,13 +12,13 @@ members = [
     "src/common/error",
     "src/common/function",
     "src/common/function-macro",
+    "src/common/greptimedb-telemetry",
     "src/common/grpc",
     "src/common/grpc-expr",
     "src/common/mem-prof",
     "src/common/meta",
     "src/common/procedure",
     "src/common/procedure-test",
-    "src/common/pprof",
     "src/common/query",
     "src/common/recordbatch",
     "src/common/runtime",
@@ -25,6 +26,7 @@ members = [
     "src/common/telemetry",
     "src/common/test-util",
     "src/common/time",
+    "src/common/version",
     "src/datanode",
     "src/datatypes",
     "src/file-table-engine",
@@ -49,6 +51,7 @@ members = [
     "tests-integration",
     "tests/runner",
 ]
+resolver = "2"
 
 [workspace.package]
 version = "0.3.2"
@@ -56,29 +59,30 @@ edition = "2021"
 license = "Apache-2.0"
 
 [workspace.dependencies]
-arrow = { version = "40.0" }
-arrow-array = "40.0"
-arrow-flight = "40.0"
-arrow-schema = { version = "40.0", features = ["serde"] }
+arrow = { version = "43.0" }
+etcd-client = "0.11"
+arrow-array = "43.0"
+arrow-flight = "43.0"
+arrow-schema = { version = "43.0", features = ["serde"] }
 async-stream = "0.3"
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
-# TODO(ruihang): use arrow-datafusion when it contains https://github.com/apache/arrow-datafusion/pull/6032
-datafusion = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "63e52dde9e44cac4b1f6c6e6b6bf6368ba3bd323" }
-datafusion-common = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "63e52dde9e44cac4b1f6c6e6b6bf6368ba3bd323" }
-datafusion-expr = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "63e52dde9e44cac4b1f6c6e6b6bf6368ba3bd323" }
-datafusion-optimizer = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "63e52dde9e44cac4b1f6c6e6b6bf6368ba3bd323" }
-datafusion-physical-expr = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "63e52dde9e44cac4b1f6c6e6b6bf6368ba3bd323" }
-datafusion-sql = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "63e52dde9e44cac4b1f6c6e6b6bf6368ba3bd323" }
-datafusion-substrait = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "63e52dde9e44cac4b1f6c6e6b6bf6368ba3bd323" }
-etcd-client = "0.11"
+datafusion = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "2ceb7f927c40787773fdc466d6a4b79f3a6c0001" }
+datafusion-common = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "2ceb7f927c40787773fdc466d6a4b79f3a6c0001" }
+datafusion-expr = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "2ceb7f927c40787773fdc466d6a4b79f3a6c0001" }
+datafusion-optimizer = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "2ceb7f927c40787773fdc466d6a4b79f3a6c0001" }
+datafusion-physical-expr = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "2ceb7f927c40787773fdc466d6a4b79f3a6c0001" }
+datafusion-sql = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "2ceb7f927c40787773fdc466d6a4b79f3a6c0001" }
+datafusion-substrait = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "2ceb7f927c40787773fdc466d6a4b79f3a6c0001" }
+derive_builder = "0.12"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/MichaelScofield/greptime-proto.git", rev = "71c0002045f6cc8d6e42609bcc5ca6cea963baad" }
+greptime-proto = { git = "https://github.com/NiwakaDev/greptime-proto.git", rev = "ec402b6500f908a0acfab6c889225cd4dc2228a4" }
 itertools = "0.10"
 lazy_static = "1.4"
+once_cell = "1.18"
 opentelemetry-proto = { version = "0.2", features = ["gen-tonic", "metrics"] }
-parquet = "40.0"
+parquet = "43.0"
 paste = "1.0"
 prost = "0.11"
 rand = "0.8"
@@ -86,7 +90,9 @@ regex = "1.8"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 snafu = { version = "0.7", features = ["backtraces"] }
-sqlparser = "0.34"
+sqlparser = { git = "https://github.com/GreptimeTeam/sqlparser-rs.git", rev = "c3814f08afa19786b13d72b1731a1e8b3cac4ab9", features = [
+    "visitor",
+] }
 tempfile = "3"
 tokio = { version = "1.28", features = ["full"] }
 tokio-util = { version = "0.7", features = ["io-util", "compat"] }
@@ -95,6 +101,55 @@ tonic = { version = "0.9", features = ["tls"] }
 uuid = { version = "1", features = ["serde", "v4", "fast-rng"] }
 metrics = "0.20"
 meter-core = { git = "https://github.com/GreptimeTeam/greptime-meter.git", rev = "abbd357c1e193cd270ea65ee7652334a150b628f" }
+## workspaces members
+api = { path = "src/api" }
+auth = { path = "src/auth" }
+catalog = { path = "src/catalog" }
+client = { path = "src/client" }
+cmd = { path = "src/cmd" }
+common-base = { path = "src/common/base" }
+common-catalog = { path = "src/common/catalog" }
+common-datasource = { path = "src/common/datasource" }
+common-error = { path = "src/common/error" }
+common-function = { path = "src/common/function" }
+common-function-macro = { path = "src/common/function-macro" }
+common-greptimedb-telemetry = { path = "src/common/greptimedb-telemetry" }
+common-grpc = { path = "src/common/grpc" }
+common-grpc-expr = { path = "src/common/grpc-expr" }
+common-mem-prof = { path = "src/common/mem-prof" }
+common-meta = { path = "src/common/meta" }
+common-procedure = { path = "src/common/procedure" }
+common-procedure-test = { path = "src/common/procedure-test" }
+common-pprof = { path = "src/common/pprof" }
+common-query = { path = "src/common/query" }
+common-recordbatch = { path = "src/common/recordbatch" }
+common-runtime = { path = "src/common/runtime" }
+substrait = { path = "src/common/substrait" }
+common-telemetry = { path = "src/common/telemetry" }
+common-test-util = { path = "src/common/test-util" }
+common-time = { path = "src/common/time" }
+common-version = { path = "src/common/version" }
+datanode = { path = "src/datanode" }
+datatypes = { path = "src/datatypes" }
+file-table-engine = { path = "src/file-table-engine" }
+frontend = { path = "src/frontend" }
+log-store = { path = "src/log-store" }
+meta-client = { path = "src/meta-client" }
+meta-srv = { path = "src/meta-srv" }
+mito = { path = "src/mito" }
+mito2 = { path = "src/mito2" }
+object-store = { path = "src/object-store" }
+partition = { path = "src/partition" }
+promql = { path = "src/promql" }
+query = { path = "src/query" }
+script = { path = "src/script" }
+servers = { path = "src/servers" }
+session = { path = "src/session" }
+sql = { path = "src/sql" }
+storage = { path = "src/storage" }
+store-api = { path = "src/store-api" }
+table = { path = "src/table" }
+table-procedure = { path = "src/table-procedure" }
 
 [workspace.dependencies.meter-macros]
 git = "https://github.com/GreptimeTeam/greptime-meter.git"

@@ -15,13 +15,15 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use ::auth::{Identity, Password, UserProviderRef};
 use async_trait::async_trait;
 use chrono::{NaiveDate, NaiveDateTime};
+use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
 use common_query::Output;
-use common_telemetry::{error, logging, timer, trace, warn};
+use common_telemetry::{error, logging, timer, warn};
 use datatypes::prelude::ConcreteDataType;
 use metrics::increment_counter;
 use opensrv_mysql::{
@@ -32,7 +34,7 @@ use parking_lot::RwLock;
 use query::plan::LogicalPlan;
 use query::query_engine::DescribeResult;
 use rand::RngCore;
-use session::context::Channel;
+use session::context::{Channel, QueryContextRef};
 use session::{Session, SessionRef};
 use snafu::{ensure, ResultExt};
 use sql::dialect::MySqlDialect;
@@ -40,7 +42,6 @@ use sql::parser::ParserContext;
 use sql::statements::statement::Statement;
 use tokio::io::AsyncWrite;
 
-use crate::auth::{Identity, Password, UserProviderRef};
 use crate::error::{self, InvalidPrepareStatementSnafu, Result};
 use crate::mysql::helper::{
     self, format_placeholder, replace_placeholders, transform_placeholders,
@@ -89,43 +90,40 @@ impl MysqlInstanceShim {
         }
     }
 
-    async fn do_query(&self, query: &str) -> Vec<Result<Output>> {
-        trace!("Start executing query: '{}'", query);
-        let start = Instant::now();
-
-        let output =
-            if let Some(output) = crate::mysql::federated::check(query, self.session.context()) {
-                vec![Ok(output)]
-            } else {
-                self.query_handler
-                    .do_query(query, self.session.context())
-                    .await
-            };
-
-        trace!(
-            "Finished executing query: '{}', total time costs in microseconds: {}",
-            query,
-            start.elapsed().as_micros()
-        );
-        output
-    }
-
-    /// Execute the logical plan and return the output
-    async fn do_exec_plan(&self, query: &str, plan: LogicalPlan) -> Result<Output> {
-        if let Some(output) = crate::mysql::federated::check(query, self.session.context()) {
-            Ok(output)
+    async fn do_query(&self, query: &str, query_ctx: QueryContextRef) -> Vec<Result<Output>> {
+        if let Some(output) = crate::mysql::federated::check(query, query_ctx.clone()) {
+            vec![Ok(output)]
         } else {
-            self.query_handler
-                .do_exec_plan(plan, self.session.context())
+            let trace_id = query_ctx.trace_id();
+            common_telemetry::TRACE_ID
+                .scope(trace_id, async move {
+                    self.query_handler.do_query(query, query_ctx).await
+                })
                 .await
         }
     }
 
+    /// Execute the logical plan and return the output
+    async fn do_exec_plan(
+        &self,
+        query: &str,
+        plan: LogicalPlan,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
+        if let Some(output) = crate::mysql::federated::check(query, query_ctx.clone()) {
+            Ok(output)
+        } else {
+            self.query_handler.do_exec_plan(plan, query_ctx).await
+        }
+    }
+
     /// Describe the statement
-    async fn do_describe(&self, statement: Statement) -> Result<Option<DescribeResult>> {
-        self.query_handler
-            .do_describe(statement, self.session.context())
-            .await
+    async fn do_describe(
+        &self,
+        statement: Statement,
+        query_ctx: QueryContextRef,
+    ) -> Result<Option<DescribeResult>> {
+        self.query_handler.do_describe(statement, query_ctx).await
     }
 
     /// Save query and logical plan, return the unique id
@@ -188,7 +186,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
                 }
             };
         }
-        let user_info = user_info.unwrap_or_default();
+        let user_info = user_info.unwrap_or_else(|| auth::userinfo_by_name(None));
 
         self.session.set_user_info(user_info);
 
@@ -200,6 +198,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         raw_query: &'a str,
         w: StatementMetaWriter<'a, W>,
     ) -> Result<()> {
+        let query_ctx = self.session.new_query_context();
         let (query, param_num) = replace_placeholders(raw_query);
 
         let statement = validate_query(raw_query).await?;
@@ -208,7 +207,9 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         // in the form of "$i", it can't process "?" right now.
         let statement = transform_placeholders(statement);
 
-        let describe_result = self.do_describe(statement.clone()).await?;
+        let describe_result = self
+            .do_describe(statement.clone(), query_ctx.clone())
+            .await?;
         let (plan, schema) = if let Some(DescribeResult {
             logical_plan,
             schema,
@@ -240,10 +241,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         w.reply(stmt_id, &params, &[]).await?;
         increment_counter!(
             crate::metrics::METRIC_MYSQL_PREPARED_COUNT,
-            &[(
-                crate::metrics::METRIC_DB_LABEL,
-                self.session.context().get_db_string()
-            )]
+            &[(crate::metrics::METRIC_DB_LABEL, query_ctx.get_db_string())]
         );
         return Ok(());
     }
@@ -254,6 +252,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         p: ParamParser<'a>,
         w: QueryResultWriter<'a, W>,
     ) -> Result<()> {
+        let query_ctx = self.session.new_query_context();
         let _timer = timer!(
             crate::metrics::METRIC_MYSQL_QUERY_TIMER,
             &[
@@ -261,10 +260,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
                     crate::metrics::METRIC_MYSQL_SUBPROTOCOL_LABEL,
                     crate::metrics::METRIC_MYSQL_BINQUERY.to_string()
                 ),
-                (
-                    crate::metrics::METRIC_DB_LABEL,
-                    self.session.context().get_db_string()
-                )
+                (crate::metrics::METRIC_DB_LABEL, query_ctx.get_db_string())
             ]
         );
         let params: Vec<ParamValue> = p.into_iter().collect();
@@ -280,7 +276,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
             Some(sql_plan) => sql_plan,
         };
 
-        let (query, outputs) = match sql_plan.plan {
+        let outputs = match sql_plan.plan {
             Some(plan) => {
                 let param_types = plan
                     .get_param_types()
@@ -294,20 +290,19 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
                 }
                 let plan = replace_params_with_values(&plan, param_types, params)?;
                 logging::debug!("Mysql execute prepared plan: {}", plan.display_indent());
-                let outputs = vec![self.do_exec_plan(&sql_plan.query, plan).await];
-
-                (sql_plan.query, outputs)
+                vec![
+                    self.do_exec_plan(&sql_plan.query, plan, query_ctx.clone())
+                        .await,
+                ]
             }
             None => {
                 let query = replace_params(params, sql_plan.query);
                 logging::debug!("Mysql execute replaced query: {}", query);
-                let outputs = self.do_query(&query).await;
-
-                (query, outputs)
+                self.do_query(&query, query_ctx.clone()).await
             }
         };
 
-        writer::write_output(w, &query, self.session.context(), outputs).await?;
+        writer::write_output(w, query_ctx, outputs).await?;
 
         Ok(())
     }
@@ -325,6 +320,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         query: &'a str,
         writer: QueryResultWriter<'a, W>,
     ) -> Result<()> {
+        let query_ctx = self.session.new_query_context();
         let _timer = timer!(
             crate::metrics::METRIC_MYSQL_QUERY_TIMER,
             &[
@@ -332,19 +328,16 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
                     crate::metrics::METRIC_MYSQL_SUBPROTOCOL_LABEL,
                     crate::metrics::METRIC_MYSQL_TEXTQUERY.to_string()
                 ),
-                (
-                    crate::metrics::METRIC_DB_LABEL,
-                    self.session.context().get_db_string()
-                )
+                (crate::metrics::METRIC_DB_LABEL, query_ctx.get_db_string())
             ]
         );
-        let outputs = self.do_query(query).await;
-        writer::write_output(writer, query, self.session.context(), outputs).await?;
+        let outputs = self.do_query(query, query_ctx.clone()).await;
+        writer::write_output(writer, query_ctx, outputs).await?;
         Ok(())
     }
 
     async fn on_init<'a>(&'a mut self, database: &'a str, w: InitWriter<'a, W>) -> Result<()> {
-        let (catalog, schema) = crate::parse_catalog_and_schema_from_client_database_name(database);
+        let (catalog, schema) = parse_catalog_and_schema_from_db_string(database);
 
         if !self.query_handler.is_valid_schema(catalog, schema).await? {
             return w
@@ -377,9 +370,8 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
             }
         }
 
-        let context = self.session.context();
-        context.set_current_catalog(catalog);
-        context.set_current_schema(schema);
+        self.session.set_catalog(catalog.into());
+        self.session.set_schema(schema.into());
 
         w.ok().await.map_err(|e| e.into())
     }

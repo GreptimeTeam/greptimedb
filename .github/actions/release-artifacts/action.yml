@@ -1,0 +1,50 @@
+name: Release artifacts
+description: Release artifacts
+inputs:
+  version:
+    description: Version to release
+    required: true
+runs:
+  using: composite
+  steps:
+    # Download artifacts from previous jobs, the artifacts will be downloaded to:
+    # ${WORKING_DIR}
+    #   |- greptime-darwin-amd64-pyo3-v0.5.0/greptime-darwin-amd64-pyo3-v0.5.0.tar.gz
+    #   |- greptime-darwin-amd64-pyo3-v0.5.0.sha256sum/greptime-darwin-amd64-pyo3-v0.5.0.sha256sum
+    #   |- greptime-darwin-amd64-v0.5.0/greptime-darwin-amd64-v0.5.0.tar.gz
+    #   |- greptime-darwin-amd64-v0.5.0.sha256sum/greptime-darwin-amd64-v0.5.0.sha256sum
+    #   ...
+    - name: Download artifacts
+      uses: actions/download-artifact@v3
+
+    - name: Create git tag for release
+      if: ${{ github.event_name != 'push' }} # Meaning this is a scheduled or manual workflow.
+      shell: bash
+      run: |
+        git tag ${{ inputs.version }}
+
+    # Only publish release when the release tag is like v1.0.0, v1.0.1, v1.0.2, etc.
+    - name: Set release arguments
+      shell: bash
+      run: |
+        if [[ "${{ inputs.version }}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          echo "prerelease=false" >> $GITHUB_ENV
+          echo "makeLatest=true" >> $GITHUB_ENV
+          echo "generateReleaseNotes=false" >> $GITHUB_ENV
+        else
+          echo "prerelease=true" >> $GITHUB_ENV
+          echo "makeLatest=false" >> $GITHUB_ENV
+          echo "generateReleaseNotes=true" >> $GITHUB_ENV
+        fi
+
+    - name: Publish release
+      uses: ncipollo/release-action@v1
+      with:
+        name: "Release ${{ inputs.version }}"
+        prerelease: ${{ env.prerelease }}
+        makeLatest: ${{ env.makeLatest }}
+        tag: ${{ inputs.version }}
+        generateReleaseNotes: ${{ env.generateReleaseNotes }}
+        allowUpdates: true
+        artifacts: |
+          **/greptime-*/*

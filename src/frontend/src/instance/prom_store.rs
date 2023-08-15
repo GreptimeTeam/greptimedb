@@ -15,6 +15,7 @@
 use api::prom_store::remote::read_request::ResponseType;
 use api::prom_store::remote::{Query, QueryResult, ReadRequest, ReadResponse, WriteRequest};
 use async_trait::async_trait;
+use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use common_catalog::format_full_table_name;
 use common_error::ext::BoxedError;
 use common_query::Output;
@@ -22,7 +23,7 @@ use common_recordbatch::RecordBatches;
 use common_telemetry::logging;
 use metrics::counter;
 use prost::Message;
-use servers::error::{self, Result as ServerResult};
+use servers::error::{self, AuthSnafu, Result as ServerResult};
 use servers::prom_store::{self, Metrics};
 use servers::query_handler::{PromStoreProtocolHandler, PromStoreResponse};
 use session::context::QueryContextRef;
@@ -67,7 +68,9 @@ fn negotiate_response_type(accepted_response_types: &[i32]) -> ServerResult<Resp
 }
 
 async fn to_query_result(table_name: &str, output: Output) -> ServerResult<QueryResult> {
-    let Output::Stream(stream) = output else { unreachable!() };
+    let Output::Stream(stream) = output else {
+        unreachable!()
+    };
     let recordbatches = RecordBatches::try_collect(stream)
         .await
         .context(error::CollectRecordbatchSnafu)?;
@@ -130,7 +133,7 @@ impl Instance {
             let table_name = prom_store::table_name(query)?;
 
             let output = self
-                .handle_remote_query(&ctx, &catalog_name, &schema_name, &table_name, query)
+                .handle_remote_query(&ctx, catalog_name, schema_name, &table_name, query)
                 .await
                 .map_err(BoxedError::new)
                 .with_context(|_| error::ExecuteQuerySnafu {
@@ -146,6 +149,11 @@ impl Instance {
 #[async_trait]
 impl PromStoreProtocolHandler for Instance {
     async fn write(&self, request: WriteRequest, ctx: QueryContextRef) -> ServerResult<()> {
+        self.plugins
+            .get::<PermissionCheckerRef>()
+            .as_ref()
+            .check_permission(ctx.current_user(), PermissionReq::PromStoreWrite)
+            .context(AuthSnafu)?;
         let (requests, samples) = prom_store::to_grpc_insert_requests(request)?;
         let _ = self
             .handle_inserts(requests, ctx)
@@ -162,6 +170,12 @@ impl PromStoreProtocolHandler for Instance {
         request: ReadRequest,
         ctx: QueryContextRef,
     ) -> ServerResult<PromStoreResponse> {
+        self.plugins
+            .get::<PermissionCheckerRef>()
+            .as_ref()
+            .check_permission(ctx.current_user(), PermissionReq::PromStoreRead)
+            .context(AuthSnafu)?;
+
         let response_type = negotiate_response_type(&request.accepted_response_types)?;
 
         // TODO(dennis): use read_hints to speedup query if possible

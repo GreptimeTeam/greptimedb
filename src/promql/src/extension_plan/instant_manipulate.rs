@@ -28,8 +28,8 @@ use datafusion::logical_expr::{EmptyRelation, Expr, LogicalPlan, UserDefinedLogi
 use datafusion::physical_expr::PhysicalSortExpr;
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
-    DisplayFormatType, ExecutionPlan, Partitioning, RecordBatchStream, SendableRecordBatchStream,
-    Statistics,
+    DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, RecordBatchStream,
+    SendableRecordBatchStream, Statistics,
 };
 use datatypes::arrow::compute;
 use datatypes::arrow::error::Result as ArrowResult;
@@ -258,18 +258,6 @@ impl ExecutionPlan for InstantManipulateExec {
         }))
     }
 
-    fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match t {
-            DisplayFormatType::Default => {
-                write!(
-                    f,
-                    "PromInstantManipulateExec: range=[{}..{}], lookback=[{}], interval=[{}], time index=[{}]",
-                   self.start,self.end, self.lookback_delta, self.interval, self.time_index_column
-                )
-            }
-        }
-    }
-
     fn metrics(&self) -> Option<MetricsSet> {
         Some(self.metric.clone_inner())
     }
@@ -290,6 +278,20 @@ impl ExecutionPlan for InstantManipulateExec {
             // TODO(ruihang): support this column statistics
             column_statistics: None,
             is_exact: false,
+        }
+    }
+}
+
+impl DisplayAs for InstantManipulateExec {
+    fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match t {
+            DisplayFormatType::Default | DisplayFormatType::Verbose => {
+                write!(
+                    f,
+                    "PromInstantManipulateExec: range=[{}..{}], lookback=[{}], interval=[{}], time index=[{}]",
+                   self.start,self.end, self.lookback_delta, self.interval, self.time_index_column
+                )
+            }
         }
     }
 }
@@ -333,7 +335,7 @@ impl InstantManipulateStream {
     // refer to Go version: https://github.com/prometheus/prometheus/blob/e934d0f01158a1d55fa0ebb035346b195fcc1260/promql/engine.go#L1571
     // and the function `vectorSelectorSingle`
     pub fn manipulate(&self, input: RecordBatch) -> DataFusionResult<RecordBatch> {
-        let mut take_indices = Vec::with_capacity(input.num_rows());
+        let mut take_indices = vec![];
         // TODO(ruihang): maybe the input is not timestamp millisecond array
         let ts_column = input
             .column(self.time_index)
@@ -347,12 +349,12 @@ impl InstantManipulateStream {
             .and_then(|index| input.column(index).as_any().downcast_ref::<Float64Array>());
 
         let mut cursor = 0;
-        let aligned_ts = (self.start..=self.end)
-            .step_by(self.interval as usize)
-            .collect::<Vec<_>>();
+
+        let aligned_ts_iter = (self.start..=self.end).step_by(self.interval as usize);
+        let mut aligned_ts = vec![];
 
         // calculate the offsets to take
-        'next: for expected_ts in aligned_ts.iter().copied() {
+        'next: for expected_ts in aligned_ts_iter {
             // first, search toward end to see if there is matched timestamp
             while cursor < ts_column.len() {
                 let curr = ts_column.value(cursor);
@@ -360,9 +362,9 @@ impl InstantManipulateStream {
                     Ordering::Equal => {
                         if let Some(field_column) = &field_column && field_column.value(cursor).is_nan() {
                             // ignore the NaN value
-                            take_indices.push(None);
                         } else {
-                            take_indices.push(Some(cursor as u64));
+                            take_indices.push(cursor as u64);
+                            aligned_ts.push(expected_ts);
                         }
                         continue 'next;
                     }
@@ -373,37 +375,39 @@ impl InstantManipulateStream {
             }
             if cursor == ts_column.len() {
                 cursor -= 1;
+                // short cut this loop
+                if ts_column.value(cursor) + self.lookback_delta < expected_ts {
+                    break;
+                }
             }
 
             // then examine the value
             let curr_ts = ts_column.value(cursor);
             if curr_ts + self.lookback_delta < expected_ts {
-                take_indices.push(None);
                 continue;
             }
             if curr_ts > expected_ts {
                 // exceeds current expected timestamp, examine the previous value
                 if let Some(prev_cursor) = cursor.checked_sub(1) {
                     let prev_ts = ts_column.value(prev_cursor);
-                    if prev_ts + self.lookback_delta < expected_ts {
-                        // not found in lookback, leave this field blank.
-                        take_indices.push(None);
-                    } else if let Some(field_column) = &field_column && field_column.value(prev_cursor).is_nan() {
-                        // if the newest value is NaN, it means the value is stale, so we should not use it
-                        take_indices.push(None);
-                    } else {
+                    if prev_ts + self.lookback_delta >= expected_ts {
+                        // only use the point in the time range
+                        if let Some(field_column) = &field_column
+                            && field_column.value(prev_cursor).is_nan() {
+                            // if the newest value is NaN, it means the value is stale, so we should not use it
+                            continue;
+                        }
                         // use this point
-                        take_indices.push(Some(prev_cursor as u64));
+                        take_indices.push(prev_cursor as u64);
+                        aligned_ts.push(expected_ts);
                     }
-                } else {
-                    take_indices.push(None);
                 }
             } else if let Some(field_column) = &field_column && field_column.value(cursor).is_nan() {
                 // if the newest value is NaN, it means the value is stale, so we should not use it
-                take_indices.push(None);
             } else {
                 // use this point
-                take_indices.push(Some(cursor as u64));
+                take_indices.push(cursor as u64);
+                aligned_ts.push(expected_ts);
             }
         }
 
@@ -415,19 +419,10 @@ impl InstantManipulateStream {
     fn take_record_batch_optional(
         &self,
         record_batch: RecordBatch,
-        take_indices: Vec<Option<u64>>,
+        take_indices: Vec<u64>,
         aligned_ts: Vec<Millisecond>,
     ) -> DataFusionResult<RecordBatch> {
-        let aligned_ts = aligned_ts
-            .into_iter()
-            .zip(take_indices.iter())
-            .filter_map(|(ts, i)| i.map(|_| ts))
-            .collect::<Vec<_>>();
-        let take_indices = take_indices
-            .iter()
-            .filter(|i| i.is_some())
-            .copied()
-            .collect::<Vec<_>>();
+        assert_eq!(take_indices.len(), aligned_ts.len());
 
         let indices_array = UInt64Array::from(take_indices);
         let mut arrays = record_batch
@@ -449,7 +444,6 @@ mod test {
     use datafusion::arrow::datatypes::{
         ArrowPrimitiveType, DataType, Field, Schema, TimestampMillisecondType,
     };
-    use datafusion::from_slice::FromSlice;
     use datafusion::physical_plan::memory::MemoryExec;
     use datafusion::prelude::SessionContext;
     use datatypes::arrow::array::TimestampMillisecondArray;
@@ -465,13 +459,13 @@ mod test {
             Field::new("value", DataType::Float64, true),
             Field::new("path", DataType::Utf8, true),
         ]));
-        let timestamp_column = Arc::new(TimestampMillisecondArray::from_slice([
+        let timestamp_column = Arc::new(TimestampMillisecondArray::from(vec![
             0, 30_000, 60_000, 90_000, 120_000, // every 30s
             180_000, 240_000, // every 60s
             241_000, 271_000, 291_000, // others
         ])) as _;
-        let field_column = Arc::new(Float64Array::from_slice([1.0; 10])) as _;
-        let path_column = Arc::new(StringArray::from_slice(["foo"; 10])) as _;
+        let field_column = Arc::new(Float64Array::from(vec![1.0; 10])) as _;
+        let path_column = Arc::new(StringArray::from(vec!["foo"; 10])) as _;
         let data = RecordBatch::try_new(
             schema.clone(),
             vec![timestamp_column, field_column, path_column],
@@ -755,16 +749,11 @@ mod test {
             Field::new(TIME_INDEX_COLUMN, TimestampMillisecondType::DATA_TYPE, true),
             Field::new("value", DataType::Float64, true),
         ]));
-        let timestamp_column = Arc::new(TimestampMillisecondArray::from_slice([
+        let timestamp_column = Arc::new(TimestampMillisecondArray::from(vec![
             0, 30_000, 60_000, 90_000, 120_000, // every 30s
         ])) as _;
-        let field_column = Arc::new(Float64Array::from_slice([
-            0.0,
-            f64::NAN,
-            6.0,
-            f64::NAN,
-            12.0,
-        ])) as _;
+        let field_column =
+            Arc::new(Float64Array::from(vec![0.0, f64::NAN, 6.0, f64::NAN, 12.0])) as _;
         let data =
             RecordBatch::try_new(schema.clone(), vec![timestamp_column, field_column]).unwrap();
 
@@ -800,5 +789,19 @@ mod test {
             \n+-------------------------+-------+",
         );
         do_normalize_test(1, 300_001, 10_000, 10_000, expected, true).await;
+    }
+
+    #[tokio::test]
+    async fn ultra_large_range() {
+        let expected = String::from(
+            "+-------------------------+-------+\
+            \n| timestamp               | value |\
+            \n+-------------------------+-------+\
+            \n| 1970-01-01T00:00:00.001 | 0.0   |\
+            \n| 1970-01-01T00:01:00.001 | 6.0   |\
+            \n| 1970-01-01T00:02:00.001 | 12.0  |\
+            \n+-------------------------+-------+",
+        );
+        do_normalize_test(1, 900_000_000_000_000, 10_000, 10_000, expected, true).await;
     }
 }

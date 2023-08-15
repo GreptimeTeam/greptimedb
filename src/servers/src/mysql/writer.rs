@@ -16,7 +16,6 @@ use std::ops::Deref;
 
 use common_query::Output;
 use common_recordbatch::{util, RecordBatch};
-use common_telemetry::warn;
 use datatypes::prelude::{ConcreteDataType, Value};
 use datatypes::schema::SchemaRef;
 use metrics::increment_counter;
@@ -31,9 +30,8 @@ use crate::error::{self, Error, Result};
 use crate::metrics::*;
 
 /// Try to write multiple output to the writer if possible.
-pub async fn write_output<'a, W: AsyncWrite + Send + Sync + Unpin>(
-    w: QueryResultWriter<'a, W>,
-    query: &str,
+pub async fn write_output<W: AsyncWrite + Send + Sync + Unpin>(
+    w: QueryResultWriter<'_, W>,
     query_context: QueryContextRef,
     outputs: Vec<Result<Output>>,
 ) -> Result<()> {
@@ -42,7 +40,7 @@ pub async fn write_output<'a, W: AsyncWrite + Send + Sync + Unpin>(
         let result_writer = writer.take().context(error::InternalSnafu {
             err_msg: "Sending multiple result set is unsupported",
         })?;
-        writer = result_writer.try_write_one(query, output).await?;
+        writer = result_writer.try_write_one(output).await?;
     }
 
     if let Some(result_writer) = writer {
@@ -75,7 +73,6 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
     /// Try to write one result set. If there are more than one result set, return `Some`.
     pub async fn try_write_one(
         self,
-        query: &str,
         output: Result<Output>,
     ) -> Result<Option<MysqlResultWriter<'a, W>>> {
         // We don't support sending multiple query result because the RowWriter's lifetime is bound to
@@ -91,16 +88,14 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
                         recordbatches,
                         schema,
                     };
-                    Self::write_query_result(query, query_result, self.writer, self.query_context)
-                        .await?;
+                    Self::write_query_result(query_result, self.writer, self.query_context).await?;
                 }
                 Output::RecordBatches(recordbatches) => {
                     let query_result = QueryResult {
                         schema: recordbatches.schema(),
                         recordbatches: recordbatches.take(),
                     };
-                    Self::write_query_result(query, query_result, self.writer, self.query_context)
-                        .await?;
+                    Self::write_query_result(query_result, self.writer, self.query_context).await?;
                 }
                 Output::AffectedRows(rows) => {
                     let next_writer = Self::write_affected_rows(self.writer, rows).await?;
@@ -110,7 +105,7 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
                     )));
                 }
             },
-            Err(error) => Self::write_query_error(query, error, self.writer).await?,
+            Err(error) => Self::write_query_error(error, self.writer).await?,
         }
         Ok(None)
     }
@@ -135,7 +130,6 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
     }
 
     async fn write_query_result(
-        query: &str,
         query_result: QueryResult,
         writer: QueryResultWriter<'a, W>,
         query_context: QueryContextRef,
@@ -152,7 +146,7 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
                 row_writer.finish().await?;
                 Ok(())
             }
-            Err(error) => Self::write_query_error(query, error, writer).await,
+            Err(error) => Self::write_query_error(error, writer).await,
         }
     }
 
@@ -182,6 +176,7 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
                     Value::DateTime(v) => row_writer.write_col(v.to_chrono_datetime())?,
                     Value::Timestamp(v) => row_writer
                         .write_col(v.to_timezone_aware_string(query_context.time_zone()))?,
+                    Value::Interval(v) => row_writer.write_col(v.to_iso8601_string())?,
                     Value::List(_) => {
                         return Err(Error::Internal {
                             err_msg: format!(
@@ -199,12 +194,7 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
         Ok(())
     }
 
-    async fn write_query_error(
-        query: &str,
-        error: Error,
-        w: QueryResultWriter<'a, W>,
-    ) -> Result<()> {
-        warn!(error; "Failed to execute query '{}'", query);
+    async fn write_query_error(error: Error, w: QueryResultWriter<'a, W>) -> Result<()> {
         increment_counter!(
             METRIC_ERROR_COUNTER,
             &[(METRIC_PROTOCOL_LABEL, METRIC_ERROR_COUNTER_LABEL_MYSQL)]
@@ -241,6 +231,7 @@ pub(crate) fn create_mysql_column(
         ConcreteDataType::Time(_) => Ok(ColumnType::MYSQL_TYPE_TIME),
         ConcreteDataType::Date(_) => Ok(ColumnType::MYSQL_TYPE_DATE),
         ConcreteDataType::DateTime(_) => Ok(ColumnType::MYSQL_TYPE_DATETIME),
+        ConcreteDataType::Interval(_) => Ok(ColumnType::MYSQL_TYPE_VARCHAR),
         _ => error::InternalSnafu {
             err_msg: format!("not implemented for column datatype {:?}", data_type),
         }

@@ -13,7 +13,6 @@
 // limitations under the License.
 
 #![feature(async_closure)]
-#![feature(btree_drain_filter)]
 #![feature(result_flattening)]
 
 pub mod bootstrap;
@@ -32,12 +31,17 @@ mod metrics;
 #[cfg(feature = "mock")]
 pub mod mocks;
 pub mod procedure;
+pub mod pubsub;
 pub mod selector;
 mod sequence;
 pub mod service;
 pub mod table_routes;
 
 pub use crate::error::Result;
+
+mod inactive_node_manager;
+
+mod greptimedb_telemetry;
 
 #[cfg(test)]
 mod test_util;

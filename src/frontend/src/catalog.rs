@@ -13,15 +13,15 @@
 // limitations under the License.
 
 use std::any::Any;
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use api::v1::CreateTableExpr;
 use catalog::error::{
-    self as catalog_err, InternalSnafu, InvalidCatalogValueSnafu, InvalidSystemTableDefSnafu,
-    Result as CatalogResult, TableMetadataManagerSnafu, UnimplementedSnafu,
+    self as catalog_err, InternalSnafu, InvalidSystemTableDefSnafu, ListCatalogsSnafu,
+    ListSchemasSnafu, Result as CatalogResult, TableMetadataManagerSnafu, UnimplementedSnafu,
 };
-use catalog::information_schema::InformationSchemaProvider;
+use catalog::information_schema::{InformationSchemaProvider, COLUMNS, TABLES};
 use catalog::remote::KvCacheInvalidatorRef;
 use catalog::{
     CatalogManager, DeregisterSchemaRequest, DeregisterTableRequest, RegisterSchemaRequest,
@@ -30,20 +30,20 @@ use catalog::{
 use client::client_manager::DatanodeClients;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME};
 use common_error::ext::BoxedError;
-use common_meta::helper::{build_catalog_prefix, build_schema_prefix, CatalogKey, SchemaKey};
+use common_meta::key::catalog_name::CatalogNameKey;
+use common_meta::key::schema_name::SchemaNameKey;
 use common_meta::key::table_info::TableInfoKey;
 use common_meta::key::table_name::TableNameKey;
 use common_meta::key::table_region::TableRegionKey;
 use common_meta::key::{TableMetaKey, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
-use common_meta::rpc::store::RangeRequest;
-use common_meta::rpc::KeyValue;
 use common_meta::table_name::TableName;
-use common_telemetry::{debug, warn};
+use common_telemetry::debug;
+use futures_util::TryStreamExt;
 use partition::manager::PartitionRuleManagerRef;
 use snafu::prelude::*;
 use table::metadata::TableId;
-use table::table::numbers::NumbersTable;
+use table::table::numbers::{NumbersTable, NUMBERS_TABLE_NAME};
 use table::TableRef;
 
 use crate::expr_factory;
@@ -95,20 +95,18 @@ impl FrontendCatalogManager {
         self.partition_manager.clone()
     }
 
+    pub fn table_metadata_manager_ref(&self) -> &TableMetadataManagerRef {
+        &self.table_metadata_manager
+    }
+
     pub fn datanode_clients(&self) -> Arc<DatanodeClients> {
         self.datanode_clients.clone()
     }
 
     pub async fn invalidate_schema(&self, catalog: &str, schema: &str) {
-        let schema_key = SchemaKey {
-            catalog_name: catalog.into(),
-            schema_name: schema.into(),
-        }
-        .to_string();
+        let key = SchemaNameKey::new(catalog, schema).as_raw_key();
 
-        let key = schema_key.as_bytes();
-
-        self.backend_cache_invalidator.invalidate_key(key).await;
+        self.backend_cache_invalidator.invalidate_key(&key).await;
     }
 
     pub async fn invalidate_table(
@@ -160,7 +158,7 @@ impl CatalogManager for FrontendCatalogManager {
         Ok(())
     }
 
-    async fn register_catalog(&self, _name: String) -> CatalogResult<bool> {
+    async fn register_catalog(self: Arc<Self>, _name: String) -> CatalogResult<bool> {
         unimplemented!("FrontendCatalogManager does not support registering catalog")
     }
 
@@ -284,46 +282,36 @@ impl CatalogManager for FrontendCatalogManager {
     }
 
     async fn catalog_names(&self) -> CatalogResult<Vec<String>> {
-        let key = build_catalog_prefix();
-        let req = RangeRequest::new().with_prefix(key.as_bytes());
+        let stream = self
+            .table_metadata_manager
+            .catalog_manager()
+            .catalog_names()
+            .await;
 
-        let kvs = self
-            .backend
-            .range(req)
+        let keys = stream
+            .try_collect::<Vec<_>>()
             .await
-            .context(TableMetadataManagerSnafu)?
-            .kvs;
+            .map_err(BoxedError::new)
+            .context(ListCatalogsSnafu)?;
 
-        let mut res = HashSet::new();
-        for KeyValue { key: k, value: _ } in kvs {
-            let catalog_key = String::from_utf8_lossy(&k);
-            if let Ok(key) = CatalogKey::parse(catalog_key.as_ref()) {
-                let _ = res.insert(key.catalog_name);
-            } else {
-                warn!("invalid catalog key: {:?}", catalog_key);
-            }
-        }
-        Ok(res.into_iter().collect())
+        Ok(keys)
     }
 
     async fn schema_names(&self, catalog: &str) -> CatalogResult<Vec<String>> {
-        let key = build_schema_prefix(catalog);
-        let req = RangeRequest::new().with_prefix(key.as_bytes());
-
-        let kvs = self
-            .backend
-            .range(req)
+        let stream = self
+            .table_metadata_manager
+            .schema_manager()
+            .schema_names(catalog)
+            .await;
+        let mut keys = stream
+            .try_collect::<BTreeSet<_>>()
             .await
-            .context(TableMetadataManagerSnafu)?
-            .kvs;
+            .map_err(BoxedError::new)
+            .context(ListSchemasSnafu { catalog })?;
 
-        let mut res = HashSet::new();
-        for KeyValue { key: k, value: _ } in kvs {
-            let key =
-                SchemaKey::parse(String::from_utf8_lossy(&k)).context(InvalidCatalogValueSnafu)?;
-            let _ = res.insert(key.schema_name);
-        }
-        Ok(res.into_iter().collect())
+        keys.insert(INFORMATION_SCHEMA_NAME.to_string());
+
+        Ok(keys.into_iter().collect::<Vec<_>>())
     }
 
     async fn table_names(&self, catalog: &str, schema: &str) -> CatalogResult<Vec<String>> {
@@ -332,41 +320,45 @@ impl CatalogManager for FrontendCatalogManager {
             .table_name_manager()
             .tables(catalog, schema)
             .await
-            .context(TableMetadataManagerSnafu)?;
+            .context(TableMetadataManagerSnafu)?
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect::<Vec<String>>();
         if catalog == DEFAULT_CATALOG_NAME && schema == DEFAULT_SCHEMA_NAME {
-            tables.push("numbers".to_string());
+            tables.push(NUMBERS_TABLE_NAME.to_string());
+        }
+        if schema == INFORMATION_SCHEMA_NAME {
+            tables.push(TABLES.to_string());
+            tables.push(COLUMNS.to_string());
         }
 
         Ok(tables)
     }
 
     async fn catalog_exist(&self, catalog: &str) -> CatalogResult<bool> {
-        let key = CatalogKey {
-            catalog_name: catalog.to_string(),
-        }
-        .to_string();
-        self.backend
-            .get(key.as_bytes())
+        self.table_metadata_manager
+            .catalog_manager()
+            .exist(CatalogNameKey::new(catalog))
             .await
             .context(TableMetadataManagerSnafu)
-            .map(|x| x.is_some())
     }
 
     async fn schema_exist(&self, catalog: &str, schema: &str) -> CatalogResult<bool> {
-        let schema_key = SchemaKey {
-            catalog_name: catalog.to_string(),
-            schema_name: schema.to_string(),
+        if schema == INFORMATION_SCHEMA_NAME {
+            return Ok(true);
         }
-        .to_string();
-        Ok(self
-            .backend()
-            .get(schema_key.as_bytes())
+        self.table_metadata_manager
+            .schema_manager()
+            .exist(SchemaNameKey::new(catalog, schema))
             .await
-            .context(TableMetadataManagerSnafu)?
-            .is_some())
+            .context(TableMetadataManagerSnafu)
     }
 
     async fn table_exist(&self, catalog: &str, schema: &str, table: &str) -> CatalogResult<bool> {
+        if schema == INFORMATION_SCHEMA_NAME && (table == TABLES || table == COLUMNS) {
+            return Ok(true);
+        }
+
         let key = TableNameKey::new(catalog, schema, table);
         self.table_metadata_manager
             .table_name_manager()
@@ -384,7 +376,7 @@ impl CatalogManager for FrontendCatalogManager {
     ) -> CatalogResult<Option<TableRef>> {
         if catalog == DEFAULT_CATALOG_NAME
             && schema == DEFAULT_SCHEMA_NAME
-            && table_name == "numbers"
+            && table_name == NUMBERS_TABLE_NAME
         {
             return Ok(Some(Arc::new(NumbersTable::default())));
         }
@@ -392,9 +384,12 @@ impl CatalogManager for FrontendCatalogManager {
         if schema == INFORMATION_SCHEMA_NAME {
             // hack: use existing cyclin reference to get Arc<Self>.
             // This can be remove by refactoring the struct into something like Arc<Inner>
+            common_telemetry::info!("going to use dist instance");
             let manager = if let Some(instance) = self.dist_instance.as_ref() {
+                common_telemetry::info!("dist instance exist");
                 instance.catalog_manager() as _
             } else {
+                common_telemetry::info!("dist instance doesn't exist");
                 return Ok(None);
             };
 
@@ -404,18 +399,26 @@ impl CatalogManager for FrontendCatalogManager {
         }
 
         let key = TableNameKey::new(catalog, schema, table_name);
-        let Some(table_name_value) = self.table_metadata_manager
+        let Some(table_name_value) = self
+            .table_metadata_manager
             .table_name_manager()
             .get(key)
             .await
-            .context(TableMetadataManagerSnafu)? else { return Ok(None) };
+            .context(TableMetadataManagerSnafu)?
+        else {
+            return Ok(None);
+        };
         let table_id = table_name_value.table_id();
 
-        let Some(table_info_value) = self.table_metadata_manager
+        let Some(table_info_value) = self
+            .table_metadata_manager
             .table_info_manager()
             .get(table_id)
             .await
-            .context(TableMetadataManagerSnafu)? else { return Ok(None) };
+            .context(TableMetadataManagerSnafu)?
+        else {
+            return Ok(None);
+        };
         let table_info = Arc::new(
             table_info_value
                 .table_info

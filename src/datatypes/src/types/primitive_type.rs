@@ -46,6 +46,7 @@ impl_native_type!(i8);
 impl_native_type!(i16);
 impl_native_type!(i32);
 impl_native_type!(i64);
+impl_native_type!(i128);
 impl_native_type!(f32);
 impl_native_type!(f64);
 
@@ -193,7 +194,9 @@ macro_rules! define_logical_primitive_type {
         // We need to define it as an empty struct `struct DataType {}` instead of a struct-unit
         // `struct DataType;` to ensure the serialized JSON string is compatible with previous
         // implementation.
-        #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+        #[derive(
+            Debug, Clone, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
+        )]
         pub struct $DataType {}
 
         impl LogicalPrimitiveType for $DataType {

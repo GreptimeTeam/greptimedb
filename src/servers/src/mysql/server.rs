@@ -17,6 +17,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use auth::UserProviderRef;
 use common_runtime::Runtime;
 use common_telemetry::logging::{info, warn};
 use futures::StreamExt;
@@ -29,7 +30,6 @@ use tokio::io::BufWriter;
 use tokio::net::TcpStream;
 use tokio_rustls::rustls::ServerConfig;
 
-use crate::auth::UserProviderRef;
 use crate::error::{Error, Result};
 use crate::mysql::handler::MysqlInstanceShim;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
@@ -214,7 +214,7 @@ impl Server for MysqlServer {
         let (stream, addr) = self.base_server.bind(listening).await?;
         let io_runtime = self.base_server.io_runtime();
 
-        let join_handle = tokio::spawn(self.accept(io_runtime, stream));
+        let join_handle = common_runtime::spawn_read(self.accept(io_runtime, stream));
         self.base_server.start_with(join_handle).await?;
         Ok(addr)
     }

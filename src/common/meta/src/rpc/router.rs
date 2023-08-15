@@ -12,14 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use api::v1::meta::{
     Partition as PbPartition, Peer as PbPeer, Region as PbRegion, RegionRoute as PbRegionRoute,
     RouteRequest as PbRouteRequest, RouteResponse as PbRouteResponse, Table as PbTable,
     TableId as PbTableId, TableRoute as PbTableRoute, TableRouteValue as PbTableRouteValue,
 };
-use serde::{Deserialize, Serialize, Serializer};
+use serde::ser::SerializeSeq;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use snafu::OptionExt;
 use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::TableId;
@@ -85,7 +86,6 @@ impl TableRoute {
             .iter()
             .map(|x| (x.region.id.region_number(), x.leader_peer.clone()))
             .collect::<HashMap<_, _>>();
-
         Self {
             table,
             region_routes,
@@ -237,7 +237,7 @@ impl TryFrom<PbTableRouteValue> for TableRoute {
 pub struct Table {
     pub id: u64,
     pub table_name: TableName,
-    #[serde(serialize_with = "as_utf8")]
+    #[serde(serialize_with = "as_utf8", deserialize_with = "from_utf8")]
     pub table_schema: Vec<u8>,
 }
 
@@ -281,7 +281,7 @@ pub struct Region {
     pub id: RegionId,
     pub name: String,
     pub partition: Option<Partition>,
-    pub attrs: HashMap<String, String>,
+    pub attrs: BTreeMap<String, String>,
 }
 
 impl From<PbRegion> for Region {
@@ -290,7 +290,7 @@ impl From<PbRegion> for Region {
             id: r.id.into(),
             name: r.name,
             partition: r.partition.map(Into::into),
-            attrs: r.attrs,
+            attrs: r.attrs.into_iter().collect::<BTreeMap<_, _>>(),
         }
     }
 }
@@ -301,16 +301,16 @@ impl From<Region> for PbRegion {
             id: region.id.into(),
             name: region.name,
             partition: region.partition.map(Into::into),
-            attrs: region.attrs,
+            attrs: region.attrs.into_iter().collect::<HashMap<_, _>>(),
         }
     }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct Partition {
-    #[serde(serialize_with = "as_utf8_vec")]
+    #[serde(serialize_with = "as_utf8_vec", deserialize_with = "from_utf8_vec")]
     pub column_list: Vec<Vec<u8>>,
-    #[serde(serialize_with = "as_utf8_vec")]
+    #[serde(serialize_with = "as_utf8_vec", deserialize_with = "from_utf8_vec")]
     pub value_list: Vec<Vec<u8>>,
 }
 
@@ -322,19 +322,37 @@ fn as_utf8<S: Serializer>(val: &[u8], serializer: S) -> std::result::Result<S::O
     )
 }
 
+pub fn from_utf8<'de, D>(deserializer: D) -> std::result::Result<Vec<u8>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let s = String::deserialize(deserializer)?;
+
+    Ok(s.into_bytes())
+}
+
 fn as_utf8_vec<S: Serializer>(
     val: &[Vec<u8>],
     serializer: S,
 ) -> std::result::Result<S::Ok, S::Error> {
-    serializer.serialize_str(
-        val.iter()
-            .map(|v| {
-                String::from_utf8(v.clone()).unwrap_or_else(|_| "<unknown-not-UTF8>".to_string())
-            })
-            .collect::<Vec<String>>()
-            .join(",")
-            .as_str(),
-    )
+    let mut seq = serializer.serialize_seq(Some(val.len()))?;
+    for v in val {
+        seq.serialize_element(&String::from_utf8_lossy(v))?;
+    }
+    seq.end()
+}
+
+pub fn from_utf8_vec<'de, D>(deserializer: D) -> std::result::Result<Vec<Vec<u8>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let values = Vec::<String>::deserialize(deserializer)?;
+
+    let values = values
+        .into_iter()
+        .map(|value| value.into_bytes())
+        .collect::<Vec<_>>();
+    Ok(values)
 }
 
 impl From<Partition> for PbPartition {
@@ -364,6 +382,19 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn test_de_serialize_partition() {
+        let p = Partition {
+            column_list: vec![b"a".to_vec(), b"b".to_vec()],
+            value_list: vec![b"hi".to_vec(), b",".to_vec()],
+        };
+
+        let output = serde_json::to_string(&p).unwrap();
+        let got: Partition = serde_json::from_str(&output).unwrap();
+
+        assert_eq!(got, p);
+    }
 
     #[test]
     fn test_route_request_trans() {
@@ -513,7 +544,7 @@ mod tests {
                         id: 1.into(),
                         name: "r1".to_string(),
                         partition: None,
-                        attrs: HashMap::new(),
+                        attrs: BTreeMap::new(),
                     },
                     leader_peer: Some(Peer::new(2, "a2")),
                     follower_peers: vec![Peer::new(1, "a1"), Peer::new(3, "a3")],
@@ -523,7 +554,7 @@ mod tests {
                         id: 2.into(),
                         name: "r2".to_string(),
                         partition: None,
-                        attrs: HashMap::new(),
+                        attrs: BTreeMap::new(),
                     },
                     leader_peer: Some(Peer::new(1, "a1")),
                     follower_peers: vec![Peer::new(2, "a2"), Peer::new(3, "a3")],

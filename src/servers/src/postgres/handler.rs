@@ -46,6 +46,7 @@ impl SimpleQueryHandler for PostgresServerHandler {
     where
         C: ClientInfo + Unpin + Send + Sync,
     {
+        let query_ctx = self.session.new_query_context();
         let _timer = timer!(
             crate::metrics::METRIC_POSTGRES_QUERY_TIMER,
             &[
@@ -53,16 +54,10 @@ impl SimpleQueryHandler for PostgresServerHandler {
                     crate::metrics::METRIC_POSTGRES_SUBPROTOCOL_LABEL,
                     crate::metrics::METRIC_POSTGRES_SIMPLE_QUERY.to_string()
                 ),
-                (
-                    crate::metrics::METRIC_DB_LABEL,
-                    self.session.context().get_db_string()
-                )
+                (crate::metrics::METRIC_DB_LABEL, query_ctx.get_db_string())
             ]
         );
-        let outputs = self
-            .query_handler
-            .do_query(query, self.session.context())
-            .await;
+        let outputs = self.query_handler.do_query(query, query_ctx).await;
 
         let mut results = Vec::with_capacity(outputs.len());
 
@@ -118,7 +113,7 @@ where
             Ok(rb) => stream::iter(
                 // collect rows from a single recordbatch into vector to avoid
                 // borrowing it
-                rb.rows().map(Ok).collect::<Vec<_>>().into_iter(),
+                rb.rows().map(Ok).collect::<Vec<_>>(),
             )
             .boxed(),
             Err(e) => stream::once(future::err(PgWireError::ApiError(Box::new(e)))).boxed(),
@@ -160,6 +155,7 @@ impl QueryParser for DefaultQueryParser {
 
     async fn parse_sql(&self, sql: &str, _types: &[Type]) -> PgWireResult<Self::Statement> {
         increment_counter!(crate::metrics::METRIC_POSTGRES_PREPARED_COUNT);
+        let query_ctx = self.session.new_query_context();
         let mut stmts = ParserContext::create_with_dialect(sql, &PostgreSqlDialect {})
             .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
         if stmts.len() != 1 {
@@ -172,7 +168,7 @@ impl QueryParser for DefaultQueryParser {
             let stmt = stmts.remove(0);
             let describe_result = self
                 .query_handler
-                .do_describe(stmt, self.session.context())
+                .do_describe(stmt, query_ctx)
                 .await
                 .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
 
@@ -218,6 +214,7 @@ impl ExtendedQueryHandler for PostgresServerHandler {
     where
         C: ClientInfo + Unpin + Send + Sync,
     {
+        let query_ctx = self.session.new_query_context();
         let _timer = timer!(
             crate::metrics::METRIC_POSTGRES_QUERY_TIMER,
             &[
@@ -225,10 +222,7 @@ impl ExtendedQueryHandler for PostgresServerHandler {
                     crate::metrics::METRIC_POSTGRES_SUBPROTOCOL_LABEL,
                     crate::metrics::METRIC_POSTGRES_EXTENDED_QUERY.to_string()
                 ),
-                (
-                    crate::metrics::METRIC_DB_LABEL,
-                    self.session.context().get_db_string()
-                )
+                (crate::metrics::METRIC_DB_LABEL, query_ctx.get_db_string())
             ]
         );
         let sql_plan = portal.statement().statement();
@@ -237,9 +231,7 @@ impl ExtendedQueryHandler for PostgresServerHandler {
             let plan = plan
                 .replace_params_with_values(parameters_to_scalar_values(plan, portal)?.as_ref())
                 .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
-            self.query_handler
-                .do_exec_plan(plan, self.session.context())
-                .await
+            self.query_handler.do_exec_plan(plan, query_ctx).await
         } else {
             // manually replace variables in prepared statement when no
             // logical_plan is generated. This happens when logical plan is not
@@ -249,10 +241,7 @@ impl ExtendedQueryHandler for PostgresServerHandler {
                 sql = sql.replace(&format!("${}", i + 1), &parameter_to_string(portal, i)?);
             }
 
-            self.query_handler
-                .do_query(&sql, self.session.context())
-                .await
-                .remove(0)
+            self.query_handler.do_query(&sql, query_ctx).await.remove(0)
         };
 
         output_to_query_response(output, portal.result_column_format())
@@ -268,10 +257,20 @@ impl ExtendedQueryHandler for PostgresServerHandler {
     {
         let (param_types, sql_plan, format) = match target {
             StatementOrPortal::Statement(stmt) => {
-                let param_types = Some(stmt.parameter_types().clone());
-                // TODO(sunng87): return server inferenced param_types if client
-                // not specified
-                (param_types, stmt.statement(), &Format::UnifiedBinary)
+                let sql_plan = stmt.statement();
+                if let Some(plan) = &sql_plan.plan {
+                    let param_types = plan
+                        .get_param_types()
+                        .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+
+                    let types = param_types_to_pg_types(&param_types)
+                        .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+
+                    (Some(types), sql_plan, &Format::UnifiedBinary)
+                } else {
+                    let param_types = Some(stmt.parameter_types().clone());
+                    (param_types, sql_plan, &Format::UnifiedBinary)
+                }
             }
             StatementOrPortal::Portal(portal) => (
                 None,

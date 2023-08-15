@@ -21,17 +21,19 @@ use arrow::array::{Array, ArrayRef, StringArray};
 use arrow::compute;
 use arrow::compute::kernels::comparison;
 use arrow::datatypes::{DataType as ArrowDataType, TimeUnit};
+use arrow_schema::IntervalUnit;
 use datafusion_common::ScalarValue;
 use snafu::{OptionExt, ResultExt};
 
+use super::{IntervalDayTimeVector, IntervalYearMonthVector};
 use crate::data_type::ConcreteDataType;
 use crate::error::{self, Result};
 use crate::scalars::{Scalar, ScalarVectorBuilder};
 use crate::value::{ListValue, ListValueRef};
 use crate::vectors::{
     BinaryVector, BooleanVector, ConstantVector, DateTimeVector, DateVector, Float32Vector,
-    Float64Vector, Int16Vector, Int32Vector, Int64Vector, Int8Vector, ListVector,
-    ListVectorBuilder, MutableVector, NullVector, StringVector, TimeMicrosecondVector,
+    Float64Vector, Int16Vector, Int32Vector, Int64Vector, Int8Vector, IntervalMonthDayNanoVector,
+    ListVector, ListVectorBuilder, MutableVector, NullVector, StringVector, TimeMicrosecondVector,
     TimeMillisecondVector, TimeNanosecondVector, TimeSecondVector, TimestampMicrosecondVector,
     TimestampMillisecondVector, TimestampNanosecondVector, TimestampSecondVector, UInt16Vector,
     UInt32Vector, UInt64Vector, UInt8Vector, Vector, VectorRef,
@@ -157,7 +159,7 @@ impl Helper {
             | ScalarValue::FixedSizeBinary(_, v) => {
                 ConstantVector::new(Arc::new(BinaryVector::from(vec![v])), length)
             }
-            ScalarValue::List(v, field) => {
+            ScalarValue::List(v, field) | ScalarValue::Fixedsizelist(v, field, _) => {
                 let item_type = ConcreteDataType::try_from(field.data_type())?;
                 let mut builder = ListVectorBuilder::with_type_capacity(item_type.clone(), 1);
                 if let Some(values) = v {
@@ -207,10 +209,20 @@ impl Helper {
             ScalarValue::Time64Nanosecond(v) => {
                 ConstantVector::new(Arc::new(TimeNanosecondVector::from(vec![v])), length)
             }
+            ScalarValue::IntervalYearMonth(v) => {
+                ConstantVector::new(Arc::new(IntervalYearMonthVector::from(vec![v])), length)
+            }
+            ScalarValue::IntervalDayTime(v) => {
+                ConstantVector::new(Arc::new(IntervalDayTimeVector::from(vec![v])), length)
+            }
+            ScalarValue::IntervalMonthDayNano(v) => {
+                ConstantVector::new(Arc::new(IntervalMonthDayNanoVector::from(vec![v])), length)
+            }
             ScalarValue::Decimal128(_, _, _)
-            | ScalarValue::IntervalYearMonth(_)
-            | ScalarValue::IntervalDayTime(_)
-            | ScalarValue::IntervalMonthDayNano(_)
+            | ScalarValue::DurationSecond(_)
+            | ScalarValue::DurationMillisecond(_)
+            | ScalarValue::DurationMicrosecond(_)
+            | ScalarValue::DurationNanosecond(_)
             | ScalarValue::Struct(_, _)
             | ScalarValue::Dictionary(_, _) => {
                 return error::ConversionSnafu {
@@ -286,9 +298,19 @@ impl Helper {
                 }
                 _ => unimplemented!("Arrow array datatype: {:?}", array.as_ref().data_type()),
             },
+            ArrowDataType::Interval(unit) => match unit {
+                IntervalUnit::YearMonth => Arc::new(
+                    IntervalYearMonthVector::try_from_arrow_interval_array(array)?,
+                ),
+                IntervalUnit::DayTime => {
+                    Arc::new(IntervalDayTimeVector::try_from_arrow_interval_array(array)?)
+                }
+                IntervalUnit::MonthDayNano => Arc::new(
+                    IntervalMonthDayNanoVector::try_from_arrow_interval_array(array)?,
+                ),
+            },
             ArrowDataType::Float16
             | ArrowDataType::Duration(_)
-            | ArrowDataType::Interval(_)
             | ArrowDataType::LargeList(_)
             | ArrowDataType::FixedSizeList(_, _)
             | ArrowDataType::Struct(_)
@@ -330,7 +352,7 @@ mod tests {
     };
     use arrow::datatypes::{Field, Int32Type};
     use common_time::time::Time;
-    use common_time::{Date, DateTime};
+    use common_time::{Date, DateTime, Interval};
 
     use super::*;
     use crate::value::Value;
@@ -476,6 +498,22 @@ mod tests {
         assert_eq!(3, vector.len());
         for i in 0..vector.len() {
             assert_eq!(Value::Time(Time::new_second(42)), vector.get(i));
+        }
+    }
+
+    #[test]
+    fn test_try_from_scalar_interval_value() {
+        let vector =
+            Helper::try_from_scalar_value(ScalarValue::IntervalMonthDayNano(Some(2000)), 3)
+                .unwrap();
+
+        assert_eq!(
+            ConcreteDataType::interval_month_day_nano_datatype(),
+            vector.data_type()
+        );
+        assert_eq!(3, vector.len());
+        for i in 0..vector.len() {
+            assert_eq!(Value::Interval(Interval::from_i128(2000)), vector.get(i));
         }
     }
 }

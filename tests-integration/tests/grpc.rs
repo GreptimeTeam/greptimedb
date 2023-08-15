@@ -13,19 +13,21 @@
 // limitations under the License.
 
 use api::v1::alter_expr::Kind;
-use api::v1::column::SemanticType;
 use api::v1::promql_request::Promql;
 use api::v1::{
-    column, AddColumn, AddColumns, AlterExpr, Column, ColumnDataType, ColumnDef, CreateTableExpr,
-    InsertRequest, InsertRequests, PromInstantQuery, PromRangeQuery, PromqlRequest, RequestHeader,
-    TableId,
+    column, AddColumn, AddColumns, AlterExpr, Basic, Column, ColumnDataType, ColumnDef,
+    CreateTableExpr, InsertRequest, InsertRequests, PromInstantQuery, PromRangeQuery,
+    PromqlRequest, RequestHeader, SemanticType, TableId,
 };
+use auth::user_provider_from_option;
 use client::{Client, Database, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::consts::{MIN_USER_TABLE_ID, MITO_ENGINE};
 use common_query::Output;
 use servers::prometheus::{PromData, PromSeries, PrometheusJsonResponse, PrometheusResponse};
 use servers::server::Server;
-use tests_integration::test_util::{setup_grpc_server, StorageType};
+use tests_integration::test_util::{
+    setup_grpc_server, setup_grpc_server_with_user_provider, StorageType,
+};
 
 #[macro_export]
 macro_rules! grpc_test {
@@ -61,6 +63,7 @@ macro_rules! grpc_tests {
                 test_auto_create_table,
                 test_insert_and_select,
                 test_dbname,
+                test_grpc_auth,
                 test_health_check,
                 test_prom_gateway_query,
             );
@@ -108,6 +111,59 @@ pub async fn test_dbname(store_type: StorageType) {
         grpc_client,
     );
     insert_and_assert(&db).await;
+    let _ = fe_grpc_server.shutdown().await;
+    guard.remove_all().await;
+}
+
+pub async fn test_grpc_auth(store_type: StorageType) {
+    let user_provider = user_provider_from_option(
+        &"static_user_provider:cmd:greptime_user=greptime_pwd".to_string(),
+    )
+    .unwrap();
+    let (addr, mut guard, fe_grpc_server) =
+        setup_grpc_server_with_user_provider(store_type, "auto_create_table", Some(user_provider))
+            .await;
+
+    let grpc_client = Client::with_urls(vec![addr]);
+    let mut db = Database::new_with_dbname(
+        format!("{}-{}", DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME),
+        grpc_client,
+    );
+
+    // 1. test without auth
+    let re = db.sql("show tables;").await;
+    assert!(re.is_err());
+    assert!(matches!(
+        re,
+        Err(client::Error::FlightGet {
+            tonic_code: tonic::Code::Unauthenticated,
+            ..
+        })
+    ));
+
+    // 2. test wrong auth
+    db.set_auth(api::v1::auth_header::AuthScheme::Basic(Basic {
+        username: "greptime_user".to_string(),
+        password: "wrong_pwd".to_string(),
+    }));
+    let re = db.sql("show tables;").await;
+    assert!(re.is_err());
+    assert!(matches!(
+        re,
+        Err(client::Error::FlightGet {
+            tonic_code: tonic::Code::Unauthenticated,
+            ..
+        })
+    ));
+
+    // 3. test right auth
+    db.set_auth(api::v1::auth_header::AuthScheme::Basic(Basic {
+        username: "greptime_user".to_string(),
+        password: "greptime_pwd".to_string(),
+    }));
+    let re = db.sql("show tables;").await;
+    assert!(re.is_ok());
+
     let _ = fe_grpc_server.shutdown().await;
     guard.remove_all().await;
 }

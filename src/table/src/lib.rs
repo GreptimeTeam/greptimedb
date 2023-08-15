@@ -13,6 +13,7 @@
 // limitations under the License.
 #![feature(assert_matches)]
 
+pub mod data_source;
 pub mod engine;
 pub mod error;
 pub mod metadata;

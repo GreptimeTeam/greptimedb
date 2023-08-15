@@ -8,20 +8,22 @@ license.workspace = true
 async-recursion = "1.0"
 async-trait.workspace = true
 bytemuck = "1.12"
-catalog = { path = "../catalog" }
-common-error = { path = "../common/error" }
-common-catalog = { path = "../common/catalog" }
-common-function-macro = { path = "../common/function-macro" }
+catalog = { workspace = true }
+common-catalog = { workspace = true }
+common-error = { workspace = true }
+common-function-macro = { workspace = true }
+common-telemetry = { workspace = true }
 datafusion.workspace = true
-datatypes = { path = "../datatypes" }
+datatypes = { workspace = true }
 futures = "0.3"
 greptime-proto.workspace = true
 promql-parser = "0.1.1"
 prost.workspace = true
-session = { path = "../session" }
+session = { workspace = true }
 snafu = { version = "0.7", features = ["backtraces"] }
-table = { path = "../table" }
+table = { workspace = true }
 
 [dev-dependencies]
+query = { workspace = true }
+session = { workspace = true, features = ["testing"] }
 tokio.workspace = true
-query = { path = "../query" }

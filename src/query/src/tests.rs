@@ -44,16 +44,15 @@ async fn exec_selection(engine: QueryEngineRef, sql: &str) -> Vec<RecordBatch> {
         .plan(stmt, QueryContext::arc())
         .await
         .unwrap();
-    let Output::Stream(stream) = engine
-        .execute(plan, QueryContext::arc())
-        .await
-        .unwrap() else { unreachable!() };
+    let Output::Stream(stream) = engine.execute(plan, QueryContext::arc()).await.unwrap() else {
+        unreachable!()
+    };
     util::collect(stream).await.unwrap()
 }
 
 pub fn new_query_engine_with_table(table: MemTable) -> QueryEngineRef {
     let table = Arc::new(table);
-    let catalog_manager = Arc::new(MemoryCatalogManager::new_with_table(table));
+    let catalog_manager = MemoryCatalogManager::new_with_table(table);
 
     QueryEngineFactory::new(catalog_manager, false).query_engine()
 }

@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
-
 use servers::error::Result;
 use servers::query_handler::sql::SqlQueryHandler;
 use servers::query_handler::ScriptHandler;
@@ -24,7 +22,7 @@ use crate::create_testing_instance;
 
 #[tokio::test]
 async fn test_insert_py_udf_and_query() -> Result<()> {
-    let query_ctx = Arc::new(QueryContext::new());
+    let query_ctx = QueryContext::arc();
     let table = MemTable::default_numbers_table();
 
     let instance = create_testing_instance(table);

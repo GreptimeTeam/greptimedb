@@ -14,9 +14,10 @@
 
 //! Structs and utilities for writing regions.
 
+mod handle_close;
 mod handle_create;
 mod handle_open;
-pub(crate) mod request;
+mod handle_write;
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -24,23 +25,27 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use common_runtime::JoinHandle;
-use common_telemetry::logging;
+use common_telemetry::{error, info, warn};
 use futures::future::try_join_all;
 use object_store::ObjectStore;
 use snafu::{ensure, ResultExt};
 use store_api::logstore::LogStore;
+use store_api::region_request::RegionRequest;
 use store_api::storage::RegionId;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{mpsc, Mutex};
 
 use crate::config::MitoConfig;
 use crate::error::{JoinSnafu, Result, WorkerStoppedSnafu};
-use crate::region::{RegionMap, RegionMapRef};
-use crate::worker::request::{RegionRequest, RequestBody, WorkerRequest};
+use crate::memtable::{DefaultMemtableBuilder, MemtableBuilderRef};
+use crate::region::{MitoRegionRef, RegionMap, RegionMapRef};
+use crate::request::{RegionTask, WorkerRequest};
+use crate::wal::Wal;
 
 /// Identifier for a worker.
 pub(crate) type WorkerId = u32;
 
+#[cfg_attr(doc, aquamarine::aquamarine)]
 /// A fixed size group of [RegionWorkers](RegionWorker).
 ///
 /// A worker group binds each region to a specific [RegionWorker] and sends
@@ -87,20 +92,18 @@ impl WorkerGroup {
     ///
     /// The number of workers should be power of two.
     pub(crate) fn start<S: LogStore>(
-        config: &MitoConfig,
+        config: MitoConfig,
         log_store: Arc<S>,
         object_store: ObjectStore,
     ) -> WorkerGroup {
         assert!(config.num_workers.is_power_of_two());
+        let config = Arc::new(config);
 
         let workers = (0..config.num_workers)
             .map(|id| {
                 RegionWorker::start(
-                    WorkerConfig {
-                        id: id as WorkerId,
-                        channel_size: config.worker_channel_size,
-                        request_batch_size: config.worker_request_batch_size,
-                    },
+                    id as WorkerId,
+                    config.clone(),
                     log_store.clone(),
                     object_store.clone(),
                 )
@@ -112,7 +115,7 @@ impl WorkerGroup {
 
     /// Stop the worker group.
     pub(crate) async fn stop(&self) -> Result<()> {
-        logging::info!("Stop region worker group");
+        info!("Stop region worker group");
 
         try_join_all(self.workers.iter().map(|worker| worker.stop())).await?;
 
@@ -120,10 +123,20 @@ impl WorkerGroup {
     }
 
     /// Submit a request to a worker in the group.
-    pub(crate) async fn submit_to_worker(&self, request: RegionRequest) -> Result<()> {
-        self.worker(request.body.region_id())
-            .submit_request(request)
-            .await
+    pub(crate) async fn submit_to_worker(&self, task: RegionTask) -> Result<()> {
+        self.worker(task.region_id).submit_request(task).await
+    }
+
+    /// Returns true if the specific region exists.
+    pub(crate) fn is_region_exists(&self, region_id: RegionId) -> bool {
+        self.worker(region_id).is_region_exists(region_id)
+    }
+
+    /// Returns region of specific `region_id`.
+    ///
+    /// This method should not be public.
+    pub(crate) fn get_region(&self, region_id: RegionId) -> Option<MitoRegionRef> {
+        self.worker(region_id).get_region(region_id)
     }
 
     /// Get worker for specific `region_id`.
@@ -139,17 +152,6 @@ impl WorkerGroup {
 
 fn value_to_index(value: usize, num_workers: usize) -> usize {
     value & (num_workers - 1)
-}
-
-/// Config for region worker.
-#[derive(Debug, Clone)]
-struct WorkerConfig {
-    /// Id of the worker
-    id: WorkerId,
-    /// Capacity of the request channel.
-    channel_size: usize,
-    /// Batch size to process request.
-    request_batch_size: usize,
 }
 
 /// Worker to write and alter regions bound to it.
@@ -170,29 +172,31 @@ pub(crate) struct RegionWorker {
 impl RegionWorker {
     /// Start a region worker and its background thread.
     fn start<S: LogStore>(
-        config: WorkerConfig,
+        id: WorkerId,
+        config: Arc<MitoConfig>,
         log_store: Arc<S>,
         object_store: ObjectStore,
     ) -> RegionWorker {
         let regions = Arc::new(RegionMap::default());
-        let (sender, receiver) = mpsc::channel(config.channel_size);
+        let (sender, receiver) = mpsc::channel(config.worker_channel_size);
 
         let running = Arc::new(AtomicBool::new(true));
         let mut worker_thread = RegionWorkerLoop {
-            id: config.id,
+            id,
+            config,
             regions: regions.clone(),
             receiver,
-            log_store,
+            wal: Wal::new(log_store),
             object_store,
             running: running.clone(),
-            request_batch_size: config.request_batch_size,
+            memtable_builder: Arc::new(DefaultMemtableBuilder::default()),
         };
-        let handle = common_runtime::spawn_bg(async move {
+        let handle = common_runtime::spawn_write(async move {
             worker_thread.run().await;
         });
 
         RegionWorker {
-            id: config.id,
+            id,
             regions,
             sender,
             handle: Mutex::new(Some(handle)),
@@ -201,7 +205,7 @@ impl RegionWorker {
     }
 
     /// Submit request to background worker thread.
-    async fn submit_request(&self, request: RegionRequest) -> Result<()> {
+    async fn submit_request(&self, request: RegionTask) -> Result<()> {
         ensure!(self.is_running(), WorkerStoppedSnafu { id: self.id });
         if self
             .sender
@@ -209,7 +213,7 @@ impl RegionWorker {
             .await
             .is_err()
         {
-            logging::warn!(
+            warn!(
                 "Worker {} is already exited but the running flag is still true",
                 self.id
             );
@@ -227,11 +231,11 @@ impl RegionWorker {
     async fn stop(&self) -> Result<()> {
         let handle = self.handle.lock().await.take();
         if let Some(handle) = handle {
-            logging::info!("Stop region worker {}", self.id);
+            info!("Stop region worker {}", self.id);
 
             self.set_running(false);
             if self.sender.send(WorkerRequest::Stop).await.is_err() {
-                logging::warn!("Worker {} is already exited before stop", self.id);
+                warn!("Worker {} is already exited before stop", self.id);
             }
 
             handle.await.context(JoinSnafu)?;
@@ -248,6 +252,16 @@ impl RegionWorker {
     /// Sets whether the worker is still running.
     fn set_running(&self, value: bool) {
         self.running.store(value, Ordering::Relaxed)
+    }
+
+    /// Returns true if the worker contains specific region.
+    fn is_region_exists(&self, region_id: RegionId) -> bool {
+        self.regions.is_region_exists(region_id)
+    }
+
+    /// Returns region of specific `region_id`.
+    fn get_region(&self, region_id: RegionId) -> Option<MitoRegionRef> {
+        self.regions.get_region(region_id)
     }
 }
 
@@ -266,27 +280,29 @@ type RequestBuffer = Vec<WorkerRequest>;
 struct RegionWorkerLoop<S> {
     // Id of the worker.
     id: WorkerId,
+    /// Engine config.
+    config: Arc<MitoConfig>,
     /// Regions bound to the worker.
     regions: RegionMapRef,
     /// Request receiver.
     receiver: Receiver<WorkerRequest>,
-    // TODO(yingwen): Replaced by Wal.
-    log_store: Arc<S>,
+    /// WAL of the engine.
+    wal: Wal<S>,
     /// Object store for manifest and SSTs.
     object_store: ObjectStore,
     /// Whether the worker thread is still running.
     running: Arc<AtomicBool>,
-    /// Batch size to fetch requests from channel.
-    request_batch_size: usize,
+    /// Memtable builder for each region.
+    memtable_builder: MemtableBuilderRef,
 }
 
-impl<S> RegionWorkerLoop<S> {
+impl<S: LogStore> RegionWorkerLoop<S> {
     /// Starts the worker loop.
     async fn run(&mut self) {
-        logging::info!("Start region worker thread {}", self.id);
+        info!("Start region worker thread {}", self.id);
 
         // Buffer to retrieve requests from receiver.
-        let mut buffer = RequestBuffer::with_capacity(self.request_batch_size);
+        let mut buffer = RequestBuffer::with_capacity(self.config.worker_request_batch_size);
 
         while self.running.load(Ordering::Relaxed) {
             // Clear the buffer before handling next batch of requests.
@@ -310,22 +326,27 @@ impl<S> RegionWorkerLoop<S> {
             self.handle_requests(&mut buffer).await;
         }
 
-        logging::info!("Exit region worker thread {}", self.id);
+        self.clean().await;
+
+        info!("Exit region worker thread {}", self.id);
     }
 
     /// Dispatches and processes requests.
     ///
     /// `buffer` should be empty.
     async fn handle_requests(&mut self, buffer: &mut RequestBuffer) {
-        let mut dml_requests = Vec::with_capacity(buffer.len());
+        let write_requests = Vec::with_capacity(buffer.len());
         let mut ddl_requests = Vec::with_capacity(buffer.len());
         for worker_req in buffer.drain(..) {
             match worker_req {
-                WorkerRequest::Region(req) => {
-                    if req.body.is_ddl() {
-                        ddl_requests.push(req);
+                WorkerRequest::Region(task) => {
+                    if matches!(task.request, RegionRequest::Write(_)) {
+                        // write_requests.push(SenderWriteRequest {
+                        //     sender: task.sender,
+                        //     request: task.request.into_write_request(),
+                        // });
                     } else {
-                        dml_requests.push(req);
+                        ddl_requests.push(task);
                     }
                 }
                 // We receive a stop signal, but we still want to process remaining
@@ -337,42 +358,53 @@ impl<S> RegionWorkerLoop<S> {
             }
         }
 
-        // Handles all dml requests first. So we can alter regions without
-        // considering existing dml requests.
-        self.handle_dml_requests(dml_requests).await;
+        // Handles all write requests first. So we can alter regions without
+        // considering existing write requests.
+        self.handle_write_requests(write_requests).await;
 
         self.handle_ddl_requests(ddl_requests).await;
     }
+}
 
-    /// Takes and handles all dml requests.
-    async fn handle_dml_requests(&mut self, write_requests: Vec<RegionRequest>) {
-        if write_requests.is_empty() {
-            return;
-        }
-
-        // Create a write context that holds meta and sequence.
-
-        unimplemented!()
-    }
-
+impl<S> RegionWorkerLoop<S> {
     /// Takes and handles all ddl requests.
-    async fn handle_ddl_requests(&mut self, ddl_requests: Vec<RegionRequest>) {
-        if ddl_requests.is_empty() {
+    async fn handle_ddl_requests(&mut self, ddl_tasks: Vec<RegionTask>) {
+        if ddl_tasks.is_empty() {
             return;
         }
 
-        for request in ddl_requests {
-            let res = match request.body {
-                RequestBody::Create(req) => self.handle_create_request(req).await,
-                RequestBody::Open(req) => self.handle_open_request(req).await,
-                RequestBody::Write(_) => unreachable!(),
+        for task in ddl_tasks {
+            let res: std::result::Result<(), crate::error::Error> = match task.request {
+                RegionRequest::Create(req) => self.handle_create_request(task.region_id, req).await,
+                RegionRequest::Open(req) => self.handle_open_request(task.region_id, req).await,
+                RegionRequest::Close(_) => self.handle_close_request(task.region_id).await,
+                RegionRequest::Write(_)
+                | RegionRequest::Read(_)
+                | RegionRequest::Delete(_)
+                | RegionRequest::Drop(_)
+                | RegionRequest::Alter(_)
+                | RegionRequest::Flush(_)
+                | RegionRequest::Compact(_) => unreachable!(),
             };
 
-            if let Some(sender) = request.sender {
+            if let Some(sender) = task.sender {
                 // Ignore send result.
                 let _ = sender.send(res);
             }
         }
+    }
+
+    // Clean up the worker.
+    async fn clean(&self) {
+        // Closes remaining regions.
+        let regions = self.regions.list_regions();
+        for region in regions {
+            if let Err(e) = region.stop().await {
+                error!(e; "Failed to stop region {}", region.region_id);
+            }
+        }
+
+        self.regions.clear();
     }
 }
 
@@ -396,9 +428,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_worker_group_start_stop() {
-        let env = TestEnv::new("group-stop");
+        let env = TestEnv::with_prefix("group-stop");
         let group = env
-            .create_worker_group(&MitoConfig {
+            .create_worker_group(MitoConfig {
                 num_workers: 4,
                 ..Default::default()
             })

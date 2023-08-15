@@ -13,19 +13,20 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
+use auth::UserInfoRef;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
+use axum::Extension;
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
+use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_grpc::writer::Precision;
 use common_telemetry::timer;
 use session::context::QueryContext;
 
 use crate::error::{Result, TimePrecisionSnafu};
 use crate::influxdb::InfluxdbRequest;
-use crate::parse_catalog_and_schema_from_client_database_name;
 use crate::query_handler::InfluxdbLineProtocolHandlerRef;
 
 // https://docs.influxdata.com/influxdb/v1.8/tools/api/#ping-http-endpoint
@@ -44,6 +45,7 @@ pub async fn influxdb_health() -> Result<impl IntoResponse> {
 pub async fn influxdb_write_v1(
     State(handler): State<InfluxdbLineProtocolHandlerRef>,
     Query(mut params): Query<HashMap<String, String>>,
+    user_info: Extension<UserInfoRef>,
     lines: String,
 ) -> Result<impl IntoResponse> {
     let db = params
@@ -55,13 +57,14 @@ pub async fn influxdb_write_v1(
         .map(|val| parse_time_precision(val))
         .transpose()?;
 
-    influxdb_write(&db, precision, lines, handler).await
+    influxdb_write(&db, precision, lines, handler, user_info.0).await
 }
 
 #[axum_macros::debug_handler]
 pub async fn influxdb_write_v2(
     State(handler): State<InfluxdbLineProtocolHandlerRef>,
     Query(mut params): Query<HashMap<String, String>>,
+    user_info: Extension<UserInfoRef>,
     lines: String,
 ) -> Result<impl IntoResponse> {
     let db = params
@@ -73,7 +76,7 @@ pub async fn influxdb_write_v2(
         .map(|val| parse_time_precision(val))
         .transpose()?;
 
-    influxdb_write(&db, precision, lines, handler).await
+    influxdb_write(&db, precision, lines, handler, user_info.0).await
 }
 
 pub async fn influxdb_write(
@@ -81,14 +84,16 @@ pub async fn influxdb_write(
     precision: Option<Precision>,
     lines: String,
     handler: InfluxdbLineProtocolHandlerRef,
+    user_info: UserInfoRef,
 ) -> Result<impl IntoResponse> {
     let _timer = timer!(
         crate::metrics::METRIC_HTTP_INFLUXDB_WRITE_ELAPSED,
         &[(crate::metrics::METRIC_DB_LABEL, db.to_string())]
     );
 
-    let (catalog, schema) = parse_catalog_and_schema_from_client_database_name(db);
-    let ctx = Arc::new(QueryContext::with(catalog, schema));
+    let (catalog, schema) = parse_catalog_and_schema_from_db_string(db);
+    let ctx = QueryContext::with(catalog, schema);
+    ctx.set_current_user(Some(user_info));
 
     let request = InfluxdbRequest { precision, lines };
 
