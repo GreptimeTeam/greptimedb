@@ -100,8 +100,8 @@ pub struct TxnRequest {
     pub failure: Vec<TxnOp>,
 }
 
-impl FromIterator<TxnRequest> for TxnRequest {
-    fn from_iter<T: IntoIterator<Item = TxnRequest>>(iter: T) -> Self {
+impl TxnRequest {
+    pub fn merge<T: IntoIterator<Item = TxnRequest>>(iter: T) -> Self {
         let mut merged = Self::default();
 
         iter.into_iter().for_each(|txn| {
