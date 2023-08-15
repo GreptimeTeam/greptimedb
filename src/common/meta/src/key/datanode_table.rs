@@ -177,8 +177,8 @@ impl DatanodeTableManager {
     ) -> Result<TxnRequest> {
         let mut txn = TxnRequest::default();
         let txns = distribution
-            .into_iter()
-            .map(|(datanode_id, _)| {
+            .into_keys()
+            .map(|datanode_id| {
                 let key = DatanodeTableKey::new(datanode_id, table_id);
                 let raw_key = key.as_raw_key();
 
