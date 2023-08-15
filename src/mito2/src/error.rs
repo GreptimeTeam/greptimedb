@@ -342,6 +342,12 @@ pub enum Error {
 
     #[snafu(display("Invalid arrow record batch, {}, location: {}", reason, location))]
     InvalidRecordBatch { reason: String, location: Location },
+
+    #[snafu(display("Failed to convert array to vector, location: {}, source: {}", location, source))]
+    ConvertVector {
+        location: Location,
+        source: datatypes::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -397,6 +403,7 @@ impl ErrorExt for Error {
             DeserializeField { .. } => StatusCode::Unexpected,
             InvalidBatch { .. } => StatusCode::InvalidArguments,
             InvalidRecordBatch { .. } => StatusCode::InvalidArguments,
+            ConvertVector { source, .. } => source.status_code(),
         }
     }
 

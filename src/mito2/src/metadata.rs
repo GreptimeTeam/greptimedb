@@ -155,6 +155,12 @@ impl RegionMetadata {
         self.schema.arrow_schema().fields[index].clone()
     }
 
+    /// Finds a column by name.
+    pub(crate) fn column_by_name(&self, name: &str) -> Option<&ColumnMetadata> {
+        self.schema.column_index_by_name(name)
+            .map(|index| &self.column_metadatas[index])
+    }
+
     // TODO(yingwen): Ensure column name is not internal columns.
     /// Checks whether the metadata is valid.
     fn validate(&self) -> Result<()> {

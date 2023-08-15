@@ -207,6 +207,7 @@ impl ParquetReader {
         RegionMetadata::from_json(json)
     }
 
+    // TODO(yingwen): We need a metrics to record the histogram of batches in on record batch.
     /// Converts our [Batch] from arrow's [RecordBatch].
     fn convert_arrow_record_batch(&self, _record_batch: RecordBatch) -> Result<Batch> {
         unimplemented!()
