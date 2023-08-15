@@ -27,10 +27,10 @@
 use std::sync::Arc;
 
 use api::v1::SemanticType;
-use datatypes::arrow::array::{ArrayRef, BinaryArray, DictionaryArray, UInt16Array, UInt64Array};
+use datatypes::arrow::array::{ArrayRef, BinaryArray, DictionaryArray, UInt16Array};
 use datatypes::arrow::datatypes::{DataType, Field, FieldRef, Fields, Schema, SchemaRef};
 use datatypes::arrow::record_batch::RecordBatch;
-use datatypes::prelude::ConcreteDataType;
+use datatypes::vectors::Vector;
 use snafu::ResultExt;
 use store_api::storage::consts::{
     OP_TYPE_COLUMN_NAME, PRIMARY_KEY_COLUMN_NAME, SEQUENCE_COLUMN_NAME,
@@ -38,7 +38,7 @@ use store_api::storage::consts::{
 use store_api::storage::{ColumnId, Tsid};
 
 use crate::error::{NewRecordBatchSnafu, Result};
-use crate::metadata::{ColumnMetadata, RegionMetadata};
+use crate::metadata::RegionMetadata;
 use crate::read::Batch;
 
 /// Number of internal columns.
@@ -73,17 +73,18 @@ pub(crate) fn to_sst_arrow_schema(metadata: &RegionMetadata) -> SchemaRef {
 ///
 /// The `arrow_schema` is constructed by [to_sst_arrow_schema].
 pub(crate) fn to_sst_record_batch(batch: &Batch, arrow_schema: &SchemaRef) -> Result<RecordBatch> {
-    let mut columns = Vec::with_capacity(num_columns_to_store(batch.columns().len()));
+    let mut columns = Vec::with_capacity(num_columns_to_store(batch.fields().len()));
 
     // Store all fields first.
-    for column in batch.columns() {
+    for column in batch.fields() {
         columns.push(column.data.to_arrow_array());
     }
     // Add time index column.
-    // Add internal columns.
+    columns.push(batch.timestamps().to_arrow_array());
+    // Add internal columns: primary key, sequences, op types.
+    columns.push(new_primary_key_array(batch.primary_key(), batch.num_rows()));
     columns.push(batch.sequences().to_arrow_array());
     columns.push(batch.op_types().to_arrow_array());
-    columns.push(new_tsid_array(batch.tsid(), batch.num_rows()));
 
     RecordBatch::try_new(arrow_schema.clone(), columns).context(NewRecordBatchSnafu)
 }
@@ -144,8 +145,8 @@ fn internal_fields() -> [FieldRef; 3] {
 
 /// Creates a new array for specific `primary_key`.
 fn new_primary_key_array(primary_key: &[u8], num_rows: usize) -> ArrayRef {
-    let keys = Arc::new(BinaryArray::from_iter_values([primary_key]));
-    let values = Arc::new(UInt16Array::from_value(0, num_rows));
+    let values = Arc::new(BinaryArray::from_iter_values([primary_key]));
+    let keys = UInt16Array::from_value(0, num_rows);
 
     // Safety: The key index is valid.
     Arc::new(DictionaryArray::new(keys, values))
