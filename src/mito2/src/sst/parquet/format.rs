@@ -15,9 +15,9 @@
 //! Format to store in parquet.
 //!
 //! We store three internal columns in parquet:
-//! - `__primary_key`, the primary key of the row (tags).
-//! - `__sequence`, the sequence number of a row.
-//! - `__op_type`, the op type of the row.
+//! - `__primary_key`, the primary key of the row (tags). Type: dictionary(uint16, binary)
+//! - `__sequence`, the sequence number of a row. Type: uint64
+//! - `__op_type`, the op type of the row. Type: uint8
 //!
 //! The schema of a parquet file is:
 //! ```text
@@ -43,8 +43,6 @@ use crate::error::{ConvertVectorSnafu, InvalidRecordBatchSnafu, NewRecordBatchSn
 use crate::metadata::RegionMetadata;
 use crate::read::{Batch, BatchBuilder, BatchColumn};
 
-/// Number of internal columns.
-const INTERNAL_COLUMN_NUM: usize = 3;
 /// Number of columns that have fixed positions.
 ///
 /// Contains: time index and internal columns.
@@ -119,7 +117,7 @@ pub(crate) fn from_sst_record_batch(
 
     // The record batch must has time index and internal columns.
     ensure!(
-        record_batch.num_columns() > INTERNAL_COLUMN_NUM,
+        record_batch.num_columns() >= FIXED_POS_COLUMN_NUM,
         InvalidRecordBatchSnafu {
             reason: format!(
                 "record batch only has {} columns",
@@ -234,24 +232,14 @@ fn primary_key_offsets(pk_dict_array: &DictionaryArray<UInt16Type>) -> Result<Ve
     Ok(offsets)
 }
 
-/// Key type for arrow dictionary.
-const fn dictionary_key_type() -> DataType {
-    DataType::UInt16
-}
-
-/// Value type of the primary key.
-const fn pk_value_type() -> DataType {
-    DataType::Binary
-}
-
 /// Fields for internal columns.
 fn internal_fields() -> [FieldRef; 3] {
     // Internal columns are always not null.
     [
         Arc::new(Field::new_dictionary(
             PRIMARY_KEY_COLUMN_NAME,
-            dictionary_key_type(),
-            pk_value_type(),
+            DataType::UInt16,
+            DataType::Binary,
             false,
         )),
         Arc::new(Field::new(SEQUENCE_COLUMN_NAME, DataType::UInt64, false)),
