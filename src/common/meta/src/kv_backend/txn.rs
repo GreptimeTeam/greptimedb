@@ -100,6 +100,20 @@ pub struct TxnRequest {
     pub failure: Vec<TxnOp>,
 }
 
+impl FromIterator<TxnRequest> for TxnRequest {
+    fn from_iter<T: IntoIterator<Item = TxnRequest>>(iter: T) -> Self {
+        let mut merged = Self::default();
+
+        iter.into_iter().for_each(|txn| {
+            merged.compare.extend(txn.compare);
+            merged.success.extend(txn.success);
+            merged.failure.extend(txn.failure);
+        });
+
+        merged
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum TxnOpResponse {
     ResponsePut(PutResponse),

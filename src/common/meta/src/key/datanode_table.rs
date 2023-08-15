@@ -109,10 +109,10 @@ impl DatanodeTableManager {
     /// Builds the create datanode table transactions. It only executes while the primary keys comparing successes.
     pub fn build_create_txn(
         &self,
-        txn: &mut TxnRequest,
         table_id: TableId,
         distribution: RegionDistribution,
-    ) -> Result<()> {
+    ) -> Result<TxnRequest> {
+        let mut txn = TxnRequest::default();
         let txns = distribution
             .into_iter()
             .map(|(datanode_id, regions)| {
@@ -125,17 +125,17 @@ impl DatanodeTableManager {
 
         txn.success.extend(txns);
 
-        Ok(())
+        Ok(txn)
     }
 
     /// Builds the update datanode table transactions. It only executes while the primary keys comparing successes.
     pub(crate) fn build_update_txn(
         &self,
-        txn: &mut TxnRequest,
         table_id: TableId,
         current_region_distribution: RegionDistribution,
         new_region_distribution: RegionDistribution,
-    ) -> Result<()> {
+    ) -> Result<TxnRequest> {
+        let mut txn = TxnRequest::default();
         let mut opts = Vec::new();
 
         // Removes the old datanode table key value pairs
@@ -166,34 +166,29 @@ impl DatanodeTableManager {
         }
 
         txn.success.extend(opts);
-        Ok(())
+        Ok(txn)
     }
 
     /// Builds the delete datanode table transactions. It only executes while the primary keys comparing successes.
     pub fn build_delete_txn(
         &self,
-        txn: &mut TxnRequest,
         table_id: TableId,
         distribution: RegionDistribution,
-    ) -> Result<()> {
+    ) -> Result<TxnRequest> {
+        let mut txn = TxnRequest::default();
         let txns = distribution
             .into_iter()
-            .map(|(datanode_id, regions)| {
+            .map(|(datanode_id, _)| {
                 let key = DatanodeTableKey::new(datanode_id, table_id);
                 let raw_key = key.as_raw_key();
-                let removed_key = to_removed_key(&String::from_utf8_lossy(&raw_key));
-                let val = DatanodeTableValue::new(table_id, regions);
 
-                Ok(TxnOp::Put(
-                    removed_key.into_bytes(),
-                    val.try_as_raw_value()?,
-                ))
+                Ok(TxnOp::Delete(raw_key))
             })
             .collect::<Result<Vec<_>>>()?;
 
         txn.success.extend(txns);
 
-        Ok(())
+        Ok(txn)
     }
 
     /// Create DatanodeTable key and value. If the key already exists, check if the value is the same.
