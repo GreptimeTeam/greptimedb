@@ -569,15 +569,19 @@ mod tests {
     }
 
     fn new_test_region_route() -> RegionRoute {
+        new_region_route(1, 2)
+    }
+
+    fn new_region_route(region_id: u64, datanode: u64) -> RegionRoute {
         RegionRoute {
             region: Region {
-                id: 1.into(),
+                id: region_id.into(),
                 name: "r1".to_string(),
                 partition: None,
                 attrs: BTreeMap::new(),
             },
-            leader_peer: Some(Peer::new(2, "a2")),
-            follower_peers: vec![Peer::new(1, "a1"), Peer::new(3, "a3")],
+            leader_peer: Some(Peer::new(datanode, "a2")),
+            follower_peers: vec![],
         }
     }
 
@@ -736,9 +740,9 @@ mod tests {
             .unwrap();
         assert_datanode_table(&table_metadata_manager, table_id, &region_routes).await;
         let new_region_routes = vec![
-            region_route.clone(),
-            region_route.clone(),
-            region_route.clone(),
+            new_region_route(1, 1),
+            new_region_route(2, 2),
+            new_region_route(3, 3),
         ];
         // it should be ok.
         table_metadata_manager
@@ -762,7 +766,7 @@ mod tests {
             .unwrap();
 
         let current_table_route_value = current_table_route_value.update(new_region_routes.clone());
-        let new_region_routes = vec![region_route.clone(), region_route.clone()];
+        let new_region_routes = vec![new_region_route(4, 4), new_region_route(5, 5)];
         // it should be ok.
         table_metadata_manager
             .update_table_route(
@@ -777,10 +781,10 @@ mod tests {
         // if the current_table_route_value is wrong, it should return an error.
         // The ABA problem.
         let wrong_table_route_value = current_table_route_value.update(vec![
-            region_route.clone(),
-            region_route.clone(),
-            region_route.clone(),
-            region_route.clone(),
+            new_region_route(1, 1),
+            new_region_route(2, 2),
+            new_region_route(3, 3),
+            new_region_route(4, 4),
         ]);
         assert!(table_metadata_manager
             .update_table_route(table_id, wrong_table_route_value, new_region_routes)
