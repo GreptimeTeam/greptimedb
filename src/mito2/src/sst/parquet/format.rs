@@ -58,12 +58,11 @@ pub(crate) fn to_sst_arrow_schema(metadata: &RegionMetadata) -> SchemaRef {
             .iter()
             .zip(&metadata.column_metadatas)
             .filter_map(|(field, column_meta)| {
-                // If the column is a tag column, we already store it in the primary key so we
-                // can ignore it.
-                if column_meta.semantic_type == SemanticType::Tag {
-                    None
-                } else {
+                if column_meta.semantic_type == SemanticType::Field {
                     Some(field.clone())
+                } else {
+                    // We have fixed positions for tags (primary key) and time index.
+                    None
                 }
             })
             .chain([metadata.time_index_field()])
@@ -254,4 +253,87 @@ fn new_primary_key_array(primary_key: &[u8], num_rows: usize) -> ArrayRef {
 
     // Safety: The key index is valid.
     Arc::new(DictionaryArray::new(keys, values))
+}
+
+#[cfg(test)]
+mod tests {
+    use datatypes::arrow::datatypes::TimeUnit;
+    use datatypes::prelude::ConcreteDataType;
+    use datatypes::schema::ColumnSchema;
+    use store_api::metadata::ColumnMetadata;
+    use store_api::storage::RegionId;
+
+    use super::*;
+    use crate::metadata::RegionMetadataBuilder;
+
+    fn build_test_region_metadata() -> RegionMetadata {
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 1), 1);
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("tag0", ConcreteDataType::int64_datatype(), true),
+                semantic_type: SemanticType::Tag,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "field0",
+                    ConcreteDataType::int64_datatype(),
+                    true,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id: 2,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("tag1", ConcreteDataType::int64_datatype(), true),
+                semantic_type: SemanticType::Tag,
+                column_id: 3,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "field1",
+                    ConcreteDataType::int64_datatype(),
+                    true,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id: 4,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 5,
+            })
+            .primary_key(vec![1, 3]);
+        builder.build().unwrap()
+    }
+
+    fn build_test_arrow_schema() -> SchemaRef {
+        let fields = vec![
+            Field::new("field0", DataType::Int64, true),
+            Field::new("field1", DataType::Int64, true),
+            Field::new(
+                "ts",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new(
+                "__primary_key",
+                DataType::Dictionary(Box::new(DataType::UInt16), Box::new(DataType::Binary)),
+                false,
+            ),
+            Field::new("__sequence", DataType::UInt64, false),
+            Field::new("__op_type", DataType::UInt8, false),
+        ];
+        Arc::new(Schema::new(fields))
+    }
+
+    #[test]
+    fn test_to_sst_arrow_schema() {
+        let metadata = build_test_region_metadata();
+        let schema = to_sst_arrow_schema(&metadata);
+        assert_eq!(build_test_arrow_schema(), schema);
+    }
 }
