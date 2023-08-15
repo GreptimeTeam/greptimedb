@@ -47,6 +47,9 @@ pub struct Batch {
     /// UInt8 type, not null.
     op_types: Arc<UInt8Vector>,
     /// Fields organized in columnar format.
+    ///
+    /// Fields are ordered by their column id so the batch after projection
+    /// is always consistent.
     fields: Vec<BatchColumn>,
 }
 
@@ -216,7 +219,7 @@ impl BatchBuilder {
     }
 
     /// Builds the [Batch].
-    pub fn build(self) -> Result<Batch> {
+    pub fn build(mut self) -> Result<Batch> {
         let timestamps = self.timestamps.context(InvalidBatchSnafu {
             reason: "missing timestamps",
         })?;
@@ -261,6 +264,8 @@ impl BatchBuilder {
                 }
             );
         }
+        // Sort fields by column id.
+        self.fields.sort_unstable_by_key(|field| field.column_id);
 
         Ok(Batch {
             primary_key: self.primary_key,
