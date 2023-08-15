@@ -14,10 +14,11 @@
 
 //! Common structs and utilities for reading data.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use common_time::Timestamp;
-use datatypes::prelude::ConcreteDataType;
-use datatypes::vectors::VectorRef;
+use datatypes::vectors::{UInt64Vector, UInt8Vector, Vector, VectorRef};
 use snafu::ensure;
 use store_api::storage::ColumnId;
 
@@ -28,7 +29,7 @@ use crate::metadata::RegionMetadataRef;
 /// for a primary key (time series).
 ///
 /// Rows are sorted by primary key, timestamp, sequence desc, op_type desc.
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct Batch {
     /// Primary key encoded in a comparable form.
     primary_key: Vec<u8>,
@@ -37,11 +38,11 @@ pub struct Batch {
     /// Sequences of rows
     ///
     /// UInt64 type, not null.
-    sequences: VectorRef,
+    sequences: Arc<UInt64Vector>,
     /// Op types of rows
     ///
     /// UInt8 type, not null.
-    op_types: VectorRef,
+    op_types: Arc<UInt8Vector>,
     /// Fields organized in columnar format.
     fields: Vec<BatchColumn>,
 }
@@ -51,8 +52,8 @@ impl Batch {
     pub fn new(
         primary_key: Vec<u8>,
         timestamps: VectorRef,
-        sequences: VectorRef,
-        op_types: VectorRef,
+        sequences: Arc<UInt64Vector>,
+        op_types: Arc<UInt8Vector>,
         fields: Vec<BatchColumn>,
     ) -> Result<Batch> {
         BatchBuilder::new(primary_key, timestamps, sequences, op_types)
@@ -66,12 +67,12 @@ impl Batch {
     }
 
     /// Returns sequences of the batch.
-    pub fn sequences(&self) -> &VectorRef {
+    pub fn sequences(&self) -> &Arc<UInt64Vector> {
         &self.sequences
     }
 
     /// Returns op types of the batch.
-    pub fn op_types(&self) -> &VectorRef {
+    pub fn op_types(&self) -> &Arc<UInt8Vector> {
         &self.op_types
     }
 
@@ -101,8 +102,8 @@ pub struct BatchColumn {
 pub struct BatchBuilder {
     primary_key: Vec<u8>,
     timestamps: VectorRef,
-    sequences: VectorRef,
-    op_types: VectorRef,
+    sequences: Arc<UInt64Vector>,
+    op_types: Arc<UInt8Vector>,
     fields: Vec<BatchColumn>,
 }
 
@@ -111,8 +112,8 @@ impl BatchBuilder {
     pub fn new(
         primary_key: Vec<u8>,
         timestamps: VectorRef,
-        sequences: VectorRef,
-        op_types: VectorRef,
+        sequences: Arc<UInt64Vector>,
+        op_types: Arc<UInt8Vector>,
     ) -> BatchBuilder {
         BatchBuilder {
             primary_key,
@@ -149,30 +150,12 @@ impl BatchBuilder {
             }
         );
         ensure!(
-            self.sequences.data_type() == ConcreteDataType::uint64_datatype(),
-            InvalidBatchSnafu {
-                reason: format!(
-                    "sequence must has uint64 type, given: {:?}",
-                    self.sequences.data_type()
-                ),
-            }
-        );
-        ensure!(
             self.op_types.len() == ts_len,
             InvalidBatchSnafu {
                 reason: format!(
                     "op type have different len {} != {}",
                     self.op_types.len(),
                     ts_len
-                ),
-            }
-        );
-        ensure!(
-            self.sequences.data_type() == ConcreteDataType::uint8_datatype(),
-            InvalidBatchSnafu {
-                reason: format!(
-                    "sequence must has uint8 type, given: {:?}",
-                    self.op_types.data_type()
                 ),
             }
         );
