@@ -22,6 +22,7 @@ use common_error::status_code::StatusCode;
 use common_meta::ident::TableIdent;
 use common_meta::instruction::Instruction;
 use common_meta::key::table_info::TableInfoValue;
+use common_meta::key::table_name::TableNameKey;
 use common_meta::key::table_route::TableRouteValue;
 use common_meta::rpc::ddl::DropTableTask;
 use common_meta::rpc::router::{find_leaders, RegionRoute};
@@ -33,13 +34,13 @@ use common_procedure::{
 use common_telemetry::{debug, info};
 use futures::future::join_all;
 use serde::{Deserialize, Serialize};
-use snafu::ResultExt;
+use snafu::{ensure, ResultExt};
 use table::engine::TableReference;
 use table::metadata::{RawTableInfo, TableId};
 
 use super::utils::handle_retry_error;
 use crate::ddl::DdlContext;
-use crate::error::{self, Result};
+use crate::error::{self, Result, TableMetadataManagerSnafu};
 use crate::procedure::utils::handle_request_datanode_error;
 use crate::service::mailbox::BroadcastChannel;
 pub struct DropTableProcedure {
@@ -66,6 +67,33 @@ impl DropTableProcedure {
     pub(crate) fn from_json(json: &str, context: DdlContext) -> ProcedureResult<Self> {
         let data = serde_json::from_str(json).context(FromJsonSnafu)?;
         Ok(Self { context, data })
+    }
+
+    async fn on_prepare(&mut self) -> Result<Status> {
+        let table_ref = &self.data.table_ref();
+
+        let exist = self
+            .context
+            .table_metadata_manager
+            .table_name_manager()
+            .exist(TableNameKey::new(
+                table_ref.catalog,
+                table_ref.schema,
+                table_ref.table,
+            ))
+            .await
+            .context(TableMetadataManagerSnafu)?;
+
+        ensure!(
+            exist,
+            error::TableNotFoundSnafu {
+                name: table_ref.to_string()
+            }
+        );
+
+        self.data.state = DropTableState::RemoveMetadata;
+
+        Ok(Status::executing(true))
     }
 
     /// Removes the table metadata.
@@ -175,6 +203,7 @@ impl Procedure for DropTableProcedure {
 
     async fn execute(&mut self, _ctx: &ProcedureContext) -> ProcedureResult<Status> {
         match self.data.state {
+            DropTableState::Prepare => self.on_prepare().await,
             DropTableState::RemoveMetadata => self.on_remove_metadata().await,
             DropTableState::InvalidateTableCache => self.on_broadcast().await,
             DropTableState::DatanodeDropTable => self.on_datanode_drop_table().await,
@@ -215,7 +244,7 @@ impl DropTableData {
         table_info_value: TableInfoValue,
     ) -> Self {
         Self {
-            state: DropTableState::RemoveMetadata,
+            state: DropTableState::Prepare,
             cluster_id,
             task,
             table_info_value,
@@ -246,6 +275,8 @@ impl DropTableData {
 
 #[derive(Debug, Serialize, Deserialize)]
 enum DropTableState {
+    /// Prepares to drop the table
+    Prepare,
     /// Removes metadata
     RemoveMetadata,
     /// Invalidates Table Cache
