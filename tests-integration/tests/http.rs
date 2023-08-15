@@ -345,7 +345,8 @@ pub async fn test_prom_http_api(store_type: StorageType) {
     // instant query
     let res = client
         .get("/v1/prometheus/query?query=up&time=1")
-        .send().await;
+        .send()
+        .await;
     assert_eq!(res.status(), StatusCode::OK);
     let res = client
         .post("/v1/prometheus/query?query=up&time=1")
