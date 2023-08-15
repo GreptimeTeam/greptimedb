@@ -34,7 +34,7 @@ use crate::error::{NoKeyValueSnafu, OpenDalSnafu, ReadParquetSnafu, Result};
 use crate::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataRef};
 use crate::read::{Batch, BatchReader};
 use crate::sst::file::FileHandle;
-use crate::sst::parquet::format::to_sst_projection_indices;
+use crate::sst::parquet::format::{from_sst_record_batch, to_sst_projection_indices};
 use crate::sst::parquet::PARQUET_METADATA_KEY;
 
 /// Parquet SST reader builder.
@@ -94,6 +94,7 @@ impl ParquetReaderBuilder {
             projection: self.projection,
             stream: None,
             region_meta: None,
+            batches: Vec::new(),
         }
     }
 }
@@ -125,6 +126,8 @@ pub struct ParquetReader {
     ///
     /// Not `None` if [ParquetReader::stream] is not `None`.
     region_meta: Option<RegionMetadataRef>,
+    /// Buffered batches to return.
+    batches: Vec<Batch>,
 }
 
 impl ParquetReader {
@@ -206,12 +209,6 @@ impl ParquetReader {
 
         RegionMetadata::from_json(json)
     }
-
-    // TODO(yingwen): We need a metrics to record the histogram of batches in on record batch.
-    /// Converts our [Batch] from arrow's [RecordBatch].
-    fn convert_arrow_record_batch(&self, _record_batch: RecordBatch) -> Result<Batch> {
-        unimplemented!()
-    }
 }
 
 #[async_trait]
@@ -219,15 +216,30 @@ impl BatchReader for ParquetReader {
     async fn next_batch(&mut self) -> Result<Option<Batch>> {
         self.maybe_init().await?;
 
-        self.stream
-            .as_mut()
-            .unwrap()
-            .try_next()
-            .await
-            .context(ReadParquetSnafu {
-                path: &self.file_path,
-            })?
-            .map(|rb| self.convert_arrow_record_batch(rb))
-            .transpose()
+        if let Some(batch) = self.batches.pop() {
+            return Ok(Some(batch));
+        }
+
+        // We need to fetch next record batch and convert it to batches.
+        let Some(record_batch) =
+            self.stream
+                .as_mut()
+                .unwrap()
+                .try_next()
+                .await
+                .context(ReadParquetSnafu {
+                    path: &self.file_path,
+                })?
+        else {
+            return Ok(None);
+        };
+
+        // Safety: the reader is initialized.
+        let metadata = self.region_meta.as_ref().unwrap();
+        from_sst_record_batch(metadata, &record_batch, &mut self.batches)?;
+        // Reverse batches so we could pop it.
+        self.batches.reverse();
+
+        Ok(self.batches.pop())
     }
 }
