@@ -73,7 +73,7 @@ use self::schema_name::{SchemaManager, SchemaNameValue};
 use self::table_route::{TableRouteManager, TableRouteValue};
 use crate::error::{self, Error, InvalidTableMetadataSnafu, Result, SerdeJsonSnafu};
 pub use crate::key::table_route::{TableRouteKey, TABLE_ROUTE_PREFIX};
-use crate::kv_backend::txn::TxnRequest;
+use crate::kv_backend::txn::Txn;
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::router::{region_distribution, RegionRoute};
 
@@ -230,13 +230,12 @@ impl TableMetadataManager {
             .table_route_manager()
             .build_create_txn(table_id, &table_route_value)?;
 
-        let txn = TxnRequest::merge(vec![
+        let txn = Txn::merge_all(vec![
             create_table_name_txn,
             create_table_info_txn,
             create_datanode_table_txn,
             create_table_route_txn,
-        ])
-        .into();
+        ]);
 
         let r = self.kv_backend.txn(txn).await?;
 
@@ -298,13 +297,12 @@ impl TableMetadataManager {
             .table_route_manager()
             .build_delete_txn(table_id, &table_route_value)?;
 
-        let txn = TxnRequest::merge(vec![
+        let txn = Txn::merge_all(vec![
             delete_table_name_txn,
             delete_table_info_txn,
             delete_datanode_txn,
             delete_table_route_txn,
-        ])
-        .into();
+        ]);
 
         // It's always successes.
         let _ = self.kv_backend.txn(txn).await?;
@@ -350,7 +348,7 @@ impl TableMetadataManager {
             .table_info_manager()
             .build_update_txn(table_id, &current_table_info_value, &new_table_info_value)?;
 
-        let txn = TxnRequest::merge(vec![update_table_name_txn, update_table_info_txn]).into();
+        let txn = Txn::merge_all(vec![update_table_name_txn, update_table_info_txn]);
 
         let r = self.kv_backend.txn(txn).await?;
 
@@ -383,7 +381,7 @@ impl TableMetadataManager {
             .table_info_manager()
             .build_update_txn(table_id, &current_table_info_value, &new_table_info_value)?;
 
-        let r = self.kv_backend.txn(update_table_info_txn.into()).await?;
+        let r = self.kv_backend.txn(update_table_info_txn).await?;
 
         // Checks whether metadata was already updated.
         if !r.succeeded {
@@ -422,7 +420,7 @@ impl TableMetadataManager {
             .table_route_manager()
             .build_update_txn(table_id, &current_table_route_value, &new_table_route_value)?;
 
-        let txn = TxnRequest::merge(vec![update_datanode_table_txn, update_table_route_txn]).into();
+        let txn = Txn::merge_all(vec![update_datanode_table_txn, update_table_route_txn]);
 
         let r = self.kv_backend.txn(txn).await?;
 

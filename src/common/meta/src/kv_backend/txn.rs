@@ -101,16 +101,10 @@ pub struct TxnRequest {
 }
 
 impl TxnRequest {
-    pub fn merge<T: IntoIterator<Item = TxnRequest>>(iter: T) -> Self {
-        let mut merged = Self::default();
-
-        iter.into_iter().for_each(|txn| {
-            merged.compare.extend(txn.compare);
-            merged.success.extend(txn.success);
-            merged.failure.extend(txn.failure);
-        });
-
-        merged
+    pub fn extend(&mut self, other: TxnRequest) {
+        self.compare.extend(other.compare);
+        self.success.extend(other.success);
+        self.failure.extend(other.failure);
     }
 }
 
@@ -134,22 +128,22 @@ pub struct Txn {
     c_else: bool,
 }
 
-impl From<TxnRequest> for Txn {
-    fn from(req: TxnRequest) -> Self {
-        let c_when = !req.compare.is_empty();
-        let c_then = !req.success.is_empty();
-        let c_else = !req.failure.is_empty();
-
-        Self {
-            req,
-            c_when,
-            c_then,
-            c_else,
-        }
-    }
-}
-
 impl Txn {
+    pub fn merge_all<T: IntoIterator<Item = Txn>>(values: T) -> Self {
+        // Safety: values must contain an element.
+        values.into_iter().reduce(|acc, e| acc.merge(e)).unwrap()
+    }
+
+    pub fn merge(mut self, other: Txn) -> Self {
+        self.c_when |= other.c_when;
+        self.c_then |= other.c_then;
+        self.c_else |= other.c_else;
+
+        self.req.extend(other.req);
+
+        self
+    }
+
     pub fn new() -> Self {
         Txn::default()
     }

@@ -19,7 +19,7 @@ use table::metadata::{RawTableInfo, TableId};
 use super::TABLE_INFO_KEY_PREFIX;
 use crate::error::{Result, UnexpectedSnafu};
 use crate::key::{to_removed_key, TableMetaKey};
-use crate::kv_backend::txn::{Compare, CompareOp, TxnOp, TxnOpResponse, TxnRequest};
+use crate::kv_backend::txn::{Compare, CompareOp, Txn, TxnOp, TxnOpResponse};
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::store::{CompareAndPutRequest, MoveValueRequest};
 
@@ -76,25 +76,22 @@ impl TableInfoManager {
         table_id: TableId,
         table_info_value: &TableInfoValue,
     ) -> Result<(
-        TxnRequest,
+        Txn,
         impl FnOnce(&Vec<TxnOpResponse>) -> Result<Option<TableInfoValue>>,
     )> {
-        let mut txn = TxnRequest::default();
-
         let key = TableInfoKey::new(table_id);
         let raw_key = key.as_raw_key();
 
-        txn.compare.push(Compare::with_not_exist_value(
-            raw_key.clone(),
-            CompareOp::Equal,
-        ));
-
-        txn.success.push(TxnOp::Put(
-            raw_key.clone(),
-            table_info_value.try_as_raw_value()?,
-        ));
-
-        txn.failure.push(TxnOp::Get(raw_key.clone()));
+        let txn = Txn::default()
+            .when(vec![Compare::with_not_exist_value(
+                raw_key.clone(),
+                CompareOp::Equal,
+            )])
+            .and_then(vec![TxnOp::Put(
+                raw_key.clone(),
+                table_info_value.try_as_raw_value()?,
+            )])
+            .or_else(vec![TxnOp::Get(raw_key.clone())]);
 
         Ok((txn, Self::build_decode_fn(raw_key)))
     }
@@ -107,27 +104,24 @@ impl TableInfoManager {
         current_table_info_value: &TableInfoValue,
         new_table_info_value: &TableInfoValue,
     ) -> Result<(
-        TxnRequest,
+        Txn,
         impl FnOnce(&Vec<TxnOpResponse>) -> Result<Option<TableInfoValue>>,
     )> {
-        let mut txn = TxnRequest::default();
-
         let key = TableInfoKey::new(table_id);
         let raw_key = key.as_raw_key();
         let raw_value = current_table_info_value.try_as_raw_value()?;
 
-        txn.compare.push(Compare::with_value(
-            raw_key.clone(),
-            CompareOp::Equal,
-            raw_value.clone(),
-        ));
-
-        txn.success.push(TxnOp::Put(
-            raw_key.clone(),
-            new_table_info_value.try_as_raw_value()?,
-        ));
-
-        txn.failure.push(TxnOp::Get(raw_key.clone()));
+        let txn = Txn::default()
+            .when(vec![Compare::with_value(
+                raw_key.clone(),
+                CompareOp::Equal,
+                raw_value.clone(),
+            )])
+            .and_then(vec![TxnOp::Put(
+                raw_key.clone(),
+                new_table_info_value.try_as_raw_value()?,
+            )])
+            .or_else(vec![TxnOp::Get(raw_key.clone())]);
 
         Ok((txn, Self::build_decode_fn(raw_key)))
     }
@@ -137,16 +131,16 @@ impl TableInfoManager {
         &self,
         table_id: TableId,
         table_info_value: &TableInfoValue,
-    ) -> Result<TxnRequest> {
-        let mut txn = TxnRequest::default();
+    ) -> Result<Txn> {
         let key = TableInfoKey::new(table_id);
         let raw_key = key.as_raw_key();
         let raw_value = table_info_value.try_as_raw_value()?;
         let removed_key = to_removed_key(&String::from_utf8_lossy(&raw_key));
 
-        txn.success.push(TxnOp::Delete(raw_key.clone()));
-        txn.success
-            .push(TxnOp::Put(removed_key.into_bytes(), raw_value));
+        let txn = Txn::default().and_then(vec![
+            TxnOp::Delete(raw_key.clone()),
+            TxnOp::Put(removed_key.into_bytes(), raw_value),
+        ]);
 
         Ok(txn)
     }
