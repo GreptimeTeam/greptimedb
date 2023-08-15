@@ -31,18 +31,22 @@ use datatypes::arrow::array::{ArrayRef, BinaryArray, DictionaryArray, UInt16Arra
 use datatypes::arrow::datatypes::{DataType, Field, FieldRef, Fields, Schema, SchemaRef};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::vectors::Vector;
-use snafu::ResultExt;
+use snafu::{ResultExt, ensure};
 use store_api::storage::consts::{
     OP_TYPE_COLUMN_NAME, PRIMARY_KEY_COLUMN_NAME, SEQUENCE_COLUMN_NAME,
 };
 use store_api::storage::ColumnId;
 
-use crate::error::{NewRecordBatchSnafu, Result};
+use crate::error::{NewRecordBatchSnafu, InvalidRecordBatchSnafu, Result};
 use crate::metadata::RegionMetadata;
 use crate::read::Batch;
 
 /// Number of internal columns.
 const INTERNAL_COLUMN_NUM: usize = 3;
+/// Number of columns that have fixed positions.
+///
+/// Contains: time index and internal columns.
+const FIXED_POS_COLUMN_NUM: usize = 4;
 
 /// Gets the arrow schema to store in parquet.
 pub(crate) fn to_sst_arrow_schema(metadata: &RegionMetadata) -> SchemaRef {
@@ -73,7 +77,7 @@ pub(crate) fn to_sst_arrow_schema(metadata: &RegionMetadata) -> SchemaRef {
 ///
 /// The `arrow_schema` is constructed by [to_sst_arrow_schema].
 pub(crate) fn to_sst_record_batch(batch: &Batch, arrow_schema: &SchemaRef) -> Result<RecordBatch> {
-    let mut columns = Vec::with_capacity(num_columns_to_store(batch.fields().len()));
+    let mut columns = Vec::with_capacity(batch.fields().len() + FIXED_POS_COLUMN_NUM);
 
     // Store all fields first.
     for column in batch.fields() {
@@ -109,6 +113,15 @@ pub(crate) fn from_sst_record_batch(
     record_batch: &RecordBatch,
     batches: &mut Vec<Batch>,
 ) -> Result<()> {
+    // The record batch must has time index and internal columns.
+    ensure!(record_batch.num_columns() > INTERNAL_COLUMN_NUM, InvalidRecordBatchSnafu {
+        reason: format!("record batch only has {} columns", record_batch.num_columns()),
+    });
+    // Convert time index.
+    let num_cols = record_batch.num_columns();
+    let ts_array = record_batch.column(num_cols - FIXED_POS_COLUMN_NUM);
+    //
+
     unimplemented!()
 }
 
@@ -120,12 +133,6 @@ const fn dictionary_key_type() -> DataType {
 /// Value type of the primary key.
 const fn pk_value_type() -> DataType {
     DataType::Binary
-}
-
-/// Number of columns to store in parquet.
-const fn num_columns_to_store(num_fields: usize) -> usize {
-    // fields, time index and internal columns.
-    num_fields + 1 + INTERNAL_COLUMN_NUM
 }
 
 /// Fields for internal columns.
