@@ -153,27 +153,28 @@ impl TableNameManager {
     /// Builds a create table name transaction. It only executes while the primary keys comparing successes.
     pub(crate) fn build_create_txn(
         &self,
-        txn: &mut TxnRequest,
         key: &TableNameKey<'_>,
         table_id: TableId,
-    ) -> Result<()> {
+    ) -> Result<TxnRequest> {
+        let mut txn = TxnRequest::default();
+
         let raw_key = key.as_raw_key();
         let value = TableNameValue::new(table_id);
         let raw_value = value.try_as_raw_value()?;
 
         txn.success.push(TxnOp::Put(raw_key, raw_value));
 
-        Ok(())
+        Ok(txn)
     }
 
     /// Builds a update table name transaction. It only executes while the primary keys comparing successes.
     pub(crate) fn build_update_txn(
         &self,
-        txn: &mut TxnRequest,
         key: &TableNameKey<'_>,
         new_key: &TableNameKey<'_>,
         table_id: TableId,
-    ) -> Result<()> {
+    ) -> Result<TxnRequest> {
+        let mut txn = TxnRequest::default();
         let raw_key = key.as_raw_key();
 
         txn.success.push(TxnOp::Delete(raw_key));
@@ -184,16 +185,16 @@ impl TableNameManager {
 
         txn.success.push(TxnOp::Put(new_raw_key, raw_value));
 
-        Ok(())
+        Ok(txn)
     }
 
     /// Builds a delete table name transaction. It only executes while the primary keys comparing successes.
     pub(crate) fn build_delete_txn(
         &self,
-        txn: &mut TxnRequest,
         key: &TableNameKey<'_>,
         table_id: TableId,
-    ) -> Result<()> {
+    ) -> Result<TxnRequest> {
+        let mut txn = TxnRequest::default();
         let raw_key = key.as_raw_key();
         let value = TableNameValue::new(table_id);
         let raw_value = value.try_as_raw_value()?;
@@ -203,7 +204,7 @@ impl TableNameManager {
         txn.success
             .push(TxnOp::Put(removed_key.into_bytes(), raw_value));
 
-        Ok(())
+        Ok(txn)
     }
 
     /// Create TableName key and value. If the key already exists, check if the value is the same.

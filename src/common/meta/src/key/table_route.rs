@@ -15,13 +15,14 @@
 use std::fmt::Display;
 
 use api::v1::meta::TableName;
+use futures::future::try_join_all;
 use serde::{Deserialize, Serialize};
 use snafu::ensure;
 use table::metadata::TableId;
 
 use crate::error::{Result, UnexpectedSnafu};
 use crate::key::{to_removed_key, TableMetaKey};
-use crate::kv_backend::txn::{Compare, CompareOp, TxnOp, TxnRequest};
+use crate::kv_backend::txn::{Compare, CompareOp, TxnOp, TxnOpResponse, TxnRequest};
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::router::{region_distribution, RegionRoute, Table, TableRoute};
 use crate::rpc::store::{BatchGetRequest, CompareAndPutRequest, MoveValueRequest};
@@ -88,10 +89,14 @@ impl TableRouteManager {
     /// Builds a create table route transaction. it expected the `__table_route/{table_id}` wasn't occupied.
     pub(crate) fn build_create_txn(
         &self,
-        txn: &mut TxnRequest,
         table_id: TableId,
         table_route_value: &TableRouteValue,
-    ) -> Result<()> {
+    ) -> Result<(
+        TxnRequest,
+        impl FnOnce(&Vec<TxnOpResponse>) -> Result<Option<TableRouteValue>>,
+    )> {
+        let mut txn = TxnRequest::default();
+
         let key = NextTableRouteKey::new(table_id);
         let raw_key = key.as_raw_key();
 
@@ -100,20 +105,29 @@ impl TableRouteManager {
             CompareOp::Equal,
         ));
 
-        txn.success
-            .push(TxnOp::Put(raw_key, table_route_value.try_as_raw_value()?));
+        txn.success.push(TxnOp::Put(
+            raw_key.clone(),
+            table_route_value.try_as_raw_value()?,
+        ));
 
-        Ok(())
+        txn.failure.push(TxnOp::Get(raw_key.clone()));
+
+        Ok((txn, Self::build_decode_fn(raw_key)))
     }
 
     /// Builds a update table route transaction, it expected the remote value equals the `current_table_route_value`.
+    /// It retrieves the latest value if the comparing failed.
     pub(crate) fn build_update_txn(
         &self,
-        txn: &mut TxnRequest,
         table_id: TableId,
         current_table_route_value: &TableRouteValue,
         new_table_route_value: &TableRouteValue,
-    ) -> Result<()> {
+    ) -> Result<(
+        TxnRequest,
+        impl FnOnce(&Vec<TxnOpResponse>) -> Result<Option<TableRouteValue>>,
+    )> {
+        let mut txn = TxnRequest::default();
+
         let key = NextTableRouteKey::new(table_id);
         let raw_key = key.as_raw_key();
         let raw_value = current_table_route_value.try_as_raw_value()?;
@@ -123,21 +137,22 @@ impl TableRouteManager {
             CompareOp::Equal,
             raw_value.clone(),
         ));
-
         let new_raw_value: Vec<u8> = new_table_route_value.try_as_raw_value()?;
+        txn.success.push(TxnOp::Put(raw_key.clone(), new_raw_value));
 
-        txn.success.push(TxnOp::Put(raw_key, new_raw_value));
+        txn.failure.push(TxnOp::Get(raw_key.clone()));
 
-        Ok(())
+        Ok((txn, Self::build_decode_fn(raw_key)))
     }
 
     /// Builds a delete table route transaction, it expected the remote value equals the `table_route_value`.
     pub(crate) fn build_delete_txn(
         &self,
-        txn: &mut TxnRequest,
         table_id: TableId,
         table_route_value: &TableRouteValue,
-    ) -> Result<()> {
+    ) -> Result<TxnRequest> {
+        let mut txn = TxnRequest::default();
+
         let key = NextTableRouteKey::new(table_id);
         let raw_key = key.as_raw_key();
         let raw_value = table_route_value.try_as_raw_value()?;
@@ -147,22 +162,25 @@ impl TableRouteManager {
         txn.success
             .push(TxnOp::Put(removed_key.into_bytes(), raw_value));
 
-        Ok(())
+        Ok(txn)
     }
 
-    pub(crate) fn build_batch_get(
-        &self,
-        batch: &mut BatchGetRequest,
-        table_id: TableId,
-    ) -> impl FnOnce(&Vec<KeyValue>) -> Result<Option<TableRouteValue>> {
-        let key = NextTableRouteKey::new(table_id);
-        let raw_key = key.as_raw_key();
-        batch.keys.push(raw_key.clone());
-
-        move |kvs: &Vec<KeyValue>| {
-            kvs.iter()
+    fn build_decode_fn(
+        raw_key: Vec<u8>,
+    ) -> impl FnOnce(&Vec<TxnOpResponse>) -> Result<Option<TableRouteValue>> {
+        move |response: &Vec<TxnOpResponse>| {
+            response
+                .iter()
+                .filter_map(|resp| {
+                    if let TxnOpResponse::ResponseGet(r) = resp {
+                        Some(r)
+                    } else {
+                        None
+                    }
+                })
+                .flat_map(|r| &r.kvs)
                 .find(|kv| kv.key == raw_key)
-                .map(|kv| TableRouteValue::try_from_raw_value_ref(&kv.value))
+                .map(|kv| TableRouteValue::try_from(&kv.value))
                 .transpose()
         }
     }
