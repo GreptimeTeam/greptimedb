@@ -17,23 +17,28 @@
 use std::sync::Arc;
 
 use common_telemetry::info;
+use store_api::region_request::RegionOpenRequest;
+use store_api::storage::RegionId;
 
 use crate::error::Result;
 use crate::region::opener::RegionOpener;
-use crate::request::OpenRequest;
 use crate::worker::RegionWorkerLoop;
 
 impl<S> RegionWorkerLoop<S> {
-    pub(crate) async fn handle_open_request(&mut self, request: OpenRequest) -> Result<()> {
-        if self.regions.is_region_exists(request.region_id) {
+    pub(crate) async fn handle_open_request(
+        &mut self,
+        region_id: RegionId,
+        request: RegionOpenRequest,
+    ) -> Result<()> {
+        if self.regions.is_region_exists(region_id) {
             return Ok(());
         }
 
-        info!("Try to open region {}", request.region_id);
+        info!("Try to open region {}", region_id);
 
         // Open region from specific region dir.
         let region = RegionOpener::new(
-            request.region_id,
+            region_id,
             self.memtable_builder.clone(),
             self.object_store.clone(),
         )
@@ -41,7 +46,7 @@ impl<S> RegionWorkerLoop<S> {
         .open(&self.config)
         .await?;
 
-        info!("Region {} is opened", request.region_id);
+        info!("Region {} is opened", region_id);
 
         // Insert the MitoRegion into the RegionMap.
         self.regions.insert_region(Arc::new(region));

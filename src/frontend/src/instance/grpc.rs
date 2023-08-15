@@ -44,6 +44,12 @@ impl GrpcQueryHandler for Instance {
 
         let output = match request {
             Request::Inserts(requests) => self.handle_inserts(requests, ctx.clone()).await?,
+            Request::RowInserts(_) | Request::RowDelete(_) => {
+                return NotSupportedSnafu {
+                    feat: "row insert/delete",
+                }
+                .fail();
+            }
             Request::Query(query_request) => {
                 let query = query_request.query.context(IncompleteGrpcResultSnafu {
                     err_msg: "Missing field 'QueryRequest.query'",
@@ -88,8 +94,6 @@ impl GrpcQueryHandler for Instance {
                 GrpcQueryHandler::do_query(self.grpc_query_handler.as_ref(), request, ctx.clone())
                     .await?
             }
-            Request::RowInserts(_) => unreachable!(),
-            Request::RowDelete(_) => unreachable!(),
         };
 
         let output = interceptor.post_execute(output, ctx)?;

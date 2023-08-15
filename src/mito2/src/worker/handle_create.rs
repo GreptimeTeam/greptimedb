@@ -18,22 +18,25 @@ use std::sync::Arc;
 
 use common_telemetry::info;
 use snafu::ensure;
+use store_api::region_request::RegionCreateRequest;
+use store_api::storage::RegionId;
 
 use crate::error::{RegionExistsSnafu, Result};
 use crate::metadata::{RegionMetadataBuilder, INIT_REGION_VERSION};
 use crate::region::opener::RegionOpener;
-use crate::request::CreateRequest;
 use crate::worker::RegionWorkerLoop;
 
 impl<S> RegionWorkerLoop<S> {
-    pub(crate) async fn handle_create_request(&mut self, request: CreateRequest) -> Result<()> {
+    pub(crate) async fn handle_create_request(
+        &mut self,
+        region_id: RegionId,
+        request: RegionCreateRequest,
+    ) -> Result<()> {
         // Checks whether the table exists.
-        if self.regions.is_region_exists(request.region_id) {
+        if self.regions.is_region_exists(region_id) {
             ensure!(
                 request.create_if_not_exists,
-                RegionExistsSnafu {
-                    region_id: request.region_id,
-                }
+                RegionExistsSnafu { region_id }
             );
 
             // Region already exists.
@@ -41,7 +44,7 @@ impl<S> RegionWorkerLoop<S> {
         }
 
         // Convert the request into a RegionMetadata and validate it.
-        let mut builder = RegionMetadataBuilder::new(request.region_id, INIT_REGION_VERSION);
+        let mut builder = RegionMetadataBuilder::new(region_id, INIT_REGION_VERSION);
         for column in request.column_metadatas {
             builder.push_column_metadata(column);
         }
@@ -50,7 +53,7 @@ impl<S> RegionWorkerLoop<S> {
 
         // Create a MitoRegion from the RegionMetadata.
         let region = RegionOpener::new(
-            request.region_id,
+            region_id,
             self.memtable_builder.clone(),
             self.object_store.clone(),
         )

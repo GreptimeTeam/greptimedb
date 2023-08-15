@@ -191,10 +191,11 @@ mod tests {
     use api::v1::ColumnDataType;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
+    use store_api::metadata::ColumnMetadata;
     use store_api::storage::RegionId;
 
     use super::*;
-    use crate::metadata::{ColumnMetadata, RegionMetadataBuilder};
+    use crate::metadata::RegionMetadataBuilder;
     use crate::test_util::i64_value;
 
     const TS_NAME: &str = "ts";

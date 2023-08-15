@@ -64,9 +64,9 @@ use table::TableRef;
 use crate::catalog::FrontendCatalogManager;
 use crate::error::{
     self, AlterExprToRequestSnafu, CatalogSnafu, ColumnDataTypeSnafu, ColumnNotFoundSnafu,
-    DeserializePartitionSnafu, InvokeDatanodeSnafu, ParseSqlSnafu, RequestDatanodeSnafu,
-    RequestMetaSnafu, Result, SchemaExistsSnafu, TableAlreadyExistSnafu, TableNotFoundSnafu,
-    TableSnafu, ToTableDeleteRequestSnafu, UnrecognizedTableOptionSnafu,
+    DeserializePartitionSnafu, InvokeDatanodeSnafu, NotSupportedSnafu, ParseSqlSnafu,
+    RequestDatanodeSnafu, RequestMetaSnafu, Result, SchemaExistsSnafu, TableAlreadyExistSnafu,
+    TableNotFoundSnafu, TableSnafu, ToTableDeleteRequestSnafu, UnrecognizedTableOptionSnafu,
 };
 use crate::expr_factory;
 use crate::instance::distributed::inserter::DistInserter;
@@ -677,6 +677,10 @@ impl GrpcQueryHandler for DistInstance {
         match request {
             Request::Inserts(requests) => self.handle_dist_insert(requests, ctx).await,
             Request::Delete(request) => self.handle_dist_delete(request, ctx).await,
+            Request::RowInserts(_) | Request::RowDelete(_) => NotSupportedSnafu {
+                feat: "row insert/delete",
+            }
+            .fail(),
             Request::Query(_) => {
                 unreachable!("Query should have been handled directly in Frontend Instance!")
             }
@@ -713,8 +717,6 @@ impl GrpcQueryHandler for DistInstance {
                     }
                 }
             }
-            Request::RowInserts(_) => unreachable!(),
-            Request::RowDelete(_) => unreachable!(),
         }
     }
 }

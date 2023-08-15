@@ -15,23 +15,23 @@
 //! Handling close request.
 
 use common_telemetry::info;
+use store_api::storage::RegionId;
 
 use crate::error::Result;
-use crate::request::CloseRequest;
 use crate::worker::RegionWorkerLoop;
 
 impl<S> RegionWorkerLoop<S> {
-    pub(crate) async fn handle_close_request(&mut self, request: CloseRequest) -> Result<()> {
-        let Some(region) = self.regions.get_region(request.region_id) else {
+    pub(crate) async fn handle_close_request(&mut self, region_id: RegionId) -> Result<()> {
+        let Some(region) = self.regions.get_region(region_id) else {
             return Ok(());
         };
 
-        info!("Try to close region {}", request.region_id);
+        info!("Try to close region {}", region_id);
 
         region.stop().await?;
-        self.regions.remove_region(request.region_id);
+        self.regions.remove_region(region_id);
 
-        info!("Region {} closed", request.region_id);
+        info!("Region {} closed", region_id);
 
         Ok(())
     }

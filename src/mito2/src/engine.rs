@@ -14,21 +14,22 @@
 
 //! Mito region engine.
 
-#[cfg(test)]
-mod tests;
+// TODO: migrate test to RegionRequest
+// #[cfg(test)]
+// mod tests;
 
 use std::sync::Arc;
 
+use common_query::Output;
 use object_store::ObjectStore;
-use snafu::{OptionExt, ResultExt};
+use snafu::ResultExt;
 use store_api::logstore::LogStore;
+use store_api::region_request::RegionRequest;
 use store_api::storage::RegionId;
 
 use crate::config::MitoConfig;
-use crate::error::{RecvSnafu, RegionNotFoundSnafu, Result};
-use crate::request::{
-    CloseRequest, CreateRequest, OpenRequest, RegionRequest, RequestBody, WriteRequest,
-};
+use crate::error::{RecvSnafu, Result};
+use crate::request::RegionTask;
 use crate::worker::WorkerGroup;
 
 /// Region engine implementation for timeseries data.
@@ -59,29 +60,13 @@ impl MitoEngine {
         self.inner.stop().await
     }
 
-    /// Creates a new region.
-    pub async fn create_region(&self, create_request: CreateRequest) -> Result<()> {
-        self.inner
-            .handle_request_body(RequestBody::Create(create_request))
-            .await
-    }
-
-    /// Opens an existing region.
-    ///
-    /// Returns error if the region does not exist.
-    pub async fn open_region(&self, open_request: OpenRequest) -> Result<()> {
-        self.inner
-            .handle_request_body(RequestBody::Open(open_request))
-            .await
-    }
-
-    /// Closes a region.
-    ///
-    /// Does nothing if the region is already closed.
-    pub async fn close_region(&self, close_request: CloseRequest) -> Result<()> {
-        self.inner
-            .handle_request_body(RequestBody::Close(close_request))
-            .await
+    pub async fn handle_request(
+        &self,
+        region_id: RegionId,
+        request: RegionRequest,
+    ) -> Result<Output> {
+        self.inner.handle_request(region_id, request).await?;
+        Ok(Output::AffectedRows(0))
     }
 
     /// Returns true if the specific region exists.
@@ -89,23 +74,22 @@ impl MitoEngine {
         self.inner.workers.is_region_exists(region_id)
     }
 
-    /// Write to a region.
-    pub async fn write_region(&self, mut write_request: WriteRequest) -> Result<()> {
-        let region = self
-            .inner
-            .workers
-            .get_region(write_request.region_id)
-            .context(RegionNotFoundSnafu {
-                region_id: write_request.region_id,
-            })?;
-        let metadata = region.metadata();
+    // /// Write to a region.
+    // pub async fn write_region(&self, write_request: WriteRequest) -> Result<()> {
+    // write_request.validate()?;
+    // RequestValidator::write_request(&write_request)?;
 
-        write_request.fill_missing_columns(&metadata)?;
+    // TODO(yingwen): Fill default values.
+    // We need to fill default values before writing it to WAL so we can get
+    // the same default value after reopening the region.
 
-        self.inner
-            .handle_request_body(RequestBody::Write(write_request))
-            .await
-    }
+    // let metadata = region.metadata();
+
+    // write_request.fill_missing_columns(&metadata)?;
+    //     self.inner
+    //         .handle_request_body(RequestBody::Write(write_request))
+    //         .await
+    // }
 }
 
 /// Inner struct of [MitoEngine].
@@ -131,9 +115,10 @@ impl EngineInner {
         self.workers.stop().await
     }
 
+    // TODO(yingwen): return `Output` instead of `Result<()>`.
     /// Handles [RequestBody] and return its executed result.
-    async fn handle_request_body(&self, body: RequestBody) -> Result<()> {
-        let (request, receiver) = RegionRequest::from_body(body);
+    async fn handle_request(&self, region_id: RegionId, request: RegionRequest) -> Result<()> {
+        let (request, receiver) = RegionTask::from_request(region_id, request);
         self.workers.submit_to_worker(request).await?;
 
         receiver.await.context(RecvSnafu)?

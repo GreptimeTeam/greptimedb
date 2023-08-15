@@ -1,4 +1,3 @@
-#![feature(let_chains)]
 // Copyright 2023 Greptime Team
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,11 +12,27 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Storage related APIs
+//! Region Engine's definition
 
-pub mod logstore;
-pub mod manifest;
-pub mod metadata;
-pub mod region_engine;
-pub mod region_request;
-pub mod storage;
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use common_error::ext::BoxedError;
+use common_query::Output;
+
+use crate::region_request::RegionRequest;
+use crate::storage::RegionId;
+
+#[async_trait]
+pub trait RegionEngine {
+    /// Name of this engine
+    fn name(&self) -> &str;
+
+    async fn handle_request(
+        &self,
+        region_id: RegionId,
+        request: RegionRequest,
+    ) -> Result<Output, BoxedError>;
+}
+
+pub type RegionEngineRef = Arc<dyn RegionEngine>;

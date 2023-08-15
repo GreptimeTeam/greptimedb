@@ -24,12 +24,14 @@ use api::helper::{
 use api::v1::{ColumnDataType, ColumnSchema, OpType, Rows, Value};
 use common_base::readable_size::ReadableSize;
 use snafu::{ensure, OptionExt, ResultExt};
+use store_api::metadata::ColumnMetadata;
+use store_api::region_request::RegionRequest;
 use store_api::storage::{ColumnId, CompactionStrategy, RegionId};
 use tokio::sync::oneshot::{self, Receiver, Sender};
 
 use crate::config::DEFAULT_WRITE_BUFFER_SIZE;
 use crate::error::{CreateDefaultSnafu, FillDefaultSnafu, InvalidRequestSnafu, Result};
-use crate::metadata::{ColumnMetadata, RegionMetadata};
+use crate::metadata::RegionMetadata;
 
 /// Options that affect the entire region.
 ///
@@ -350,7 +352,7 @@ pub(crate) struct SenderWriteRequest {
 /// Request sent to a worker
 pub(crate) enum WorkerRequest {
     /// Region request.
-    Region(RegionRequest),
+    Region(RegionTask),
 
     /// Notify a worker to stop.
     Stop,
@@ -358,70 +360,47 @@ pub(crate) enum WorkerRequest {
 
 /// Request to modify a region.
 #[derive(Debug)]
-pub(crate) struct RegionRequest {
+pub(crate) struct RegionTask {
     /// Sender to send result.
     ///
     /// Now the result is a `Result<()>`, but we could replace the empty tuple
     /// with an enum if we need to carry more information.
     pub(crate) sender: Option<Sender<Result<()>>>,
     /// Request body.
-    pub(crate) body: RequestBody,
+    pub(crate) request: RegionRequest,
+    /// Region identifier.
+    pub(crate) region_id: RegionId,
 }
 
-impl RegionRequest {
-    /// Creates a [RegionRequest] and a receiver from `body`.
-    pub(crate) fn from_body(body: RequestBody) -> (RegionRequest, Receiver<Result<()>>) {
+impl RegionTask {
+    /// Creates a [RegionTask] and a receiver from [RegionRequest].
+    pub(crate) fn from_request(
+        region_id: RegionId,
+        request: RegionRequest,
+    ) -> (RegionTask, Receiver<Result<()>>) {
         let (sender, receiver) = oneshot::channel();
         (
-            RegionRequest {
+            RegionTask {
                 sender: Some(sender),
-                body,
+                request,
+                region_id,
             },
             receiver,
         )
     }
 }
 
-/// Body to carry actual region request.
-#[derive(Debug)]
-pub(crate) enum RequestBody {
-    /// Write to a region.
-    Write(WriteRequest),
+/// Mito Region Engine's request validator
+pub(crate) struct RequestValidator;
 
-    // DDL:
-    /// Creates a new region.
-    Create(CreateRequest),
-    /// Opens an existing region.
-    Open(OpenRequest),
-    /// Closes a region.
-    Close(CloseRequest),
-}
-
-impl RequestBody {
-    /// Region id of this request.
-    pub(crate) fn region_id(&self) -> RegionId {
-        match self {
-            RequestBody::Write(req) => req.region_id,
-            RequestBody::Create(req) => req.region_id,
-            RequestBody::Open(req) => req.region_id,
-            RequestBody::Close(req) => req.region_id,
-        }
-    }
-
-    /// Returns whether the request is a write request.
-    pub(crate) fn is_write(&self) -> bool {
-        matches!(self, RequestBody::Write(_))
-    }
-
-    /// Converts the request into a [WriteRequest].
-    ///
-    /// # Panics
-    /// Panics if it isn't a [WriteRequest].
-    pub(crate) fn into_write_request(self) -> WriteRequest {
-        match self {
-            RequestBody::Write(req) => req,
-            other => panic!("expect write request, found {other:?}"),
-        }
+impl RequestValidator {
+    /// Validate the [WriteRequest].
+    pub fn write_request(_write_request: &WriteRequest) -> Result<()> {
+        // - checks whether the request is too large.
+        // - checks whether each row in rows has the same schema.
+        // - checks whether each column match the schema in Rows.
+        // - checks rows don't have duplicate columns.
+        unimplemented!()
     }
 }
 

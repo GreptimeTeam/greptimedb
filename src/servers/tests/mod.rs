@@ -159,7 +159,10 @@ impl GrpcQueryHandler for DummyInstance {
         ctx: QueryContextRef,
     ) -> std::result::Result<Output, Self::Error> {
         let output = match request {
-            Request::Inserts(_) | Request::Delete(_) => unimplemented!(),
+            Request::Inserts(_)
+            | Request::Delete(_)
+            | Request::RowInserts(_)
+            | Request::RowDelete(_) => unimplemented!(),
             Request::Query(query_request) => {
                 let query = query_request.query.unwrap();
                 match query {
@@ -194,8 +197,6 @@ impl GrpcQueryHandler for DummyInstance {
                 }
             }
             Request::Ddl(_) => unimplemented!(),
-            Request::RowInserts(_) => unimplemented!(),
-            Request::RowDelete(_) => unimplemented!(),
         };
         Ok(output)
     }

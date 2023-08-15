@@ -451,11 +451,12 @@ mod test {
     use common_datasource::compression::CompressionType;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
+    use store_api::metadata::ColumnMetadata;
 
     use super::*;
     use crate::manifest::action::RegionChange;
     use crate::manifest::tests::utils::basic_region_metadata;
-    use crate::metadata::{ColumnMetadata, RegionMetadataBuilder};
+    use crate::metadata::RegionMetadataBuilder;
     use crate::test_util::TestEnv;
 
     #[tokio::test]
