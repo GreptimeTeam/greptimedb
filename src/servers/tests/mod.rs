@@ -160,7 +160,7 @@ impl GrpcQueryHandler for DummyInstance {
     ) -> std::result::Result<Output, Self::Error> {
         let output = match request {
             Request::Inserts(_)
-            | Request::Delete(_)
+            | Request::Deletes(_)
             | Request::RowInserts(_)
             | Request::RowDelete(_) => unimplemented!(),
             Request::Query(query_request) => {

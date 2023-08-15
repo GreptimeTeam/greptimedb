@@ -843,7 +843,12 @@ async fn test_table_delete_rows() {
     let del_tss: VectorRef = Arc::new(TimestampMillisecondVector::from_vec(vec![1, 2]));
     let key_column_values =
         HashMap::from([("host".to_string(), del_hosts), ("ts".to_string(), del_tss)]);
-    let del_req = DeleteRequest { key_column_values };
+    let del_req = DeleteRequest {
+        catalog_name: "foo_catalog".to_string(),
+        schema_name: "foo_schema".to_string(),
+        table_name: "demo".to_string(),
+        key_column_values,
+    };
     let _ = table.delete(del_req).await.unwrap();
 
     let stream = table.scan_to_stream(ScanRequest::default()).await.unwrap();

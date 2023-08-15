@@ -13,43 +13,42 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::iter;
 use std::sync::Arc;
 
-use api::v1::InsertRequests;
+use api::v1::DeleteRequests;
 use catalog::CatalogManager;
 use client::Database;
-use common_grpc_expr::insert::to_table_insert_request;
+use common_grpc_expr::delete::to_table_delete_request;
 use common_meta::peer::Peer;
 use common_meta::table_name::TableName;
 use futures::future;
-use metrics::counter;
 use snafu::{OptionExt, ResultExt};
-use table::metadata::TableInfoRef;
-use table::meter_insert_request;
-use table::requests::InsertRequest;
+use table::requests::DeleteRequest;
 
 use crate::catalog::FrontendCatalogManager;
 use crate::error::{
-    CatalogSnafu, FindDatanodeSnafu, FindTableRouteSnafu, JoinTaskSnafu, RequestDatanodeSnafu,
-    Result, SplitInsertSnafu, TableNotFoundSnafu, ToTableInsertRequestSnafu,
+    CatalogSnafu, FindDatanodeSnafu, FindTableRouteSnafu, JoinTaskSnafu,
+    MissingTimeIndexColumnSnafu, RequestDatanodeSnafu, Result, SplitDeleteSnafu,
+    TableNotFoundSnafu, ToTableDeleteRequestSnafu,
 };
-use crate::table::insert::to_grpc_insert_request;
+use crate::table::delete::to_grpc_delete_request;
 
-/// A distributed inserter. It ingests GRPC [InsertRequests] or table [InsertRequest] (so it can be
-/// used in protocol handlers or table insertion API).
+/// A distributed deleter. It ingests GRPC [DeleteRequests] or table [DeleteRequest] (so it can be
+/// used in protocol handlers or table deletion API).
 ///
 /// Table data partitioning and Datanode requests batching are handled inside.
 ///
-/// Note that the inserter is confined to a single catalog and schema. I.e., it cannot handle
-/// multiple insert requests with different catalog or schema (will throw "NotSupported" error).
+/// Note that the deleter is confined to a single catalog and schema. I.e., it cannot handle
+/// multiple deletes requests with different catalog or schema (will throw "NotSupported" error).
 /// This is because we currently do not have this kind of requirements. Let's keep it simple for now.
-pub(crate) struct DistInserter {
+pub(crate) struct DistDeleter {
     catalog: String,
     schema: String,
     catalog_manager: Arc<FrontendCatalogManager>,
 }
 
-impl DistInserter {
+impl DistDeleter {
     pub(crate) fn new(
         catalog: String,
         schema: String,
@@ -62,53 +61,67 @@ impl DistInserter {
         }
     }
 
-    pub(crate) async fn grpc_insert(&self, requests: InsertRequests) -> Result<u32> {
-        let inserts = requests
-            .inserts
+    pub async fn grpc_delete(&self, requests: DeleteRequests) -> Result<usize> {
+        let deletes = requests
+            .deletes
             .into_iter()
-            .map(|x| {
-                to_table_insert_request(&self.catalog, &self.schema, x)
-                    .context(ToTableInsertRequestSnafu)
+            .map(|delete| {
+                to_table_delete_request(&self.catalog, &self.schema, delete)
+                    .context(ToTableDeleteRequestSnafu)
             })
             .collect::<Result<Vec<_>>>()?;
-
-        self.insert(inserts).await
+        self.delete(deletes).await
     }
 
-    pub(crate) async fn insert(&self, requests: Vec<InsertRequest>) -> Result<u32> {
+    pub(crate) async fn delete(&self, requests: Vec<DeleteRequest>) -> Result<usize> {
         debug_assert!(requests
             .iter()
             .all(|x| x.catalog_name == self.catalog && x.schema_name == self.schema));
-
-        let inserts = self.split_inserts(requests).await?;
-
-        self.request_datanodes(inserts).await
+        let deletes = self.split_deletes(requests).await?;
+        self.request_datanodes(deletes).await
     }
 
-    /// Splits multiple table [InsertRequest]s into multiple GRPC [InsertRequests]s, each of which
-    /// is grouped by the peer of Datanode, so we can batch them together when invoking gRPC write
-    /// method in Datanode.
-    async fn split_inserts(
+    async fn split_deletes(
         &self,
-        requests: Vec<InsertRequest>,
-    ) -> Result<HashMap<Peer, InsertRequests>> {
+        requests: Vec<DeleteRequest>,
+    ) -> Result<HashMap<Peer, DeleteRequests>> {
         let partition_manager = self.catalog_manager.partition_manager();
 
-        let mut inserts = HashMap::new();
+        let mut deletes = HashMap::new();
 
         for request in requests {
-            meter_insert_request!(request);
-
-            let table_name = TableName::new(&self.catalog, &self.schema, &request.table_name);
-            let table_info = self.find_table_info(&request.table_name).await?;
+            let table_name = &request.table_name;
+            let table = self
+                .catalog_manager
+                .table(&self.catalog, &self.schema, table_name)
+                .await
+                .context(CatalogSnafu)?
+                .with_context(|| TableNotFoundSnafu {
+                    table_name: table_name.to_string(),
+                })?;
+            let table_info = table.table_info();
             let table_meta = &table_info.meta;
 
             let table_id = table_info.table_id();
+            let table_name = &request.table_name;
+            let schema = table.schema();
+            let time_index = &schema
+                .timestamp_column()
+                .with_context(|| table::error::MissingTimeIndexColumnSnafu {
+                    table_name: table_name.to_string(),
+                })
+                .context(MissingTimeIndexColumnSnafu)?
+                .name;
+            let primary_key_column_names = table_info
+                .meta
+                .row_key_column_names()
+                .chain(iter::once(time_index))
+                .collect::<Vec<_>>();
+            let table_name = request.table_name.clone();
             let split = partition_manager
-                .split_insert_request(table_id, request, table_meta.schema.as_ref())
+                .split_delete_request(table_id, request, primary_key_column_names)
                 .await
-                .context(SplitInsertSnafu)?;
-
+                .context(SplitDeleteSnafu)?;
             let table_route = partition_manager
                 .find_table_route(table_id)
                 .await
@@ -116,44 +129,28 @@ impl DistInserter {
                     table_name: table_name.to_string(),
                 })?;
 
-            for (region_number, insert) in split {
+            for (region_number, delete) in split {
                 let datanode =
                     table_route
                         .find_region_leader(region_number)
                         .context(FindDatanodeSnafu {
                             region: region_number,
                         })?;
-
-                let insert = to_grpc_insert_request(table_meta, region_number, insert)?;
-
-                inserts
+                let table_name = TableName::new(&self.catalog, &self.schema, &table_name);
+                let delete =
+                    to_grpc_delete_request(table_meta, &table_name, region_number, delete)?;
+                deletes
                     .entry(datanode.clone())
-                    .or_insert_with(|| InsertRequests { inserts: vec![] })
-                    .inserts
-                    .push(insert);
+                    .or_insert_with(|| DeleteRequests { deletes: vec![] })
+                    .deletes
+                    .push(delete);
             }
         }
-        Ok(inserts)
+        Ok(deletes)
     }
 
-    async fn find_table_info(&self, table_name: &str) -> Result<TableInfoRef> {
-        let table = self
-            .catalog_manager
-            .table(&self.catalog, &self.schema, table_name)
-            .await
-            .context(CatalogSnafu)?
-            .with_context(|| TableNotFoundSnafu {
-                table_name: common_catalog::format_full_table_name(
-                    &self.catalog,
-                    &self.schema,
-                    table_name,
-                ),
-            })?;
-        Ok(table.table_info())
-    }
-
-    async fn request_datanodes(&self, inserts: HashMap<Peer, InsertRequests>) -> Result<u32> {
-        let results = future::try_join_all(inserts.into_iter().map(|(peer, inserts)| {
+    async fn request_datanodes(&self, deletes: HashMap<Peer, DeleteRequests>) -> Result<usize> {
+        let results = future::try_join_all(deletes.into_iter().map(|(peer, deletes)| {
             let datanode_clients = self.catalog_manager.datanode_clients();
             let catalog = self.catalog.clone();
             let schema = self.schema.clone();
@@ -161,31 +158,32 @@ impl DistInserter {
             common_runtime::spawn_write(async move {
                 let client = datanode_clients.get_client(&peer).await;
                 let database = Database::new(&catalog, &schema, client);
-                database.insert(inserts).await.context(RequestDatanodeSnafu)
+                database.delete(deletes).await.context(RequestDatanodeSnafu)
             })
         }))
         .await
         .context(JoinTaskSnafu)?;
 
         let affected_rows = results.into_iter().sum::<Result<u32>>()?;
-        counter!(crate::metrics::DIST_INGEST_ROW_COUNT, affected_rows as u64);
-        Ok(affected_rows)
+        Ok(affected_rows as usize)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use api::v1::column::Values;
-    use api::v1::{Column, ColumnDataType, InsertRequest as GrpcInsertRequest, SemanticType};
+    use api::v1::{Column, ColumnDataType, DeleteRequest as GrpcDeleteRequest, SemanticType};
     use client::client_manager::DatanodeClients;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-    use common_meta::key::catalog_name::{CatalogManager, CatalogNameKey};
-    use common_meta::key::schema_name::{SchemaManager, SchemaNameKey};
+    use common_meta::helper::{CatalogValue, SchemaValue};
+    use common_meta::key::catalog_name::CatalogNameKey;
+    use common_meta::key::schema_name::SchemaNameKey;
     use common_meta::key::table_name::TableNameKey;
     use common_meta::key::table_region::RegionDistribution;
     use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
     use common_meta::kv_backend::memory::MemoryKvBackend;
-    use common_meta::kv_backend::KvBackendRef;
+    use common_meta::kv_backend::{KvBackend, KvBackendRef};
+    use common_meta::rpc::store::PutRequest;
     use datatypes::prelude::{ConcreteDataType, VectorRef};
     use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, Schema};
     use datatypes::vectors::Int32Vector;
@@ -198,17 +196,24 @@ mod tests {
     async fn prepare_mocked_backend() -> KvBackendRef {
         let backend = Arc::new(MemoryKvBackend::default());
 
-        let catalog_manager = CatalogManager::new(backend.clone());
-        let schema_manager = SchemaManager::new(backend.clone());
+        let default_catalog = CatalogNameKey {
+            catalog: DEFAULT_CATALOG_NAME,
+        }
+        .to_string();
+        let req = PutRequest::new()
+            .with_key(default_catalog.as_bytes())
+            .with_value(CatalogValue.as_bytes().unwrap());
+        backend.put(req).await.unwrap();
 
-        catalog_manager
-            .create(CatalogNameKey::default())
-            .await
-            .unwrap();
-        schema_manager
-            .create(SchemaNameKey::default())
-            .await
-            .unwrap();
+        let default_schema = SchemaNameKey {
+            catalog: DEFAULT_CATALOG_NAME,
+            schema: DEFAULT_SCHEMA_NAME,
+        }
+        .to_string();
+        let req = PutRequest::new()
+            .with_key(default_schema.as_bytes())
+            .with_value(SchemaValue.as_bytes().unwrap());
+        backend.put(req).await.unwrap();
 
         backend
     }
@@ -225,11 +230,12 @@ mod tests {
                 )))
                 .unwrap(),
             ColumnSchema::new("a", ConcreteDataType::int32_datatype(), true),
+            ColumnSchema::new("value", ConcreteDataType::int32_datatype(), false),
         ]));
 
         let table_meta = TableMetaBuilder::default()
             .schema(schema)
-            .primary_key_indices(vec![])
+            .primary_key_indices(vec![1])
             .next_column_id(1)
             .build()
             .unwrap();
@@ -266,7 +272,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_split_inserts() {
+    async fn test_split_deletes() {
         let backend = prepare_mocked_backend().await;
 
         let table_metadata_manager = Arc::new(TableMetadataManager::new(backend.clone()));
@@ -281,50 +287,46 @@ mod tests {
             table_metadata_manager,
         ));
 
-        let inserter = DistInserter::new(
-            DEFAULT_CATALOG_NAME.to_string(),
-            DEFAULT_SCHEMA_NAME.to_string(),
-            catalog_manager,
-        );
-
-        let new_insert_request = |vector: VectorRef| -> InsertRequest {
-            InsertRequest {
+        let new_delete_request = |vector: VectorRef| -> DeleteRequest {
+            DeleteRequest {
                 catalog_name: DEFAULT_CATALOG_NAME.to_string(),
                 schema_name: DEFAULT_SCHEMA_NAME.to_string(),
                 table_name: table_name.to_string(),
-                columns_values: HashMap::from([("a".to_string(), vector)]),
-                region_number: 0,
+                key_column_values: HashMap::from([("a".to_string(), vector)]),
             }
         };
         let requests = vec![
-            new_insert_request(Arc::new(Int32Vector::from(vec![
+            new_delete_request(Arc::new(Int32Vector::from(vec![
                 Some(1),
-                None,
                 Some(11),
-                Some(101),
+                Some(50),
             ]))),
-            new_insert_request(Arc::new(Int32Vector::from(vec![
+            new_delete_request(Arc::new(Int32Vector::from(vec![
                 Some(2),
                 Some(12),
-                None,
                 Some(102),
             ]))),
         ];
 
-        let mut inserts = inserter.split_inserts(requests).await.unwrap();
+        let deleter = DistDeleter::new(
+            DEFAULT_CATALOG_NAME.to_string(),
+            DEFAULT_SCHEMA_NAME.to_string(),
+            catalog_manager,
+        );
+        let mut deletes = deleter.split_deletes(requests).await.unwrap();
 
-        assert_eq!(inserts.len(), 3);
+        assert_eq!(deletes.len(), 3);
 
-        let new_grpc_insert_request = |column_values: Vec<i32>,
+        let new_grpc_delete_request = |column_values: Vec<i32>,
                                        null_mask: Vec<u8>,
                                        row_count: u32,
                                        region_number: u32|
-         -> GrpcInsertRequest {
-            GrpcInsertRequest {
+         -> GrpcDeleteRequest {
+            GrpcDeleteRequest {
                 table_name: table_name.to_string(),
-                columns: vec![Column {
+                key_columns: vec![Column {
                     column_name: "a".to_string(),
-                    semantic_type: SemanticType::Field as i32,
+                    semantic_type: SemanticType::Tag as i32,
                     values: Some(Values {
                         i32_values: column_values,
                         ..Default::default()
@@ -347,37 +349,38 @@ mod tests {
         // 2 -> [10, 50)
         // 3 -> (min, 10)
 
-        let datanode_inserts = inserts.remove(&Peer::new(1, "")).unwrap().inserts;
-        assert_eq!(datanode_inserts.len(), 2);
+        let datanode_deletes = deletes.remove(&Peer::new(1, "")).unwrap().deletes;
+        assert_eq!(datanode_deletes.len(), 2);
+
         assert_eq!(
-            datanode_inserts[0],
-            new_grpc_insert_request(vec![101], vec![0], 1, 1)
+            datanode_deletes[0],
+            new_grpc_delete_request(vec![50], vec![0], 1, 1)
         );
         assert_eq!(
-            datanode_inserts[1],
-            new_grpc_insert_request(vec![102], vec![0], 1, 1)
+            datanode_deletes[1],
+            new_grpc_delete_request(vec![102], vec![0], 1, 1)
         );
 
-        let datanode_inserts = inserts.remove(&Peer::new(2, "")).unwrap().inserts;
-        assert_eq!(datanode_inserts.len(), 2);
+        let datanode_deletes = deletes.remove(&Peer::new(2, "")).unwrap().deletes;
+        assert_eq!(datanode_deletes.len(), 2);
         assert_eq!(
-            datanode_inserts[0],
-            new_grpc_insert_request(vec![11], vec![0], 1, 2)
+            datanode_deletes[0],
+            new_grpc_delete_request(vec![11], vec![0], 1, 2)
         );
         assert_eq!(
-            datanode_inserts[1],
-            new_grpc_insert_request(vec![12], vec![0], 1, 2)
+            datanode_deletes[1],
+            new_grpc_delete_request(vec![12], vec![0], 1, 2)
         );
 
-        let datanode_inserts = inserts.remove(&Peer::new(3, "")).unwrap().inserts;
-        assert_eq!(datanode_inserts.len(), 2);
+        let datanode_deletes = deletes.remove(&Peer::new(3, "")).unwrap().deletes;
+        assert_eq!(datanode_deletes.len(), 2);
         assert_eq!(
-            datanode_inserts[0],
-            new_grpc_insert_request(vec![1], vec![2], 2, 3)
+            datanode_deletes[0],
+            new_grpc_delete_request(vec![1], vec![0], 1, 3)
         );
         assert_eq!(
-            datanode_inserts[1],
-            new_grpc_insert_request(vec![2], vec![2], 2, 3)
+            datanode_deletes[1],
+            new_grpc_delete_request(vec![2], vec![0], 1, 3)
         );
     }
 }
