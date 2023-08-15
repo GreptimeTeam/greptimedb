@@ -20,6 +20,7 @@ pub mod util;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use api::v1::OpType;
 use datatypes::prelude::ScalarVectorBuilder;
 use datatypes::timestamp::TimestampMillisecond;
 use datatypes::vectors::{
@@ -29,7 +30,7 @@ use rand::distributions::Alphanumeric;
 use rand::prelude::ThreadRng;
 use rand::Rng;
 use storage::memtable::KeyValues;
-use store_api::storage::{OpType, SequenceNumber};
+use store_api::storage::SequenceNumber;
 
 static NEXT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 

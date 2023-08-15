@@ -14,9 +14,8 @@
 
 use std::collections::HashMap;
 
-use greptime_proto::v1::mito::{Mutation, OpType};
-use greptime_proto::v1::{Row, Rows, Value};
-use store_api::metadata::SemanticType;
+use api::v1::{Mutation, OpType, Row, Rows, SemanticType};
+use datatypes::value::ValueRef;
 use store_api::storage::SequenceNumber;
 
 use crate::metadata::RegionMetadata;
@@ -81,24 +80,24 @@ pub struct KeyValue<'a> {
 
 impl<'a> KeyValue<'a> {
     /// Get primary key columns.
-    pub fn primary_keys(&self) -> impl Iterator<Item = &Value> {
+    pub fn primary_keys(&self) -> impl Iterator<Item = ValueRef> {
         self.helper.indices[..self.helper.num_primary_key_column]
             .iter()
-            .map(|idx| &self.row.values[*idx])
+            .map(|idx| api::helper::pb_value_to_value_ref(&self.row.values[*idx]))
     }
 
     /// Get field columns.
-    pub fn fields(&self) -> impl Iterator<Item = &Value> {
+    pub fn fields(&self) -> impl Iterator<Item = ValueRef> {
         self.helper.indices[self.helper.num_primary_key_column + 1..]
             .iter()
-            .map(|idx| &self.row.values[*idx])
+            .map(|idx| api::helper::pb_value_to_value_ref(&self.row.values[*idx]))
     }
 
     /// Get timestamp.
-    pub fn timestamp(&self) -> Value {
+    pub fn timestamp(&self) -> ValueRef {
         // Timestamp is primitive, we clone it.
         let index = self.helper.indices[self.helper.num_primary_key_column];
-        self.row.values[index].clone()
+        api::helper::pb_value_to_value_ref(&self.row.values[index])
     }
 
     /// Get number of primary key columns.
@@ -188,16 +187,16 @@ impl ReadRowHelper {
 
 #[cfg(test)]
 mod tests {
+    use api::v1;
+    use api::v1::ColumnDataType;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
-    use greptime_proto::v1;
-    use greptime_proto::v1::ColumnDataType;
     use store_api::metadata::ColumnMetadata;
     use store_api::storage::RegionId;
 
     use super::*;
     use crate::metadata::RegionMetadataBuilder;
-    use crate::proto_util::i64_value;
+    use crate::test_util::i64_value;
 
     const TS_NAME: &str = "ts";
     const START_SEQ: SequenceNumber = 100;
@@ -296,7 +295,7 @@ mod tests {
     fn check_key_values(kvs: &KeyValues, num_rows: usize, keys: &[i64], ts: i64, values: &[i64]) {
         assert_eq!(num_rows, kvs.num_rows());
         let mut expect_seq = START_SEQ;
-        let expect_ts = i64_value(ts);
+        let expect_ts = ValueRef::Int64(ts);
         for kv in kvs.iter() {
             assert_eq!(expect_seq, kv.sequence());
             expect_seq += 1;
@@ -305,11 +304,11 @@ mod tests {
             assert_eq!(values.len(), kv.num_fields());
 
             assert_eq!(expect_ts, kv.timestamp());
-            let expect_keys: Vec<_> = keys.iter().map(|k| i64_value(*k)).collect();
-            let actual_keys: Vec<_> = kv.primary_keys().cloned().collect();
+            let expect_keys: Vec<_> = keys.iter().map(|k| ValueRef::Int64(*k)).collect();
+            let actual_keys: Vec<_> = kv.primary_keys().collect();
             assert_eq!(expect_keys, actual_keys);
-            let expect_values: Vec<_> = values.iter().map(|v| i64_value(*v)).collect();
-            let actual_values: Vec<_> = kv.fields().cloned().collect();
+            let expect_values: Vec<_> = values.iter().map(|v| ValueRef::Int64(*v)).collect();
+            let actual_values: Vec<_> = kv.fields().collect();
             assert_eq!(expect_values, actual_values);
         }
     }

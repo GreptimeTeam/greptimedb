@@ -447,10 +447,11 @@ impl RegionManifestManagerInner {
 
 #[cfg(test)]
 mod test {
+    use api::v1::SemanticType;
     use common_datasource::compression::CompressionType;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
-    use store_api::metadata::{ColumnMetadata, SemanticType};
+    use store_api::metadata::ColumnMetadata;
 
     use super::*;
     use crate::manifest::action::RegionChange;

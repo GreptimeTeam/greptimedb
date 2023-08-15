@@ -17,21 +17,21 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use api::helper::{
+    is_column_type_value_eq, is_semantic_type_eq, proto_value_type, to_column_data_type,
+    to_proto_value,
+};
+use api::v1::{ColumnDataType, ColumnSchema, OpType, Rows, Value};
 use common_base::readable_size::ReadableSize;
-use greptime_proto::v1::{ColumnDataType, ColumnSchema, Rows, Value};
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::metadata::ColumnMetadata;
 use store_api::region_request::RegionRequest;
-use store_api::storage::{ColumnId, CompactionStrategy, OpType, RegionId};
+use store_api::storage::{ColumnId, CompactionStrategy, RegionId};
 use tokio::sync::oneshot::{self, Receiver, Sender};
 
 use crate::config::DEFAULT_WRITE_BUFFER_SIZE;
 use crate::error::{CreateDefaultSnafu, FillDefaultSnafu, InvalidRequestSnafu, Result};
 use crate::metadata::RegionMetadata;
-use crate::proto_util::{
-    is_column_type_value_eq, is_semantic_type_eq, proto_value_type, to_column_data_type,
-    to_proto_semantic_type, to_proto_value,
-};
 
 /// Options that affect the entire region.
 ///
@@ -141,7 +141,7 @@ impl WriteRequest {
             for (i, (value, column_schema)) in row.values.iter().zip(&rows.schema).enumerate() {
                 validate_proto_value(region_id, value, column_schema)?;
 
-                if value.value.is_none() {
+                if value.value_data.is_none() {
                     has_null[i] = true;
                 }
             }
@@ -204,7 +204,7 @@ impl WriteRequest {
                             "column {} has semantic type {:?}, given: {}({})",
                             column.column_schema.name,
                             column.semantic_type,
-                            greptime_proto::v1::SemanticType::from_i32(input_col.semantic_type)
+                            api::v1::SemanticType::from_i32(input_col.semantic_type)
                                 .map(|v| v.as_str_name())
                                 .unwrap_or("Unknown"),
                             input_col.semantic_type
@@ -284,6 +284,7 @@ impl WriteRequest {
             })?;
 
         // Convert default value into proto's value.
+
         let proto_value = to_proto_value(default_value).with_context(|| InvalidRequestSnafu {
             region_id,
             reason: format!(
@@ -310,7 +311,7 @@ impl WriteRequest {
         self.rows.schema.push(ColumnSchema {
             column_name: column.column_schema.name.clone(),
             datatype: datatype as i32,
-            semantic_type: to_proto_semantic_type(column.semantic_type) as i32,
+            semantic_type: column.semantic_type as i32,
         });
 
         Ok(())
@@ -405,14 +406,13 @@ impl RequestValidator {
 
 #[cfg(test)]
 mod tests {
+    use api::v1::{Row, SemanticType};
     use datatypes::prelude::ConcreteDataType;
-    use greptime_proto::v1::Row;
-    use store_api::metadata::SemanticType;
 
     use super::*;
     use crate::error::Error;
     use crate::metadata::RegionMetadataBuilder;
-    use crate::proto_util::{i64_value, ts_ms_value};
+    use crate::test_util::{i64_value, ts_ms_value};
 
     fn new_column_schema(
         name: &str,
@@ -585,7 +585,7 @@ mod tests {
                 new_column_schema("k0", ColumnDataType::Int64, SemanticType::Tag),
             ],
             rows: vec![Row {
-                values: vec![Value { value: None }, i64_value(2)],
+                values: vec![Value { value_data: None }, i64_value(2)],
             }],
         };
         let metadata = new_region_metadata();
@@ -666,7 +666,7 @@ mod tests {
                 new_column_schema("k0", ColumnDataType::Int64, SemanticType::Tag),
             ],
             rows: vec![Row {
-                values: vec![ts_ms_value(1), Value { value: None }],
+                values: vec![ts_ms_value(1), Value { value_data: None }],
             }],
         };
         assert_eq!(expect_rows, request.rows);

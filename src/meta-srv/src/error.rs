@@ -489,6 +489,12 @@ pub enum Error {
 
     #[snafu(display("Too many partitions, location: {}", location))]
     TooManyPartitions { location: Location },
+
+    #[snafu(display("Unsupported operation {}, location: {}", operation, location))]
+    Unsupported {
+        operation: String,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -535,7 +541,8 @@ impl ErrorExt for Error {
             | Error::NoEnoughAvailableDatanode { .. }
             | Error::ConvertGrpcExpr { .. }
             | Error::PublishMessage { .. }
-            | Error::Join { .. } => StatusCode::Internal,
+            | Error::Join { .. }
+            | Error::Unsupported { .. } => StatusCode::Internal,
             Error::EmptyKey { .. }
             | Error::MissingRequiredParameter { .. }
             | Error::MissingRequestHeader { .. }

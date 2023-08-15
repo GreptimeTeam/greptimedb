@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use api::v1::SemanticType;
 use datatypes::schema::ColumnSchema;
 use serde::{Deserialize, Serialize};
 
@@ -26,15 +27,4 @@ pub struct ColumnMetadata {
     pub semantic_type: SemanticType,
     /// Immutable and unique id of a region.
     pub column_id: ColumnId,
-}
-
-/// The semantic type of one column
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-pub enum SemanticType {
-    /// Tag column, also is a part of primary key.
-    Tag = 0,
-    /// A column that isn't a time index or part of primary key.
-    Field = 1,
-    /// Time index column.
-    Timestamp = 2,
 }

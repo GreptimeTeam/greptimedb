@@ -16,6 +16,9 @@
 
 use std::sync::Arc;
 
+use api::greptime_proto::v1;
+use api::v1::value::ValueData;
+use api::v1::SemanticType;
 use common_datasource::compression::CompressionType;
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
 use datatypes::prelude::ConcreteDataType;
@@ -24,7 +27,7 @@ use log_store::raft_engine::log_store::RaftEngineLogStore;
 use log_store::test_util::log_store_util;
 use object_store::services::Fs;
 use object_store::ObjectStore;
-use store_api::metadata::{ColumnMetadata, SemanticType};
+use store_api::metadata::ColumnMetadata;
 use store_api::storage::RegionId;
 
 use crate::config::MitoConfig;
@@ -225,5 +228,22 @@ impl CreateRequestBuilder {
             create_if_not_exists: self.create_if_not_exists,
             options: RegionOptions::default(),
         }
+    }
+}
+
+// TODO(yingwen): Support conversion in greptime-proto.
+/// Creates value for i64.
+#[cfg(test)]
+pub(crate) fn i64_value(data: i64) -> v1::Value {
+    v1::Value {
+        value_data: Some(ValueData::I64Value(data)),
+    }
+}
+
+/// Creates value for timestamp millis.
+#[cfg(test)]
+pub(crate) fn ts_ms_value(data: i64) -> v1::Value {
+    v1::Value {
+        value_data: Some(ValueData::TsMillisecondValue(data)),
     }
 }

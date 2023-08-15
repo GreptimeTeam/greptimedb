@@ -139,7 +139,7 @@ fn check_iter_content(
             assert_eq!(Value::from(values[index].0), v0);
             assert_eq!(Value::from(values[index].1), v1);
             assert_eq!(Value::from(sequences[index]), sequence);
-            assert_eq!(Value::from(op_types[index].as_u8()), op_type);
+            assert_eq!(Value::from(op_types[index] as u8), op_type);
 
             index += 1;
         }

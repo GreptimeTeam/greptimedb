@@ -18,7 +18,7 @@ use std::collections::{hash_map, HashMap};
 use std::mem;
 use std::sync::Arc;
 
-use greptime_proto::v1::mito::{Mutation, WalEntry};
+use api::v1::{Mutation, WalEntry};
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
 use store_api::storage::{RegionId, SequenceNumber};
@@ -27,7 +27,6 @@ use tokio::sync::oneshot::Sender;
 use crate::error::{Error, RegionNotFoundSnafu, Result, WriteGroupSnafu};
 use crate::memtable::KeyValues;
 use crate::metadata::RegionMetadata;
-use crate::proto_util::to_proto_op_type;
 use crate::region::version::{VersionControlData, VersionRef};
 use crate::region::MitoRegionRef;
 use crate::request::{SenderWriteRequest, WriteRequest};
@@ -212,7 +211,7 @@ impl RegionWriteCtx {
         let num_rows = sender_req.request.rows.rows.len() as u64;
 
         self.wal_entry.mutations.push(Mutation {
-            op_type: to_proto_op_type(sender_req.request.op_type) as i32,
+            op_type: sender_req.request.op_type as i32,
             sequence: self.next_sequence,
             rows: Some(sender_req.request.rows),
         });

@@ -17,11 +17,11 @@
 use std::mem;
 use std::sync::Arc;
 
+use api::v1::WalEntry;
 use async_stream::try_stream;
 use common_error::ext::BoxedError;
 use futures::stream::BoxStream;
 use futures::StreamExt;
-use greptime_proto::v1::mito::WalEntry;
 use prost::Message;
 use snafu::ResultExt;
 use store_api::logstore::entry::Entry;
@@ -157,10 +157,11 @@ impl<S: LogStore> WalWriter<S> {
 
 #[cfg(test)]
 mod tests {
+    use api::v1::{
+        value, ColumnDataType, ColumnSchema, Mutation, OpType, Row, Rows, SemanticType, Value,
+    };
     use common_test_util::temp_dir::{create_temp_dir, TempDir};
     use futures::TryStreamExt;
-    use greptime_proto::v1::mito::{Mutation, OpType};
-    use greptime_proto::v1::{value, ColumnDataType, ColumnSchema, Row, Rows, SemanticType, Value};
     use log_store::raft_engine::log_store::RaftEngineLogStore;
     use log_store::test_util::log_store_util;
     use store_api::storage::SequenceNumber;
@@ -199,10 +200,10 @@ mod tests {
             .map(|(str_col, int_col)| {
                 let values = vec![
                     Value {
-                        value: Some(value::Value::StringValue(str_col.to_string())),
+                        value_data: Some(value::ValueData::StringValue(str_col.to_string())),
                     },
                     Value {
-                        value: Some(value::Value::TsMillisecondValue(*int_col)),
+                        value_data: Some(value::ValueData::TsMillisecondValue(*int_col)),
                     },
                 ];
                 Row { values }

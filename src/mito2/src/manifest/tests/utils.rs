@@ -12,9 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use api::v1::SemanticType;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
-use store_api::metadata::{ColumnMetadata, SemanticType};
+use store_api::metadata::ColumnMetadata;
 use store_api::storage::RegionId;
 
 use crate::metadata::{RegionMetadata, RegionMetadataBuilder};

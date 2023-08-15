@@ -50,10 +50,11 @@ impl GreptimeDBTelemetryTask {
     }
 
     pub fn start(&self, runtime: Runtime) -> Result<()> {
-        print_anonymous_usage_data_disclaimer();
-
         match self {
-            GreptimeDBTelemetryTask::Enable(task) => task.start(runtime),
+            GreptimeDBTelemetryTask::Enable(task) => {
+                print_anonymous_usage_data_disclaimer();
+                task.start(runtime)
+            }
             GreptimeDBTelemetryTask::Disable => Ok(()),
         }
     }

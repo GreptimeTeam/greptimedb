@@ -14,43 +14,11 @@
 
 //! Common types.
 
+use api::v1::OpType;
+
 /// Represents a sequence number of data in storage. The offset of logstore can be used
 /// as a sequence number.
 pub type SequenceNumber = u64;
 
-/// Operation type of the value to write to storage.
-///
-/// The enum values are stored in the SST files so don't change
-/// them if possible.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum OpType {
-    /// Delete operation.
-    Delete = 0,
-    /// Put operation.
-    Put = 1,
-}
-
-impl OpType {
-    /// Cast the [OpType] to u8.
-    #[inline]
-    pub fn as_u8(&self) -> u8 {
-        *self as u8
-    }
-
-    /// Minimal op type after casting to u8.
-    pub const fn min_type() -> OpType {
-        OpType::Delete
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_op_type() {
-        assert_eq!(0, OpType::Delete.as_u8());
-        assert_eq!(1, OpType::Put.as_u8());
-        assert_eq!(0, OpType::min_type().as_u8());
-    }
-}
+// TODO(hl): We should implement a `min` method for OpType in greptime-proto crate.
+pub const MIN_OP_TYPE: OpType = OpType::Delete;

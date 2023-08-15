@@ -355,6 +355,7 @@ mod tests {
     use std::ops::Range;
     use std::sync::Arc;
 
+    use api::v1::OpType;
     use common_base::readable_size::ReadableSize;
     use common_test_util::temp_dir::create_temp_dir;
     use datatypes::arrow::array::{Array, UInt64Array, UInt8Array};
@@ -362,7 +363,6 @@ mod tests {
     use datatypes::types::{TimestampMillisecondType, TimestampType};
     use datatypes::vectors::TimestampMillisecondVector;
     use object_store::services::Fs;
-    use store_api::storage::OpType;
 
     use super::*;
     use crate::file_purger::noop::new_noop_file_purger;

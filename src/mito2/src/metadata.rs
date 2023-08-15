@@ -17,12 +17,13 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use api::v1::SemanticType;
 use datatypes::prelude::DataType;
 use datatypes::schema::{Schema, SchemaRef};
 use serde::de::Error;
 use serde::{Deserialize, Deserializer, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
-use store_api::metadata::{ColumnMetadata, SemanticType};
+use store_api::metadata::ColumnMetadata;
 use store_api::storage::{ColumnId, RegionId};
 
 use crate::error::{InvalidMetaSnafu, InvalidSchemaSnafu, Result, SerdeJsonSnafu};
