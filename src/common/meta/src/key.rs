@@ -521,12 +521,13 @@ mod tests {
     use datatypes::schema::{ColumnSchema, SchemaBuilder};
     use table::metadata::{RawTableInfo, TableInfo, TableInfoBuilder, TableMetaBuilder};
 
+    use super::datanode_table::DatanodeTableKey;
     use crate::key::table_info::TableInfoValue;
     use crate::key::table_route::TableRouteValue;
     use crate::key::{to_removed_key, TableMetadataManager};
     use crate::kv_backend::memory::MemoryKvBackend;
     use crate::peer::Peer;
-    use crate::rpc::router::{Region, RegionRoute};
+    use crate::rpc::router::{region_distribution, Region, RegionRoute};
 
     #[test]
     fn test_to_removed_key() {
@@ -584,29 +585,22 @@ mod tests {
     #[tokio::test]
     async fn test_create_table_metadata() {
         let mem_kv = Arc::new(MemoryKvBackend::default());
-
         let table_metadata_manager = TableMetadataManager::new(mem_kv);
-
         let table_info: RawTableInfo = new_test_table_info().into();
-
         let region_route = new_test_region_route();
         let region_routes = vec![region_route.clone()];
-
         // creates metadata.
         table_metadata_manager
             .create_table_metadata(table_info.clone(), region_routes.clone())
             .await
             .unwrap();
-
         // if metadata was already created, it should be ok.
         table_metadata_manager
             .create_table_metadata(table_info.clone(), region_routes.clone())
             .await
             .unwrap();
-
         let mut modified_region_routes = region_routes.clone();
         modified_region_routes.push(region_route);
-
         // if remote metadata was exists, it should return an error.
         assert!(table_metadata_manager
             .create_table_metadata(table_info, modified_region_routes)
@@ -617,27 +611,21 @@ mod tests {
     #[tokio::test]
     async fn test_delete_table_metadata() {
         let mem_kv = Arc::new(MemoryKvBackend::default());
-
         let table_metadata_manager = TableMetadataManager::new(mem_kv);
-
         let table_info: RawTableInfo = new_test_table_info().into();
-
         let region_route = new_test_region_route();
         let region_routes = vec![region_route.clone()];
-
         // creates metadata.
         table_metadata_manager
             .create_table_metadata(table_info.clone(), region_routes.clone())
             .await
             .unwrap();
         let table_info_value = TableInfoValue::new(table_info);
-
         // deletes metadata.
         table_metadata_manager
             .delete_table_metadata(table_info_value.clone(), region_routes.clone())
             .await
             .unwrap();
-
         // if metadata was already deleted, it should be ok.
         table_metadata_manager
             .delete_table_metadata(table_info_value.clone(), region_routes.clone())
@@ -648,38 +636,29 @@ mod tests {
     #[tokio::test]
     async fn test_rename_table() {
         let mem_kv = Arc::new(MemoryKvBackend::default());
-
         let table_metadata_manager = TableMetadataManager::new(mem_kv);
-
         let table_info: RawTableInfo = new_test_table_info().into();
-
         let region_route = new_test_region_route();
         let region_routes = vec![region_route.clone()];
-
         // creates metadata.
         table_metadata_manager
             .create_table_metadata(table_info.clone(), region_routes.clone())
             .await
             .unwrap();
         let new_table_name = "another_name".to_string();
-
         let table_info_value = TableInfoValue::new(table_info.clone());
-
         table_metadata_manager
             .rename_table(table_info_value.clone(), new_table_name.clone())
             .await
             .unwrap();
-
         // if remote metadata was updated, it should be ok.
         table_metadata_manager
             .rename_table(table_info_value.clone(), new_table_name.clone())
             .await
             .unwrap();
-
         let mut modified_table_info = table_info;
         modified_table_info.name = "hi".to_string();
         let modified_table_info_value = table_info_value.update(modified_table_info);
-
         // if the table_info_value is wrong, it should return an error.
         // The ABA problem.
         assert!(table_metadata_manager
@@ -695,7 +674,6 @@ mod tests {
         let table_info: RawTableInfo = new_test_table_info().into();
         let region_route = new_test_region_route();
         let region_routes = vec![region_route.clone()];
-
         // creates metadata.
         table_metadata_manager
             .create_table_metadata(table_info.clone(), region_routes.clone())
@@ -703,31 +681,44 @@ mod tests {
             .unwrap();
         let mut new_table_info = table_info.clone();
         new_table_info.name = "hi".to_string();
-
         let current_table_info_value = TableInfoValue::new(table_info.clone());
-
         // should be ok.
         table_metadata_manager
             .update_table_info(current_table_info_value.clone(), new_table_info.clone())
             .await
             .unwrap();
-
         // if table info was updated, it should be ok.
         table_metadata_manager
             .update_table_info(current_table_info_value.clone(), new_table_info.clone())
             .await
             .unwrap();
-
         let mut wrong_table_info = table_info.clone();
         wrong_table_info.name = "wrong".to_string();
         let wrong_table_info_value = current_table_info_value.update(wrong_table_info);
-
         // if the current_table_info_value is wrong, it should return an error.
         // The ABA problem.
         assert!(table_metadata_manager
             .update_table_info(wrong_table_info_value, new_table_info)
             .await
             .is_err())
+    }
+
+    async fn assert_datanode_table(
+        table_metadata_manager: &TableMetadataManager,
+        table_id: u32,
+        region_routes: &[RegionRoute],
+    ) {
+        let region_distribution = region_distribution(region_routes).unwrap();
+        for (datanode, regions) in region_distribution {
+            let got = table_metadata_manager
+                .datanode_table_manager()
+                .get(&DatanodeTableKey::new(datanode, table_id))
+                .await
+                .unwrap()
+                .unwrap();
+
+            assert_eq!(got.regions, regions)
+        }
     }
 
     #[tokio::test]
@@ -739,15 +730,17 @@ mod tests {
         let region_routes = vec![region_route.clone()];
         let table_id = table_info.ident.table_id;
         let current_table_route_value = TableRouteValue::new(region_routes.clone());
-
         // creates metadata.
         table_metadata_manager
             .create_table_metadata(table_info.clone(), region_routes.clone())
             .await
             .unwrap();
-
-        let new_region_routes = vec![region_route.clone(), region_route.clone()];
-
+        assert_datanode_table(&table_metadata_manager, table_id, &region_routes).await;
+        let new_region_routes = vec![
+            region_route.clone(),
+            region_route.clone(),
+            region_route.clone(),
+        ];
         // it should be ok.
         table_metadata_manager
             .update_table_route(
@@ -757,6 +750,7 @@ mod tests {
             )
             .await
             .unwrap();
+        assert_datanode_table(&table_metadata_manager, table_id, &new_region_routes).await;
 
         // if the table route was updated. it should be ok.
         table_metadata_manager
@@ -768,14 +762,27 @@ mod tests {
             .await
             .unwrap();
 
+        let current_table_route_value = current_table_route_value.update(new_region_routes.clone());
+        let new_region_routes = vec![region_route.clone(), region_route.clone()];
+        // it should be ok.
+        table_metadata_manager
+            .update_table_route(
+                table_id,
+                current_table_route_value.clone(),
+                new_region_routes.clone(),
+            )
+            .await
+            .unwrap();
+        assert_datanode_table(&table_metadata_manager, table_id, &new_region_routes).await;
+
         // if the current_table_route_value is wrong, it should return an error.
         // The ABA problem.
         let wrong_table_route_value = current_table_route_value.update(vec![
             region_route.clone(),
             region_route.clone(),
             region_route.clone(),
+            region_route.clone(),
         ]);
-
         assert!(table_metadata_manager
             .update_table_route(table_id, wrong_table_route_value, new_region_routes)
             .await
