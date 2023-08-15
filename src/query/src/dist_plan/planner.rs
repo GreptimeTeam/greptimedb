@@ -85,34 +85,41 @@ impl ExtensionPlanner for DistExtensionPlanner {
                 let input_plan = merge_scan.input();
                 let optimized_input =
                     self.optimize_input_logical_plan(session_state, input_plan)?;
-                let input_physical_plan = planner
-                    .create_physical_plan(&optimized_input, session_state)
-                    .await?;
-                let Some(table_name) = self.get_table_name(input_plan)? else {
-                    // no relation found in input plan, going to execute them locally
-                    return Ok(Some(input_physical_plan));
+
+                let fallback_plan = || async {
+                    planner
+                        .create_physical_plan(&optimized_input, session_state)
+                        .await
+                        .map(Some)
                 };
 
-                let input_schema = input_physical_plan.schema().clone();
-                let input_plan = self.set_table_name(&table_name, input_plan.clone())?;
+                let Some(table_name) = Self::extract_table_name(input_plan)? else {
+                    // no relation found in input plan, going to execute them locally
+                    return fallback_plan().await;
+                };
+
+                let schema = optimized_input.schema().as_ref().into();
+
+                let amended_plan =
+                    Self::plan_with_full_table_name(input_plan.clone(), &table_name)?;
                 let substrait_plan: Bytes = DFLogicalSubstraitConvertor
-                    .encode(&input_plan)
+                    .encode(&amended_plan)
                     .context(error::EncodeSubstraitLogicalPlanSnafu)?
                     .into();
-                let peers = self.get_peers(&table_name).await;
-                match peers {
+
+                match self.get_peers(&table_name).await {
                     Ok(peers) => {
-                        let exec = MergeScanExec::new(
+                        let merge_scan_plan = MergeScanExec::new(
                             table_name,
                             peers,
                             substrait_plan,
-                            input_schema,
+                            &schema,
                             self.clients.clone(),
-                        );
+                        )?;
 
-                        Ok(Some(Arc::new(exec) as _))
+                        Ok(Some(Arc::new(merge_scan_plan) as _))
                     }
-                    Err(_) => Ok(Some(input_physical_plan)),
+                    Err(_) => fallback_plan().await,
                 }
             }
         } else {
@@ -123,15 +130,14 @@ impl ExtensionPlanner for DistExtensionPlanner {
 
 impl DistExtensionPlanner {
     /// Extract table name from logical plan
-    fn get_table_name(&self, plan: &LogicalPlan) -> Result<Option<TableName>> {
+    fn extract_table_name(plan: &LogicalPlan) -> Result<Option<TableName>> {
         let mut extractor = TableNameExtractor::default();
         let _ = plan.visit(&mut extractor)?;
         Ok(extractor.table_name)
     }
 
-    /// Set the fully resolved table name to TableScan plan
-    fn set_table_name(&self, name: &TableName, plan: LogicalPlan) -> Result<LogicalPlan> {
-        // let mut rewriter
+    /// Apply the fully resolved table name to the TableScan plan
+    fn plan_with_full_table_name(plan: LogicalPlan, name: &TableName) -> Result<LogicalPlan> {
         plan.transform(&|plan| TableNameRewriter::rewrite_table_name(plan, name))
     }
 

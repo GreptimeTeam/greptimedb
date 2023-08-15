@@ -37,7 +37,7 @@ use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, Par
 use datafusion_common::{DataFusionError, Result, Statistics};
 use datafusion_expr::{Extension, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion_physical_expr::PhysicalSortExpr;
-use datatypes::schema::Schema;
+use datatypes::schema::{Schema, SchemaRef};
 use futures_util::StreamExt;
 use snafu::ResultExt;
 
@@ -113,6 +113,7 @@ pub struct MergeScanExec {
     table: TableName,
     peers: Vec<Peer>,
     substrait_plan: Bytes,
+    schema: SchemaRef,
     arrow_schema: ArrowSchemaRef,
     clients: Arc<DatanodeClients>,
     metric: ExecutionPlanMetricsSet,
@@ -123,19 +124,21 @@ impl MergeScanExec {
         table: TableName,
         peers: Vec<Peer>,
         substrait_plan: Bytes,
-        arrow_schema: ArrowSchemaRef,
+        arrow_schema: &ArrowSchema,
         clients: Arc<DatanodeClients>,
-    ) -> Self {
-        // remove all metadata
-        let arrow_schema = Arc::new(ArrowSchema::new(arrow_schema.fields().to_vec()));
-        Self {
+    ) -> Result<Self> {
+        let arrow_schema_without_metadata = Self::arrow_schema_without_metadata(arrow_schema);
+        let schema_without_metadata =
+            Self::arrow_schema_to_schema(arrow_schema_without_metadata.clone())?;
+        Ok(Self {
             table,
             peers,
             substrait_plan,
-            arrow_schema,
+            schema: schema_without_metadata,
+            arrow_schema: arrow_schema_without_metadata,
             clients,
             metric: ExecutionPlanMetricsSet::new(),
-        }
+        })
     }
 
     pub fn to_stream(&self, context: Arc<TaskContext>) -> Result<SendableRecordBatchStream> {
@@ -187,24 +190,37 @@ impl MergeScanExec {
         };
 
         Ok(Box::pin(RecordBatchStreamAdaptor {
-            schema: Arc::new(
-                self.arrow_schema
-                    .clone()
-                    .try_into()
-                    .context(ConvertSchemaSnafu)?,
-            ),
+            schema: self.schema.clone(),
             stream: Box::pin(stream),
             output_ordering: None,
         }))
     }
 
     fn remove_metadata_from_record_batch(batch: RecordBatch) -> RecordBatch {
-        let schema = ArrowSchema::new(batch.schema.arrow_schema().fields().to_vec());
-        RecordBatch::new(
-            Arc::new(Schema::try_from(schema).unwrap()),
-            batch.columns().iter().cloned(),
-        )
-        .unwrap()
+        let arrow_schema = batch.schema.arrow_schema().as_ref();
+        let arrow_schema_without_metadata = Self::arrow_schema_without_metadata(arrow_schema);
+        let schema_without_metadata =
+            Self::arrow_schema_to_schema(arrow_schema_without_metadata).unwrap();
+        RecordBatch::new(schema_without_metadata, batch.columns().iter().cloned()).unwrap()
+    }
+
+    fn arrow_schema_without_metadata(arrow_schema: &ArrowSchema) -> ArrowSchemaRef {
+        Arc::new(ArrowSchema::new(
+            arrow_schema
+                .fields()
+                .iter()
+                .map(|field| {
+                    let field = field.as_ref().clone();
+                    let field_without_metadata = field.with_metadata(Default::default());
+                    Arc::new(field_without_metadata)
+                })
+                .collect::<Vec<_>>(),
+        ))
+    }
+
+    fn arrow_schema_to_schema(arrow_schema: ArrowSchemaRef) -> Result<SchemaRef> {
+        let schema = Schema::try_from(arrow_schema).context(ConvertSchemaSnafu)?;
+        Ok(Arc::new(schema))
     }
 }
 
