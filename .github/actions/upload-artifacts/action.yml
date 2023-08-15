@@ -66,17 +66,13 @@ runs:
         name: ${{ inputs.artifacts-dir }}.sha256sum
         path: ${{ inputs.working-dir }}/${{ inputs.artifacts-dir }}.sha256sum
 
-    - name: Configure AWS credentials
-      if: ${{ inputs.upload-to-s3 == 'true' }}
-      uses: aws-actions/configure-aws-credentials@v2
-      with:
-        aws-access-key-id: ${{ inputs.aws-access-key-id }}
-        aws-secret-access-key: ${{ inputs.aws-secret-access-key }}
-        aws-region: ${{ inputs.aws-region }}
-
     - name: Upload artifacts to S3
       if: ${{ inputs.upload-to-s3 == 'true' }}
       uses: nick-invision/retry@v2
+      env:
+        AWS_ACCESS_KEY_ID: ${{ inputs.aws-access-key-id }}
+        AWS_SECRET_ACCESS_KEY: ${{ inputs.aws-secret-access-key }}
+        AWS_DEFAULT_REGION: ${{ inputs.aws-region }}
       with:
         max_attempts: 20
         timeout_minutes: 5
