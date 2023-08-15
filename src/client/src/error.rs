@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::any::Any;
-use std::str::FromStr;
 
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
@@ -108,7 +107,13 @@ impl From<Status> for Error {
         }
 
         let code = get_metadata_value(&e, GREPTIME_ERROR_CODE)
-            .and_then(|s| StatusCode::from_str(&s).ok())
+            .and_then(|s| {
+                if let Ok(code) = s.parse::<u32>() {
+                    StatusCode::from_u32(code)
+                } else {
+                    None
+                }
+            })
             .unwrap_or(StatusCode::Unknown);
 
         let msg = get_metadata_value(&e, GREPTIME_ERROR_MSG).unwrap_or(e.to_string());
