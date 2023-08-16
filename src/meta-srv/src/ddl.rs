@@ -51,7 +51,6 @@ pub(crate) struct DdlContext {
     pub(crate) datanode_clients: Arc<DatanodeClients>,
     pub(crate) mailbox: MailboxRef,
     pub(crate) server_addr: String,
-    #[allow(unused)]
     pub(crate) table_metadata_manager: TableMetadataManagerRef,
 }
 

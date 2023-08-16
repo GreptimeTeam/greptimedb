@@ -15,19 +15,16 @@
 use std::fmt::Display;
 
 use api::v1::meta::TableName;
-use futures::future::try_join_all;
-use serde::__private::de;
 use serde::{Deserialize, Serialize};
 use snafu::ensure;
 use table::metadata::TableId;
 
 use crate::error::{Result, UnexpectedSnafu};
 use crate::key::{to_removed_key, TableMetaKey};
-use crate::kv_backend::txn::{Compare, CompareOp, Txn, TxnOp, TxnOpResponse, TxnRequest};
+use crate::kv_backend::txn::{Compare, CompareOp, Txn, TxnOp, TxnOpResponse};
 use crate::kv_backend::KvBackendRef;
-use crate::rpc::router::{region_distribution, RegionRoute, Table, TableRoute};
-use crate::rpc::store::{BatchGetRequest, CompareAndPutRequest, MoveValueRequest};
-use crate::rpc::KeyValue;
+use crate::rpc::router::RegionRoute;
+use crate::rpc::store::{CompareAndPutRequest, MoveValueRequest};
 
 pub const TABLE_ROUTE_PREFIX: &str = "__meta_table_route";
 
@@ -319,19 +316,13 @@ mod tests {
     use super::TableRouteKey;
     use crate::key::table_route::{TableRouteManager, TableRouteValue};
     use crate::kv_backend::memory::MemoryKvBackend;
-    use crate::rpc::router::{RegionRoute, Table, TableRoute};
-    use crate::table_name::TableName;
+    use crate::rpc::router::RegionRoute;
 
     #[tokio::test]
     async fn test_table_route_manager() {
         let mgr = TableRouteManager::new(Arc::new(MemoryKvBackend::default()));
 
         let table_id = 1024u32;
-        let table = Table {
-            id: table_id as u64,
-            table_name: TableName::new("foo", "bar", "baz"),
-            table_schema: b"mock schema".to_vec(),
-        };
         let region_route = RegionRoute::default();
         let region_routes = vec![region_route];
 
@@ -349,11 +340,13 @@ mod tests {
         let mut updated = expect.clone();
         updated.region_routes.push(RegionRoute::default());
 
-        mgr.compare_and_put(1024, Some(expect.clone()), updated.region_routes.clone())
+        let _ = mgr
+            .compare_and_put(1024, Some(expect.clone()), updated.region_routes.clone())
             .await
             .unwrap();
 
-        mgr.compare_and_put(1024, Some(expect.clone()), updated.region_routes)
+        let _ = mgr
+            .compare_and_put(1024, Some(expect.clone()), updated.region_routes)
             .await
             .unwrap();
     }

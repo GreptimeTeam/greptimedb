@@ -53,8 +53,6 @@ pub mod schema_name;
 pub mod table_info;
 pub mod table_name;
 pub mod table_region;
-// TODO(weny): removes it.
-#[allow(unused)]
 pub mod table_route;
 
 use std::sync::Arc;
