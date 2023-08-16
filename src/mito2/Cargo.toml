@@ -51,7 +51,9 @@ store-api = { workspace = true }
 strum = "0.21"
 table = { workspace = true }
 tokio.workspace = true
+tokio-util.workspace = true
 uuid.workspace = true
+flume = "0.10"
 
 [dev-dependencies]
 common-procedure-test = { workspace = true }

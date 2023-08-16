@@ -170,3 +170,6 @@ mod worker;
 /// The [RegionManifestManager](crate::manifest::manager::RegionManifestManager) manages metadata of the engine.
 ///
 mod docs {}
+
+#[allow(dead_code)]
+mod schedule;
