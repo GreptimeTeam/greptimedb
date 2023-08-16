@@ -16,9 +16,12 @@
 
 use std::sync::Arc;
 
+use api::v1::QueryRequest;
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
 use common_query::Output;
+use common_recordbatch::SendableRecordBatchStream;
+use datatypes::schema::SchemaRef;
 
 use crate::region_request::RegionRequest;
 use crate::storage::RegionId;
@@ -33,6 +36,14 @@ pub trait RegionEngine {
         region_id: RegionId,
         request: RegionRequest,
     ) -> Result<Output, BoxedError>;
+
+    async fn handle_query(
+        &self,
+        region_id: RegionId,
+        request: QueryRequest,
+    ) -> Result<SendableRecordBatchStream, BoxedError>;
+
+    async fn get_metadata(&self, region_id: RegionId) -> Result<SchemaRef, BoxedError>;
 }
 
 pub type RegionEngineRef = Arc<dyn RegionEngine>;

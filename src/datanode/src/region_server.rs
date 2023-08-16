@@ -14,7 +14,9 @@
 
 use std::collections::HashMap;
 
+use common_base::bytes::Bytes;
 use common_query::Output;
+use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::info;
 use dashmap::DashMap;
 use snafu::{OptionExt, ResultExt};
@@ -54,7 +56,6 @@ impl RegionServer {
             RegionRequest::Open(open) => RegionChange::Register(open.engine.clone()),
             RegionRequest::Close(_) | RegionRequest::Drop(_) => RegionChange::Deregisters,
             RegionRequest::Write(_)
-            | RegionRequest::Read(_)
             | RegionRequest::Delete(_)
             | RegionRequest::Alter(_)
             | RegionRequest::Flush(_)
@@ -94,6 +95,14 @@ impl RegionServer {
 
         Ok(result)
     }
+
+    pub fn handle_read(
+        &self,
+        region_id: RegionId,
+        plan: Bytes,
+    ) -> Result<SendableRecordBatchStream> {
+        todo!()
+    }
 }
 
 enum RegionChange {
@@ -101,3 +110,14 @@ enum RegionChange {
     Register(String),
     Deregisters,
 }
+
+struct DummyCatalogList {}
+
+impl DummyCatalogList {
+    pub fn new(region_id: RegionId) -> Self {
+        todo!()
+    }
+}
+
+/// For [TableProvider](datafusion::datasource::TableProvider)
+struct DummyTableProvider {}

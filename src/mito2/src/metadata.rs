@@ -33,7 +33,7 @@ use crate::region::VersionNumber;
 pub(crate) const INIT_REGION_VERSION: VersionNumber = 0;
 
 #[cfg_attr(doc, aquamarine::aquamarine)]
-/// Static metadata of a region.
+/// General static metadata of a region.
 ///
 /// This struct implements [Serialize] and [Deserialize] traits.
 /// To build a [RegionMetadata] object, use [RegionMetadataBuilder].
@@ -41,7 +41,6 @@ pub(crate) const INIT_REGION_VERSION: VersionNumber = 0;
 /// ```mermaid
 /// class RegionMetadata {
 ///     +RegionId region_id
-///     +VersionNumber version
 ///     +SchemaRef schema
 ///     +Vec&lt;ColumnMetadata&gt; column_metadatas
 ///     +Vec&lt;ColumnId&gt; primary_key
@@ -75,8 +74,6 @@ pub struct RegionMetadata {
     /// Columns in the region. Has the same order as columns
     /// in [schema](RegionMetadata::schema).
     pub column_metadatas: Vec<ColumnMetadata>,
-    /// Version of metadata.
-    pub version: VersionNumber,
     /// Maintains an ordered list of primary keys
     pub primary_key: Vec<ColumnId>,
 
@@ -109,7 +106,6 @@ impl<'de> Deserialize<'de> for RegionMetadata {
             time_index: skipped.time_index,
             id_to_index: skipped.id_to_index,
             column_metadatas: without_schema.column_metadatas,
-            version: without_schema.version,
             primary_key: without_schema.primary_key,
             region_id: without_schema.region_id,
         })
@@ -326,7 +322,6 @@ impl RegionMetadataBuilder {
             time_index: skipped.time_index,
             id_to_index: skipped.id_to_index,
             column_metadatas: self.column_metadatas,
-            version: self.version,
             primary_key: self.primary_key,
             region_id: self.region_id,
         };

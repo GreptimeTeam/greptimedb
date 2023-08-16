@@ -22,7 +22,6 @@ use crate::storage::{AlterRequest, ColumnId, ScanRequest};
 #[derive(Debug)]
 pub enum RegionRequest {
     Write(RegionWriteRequest),
-    Read(RegionReadRequest),
     Delete(RegionDeleteRequest),
     Create(RegionCreateRequest),
     Drop(RegionDropRequest),
@@ -77,7 +76,7 @@ pub struct RegionOpenRequest {
     pub engine: String,
     /// Data directory of the region.
     pub region_dir: String,
-    /// Options of the created region.
+    /// Options of the opened region.
     pub options: HashMap<String, String>,
 }
 
