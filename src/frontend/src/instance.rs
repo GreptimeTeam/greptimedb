@@ -379,10 +379,13 @@ impl Instance {
         let schema_name = ctx.current_schema();
 
         // Create table automatically, build schema from data.
-        let create_expr = self
-            .create_expr_factory
-            .create_expr_by_columns(catalog_name, schema_name, table_name, columns, engine)
-            .await?;
+        let create_expr = self.create_expr_factory.create_table_expr_by_columns(
+            catalog_name,
+            schema_name,
+            table_name,
+            columns,
+            engine,
+        )?;
 
         info!(
             "Try to create table: {} automatically with request: {:?}",

@@ -94,10 +94,9 @@ impl RowInserter {
         let mut columns_values = HashMap::with_capacity(schema.len());
         for column_schema in &schema {
             let column_name = column_schema.column_name.clone();
-            let datatype: ConcreteDataType =
-                ColumnDataTypeWrapper::try_new(column_schema.datatype.clone())
-                    .context(ColumnDataTypeSnafu)?
-                    .into();
+            let datatype: ConcreteDataType = ColumnDataTypeWrapper::try_new(column_schema.datatype)
+                .context(ColumnDataTypeSnafu)?
+                .into();
             let mutable_vector = datatype.create_mutable_vector(num_rows);
             columns_values.insert(column_name, mutable_vector);
         }
