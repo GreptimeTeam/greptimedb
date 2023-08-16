@@ -186,7 +186,7 @@ impl ReadFormat {
         let sequence_array = fixed_pos_columns.next().unwrap();
         let pk_array = fixed_pos_columns.next().unwrap();
         let ts_array = fixed_pos_columns.next().unwrap();
-        let field_batch_columns = self.get_field_batch_columns(&record_batch)?;
+        let field_batch_columns = self.get_field_batch_columns(record_batch)?;
 
         // Compute primary key offsets.
         let pk_dict_array = pk_array
@@ -215,7 +215,6 @@ impl ReadFormat {
         for (i, start) in offsets[..offsets.len() - 1].iter().enumerate() {
             let end = offsets[i + 1];
             let rows_in_batch = end - start;
-
             let dict_key = keys.value(*start);
             let primary_key = pk_values.value(dict_key.into()).to_vec();
 
