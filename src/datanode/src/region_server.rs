@@ -122,31 +122,3 @@ impl DummyCatalogList {
         todo!()
     }
 }
-
-// /// For [TableProvider](datafusion::datasource::TableProvider)
-// struct DummyTableProvider {}
-
-// #[async_trait]
-// impl TableProvider for DummyTableProvider {
-//     fn as_any(&self) -> &dyn Any {
-//         self
-//     }
-
-//     fn schema(&self) -> SchemaRef {
-//         todo!()
-//     }
-
-//     fn table_type(&self) -> TableType {
-//         TableType::Base
-//     }
-
-//     async fn scan(
-//         &self,
-//         state: &SessionState,
-//         projection: Option<&Vec<usize>>,
-//         filters: &[Expr],
-//         limit: Option<usize>,
-//     ) -> Result<Arc<dyn DfPhysicalPlan>> {
-//         todo!()
-//     }
-// }
