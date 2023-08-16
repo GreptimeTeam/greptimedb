@@ -131,7 +131,7 @@ impl ReadFormat {
         }
     }
 
-    /// Gets projection indices to read `columns` from parquet files.
+    /// Gets sorted projection indices to read `columns` from parquet files.
     ///
     /// This function ignores columns not in `metadata` to for compatibility between
     /// different schemas.
@@ -139,7 +139,7 @@ impl ReadFormat {
         &self,
         columns: impl IntoIterator<Item = ColumnId>,
     ) -> Vec<usize> {
-        columns
+        let mut indices: Vec<_> = columns
             .into_iter()
             .filter_map(|column_id| {
                 // Only apply projection to fields.
@@ -150,7 +150,9 @@ impl ReadFormat {
                 self.arrow_schema.fields.len() - FIXED_POS_COLUMN_NUM
                     ..self.arrow_schema.fields.len(),
             )
-            .collect()
+            .collect();
+        indices.sort_unstable();
+        indices
     }
 
     /// Convert a arrow record batch into `batches`.
@@ -183,7 +185,7 @@ impl ReadFormat {
         let pk_array = fixed_pos_columns.next().unwrap();
         let ts_array = fixed_pos_columns.next().unwrap();
         let num_cols = record_batch.num_columns();
-        let field_vectors = record_batch
+        let field_batch_columns = record_batch
             .columns()
             .iter()
             .zip(record_batch.schema().fields())
@@ -241,10 +243,10 @@ impl ReadFormat {
                 .sequences_array(sequence_array.slice(*start, rows_in_batch))?
                 .op_types_array(op_type_array.slice(*start, rows_in_batch))?;
             // Push all fields
-            for field_vector in &field_vectors {
+            for batch_column in &field_batch_columns {
                 builder.push_field(BatchColumn {
-                    column_id: field_vector.column_id,
-                    data: field_vector.data.slice(*start, rows_in_batch),
+                    column_id: batch_column.column_id,
+                    data: batch_column.data.slice(*start, rows_in_batch),
                 });
             }
 
@@ -472,5 +474,23 @@ mod tests {
 
         let actual = write_format.convert_batch(&batch).unwrap();
         assert_eq!(expect_record, actual);
+    }
+
+    #[test]
+    fn test_projection_indices() {
+        let metadata = build_test_region_metadata();
+        let arrow_schema = build_test_arrow_schema();
+        let read_format = ReadFormat::new(metadata, arrow_schema);
+        // Only read tag1
+        assert_eq!(vec![2, 3, 4, 5], read_format.projection_indices([3]));
+        // Only read field1
+        assert_eq!(vec![0, 2, 3, 4, 5], read_format.projection_indices([4]));
+        // Only read ts
+        assert_eq!(vec![2, 3, 4, 5], read_format.projection_indices([5]));
+        // Read field0, tag0, ts
+        assert_eq!(
+            vec![1, 2, 3, 4, 5],
+            read_format.projection_indices([2, 1, 5])
+        );
     }
 }
