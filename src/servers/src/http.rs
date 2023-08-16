@@ -74,6 +74,10 @@ use crate::metrics::{
     METRIC_METHOD_LABEL, METRIC_PATH_LABEL,
 };
 use crate::metrics_handler::MetricsHandler;
+use crate::prometheus::{
+    instant_query, label_values_query, labels_query, range_query, series_query,
+    PrometheusHandlerRef,
+};
 use crate::query_handler::grpc::ServerGrpcQueryHandlerRef;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 use crate::query_handler::{
@@ -128,6 +132,7 @@ pub struct HttpServer {
     influxdb_handler: Option<InfluxdbLineProtocolHandlerRef>,
     opentsdb_handler: Option<OpentsdbProtocolHandlerRef>,
     prom_handler: Option<PromStoreProtocolHandlerRef>,
+    prometheus_handler: Option<PrometheusHandlerRef>,
     otlp_handler: Option<OpenTelemetryProtocolHandlerRef>,
     script_handler: Option<ScriptHandlerRef>,
     shutdown_tx: Mutex<Option<Sender<()>>>,
@@ -409,6 +414,7 @@ impl HttpServerBuilder {
                 opentsdb_handler: None,
                 influxdb_handler: None,
                 prom_handler: None,
+                prometheus_handler: None,
                 otlp_handler: None,
                 user_provider: None,
                 script_handler: None,
@@ -447,6 +453,11 @@ impl HttpServerBuilder {
 
     pub fn with_prom_handler(&mut self, handler: PromStoreProtocolHandlerRef) -> &mut Self {
         let _ = self.inner.prom_handler.get_or_insert(handler);
+        self
+    }
+
+    pub fn with_prometheus_handler(&mut self, handler: PrometheusHandlerRef) -> &mut Self {
+        let _ = self.inner.prometheus_handler.get_or_insert(handler);
         self
     }
 
@@ -534,6 +545,13 @@ impl HttpServer {
             router = router.nest(
                 &format!("/{HTTP_API_VERSION}/prometheus"),
                 self.route_prom(prom_handler),
+            );
+        }
+
+        if let Some(prometheus_handler) = self.prometheus_handler.clone() {
+            router = router.nest(
+                &format!("/{HTTP_API_VERSION}/prometheus"),
+                self.route_prometheus(prometheus_handler),
             );
         }
 
@@ -646,6 +664,19 @@ impl HttpServer {
             .route("/private/api.json", apirouting::get(serve_api))
             .route("/private/docs", apirouting::get(serve_docs))
             .with_state(api_state)
+    }
+
+    fn route_prometheus<S>(&self, prometheus_handler: PrometheusHandlerRef) -> Router<S> {
+        Router::new()
+            .route("/query", routing::post(instant_query).get(instant_query))
+            .route("/query_range", routing::post(range_query).get(range_query))
+            .route("/labels", routing::post(labels_query).get(labels_query))
+            .route("/series", routing::post(series_query).get(series_query))
+            .route(
+                "/label/:label_name/values",
+                routing::get(label_values_query),
+            )
+            .with_state(prometheus_handler)
     }
 
     fn route_prom<S>(&self, prom_handler: PromStoreProtocolHandlerRef) -> Router<S> {
