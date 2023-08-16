@@ -74,7 +74,7 @@ impl WriteFormat {
     }
 
     /// Convert `batch` to a arrow record batch to store in parquet.
-    pub(crate) fn convert_record_batch(&self, batch: &Batch) -> Result<RecordBatch> {
+    pub(crate) fn convert_batch(&self, batch: &Batch) -> Result<RecordBatch> {
         debug_assert_eq!(
             batch.fields().len() + FIXED_POS_COLUMN_NUM,
             self.arrow_schema.fields().len()
@@ -329,6 +329,7 @@ fn new_primary_key_array(primary_key: &[u8], num_rows: usize) -> ArrayRef {
 
 #[cfg(test)]
 mod tests {
+    use datatypes::arrow::array::{Int64Array, TimestampMillisecondArray, UInt64Array, UInt8Array};
     use datatypes::arrow::datatypes::TimeUnit;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
@@ -339,7 +340,10 @@ mod tests {
     use super::*;
     use crate::metadata::RegionMetadataBuilder;
 
-    fn build_test_region_metadata() -> RegionMetadata {
+    const TEST_SEQUENCE: u64 = 1;
+    const TEST_OP_TYPE: u8 = 1;
+
+    fn build_test_region_metadata() -> RegionMetadataRef {
         let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 1), 1);
         builder
             .push_column_metadata(ColumnMetadata {
@@ -380,7 +384,7 @@ mod tests {
                 column_id: 5,
             })
             .primary_key(vec![1, 3]);
-        builder.build().unwrap()
+        Arc::new(builder.build().unwrap())
     }
 
     fn build_test_arrow_schema() -> SchemaRef {
@@ -406,15 +410,15 @@ mod tests {
     fn new_batch(primary_key: &[u8], start_ts: i64, start_field: i64, num_rows: usize) -> Batch {
         let ts_values = (0..num_rows).into_iter().map(|i| start_ts + i as i64);
         let timestamps = Arc::new(TimestampMillisecondVector::from_values(ts_values));
-        let sequences = Arc::new(UInt64Vector::from_vec(vec![1; num_rows]));
-        let op_types = Arc::new(UInt8Vector::from_vec(vec![0; num_rows]));
+        let sequences = Arc::new(UInt64Vector::from_vec(vec![TEST_SEQUENCE; num_rows]));
+        let op_types = Arc::new(UInt8Vector::from_vec(vec![TEST_OP_TYPE; num_rows]));
         let fields = vec![
             BatchColumn {
-                column_id: 2,
+                column_id: 4,
                 data: Arc::new(Int64Vector::from_vec(vec![start_field; num_rows])),
             },
             BatchColumn {
-                column_id: 4,
+                column_id: 2,
                 data: Arc::new(Int64Vector::from_vec(vec![start_field + 1; num_rows])),
             },
         ];
@@ -428,7 +432,45 @@ mod tests {
     #[test]
     fn test_to_sst_arrow_schema() {
         let metadata = build_test_region_metadata();
-        let schema = to_sst_arrow_schema(&metadata);
-        assert_eq!(build_test_arrow_schema(), schema);
+        let write_format = WriteFormat::new(metadata);
+        assert_eq!(build_test_arrow_schema(), write_format.arrow_schema());
+    }
+
+    #[test]
+    fn test_new_primary_key_array() {
+        let array = new_primary_key_array(b"test", 3);
+        let dict_array = array
+            .as_any()
+            .downcast_ref::<DictionaryArray<UInt16Type>>()
+            .unwrap();
+        assert_eq!(3, array.len());
+        assert_eq!(*dict_array.keys(), UInt16Array::from_value(0, 3));
+        let values = dict_array
+            .values()
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .unwrap();
+        assert_eq!(*values, BinaryArray::from_vec(vec![b"test"]));
+    }
+
+    #[test]
+    fn test_convert_batch() {
+        let metadata = build_test_region_metadata();
+        let write_format = WriteFormat::new(metadata);
+
+        let num_rows = 4;
+        let batch = new_batch(b"test", 1, 2, num_rows);
+        let columns: Vec<ArrayRef> = vec![
+            Arc::new(Int64Array::from(vec![2; num_rows])), // field1
+            Arc::new(Int64Array::from(vec![3; num_rows])), // field0
+            Arc::new(TimestampMillisecondArray::from(vec![1, 2, 3, 4])), // ts
+            new_primary_key_array(b"test", num_rows),      // primary key
+            Arc::new(UInt64Array::from(vec![TEST_SEQUENCE; num_rows])), // sequence
+            Arc::new(UInt8Array::from(vec![TEST_OP_TYPE; num_rows])), // op type
+        ];
+        let expect_record = RecordBatch::try_new(build_test_arrow_schema(), columns).unwrap();
+
+        let actual = write_format.convert_batch(&batch).unwrap();
+        assert_eq!(expect_record, actual);
     }
 }

@@ -88,7 +88,7 @@ impl<'a> ParquetWriter<'a> {
         .await?;
 
         while let Some(batch) = self.source.next_batch().await? {
-            let arrow_batch = write_format.convert_record_batch(&batch)?;
+            let arrow_batch = write_format.convert_batch(&batch)?;
 
             buffered_writer.write(&arrow_batch).await?;
         }
