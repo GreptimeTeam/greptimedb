@@ -44,9 +44,6 @@ pub struct ColumnMetadata {
     pub column_id: ColumnId,
 }
 
-/// Initial version number of a new region.
-// pub(crate) const INIT_REGION_VERSION: VersionNumber = 0;
-
 #[cfg_attr(doc, aquamarine::aquamarine)]
 /// General static metadata of a region.
 ///
