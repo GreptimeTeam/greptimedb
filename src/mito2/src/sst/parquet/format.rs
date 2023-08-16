@@ -186,27 +186,7 @@ impl ReadFormat {
         let sequence_array = fixed_pos_columns.next().unwrap();
         let pk_array = fixed_pos_columns.next().unwrap();
         let ts_array = fixed_pos_columns.next().unwrap();
-        let num_cols = record_batch.num_columns();
-        let field_batch_columns = record_batch
-            .columns()
-            .iter()
-            .zip(record_batch.schema().fields())
-            .take(num_cols - FIXED_POS_COLUMN_NUM) // Take all field columns.
-            .map(|(array, field)| {
-                let vector = Helper::try_into_vector(array.clone()).context(ConvertVectorSnafu)?;
-                let column = self
-                    .metadata
-                    .column_by_name(field.name())
-                    .with_context(|| InvalidRecordBatchSnafu {
-                        reason: format!("column {} not found in metadata", field.name()),
-                    })?;
-
-                Ok(BatchColumn {
-                    column_id: column.column_id,
-                    data: vector,
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let field_batch_columns = self.get_field_batch_columns(&record_batch)?;
 
         // Compute primary key offsets.
         let pk_dict_array = pk_array
@@ -257,6 +237,30 @@ impl ReadFormat {
         }
 
         Ok(())
+    }
+
+    /// Get fields from `record_batch`.
+    fn get_field_batch_columns(&self, record_batch: &RecordBatch) -> Result<Vec<BatchColumn>> {
+        record_batch
+            .columns()
+            .iter()
+            .zip(record_batch.schema().fields())
+            .take(record_batch.num_columns() - FIXED_POS_COLUMN_NUM) // Take all field columns.
+            .map(|(array, field)| {
+                let vector = Helper::try_into_vector(array.clone()).context(ConvertVectorSnafu)?;
+                let column = self
+                    .metadata
+                    .column_by_name(field.name())
+                    .with_context(|| InvalidRecordBatchSnafu {
+                        reason: format!("column {} not found in metadata", field.name()),
+                    })?;
+
+                Ok(BatchColumn {
+                    column_id: column.column_id,
+                    data: vector,
+                })
+            })
+            .collect()
     }
 }
 
@@ -412,7 +416,7 @@ mod tests {
     }
 
     fn new_batch(primary_key: &[u8], start_ts: i64, start_field: i64, num_rows: usize) -> Batch {
-        let ts_values = (0..num_rows).into_iter().map(|i| start_ts + i as i64);
+        let ts_values = (0..num_rows).map(|i| start_ts + i as i64);
         let timestamps = Arc::new(TimestampMillisecondVector::from_values(ts_values));
         let sequences = Arc::new(UInt64Vector::from_vec(vec![TEST_SEQUENCE; num_rows]));
         let op_types = Arc::new(UInt8Vector::from_vec(vec![TEST_OP_TYPE; num_rows]));
