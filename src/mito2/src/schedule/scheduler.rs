@@ -15,7 +15,7 @@ const STATE_STOP: u8 = 1;
 const STATE_AWAIT_TERMINATION: u8 = 2;
 
 // producer and consumer count
-const PC_CNT: u8 = 2;
+const CONSUMER_NUM: u8 = 2;
 
 #[async_trait::async_trait]
 pub trait Scheduler {
@@ -28,7 +28,7 @@ pub trait Request {
 }
 
 pub struct LocalScheduler {
-    senders: Vec<flume::Sender<Job>>,
+    sender: flume::Sender<Job>,
     handles: Vec<Option<JoinHandle<()>>>,
     cancel_token: CancellationToken,
     /// State of scheduler.
@@ -43,14 +43,9 @@ impl LocalScheduler {
         let token = CancellationToken::new();
         let state = Arc::new(AtomicU8::new(STATE_RUNNING));
 
-        let mut senders = Vec::new();
         let mut handles = Vec::new();
 
-        for _ in 0..PC_CNT {
-            senders.push(tx.clone());
-        }
-
-        for _ in 0..PC_CNT {
+        for _ in 0..CONSUMER_NUM {
             let child = token.child_token().clone();
             let receiver = rx.clone();
             let state = Arc::clone(&state);
@@ -61,7 +56,6 @@ impl LocalScheduler {
                         return;
                     }
 
-                    // 如果收到请求，等待请求中的异步任务完成
                     if let Ok(req) = receiver.recv() {
                         req.await;
                     }
@@ -73,7 +67,7 @@ impl LocalScheduler {
 
         // 构造LocalScheduler结构体并返回
         Self {
-            senders,
+            sender: tx,
             cancel_token: token,
             handles: handles,
             state,
@@ -82,7 +76,6 @@ impl LocalScheduler {
 
     pub async fn stop(&mut self) -> Result<()> {
         self.state.store(STATE_STOP, Ordering::Relaxed);
-
         self.cancel_token.cancel();
         for handle in &mut self.handles {
             if let Some(handle) = handle.take() {
@@ -101,9 +94,7 @@ impl LocalScheduler {
 #[async_trait::async_trait]
 impl Scheduler for LocalScheduler {
     async fn schedule(&self, req: Job) -> Result<()> {
-        if let Some(sender) = self.senders.get(1) {
-            sender.send_async(req).await.unwrap();
-        }
+        self.sender.send_async(req).await.unwrap();
         Ok(())
     }
 }
@@ -112,7 +103,6 @@ impl Drop for LocalScheduler {
     fn drop(&mut self) {
         self.state.store(STATE_STOP, Ordering::Relaxed);
         self.cancel_token.cancel();
-        self.senders.clear();
         self.handles.clear();
     }
 }
