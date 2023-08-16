@@ -209,6 +209,12 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to split delete request, source: {}", source))]
+    SplitDelete {
+        source: partition::error::Error,
+        location: Location,
+    },
+
     #[snafu(display("Failed to create table info, source: {}", source))]
     CreateTableInfo {
         #[snafu(backtrace)]
@@ -409,6 +415,12 @@ pub enum Error {
         source: table::error::Error,
     },
 
+    #[snafu(display("Missing time index column: {}", source))]
+    MissingTimeIndexColumn {
+        location: Location,
+        source: table::error::Error,
+    },
+
     #[snafu(display("Failed to start script manager, source: {}", source))]
     StartScriptManager {
         #[snafu(backtrace)]
@@ -581,7 +593,7 @@ pub enum Error {
 
     #[snafu(display("Failed to pass permission check, source: {}", source))]
     Permission {
-        source: auth::Error,
+        source: auth::error::Error,
         location: Location,
     },
 }
@@ -644,6 +656,8 @@ impl ErrorExt for Error {
                 source.status_code()
             }
 
+            Error::MissingTimeIndexColumn { source, .. } => source.status_code(),
+
             Error::FindDatanode { .. }
             | Error::CreateTableRoute { .. }
             | Error::FindRegionRoute { .. }
@@ -693,7 +707,8 @@ impl ErrorExt for Error {
             Error::DeserializePartition { source, .. }
             | Error::FindTablePartitionRule { source, .. }
             | Error::FindTableRoute { source, .. }
-            | Error::SplitInsert { source, .. } => source.status_code(),
+            | Error::SplitInsert { source, .. }
+            | Error::SplitDelete { source, .. } => source.status_code(),
 
             Error::UnrecognizedTableOption { .. } => StatusCode::InvalidArguments,
 

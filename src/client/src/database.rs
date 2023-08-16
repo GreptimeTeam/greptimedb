@@ -17,7 +17,7 @@ use api::v1::ddl_request::Expr as DdlExpr;
 use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
 use api::v1::{
-    AlterExpr, AuthHeader, CompactTableExpr, CreateTableExpr, DdlRequest, DeleteRequest,
+    AlterExpr, AuthHeader, CompactTableExpr, CreateTableExpr, DdlRequest, DeleteRequests,
     DropTableExpr, FlushTableExpr, GreptimeRequest, InsertRequests, PromRangeQuery, QueryRequest,
     RequestHeader, TruncateTableExpr,
 };
@@ -132,9 +132,9 @@ impl Database {
         Ok(stream_inserter)
     }
 
-    pub async fn delete(&self, request: DeleteRequest) -> Result<u32> {
+    pub async fn delete(&self, request: DeleteRequests) -> Result<u32> {
         let _timer = timer!(metrics::METRIC_GRPC_DELETE);
-        self.handle(Request::Delete(request)).await
+        self.handle(Request::Deletes(request)).await
     }
 
     async fn handle(&self, request: Request) -> Result<u32> {

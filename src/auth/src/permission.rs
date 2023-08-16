@@ -17,7 +17,7 @@ use std::fmt::Debug;
 use api::v1::greptime_request::Request;
 use sql::statements::statement::Statement;
 
-use crate::error::Result;
+use crate::error::{PermissionDeniedSnafu, Result};
 use crate::{PermissionCheckerRef, UserInfoRef};
 
 #[derive(Debug, Clone)]
@@ -53,7 +53,11 @@ impl PermissionChecker for Option<&PermissionCheckerRef> {
         req: PermissionReq,
     ) -> Result<PermissionResp> {
         match self {
-            Some(checker) => checker.check_permission(user_info, req),
+            Some(checker) => match checker.check_permission(user_info, req) {
+                Ok(PermissionResp::Reject) => PermissionDeniedSnafu.fail(),
+                Ok(PermissionResp::Allow) => Ok(PermissionResp::Allow),
+                Err(e) => Err(e),
+            },
             None => Ok(PermissionResp::Allow),
         }
     }

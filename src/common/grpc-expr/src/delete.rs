@@ -23,7 +23,11 @@ use table::requests::DeleteRequest;
 use crate::error::{ColumnDataTypeSnafu, IllegalDeleteRequestSnafu, Result};
 use crate::insert::add_values_to_builder;
 
-pub fn to_table_delete_request(request: GrpcDeleteRequest) -> Result<DeleteRequest> {
+pub fn to_table_delete_request(
+    catalog_name: &str,
+    schema_name: &str,
+    request: GrpcDeleteRequest,
+) -> Result<DeleteRequest> {
     let row_count = request.row_count as usize;
 
     let mut key_column_values = HashMap::with_capacity(request.key_columns.len());
@@ -52,7 +56,12 @@ pub fn to_table_delete_request(request: GrpcDeleteRequest) -> Result<DeleteReque
         );
     }
 
-    Ok(DeleteRequest { key_column_values })
+    Ok(DeleteRequest {
+        catalog_name: catalog_name.to_string(),
+        schema_name: schema_name.to_string(),
+        table_name: request.table_name,
+        key_column_values,
+    })
 }
 
 #[cfg(test)]
@@ -94,8 +103,12 @@ mod tests {
             row_count: 3,
         };
 
-        let mut request = to_table_delete_request(grpc_request).unwrap();
+        let mut request =
+            to_table_delete_request("foo_catalog", "foo_schema", grpc_request).unwrap();
 
+        assert_eq!(request.catalog_name, "foo_catalog");
+        assert_eq!(request.schema_name, "foo_schema");
+        assert_eq!(request.table_name, "foo");
         assert_eq!(
             Arc::new(Int32Vector::from_slice(vec![1, 2, 3])) as VectorRef,
             request.key_column_values.remove("id").unwrap()

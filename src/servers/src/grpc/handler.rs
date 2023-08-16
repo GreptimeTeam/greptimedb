@@ -31,10 +31,7 @@ use session::context::{QueryContextBuilder, QueryContextRef};
 use snafu::{OptionExt, ResultExt};
 
 use crate::error::Error::UnsupportedAuthScheme;
-use crate::error::{
-    AuthSnafu, InvalidQuerySnafu, JoinTaskSnafu, NotFoundAuthHeaderSnafu, Result as InternalResult,
-};
-use crate::grpc::TonicResult;
+use crate::error::{AuthSnafu, InvalidQuerySnafu, JoinTaskSnafu, NotFoundAuthHeaderSnafu, Result};
 use crate::metrics::{
     METRIC_AUTH_FAILURE, METRIC_CODE_LABEL, METRIC_DB_LABEL, METRIC_SERVER_GRPC_DB_REQUEST_TIMER,
     METRIC_TYPE_LABEL,
@@ -60,23 +57,15 @@ impl GreptimeRequestHandler {
         }
     }
 
-    pub(crate) async fn handle_request(
-        &self,
-        request: GreptimeRequest,
-    ) -> TonicResult<InternalResult<Output>> {
+    pub(crate) async fn handle_request(&self, request: GreptimeRequest) -> Result<Output> {
         let query = request.request.context(InvalidQuerySnafu {
             reason: "Expecting non-empty GreptimeRequest.",
         })?;
 
         let header = request.header.as_ref();
         let query_ctx = create_query_context(header);
-
-        match self.auth(header, &query_ctx).await? {
-            Err(e) => return Ok(Err(e)),
-            Ok(user_info) => {
-                query_ctx.set_current_user(user_info);
-            }
-        };
+        let user_info = self.auth(header, &query_ctx).await?;
+        query_ctx.set_current_user(user_info);
 
         let handler = self.handler.clone();
         let request_type = request_type(&query);
@@ -102,20 +91,19 @@ impl GreptimeRequestHandler {
             })
         });
 
-        let output = handle.await.context(JoinTaskSnafu).map_err(|e| {
+        handle.await.context(JoinTaskSnafu).map_err(|e| {
             timer.record(e.status_code());
             e
-        })?;
-        Ok(output)
+        })?
     }
 
     async fn auth(
         &self,
         header: Option<&RequestHeader>,
         query_ctx: &QueryContextRef,
-    ) -> TonicResult<InternalResult<Option<UserInfoRef>>> {
+    ) -> Result<Option<UserInfoRef>> {
         let Some(user_provider) = self.user_provider.as_ref() else {
-            return Ok(Ok(None));
+            return Ok(None);
         };
 
         let auth_scheme = header
@@ -127,7 +115,7 @@ impl GreptimeRequestHandler {
             })
             .context(NotFoundAuthHeaderSnafu)?;
 
-        let res = match auth_scheme {
+        match auth_scheme {
             AuthScheme::Basic(Basic { username, password }) => user_provider
                 .auth(
                     Identity::UserId(&username, None),
@@ -148,8 +136,7 @@ impl GreptimeRequestHandler {
                 &[(METRIC_CODE_LABEL, format!("{}", e.status_code()))]
             );
             e
-        });
-        Ok(res)
+        })
     }
 }
 

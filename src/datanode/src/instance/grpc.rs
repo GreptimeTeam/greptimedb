@@ -18,7 +18,7 @@ use std::sync::Arc;
 use api::v1::ddl_request::Expr as DdlExpr;
 use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
-use api::v1::{CreateDatabaseExpr, DdlRequest, DeleteRequest, InsertRequests};
+use api::v1::{CreateDatabaseExpr, DdlRequest, DeleteRequests, InsertRequests};
 use async_trait::async_trait;
 use catalog::CatalogManagerRef;
 use common_grpc_expr::insert::to_table_insert_request;
@@ -164,27 +164,38 @@ impl Instance {
         Ok(Output::AffectedRows(affected_rows))
     }
 
-    async fn handle_delete(&self, request: DeleteRequest, ctx: QueryContextRef) -> Result<Output> {
-        let catalog = ctx.current_catalog();
-        let schema = ctx.current_schema();
-        let table_name = &request.table_name.clone();
-        let table_ref = TableReference::full(catalog, schema, table_name);
+    async fn handle_deletes(
+        &self,
+        request: DeleteRequests,
+        ctx: QueryContextRef,
+    ) -> Result<Output> {
+        let results = future::try_join_all(request.deletes.into_iter().map(|delete| {
+            let catalog_manager = self.catalog_manager.clone();
+            let catalog = ctx.current_catalog().to_string();
+            let schema = ctx.current_schema().to_string();
+            common_runtime::spawn_write(async move {
+                let table_name = delete.table_name.clone();
+                let table_ref = TableReference::full(&catalog, &schema, &table_name);
+                let table = catalog_manager
+                    .table(&catalog, &schema, &table_name)
+                    .await
+                    .context(CatalogSnafu)?
+                    .with_context(|| TableNotFoundSnafu {
+                        table_name: table_ref.to_string(),
+                    })?;
 
-        let table = self
-            .catalog_manager
-            .table(catalog, schema, table_name)
-            .await
-            .context(CatalogSnafu)?
-            .with_context(|| TableNotFoundSnafu {
-                table_name: table_ref.to_string(),
-            })?;
+                let request =
+                    common_grpc_expr::delete::to_table_delete_request(&catalog, &schema, delete)
+                        .context(DeleteExprToRequestSnafu)?;
 
-        let request = common_grpc_expr::delete::to_table_delete_request(request)
-            .context(DeleteExprToRequestSnafu)?;
-
-        let affected_rows = table.delete(request).await.with_context(|_| DeleteSnafu {
-            table_name: table_ref.to_string(),
-        })?;
+                table.delete(request).await.with_context(|_| DeleteSnafu {
+                    table_name: table_ref.to_string(),
+                })
+            })
+        }))
+        .await
+        .context(JoinTaskSnafu)?;
+        let affected_rows = results.into_iter().sum::<Result<usize>>()?;
         Ok(Output::AffectedRows(affected_rows))
     }
 
@@ -211,7 +222,7 @@ impl GrpcQueryHandler for Instance {
     async fn do_query(&self, request: Request, ctx: QueryContextRef) -> Result<Output> {
         match request {
             Request::Inserts(requests) => self.handle_inserts(requests, &ctx).await,
-            Request::Delete(request) => self.handle_delete(request, ctx).await,
+            Request::Deletes(request) => self.handle_deletes(request, ctx).await,
             Request::Query(query_request) => {
                 let query = query_request
                     .query
@@ -310,8 +321,8 @@ mod test {
     use api::v1::column::Values;
     use api::v1::{
         alter_expr, AddColumn, AddColumns, AlterExpr, Column, ColumnDataType, ColumnDef,
-        CreateDatabaseExpr, CreateTableExpr, DropTableExpr, InsertRequest, InsertRequests,
-        QueryRequest, RenameTable, SemanticType, TableId, TruncateTableExpr,
+        CreateDatabaseExpr, CreateTableExpr, DeleteRequest, DropTableExpr, InsertRequest,
+        InsertRequests, QueryRequest, RenameTable, SemanticType, TableId, TruncateTableExpr,
     };
     use common_catalog::consts::MITO_ENGINE;
     use common_error::ext::ErrorExt;
@@ -903,7 +914,7 @@ mod test {
         let output = instance.do_query(query, QueryContext::arc()).await.unwrap();
         assert!(matches!(output, Output::AffectedRows(3)));
 
-        let request = DeleteRequest {
+        let request1 = DeleteRequest {
             table_name: "demo".to_string(),
             region_number: 0,
             key_columns: vec![
@@ -928,13 +939,39 @@ mod test {
             ],
             row_count: 1,
         };
-
-        let request = Request::Delete(request);
+        let request2 = DeleteRequest {
+            table_name: "demo".to_string(),
+            region_number: 0,
+            key_columns: vec![
+                Column {
+                    column_name: "host".to_string(),
+                    values: Some(Values {
+                        string_values: vec!["host3".to_string()],
+                        ..Default::default()
+                    }),
+                    datatype: ColumnDataType::String as i32,
+                    ..Default::default()
+                },
+                Column {
+                    column_name: "ts".to_string(),
+                    values: Some(Values {
+                        ts_millisecond_values: vec![1672201026000],
+                        ..Default::default()
+                    }),
+                    datatype: ColumnDataType::TimestampMillisecond as i32,
+                    ..Default::default()
+                },
+            ],
+            row_count: 1,
+        };
+        let request = Request::Deletes(DeleteRequests {
+            deletes: vec![request1, request2],
+        });
         let output = instance
             .do_query(request, QueryContext::arc())
             .await
             .unwrap();
-        assert!(matches!(output, Output::AffectedRows(1)));
+        assert!(matches!(output, Output::AffectedRows(2)));
 
         let output = exec_selection(instance, "SELECT ts, host, cpu FROM demo").await;
         let Output::Stream(stream) = output else {
@@ -946,7 +983,6 @@ mod test {
 | ts                  | host  | cpu  |
 +---------------------+-------+------+
 | 2022-12-28T04:17:05 | host1 | 66.6 |
-| 2022-12-28T04:17:06 | host3 | 88.8 |
 +---------------------+-------+------+";
         assert_eq!(recordbatches.pretty_print().unwrap(), expected);
     }
