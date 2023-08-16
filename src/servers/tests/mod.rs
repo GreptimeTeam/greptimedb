@@ -162,7 +162,7 @@ impl GrpcQueryHandler for DummyInstance {
             Request::Inserts(_)
             | Request::Deletes(_)
             | Request::RowInserts(_)
-            | Request::RowDelete(_) => unimplemented!(),
+            | Request::RowDeletes(_) => unimplemented!(),
             Request::Query(query_request) => {
                 let query = query_request.query.unwrap();
                 match query {

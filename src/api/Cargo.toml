@@ -16,3 +16,6 @@ tonic.workspace = true
 
 [build-dependencies]
 tonic-build = "0.9"
+
+[dev-dependencies]
+paste = "1.0"
