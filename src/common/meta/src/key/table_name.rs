@@ -150,6 +150,59 @@ impl TableNameManager {
         Self { kv_backend }
     }
 
+    /// Builds a create table name transaction. It only executes while the primary keys comparing successes.
+    pub(crate) fn build_create_txn(
+        &self,
+        key: &TableNameKey<'_>,
+        table_id: TableId,
+    ) -> Result<Txn> {
+        let raw_key = key.as_raw_key();
+        let value = TableNameValue::new(table_id);
+        let raw_value = value.try_as_raw_value()?;
+
+        let txn = Txn::default().and_then(vec![TxnOp::Put(raw_key, raw_value)]);
+
+        Ok(txn)
+    }
+
+    /// Builds a update table name transaction. It only executes while the primary keys comparing successes.
+    pub(crate) fn build_update_txn(
+        &self,
+        key: &TableNameKey<'_>,
+        new_key: &TableNameKey<'_>,
+        table_id: TableId,
+    ) -> Result<Txn> {
+        let raw_key = key.as_raw_key();
+        let new_raw_key = new_key.as_raw_key();
+        let value = TableNameValue::new(table_id);
+        let raw_value = value.try_as_raw_value()?;
+
+        let txn = Txn::default().and_then(vec![
+            TxnOp::Delete(raw_key),
+            TxnOp::Put(new_raw_key, raw_value),
+        ]);
+        Ok(txn)
+    }
+
+    /// Builds a delete table name transaction. It only executes while the primary keys comparing successes.
+    pub(crate) fn build_delete_txn(
+        &self,
+        key: &TableNameKey<'_>,
+        table_id: TableId,
+    ) -> Result<Txn> {
+        let raw_key = key.as_raw_key();
+        let value = TableNameValue::new(table_id);
+        let raw_value = value.try_as_raw_value()?;
+        let removed_key = to_removed_key(&String::from_utf8_lossy(&raw_key));
+
+        let txn = Txn::default().and_then(vec![
+            TxnOp::Delete(raw_key),
+            TxnOp::Put(removed_key.into_bytes(), raw_value),
+        ]);
+
+        Ok(txn)
+    }
+
     /// Create TableName key and value. If the key already exists, check if the value is the same.
     pub async fn create(&self, key: &TableNameKey<'_>, table_id: TableId) -> Result<()> {
         let raw_key = key.as_raw_key();

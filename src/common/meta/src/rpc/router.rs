@@ -26,6 +26,7 @@ use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::TableId;
 
 use crate::error::{self, Result};
+use crate::key::table_region::RegionDistribution;
 use crate::peer::Peer;
 use crate::rpc::util;
 use crate::table_name::TableName;
@@ -71,6 +72,23 @@ impl TryFrom<PbRouteResponse> for RouteResponse {
             .collect::<Result<Vec<_>>>()?;
         Ok(Self { table_routes })
     }
+}
+
+pub(crate) fn region_distribution(region_routes: &[RegionRoute]) -> Result<RegionDistribution> {
+    let mut regions_id_map = RegionDistribution::new();
+    for route in region_routes.iter() {
+        let node_id = route
+            .leader_peer
+            .as_ref()
+            .context(error::UnexpectedSnafu {
+                err_msg: "leader not found",
+            })?
+            .id;
+
+        let region_id = route.region.id.region_number();
+        regions_id_map.entry(node_id).or_default().push(region_id);
+    }
+    Ok(regions_id_map)
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]

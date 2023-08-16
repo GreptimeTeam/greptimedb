@@ -100,6 +100,14 @@ pub struct TxnRequest {
     pub failure: Vec<TxnOp>,
 }
 
+impl TxnRequest {
+    pub fn extend(&mut self, other: TxnRequest) {
+        self.compare.extend(other.compare);
+        self.success.extend(other.success);
+        self.failure.extend(other.failure);
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum TxnOpResponse {
     ResponsePut(PutResponse),
@@ -121,6 +129,23 @@ pub struct Txn {
 }
 
 impl Txn {
+    pub fn merge_all<T: IntoIterator<Item = Txn>>(values: T) -> Self {
+        values
+            .into_iter()
+            .reduce(|acc, e| acc.merge(e))
+            .unwrap_or_default()
+    }
+
+    pub fn merge(mut self, other: Txn) -> Self {
+        self.c_when |= other.c_when;
+        self.c_then |= other.c_then;
+        self.c_else |= other.c_else;
+
+        self.req.extend(other.req);
+
+        self
+    }
+
     pub fn new() -> Self {
         Txn::default()
     }
