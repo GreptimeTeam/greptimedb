@@ -35,7 +35,7 @@ use futures_util::{Stream, StreamExt, TryStreamExt};
 use prost::Message;
 use snafu::{ensure, ResultExt};
 
-use crate::error::{ConvertFlightDataSnafu, IllegalFlightMessagesSnafu, ServerSnafu};
+use crate::error::{ConvertFlightDataSnafu, Error, IllegalFlightMessagesSnafu, ServerSnafu};
 use crate::{error, from_grpc_response, metrics, Client, Result, StreamInserter};
 
 #[derive(Clone, Debug, Default)]
@@ -353,13 +353,8 @@ impl Database {
                                 match flight_message {
                                     // tonic error.
                                     Err(status) => {
-                                        let e: error::Error = status.into();
-                                        let code = e.status_code();
-                                        let msg = e.to_string();
-                                        yield ServerSnafu { code, msg }
-                                            .fail()
-                                            .map_err(BoxedError::new)
-                                            .context(ExternalSnafu);
+                                        let err = Error::from(status);
+                                        yield Err(err).map_err(BoxedError::new).context(ExternalSnafu);
                                         break;
                                     }
                                     // decode error.
