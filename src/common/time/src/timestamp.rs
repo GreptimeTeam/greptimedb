@@ -649,11 +649,7 @@ mod tests {
     // but expected timestamp is in UTC timezone
     fn check_from_str(s: &str, expect: &str) {
         let ts = Timestamp::from_str(s).unwrap();
-        let time = NaiveDateTime::from_timestamp_opt(
-            ts.value / 1_000_000_000,
-            (ts.value % 1_000_000_000) as u32,
-        )
-        .unwrap();
+        let time = ts.to_chrono_datetime().unwrap();
         assert_eq!(expect, time.to_string());
     }
 
