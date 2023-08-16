@@ -88,19 +88,20 @@ impl ExtensionPlanner for DistExtensionPlanner {
             return fallback(input_plan).await;
         }
 
-        let optimized_input = self.optimize_input_logical_plan(session_state, input_plan)?;
+        let optimized_plan = self.optimize_input_logical_plan(session_state, input_plan)?;
         let Some(table_name) = Self::extract_full_table_name(input_plan)? else {
             // no relation found in input plan, going to execute them locally
-            return fallback(&optimized_input).await;
+            return fallback(&optimized_plan).await;
         };
 
         let Ok(peers) = self.get_peers(&table_name).await else {
             // no peers found, going to execute them locally
-            return fallback(&optimized_input).await;
+            return fallback(&optimized_plan).await;
         };
 
         // TODO(ruihang): generate different execution plans for different variant merge operation
-        let schema = optimized_input.schema().as_ref().into();
+        let schema = optimized_plan.schema().as_ref().into();
+        // Pass down the original plan, allow execution nodes to do their optimization
         let amended_plan = Self::plan_with_full_table_name(input_plan.clone(), &table_name)?;
         let substrait_plan = DFLogicalSubstraitConvertor
             .encode(&amended_plan)
