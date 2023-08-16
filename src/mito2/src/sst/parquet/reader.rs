@@ -195,9 +195,9 @@ impl ParquetReader {
         &self,
         key_value_meta: Option<&Vec<KeyValue>>,
     ) -> Result<RegionMetadata> {
-        let key_values = key_value_meta.with_context(|| NoKeyValueSnafu {
+        let key_values = key_value_meta.context(NoKeyValueSnafu {
             file: &self.file_path,
-            reason: format!("missing key value meta"),
+            reason: "missing key value meta",
         })?;
         let meta_value = key_values
             .iter()
