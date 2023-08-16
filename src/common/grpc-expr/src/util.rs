@@ -135,7 +135,7 @@ pub fn build_create_table_expr(
         table_options: Default::default(),
         table_id: table_id.map(|id| api::v1::TableId { id }),
         // TODO(hl): region number should be allocated by frontend
-        region_numbers: vec![0], 
+        region_numbers: vec![0],
         engine: engine.to_string(),
     };
 
