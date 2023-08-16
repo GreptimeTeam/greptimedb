@@ -143,7 +143,7 @@ macro_rules! ensure_values {
             $got == $expected_value,
             error::UnexpectedSnafu {
                 err_msg: format!(
-                    "Reads the different table info: {:?} during {}, expected: {:?}",
+                    "Reads the different value: {:?} during {}, expected: {:?}",
                     $got, $name, $expected_value
                 )
             }
@@ -463,10 +463,7 @@ macro_rules! impl_table_meta_value {
         $(
             impl $val_ty {
                 pub fn try_from_raw_value_ref(raw_value: &[u8]) -> Result<Self> {
-                    let raw_value = std::str::from_utf8(raw_value).map_err(|e| {
-                        InvalidTableMetadataSnafu { err_msg: e.to_string() }.build()
-                    })?;
-                    serde_json::from_str(raw_value).context(SerdeJsonSnafu)
+                    serde_json::from_slice(raw_value).context(SerdeJsonSnafu)
                 }
 
                 pub fn try_from_raw_value(raw_value: Vec<u8>) -> Result<Self> {

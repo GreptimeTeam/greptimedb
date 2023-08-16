@@ -85,7 +85,7 @@ pub(crate) fn region_distribution(region_routes: &[RegionRoute]) -> Result<Regio
             })?
             .id;
 
-        let region_id = route.region.id.region_sequence();
+        let region_id = route.region.id.region_number();
         regions_id_map.entry(node_id).or_default().push(region_id);
     }
     Ok(regions_id_map)
