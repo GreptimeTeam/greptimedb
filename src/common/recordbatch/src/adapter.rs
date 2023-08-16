@@ -28,7 +28,7 @@ use datatypes::schema::{Schema, SchemaRef};
 use futures::ready;
 use snafu::ResultExt;
 
-use crate::error::{self, Result};
+use crate::error::{self, Error, Result};
 use crate::{
     DfRecordBatch, DfSendableRecordBatchStream, RecordBatch, RecordBatchStream,
     SendableRecordBatchStream, Stream,
@@ -36,9 +36,8 @@ use crate::{
 
 type FutureStream = Pin<
     Box<
-        dyn std::future::Future<
-                Output = std::result::Result<DfSendableRecordBatchStream, DataFusionError>,
-            > + Send,
+        dyn std::future::Future<Output = std::result::Result<SendableRecordBatchStream, Error>>
+            + Send,
     >,
 >;
 
@@ -223,7 +222,7 @@ impl Stream for RecordBatchStreamAdapter {
 
 enum AsyncRecordBatchStreamAdapterState {
     Uninit(FutureStream),
-    Ready(DfSendableRecordBatchStream),
+    Ready(SendableRecordBatchStream),
     Failed,
 }
 
@@ -261,17 +260,12 @@ impl Stream for AsyncRecordBatchStreamAdapter {
                         }
                         Err(e) => {
                             self.state = AsyncRecordBatchStreamAdapterState::Failed;
-                            return Poll::Ready(Some(
-                                Err(e).context(error::InitRecordbatchStreamSnafu),
-                            ));
+                            return Poll::Ready(Some(Err(e)));
                         }
                     };
                 }
                 AsyncRecordBatchStreamAdapterState::Ready(stream) => {
-                    return Poll::Ready(ready!(Pin::new(stream).poll_next(cx)).map(|x| {
-                        let df_record_batch = x.context(error::PollStreamSnafu)?;
-                        RecordBatch::try_from_df_record_batch(self.schema(), df_record_batch)
-                    }))
+                    return Poll::Ready(ready!(Pin::new(stream).poll_next(cx)))
                 }
                 AsyncRecordBatchStreamAdapterState::Failed => return Poll::Ready(None),
             }
@@ -330,12 +324,7 @@ mod test {
         ) -> FutureStream {
             Box::pin(async move {
                 maybe_recordbatches
-                    .map(|items| {
-                        Box::pin(DfRecordBatchStreamAdapter::new(Box::pin(
-                            MaybeErrorRecordBatchStream { items },
-                        ))) as _
-                    })
-                    .map_err(|e| DataFusionError::External(Box::new(e)))
+                    .map(|items| Box::pin(MaybeErrorRecordBatchStream { items }) as _)
             })
         }
 
