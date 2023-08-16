@@ -154,6 +154,7 @@ impl State for UpdateRegionMetadata {
 mod tests {
 
     use common_meta::rpc::router::{all_peers, region_distribution};
+    use futures::TryStreamExt;
 
     use super::super::tests::{TestingEnv, TestingEnvBuilder};
     use super::{State, *};
@@ -372,15 +373,27 @@ mod tests {
 
             // test DatanodeTableValues matches the table region distribution
             let datanode_table_manager = manager.datanode_table_manager();
-            let tables = datanode_table_manager.tables(1).await.unwrap();
+            let tables = datanode_table_manager
+                .tables(1)
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap();
             assert!(tables.is_empty());
 
-            let tables = datanode_table_manager.tables(2).await.unwrap();
+            let tables = datanode_table_manager
+                .tables(2)
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap();
             assert_eq!(tables.len(), 1);
             assert_eq!(tables[0].table_id, 1);
             assert_eq!(tables[0].regions, vec![1, 3]);
 
-            let tables = datanode_table_manager.tables(3).await.unwrap();
+            let tables = datanode_table_manager
+                .tables(3)
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap();
             assert_eq!(tables.len(), 1);
             assert_eq!(tables[0].table_id, 1);
             assert_eq!(tables[0].regions, vec![2, 4]);

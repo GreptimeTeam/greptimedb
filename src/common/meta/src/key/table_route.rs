@@ -204,6 +204,17 @@ impl TableRouteManager {
             .transpose()
     }
 
+    #[cfg(test)]
+    pub async fn get_removed(&self, table_id: TableId) -> Result<Option<TableRouteValue>> {
+        let key = NextTableRouteKey::new(table_id).to_string();
+        let removed_key = to_removed_key(&key).into_bytes();
+        self.kv_backend
+            .get(&removed_key)
+            .await?
+            .map(|x| TableRouteValue::try_from_raw_value(x.value))
+            .transpose()
+    }
+
     pub async fn get_region_distribution(
         &self,
         table_id: TableId,

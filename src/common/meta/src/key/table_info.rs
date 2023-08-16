@@ -206,6 +206,17 @@ impl TableInfoManager {
         }
     }
 
+    #[cfg(test)]
+    pub async fn get_removed(&self, table_id: TableId) -> Result<Option<TableInfoValue>> {
+        let key = TableInfoKey::new(table_id).to_string();
+        let removed_key = to_removed_key(&key).into_bytes();
+        self.kv_backend
+            .get(&removed_key)
+            .await?
+            .map(|x| TableInfoValue::try_from_raw_value(x.value))
+            .transpose()
+    }
+
     pub async fn get(&self, table_id: TableId) -> Result<Option<TableInfoValue>> {
         let key = TableInfoKey::new(table_id);
         let raw_key = key.as_raw_key();

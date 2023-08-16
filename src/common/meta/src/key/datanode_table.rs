@@ -12,6 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
+use futures::stream::BoxStream;
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
 use store_api::storage::RegionNumber;
@@ -23,7 +27,9 @@ use crate::error::{InvalidTableMetadataSnafu, Result};
 use crate::key::TableMetaKey;
 use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
+use crate::range_stream::{PaginationStream, DEFAULT_PAGE_SIZE};
 use crate::rpc::store::RangeRequest;
+use crate::rpc::KeyValue;
 use crate::DatanodeId;
 
 pub struct DatanodeTableKey {
@@ -41,6 +47,10 @@ impl DatanodeTableKey {
 
     fn prefix(datanode_id: DatanodeId) -> String {
         format!("{}/{datanode_id}", DATANODE_TABLE_KEY_PREFIX)
+    }
+
+    pub fn range_start_key(datanode_id: DatanodeId) -> String {
+        format!("{}/", Self::prefix(datanode_id))
     }
 
     #[allow(unused)]
@@ -89,6 +99,13 @@ impl DatanodeTableValue {
     }
 }
 
+/// Decodes `KeyValue` to ((),`DatanodeTableValue`)
+pub fn datanode_table_value_decoder(kv: KeyValue) -> Result<((), DatanodeTableValue)> {
+    let value = DatanodeTableValue::try_from(&kv.value)?;
+
+    Ok(((), value))
+}
+
 pub struct DatanodeTableManager {
     kv_backend: KvBackendRef,
 }
@@ -104,6 +121,23 @@ impl DatanodeTableManager {
             .await?
             .map(|kv| DatanodeTableValue::try_from_raw_value(kv.value))
             .transpose()
+    }
+
+    pub fn tables(
+        &self,
+        datanode_id: DatanodeId,
+    ) -> BoxStream<'static, Result<DatanodeTableValue>> {
+        let start_key = DatanodeTableKey::range_start_key(datanode_id);
+        let req = RangeRequest::new().with_prefix(start_key.as_bytes());
+
+        let stream = PaginationStream::new(
+            self.kv_backend.clone(),
+            req,
+            DEFAULT_PAGE_SIZE,
+            Arc::new(datanode_table_value_decoder),
+        );
+
+        Box::pin(stream.map(|kv| kv.map(|kv| kv.1)))
     }
 
     /// Builds the create datanode table transactions. It only executes while the primary keys comparing successes.
@@ -186,18 +220,6 @@ impl DatanodeTableManager {
         let txn = Txn::default().and_then(txns);
 
         Ok(txn)
-    }
-
-    pub async fn tables(&self, datanode_id: DatanodeId) -> Result<Vec<DatanodeTableValue>> {
-        let prefix = DatanodeTableKey::prefix(datanode_id);
-        let req = RangeRequest::new().with_prefix(prefix.as_bytes());
-        let resp = self.kv_backend.range(req).await?;
-        let table_ids = resp
-            .kvs
-            .into_iter()
-            .map(|kv| DatanodeTableValue::try_from_raw_value(kv.value))
-            .collect::<Result<Vec<_>>>()?;
-        Ok(table_ids)
     }
 }
 

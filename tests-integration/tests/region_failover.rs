@@ -31,6 +31,7 @@ use common_telemetry::info;
 use frontend::catalog::FrontendCatalogManager;
 use frontend::error::Result as FrontendResult;
 use frontend::instance::Instance;
+use futures::TryStreamExt;
 use meta_srv::error::Result as MetaResult;
 use meta_srv::metasrv::{SelectorContext, SelectorRef};
 use meta_srv::procedure::region_failover::{RegionFailoverContext, RegionFailoverProcedure};
@@ -277,6 +278,7 @@ async fn find_region_distribution(
         let mut actual = manager
             .datanode_table_manager()
             .tables(*datanode_id)
+            .try_collect::<Vec<_>>()
             .await
             .unwrap()
             .into_iter()
