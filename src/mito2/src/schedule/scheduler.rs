@@ -16,48 +16,46 @@ const STATE_AWAIT_TERMINATION: u8 = 2;
 // producer and consumer count
 const CONSUMER_NUM: u8 = 2;
 
+/// [Scheduler] defines a set of API to schedule Jobs
 #[async_trait::async_trait]
 pub trait Scheduler {
+    /// Schedules a Job
     async fn schedule(&self, req: Job) -> Result<()>;
-}
 
-#[async_trait::async_trait]
-pub trait Request {
-    async fn handle_reqeust(&self) -> Result<()>;
+    /// Stops scheduler
+    async fn stop(&mut self) -> Result<()>;
 }
 
 pub struct LocalScheduler {
     sender: flume::Sender<Job>,
     handles: Vec<Option<JoinHandle<()>>>,
+    /// Token used to halt the scheduler
     cancel_token: CancellationToken,
     /// State of scheduler.
     state: Arc<AtomicU8>,
 }
 
 impl LocalScheduler {
-    pub fn new() -> Self {
-        // 创建一个用于发送任务的通道，容量为128
-        let (tx, rx) = flume::bounded(128);
-        // 创建一个取消令牌（Cancellation Token）
+    /// cap: flume bounded cap 
+    /// num: the number of bounded receiver
+    pub fn new(cap: usize, num: usize) -> Self {
+        let (tx, rx) = flume::bounded(cap);
         let token = CancellationToken::new();
         let state = Arc::new(AtomicU8::new(STATE_RUNNING));
 
-        let mut handles = Vec::new();
+        let mut handles = Vec::with_capacity(num);
 
-        for _ in 0..CONSUMER_NUM {
+        for _ in 0..num {
             let child = token.child_token().clone();
             let receiver = rx.clone();
             let state = Arc::clone(&state);
             let handle = tokio::spawn(async move {
                 while state.load(Ordering::Relaxed) == STATE_RUNNING {
                     tokio::select! {
-                        // 1.如果子令牌被取消，就返回退出任务
                         _ = child.cancelled() => {
                             return;
                         }
-                        // 2.等待接收任务请求
                         req_opt = receiver.recv_async() =>{
-                            // 如果收到请求，等待请求中的异步任务完成
                             if let Ok(req) = req_opt{
                                 req.await;
                             }
@@ -69,24 +67,12 @@ impl LocalScheduler {
             handles.push(Some(handle));
         }
 
-        // 构造LocalScheduler结构体并返回
         Self {
             sender: tx,
             cancel_token: token,
             handles: handles,
             state,
         }
-    }
-
-    pub async fn stop(&mut self) -> Result<()> {
-        self.cancel_token.cancel();
-        self.state.store(STATE_STOP, Ordering::Relaxed);
-        for handle in &mut self.handles {
-            if let Some(handle) = handle.take() {
-                handle.await.unwrap();
-            }
-        }
-        Ok(())
     }
 
     #[inline]
@@ -101,6 +87,24 @@ impl Scheduler for LocalScheduler {
         self.sender.send_async(req).await.unwrap();
         Ok(())
     }
+
+    async fn stop(&mut self) -> Result<()> {
+        self.cancel_token.cancel();
+        self.state.store(STATE_STOP, Ordering::Relaxed);
+        for handle in &mut self.handles {
+            if let Some(handle) = handle.take() {
+                handle.await.unwrap();
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Drop for LocalScheduler {
+    fn drop(&mut self) {
+        self.state.store(STATE_STOP, Ordering::Relaxed);
+        self.cancel_token.cancel();
+    }
 }
 
 #[cfg(test)]
@@ -110,7 +114,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_scheduler() {
-        let mut local = LocalScheduler::new();
+        let mut local = LocalScheduler::new(3, 32);
         local
             .schedule(Box::pin(async {
                 println!("hello1");
