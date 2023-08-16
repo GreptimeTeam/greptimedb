@@ -543,7 +543,7 @@ impl HttpServer {
 
         if let Some(prom_handler) = self.prom_handler.clone() {
             router = router.nest(
-                &format!("/{HTTP_API_VERSION}/prom_store"),
+                &format!("/{HTTP_API_VERSION}/prometheus"),
                 self.route_prom(prom_handler),
             );
         }
