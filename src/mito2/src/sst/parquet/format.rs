@@ -156,6 +156,8 @@ impl ReadFormat {
     }
 
     /// Convert a arrow record batch into `batches`.
+    ///
+    /// Note that the `record_batch` may only contains a subset of columns if it is projected.
     pub(crate) fn convert_record_batch(
         &self,
         record_batch: &RecordBatch,
@@ -292,8 +294,8 @@ fn primary_key_offsets(pk_dict_array: &DictionaryArray<UInt16Type>) -> Result<Ve
     let mut offsets = vec![0];
     let keys = pk_dict_array.keys();
     // We know that primary keys are always not null so we iterate `keys.values()` directly.
-    let pk_indices = &keys.values()[..keys.len() - 1];
-    for (i, key) in pk_indices.iter().enumerate() {
+    let pk_indices = keys.values();
+    for (i, key) in pk_indices.iter().take(keys.len() - 1).enumerate() {
         // Compare each key with next key
         if *key != pk_indices[i + 1] {
             // We meet a new key, push the next index as end of the offset.
@@ -418,11 +420,11 @@ mod tests {
             BatchColumn {
                 column_id: 4,
                 data: Arc::new(Int64Vector::from_vec(vec![start_field; num_rows])),
-            },
+            }, // field1
             BatchColumn {
                 column_id: 2,
                 data: Arc::new(Int64Vector::from_vec(vec![start_field + 1; num_rows])),
-            },
+            }, // field0
         ];
 
         BatchBuilder::with_required_columns(primary_key.to_vec(), timestamps, sequences, op_types)
@@ -441,18 +443,20 @@ mod tests {
     #[test]
     fn test_new_primary_key_array() {
         let array = new_primary_key_array(b"test", 3);
-        let dict_array = array
-            .as_any()
-            .downcast_ref::<DictionaryArray<UInt16Type>>()
-            .unwrap();
-        assert_eq!(3, array.len());
-        assert_eq!(*dict_array.keys(), UInt16Array::from_value(0, 3));
-        let values = dict_array
-            .values()
-            .as_any()
-            .downcast_ref::<BinaryArray>()
-            .unwrap();
-        assert_eq!(*values, BinaryArray::from_vec(vec![b"test"]));
+        let expect = build_test_pk_array(&[(b"test".to_vec(), 3)]) as ArrayRef;
+        assert_eq!(&expect, &array);
+    }
+
+    fn build_test_pk_array(pk_row_nums: &[(Vec<u8>, usize)]) -> Arc<DictionaryArray<UInt16Type>> {
+        let values = Arc::new(BinaryArray::from_iter_values(
+            pk_row_nums.iter().map(|v| &v.0),
+        ));
+        let mut keys = vec![];
+        for (index, num_rows) in pk_row_nums.iter().map(|v| v.1).enumerate() {
+            keys.extend(std::iter::repeat(index as u16).take(num_rows));
+        }
+        let keys = UInt16Array::from(keys);
+        Arc::new(DictionaryArray::new(keys, values))
     }
 
     #[test]
@@ -466,7 +470,7 @@ mod tests {
             Arc::new(Int64Array::from(vec![2; num_rows])), // field1
             Arc::new(Int64Array::from(vec![3; num_rows])), // field0
             Arc::new(TimestampMillisecondArray::from(vec![1, 2, 3, 4])), // ts
-            new_primary_key_array(b"test", num_rows),      // primary key
+            build_test_pk_array(&[(b"test".to_vec(), num_rows)]), // primary key
             Arc::new(UInt64Array::from(vec![TEST_SEQUENCE; num_rows])), // sequence
             Arc::new(UInt8Array::from(vec![TEST_OP_TYPE; num_rows])), // op type
         ];
@@ -491,6 +495,79 @@ mod tests {
         assert_eq!(
             vec![1, 2, 3, 4, 5],
             read_format.projection_indices([2, 1, 5])
+        );
+    }
+
+    #[test]
+    fn test_empty_primary_key_offsets() {
+        let array = build_test_pk_array(&[]);
+        assert!(primary_key_offsets(&array).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_primary_key_offsets_one_series() {
+        let array = build_test_pk_array(&[(b"one".to_vec(), 1)]);
+        assert_eq!(vec![0, 1], primary_key_offsets(&array).unwrap());
+
+        let array = build_test_pk_array(&[(b"one".to_vec(), 1), (b"two".to_vec(), 1)]);
+        assert_eq!(vec![0, 1, 2], primary_key_offsets(&array).unwrap());
+
+        let array = build_test_pk_array(&[
+            (b"one".to_vec(), 1),
+            (b"two".to_vec(), 1),
+            (b"three".to_vec(), 1),
+        ]);
+        assert_eq!(vec![0, 1, 2, 3], primary_key_offsets(&array).unwrap());
+    }
+
+    #[test]
+    fn test_primary_key_offsets_multi_series() {
+        let array = build_test_pk_array(&[(b"one".to_vec(), 1), (b"two".to_vec(), 3)]);
+        assert_eq!(vec![0, 1, 4], primary_key_offsets(&array).unwrap());
+
+        let array = build_test_pk_array(&[(b"one".to_vec(), 3), (b"two".to_vec(), 1)]);
+        assert_eq!(vec![0, 3, 4], primary_key_offsets(&array).unwrap());
+
+        let array = build_test_pk_array(&[(b"one".to_vec(), 3), (b"two".to_vec(), 3)]);
+        assert_eq!(vec![0, 3, 6], primary_key_offsets(&array).unwrap());
+    }
+
+    #[test]
+    fn test_convert_empty_record_batch() {
+        let metadata = build_test_region_metadata();
+        let arrow_schema = build_test_arrow_schema();
+        let read_format = ReadFormat::new(metadata, arrow_schema.clone());
+        let record_batch = RecordBatch::new_empty(arrow_schema);
+        let mut batches = vec![];
+        read_format
+            .convert_record_batch(&record_batch, &mut batches)
+            .unwrap();
+        assert!(batches.is_empty());
+    }
+
+    #[test]
+    fn test_convert_record_batch() {
+        let metadata = build_test_region_metadata();
+        let arrow_schema = build_test_arrow_schema();
+        let read_format = ReadFormat::new(metadata, arrow_schema.clone());
+
+        let columns: Vec<ArrayRef> = vec![
+            Arc::new(Int64Array::from(vec![1, 1, 10, 10])), // field1
+            Arc::new(Int64Array::from(vec![2, 2, 11, 11])), // field0
+            Arc::new(TimestampMillisecondArray::from(vec![1, 2, 11, 12])), // ts
+            build_test_pk_array(&[(b"one".to_vec(), 2), (b"two".to_vec(), 2)]), // primary key
+            Arc::new(UInt64Array::from(vec![TEST_SEQUENCE; 4])), // sequence
+            Arc::new(UInt8Array::from(vec![TEST_OP_TYPE; 4])), // op type
+        ];
+        let record_batch = RecordBatch::try_new(arrow_schema, columns).unwrap();
+        let mut batches = vec![];
+        read_format
+            .convert_record_batch(&record_batch, &mut batches)
+            .unwrap();
+
+        assert_eq!(
+            vec![new_batch(b"one", 1, 1, 2), new_batch(b"two", 11, 10, 2)],
+            batches
         );
     }
 }
