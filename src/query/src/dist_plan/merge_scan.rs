@@ -41,7 +41,7 @@ use datatypes::schema::{Schema, SchemaRef};
 use futures_util::StreamExt;
 use snafu::ResultExt;
 
-use crate::error::{ConvertSchemaSnafu, RemoteRequestSnafu, UnexpectedOutputKindSnafu};
+use crate::error::{ConvertSchemaSnafu, RemoteRequestSnafu};
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone)]
 pub struct MergeScanLogicalPlan {
@@ -161,30 +161,14 @@ impl MergeScanExec {
                     .map_err(BoxedError::new)
                     .context(ExternalSnafu)?;
 
-                match output {
-                    Output::AffectedRows(_) => {
-                        Err(BoxedError::new(
-                            UnexpectedOutputKindSnafu {
-                                expected: "RecordBatches or Stream",
-                                got: "AffectedRows",
-                            }
-                            .build(),
-                        ))
-                        .context(ExternalSnafu)?;
-                    }
-                    Output::RecordBatches(record_batches) => {
-                        for batch in record_batches.into_iter() {
-                            metric.record_output_batch_rows(batch.num_rows());
-                            yield Self::remove_metadata_from_record_batch(batch);
-                        }
-                    }
-                    Output::Stream(mut stream) => {
-                        while let Some(batch) = stream.next().await {
-                            let batch = batch?;
-                            metric.record_output_batch_rows(batch.num_rows());
-                            yield Self::remove_metadata_from_record_batch(batch);
-                        }
-                    }
+                let Output::Stream(mut stream) = output else {
+                    unreachable!()
+                };
+
+                while let Some(batch) = stream.next().await {
+                    let batch = batch?;
+                    metric.record_output_batch_rows(batch.num_rows());
+                    yield Self::remove_metadata_from_record_batch(batch);
                 }
             }
         };

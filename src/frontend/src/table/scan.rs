@@ -19,7 +19,6 @@ use client::Database;
 use common_meta::table_name::TableName;
 use common_query::prelude::Expr;
 use common_query::Output;
-use common_recordbatch::RecordBatches;
 use datafusion::datasource::DefaultTableSource;
 use datafusion_expr::{LogicalPlan, LogicalPlanBuilder};
 use snafu::ResultExt;
@@ -46,22 +45,23 @@ impl DatanodeInstance {
         Self { table, db }
     }
 
-    pub(crate) async fn grpc_table_scan(&self, plan: TableScanPlan) -> Result<RecordBatches> {
+    pub(crate) async fn grpc_table_scan(&self, plan: TableScanPlan) -> Result<Output> {
         let logical_plan = self.build_logical_plan(&plan)?;
 
         let substrait_plan = DFLogicalSubstraitConvertor
             .encode(&logical_plan)
             .context(error::EncodeSubstraitLogicalPlanSnafu)?;
 
-        let result = self
+        let output = self
             .db
             .logical_plan(substrait_plan.to_vec(), None)
             .await
             .context(error::RequestDatanodeSnafu)?;
-        let Output::RecordBatches(record_batches) = result else {
-            unreachable!()
-        };
-        Ok(record_batches)
+
+        match output {
+            Output::Stream(_) => Ok(output),
+            _ => unreachable!(),
+        }
     }
 
     fn build_logical_plan(&self, table_scan: &TableScanPlan) -> Result<LogicalPlan> {
