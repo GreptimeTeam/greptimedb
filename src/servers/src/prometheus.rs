@@ -59,8 +59,6 @@ pub trait PrometheusHandler {
     fn catalog_manager(&self) -> CatalogManagerRef;
 }
 
-pub const PROMETHEUS_SERVER: &str = "PROMETHEUS_SERVER";
-
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
 pub struct PromSeries {
     pub metric: HashMap<String, String>,
