@@ -85,6 +85,7 @@ impl AvailableCollections {
 /// Rendering Plan
 ///
 /// TODO(discord9): see if we ever need to support recursive plans
+#[derive(Debug, Clone)]
 pub enum Plan<T = repr::Timestamp> {
     /// A collection containing a pre-determined collection.
     Constant {
@@ -188,6 +189,7 @@ pub enum Plan<T = repr::Timestamp> {
 }
 
 /// TODO(discord9): impl GetPlan
+#[derive(Debug, Clone)]
 pub enum GetPlan {
     /// Simply pass input arrangements on to the next stage.
     PassArrangements,

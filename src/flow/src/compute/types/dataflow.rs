@@ -41,6 +41,22 @@ pub struct DataflowDescription<P, S: 'static = (), T = repr::Timestamp> {
     pub debug_name: String,
 }
 
+impl<P, T> DataflowDescription<P, (), T> {
+    /// Creates a new dataflow description with a human-readable name.
+    pub fn new(name: String) -> Self {
+        Self {
+            source_imports: Default::default(),
+            index_imports: Default::default(),
+            objects_to_build: Vec::new(),
+            index_exports: Default::default(),
+            sink_exports: Default::default(),
+            as_of: Default::default(),
+            until: Antichain::new(),
+            debug_name: name,
+        }
+    }
+}
+
 /// An association of a global identifier to an expression.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct BuildDesc<P = Plan> {

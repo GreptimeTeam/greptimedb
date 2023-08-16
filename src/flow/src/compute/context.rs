@@ -14,6 +14,8 @@ use timely::dataflow::{Scope, ScopeParent};
 use timely::progress::timestamp::Refines;
 use timely::progress::{Antichain, Timestamp};
 
+use super::plan::Plan;
+use super::types::DataflowDescription;
 use crate::compute::render::RenderTimestamp;
 use crate::compute::typedefs::{TraceErrHandle, TraceRowHandle};
 use crate::expr::{GlobalId, Id, MapFilterProject, ScalarExpr};
@@ -225,10 +227,22 @@ where
     S::Timestamp: Lattice + Refines<repr::Timestamp>,
 {
     /// TODO(discord9)" DataflowDesc & Plan & etc.
-    pub fn for_dataflow_in(scope: S) -> Self {
+    /// Creates a new empty Context from given dataflow
+    pub fn for_dataflow_in<Plan>(dataflow: &DataflowDescription<Plan, ()>, scope: S) -> Self {
         let dataflow_id = scope.addr()[0];
+        let since_frontier = dataflow
+            .as_of
+            .clone()
+            .unwrap_or_else(|| Antichain::from_elem(Timestamp::minimum()));
         // TODO(discord9)=: get since_frontier and until_frontier from dataflow_desc
-        todo!()
+        Self {
+            scope,
+            debug_name: dataflow.debug_name.clone(),
+            dataflow_id,
+            since_frontier,
+            until_frontier: dataflow.until.clone(),
+            bindings: BTreeMap::new(),
+        }
     }
 }
 
