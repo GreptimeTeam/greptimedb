@@ -413,6 +413,6 @@ mod tests {
         let uuid = default_get_uuid(&Some(working_home.clone()));
         assert!(uuid.is_some());
         assert_eq!(uuid, default_get_uuid(&Some(working_home.clone())));
-        assert_eq!(uuid, default_get_uuid(&Some(working_home.clone())));
+        assert_eq!(uuid, default_get_uuid(&Some(working_home)));
     }
 }

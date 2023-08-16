@@ -25,11 +25,11 @@
 
 use std::sync::{Arc, RwLock};
 
+use store_api::metadata::RegionMetadataRef;
 use store_api::storage::SequenceNumber;
 
 use crate::memtable::version::{MemtableVersion, MemtableVersionRef};
 use crate::memtable::MemtableRef;
-use crate::metadata::RegionMetadataRef;
 use crate::sst::version::{SstVersion, SstVersionRef};
 use crate::wal::EntryId;
 

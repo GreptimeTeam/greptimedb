@@ -35,6 +35,7 @@ use datatypes::arrow::datatypes::{
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::vectors::{Helper, Vector};
 use snafu::{ensure, OptionExt, ResultExt};
+use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::storage::consts::{
     OP_TYPE_COLUMN_NAME, PRIMARY_KEY_COLUMN_NAME, SEQUENCE_COLUMN_NAME,
 };
@@ -43,7 +44,6 @@ use store_api::storage::ColumnId;
 use crate::error::{
     ConvertVectorSnafu, InvalidBatchSnafu, InvalidRecordBatchSnafu, NewRecordBatchSnafu, Result,
 };
-use crate::metadata::{RegionMetadata, RegionMetadataRef};
 use crate::read::{Batch, BatchBuilder, BatchColumn};
 
 /// Number of columns that have fixed positions.
@@ -341,17 +341,16 @@ mod tests {
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
     use datatypes::vectors::{Int64Vector, TimestampMillisecondVector, UInt64Vector, UInt8Vector};
-    use store_api::metadata::ColumnMetadata;
+    use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
     use store_api::storage::RegionId;
 
     use super::*;
-    use crate::metadata::RegionMetadataBuilder;
 
     const TEST_SEQUENCE: u64 = 1;
     const TEST_OP_TYPE: u8 = 1;
 
     fn build_test_region_metadata() -> RegionMetadataRef {
-        let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 1), 1);
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 1));
         builder
             .push_column_metadata(ColumnMetadata {
                 column_schema: ColumnSchema::new("tag0", ConcreteDataType::int64_datatype(), true),

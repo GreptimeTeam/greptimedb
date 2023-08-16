@@ -21,11 +21,11 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use common_telemetry::info;
+use store_api::metadata::RegionMetadataRef;
 use store_api::storage::RegionId;
 
 use crate::error::Result;
 use crate::manifest::manager::RegionManifestManager;
-use crate::metadata::RegionMetadataRef;
 use crate::region::version::VersionControlRef;
 
 /// Type to store region version.

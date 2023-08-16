@@ -110,6 +110,12 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid region metadata, source: {}, location: {}", source, location))]
+    InvalidMetadata {
+        source: store_api::metadata::MetadataError,
+        location: Location,
+    },
+
     #[snafu(display("Region {} already exists, location: {}", region_id, location))]
     RegionExists {
         region_id: RegionId,
@@ -361,7 +367,8 @@ impl ErrorExt for Error {
             | InvalidMeta { .. }
             | InvalidSchema { .. }
             | InvalidRequest { .. }
-            | FillDefault { .. } => StatusCode::InvalidArguments,
+            | FillDefault { .. }
+            | InvalidMetadata { .. } => StatusCode::InvalidArguments,
             RegionMetadataNotFound { .. }
             | Join { .. }
             | WorkerStopped { .. }

@@ -343,10 +343,13 @@ pub async fn test_prom_http_api(store_type: StorageType) {
     let client = TestClient::new(app);
 
     // instant query
-    let res = client.get("/api/v1/query?query=up&time=1").send().await;
+    let res = client
+        .get("/v1/prometheus/query?query=up&time=1")
+        .send()
+        .await;
     assert_eq!(res.status(), StatusCode::OK);
     let res = client
-        .post("/api/v1/query?query=up&time=1")
+        .post("/v1/prometheus/query?query=up&time=1")
         .header("Content-Type", "application/x-www-form-urlencoded")
         .send()
         .await;
@@ -354,28 +357,31 @@ pub async fn test_prom_http_api(store_type: StorageType) {
 
     // range query
     let res = client
-        .get("/api/v1/query_range?query=up&start=1&end=100&step=5")
+        .get("/v1/prometheus/query_range?query=up&start=1&end=100&step=5")
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
     let res = client
-        .post("/api/v1/query_range?query=up&start=1&end=100&step=5")
+        .post("/v1/prometheus/query_range?query=up&start=1&end=100&step=5")
         .header("Content-Type", "application/x-www-form-urlencoded")
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
 
     // labels
-    let res = client.get("/api/v1/labels?match[]=demo").send().await;
+    let res = client
+        .get("/v1/prometheus/labels?match[]=demo")
+        .send()
+        .await;
     assert_eq!(res.status(), StatusCode::OK);
     let res = client
-        .post("/api/v1/labels?match[]=up")
+        .post("/v1/prometheus/labels?match[]=up")
         .header("Content-Type", "application/x-www-form-urlencoded")
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
     let res = client
-        .get("/api/v1/labels?match[]=demo&start=0")
+        .get("/v1/prometheus/labels?match[]=demo&start=0")
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
@@ -390,17 +396,17 @@ pub async fn test_prom_http_api(store_type: StorageType) {
     );
 
     // labels without match[] param
-    let res = client.get("/api/v1/labels").send().await;
+    let res = client.get("/v1/prometheus/labels").send().await;
     assert_eq!(res.status(), StatusCode::OK);
 
     // labels query with multiple match[] params
     let res = client
-        .get("/api/v1/labels?match[]=up&match[]=down")
+        .get("/v1/prometheus/labels?match[]=up&match[]=down")
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
     let res = client
-        .post("/api/v1/labels?match[]=up&match[]=down")
+        .post("/v1/prometheus/labels?match[]=up&match[]=down")
         .header("Content-Type", "application/x-www-form-urlencoded")
         .send()
         .await;
@@ -408,7 +414,7 @@ pub async fn test_prom_http_api(store_type: StorageType) {
 
     // series
     let res = client
-        .get("/api/v1/series?match[]=demo&start=0&end=0")
+        .get("/v1/prometheus/series?match[]=demo&start=0&end=0")
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
@@ -432,7 +438,7 @@ pub async fn test_prom_http_api(store_type: StorageType) {
     assert_eq!(actual, expected);
 
     let res = client
-        .post("/api/v1/series?match[]=up&match[]=down")
+        .post("/v1/prometheus/series?match[]=up&match[]=down")
         .header("Content-Type", "application/x-www-form-urlencoded")
         .send()
         .await;
@@ -440,7 +446,10 @@ pub async fn test_prom_http_api(store_type: StorageType) {
 
     // label values
     // should return error if there is no match[]
-    let res = client.get("/api/v1/label/instance/values").send().await;
+    let res = client
+        .get("/v1/prometheus/label/instance/values")
+        .send()
+        .await;
     assert_eq!(res.status(), StatusCode::OK);
     let prom_resp = res.json::<PrometheusJsonResponse>().await;
     assert_eq!(prom_resp.status, "error");
@@ -449,7 +458,7 @@ pub async fn test_prom_http_api(store_type: StorageType) {
 
     // single match[]
     let res = client
-        .get("/api/v1/label/host/values?match[]=demo&start=0&end=600")
+        .get("/v1/prometheus/label/host/values?match[]=demo&start=0&end=600")
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
@@ -462,7 +471,7 @@ pub async fn test_prom_http_api(store_type: StorageType) {
 
     // multiple match[]
     let res = client
-        .get("/api/v1/label/instance/values?match[]=up&match[]=system_metrics")
+        .get("/v1/prometheus/label/instance/values?match[]=up&match[]=system_metrics")
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
@@ -472,7 +481,10 @@ pub async fn test_prom_http_api(store_type: StorageType) {
     assert!(prom_resp.error_type.is_none());
 
     // query `__name__` without match[]
-    let res = client.get("/api/v1/label/__name__/values").send().await;
+    let res = client
+        .get("/v1/prometheus/label/__name__/values")
+        .send()
+        .await;
     assert_eq!(res.status(), StatusCode::OK);
     let prom_resp = res.json::<PrometheusJsonResponse>().await;
     assert_eq!(prom_resp.status, "success");

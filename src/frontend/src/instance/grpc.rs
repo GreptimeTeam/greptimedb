@@ -90,7 +90,7 @@ impl GrpcQueryHandler for Instance {
                     }
                 }
             }
-            Request::Ddl(_) | Request::Delete(_) => {
+            Request::Ddl(_) | Request::Deletes(_) => {
                 GrpcQueryHandler::do_query(self.grpc_query_handler.as_ref(), request, ctx.clone())
                     .await?
             }

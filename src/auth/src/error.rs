@@ -60,6 +60,9 @@ pub enum Error {
         schema: String,
         username: String,
     },
+
+    #[snafu(display("User is not authorized to perform this action"))]
+    PermissionDenied { location: Location },
 }
 
 impl ErrorExt for Error {
@@ -75,6 +78,7 @@ impl ErrorExt for Error {
             Error::UnsupportedPasswordType { .. } => StatusCode::UnsupportedPasswordType,
             Error::UserPasswordMismatch { .. } => StatusCode::UserPasswordMismatch,
             Error::AccessDenied { .. } => StatusCode::AccessDenied,
+            Error::PermissionDenied { .. } => StatusCode::PermissionDenied,
         }
     }
 

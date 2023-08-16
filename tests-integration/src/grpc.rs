@@ -22,8 +22,8 @@ mod test {
     use api::v1::query_request::Query;
     use api::v1::{
         alter_expr, AddColumn, AddColumns, AlterExpr, Column, ColumnDataType, ColumnDef,
-        CreateDatabaseExpr, CreateTableExpr, DdlRequest, DeleteRequest, DropTableExpr,
-        FlushTableExpr, InsertRequest, InsertRequests, QueryRequest, SemanticType,
+        CreateDatabaseExpr, CreateTableExpr, DdlRequest, DeleteRequest, DeleteRequests,
+        DropTableExpr, FlushTableExpr, InsertRequest, InsertRequests, QueryRequest, SemanticType,
     };
     use common_catalog::consts::MITO_ENGINE;
     use common_query::Output;
@@ -216,7 +216,6 @@ CREATE TABLE {table_name} (
 | ts                  | a | b                 |
 +---------------------+---+-------------------+
 | 2023-01-01T07:26:12 | 1 | ts: 1672557972000 |
-| 2023-01-01T07:26:14 | 3 | ts: 1672557974000 |
 | 2023-01-01T07:26:15 | 4 | ts: 1672557975000 |
 | 2023-01-01T07:26:16 | 5 | ts: 1672557976000 |
 | 2023-01-01T07:26:17 |   | ts: 1672557977000 |
@@ -250,7 +249,6 @@ CREATE TABLE {table_name} (
 +---------------------+----+-------------------+
 | 2023-01-01T07:26:24 | 50 | ts: 1672557984000 |
 | 2023-01-01T07:26:25 | 51 | ts: 1672557985000 |
-| 2023-01-01T07:26:27 | 53 | ts: 1672557987000 |
 +---------------------+----+-------------------+",
                 ),
             ]),
@@ -527,7 +525,7 @@ CREATE TABLE {table_name} (
 +---------------------+----+-------------------+";
         assert_eq!(recordbatches.pretty_print().unwrap(), expected);
 
-        let delete = DeleteRequest {
+        let new_grpc_delete_request = |a, b, ts, row_count| DeleteRequest {
             table_name: table_name.to_string(),
             region_number: 0,
             key_columns: vec![
@@ -535,7 +533,7 @@ CREATE TABLE {table_name} (
                     column_name: "a".to_string(),
                     semantic_type: SemanticType::Field as i32,
                     values: Some(Values {
-                        i32_values: vec![2, 12, 22, 52],
+                        i32_values: a,
                         ..Default::default()
                     }),
                     datatype: ColumnDataType::Int32 as i32,
@@ -545,12 +543,7 @@ CREATE TABLE {table_name} (
                     column_name: "b".to_string(),
                     semantic_type: SemanticType::Tag as i32,
                     values: Some(Values {
-                        string_values: vec![
-                            "ts: 1672557973000".to_string(),
-                            "ts: 1672557979000".to_string(),
-                            "ts: 1672557982000".to_string(),
-                            "ts: 1672557986000".to_string(),
-                        ],
+                        string_values: b,
                         ..Default::default()
                     }),
                     datatype: ColumnDataType::String as i32,
@@ -560,22 +553,43 @@ CREATE TABLE {table_name} (
                     column_name: "ts".to_string(),
                     semantic_type: SemanticType::Timestamp as i32,
                     values: Some(Values {
-                        ts_millisecond_values: vec![
-                            1672557973000,
-                            1672557979000,
-                            1672557982000,
-                            1672557986000,
-                        ],
+                        ts_millisecond_values: ts,
                         ..Default::default()
                     }),
                     datatype: ColumnDataType::TimestampMillisecond as i32,
                     ..Default::default()
                 },
             ],
-            row_count: 4,
+            row_count,
         };
-        let output = query(instance, Request::Delete(delete)).await;
-        assert!(matches!(output, Output::AffectedRows(4)));
+        let delete1 = new_grpc_delete_request(
+            vec![2, 12, 22, 52],
+            vec![
+                "ts: 1672557973000".to_string(),
+                "ts: 1672557979000".to_string(),
+                "ts: 1672557982000".to_string(),
+                "ts: 1672557986000".to_string(),
+            ],
+            vec![1672557973000, 1672557979000, 1672557982000, 1672557986000],
+            4,
+        );
+        let delete2 = new_grpc_delete_request(
+            vec![3, 53],
+            vec![
+                "ts: 1672557974000".to_string(),
+                "ts: 1672557987000".to_string(),
+            ],
+            vec![1672557974000, 1672557987000],
+            2,
+        );
+        let output = query(
+            instance,
+            Request::Deletes(DeleteRequests {
+                deletes: vec![delete1, delete2],
+            }),
+        )
+        .await;
+        assert!(matches!(output, Output::AffectedRows(6)));
 
         let output = query(instance, request).await;
         let Output::Stream(stream) = output else {
@@ -587,7 +601,6 @@ CREATE TABLE {table_name} (
 | ts                  | a  | b                 |
 +---------------------+----+-------------------+
 | 2023-01-01T07:26:12 | 1  | ts: 1672557972000 |
-| 2023-01-01T07:26:14 | 3  | ts: 1672557974000 |
 | 2023-01-01T07:26:15 | 4  | ts: 1672557975000 |
 | 2023-01-01T07:26:16 | 5  | ts: 1672557976000 |
 | 2023-01-01T07:26:17 |    | ts: 1672557977000 |
@@ -597,7 +610,6 @@ CREATE TABLE {table_name} (
 | 2023-01-01T07:26:23 | 23 | ts: 1672557983000 |
 | 2023-01-01T07:26:24 | 50 | ts: 1672557984000 |
 | 2023-01-01T07:26:25 | 51 | ts: 1672557985000 |
-| 2023-01-01T07:26:27 | 53 | ts: 1672557987000 |
 +---------------------+----+-------------------+";
         assert_eq!(recordbatches.pretty_print().unwrap(), expected);
     }
@@ -765,7 +777,13 @@ CREATE TABLE {table_name} (
             row_count: 2,
         };
 
-        let output = query(instance, Request::Delete(delete)).await;
+        let output = query(
+            instance,
+            Request::Deletes(DeleteRequests {
+                deletes: vec![delete],
+            }),
+        )
+        .await;
         assert!(matches!(output, Output::AffectedRows(2)));
 
         let output = query(instance, request).await;

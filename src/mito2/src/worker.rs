@@ -379,7 +379,6 @@ impl<S> RegionWorkerLoop<S> {
                 RegionRequest::Open(req) => self.handle_open_request(task.region_id, req).await,
                 RegionRequest::Close(_) => self.handle_close_request(task.region_id).await,
                 RegionRequest::Write(_)
-                | RegionRequest::Read(_)
                 | RegionRequest::Delete(_)
                 | RegionRequest::Drop(_)
                 | RegionRequest::Alter(_)

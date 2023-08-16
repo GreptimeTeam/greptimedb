@@ -17,12 +17,12 @@
 use std::sync::Arc;
 
 use common_telemetry::info;
-use snafu::ensure;
+use snafu::{ensure, ResultExt};
+use store_api::metadata::RegionMetadataBuilder;
 use store_api::region_request::RegionCreateRequest;
 use store_api::storage::RegionId;
 
-use crate::error::{RegionExistsSnafu, Result};
-use crate::metadata::{RegionMetadataBuilder, INIT_REGION_VERSION};
+use crate::error::{InvalidMetadataSnafu, RegionExistsSnafu, Result};
 use crate::region::opener::RegionOpener;
 use crate::worker::RegionWorkerLoop;
 
@@ -44,12 +44,12 @@ impl<S> RegionWorkerLoop<S> {
         }
 
         // Convert the request into a RegionMetadata and validate it.
-        let mut builder = RegionMetadataBuilder::new(region_id, INIT_REGION_VERSION);
+        let mut builder = RegionMetadataBuilder::new(region_id);
         for column in request.column_metadatas {
             builder.push_column_metadata(column);
         }
         builder.primary_key(request.primary_key);
-        let metadata = builder.build()?;
+        let metadata = builder.build().context(InvalidMetadataSnafu)?;
 
         // Create a MitoRegion from the RegionMetadata.
         let region = RegionOpener::new(

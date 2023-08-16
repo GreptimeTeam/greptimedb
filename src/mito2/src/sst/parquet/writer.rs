@@ -20,9 +20,10 @@ use parquet::basic::{Compression, Encoding, ZstdLevel};
 use parquet::file::metadata::KeyValue;
 use parquet::file::properties::WriterProperties;
 use parquet::schema::types::ColumnPath;
+use snafu::ResultExt;
 use store_api::storage::consts::SEQUENCE_COLUMN_NAME;
 
-use crate::error::Result;
+use crate::error::{InvalidMetadataSnafu, Result};
 use crate::read::Source;
 use crate::sst::parquet::format::WriteFormat;
 use crate::sst::parquet::{SstInfo, WriteOptions, PARQUET_METADATA_KEY};
@@ -53,7 +54,7 @@ impl<'a> ParquetWriter<'a> {
     pub async fn write_all(&mut self, opts: &WriteOptions) -> Result<Option<SstInfo>> {
         let metadata = self.source.metadata();
 
-        let json = metadata.to_json()?;
+        let json = metadata.to_json().context(InvalidMetadataSnafu)?;
         let key_value_meta = KeyValue::new(PARQUET_METADATA_KEY.to_string(), json);
         let ts_column = metadata.time_index_column();
 

@@ -23,10 +23,10 @@ use datatypes::arrow::array::ArrayRef;
 use datatypes::prelude::DataType;
 use datatypes::vectors::{Helper, UInt64Vector, UInt8Vector, Vector, VectorRef};
 use snafu::{ensure, OptionExt, ResultExt};
+use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ColumnId;
 
 use crate::error::{ConvertVectorSnafu, InvalidBatchSnafu, Result};
-use crate::metadata::RegionMetadataRef;
 
 /// Storage internal representation of a batch of rows
 /// for a primary key (time series).

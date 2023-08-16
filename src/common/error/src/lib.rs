@@ -17,7 +17,7 @@ pub mod format;
 pub mod mock;
 pub mod status_code;
 
-pub const INNER_ERROR_CODE: &str = "INNER_ERROR_CODE";
-pub const INNER_ERROR_MSG: &str = "INNER_ERROR_MSG";
+pub const GREPTIME_ERROR_CODE: &str = "x-greptime-err-code";
+pub const GREPTIME_ERROR_MSG: &str = "x-greptime-err-msg";
 
 pub use snafu;

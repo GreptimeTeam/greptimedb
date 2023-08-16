@@ -43,7 +43,7 @@ runs:
       shell: bash
       run: |
         cd ${{ inputs.working-dir }} && \
-        make build-greptime-by-buildx \
+        make build-by-dev-builder \
           CARGO_PROFILE=${{ inputs.cargo-profile }} \
           FEATURES=${{ inputs.features }} \
           BASE_IMAGE=${{ inputs.base-image }}
@@ -52,7 +52,7 @@ runs:
       uses: ./.github/actions/upload-artifacts
       with:
         artifacts-dir: ${{ inputs.artifacts-dir }}
-        target-file: ./greptime
+        target-file: ./target/${{ inputs.cargo-profile }}/greptime
         version: ${{ inputs.version }}
         release-to-s3-bucket: ${{ inputs.release-to-s3-bucket }}
         aws-access-key-id: ${{ inputs.aws-access-key-id }}

@@ -16,10 +16,13 @@
 
 use std::sync::Arc;
 
+use api::v1::QueryRequest;
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
 use common_query::Output;
+use common_recordbatch::SendableRecordBatchStream;
 
+use crate::metadata::RegionMetadata;
 use crate::region_request::RegionRequest;
 use crate::storage::RegionId;
 
@@ -28,11 +31,24 @@ pub trait RegionEngine {
     /// Name of this engine
     fn name(&self) -> &str;
 
+    /// Handle request to the region.
+    ///
+    /// Only query is not included, which is handled in `handle_query`
     async fn handle_request(
         &self,
         region_id: RegionId,
         request: RegionRequest,
     ) -> Result<Output, BoxedError>;
+
+    /// Handle substrait query and return a stream of record batches
+    async fn handle_query(
+        &self,
+        region_id: RegionId,
+        request: QueryRequest,
+    ) -> Result<SendableRecordBatchStream, BoxedError>;
+
+    /// Retrieve region's metadata.
+    async fn get_metadata(&self, region_id: RegionId) -> Result<RegionMetadata, BoxedError>;
 }
 
 pub type RegionEngineRef = Arc<dyn RegionEngine>;

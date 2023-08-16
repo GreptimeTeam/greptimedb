@@ -21,9 +21,10 @@ use std::fmt;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
+use store_api::metadata::RegionMetadataRef;
+
 use crate::error::Result;
 pub use crate::memtable::key_values::KeyValues;
-use crate::metadata::RegionMetadataRef;
 
 /// Id for memtables.
 ///

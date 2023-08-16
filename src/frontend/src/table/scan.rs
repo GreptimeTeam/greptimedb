@@ -15,7 +15,6 @@
 use std::fmt::Formatter;
 use std::sync::Arc;
 
-use api::v1::DeleteRequest;
 use client::Database;
 use common_meta::table_name::TableName;
 use common_query::prelude::Expr;
@@ -45,10 +44,6 @@ impl std::fmt::Debug for DatanodeInstance {
 impl DatanodeInstance {
     pub(crate) fn new(table: TableRef, db: Database) -> Self {
         Self { table, db }
-    }
-
-    pub(crate) async fn grpc_delete(&self, request: DeleteRequest) -> client::Result<u32> {
-        self.db.delete(request).await
     }
 
     pub(crate) async fn grpc_table_scan(&self, plan: TableScanPlan) -> Result<RecordBatches> {

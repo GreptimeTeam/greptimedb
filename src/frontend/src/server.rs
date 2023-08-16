@@ -28,7 +28,6 @@ use servers::metrics_handler::MetricsHandler;
 use servers::mysql::server::{MysqlServer, MysqlSpawnConfig, MysqlSpawnRef};
 use servers::opentsdb::OpentsdbServer;
 use servers::postgres::PostgresServer;
-use servers::prometheus::PrometheusServer;
 use servers::query_handler::grpc::ServerGrpcQueryHandlerAdaptor;
 use servers::query_handler::sql::ServerSqlQueryHandlerAdaptor;
 use servers::server::Server;
@@ -190,17 +189,6 @@ impl Services {
                 .build();
             result.push((Box::new(http_server), http_addr));
         }
-
-        if let Some(prometheus_options) = &opts.prometheus_options {
-            let prom_addr = parse_addr(&prometheus_options.addr)?;
-
-            let mut prom_server = PrometheusServer::create_server(instance);
-            if let Some(user_provider) = user_provider {
-                prom_server.set_user_provider(user_provider);
-            }
-
-            result.push((prom_server, prom_addr));
-        };
 
         Ok(result
             .into_iter()

@@ -27,12 +27,12 @@ use parquet::arrow::{ParquetRecordBatchStreamBuilder, ProjectionMask};
 use parquet::errors::ParquetError;
 use parquet::format::KeyValue;
 use snafu::{OptionExt, ResultExt};
+use store_api::metadata::RegionMetadata;
 use store_api::storage::ColumnId;
 use table::predicate::Predicate;
 use tokio::io::BufReader;
 
-use crate::error::{NoKeyValueSnafu, OpenDalSnafu, ReadParquetSnafu, Result};
-use crate::metadata::RegionMetadata;
+use crate::error::{InvalidMetadataSnafu, NoKeyValueSnafu, OpenDalSnafu, ReadParquetSnafu, Result};
 use crate::read::{Batch, BatchReader};
 use crate::sst::file::FileHandle;
 use crate::sst::parquet::format::ReadFormat;
@@ -211,7 +211,7 @@ impl ParquetReader {
             reason: format!("No value for key {}", PARQUET_METADATA_KEY),
         })?;
 
-        RegionMetadata::from_json(json)
+        RegionMetadata::from_json(json).context(InvalidMetadataSnafu)
     }
 }
 

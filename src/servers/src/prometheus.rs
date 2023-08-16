@@ -14,14 +14,11 @@
 
 //! prom supply the prometheus HTTP API Server compliance
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::net::SocketAddr;
 use std::sync::Arc;
 
-use ::auth::UserProviderRef;
 use async_trait::async_trait;
-use axum::body::BoxBody;
 use axum::extract::{Path, Query, State};
-use axum::{middleware, routing, Form, Json, Router};
+use axum::{Form, Json};
 use catalog::CatalogManagerRef;
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use common_catalog::parse_catalog_and_schema_from_db_string;
@@ -29,12 +26,11 @@ use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
-use common_telemetry::{info, timer};
+use common_telemetry::timer;
 use common_time::util::{current_time_rfc3339, yesterday_rfc3339};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::scalars::ScalarVector;
 use datatypes::vectors::{Float64Vector, StringVector, TimestampMillisecondVector};
-use futures::FutureExt;
 use promql_parser::label::METRIC_NAME;
 use promql_parser::parser::{
     AggregateExpr, BinaryExpr, Call, Expr as PromqlExpr, MatrixSelector, ParenExpr, SubqueryExpr,
@@ -45,22 +41,12 @@ use schemars::JsonSchema;
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use session::context::{QueryContext, QueryContextRef};
-use snafu::{ensure, Location, OptionExt, ResultExt};
-use tokio::sync::oneshot::Sender;
-use tokio::sync::{oneshot, Mutex};
-use tower::ServiceBuilder;
-use tower_http::auth::AsyncRequireAuthorizationLayer;
-use tower_http::compression::CompressionLayer;
-use tower_http::trace::TraceLayer;
+use snafu::{Location, OptionExt, ResultExt};
 
 use crate::error::{
-    AlreadyStartedSnafu, CollectRecordbatchSnafu, Error, InternalSnafu, InvalidQuerySnafu, Result,
-    StartHttpSnafu, UnexpectedResultSnafu,
+    CollectRecordbatchSnafu, Error, InternalSnafu, InvalidQuerySnafu, Result, UnexpectedResultSnafu,
 };
-use crate::http::authorize::HttpAuth;
-use crate::http::track_metrics;
 use crate::prom_store::{FIELD_COLUMN_NAME, METRIC_NAME_LABEL, TIMESTAMP_COLUMN_NAME};
-use crate::server::Server;
 
 pub const PROMETHEUS_API_VERSION: &str = "v1";
 
@@ -71,107 +57,6 @@ pub trait PrometheusHandler {
     async fn do_query(&self, query: &PromQuery, query_ctx: QueryContextRef) -> Result<Output>;
 
     fn catalog_manager(&self) -> CatalogManagerRef;
-}
-
-/// PromServer represents PrometheusServer which handles the compliance with prometheus HTTP API
-pub struct PrometheusServer {
-    query_handler: PrometheusHandlerRef,
-    shutdown_tx: Mutex<Option<Sender<()>>>,
-    user_provider: Option<UserProviderRef>,
-}
-
-impl PrometheusServer {
-    pub fn create_server(query_handler: PrometheusHandlerRef) -> Box<Self> {
-        Box::new(PrometheusServer {
-            query_handler,
-            shutdown_tx: Mutex::new(None),
-            user_provider: None,
-        })
-    }
-
-    pub fn set_user_provider(&mut self, user_provider: UserProviderRef) {
-        debug_assert!(self.user_provider.is_none());
-        self.user_provider = Some(user_provider);
-    }
-
-    pub fn make_app(&self) -> Router {
-        // TODO(ruihang): implement format_query, series, values, query_exemplars and targets methods
-
-        let router = Router::new()
-            .route("/query", routing::post(instant_query).get(instant_query))
-            .route("/query_range", routing::post(range_query).get(range_query))
-            .route("/labels", routing::post(labels_query).get(labels_query))
-            .route("/series", routing::post(series_query).get(series_query))
-            .route(
-                "/label/:label_name/values",
-                routing::get(label_values_query),
-            )
-            .with_state(self.query_handler.clone());
-
-        Router::new()
-            .nest(&format!("/api/{PROMETHEUS_API_VERSION}"), router)
-            // middlewares
-            .layer(
-                ServiceBuilder::new()
-                    .layer(TraceLayer::new_for_http())
-                    .layer(CompressionLayer::new())
-                    // custom layer
-                    .layer(AsyncRequireAuthorizationLayer::new(
-                        HttpAuth::<BoxBody>::new(self.user_provider.clone()),
-                    )),
-            )
-            // We need to register the metrics layer again since start a new http server
-            // for the PromServer.
-            .route_layer(middleware::from_fn(track_metrics))
-    }
-}
-
-pub const PROMETHEUS_SERVER: &str = "PROMETHEUS_SERVER";
-
-#[async_trait]
-impl Server for PrometheusServer {
-    async fn shutdown(&self) -> Result<()> {
-        let mut shutdown_tx = self.shutdown_tx.lock().await;
-        if let Some(tx) = shutdown_tx.take() {
-            if tx.send(()).is_err() {
-                info!("Receiver dropped, the Prometheus API server has already existed");
-            }
-        }
-        info!("Shutdown Prometheus API server");
-
-        Ok(())
-    }
-
-    async fn start(&self, listening: SocketAddr) -> Result<SocketAddr> {
-        let (tx, rx) = oneshot::channel();
-        let server = {
-            let mut shutdown_tx = self.shutdown_tx.lock().await;
-            ensure!(
-                shutdown_tx.is_none(),
-                AlreadyStartedSnafu {
-                    server: "Prometheus"
-                }
-            );
-
-            let app = self.make_app();
-            let server = axum::Server::bind(&listening).serve(app.into_make_service());
-
-            *shutdown_tx = Some(tx);
-
-            server
-        };
-        let listening = server.local_addr();
-        info!("Prometheus API server is bound to {}", listening);
-
-        let graceful = server.with_graceful_shutdown(rx.map(drop));
-        graceful.await.context(StartHttpSnafu)?;
-
-        Ok(listening)
-    }
-
-    fn name(&self) -> &str {
-        PROMETHEUS_SERVER
-    }
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
