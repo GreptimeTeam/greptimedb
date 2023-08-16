@@ -8,6 +8,7 @@ license.workspace = true
 ahash = { version = "0.8", features = ["compile-time-rng"] }
 arc-swap = "1.0"
 arrow-schema.workspace = true
+arrow.workspace = true
 async-recursion = "1.0"
 async-stream.workspace = true
 async-trait = "0.1"

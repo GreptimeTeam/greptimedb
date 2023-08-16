@@ -21,7 +21,8 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use ahash::RandomState;
-use arrow_schema::{Field, Schema, SchemaRef};
+use arrow::compute;
+use arrow_schema::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use common_query::DfPhysicalPlan;
 use common_recordbatch::DfSendableRecordBatchStream;
 use datafusion::common::{Result as DataFusionResult, Statistics};
@@ -99,7 +100,7 @@ impl RangeSelect {
                 Ok(DFField::new_unqualified(
                     &expr.display_name()?,
                     expr.get_type(input.schema())?,
-                    //TODO: We have not implemented fill currently,
+                    // TODO(Taylor-lagrange): We have not implemented fill currently,
                     // it is possible that some columns may not be able to aggregate data,
                     // so we temporarily set that all data is nullable
                     true,
@@ -195,6 +196,7 @@ impl RangeSelect {
             .map(|by| create_physical_expr(by, df_schema, schema, session_state.execution_props()))
             .collect::<DfResult<Vec<_>>>()
     }
+
     pub fn to_execution_plan(
         &self,
         logical_input: &LogicalPlan,
@@ -290,14 +292,14 @@ impl RangeSelect {
 struct RangeFnExec {
     pub expr: Arc<dyn AggregateExpr>,
     pub args: Vec<Arc<dyn PhysicalExpr>>,
-    pub range: i64,
+    pub range: Millisecond,
 }
 
 #[derive(Debug)]
 pub struct RangeSelectExec {
     input: Arc<dyn ExecutionPlan>,
     range_exec: Vec<RangeFnExec>,
-    align: i64,
+    align: Millisecond,
     time_index: String,
     by: Vec<Arc<dyn PhysicalExpr>>,
     schema: SchemaRef,
@@ -310,7 +312,7 @@ impl DisplayAs for RangeSelectExec {
         match t {
             DisplayFormatType::Default | DisplayFormatType::Verbose => {
                 write!(f, "RangeSelectExec: ")?;
-                let g: Vec<String> = self
+                let range_expr_strs: Vec<String> = self
                     .range_exec
                     .iter()
                     .map(|e| format!("RangeFnExec{{ {}, range: {:?}}}", e.expr.name(), e.range))
@@ -319,7 +321,7 @@ impl DisplayAs for RangeSelectExec {
                 write!(
                     f,
                     "range_expr=[{}], align={}, time_index={}, by=[{}]",
-                    g.join(", "),
+                    range_expr_strs.join(", "),
                     self.align,
                     self.time_index,
                     by.join(", ")
@@ -378,7 +380,9 @@ impl ExecutionPlan for RangeSelectExec {
         let schema = input.schema();
         let time_index = schema
             .column_with_name(&self.time_index)
-            .expect("time index column not found")
+            .ok_or(DataFusionError::Execution(
+                "time index column not found".into(),
+            ))?
             .0;
         let row_converter = RowConverter::new(
             self.by_schema
@@ -418,10 +422,10 @@ struct RangeSelectStream {
     schema: SchemaRef,
     range_exec: Vec<RangeFnExec>,
     input: SendableRecordBatchStream,
-    /// Column index of TIME INDEX column's position in schema
+    /// Column index of TIME INDEX column's position in the input schema
     time_index: usize,
     /// the unit of `align` is millisecond
-    align: i64,
+    align: Millisecond,
     by: Vec<Arc<dyn PhysicalExpr>>,
     exec_state: ExecutionState,
     /// Converter for the by values
@@ -433,18 +437,44 @@ struct RangeSelectStream {
     /// key: (hash of by rows, align_ts)
     /// value: [row_ids]
     /// It is used to record the data that needs to be aggregated in each time slot during the data update process
-    modify_map: HashMap<(u64, i64), Vec<u32>>,
+    modify_map: HashMap<(u64, Millisecond), Vec<u32>>,
     /// The number of rows of the final output
     output_num_rows: usize,
     metric: BaselineMetrics,
 }
 
 struct SeriesState {
-    /// by values write by `RowWriter`
+    /// by values written by `RowWriter`
     row: OwnedRow,
     /// key: align_ts
     /// value: a vector, each element is a range_fn follow the order of `range_exec`
-    align_ts_accumulator: HashMap<i64, Vec<Box<dyn Accumulator>>>,
+    align_ts_accumulator: HashMap<Millisecond, Vec<Box<dyn Accumulator>>>,
+}
+
+/// According to `align`, produces a calendar-based aligned time.
+/// Combining the parameters related to the range query,
+/// determine for each `Accumulator` `(hash, align_ts)` define,
+/// which rows of data will be applied to it.
+fn align_to_calendar(
+    range: Millisecond,
+    align: Millisecond,
+    ts_column: &TimestampMillisecondArray,
+    by_columns_hash: &[u64],
+    modify_map: &mut HashMap<(u64, Millisecond), Vec<u32>>,
+) {
+    modify_map.clear();
+    // make modify_map for range_fn[i]
+    for (row, hash) in by_columns_hash.iter().enumerate() {
+        let ts = ts_column.value(row);
+        let mut align_ts = ((ts + align - 1) / align) * align;
+        while align_ts - range < ts && ts <= align_ts {
+            modify_map
+                .entry((*hash, align_ts))
+                .or_default()
+                .push(row as u32);
+            align_ts += align;
+        }
+    }
 }
 
 impl RangeSelectStream {
@@ -469,28 +499,32 @@ impl RangeSelectStream {
         let mut hashes = vec![0; num_rows];
         create_hashes(&by_arrays, &self.random_state, &mut hashes)?;
         let by_rows = self.row_converter.convert_columns(&by_arrays)?;
-        let ts_column = batch
-            .column(self.time_index)
+        let mut ts_column = batch.column(self.time_index).clone();
+        if !matches!(
+            ts_column.data_type(),
+            DataType::Timestamp(TimeUnit::Millisecond, _)
+        ) {
+            ts_column = compute::cast(
+                ts_column.as_ref(),
+                &DataType::Timestamp(TimeUnit::Millisecond, None),
+            )?;
+        }
+        let ts_column_ref = ts_column
             .as_any()
             .downcast_ref::<TimestampMillisecondArray>()
-            .unwrap();
+            .ok_or(DataFusionError::Execution(
+                "Time index Column downcast to TimestampMillisecondArray failed".into(),
+            ))?;
         for i in 0..self.range_exec.len() {
             let args = self.evaluate_many(&batch, &self.range_exec[i].args)?;
             // use self.modify_map record (hash, align_ts) => [row_nums]
-            self.modify_map.clear();
-            let range = self.range_exec[i].range;
-            // make modify_map for range_fn[i]
-            for (row, hash) in hashes.iter().enumerate() {
-                let ts = ts_column.value(row);
-                let mut align_ts = ((ts + self.align - 1) / self.align) * self.align;
-                while align_ts - range < ts && ts <= align_ts {
-                    self.modify_map
-                        .entry((*hash, align_ts))
-                        .or_default()
-                        .push(row as u32);
-                    align_ts += self.align;
-                }
-            }
+            align_to_calendar(
+                self.range_exec[i].range,
+                self.align,
+                ts_column_ref,
+                &hashes,
+                &mut self.modify_map,
+            );
             // build modify_rows/modify_index/offsets for batch update
             let mut modify_rows = UInt32Builder::with_capacity(0);
             // (hash, align_ts, row_num)
@@ -541,6 +575,7 @@ impl RangeSelectStream {
         }
         Ok(())
     }
+
     fn generate_output(&mut self) -> DfResult<RecordBatch> {
         let _timer = self.metric.elapsed_compute().timer();
         if self.series_map.is_empty() {
@@ -568,7 +603,10 @@ impl RangeSelectStream {
         for column_scalar in all_scalar {
             columns.push(ScalarValue::iter_to_array(column_scalar)?);
         }
-        columns.push(Arc::new(ts_builder.finish()));
+        let ts_column = ts_builder.finish();
+        // output schema follow the order of range expr | time index | by columns
+        let ts_column = compute::cast(&ts_column, self.schema.field(columns.len()).data_type())?;
+        columns.push(ts_column);
         columns.extend(self.row_converter.convert_rows(by_rows)?);
         Ok(RecordBatch::try_new(self.schema(), columns)?)
     }
@@ -657,9 +695,8 @@ mod test {
             0, 5_000, 10_000, 15_000, 20_000, 25_000, 30_000, 35_000, 40_000,
         ])) as _;
         let values = vec![
-            // host 1
-            0, 1, 2, 3, 4, 5, 6, 7, 8, // host 2
-            9, 10, 11, 12, 13, 14, 15, 16, 17,
+            0, 1, 2, 3, 4, 5, 6, 7, 8, // data for host 1
+            9, 10, 11, 12, 13, 14, 15, 16, 17, // data for host 2
         ];
         let mut host = vec!["host1"; 9];
         host.extend(vec!["host2"; 9]);
@@ -674,7 +711,12 @@ mod test {
         MemoryExec::try_new(&[vec![data]], schema, None).unwrap()
     }
 
-    async fn do_range_select_test(range1: i64, range2: i64, align: i64, expected: String) {
+    async fn do_range_select_test(
+        range1: Millisecond,
+        range2: Millisecond,
+        align: Millisecond,
+        expected: String,
+    ) {
         let memory_exec = Arc::new(prepare_test_data());
         let range_select_exec = Arc::new(RangeSelectExec {
             input: memory_exec,
