@@ -19,6 +19,7 @@ use table::metadata::{RawTableInfo, TableId};
 use super::TABLE_INFO_KEY_PREFIX;
 use crate::error::{Result, UnexpectedSnafu};
 use crate::key::{to_removed_key, TableMetaKey};
+use crate::kv_backend::txn::{Compare, CompareOp, Txn, TxnOp, TxnOpResponse};
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::store::{CompareAndPutRequest, MoveValueRequest};
 
@@ -51,6 +52,13 @@ impl TableInfoValue {
             version: 0,
         }
     }
+
+    pub(crate) fn update(&self, new_table_info: RawTableInfo) -> Self {
+        Self {
+            table_info: new_table_info,
+            version: self.version + 1,
+        }
+    }
 }
 
 pub struct TableInfoManager {
@@ -60,6 +68,100 @@ pub struct TableInfoManager {
 impl TableInfoManager {
     pub fn new(kv_backend: KvBackendRef) -> Self {
         Self { kv_backend }
+    }
+
+    /// Builds a create table info transaction, it expected the `__table_info/{table_id}` wasn't occupied.
+    pub(crate) fn build_create_txn(
+        &self,
+        table_id: TableId,
+        table_info_value: &TableInfoValue,
+    ) -> Result<(
+        Txn,
+        impl FnOnce(&Vec<TxnOpResponse>) -> Result<Option<TableInfoValue>>,
+    )> {
+        let key = TableInfoKey::new(table_id);
+        let raw_key = key.as_raw_key();
+
+        let txn = Txn::default()
+            .when(vec![Compare::with_not_exist_value(
+                raw_key.clone(),
+                CompareOp::Equal,
+            )])
+            .and_then(vec![TxnOp::Put(
+                raw_key.clone(),
+                table_info_value.try_as_raw_value()?,
+            )])
+            .or_else(vec![TxnOp::Get(raw_key.clone())]);
+
+        Ok((txn, Self::build_decode_fn(raw_key)))
+    }
+
+    /// Builds a update table info transaction, it expected the remote value equals the `current_current_table_info_value`.
+    /// It retrieves the latest value if the comparing failed.
+    pub(crate) fn build_update_txn(
+        &self,
+        table_id: TableId,
+        current_table_info_value: &TableInfoValue,
+        new_table_info_value: &TableInfoValue,
+    ) -> Result<(
+        Txn,
+        impl FnOnce(&Vec<TxnOpResponse>) -> Result<Option<TableInfoValue>>,
+    )> {
+        let key = TableInfoKey::new(table_id);
+        let raw_key = key.as_raw_key();
+        let raw_value = current_table_info_value.try_as_raw_value()?;
+
+        let txn = Txn::default()
+            .when(vec![Compare::with_value(
+                raw_key.clone(),
+                CompareOp::Equal,
+                raw_value.clone(),
+            )])
+            .and_then(vec![TxnOp::Put(
+                raw_key.clone(),
+                new_table_info_value.try_as_raw_value()?,
+            )])
+            .or_else(vec![TxnOp::Get(raw_key.clone())]);
+
+        Ok((txn, Self::build_decode_fn(raw_key)))
+    }
+
+    /// Builds a delete table info transaction.
+    pub(crate) fn build_delete_txn(
+        &self,
+        table_id: TableId,
+        table_info_value: &TableInfoValue,
+    ) -> Result<Txn> {
+        let key = TableInfoKey::new(table_id);
+        let raw_key = key.as_raw_key();
+        let raw_value = table_info_value.try_as_raw_value()?;
+        let removed_key = to_removed_key(&String::from_utf8_lossy(&raw_key));
+
+        let txn = Txn::default().and_then(vec![
+            TxnOp::Delete(raw_key.clone()),
+            TxnOp::Put(removed_key.into_bytes(), raw_value),
+        ]);
+
+        Ok(txn)
+    }
+
+    fn build_decode_fn(
+        raw_key: Vec<u8>,
+    ) -> impl FnOnce(&Vec<TxnOpResponse>) -> Result<Option<TableInfoValue>> {
+        move |kvs: &Vec<TxnOpResponse>| {
+            kvs.iter()
+                .filter_map(|resp| {
+                    if let TxnOpResponse::ResponseGet(r) = resp {
+                        Some(r)
+                    } else {
+                        None
+                    }
+                })
+                .flat_map(|r| &r.kvs)
+                .find(|kv| kv.key == raw_key)
+                .map(|kv| TableInfoValue::try_from(&kv.value))
+                .transpose()
+        }
     }
 
     pub async fn get(&self, table_id: TableId) -> Result<Option<TableInfoValue>> {
