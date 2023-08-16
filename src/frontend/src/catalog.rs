@@ -34,7 +34,6 @@ use common_meta::key::catalog_name::CatalogNameKey;
 use common_meta::key::schema_name::SchemaNameKey;
 use common_meta::key::table_info::TableInfoKey;
 use common_meta::key::table_name::TableNameKey;
-use common_meta::key::table_region::TableRegionKey;
 use common_meta::key::{TableMetaKey, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::table_name::TableName;
@@ -126,15 +125,6 @@ impl FrontendCatalogManager {
         );
 
         let key = TableInfoKey::new(table_id);
-        self.backend_cache_invalidator
-            .invalidate_key(&key.as_raw_key())
-            .await;
-        debug!(
-            "invalidated cache key: {}",
-            String::from_utf8_lossy(&key.as_raw_key())
-        );
-
-        let key = TableRegionKey::new(table_id);
         self.backend_cache_invalidator
             .invalidate_key(&key.as_raw_key())
             .await;

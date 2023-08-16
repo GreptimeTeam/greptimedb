@@ -21,9 +21,8 @@ use serde::{Deserialize, Serialize};
 use snafu::ensure;
 use table::metadata::TableId;
 
-use super::table_region::RegionDistribution;
 use crate::error::{Result, UnexpectedSnafu};
-use crate::key::{to_removed_key, TableMetaKey};
+use crate::key::{to_removed_key, RegionDistribution, TableMetaKey};
 use crate::kv_backend::txn::{Compare, CompareOp, Txn, TxnOp, TxnOpResponse, TxnRequest};
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::router::{region_distribution, RegionRoute, Table, TableRoute};

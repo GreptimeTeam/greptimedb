@@ -26,7 +26,7 @@ use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::TableId;
 
 use crate::error::{self, Result};
-use crate::key::table_region::RegionDistribution;
+use crate::key::RegionDistribution;
 use crate::peer::Peer;
 use crate::rpc::util;
 use crate::table_name::TableName;

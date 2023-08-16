@@ -15,17 +15,21 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
+use snafu::ResultExt;
 use store_api::storage::RegionNumber;
 use table::metadata::TableId;
 
 use super::TABLE_REGION_KEY_PREFIX;
-use crate::error::Result;
+use crate::error::{InvalidTableMetadataSnafu, Result, SerdeJsonSnafu};
 use crate::key::TableMetaKey;
-use crate::kv_backend::KvBackendRef;
-use crate::DatanodeId;
+use crate::{impl_table_meta_key, impl_table_meta_value, DatanodeId};
 
 pub type RegionDistribution = BTreeMap<DatanodeId, Vec<RegionNumber>>;
 
+#[deprecated(
+    since = "0.4.0",
+    note = "Please use the TableRouteManager's get_region_distribution method instead"
+)]
 pub struct TableRegionKey {
     table_id: TableId,
 }
@@ -42,6 +46,12 @@ impl TableMetaKey for TableRegionKey {
     }
 }
 
+impl_table_meta_key! {TableRegionKey}
+
+#[deprecated(
+    since = "0.4.0",
+    note = "Please use the TableRouteManager's get_region_distribution method instead"
+)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TableRegionValue {
     pub region_distribution: RegionDistribution,
@@ -57,25 +67,7 @@ impl TableRegionValue {
     }
 }
 
-pub struct TableRegionManager {
-    kv_backend: KvBackendRef,
-}
-
-impl TableRegionManager {
-    pub fn new(kv_backend: KvBackendRef) -> Self {
-        Self { kv_backend }
-    }
-
-    pub async fn get(&self, table_id: TableId) -> Result<Option<TableRegionValue>> {
-        let key = TableRegionKey::new(table_id);
-        let raw_key = key.as_raw_key();
-        self.kv_backend
-            .get(&raw_key)
-            .await?
-            .map(|x| TableRegionValue::try_from_raw_value(x.value))
-            .transpose()
-    }
-}
+impl_table_meta_value! {TableRegionValue}
 
 #[cfg(test)]
 mod tests {

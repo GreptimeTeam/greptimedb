@@ -36,10 +36,6 @@
 //!     - The value is a [TableNameValue] struct; it contains the table id.
 //!     - Used in the table name to table id lookup.
 //!
-//! 6. Table region key: `__table_region/{table_id}`
-//!     - The value is a [TableRegionValue] struct; it contains the region distribution of the
-//!       table in the Datanodes.
-//!
 //! All keys have related managers. The managers take care of the serialization and deserialization
 //! of keys and values, and the interaction with the underlying KV store backend.
 //!
@@ -48,29 +44,28 @@
 //! It's recommended to just use this manager only.
 
 pub mod catalog_name;
-#[allow(deprecated)]
 pub mod datanode_table;
 pub mod schema_name;
-#[allow(deprecated)]
 pub mod table_info;
-#[allow(deprecated)]
 pub mod table_name;
+// TODO(weny): removes it.
 #[allow(deprecated)]
 pub mod table_region;
 // TODO(weny): removes it.
 #[allow(unused, deprecated)]
 pub mod table_route;
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use datanode_table::{DatanodeTableKey, DatanodeTableManager, DatanodeTableValue};
 use lazy_static::lazy_static;
 use regex::Regex;
 use snafu::{ensure, OptionExt, ResultExt};
+use store_api::storage::RegionNumber;
 use table::metadata::{RawTableInfo, TableId};
 use table_info::{TableInfoKey, TableInfoManager, TableInfoValue};
 use table_name::{TableNameKey, TableNameManager, TableNameValue};
-use table_region::{TableRegionKey, TableRegionManager, TableRegionValue};
 
 use self::catalog_name::{CatalogManager, CatalogNameValue};
 use self::schema_name::{SchemaManager, SchemaNameValue};
@@ -81,6 +76,7 @@ pub use crate::key::table_route::{TableRouteKey, TABLE_ROUTE_PREFIX};
 use crate::kv_backend::txn::Txn;
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::router::{region_distribution, RegionRoute};
+use crate::DatanodeId;
 
 pub const REMOVED_PREFIX: &str = "__removed";
 
@@ -92,6 +88,8 @@ const TABLE_NAME_KEY_PREFIX: &str = "__table_name";
 const TABLE_REGION_KEY_PREFIX: &str = "__table_region";
 const CATALOG_NAME_KEY_PREFIX: &str = "__catalog_name";
 const SCHEMA_NAME_KEY_PREFIX: &str = "__schema_name";
+
+pub type RegionDistribution = BTreeMap<DatanodeId, Vec<RegionNumber>>;
 
 lazy_static! {
     static ref DATANODE_TABLE_KEY_PATTERN: Regex =
@@ -134,7 +132,6 @@ pub type TableMetadataManagerRef = Arc<TableMetadataManager>;
 pub struct TableMetadataManager {
     table_name_manager: TableNameManager,
     table_info_manager: TableInfoManager,
-    table_region_manager: TableRegionManager,
     datanode_table_manager: DatanodeTableManager,
     catalog_manager: CatalogManager,
     schema_manager: SchemaManager,
@@ -161,7 +158,6 @@ impl TableMetadataManager {
         TableMetadataManager {
             table_name_manager: TableNameManager::new(kv_backend.clone()),
             table_info_manager: TableInfoManager::new(kv_backend.clone()),
-            table_region_manager: TableRegionManager::new(kv_backend.clone()),
             datanode_table_manager: DatanodeTableManager::new(kv_backend.clone()),
             catalog_manager: CatalogManager::new(kv_backend.clone()),
             schema_manager: SchemaManager::new(kv_backend.clone()),
@@ -176,11 +172,6 @@ impl TableMetadataManager {
 
     pub fn table_info_manager(&self) -> &TableInfoManager {
         &self.table_info_manager
-    }
-
-    #[deprecated(since = "0.4.0", note = "Please use the table_route_manager instead")]
-    pub fn table_region_manager(&self) -> &TableRegionManager {
-        &self.table_region_manager
     }
 
     pub fn datanode_table_manager(&self) -> &DatanodeTableManager {
@@ -466,6 +457,7 @@ impl TableMetadataManager {
     }
 }
 
+#[macro_export]
 macro_rules! impl_table_meta_key {
     ($($val_ty: ty), *) => {
         $(
@@ -478,13 +470,9 @@ macro_rules! impl_table_meta_key {
     }
 }
 
-impl_table_meta_key!(
-    TableNameKey<'_>,
-    TableInfoKey,
-    TableRegionKey,
-    DatanodeTableKey
-);
+impl_table_meta_key!(TableNameKey<'_>, TableInfoKey, DatanodeTableKey);
 
+#[macro_export]
 macro_rules! impl_table_meta_value {
     ($($val_ty: ty), *) => {
         $(
@@ -528,7 +516,6 @@ impl_table_meta_value! {
     SchemaNameValue,
     TableNameValue,
     TableInfoValue,
-    TableRegionValue,
     DatanodeTableValue,
     TableRouteValue
 }
