@@ -2,7 +2,6 @@ use std::pin::Pin;
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
-
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -50,14 +49,19 @@ impl LocalScheduler {
             let receiver = rx.clone();
             let state = Arc::clone(&state);
             let handle = tokio::spawn(async move {
-                loop {
-                    if state.load(Ordering::Relaxed) == STATE_STOP || child.is_cancelled() {
-                        println!("cancel handle");
-                        return;
-                    }
-
-                    if let Ok(req) = receiver.recv() {
-                        req.await;
+                while state.load(Ordering::Relaxed) == STATE_RUNNING {
+                    tokio::select! {
+                        // 1.如果子令牌被取消，就返回退出任务
+                        _ = child.cancelled() => {
+                            return;
+                        }
+                        // 2.等待接收任务请求
+                        req_opt = receiver.recv_async() =>{
+                            // 如果收到请求，等待请求中的异步任务完成
+                            if let Ok(req) = req_opt{
+                                req.await;
+                            }
+                        }
                     }
                     
                 }
@@ -75,8 +79,8 @@ impl LocalScheduler {
     }
 
     pub async fn stop(&mut self) -> Result<()> {
-        self.state.store(STATE_STOP, Ordering::Relaxed);
         self.cancel_token.cancel();
+        self.state.store(STATE_STOP, Ordering::Relaxed);
         for handle in &mut self.handles {
             if let Some(handle) = handle.take() {
                 handle.await.unwrap();
@@ -99,14 +103,6 @@ impl Scheduler for LocalScheduler {
     }
 }
 
-impl Drop for LocalScheduler {
-    fn drop(&mut self) {
-        self.state.store(STATE_STOP, Ordering::Relaxed);
-        self.cancel_token.cancel();
-        self.handles.clear();
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -114,8 +110,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_scheduler() {
-        println!("============================== test_scheduler begin ==============================");
-
         let mut local = LocalScheduler::new();
         local
             .schedule(Box::pin(async {
@@ -140,7 +134,5 @@ mod tests {
 
         tokio::time::sleep(Duration::from_secs(3)).await; 
         local.stop().await.unwrap();
-
-        println!("============================== test_scheduler end   ==============================");
     }
 }
