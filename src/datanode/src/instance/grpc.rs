@@ -232,7 +232,7 @@ impl GrpcQueryHandler for Instance {
                 self.handle_query(query, ctx).await
             }
             Request::Ddl(request) => self.handle_ddl(request, ctx).await,
-            Request::RowInserts(_) | Request::RowDelete(_) => UnsupportedGrpcRequestSnafu {
+            Request::RowInserts(_) | Request::RowDeletes(_) => UnsupportedGrpcRequestSnafu {
                 kind: "row insert/delete",
             }
             .fail(),

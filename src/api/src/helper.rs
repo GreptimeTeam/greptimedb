@@ -300,9 +300,9 @@ pub fn request_type(request: &Request) -> &'static str {
         Request::Inserts(_) => "inserts",
         Request::Query(query_req) => query_request_type(query_req),
         Request::Ddl(ddl_req) => ddl_request_type(ddl_req),
-        Request::RowInserts(_) => "row_inserts",
-        Request::RowDelete(_) => "row_delete",
         Request::Deletes(_) => "deletes",
+        Request::RowInserts(_) => "row_inserts",
+        Request::RowDeletes(_) => "row_deletes",
     }
 }
 
@@ -341,60 +341,40 @@ pub fn convert_i128_to_interval(v: i128) -> IntervalMonthDayNano {
     }
 }
 
-pub fn pb_value_to_value_ref(value: &greptime_proto::v1::Value) -> ValueRef {
+pub fn pb_value_to_value_ref(value: &v1::Value) -> ValueRef {
     let Some(value) = &value.value_data else {
         return ValueRef::Null;
     };
 
     match value {
-        greptime_proto::v1::value::ValueData::I8Value(v) => ValueRef::Int8(*v as i8),
-        greptime_proto::v1::value::ValueData::I16Value(v) => ValueRef::Int16(*v as i16),
-        greptime_proto::v1::value::ValueData::I32Value(v) => ValueRef::Int32(*v),
-        greptime_proto::v1::value::ValueData::I64Value(v) => ValueRef::Int64(*v),
-        greptime_proto::v1::value::ValueData::U8Value(v) => ValueRef::UInt8(*v as u8),
-        greptime_proto::v1::value::ValueData::U16Value(v) => ValueRef::UInt16(*v as u16),
-        greptime_proto::v1::value::ValueData::U32Value(v) => ValueRef::UInt32(*v),
-        greptime_proto::v1::value::ValueData::U64Value(v) => ValueRef::UInt64(*v),
-        greptime_proto::v1::value::ValueData::F32Value(f) => {
-            ValueRef::Float32(OrderedF32::from(*f))
-        }
-        greptime_proto::v1::value::ValueData::F64Value(f) => {
-            ValueRef::Float64(OrderedF64::from(*f))
-        }
-        greptime_proto::v1::value::ValueData::BoolValue(b) => ValueRef::Boolean(*b),
-        greptime_proto::v1::value::ValueData::BinaryValue(bytes) => {
-            ValueRef::Binary(bytes.as_slice())
-        }
-        greptime_proto::v1::value::ValueData::StringValue(string) => {
-            ValueRef::String(string.as_str())
-        }
-        greptime_proto::v1::value::ValueData::DateValue(d) => ValueRef::Date(Date::from(*d)),
-        greptime_proto::v1::value::ValueData::DatetimeValue(d) => {
-            ValueRef::DateTime(DateTime::new(*d))
-        }
-        greptime_proto::v1::value::ValueData::TsSecondValue(t) => {
-            ValueRef::Timestamp(Timestamp::new_second(*t))
-        }
-        greptime_proto::v1::value::ValueData::TsMillisecondValue(t) => {
-            ValueRef::Timestamp(Timestamp::new_millisecond(*t))
-        }
-        greptime_proto::v1::value::ValueData::TsMicrosecondValue(t) => {
-            ValueRef::Timestamp(Timestamp::new_microsecond(*t))
-        }
-        greptime_proto::v1::value::ValueData::TsNanosecondValue(t) => {
-            ValueRef::Timestamp(Timestamp::new_nanosecond(*t))
-        }
-        greptime_proto::v1::value::ValueData::TimeSecondValue(t) => {
-            ValueRef::Time(Time::new_second(*t))
-        }
-        greptime_proto::v1::value::ValueData::TimeMillisecondValue(t) => {
-            ValueRef::Time(Time::new_millisecond(*t))
-        }
-        greptime_proto::v1::value::ValueData::TimeMicrosecondValue(t) => {
-            ValueRef::Time(Time::new_microsecond(*t))
-        }
-        greptime_proto::v1::value::ValueData::TimeNanosecondValue(t) => {
-            ValueRef::Time(Time::new_nanosecond(*t))
+        ValueData::I8Value(v) => ValueRef::Int8(*v as i8),
+        ValueData::I16Value(v) => ValueRef::Int16(*v as i16),
+        ValueData::I32Value(v) => ValueRef::Int32(*v),
+        ValueData::I64Value(v) => ValueRef::Int64(*v),
+        ValueData::U8Value(v) => ValueRef::UInt8(*v as u8),
+        ValueData::U16Value(v) => ValueRef::UInt16(*v as u16),
+        ValueData::U32Value(v) => ValueRef::UInt32(*v),
+        ValueData::U64Value(v) => ValueRef::UInt64(*v),
+        ValueData::F32Value(f) => ValueRef::Float32(OrderedF32::from(*f)),
+        ValueData::F64Value(f) => ValueRef::Float64(OrderedF64::from(*f)),
+        ValueData::BoolValue(b) => ValueRef::Boolean(*b),
+        ValueData::BinaryValue(bytes) => ValueRef::Binary(bytes.as_slice()),
+        ValueData::StringValue(string) => ValueRef::String(string.as_str()),
+        ValueData::DateValue(d) => ValueRef::Date(Date::from(*d)),
+        ValueData::DatetimeValue(d) => ValueRef::DateTime(DateTime::new(*d)),
+        ValueData::TsSecondValue(t) => ValueRef::Timestamp(Timestamp::new_second(*t)),
+        ValueData::TsMillisecondValue(t) => ValueRef::Timestamp(Timestamp::new_millisecond(*t)),
+        ValueData::TsMicrosecondValue(t) => ValueRef::Timestamp(Timestamp::new_microsecond(*t)),
+        ValueData::TsNanosecondValue(t) => ValueRef::Timestamp(Timestamp::new_nanosecond(*t)),
+        ValueData::TimeSecondValue(t) => ValueRef::Time(Time::new_second(*t)),
+        ValueData::TimeMillisecondValue(t) => ValueRef::Time(Time::new_millisecond(*t)),
+        ValueData::TimeMicrosecondValue(t) => ValueRef::Time(Time::new_microsecond(*t)),
+        ValueData::TimeNanosecondValue(t) => ValueRef::Time(Time::new_nanosecond(*t)),
+        ValueData::IntervalYearMonthValues(v) => ValueRef::Interval(Interval::from_i32(*v)),
+        ValueData::IntervalDayTimeValues(v) => ValueRef::Interval(Interval::from_i64(*v)),
+        ValueData::IntervalMonthDayNanoValues(v) => {
+            let interval = Interval::from_month_day_nano(v.months, v.days, v.nanoseconds);
+            ValueRef::Interval(interval)
         }
     }
 }
@@ -478,19 +458,32 @@ pub fn to_proto_value(value: Value) -> Option<v1::Value> {
         },
         Value::Time(v) => match v.unit() {
             TimeUnit::Second => v1::Value {
-                value_data: Some(v1::value::ValueData::TimeSecondValue(v.value())),
+                value_data: Some(ValueData::TimeSecondValue(v.value())),
             },
             TimeUnit::Millisecond => v1::Value {
-                value_data: Some(v1::value::ValueData::TimeMillisecondValue(v.value())),
+                value_data: Some(ValueData::TimeMillisecondValue(v.value())),
             },
             TimeUnit::Microsecond => v1::Value {
-                value_data: Some(v1::value::ValueData::TimeMicrosecondValue(v.value())),
+                value_data: Some(ValueData::TimeMicrosecondValue(v.value())),
             },
             TimeUnit::Nanosecond => v1::Value {
-                value_data: Some(v1::value::ValueData::TimeNanosecondValue(v.value())),
+                value_data: Some(ValueData::TimeNanosecondValue(v.value())),
             },
         },
-        Value::Interval(_) | Value::List(_) => return None,
+        Value::Interval(v) => match v.unit() {
+            IntervalUnit::YearMonth => v1::Value {
+                value_data: Some(ValueData::IntervalYearMonthValues(v.to_i32())),
+            },
+            IntervalUnit::DayTime => v1::Value {
+                value_data: Some(ValueData::IntervalDayTimeValues(v.to_i64())),
+            },
+            IntervalUnit::MonthDayNano => v1::Value {
+                value_data: Some(ValueData::IntervalMonthDayNanoValues(
+                    convert_i128_to_interval(v.to_i128()),
+                )),
+            },
+        },
+        Value::List(_) => return None,
     };
 
     Some(proto_value)
@@ -500,8 +493,7 @@ pub fn to_proto_value(value: Value) -> Option<v1::Value> {
 ///
 /// If value is null, returns `None`.
 pub fn proto_value_type(value: &v1::Value) -> Option<ColumnDataType> {
-    let value_data = value.value_data.as_ref()?;
-    let value_type = match value_data {
+    let value_type = match value.value_data.as_ref()? {
         ValueData::I8Value(_) => ColumnDataType::Int8,
         ValueData::I16Value(_) => ColumnDataType::Int16,
         ValueData::I32Value(_) => ColumnDataType::Int32,
@@ -525,6 +517,9 @@ pub fn proto_value_type(value: &v1::Value) -> Option<ColumnDataType> {
         ValueData::TimeMillisecondValue(_) => ColumnDataType::TimeMillisecond,
         ValueData::TimeMicrosecondValue(_) => ColumnDataType::TimeMicrosecond,
         ValueData::TimeNanosecondValue(_) => ColumnDataType::TimeNanosecond,
+        ValueData::IntervalYearMonthValues(_) => ColumnDataType::IntervalYearMonth,
+        ValueData::IntervalDayTimeValues(_) => ColumnDataType::IntervalDayTime,
+        ValueData::IntervalMonthDayNanoValues(_) => ColumnDataType::IntervalMonthDayNano,
     };
     Some(value_type)
 }
