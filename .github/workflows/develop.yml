@@ -24,6 +24,10 @@ on:
 
 name: CI
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 env:
   RUST_TOOLCHAIN: nightly-2023-08-07
 
