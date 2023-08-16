@@ -21,6 +21,7 @@ use common_time::Timestamp;
 use datatypes::arrow;
 use datatypes::arrow::array::ArrayRef;
 use datatypes::prelude::DataType;
+use datatypes::value::ValueRef;
 use datatypes::vectors::{Helper, UInt64Vector, UInt8Vector, Vector, VectorRef};
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
@@ -99,6 +100,57 @@ impl Batch {
     /// Returns true if the number of rows in the batch is 0.
     pub fn is_empty(&self) -> bool {
         self.num_rows() == 0
+    }
+
+    /// Returns the first timestamp in the batch.
+    pub fn first_timestamp(&self) -> Option<Timestamp> {
+        self.get_timestamp(0)
+    }
+
+    /// Returns the last timestamp in the batch.
+    pub fn last_timestamp(&self) -> Option<Timestamp> {
+        self.get_timestamp(self.timestamps.len() - 1)
+    }
+
+    /// Slice the batch, returning a new batch.
+    ///
+    /// # Panics
+    /// Panics if `offset + length > self.num_rows()`.
+    pub fn slice(&self, offset: usize, length: usize) -> Batch {
+        let fields = self
+            .fields
+            .iter()
+            .map(|column| BatchColumn {
+                column_id: column.column_id,
+                data: column.data.slice(offset, length),
+            })
+            .collect();
+        // We skip using the builder to avoid validating the batch again.
+        Batch {
+            // Now we need to clone the primary key. We could try `Bytes` if
+            // this becomes a bottleneck.
+            primary_key: self.primary_key.clone(),
+            timestamps: self.timestamps.slice(offset, length),
+            sequences: Arc::new(self.sequences.get_slice(offset, length)),
+            op_types: Arc::new(self.op_types.get_slice(offset, length)),
+            fields,
+        }
+    }
+
+    /// Get a timestamp at given index.
+    fn get_timestamp(&self, index: usize) -> Option<Timestamp> {
+        if self.timestamps.is_empty() {
+            return None;
+        }
+
+        match self.timestamps.get_ref(index) {
+            ValueRef::Timestamp(timestamp) => Some(timestamp),
+            // Int64 is always millisecond.
+            // TODO(yingwen): Don't allow using int64 as time index.
+            ValueRef::Int64(v) => Some(Timestamp::new_millisecond(v)),
+            // We have check the data type is timestamp compatible in the [BatchBuilder] so it's safe to panic.
+            value => panic!("{:?} is not a timestmap", value),
+        }
     }
 }
 
