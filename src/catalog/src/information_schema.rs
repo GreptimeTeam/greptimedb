@@ -25,12 +25,12 @@ use common_catalog::consts::{
     INFORMATION_SCHEMA_TABLES_TABLE_ID,
 };
 use common_error::ext::BoxedError;
+use common_query::data_source::DataSource;
 use common_recordbatch::{RecordBatchStreamAdaptor, SendableRecordBatchStream};
 use datatypes::schema::SchemaRef;
 use futures_util::StreamExt;
 use snafu::ResultExt;
 use store_api::storage::{ScanRequest, TableId};
-use table::data_source::DataSource;
 use table::error::{SchemaConversionSnafu, TablesRecordBatchSnafu};
 use table::metadata::{TableIdent, TableInfoBuilder, TableMetaBuilder, TableType};
 use table::{Result as TableResult, Table, TableRef};

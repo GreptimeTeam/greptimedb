@@ -12,13 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::any::Any;
 use std::collections::HashMap;
+use std::sync::Arc;
 
+use async_trait::async_trait;
 use common_base::bytes::Bytes;
-use common_query::Output;
+use common_query::{DfPhysicalPlan, Output};
 use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::info;
 use dashmap::DashMap;
+use datafusion::datasource::TableProvider;
+use datafusion::execution::context::SessionState;
+use datafusion_expr::{Expr, TableType};
+use datatypes::arrow::datatypes::SchemaRef;
 use snafu::{OptionExt, ResultExt};
 use store_api::region_engine::RegionEngineRef;
 use store_api::region_request::RegionRequest;
@@ -119,6 +126,34 @@ struct DummyCatalogList {}
 #[allow(unused_variables)]
 impl DummyCatalogList {
     pub fn new(region_id: RegionId) -> Self {
+        todo!()
+    }
+}
+
+/// For [TableProvider](datafusion::datasource::TableProvider)
+struct DummyTableProvider {}
+
+#[async_trait]
+impl TableProvider for DummyTableProvider {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn schema(&self) -> SchemaRef {
+        todo!()
+    }
+
+    fn table_type(&self) -> TableType {
+        TableType::Base
+    }
+
+    async fn scan(
+        &self,
+        state: &SessionState,
+        projection: Option<&Vec<usize>>,
+        filters: &[Expr],
+        limit: Option<usize>,
+    ) -> Result<Arc<dyn DfPhysicalPlan>> {
         todo!()
     }
 }

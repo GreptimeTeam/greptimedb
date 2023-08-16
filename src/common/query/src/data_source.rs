@@ -27,3 +27,5 @@ pub trait DataSource {
 }
 
 pub type DataSourceRef = Arc<dyn DataSource>;
+
+pub type TableFactory = Arc<dyn Fn() -> DataSourceRef>;

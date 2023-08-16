@@ -37,7 +37,6 @@ pub mod local;
 mod metrics;
 pub mod remote;
 pub mod system;
-pub mod table_factory;
 pub mod table_source;
 pub mod tables;
 
