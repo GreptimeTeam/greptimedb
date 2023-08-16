@@ -36,6 +36,11 @@ impl ColumnExpr {
     pub fn from_columns(columns: &[Column]) -> Vec<Self> {
         columns.iter().map(Self::from).collect()
     }
+
+    #[inline]
+    pub fn from_column_schemas(schemas: &[ColumnSchema]) -> Vec<Self> {
+        schemas.iter().map(Self::from).collect()
+    }
 }
 
 impl From<&Column> for ColumnExpr {
