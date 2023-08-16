@@ -130,8 +130,10 @@ pub struct Txn {
 
 impl Txn {
     pub fn merge_all<T: IntoIterator<Item = Txn>>(values: T) -> Self {
-        // Safety: values must contain an element.
-        values.into_iter().reduce(|acc, e| acc.merge(e)).unwrap()
+        values
+            .into_iter()
+            .reduce(|acc, e| acc.merge(e))
+            .unwrap_or_default()
     }
 
     pub fn merge(mut self, other: Txn) -> Self {
