@@ -361,7 +361,7 @@ mod test {
         let result = RecordBatches::try_collect(Box::pin(adapter)).await;
         assert_eq!(
             result.unwrap_err().to_string(),
-            "Failed to poll stream, source: External error: External error, source: Unknown"
+            "External error, source: Unknown",
         );
 
         let failed_to_init_stream =
@@ -371,7 +371,7 @@ mod test {
         let result = RecordBatches::try_collect(Box::pin(adapter)).await;
         assert_eq!(
             result.unwrap_err().to_string(),
-            "Failed to init Recordbatch stream, source: External error: External error, source: Internal"
+            "External error, source: Internal",
         );
     }
 }
