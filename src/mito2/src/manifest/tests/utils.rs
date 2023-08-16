@@ -15,10 +15,8 @@
 use api::v1::SemanticType;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
-use store_api::metadata::ColumnMetadata;
+use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder};
 use store_api::storage::RegionId;
-
-use crate::metadata::{RegionMetadata, RegionMetadataBuilder};
 
 /// Build a basic region metadata for testing.
 /// It contains three columns:
@@ -26,7 +24,7 @@ use crate::metadata::{RegionMetadata, RegionMetadataBuilder};
 /// - pk: string, semantic type: `Tag`, column id: 36
 /// - val: float64, semantic type: `Field`, column id: 251
 pub fn basic_region_metadata() -> RegionMetadata {
-    let mut builder = RegionMetadataBuilder::new(RegionId::new(23, 33), 0);
+    let mut builder = RegionMetadataBuilder::new(RegionId::new(23, 33));
     builder
         .push_column_metadata(ColumnMetadata {
             column_schema: ColumnSchema::new(

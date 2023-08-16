@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 api = { workspace = true }
+aquamarine = "0.3"
 async-trait.workspace = true
 bytes = "1.1"
 common-base = { workspace = true }
@@ -17,6 +18,7 @@ datatypes = { workspace = true }
 derive_builder.workspace = true
 futures.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 snafu.workspace = true
 
 [dev-dependencies]

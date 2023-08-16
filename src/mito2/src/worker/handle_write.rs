@@ -21,12 +21,12 @@ use std::sync::Arc;
 use api::v1::{Mutation, WalEntry};
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
+use store_api::metadata::RegionMetadata;
 use store_api::storage::{RegionId, SequenceNumber};
 use tokio::sync::oneshot::Sender;
 
 use crate::error::{Error, RegionNotFoundSnafu, Result, WriteGroupSnafu};
 use crate::memtable::KeyValues;
-use crate::metadata::RegionMetadata;
 use crate::region::version::{VersionControlData, VersionRef};
 use crate::region::MitoRegionRef;
 use crate::request::{SenderWriteRequest, WriteRequest};

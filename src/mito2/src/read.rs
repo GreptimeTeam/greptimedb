@@ -20,10 +20,10 @@ use async_trait::async_trait;
 use common_time::Timestamp;
 use datatypes::vectors::{UInt64Vector, UInt8Vector, Vector, VectorRef};
 use snafu::ensure;
+use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ColumnId;
 
 use crate::error::{InvalidBatchSnafu, Result};
-use crate::metadata::RegionMetadataRef;
 
 /// Storage internal representation of a batch of rows
 /// for a primary key (time series).

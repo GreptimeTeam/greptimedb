@@ -19,13 +19,13 @@ use std::sync::Arc;
 use object_store::util::join_dir;
 use object_store::ObjectStore;
 use snafu::{ensure, OptionExt};
+use store_api::metadata::RegionMetadata;
 use store_api::storage::RegionId;
 
 use crate::config::MitoConfig;
 use crate::error::{RegionCorruptedSnafu, RegionNotFoundSnafu, Result};
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::memtable::MemtableBuilderRef;
-use crate::metadata::RegionMetadata;
 use crate::region::version::{VersionBuilder, VersionControl};
 use crate::region::MitoRegion;
 

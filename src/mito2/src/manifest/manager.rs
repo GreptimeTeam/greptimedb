@@ -18,6 +18,7 @@ use common_datasource::compression::CompressionType;
 use common_telemetry::{debug, info};
 use object_store::ObjectStore;
 use store_api::manifest::{ManifestVersion, MAX_VERSION, MIN_VERSION};
+use store_api::metadata::RegionMetadataRef;
 use tokio::sync::RwLock;
 
 use crate::error::Result;
@@ -26,7 +27,6 @@ use crate::manifest::action::{
     RegionMetaActionList,
 };
 use crate::manifest::storage::ManifestObjectStore;
-use crate::metadata::RegionMetadataRef;
 
 /// Options for [RegionManifestManager].
 #[derive(Debug, Clone)]
@@ -451,12 +451,11 @@ mod test {
     use common_datasource::compression::CompressionType;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
-    use store_api::metadata::ColumnMetadata;
+    use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
 
     use super::*;
     use crate::manifest::action::RegionChange;
     use crate::manifest::tests::utils::basic_region_metadata;
-    use crate::metadata::RegionMetadataBuilder;
     use crate::test_util::TestEnv;
 
     #[tokio::test]
@@ -512,7 +511,7 @@ mod test {
             .unwrap()
             .unwrap();
 
-        let mut new_metadata_builder = RegionMetadataBuilder::from_existing((*metadata).clone(), 1);
+        let mut new_metadata_builder = RegionMetadataBuilder::from_existing((*metadata).clone());
         new_metadata_builder.push_column_metadata(ColumnMetadata {
             column_schema: ColumnSchema::new("val2", ConcreteDataType::float64_datatype(), false),
             semantic_type: SemanticType::Field,
