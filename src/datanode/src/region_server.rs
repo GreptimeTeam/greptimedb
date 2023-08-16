@@ -96,6 +96,7 @@ impl RegionServer {
         Ok(result)
     }
 
+    #[allow(unused_variables)]
     pub fn handle_read(
         &self,
         region_id: RegionId,
@@ -111,13 +112,41 @@ enum RegionChange {
     Deregisters,
 }
 
+#[allow(dead_code)]
 struct DummyCatalogList {}
 
+#[allow(dead_code)]
+#[allow(unused_variables)]
 impl DummyCatalogList {
     pub fn new(region_id: RegionId) -> Self {
         todo!()
     }
 }
 
-/// For [TableProvider](datafusion::datasource::TableProvider)
-struct DummyTableProvider {}
+// /// For [TableProvider](datafusion::datasource::TableProvider)
+// struct DummyTableProvider {}
+
+// #[async_trait]
+// impl TableProvider for DummyTableProvider {
+//     fn as_any(&self) -> &dyn Any {
+//         self
+//     }
+
+//     fn schema(&self) -> SchemaRef {
+//         todo!()
+//     }
+
+//     fn table_type(&self) -> TableType {
+//         TableType::Base
+//     }
+
+//     async fn scan(
+//         &self,
+//         state: &SessionState,
+//         projection: Option<&Vec<usize>>,
+//         filters: &[Expr],
+//         limit: Option<usize>,
+//     ) -> Result<Arc<dyn DfPhysicalPlan>> {
+//         todo!()
+//     }
+// }

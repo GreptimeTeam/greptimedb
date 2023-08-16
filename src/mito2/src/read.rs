@@ -17,9 +17,9 @@
 use async_trait::async_trait;
 use common_time::Timestamp;
 use datatypes::vectors::VectorRef;
+use store_api::metadata::RegionMetadataRef;
 
 use crate::error::Result;
-use crate::metadata::RegionMetadataRef;
 
 /// Storage internal representation of a batch of rows.
 ///

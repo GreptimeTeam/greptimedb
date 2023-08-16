@@ -24,14 +24,13 @@ use api::helper::{
 use api::v1::{ColumnDataType, ColumnSchema, OpType, Rows, Value};
 use common_base::readable_size::ReadableSize;
 use snafu::{ensure, OptionExt, ResultExt};
-use store_api::metadata::ColumnMetadata;
+use store_api::metadata::{ColumnMetadata, RegionMetadata};
 use store_api::region_request::RegionRequest;
 use store_api::storage::{ColumnId, CompactionStrategy, RegionId};
 use tokio::sync::oneshot::{self, Receiver, Sender};
 
 use crate::config::DEFAULT_WRITE_BUFFER_SIZE;
 use crate::error::{CreateDefaultSnafu, FillDefaultSnafu, InvalidRequestSnafu, Result};
-use crate::metadata::RegionMetadata;
 
 /// Options that affect the entire region.
 ///
@@ -408,10 +407,10 @@ impl RequestValidator {
 mod tests {
     use api::v1::{Row, SemanticType};
     use datatypes::prelude::ConcreteDataType;
+    use store_api::metadata::RegionMetadataBuilder;
 
     use super::*;
     use crate::error::Error;
-    use crate::metadata::RegionMetadataBuilder;
     use crate::test_util::{i64_value, ts_ms_value};
 
     fn new_column_schema(
@@ -488,7 +487,7 @@ mod tests {
     }
 
     fn new_region_metadata() -> RegionMetadata {
-        let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 1), 1);
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 1));
         builder
             .push_column_metadata(ColumnMetadata {
                 column_schema: datatypes::schema::ColumnSchema::new(

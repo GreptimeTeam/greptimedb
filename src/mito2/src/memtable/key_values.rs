@@ -16,9 +16,8 @@ use std::collections::HashMap;
 
 use api::v1::{Mutation, OpType, Row, Rows, SemanticType};
 use datatypes::value::ValueRef;
+use store_api::metadata::RegionMetadata;
 use store_api::storage::SequenceNumber;
-
-use crate::metadata::RegionMetadata;
 
 /// Key value view of a mutation.
 #[derive(Debug)]
@@ -191,11 +190,10 @@ mod tests {
     use api::v1::ColumnDataType;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
-    use store_api::metadata::ColumnMetadata;
+    use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
     use store_api::storage::RegionId;
 
     use super::*;
-    use crate::metadata::RegionMetadataBuilder;
     use crate::test_util::i64_value;
 
     const TS_NAME: &str = "ts";
@@ -203,7 +201,7 @@ mod tests {
 
     /// Creates a region: `ts, k0, k1, ..., v0, v1, ...`
     fn new_region_metadata(num_tag: usize, num_field: usize) -> RegionMetadata {
-        let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 1), 1);
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 1));
         let mut column_id = 0;
         builder.push_column_metadata(ColumnMetadata {
             column_schema: ColumnSchema::new(

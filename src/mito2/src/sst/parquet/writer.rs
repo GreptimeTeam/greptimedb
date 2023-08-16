@@ -19,8 +19,9 @@ use object_store::ObjectStore;
 use parquet::basic::{Compression, Encoding, ZstdLevel};
 use parquet::file::metadata::KeyValue;
 use parquet::file::properties::WriterProperties;
+use snafu::ResultExt;
 
-use crate::error::Result;
+use crate::error::{InvalidMetadataSnafu, Result};
 use crate::read::Source;
 use crate::sst::parquet::{SstInfo, WriteOptions, PARQUET_METADATA_KEY};
 use crate::sst::stream_writer::BufferedWriter;
@@ -50,7 +51,7 @@ impl<'a> ParquetWriter<'a> {
     pub async fn write_all(&mut self, opts: &WriteOptions) -> Result<Option<SstInfo>> {
         let metadata = self.source.metadata();
 
-        let json = metadata.to_json()?;
+        let json = metadata.to_json().context(InvalidMetadataSnafu)?;
         let key_value_meta = KeyValue::new(PARQUET_METADATA_KEY.to_string(), json);
 
         // FIXME(yingwen): encode metadata into key value.
