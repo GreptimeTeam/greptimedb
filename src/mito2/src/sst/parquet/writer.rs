@@ -24,7 +24,7 @@ use store_api::storage::consts::SEQUENCE_COLUMN_NAME;
 
 use crate::error::Result;
 use crate::read::Source;
-use crate::sst::parquet::format::{to_sst_arrow_schema, to_sst_record_batch};
+use crate::sst::parquet::format::WriteFormat;
 use crate::sst::parquet::{SstInfo, WriteOptions, PARQUET_METADATA_KEY};
 use crate::sst::stream_writer::BufferedWriter;
 
@@ -77,18 +77,18 @@ impl<'a> ParquetWriter<'a> {
             );
         let writer_props = props_builder.build();
 
-        let arrow_schema = to_sst_arrow_schema(&metadata);
+        let write_format = WriteFormat::new(metadata);
         let mut buffered_writer = BufferedWriter::try_new(
             self.file_path.to_string(),
             self.object_store.clone(),
-            arrow_schema.clone(),
+            write_format.arrow_schema(),
             Some(writer_props),
             opts.write_buffer_size.as_bytes() as usize,
         )
         .await?;
 
         while let Some(batch) = self.source.next_batch().await? {
-            let arrow_batch = to_sst_record_batch(&batch, &arrow_schema)?;
+            let arrow_batch = write_format.convert_record_batch(&batch)?;
 
             buffered_writer.write(&arrow_batch).await?;
         }

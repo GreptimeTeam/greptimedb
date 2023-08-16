@@ -24,6 +24,7 @@
 //! field 0, field 1, ..., field N, time index, primary key, sequence, op type
 //! ```
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::v1::SemanticType;
@@ -39,8 +40,10 @@ use store_api::storage::consts::{
 };
 use store_api::storage::ColumnId;
 
-use crate::error::{ConvertVectorSnafu, InvalidRecordBatchSnafu, NewRecordBatchSnafu, Result};
-use crate::metadata::RegionMetadata;
+use crate::error::{
+    ConvertVectorSnafu, InvalidBatchSnafu, InvalidRecordBatchSnafu, NewRecordBatchSnafu, Result,
+};
+use crate::metadata::{RegionMetadata, RegionMetadataRef};
 use crate::read::{Batch, BatchBuilder, BatchColumn};
 
 /// Number of columns that have fixed positions.
@@ -48,8 +51,213 @@ use crate::read::{Batch, BatchBuilder, BatchColumn};
 /// Contains: time index and internal columns.
 const FIXED_POS_COLUMN_NUM: usize = 4;
 
+/// Helper for writing the SST format.
+pub(crate) struct WriteFormat {
+    metadata: RegionMetadataRef,
+    /// SST file schema.
+    arrow_schema: SchemaRef,
+}
+
+impl WriteFormat {
+    /// Creates a new helper.
+    pub(crate) fn new(metadata: RegionMetadataRef) -> WriteFormat {
+        let arrow_schema = to_sst_arrow_schema(&metadata);
+        WriteFormat {
+            metadata,
+            arrow_schema,
+        }
+    }
+
+    /// Gets the arrow schema to store in parquet.
+    pub(crate) fn arrow_schema(&self) -> SchemaRef {
+        self.arrow_schema.clone()
+    }
+
+    /// Convert `batch` to a arrow record batch to store in parquet.
+    pub(crate) fn convert_record_batch(&self, batch: &Batch) -> Result<RecordBatch> {
+        debug_assert_eq!(
+            batch.fields().len() + FIXED_POS_COLUMN_NUM,
+            self.arrow_schema.fields().len()
+        );
+        let mut columns = Vec::with_capacity(batch.fields().len() + FIXED_POS_COLUMN_NUM);
+        // Store all fields first.
+        for (column, column_metadata) in batch.fields().iter().zip(self.metadata.field_columns()) {
+            ensure!(
+                column.column_id == column_metadata.column_id,
+                InvalidBatchSnafu {
+                    reason: format!(
+                        "Batch has column {} but metadata has column {}",
+                        column.column_id, column_metadata.column_id
+                    ),
+                }
+            );
+
+            columns.push(column.data.to_arrow_array());
+        }
+        // Add time index column.
+        columns.push(batch.timestamps().to_arrow_array());
+        // Add internal columns: primary key, sequences, op types.
+        columns.push(new_primary_key_array(batch.primary_key(), batch.num_rows()));
+        columns.push(batch.sequences().to_arrow_array());
+        columns.push(batch.op_types().to_arrow_array());
+
+        RecordBatch::try_new(self.arrow_schema.clone(), columns).context(NewRecordBatchSnafu)
+    }
+}
+
+/// Helper for reading the SST format.
+pub(crate) struct ReadFormat {
+    metadata: RegionMetadataRef,
+    /// SST file schema.
+    arrow_schema: SchemaRef,
+    // Field column id to its index in `schema` (SST schema).
+    field_id_to_index: HashMap<ColumnId, usize>,
+}
+
+impl ReadFormat {
+    /// Creates a helper with existing `arrow_schema` converted from `metadata`.
+    pub(crate) fn new(metadata: RegionMetadataRef, arrow_schema: SchemaRef) -> ReadFormat {
+        debug_assert_eq!(to_sst_arrow_schema(&metadata), arrow_schema);
+        let field_id_to_index: HashMap<_, _> = metadata
+            .field_columns()
+            .enumerate()
+            .map(|(index, column)| (column.column_id, index))
+            .collect();
+
+        ReadFormat {
+            metadata,
+            arrow_schema,
+            field_id_to_index,
+        }
+    }
+
+    /// Gets projection indices to read `columns` from parquet files.
+    ///
+    /// This function ignores columns not in `metadata` to for compatibility between
+    /// different schemas.
+    pub(crate) fn projection_indices(
+        &self,
+        columns: impl IntoIterator<Item = ColumnId>,
+    ) -> Vec<usize> {
+        columns
+            .into_iter()
+            .filter_map(|column_id| {
+                // Only apply projection to fields.
+                self.field_id_to_index.get(&column_id).copied()
+            })
+            // We need to add all fixed position columns.
+            .chain(
+                self.arrow_schema.fields.len() - FIXED_POS_COLUMN_NUM
+                    ..self.arrow_schema.fields.len(),
+            )
+            .collect()
+    }
+
+    /// Convert a arrow record batch into `batches`.
+    pub(crate) fn convert_record_batch(
+        &self,
+        record_batch: &RecordBatch,
+        batches: &mut Vec<Batch>,
+    ) -> Result<()> {
+        debug_assert!(batches.is_empty());
+
+        // The record batch must has time index and internal columns.
+        ensure!(
+            record_batch.num_columns() >= FIXED_POS_COLUMN_NUM,
+            InvalidRecordBatchSnafu {
+                reason: format!(
+                    "record batch only has {} columns",
+                    record_batch.num_columns()
+                ),
+            }
+        );
+
+        let mut fixed_pos_columns = record_batch
+            .columns()
+            .iter()
+            .rev()
+            .take(FIXED_POS_COLUMN_NUM);
+        // Safety: We have checked the column number.
+        let op_type_array = fixed_pos_columns.next().unwrap();
+        let sequence_array = fixed_pos_columns.next().unwrap();
+        let pk_array = fixed_pos_columns.next().unwrap();
+        let ts_array = fixed_pos_columns.next().unwrap();
+        let num_cols = record_batch.num_columns();
+        let field_vectors = record_batch
+            .columns()
+            .iter()
+            .zip(record_batch.schema().fields())
+            .take(num_cols - FIXED_POS_COLUMN_NUM) // Take all field columns.
+            .map(|(array, field)| {
+                let vector = Helper::try_into_vector(array.clone()).context(ConvertVectorSnafu)?;
+                let column = self
+                    .metadata
+                    .column_by_name(field.name())
+                    .with_context(|| InvalidRecordBatchSnafu {
+                        reason: format!("column {} not found in metadata", field.name()),
+                    })?;
+
+                Ok(BatchColumn {
+                    column_id: column.column_id,
+                    data: vector,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        // Compute primary key offsets.
+        let pk_dict_array = pk_array
+            .as_any()
+            .downcast_ref::<DictionaryArray<UInt16Type>>()
+            .with_context(|| InvalidRecordBatchSnafu {
+                reason: format!("primary key array should not be {:?}", pk_array.data_type()),
+            })?;
+        let offsets = primary_key_offsets(pk_dict_array)?;
+        if offsets.is_empty() {
+            return Ok(());
+        }
+
+        // Split record batch according to pk offsets.
+        let keys = pk_dict_array.keys();
+        let pk_values = pk_dict_array
+            .values()
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .with_context(|| InvalidRecordBatchSnafu {
+                reason: format!(
+                    "values of primary key array should not be {:?}",
+                    pk_dict_array.values().data_type()
+                ),
+            })?;
+        for (i, start) in offsets[..offsets.len() - 1].iter().enumerate() {
+            let end = offsets[i + 1];
+            let rows_in_batch = end - start;
+
+            let dict_key = keys.value(*start);
+            let primary_key = pk_values.value(dict_key.into()).to_vec();
+
+            let mut builder = BatchBuilder::new(primary_key);
+            builder
+                .timestamps_array(ts_array.slice(*start, rows_in_batch))?
+                .sequences_array(sequence_array.slice(*start, rows_in_batch))?
+                .op_types_array(op_type_array.slice(*start, rows_in_batch))?;
+            // Push all fields
+            for field_vector in &field_vectors {
+                builder.push_field(BatchColumn {
+                    column_id: field_vector.column_id,
+                    data: field_vector.data.slice(*start, rows_in_batch),
+                });
+            }
+
+            let batch = builder.build()?;
+            batches.push(batch);
+        }
+
+        Ok(())
+    }
+}
+
 /// Gets the arrow schema to store in parquet.
-pub(crate) fn to_sst_arrow_schema(metadata: &RegionMetadata) -> SchemaRef {
+fn to_sst_arrow_schema(metadata: &RegionMetadata) -> SchemaRef {
     let fields = Fields::from_iter(
         metadata
             .schema
@@ -70,147 +278,6 @@ pub(crate) fn to_sst_arrow_schema(metadata: &RegionMetadata) -> SchemaRef {
     );
 
     Arc::new(Schema::new(fields))
-}
-
-/// Gets the arrow record batch to store in parquet.
-///
-/// The `arrow_schema` is constructed by [to_sst_arrow_schema].
-pub(crate) fn to_sst_record_batch(batch: &Batch, arrow_schema: &SchemaRef) -> Result<RecordBatch> {
-    let mut columns = Vec::with_capacity(batch.fields().len() + FIXED_POS_COLUMN_NUM);
-
-    // Store all fields first.
-    for column in batch.fields() {
-        columns.push(column.data.to_arrow_array());
-    }
-    // Add time index column.
-    columns.push(batch.timestamps().to_arrow_array());
-    // Add internal columns: primary key, sequences, op types.
-    columns.push(new_primary_key_array(batch.primary_key(), batch.num_rows()));
-    columns.push(batch.sequences().to_arrow_array());
-    columns.push(batch.op_types().to_arrow_array());
-
-    RecordBatch::try_new(arrow_schema.clone(), columns).context(NewRecordBatchSnafu)
-}
-
-/// Gets projection indices to read `columns` from parquet files.
-///
-/// The `arrow_schema` is the schema of the parquet file.
-/// This function ignores columns not in `metadata` to for compatibility between
-/// different schemas.
-pub(crate) fn to_sst_projection_indices(
-    metadata: &RegionMetadata,
-    arrow_schema: &SchemaRef,
-    columns: impl IntoIterator<Item = ColumnId>,
-) -> Vec<usize> {
-    columns
-        .into_iter()
-        .filter_map(|column_id| {
-            let column = metadata.column_by_id(column_id)?;
-            arrow_schema.index_of(&column.column_schema.name).ok()
-        })
-        .collect()
-}
-
-/// Convert a arrow record batch into `batches`.
-pub(crate) fn from_sst_record_batch(
-    metadata: &RegionMetadata,
-    record_batch: &RecordBatch,
-    batches: &mut Vec<Batch>,
-) -> Result<()> {
-    debug_assert!(batches.is_empty());
-
-    // The record batch must has time index and internal columns.
-    ensure!(
-        record_batch.num_columns() >= FIXED_POS_COLUMN_NUM,
-        InvalidRecordBatchSnafu {
-            reason: format!(
-                "record batch only has {} columns",
-                record_batch.num_columns()
-            ),
-        }
-    );
-
-    let mut fixed_pos_columns = record_batch
-        .columns()
-        .iter()
-        .rev()
-        .take(FIXED_POS_COLUMN_NUM);
-    // Safety: We have checked the column number.
-    let op_type_array = fixed_pos_columns.next().unwrap();
-    let sequence_array = fixed_pos_columns.next().unwrap();
-    let pk_array = fixed_pos_columns.next().unwrap();
-    let ts_array = fixed_pos_columns.next().unwrap();
-    let num_cols = record_batch.num_columns();
-    let field_vectors = record_batch
-        .columns()
-        .iter()
-        .zip(record_batch.schema().fields())
-        .take(num_cols - FIXED_POS_COLUMN_NUM) // Take all field columns.
-        .map(|(array, field)| {
-            let vector = Helper::try_into_vector(array.clone()).context(ConvertVectorSnafu)?;
-            let column =
-                metadata
-                    .column_by_name(field.name())
-                    .with_context(|| InvalidRecordBatchSnafu {
-                        reason: format!("column {} not found in metadata", field.name()),
-                    })?;
-
-            Ok(BatchColumn {
-                column_id: column.column_id,
-                data: vector,
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-
-    // Compute primary key offsets.
-    let pk_dict_array = pk_array
-        .as_any()
-        .downcast_ref::<DictionaryArray<UInt16Type>>()
-        .with_context(|| InvalidRecordBatchSnafu {
-            reason: format!("primary key array should not be {:?}", pk_array.data_type()),
-        })?;
-    let offsets = primary_key_offsets(pk_dict_array)?;
-    if offsets.is_empty() {
-        return Ok(());
-    }
-
-    // Split record batch according to pk offsets.
-    let keys = pk_dict_array.keys();
-    let pk_values = pk_dict_array
-        .values()
-        .as_any()
-        .downcast_ref::<BinaryArray>()
-        .with_context(|| InvalidRecordBatchSnafu {
-            reason: format!(
-                "values of primary key array should not be {:?}",
-                pk_dict_array.values().data_type()
-            ),
-        })?;
-    for (i, start) in offsets[..offsets.len() - 1].iter().enumerate() {
-        let end = offsets[i + 1];
-        let rows_in_batch = end - start;
-
-        let dict_key = keys.value(*start);
-        let primary_key = pk_values.value(dict_key.into()).to_vec();
-
-        let mut builder = BatchBuilder::new(primary_key);
-        builder
-            .timestamps_array(ts_array.slice(*start, rows_in_batch))?
-            .sequences_array(sequence_array.slice(*start, rows_in_batch))?
-            .op_types_array(op_type_array.slice(*start, rows_in_batch))?;
-        // Push all fields
-        for field_vector in &field_vectors {
-            builder.push_field(BatchColumn {
-                column_id: field_vector.column_id,
-                data: field_vector.data.slice(*start, rows_in_batch),
-            });
-        }
-
-        let batch = builder.build()?;
-        batches.push(batch);
-    }
-
-    Ok(())
 }
 
 /// Compute offsets of different primary keys in the array.

@@ -311,8 +311,12 @@ impl Source {
 }
 
 /// Async batch reader.
+///
+/// The reader must guarantee [Batch]es returned by it have the same schema.
 #[async_trait]
 pub trait BatchReader: Send {
+    // TODO(yingwen): fields of the batch returned.
+
     /// Fetch next [Batch].
     ///
     /// Returns `Ok(None)` when the reader has reached its end and calling `next_batch()`

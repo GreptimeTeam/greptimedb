@@ -32,10 +32,10 @@ use table::predicate::Predicate;
 use tokio::io::BufReader;
 
 use crate::error::{NoKeyValueSnafu, OpenDalSnafu, ReadParquetSnafu, Result};
-use crate::metadata::{RegionMetadata, RegionMetadataRef};
+use crate::metadata::RegionMetadata;
 use crate::read::{Batch, BatchReader};
 use crate::sst::file::FileHandle;
-use crate::sst::parquet::format::{from_sst_record_batch, to_sst_projection_indices};
+use crate::sst::parquet::format::ReadFormat;
 use crate::sst::parquet::PARQUET_METADATA_KEY;
 
 /// Parquet SST reader builder.
@@ -78,6 +78,8 @@ impl ParquetReaderBuilder {
     }
 
     /// Attaches the projection to the builder.
+    ///
+    /// The reader only applies the projection to fields.
     pub fn projection(mut self, projection: Vec<ColumnId>) -> ParquetReaderBuilder {
         self.projection = Some(projection);
         self
@@ -94,7 +96,7 @@ impl ParquetReaderBuilder {
             time_range: self.time_range,
             projection: self.projection,
             stream: None,
-            region_meta: None,
+            read_format: None,
             batches: Vec::new(),
         }
     }
@@ -123,15 +125,16 @@ pub struct ParquetReader {
 
     /// Inner parquet record batch stream.
     stream: Option<BoxedRecordBatchStream>,
-    /// Region metadata of the parquet file.
+    /// Helper to read record batches.
     ///
     /// Not `None` if [ParquetReader::stream] is not `None`.
-    region_meta: Option<RegionMetadataRef>,
+    read_format: Option<ReadFormat>,
     /// Buffered batches to return.
     batches: Vec<Batch>,
 }
 
 impl ParquetReader {
+    // TODO(yingwen): Init reader in builder so we can get the schema of the reader.
     /// Initializes the reader and the parquet stream.
     async fn maybe_init(&mut self) -> Result<()> {
         if self.stream.is_some() {
@@ -170,13 +173,10 @@ impl ParquetReader {
             builder = builder.with_row_groups(pruned_row_groups);
         }
 
+        let read_format = ReadFormat::new(Arc::new(region_meta), builder.schema().clone());
         let parquet_schema_desc = builder.metadata().file_metadata().schema_descr();
         if let Some(column_ids) = self.projection.as_ref() {
-            let indices = to_sst_projection_indices(
-                &region_meta,
-                builder.schema(),
-                column_ids.iter().copied(),
-            );
+            let indices = read_format.projection_indices(column_ids.iter().copied());
             let projection_mask = ProjectionMask::roots(parquet_schema_desc, indices);
             builder = builder.with_projection(projection_mask);
         }
@@ -185,7 +185,7 @@ impl ParquetReader {
             path: &self.file_path,
         })?;
         self.stream = Some(Box::pin(stream));
-        self.region_meta = Some(Arc::new(region_meta));
+        self.read_format = Some(read_format);
 
         Ok(())
     }
@@ -239,8 +239,8 @@ impl BatchReader for ParquetReader {
         };
 
         // Safety: the reader is initialized.
-        let metadata = self.region_meta.as_ref().unwrap();
-        from_sst_record_batch(metadata, &record_batch, &mut self.batches)?;
+        let read_format = self.read_format.as_ref().unwrap();
+        read_format.convert_record_batch(&record_batch, &mut self.batches)?;
         // Reverse batches so we could pop it.
         self.batches.reverse();
 

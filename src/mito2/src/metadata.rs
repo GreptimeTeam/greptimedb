@@ -162,6 +162,13 @@ impl RegionMetadata {
             .map(|index| &self.column_metadatas[index])
     }
 
+    /// Returns all field columns.
+    pub(crate) fn field_columns(&self) -> impl Iterator<Item = &ColumnMetadata> {
+        self.column_metadatas
+            .iter()
+            .filter(|column| column.semantic_type == SemanticType::Field)
+    }
+
     // TODO(yingwen): Ensure column name is not internal columns.
     /// Checks whether the metadata is valid.
     fn validate(&self) -> Result<()> {
