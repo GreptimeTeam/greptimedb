@@ -6,6 +6,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::Result;
+use common_telemetry::info;
 
 pub type Job = Pin<Box<dyn Future<Output = ()> + Send>>;
 
@@ -45,18 +46,21 @@ impl LocalScheduler {
 
         let mut handles = Vec::with_capacity(num);
 
-        for _ in 0..num {
+        for id in 0..num {
             let child = token.child_token().clone();
             let receiver = rx.clone();
             let state = Arc::clone(&state);
             let handle = tokio::spawn(async move {
                 while state.load(Ordering::Relaxed) == STATE_RUNNING {
+                    info!("Task scheduler loop.");
                     tokio::select! {
                         _ = child.cancelled() => {
+                            info!("Task scheduler cancelled.");
                             return;
                         }
                         req_opt = receiver.recv_async() =>{
                             if let Ok(req) = req_opt{
+                                println!("handle {} is doing", id);
                                 req.await;
                             }
                         }
@@ -110,33 +114,169 @@ impl Drop for LocalScheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
+    use std::sync::atomic::AtomicI32;
+    use std::time::{Instant, Duration};
+    use std::sync::{Arc, Mutex};
+    use tokio::sync::Notify;
+
+    struct CountdownLatch {
+        counter: std::sync::Mutex<usize>,
+        notify: Notify,
+    }
+
+    impl CountdownLatch {
+        fn new(size: usize) -> Self {
+            Self {
+                counter: std::sync::Mutex::new(size),
+                notify: Notify::new(),
+            }
+        }
+
+        fn countdown(&self) {
+            let mut counter = self.counter.lock().unwrap();
+            if *counter >= 1 {
+                *counter -= 1;
+                if *counter == 0 {
+                    self.notify.notify_waiters();
+                }
+            }
+        }
+
+        /// Users should only call this once.
+        async fn wait(&self) {
+            self.notify.notified().await
+        }
+    }
 
     #[tokio::test]
     async fn test_scheduler() {
-        let mut local = LocalScheduler::new(3, 32);
+        let mut local = LocalScheduler::new(32, 3);
+        let latch = Arc::new(CountdownLatch::new(3));
+
+        let latch_clone1 = latch.clone();
         local
-            .schedule(Box::pin(async {
+            .schedule(Box::pin(async move {
                 println!("hello1");
+                latch_clone1.countdown();
             }))
             .await
             .unwrap();
-
+        
+        let latch_clone2= latch.clone();
         local
-            .schedule(Box::pin(async {
+            .schedule(Box::pin(async move {
                 println!("hello2");
+                latch_clone2.countdown();
             }))
             .await
             .unwrap();
 
+        let latch_clone3= latch.clone();
         local
-            .schedule(Box::pin(async {
+            .schedule(Box::pin(async move {
                 println!("hello3");
+                latch_clone3.countdown();
             }))
             .await
             .unwrap();
 
-        tokio::time::sleep(Duration::from_secs(3)).await; 
+        latch.wait().await;
+
         local.stop().await.unwrap();
     }
+
+    #[tokio::test]
+    async fn test_sum() {
+
+        let task_size = 1000;
+        let sum = Arc::new(AtomicI32::new(0));
+        let mut local = LocalScheduler::new(32, 10);
+        let latch = Arc::new(CountdownLatch::new(task_size));
+        let start = Instant::now();
+        for _ in 0..task_size {
+            let sum = Arc::clone(&sum);
+            let latch_clone = latch.clone();
+            local.schedule(Box::pin(async move {
+                sum.fetch_add(1, Ordering::Relaxed);
+                tokio::time::sleep(Duration::from_millis(3)).await;
+                latch_clone.countdown();
+            }))
+            .await
+            .unwrap();
+        }
+
+        latch.wait().await;
+        let end = Instant::now();
+        println!("Elapsed time: {:?}s", (end - start).as_secs_f32());
+        local.stop().await.unwrap();
+
+        assert_eq!(sum.load(Ordering::Relaxed), 1000);
+
+    }
+
+    #[tokio::test]
+    async fn test_scheduler_many() {
+        let task_size = 100;
+
+        let latch = Arc::new(CountdownLatch::new(task_size + 1));
+        let mut local = LocalScheduler::new(20, 100);
+
+        for _ in 0..task_size {
+            let latch_clone = latch.clone();
+            local.schedule(Box::pin(async move {
+                latch_clone.countdown();
+                latch_clone.wait().await;
+
+            }))
+            .await
+            .unwrap();
+        }
+        
+        tokio::time::sleep(Duration::from_millis(1000)).await;
+        latch.countdown();
+        local.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_scheduler_interval() {
+        
+        let task_size = 100;
+        let latch = Arc::new(CountdownLatch::new(task_size));
+        let mut local = LocalScheduler::new(32, 3);
+        let sum = Arc::new(Mutex::new(0));
+        
+        for _ in 0..task_size / 2{
+            let sum = Arc::clone(&sum);
+            let latch_clone = latch.clone();
+            local.schedule(Box::pin(async move {
+                let mut sum = sum.lock().unwrap();
+                *sum += 1;
+                latch_clone.countdown();
+
+            }))
+            .await
+            .unwrap();
+        }
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        for _ in 0..task_size / 2{
+            let sum = Arc::clone(&sum);
+            let latch_clone = latch.clone();
+            local.schedule(Box::pin(async move {
+                let mut sum = sum.lock().unwrap();
+                *sum += 1;
+                latch_clone.countdown();
+            }))
+            .await
+            .unwrap();
+        }
+
+        latch.wait().await;
+        local.stop().await.unwrap();
+
+        assert_eq!(*sum.lock().unwrap(), task_size);
+
+    }
+
 }
