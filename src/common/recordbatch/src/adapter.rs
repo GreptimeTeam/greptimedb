@@ -17,6 +17,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+use datafusion::arrow::compute::cast;
 use datafusion::arrow::datatypes::SchemaRef as DfSchemaRef;
 use datafusion::error::Result as DfResult;
 use datafusion::parquet::arrow::async_reader::{AsyncFileReader, ParquetRecordBatchStream};
@@ -44,11 +45,27 @@ type FutureStream = Pin<
 /// ParquetRecordBatchStream -> DataFusion RecordBatchStream
 pub struct ParquetRecordBatchStreamAdapter<T> {
     stream: ParquetRecordBatchStream<T>,
+    output_schema: DfSchemaRef,
+    projection: Vec<usize>,
 }
 
 impl<T: Unpin + AsyncFileReader + Send + 'static> ParquetRecordBatchStreamAdapter<T> {
-    pub fn new(stream: ParquetRecordBatchStream<T>) -> Self {
-        Self { stream }
+    pub fn new(
+        output_schema: DfSchemaRef,
+        stream: ParquetRecordBatchStream<T>,
+        projection: Option<Vec<usize>>,
+    ) -> Self {
+        let projection = if let Some(projection) = projection {
+            projection
+        } else {
+            (0..output_schema.fields().len()).collect()
+        };
+
+        Self {
+            stream,
+            output_schema,
+            projection,
+        }
     }
 }
 
@@ -66,6 +83,29 @@ impl<T: Unpin + AsyncFileReader + Send + 'static> Stream for ParquetRecordBatchS
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let batch = futures::ready!(Pin::new(&mut self.stream).poll_next(cx))
             .map(|r| r.map_err(|e| DataFusionError::External(Box::new(e))));
+
+        let projected_schema = self.output_schema.project(&self.projection)?;
+        let batch = batch.map(|b| {
+            b.and_then(|b| {
+                let mut columns = Vec::with_capacity(self.projection.len());
+                for idx in self.projection.iter() {
+                    let column = b.column(*idx);
+                    let field = self.output_schema.field(*idx);
+
+                    if column.data_type() != field.data_type() {
+                        let output = cast(&column, field.data_type())?;
+                        columns.push(output)
+                    } else {
+                        columns.push(column.clone())
+                    }
+                }
+
+                let record_batch = DfRecordBatch::try_new(projected_schema.into(), columns)?;
+
+                Ok(record_batch)
+            })
+        });
+
         Poll::Ready(batch)
     }
 
