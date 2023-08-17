@@ -70,7 +70,7 @@ impl InformationSchemaProvider {
 
     pub fn table(&self, name: &str) -> Option<TableRef> {
         self.information_table(name).map(|table| {
-            let schema: Arc<datatypes::schema::Schema> = table.schema();
+            let schema = table.schema();
             let table_info = Self::table_info(self.catalog_name.clone(), &table);
             let table_type = table.table_type();
             let data_source = Arc::new(InformationTableDataSource::new(table));
