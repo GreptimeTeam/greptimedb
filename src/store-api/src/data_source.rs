@@ -26,6 +26,4 @@ pub trait DataSource {
     fn get_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream, BoxedError>;
 }
 
-pub type DataSourceRef = Arc<dyn DataSource>;
-
-pub type TableFactory = Arc<dyn Fn() -> DataSourceRef>;
+pub type DataSourceRef = Arc<dyn DataSource + Send + Sync>;
