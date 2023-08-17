@@ -232,8 +232,17 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Table route not found: {}", key))]
-    TableRouteNotFound { key: String, location: Location },
+    #[snafu(display("Table route not found: {}", table_name))]
+    TableRouteNotFound {
+        table_name: String,
+        location: Location,
+    },
+
+    #[snafu(display("Table info not found: {}", table_name))]
+    TableInfoNotFound {
+        table_name: String,
+        location: Location,
+    },
 
     #[snafu(display("Table route corrupted, key: {}, reason: {}", key, reason))]
     CorruptedTableRoute {
@@ -478,6 +487,18 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to update table route: {}", source))]
+    UpdateTableRoute {
+        source: common_meta::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to get table info error: {}", source))]
+    GetFullTableInfo {
+        source: common_meta::error::Error,
+        location: Location,
+    },
+
     #[snafu(display("Invalid heartbeat request: {}", err_msg))]
     InvalidHeartbeatRequest { err_msg: String, location: Location },
 
@@ -560,6 +581,7 @@ impl ErrorExt for Error {
             | Error::StatValueFromUtf8 { .. }
             | Error::UnexpectedSequenceValue { .. }
             | Error::TableRouteNotFound { .. }
+            | Error::TableInfoNotFound { .. }
             | Error::CorruptedTableRoute { .. }
             | Error::NextSequence { .. }
             | Error::SequenceOutOfRange { .. }
@@ -594,7 +616,9 @@ impl ErrorExt for Error {
             Error::TableRouteConversion { source, .. }
             | Error::ConvertProtoData { source, .. }
             | Error::TableMetadataManager { source, .. }
-            | Error::ConvertEtcdTxnObject { source, .. } => source.status_code(),
+            | Error::UpdateTableRoute { source, .. }
+            | Error::ConvertEtcdTxnObject { source, .. }
+            | Error::GetFullTableInfo { source, .. } => source.status_code(),
 
             Error::Other { source, .. } => source.status_code(),
         }

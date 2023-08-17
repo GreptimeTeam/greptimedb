@@ -15,13 +15,14 @@
 use std::sync::Arc;
 
 use client::client_manager::DatanodeClients;
+use common_meta::key::table_info::TableInfoValue;
+use common_meta::key::table_route::TableRouteValue;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::rpc::ddl::{AlterTableTask, CreateTableTask, DropTableTask, TruncateTableTask};
-use common_meta::rpc::router::TableRoute;
+use common_meta::rpc::router::RegionRoute;
 use common_procedure::{watcher, ProcedureId, ProcedureManagerRef, ProcedureWithId};
 use common_telemetry::error;
 use snafu::ResultExt;
-use table::metadata::RawTableInfo;
 use table::requests::AlterTableRequest;
 
 use crate::error::{
@@ -32,13 +33,11 @@ use crate::procedure::alter_table::AlterTableProcedure;
 use crate::procedure::create_table::CreateTableProcedure;
 use crate::procedure::drop_table::DropTableProcedure;
 use crate::service::mailbox::MailboxRef;
-use crate::service::store::kv::KvStoreRef;
 
 pub type DdlManagerRef = Arc<DdlManager>;
 
 pub struct DdlManager {
     procedure_manager: ProcedureManagerRef,
-    kv_store: KvStoreRef,
     datanode_clients: Arc<DatanodeClients>,
     pub(crate) mailbox: MailboxRef,
     pub(crate) server_addr: String,
@@ -47,7 +46,6 @@ pub struct DdlManager {
 
 #[derive(Clone)]
 pub(crate) struct DdlContext {
-    pub(crate) kv_store: KvStoreRef,
     pub(crate) datanode_clients: Arc<DatanodeClients>,
     pub(crate) mailbox: MailboxRef,
     pub(crate) server_addr: String,
@@ -57,7 +55,6 @@ pub(crate) struct DdlContext {
 impl DdlManager {
     pub(crate) fn new(
         procedure_manager: ProcedureManagerRef,
-        kv_store: KvStoreRef,
         datanode_clients: Arc<DatanodeClients>,
         mailbox: MailboxRef,
         server_addr: String,
@@ -65,7 +62,6 @@ impl DdlManager {
     ) -> Self {
         Self {
             procedure_manager,
-            kv_store,
             datanode_clients,
             mailbox,
             server_addr,
@@ -75,7 +71,6 @@ impl DdlManager {
 
     pub(crate) fn create_context(&self) -> DdlContext {
         DdlContext {
-            kv_store: self.kv_store.clone(),
             datanode_clients: self.datanode_clients.clone(),
             mailbox: self.mailbox.clone(),
             server_addr: self.server_addr.clone(),
@@ -132,7 +127,7 @@ impl DdlManager {
         cluster_id: u64,
         alter_table_task: AlterTableTask,
         alter_table_request: AlterTableRequest,
-        table_info: RawTableInfo,
+        table_info_value: TableInfoValue,
     ) -> Result<ProcedureId> {
         let context = self.create_context();
 
@@ -140,7 +135,7 @@ impl DdlManager {
             cluster_id,
             alter_table_task,
             alter_table_request,
-            table_info,
+            table_info_value,
             context,
         );
 
@@ -153,12 +148,12 @@ impl DdlManager {
         &self,
         cluster_id: u64,
         create_table_task: CreateTableTask,
-        table_route: TableRoute,
+        region_routes: Vec<RegionRoute>,
     ) -> Result<ProcedureId> {
         let context = self.create_context();
 
         let procedure =
-            CreateTableProcedure::new(cluster_id, create_table_task, table_route, context);
+            CreateTableProcedure::new(cluster_id, create_table_task, region_routes, context);
 
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
@@ -169,11 +164,18 @@ impl DdlManager {
         &self,
         cluster_id: u64,
         drop_table_task: DropTableTask,
-        table_route: TableRoute,
+        table_info_value: TableInfoValue,
+        table_route_value: TableRouteValue,
     ) -> Result<ProcedureId> {
         let context = self.create_context();
 
-        let procedure = DropTableProcedure::new(cluster_id, drop_table_task, table_route, context);
+        let procedure = DropTableProcedure::new(
+            cluster_id,
+            drop_table_task,
+            table_route_value,
+            table_info_value,
+            context,
+        );
 
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
@@ -184,10 +186,10 @@ impl DdlManager {
         &self,
         cluster_id: u64,
         truncate_table_task: TruncateTableTask,
-        table_route: TableRoute,
+        region_routes: Vec<RegionRoute>,
     ) -> Result<ProcedureId> {
-        error!("truncate table procedure is not supported, cluster_id = {}, truncate_table_task = {:?}, table_route = {:?}",
-            cluster_id, truncate_table_task, table_route);
+        error!("truncate table procedure is not supported, cluster_id = {}, truncate_table_task = {:?}, region_routes = {:?}",
+            cluster_id, truncate_table_task, region_routes);
 
         UnsupportedSnafu {
             operation: "TRUNCATE TABLE",

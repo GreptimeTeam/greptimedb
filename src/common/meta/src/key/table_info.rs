@@ -13,15 +13,15 @@
 // limitations under the License.
 
 use serde::{Deserialize, Serialize};
-use snafu::ensure;
+use table::engine::TableReference;
 use table::metadata::{RawTableInfo, TableId};
 
 use super::TABLE_INFO_KEY_PREFIX;
-use crate::error::{Result, UnexpectedSnafu};
+use crate::error::Result;
 use crate::key::{to_removed_key, TableMetaKey};
 use crate::kv_backend::txn::{Compare, CompareOp, Txn, TxnOp, TxnOpResponse};
 use crate::kv_backend::KvBackendRef;
-use crate::rpc::store::{CompareAndPutRequest, MoveValueRequest};
+use crate::table_name::TableName;
 
 pub struct TableInfoKey {
     table_id: TableId,
@@ -59,6 +59,34 @@ impl TableInfoValue {
             version: self.version + 1,
         }
     }
+
+    pub(crate) fn with_update<F>(&self, update: F) -> Self
+    where
+        F: FnOnce(&mut RawTableInfo),
+    {
+        let mut new_table_info = self.table_info.clone();
+        update(&mut new_table_info);
+        Self {
+            table_info: new_table_info,
+            version: self.version + 1,
+        }
+    }
+
+    pub fn table_ref(&self) -> TableReference {
+        TableReference::full(
+            &self.table_info.catalog_name,
+            &self.table_info.schema_name,
+            &self.table_info.name,
+        )
+    }
+
+    pub fn table_name(&self) -> TableName {
+        TableName {
+            catalog_name: self.table_info.catalog_name.to_string(),
+            schema_name: self.table_info.schema_name.to_string(),
+            table_name: self.table_info.name.to_string(),
+        }
+    }
 }
 
 pub struct TableInfoManager {
@@ -68,6 +96,20 @@ pub struct TableInfoManager {
 impl TableInfoManager {
     pub fn new(kv_backend: KvBackendRef) -> Self {
         Self { kv_backend }
+    }
+
+    pub(crate) fn build_get_txn(
+        &self,
+        table_id: TableId,
+    ) -> (
+        Txn,
+        impl FnOnce(&Vec<TxnOpResponse>) -> Result<Option<TableInfoValue>>,
+    ) {
+        let key = TableInfoKey::new(table_id);
+        let raw_key = key.as_raw_key();
+        let txn = Txn::new().and_then(vec![TxnOp::Get(raw_key.clone())]);
+
+        (txn, Self::build_decode_fn(raw_key))
     }
 
     /// Builds a create table info transaction, it expected the `__table_info/{table_id}` wasn't occupied.
@@ -82,7 +124,7 @@ impl TableInfoManager {
         let key = TableInfoKey::new(table_id);
         let raw_key = key.as_raw_key();
 
-        let txn = Txn::default()
+        let txn = Txn::new()
             .when(vec![Compare::with_not_exist_value(
                 raw_key.clone(),
                 CompareOp::Equal,
@@ -111,7 +153,7 @@ impl TableInfoManager {
         let raw_key = key.as_raw_key();
         let raw_value = current_table_info_value.try_as_raw_value()?;
 
-        let txn = Txn::default()
+        let txn = Txn::new()
             .when(vec![Compare::with_value(
                 raw_key.clone(),
                 CompareOp::Equal,
@@ -137,7 +179,7 @@ impl TableInfoManager {
         let raw_value = table_info_value.try_as_raw_value()?;
         let removed_key = to_removed_key(&String::from_utf8_lossy(&raw_key));
 
-        let txn = Txn::default().and_then(vec![
+        let txn = Txn::new().and_then(vec![
             TxnOp::Delete(raw_key.clone()),
             TxnOp::Put(removed_key.into_bytes(), raw_value),
         ]);
@@ -164,6 +206,17 @@ impl TableInfoManager {
         }
     }
 
+    #[cfg(test)]
+    pub async fn get_removed(&self, table_id: TableId) -> Result<Option<TableInfoValue>> {
+        let key = TableInfoKey::new(table_id).to_string();
+        let removed_key = to_removed_key(&key).into_bytes();
+        self.kv_backend
+            .get(&removed_key)
+            .await?
+            .map(|x| TableInfoValue::try_from_raw_value(x.value))
+            .transpose()
+    }
+
     pub async fn get(&self, table_id: TableId) -> Result<Option<TableInfoValue>> {
         let key = TableInfoKey::new(table_id);
         let raw_key = key.as_raw_key();
@@ -173,192 +226,22 @@ impl TableInfoManager {
             .map(|x| TableInfoValue::try_from_raw_value(x.value))
             .transpose()
     }
-
-    /// Create TableInfo key and value. If the key already exists, check if the value is the same.
-    pub async fn create(&self, table_id: TableId, table_info: &RawTableInfo) -> Result<()> {
-        let result = self
-            .compare_and_put(table_id, None, table_info.clone())
-            .await?;
-        if let Err(curr) = result {
-            let Some(curr) = curr else {
-                return UnexpectedSnafu {
-                    err_msg: format!("compare_and_put expect None but failed with current value None, table_id: {table_id}, table_info: {table_info:?}"),
-                }.fail();
-            };
-            ensure!(
-                &curr.table_info == table_info,
-                UnexpectedSnafu {
-                    err_msg: format!(
-                        "TableInfoValue for table {table_id} is updated before it is created!"
-                    )
-                }
-            )
-        }
-        Ok(())
-    }
-
-    /// Compare and put value of key. `expect` is the expected value, if backend's current value associated
-    /// with key is the same as `expect`, the value will be updated to `val`.
-    ///
-    /// - If the compare-and-set operation successfully updated value, this method will return an `Ok(Ok())`
-    /// - If associated value is not the same as `expect`, no value will be updated and an
-    ///   `Ok(Err(Option<TableInfoValue>))` will be returned. The `Option<TableInfoValue>` indicates
-    ///   the current associated value of key.
-    /// - If any error happens during operation, an `Err(Error)` will be returned.
-    pub async fn compare_and_put(
-        &self,
-        table_id: TableId,
-        expect: Option<TableInfoValue>,
-        table_info: RawTableInfo,
-    ) -> Result<std::result::Result<(), Option<TableInfoValue>>> {
-        let key = TableInfoKey::new(table_id);
-        let raw_key = key.as_raw_key();
-
-        let (expect, version) = if let Some(x) = expect {
-            (x.try_as_raw_value()?, x.version + 1)
-        } else {
-            (vec![], 0)
-        };
-
-        let value = TableInfoValue {
-            table_info,
-            version,
-        };
-        let raw_value = value.try_as_raw_value()?;
-
-        let req = CompareAndPutRequest::new()
-            .with_key(raw_key)
-            .with_expect(expect)
-            .with_value(raw_value);
-        let resp = self.kv_backend.compare_and_put(req).await?;
-        Ok(if resp.success {
-            Ok(())
-        } else {
-            Err(resp
-                .prev_kv
-                .map(|x| TableInfoValue::try_from_raw_value(x.value))
-                .transpose()?)
-        })
-    }
-
-    pub async fn remove(&self, table_id: TableId) -> Result<()> {
-        let key = TableInfoKey::new(table_id).as_raw_key();
-        let removed_key = to_removed_key(&String::from_utf8_lossy(&key));
-        let req = MoveValueRequest::new(key, removed_key.as_bytes());
-        self.kv_backend.move_value(req).await?;
-        Ok(())
-    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
 
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, RawSchema, Schema};
     use table::metadata::{RawTableMeta, TableIdent, TableType};
 
     use super::*;
-    use crate::kv_backend::memory::MemoryKvBackend;
-    use crate::kv_backend::KvBackend;
-    use crate::rpc::store::PutRequest;
 
     #[test]
     fn test_deserialization_compatibility() {
         let s = r#"{"version":1,"table_info":{"ident":{"table_id":8714,"version":0},"name":"go_gc_duration_seconds","desc":"Created on insertion","catalog_name":"e87lehzy63d4cloud_docs_test","schema_name":"public","meta":{"schema":{"column_schemas":[{"name":"instance","data_type":{"String":null},"is_nullable":true,"is_time_index":false,"default_constraint":null,"metadata":{}},{"name":"job","data_type":{"String":null},"is_nullable":true,"is_time_index":false,"default_constraint":null,"metadata":{}},{"name":"quantile","data_type":{"String":null},"is_nullable":true,"is_time_index":false,"default_constraint":null,"metadata":{}},{"name":"greptime_timestamp","data_type":{"Timestamp":{"Millisecond":null}},"is_nullable":false,"is_time_index":true,"default_constraint":null,"metadata":{"greptime:time_index":"true"}},{"name":"greptime_value","data_type":{"Float64":{}},"is_nullable":true,"is_time_index":false,"default_constraint":null,"metadata":{}}],"timestamp_index":3,"version":0},"primary_key_indices":[0,1,2],"value_indices":[],"engine":"mito","next_column_id":5,"region_numbers":[],"engine_options":{},"options":{"write_buffer_size":null,"ttl":null,"extra_options":{}},"created_on":"1970-01-01T00:00:00Z"},"table_type":"Base"}}"#;
         let v = TableInfoValue::try_from_raw_value(s.as_bytes().to_vec()).unwrap();
         assert!(v.table_info.meta.partition_key_indices.is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_table_info_manager() {
-        let backend = Arc::new(MemoryKvBackend::default());
-
-        for i in 1..=3 {
-            let key = TableInfoKey::new(i).as_raw_key();
-            let val = TableInfoValue {
-                table_info: new_table_info(i),
-                version: 1,
-            }
-            .try_as_raw_value()
-            .unwrap();
-            let req = PutRequest::new().with_key(key).with_value(val);
-            backend.put(req).await.unwrap();
-        }
-
-        let manager = TableInfoManager::new(backend.clone());
-        assert!(manager.create(99, &new_table_info(99)).await.is_ok());
-        assert!(manager.create(99, &new_table_info(99)).await.is_ok());
-
-        let result = manager.create(99, &new_table_info(88)).await;
-        let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg
-            .contains("Unexpected: TableInfoValue for table 99 is updated before it is created!"));
-
-        let val = manager.get(1).await.unwrap().unwrap();
-        assert_eq!(
-            val,
-            TableInfoValue {
-                table_info: new_table_info(1),
-                version: 1,
-            }
-        );
-        assert!(manager.get(4).await.unwrap().is_none());
-
-        // test cas failed, current value is not set
-        let table_info = new_table_info(4);
-        let result = manager
-            .compare_and_put(
-                4,
-                Some(TableInfoValue {
-                    table_info: table_info.clone(),
-                    version: 0,
-                }),
-                table_info.clone(),
-            )
-            .await
-            .unwrap();
-        assert!(result.unwrap_err().is_none());
-
-        let result = manager
-            .compare_and_put(4, None, table_info.clone())
-            .await
-            .unwrap();
-        assert!(result.is_ok());
-
-        // test cas failed, the new table info is not set
-        let new_table_info = new_table_info(4);
-        let result = manager
-            .compare_and_put(4, None, new_table_info.clone())
-            .await
-            .unwrap();
-        let actual = result.unwrap_err().unwrap();
-        assert_eq!(
-            actual,
-            TableInfoValue {
-                table_info: table_info.clone(),
-                version: 0,
-            }
-        );
-
-        // test cas success
-        let result = manager
-            .compare_and_put(4, Some(actual), new_table_info.clone())
-            .await
-            .unwrap();
-        assert!(result.is_ok());
-
-        assert!(manager.remove(4).await.is_ok());
-
-        let kv = backend
-            .get(b"__removed-__table_info/4")
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(b"__removed-__table_info/4", kv.key.as_slice());
-        let value = TableInfoValue::try_from_raw_value(kv.value).unwrap();
-        assert_eq!(value.table_info, new_table_info);
-        assert_eq!(value.version, 1);
     }
 
     #[test]

@@ -20,8 +20,7 @@ use catalog::remote::CachedMetaKvBackend;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO_ENGINE};
 use common_meta::ident::TableIdent;
 use common_meta::key::table_name::{TableNameKey, TableNameValue};
-use common_meta::key::table_region::RegionDistribution;
-use common_meta::key::TableMetaKey;
+use common_meta::key::{RegionDistribution, TableMetaKey};
 use common_meta::rpc::router::TableRoute;
 use common_meta::rpc::KeyValue;
 use common_meta::RegionIdent;
@@ -31,6 +30,7 @@ use common_telemetry::info;
 use frontend::catalog::FrontendCatalogManager;
 use frontend::error::Result as FrontendResult;
 use frontend::instance::Instance;
+use futures::TryStreamExt;
 use meta_srv::error::Result as MetaResult;
 use meta_srv::metasrv::{SelectorContext, SelectorRef};
 use meta_srv::procedure::region_failover::{RegionFailoverContext, RegionFailoverProcedure};
@@ -266,18 +266,18 @@ async fn find_region_distribution(
 ) -> RegionDistribution {
     let manager = cluster.meta_srv.table_metadata_manager();
     let region_distribution = manager
-        .table_region_manager()
-        .get(table_id)
+        .table_route_manager()
+        .get_region_distribution(table_id)
         .await
         .unwrap()
-        .unwrap()
-        .region_distribution;
+        .unwrap();
 
     // test DatanodeTableValues match the table region distribution
     for datanode_id in cluster.datanode_instances.keys() {
         let mut actual = manager
             .datanode_table_manager()
             .tables(*datanode_id)
+            .try_collect::<Vec<_>>()
             .await
             .unwrap()
             .into_iter()

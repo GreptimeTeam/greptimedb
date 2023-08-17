@@ -23,6 +23,7 @@ use common_meta::key::datanode_table::DatanodeTableValue;
 use common_meta::key::schema_name::SchemaNameKey;
 use common_meta::key::TableMetadataManagerRef;
 use common_telemetry::{error, info, warn};
+use futures_util::TryStreamExt;
 use metrics::increment_gauge;
 use snafu::{ensure, OptionExt, ResultExt};
 use table::engine::manager::TableEngineManagerRef;
@@ -74,6 +75,7 @@ impl RemoteCatalogManager {
             .table_metadata_manager
             .datanode_table_manager()
             .tables(self.node_id)
+            .try_collect::<Vec<_>>()
             .await
             .context(TableMetadataManagerSnafu)?;
 

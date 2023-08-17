@@ -165,13 +165,13 @@ impl HttpHandler for TableHandler {
         if let Some(table_id) = table_id {
             let table_region_value = self
                 .table_metadata_manager
-                .table_region_manager()
+                .table_route_manager()
                 .get(table_id)
                 .await
                 .context(TableMetadataManagerSnafu)?
                 .map(|x| format!("{x:?}"))
                 .unwrap_or_else(|| "Not Found".to_string());
-            result.insert("table_region_value", table_region_value);
+            result.insert("table_route_value", table_region_value);
         }
 
         http::Response::builder()

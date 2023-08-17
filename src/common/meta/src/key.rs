@@ -36,10 +36,6 @@
 //!     - The value is a [TableNameValue] struct; it contains the table id.
 //!     - Used in the table name to table id lookup.
 //!
-//! 6. Table region key: `__table_region/{table_id}`
-//!     - The value is a [TableRegionValue] struct; it contains the region distribution of the
-//!       table in the Datanodes.
-//!
 //! All keys have related managers. The managers take care of the serialization and deserialization
 //! of keys and values, and the interaction with the underlying KV store backend.
 //!
@@ -52,28 +48,35 @@ pub mod datanode_table;
 pub mod schema_name;
 pub mod table_info;
 pub mod table_name;
+// TODO(weny): removes it.
+#[allow(deprecated)]
 pub mod table_region;
+// TODO(weny): removes it.
+#[allow(deprecated)]
 pub mod table_route;
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use datanode_table::{DatanodeTableKey, DatanodeTableManager, DatanodeTableValue};
 use lazy_static::lazy_static;
 use regex::Regex;
 use snafu::{ensure, OptionExt, ResultExt};
+use store_api::storage::RegionNumber;
 use table::metadata::{RawTableInfo, TableId};
 use table_info::{TableInfoKey, TableInfoManager, TableInfoValue};
 use table_name::{TableNameKey, TableNameManager, TableNameValue};
-use table_region::{TableRegionKey, TableRegionManager, TableRegionValue};
 
 use self::catalog_name::{CatalogManager, CatalogNameValue};
 use self::schema_name::{SchemaManager, SchemaNameValue};
 use self::table_route::{TableRouteManager, TableRouteValue};
 use crate::error::{self, Error, InvalidTableMetadataSnafu, Result, SerdeJsonSnafu};
+#[allow(deprecated)]
 pub use crate::key::table_route::{TableRouteKey, TABLE_ROUTE_PREFIX};
 use crate::kv_backend::txn::Txn;
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::router::{region_distribution, RegionRoute};
+use crate::DatanodeId;
 
 pub const REMOVED_PREFIX: &str = "__removed";
 
@@ -85,6 +88,8 @@ const TABLE_NAME_KEY_PREFIX: &str = "__table_name";
 const TABLE_REGION_KEY_PREFIX: &str = "__table_region";
 const CATALOG_NAME_KEY_PREFIX: &str = "__catalog_name";
 const SCHEMA_NAME_KEY_PREFIX: &str = "__schema_name";
+
+pub type RegionDistribution = BTreeMap<DatanodeId, Vec<RegionNumber>>;
 
 lazy_static! {
     static ref DATANODE_TABLE_KEY_PATTERN: Regex =
@@ -127,7 +132,6 @@ pub type TableMetadataManagerRef = Arc<TableMetadataManager>;
 pub struct TableMetadataManager {
     table_name_manager: TableNameManager,
     table_info_manager: TableInfoManager,
-    table_region_manager: TableRegionManager,
     datanode_table_manager: DatanodeTableManager,
     catalog_manager: CatalogManager,
     schema_manager: SchemaManager,
@@ -154,7 +158,6 @@ impl TableMetadataManager {
         TableMetadataManager {
             table_name_manager: TableNameManager::new(kv_backend.clone()),
             table_info_manager: TableInfoManager::new(kv_backend.clone()),
-            table_region_manager: TableRegionManager::new(kv_backend.clone()),
             datanode_table_manager: DatanodeTableManager::new(kv_backend.clone()),
             catalog_manager: CatalogManager::new(kv_backend.clone()),
             schema_manager: SchemaManager::new(kv_backend.clone()),
@@ -171,10 +174,6 @@ impl TableMetadataManager {
         &self.table_info_manager
     }
 
-    pub fn table_region_manager(&self) -> &TableRegionManager {
-        &self.table_region_manager
-    }
-
     pub fn datanode_table_manager(&self) -> &DatanodeTableManager {
         &self.datanode_table_manager
     }
@@ -189,6 +188,27 @@ impl TableMetadataManager {
 
     pub fn table_route_manager(&self) -> &TableRouteManager {
         &self.table_route_manager
+    }
+
+    pub async fn get_full_table_info(
+        &self,
+        table_id: TableId,
+    ) -> Result<(Option<TableInfoValue>, Option<TableRouteValue>)> {
+        let (get_table_route_txn, table_route_decoder) =
+            self.table_route_manager.build_get_txn(table_id);
+
+        let (get_table_info_txn, table_info_decoder) =
+            self.table_info_manager.build_get_txn(table_id);
+
+        let txn = Txn::merge_all(vec![get_table_route_txn, get_table_info_txn]);
+
+        let r = self.kv_backend.txn(txn).await?;
+
+        let table_info_value = table_info_decoder(&r.responses)?;
+
+        let table_route_value = table_route_decoder(&r.responses)?;
+
+        Ok((table_info_value, table_route_value))
     }
 
     /// Creates metadata for table and returns an error if different metadata exists.
@@ -261,8 +281,8 @@ impl TableMetadataManager {
     /// The caller MUST ensure it has the exclusive access to `TableNameKey`.
     pub async fn delete_table_metadata(
         &self,
-        table_info_value: TableInfoValue,
-        region_routes: Vec<RegionRoute>,
+        table_info_value: &TableInfoValue,
+        table_route_value: &TableRouteValue,
     ) -> Result<()> {
         let table_info = &table_info_value.table_info;
         let table_id = table_info.ident.table_id;
@@ -281,19 +301,18 @@ impl TableMetadataManager {
         // Deletes table info.
         let delete_table_info_txn = self
             .table_info_manager()
-            .build_delete_txn(table_id, &table_info_value)?;
+            .build_delete_txn(table_id, table_info_value)?;
 
         // Deletes datanode table key value pairs.
-        let distribution = region_distribution(&region_routes)?;
+        let distribution = region_distribution(&table_route_value.region_routes)?;
         let delete_datanode_txn = self
             .datanode_table_manager()
             .build_delete_txn(table_id, distribution)?;
 
         // Deletes table route.
-        let table_route_value = TableRouteValue::new(region_routes);
         let delete_table_route_txn = self
             .table_route_manager()
-            .build_delete_txn(table_id, &table_route_value)?;
+            .build_delete_txn(table_id, table_route_value)?;
 
         let txn = Txn::merge_all(vec![
             delete_table_name_txn,
@@ -338,8 +357,9 @@ impl TableMetadataManager {
             table_id,
         )?;
 
-        let mut new_table_info_value = current_table_info_value.clone();
-        new_table_info_value.table_info.name = new_table_name;
+        let new_table_info_value = current_table_info_value.with_update(move |table_info| {
+            table_info.name = new_table_name;
+        });
 
         // Updates table info.
         let (update_table_info_txn, on_update_table_info_failure) = self
@@ -437,6 +457,7 @@ impl TableMetadataManager {
     }
 }
 
+#[macro_export]
 macro_rules! impl_table_meta_key {
     ($($val_ty: ty), *) => {
         $(
@@ -449,13 +470,9 @@ macro_rules! impl_table_meta_key {
     }
 }
 
-impl_table_meta_key!(
-    TableNameKey<'_>,
-    TableInfoKey,
-    TableRegionKey,
-    DatanodeTableKey
-);
+impl_table_meta_key!(TableNameKey<'_>, TableInfoKey, DatanodeTableKey);
 
+#[macro_export]
 macro_rules! impl_table_meta_value {
     ($($val_ty: ty), *) => {
         $(
@@ -492,14 +509,13 @@ macro_rules! impl_try_from {
     };
 }
 
-impl_try_from! {TableInfoValue, TableRouteValue}
+impl_try_from! {TableInfoValue, TableRouteValue, DatanodeTableValue}
 
 impl_table_meta_value! {
     CatalogNameValue,
     SchemaNameValue,
     TableNameValue,
     TableInfoValue,
-    TableRegionValue,
     DatanodeTableValue,
     TableRouteValue
 }
@@ -511,10 +527,12 @@ mod tests {
 
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, SchemaBuilder};
+    use futures::TryStreamExt;
     use table::metadata::{RawTableInfo, TableInfo, TableInfoBuilder, TableMetaBuilder};
 
     use super::datanode_table::DatanodeTableKey;
     use crate::key::table_info::TableInfoValue;
+    use crate::key::table_name::TableNameKey;
     use crate::key::table_route::TableRouteValue;
     use crate::key::{to_removed_key, TableMetadataManager};
     use crate::kv_backend::memory::MemoryKvBackend;
@@ -596,12 +614,20 @@ mod tests {
             .await
             .unwrap();
         let mut modified_region_routes = region_routes.clone();
-        modified_region_routes.push(region_route);
+        modified_region_routes.push(region_route.clone());
         // if remote metadata was exists, it should return an error.
         assert!(table_metadata_manager
-            .create_table_metadata(table_info, modified_region_routes)
+            .create_table_metadata(table_info.clone(), modified_region_routes)
             .await
             .is_err());
+
+        let (remote_table_info, remote_table_route) = table_metadata_manager
+            .get_full_table_info(10)
+            .await
+            .unwrap();
+
+        assert_eq!(remote_table_info.unwrap().table_info, table_info);
+        assert_eq!(remote_table_route.unwrap().region_routes, region_routes);
     }
 
     #[tokio::test]
@@ -609,24 +635,69 @@ mod tests {
         let mem_kv = Arc::new(MemoryKvBackend::default());
         let table_metadata_manager = TableMetadataManager::new(mem_kv);
         let table_info: RawTableInfo = new_test_table_info().into();
+        let table_id = table_info.ident.table_id;
         let region_route = new_test_region_route();
+        let datanode_id = 2;
         let region_routes = vec![region_route.clone()];
+        let table_route_value = TableRouteValue::new(region_routes.clone());
+
         // creates metadata.
         table_metadata_manager
             .create_table_metadata(table_info.clone(), region_routes.clone())
             .await
             .unwrap();
-        let table_info_value = TableInfoValue::new(table_info);
+
+        let table_info_value = TableInfoValue::new(table_info.clone());
+
         // deletes metadata.
         table_metadata_manager
-            .delete_table_metadata(table_info_value.clone(), region_routes.clone())
+            .delete_table_metadata(&table_info_value, &table_route_value)
             .await
             .unwrap();
+
         // if metadata was already deleted, it should be ok.
         table_metadata_manager
-            .delete_table_metadata(table_info_value.clone(), region_routes.clone())
+            .delete_table_metadata(&table_info_value, &table_route_value)
             .await
             .unwrap();
+
+        assert!(table_metadata_manager
+            .table_info_manager()
+            .get(table_id)
+            .await
+            .unwrap()
+            .is_none());
+
+        assert!(table_metadata_manager
+            .table_route_manager()
+            .get(table_id)
+            .await
+            .unwrap()
+            .is_none());
+
+        assert!(table_metadata_manager
+            .datanode_table_manager()
+            .tables(datanode_id)
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap()
+            .is_empty());
+        // Checks removed values
+        let removed_table_info = table_metadata_manager
+            .table_info_manager()
+            .get_removed(table_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(removed_table_info.table_info, table_info);
+
+        let removed_table_route = table_metadata_manager
+            .table_route_manager()
+            .get_removed(table_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(removed_table_route.region_routes, region_routes);
     }
 
     #[tokio::test]
@@ -634,6 +705,7 @@ mod tests {
         let mem_kv = Arc::new(MemoryKvBackend::default());
         let table_metadata_manager = TableMetadataManager::new(mem_kv);
         let table_info: RawTableInfo = new_test_table_info().into();
+        let table_id = table_info.ident.table_id;
         let region_route = new_test_region_route();
         let region_routes = vec![region_route.clone()];
         // creates metadata.
@@ -652,7 +724,7 @@ mod tests {
             .rename_table(table_info_value.clone(), new_table_name.clone())
             .await
             .unwrap();
-        let mut modified_table_info = table_info;
+        let mut modified_table_info = table_info.clone();
         modified_table_info.name = "hi".to_string();
         let modified_table_info_value = table_info_value.update(modified_table_info);
         // if the table_info_value is wrong, it should return an error.
@@ -660,7 +732,36 @@ mod tests {
         assert!(table_metadata_manager
             .rename_table(modified_table_info_value.clone(), new_table_name.clone())
             .await
-            .is_err())
+            .is_err());
+
+        let old_table_name = TableNameKey::new(
+            &table_info.catalog_name,
+            &table_info.schema_name,
+            &table_info.name,
+        );
+        let new_table_name = TableNameKey::new(
+            &table_info.catalog_name,
+            &table_info.schema_name,
+            &new_table_name,
+        );
+
+        assert!(table_metadata_manager
+            .table_name_manager()
+            .get(old_table_name)
+            .await
+            .unwrap()
+            .is_none());
+
+        assert_eq!(
+            table_metadata_manager
+                .table_name_manager()
+                .get(new_table_name)
+                .await
+                .unwrap()
+                .unwrap()
+                .table_id(),
+            table_id
+        );
     }
 
     #[tokio::test]
@@ -668,6 +769,7 @@ mod tests {
         let mem_kv = Arc::new(MemoryKvBackend::default());
         let table_metadata_manager = TableMetadataManager::new(mem_kv);
         let table_info: RawTableInfo = new_test_table_info().into();
+        let table_id = table_info.ident.table_id;
         let region_route = new_test_region_route();
         let region_routes = vec![region_route.clone()];
         // creates metadata.
@@ -688,6 +790,16 @@ mod tests {
             .update_table_info(current_table_info_value.clone(), new_table_info.clone())
             .await
             .unwrap();
+
+        // updated table_info should equal the `new_table_info`
+        let updated_table_info = table_metadata_manager
+            .table_info_manager()
+            .get(table_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated_table_info.table_info, new_table_info);
+
         let mut wrong_table_info = table_info.clone();
         wrong_table_info.name = "wrong".to_string();
         let wrong_table_info_value = current_table_info_value.update(wrong_table_info);
@@ -759,7 +871,7 @@ mod tests {
             .unwrap();
 
         let current_table_route_value = current_table_route_value.update(new_region_routes.clone());
-        let new_region_routes = vec![new_region_route(4, 4), new_region_route(5, 5)];
+        let new_region_routes = vec![new_region_route(2, 4), new_region_route(5, 5)];
         // it should be ok.
         table_metadata_manager
             .update_table_route(
