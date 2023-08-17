@@ -38,7 +38,7 @@ use table::metadata::{RawTableInfo, TableId, TableInfo};
 use table::requests::{AlterKind, AlterTableRequest};
 
 use crate::ddl::DdlContext;
-use crate::error::{self, Result, TableMetadataManagerSnafu};
+use crate::error::{self, Result};
 use crate::procedure::utils::handle_request_datanode_error;
 use crate::service::mailbox::BroadcastChannel;
 
@@ -79,41 +79,65 @@ impl AlterTableProcedure {
 
         let manager = &self.context.table_metadata_manager;
 
+        // (comparing_key, expected)
+        let mut compares = Vec::default();
+
         if let AlterKind::RenameTable { new_table_name } = &request.alter_kind {
-            let exist = manager
-                .table_name_manager()
-                .exist(TableNameKey::new(
-                    &request.catalog_name,
-                    &request.schema_name,
-                    new_table_name,
-                ))
-                .await
-                .context(TableMetadataManagerSnafu)?;
+            // should not exist
+            compares.push((
+                TableNameKey::new(&request.catalog_name, &request.schema_name, new_table_name),
+                false,
+            ));
+        };
 
-            ensure!(
-                !exist,
-                error::TableAlreadyExistsSnafu {
-                    table_name: request.table_ref().to_string()
-                }
-            )
-        }
-
-        let exist = manager
-            .table_name_manager()
-            .exist(TableNameKey::new(
+        // should exist
+        compares.push((
+            TableNameKey::new(
                 &request.catalog_name,
                 &request.schema_name,
                 &request.table_name,
-            ))
-            .await
-            .context(TableMetadataManagerSnafu)?;
+            ),
+            true,
+        ));
 
-        ensure!(
-            exist,
-            error::TableNotFoundSnafu {
-                name: request.table_ref().to_string()
-            }
-        );
+        let (compare_keys, handlers): (Vec<_>, Vec<_>) = compares
+            .into_iter()
+            .enumerate()
+            .map(|(idx, (key, expected))| {
+                (key, move |exists: &Vec<bool>| -> Result<()> {
+                    if expected {
+                        ensure!(
+                            exists[idx],
+                            error::TableNotFoundSnafu {
+                                name: request.table_ref().to_string()
+                            }
+                        );
+                    } else {
+                        ensure!(
+                            !exists[idx],
+                            error::TableAlreadyExistsSnafu {
+                                table_name: request.table_ref().to_string()
+                            }
+                        );
+                    }
+
+                    Ok(())
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .unzip();
+
+        let exists = manager
+            .table_name_manager()
+            .batch_exists(compare_keys)
+            .await
+            .context(error::TableMetadataManagerSnafu)?;
+
+        for handler in handlers {
+            handler(&exists)?;
+        }
+
         self.data.state = AlterTableState::UpdateMetadata;
 
         Ok(Status::executing(true))

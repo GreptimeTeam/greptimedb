@@ -153,7 +153,7 @@ impl State for UpdateRegionMetadata {
 #[cfg(test)]
 mod tests {
 
-    use common_meta::rpc::router::{all_peers, region_distribution};
+    use common_meta::rpc::router::{extract_all_peers, region_distribution};
     use futures::TryStreamExt;
 
     use super::super::tests::{TestingEnv, TestingEnvBuilder};
@@ -216,7 +216,7 @@ mod tests {
         // 2 => 1
         // 3 => 2
         // 4 => 3
-        let peers = &all_peers(&actual);
+        let peers = &extract_all_peers(&actual);
         assert_eq!(peers.len(), 3);
         let expected = vec![
             new_region_route(1, peers, 2),
@@ -236,7 +236,7 @@ mod tests {
         // 2 => 1
         // 3 => 3
         // 4 => 3
-        let peers = &all_peers(&actual);
+        let peers = &extract_all_peers(&actual);
         assert_eq!(peers.len(), 2);
         let expected = vec![
             new_region_route(1, peers, 1),
@@ -256,7 +256,7 @@ mod tests {
         // 2 => 1
         // 3 => 2
         // 4 => 3
-        let peers = &all_peers(&actual);
+        let peers = &extract_all_peers(&actual);
         assert_eq!(peers.len(), 4);
         let expected = vec![
             new_region_route(1, peers, 4),
@@ -276,7 +276,7 @@ mod tests {
         // 2 => 1
         // 3 => 4
         // 4 => 3
-        let peers = &all_peers(&actual);
+        let peers = &extract_all_peers(&actual);
         assert_eq!(peers.len(), 3);
         let expected = vec![
             new_region_route(1, peers, 1),
@@ -347,7 +347,7 @@ mod tests {
                 .unwrap()
                 .unwrap();
 
-            let peers = &all_peers(&table_route_value.region_routes);
+            let peers = &extract_all_peers(&table_route_value.region_routes);
             let actual = &table_route_value.region_routes;
             let expected = &vec![
                 new_region_route(1, peers, 2),

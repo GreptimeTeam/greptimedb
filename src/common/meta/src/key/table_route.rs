@@ -96,7 +96,7 @@ impl TableRouteManager {
     ) {
         let key = NextTableRouteKey::new(table_id);
         let raw_key = key.as_raw_key();
-        let txn = Txn::default().and_then(vec![TxnOp::Get(raw_key.clone())]);
+        let txn = Txn::new().and_then(vec![TxnOp::Get(raw_key.clone())]);
 
         (txn, Self::build_decode_fn(raw_key))
     }
@@ -113,7 +113,7 @@ impl TableRouteManager {
         let key = NextTableRouteKey::new(table_id);
         let raw_key = key.as_raw_key();
 
-        let txn = Txn::default()
+        let txn = Txn::new()
             .when(vec![Compare::with_not_exist_value(
                 raw_key.clone(),
                 CompareOp::Equal,
@@ -143,7 +143,7 @@ impl TableRouteManager {
         let raw_value = current_table_route_value.try_as_raw_value()?;
         let new_raw_value: Vec<u8> = new_table_route_value.try_as_raw_value()?;
 
-        let txn = Txn::default()
+        let txn = Txn::new()
             .when(vec![Compare::with_value(
                 raw_key.clone(),
                 CompareOp::Equal,
@@ -166,7 +166,7 @@ impl TableRouteManager {
         let raw_value = table_route_value.try_as_raw_value()?;
         let removed_key = to_removed_key(&String::from_utf8_lossy(&raw_key));
 
-        let txn = Txn::default().and_then(vec![
+        let txn = Txn::new().and_then(vec![
             TxnOp::Delete(raw_key),
             TxnOp::Put(removed_key.into_bytes(), raw_value),
         ]);

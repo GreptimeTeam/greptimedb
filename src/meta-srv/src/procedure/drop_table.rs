@@ -76,7 +76,7 @@ impl DropTableProcedure {
             .context
             .table_metadata_manager
             .table_name_manager()
-            .exist(TableNameKey::new(
+            .exists(TableNameKey::new(
                 table_ref.catalog,
                 table_ref.schema,
                 table_ref.table,

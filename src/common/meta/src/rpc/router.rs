@@ -124,21 +124,14 @@ pub fn find_leader_regions(region_routes: &[RegionRoute], datanode: &Peer) -> Ve
         .collect()
 }
 
-pub fn all_peers(region_routes: &[RegionRoute]) -> Vec<Peer> {
-    let mut peers = HashSet::new();
-    region_routes
+pub fn extract_all_peers(region_routes: &[RegionRoute]) -> Vec<Peer> {
+    let mut peers = region_routes
         .iter()
-        .filter_map(|x| x.leader_peer.as_ref())
-        .for_each(|p| {
-            let _ = peers.insert(p.clone());
-        });
-    region_routes
-        .iter()
-        .flat_map(|x| x.follower_peers.iter())
-        .for_each(|p| {
-            let _ = peers.insert(p.clone());
-        });
-    let mut peers = peers.into_iter().collect::<Vec<_>>();
+        .flat_map(|x| x.leader_peer.iter().chain(x.follower_peers.iter()))
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .cloned()
+        .collect::<Vec<_>>();
     peers.sort_by_key(|x| x.id);
 
     peers
@@ -257,25 +250,11 @@ impl TableRoute {
     }
 
     pub fn find_leaders(&self) -> HashSet<Peer> {
-        self.region_routes
-            .iter()
-            .flat_map(|x| &x.leader_peer)
-            .cloned()
-            .collect()
+        find_leaders(&self.region_routes)
     }
 
     pub fn find_leader_regions(&self, datanode: &Peer) -> Vec<RegionNumber> {
-        self.region_routes
-            .iter()
-            .filter_map(|x| {
-                if let Some(peer) = &x.leader_peer {
-                    if peer == datanode {
-                        return Some(x.region.id.region_number());
-                    }
-                }
-                None
-            })
-            .collect()
+        find_leader_regions(&self.region_routes, datanode)
     }
 
     pub fn find_region_leader(&self, region_number: RegionNumber) -> Option<&Peer> {
@@ -287,6 +266,7 @@ impl TableRoute {
 
 impl TryFrom<PbTableRouteValue> for TableRoute {
     type Error = error::Error;
+
     fn try_from(pb: PbTableRouteValue) -> Result<Self> {
         TableRoute::try_from_raw(
             &pb.peers,
@@ -299,6 +279,7 @@ impl TryFrom<PbTableRouteValue> for TableRoute {
 
 impl TryFrom<TableRoute> for PbTableRouteValue {
     type Error = error::Error;
+
     fn try_from(table_route: TableRoute) -> Result<Self> {
         let (peers, table_route) = table_route.try_into_raw()?;
 

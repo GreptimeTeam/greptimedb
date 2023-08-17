@@ -22,7 +22,7 @@ use super::{TABLE_NAME_KEY_PATTERN, TABLE_NAME_KEY_PREFIX};
 use crate::error::{Error, InvalidTableMetadataSnafu, Result};
 use crate::key::{to_removed_key, TableMetaKey};
 use crate::kv_backend::memory::MemoryKvBackend;
-use crate::kv_backend::txn::{Txn, TxnOp};
+use crate::kv_backend::txn::{Txn, TxnOp, TxnOpResponse};
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::store::RangeRequest;
 use crate::table_name::TableName;
@@ -157,7 +157,7 @@ impl TableNameManager {
         let value = TableNameValue::new(table_id);
         let raw_value = value.try_as_raw_value()?;
 
-        let txn = Txn::default().and_then(vec![TxnOp::Put(raw_key, raw_value)]);
+        let txn = Txn::new().and_then(vec![TxnOp::Put(raw_key, raw_value)]);
 
         Ok(txn)
     }
@@ -174,7 +174,7 @@ impl TableNameManager {
         let value = TableNameValue::new(table_id);
         let raw_value = value.try_as_raw_value()?;
 
-        let txn = Txn::default().and_then(vec![
+        let txn = Txn::new().and_then(vec![
             TxnOp::Delete(raw_key),
             TxnOp::Put(new_raw_key, raw_value),
         ]);
@@ -192,7 +192,7 @@ impl TableNameManager {
         let raw_value = value.try_as_raw_value()?;
         let removed_key = to_removed_key(&String::from_utf8_lossy(&raw_key));
 
-        let txn = Txn::default().and_then(vec![
+        let txn = Txn::new().and_then(vec![
             TxnOp::Delete(raw_key),
             TxnOp::Put(removed_key.into_bytes(), raw_value),
         ]);
@@ -209,8 +209,52 @@ impl TableNameManager {
             .transpose()
     }
 
-    pub async fn exist(&self, key: TableNameKey<'_>) -> Result<bool> {
-        Ok(self.get(key).await?.is_some())
+    pub async fn exists(&self, key: TableNameKey<'_>) -> Result<bool> {
+        let raw_key = key.as_raw_key();
+        self.kv_backend.exists(&raw_key).await
+    }
+
+    pub async fn batch_exists<'a, T: IntoIterator<Item = TableNameKey<'a>>>(
+        &self,
+        keys: T,
+    ) -> Result<Vec<bool>> {
+        let (ops, handlers): (Vec<_>, Vec<_>) = keys
+            .into_iter()
+            .enumerate()
+            .map(|(idx, key)| {
+                let raw_key = key.as_raw_key();
+                (
+                    TxnOp::Get(raw_key.clone()),
+                    move |kvs: &Vec<TxnOpResponse>, output: &mut Vec<bool>| {
+                        let found = kvs
+                            .iter()
+                            .filter_map(|resp| {
+                                if let TxnOpResponse::ResponseGet(r) = resp {
+                                    Some(r)
+                                } else {
+                                    None
+                                }
+                            })
+                            .flat_map(|r| &r.kvs)
+                            .any(|kv| kv.key == raw_key);
+
+                        output[idx] = found;
+                    },
+                )
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .unzip();
+
+        let txn = Txn::new().and_then(ops);
+        let r = self.kv_backend.txn(txn).await?;
+        let mut result = vec![false; handlers.len()];
+
+        handlers.into_iter().for_each(|h| {
+            h(&r.responses, &mut result);
+        });
+
+        Ok(result)
     }
 
     pub async fn tables(

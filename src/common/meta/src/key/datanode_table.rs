@@ -156,7 +156,7 @@ impl DatanodeTableManager {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        let txn = Txn::default().and_then(txns);
+        let txn = Txn::new().and_then(txns);
 
         Ok(txn)
     }
@@ -197,7 +197,7 @@ impl DatanodeTableManager {
             }
         }
 
-        let txn = Txn::default().and_then(opts);
+        let txn = Txn::new().and_then(opts);
         Ok(txn)
     }
 
@@ -217,7 +217,7 @@ impl DatanodeTableManager {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        let txn = Txn::default().and_then(txns);
+        let txn = Txn::new().and_then(txns);
 
         Ok(txn)
     }

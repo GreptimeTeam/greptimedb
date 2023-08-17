@@ -80,7 +80,7 @@ impl CreateTableProcedure {
             .context
             .table_metadata_manager
             .table_name_manager()
-            .exist(TableNameKey::new(
+            .exists(TableNameKey::new(
                 &expr.catalog_name,
                 &expr.schema_name,
                 &expr.table_name,
