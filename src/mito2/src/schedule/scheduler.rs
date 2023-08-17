@@ -98,7 +98,7 @@ impl LocalScheduler {
         Self {
             sender: Some(tx),
             cancel_token: token,
-            handles: handles,
+            handles,
             state,
         }
     }
