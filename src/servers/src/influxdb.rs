@@ -147,18 +147,18 @@ impl TryFrom<InfluxdbRequest> for RowInsertRequests {
             .collect::<influxdb_line_protocol::Result<Vec<_>>>()
             .context(InfluxdbLineProtocolSnafu)?;
 
-        struct TableData {
+        struct TableData<'a> {
             schema: Vec<ColumnSchema>,
             rows: Vec<Row>,
-            column_indexes: HashMap<String, usize>,
+            column_indexes: HashMap<&'a str, usize>,
         }
 
         let mut table_data_map = HashMap::new();
 
-        for line in lines {
+        for line in &lines {
             let table_name = line.series.measurement.as_str();
-            let tags = line.series.tag_set;
-            let fields = line.field_set;
+            let tags = &line.series.tag_set;
+            let fields = &line.field_set;
             let ts = line.timestamp;
             let num_columns = tags.as_ref().map(|x| x.len()).unwrap_or(0) + fields.len() + 1;
 
@@ -167,7 +167,7 @@ impl TryFrom<InfluxdbRequest> for RowInsertRequests {
                 rows,
                 column_indexes,
             } = table_data_map
-                .entry(table_name.to_string())
+                .entry(table_name)
                 .or_insert_with(|| TableData {
                     schema: Vec::with_capacity(num_columns),
                     rows: Vec::new(),
@@ -203,7 +203,7 @@ impl TryFrom<InfluxdbRequest> for RowInsertRequests {
                     }
 
                     RowInsertRequest {
-                        table_name,
+                        table_name: table_name.to_string(),
                         rows: Some(Rows { schema, rows }),
                         ..Default::default()
                     }
@@ -215,9 +215,9 @@ impl TryFrom<InfluxdbRequest> for RowInsertRequests {
     }
 }
 
-fn parse_tags(
-    tags: Option<TagSet>,
-    column_indexes: &mut HashMap<String, usize>,
+fn parse_tags<'a>(
+    tags: &'a Option<TagSet>,
+    column_indexes: &mut HashMap<&'a str, usize>,
     schema: &mut Vec<ColumnSchema>,
     one_row: &mut Vec<Value>,
 ) -> Result<(), Error> {
@@ -226,7 +226,7 @@ fn parse_tags(
     };
 
     for (k, v) in tags {
-        let index = column_indexes.entry(k.to_string()).or_insert(schema.len());
+        let index = column_indexes.entry(k.as_str()).or_insert(schema.len());
         if *index == schema.len() {
             schema.push(ColumnSchema {
                 column_name: k.to_string(),
@@ -245,23 +245,23 @@ fn parse_tags(
     Ok(())
 }
 
-fn parse_fields(
-    fields: FieldSet,
-    column_indexes: &mut HashMap<String, usize>,
+fn parse_fields<'a>(
+    fields: &'a FieldSet,
+    column_indexes: &mut HashMap<&'a str, usize>,
     schema: &mut Vec<ColumnSchema>,
     one_row: &mut Vec<Value>,
 ) -> Result<(), Error> {
     for (k, v) in fields {
-        let index = column_indexes.entry(k.to_string()).or_insert(schema.len());
+        let index = column_indexes.entry(k.as_str()).or_insert(schema.len());
         let (datatype, value) = match v {
-            FieldValue::I64(v) => (ColumnDataType::Int64, ValueData::I64Value(v)),
-            FieldValue::U64(v) => (ColumnDataType::Uint64, ValueData::U64Value(v)),
-            FieldValue::F64(v) => (ColumnDataType::Float64, ValueData::F64Value(v)),
+            FieldValue::I64(v) => (ColumnDataType::Int64, ValueData::I64Value(*v)),
+            FieldValue::U64(v) => (ColumnDataType::Uint64, ValueData::U64Value(*v)),
+            FieldValue::F64(v) => (ColumnDataType::Float64, ValueData::F64Value(*v)),
             FieldValue::String(v) => (
                 ColumnDataType::String,
                 ValueData::StringValue(v.to_string()),
             ),
-            FieldValue::Boolean(v) => (ColumnDataType::Boolean, ValueData::BoolValue(v)),
+            FieldValue::Boolean(v) => (ColumnDataType::Boolean, ValueData::BoolValue(*v)),
         };
 
         if *index == schema.len() {
@@ -284,7 +284,7 @@ fn parse_fields(
 fn parse_ts(
     ts: Option<i64>,
     precision: Option<Precision>,
-    column_indexes: &mut HashMap<String, usize>,
+    column_indexes: &mut HashMap<&str, usize>,
     schema: &mut Vec<ColumnSchema>,
     one_row: &mut Vec<Value>,
 ) -> Result<(), Error> {
@@ -304,9 +304,7 @@ fn parse_ts(
     };
 
     let column_name = INFLUXDB_TIMESTAMP_COLUMN_NAME;
-    let index = column_indexes
-        .entry(column_name.to_string())
-        .or_insert(schema.len());
+    let index = column_indexes.entry(column_name).or_insert(schema.len());
     if *index == schema.len() {
         schema.push(ColumnSchema {
             column_name: column_name.to_string(),
