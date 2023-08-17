@@ -27,7 +27,9 @@ use snafu::ResultExt;
 use store_api::data_source::DataSource;
 use store_api::storage::{ScanRequest, TableId};
 use table::error::{SchemaConversionSnafu, TablesRecordBatchSnafu};
-use table::metadata::{TableIdent, TableInfoBuilder, TableInfoRef, TableMetaBuilder, TableType};
+use table::metadata::{
+    FilterPushDownType, TableIdent, TableInfoBuilder, TableInfoRef, TableMetaBuilder, TableType,
+};
 use table::thin_table::{ThinTable, ThinTableAdapter};
 use table::TableRef;
 
@@ -68,11 +70,12 @@ impl InformationSchemaProvider {
 
     pub fn table(&self, name: &str) -> Option<TableRef> {
         self.information_table(name).map(|table| {
-            let schema = table.schema();
+            let schema: Arc<datatypes::schema::Schema> = table.schema();
             let table_info = Self::table_info(self.catalog_name.clone(), &table);
             let table_type = table.table_type();
             let data_source = Arc::new(InformationTableDataSource::new(table));
-            let thin_table = ThinTable::new(schema, table_info, table_type);
+            let filter_pushdown = FilterPushDownType::Unsupported;
+            let thin_table = ThinTable::new(schema, table_info, table_type, filter_pushdown);
             Arc::new(ThinTableAdapter::new(thin_table, data_source)) as _
         })
     }

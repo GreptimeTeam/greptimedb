@@ -32,14 +32,21 @@ pub struct ThinTable {
     schema: SchemaRef,
     table_info: TableInfoRef,
     table_type: TableType,
+    filter_pushdown: FilterPushDownType,
 }
 
 impl ThinTable {
-    pub fn new(schema: SchemaRef, table_info: TableInfoRef, table_type: TableType) -> Self {
+    pub fn new(
+        schema: SchemaRef,
+        table_info: TableInfoRef,
+        table_type: TableType,
+        filter_pushdown: FilterPushDownType,
+    ) -> Self {
         Self {
             schema,
             table_info,
             table_type,
+            filter_pushdown,
         }
     }
 }
@@ -79,7 +86,7 @@ impl Table for ThinTableAdapter {
             .context(TablesRecordBatchSnafu)
     }
 
-    fn supports_filters_pushdown(&self, _filters: &[&Expr]) -> Result<Vec<FilterPushDownType>> {
-        todo!()
+    fn supports_filters_pushdown(&self, filters: &[&Expr]) -> Result<Vec<FilterPushDownType>> {
+        Ok(vec![self.table.filter_pushdown; filters.len()])
     }
 }
