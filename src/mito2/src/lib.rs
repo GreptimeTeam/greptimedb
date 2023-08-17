@@ -41,6 +41,8 @@ pub mod sst;
 pub mod wal;
 #[allow(dead_code)]
 mod worker;
+#[allow(dead_code)]
+mod schedule;
 
 #[cfg_attr(doc, aquamarine::aquamarine)]
 /// # Mito developer document
@@ -170,6 +172,3 @@ mod worker;
 /// The [RegionManifestManager](crate::manifest::manager::RegionManifestManager) manages metadata of the engine.
 ///
 mod docs {}
-
-#[allow(dead_code)]
-mod schedule;
