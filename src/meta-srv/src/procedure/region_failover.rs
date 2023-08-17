@@ -201,8 +201,8 @@ impl RegionFailoverManager {
         let table_ident = &failed_region.table_ident;
         Ok(self
             .table_metadata_manager
-            .table_region_manager()
-            .get(table_ident.table_id)
+            .table_route_manager()
+            .get_region_distribution(table_ident.table_id)
             .await
             .context(TableMetadataManagerSnafu)?
             .is_some())
@@ -410,16 +410,15 @@ mod tests {
 
     impl TestingEnv {
         pub async fn failed_region(&self, region_number: u32) -> RegionIdent {
-            let value = self
+            let region_distribution = self
                 .context
                 .table_metadata_manager
-                .table_region_manager()
-                .get(1)
+                .table_route_manager()
+                .get_region_distribution(1)
                 .await
                 .unwrap()
                 .unwrap();
-            let failed_datanode = value
-                .region_distribution
+            let failed_datanode = region_distribution
                 .iter()
                 .find_map(|(&datanode_id, regions)| {
                     if regions.contains(&region_number) {
@@ -453,12 +452,6 @@ mod tests {
             Self { selector: None }
         }
 
-        #[allow(unused)]
-        pub fn with_selector(mut self, selector: SelectorRef) -> Self {
-            self.selector = Some(selector);
-            self
-        }
-
         pub async fn build(self) -> TestingEnv {
             let in_memory = Arc::new(MemStore::new());
             let kv_store: KvStoreRef = Arc::new(MemStore::new());
@@ -479,14 +472,12 @@ mod tests {
                 table,
             )
             .await;
-            let table_region_value = table_metadata_manager
-                .table_region_manager()
-                .get(1)
+            let region_distribution = table_metadata_manager
+                .table_route_manager()
+                .get_region_distribution(1)
                 .await
                 .unwrap()
                 .unwrap();
-
-            let _ = table_routes::tests::prepare_table_route_value(&kv_store, table).await;
 
             let pushers = Pushers::default();
             let mut heartbeat_receivers = HashMap::with_capacity(3);
@@ -505,7 +496,7 @@ mod tests {
             let mailbox = HeartbeatMailbox::create(pushers.clone(), mailbox_sequence);
 
             let selector = self.selector.unwrap_or_else(|| {
-                let nodes = (1..=table_region_value.region_distribution.len())
+                let nodes = (1..=region_distribution.len())
                     .map(|id| Peer {
                         id: id as u64,
                         addr: "".to_string(),
@@ -645,23 +636,19 @@ mod tests {
         );
 
         // Verifies that the failed region (region 1) is moved from failed datanode (datanode 1) to the candidate datanode.
-        let value = env
+        let region_distribution = env
             .context
             .table_metadata_manager
-            .table_region_manager()
-            .get(1)
+            .table_route_manager()
+            .get_region_distribution(1)
             .await
             .unwrap()
             .unwrap();
         assert_eq!(
-            value
-                .region_distribution
-                .get(&failed_region.datanode_id)
-                .unwrap(),
+            region_distribution.get(&failed_region.datanode_id).unwrap(),
             &vec![2]
         );
-        assert!(value
-            .region_distribution
+        assert!(region_distribution
             .get(&candidate_rx.recv().await.unwrap())
             .unwrap()
             .contains(&1));

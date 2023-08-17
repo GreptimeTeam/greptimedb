@@ -14,6 +14,7 @@
 
 //! SST in parquet format.
 
+mod format;
 mod reader;
 mod writer;
 

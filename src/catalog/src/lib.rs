@@ -25,7 +25,7 @@ use api::v1::meta::{RegionStat, TableIdent, TableName};
 use common_telemetry::{info, warn};
 use snafu::ResultExt;
 use table::engine::{EngineContext, TableEngineRef};
-use table::metadata::TableId;
+use table::metadata::{TableId, TableType};
 use table::requests::CreateTableRequest;
 use table::TableRef;
 
@@ -238,6 +238,10 @@ pub async fn datanode_stat(catalog_manager: &CatalogManagerRef) -> (u64, Vec<Reg
                 else {
                     continue;
                 };
+
+                if table.table_type() != TableType::Base {
+                    continue;
+                }
 
                 let table_info = table.table_info();
                 let region_numbers = &table_info.meta.region_numbers;

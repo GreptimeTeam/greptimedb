@@ -12,24 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::meta::TableRouteValue;
 use common_meta::peer::Peer;
-use common_meta::rpc::router::TableRoute;
 use common_procedure::error::Error as ProcedureError;
-use snafu::{location, Location, ResultExt};
+use snafu::{location, Location};
 
-use crate::error::{self, Error, Result};
-
-pub fn build_table_route_value(table_route: TableRoute) -> Result<TableRouteValue> {
-    let (peers, table_route) = table_route
-        .try_into_raw()
-        .context(error::ConvertProtoDataSnafu)?;
-
-    Ok(TableRouteValue {
-        peers,
-        table_route: Some(table_route),
-    })
-}
+use crate::error::{self, Error};
 
 pub fn handle_request_datanode_error(datanode: Peer) -> impl FnOnce(client::error::Error) -> Error {
     move |err| {

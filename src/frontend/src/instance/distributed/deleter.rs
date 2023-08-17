@@ -178,11 +178,10 @@ mod tests {
     use common_meta::helper::{CatalogValue, SchemaValue};
     use common_meta::key::catalog_name::CatalogNameKey;
     use common_meta::key::schema_name::SchemaNameKey;
-    use common_meta::key::table_name::TableNameKey;
-    use common_meta::key::table_region::RegionDistribution;
     use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_meta::kv_backend::{KvBackend, KvBackendRef};
+    use common_meta::rpc::router::{Region, RegionRoute};
     use common_meta::rpc::store::PutRequest;
     use datatypes::prelude::{ConcreteDataType, VectorRef};
     use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, Schema};
@@ -247,26 +246,25 @@ mod tests {
             .unwrap()
             .into();
 
-        let key = TableNameKey::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, table_name);
-        assert!(table_metadata_manager
-            .table_name_manager()
-            .create(&key, table_id)
-            .await
-            .is_ok());
+        let region_route_factory = |region_id: u64, peer: u64| RegionRoute {
+            region: Region {
+                id: region_id.into(),
+                ..Default::default()
+            },
+            leader_peer: Some(Peer {
+                id: peer,
+                addr: String::new(),
+            }),
+            follower_peers: vec![],
+        };
 
-        assert!(table_metadata_manager
-            .table_info_manager()
-            .compare_and_put(table_id, None, table_info)
-            .await
-            .is_ok());
-
-        let _ = table_metadata_manager
-            .table_region_manager()
-            .compare_and_put(
-                1,
-                None,
-                RegionDistribution::from([(1, vec![1]), (2, vec![2]), (3, vec![3])]),
-            )
+        let region_routes = vec![
+            region_route_factory(1, 1),
+            region_route_factory(2, 2),
+            region_route_factory(3, 3),
+        ];
+        table_metadata_manager
+            .create_table_metadata(table_info, region_routes)
             .await
             .unwrap();
     }

@@ -309,8 +309,28 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid parquet SST file {}, reason: {}", file, reason))]
+    InvalidParquet {
+        file: String,
+        reason: String,
+        location: Location,
+    },
+
     #[snafu(display("Invalid batch, {}, location: {}", reason, location))]
     InvalidBatch { reason: String, location: Location },
+
+    #[snafu(display("Invalid arrow record batch, {}, location: {}", reason, location))]
+    InvalidRecordBatch { reason: String, location: Location },
+
+    #[snafu(display(
+        "Failed to convert array to vector, location: {}, source: {}",
+        location,
+        source
+    ))]
+    ConvertVector {
+        location: Location,
+        source: datatypes::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -341,7 +361,8 @@ impl ErrorExt for Error {
             | NewRecordBatch { .. }
             | RegionNotFound { .. }
             | RegionCorrupted { .. }
-            | CreateDefault { .. } => StatusCode::Unexpected,
+            | CreateDefault { .. }
+            | InvalidParquet { .. } => StatusCode::Unexpected,
             InvalidScanIndex { .. }
             | InvalidMeta { .. }
             | InvalidSchema { .. }
@@ -362,6 +383,8 @@ impl ErrorExt for Error {
             NotSupportedField { .. } => StatusCode::Unsupported,
             DeserializeField { .. } => StatusCode::Unexpected,
             InvalidBatch { .. } => StatusCode::InvalidArguments,
+            InvalidRecordBatch { .. } => StatusCode::InvalidArguments,
+            ConvertVector { source, .. } => source.status_code(),
         }
     }
 

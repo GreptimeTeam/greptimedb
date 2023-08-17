@@ -23,6 +23,7 @@ use std::sync::Arc;
 use api::v1::SemanticType;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
+use datatypes::arrow::datatypes::FieldRef;
 use datatypes::prelude::DataType;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use serde::de::Error;
@@ -124,6 +125,11 @@ impl<'de> Deserialize<'de> for RegionMetadata {
 }
 
 impl RegionMetadata {
+    /// Decode the metadata from a JSON str.
+    pub fn from_json(s: &str) -> Result<Self> {
+        serde_json::from_str(s).context(SerdeJsonSnafu)
+    }
+
     /// Encode the metadata to a JSON string.
     pub fn to_json(&self) -> Result<String> {
         serde_json::to_string(&self).context(SerdeJsonSnafu)
@@ -136,6 +142,11 @@ impl RegionMetadata {
             .map(|index| &self.column_metadatas[*index])
     }
 
+    /// Find column index by id.
+    pub fn column_index_by_id(&self, column_id: ColumnId) -> Option<usize> {
+        self.id_to_index.get(&column_id).copied()
+    }
+
     /// Returns the time index column
     ///
     /// # Panics
@@ -143,6 +154,26 @@ impl RegionMetadata {
     pub fn time_index_column(&self) -> &ColumnMetadata {
         let index = self.id_to_index[&self.time_index];
         &self.column_metadatas[index]
+    }
+
+    /// Returns the arrow field of the time index column.
+    pub fn time_index_field(&self) -> FieldRef {
+        let index = self.id_to_index[&self.time_index];
+        self.schema.arrow_schema().fields[index].clone()
+    }
+
+    /// Finds a column by name.
+    pub fn column_by_name(&self, name: &str) -> Option<&ColumnMetadata> {
+        self.schema
+            .column_index_by_name(name)
+            .map(|index| &self.column_metadatas[index])
+    }
+
+    /// Returns all field columns.
+    pub fn field_columns(&self) -> impl Iterator<Item = &ColumnMetadata> {
+        self.column_metadatas
+            .iter()
+            .filter(|column| column.semantic_type == SemanticType::Field)
     }
 
     /// Checks whether the metadata is valid.
@@ -264,6 +295,7 @@ impl RegionMetadata {
 
     /// Checks whether it is a valid column.
     fn validate_column_metadata(column_metadata: &ColumnMetadata) -> Result<()> {
+        // TODO(yingwen): Ensure column name is not internal columns.
         if column_metadata.semantic_type == SemanticType::Timestamp {
             ensure!(
                 column_metadata

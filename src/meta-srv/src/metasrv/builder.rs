@@ -177,7 +177,6 @@ impl MetaSrvBuilder {
             &options,
             datanode_clients,
             &procedure_manager,
-            &kv_store,
             &mailbox,
             &table_metadata_manager,
         );
@@ -316,7 +315,6 @@ fn build_ddl_manager(
     options: &MetaSrvOptions,
     datanode_clients: Option<Arc<DatanodeClients>>,
     procedure_manager: &ProcedureManagerRef,
-    kv_store: &KvStoreRef,
     mailbox: &MailboxRef,
     table_metadata_manager: &TableMetadataManagerRef,
 ) -> DdlManagerRef {
@@ -334,7 +332,6 @@ fn build_ddl_manager(
     // TODO(weny): considers to modify the default config of procedure manager
     Arc::new(DdlManager::new(
         procedure_manager.clone(),
-        kv_store.clone(),
         datanode_clients,
         mailbox.clone(),
         options.server_addr.clone(),

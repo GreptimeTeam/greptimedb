@@ -26,7 +26,7 @@ use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::TableId;
 
 use crate::error::{self, Result};
-use crate::key::table_region::RegionDistribution;
+use crate::key::RegionDistribution;
 use crate::peer::Peer;
 use crate::rpc::util;
 use crate::table_name::TableName;
@@ -74,7 +74,7 @@ impl TryFrom<PbRouteResponse> for RouteResponse {
     }
 }
 
-pub(crate) fn region_distribution(region_routes: &[RegionRoute]) -> Result<RegionDistribution> {
+pub fn region_distribution(region_routes: &[RegionRoute]) -> Result<RegionDistribution> {
     let mut regions_id_map = RegionDistribution::new();
     for route in region_routes.iter() {
         let node_id = route
@@ -88,6 +88,10 @@ pub(crate) fn region_distribution(region_routes: &[RegionRoute]) -> Result<Regio
         let region_id = route.region.id.region_number();
         regions_id_map.entry(node_id).or_default().push(region_id);
     }
+    for (_, regions) in regions_id_map.iter_mut() {
+        // id asc
+        regions.sort()
+    }
     Ok(regions_id_map)
 }
 
@@ -96,6 +100,41 @@ pub struct TableRoute {
     pub table: Table,
     pub region_routes: Vec<RegionRoute>,
     region_leaders: HashMap<RegionNumber, Option<Peer>>,
+}
+
+pub fn find_leaders(region_routes: &[RegionRoute]) -> HashSet<Peer> {
+    region_routes
+        .iter()
+        .flat_map(|x| &x.leader_peer)
+        .cloned()
+        .collect()
+}
+
+pub fn find_leader_regions(region_routes: &[RegionRoute], datanode: &Peer) -> Vec<RegionNumber> {
+    region_routes
+        .iter()
+        .filter_map(|x| {
+            if let Some(peer) = &x.leader_peer {
+                if peer == datanode {
+                    return Some(x.region.id.region_number());
+                }
+            }
+            None
+        })
+        .collect()
+}
+
+pub fn extract_all_peers(region_routes: &[RegionRoute]) -> Vec<Peer> {
+    let mut peers = region_routes
+        .iter()
+        .flat_map(|x| x.leader_peer.iter().chain(x.follower_peers.iter()))
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    peers.sort_by_key(|x| x.id);
+
+    peers
 }
 
 impl TableRoute {
@@ -211,25 +250,11 @@ impl TableRoute {
     }
 
     pub fn find_leaders(&self) -> HashSet<Peer> {
-        self.region_routes
-            .iter()
-            .flat_map(|x| &x.leader_peer)
-            .cloned()
-            .collect()
+        find_leaders(&self.region_routes)
     }
 
     pub fn find_leader_regions(&self, datanode: &Peer) -> Vec<RegionNumber> {
-        self.region_routes
-            .iter()
-            .filter_map(|x| {
-                if let Some(peer) = &x.leader_peer {
-                    if peer == datanode {
-                        return Some(x.region.id.region_number());
-                    }
-                }
-                None
-            })
-            .collect()
+        find_leader_regions(&self.region_routes, datanode)
     }
 
     pub fn find_region_leader(&self, region_number: RegionNumber) -> Option<&Peer> {
@@ -241,6 +266,7 @@ impl TableRoute {
 
 impl TryFrom<PbTableRouteValue> for TableRoute {
     type Error = error::Error;
+
     fn try_from(pb: PbTableRouteValue) -> Result<Self> {
         TableRoute::try_from_raw(
             &pb.peers,
@@ -248,6 +274,19 @@ impl TryFrom<PbTableRouteValue> for TableRoute {
                 err_msg: "expected table_route",
             })?,
         )
+    }
+}
+
+impl TryFrom<TableRoute> for PbTableRouteValue {
+    type Error = error::Error;
+
+    fn try_from(table_route: TableRoute) -> Result<Self> {
+        let (peers, table_route) = table_route.try_into_raw()?;
+
+        Ok(PbTableRouteValue {
+            peers,
+            table_route: Some(table_route),
+        })
     }
 }
 
