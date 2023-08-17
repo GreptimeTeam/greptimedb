@@ -114,16 +114,18 @@ impl InformationSchemaProvider {
     }
 }
 
-pub trait InformationTable {
+trait InformationTable {
     fn table_id(&self) -> TableId;
 
     fn table_name(&self) -> &'static str;
 
-    fn table_type(&self) -> TableType;
-
     fn schema(&self) -> SchemaRef;
 
     fn to_stream(&self) -> Result<SendableRecordBatchStream>;
+
+    fn table_type(&self) -> TableType {
+        TableType::Temporary
+    }
 }
 
 type InformationTableRef = Arc<dyn InformationTable + Send + Sync>;

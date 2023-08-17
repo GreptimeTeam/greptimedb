@@ -84,10 +84,6 @@ impl InformationTable for InformationSchemaTables {
         TABLES
     }
 
-    fn table_type(&self) -> TableType {
-        TableType::Temporary
-    }
-
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }

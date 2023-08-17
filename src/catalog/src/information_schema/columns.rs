@@ -32,7 +32,6 @@ use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::vectors::{StringVectorBuilder, VectorRef};
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::TableId;
-use table::metadata::TableType;
 
 use super::tables::InformationSchemaTables;
 use super::{InformationTable, COLUMNS, TABLES};
@@ -90,10 +89,6 @@ impl InformationTable for InformationSchemaColumns {
 
     fn table_name(&self) -> &'static str {
         COLUMNS
-    }
-
-    fn table_type(&self) -> TableType {
-        TableType::Temporary
     }
 
     fn schema(&self) -> SchemaRef {
