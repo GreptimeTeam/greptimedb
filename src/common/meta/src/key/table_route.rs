@@ -15,19 +15,14 @@
 use std::fmt::Display;
 
 use api::v1::meta::TableName;
-use futures::future::try_join_all;
-use serde::__private::de;
 use serde::{Deserialize, Serialize};
-use snafu::ensure;
 use table::metadata::TableId;
 
-use crate::error::{Result, UnexpectedSnafu};
+use crate::error::Result;
 use crate::key::{to_removed_key, RegionDistribution, TableMetaKey};
-use crate::kv_backend::txn::{Compare, CompareOp, Txn, TxnOp, TxnOpResponse, TxnRequest};
+use crate::kv_backend::txn::{Compare, CompareOp, Txn, TxnOp, TxnOpResponse};
 use crate::kv_backend::KvBackendRef;
-use crate::rpc::router::{region_distribution, RegionRoute, Table, TableRoute};
-use crate::rpc::store::{BatchGetRequest, CompareAndPutRequest, MoveValueRequest};
-use crate::rpc::KeyValue;
+use crate::rpc::router::{region_distribution, RegionRoute};
 
 pub const TABLE_ROUTE_PREFIX: &str = "__meta_table_route";
 
@@ -264,15 +259,10 @@ impl<'a> Display for TableRouteKey<'a> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
 
     use api::v1::meta::TableName as PbTableName;
 
     use super::TableRouteKey;
-    use crate::key::table_route::{TableRouteManager, TableRouteValue};
-    use crate::kv_backend::memory::MemoryKvBackend;
-    use crate::rpc::router::{RegionRoute, Table, TableRoute};
-    use crate::table_name::TableName;
 
     #[test]
     fn test_table_route_key() {

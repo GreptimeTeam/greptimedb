@@ -452,12 +452,6 @@ mod tests {
             Self { selector: None }
         }
 
-        #[allow(unused)]
-        pub fn with_selector(mut self, selector: SelectorRef) -> Self {
-            self.selector = Some(selector);
-            self
-        }
-
         pub async fn build(self) -> TestingEnv {
             let in_memory = Arc::new(MemStore::new());
             let kv_store: KvStoreRef = Arc::new(MemStore::new());

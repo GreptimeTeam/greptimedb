@@ -52,7 +52,7 @@ pub mod table_name;
 #[allow(deprecated)]
 pub mod table_region;
 // TODO(weny): removes it.
-#[allow(unused, deprecated)]
+#[allow(deprecated)]
 pub mod table_route;
 
 use std::collections::BTreeMap;
