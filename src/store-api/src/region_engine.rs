@@ -16,7 +16,6 @@
 
 use std::sync::Arc;
 
-use api::v1::QueryRequest;
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
 use common_query::Output;
@@ -24,7 +23,7 @@ use common_recordbatch::SendableRecordBatchStream;
 
 use crate::metadata::RegionMetadataRef;
 use crate::region_request::RegionRequest;
-use crate::storage::RegionId;
+use crate::storage::{RegionId, ScanRequest};
 
 #[async_trait]
 pub trait RegionEngine: Send + Sync {
@@ -44,7 +43,7 @@ pub trait RegionEngine: Send + Sync {
     async fn handle_query(
         &self,
         region_id: RegionId,
-        request: QueryRequest,
+        request: ScanRequest,
     ) -> Result<SendableRecordBatchStream, BoxedError>;
 
     /// Retrieve region's metadata.

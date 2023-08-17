@@ -30,7 +30,7 @@ use datatypes::schema::SchemaRef;
 use futures::{Stream, StreamExt};
 use snafu::OptionExt;
 
-/// Adapt greptime's [SendableRecordBatchStream] to DataFusion's [PhysicalPlan].
+/// Adapt greptime's [SendableRecordBatchStream] to GreptimeDB's [PhysicalPlan].
 pub struct StreamScanAdapter {
     stream: Mutex<Option<SendableRecordBatchStream>>,
     schema: SchemaRef,

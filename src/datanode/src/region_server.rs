@@ -14,11 +14,13 @@
 
 use std::any::Any;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use api::v1::region::QueryRequest;
 use async_trait::async_trait;
 use bytes::Bytes;
+use common_query::logical_plan::Expr;
+use common_query::physical_plan::DfPhysicalPlanAdapter;
 use common_query::{DfPhysicalPlan, Output};
 use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::info;
@@ -28,7 +30,8 @@ use datafusion::catalog::{CatalogList, CatalogProvider};
 use datafusion::datasource::TableProvider;
 use datafusion::error::Result as DfResult;
 use datafusion::execution::context::SessionState;
-use datafusion_expr::{Expr, TableType};
+use datafusion_common::DataFusionError;
+use datafusion_expr::{Expr as DfExpr, TableType};
 use datatypes::arrow::datatypes::SchemaRef;
 use query::QueryEngineRef;
 use session::context::QueryContext;
@@ -36,8 +39,9 @@ use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::RegionEngineRef;
 use store_api::region_request::RegionRequest;
-use store_api::storage::RegionId;
+use store_api::storage::{RegionId, ScanRequest};
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
+use table::table::scan::StreamScanAdapter;
 
 use crate::error::{
     DecodeLogicalPlanSnafu, ExecuteLogicalPlanSnafu, GetRegionMetadataSnafu,
@@ -177,6 +181,7 @@ impl DummyCatalogList {
             region_id,
             engine,
             metadata,
+            scan_request: Default::default(),
         };
         let schema_provider = DummySchemaProvider {
             table: table_provider,
@@ -264,6 +269,7 @@ struct DummyTableProvider {
     region_id: RegionId,
     engine: RegionEngineRef,
     metadata: RegionMetadataRef,
+    scan_request: Arc<Mutex<ScanRequest>>,
 }
 
 #[async_trait]
@@ -282,11 +288,23 @@ impl TableProvider for DummyTableProvider {
 
     async fn scan(
         &self,
-        state: &SessionState,
+        _state: &SessionState,
         projection: Option<&Vec<usize>>,
-        filters: &[Expr],
+        filters: &[DfExpr],
         limit: Option<usize>,
     ) -> DfResult<Arc<dyn DfPhysicalPlan>> {
-        todo!()
+        let mut request = self.scan_request.lock().unwrap().clone();
+        request.projection = projection.cloned();
+        request.filters = filters.iter().map(|e| Expr::from(e.clone())).collect();
+        request.limit = limit;
+
+        let stream = self
+            .engine
+            .handle_query(self.region_id, request)
+            .await
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        Ok(Arc::new(DfPhysicalPlanAdapter(Arc::new(
+            StreamScanAdapter::new(stream),
+        ))))
     }
 }

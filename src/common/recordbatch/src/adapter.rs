@@ -75,7 +75,8 @@ impl<T: Unpin + AsyncFileReader + Send + 'static> Stream for ParquetRecordBatchS
     }
 }
 
-/// Greptime SendableRecordBatchStream -> DataFusion RecordBatchStream
+/// Greptime SendableRecordBatchStream -> DataFusion RecordBatchStream.
+/// The reverse one is [RecordBatchStreamAdapter].
 pub struct DfRecordBatchStreamAdapter {
     stream: SendableRecordBatchStream,
 }
@@ -112,7 +113,8 @@ impl Stream for DfRecordBatchStreamAdapter {
     }
 }
 
-/// DataFusion [SendableRecordBatchStream](DfSendableRecordBatchStream) -> Greptime [RecordBatchStream]
+/// DataFusion [SendableRecordBatchStream](DfSendableRecordBatchStream) -> Greptime [RecordBatchStream].
+/// The reverse one is [DfRecordBatchStreamAdapter]
 pub struct RecordBatchStreamAdapter {
     schema: SchemaRef,
     stream: DfSendableRecordBatchStream,
