@@ -26,13 +26,15 @@ use object_store::ObjectStore;
 use parquet::arrow::{ParquetRecordBatchStreamBuilder, ProjectionMask};
 use parquet::errors::ParquetError;
 use parquet::format::KeyValue;
-use snafu::{OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use store_api::metadata::RegionMetadata;
 use store_api::storage::ColumnId;
 use table::predicate::Predicate;
 use tokio::io::BufReader;
 
-use crate::error::{InvalidMetadataSnafu, NoKeyValueSnafu, OpenDalSnafu, ReadParquetSnafu, Result};
+use crate::error::{
+    InvalidMetadataSnafu, InvalidParquetSnafu, OpenDalSnafu, ReadParquetSnafu, Result,
+};
 use crate::read::{Batch, BatchReader};
 use crate::sst::file::FileHandle;
 use crate::sst::parquet::format::ReadFormat;
@@ -173,7 +175,21 @@ impl ParquetReader {
             builder = builder.with_row_groups(pruned_row_groups);
         }
 
-        let read_format = ReadFormat::new(Arc::new(region_meta), builder.schema().clone());
+        let read_format = ReadFormat::new(Arc::new(region_meta));
+        // The arrow schema converted from the region meta should be the same as parquet's.
+        // We only compare fields to avoid schema's metadata breaks the comparision.
+        ensure!(
+            read_format.arrow_schema().fields() == builder.schema().fields(),
+            InvalidParquetSnafu {
+                file: &self.file_path,
+                reason: format!(
+                    "schema mismatch, expect: {:?}, given: {:?}",
+                    read_format.arrow_schema().fields(),
+                    builder.schema().fields()
+                )
+            }
+        );
+
         let parquet_schema_desc = builder.metadata().file_metadata().schema_descr();
         if let Some(column_ids) = self.projection.as_ref() {
             let indices = read_format.projection_indices(column_ids.iter().copied());
@@ -195,21 +211,24 @@ impl ParquetReader {
         &self,
         key_value_meta: Option<&Vec<KeyValue>>,
     ) -> Result<RegionMetadata> {
-        let key_values = key_value_meta.context(NoKeyValueSnafu {
+        let key_values = key_value_meta.context(InvalidParquetSnafu {
             file: &self.file_path,
             reason: "missing key value meta",
         })?;
         let meta_value = key_values
             .iter()
             .find(|kv| kv.key == PARQUET_METADATA_KEY)
-            .with_context(|| NoKeyValueSnafu {
+            .with_context(|| InvalidParquetSnafu {
                 file: &self.file_path,
                 reason: format!("key {} not found", PARQUET_METADATA_KEY),
             })?;
-        let json = meta_value.value.as_ref().with_context(|| NoKeyValueSnafu {
-            file: &self.file_path,
-            reason: format!("No value for key {}", PARQUET_METADATA_KEY),
-        })?;
+        let json = meta_value
+            .value
+            .as_ref()
+            .with_context(|| InvalidParquetSnafu {
+                file: &self.file_path,
+                reason: format!("No value for key {}", PARQUET_METADATA_KEY),
+            })?;
 
         RegionMetadata::from_json(json).context(InvalidMetadataSnafu)
     }

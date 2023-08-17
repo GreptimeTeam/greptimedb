@@ -115,20 +115,25 @@ pub(crate) struct ReadFormat {
 }
 
 impl ReadFormat {
-    /// Creates a helper with existing `arrow_schema` converted from `metadata`.
-    pub(crate) fn new(metadata: RegionMetadataRef, arrow_schema: SchemaRef) -> ReadFormat {
-        debug_assert_eq!(to_sst_arrow_schema(&metadata), arrow_schema);
+    /// Creates a helper with existing `metadata`.
+    pub(crate) fn new(metadata: RegionMetadataRef) -> ReadFormat {
         let field_id_to_index: HashMap<_, _> = metadata
             .field_columns()
             .enumerate()
             .map(|(index, column)| (column.column_id, index))
             .collect();
+        let arrow_schema = to_sst_arrow_schema(&metadata);
 
         ReadFormat {
             metadata,
             arrow_schema,
             field_id_to_index,
         }
+    }
+
+    /// Gets the converted arrow schema.
+    pub(crate) fn arrow_schema(&self) -> &SchemaRef {
+        &self.arrow_schema
     }
 
     /// Gets sorted projection indices to read `columns` from parquet files.
@@ -485,8 +490,7 @@ mod tests {
     #[test]
     fn test_projection_indices() {
         let metadata = build_test_region_metadata();
-        let arrow_schema = build_test_arrow_schema();
-        let read_format = ReadFormat::new(metadata, arrow_schema);
+        let read_format = ReadFormat::new(metadata);
         // Only read tag1
         assert_eq!(vec![2, 3, 4, 5], read_format.projection_indices([3]));
         // Only read field1
@@ -538,7 +542,9 @@ mod tests {
     fn test_convert_empty_record_batch() {
         let metadata = build_test_region_metadata();
         let arrow_schema = build_test_arrow_schema();
-        let read_format = ReadFormat::new(metadata, arrow_schema.clone());
+        let read_format = ReadFormat::new(metadata);
+        assert_eq!(arrow_schema, *read_format.arrow_schema());
+
         let record_batch = RecordBatch::new_empty(arrow_schema);
         let mut batches = vec![];
         read_format
@@ -550,8 +556,7 @@ mod tests {
     #[test]
     fn test_convert_record_batch() {
         let metadata = build_test_region_metadata();
-        let arrow_schema = build_test_arrow_schema();
-        let read_format = ReadFormat::new(metadata, arrow_schema.clone());
+        let read_format = ReadFormat::new(metadata);
 
         let columns: Vec<ArrayRef> = vec![
             Arc::new(Int64Array::from(vec![1, 1, 10, 10])), // field1
@@ -561,6 +566,7 @@ mod tests {
             Arc::new(UInt64Array::from(vec![TEST_SEQUENCE; 4])), // sequence
             Arc::new(UInt8Array::from(vec![TEST_OP_TYPE; 4])), // op type
         ];
+        let arrow_schema = build_test_arrow_schema();
         let record_batch = RecordBatch::try_new(arrow_schema, columns).unwrap();
         let mut batches = vec![];
         read_format

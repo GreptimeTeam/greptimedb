@@ -309,8 +309,8 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to get metadata from file {}, reason: {}", file, reason))]
-    NoKeyValue {
+    #[snafu(display("Invalid parquet SST file {}, reason: {}", file, reason))]
+    InvalidParquet {
         file: String,
         reason: String,
         location: Location,
@@ -362,7 +362,7 @@ impl ErrorExt for Error {
             | RegionNotFound { .. }
             | RegionCorrupted { .. }
             | CreateDefault { .. }
-            | NoKeyValue { .. } => StatusCode::Unexpected,
+            | InvalidParquet { .. } => StatusCode::Unexpected,
             InvalidScanIndex { .. }
             | InvalidMeta { .. }
             | InvalidSchema { .. }

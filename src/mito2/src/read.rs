@@ -221,10 +221,10 @@ impl BatchBuilder {
             reason: "missing timestamps",
         })?;
         let sequences = self.sequences.context(InvalidBatchSnafu {
-            reason: "missing timestamps",
+            reason: "missing sequences",
         })?;
         let op_types = self.op_types.context(InvalidBatchSnafu {
-            reason: "missing timestamps",
+            reason: "missing op_types",
         })?;
 
         let ts_len = timestamps.len();
