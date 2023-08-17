@@ -21,6 +21,7 @@ pub mod requests;
 pub mod stats;
 pub mod table;
 pub mod test_util;
+pub mod thin_table;
 
 pub use store_api::storage::RegionStat;
 

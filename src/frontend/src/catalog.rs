@@ -385,7 +385,7 @@ impl CatalogManager for FrontendCatalogManager {
 
             let provider =
                 InformationSchemaProvider::new(catalog.to_string(), Arc::downgrade(&manager));
-            return provider.table(table_name);
+            return Ok(provider.table(table_name));
         }
 
         let key = TableNameKey::new(catalog, schema, table_name);
