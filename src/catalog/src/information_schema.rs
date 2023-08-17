@@ -28,7 +28,7 @@ use store_api::data_source::DataSource;
 use store_api::storage::{ScanRequest, TableId};
 use table::error::{SchemaConversionSnafu, TablesRecordBatchSnafu};
 use table::metadata::{TableIdent, TableInfoBuilder, TableInfoRef, TableMetaBuilder, TableType};
-use table::thin_table::ThinTable;
+use table::thin_table::{ThinTable, ThinTableAdapter};
 use table::TableRef;
 
 use self::columns::InformationSchemaColumns;
@@ -72,8 +72,8 @@ impl InformationSchemaProvider {
             let table_info = Self::table_info(self.catalog_name.clone(), &table);
             let table_type = table.table_type();
             let data_source = Arc::new(InformationTableDataSource::new(table));
-            let t = ThinTable::new(schema, table_info, table_type, data_source);
-            Arc::new(t) as _
+            let thin_table = ThinTable::new(schema, table_info, table_type);
+            Arc::new(ThinTableAdapter::new(thin_table, data_source)) as _
         })
     }
 

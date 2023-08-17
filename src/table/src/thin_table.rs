@@ -32,41 +32,45 @@ pub struct ThinTable {
     schema: SchemaRef,
     table_info: TableInfoRef,
     table_type: TableType,
-    data_source: DataSourceRef,
 }
 
 impl ThinTable {
-    pub fn new(
-        schema: SchemaRef,
-        table_info: TableInfoRef,
-        table_type: TableType,
-        data_source: DataSourceRef,
-    ) -> Self {
+    pub fn new(schema: SchemaRef, table_info: TableInfoRef, table_type: TableType) -> Self {
         Self {
             schema,
             table_info,
             table_type,
-            data_source,
         }
     }
 }
 
+pub struct ThinTableAdapter {
+    table: ThinTable,
+    data_source: DataSourceRef,
+}
+
+impl ThinTableAdapter {
+    pub fn new(table: ThinTable, data_source: DataSourceRef) -> Self {
+        Self { table, data_source }
+    }
+}
+
 #[async_trait]
-impl Table for ThinTable {
+impl Table for ThinTableAdapter {
     fn as_any(&self) -> &dyn Any {
         self
     }
 
     fn schema(&self) -> SchemaRef {
-        self.schema.clone()
+        self.table.schema.clone()
     }
 
     fn table_info(&self) -> TableInfoRef {
-        self.table_info.clone()
+        self.table.table_info.clone()
     }
 
     fn table_type(&self) -> TableType {
-        self.table_type
+        self.table.table_type
     }
 
     async fn scan_to_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream> {
