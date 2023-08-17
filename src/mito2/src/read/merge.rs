@@ -17,13 +17,16 @@
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
+use crate::error::Result;
 use crate::read::{Batch, Source};
 
 /// Reader to merge sorted batches.
 ///
 /// The merge reader merges [Batch]es from multiple sources that yields sorted batches.
-/// Batches from each source **must** be ordered by primary key, time index, sequence desc,
-/// op type desc.
+/// Batches from each source **must** obey the following rules:
+/// 1. Batch is ordered by primary key, time index, sequence desc, op type desc (we can
+/// ignore op type as sequence is already unique).
+/// 2. Batch doesn't have duplicate elements (element with same key).
 pub struct MergeReader {
     /// Whether the reader has been initialized.
     initialized: bool,
@@ -34,6 +37,31 @@ pub struct MergeReader {
     sources: Vec<Source>,
     /// Holds a min-heap for all [Node]s. Each node yields batches from a `source`.
     nodes: BinaryHeap<Node>,
+    /// Batches for the next primary key.
+    batch_merger: BatchMerger,
+}
+
+impl MergeReader {
+    fn fetch_batches_of_same_key(&mut self) -> Result<()> {
+        unimplemented!()
+    }
+}
+
+/// Helper to merge batches for same primary key.
+struct BatchMerger {
+    /// Buffered batches to merge.
+    batches: Vec<Batch>,
+    /// Whether the batch buffer is still sorted.
+    is_sorted: bool,
+}
+
+impl BatchMerger {
+    fn new() -> BatchMerger {
+        BatchMerger {
+            batches: Vec::new(),
+            is_sorted: true,
+        }
+    }
 }
 
 /// A `Node` represent an individual input data source to be merged.
