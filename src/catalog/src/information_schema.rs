@@ -25,11 +25,11 @@ use common_catalog::consts::{
     INFORMATION_SCHEMA_TABLES_TABLE_ID,
 };
 use common_error::ext::BoxedError;
-use common_query::data_source::{DataSource, TableFactory};
 use common_recordbatch::{RecordBatchStreamAdaptor, SendableRecordBatchStream};
 use datatypes::schema::SchemaRef;
 use futures_util::StreamExt;
 use snafu::ResultExt;
+use store_api::data_source::{DataSource, TableFactory};
 use store_api::storage::{ScanRequest, TableId};
 use table::error::{SchemaConversionSnafu, TablesRecordBatchSnafu};
 use table::metadata::{TableIdent, TableInfoBuilder, TableMetaBuilder, TableType};
@@ -218,18 +218,22 @@ impl Table for InformationTable {
     }
 
     async fn scan_to_stream(&self, request: ScanRequest) -> TableResult<SendableRecordBatchStream> {
-        self.get_stream(request)
+        self.get_stream(request).context(TablesRecordBatchSnafu)
     }
 }
 
 impl DataSource for InformationTable {
-    fn get_stream(&self, request: ScanRequest) -> TableResult<SendableRecordBatchStream> {
+    fn get_stream(
+        &self,
+        request: ScanRequest,
+    ) -> std::result::Result<SendableRecordBatchStream, BoxedError> {
         let projection = request.projection;
         let projected_schema = if let Some(projection) = &projection {
             Arc::new(
                 self.schema()
                     .try_project(projection)
-                    .context(SchemaConversionSnafu)?,
+                    .context(SchemaConversionSnafu)
+                    .map_err(BoxedError::new)?,
             )
         } else {
             self.schema()
@@ -238,7 +242,8 @@ impl DataSource for InformationTable {
             .stream_builder
             .to_stream()
             .map_err(BoxedError::new)
-            .context(TablesRecordBatchSnafu)?
+            .context(TablesRecordBatchSnafu)
+            .map_err(BoxedError::new)?
             .map(move |batch| {
                 batch.and_then(|batch| {
                     if let Some(projection) = &projection {

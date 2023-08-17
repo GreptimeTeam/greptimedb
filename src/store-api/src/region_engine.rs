@@ -22,12 +22,12 @@ use common_error::ext::BoxedError;
 use common_query::Output;
 use common_recordbatch::SendableRecordBatchStream;
 
-use crate::metadata::RegionMetadata;
+use crate::metadata::RegionMetadataRef;
 use crate::region_request::RegionRequest;
 use crate::storage::RegionId;
 
 #[async_trait]
-pub trait RegionEngine {
+pub trait RegionEngine: Send + Sync {
     /// Name of this engine
     fn name(&self) -> &str;
 
@@ -48,7 +48,7 @@ pub trait RegionEngine {
     ) -> Result<SendableRecordBatchStream, BoxedError>;
 
     /// Retrieve region's metadata.
-    async fn get_metadata(&self, region_id: RegionId) -> Result<RegionMetadata, BoxedError>;
+    async fn get_metadata(&self, region_id: RegionId) -> Result<RegionMetadataRef, BoxedError>;
 }
 
 pub type RegionEngineRef = Arc<dyn RegionEngine>;

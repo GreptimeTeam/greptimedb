@@ -20,7 +20,6 @@ use common_recordbatch::{RecordBatches, SendableRecordBatchStream};
 use serde::{Deserialize, Serialize};
 
 pub mod columnar_value;
-pub mod data_source;
 pub mod error;
 mod function;
 pub mod logical_plan;

@@ -516,6 +516,20 @@ pub enum Error {
         expected: String,
         location: Location,
     },
+
+    #[snafu(display(
+        "Failed to get metadata from region {} for region_id {}, location: {}, source: {}",
+        region,
+        region_id,
+        location,
+        source
+    ))]
+    GetRegionMetadata {
+        region: String,
+        region_id: RegionId,
+        location: Location,
+        source: BoxedError,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -596,7 +610,8 @@ impl ErrorExt for Error {
             | JoinTask { .. }
             | RegionNotFound { .. }
             | RegionEngineNotFound { .. }
-            | UnsupportedOutput { .. } => StatusCode::Internal,
+            | UnsupportedOutput { .. }
+            | GetRegionMetadata { .. } => StatusCode::Internal,
 
             StartServer { source, .. }
             | ShutdownServer { source, .. }

@@ -14,20 +14,16 @@
 
 use std::sync::Arc;
 
+use common_error::ext::BoxedError;
 use common_recordbatch::SendableRecordBatchStream;
 
-use crate::error::Result;
+use crate::storage::ScanRequest;
 
 /// This trait represents a common data source abstraction which provides an interface
 /// for retrieving data in the form of a stream of record batches.
 pub trait DataSource {
     /// Retrieves a stream of record batches based on the provided scan request.
-    fn get_stream(&self, request: PlaceholderScanRequest) -> Result<SendableRecordBatchStream>;
-}
-
-pub struct PlaceholderScanRequest {
-    /// Indices of columns to read, `None` to read all columns.
-    pub projection: Option<Vec<usize>>,
+    fn get_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream, BoxedError>;
 }
 
 pub type DataSourceRef = Arc<dyn DataSource>;
