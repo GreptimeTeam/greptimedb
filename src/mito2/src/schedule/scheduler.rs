@@ -21,14 +21,14 @@ const CONSUMER_NUM: u8 = 2;
 #[async_trait::async_trait]
 pub trait Scheduler {
     /// Schedules a Job
-    async fn schedule(&self, req: Job) -> Result<()>;
+    async fn schedule(&mut self, req: Job) -> Result<()>;
 
     /// Stops scheduler
-    async fn stop(&mut self) -> Result<()>;
+    async fn stop(&mut self, await_termination: bool) -> Result<()>;
 }
 
 pub struct LocalScheduler {
-    sender: flume::Sender<Job>,
+    sender: Option<flume::Sender<Job>>,
     handles: Vec<Option<JoinHandle<()>>>,
     /// Token used to halt the scheduler
     cancel_token: CancellationToken,
@@ -60,19 +60,25 @@ impl LocalScheduler {
                         }
                         req_opt = receiver.recv_async() =>{
                             if let Ok(req) = req_opt{
-                                println!("handle {} is doing", id);
+                                info!("handle {} is doing", id);
                                 req.await;
                             }
                         }
                     }
                     
                 }
+                // For correctness, we need to poll requests from fifo again.
+                if state.load(Ordering::Relaxed) == STATE_AWAIT_TERMINATION {
+                    while let Ok(req) = receiver.recv() {
+                        req.await;
+                    }
+                }
             });
             handles.push(Some(handle));
         }
 
         Self {
-            sender: tx,
+            sender: Some(tx),
             cancel_token: token,
             handles: handles,
             state,
@@ -87,14 +93,21 @@ impl LocalScheduler {
 
 #[async_trait::async_trait]
 impl Scheduler for LocalScheduler {
-    async fn schedule(&self, req: Job) -> Result<()> {
-        self.sender.send_async(req).await.unwrap();
+    async fn schedule(&mut self, req: Job) -> Result<()> {
+        self.sender.as_mut().unwrap().send_async(req).await.unwrap();
         Ok(())
     }
 
-    async fn stop(&mut self) -> Result<()> {
+    async fn stop(&mut self, await_termination: bool) -> Result<()> {
+        let state = if await_termination {
+            STATE_AWAIT_TERMINATION
+        } else {
+            STATE_STOP
+        };
+        self.state.store(state, Ordering::Relaxed);
         self.cancel_token.cancel();
-        self.state.store(STATE_STOP, Ordering::Relaxed);
+        let _  = self.sender.take();
+
         for handle in &mut self.handles {
             if let Some(handle) = handle.take() {
                 handle.await.unwrap();
@@ -115,168 +128,96 @@ impl Drop for LocalScheduler {
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicI32;
-    use std::time::{Instant, Duration};
-    use std::sync::{Arc, Mutex};
-    use tokio::sync::Notify;
-
-    struct CountdownLatch {
-        counter: std::sync::Mutex<usize>,
-        notify: Notify,
-    }
-
-    impl CountdownLatch {
-        fn new(size: usize) -> Self {
-            Self {
-                counter: std::sync::Mutex::new(size),
-                notify: Notify::new(),
-            }
-        }
-
-        fn countdown(&self) {
-            let mut counter = self.counter.lock().unwrap();
-            if *counter >= 1 {
-                *counter -= 1;
-                if *counter == 0 {
-                    self.notify.notify_waiters();
-                }
-            }
-        }
-
-        /// Users should only call this once.
-        async fn wait(&self) {
-            self.notify.notified().await
-        }
-    }
+    use std::time::Duration;
+    use std::sync::Arc;
+    use tokio::sync::Barrier;
 
     #[tokio::test]
     async fn test_scheduler() {
-        let mut local = LocalScheduler::new(32, 3);
-        let latch = Arc::new(CountdownLatch::new(3));
+        let mut local = LocalScheduler::new(3, 3);
 
-        let latch_clone1 = latch.clone();
         local
             .schedule(Box::pin(async move {
                 println!("hello1");
-                latch_clone1.countdown();
             }))
             .await
             .unwrap();
         
-        let latch_clone2= latch.clone();
         local
             .schedule(Box::pin(async move {
                 println!("hello2");
-                latch_clone2.countdown();
             }))
             .await
             .unwrap();
 
-        let latch_clone3= latch.clone();
         local
             .schedule(Box::pin(async move {
                 println!("hello3");
-                latch_clone3.countdown();
             }))
             .await
             .unwrap();
 
-        latch.wait().await;
-
-        local.stop().await.unwrap();
     }
 
     #[tokio::test]
-    async fn test_sum() {
+    async fn test_sum_cap() {
 
         let task_size = 1000;
         let sum = Arc::new(AtomicI32::new(0));
-        let mut local = LocalScheduler::new(32, 10);
-        let latch = Arc::new(CountdownLatch::new(task_size));
-        let start = Instant::now();
+        let mut local = LocalScheduler::new(3, task_size);
+
         for _ in 0..task_size {
             let sum = Arc::clone(&sum);
-            let latch_clone = latch.clone();
             local.schedule(Box::pin(async move {
                 sum.fetch_add(1, Ordering::Relaxed);
-                tokio::time::sleep(Duration::from_millis(3)).await;
-                latch_clone.countdown();
+            }))
+            .await
+            .unwrap();
+        }
+        local.stop(true).await.unwrap();
+
+        assert_eq!(sum.load(Ordering::Relaxed), 1000);
+    }
+
+    #[tokio::test]
+    async fn test_sum_consumer_num() {
+
+        let task_size = 1000;
+        let sum = Arc::new(AtomicI32::new(0));
+        let mut local = LocalScheduler::new(task_size, 3);
+
+        for _ in 0..task_size{
+            let sum = Arc::clone(&sum);
+            local.schedule(Box::pin(async move {
+                sum.fetch_add(1, Ordering::Relaxed);
             }))
             .await
             .unwrap();
         }
 
-        latch.wait().await;
-        let end = Instant::now();
-        println!("Elapsed time: {:?}s", (end - start).as_secs_f32());
-        local.stop().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        local.stop(true).await.unwrap();
 
         assert_eq!(sum.load(Ordering::Relaxed), 1000);
-
     }
 
     #[tokio::test]
     async fn test_scheduler_many() {
-        let task_size = 100;
+        let task_size = 1000;
 
-        let latch = Arc::new(CountdownLatch::new(task_size + 1));
-        let mut local = LocalScheduler::new(20, 100);
+        let barrier = Arc::new(Barrier::new(task_size + 1));
+        let mut local: LocalScheduler = LocalScheduler::new(20, task_size + 1);
 
         for _ in 0..task_size {
-            let latch_clone = latch.clone();
+            let barrier_clone = barrier.clone();
             local.schedule(Box::pin(async move {
-                latch_clone.countdown();
-                latch_clone.wait().await;
-
+                barrier_clone.wait().await;
             }))
             .await
             .unwrap();
         }
         
-        tokio::time::sleep(Duration::from_millis(1000)).await;
-        latch.countdown();
-        local.stop().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_scheduler_interval() {
-        
-        let task_size = 100;
-        let latch = Arc::new(CountdownLatch::new(task_size));
-        let mut local = LocalScheduler::new(32, 3);
-        let sum = Arc::new(Mutex::new(0));
-        
-        for _ in 0..task_size / 2{
-            let sum = Arc::clone(&sum);
-            let latch_clone = latch.clone();
-            local.schedule(Box::pin(async move {
-                let mut sum = sum.lock().unwrap();
-                *sum += 1;
-                latch_clone.countdown();
-
-            }))
-            .await
-            .unwrap();
-        }
-
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
-        for _ in 0..task_size / 2{
-            let sum = Arc::clone(&sum);
-            let latch_clone = latch.clone();
-            local.schedule(Box::pin(async move {
-                let mut sum = sum.lock().unwrap();
-                *sum += 1;
-                latch_clone.countdown();
-            }))
-            .await
-            .unwrap();
-        }
-
-        latch.wait().await;
-        local.stop().await.unwrap();
-
-        assert_eq!(*sum.lock().unwrap(), task_size);
-
+        barrier.wait().await;
     }
 
 }
