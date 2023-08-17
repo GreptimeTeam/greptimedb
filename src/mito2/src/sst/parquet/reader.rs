@@ -87,80 +87,43 @@ impl ParquetReaderBuilder {
         self
     }
 
-    /// Builds a [ParquetReader].
-    pub fn build(self) -> ParquetReader {
+    /// Builds and initializes a [ParquetReader].
+    ///
+    /// This needs to perform IO operation.
+    pub async fn build(self) -> Result<ParquetReader> {
         let file_path = self.file_handle.file_path(&self.file_dir);
-        ParquetReader {
+        let (stream, read_format) = self.init_stream(&file_path).await?;
+
+        Ok(ParquetReader {
             file_path,
             file_handle: self.file_handle,
             object_store: self.object_store,
             predicate: self.predicate,
             time_range: self.time_range,
             projection: self.projection,
-            stream: None,
-            read_format: None,
+            stream,
+            read_format,
             batches: Vec::new(),
-        }
+        })
     }
-}
 
-type BoxedRecordBatchStream = BoxStream<'static, std::result::Result<RecordBatch, ParquetError>>;
-
-/// Parquet batch reader.
-pub struct ParquetReader {
-    /// Path of the file.
-    file_path: String,
-    /// SST file to read.
-    ///
-    /// Holds the file handle to avoid the file purge purge it.
-    file_handle: FileHandle,
-    object_store: ObjectStore,
-    /// Predicate to push down.
-    predicate: Option<Predicate>,
-    /// Time range to filter.
-    time_range: Option<TimestampRange>,
-    /// Metadata of columns to read.
-    ///
-    /// `None` reads all columns. Due to schema change, the projection
-    /// can contain columns not in the parquet file.
-    projection: Option<Vec<ColumnId>>,
-
-    /// Inner parquet record batch stream.
-    stream: Option<BoxedRecordBatchStream>,
-    /// Helper to read record batches.
-    ///
-    /// Not `None` if [ParquetReader::stream] is not `None`.
-    read_format: Option<ReadFormat>,
-    /// Buffered batches to return.
-    batches: Vec<Batch>,
-}
-
-impl ParquetReader {
-    // TODO(yingwen): Init reader in builder so we can get the schema of the reader.
-    /// Initializes the reader and the parquet stream.
-    async fn maybe_init(&mut self) -> Result<()> {
-        if self.stream.is_some() {
-            // Already initialized.
-            return Ok(());
-        }
-
+    /// Initializes the parquet stream, also creates a [ReadFormat] to decode record batches.
+    async fn init_stream(&self, file_path: &str) -> Result<(BoxedRecordBatchStream, ReadFormat)> {
         // Creates parquet stream builder.
         let reader = self
             .object_store
-            .reader(&self.file_path)
+            .reader(file_path)
             .await
             .context(OpenDalSnafu)?
             .compat();
         let buf_reader = BufReader::new(reader);
         let mut builder = ParquetRecordBatchStreamBuilder::new(buf_reader)
             .await
-            .context(ReadParquetSnafu {
-                path: &self.file_path,
-            })?;
+            .context(ReadParquetSnafu { path: file_path })?;
 
         // Decode region metadata.
         let key_value_meta = builder.metadata().file_metadata().key_value_metadata();
-        let region_meta = self.get_region_metadata(key_value_meta)?;
+        let region_meta = self.get_region_metadata(file_path, key_value_meta)?;
 
         // Prune row groups by metadata.
         if let Some(predicate) = &self.predicate {
@@ -181,7 +144,7 @@ impl ParquetReader {
         ensure!(
             read_format.arrow_schema().fields() == builder.schema().fields(),
             InvalidParquetSnafu {
-                file: &self.file_path,
+                file: file_path,
                 reason: format!(
                     "schema mismatch, expect: {:?}, given: {:?}",
                     read_format.arrow_schema().fields(),
@@ -197,36 +160,35 @@ impl ParquetReader {
             builder = builder.with_projection(projection_mask);
         }
 
-        let stream = builder.build().context(ReadParquetSnafu {
-            path: &self.file_path,
-        })?;
-        self.stream = Some(Box::pin(stream));
-        self.read_format = Some(read_format);
+        let stream = builder
+            .build()
+            .context(ReadParquetSnafu { path: file_path })?;
 
-        Ok(())
+        Ok((Box::pin(stream), read_format))
     }
 
     /// Decode region metadata from key value.
     fn get_region_metadata(
         &self,
+        file_path: &str,
         key_value_meta: Option<&Vec<KeyValue>>,
     ) -> Result<RegionMetadata> {
         let key_values = key_value_meta.context(InvalidParquetSnafu {
-            file: &self.file_path,
+            file: file_path,
             reason: "missing key value meta",
         })?;
         let meta_value = key_values
             .iter()
             .find(|kv| kv.key == PARQUET_METADATA_KEY)
             .with_context(|| InvalidParquetSnafu {
-                file: &self.file_path,
+                file: file_path,
                 reason: format!("key {} not found", PARQUET_METADATA_KEY),
             })?;
         let json = meta_value
             .value
             .as_ref()
             .with_context(|| InvalidParquetSnafu {
-                file: &self.file_path,
+                file: file_path,
                 reason: format!("No value for key {}", PARQUET_METADATA_KEY),
             })?;
 
@@ -234,32 +196,54 @@ impl ParquetReader {
     }
 }
 
+type BoxedRecordBatchStream = BoxStream<'static, std::result::Result<RecordBatch, ParquetError>>;
+
+/// Parquet batch reader to read our SST format.
+pub struct ParquetReader {
+    /// Path of the file.
+    file_path: String,
+    /// SST file to read.
+    ///
+    /// Holds the file handle to avoid the file purge purge it.
+    file_handle: FileHandle,
+    object_store: ObjectStore,
+    /// Predicate to push down.
+    predicate: Option<Predicate>,
+    /// Time range to filter.
+    time_range: Option<TimestampRange>,
+    /// Metadata of columns to read.
+    ///
+    /// `None` reads all columns. Due to schema change, the projection
+    /// can contain columns not in the parquet file.
+    projection: Option<Vec<ColumnId>>,
+
+    /// Inner parquet record batch stream.
+    stream: BoxedRecordBatchStream,
+    /// Helper to read record batches.
+    ///
+    /// Not `None` if [ParquetReader::stream] is not `None`.
+    read_format: ReadFormat,
+    /// Buffered batches to return.
+    batches: Vec<Batch>,
+}
+
 #[async_trait]
 impl BatchReader for ParquetReader {
     async fn next_batch(&mut self) -> Result<Option<Batch>> {
-        self.maybe_init().await?;
-
         if let Some(batch) = self.batches.pop() {
             return Ok(Some(batch));
         }
 
         // We need to fetch next record batch and convert it to batches.
-        let Some(record_batch) =
-            self.stream
-                .as_mut()
-                .unwrap()
-                .try_next()
-                .await
-                .context(ReadParquetSnafu {
-                    path: &self.file_path,
-                })?
+        let Some(record_batch) = self.stream.try_next().await.context(ReadParquetSnafu {
+            path: &self.file_path,
+        })?
         else {
             return Ok(None);
         };
 
-        // Safety: the reader is initialized.
-        let read_format = self.read_format.as_ref().unwrap();
-        read_format.convert_record_batch(&record_batch, &mut self.batches)?;
+        self.read_format
+            .convert_record_batch(&record_batch, &mut self.batches)?;
         // Reverse batches so we could pop it.
         self.batches.reverse();
 
