@@ -325,10 +325,10 @@ async fn handle_truncate_table_task(
             table_name: table_ref.to_string(),
         })?;
 
-    let table_route = table_route_value.region_routes;
+    let region_routes = table_route_value.region_routes;
 
     let id = ddl_manager
-        .submit_truncate_table_task(cluster_id, truncate_table_task, table_route)
+        .submit_truncate_table_task(cluster_id, truncate_table_task, region_routes)
         .await?;
 
     Ok(SubmitDdlTaskResponse {

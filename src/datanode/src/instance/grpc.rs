@@ -827,7 +827,22 @@ mod test {
 
         let output = instance.do_query(query, QueryContext::arc()).await.unwrap();
         assert!(matches!(output, Output::AffectedRows(0)));
-        // TODO(DevilExileSu): Validate is an empty table.
+
+        // Validate is an empty table.
+        let query = Request::Query(QueryRequest {
+            query: Some(Query::Sql(
+                "SELECT ts, host, cpu, memory FROM demo".to_string(),
+            )),
+        });
+        let output = instance.do_query(query, QueryContext::arc()).await.unwrap();
+        if let Output::Stream(stream) = output {
+            let output = RecordBatches::try_collect(stream)
+                .await
+                .unwrap()
+                .pretty_print()
+                .unwrap();
+            assert_eq!("++\n++", output)
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]

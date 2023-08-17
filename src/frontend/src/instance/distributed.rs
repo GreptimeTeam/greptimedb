@@ -339,6 +339,8 @@ impl DistInstance {
         };
         self.truncate_table_procedure(&expr).await?;
 
+        info!("Successfully truncated distributed table '{table_name}' with table id {table_id}");
+
         Ok(Output::AffectedRows(0))
     }
 
