@@ -140,7 +140,7 @@ impl ParquetReaderBuilder {
 
         let read_format = ReadFormat::new(Arc::new(region_meta));
         // The arrow schema converted from the region meta should be the same as parquet's.
-        // We only compare fields to avoid schema's metadata breaks the comparision.
+        // We only compare fields to avoid schema's metadata breaks the comparison.
         ensure!(
             read_format.arrow_schema().fields() == builder.schema().fields(),
             InvalidParquetSnafu {
