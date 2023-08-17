@@ -15,7 +15,6 @@
 use std::sync::Arc;
 
 use common_recordbatch::SendableRecordBatchStream;
-use store_api::storage::ScanRequest;
 
 use crate::error::Result;
 
@@ -23,7 +22,12 @@ use crate::error::Result;
 /// for retrieving data in the form of a stream of record batches.
 pub trait DataSource {
     /// Retrieves a stream of record batches based on the provided scan request.
-    fn get_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream>;
+    fn get_stream(&self, request: PlaceholderScanRequest) -> Result<SendableRecordBatchStream>;
+}
+
+pub struct PlaceholderScanRequest {
+    /// Indices of columns to read, `None` to read all columns.
+    pub projection: Option<Vec<usize>>,
 }
 
 pub type DataSourceRef = Arc<dyn DataSource>;

@@ -25,7 +25,7 @@ use common_catalog::consts::{
     INFORMATION_SCHEMA_TABLES_TABLE_ID,
 };
 use common_error::ext::BoxedError;
-use common_query::data_source::DataSource;
+use common_query::data_source::{DataSource, TableFactory};
 use common_recordbatch::{RecordBatchStreamAdaptor, SendableRecordBatchStream};
 use datatypes::schema::SchemaRef;
 use futures_util::StreamExt;
@@ -38,7 +38,6 @@ use table::{Result as TableResult, Table, TableRef};
 use self::columns::InformationSchemaColumns;
 use crate::error::Result;
 use crate::information_schema::tables::InformationSchemaTables;
-use crate::table_factory::TableFactory;
 use crate::CatalogManager;
 
 pub const TABLES: &str = "tables";

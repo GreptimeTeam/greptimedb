@@ -16,29 +16,38 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use api::v1::region::QueryRequest;
 use async_trait::async_trait;
 use common_base::bytes::Bytes;
 use common_query::{DfPhysicalPlan, Output};
 use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::info;
 use dashmap::DashMap;
+use datafusion::catalog::schema::SchemaProvider;
+use datafusion::catalog::{CatalogList, CatalogProvider};
 use datafusion::datasource::TableProvider;
 use datafusion::execution::context::SessionState;
 use datafusion_expr::{Expr, TableType};
 use datatypes::arrow::datatypes::SchemaRef;
+use query::QueryEngineRef;
+use session::context::QueryContext;
 use snafu::{OptionExt, ResultExt};
+use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::RegionEngineRef;
 use store_api::region_request::RegionRequest;
 use store_api::storage::RegionId;
+use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 
 use crate::error::{
     HandleRegionRequestSnafu, RegionEngineNotFoundSnafu, RegionNotFoundSnafu, Result,
+    UnsupportedOutputSnafu,
 };
 
 #[derive(Default)]
 pub struct RegionServer {
     engines: HashMap<String, RegionEngineRef>,
     region_map: DashMap<RegionId, RegionEngineRef>,
+    query_engine: QueryEngineRef,
 }
 
 impl RegionServer {
@@ -103,13 +112,35 @@ impl RegionServer {
         Ok(result)
     }
 
-    #[allow(unused_variables)]
-    pub fn handle_read(
-        &self,
-        region_id: RegionId,
-        plan: Bytes,
-    ) -> Result<SendableRecordBatchStream> {
-        todo!()
+    pub fn handle_read(&self, request: QueryRequest) -> Result<SendableRecordBatchStream> {
+        // TODO(ruihang): add metrics and set trace id
+
+        let QueryRequest { region_id, plan } = request;
+
+        // build dummy catalog list
+        let engine = self
+            .engines
+            .get(&region_id)
+            .with_context(|| RegionNotFoundSnafu { region_id })?
+            .clone();
+        let catalog_list = Arc::new(DummyCatalogList::new(region_id, engine).await?);
+
+        // decode substrait plan to logical plan and execute it
+        let logical_plan = DFLogicalSubstraitConvertor
+            .decode(plan, catalog_list, "", "")
+            .await
+            .context(DecodeLogicalPlan)?;
+        let result = self
+            .query_engine
+            .execute(logical_plan, QueryContext::arc())
+            .await?;
+
+        match result {
+            Output::AffectedRows(_) | Output::RecordBatches(_) => {
+                UnsupportedOutputSnafu { expected: "stream" }.fail()
+            }
+            Output::Stream(stream) => Ok(stream),
+        }
     }
 }
 
@@ -119,19 +150,108 @@ enum RegionChange {
     Deregisters,
 }
 
-#[allow(dead_code)]
-struct DummyCatalogList {}
+/// Resolve to the given region (specified by [RegionId]) unconditionally.
+struct DummyCatalogList {
+    catalog: Arc<DummyCatalogProvider>,
+}
 
-#[allow(dead_code)]
-#[allow(unused_variables)]
 impl DummyCatalogList {
-    pub fn new(region_id: RegionId) -> Self {
-        todo!()
+    pub async fn new(region_id: RegionId, engine: RegionEngineRef) -> Result<Self> {
+        let metadata = engine.get_metadata(region_id).await?;
+        let table_provider = DummyTableProvider {
+            region_id,
+            engine,
+            metadata,
+        };
+        let schema_provider = DummySchemaProvider {
+            table: Arc::new(table_provider),
+        };
+        let catalog_provider = DummyCatalogProvider {
+            schema: Arc::new(schema_provider),
+        };
+        let catalog_list = Self {
+            catalog: Arc::new(catalog_provider),
+        };
+        Ok(catalog_list)
     }
 }
 
-/// For [TableProvider](datafusion::datasource::TableProvider)
-struct DummyTableProvider {}
+impl CatalogList for DummyCatalogList {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn register_catalog(
+        &self,
+        name: String,
+        catalog: Arc<dyn CatalogProvider>,
+    ) -> Option<Arc<dyn CatalogProvider>> {
+        None
+    }
+
+    fn catalog_names(&self) -> Vec<String> {
+        vec![]
+    }
+
+    fn catalog(&self, name: &str) -> Option<Arc<dyn CatalogProvider>> {
+        Some(self.catalog.clone())
+    }
+}
+
+/// For [DummyCatalogList].
+struct DummyCatalogProvider {
+    schema: Arc<DummySchemaProvider>,
+}
+
+impl CatalogProvider for DummyCatalogProvider {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn schema_names(&self) -> Vec<String> {
+        vec![]
+    }
+
+    fn schema(&self, name: &str) -> Option<Arc<dyn SchemaProvider>> {
+        Some(self.schema.clone())
+    }
+}
+
+/// For [DummyCatalogList].
+struct DummySchemaProvider {
+    table: Arc<DummyTableProvider>,
+}
+
+impl SchemaProvider for DummySchemaProvider {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn table_names(&self) -> Vec<String> {
+        vec![]
+    }
+
+    fn table(&self, _name: &str) -> Option<Arc<dyn TableProvider>> {
+        Some(Arc::new(self.table.clone()))
+    }
+}
+
+/// For [TableProvider](datafusion::datasource::TableProvider) and [DummyCatalogList]
+struct DummyTableProvider {
+    region_id: RegionId,
+    engine: RegionEngineRef,
+    metadata: RegionMetadataRef,
+}
+
+impl DummyTableProvider {
+    pub fn new(region_id: RegionId, engine: RegionEngineRef, metadata: RegionMetadataRef) -> Self {
+        Self {
+            region_id,
+            engine,
+            metadata,
+        }
+    }
+}
 
 #[async_trait]
 impl TableProvider for DummyTableProvider {
@@ -140,7 +260,7 @@ impl TableProvider for DummyTableProvider {
     }
 
     fn schema(&self) -> SchemaRef {
-        todo!()
+        self.metadata.schema.arrow_schema().clone()
     }
 
     fn table_type(&self) -> TableType {
