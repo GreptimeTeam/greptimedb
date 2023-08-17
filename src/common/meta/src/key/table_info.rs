@@ -157,7 +157,7 @@ impl TableInfoManager {
             .when(vec![Compare::with_value(
                 raw_key.clone(),
                 CompareOp::Equal,
-                raw_value.clone(),
+                raw_value,
             )])
             .and_then(vec![TxnOp::Put(
                 raw_key.clone(),
@@ -180,7 +180,7 @@ impl TableInfoManager {
         let removed_key = to_removed_key(&String::from_utf8_lossy(&raw_key));
 
         let txn = Txn::new().and_then(vec![
-            TxnOp::Delete(raw_key.clone()),
+            TxnOp::Delete(raw_key),
             TxnOp::Put(removed_key.into_bytes(), raw_value),
         ]);
 

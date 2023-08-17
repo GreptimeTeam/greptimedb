@@ -506,6 +506,30 @@ pub enum Error {
 
     #[snafu(display("Unsupported gRPC request, kind: {}, location: {}", kind, location))]
     UnsupportedGrpcRequest { kind: String, location: Location },
+
+    #[snafu(display(
+        "Unsupported output type, expected: {}, location: {}",
+        expected,
+        location
+    ))]
+    UnsupportedOutput {
+        expected: String,
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Failed to get metadata from engine {} for region_id {}, location: {}, source: {}",
+        engine,
+        region_id,
+        location,
+        source
+    ))]
+    GetRegionMetadata {
+        engine: String,
+        region_id: RegionId,
+        location: Location,
+        source: BoxedError,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -585,7 +609,9 @@ impl ErrorExt for Error {
             | CloseTableEngine { .. }
             | JoinTask { .. }
             | RegionNotFound { .. }
-            | RegionEngineNotFound { .. } => StatusCode::Internal,
+            | RegionEngineNotFound { .. }
+            | UnsupportedOutput { .. }
+            | GetRegionMetadata { .. } => StatusCode::Internal,
 
             StartServer { source, .. }
             | ShutdownServer { source, .. }

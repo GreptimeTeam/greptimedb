@@ -142,7 +142,7 @@ impl TableRouteManager {
             .when(vec![Compare::with_value(
                 raw_key.clone(),
                 CompareOp::Equal,
-                raw_value.clone(),
+                raw_value,
             )])
             .and_then(vec![TxnOp::Put(raw_key.clone(), new_raw_value)])
             .or_else(vec![TxnOp::Get(raw_key.clone())]);
