@@ -14,6 +14,8 @@
 
 //! Common structs and utilities for reading data.
 
+mod merge;
+
 use std::sync::Arc;
 
 use api::v1::OpType;
@@ -109,7 +111,7 @@ impl Batch {
         self.num_rows() == 0
     }
 
-    /// Returns the first timestamp in the batch.
+    /// Returns the first timestamp in the batch or `None` if the batch is empty.
     pub fn first_timestamp(&self) -> Option<Timestamp> {
         if self.timestamps.is_empty() {
             return None;
@@ -118,7 +120,7 @@ impl Batch {
         self.get_timestamp(0)
     }
 
-    /// Returns the last timestamp in the batch.
+    /// Returns the last timestamp in the batch or `None` if the batch is empty.
     pub fn last_timestamp(&self) -> Option<Timestamp> {
         if self.timestamps.is_empty() {
             return None;
