@@ -12,11 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
-
 use api::helper;
 use api::helper::ColumnDataTypeWrapper;
-use api::v1::{ColumnSchema, RowInsertRequest, RowInsertRequests};
+use api::v1::{RowInsertRequest, RowInsertRequests};
 use catalog::CatalogManagerRef;
 use common_query::Output;
 use datatypes::data_type::{ConcreteDataType, DataType};
@@ -89,34 +87,32 @@ impl RowInserter {
         })?;
         let schema = rows.schema;
         let rows = rows.rows;
+        let num_columns = schema.len();
         let num_rows = rows.len();
 
-        let mut columns_values = HashMap::with_capacity(schema.len());
-        for column_schema in &schema {
-            let column_name = column_schema.column_name.clone();
+        let mut columns_values = Vec::with_capacity(num_columns);
+        for column_schema in schema {
             let datatype: ConcreteDataType = ColumnDataTypeWrapper::try_new(column_schema.datatype)
                 .context(ColumnDataTypeSnafu)?
                 .into();
             let mutable_vector = datatype.create_mutable_vector(num_rows);
-            columns_values.insert(column_name, mutable_vector);
+            columns_values.push((column_schema.column_name, mutable_vector));
         }
 
         for row in rows {
             ensure!(
-                row.values.len() == schema.len(),
+                row.values.len() == num_columns,
                 InvalidInsertRowLenSnafu {
                     table_name: format!("{catalog_name}.{schema_name}.{table_name}"),
-                    expected: schema.len(),
+                    expected: num_columns,
                     actual: row.values.len(),
                 }
             );
 
-            for (ColumnSchema { column_name, .. }, value) in schema.iter().zip(row.values.iter()) {
-                if let Some(mutable_vector) = columns_values.get_mut(column_name) {
-                    mutable_vector
-                        .try_push_value_ref(helper::pb_value_to_value_ref(value))
-                        .context(CreateVectorSnafu)?;
-                }
+            for ((_, mutable_vector), value) in columns_values.iter_mut().zip(row.values.iter()) {
+                mutable_vector
+                    .try_push_value_ref(helper::pb_value_to_value_ref(value))
+                    .context(CreateVectorSnafu)?;
             }
         }
 

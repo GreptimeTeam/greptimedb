@@ -147,27 +147,33 @@ impl TryFrom<InfluxdbRequest> for RowInsertRequests {
             .collect::<influxdb_line_protocol::Result<Vec<_>>>()
             .context(InfluxdbLineProtocolSnafu)?;
 
-        let mut table_schemas = HashMap::with_capacity(lines.len());
-        let mut table_rows = HashMap::with_capacity(lines.len());
-        let mut table_column_indexes = HashMap::with_capacity(lines.len());
+        struct TableData {
+            schema: Vec<ColumnSchema>,
+            rows: Vec<Row>,
+            column_indexes: HashMap<String, usize>,
+        }
+
+        let mut table_data_map = HashMap::new();
 
         for line in lines {
             let table_name = line.series.measurement.as_str();
             let tags = line.series.tag_set;
             let fields = line.field_set;
             let ts = line.timestamp;
-            let len = tags.as_ref().map(|x| x.len()).unwrap_or(0) + fields.len();
+            let num_columns = tags.as_ref().map(|x| x.len()).unwrap_or(0) + fields.len() + 1;
 
-            let schema = table_schemas
+            let TableData {
+                schema,
+                rows,
+                column_indexes,
+            } = table_data_map
                 .entry(table_name.to_string())
-                .or_insert_with(|| Vec::with_capacity(len));
-            let rows = table_rows
-                .entry(table_name.to_string())
-                .or_insert_with(Vec::new);
-            let column_indexes = table_column_indexes
-                .entry(table_name.to_string())
-                .or_insert_with(|| HashMap::with_capacity(len));
-            assert_eq!(schema.len(), column_indexes.len());
+                .or_insert_with(|| TableData {
+                    schema: Vec::with_capacity(num_columns),
+                    rows: Vec::new(),
+                    column_indexes: HashMap::with_capacity(num_columns),
+                });
+
             let mut one_row = vec![Value { value_data: None }; schema.len()];
 
             // tags
@@ -180,27 +186,30 @@ impl TryFrom<InfluxdbRequest> for RowInsertRequests {
             rows.push(Row { values: one_row });
         }
 
-        let mut inserts = Vec::with_capacity(table_schemas.len());
-        for (table_name, schema) in table_schemas {
-            let Some(mut rows) = table_rows.remove(&table_name) else {
-                continue;
-            };
+        let inserts = table_data_map
+            .into_iter()
+            .map(
+                |(
+                    table_name,
+                    TableData {
+                        schema, mut rows, ..
+                    },
+                )| {
+                    let num_columns = schema.len();
+                    for row in rows.iter_mut() {
+                        if num_columns > row.values.len() {
+                            row.values.resize(num_columns, Value { value_data: None });
+                        }
+                    }
 
-            let len = schema.len();
-            for row in rows.iter_mut() {
-                let num_placeholders = len - row.values.len();
-                if num_placeholders > 0 {
-                    row.values
-                        .extend((0..num_placeholders).map(|_| Value { value_data: None }));
-                }
-            }
-
-            inserts.push(RowInsertRequest {
-                table_name,
-                rows: Some(Rows { schema, rows }),
-                ..Default::default()
-            });
-        }
+                    RowInsertRequest {
+                        table_name,
+                        rows: Some(Rows { schema, rows }),
+                        ..Default::default()
+                    }
+                },
+            )
+            .collect::<Vec<_>>();
 
         Ok(RowInsertRequests { inserts })
     }
@@ -347,12 +356,14 @@ fn check_schema(
     Ok(())
 }
 
+#[inline]
 fn to_value(value: ValueData) -> Value {
     Value {
         value_data: Some(value),
     }
 }
 
+#[inline]
 fn unwrap_or_default_precision(precision: Option<Precision>) -> Precision {
     if let Some(val) = precision {
         val
@@ -361,6 +372,7 @@ fn unwrap_or_default_precision(precision: Option<Precision>) -> Precision {
     }
 }
 
+#[inline]
 fn get_time_unit(precision: Precision) -> Result<TimeUnit, Error> {
     Ok(match precision {
         Precision::Second => TimeUnit::Second,
