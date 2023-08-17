@@ -116,7 +116,8 @@ impl From<Status> for Error {
             })
             .unwrap_or(StatusCode::Unknown);
 
-        let msg = get_metadata_value(&e, GREPTIME_ERROR_MSG).unwrap_or(e.to_string());
+        let msg =
+            get_metadata_value(&e, GREPTIME_ERROR_MSG).unwrap_or_else(|| e.message().to_string());
 
         Self::Server { code, msg }
     }
