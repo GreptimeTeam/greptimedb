@@ -71,7 +71,7 @@ impl InformationSchemaProvider {
             let schema = table.schema();
             let table_info = Self::table_info(self.catalog_name.clone(), &table);
             let table_type = table.table_type();
-            let data_source = Arc::new(DataSourceAdapter::new(table));
+            let data_source = Arc::new(InformationTableDataSource::new(table));
             let t = ThinTable::new(schema, table_info, table_type, data_source);
             Arc::new(t) as _
         })
@@ -128,17 +128,17 @@ pub trait InformationTable {
 
 type InformationTableRef = Arc<dyn InformationTable + Send + Sync>;
 
-struct DataSourceAdapter {
+struct InformationTableDataSource {
     table: InformationTableRef,
 }
 
-impl DataSourceAdapter {
+impl InformationTableDataSource {
     fn new(table: InformationTableRef) -> Self {
         Self { table }
     }
 }
 
-impl DataSource for DataSourceAdapter {
+impl DataSource for InformationTableDataSource {
     fn get_stream(&self, request: ScanRequest) -> std::result::Result<SendableRecordBatchStream, BoxedError> {
         let projection = request.projection;
         let projected_schema = if let Some(projection) = &projection {
