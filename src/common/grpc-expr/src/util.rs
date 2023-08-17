@@ -175,7 +175,7 @@ pub fn extract_new_columns(
     } else {
         let mut distinct_names = HashSet::with_capacity(columns_to_add.len());
         for add_column in &columns_to_add {
-            let name = &add_column.column_def.as_ref().unwrap().name;
+            let name = add_column.column_def.as_ref().unwrap().name.as_str();
             ensure!(
                 distinct_names.insert(name),
                 DuplicatedColumnNameSnafu { name }

@@ -44,9 +44,10 @@ impl GrpcQueryHandler for Instance {
 
         let output = match request {
             Request::Inserts(requests) => self.handle_inserts(requests, ctx.clone()).await?,
-            Request::RowInserts(_) | Request::RowDeletes(_) => {
+            Request::RowInserts(requests) => self.handle_row_inserts(requests, ctx.clone()).await?,
+            Request::RowDeletes(_) => {
                 return NotSupportedSnafu {
-                    feat: "row insert/delete",
+                    feat: "row deletes",
                 }
                 .fail();
             }
