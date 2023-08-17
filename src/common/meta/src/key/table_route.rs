@@ -184,7 +184,7 @@ impl TableRouteManager {
                 })
                 .flat_map(|r| &r.kvs)
                 .find(|kv| kv.key == raw_key)
-                .map(|kv| TableRouteValue::try_from(&kv.value))
+                .map(|kv| TableRouteValue::try_from_raw_value(&kv.value))
                 .transpose()
         }
     }
@@ -194,7 +194,7 @@ impl TableRouteManager {
         self.kv_backend
             .get(&key.as_raw_key())
             .await?
-            .map(|kv| TableRouteValue::try_from_raw_value(kv.value))
+            .map(|kv| TableRouteValue::try_from_raw_value(&kv.value))
             .transpose()
     }
 
@@ -205,7 +205,7 @@ impl TableRouteManager {
         self.kv_backend
             .get(&removed_key)
             .await?
-            .map(|x| TableRouteValue::try_from_raw_value(x.value))
+            .map(|x| TableRouteValue::try_from_raw_value(&x.value))
             .transpose()
     }
 

@@ -100,7 +100,7 @@ impl DatanodeTableValue {
 
 /// Decodes `KeyValue` to ((),`DatanodeTableValue`)
 pub fn datanode_table_value_decoder(kv: KeyValue) -> Result<((), DatanodeTableValue)> {
-    let value = DatanodeTableValue::try_from(&kv.value)?;
+    let value = DatanodeTableValue::try_from_raw_value(&kv.value)?;
 
     Ok(((), value))
 }
@@ -118,7 +118,7 @@ impl DatanodeTableManager {
         self.kv_backend
             .get(&key.as_raw_key())
             .await?
-            .map(|kv| DatanodeTableValue::try_from_raw_value(kv.value))
+            .map(|kv| DatanodeTableValue::try_from_raw_value(&kv.value))
             .transpose()
     }
 
@@ -246,7 +246,7 @@ mod tests {
         let raw_value = value.try_as_raw_value().unwrap();
         assert_eq!(raw_value, literal);
 
-        let actual = DatanodeTableValue::try_from_raw_value(literal.to_vec()).unwrap();
+        let actual = DatanodeTableValue::try_from_raw_value(literal).unwrap();
         assert_eq!(actual, value);
     }
 

@@ -70,7 +70,7 @@ use table_name::{TableNameKey, TableNameManager, TableNameValue};
 use self::catalog_name::{CatalogManager, CatalogNameValue};
 use self::schema_name::{SchemaManager, SchemaNameValue};
 use self::table_route::{TableRouteManager, TableRouteValue};
-use crate::error::{self, Error, InvalidTableMetadataSnafu, Result, SerdeJsonSnafu};
+use crate::error::{self, Result, SerdeJsonSnafu};
 #[allow(deprecated)]
 pub use crate::key::table_route::{TableRouteKey, TABLE_ROUTE_PREFIX};
 use crate::kv_backend::txn::Txn;
@@ -477,15 +477,8 @@ macro_rules! impl_table_meta_value {
     ($($val_ty: ty), *) => {
         $(
             impl $val_ty {
-                pub fn try_from_raw_value_ref(raw_value: &[u8]) -> Result<Self> {
+                pub fn try_from_raw_value(raw_value: &[u8]) -> Result<Self> {
                     serde_json::from_slice(raw_value).context(SerdeJsonSnafu)
-                }
-
-                pub fn try_from_raw_value(raw_value: Vec<u8>) -> Result<Self> {
-                    let raw_value = String::from_utf8(raw_value).map_err(|e| {
-                        InvalidTableMetadataSnafu { err_msg: e.to_string() }.build()
-                    })?;
-                    serde_json::from_str(&raw_value).context(SerdeJsonSnafu)
                 }
 
                 pub fn try_as_raw_value(&self) -> Result<Vec<u8>> {
@@ -495,21 +488,6 @@ macro_rules! impl_table_meta_value {
         )*
     }
 }
-
-macro_rules! impl_try_from {
-    ($($val_ty: ty), *) => {
-        $(
-            impl<'a> TryFrom<&'a Vec<u8>> for $val_ty {
-                type Error = Error;
-                fn try_from(value: &'a Vec<u8>) -> Result<Self> {
-                    serde_json::from_slice(value).context(SerdeJsonSnafu)
-                }
-            }
-        )*
-    };
-}
-
-impl_try_from! {TableInfoValue, TableRouteValue, DatanodeTableValue}
 
 impl_table_meta_value! {
     CatalogNameValue,

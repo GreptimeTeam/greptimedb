@@ -201,7 +201,7 @@ impl TableInfoManager {
                 })
                 .flat_map(|r| &r.kvs)
                 .find(|kv| kv.key == raw_key)
-                .map(|kv| TableInfoValue::try_from(&kv.value))
+                .map(|kv| TableInfoValue::try_from_raw_value(&kv.value))
                 .transpose()
         }
     }
@@ -213,7 +213,7 @@ impl TableInfoManager {
         self.kv_backend
             .get(&removed_key)
             .await?
-            .map(|x| TableInfoValue::try_from_raw_value(x.value))
+            .map(|x| TableInfoValue::try_from_raw_value(&x.value))
             .transpose()
     }
 
@@ -223,7 +223,7 @@ impl TableInfoManager {
         self.kv_backend
             .get(&raw_key)
             .await?
-            .map(|x| TableInfoValue::try_from_raw_value(x.value))
+            .map(|x| TableInfoValue::try_from_raw_value(&x.value))
             .transpose()
     }
 }
@@ -240,7 +240,7 @@ mod tests {
     #[test]
     fn test_deserialization_compatibility() {
         let s = r#"{"version":1,"table_info":{"ident":{"table_id":8714,"version":0},"name":"go_gc_duration_seconds","desc":"Created on insertion","catalog_name":"e87lehzy63d4cloud_docs_test","schema_name":"public","meta":{"schema":{"column_schemas":[{"name":"instance","data_type":{"String":null},"is_nullable":true,"is_time_index":false,"default_constraint":null,"metadata":{}},{"name":"job","data_type":{"String":null},"is_nullable":true,"is_time_index":false,"default_constraint":null,"metadata":{}},{"name":"quantile","data_type":{"String":null},"is_nullable":true,"is_time_index":false,"default_constraint":null,"metadata":{}},{"name":"greptime_timestamp","data_type":{"Timestamp":{"Millisecond":null}},"is_nullable":false,"is_time_index":true,"default_constraint":null,"metadata":{"greptime:time_index":"true"}},{"name":"greptime_value","data_type":{"Float64":{}},"is_nullable":true,"is_time_index":false,"default_constraint":null,"metadata":{}}],"timestamp_index":3,"version":0},"primary_key_indices":[0,1,2],"value_indices":[],"engine":"mito","next_column_id":5,"region_numbers":[],"engine_options":{},"options":{"write_buffer_size":null,"ttl":null,"extra_options":{}},"created_on":"1970-01-01T00:00:00Z"},"table_type":"Base"}}"#;
-        let v = TableInfoValue::try_from_raw_value(s.as_bytes().to_vec()).unwrap();
+        let v = TableInfoValue::try_from_raw_value(s.as_bytes()).unwrap();
         assert!(v.table_info.meta.partition_key_indices.is_empty());
     }
 
@@ -258,7 +258,7 @@ mod tests {
             version: 1,
         };
         let serialized = value.try_as_raw_value().unwrap();
-        let deserialized = TableInfoValue::try_from_raw_value(serialized).unwrap();
+        let deserialized = TableInfoValue::try_from_raw_value(&serialized).unwrap();
         assert_eq!(value, deserialized);
     }
 
