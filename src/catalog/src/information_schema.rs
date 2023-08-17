@@ -28,7 +28,7 @@ use store_api::data_source::DataSource;
 use store_api::storage::{ScanRequest, TableId};
 use table::error::{SchemaConversionSnafu, TablesRecordBatchSnafu};
 use table::metadata::{
-    FilterPushDownType, TableIdent, TableInfoBuilder, TableInfoRef, TableMetaBuilder, TableType,
+    FilterPushDownType, TableInfoBuilder, TableInfoRef, TableMetaBuilder, TableType,
 };
 use table::thin_table::{ThinTable, ThinTableAdapter};
 use table::TableRef;
