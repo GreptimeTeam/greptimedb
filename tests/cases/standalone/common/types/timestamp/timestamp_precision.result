@@ -1,0 +1,61 @@
+-- description: Test timestamp precision
+CREATE TABLE ts_precision(
+    sec TIMESTAMP,
+    msec TIMESTAMP(3),
+    micros TIMESTAMP(6),
+    nanos TIMESTAMP (9) TIME INDEX
+);
+
+Affected Rows: 0
+
+INSERT INTO ts_precision VALUES ('2020-01-01 01:23:45.123456789', '2020-01-01 01:23:45.123456789', '2020-01-01 01:23:45.123456789', '2020-01-01 01:23:45.123456789');
+
+Affected Rows: 1
+
+-- FIXME: nano seconds do not render correctly
+SELECT CAST(sec AS VARCHAR), CAST(msec AS VARCHAR), CAST(micros AS VARCHAR), CAST(nanos AS VARCHAR) FROM ts_precision;
+
++-------------------------+-------------------------+----------------------------+-------------------------------+
+| ts_precision.sec        | ts_precision.msec       | ts_precision.micros        | ts_precision.nanos            |
++-------------------------+-------------------------+----------------------------+-------------------------------+
+| 2019-12-31T17:23:45.123 | 2019-12-31T17:23:45.123 | 2019-12-31T17:23:45.123456 | 2019-12-31T17:23:45.123456789 |
++-------------------------+-------------------------+----------------------------+-------------------------------+
+
+SELECT EXTRACT(MICROSECONDS FROM sec), EXTRACT(MICROSECONDS FROM msec), EXTRACT(MICROSECONDS FROM micros), EXTRACT(MICROSECONDS FROM nanos) FROM ts_precision;
+
+Error: 1003(Internal), Execution error: Date part 'MICROSECONDS' not supported
+
+-- we only support precisions 0, 3, 6, and 9
+-- any other precision is rounded up (e.g. 1/2 -> 3, 4/5 -> 6, 7/8 -> 9)
+SELECT TIMESTAMP '2020-01-01 01:23:45.123456789'::TIMESTAMP(0);
+
+Error: 3000(PlanQuery), This feature is not implemented: Unsupported SQL type Timestamp(Some(0), None)
+
+SELECT TIMESTAMP '2020-01-01 01:23:45.123456789'::TIMESTAMP(3);
+
+Error: 3000(PlanQuery), This feature is not implemented: Unsupported SQL type Timestamp(Some(3), None)
+
+SELECT TIMESTAMP '2020-01-01 01:23:45.123456789'::TIMESTAMP(6);
+
+Error: 3000(PlanQuery), This feature is not implemented: Unsupported SQL type Timestamp(Some(6), None)
+
+SELECT TIMESTAMP '2020-01-01 01:23:45.123456789'::TIMESTAMP(9);
+
+Error: 3000(PlanQuery), This feature is not implemented: Unsupported SQL type Timestamp(Some(9), None)
+
+SELECT TIMESTAMP '2020-01-01 01:23:45.12'::TIMESTAMP(3);
+
+Error: 3000(PlanQuery), This feature is not implemented: Unsupported SQL type Timestamp(Some(3), None)
+
+SELECT TIMESTAMP '2020-01-01 01:23:45.12345'::TIMESTAMP(6);
+
+Error: 3000(PlanQuery), This feature is not implemented: Unsupported SQL type Timestamp(Some(6), None)
+
+SELECT TIMESTAMP '2020-01-01 01:23:45.12345678'::TIMESTAMP(9);
+
+Error: 3000(PlanQuery), This feature is not implemented: Unsupported SQL type Timestamp(Some(9), None)
+
+DROP TABLE ts_precision;
+
+Affected Rows: 1
+

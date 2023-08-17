@@ -24,11 +24,15 @@ SELECT timestamp '2017-07-23T13:10:11',timestamp '2017-07-23T13:10:11Z';
 
 SELECT timestamp '    2017-07-23     13:10:11    ';
 
-Error: 3001(EngineExecuteQuery), Parser error: Error parsing timestamp from '    2017-07-23     13:10:11    ': error parsing date
++-----------------------------+
+| Utf8("2017-07-23 13:10:11") |
++-----------------------------+
+| 2017-07-23T13:10:11         |
++-----------------------------+
 
 SELECT timestamp '    2017-07-23     13:10:11    AA';
 
-Error: 3001(EngineExecuteQuery), Parser error: Error parsing timestamp from '    2017-07-23     13:10:11    AA': error parsing date
+Error: 3001(EngineExecuteQuery), Parser error: Invalid timezone "AA": 'AA' is not a valid timezone
 
 SELECT timestamp 'AA2017-07-23 13:10:11';
 
@@ -95,18 +99,7 @@ Error: 1003(Internal), Invalid argument error: column types must match schema ty
 
 SELECT t-t FROM timestamp;
 
-+-------------------------------------------------+
-| timestamp.t - timestamp.t                       |
-+-------------------------------------------------+
-| 0 years 0 mons 0 days 0 hours 0 mins 0.000 secs |
-|                                                 |
-| 0 years 0 mons 0 days 0 hours 0 mins 0.000 secs |
-| 0 years 0 mons 0 days 0 hours 0 mins 0.000 secs |
-| 0 years 0 mons 0 days 0 hours 0 mins 0.000 secs |
-| 0 years 0 mons 0 days 0 hours 0 mins 0.000 secs |
-| 0 years 0 mons 0 days 0 hours 0 mins 0.000 secs |
-| 0 years 0 mons 0 days 0 hours 0 mins 0.000 secs |
-+-------------------------------------------------+
+Error: 1003(Internal), This feature is not implemented: Unsupported function name: "substract"
 
 SELECT EXTRACT(YEAR from TIMESTAMP '1992-01-01 01:01:01');
 
