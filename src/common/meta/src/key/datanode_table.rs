@@ -43,7 +43,6 @@ impl DatanodeTableKey {
         format!("{}/{datanode_id}", DATANODE_TABLE_KEY_PREFIX)
     }
 
-    #[allow(unused)]
     pub fn strip_table_id(raw_key: &[u8]) -> Result<TableId> {
         let key = String::from_utf8(raw_key.to_vec()).map_err(|e| {
             InvalidTableMetadataSnafu {
