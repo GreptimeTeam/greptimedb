@@ -388,7 +388,7 @@ mod tests {
             schema: DEFAULT_SCHEMA_NAME.to_string(),
             table_name: NUMBERS_TABLE_NAME.to_string(),
             table_id: NUMBERS_TABLE_ID,
-            table: Arc::new(NumbersTable::default()),
+            table: NumbersTable::table(NUMBERS_TABLE_ID),
         };
 
         let _ = catalog_list.register_table(register_request).await.unwrap();
@@ -423,7 +423,7 @@ mod tests {
             schema: DEFAULT_SCHEMA_NAME.to_string(),
             table_name: table_name.to_string(),
             table_id,
-            table: Arc::new(NumbersTable::new(table_id)),
+            table: NumbersTable::table(table_id),
         };
         assert!(catalog.register_table(register_request).await.unwrap());
         assert!(catalog
@@ -465,7 +465,7 @@ mod tests {
             schema: DEFAULT_SCHEMA_NAME.to_string(),
             table_name: new_table_name.to_string(),
             table_id: table_id + 1,
-            table: Arc::new(NumbersTable::new(table_id + 1)),
+            table: NumbersTable::table(table_id + 1),
         };
         let result = catalog.register_table(dup_register_request).await;
         let err = result.err().unwrap();
@@ -477,7 +477,7 @@ mod tests {
         let catalog = MemoryCatalogManager::with_default_setup();
         let table_name = "num";
         let table_id = 2333;
-        let table: TableRef = Arc::new(NumbersTable::new(table_id));
+        let table = NumbersTable::table(table_id);
 
         // register table
         let register_table_req = RegisterTableRequest {
@@ -540,7 +540,7 @@ mod tests {
             schema: DEFAULT_SCHEMA_NAME.to_string(),
             table_name: table_name.to_string(),
             table_id: 2333,
-            table: Arc::new(NumbersTable::default()),
+            table: NumbersTable::table(2333),
         };
         let _ = catalog.register_table(register_table_req).await.unwrap();
         assert!(catalog
@@ -582,7 +582,7 @@ mod tests {
             schema: schema_name.clone(),
             table_name,
             table_id: 0,
-            table: Arc::new(NumbersTable::default()),
+            table: NumbersTable::table(0),
         };
         catalog
             .clone()

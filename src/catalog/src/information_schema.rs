@@ -141,6 +141,16 @@ impl InformationTableDataSource {
     fn new(table: InformationTableRef) -> Self {
         Self { table }
     }
+
+    fn try_project(&self, projection: &[usize]) -> std::result::Result<SchemaRef, BoxedError> {
+        let schema = self
+            .table
+            .schema()
+            .try_project(projection)
+            .context(SchemaConversionSnafu)
+            .map_err(BoxedError::new)?;
+        Ok(Arc::new(schema))
+    }
 }
 
 impl DataSource for InformationTableDataSource {
@@ -149,32 +159,22 @@ impl DataSource for InformationTableDataSource {
         request: ScanRequest,
     ) -> std::result::Result<SendableRecordBatchStream, BoxedError> {
         let projection = request.projection;
-        let projected_schema = if let Some(projection) = &projection {
-            Arc::new(
-                self.table
-                    .schema()
-                    .try_project(projection)
-                    .context(SchemaConversionSnafu)
-                    .map_err(BoxedError::new)?,
-            )
-        } else {
-            self.table.schema()
+        let projected_schema = match &projection {
+            Some(projection) => self.try_project(projection)?,
+            None => self.table.schema(),
         };
+
         let stream = self
             .table
             .to_stream()
             .map_err(BoxedError::new)
             .context(TablesRecordBatchSnafu)
             .map_err(BoxedError::new)?
-            .map(move |batch| {
-                batch.and_then(|batch: common_recordbatch::RecordBatch| {
-                    if let Some(projection) = &projection {
-                        batch.try_project(projection)
-                    } else {
-                        Ok(batch)
-                    }
-                })
+            .map(move |batch| match &projection {
+                Some(p) => batch.and_then(|b| b.try_project(p)),
+                None => batch,
             });
+
         let stream = RecordBatchStreamAdaptor {
             schema: projected_schema,
             stream: Box::pin(stream),

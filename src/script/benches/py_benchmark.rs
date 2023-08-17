@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use catalog::local::MemoryCatalogManager;
+use common_catalog::consts::NUMBERS_TABLE_ID;
 use common_query::Output;
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use futures::Future;
@@ -49,7 +50,8 @@ where
 }
 
 pub(crate) fn sample_script_engine() -> PyEngine {
-    let catalog_manager = MemoryCatalogManager::new_with_table(Arc::new(NumbersTable::default()));
+    let catalog_manager =
+        MemoryCatalogManager::new_with_table(NumbersTable::table(NUMBERS_TABLE_ID));
     let query_engine = QueryEngineFactory::new(catalog_manager, false).query_engine();
 
     PyEngine::new(query_engine.clone())
