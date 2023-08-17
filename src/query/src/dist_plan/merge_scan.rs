@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::any::Any;
+use std::mem;
 use std::sync::Arc;
 
 use arrow_schema::{Schema as ArrowSchema, SchemaRef as ArrowSchemaRef};
@@ -150,10 +151,11 @@ impl MergeScanExec {
         let metric = MergeScanMetric::new(&self.metric);
 
         let stream = try_stream! {
+            let _finish_timer = metric.finish_time().timer();
             for peer in peers {
                 let client = clients.get_client(&peer).await;
                 let database = Database::new(&table.catalog_name, &table.schema_name, client);
-                let _timer = metric.grpc_time().timer();
+                let ready_timer = metric.ready_time().timer();
                 let output: Output = database
                     .logical_plan(substrait_plan.clone(), trace_id)
                     .await
@@ -164,6 +166,9 @@ impl MergeScanExec {
                 let Output::Stream(mut stream) = output else {
                     unreachable!()
                 };
+
+                // explicitly drop the timer to finish recording of elapsed time.
+                mem::drop(ready_timer);
 
                 while let Some(batch) = stream.next().await {
                     let batch = batch?;
@@ -269,8 +274,10 @@ impl DisplayAs for MergeScanExec {
 
 #[derive(Debug, Clone)]
 struct MergeScanMetric {
-    /// Nanosecond spent on fetching data from remote
-    grpc_time: Time,
+    /// Nanosecond elapsed till the scan operator is ready to emit data
+    ready_time: Time,
+    /// Nanosecond elapsed till the scan operator finished execution
+    finish_time: Time,
     /// Count of rows fetched from remote
     output_rows: Count,
 }
@@ -278,13 +285,18 @@ struct MergeScanMetric {
 impl MergeScanMetric {
     pub fn new(metric: &ExecutionPlanMetricsSet) -> Self {
         Self {
-            grpc_time: MetricBuilder::new(metric).subset_time("gRPC", 1),
+            ready_time: MetricBuilder::new(metric).subset_time("ready_time", 1),
+            finish_time: MetricBuilder::new(metric).subset_time("finish_time", 1),
             output_rows: MetricBuilder::new(metric).output_rows(1),
         }
     }
 
-    pub fn grpc_time(&self) -> &Time {
-        &self.grpc_time
+    pub fn ready_time(&self) -> &Time {
+        &self.ready_time
+    }
+
+    pub fn finish_time(&self) -> &Time {
+        &self.finish_time
     }
 
     pub fn record_output_batch_rows(&self, num_rows: usize) {
