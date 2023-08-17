@@ -114,7 +114,7 @@ impl InformationSchemaProvider {
     }
 }
 
-pub trait InformationTable: Send + Sync {
+pub trait InformationTable {
     fn table_id(&self) -> TableId;
 
     fn table_name(&self) -> &'static str;
