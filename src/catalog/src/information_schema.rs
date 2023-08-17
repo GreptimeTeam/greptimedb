@@ -73,9 +73,10 @@ impl InformationSchemaProvider {
             let schema = table.schema();
             let table_info = Self::table_info(self.catalog_name.clone(), &table);
             let table_type = table.table_type();
-            let data_source = Arc::new(InformationTableDataSource::new(table));
             let filter_pushdown = FilterPushDownType::Unsupported;
             let thin_table = ThinTable::new(schema, table_info, table_type, filter_pushdown);
+
+            let data_source = Arc::new(InformationTableDataSource::new(table));
             Arc::new(ThinTableAdapter::new(thin_table, data_source)) as _
         })
     }
@@ -101,11 +102,12 @@ impl InformationSchemaProvider {
             .next_column_id(0)
             .build()
             .unwrap();
+        let table_ident = TableIdent {
+            table_id: table.table_id(),
+            version: 0,
+        };
         let table_info = TableInfoBuilder::default()
-            .ident(TableIdent {
-                table_id: table.table_id(),
-                version: 0,
-            })
+            .ident(table_ident)
             .name(table.table_name().to_owned())
             .catalog_name(catalog_name)
             .schema_name(INFORMATION_SCHEMA_NAME.to_owned())
@@ -167,7 +169,7 @@ impl DataSource for InformationTableDataSource {
             .context(TablesRecordBatchSnafu)
             .map_err(BoxedError::new)?
             .map(move |batch| {
-                batch.and_then(|batch: common_recordbatch::RecordBatch| {
+                batch.and_then(|batch| {
                     if let Some(projection) = &projection {
                         batch.try_project(projection)
                     } else {
