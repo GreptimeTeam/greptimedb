@@ -22,7 +22,10 @@ use async_trait::async_trait;
 use auth::tests::MockUserProvider;
 use auth::UserProviderRef;
 use client::{Client, Database, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_query::Output;
+use common_recordbatch::RecordBatches;
 use common_runtime::{Builder as RuntimeBuilder, Runtime};
+use common_telemetry::timer;
 use servers::error::{Result, StartGrpcSnafu, TcpBindSnafu};
 use servers::grpc::flight::FlightHandler;
 use servers::grpc::handler::GreptimeRequestHandler;
@@ -144,4 +147,61 @@ async fn test_grpc_query() {
     }));
     let re = db.sql("select * from numbers").await;
     let _ = re.unwrap();
+}
+
+#[tokio::test]
+async fn test_streaming_do_get() {
+    // create a mock grpc server which hosts a default table.
+    let timer_bootstrap = timer!("BOOTSTRAP_TIMER");
+    let num_cols = 1000000000;
+    let server = create_grpc_server(MemTable::default_numbers_table_with_length(num_cols)).unwrap();
+    let re = server
+        .start(LOCALHOST_WITH_0.parse().unwrap())
+        .await
+        .unwrap();
+
+    // create an authorized mock client.
+    let grpc_client = Client::with_urls(vec![re.to_string()]);
+    let mut db = Database::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, grpc_client);
+    let greptime = "greptime".to_string();
+    db.set_auth(AuthScheme::Basic(Basic {
+        username: greptime.clone(),
+        password: greptime.clone(),
+    }));
+
+    println!(
+        "bootstrap costs {} ms",
+        timer_bootstrap.elapsed().as_millis()
+    );
+
+    let timer_response = timer!("RESPONSE_TIMER");
+
+    let output = db.sql("select * from numbers").await.unwrap();
+
+    let toggle = false;
+    match output {
+        Output::AffectedRows(_) => unreachable!(),
+        Output::RecordBatches(record_batches) => {
+            if toggle {
+                println!(
+                    "got record batches {}",
+                    record_batches.pretty_print().unwrap()
+                )
+            }
+        }
+        Output::Stream(stream) => {
+            if toggle {
+                println!(
+                    "got stream which prints to {}",
+                    RecordBatches::try_collect(stream)
+                        .await
+                        .unwrap()
+                        .pretty_print()
+                        .unwrap()
+                );
+            }
+        }
+    }
+
+    println!("response costs {} ms", timer_response.elapsed().as_millis());
 }
