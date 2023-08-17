@@ -12,44 +12,30 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use clap::Parser;
-use common_meta::key::table_region::RegionDistribution;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
+use common_meta::peer::Peer;
+use common_meta::rpc::router::{Region, RegionRoute};
 use common_meta::table_name::TableName;
 use common_telemetry::info;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, RawSchema};
 use meta_srv::service::store::etcd::EtcdStore;
 use meta_srv::service::store::kv::KvBackendAdapter;
-use rand::prelude::SliceRandom;
+use rand::Rng;
 use table::metadata::{RawTableInfo, RawTableMeta, TableId, TableIdent, TableType};
 
+use self::metadata::TableMetadataBencher;
 use crate::cli::{Instance, Tool};
 use crate::error::Result;
 
-async fn bench<F, Fut>(desc: &str, f: F, count: u32)
-where
-    F: Fn(u32) -> Fut,
-    Fut: Future<Output = ()>,
-{
-    let mut total = Duration::default();
-
-    for i in 1..=count {
-        let start = Instant::now();
-
-        f(i).await;
-
-        total += start.elapsed();
-    }
-
-    let cost = total.as_millis() as f64 / count as f64;
-    info!("{desc}, average operation cost: {cost:.2} ms");
-}
+mod metadata;
 
 async fn bench_self_recorded<F, Fut>(desc: &str, f: F, count: u32)
 where
@@ -98,6 +84,11 @@ struct BenchTableMetadata {
 #[async_trait]
 impl Tool for BenchTableMetadata {
     async fn do_work(&self) -> Result<()> {
+        let bencher = TableMetadataBencher::new(self.table_metadata_manager.clone(), self.count);
+        bencher.bench_create().await;
+        bencher.bench_get().await;
+        bencher.bench_rename().await;
+        bencher.bench_delete().await;
         Ok(())
     }
 }
@@ -150,16 +141,25 @@ fn create_table_info(table_id: TableId, table_name: TableName) -> RawTableInfo {
     }
 }
 
-fn create_region_distribution() -> RegionDistribution {
-    let mut regions = (1..=100).collect::<Vec<u32>>();
-    regions.shuffle(&mut rand::thread_rng());
+fn create_region_routes() -> Vec<RegionRoute> {
+    let mut regions = Vec::with_capacity(100);
+    let mut rng = rand::thread_rng();
 
-    let mut region_distribution = RegionDistribution::new();
-    for datanode_id in 0..10 {
-        region_distribution.insert(
-            datanode_id as u64,
-            regions[datanode_id * 10..(datanode_id + 1) * 10].to_vec(),
-        );
+    for region_id in 0..64u64 {
+        regions.push(RegionRoute {
+            region: Region {
+                id: region_id.into(),
+                name: String::new(),
+                partition: None,
+                attrs: BTreeMap::new(),
+            },
+            leader_peer: Some(Peer {
+                id: rng.gen_range(0..10),
+                addr: String::new(),
+            }),
+            follower_peers: vec![],
+        });
     }
-    region_distribution
+
+    regions
 }

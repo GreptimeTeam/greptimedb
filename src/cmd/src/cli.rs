@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// TODO(weny): Adds bench program.
-#[allow(unused)]
 mod bench;
 mod cmd;
 mod helper;
