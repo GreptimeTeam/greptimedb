@@ -139,7 +139,10 @@ impl InformationTableDataSource {
 }
 
 impl DataSource for InformationTableDataSource {
-    fn get_stream(&self, request: ScanRequest) -> std::result::Result<SendableRecordBatchStream, BoxedError> {
+    fn get_stream(
+        &self,
+        request: ScanRequest,
+    ) -> std::result::Result<SendableRecordBatchStream, BoxedError> {
         let projection = request.projection;
         let projected_schema = if let Some(projection) = &projection {
             Arc::new(
