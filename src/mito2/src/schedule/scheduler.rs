@@ -10,25 +10,30 @@ use common_telemetry::info;
 
 pub type Job = Pin<Box<dyn Future<Output = ()> + Send>>;
 
+/// state of scheduler
 const STATE_RUNNING: u8 = 0;
 const STATE_STOP: u8 = 1;
 const STATE_AWAIT_TERMINATION: u8 = 2;
 
-// producer and consumer count
+/// producer and consumer count
 const CONSUMER_NUM: u8 = 2;
 
 /// [Scheduler] defines a set of API to schedule Jobs
 #[async_trait::async_trait]
 pub trait Scheduler {
-    /// Schedules a Job
+    /// Schedule a Job
     async fn schedule(&mut self, req: Job) -> Result<()>;
 
-    /// Stops scheduler
+    /// Stops scheduler. If `await_termination` is set to true, the scheduler will
+    /// wait until all tasks are processed.
     async fn stop(&mut self, await_termination: bool) -> Result<()>;
 }
 
+/// Request scheduler based on local state.
 pub struct LocalScheduler {
+    /// send jobs to flume bounded
     sender: Option<flume::Sender<Job>>,
+    /// handle task
     handles: Vec<Option<JoinHandle<()>>>,
     /// Token used to halt the scheduler
     cancel_token: CancellationToken,
@@ -46,7 +51,7 @@ impl LocalScheduler {
 
         let mut handles = Vec::with_capacity(num);
 
-        for id in 0..num {
+        for _ in 0..num {
             let child = token.child_token().clone();
             let receiver = rx.clone();
             let state = Arc::clone(&state);
@@ -60,14 +65,13 @@ impl LocalScheduler {
                         }
                         req_opt = receiver.recv_async() =>{
                             if let Ok(req) = req_opt{
-                                info!("handle {} is doing", id);
                                 req.await;
                             }
                         }
                     }
                     
                 }
-                // For correctness, we need to poll requests from fifo again.
+                // For correctness, we need to handle all tasks
                 if state.load(Ordering::Relaxed) == STATE_AWAIT_TERMINATION {
                     while let Ok(req) = receiver.recv() {
                         req.await;
