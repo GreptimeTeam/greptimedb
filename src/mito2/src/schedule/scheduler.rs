@@ -158,21 +158,21 @@ mod tests {
 
         local
             .schedule(Box::pin(async move {
-                println!("hello1");
+                tokio::time::sleep(Duration::from_secs(1)).await;
             }))
             .await
             .unwrap();
 
         local
             .schedule(Box::pin(async move {
-                println!("hello2");
+                tokio::time::sleep(Duration::from_secs(1)).await;
             }))
             .await
             .unwrap();
 
         local
             .schedule(Box::pin(async move {
-                println!("hello3");
+                tokio::time::sleep(Duration::from_secs(1)).await;
             }))
             .await
             .unwrap();
