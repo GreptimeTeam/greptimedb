@@ -174,7 +174,7 @@ impl DummyCatalogList {
                 .get_metadata(region_id)
                 .await
                 .with_context(|_| GetRegionMetadataSnafu {
-                    region: engine.name(),
+                    engine: engine.name(),
                     region_id,
                 })?;
         let table_provider = DummyTableProvider {
@@ -269,6 +269,7 @@ struct DummyTableProvider {
     region_id: RegionId,
     engine: RegionEngineRef,
     metadata: RegionMetadataRef,
+    /// Keeping a mutable request makes it possible to change in the optimize phase.
     scan_request: Arc<Mutex<ScanRequest>>,
 }
 

@@ -518,14 +518,14 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Failed to get metadata from region {} for region_id {}, location: {}, source: {}",
-        region,
+        "Failed to get metadata from engine {} for region_id {}, location: {}, source: {}",
+        engine,
         region_id,
         location,
         source
     ))]
     GetRegionMetadata {
-        region: String,
+        engine: String,
         region_id: RegionId,
         location: Location,
         source: BoxedError,
