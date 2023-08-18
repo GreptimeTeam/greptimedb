@@ -39,7 +39,8 @@ impl BooleanVector {
         &self.array
     }
 
-    pub(crate) fn as_boolean_array(&self) -> &BooleanArray {
+    /// Get the inner boolean array.
+    pub fn as_boolean_array(&self) -> &BooleanArray {
         &self.array
     }
 

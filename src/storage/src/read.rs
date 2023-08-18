@@ -255,7 +255,7 @@ pub trait BatchReader: Send {
     /// Returns `Ok(None)` when the reader has reached its end and calling `next_batch()`
     /// again won't return batch again.
     ///
-    /// If `Err` is returned, caller should not call this method again, the implementor
+    /// If `Err` is returned, caller **must** not call this method again, the implementor
     /// may or may not panic in such case.
     async fn next_batch(&mut self) -> Result<Option<Batch>>;
 }
