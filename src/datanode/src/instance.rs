@@ -56,7 +56,6 @@ use table::engine::{TableEngine, TableEngineProcedureRef};
 use table::requests::FlushTableRequest;
 use table::table::numbers::NumbersTable;
 use table::table::TableIdProviderRef;
-use table::Table;
 
 use crate::datanode::{DatanodeOptions, ObjectStoreConfig, ProcedureConfig, WalConfig};
 use crate::error::{
@@ -212,13 +211,13 @@ impl Instance {
             Mode::Standalone => {
                 if opts.enable_memory_catalog {
                     let catalog = catalog::local::MemoryCatalogManager::with_default_setup();
-                    let table = NumbersTable::new(MIN_USER_TABLE_ID);
+                    let table = NumbersTable::table(MIN_USER_TABLE_ID);
 
                     let _ = catalog
                         .register_table(RegisterTableRequest {
                             table_id: MIN_USER_TABLE_ID,
                             table_name: table.table_info().name.to_string(),
-                            table: Arc::new(table),
+                            table,
                             catalog: DEFAULT_CATALOG_NAME.to_string(),
                             schema: DEFAULT_SCHEMA_NAME.to_string(),
                         })

@@ -359,6 +359,7 @@ pub(crate) use tests::sample_script_engine;
 #[cfg(test)]
 mod tests {
     use catalog::local::MemoryCatalogManager;
+    use common_catalog::consts::NUMBERS_TABLE_ID;
     use common_recordbatch::util;
     use datatypes::prelude::ScalarVector;
     use datatypes::value::Value;
@@ -370,7 +371,7 @@ mod tests {
 
     pub(crate) fn sample_script_engine() -> PyEngine {
         let catalog_manager =
-            MemoryCatalogManager::new_with_table(Arc::new(NumbersTable::default()));
+            MemoryCatalogManager::new_with_table(NumbersTable::table(NUMBERS_TABLE_ID));
         let query_engine = QueryEngineFactory::new(catalog_manager, false).query_engine();
 
         PyEngine::new(query_engine.clone())

@@ -28,7 +28,9 @@ use catalog::{
     RegisterSystemTableRequest, RegisterTableRequest, RenameTableRequest,
 };
 use client::client_manager::DatanodeClients;
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME};
+use common_catalog::consts::{
+    DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME, NUMBERS_TABLE_ID,
+};
 use common_error::ext::BoxedError;
 use common_meta::key::catalog_name::CatalogNameKey;
 use common_meta::key::schema_name::SchemaNameKey;
@@ -368,7 +370,7 @@ impl CatalogManager for FrontendCatalogManager {
             && schema == DEFAULT_SCHEMA_NAME
             && table_name == NUMBERS_TABLE_NAME
         {
-            return Ok(Some(Arc::new(NumbersTable::default())));
+            return Ok(Some(NumbersTable::table(NUMBERS_TABLE_ID)));
         }
 
         if schema == INFORMATION_SCHEMA_NAME {

@@ -277,7 +277,7 @@ mod test {
     #[ignore = "Projection is disabled for https://github.com/apache/arrow-datafusion/issues/6489"]
     #[test]
     fn transform_simple_projection_filter() {
-        let numbers_table = Arc::new(NumbersTable::new(0)) as _;
+        let numbers_table = NumbersTable::table(0);
         let table_source = Arc::new(DefaultTableSource::new(Arc::new(
             DfTableProviderAdapter::new(numbers_table),
         )));
@@ -309,7 +309,7 @@ mod test {
 
     #[test]
     fn transform_aggregator() {
-        let numbers_table = Arc::new(NumbersTable::new(0)) as _;
+        let numbers_table = NumbersTable::table(0);
         let table_source = Arc::new(DefaultTableSource::new(Arc::new(
             DfTableProviderAdapter::new(numbers_table),
         )));
@@ -333,7 +333,7 @@ mod test {
 
     #[test]
     fn transform_distinct_order() {
-        let numbers_table = Arc::new(NumbersTable::new(0)) as _;
+        let numbers_table = NumbersTable::table(0);
         let table_source = Arc::new(DefaultTableSource::new(Arc::new(
             DfTableProviderAdapter::new(numbers_table),
         )));
@@ -360,7 +360,7 @@ mod test {
 
     #[test]
     fn transform_single_limit() {
-        let numbers_table = Arc::new(NumbersTable::new(0)) as _;
+        let numbers_table = NumbersTable::table(0);
         let table_source = Arc::new(DefaultTableSource::new(Arc::new(
             DfTableProviderAdapter::new(numbers_table),
         )));

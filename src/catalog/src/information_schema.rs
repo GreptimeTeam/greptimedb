@@ -28,7 +28,7 @@ use store_api::data_source::DataSource;
 use store_api::storage::{ScanRequest, TableId};
 use table::error::{SchemaConversionSnafu, TablesRecordBatchSnafu};
 use table::metadata::{
-    FilterPushDownType, TableIdent, TableInfoBuilder, TableInfoRef, TableMetaBuilder, TableType,
+    FilterPushDownType, TableInfoBuilder, TableInfoRef, TableMetaBuilder, TableType,
 };
 use table::thin_table::{ThinTable, ThinTableAdapter};
 use table::TableRef;
@@ -73,9 +73,10 @@ impl InformationSchemaProvider {
             let schema = table.schema();
             let table_info = Self::table_info(self.catalog_name.clone(), &table);
             let table_type = table.table_type();
-            let data_source = Arc::new(InformationTableDataSource::new(table));
             let filter_pushdown = FilterPushDownType::Unsupported;
             let thin_table = ThinTable::new(schema, table_info, table_type, filter_pushdown);
+
+            let data_source = Arc::new(InformationTableDataSource::new(table));
             Arc::new(ThinTableAdapter::new(thin_table, data_source)) as _
         })
     }
@@ -102,10 +103,7 @@ impl InformationSchemaProvider {
             .build()
             .unwrap();
         let table_info = TableInfoBuilder::default()
-            .ident(TableIdent {
-                table_id: table.table_id(),
-                version: 0,
-            })
+            .table_id(table.table_id())
             .name(table.table_name().to_owned())
             .catalog_name(catalog_name)
             .schema_name(INFORMATION_SCHEMA_NAME.to_owned())
@@ -141,6 +139,16 @@ impl InformationTableDataSource {
     fn new(table: InformationTableRef) -> Self {
         Self { table }
     }
+
+    fn try_project(&self, projection: &[usize]) -> std::result::Result<SchemaRef, BoxedError> {
+        let schema = self
+            .table
+            .schema()
+            .try_project(projection)
+            .context(SchemaConversionSnafu)
+            .map_err(BoxedError::new)?;
+        Ok(Arc::new(schema))
+    }
 }
 
 impl DataSource for InformationTableDataSource {
@@ -149,32 +157,22 @@ impl DataSource for InformationTableDataSource {
         request: ScanRequest,
     ) -> std::result::Result<SendableRecordBatchStream, BoxedError> {
         let projection = request.projection;
-        let projected_schema = if let Some(projection) = &projection {
-            Arc::new(
-                self.table
-                    .schema()
-                    .try_project(projection)
-                    .context(SchemaConversionSnafu)
-                    .map_err(BoxedError::new)?,
-            )
-        } else {
-            self.table.schema()
+        let projected_schema = match &projection {
+            Some(projection) => self.try_project(projection)?,
+            None => self.table.schema(),
         };
+
         let stream = self
             .table
             .to_stream()
             .map_err(BoxedError::new)
             .context(TablesRecordBatchSnafu)
             .map_err(BoxedError::new)?
-            .map(move |batch| {
-                batch.and_then(|batch: common_recordbatch::RecordBatch| {
-                    if let Some(projection) = &projection {
-                        batch.try_project(projection)
-                    } else {
-                        Ok(batch)
-                    }
-                })
+            .map(move |batch| match &projection {
+                Some(p) => batch.and_then(|b| b.try_project(p)),
+                None => batch,
             });
+
         let stream = RecordBatchStreamAdaptor {
             schema: projected_schema,
             stream: Box::pin(stream),
