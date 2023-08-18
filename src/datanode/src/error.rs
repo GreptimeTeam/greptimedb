@@ -477,9 +477,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Empty data: {}", msg))]
-    EmptyData { msg: String, location: Location },
-
     #[snafu(display(
         "Invalid insert row len, table: {}, expected: {}, actual: {}",
         table_name,
@@ -589,7 +586,6 @@ impl ErrorExt for Error {
             | MissingWalDirConfig { .. }
             | PrepareImmutableTable { .. }
             | InvalidInsertRowLen { .. }
-            | EmptyData { .. }
             | ColumnDataType { .. } => StatusCode::InvalidArguments,
 
             EncodeJson { .. } | DecodeJson { .. } | PayloadNotExist { .. } | Unexpected { .. } => {
