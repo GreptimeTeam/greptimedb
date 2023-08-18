@@ -44,7 +44,6 @@ use crate::error::{
 
 pub type CreateExprFactoryRef = Arc<dyn CreateExprFactory + Send + Sync>;
 
-#[async_trait::async_trait]
 pub trait CreateExprFactory {
     fn create_table_expr_by_columns(
         &self,
@@ -68,7 +67,6 @@ pub trait CreateExprFactory {
 #[derive(Debug)]
 pub struct DefaultCreateExprFactory;
 
-#[async_trait::async_trait]
 impl CreateExprFactory for DefaultCreateExprFactory {
     fn create_table_expr_by_columns(
         &self,
