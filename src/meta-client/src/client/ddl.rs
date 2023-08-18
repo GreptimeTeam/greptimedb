@@ -17,9 +17,11 @@ use std::sync::Arc;
 use api::v1::meta::ddl_task_client::DdlTaskClient;
 use api::v1::meta::{ErrorCode, Role, SubmitDdlTaskRequest, SubmitDdlTaskResponse};
 use common_grpc::channel_manager::ChannelManager;
+use common_telemetry::{info, warn};
 use snafu::{ensure, ResultExt};
 use tokio::sync::RwLock;
 use tonic::transport::Channel;
+use tonic::Code;
 
 use crate::client::ask_leader::AskLeader;
 use crate::client::Id;
@@ -133,23 +135,35 @@ impl Inner {
         loop {
             if let Some(leader) = &ask_leader.get_leader() {
                 let mut client = self.make_client(leader)?;
-                let res = client
+
+                match client
                     .submit_ddl_task(req.clone())
                     .await
-                    .map_err(error::Error::from)?;
+                    .map_err(error::Error::from)
+                {
+                    Ok(res) => {
+                        let res = res.into_inner();
 
-                let res = res.into_inner();
-
-                if let Some(header) = res.header.as_ref() {
-                    if let Some(err) = header.error.as_ref() {
-                        if err.code == ErrorCode::NotLeader as i32 {
-                            let _ = ask_leader.ask_leader().await?;
-                            continue;
+                        if let Some(header) = res.header.as_ref() {
+                            if let Some(err) = header.error.as_ref() {
+                                if err.code == ErrorCode::NotLeader as i32 {
+                                    let _ = ask_leader.ask_leader().await?;
+                                    continue;
+                                }
+                            }
                         }
+                        return Ok(res);
+                    }
+                    // The leader may be unreachable.
+                    Err(err) => {
+                        warn!(
+                            "Submitting ddl to {leader} is unreachable, try to update leader addr"
+                        );
+                        let leader = ask_leader.ask_leader().await?;
+                        info!("DDL client updated to new leader addr: {leader}");
+                        continue;
                     }
                 }
-
-                return Ok(res);
             } else if let Err(err) = ask_leader.ask_leader().await {
                 return Err(err);
             }
