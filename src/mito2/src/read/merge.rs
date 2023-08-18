@@ -17,11 +17,6 @@
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
-use datatypes::arrow::compute::SortOptions;
-use datatypes::arrow::row::{RowConverter, SortField};
-use datatypes::prelude::DataType;
-use datatypes::vectors::{UInt32Vector, Vector};
-
 use crate::error::Result;
 use crate::read::{Batch, Source};
 
@@ -173,53 +168,21 @@ impl BatchMerger {
 
         let batches = std::mem::take(&mut self.batches);
         // Concat all batches.
-        let batch = Batch::concat(batches)?;
+        let mut batch = Batch::concat(batches)?;
 
-        // TODO(yingwen): metrics
-        let batch = if self.is_sorted {
-            // TODO(yingwen): filter by op type and sequence.
-            // We don't need to remove duplications.
-            unimplemented!();
-        } else {
+        // TODO(yingwen): metrics for sorted and unsorted batches.
+        if !self.is_sorted {
             // Slow path. We need to merge overlapping batches. For simplicity, we
-            // just sort the all batches.
-            // Safety: We ensure fields have supported format.
-            // TODO(yingwen): 1. If we know the data type of timestamp we could precreate
-            // the converter. 2. We can cache the converter.
-            let mut converter = RowConverter::new(vec![
-                SortField::new(batch.timestamps().data_type().as_arrow_type()),
-                SortField::new_with_options(
-                    batch.sequences().data_type().as_arrow_type(),
-                    SortOptions {
-                        descending: true,
-                        ..Default::default()
-                    },
-                ),
-            ])
-            .unwrap();
-
-            // Batches are always have elements.
-            let columns = [
-                batch.timestamps().to_arrow_array(),
-                batch.sequences().to_arrow_array(),
-            ];
-            let rows = converter.convert_columns(&columns).unwrap();
-            let mut to_sort: Vec<_> = rows.iter().enumerate().collect();
-            to_sort.sort_unstable_by(|left, right| left.1.cmp(&right.1));
-
-            // TODO(yingwen): We can remove duplication by key.
-
-            let indices = UInt32Vector::from_iter_values(to_sort.iter().map(|v| v.0 as u32));
-
-            // Take the sorted batch.
-            batch.take(&indices)
-
-            // We need to remove duplications.
-        };
+            // just sort the all batches and remove duplications.
+            batch.sort_and_dedup()?;
+            // We don't need to remove duplications if timestamps of batches
+            // are not overlapping.
+        }
 
         // Filter rows by op type.
+        batch.filter_deleted()?;
 
-        unimplemented!()
+        Ok(Some(batch))
     }
 }
 
