@@ -162,7 +162,7 @@ impl RowInserter {
 }
 
 fn extract_schema_and_rows(req: &RowInsertRequest) -> Result<(&[ColumnSchema], &[Row])> {
-    let rows = req.rows.as_ref().context(EmptyDataSnafu {
+    let rows = req.rows.as_ref().with_context(|| EmptyDataSnafu {
         msg: format!("insert to table: {:?}", &req.table_name),
     })?;
     let schema = &rows.schema;
