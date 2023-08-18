@@ -14,6 +14,7 @@
 
 pub mod deleter;
 pub(crate) mod inserter;
+pub(crate) mod row_inserter;
 
 use std::collections::HashMap;
 use std::sync::Arc;

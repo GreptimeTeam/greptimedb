@@ -12,16 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(assert_matches)]
+use api::v1::RowInsertRequest;
+use store_api::storage::RegionNumber;
 
-pub mod columns;
-pub mod error;
-pub mod manager;
-pub mod metrics;
-pub mod partition;
-pub mod range;
-pub mod route;
-pub mod row_splitter;
-pub mod splitter;
+use crate::PartitionRuleRef;
 
-pub use crate::partition::{PartitionRule, PartitionRuleRef};
+pub type RowInsertRequestSplit = Vec<(RegionNumber, RowInsertRequest)>;
+
+pub struct RowSplitter {
+    partition_rule: PartitionRuleRef,
+}
+
+impl RowSplitter {
+    pub fn new(partition_rule: PartitionRuleRef) -> Self {
+        Self { partition_rule }
+    }
+
+    pub fn split_inserts(&self) {
+        todo!("Implement split")
+    }
+}

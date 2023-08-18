@@ -16,6 +16,7 @@ use api::v1::greptime_database_client::GreptimeDatabaseClient;
 use api::v1::greptime_request::Request;
 use api::v1::{
     AuthHeader, GreptimeRequest, GreptimeResponse, InsertRequest, InsertRequests, RequestHeader,
+    RowInsertRequest, RowInsertRequests,
 };
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -75,6 +76,18 @@ impl StreamInserter {
     pub async fn insert(&self, requests: Vec<InsertRequest>) -> Result<()> {
         let inserts = InsertRequests { inserts: requests };
         let request = self.to_rpc_request(Request::Inserts(inserts));
+
+        self.sender.send(request).await.map_err(|e| {
+            error::ClientStreamingSnafu {
+                err_msg: e.to_string(),
+            }
+            .build()
+        })
+    }
+
+    pub async fn row_insert(&self, requests: Vec<RowInsertRequest>) -> Result<()> {
+        let inserts = RowInsertRequests { inserts: requests };
+        let request = self.to_rpc_request(Request::RowInserts(inserts));
 
         self.sender.send(request).await.map_err(|e| {
             error::ClientStreamingSnafu {

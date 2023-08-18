@@ -234,7 +234,7 @@ fn parse_tags<'a>(
                 datatype: ColumnDataType::String as i32,
                 semantic_type: SemanticType::Tag as i32,
             });
-            one_row.push(to_value(ValueData::StringValue(v.to_string())));
+            one_row.push(ValueData::StringValue(v.to_string()).into());
         } else {
             check_schema(ColumnDataType::String, SemanticType::Tag, &schema[*index])?;
             one_row[*index].value_data = Some(ValueData::StringValue(v.to_string()));
@@ -269,7 +269,7 @@ fn parse_fields<'a>(
                 datatype: datatype as i32,
                 semantic_type: SemanticType::Field as i32,
             });
-            one_row.push(to_value(value));
+            one_row.push(value.into());
         } else {
             check_schema(datatype, SemanticType::Field, &schema[*index])?;
             one_row[*index].value_data = Some(value);
@@ -309,7 +309,7 @@ fn parse_ts(
             datatype: ColumnDataType::TimestampMillisecond as i32,
             semantic_type: SemanticType::Timestamp as i32,
         });
-        one_row.push(to_value(ValueData::TsMillisecondValue(ts)))
+        one_row.push(ValueData::TsMillisecondValue(ts).into())
     } else {
         check_schema(
             ColumnDataType::TimestampMillisecond,
@@ -349,14 +349,6 @@ fn check_schema(
     );
 
     Ok(())
-}
-
-// TODO(jeremy): impl From<ValueData> for Value
-#[inline]
-fn to_value(value: ValueData) -> Value {
-    Value {
-        value_data: Some(value),
-    }
 }
 
 #[inline]
