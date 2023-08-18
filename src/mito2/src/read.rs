@@ -249,11 +249,12 @@ impl Batch {
         Ok(())
     }
 
-    /// Sorts rows in the batch.
+    /// Sorts and dedup rows in the batch.
     ///
-    /// It orders rows by timestamp, sequence desc. It doesn't consider op type as sequence
+    /// It orders rows by timestamp, sequence desc and only keep the latest
+    /// row for the same timestamp. It doesn't consider op type as sequence
     /// should already provide uniqueness for a row.
-    pub fn sort(&mut self) -> Result<()> {
+    pub fn sort_and_dedup(&mut self) -> Result<()> {
         // If building a converter each time is costly, we may allow passing a
         // converter.
         let mut converter = RowConverter::new(vec![
@@ -275,6 +276,15 @@ impl Batch {
         let rows = converter.convert_columns(&columns).unwrap();
         let mut to_sort: Vec<_> = rows.iter().enumerate().collect();
         to_sort.sort_unstable_by(|left, right| left.1.cmp(&right.1));
+
+        // Dedup by timestamps.
+        to_sort.dedup_by(|left, right| {
+            debug_assert_eq!(18, left.1.as_ref().len());
+            debug_assert_eq!(18, right.1.as_ref().len());
+            let (left_key, right_key) = (left.1.as_ref(), right.1.as_ref());
+            // We only compare the timestamp part and ignore sequence.
+            &left_key[..TIMESTAMP_KEY_LEN] == &right_key[..TIMESTAMP_KEY_LEN]
+        });
 
         let indices = UInt32Vector::from_iter_values(to_sort.iter().map(|v| v.0 as u32));
         self.take_in_place(&indices)
@@ -326,6 +336,9 @@ impl Batch {
         self.sequences.get_data(index)
     }
 }
+
+/// Len of timestamp in arrow row format.
+const TIMESTAMP_KEY_LEN: usize = 9;
 
 /// Helper function to concat arrays from `iter`.
 fn concat_arrays(iter: impl Iterator<Item = ArrayRef>) -> Result<ArrayRef> {
