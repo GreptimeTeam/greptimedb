@@ -334,20 +334,20 @@ fn check_schema(
     ensure!(
         schema.datatype == datatype as i32,
         IncompatibleSchemaSnafu {
-            err_msg: format!(
-                "column {} datatype incompatible, expected {:?}, found {:?}",
-                schema.column_name, schema.datatype, datatype
-            )
+            column_name: &schema.column_name,
+            datatype: "datatype",
+            expected: schema.datatype,
+            actual: datatype as i32,
         }
     );
 
     ensure!(
         schema.semantic_type == semantic_type as i32,
         IncompatibleSchemaSnafu {
-            err_msg: format!(
-                "column {} semantic type incompatible, expected {:?}, found {:?}",
-                schema.column_name, schema.semantic_type, semantic_type
-            )
+            column_name: &schema.column_name,
+            datatype: "semantic_type",
+            expected: schema.semantic_type,
+            actual: semantic_type as i32,
         }
     );
 

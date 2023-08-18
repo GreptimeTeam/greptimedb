@@ -332,8 +332,20 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Incompatible schema: {:?}", err_msg,))]
-    IncompatibleSchema { err_msg: String, location: Location },
+    #[snafu(display(
+        "Column: {:?}, {:?} incompatible, expected: {:?}, actual: {:?}",
+        column_name,
+        datatype,
+        expected,
+        actual
+    ))]
+    IncompatibleSchema {
+        column_name: String,
+        datatype: String,
+        expected: i32,
+        actual: i32,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
