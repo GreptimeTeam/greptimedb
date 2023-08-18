@@ -16,9 +16,12 @@
 
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
+use std::mem;
+
+use async_trait::async_trait;
 
 use crate::error::Result;
-use crate::read::{Batch, Source};
+use crate::read::{Batch, BatchReader, BoxedBatchReader, Source};
 
 /// Reader to merge sorted batches.
 ///
@@ -28,14 +31,6 @@ use crate::read::{Batch, Source};
 /// ignore op type as sequence is already unique).
 /// 2. Batch doesn't have duplicate elements (element with same key).
 pub struct MergeReader {
-    /// Whether the reader has been initialized.
-    initialized: bool,
-    // TODO(yingwen): Init nodes in builder.
-    /// Input sources.
-    ///
-    /// All source must yield batches with the same schema. Initialize the reader would
-    /// convert all `Source`s into `Node`s and then clear this vector.
-    sources: Vec<Source>,
     /// Holds a min-heap for all [Node]s. Each node yields batches from a `source`.
     ///
     /// `Node` in this heap **must** not be EOF.
@@ -44,16 +39,12 @@ pub struct MergeReader {
     batch_merger: BatchMerger,
 }
 
-impl MergeReader {
-    /// Collect batches from sources for the same primary key and return
-    /// the collected batch.
-    async fn collect_batches_for_same_key(&mut self) -> Result<Option<Batch>> {
-        loop {
-            // Peek next node from heap.
-            let Some(next_node) = self.nodes.peek() else {
-                // heap is empty.
-                break;
-            };
+#[async_trait]
+impl BatchReader for MergeReader {
+    async fn next_batch(&mut self) -> Result<Option<Batch>> {
+        // Collect batches from sources for the same primary key and return
+        // the collected batch.
+        while !self.nodes.is_empty() {
             // Peek current key.
             let Some(current_key) = self.batch_merger.primary_key() else {
                 // The merger is empty, we could push it directly.
@@ -62,7 +53,51 @@ impl MergeReader {
                 continue;
             };
             // If next node has a different key, we have finish collecting current key.
-            if next_node.primary_key() != current_key {
+            // Safety: node is not empty.
+            if self.nodes.peek().unwrap().primary_key() != current_key {
+                break;
+            }
+            // They have the same primary key, we could take it and try next node.
+            self.take_batch_from_heap().await?;
+        }
+
+        // Merge collected batches.
+        self.batch_merger.merge_batches()
+    }
+}
+
+impl MergeReader {
+    /// Creates a new [MergeReader].
+    async fn new(sources: Vec<Source>) -> Result<MergeReader> {
+        let mut nodes = BinaryHeap::with_capacity(sources.len());
+        for source in sources {
+            let node = Node::new(source).await?;
+            if !node.is_eof() {
+                // Ensure `nodes` don't have eof node.
+                nodes.push(node);
+            }
+        }
+
+        Ok(MergeReader {
+            nodes,
+            batch_merger: BatchMerger::new(),
+        })
+    }
+
+    /// Collect batches from sources for the same primary key and return
+    /// the collected batch.
+    async fn collect_batches_for_same_key(&mut self) -> Result<Option<Batch>> {
+        while !self.nodes.is_empty() {
+            // Peek current key.
+            let Some(current_key) = self.batch_merger.primary_key() else {
+                // The merger is empty, we could push it directly.
+                self.take_batch_from_heap().await?;
+                // Try next node.
+                continue;
+            };
+            // If next node has a different key, we have finish collecting current key.
+            // Safety: node is not empty.
+            if self.nodes.peek().unwrap().primary_key() != current_key {
                 break;
             }
             // They have the same primary key, we could take it and try next node.
@@ -86,12 +121,40 @@ impl MergeReader {
 
     /// Takes batch from heap top and reheap.
     async fn take_batch_from_heap(&mut self) -> Result<()> {
-        let next_node = self.nodes.pop().unwrap();
+        let mut next_node = self.nodes.pop().unwrap();
         let batch = next_node.fetch_batch().await?;
         self.batch_merger.push(batch);
         self.reheap(next_node);
 
         Ok(())
+    }
+}
+
+/// Builder to build and initialize a [MergeReader].
+#[derive(Default)]
+pub struct MergeReaderBuilder {
+    /// Input sources.
+    ///
+    /// All source must yield batches with the same schema.
+    sources: Vec<Source>,
+}
+
+impl MergeReaderBuilder {
+    /// Returns an empty builder.
+    pub fn new() -> MergeReaderBuilder {
+        MergeReaderBuilder::default()
+    }
+
+    /// Pushs a batch reader to sources.
+    pub fn push_batch_reader(&mut self, reader: BoxedBatchReader) -> &mut Self {
+        self.sources.push(Source::Reader(reader));
+        self
+    }
+
+    /// Builds and initializes the reader, then resets the builder.
+    pub async fn build(&mut self) -> Result<MergeReader> {
+        let sources = mem::take(&mut self.sources);
+        MergeReader::new(sources).await
     }
 }
 
@@ -166,7 +229,7 @@ impl BatchMerger {
             return Ok(None);
         }
 
-        let batches = std::mem::take(&mut self.batches);
+        let batches = mem::take(&mut self.batches);
         // Concat all batches.
         let mut batch = Batch::concat(batches)?;
 
@@ -197,6 +260,17 @@ struct Node {
 }
 
 impl Node {
+    /// Initialize a node.
+    ///
+    /// It tries to fetch one batch from the `source`.
+    async fn new(mut source: Source) -> Result<Node> {
+        let current_batch = source.next_batch().await?.map(CompareFirst);
+        Ok(Node {
+            source,
+            current_batch,
+        })
+    }
+
     /// Returns whether the node still has batch to read.
     fn is_eof(&self) -> bool {
         self.current_batch.is_none()

@@ -556,7 +556,10 @@ pub struct SourceStats {
 /// Async [Batch] reader and iterator wrapper.
 ///
 /// This is the data source for SST writers or internal readers.
-pub enum Source {}
+pub enum Source {
+    /// Source from a [BoxedBatchReader].
+    Reader(BoxedBatchReader),
+}
 
 impl Source {
     /// Returns next [Batch] from this data source.
