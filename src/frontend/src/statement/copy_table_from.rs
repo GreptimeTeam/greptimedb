@@ -214,7 +214,11 @@ impl StatementExecutor {
                     .build()
                     .context(error::BuildParquetRecordBatchStreamSnafu)?;
 
-                Ok(Box::pin(ParquetRecordBatchStreamAdapter::new(upstream)))
+                Ok(Box::pin(ParquetRecordBatchStreamAdapter::new(
+                    schema,
+                    upstream,
+                    Some(projection),
+                )))
             }
             Format::Orc(_) => {
                 let reader = object_store

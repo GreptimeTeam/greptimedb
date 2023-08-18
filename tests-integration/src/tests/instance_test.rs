@@ -1306,6 +1306,39 @@ async fn test_execute_copy_from_s3(instance: Arc<dyn MockInstance>) {
 }
 
 #[apply(both_instances_cases)]
+async fn test_execute_copy_from_orc_with_cast(instance: Arc<dyn MockInstance>) {
+    logging::init_default_ut_logging();
+    let instance = instance.frontend();
+
+    // setups
+    assert!(matches!(execute_sql(
+        &instance,
+        "create table demo(bigint_direct timestamp(9), bigint_neg_direct timestamp(6), bigint_other timestamp(3), timestamp_simple timestamp(9), time index (bigint_other));",
+    )
+    .await, Output::AffectedRows(0)));
+
+    let filepath = find_testing_resource("/src/common/datasource/tests/orc/test.orc");
+
+    let output = execute_sql(
+        &instance,
+        &format!("copy demo from '{}' WITH(FORMAT='orc');", &filepath),
+    )
+    .await;
+
+    assert!(matches!(output, Output::AffectedRows(5)));
+
+    let output = execute_sql(&instance, "select * from demo;").await;
+    let expected = r#"+-------------------------------+----------------------------+-------------------------+----------------------------+
+| bigint_direct                 | bigint_neg_direct          | bigint_other            | timestamp_simple           |
++-------------------------------+----------------------------+-------------------------+----------------------------+
+| 1970-01-01T00:00:00.000000006 | 1969-12-31T23:59:59.999994 | 1969-12-31T23:59:59.995 | 2021-08-22T07:26:44.525777 |
+|                               |                            | 1970-01-01T00:00:00.001 | 2023-01-01T00:00:00        |
+| 1970-01-01T00:00:00.000000002 | 1969-12-31T23:59:59.999998 | 1970-01-01T00:00:00.005 | 2023-03-01T00:00:00        |
++-------------------------------+----------------------------+-------------------------+----------------------------+"#;
+    check_output_stream(output, expected).await;
+}
+
+#[apply(both_instances_cases)]
 async fn test_execute_copy_from_orc(instance: Arc<dyn MockInstance>) {
     logging::init_default_ut_logging();
     let instance = instance.frontend();
