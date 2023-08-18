@@ -93,7 +93,11 @@ impl AlterTableProcedure {
             ensure!(
                 !exist,
                 error::TableAlreadyExistsSnafu {
-                    table_name: request.table_ref().to_string()
+                    table_name: common_catalog::format_full_table_name(
+                        &request.catalog_name,
+                        &request.schema_name,
+                        new_table_name,
+                    ),
                 }
             )
         }

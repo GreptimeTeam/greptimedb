@@ -18,6 +18,7 @@ use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_procedure::ProcedureId;
 use serde_json::error::Error as JsonError;
+use servers::define_into_tonic_status;
 use snafu::{Location, Snafu};
 use store_api::storage::{RegionId, RegionNumber};
 use table::error::Error as TableError;
@@ -644,11 +645,7 @@ impl ErrorExt for Error {
     }
 }
 
-impl From<Error> for tonic::Status {
-    fn from(err: Error) -> Self {
-        tonic::Status::from_error(Box::new(err))
-    }
-}
+define_into_tonic_status!(Error);
 
 #[cfg(test)]
 mod tests {

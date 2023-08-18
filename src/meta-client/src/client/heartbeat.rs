@@ -78,7 +78,7 @@ impl HeartbeatStream {
     /// Fetch the next message from this stream.
     #[inline]
     pub async fn message(&mut self) -> Result<Option<HeartbeatResponse>> {
-        let res = self.stream.message().await.context(error::TonicStatusSnafu);
+        let res = self.stream.message().await.map_err(error::Error::from);
         if let Ok(Some(heartbeat)) = &res {
             util::check_response_header(heartbeat.header.as_ref())
                 .context(InvalidResponseHeaderSnafu)?;
@@ -214,13 +214,13 @@ impl Inner {
         let mut stream = leader
             .heartbeat(receiver)
             .await
-            .context(error::TonicStatusSnafu)?
+            .map_err(error::Error::from)?
             .into_inner();
 
         let res = stream
             .message()
             .await
-            .context(error::TonicStatusSnafu)?
+            .map_err(error::Error::from)?
             .context(error::CreateHeartbeatStreamSnafu)?;
         info!("Success to create heartbeat stream to server: {:#?}", res);
 
