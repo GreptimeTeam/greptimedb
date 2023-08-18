@@ -64,7 +64,7 @@ impl GreptimeRequestHandler {
 
         let header = request.header.as_ref();
         let query_ctx = create_query_context(header);
-        let user_info = self.auth(header, &query_ctx).await?;
+        let user_info = auth(self.user_provider.clone(), header, &query_ctx).await?;
         query_ctx.set_current_user(user_info);
 
         let handler = self.handler.clone();
@@ -96,48 +96,48 @@ impl GreptimeRequestHandler {
             e
         })?
     }
+}
 
-    async fn auth(
-        &self,
-        header: Option<&RequestHeader>,
-        query_ctx: &QueryContextRef,
-    ) -> Result<Option<UserInfoRef>> {
-        let Some(user_provider) = self.user_provider.as_ref() else {
-            return Ok(None);
-        };
+pub(crate) async fn auth(
+    user_provider: Option<UserProviderRef>,
+    header: Option<&RequestHeader>,
+    query_ctx: &QueryContextRef,
+) -> Result<Option<UserInfoRef>> {
+    let Some(user_provider) = user_provider else {
+        return Ok(None);
+    };
 
-        let auth_scheme = header
-            .and_then(|header| {
-                header
-                    .authorization
-                    .as_ref()
-                    .and_then(|x| x.auth_scheme.clone())
-            })
-            .context(NotFoundAuthHeaderSnafu)?;
-
-        match auth_scheme {
-            AuthScheme::Basic(Basic { username, password }) => user_provider
-                .auth(
-                    Identity::UserId(&username, None),
-                    Password::PlainText(password.into()),
-                    query_ctx.current_catalog(),
-                    query_ctx.current_schema(),
-                )
-                .await
-                .context(AuthSnafu),
-            AuthScheme::Token(_) => Err(UnsupportedAuthScheme {
-                name: "Token AuthScheme".to_string(),
-            }),
-        }
-        .map(Some)
-        .map_err(|e| {
-            increment_counter!(
-                METRIC_AUTH_FAILURE,
-                &[(METRIC_CODE_LABEL, format!("{}", e.status_code()))]
-            );
-            e
+    let auth_scheme = header
+        .and_then(|header| {
+            header
+                .authorization
+                .as_ref()
+                .and_then(|x| x.auth_scheme.clone())
         })
+        .context(NotFoundAuthHeaderSnafu)?;
+
+    match auth_scheme {
+        AuthScheme::Basic(Basic { username, password }) => user_provider
+            .auth(
+                Identity::UserId(&username, None),
+                Password::PlainText(password.into()),
+                query_ctx.current_catalog(),
+                query_ctx.current_schema(),
+            )
+            .await
+            .context(AuthSnafu),
+        AuthScheme::Token(_) => Err(UnsupportedAuthScheme {
+            name: "Token AuthScheme".to_string(),
+        }),
     }
+    .map(Some)
+    .map_err(|e| {
+        increment_counter!(
+            METRIC_AUTH_FAILURE,
+            &[(METRIC_CODE_LABEL, format!("{}", e.status_code()))]
+        );
+        e
+    })
 }
 
 pub(crate) fn create_query_context(header: Option<&RequestHeader>) -> QueryContextRef {
