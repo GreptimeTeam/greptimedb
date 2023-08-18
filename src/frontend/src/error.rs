@@ -20,6 +20,7 @@ use common_error::status_code::StatusCode;
 use datafusion::parquet;
 use datatypes::arrow::error::ArrowError;
 use datatypes::value::Value;
+use servers::define_into_tonic_status;
 use snafu::{Location, Snafu};
 use store_api::storage::RegionNumber;
 
@@ -734,8 +735,4 @@ impl ErrorExt for Error {
     }
 }
 
-impl From<Error> for tonic::Status {
-    fn from(err: Error) -> Self {
-        tonic::Status::new(tonic::Code::Internal, err.to_string())
-    }
-}
+define_into_tonic_status!(Error);
