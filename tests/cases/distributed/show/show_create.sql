@@ -15,7 +15,14 @@ PARTITION BY RANGE COLUMNS (n) (
 )
 ENGINE=mito;
 
-
 SHOW CREATE TABLE system_metrics;
 
 DROP TABLE system_metrics;
+
+create table table_without_partition (
+  ts TIMESTAMP TIME INDEX NOT NULL DEFAULT current_timestamp()
+);
+
+show create table table_without_partition;
+
+drop table table_without_partition;

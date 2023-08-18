@@ -98,22 +98,20 @@ async fn test_show_create_table(instance: Arc<dyn MockInstance>) {
 
     let expected = if instance.is_distributed_mode() {
         "\
-+-------+--------------------------------------------+
-| Table | Create Table                               |
-+-------+--------------------------------------------+
-| demo  | CREATE TABLE IF NOT EXISTS demo (          |
-|       |   host STRING NULL,                        |
-|       |   cpu DOUBLE NULL,                         |
-|       |   memory DOUBLE NULL,                      |
-|       |   ts BIGINT NOT NULL,                      |
-|       |   TIME INDEX (ts)                          |
-|       | )                                          |
-|       | PARTITION BY RANGE COLUMNS () (            |
-|       |   PARTITION r0 VALUES LESS THAN (MAXVALUE) |
-|       | )                                          |
-|       | ENGINE=mito                                |
-|       |                                            |
-+-------+--------------------------------------------+"
++-------+-----------------------------------+
+| Table | Create Table                      |
++-------+-----------------------------------+
+| demo  | CREATE TABLE IF NOT EXISTS demo ( |
+|       |   host STRING NULL,               |
+|       |   cpu DOUBLE NULL,                |
+|       |   memory DOUBLE NULL,             |
+|       |   ts BIGINT NOT NULL,             |
+|       |   TIME INDEX (ts)                 |
+|       | )                                 |
+|       |                                   |
+|       | ENGINE=mito                       |
+|       |                                   |
++-------+-----------------------------------+"
     } else {
         "\
 +-------+-----------------------------------+
