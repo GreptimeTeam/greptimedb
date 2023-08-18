@@ -22,8 +22,8 @@ TQL EXPLAIN (0, 10, '5s') test;
 |               |         MergeScan [is_placeholder=false]                                                      |
 | physical_plan | PromInstantManipulateExec: range=[0..0], lookback=[300000], interval=[300000], time index=[j] |
 |               |   PromSeriesNormalizeExec: offset=[0], time index=[j], filter NaN: [false]                    |
-|               |     RepartitionExec: partitioning=REDACTED
-|               |       PromSeriesDivideExec: tags=["k"]                                                        |
+|               |     PromSeriesDivideExec: tags=["k"]                                                          |
+|               |       SortExec: expr=[k@2 DESC NULLS LAST,j@1 DESC NULLS LAST]                                |
 |               |         MergeScanExec: peers=[REDACTED
 |               |                                                                                               |
 +---------------+-----------------------------------------------------------------------------------------------+
@@ -57,8 +57,8 @@ TQL EXPLAIN host_load1{__field__="val"};
 |               |         MergeScan [is_placeholder=false]                                                                         |
 | physical_plan | PromInstantManipulateExec: range=[0..0], lookback=[300000], interval=[300000], time index=[ts]                   |
 |               |   PromSeriesNormalizeExec: offset=[0], time index=[ts], filter NaN: [false]                                      |
-|               |     RepartitionExec: partitioning=REDACTED
-|               |       PromSeriesDivideExec: tags=["collector", "host"]                                                           |
+|               |     PromSeriesDivideExec: tags=["collector", "host"]                                                             |
+|               |       SortExec: expr=[collector@1 DESC NULLS LAST,host@2 DESC NULLS LAST,ts@3 DESC NULLS LAST]                   |
 |               |         MergeScanExec: peers=[REDACTED
 |               |                                                                                                                  |
 +---------------+------------------------------------------------------------------------------------------------------------------+
