@@ -334,11 +334,6 @@ fn concat_arrays(iter: impl Iterator<Item = ArrayRef>) -> Result<ArrayRef> {
     arrow::compute::concat(&dyn_arrays).context(ComputeArrowSnafu)
 }
 
-// /// Helper function to take array by `indices`.
-// fn take_array(array: &dyn Array, indices: &Int32Vector) -> Result<ArrayRef> {
-//     arrow::compute::take(array, indices.as_arrow(), None).context(ComputeArrowSnafu)?;
-// }
-
 /// A column in a [Batch].
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct BatchColumn {
