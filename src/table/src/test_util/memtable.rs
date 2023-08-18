@@ -23,7 +23,7 @@ use common_recordbatch::error::Result as RecordBatchResult;
 use common_recordbatch::{RecordBatch, RecordBatchStream, SendableRecordBatchStream};
 use datatypes::prelude::*;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
-use datatypes::vectors::UInt64Vector;
+use datatypes::vectors::UInt32Vector;
 use futures::task::{Context, Poll};
 use futures::Stream;
 use snafu::prelude::*;
@@ -105,21 +105,17 @@ impl MemTable {
         &self.info.name
     }
 
-    /// Creates a 1 column 100 rows table, with table name "numbers", column name "uint64s" and
-    /// column type "uint64". Column data increased from 0 to 100.
+    /// Creates a 1 column 100 rows table, with table name "numbers", column name "uint32s" and
+    /// column type "uint32". Column data increased from 0 to 100.
     pub fn default_numbers_table() -> Self {
-        MemTable::default_numbers_table_with_length(100)
-    }
-
-    pub fn default_numbers_table_with_length(length: u64) -> Self {
         let column_schemas = vec![ColumnSchema::new(
-            "uint64s",
-            ConcreteDataType::uint64_datatype(),
+            "uint32s",
+            ConcreteDataType::uint32_datatype(),
             true,
         )];
         let schema = Arc::new(Schema::new(column_schemas));
-        let columns: Vec<VectorRef> = vec![Arc::new(UInt64Vector::from_slice(
-            (0..length).collect::<Vec<_>>(),
+        let columns: Vec<VectorRef> = vec![Arc::new(UInt32Vector::from_slice(
+            (0..100).collect::<Vec<_>>(),
         ))];
         let recordbatch = RecordBatch::new(schema, columns).unwrap();
         MemTable::new("numbers", recordbatch)

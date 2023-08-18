@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::any::Any;
-use std::mem;
 use std::sync::Arc;
 
 use arrow_schema::{Schema as ArrowSchema, SchemaRef as ArrowSchemaRef};
@@ -155,7 +154,11 @@ impl MergeScanExec {
             for peer in peers {
                 let client = clients.get_client(&peer).await;
                 let database = Database::new(&table.catalog_name, &table.schema_name, client);
-                let ready_timer = metric.ready_time().timer();
+
+                let mut ready_timer = metric.ready_time().timer();
+                let mut first_consume_timer = metric.first_consume_time().timer();
+                let mut stopped = false;
+
                 let output: Output = database
                     .logical_plan(substrait_plan.clone(), trace_id)
                     .await
@@ -167,13 +170,17 @@ impl MergeScanExec {
                     unreachable!()
                 };
 
-                // explicitly drop the timer to finish recording of elapsed time.
-                mem::drop(ready_timer);
+                ready_timer.stop();
 
                 while let Some(batch) = stream.next().await {
                     let batch = batch?;
                     metric.record_output_batch_rows(batch.num_rows());
                     yield Self::remove_metadata_from_record_batch(batch);
+
+                    if !stopped {
+                        first_consume_timer.stop();
+                        stopped = true;
+                    }
                 }
             }
         };
@@ -276,6 +283,8 @@ impl DisplayAs for MergeScanExec {
 struct MergeScanMetric {
     /// Nanosecond elapsed till the scan operator is ready to emit data
     ready_time: Time,
+    /// Nanosecond elapsed till the first record batch emitted from the scan operator gets consumed
+    first_consume_time: Time,
     /// Nanosecond elapsed till the scan operator finished execution
     finish_time: Time,
     /// Count of rows fetched from remote
@@ -286,6 +295,7 @@ impl MergeScanMetric {
     pub fn new(metric: &ExecutionPlanMetricsSet) -> Self {
         Self {
             ready_time: MetricBuilder::new(metric).subset_time("ready_time", 1),
+            first_consume_time: MetricBuilder::new(metric).subset_time("first_consume_time", 1),
             finish_time: MetricBuilder::new(metric).subset_time("finish_time", 1),
             output_rows: MetricBuilder::new(metric).output_rows(1),
         }
@@ -293,6 +303,10 @@ impl MergeScanMetric {
 
     pub fn ready_time(&self) -> &Time {
         &self.ready_time
+    }
+
+    pub fn first_consume_time(&self) -> &Time {
+        &self.first_consume_time
     }
 
     pub fn finish_time(&self) -> &Time {
