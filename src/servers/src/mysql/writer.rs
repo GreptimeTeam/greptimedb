@@ -15,9 +15,10 @@
 use std::ops::Deref;
 
 use common_query::Output;
-use common_recordbatch::{util, RecordBatch};
+use common_recordbatch::RecordBatch;
 use datatypes::prelude::{ConcreteDataType, Value};
 use datatypes::schema::SchemaRef;
+use futures::StreamExt;
 use metrics::increment_counter;
 use opensrv_mysql::{
     Column, ColumnFlags, ColumnType, ErrorKind, OkResponse, QueryResultWriter, RowWriter,
@@ -79,16 +80,25 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
         // a local variable.
         match output {
             Ok(output) => match output {
-                Output::Stream(stream) => {
+                Output::Stream(mut stream) => {
                     let schema = stream.schema().clone();
-                    let recordbatches = util::collect(stream)
-                        .await
-                        .context(error::CollectRecordbatchSnafu)?;
-                    let query_result = QueryResult {
-                        recordbatches,
-                        schema,
-                    };
-                    Self::write_query_result(query_result, self.writer, self.query_context).await?;
+                    match create_mysql_column_def(&schema) {
+                        Ok(column_def) => {
+                            // The RowWriter's lifetime is bound to `column_def` thus we can't use finish_one()
+                            // to return a new QueryResultWriter.
+                            let mut row_writer = self.writer.start(&column_def).await?;
+                            while let Some(record_batch) = stream.next().await {
+                                Self::write_recordbatch(
+                                    &mut row_writer,
+                                    &record_batch.unwrap(),
+                                    self.query_context.clone(),
+                                )
+                                .await?;
+                            }
+                            row_writer.finish().await?;
+                        }
+                        Err(error) => Self::write_query_error(error, self.writer).await?,
+                    }
                 }
                 Output::RecordBatches(recordbatches) => {
                     let query_result = QueryResult {
