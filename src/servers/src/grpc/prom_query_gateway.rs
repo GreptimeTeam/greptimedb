@@ -81,7 +81,6 @@ impl PrometheusGateway for PrometheusGatewayService {
         let user_info = auth(self.user_provider.clone(), header, &query_ctx).await?;
         query_ctx.set_current_user(user_info);
 
-        // let query_context = create_query_context(inner.header.as_ref());
         let json_response = self
             .handle_inner(prom_query, query_ctx, is_range_query)
             .await;
