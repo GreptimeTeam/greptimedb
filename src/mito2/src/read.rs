@@ -312,7 +312,7 @@ impl Batch {
             // TODO(yingwen): Don't allow using int64 as time index.
             ValueRef::Int64(v) => Some(Timestamp::new_millisecond(v)),
             // We have check the data type is timestamp compatible in the [BatchBuilder] so it's safe to panic.
-            value => panic!("{:?} is not a timestmap", value),
+            value => panic!("{:?} is not a timestamp", value),
         }
     }
 
