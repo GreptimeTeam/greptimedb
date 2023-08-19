@@ -111,21 +111,37 @@ impl Batch {
 
     /// Returns the first timestamp in the batch.
     pub fn first_timestamp(&self) -> Option<Timestamp> {
+        if self.timestamps.is_empty() {
+            return None;
+        }
+
         self.get_timestamp(0)
     }
 
     /// Returns the last timestamp in the batch.
     pub fn last_timestamp(&self) -> Option<Timestamp> {
+        if self.timestamps.is_empty() {
+            return None;
+        }
+
         self.get_timestamp(self.timestamps.len() - 1)
     }
 
     /// Returns the first sequence in the batch or `None` if the batch is empty.
     pub fn first_sequence(&self) -> Option<SequenceNumber> {
+        if self.sequences.is_empty() {
+            return None;
+        }
+
         self.get_sequence(0)
     }
 
     /// Returns the last sequence in the batch or `None` if the batch is empty.
     pub fn last_sequence(&self) -> Option<SequenceNumber> {
+        if self.sequences.is_empty() {
+            return None;
+        }
+
         self.get_sequence(self.sequences.len() - 1)
     }
 
@@ -311,11 +327,10 @@ impl Batch {
     }
 
     /// Gets a timestamp at given `index`.
+    ///
+    /// # Panics
+    /// Panics if `index` is out-of-bound
     fn get_timestamp(&self, index: usize) -> Option<Timestamp> {
-        if self.timestamps.is_empty() {
-            return None;
-        }
-
         match self.timestamps.get_ref(index) {
             ValueRef::Timestamp(timestamp) => Some(timestamp),
             // Int64 is always millisecond.
@@ -327,11 +342,10 @@ impl Batch {
     }
 
     /// Gets a sequence at given `index`.
+    ///
+    /// # Panics
+    /// Panics if `index` is out-of-bound
     fn get_sequence(&self, index: usize) -> Option<SequenceNumber> {
-        if self.sequences.is_empty() {
-            return None;
-        }
-
         // Sequences is not null so it actually returns Some.
         self.sequences.get_data(index)
     }
@@ -584,5 +598,221 @@ pub type BoxedBatchReader = Box<dyn BatchReader>;
 impl<T: BatchReader + ?Sized> BatchReader for Box<T> {
     async fn next_batch(&mut self) -> Result<Option<Batch>> {
         (**self).next_batch().await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use datatypes::arrow::array::{TimestampMillisecondArray, UInt64Array, UInt8Array};
+
+    use super::*;
+    use crate::error::Error;
+
+    fn new_batch_builder(
+        timestamps: &[i64],
+        sequences: &[u64],
+        op_types: &[OpType],
+        field: &[u64],
+    ) -> BatchBuilder {
+        let mut builder = BatchBuilder::new(b"test".to_vec());
+        builder
+            .timestamps_array(Arc::new(TimestampMillisecondArray::from_iter_values(
+                timestamps.iter().copied(),
+            )))
+            .unwrap()
+            .sequences_array(Arc::new(UInt64Array::from_iter_values(
+                sequences.iter().copied(),
+            )))
+            .unwrap()
+            .op_types_array(Arc::new(UInt8Array::from_iter_values(
+                op_types.iter().map(|v| *v as u8),
+            )))
+            .unwrap()
+            .push_field_array(
+                1,
+                Arc::new(UInt64Array::from_iter_values(field.iter().copied())),
+            )
+            .unwrap();
+        builder
+    }
+
+    fn new_batch(
+        timestamps: &[i64],
+        sequences: &[u64],
+        op_types: &[OpType],
+        field: &[u64],
+    ) -> Batch {
+        new_batch_builder(timestamps, sequences, op_types, field)
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn test_first_last_empty() {
+        let batch = new_batch(&[], &[], &[], &[]);
+        assert_eq!(None, batch.first_timestamp());
+        assert_eq!(None, batch.last_timestamp());
+        assert_eq!(None, batch.first_sequence());
+        assert_eq!(None, batch.last_sequence());
+    }
+
+    #[test]
+    fn test_first_last_one() {
+        let batch = new_batch(&[1], &[2], &[OpType::Put], &[4]);
+        assert_eq!(
+            Timestamp::new_millisecond(1),
+            batch.first_timestamp().unwrap()
+        );
+        assert_eq!(
+            Timestamp::new_millisecond(1),
+            batch.last_timestamp().unwrap()
+        );
+        assert_eq!(2, batch.first_sequence().unwrap());
+        assert_eq!(2, batch.last_sequence().unwrap());
+    }
+
+    #[test]
+    fn test_first_last_multiple() {
+        let batch = new_batch(
+            &[1, 2, 3],
+            &[11, 12, 13],
+            &[OpType::Put, OpType::Put, OpType::Put],
+            &[21, 22, 23],
+        );
+        assert_eq!(
+            Timestamp::new_millisecond(1),
+            batch.first_timestamp().unwrap()
+        );
+        assert_eq!(
+            Timestamp::new_millisecond(3),
+            batch.last_timestamp().unwrap()
+        );
+        assert_eq!(11, batch.first_sequence().unwrap());
+        assert_eq!(13, batch.last_sequence().unwrap());
+    }
+
+    #[test]
+    fn test_slice() {
+        let batch = new_batch(
+            &[1, 2, 3, 4],
+            &[11, 12, 13, 14],
+            &[OpType::Put, OpType::Delete, OpType::Put, OpType::Put],
+            &[21, 22, 23, 24],
+        );
+        let batch = batch.slice(1, 2);
+        let expect = new_batch(
+            &[2, 3],
+            &[12, 13],
+            &[OpType::Delete, OpType::Put],
+            &[22, 23],
+        );
+        assert_eq!(expect, batch);
+    }
+
+    #[test]
+    fn test_concat_empty() {
+        let err = Batch::concat(vec![]).unwrap_err();
+        assert!(
+            matches!(err, Error::InvalidBatch { .. }),
+            "unexpected err: {err}"
+        );
+    }
+
+    #[test]
+    fn test_concat_one() {
+        let batch = new_batch(&[], &[], &[], &[]);
+        let actual = Batch::concat(vec![batch.clone()]).unwrap();
+        assert_eq!(batch, actual);
+
+        let batch = new_batch(&[1, 2], &[11, 12], &[OpType::Put, OpType::Put], &[21, 22]);
+        let actual = Batch::concat(vec![batch.clone()]).unwrap();
+        assert_eq!(batch, actual);
+    }
+
+    #[test]
+    fn test_concat_multiple() {
+        let batches = vec![
+            new_batch(&[1, 2], &[11, 12], &[OpType::Put, OpType::Put], &[21, 22]),
+            new_batch(
+                &[3, 4, 5],
+                &[13, 14, 15],
+                &[OpType::Put, OpType::Delete, OpType::Put],
+                &[23, 24, 25],
+            ),
+            new_batch(&[], &[], &[], &[]),
+            new_batch(&[6], &[16], &[OpType::Put], &[26]),
+        ];
+        let batch = Batch::concat(batches).unwrap();
+        let expect = new_batch(
+            &[1, 2, 3, 4, 5, 6],
+            &[11, 12, 13, 14, 15, 16],
+            &[
+                OpType::Put,
+                OpType::Put,
+                OpType::Put,
+                OpType::Delete,
+                OpType::Put,
+                OpType::Put,
+            ],
+            &[21, 22, 23, 24, 25, 26],
+        );
+        assert_eq!(expect, batch);
+    }
+
+    #[test]
+    fn test_concat_different() {
+        let batch1 = new_batch(&[1], &[1], &[OpType::Put], &[1]);
+        let mut batch2 = new_batch(&[2], &[2], &[OpType::Put], &[2]);
+        batch2.primary_key = b"hello".to_vec();
+        let err = Batch::concat(vec![batch1, batch2]).unwrap_err();
+        assert!(
+            matches!(err, Error::InvalidBatch { .. }),
+            "unexpected err: {err}"
+        );
+    }
+
+    #[test]
+    fn test_filter_deleted() {
+        let mut batch = new_batch(
+            &[1, 2, 3, 4],
+            &[11, 12, 13, 14],
+            &[OpType::Delete, OpType::Put, OpType::Delete, OpType::Put],
+            &[21, 22, 23, 24],
+        );
+        batch.filter_deleted().unwrap();
+        let expect = new_batch(&[2, 4], &[12, 14], &[OpType::Put, OpType::Put], &[22, 24]);
+        assert_eq!(expect, batch);
+    }
+
+    #[test]
+    fn test_sort_and_dedup() {
+        let mut batch = new_batch(
+            &[2, 3, 1, 4, 5, 2],
+            &[1, 2, 3, 4, 5, 6],
+            &[
+                OpType::Put,
+                OpType::Put,
+                OpType::Put,
+                OpType::Put,
+                OpType::Put,
+                OpType::Put,
+            ],
+            &[21, 22, 23, 24, 25, 26],
+        );
+        batch.sort_and_dedup().unwrap();
+        // It should only keep one timestamp 2.
+        let expect = new_batch(
+            &[1, 2, 3, 4, 5],
+            &[3, 6, 2, 4, 5],
+            &[
+                OpType::Put,
+                OpType::Put,
+                OpType::Put,
+                OpType::Put,
+                OpType::Put,
+            ],
+            &[23, 26, 22, 24, 25],
+        );
+        assert_eq!(expect, batch);
     }
 }
