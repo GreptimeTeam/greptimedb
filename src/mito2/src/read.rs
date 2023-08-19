@@ -192,7 +192,7 @@ impl Batch {
             batches
                 .iter()
                 .skip(1)
-                .all(|b| b.primary_key() == &primary_key),
+                .all(|b| b.primary_key() == primary_key),
             InvalidBatchSnafu {
                 reason: "batches have different primary key",
             }
@@ -299,7 +299,7 @@ impl Batch {
             debug_assert_eq!(18, right.1.as_ref().len());
             let (left_key, right_key) = (left.1.as_ref(), right.1.as_ref());
             // We only compare the timestamp part and ignore sequence.
-            &left_key[..TIMESTAMP_KEY_LEN] == &right_key[..TIMESTAMP_KEY_LEN]
+            left_key[..TIMESTAMP_KEY_LEN] == right_key[..TIMESTAMP_KEY_LEN]
         });
 
         let indices = UInt32Vector::from_iter_values(to_sort.iter().map(|v| v.0 as u32));
