@@ -341,6 +341,7 @@ fn new_primary_key_array(primary_key: &[u8], num_rows: usize) -> ArrayRef {
 
 #[cfg(test)]
 mod tests {
+    use api::v1::OpType;
     use datatypes::arrow::array::{Int64Array, TimestampMillisecondArray, UInt64Array, UInt8Array};
     use datatypes::arrow::datatypes::TimeUnit;
     use datatypes::prelude::ConcreteDataType;
@@ -352,7 +353,7 @@ mod tests {
     use super::*;
 
     const TEST_SEQUENCE: u64 = 1;
-    const TEST_OP_TYPE: u8 = 1;
+    const TEST_OP_TYPE: u8 = OpType::Put as u8;
 
     fn build_test_region_metadata() -> RegionMetadataRef {
         let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 1));
