@@ -68,7 +68,7 @@ impl BatchReader for MergeReader {
 
 impl MergeReader {
     /// Creates a new [MergeReader].
-    async fn new(sources: Vec<Source>) -> Result<MergeReader> {
+    pub async fn new(sources: Vec<Source>) -> Result<MergeReader> {
         let mut nodes = BinaryHeap::with_capacity(sources.len());
         for source in sources {
             let node = Node::new(source).await?;
@@ -84,47 +84,18 @@ impl MergeReader {
         })
     }
 
-    /// Collect batches from sources for the same primary key and return
-    /// the collected batch.
-    async fn collect_batches_for_same_key(&mut self) -> Result<Option<Batch>> {
-        while !self.nodes.is_empty() {
-            // Peek current key.
-            let Some(current_key) = self.batch_merger.primary_key() else {
-                // The merger is empty, we could push it directly.
-                self.take_batch_from_heap().await?;
-                // Try next node.
-                continue;
-            };
-            // If next node has a different key, we have finish collecting current key.
-            // Safety: node is not empty.
-            if self.nodes.peek().unwrap().primary_key() != current_key {
-                break;
-            }
-            // They have the same primary key, we could take it and try next node.
-            self.take_batch_from_heap().await?;
-        }
-
-        // Merge collected batches.
-        self.batch_merger.merge_batches()
-    }
-
-    /// Insert a node back to the heap.
-    ///
-    /// If the node reaches EOF, ignores it. This ensures nodes in the heap is always not EOF.
-    fn reheap(&mut self, node: Node) {
-        if node.is_eof() {
-            return;
-        }
-
-        self.nodes.push(node);
-    }
-
     /// Takes batch from heap top and reheap.
     async fn take_batch_from_heap(&mut self) -> Result<()> {
         let mut next_node = self.nodes.pop().unwrap();
         let batch = next_node.fetch_batch().await?;
         self.batch_merger.push(batch);
-        self.reheap(next_node);
+
+        // Insert the node back to the heap.
+        // If the node reaches EOF, ignores it. This ensures nodes in the heap is always not EOF.
+        if next_node.is_eof() {
+            return Ok(());
+        }
+        self.nodes.push(next_node);
 
         Ok(())
     }
@@ -355,5 +326,17 @@ impl Ord for CompareFirst {
             .cmp(other.0.primary_key())
             .then_with(|| self.0.first_timestamp().cmp(&other.0.first_timestamp()))
             .then_with(|| other.0.first_sequence().cmp(&self.0.first_sequence()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_merge_reader_empty() {
+        let mut reader = MergeReaderBuilder::new().build().await.unwrap();
+        assert!(reader.next_batch().await.unwrap().is_none());
+        assert!(reader.next_batch().await.unwrap().is_none());
     }
 }
