@@ -16,7 +16,7 @@ use std::any::Any;
 use std::sync::Arc;
 
 use arrow_schema::{Schema as ArrowSchema, SchemaRef as ArrowSchemaRef};
-use async_stream::try_stream;
+use async_stream::stream;
 use client::client_manager::DatanodeClients;
 use client::Database;
 use common_base::bytes::Bytes;
@@ -41,7 +41,7 @@ use datatypes::schema::{Schema, SchemaRef};
 use futures_util::StreamExt;
 use snafu::ResultExt;
 
-use crate::error::{ConvertSchemaSnafu, RemoteRequestSnafu};
+use crate::error::{ConvertSchemaSnafu, RemoteRequestSnafu, UnexpectedOutputKindSnafu};
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone)]
 pub struct MergeScanLogicalPlan {
@@ -149,16 +149,14 @@ impl MergeScanExec {
         let trace_id = context.task_id().and_then(|id| id.parse().ok());
         let metric = MergeScanMetric::new(&self.metric);
 
-        let stream = try_stream! {
+        let stream = Box::pin(stream!({
             let _finish_timer = metric.finish_time().timer();
+            let mut ready_timer = metric.ready_time().timer();
+            let mut first_consume_timer = Some(metric.first_consume_time().timer());
+
             for peer in peers {
                 let client = clients.get_client(&peer).await;
                 let database = Database::new(&table.catalog_name, &table.schema_name, client);
-
-                let mut ready_timer = metric.ready_time().timer();
-                let mut first_consume_timer = metric.first_consume_time().timer();
-                let mut stopped = false;
-
                 let output: Output = database
                     .logical_plan(substrait_plan.clone(), trace_id)
                     .await
@@ -167,7 +165,14 @@ impl MergeScanExec {
                     .context(ExternalSnafu)?;
 
                 let Output::Stream(mut stream) = output else {
-                    unreachable!()
+                    yield UnexpectedOutputKindSnafu {
+                        expected: "Stream",
+                        got: "RecordBatches or AffectedRows",
+                    }
+                    .fail()
+                    .map_err(BoxedError::new)
+                    .context(ExternalSnafu);
+                    return;
                 };
 
                 ready_timer.stop();
@@ -175,19 +180,18 @@ impl MergeScanExec {
                 while let Some(batch) = stream.next().await {
                     let batch = batch?;
                     metric.record_output_batch_rows(batch.num_rows());
-                    yield Self::remove_metadata_from_record_batch(batch);
+                    yield Ok(Self::remove_metadata_from_record_batch(batch));
 
-                    if !stopped {
+                    if let Some(first_consume_timer) = first_consume_timer.as_mut().take() {
                         first_consume_timer.stop();
-                        stopped = true;
                     }
                 }
             }
-        };
+        }));
 
         Ok(Box::pin(RecordBatchStreamAdaptor {
             schema: self.schema.clone(),
-            stream: Box::pin(stream),
+            stream,
             output_ordering: None,
         }))
     }
