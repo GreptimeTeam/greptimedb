@@ -772,6 +772,13 @@ mod tests {
     }
 
     #[test]
+    fn test_filter_deleted_empty() {
+        let mut batch = new_batch(&[], &[], &[], &[]);
+        batch.filter_deleted().unwrap();
+        assert!(batch.is_empty());
+    }
+
+    #[test]
     fn test_filter_deleted() {
         let mut batch = new_batch(
             &[1, 2, 3, 4],
@@ -782,6 +789,25 @@ mod tests {
         batch.filter_deleted().unwrap();
         let expect = new_batch(&[2, 4], &[12, 14], &[OpType::Put, OpType::Put], &[22, 24]);
         assert_eq!(expect, batch);
+    }
+
+    #[test]
+    fn test_filter() {
+        let mut batch = new_batch(
+            &[1, 2, 3, 4],
+            &[11, 12, 13, 14],
+            &[OpType::Put, OpType::Put, OpType::Put, OpType::Put],
+            &[21, 22, 23, 24],
+        );
+        let predicate = BooleanVector::from_vec(vec![false, false, true, true]);
+        batch.filter(&predicate).unwrap();
+        let expect = new_batch(&[3, 4], &[13, 14], &[OpType::Put, OpType::Put], &[23, 24]);
+        assert_eq!(expect, batch);
+
+        // filter to empty.
+        let predicate = BooleanVector::from_vec(vec![false, false]);
+        batch.filter(&predicate).unwrap();
+        assert!(batch.is_empty());
     }
 
     #[test]
