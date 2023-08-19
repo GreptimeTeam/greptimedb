@@ -19,6 +19,7 @@ use api::v1::{
 };
 use datatypes::schema::Schema;
 use snafu::{ensure, OptionExt};
+use table::engine::TableReference;
 use table::metadata::TableId;
 
 use crate::error::{
@@ -64,10 +65,8 @@ impl<'a> From<&'a ColumnSchema> for ColumnExpr<'a> {
 }
 
 pub fn build_create_table_expr(
-    catalog_name: &str,
-    schema_name: &str,
     table_id: Option<TableId>,
-    table_name: &str,
+    table_name: &TableReference<'_>,
     column_exprs: Vec<ColumnExpr>,
     engine: &str,
     desc: &str,
@@ -125,13 +124,13 @@ pub fn build_create_table_expr(
     }
 
     let time_index = time_index.context(MissingTimestampColumnSnafu {
-        msg: format!("table is {}", table_name),
+        msg: format!("table is {}", table_name.table),
     })?;
 
     let expr = CreateTableExpr {
-        catalog_name: catalog_name.to_string(),
-        schema_name: schema_name.to_string(),
-        table_name: table_name.to_string(),
+        catalog_name: table_name.catalog.to_string(),
+        schema_name: table_name.schema.to_string(),
+        table_name: table_name.table.to_string(),
         desc: desc.to_string(),
         column_defs,
         time_index,

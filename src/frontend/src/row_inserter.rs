@@ -23,15 +23,16 @@ use common_telemetry::info;
 use servers::query_handler::grpc::GrpcQueryHandlerRef;
 use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
+use table::engine::TableReference;
 use table::TableRef;
 
 use crate::error::{CatalogSnafu, EmptyDataSnafu, Error, FindNewColumnsOnInsertionSnafu, Result};
-use crate::expr_factory::CreateExprFactoryRef;
+use crate::expr_factory::CreateExprFactory;
 
 pub struct RowInserter {
     engine_name: String,
     catalog_manager: CatalogManagerRef,
-    create_expr_factory: CreateExprFactoryRef,
+    create_expr_factory: CreateExprFactory,
     grpc_query_handler: GrpcQueryHandlerRef<Error>,
 }
 
@@ -39,7 +40,7 @@ impl RowInserter {
     pub fn new(
         engine_name: String,
         catalog_manager: CatalogManagerRef,
-        create_expr_factory: CreateExprFactoryRef,
+        create_expr_factory: CreateExprFactory,
         grpc_query_handler: GrpcQueryHandlerRef<Error>,
     ) -> Self {
         Self {
@@ -86,8 +87,8 @@ impl RowInserter {
                         .await?
                 }
                 None => {
-                    self.create_table(catalog_name, schema_name, table_name, req, ctx.clone())
-                        .await?
+                    let table_name = TableReference::full(catalog_name, schema_name, table_name);
+                    self.create_table(&table_name, req, ctx.clone()).await?
                 }
             }
         }
@@ -97,22 +98,14 @@ impl RowInserter {
 
     async fn create_table(
         &self,
-        catalog_name: &str,
-        schema_name: &str,
-        table_name: &str,
+        table_name: &TableReference<'_>,
         req: &RowInsertRequest,
         ctx: QueryContextRef,
     ) -> Result<()> {
         let (column_schemas, _) = extract_schema_and_rows(req)?;
         let create_table_expr = self
             .create_expr_factory
-            .create_table_expr_by_column_schemas(
-                catalog_name,
-                schema_name,
-                table_name,
-                column_schemas,
-                &self.engine_name,
-            )?;
+            .create_table_expr_by_column_schemas(table_name, column_schemas, &self.engine_name)?;
 
         let req = Request::Ddl(DdlRequest {
             expr: Some(Expr::CreateTable(create_table_expr)),

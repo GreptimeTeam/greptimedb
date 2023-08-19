@@ -96,6 +96,10 @@ fn convert_to_table_insert_request(
     let num_columns = schema.len();
     let num_rows = rows.len();
 
+    if num_rows == 0 || num_columns == 0 {
+        return Ok(None);
+    }
+
     let mut columns_values = Vec::with_capacity(num_columns);
     for column_schema in schema {
         let datatype: ConcreteDataType = ColumnDataTypeWrapper::try_new(column_schema.datatype)

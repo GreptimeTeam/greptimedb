@@ -160,6 +160,7 @@ impl TryFrom<InfluxdbRequest> for RowInsertRequests {
             let tags = &line.series.tag_set;
             let fields = &line.field_set;
             let ts = line.timestamp;
+            // tags.len + fields.len + timestamp(+1)
             let num_columns = tags.as_ref().map(|x| x.len()).unwrap_or(0) + fields.len() + 1;
 
             let TableData {

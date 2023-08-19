@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::alter_expr::Kind;
@@ -34,6 +33,7 @@ use sql::statements::alter::{AlterTable, AlterTableOperation};
 use sql::statements::create::{CreateExternalTable, CreateTable, TIME_INDEX};
 use sql::statements::{column_def_to_schema, sql_column_def_to_grpc_column_def};
 use sql::util::to_lowercase_options_map;
+use table::engine::TableReference;
 use table::requests::{TableOptions, IMMUTABLE_TABLE_META_KEY};
 
 use crate::error::{
@@ -42,44 +42,18 @@ use crate::error::{
     ParseSqlSnafu, PrepareImmutableTableSnafu, Result, UnrecognizedTableOptionSnafu,
 };
 
-pub type CreateExprFactoryRef = Arc<dyn CreateExprFactory + Send + Sync>;
+#[derive(Debug, Copy, Clone)]
+pub struct CreateExprFactory;
 
-pub trait CreateExprFactory {
-    fn create_table_expr_by_columns(
+impl CreateExprFactory {
+    pub fn create_table_expr_by_columns(
         &self,
-        catalog_name: &str,
-        schema_name: &str,
-        table_name: &str,
-        columns: &[Column],
-        engine: &str,
-    ) -> Result<CreateTableExpr>;
-
-    fn create_table_expr_by_column_schemas(
-        &self,
-        catalog_name: &str,
-        schema_name: &str,
-        table_name: &str,
-        column_schemas: &[api::v1::ColumnSchema],
-        engine: &str,
-    ) -> Result<CreateTableExpr>;
-}
-
-#[derive(Debug)]
-pub struct DefaultCreateExprFactory;
-
-impl CreateExprFactory for DefaultCreateExprFactory {
-    fn create_table_expr_by_columns(
-        &self,
-        catalog_name: &str,
-        schema_name: &str,
-        table_name: &str,
+        table_name: &TableReference<'_>,
         columns: &[Column],
         engine: &str,
     ) -> Result<CreateTableExpr> {
         let column_exprs = ColumnExpr::from_columns(columns);
         let create_expr = common_grpc_expr::util::build_create_table_expr(
-            catalog_name,
-            schema_name,
             None,
             table_name,
             column_exprs,
@@ -91,18 +65,14 @@ impl CreateExprFactory for DefaultCreateExprFactory {
         Ok(create_expr)
     }
 
-    fn create_table_expr_by_column_schemas(
+    pub fn create_table_expr_by_column_schemas(
         &self,
-        catalog_name: &str,
-        schema_name: &str,
-        table_name: &str,
+        table_name: &TableReference<'_>,
         column_schemas: &[api::v1::ColumnSchema],
         engine: &str,
     ) -> Result<CreateTableExpr> {
         let column_exprs = ColumnExpr::from_column_schemas(column_schemas);
         let create_expr = common_grpc_expr::util::build_create_table_expr(
-            catalog_name,
-            schema_name,
             None,
             table_name,
             column_exprs,
