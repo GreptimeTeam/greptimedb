@@ -203,12 +203,10 @@ impl fmt::Display for ToTimeZoneFunction {
 mod tests {
 
     use common_query::prelude::TypeSignature;
-    use datatypes::prelude::ScalarVectorBuilder;
     use datatypes::scalars::ScalarVector;
     use datatypes::timestamp::{
         TimestampMicrosecond, TimestampMillisecond, TimestampNanosecond, TimestampSecond,
     };
-    use datatypes::value::Value;
     use datatypes::vectors::{Int64Vector, StringVector};
 
     use super::{ToTimeZoneFunction, *};
@@ -256,20 +254,8 @@ mod tests {
             Arc::new(StringVector::from(tzs.clone())),
         ];
         let vector = f.eval(FunctionContext::default(), &args).unwrap();
-        assert_eq!(4, vector.len());
-        for (i, _t) in times.iter().enumerate() {
-            let v = vector.get(i);
-            if i == 1 || i == 3 {
-                assert_eq!(Value::Null, v);
-                continue;
-            }
-            match v {
-                Value::String(time) => {
-                    assert_eq!(time.as_utf8(), (*results.get(i).unwrap()).unwrap());
-                }
-                _ => unreachable!(),
-            }
-        }
+        let expect_times: VectorRef = Arc::new(StringVector::from(results));
+        assert_eq!(expect_times, vector);
     }
 
     #[test]
@@ -310,19 +296,8 @@ mod tests {
         ];
         let vector = f.eval(FunctionContext::default(), &args).unwrap();
         assert_eq!(4, vector.len());
-        for (i, _t) in times.iter().enumerate() {
-            let v = vector.get(i);
-            if i == 1 || i == 3 {
-                assert_eq!(Value::Null, v);
-                continue;
-            }
-            match v {
-                Value::String(time) => {
-                    assert_eq!(time.as_utf8(), (*results.get(i).unwrap()).unwrap());
-                }
-                _ => unreachable!(),
-            }
-        }
+        let expect_times: VectorRef = Arc::new(StringVector::from(results));
+        assert_eq!(expect_times, vector);
     }
 
     #[test]
@@ -355,14 +330,14 @@ mod tests {
             Some("1970-01-01 03:00:01"),
             None,
         ];
-
         let times: Vec<Option<TimestampSecond>> = vec![
             Some(TimestampSecond::new(1)),
             None,
             Some(TimestampSecond::new(1)),
             None,
         ];
-        let ts_vector: TimestampSecondVector = build_vector_from_slice(&times);
+        let ts_vector: TimestampSecondVector =
+            TimestampSecondVector::from_owned_iterator(times.into_iter());
         let tzs = vec![Some("America/New_York"), None, Some("Europe/Moscow"), None];
         let args: Vec<VectorRef> = vec![
             Arc::new(ts_vector),
@@ -370,19 +345,8 @@ mod tests {
         ];
         let vector = f.eval(FunctionContext::default(), &args).unwrap();
         assert_eq!(4, vector.len());
-        for (i, _t) in times.iter().enumerate() {
-            let v = vector.get(i);
-            if i == 1 || i == 3 {
-                assert_eq!(Value::Null, v);
-                continue;
-            }
-            match v {
-                Value::String(time) => {
-                    assert_eq!(time.as_utf8(), (*results.get(i).unwrap()).unwrap());
-                }
-                _ => unreachable!(),
-            }
-        }
+        let expect_times: VectorRef = Arc::new(StringVector::from(results));
+        assert_eq!(expect_times, vector);
 
         let results = vec![
             Some("1969-12-31 19:00:00.001"),
@@ -390,34 +354,22 @@ mod tests {
             Some("1970-01-01 03:00:00.001"),
             None,
         ];
-
         let times: Vec<Option<TimestampMillisecond>> = vec![
             Some(TimestampMillisecond::new(1)),
             None,
             Some(TimestampMillisecond::new(1)),
             None,
         ];
-        let ts_vector: TimestampMillisecondVector = build_vector_from_slice(&times);
-
+        let ts_vector: TimestampMillisecondVector =
+            TimestampMillisecondVector::from_owned_iterator(times.into_iter());
         let args: Vec<VectorRef> = vec![
             Arc::new(ts_vector),
             Arc::new(StringVector::from(tzs.clone())),
         ];
         let vector = f.eval(FunctionContext::default(), &args).unwrap();
         assert_eq!(4, vector.len());
-        for (i, _t) in times.iter().enumerate() {
-            let v = vector.get(i);
-            if i == 1 || i == 3 {
-                assert_eq!(Value::Null, v);
-                continue;
-            }
-            match v {
-                Value::String(time) => {
-                    assert_eq!(time.as_utf8(), (*results.get(i).unwrap()).unwrap());
-                }
-                _ => unreachable!(),
-            }
-        }
+        let expect_times: VectorRef = Arc::new(StringVector::from(results));
+        assert_eq!(expect_times, vector);
 
         let results = vec![
             Some("1969-12-31 19:00:00.000001"),
@@ -425,14 +377,14 @@ mod tests {
             Some("1970-01-01 03:00:00.000001"),
             None,
         ];
-
         let times: Vec<Option<TimestampMicrosecond>> = vec![
             Some(TimestampMicrosecond::new(1)),
             None,
             Some(TimestampMicrosecond::new(1)),
             None,
         ];
-        let ts_vector: TimestampMicrosecondVector = build_vector_from_slice(&times);
+        let ts_vector: TimestampMicrosecondVector =
+            TimestampMicrosecondVector::from_owned_iterator(times.into_iter());
 
         let args: Vec<VectorRef> = vec![
             Arc::new(ts_vector),
@@ -440,19 +392,8 @@ mod tests {
         ];
         let vector = f.eval(FunctionContext::default(), &args).unwrap();
         assert_eq!(4, vector.len());
-        for (i, _t) in times.iter().enumerate() {
-            let v = vector.get(i);
-            if i == 1 || i == 3 {
-                assert_eq!(Value::Null, v);
-                continue;
-            }
-            match v {
-                Value::String(time) => {
-                    assert_eq!(time.as_utf8(), (*results.get(i).unwrap()).unwrap());
-                }
-                _ => unreachable!(),
-            }
-        }
+        let expect_times: VectorRef = Arc::new(StringVector::from(results));
+        assert_eq!(expect_times, vector);
 
         let results = vec![
             Some("1969-12-31 19:00:00.000000001"),
@@ -460,14 +401,14 @@ mod tests {
             Some("1970-01-01 03:00:00.000000001"),
             None,
         ];
-
         let times: Vec<Option<TimestampNanosecond>> = vec![
             Some(TimestampNanosecond::new(1)),
             None,
             Some(TimestampNanosecond::new(1)),
             None,
         ];
-        let ts_vector: TimestampNanosecondVector = build_vector_from_slice(&times);
+        let ts_vector: TimestampNanosecondVector =
+            TimestampNanosecondVector::from_owned_iterator(times.into_iter());
 
         let args: Vec<VectorRef> = vec![
             Arc::new(ts_vector),
@@ -475,25 +416,7 @@ mod tests {
         ];
         let vector = f.eval(FunctionContext::default(), &args).unwrap();
         assert_eq!(4, vector.len());
-        for (i, _t) in times.iter().enumerate() {
-            let v = vector.get(i);
-            if i == 1 || i == 3 {
-                assert_eq!(Value::Null, v);
-                continue;
-            }
-            match v {
-                Value::String(time) => {
-                    assert_eq!(time.as_utf8(), (*results.get(i).unwrap()).unwrap());
-                }
-                _ => unreachable!(),
-            }
-        }
-    }
-    fn build_vector_from_slice<T: ScalarVector>(items: &[Option<T::RefItem<'_>>]) -> T {
-        let mut builder = T::Builder::with_capacity(items.len());
-        for item in items {
-            builder.push(*item);
-        }
-        builder.finish()
+        let expect_times: VectorRef = Arc::new(StringVector::from(results));
+        assert_eq!(expect_times, vector);
     }
 }
