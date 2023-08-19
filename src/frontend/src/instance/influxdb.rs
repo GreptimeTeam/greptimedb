@@ -13,7 +13,9 @@
 // limitations under the License.
 
 use async_trait::async_trait;
+use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use common_error::ext::BoxedError;
+use servers::error::AuthSnafu;
 use servers::influxdb::InfluxdbRequest;
 use servers::query_handler::InfluxdbLineProtocolHandler;
 use session::context::QueryContextRef;
@@ -25,9 +27,15 @@ use crate::instance::Instance;
 impl InfluxdbLineProtocolHandler for Instance {
     async fn exec(
         &self,
-        request: &InfluxdbRequest,
+        request: InfluxdbRequest,
         ctx: QueryContextRef,
     ) -> servers::error::Result<()> {
+        self.plugins
+            .get::<PermissionCheckerRef>()
+            .as_ref()
+            .check_permission(ctx.current_user(), PermissionReq::LineProtocol)
+            .context(AuthSnafu)?;
+
         let requests = request.try_into()?;
         let _ = self
             .handle_inserts(requests, ctx)

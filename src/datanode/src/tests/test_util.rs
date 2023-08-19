@@ -74,9 +74,8 @@ fn create_tmp_dir_and_datanode_opts(name: &str) -> (DatanodeOptions, TestGuard) 
             ..Default::default()
         },
         storage: StorageConfig {
-            store: ObjectStoreConfig::File(FileConfig {
-                data_home: data_tmp_dir.path().to_str().unwrap().to_string(),
-            }),
+            data_home: data_tmp_dir.path().to_str().unwrap().to_string(),
+            store: ObjectStoreConfig::File(FileConfig {}),
             ..Default::default()
         },
         mode: Mode::Standalone,

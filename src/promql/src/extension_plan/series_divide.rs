@@ -24,10 +24,11 @@ use datafusion::common::{DFSchema, DFSchemaRef};
 use datafusion::error::Result as DataFusionResult;
 use datafusion::execution::context::TaskContext;
 use datafusion::logical_expr::{EmptyRelation, Expr, LogicalPlan, UserDefinedLogicalNodeCore};
-use datafusion::physical_expr::PhysicalSortExpr;
+use datafusion::physical_expr::{PhysicalSortExpr, PhysicalSortRequirement};
+use datafusion::physical_plan::expressions::Column as ColumnExpr;
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
-    DisplayFormatType, Distribution, ExecutionPlan, Partitioning, RecordBatchStream,
+    DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, Partitioning, RecordBatchStream,
     SendableRecordBatchStream, Statistics,
 };
 use datatypes::arrow::compute;
@@ -136,7 +137,19 @@ impl ExecutionPlan for SeriesDivideExec {
         vec![Distribution::SinglePartition]
     }
 
-    // TODO(ruihang): specify required input ordering
+    fn required_input_ordering(&self) -> Vec<Option<Vec<PhysicalSortRequirement>>> {
+        let input_schema = self.input.schema();
+        let exprs = self
+            .tag_columns
+            .iter()
+            .map(|tag| PhysicalSortRequirement {
+                // Safety: the tag column names is verified in the planning phase
+                expr: Arc::new(ColumnExpr::new_with_schema(tag, &input_schema).unwrap()),
+                options: None,
+            })
+            .collect();
+        vec![Some(exprs)]
+    }
 
     fn output_ordering(&self) -> Option<&[PhysicalSortExpr]> {
         self.input.output_ordering()
@@ -190,14 +203,6 @@ impl ExecutionPlan for SeriesDivideExec {
         }))
     }
 
-    fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match t {
-            DisplayFormatType::Default => {
-                write!(f, "PromSeriesDivideExec: tags={:?}", self.tag_columns)
-            }
-        }
-    }
-
     fn metrics(&self) -> Option<MetricsSet> {
         Some(self.metric.clone_inner())
     }
@@ -209,6 +214,16 @@ impl ExecutionPlan for SeriesDivideExec {
             // TODO(ruihang): support this column statistics
             column_statistics: None,
             is_exact: false,
+        }
+    }
+}
+
+impl DisplayAs for SeriesDivideExec {
+    fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match t {
+            DisplayFormatType::Default | DisplayFormatType::Verbose => {
+                write!(f, "PromSeriesDivideExec: tags={:?}", self.tag_columns)
+            }
         }
     }
 }
@@ -312,7 +327,6 @@ impl SeriesDivideStream {
 #[cfg(test)]
 mod test {
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
-    use datafusion::from_slice::FromSlice;
     use datafusion::physical_plan::memory::MemoryExec;
     use datafusion::prelude::SessionContext;
 
@@ -324,20 +338,20 @@ mod test {
             Field::new("path", DataType::Utf8, true),
         ]));
 
-        let path_column_1 = Arc::new(StringArray::from_slice([
+        let path_column_1 = Arc::new(StringArray::from(vec![
             "foo", "foo", "foo", "bar", "bar", "bar", "bar", "bar", "bar", "bla", "bla", "bla",
         ])) as _;
-        let host_column_1 = Arc::new(StringArray::from_slice([
+        let host_column_1 = Arc::new(StringArray::from(vec![
             "000", "000", "001", "002", "002", "002", "002", "002", "003", "005", "005", "005",
         ])) as _;
 
-        let path_column_2 = Arc::new(StringArray::from_slice(["bla", "bla", "bla"])) as _;
-        let host_column_2 = Arc::new(StringArray::from_slice(["005", "005", "005"])) as _;
+        let path_column_2 = Arc::new(StringArray::from(vec!["bla", "bla", "bla"])) as _;
+        let host_column_2 = Arc::new(StringArray::from(vec!["005", "005", "005"])) as _;
 
-        let path_column_3 = Arc::new(StringArray::from_slice([
+        let path_column_3 = Arc::new(StringArray::from(vec![
             "bla", "🥺", "🥺", "🥺", "🥺", "🥺", "🫠", "🫠",
         ])) as _;
-        let host_column_3 = Arc::new(StringArray::from_slice([
+        let host_column_3 = Arc::new(StringArray::from(vec![
             "005", "001", "001", "001", "001", "001", "001", "001",
         ])) as _;
 

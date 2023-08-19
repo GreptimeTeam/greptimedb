@@ -246,8 +246,8 @@ pub fn try_into_columnar_value(py: Python<'_>, obj: PyObject) -> PyResult<Column
     }
     if let Ok(v) = obj.extract::<PyVector>(py) {
         Ok(ColumnarValue::Array(v.to_arrow_array()))
-    } else if obj.as_ref(py).is_instance_of::<PyList>()?
-        || obj.as_ref(py).is_instance_of::<PyTuple>()?
+    } else if obj.as_ref(py).is_instance_of::<PyList>()
+        || obj.as_ref(py).is_instance_of::<PyTuple>()
     {
         let ret: Vec<ScalarValue> = {
             if let Ok(val) = obj.downcast::<PyList>(py) {

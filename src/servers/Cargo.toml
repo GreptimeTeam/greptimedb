@@ -7,36 +7,35 @@ license.workspace = true
 [features]
 dashboard = []
 mem-prof = ["dep:common-mem-prof"]
-pprof = ["dep:common-pprof"]
+pprof = ["dep:pprof"]
 
 [dependencies]
 aide = { version = "0.9", features = ["axum"] }
-api = { path = "../api" }
+api = { workspace = true }
 arrow-flight.workspace = true
 async-trait = "0.1"
+auth.workspace = true
 axum = { version = "0.6", features = ["headers"] }
-axum-macros = "0.3"
+axum-macros = "0.3.8"
 base64 = "0.13"
 bytes = "1.2"
-catalog = { path = "../catalog" }
+catalog = { workspace = true }
 chrono.workspace = true
-common-base = { path = "../common/base" }
-common-catalog = { path = "../common/catalog" }
-common-error = { path = "../common/error" }
-common-grpc = { path = "../common/grpc" }
-common-grpc-expr = { path = "../common/grpc-expr" }
-common-mem-prof = { path = "../common/mem-prof", optional = true }
-common-pprof = { path = "../common/pprof", optional = true }
-common-query = { path = "../common/query" }
-common-recordbatch = { path = "../common/recordbatch" }
-common-runtime = { path = "../common/runtime" }
-common-telemetry = { path = "../common/telemetry" }
-common-time = { path = "../common/time" }
-datafusion.workspace = true
+common-base = { workspace = true }
+common-catalog = { workspace = true }
+common-error = { workspace = true }
+common-grpc = { workspace = true }
+common-grpc-expr = { workspace = true }
+common-mem-prof = { workspace = true, optional = true }
+common-query = { workspace = true }
+common-recordbatch = { workspace = true }
+common-runtime = { workspace = true }
+common-telemetry = { workspace = true }
+common-time = { workspace = true }
 datafusion-common.workspace = true
 datafusion-expr.workspace = true
-
-datatypes = { path = "../datatypes" }
+datafusion.workspace = true
+datatypes = { workspace = true }
 derive_builder.workspace = true
 digest = "0.10"
 futures = "0.3"
@@ -58,53 +57,60 @@ openmetrics-parser = "0.4"
 opensrv-mysql = "0.4"
 opentelemetry-proto.workspace = true
 parking_lot = "0.12"
-pgwire = "0.15"
+pgwire = "0.16"
 pin-project = "1.0"
 postgres-types = { version = "0.2", features = ["with-chrono-0_4"] }
+pprof = { version = "0.11", features = [
+    "flamegraph",
+    "prost-codec",
+    "protobuf",
+], optional = true }
 promql-parser = "0.1.1"
 prost.workspace = true
-query = { path = "../query" }
+query = { workspace = true }
 rand.workspace = true
 regex.workspace = true
+rust-embed = { version = "6.6", features = ["debug-embed"] }
 rustls = "0.21"
 rustls-pemfile = "1.0"
-rust-embed = { version = "6.6", features = ["debug-embed"] }
 schemars = "0.8"
 secrecy = { version = "0.8", features = ["serde", "alloc"] }
 serde.workspace = true
 serde_json = "1.0"
-session = { path = "../session" }
+session = { workspace = true }
 sha1 = "0.10"
-snafu = { version = "0.7", features = ["backtraces"] }
+snafu.workspace = true
 snap = "1"
-sql = { path = "../sql" }
+sql = { workspace = true }
 strum = { version = "0.24", features = ["derive"] }
-table = { path = "../table" }
-tikv-jemalloc-ctl = { version = "0.5", features = ["use_std"] }
+table = { workspace = true }
 tokio-rustls = "0.24"
 tokio-stream = { version = "0.1", features = ["net"] }
 tokio.workspace = true
-tonic.workspace = true
 tonic-reflection = "0.9"
+tonic.workspace = true
 tower = { version = "0.4", features = ["full"] }
 tower-http = { version = "0.3", features = ["full"] }
 
+[target.'cfg(not(windows))'.dependencies]
+tikv-jemalloc-ctl = { version = "0.5", features = ["use_std"] }
 
 [dev-dependencies]
+auth = { workspace = true, features = ["testing"] }
 axum-test-helper = { git = "https://github.com/sunng87/axum-test-helper.git", branch = "patch-1" }
-catalog = { path = "../catalog", features = ["testing"] }
-client = { path = "../client" }
-common-base = { path = "../common/base" }
-common-test-util = { path = "../common/test-util" }
+catalog = { workspace = true, features = ["testing"] }
+client = { workspace = true }
+common-base = { workspace = true }
+common-test-util = { workspace = true }
 mysql_async = { git = "https://github.com/blackbeam/mysql_async.git", rev = "32c6f2a986789f97108502c2d0c755a089411b66", default-features = false, features = [
     "default-rustls",
 ] }
 rand.workspace = true
 rustls = { version = "0.21", features = ["dangerous_configuration"] }
-script = { path = "../script", features = ["python"] }
+script = { workspace = true, features = ["python"] }
 serde_json = "1.0"
-session = { path = "../session", features = ["testing"] }
-table = { path = "../table" }
+session = { workspace = true, features = ["testing"] }
+table = { workspace = true }
 tokio-postgres = "0.7"
 tokio-postgres-rustls = "0.10"
 tokio-test = "0.4"

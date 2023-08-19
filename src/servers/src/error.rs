@@ -22,17 +22,12 @@ use base64::DecodeError;
 use catalog;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
-use common_error::{INNER_ERROR_CODE, INNER_ERROR_MSG};
 use common_telemetry::logging;
 use datatypes::prelude::ConcreteDataType;
 use query::parser::PromQuery;
 use serde_json::json;
-use snafu::{ErrorCompat, Location, Snafu};
-use tonic::codegen::http::{HeaderMap, HeaderValue};
-use tonic::metadata::MetadataMap;
+use snafu::{Location, Snafu};
 use tonic::Code;
-
-use crate::auth;
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
@@ -114,6 +109,9 @@ pub enum Error {
 
     #[snafu(display("Not supported: {}", feat))]
     NotSupported { feat: String },
+
+    #[snafu(display("Invalid request parameter: {}", reason))]
+    InvalidParameter { reason: String, location: Location },
 
     #[snafu(display("Invalid query: {}", reason))]
     InvalidQuery { reason: String, location: Location },
@@ -199,7 +197,7 @@ pub enum Error {
     #[snafu(display("Failed to get user info, source: {}", source))]
     Auth {
         location: Location,
-        source: auth::Error,
+        source: auth::error::Error,
     },
 
     #[snafu(display("Not found http or grpc authorization header"))]
@@ -297,11 +295,8 @@ pub enum Error {
     #[snafu(display("Failed to dump pprof data, source: {}", source))]
     DumpPprof { source: common_pprof::Error },
 
-    #[snafu(display("Failed to update jemalloc metrics, source: {source}, location: {location}"))]
-    UpdateJemallocMetrics {
-        source: tikv_jemalloc_ctl::Error,
-        location: Location,
-    },
+    #[snafu(display("{source}"))]
+    Metrics { source: BoxedError },
 
     #[snafu(display("DataFrame operation error, source: {source}, location: {location}"))]
     DataFrame {
@@ -333,6 +328,21 @@ pub enum Error {
         actual: opensrv_mysql::ColumnType,
         location: Location,
     },
+
+    #[snafu(display(
+        "Column: {}, {} incompatible, expected: {}, actual: {}",
+        column_name,
+        datatype,
+        expected,
+        actual
+    ))]
+    IncompatibleSchema {
+        column_name: String,
+        datatype: String,
+        expected: i32,
+        actual: i32,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -362,6 +372,7 @@ impl ErrorExt for Error {
             | CheckDatabaseValidity { source, .. } => source.status_code(),
 
             NotSupported { .. }
+            | InvalidParameter { .. }
             | InvalidQuery { .. }
             | InfluxdbLineProtocol { .. }
             | ConnResetByPeer { .. }
@@ -375,7 +386,8 @@ impl ErrorExt for Error {
             | InvalidPrepareStatement { .. }
             | DataFrame { .. }
             | PreparedStmtTypeMismatch { .. }
-            | TimePrecision { .. } => StatusCode::InvalidArguments,
+            | TimePrecision { .. }
+            | IncompatibleSchema { .. } => StatusCode::InvalidArguments,
 
             InfluxdbLinesWrite { source, .. }
             | PromSeriesWrite { source, .. }
@@ -418,7 +430,7 @@ impl ErrorExt for Error {
             #[cfg(feature = "pprof")]
             DumpPprof { source, .. } => source.status_code(),
 
-            UpdateJemallocMetrics { .. } => StatusCode::Internal,
+            Metrics { source } => source.status_code(),
 
             ConvertScalarValue { source, .. } => source.status_code(),
         }
@@ -430,7 +442,7 @@ impl ErrorExt for Error {
 }
 
 /// Returns the tonic [Code] of a [StatusCode].
-fn status_to_tonic_code(status_code: StatusCode) -> Code {
+pub fn status_to_tonic_code(status_code: StatusCode) -> Code {
     match status_code {
         StatusCode::Success => Code::Ok,
         StatusCode::Unknown => Code::Unknown,
@@ -452,29 +464,44 @@ fn status_to_tonic_code(status_code: StatusCode) -> Code {
         | StatusCode::UserPasswordMismatch
         | StatusCode::AuthHeaderNotFound
         | StatusCode::InvalidAuthHeader => Code::Unauthenticated,
-        StatusCode::AccessDenied => Code::PermissionDenied,
+        StatusCode::AccessDenied | StatusCode::PermissionDenied => Code::PermissionDenied,
     }
 }
 
-impl From<Error> for tonic::Status {
-    fn from(err: Error) -> Self {
-        let mut headers = HeaderMap::<HeaderValue>::with_capacity(2);
+#[macro_export]
+macro_rules! define_into_tonic_status {
+    ($Error: ty) => {
+        impl From<$Error> for tonic::Status {
+            fn from(err: $Error) -> Self {
+                use common_error::{GREPTIME_ERROR_CODE, GREPTIME_ERROR_MSG};
+                use snafu::ErrorCompat;
+                use tonic::codegen::http::{HeaderMap, HeaderValue};
+                use tonic::metadata::MetadataMap;
 
-        // If either of the status_code or error msg cannot convert to valid HTTP header value
-        // (which is a very rare case), just ignore. Client will use Tonic status code and message.
-        let status_code = err.status_code();
-        if let Ok(code) = HeaderValue::from_bytes(status_code.to_string().as_bytes()) {
-            let _ = headers.insert(INNER_ERROR_CODE, code);
-        }
-        let root_error = err.iter_chain().last().unwrap();
-        if let Ok(err_msg) = HeaderValue::from_bytes(root_error.to_string().as_bytes()) {
-            let _ = headers.insert(INNER_ERROR_MSG, err_msg);
-        }
+                let mut headers = HeaderMap::<HeaderValue>::with_capacity(2);
 
-        let metadata = MetadataMap::from_headers(headers);
-        tonic::Status::with_metadata(status_to_tonic_code(status_code), err.to_string(), metadata)
-    }
+                // If either of the status_code or error msg cannot convert to valid HTTP header value
+                // (which is a very rare case), just ignore. Client will use Tonic status code and message.
+                let status_code = err.status_code();
+                headers.insert(GREPTIME_ERROR_CODE, HeaderValue::from(status_code as u32));
+                let root_error = err.iter_chain().last().unwrap();
+
+                if let Ok(err_msg) = HeaderValue::from_bytes(root_error.to_string().as_bytes()) {
+                    let _ = headers.insert(GREPTIME_ERROR_MSG, err_msg);
+                }
+
+                let metadata = MetadataMap::from_headers(headers);
+                tonic::Status::with_metadata(
+                    $crate::error::status_to_tonic_code(status_code),
+                    err.to_string(),
+                    metadata,
+                )
+            }
+        }
+    };
 }
+
+define_into_tonic_status!(Error);
 
 impl From<std::io::Error> for Error {
     fn from(e: std::io::Error) -> Self {

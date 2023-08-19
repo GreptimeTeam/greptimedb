@@ -15,7 +15,10 @@
 use std::fmt;
 use std::sync::Arc;
 
-use arrow::datatypes::{DataType as ArrowDataType, TimeUnit as ArrowTimeUnit};
+use arrow::datatypes::{
+    DataType as ArrowDataType, IntervalUnit as ArrowIntervalUnit, TimeUnit as ArrowTimeUnit,
+};
+use common_time::interval::IntervalUnit;
 use common_time::timestamp::TimeUnit;
 use paste::paste;
 use serde::{Deserialize, Serialize};
@@ -24,14 +27,15 @@ use crate::error::{self, Error, Result};
 use crate::type_id::LogicalTypeId;
 use crate::types::{
     BinaryType, BooleanType, DateTimeType, DateType, DictionaryType, Float32Type, Float64Type,
-    Int16Type, Int32Type, Int64Type, Int8Type, ListType, NullType, StringType, TimeMillisecondType,
+    Int16Type, Int32Type, Int64Type, Int8Type, IntervalDayTimeType, IntervalMonthDayNanoType,
+    IntervalType, IntervalYearMonthType, ListType, NullType, StringType, TimeMillisecondType,
     TimeType, TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType,
     TimestampSecondType, TimestampType, UInt16Type, UInt32Type, UInt64Type, UInt8Type,
 };
 use crate::value::Value;
 use crate::vectors::MutableVector;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[enum_dispatch::enum_dispatch(DataType)]
 pub enum ConcreteDataType {
     Null(NullType),
@@ -58,6 +62,9 @@ pub enum ConcreteDataType {
     DateTime(DateTimeType),
     Timestamp(TimestampType),
     Time(TimeType),
+
+    // Interval types:
+    Interval(IntervalType),
 
     // Compound types:
     List(ListType),
@@ -87,6 +94,7 @@ impl fmt::Display for ConcreteDataType {
             ConcreteDataType::Time(_) => write!(f, "Time"),
             ConcreteDataType::List(_) => write!(f, "List"),
             ConcreteDataType::Dictionary(_) => write!(f, "Dictionary"),
+            ConcreteDataType::Interval(_) => write!(f, "Interval"),
         }
     }
 }
@@ -113,6 +121,7 @@ impl ConcreteDataType {
                 | ConcreteDataType::DateTime(_)
                 | ConcreteDataType::Timestamp(_)
                 | ConcreteDataType::Time(_)
+                | ConcreteDataType::Interval(_)
         )
     }
 
@@ -127,6 +136,7 @@ impl ConcreteDataType {
                 | ConcreteDataType::DateTime(_)
                 | ConcreteDataType::Timestamp(_)
                 | ConcreteDataType::Time(_)
+                | ConcreteDataType::Interval(_)
         )
     }
 
@@ -222,6 +232,7 @@ impl TryFrom<&ArrowDataType> for ConcreteDataType {
             ArrowDataType::Date32 => Self::date_datatype(),
             ArrowDataType::Date64 => Self::datetime_datatype(),
             ArrowDataType::Timestamp(u, _) => ConcreteDataType::from_arrow_time_unit(u),
+            ArrowDataType::Interval(u) => ConcreteDataType::from_arrow_interval_unit(u),
             ArrowDataType::Binary | ArrowDataType::LargeBinary => Self::binary_datatype(),
             ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 => Self::string_datatype(),
             ArrowDataType::List(field) => Self::List(ListType::new(
@@ -267,23 +278,19 @@ impl_new_concrete_type_functions!(
 
 impl ConcreteDataType {
     pub fn timestamp_second_datatype() -> Self {
-        ConcreteDataType::Timestamp(TimestampType::Second(TimestampSecondType::default()))
+        ConcreteDataType::Timestamp(TimestampType::Second(TimestampSecondType))
     }
 
     pub fn timestamp_millisecond_datatype() -> Self {
-        ConcreteDataType::Timestamp(TimestampType::Millisecond(
-            TimestampMillisecondType::default(),
-        ))
+        ConcreteDataType::Timestamp(TimestampType::Millisecond(TimestampMillisecondType))
     }
 
     pub fn timestamp_microsecond_datatype() -> Self {
-        ConcreteDataType::Timestamp(TimestampType::Microsecond(
-            TimestampMicrosecondType::default(),
-        ))
+        ConcreteDataType::Timestamp(TimestampType::Microsecond(TimestampMicrosecondType))
     }
 
     pub fn timestamp_nanosecond_datatype() -> Self {
-        ConcreteDataType::Timestamp(TimestampType::Nanosecond(TimestampNanosecondType::default()))
+        ConcreteDataType::Timestamp(TimestampType::Nanosecond(TimestampNanosecondType))
     }
 
     /// Returns the time data type with `TimeUnit`.
@@ -311,6 +318,18 @@ impl ConcreteDataType {
         Self::time_datatype(TimeUnit::Nanosecond)
     }
 
+    pub fn interval_month_day_nano_datatype() -> Self {
+        ConcreteDataType::Interval(IntervalType::MonthDayNano(IntervalMonthDayNanoType))
+    }
+
+    pub fn interval_year_month_datatype() -> Self {
+        ConcreteDataType::Interval(IntervalType::YearMonth(IntervalYearMonthType))
+    }
+
+    pub fn interval_day_time_datatype() -> Self {
+        ConcreteDataType::Interval(IntervalType::DayTime(IntervalDayTimeType))
+    }
+
     pub fn timestamp_datatype(unit: TimeUnit) -> Self {
         match unit {
             TimeUnit::Second => Self::timestamp_second_datatype(),
@@ -327,6 +346,22 @@ impl ConcreteDataType {
             ArrowTimeUnit::Millisecond => Self::timestamp_millisecond_datatype(),
             ArrowTimeUnit::Microsecond => Self::timestamp_microsecond_datatype(),
             ArrowTimeUnit::Nanosecond => Self::timestamp_nanosecond_datatype(),
+        }
+    }
+
+    pub fn interval_datatype(unit: IntervalUnit) -> Self {
+        match unit {
+            IntervalUnit::YearMonth => Self::interval_year_month_datatype(),
+            IntervalUnit::DayTime => Self::interval_day_time_datatype(),
+            IntervalUnit::MonthDayNano => Self::interval_month_day_nano_datatype(),
+        }
+    }
+
+    pub fn from_arrow_interval_unit(u: &ArrowIntervalUnit) -> Self {
+        match u {
+            ArrowIntervalUnit::YearMonth => Self::interval_year_month_datatype(),
+            ArrowIntervalUnit::DayTime => Self::interval_day_time_datatype(),
+            ArrowIntervalUnit::MonthDayNano => Self::interval_month_day_nano_datatype(),
         }
     }
 
@@ -545,6 +580,10 @@ mod tests {
         assert!(ConcreteDataType::time_millisecond_datatype().is_stringifiable());
         assert!(ConcreteDataType::time_microsecond_datatype().is_stringifiable());
         assert!(ConcreteDataType::time_nanosecond_datatype().is_stringifiable());
+
+        assert!(ConcreteDataType::interval_year_month_datatype().is_stringifiable());
+        assert!(ConcreteDataType::interval_day_time_datatype().is_stringifiable());
+        assert!(ConcreteDataType::interval_month_day_nano_datatype().is_stringifiable());
     }
 
     #[test]
@@ -563,6 +602,9 @@ mod tests {
         assert!(ConcreteDataType::time_millisecond_datatype().is_signed());
         assert!(ConcreteDataType::time_microsecond_datatype().is_signed());
         assert!(ConcreteDataType::time_nanosecond_datatype().is_signed());
+        assert!(ConcreteDataType::interval_year_month_datatype().is_signed());
+        assert!(ConcreteDataType::interval_day_time_datatype().is_signed());
+        assert!(ConcreteDataType::interval_month_day_nano_datatype().is_signed());
 
         assert!(!ConcreteDataType::uint8_datatype().is_signed());
         assert!(!ConcreteDataType::uint16_datatype().is_signed());
@@ -589,6 +631,9 @@ mod tests {
         assert!(!ConcreteDataType::time_millisecond_datatype().is_unsigned());
         assert!(!ConcreteDataType::time_microsecond_datatype().is_unsigned());
         assert!(!ConcreteDataType::time_nanosecond_datatype().is_unsigned());
+        assert!(!ConcreteDataType::interval_year_month_datatype().is_unsigned());
+        assert!(!ConcreteDataType::interval_day_time_datatype().is_unsigned());
+        assert!(!ConcreteDataType::interval_month_day_nano_datatype().is_unsigned());
 
         assert!(ConcreteDataType::uint8_datatype().is_unsigned());
         assert!(ConcreteDataType::uint16_datatype().is_unsigned());
@@ -691,5 +736,12 @@ mod tests {
             "Date"
         );
         assert_eq!(ConcreteDataType::time_second_datatype().to_string(), "Time");
+        assert_eq!(
+            ConcreteDataType::from_arrow_type(&ArrowDataType::Interval(
+                arrow_schema::IntervalUnit::MonthDayNano,
+            ))
+            .to_string(),
+            "Interval"
+        )
     }
 }

@@ -21,7 +21,7 @@ use async_recursion::async_recursion;
 use catalog::table_source::DfTableSourceProvider;
 use datafusion::common::{DFSchemaRef, OwnedTableReference, Result as DfResult};
 use datafusion::datasource::DefaultTableSource;
-use datafusion::logical_expr::expr::{AggregateFunction, ScalarFunction, ScalarUDF};
+use datafusion::logical_expr::expr::{AggregateFunction, Alias, ScalarFunction, ScalarUDF};
 use datafusion::logical_expr::expr_rewriter::normalize_cols;
 use datafusion::logical_expr::{
     AggregateFunction as AggregateFunctionEnum, BinaryExpr, BuiltinScalarFunction, Cast, Extension,
@@ -44,9 +44,10 @@ use table::table::adapter::DfTableProviderAdapter;
 
 use crate::error::{
     CatalogSnafu, ColumnNotFoundSnafu, DataFusionPlanningSnafu, ExpectExprSnafu,
-    ExpectRangeSelectorSnafu, MultipleVectorSnafu, Result, TableNameNotFoundSnafu,
-    TimeIndexNotFoundSnafu, UnexpectedPlanExprSnafu, UnexpectedTokenSnafu, UnknownTableSnafu,
-    UnsupportedExprSnafu, ValueNotFoundSnafu, ZeroRangeSelectorSnafu,
+    ExpectRangeSelectorSnafu, MultipleMetricMatchersSnafu, MultipleVectorSnafu,
+    NoMetricMatcherSnafu, Result, TableNameNotFoundSnafu, TimeIndexNotFoundSnafu,
+    UnexpectedPlanExprSnafu, UnexpectedTokenSnafu, UnknownTableSnafu, UnsupportedExprSnafu,
+    ValueNotFoundSnafu, ZeroRangeSelectorSnafu,
 };
 use crate::extension_plan::{
     build_special_time_expr, EmptyMetric, InstantManipulate, Millisecond, RangeManipulate,
@@ -338,12 +339,12 @@ impl PromPlanner {
                 })
             }
             PromExpr::VectorSelector(VectorSelector {
-                name: _,
+                name,
                 offset,
                 matchers,
                 at: _,
             }) => {
-                let matchers = self.preprocess_label_matchers(matchers)?;
+                let matchers = self.preprocess_label_matchers(matchers, name)?;
                 self.setup_context().await?;
                 let normalize = self
                     .selector_to_series_normalize_plan(offset, matchers, false)
@@ -364,14 +365,14 @@ impl PromPlanner {
                     node: Arc::new(manipulate),
                 })
             }
-            PromExpr::MatrixSelector(MatrixSelector {
-                vector_selector,
-                range,
-            }) => {
+            PromExpr::MatrixSelector(MatrixSelector { vs, range }) => {
                 let VectorSelector {
-                    offset, matchers, ..
-                } = vector_selector;
-                let matchers = self.preprocess_label_matchers(matchers)?;
+                    name,
+                    offset,
+                    matchers,
+                    ..
+                } = vs;
+                let matchers = self.preprocess_label_matchers(matchers, name)?;
                 self.setup_context().await?;
 
                 ensure!(!range.is_zero(), ZeroRangeSelectorSnafu);
@@ -471,13 +472,35 @@ impl PromPlanner {
 
     /// Extract metric name from `__name__` matcher and set it into [PromPlannerContext].
     /// Returns a new [Matchers] that doesn't contains metric name matcher.
-    fn preprocess_label_matchers(&mut self, label_matchers: &Matchers) -> Result<Matchers> {
+    ///
+    /// Name rule:
+    /// - if `name` is some, then the matchers MUST NOT contains `__name__` matcher.
+    /// - if `name` is none, then the matchers MAY contains NONE OR MULTIPLE `__name__` matchers.
+    fn preprocess_label_matchers(
+        &mut self,
+        label_matchers: &Matchers,
+        name: &Option<String>,
+    ) -> Result<Matchers> {
+        let metric_name;
+        if let Some(name) = name.clone() {
+            metric_name = Some(name);
+            ensure!(
+                label_matchers.find_matcher(METRIC_NAME).is_none(),
+                MultipleMetricMatchersSnafu
+            );
+        } else {
+            metric_name = Some(
+                label_matchers
+                    .find_matcher(METRIC_NAME)
+                    .context(NoMetricMatcherSnafu)?,
+            );
+        }
+        self.ctx.table_name = metric_name;
+
         let mut matchers = HashSet::new();
         for matcher in &label_matchers.matchers {
             // TODO(ruihang): support other metric match ops
-            if matcher.name == METRIC_NAME && matches!(matcher.op, MatchOp::Equal) {
-                self.ctx.table_name = Some(matcher.value.clone());
-            } else if matcher.name == FIELD_COLUMN_MATCHER {
+            if matcher.name == FIELD_COLUMN_MATCHER {
                 self.ctx
                     .field_column_matcher
                     .get_or_insert_default()
@@ -486,6 +509,7 @@ impl PromPlanner {
                 let _ = matchers.insert(matcher.clone());
             }
         }
+        let matchers = matchers.into_iter().collect();
         Ok(Matchers { matchers })
     }
 
@@ -580,7 +604,7 @@ impl PromPlanner {
             let exprs = result_set
                 .into_iter()
                 .map(|col| DfExpr::Column(col.into()))
-                .chain(self.create_tag_column_exprs()?.into_iter())
+                .chain(self.create_tag_column_exprs()?)
                 .chain(Some(self.create_time_index_column_expr()?))
                 .collect::<Vec<_>>();
             // reuse this variable for simplicity
@@ -640,8 +664,8 @@ impl PromPlanner {
     ) -> Result<Vec<DfExpr>> {
         match modifier {
             LabelModifier::Include(labels) => {
-                let mut exprs = Vec::with_capacity(labels.len());
-                for label in labels {
+                let mut exprs = Vec::with_capacity(labels.labels.len());
+                for label in &labels.labels {
                     // nonexistence label will be ignored
                     if let Ok(field) = input_schema.field_with_unqualified_name(label) {
                         exprs.push(DfExpr::Column(Column::from(field.name())));
@@ -649,7 +673,7 @@ impl PromPlanner {
                 }
 
                 // change the tag columns in context
-                self.ctx.tag_columns = labels.iter().cloned().collect();
+                self.ctx.tag_columns = labels.labels.clone();
 
                 // add timestamp column
                 exprs.push(self.create_time_index_column_expr()?);
@@ -665,7 +689,7 @@ impl PromPlanner {
 
                 // remove "without"-ed fields
                 // nonexistence label will be ignored
-                for label in labels {
+                for label in &labels.labels {
                     let _ = all_fields.remove(label);
                 }
 
@@ -1016,7 +1040,7 @@ impl PromPlanner {
             exprs.push(expr);
         }
 
-        utils::conjunction(exprs.into_iter()).context(ValueNotFoundSnafu {
+        utils::conjunction(exprs).context(ValueNotFoundSnafu {
             table: self.ctx.table_name.clone().unwrap(),
         })
     }
@@ -1250,7 +1274,7 @@ impl PromPlanner {
         let field_columns_iter = result_field_columns
             .into_iter()
             .zip(self.ctx.field_columns.iter())
-            .map(|(expr, name)| Ok(DfExpr::Alias(Box::new(expr), name.to_string())));
+            .map(|(expr, name)| Ok(DfExpr::Alias(Alias::new(expr, name.to_string()))));
 
         // chain non-value columns (unchanged) and value columns (applied computation then alias)
         let project_fields = non_field_columns_iter
@@ -1315,6 +1339,7 @@ mod test {
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
+    use promql_parser::label::Labels;
     use promql_parser::parser;
     use session::context::QueryContext;
     use table::metadata::{TableInfoBuilder, TableMetaBuilder};
@@ -1364,7 +1389,7 @@ mod test {
             .build()
             .unwrap();
         let table = Arc::new(EmptyTable::from_table_info(&table_info));
-        let catalog_list = Arc::new(MemoryCatalogManager::default());
+        let catalog_list = MemoryCatalogManager::with_default_setup();
         assert!(catalog_list
             .register_table(RegisterTableRequest {
                 catalog: DEFAULT_CATALOG_NAME.to_string(),
@@ -1615,7 +1640,7 @@ mod test {
         let plan = PromPlanner::stmt_to_plan(table_provider, eval_stmt.clone())
             .await
             .unwrap();
-        let  expected_no_without = String::from(
+        let expected_no_without = String::from(
             "Sort: some_metric.tag_1 ASC NULLS LAST, some_metric.timestamp ASC NULLS LAST [tag_1:Utf8, timestamp:Timestamp(Millisecond, None), TEMPLATE(some_metric.field_0):Float64;N, TEMPLATE(some_metric.field_1):Float64;N]\
             \n  Aggregate: groupBy=[[some_metric.tag_1, some_metric.timestamp]], aggr=[[TEMPLATE(some_metric.field_0), TEMPLATE(some_metric.field_1)]] [tag_1:Utf8, timestamp:Timestamp(Millisecond, None), TEMPLATE(some_metric.field_0):Float64;N, TEMPLATE(some_metric.field_1):Float64;N]\
             \n    PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, tag_1:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N, field_1:Float64;N]\
@@ -1632,15 +1657,15 @@ mod test {
 
         // test group without
         if let PromExpr::Aggregate(AggregateExpr { modifier, .. }) = &mut eval_stmt.expr {
-            *modifier = Some(LabelModifier::Exclude(
-                vec![String::from("tag_1")].into_iter().collect(),
-            ));
+            *modifier = Some(LabelModifier::Exclude(Labels {
+                labels: vec![String::from("tag_1")].into_iter().collect(),
+            }));
         }
         let table_provider = build_test_table_provider("some_metric".to_string(), 2, 2).await;
         let plan = PromPlanner::stmt_to_plan(table_provider, eval_stmt)
             .await
             .unwrap();
-        let  expected_without = String::from(
+        let expected_without = String::from(
             "Sort: some_metric.tag_0 ASC NULLS LAST, some_metric.timestamp ASC NULLS LAST [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), TEMPLATE(some_metric.field_0):Float64;N, TEMPLATE(some_metric.field_1):Float64;N]\
             \n  Aggregate: groupBy=[[some_metric.tag_0, some_metric.timestamp]], aggr=[[TEMPLATE(some_metric.field_0), TEMPLATE(some_metric.field_1)]] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), TEMPLATE(some_metric.field_0):Float64;N, TEMPLATE(some_metric.field_1):Float64;N]\
             \n    PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, tag_1:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N, field_1:Float64;N]\

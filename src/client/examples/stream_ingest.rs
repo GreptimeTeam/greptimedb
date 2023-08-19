@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::column::*;
 use api::v1::*;
 use client::{Client, Database, DEFAULT_SCHEMA_NAME};
 use derive_new::new;

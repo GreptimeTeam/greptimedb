@@ -16,24 +16,27 @@
 
 use std::sync::Arc;
 
-use common_telemetry::logging;
-use snafu::ensure;
+use common_telemetry::info;
+use snafu::{ensure, ResultExt};
+use store_api::metadata::RegionMetadataBuilder;
+use store_api::region_request::RegionCreateRequest;
+use store_api::storage::RegionId;
 
-use crate::error::{RegionExistsSnafu, Result};
-use crate::metadata::{RegionMetadataBuilder, INIT_REGION_VERSION};
+use crate::error::{InvalidMetadataSnafu, RegionExistsSnafu, Result};
 use crate::region::opener::RegionOpener;
-use crate::worker::request::CreateRequest;
 use crate::worker::RegionWorkerLoop;
 
 impl<S> RegionWorkerLoop<S> {
-    pub(crate) async fn handle_create_request(&mut self, request: CreateRequest) -> Result<()> {
+    pub(crate) async fn handle_create_request(
+        &mut self,
+        region_id: RegionId,
+        request: RegionCreateRequest,
+    ) -> Result<()> {
         // Checks whether the table exists.
-        if self.regions.is_region_exists(request.region_id) {
+        if self.regions.is_region_exists(region_id) {
             ensure!(
                 request.create_if_not_exists,
-                RegionExistsSnafu {
-                    region_id: request.region_id,
-                }
+                RegionExistsSnafu { region_id }
             );
 
             // Region already exists.
@@ -41,25 +44,28 @@ impl<S> RegionWorkerLoop<S> {
         }
 
         // Convert the request into a RegionMetadata and validate it.
-        let mut builder = RegionMetadataBuilder::new(request.region_id, INIT_REGION_VERSION);
+        let mut builder = RegionMetadataBuilder::new(region_id);
         for column in request.column_metadatas {
             builder.push_column_metadata(column);
         }
         builder.primary_key(request.primary_key);
-        let metadata = builder.build()?;
+        let metadata = builder.build().context(InvalidMetadataSnafu)?;
 
         // Create a MitoRegion from the RegionMetadata.
         let region = RegionOpener::new(
-            metadata,
+            region_id,
             self.memtable_builder.clone(),
             self.object_store.clone(),
         )
+        .metadata(metadata)
         .region_dir(&request.region_dir)
         .create(&self.config)
         .await?;
 
         // TODO(yingwen): Custom the Debug format for the metadata and also print it.
-        logging::info!("A new region created, region_id: {}", region.region_id);
+        info!("A new region created, region_id: {}", region.region_id);
+
+        // TODO(yingwen): Metrics.
 
         // Insert the MitoRegion into the RegionMap.
         self.regions.insert_region(Arc::new(region));

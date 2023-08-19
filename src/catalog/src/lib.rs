@@ -25,7 +25,7 @@ use api::v1::meta::{RegionStat, TableIdent, TableName};
 use common_telemetry::{info, warn};
 use snafu::ResultExt;
 use table::engine::{EngineContext, TableEngineRef};
-use table::metadata::TableId;
+use table::metadata::{TableId, TableType};
 use table::requests::CreateTableRequest;
 use table::TableRef;
 
@@ -48,7 +48,7 @@ pub trait CatalogManager: Send + Sync {
     async fn start(&self) -> Result<()>;
 
     /// Registers a catalog to catalog manager, returns whether the catalog exist before.
-    async fn register_catalog(&self, name: String) -> Result<bool>;
+    async fn register_catalog(self: Arc<Self>, name: String) -> Result<bool>;
 
     /// Register a schema with catalog name and schema name. Retuens whether the
     /// schema registered.
@@ -217,13 +217,31 @@ pub async fn datanode_stat(catalog_manager: &CatalogManagerRef) -> (u64, Vec<Reg
     let mut region_number: u64 = 0;
     let mut region_stats = Vec::new();
 
-    let Ok(catalog_names) = catalog_manager.catalog_names().await else { return (region_number, region_stats) };
+    let Ok(catalog_names) = catalog_manager.catalog_names().await else {
+        return (region_number, region_stats);
+    };
     for catalog_name in catalog_names {
-        let Ok(schema_names) = catalog_manager.schema_names(&catalog_name).await else { continue };
+        let Ok(schema_names) = catalog_manager.schema_names(&catalog_name).await else {
+            continue;
+        };
         for schema_name in schema_names {
-            let Ok(table_names) = catalog_manager.table_names(&catalog_name,&schema_name).await else { continue };
+            let Ok(table_names) = catalog_manager
+                .table_names(&catalog_name, &schema_name)
+                .await
+            else {
+                continue;
+            };
             for table_name in table_names {
-                let Ok(Some(table)) = catalog_manager.table(&catalog_name, &schema_name, &table_name).await else { continue };
+                let Ok(Some(table)) = catalog_manager
+                    .table(&catalog_name, &schema_name, &table_name)
+                    .await
+                else {
+                    continue;
+                };
+
+                if table.table_type() != TableType::Base {
+                    continue;
+                }
 
                 let table_info = table.table_info();
                 let region_numbers = &table_info.meta.region_numbers;

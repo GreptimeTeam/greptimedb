@@ -26,7 +26,9 @@ use snafu::ResultExt;
 use table::engine::{table_dir, EngineContext, TableEngine, TableEngineProcedure, TableReference};
 use table::error::TableOperationSnafu;
 use table::metadata::{TableId, TableInfo, TableInfoBuilder, TableMetaBuilder, TableType};
-use table::requests::{AlterTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest};
+use table::requests::{
+    AlterTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest, TruncateTableRequest,
+};
 use table::{error as table_error, Result as TableResult, Table, TableRef};
 use tokio::sync::Mutex;
 
@@ -111,6 +113,17 @@ impl TableEngine for ImmutableFileTableEngine {
     async fn close(&self) -> TableResult<()> {
         self.inner.close().await
     }
+
+    async fn truncate_table(
+        &self,
+        _ctx: &EngineContext,
+        _request: TruncateTableRequest,
+    ) -> TableResult<bool> {
+        table_error::UnsupportedSnafu {
+            operation: "TRUNCATE TABLE",
+        }
+        .fail()
+    }
 }
 
 #[async_trait]
@@ -142,6 +155,17 @@ impl TableEngineProcedure for ImmutableFileTableEngine {
     ) -> TableResult<BoxedProcedure> {
         let procedure = Box::new(DropImmutableFileTable::new(request, self.clone()));
         Ok(procedure)
+    }
+
+    fn truncate_table_procedure(
+        &self,
+        _ctx: &EngineContext,
+        _request: TruncateTableRequest,
+    ) -> TableResult<BoxedProcedure> {
+        table_error::UnsupportedSnafu {
+            operation: "TRUNCATE TABLE",
+        }
+        .fail()
     }
 }
 

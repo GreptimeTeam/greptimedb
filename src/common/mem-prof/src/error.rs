@@ -13,51 +13,28 @@
 // limitations under the License.
 
 use std::any::Any;
-use std::path::PathBuf;
 
-use common_error::ext::ErrorExt;
+use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
-use snafu::{Location, Snafu};
+use snafu::Snafu;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
-    #[snafu(display("Failed to read OPT_PROF, source: {}", source))]
-    ReadOptProf { source: tikv_jemalloc_ctl::Error },
+    #[snafu(display("{source}"))]
+    Internal { source: BoxedError },
 
-    #[snafu(display("Memory profiling is not enabled"))]
-    ProfilingNotEnabled,
-
-    #[snafu(display("Failed to build temp file from given path: {:?}", path))]
-    BuildTempPath { path: PathBuf, location: Location },
-
-    #[snafu(display("Failed to open temp file: {}, source: {}", path, source))]
-    OpenTempFile {
-        path: String,
-        source: std::io::Error,
-    },
-
-    #[snafu(display(
-        "Failed to dump profiling data to temp file: {:?}, source: {}",
-        path,
-        source
-    ))]
-    DumpProfileData {
-        path: PathBuf,
-        source: tikv_jemalloc_ctl::Error,
-    },
+    #[snafu(display("Memory profiling is not supported"))]
+    ProfilingNotSupported,
 }
 
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Error::ReadOptProf { .. } => StatusCode::Internal,
-            Error::ProfilingNotEnabled => StatusCode::InvalidArguments,
-            Error::BuildTempPath { .. } => StatusCode::Internal,
-            Error::OpenTempFile { .. } => StatusCode::StorageUnavailable,
-            Error::DumpProfileData { .. } => StatusCode::StorageUnavailable,
+            Error::Internal { source } => source.status_code(),
+            Error::ProfilingNotSupported => StatusCode::Unsupported,
         }
     }
 

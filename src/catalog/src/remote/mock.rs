@@ -23,6 +23,7 @@ use table::engine::{CloseTableResult, EngineContext, TableEngine};
 use table::metadata::TableId;
 use table::requests::{
     AlterTableRequest, CloseTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest,
+    TruncateTableRequest,
 };
 use table::test_util::MemTable;
 use table::TableRef;
@@ -115,5 +116,13 @@ impl TableEngine for MockTableEngine {
 
     async fn close(&self) -> table::Result<()> {
         Ok(())
+    }
+
+    async fn truncate_table(
+        &self,
+        _ctx: &EngineContext,
+        _request: TruncateTableRequest,
+    ) -> table::Result<bool> {
+        Ok(true)
     }
 }

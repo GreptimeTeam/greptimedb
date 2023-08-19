@@ -110,7 +110,7 @@ fn catalog_manager() -> Result<Arc<MemoryCatalogManager>> {
         schema: DEFAULT_SCHEMA_NAME.to_string(),
         table_name: NUMBERS_TABLE_NAME.to_string(),
         table_id: NUMBERS_TABLE_ID,
-        table: Arc::new(NumbersTable::default()),
+        table: NumbersTable::table(NUMBERS_TABLE_ID),
     };
     let _ = catalog_manager.register_table_sync(req).unwrap();
 

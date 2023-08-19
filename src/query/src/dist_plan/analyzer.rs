@@ -14,10 +14,14 @@
 
 use std::sync::{Arc, Mutex};
 
+use datafusion::datasource::DefaultTableSource;
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeVisitor, VisitRecursion};
 use datafusion_expr::{Extension, LogicalPlan};
 use datafusion_optimizer::analyzer::AnalyzerRule;
+use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
+use table::metadata::TableType;
+use table::table::adapter::DfTableProviderAdapter;
 
 use crate::dist_plan::commutativity::{
     partial_commutative_transformer, Categorizer, Commutativity,
@@ -37,16 +41,13 @@ impl AnalyzerRule for DistPlannerAnalyzer {
         plan: LogicalPlan,
         _config: &ConfigOptions,
     ) -> datafusion_common::Result<LogicalPlan> {
-        // (1) add merge scan
-        let plan = plan.transform(&Self::add_merge_scan)?;
-
-        // (2) transform up merge scan
+        // (1) transform up merge scan
         let mut visitor = CommutativeVisitor::new();
         let _ = plan.visit(&mut visitor)?;
         let state = ExpandState::new();
         let plan = plan.transform_down(&|plan| Self::expand(plan, &visitor, &state))?;
 
-        // (3) remove placeholder merge scan
+        // (2) remove placeholder merge scan
         let plan = plan.transform(&Self::remove_placeholder_merge_scan)?;
 
         Ok(plan)
@@ -55,6 +56,7 @@ impl AnalyzerRule for DistPlannerAnalyzer {
 
 impl DistPlannerAnalyzer {
     /// Add [MergeScanLogicalPlan] before the table scan
+    #[allow(dead_code)]
     fn add_merge_scan(plan: LogicalPlan) -> datafusion_common::Result<Transformed<LogicalPlan>> {
         Ok(match plan {
             LogicalPlan::TableScan(table_scan) => {
@@ -161,6 +163,8 @@ struct CommutativeVisitor {
     next_stage: Vec<LogicalPlan>,
     // hash of the stop node
     stop_node: Option<u64>,
+    /// Partition columns of current visiting table
+    current_partition_cols: Option<Vec<String>>,
 }
 
 impl TreeNodeVisitor for CommutativeVisitor {
@@ -170,18 +174,46 @@ impl TreeNodeVisitor for CommutativeVisitor {
         // find the first merge scan and stop traversing down
         // todo: check if it works for join
         Ok(match plan {
-            LogicalPlan::Extension(ext) => {
-                if ext.node.name() == MergeScanLogicalPlan::name() {
-                    VisitRecursion::Skip
-                } else {
-                    VisitRecursion::Continue
+            LogicalPlan::TableScan(table_scan) => {
+                // TODO(ruihang): spawn a sub visitor to retrieve partition columns
+                if let Some(source) = table_scan
+                    .source
+                    .as_any()
+                    .downcast_ref::<DefaultTableSource>()
+                {
+                    if let Some(provider) = source
+                        .table_provider
+                        .as_any()
+                        .downcast_ref::<DfTableProviderAdapter>()
+                    {
+                        if provider.table().table_type() == TableType::Base {
+                            let info = provider.table().table_info();
+                            let partition_key_indices = info.meta.partition_key_indices.clone();
+                            let schema = info.meta.schema.clone();
+                            let partition_cols = partition_key_indices
+                                .into_iter()
+                                .map(|index| schema.column_name_by_index(index).to_string())
+                                .collect::<Vec<String>>();
+                            self.current_partition_cols = Some(partition_cols);
+                        }
+                    }
                 }
+                VisitRecursion::Continue
             }
             _ => VisitRecursion::Continue,
         })
     }
 
     fn post_visit(&mut self, plan: &LogicalPlan) -> datafusion_common::Result<VisitRecursion> {
+        if DFLogicalSubstraitConvertor.encode(plan).is_err() {
+            common_telemetry::info!(
+                "substrait error: {:?}",
+                DFLogicalSubstraitConvertor.encode(plan)
+            );
+            self.stop_node = Some(utils::hash_plan(plan));
+            return Ok(VisitRecursion::Stop);
+        }
+
         match Categorizer::check_plan(plan) {
             Commutativity::Commutative => {}
             Commutativity::PartialCommutative => {
@@ -201,6 +233,16 @@ impl TreeNodeVisitor for CommutativeVisitor {
                     self.next_stage.push(plan)
                 }
             },
+            Commutativity::CheckPartition => {
+                if let Some(partition_cols) = &self.current_partition_cols
+                    && partition_cols.is_empty() {
+                    // no partition columns, and can be encoded skip
+                    return Ok(VisitRecursion::Continue);
+                } else {
+                    self.stop_node = Some(utils::hash_plan(plan));
+                    return Ok(VisitRecursion::Stop);
+                }
+            },
             Commutativity::NonCommutative
             | Commutativity::Unimplemented
             | Commutativity::Unsupported => {
@@ -218,6 +260,7 @@ impl CommutativeVisitor {
         Self {
             next_stage: vec![],
             stop_node: None,
+            current_partition_cols: None,
         }
     }
 }
@@ -234,7 +277,7 @@ mod test {
     #[ignore = "Projection is disabled for https://github.com/apache/arrow-datafusion/issues/6489"]
     #[test]
     fn transform_simple_projection_filter() {
-        let numbers_table = Arc::new(NumbersTable::new(0)) as _;
+        let numbers_table = NumbersTable::table(0);
         let table_source = Arc::new(DefaultTableSource::new(Arc::new(
             DfTableProviderAdapter::new(numbers_table),
         )));
@@ -252,20 +295,21 @@ mod test {
 
         let config = ConfigOptions::default();
         let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
-        let expected = String::from(
-            "Distinct:\
-            \n  MergeScan [is_placeholder=false]\
-            \n    Distinct:\
-            \n      Projection: t.number\
-            \n        Filter: t.number < Int32(10)\
-            \n          TableScan: t",
-        );
+        let expected = [
+            "Distinct:",
+            "  MergeScan [is_placeholder=false]",
+            "    Distinct:",
+            "      Projection: t.number",
+            "        Filter: t.number < Int32(10)",
+            "          TableScan: t",
+        ]
+        .join("\n");
         assert_eq!(expected, format!("{:?}", result));
     }
 
     #[test]
     fn transform_aggregator() {
-        let numbers_table = Arc::new(NumbersTable::new(0)) as _;
+        let numbers_table = NumbersTable::table(0);
         let table_source = Arc::new(DefaultTableSource::new(Arc::new(
             DfTableProviderAdapter::new(numbers_table),
         )));
@@ -279,17 +323,17 @@ mod test {
 
         let config = ConfigOptions::default();
         let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
-        let expected = String::from(
-            "Aggregate: groupBy=[[]], aggr=[[AVG(t.number)]]\
-            \n  MergeScan [is_placeholder=false]\
-            \n    TableScan: t",
-        );
+        let expected = [
+            "Aggregate: groupBy=[[]], aggr=[[AVG(t.number)]]",
+            "  TableScan: t",
+        ]
+        .join("\n");
         assert_eq!(expected, format!("{:?}", result));
     }
 
     #[test]
     fn transform_distinct_order() {
-        let numbers_table = Arc::new(NumbersTable::new(0)) as _;
+        let numbers_table = NumbersTable::table(0);
         let table_source = Arc::new(DefaultTableSource::new(Arc::new(
             DfTableProviderAdapter::new(numbers_table),
         )));
@@ -305,19 +349,18 @@ mod test {
 
         let config = ConfigOptions::default();
         let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
-        let expected = String::from(
-            "Sort: t.number ASC NULLS LAST\
-            \n  Distinct:\
-            \n    MergeScan [is_placeholder=false]\
-            \n      Distinct:\
-            \n        TableScan: t",
-        );
+        let expected = [
+            "Sort: t.number ASC NULLS LAST",
+            "  Distinct:",
+            "    TableScan: t",
+        ]
+        .join("\n");
         assert_eq!(expected, format!("{:?}", result));
     }
 
     #[test]
     fn transform_single_limit() {
-        let numbers_table = Arc::new(NumbersTable::new(0)) as _;
+        let numbers_table = NumbersTable::table(0);
         let table_source = Arc::new(DefaultTableSource::new(Arc::new(
             DfTableProviderAdapter::new(numbers_table),
         )));
@@ -331,12 +374,7 @@ mod test {
 
         let config = ConfigOptions::default();
         let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
-        let expected = String::from(
-            "Limit: skip=0, fetch=1\
-            \n  MergeScan [is_placeholder=false]\
-            \n    Limit: skip=0, fetch=1\
-            \n      TableScan: t",
-        );
+        let expected = ["Limit: skip=0, fetch=1", "  TableScan: t"].join("\n");
         assert_eq!(expected, format!("{:?}", result));
     }
 }

@@ -34,6 +34,7 @@ use std::time::{Duration, Instant};
 use aide::axum::{routing as apirouting, ApiRouter, IntoApiResponse};
 use aide::openapi::{Info, OpenApi, Server as OpenAPIServer};
 use async_trait::async_trait;
+use auth::UserProviderRef;
 use axum::body::BoxBody;
 use axum::error_handling::HandleErrorLayer;
 use axum::extract::{DefaultBodyLimit, MatchedPath};
@@ -42,6 +43,8 @@ use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Json};
 use axum::{routing, BoxError, Extension, Router};
 use common_base::readable_size::ReadableSize;
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_query::Output;
@@ -63,15 +66,18 @@ use tower_http::trace::TraceLayer;
 
 use self::authorize::HttpAuth;
 use self::influxdb::{influxdb_health, influxdb_ping, influxdb_write_v1, influxdb_write_v2};
-use crate::auth::UserProviderRef;
 use crate::configurator::ConfiguratorRef;
 use crate::error::{AlreadyStartedSnafu, Result, StartHttpSnafu};
 use crate::http::admin::{compact, flush};
 use crate::metrics::{
-    METRIC_HTTP_REQUESTS_ELAPSED, METRIC_HTTP_REQUESTS_TOTAL, METRIC_METHOD_LABEL,
-    METRIC_PATH_LABEL, METRIC_STATUS_LABEL,
+    METRIC_CODE_LABEL, METRIC_HTTP_REQUESTS_ELAPSED, METRIC_HTTP_REQUESTS_TOTAL,
+    METRIC_METHOD_LABEL, METRIC_PATH_LABEL,
 };
 use crate::metrics_handler::MetricsHandler;
+use crate::prometheus::{
+    instant_query, label_values_query, labels_query, range_query, series_query,
+    PrometheusHandlerRef,
+};
 use crate::query_handler::grpc::ServerGrpcQueryHandlerRef;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 use crate::query_handler::{
@@ -86,23 +92,28 @@ pub(crate) async fn query_context_from_db(
     query_handler: ServerSqlQueryHandlerRef,
     db: Option<String>,
 ) -> std::result::Result<Arc<QueryContext>, JsonResponse> {
-    if let Some(db) = &db {
-        let (catalog, schema) = super::parse_catalog_and_schema_from_client_database_name(db);
+    let (catalog, schema) = if let Some(db) = &db {
+        let (catalog, schema) = parse_catalog_and_schema_from_db_string(db);
 
         match query_handler.is_valid_schema(catalog, schema).await {
-            Ok(true) => Ok(QueryContext::with(catalog, schema)),
-            Ok(false) => Err(JsonResponse::with_error(
-                format!("Database not found: {db}"),
-                StatusCode::DatabaseNotFound,
-            )),
-            Err(e) => Err(JsonResponse::with_error(
-                format!("Error checking database: {db}, {e}"),
-                StatusCode::Internal,
-            )),
+            Ok(true) => (catalog, schema),
+            Ok(false) => {
+                return Err(JsonResponse::with_error(
+                    format!("Database not found: {db}"),
+                    StatusCode::DatabaseNotFound,
+                ))
+            }
+            Err(e) => {
+                return Err(JsonResponse::with_error(
+                    format!("Error checking database: {db}, {e}"),
+                    StatusCode::Internal,
+                ))
+            }
         }
     } else {
-        Ok(QueryContext::arc())
-    }
+        (DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME)
+    };
+    Ok(QueryContext::with(catalog, schema))
 }
 
 pub const HTTP_API_VERSION: &str = "v1";
@@ -121,6 +132,7 @@ pub struct HttpServer {
     influxdb_handler: Option<InfluxdbLineProtocolHandlerRef>,
     opentsdb_handler: Option<OpentsdbProtocolHandlerRef>,
     prom_handler: Option<PromStoreProtocolHandlerRef>,
+    prometheus_handler: Option<PrometheusHandlerRef>,
     otlp_handler: Option<OpenTelemetryProtocolHandlerRef>,
     script_handler: Option<ScriptHandlerRef>,
     shutdown_tx: Mutex<Option<Sender<()>>>,
@@ -402,6 +414,7 @@ impl HttpServerBuilder {
                 opentsdb_handler: None,
                 influxdb_handler: None,
                 prom_handler: None,
+                prometheus_handler: None,
                 otlp_handler: None,
                 user_provider: None,
                 script_handler: None,
@@ -440,6 +453,11 @@ impl HttpServerBuilder {
 
     pub fn with_prom_handler(&mut self, handler: PromStoreProtocolHandlerRef) -> &mut Self {
         let _ = self.inner.prom_handler.get_or_insert(handler);
+        self
+    }
+
+    pub fn with_prometheus_handler(&mut self, handler: PrometheusHandlerRef) -> &mut Self {
+        let _ = self.inner.prometheus_handler.get_or_insert(handler);
         self
     }
 
@@ -527,6 +545,13 @@ impl HttpServer {
             router = router.nest(
                 &format!("/{HTTP_API_VERSION}/prometheus"),
                 self.route_prom(prom_handler),
+            );
+        }
+
+        if let Some(prometheus_handler) = self.prometheus_handler.clone() {
+            router = router.nest(
+                &format!("/{HTTP_API_VERSION}/prometheus"),
+                self.route_prometheus(prometheus_handler),
             );
         }
 
@@ -641,6 +666,19 @@ impl HttpServer {
             .with_state(api_state)
     }
 
+    fn route_prometheus<S>(&self, prometheus_handler: PrometheusHandlerRef) -> Router<S> {
+        Router::new()
+            .route("/query", routing::post(instant_query).get(instant_query))
+            .route("/query_range", routing::post(range_query).get(range_query))
+            .route("/labels", routing::post(labels_query).get(labels_query))
+            .route("/series", routing::post(series_query).get(series_query))
+            .route(
+                "/label/:label_name/values",
+                routing::get(label_values_query),
+            )
+            .with_state(prometheus_handler)
+    }
+
     fn route_prom<S>(&self, prom_handler: PromStoreProtocolHandlerRef) -> Router<S> {
         Router::new()
             .route("/write", routing::post(prom_store::remote_write))
@@ -703,7 +741,7 @@ pub(crate) async fn track_metrics<B>(req: Request<B>, next: Next<B>) -> impl Int
     let labels = [
         (METRIC_METHOD_LABEL, method.to_string()),
         (METRIC_PATH_LABEL, path),
-        (METRIC_STATUS_LABEL, status),
+        (METRIC_CODE_LABEL, status),
     ];
 
     metrics::increment_counter!(METRIC_HTTP_REQUESTS_TOTAL, &labels);

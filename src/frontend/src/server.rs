@@ -16,10 +16,10 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use auth::UserProviderRef;
 use common_base::Plugins;
 use common_runtime::Builder as RuntimeBuilder;
 use common_telemetry::info;
-use servers::auth::UserProviderRef;
 use servers::configurator::ConfiguratorRef;
 use servers::error::Error::InternalIo;
 use servers::grpc::GrpcServer;
@@ -28,7 +28,6 @@ use servers::metrics_handler::MetricsHandler;
 use servers::mysql::server::{MysqlServer, MysqlSpawnConfig, MysqlSpawnRef};
 use servers::opentsdb::OpentsdbServer;
 use servers::postgres::PostgresServer;
-use servers::prometheus::PrometheusServer;
 use servers::query_handler::grpc::ServerGrpcQueryHandlerAdaptor;
 use servers::query_handler::sql::ServerSqlQueryHandlerAdaptor;
 use servers::server::Server;
@@ -184,23 +183,12 @@ impl Services {
 
             let http_server = http_server_builder
                 .with_metrics_handler(MetricsHandler)
-                .with_script_handler(instance.clone())
+                .with_script_handler(instance)
                 .with_configurator(plugins.get::<ConfiguratorRef>())
                 .with_greptime_config_options(opts.to_toml_string())
                 .build();
             result.push((Box::new(http_server), http_addr));
         }
-
-        if let Some(prometheus_options) = &opts.prometheus_options {
-            let prom_addr = parse_addr(&prometheus_options.addr)?;
-
-            let mut prom_server = PrometheusServer::create_server(instance);
-            if let Some(user_provider) = user_provider {
-                prom_server.set_user_provider(user_provider);
-            }
-
-            result.push((prom_server, prom_addr));
-        };
 
         Ok(result
             .into_iter()

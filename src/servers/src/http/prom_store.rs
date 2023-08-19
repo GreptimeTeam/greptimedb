@@ -26,7 +26,6 @@ use session::context::QueryContext;
 use snafu::prelude::*;
 
 use crate::error::{self, Result};
-use crate::parse_catalog_and_schema_from_client_database_name;
 use crate::prom_store::snappy_decompress;
 use crate::query_handler::{PromStoreProtocolHandlerRef, PromStoreResponse};
 
@@ -58,14 +57,8 @@ pub async fn remote_write(
             params.db.clone().unwrap_or_default()
         )]
     );
-    let ctx = if let Some(db) = params.db {
-        let (catalog, schema) = parse_catalog_and_schema_from_client_database_name(&db);
-        QueryContext::with(catalog, schema)
-    } else {
-        QueryContext::arc()
-    };
 
-    // TODO(shuiyisong): add more error log
+    let ctx = QueryContext::with_db_name(params.db.as_ref());
     handler.write(request, ctx).await?;
     Ok((StatusCode::NO_CONTENT, ()))
 }
@@ -98,14 +91,8 @@ pub async fn remote_read(
             params.db.clone().unwrap_or_default()
         )]
     );
-    let ctx = if let Some(db) = params.db {
-        let (catalog, schema) = parse_catalog_and_schema_from_client_database_name(&db);
-        QueryContext::with(catalog, schema)
-    } else {
-        QueryContext::arc()
-    };
 
-    // TODO(shuiyisong): add more error log
+    let ctx = QueryContext::with_db_name(params.db.as_ref());
     handler.read(request, ctx).await
 }
 

@@ -18,13 +18,13 @@ use std::sync::Arc;
 use arrow::record_batch::RecordBatch;
 use arrow_schema::Schema;
 use async_trait::async_trait;
+use datafusion::datasource::physical_plan::{FileMeta, ParquetFileReaderFactory};
 use datafusion::error::Result as DatafusionResult;
 use datafusion::parquet::arrow::async_reader::AsyncFileReader;
 use datafusion::parquet::arrow::{parquet_to_arrow_schema, ArrowWriter};
 use datafusion::parquet::errors::{ParquetError, Result as ParquetResult};
 use datafusion::parquet::file::metadata::ParquetMetaData;
 use datafusion::parquet::format::FileMetaData;
-use datafusion::physical_plan::file_format::{FileMeta, ParquetFileReaderFactory};
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use futures::future::BoxFuture;
 use object_store::{ObjectStore, Reader};
@@ -158,11 +158,13 @@ impl ArrowWriterCloser for ArrowWriter<SharedBuffer> {
 
 #[cfg(test)]
 mod tests {
+    use common_test_util::find_workspace_path;
+
     use super::*;
-    use crate::test_util::{self, format_schema, test_store};
+    use crate::test_util::{format_schema, test_store};
 
     fn test_data_root() -> String {
-        test_util::get_data_dir("tests/parquet")
+        find_workspace_path("/src/common/datasource/tests/parquet")
             .display()
             .to_string()
     }

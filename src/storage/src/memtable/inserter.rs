@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use store_api::storage::{OpType, SequenceNumber};
+use api::v1::OpType;
+use store_api::storage::SequenceNumber;
 
 use super::MemtableRef;
 use crate::error::Result;

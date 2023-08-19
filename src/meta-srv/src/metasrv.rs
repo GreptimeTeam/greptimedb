@@ -19,12 +19,13 @@ use std::sync::Arc;
 
 use api::v1::meta::Peer;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
 use common_grpc::channel_manager;
 use common_meta::key::TableMetadataManagerRef;
 use common_procedure::options::ProcedureConfig;
 use common_procedure::ProcedureManagerRef;
 use common_telemetry::logging::LoggingOptions;
-use common_telemetry::{error, info, warn};
+use common_telemetry::{debug, error, info, warn};
 use serde::{Deserialize, Serialize};
 use servers::http::HttpOptions;
 use snafu::ResultExt;
@@ -37,11 +38,13 @@ use crate::error::{RecoverProcedureSnafu, Result};
 use crate::handler::HeartbeatHandlerGroup;
 use crate::lock::DistLockRef;
 use crate::metadata_service::MetadataServiceRef;
+use crate::pubsub::{PublishRef, SubscribeManagerRef};
 use crate::selector::{Selector, SelectorType};
 use crate::sequence::SequenceRef;
 use crate::service::mailbox::MailboxRef;
 use crate::service::store::kv::{KvStoreRef, ResettableKvStoreRef};
 pub const TABLE_ID_SEQ: &str = "table_id";
+const METASRV_HOME: &str = "/tmp/metasrv";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -57,6 +60,8 @@ pub struct MetaSrvOptions {
     pub logging: LoggingOptions,
     pub procedure: ProcedureConfig,
     pub datanode: DatanodeOptions,
+    pub enable_telemetry: bool,
+    pub data_home: String,
 }
 
 impl Default for MetaSrvOptions {
@@ -70,9 +75,14 @@ impl Default for MetaSrvOptions {
             use_memory_store: false,
             disable_region_failover: false,
             http_opts: HttpOptions::default(),
-            logging: LoggingOptions::default(),
+            logging: LoggingOptions {
+                dir: format!("{METASRV_HOME}/logs"),
+                ..Default::default()
+            },
             procedure: ProcedureConfig::default(),
             datanode: DatanodeOptions::default(),
+            enable_telemetry: true,
+            data_home: METASRV_HOME.to_string(),
         }
     }
 }
@@ -86,7 +96,7 @@ impl MetaSrvOptions {
 // Options for datanode.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct DatanodeOptions {
-    client_options: DatanodeClientOptions,
+    pub client_options: DatanodeClientOptions,
 }
 
 // Options for datanode client.
@@ -175,6 +185,8 @@ pub struct MetaSrv {
     mailbox: MailboxRef,
     ddl_manager: DdlManagerRef,
     table_metadata_manager: TableMetadataManagerRef,
+    greptimedb_telemetry_task: Arc<GreptimeDBTelemetryTask>,
+    pubsub: Option<(PublishRef, SubscribeManagerRef)>,
 }
 
 impl MetaSrv {
@@ -194,7 +206,9 @@ impl MetaSrv {
             let procedure_manager = self.procedure_manager.clone();
             let in_memory = self.in_memory.clone();
             let leader_cached_kv_store = self.leader_cached_kv_store.clone();
+            let subscribe_manager = self.subscribe_manager().cloned();
             let mut rx = election.subscribe_leader_change();
+            let task_handler = self.greptimedb_telemetry_task.clone();
             let _handle = common_runtime::spawn_bg(async move {
                 loop {
                     match rx.recv().await {
@@ -210,9 +224,24 @@ impl MetaSrv {
                                     if let Err(e) = procedure_manager.recover().await {
                                         error!("Failed to recover procedures, error: {e}");
                                     }
+                                    let _ = task_handler.start(common_runtime::bg_runtime())
+                                    .map_err(|e| {
+                                        debug!("Failed to start greptimedb telemetry task, error: {e}");
+                                    });
                                 }
                                 LeaderChangeMessage::StepDown(leader) => {
+                                    if let Some(sub_manager) = subscribe_manager.clone() {
+                                        info!("Leader changed, un_subscribe all");
+                                        if let Err(e) = sub_manager.un_subscribe_all() {
+                                            error!("Failed to un_subscribe all, error: {}", e);
+                                        }
+                                    }
                                     error!("Leader :{:?} step down", leader);
+                                    let _ = task_handler.stop().await.map_err(|e| {
+                                        debug!(
+                                            "Failed to stop greptimedb telemetry task, error: {e}"
+                                        );
+                                    });
                                 }
                             }
                         }
@@ -317,6 +346,14 @@ impl MetaSrv {
         &self.table_metadata_manager
     }
 
+    pub fn publish(&self) -> Option<&PublishRef> {
+        self.pubsub.as_ref().map(|suite| &suite.0)
+    }
+
+    pub fn subscribe_manager(&self) -> Option<&SubscribeManagerRef> {
+        self.pubsub.as_ref().map(|suite| &suite.1)
+    }
+
     #[inline]
     pub fn new_ctx(&self) -> Context {
         let server_addr = self.options().server_addr.clone();
@@ -327,6 +364,7 @@ impl MetaSrv {
         let mailbox = self.mailbox.clone();
         let election = self.election.clone();
         let skip_all = Arc::new(AtomicBool::new(false));
+
         Context {
             server_addr,
             in_memory,

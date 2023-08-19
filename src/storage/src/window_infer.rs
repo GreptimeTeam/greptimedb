@@ -64,6 +64,7 @@ impl WindowInfer for PlainWindowInference {
         ts_desc: bool,
     ) -> Vec<TimestampRange> {
         let mut min_duration_sec = i64::MAX;
+        let mut max_durations_sec = i64::MIN;
         let mut durations = Vec::with_capacity(files.len() + mem_tables.len());
 
         for meta in files {
@@ -76,6 +77,7 @@ impl WindowInfer for PlainWindowInference {
                 if meta.level == 0 {
                     // only level 0 is involved when calculating time windows.
                     min_duration_sec = min_duration_sec.min(end_sec - start_sec);
+                    max_durations_sec = max_durations_sec.max(end_sec - start_sec);
                 }
                 durations.push((start_sec, end_sec));
             }
@@ -94,10 +96,11 @@ impl WindowInfer for PlainWindowInference {
                 .unwrap()
                 .value();
             min_duration_sec = min_duration_sec.min(end_sec - start_sec);
+            max_durations_sec = max_durations_sec.max(end_sec - start_sec);
             durations.push((start_sec, end_sec));
         }
 
-        let window_size = min_duration_to_window_size(min_duration_sec);
+        let window_size = duration_to_window_size(min_duration_sec, max_durations_sec);
         align_time_spans_to_windows(&durations, window_size)
             .into_iter()
             .sorted_by(|(l_start, _), (r_start, _)| {
@@ -138,10 +141,12 @@ fn align_time_spans_to_windows(durations: &[(i64, i64)], min_duration: i64) -> H
     res
 }
 
-/// Find the most suitable time window size according to the `min_duration` found across all
-/// SST files and memtables through a binary search.
-fn min_duration_to_window_size(min_duration: i64) -> i64 {
-    match TIME_WINDOW_SIZE.binary_search(&min_duration) {
+/// Find the most suitable time window size according to the `min_duration` and `max_duration`
+/// found across all SST files and memtables through a binary search.
+fn duration_to_window_size(min_duration: i64, max_duration: i64) -> i64 {
+    let max_bucket = max_duration >> 7;
+    let target = min_duration.max(max_bucket);
+    match TIME_WINDOW_SIZE.binary_search(&target) {
         Ok(idx) => TIME_WINDOW_SIZE[idx],
         Err(idx) => {
             if idx < TIME_WINDOW_SIZE.len() {
@@ -161,22 +166,37 @@ mod tests {
 
     #[test]
     fn test_get_time_window_size() {
-        assert_eq!(1, min_duration_to_window_size(0));
+        assert_eq!(1, duration_to_window_size(0, 0));
         for window in TIME_WINDOW_SIZE {
-            assert_eq!(window, min_duration_to_window_size(window));
+            assert_eq!(window, duration_to_window_size(window, window));
         }
-        assert_eq!(1, min_duration_to_window_size(1));
-        assert_eq!(60, min_duration_to_window_size(60));
-        assert_eq!(60 * 10, min_duration_to_window_size(100));
-        assert_eq!(60 * 30, min_duration_to_window_size(1800));
-        assert_eq!(60 * 60, min_duration_to_window_size(3000));
-        assert_eq!(2 * 60 * 60, min_duration_to_window_size(4000));
-        assert_eq!(6 * 60 * 60, min_duration_to_window_size(21599));
-        assert_eq!(12 * 60 * 60, min_duration_to_window_size(21601));
-        assert_eq!(24 * 60 * 60, min_duration_to_window_size(43201));
-        assert_eq!(7 * 24 * 60 * 60, min_duration_to_window_size(604799));
-        assert_eq!(7 * 24 * 60 * 60, min_duration_to_window_size(31535999));
-        assert_eq!(7 * 24 * 60 * 60, min_duration_to_window_size(i64::MAX));
+        assert_eq!(1, duration_to_window_size(1, 1));
+        assert_eq!(60, duration_to_window_size(60, 60));
+        assert_eq!(60 * 10, duration_to_window_size(100, 100));
+        assert_eq!(60 * 30, duration_to_window_size(1800, 1800));
+        assert_eq!(60 * 60, duration_to_window_size(3000, 3000));
+        assert_eq!(2 * 60 * 60, duration_to_window_size(4000, 4000));
+        assert_eq!(6 * 60 * 60, duration_to_window_size(21599, 21599));
+        assert_eq!(12 * 60 * 60, duration_to_window_size(21601, 21601));
+        assert_eq!(24 * 60 * 60, duration_to_window_size(43201, 43201));
+        assert_eq!(7 * 24 * 60 * 60, duration_to_window_size(604799, 604799));
+        assert_eq!(
+            7 * 24 * 60 * 60,
+            duration_to_window_size(31535999, 31535999)
+        );
+        assert_eq!(
+            7 * 24 * 60 * 60,
+            duration_to_window_size(i64::MAX, i64::MAX)
+        );
+    }
+
+    #[test]
+    fn test_get_time_window_size_with_diff() {
+        assert_eq!(600, duration_to_window_size(60, 10000));
+        assert_eq!(
+            TIME_WINDOW_SIZE.last().copied().unwrap(),
+            duration_to_window_size(60, i64::MAX)
+        );
     }
 
     fn check_align_durations_to_windows(

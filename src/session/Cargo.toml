@@ -9,8 +9,9 @@ testing = []
 
 [dependencies]
 arc-swap = "1.5"
-common-catalog = { path = "../common/catalog" }
-common-telemetry = { path = "../common/telemetry" }
-common-time = { path = "../common/time" }
+auth.workspace = true
+common-catalog = { workspace = true }
+common-telemetry = { workspace = true }
+common-time = { workspace = true }
 derive_builder.workspace = true
-sql = { path = "../sql" }
+sql = { workspace = true }

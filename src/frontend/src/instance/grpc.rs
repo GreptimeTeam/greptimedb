@@ -15,15 +15,16 @@
 use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
 use async_trait::async_trait;
+use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use common_query::Output;
 use query::parser::PromQuery;
 use servers::interceptor::{GrpcQueryInterceptor, GrpcQueryInterceptorRef};
 use servers::query_handler::grpc::GrpcQueryHandler;
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::QueryContextRef;
-use snafu::{ensure, OptionExt};
+use snafu::{ensure, OptionExt, ResultExt};
 
-use crate::error::{Error, IncompleteGrpcResultSnafu, NotSupportedSnafu, Result};
+use crate::error::{Error, IncompleteGrpcResultSnafu, NotSupportedSnafu, PermissionSnafu, Result};
 use crate::instance::Instance;
 
 #[async_trait]
@@ -35,8 +36,21 @@ impl GrpcQueryHandler for Instance {
         let interceptor = interceptor_ref.as_ref();
         interceptor.pre_execute(&request, ctx.clone())?;
 
+        self.plugins
+            .get::<PermissionCheckerRef>()
+            .as_ref()
+            .check_permission(ctx.current_user(), PermissionReq::GrpcRequest(&request))
+            .context(PermissionSnafu)?;
+
         let output = match request {
             Request::Inserts(requests) => self.handle_inserts(requests, ctx.clone()).await?,
+            Request::RowInserts(requests) => self.handle_row_inserts(requests, ctx.clone()).await?,
+            Request::RowDeletes(_) => {
+                return NotSupportedSnafu {
+                    feat: "row deletes",
+                }
+                .fail();
+            }
             Request::Query(query_request) => {
                 let query = query_request.query.context(IncompleteGrpcResultSnafu {
                     err_msg: "Missing field 'QueryRequest.query'",
@@ -77,7 +91,7 @@ impl GrpcQueryHandler for Instance {
                     }
                 }
             }
-            Request::Ddl(_) | Request::Delete(_) => {
+            Request::Ddl(_) | Request::Deletes(_) => {
                 GrpcQueryHandler::do_query(self.grpc_query_handler.as_ref(), request, ctx.clone())
                     .await?
             }

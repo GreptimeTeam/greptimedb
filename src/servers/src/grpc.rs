@@ -26,6 +26,7 @@ use api::v1::prometheus_gateway_server::{PrometheusGateway, PrometheusGatewaySer
 use api::v1::{HealthCheckRequest, HealthCheckResponse};
 use arrow_flight::flight_service_server::{FlightService, FlightServiceServer};
 use async_trait::async_trait;
+use auth::UserProviderRef;
 use common_runtime::Runtime;
 use common_telemetry::logging::info;
 use common_telemetry::{error, warn};
@@ -38,7 +39,6 @@ use tokio_stream::wrappers::TcpListenerStream;
 use tonic::{Request, Response, Status};
 
 use self::prom_query_gateway::PrometheusGatewayService;
-use crate::auth::UserProviderRef;
 use crate::error::{
     AlreadyStartedSnafu, GrpcReflectionServiceSnafu, InternalSnafu, Result, StartGrpcSnafu,
     TcpBindSnafu,
@@ -55,6 +55,7 @@ type TonicResult<T> = std::result::Result<T, Status>;
 pub struct GrpcServer {
     shutdown_tx: Mutex<Option<Sender<()>>>,
     request_handler: Arc<GreptimeRequestHandler>,
+    user_provider: Option<UserProviderRef>,
     /// Handler for Prometheus-compatible PromQL queries. Only present for frontend server.
     prometheus_handler: Option<PrometheusHandlerRef>,
 
@@ -72,12 +73,13 @@ impl GrpcServer {
     ) -> Self {
         let request_handler = Arc::new(GreptimeRequestHandler::new(
             query_handler,
-            user_provider,
+            user_provider.clone(),
             runtime,
         ));
         Self {
             shutdown_tx: Mutex::new(None),
             request_handler,
+            user_provider,
             prometheus_handler,
             serve_state: Mutex::new(None),
         }
@@ -99,7 +101,10 @@ impl GrpcServer {
         &self,
         handler: PrometheusHandlerRef,
     ) -> PrometheusGatewayServer<impl PrometheusGateway> {
-        PrometheusGatewayServer::new(PrometheusGatewayService::new(handler))
+        PrometheusGatewayServer::new(PrometheusGatewayService::new(
+            handler,
+            self.user_provider.clone(),
+        ))
     }
 
     pub async fn wait_for_serve(&self) -> Result<()> {

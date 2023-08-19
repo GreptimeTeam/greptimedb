@@ -18,19 +18,21 @@ use std::sync::Arc;
 
 use object_store::util::join_dir;
 use object_store::ObjectStore;
+use snafu::{ensure, OptionExt};
+use store_api::metadata::RegionMetadata;
+use store_api::storage::RegionId;
 
 use crate::config::MitoConfig;
-use crate::error::Result;
-use crate::manifest::manager::RegionManifestManager;
-use crate::manifest::options::RegionManifestOptions;
+use crate::error::{RegionCorruptedSnafu, RegionNotFoundSnafu, Result};
+use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::memtable::MemtableBuilderRef;
-use crate::metadata::RegionMetadata;
 use crate::region::version::{VersionBuilder, VersionControl};
 use crate::region::MitoRegion;
 
 /// Builder to create a new [MitoRegion] or open an existing one.
 pub(crate) struct RegionOpener {
-    metadata: RegionMetadata,
+    region_id: RegionId,
+    metadata: Option<RegionMetadata>,
     memtable_builder: MemtableBuilderRef,
     object_store: ObjectStore,
     region_dir: String,
@@ -39,16 +41,23 @@ pub(crate) struct RegionOpener {
 impl RegionOpener {
     /// Returns a new opener.
     pub(crate) fn new(
-        metadata: RegionMetadata,
+        region_id: RegionId,
         memtable_builder: MemtableBuilderRef,
         object_store: ObjectStore,
     ) -> RegionOpener {
         RegionOpener {
-            metadata,
+            region_id,
+            metadata: None,
             memtable_builder,
             object_store,
             region_dir: String::new(),
         }
+    }
+
+    /// Sets metadata of the region to create.
+    pub(crate) fn metadata(mut self, metadata: RegionMetadata) -> Self {
+        self.metadata = Some(metadata);
+        self
     }
 
     /// Sets the region dir.
@@ -58,21 +67,23 @@ impl RegionOpener {
     }
 
     /// Writes region manifest and creates a new region.
+    ///
+    /// # Panics
+    /// Panics if metadata is not set.
     pub(crate) async fn create(self, config: &MitoConfig) -> Result<MitoRegion> {
-        let region_id = self.metadata.region_id;
+        let region_id = self.region_id;
+        let metadata = Arc::new(self.metadata.unwrap());
+
         // Create a manifest manager for this region.
         let options = RegionManifestOptions {
             manifest_dir: new_manifest_dir(&self.region_dir),
             object_store: self.object_store,
             compress_type: config.manifest_compress_type,
-            checkpoint_interval: config.manifest_checkpoint_interval,
-            // We are creating a new region, so we need to set this field.
-            initial_metadata: Some(self.metadata.clone()),
+            checkpoint_distance: config.manifest_checkpoint_distance,
         };
         // Writes regions to the manifest file.
-        let manifest_manager = RegionManifestManager::new(options).await?;
+        let manifest_manager = RegionManifestManager::new(metadata.clone(), options).await?;
 
-        let metadata = Arc::new(self.metadata);
         let mutable = self.memtable_builder.build(&metadata);
 
         let version = VersionBuilder::new(metadata, mutable).build();
@@ -80,6 +91,47 @@ impl RegionOpener {
 
         Ok(MitoRegion {
             region_id,
+            version_control,
+            manifest_manager,
+        })
+    }
+
+    /// Opens an existing region.
+    ///
+    /// Returns error if the region doesn't exist.
+    pub(crate) async fn open(self, config: &MitoConfig) -> Result<MitoRegion> {
+        let options = RegionManifestOptions {
+            manifest_dir: new_manifest_dir(&self.region_dir),
+            object_store: self.object_store,
+            compress_type: config.manifest_compress_type,
+            checkpoint_distance: config.manifest_checkpoint_distance,
+        };
+        let manifest_manager =
+            RegionManifestManager::open(options)
+                .await?
+                .context(RegionNotFoundSnafu {
+                    region_id: self.region_id,
+                })?;
+
+        let manifest = manifest_manager.manifest().await;
+        let metadata = manifest.metadata.clone();
+
+        ensure!(
+            metadata.region_id == self.region_id,
+            RegionCorruptedSnafu {
+                region_id: self.region_id,
+                reason: format!("region id in metadata is {}", metadata.region_id),
+            }
+        );
+
+        let mutable = self.memtable_builder.build(&metadata);
+        let version = VersionBuilder::new(metadata, mutable).build();
+        let version_control = Arc::new(VersionControl::new(version));
+
+        // TODO(yingwen): Replay.
+
+        Ok(MitoRegion {
+            region_id: self.region_id,
             version_control,
             manifest_manager,
         })

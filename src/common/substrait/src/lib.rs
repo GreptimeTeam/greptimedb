@@ -17,12 +17,13 @@
 
 mod df_substrait;
 pub mod error;
+pub mod extension_serializer;
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::{Buf, Bytes};
-use datafusion::catalog::catalog::CatalogList;
+use datafusion::catalog::CatalogList;
 
 pub use crate::df_substrait::DFLogicalSubstraitConvertor;
 
@@ -40,5 +41,5 @@ pub trait SubstraitPlan {
         schema: &str,
     ) -> Result<Self::Plan, Self::Error>;
 
-    fn encode(&self, plan: Self::Plan) -> Result<Bytes, Self::Error>;
+    fn encode(&self, plan: &Self::Plan) -> Result<Bytes, Self::Error>;
 }

@@ -14,14 +14,18 @@
 
 //! Parquet writer.
 
-use common_telemetry::logging;
+use common_telemetry::debug;
 use object_store::ObjectStore;
 use parquet::basic::{Compression, Encoding, ZstdLevel};
 use parquet::file::metadata::KeyValue;
 use parquet::file::properties::WriterProperties;
+use parquet::schema::types::ColumnPath;
+use snafu::ResultExt;
+use store_api::storage::consts::SEQUENCE_COLUMN_NAME;
 
-use crate::error::Result;
+use crate::error::{InvalidMetadataSnafu, Result};
 use crate::read::Source;
+use crate::sst::parquet::format::WriteFormat;
 use crate::sst::parquet::{SstInfo, WriteOptions, PARQUET_METADATA_KEY};
 use crate::sst::stream_writer::BufferedWriter;
 
@@ -50,37 +54,50 @@ impl<'a> ParquetWriter<'a> {
     pub async fn write_all(&mut self, opts: &WriteOptions) -> Result<Option<SstInfo>> {
         let metadata = self.source.metadata();
 
-        let json = metadata.to_json()?;
+        let json = metadata.to_json().context(InvalidMetadataSnafu)?;
         let key_value_meta = KeyValue::new(PARQUET_METADATA_KEY.to_string(), json);
+        let ts_column = metadata.time_index_column();
 
-        // FIXME(yingwen): encode metadata into key value.
+        // TODO(yingwen): Find and set proper column encoding for internal columns: op type and tsid.
         let props_builder = WriterProperties::builder()
             .set_key_value_metadata(Some(vec![key_value_meta]))
             .set_compression(Compression::ZSTD(ZstdLevel::default()))
             .set_encoding(Encoding::PLAIN)
-            .set_max_row_group_size(opts.row_group_size);
-        // TODO(yingwen): Set column encoding for internal columns and timestamp.
-        // e.g. Use DELTA_BINARY_PACKED and disable dictionary for sequence.
-
+            .set_max_row_group_size(opts.row_group_size)
+            .set_column_encoding(
+                ColumnPath::new(vec![SEQUENCE_COLUMN_NAME.to_string()]),
+                Encoding::DELTA_BINARY_PACKED,
+            )
+            .set_column_dictionary_enabled(
+                ColumnPath::new(vec![SEQUENCE_COLUMN_NAME.to_string()]),
+                false,
+            )
+            .set_column_encoding(
+                ColumnPath::new(vec![ts_column.column_schema.name.clone()]),
+                Encoding::DELTA_BINARY_PACKED,
+            );
         let writer_props = props_builder.build();
 
+        let write_format = WriteFormat::new(metadata);
         let mut buffered_writer = BufferedWriter::try_new(
             self.file_path.to_string(),
             self.object_store.clone(),
-            &metadata.schema,
+            write_format.arrow_schema(),
             Some(writer_props),
             opts.write_buffer_size.as_bytes() as usize,
         )
         .await?;
 
         while let Some(batch) = self.source.next_batch().await? {
-            buffered_writer.write(&batch).await?;
+            let arrow_batch = write_format.convert_batch(&batch)?;
+
+            buffered_writer.write(&arrow_batch).await?;
         }
         // Get stats from the source.
         let stats = self.source.stats();
 
         if stats.num_rows == 0 {
-            logging::debug!(
+            debug!(
                 "No data written, try to stop the writer: {}",
                 self.file_path
             );

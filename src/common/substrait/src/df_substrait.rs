@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::{Buf, Bytes, BytesMut};
-use datafusion::catalog::catalog::CatalogList;
+use datafusion::catalog::CatalogList;
 use datafusion::execution::context::SessionState;
 use datafusion::execution::runtime_env::RuntimeEnv;
 use datafusion::prelude::{SessionConfig, SessionContext};
@@ -28,6 +28,7 @@ use snafu::ResultExt;
 use substrait_proto::proto::Plan;
 
 use crate::error::{DecodeDfPlanSnafu, DecodeRelSnafu, EncodeDfPlanSnafu, EncodeRelSnafu, Error};
+use crate::extension_serializer::ExtensionSerializer;
 use crate::SubstraitPlan;
 
 pub struct DFLogicalSubstraitConvertor;
@@ -46,7 +47,8 @@ impl SubstraitPlan for DFLogicalSubstraitConvertor {
         schema: &str,
     ) -> Result<Self::Plan, Self::Error> {
         let state_config = SessionConfig::new().with_default_catalog_and_schema(catalog, schema);
-        let state = SessionState::with_config_rt(state_config, Arc::new(RuntimeEnv::default()));
+        let state = SessionState::with_config_rt(state_config, Arc::new(RuntimeEnv::default()))
+            .with_serializer_registry(Arc::new(ExtensionSerializer));
         let mut context = SessionContext::with_state(state);
         context.register_catalog_list(catalog_list);
         let plan = Plan::decode(message).context(DecodeRelSnafu)?;
@@ -56,11 +58,14 @@ impl SubstraitPlan for DFLogicalSubstraitConvertor {
         Ok(df_plan)
     }
 
-    fn encode(&self, plan: Self::Plan) -> Result<Bytes, Self::Error> {
+    fn encode(&self, plan: &Self::Plan) -> Result<Bytes, Self::Error> {
         let mut buf = BytesMut::new();
-        let context = SessionContext::new();
+        let session_state =
+            SessionState::with_config_rt(SessionConfig::new(), Arc::new(RuntimeEnv::default()))
+                .with_serializer_registry(Arc::new(ExtensionSerializer));
+        let context = SessionContext::with_state(session_state);
 
-        let substrait_plan = to_substrait_plan(&plan, &context).context(EncodeDfPlanSnafu)?;
+        let substrait_plan = to_substrait_plan(plan, &context).context(EncodeDfPlanSnafu)?;
         substrait_plan.encode(&mut buf).context(EncodeRelSnafu)?;
 
         Ok(buf.freeze())

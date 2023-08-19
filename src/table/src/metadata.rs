@@ -34,7 +34,7 @@ pub type TableVersion = u64;
 
 /// Indicates whether and how a filter expression can be handled by a
 /// Table for table scans.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FilterPushDownType {
     /// The expression cannot be used by the provider.
     Unsupported,
@@ -115,6 +115,8 @@ pub struct TableMeta {
     pub options: TableOptions,
     #[builder(default = "Utc::now()")]
     pub created_on: DateTime<Utc>,
+    #[builder(default = "Vec::new()")]
+    pub partition_key_indices: Vec<usize>,
 }
 
 impl TableMetaBuilder {
@@ -518,6 +520,8 @@ pub struct RawTableMeta {
     pub engine_options: HashMap<String, String>,
     pub options: TableOptions,
     pub created_on: DateTime<Utc>,
+    #[serde(default)]
+    pub partition_key_indices: Vec<usize>,
 }
 
 impl From<TableMeta> for RawTableMeta {
@@ -532,6 +536,7 @@ impl From<TableMeta> for RawTableMeta {
             engine_options: meta.engine_options,
             options: meta.options,
             created_on: meta.created_on,
+            partition_key_indices: meta.partition_key_indices,
         }
     }
 }
@@ -550,6 +555,7 @@ impl TryFrom<RawTableMeta> for TableMeta {
             engine_options: raw.engine_options,
             options: raw.options,
             created_on: raw.created_on,
+            partition_key_indices: raw.partition_key_indices,
         })
     }
 }

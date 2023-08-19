@@ -6,12 +6,12 @@ license.workspace = true
 
 [dependencies]
 async-trait = "0.1"
-client = { path = "../../src/client" }
-common-base = { path = "../../src/common/base" }
-common-error = { path = "../../src/common/error" }
-common-grpc = { path = "../../src/common/grpc" }
-common-query = { path = "../../src/common/query" }
-common-time = { path = "../../src/common/time" }
+client = { workspace = true }
+common-base = { workspace = true }
+common-error = { workspace = true }
+common-grpc = { workspace = true }
+common-query = { workspace = true }
+common-time = { workspace = true }
 serde.workspace = true
 sqlness = { version = "0.5" }
 tinytemplate = "1.2"

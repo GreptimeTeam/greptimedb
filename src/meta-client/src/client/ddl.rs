@@ -136,7 +136,7 @@ impl Inner {
                 let res = client
                     .submit_ddl_task(req.clone())
                     .await
-                    .context(error::TonicStatusSnafu)?;
+                    .map_err(error::Error::from)?;
 
                 let res = res.into_inner();
 

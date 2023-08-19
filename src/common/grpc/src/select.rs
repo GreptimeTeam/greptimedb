@@ -12,12 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use api::helper::convert_i128_to_interval;
 use api::v1::column::Values;
 use common_base::BitVec;
-use datatypes::types::{TimeType, TimestampType, WrapperType};
+use datatypes::types::{IntervalType, TimeType, TimestampType, WrapperType};
 use datatypes::vectors::{
     BinaryVector, BooleanVector, DateTimeVector, DateVector, Float32Vector, Float64Vector,
-    Int16Vector, Int32Vector, Int64Vector, Int8Vector, StringVector, TimeMicrosecondVector,
+    Int16Vector, Int32Vector, Int64Vector, Int8Vector, IntervalDayTimeVector,
+    IntervalMonthDayNanoVector, IntervalYearMonthVector, StringVector, TimeMicrosecondVector,
     TimeMillisecondVector, TimeNanosecondVector, TimeSecondVector, TimestampMicrosecondVector,
     TimestampMillisecondVector, TimestampNanosecondVector, TimestampSecondVector, UInt16Vector,
     UInt32Vector, UInt64Vector, UInt8Vector, VectorRef,
@@ -192,6 +194,24 @@ pub fn values(arrays: &[VectorRef]) -> Result<Values> {
             TimeNanosecondVector,
             time_nanosecond_values,
             |x| { x.into_native() }
+        ),
+        (
+            ConcreteDataType::Interval(IntervalType::YearMonth(_)),
+            IntervalYearMonthVector,
+            interval_year_month_values,
+            |x| { x.into_native() }
+        ),
+        (
+            ConcreteDataType::Interval(IntervalType::DayTime(_)),
+            IntervalDayTimeVector,
+            interval_day_time_values,
+            |x| { x.into_native() }
+        ),
+        (
+            ConcreteDataType::Interval(IntervalType::MonthDayNano(_)),
+            IntervalMonthDayNanoVector,
+            interval_month_day_nano_values,
+            |x| { convert_i128_to_interval(x.into_native()) }
         )
     )
 }
@@ -220,6 +240,43 @@ mod tests {
         let values = values(&[array]).unwrap();
 
         assert_eq!(vec![1, 2, 3], values.time_second_values);
+    }
+
+    #[test]
+    fn test_convert_arrow_array_interval_year_month() {
+        let array = IntervalYearMonthVector::from(vec![Some(1), Some(2), None, Some(3)]);
+        let array: VectorRef = Arc::new(array);
+
+        let values = values(&[array]).unwrap();
+
+        assert_eq!(vec![1, 2, 3], values.interval_year_month_values);
+    }
+
+    #[test]
+    fn test_convert_arrow_array_interval_day_time() {
+        let array = IntervalDayTimeVector::from(vec![Some(1), Some(2), None, Some(3)]);
+        let array: VectorRef = Arc::new(array);
+
+        let values = values(&[array]).unwrap();
+
+        assert_eq!(vec![1, 2, 3], values.interval_day_time_values);
+    }
+
+    #[test]
+    fn test_convert_arrow_array_interval_month_day_nano() {
+        let array = IntervalMonthDayNanoVector::from(vec![Some(1), Some(2), None, Some(3)]);
+        let array: VectorRef = Arc::new(array);
+
+        let values = values(&[array]).unwrap();
+
+        (0..3).for_each(|i| {
+            assert_eq!(values.interval_month_day_nano_values[i].months, 0);
+            assert_eq!(values.interval_month_day_nano_values[i].days, 0);
+            assert_eq!(
+                values.interval_month_day_nano_values[i].nanoseconds,
+                i as i64 + 1
+            );
+        })
     }
 
     #[test]

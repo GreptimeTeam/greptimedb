@@ -374,7 +374,7 @@ pub(crate) mod data_frame {
         #[pymethod(magic)]
         fn invert(zelf: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyExpr> {
             let zelf = obj_cast_to::<Self>(zelf, vm)?;
-            Ok(zelf.inner.clone().not().into())
+            Ok((!zelf.inner.clone()).into())
         }
 
         /// sort ascending&nulls_first

@@ -114,6 +114,7 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
 
+    use api::v1::OpType;
     use common_base::readable_size::ReadableSize;
     use common_test_util::temp_dir::create_temp_dir;
     use common_time::Timestamp;
@@ -124,7 +125,7 @@ mod tests {
     };
     use object_store::services::Fs;
     use object_store::ObjectStore;
-    use store_api::storage::{ChunkReader, OpType, SequenceNumber};
+    use store_api::storage::{ChunkReader, SequenceNumber};
 
     use super::*;
     use crate::file_purger::noop::new_noop_file_purger;

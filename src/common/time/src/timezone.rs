@@ -15,13 +15,14 @@
 use std::fmt::Display;
 use std::str::FromStr;
 
-use chrono::{FixedOffset, Local};
+use chrono::{FixedOffset, Local, Offset};
 use chrono_tz::Tz;
 use snafu::{OptionExt, ResultExt};
 
 use crate::error::{
     InvalidTimeZoneOffsetSnafu, ParseOffsetStrSnafu, ParseTimeZoneNameSnafu, Result,
 };
+use crate::util::find_tz_from_env;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TimeZone {
@@ -87,7 +88,11 @@ impl Display for TimeZone {
 
 #[inline]
 pub fn system_time_zone_name() -> String {
-    Local::now().offset().to_string()
+    if let Some(tz) = find_tz_from_env() {
+        Local::now().with_timezone(&tz).offset().fix().to_string()
+    } else {
+        Local::now().offset().to_string()
+    }
 }
 
 #[cfg(test)]

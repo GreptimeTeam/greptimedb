@@ -62,7 +62,9 @@ impl<S: StorageEngine> Procedure for DropMitoTable<S> {
 
     fn lock_key(&self) -> LockKey {
         let table_ref = self.data.table_ref();
-        let Some(table) = &self.table else { return LockKey::default() };
+        let Some(table) = &self.table else {
+            return LockKey::default();
+        };
         let info = table.table_info();
         let keys = info
             .meta
@@ -169,7 +171,7 @@ mod tests {
         let TestEnv {
             table_engine,
             dir: _dir,
-        } = procedure_test_util::setup_test_engine("add_column").await;
+        } = procedure_test_util::setup_test_engine("drop_table").await;
         let schema = Arc::new(test_util::schema_for_test());
         let request = test_util::new_create_request(schema.clone());
 

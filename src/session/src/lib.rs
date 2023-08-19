@@ -18,18 +18,19 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
+use auth::UserInfoRef;
 use common_catalog::build_db_string;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use context::QueryContextBuilder;
 
-use crate::context::{Channel, ConnInfo, QueryContextRef, UserInfo};
+use crate::context::{Channel, ConnInfo, QueryContextRef};
 
 /// Session for persistent connection such as MySQL, PostgreSQL etc.
 #[derive(Debug)]
 pub struct Session {
     catalog: ArcSwap<String>,
     schema: ArcSwap<String>,
-    user_info: ArcSwap<UserInfo>,
+    user_info: ArcSwap<UserInfoRef>,
     conn_info: ConnInfo,
 }
 
@@ -40,7 +41,7 @@ impl Session {
         Session {
             catalog: ArcSwap::new(Arc::new(DEFAULT_CATALOG_NAME.into())),
             schema: ArcSwap::new(Arc::new(DEFAULT_SCHEMA_NAME.into())),
-            user_info: ArcSwap::new(Arc::new(UserInfo::default())),
+            user_info: ArcSwap::new(Arc::new(auth::userinfo_by_name(None))),
             conn_info: ConnInfo::new(addr, channel),
         }
     }
@@ -48,6 +49,9 @@ impl Session {
     #[inline]
     pub fn new_query_context(&self) -> QueryContextRef {
         QueryContextBuilder::default()
+            .current_user(ArcSwap::new(Arc::new(Some(
+                self.user_info.load().as_ref().clone(),
+            ))))
             .current_catalog(self.catalog.load().to_string())
             .current_schema(self.schema.load().to_string())
             .sql_dialect(self.conn_info.channel.dialect())
@@ -65,12 +69,12 @@ impl Session {
     }
 
     #[inline]
-    pub fn user_info(&self) -> Arc<UserInfo> {
-        self.user_info.load().clone()
+    pub fn user_info(&self) -> UserInfoRef {
+        self.user_info.load().clone().as_ref().clone()
     }
 
     #[inline]
-    pub fn set_user_info(&self, user_info: UserInfo) {
+    pub fn set_user_info(&self, user_info: UserInfoRef) {
         self.user_info.store(Arc::new(user_info));
     }
 

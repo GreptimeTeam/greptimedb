@@ -41,6 +41,7 @@ impl FromStr for Date {
     type Err = Error;
 
     fn from_str(s: &str) -> Result<Self> {
+        let s = s.trim();
         let date = NaiveDate::parse_from_str(s, "%F").context(ParseDateStrSnafu { raw: s })?;
         Ok(Self(date.num_days_from_ce() - UNIX_EPOCH_FROM_CE))
     }
@@ -106,6 +107,13 @@ mod tests {
         assert_eq!(
             "1969-01-01",
             Date::from_str("1969-01-01").unwrap().to_string()
+        );
+
+        assert_eq!(
+            "1969-01-01",
+            Date::from_str("     1969-01-01       ")
+                .unwrap()
+                .to_string()
         );
 
         let now = Utc::now().date_naive().format("%F").to_string();

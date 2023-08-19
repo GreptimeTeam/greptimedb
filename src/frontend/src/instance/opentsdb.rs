@@ -14,8 +14,10 @@
 
 use api::v1::InsertRequests;
 use async_trait::async_trait;
+use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use common_error::ext::BoxedError;
 use servers::error as server_error;
+use servers::error::AuthSnafu;
 use servers::opentsdb::codec::DataPoint;
 use servers::query_handler::OpentsdbProtocolHandler;
 use session::context::QueryContextRef;
@@ -26,6 +28,12 @@ use crate::instance::Instance;
 #[async_trait]
 impl OpentsdbProtocolHandler for Instance {
     async fn exec(&self, data_point: &DataPoint, ctx: QueryContextRef) -> server_error::Result<()> {
+        self.plugins
+            .get::<PermissionCheckerRef>()
+            .as_ref()
+            .check_permission(ctx.current_user(), PermissionReq::Opentsdb)
+            .context(AuthSnafu)?;
+
         let requests = InsertRequests {
             inserts: vec![data_point.as_grpc_insert()],
         };

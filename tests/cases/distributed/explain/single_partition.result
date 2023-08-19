@@ -1,0 +1,69 @@
+CREATE TABLE single_partition(i DOUBLE, j TIMESTAMP TIME INDEX, k STRING PRIMARY KEY);
+
+Affected Rows: 0
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (peer-.*) REDACTED
+EXPLAIN SELECT COUNT(*) FROM single_partition;
+
++-+-+
+| plan_type_| plan_|
++-+-+
+| logical_plan_| Aggregate: groupBy=[[]], aggr=[[COUNT(UInt8(1))]]_|
+|_|_Projection:_|
+|_|_MergeScan [is_placeholder=false]_|
+| physical_plan | AggregateExec: mode=Final, gby=[], aggr=[COUNT(UInt8(1))]_|
+|_|_CoalescePartitionsExec_|
+|_|_AggregateExec: mode=Partial, gby=[], aggr=[COUNT(UInt8(1))]_|
+|_|_RepartitionExec: partitioning=REDACTED
+|_|_ProjectionExec: expr=[]_|
+|_|_MergeScanExec: peers=[REDACTED
+|_|_|
++-+-+
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (peer-.*) REDACTED
+EXPLAIN SELECT SUM(i) FROM single_partition;
+
++-+-+
+| plan_type_| plan_|
++-+-+
+| logical_plan_| Aggregate: groupBy=[[]], aggr=[[SUM(single_partition.i)]]_|
+|_|_Projection: single_partition.i_|
+|_|_MergeScan [is_placeholder=false]_|
+| physical_plan | AggregateExec: mode=Final, gby=[], aggr=[SUM(single_partition.i)]_|
+|_|_CoalescePartitionsExec_|
+|_|_AggregateExec: mode=Partial, gby=[], aggr=[SUM(single_partition.i)]_|
+|_|_RepartitionExec: partitioning=REDACTED
+|_|_ProjectionExec: expr=[i@0 as i]_|
+|_|_MergeScanExec: peers=[REDACTED
+|_|_|
++-+-+
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (peer-.*) REDACTED
+EXPLAIN SELECT * FROM single_partition ORDER BY i DESC;
+
++-+-+
+| plan_type_| plan_|
++-+-+
+| logical_plan_| Sort: single_partition.i DESC NULLS FIRST_|
+|_|_MergeScan [is_placeholder=false]_|
+| physical_plan | SortExec: expr=[i@0 DESC]_|
+|_|_MergeScanExec: peers=[REDACTED
+|_|_|
++-+-+
+
+drop table single_partition;
+
+Affected Rows: 1
+

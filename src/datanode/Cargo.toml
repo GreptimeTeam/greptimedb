@@ -4,71 +4,79 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+testing = ["meta-srv/mock"]
+
 [dependencies]
+api = { workspace = true }
 async-compat = "0.2"
 async-stream.workspace = true
 async-trait.workspace = true
-api = { path = "../api" }
 axum = "0.6"
 axum-macros = "0.3"
-backon = "0.2"
-catalog = { path = "../catalog" }
-common-base = { path = "../common/base" }
-common-catalog = { path = "../common/catalog" }
-common-error = { path = "../common/error" }
-common-datasource = { path = "../common/datasource" }
-common-function = { path = "../common/function" }
-common-grpc = { path = "../common/grpc" }
-common-grpc-expr = { path = "../common/grpc-expr" }
-common-meta = { path = "../common/meta" }
-common-procedure = { path = "../common/procedure" }
-common-query = { path = "../common/query" }
-common-recordbatch = { path = "../common/recordbatch" }
-common-runtime = { path = "../common/runtime" }
-common-telemetry = { path = "../common/telemetry" }
-common-time = { path = "../common/time" }
-datafusion.workspace = true
+bytes = "1.1"
+catalog = { workspace = true }
+common-base = { workspace = true }
+common-catalog = { workspace = true }
+common-datasource = { workspace = true }
+common-error = { workspace = true }
+common-function = { workspace = true }
+common-greptimedb-telemetry = { workspace = true }
+common-grpc = { workspace = true }
+common-grpc-expr = { workspace = true }
+common-meta = { workspace = true }
+common-procedure = { workspace = true }
+common-query = { workspace = true }
+common-recordbatch = { workspace = true }
+common-runtime = { workspace = true }
+common-telemetry = { workspace = true }
+common-time = { workspace = true }
+dashmap = "5.4"
 datafusion-common.workspace = true
 datafusion-expr.workspace = true
-datatypes = { path = "../datatypes" }
-file-table-engine = { path = "../file-table-engine" }
+datafusion.workspace = true
+datatypes = { workspace = true }
+file-table-engine = { workspace = true }
 futures = "0.3"
 futures-util.workspace = true
-key-lock = "0.1"
-hyper = { version = "0.14", features = ["full"] }
 humantime-serde = "1.1"
-log-store = { path = "../log-store" }
-meta-client = { path = "../meta-client" }
-meta-srv = { path = "../meta-srv", features = ["mock"] }
+hyper = { version = "0.14", features = ["full"] }
+key-lock = "0.1"
+log-store = { workspace = true }
+meta-client = { workspace = true }
+meta-srv = { workspace = true }
 metrics.workspace = true
-mito = { path = "../mito", features = ["test"] }
-object-store = { path = "../object-store" }
+mito = { workspace = true }
+object-store = { workspace = true }
 pin-project = "1.0"
 prost.workspace = true
-query = { path = "../query" }
+query = { workspace = true }
 secrecy = { version = "0.8", features = ["serde", "alloc"] }
-serde = "1.0"
+serde.workspace = true
 serde_json = "1.0"
-servers = { path = "../servers" }
-session = { path = "../session" }
+servers = { workspace = true }
+session = { workspace = true }
 snafu = { version = "0.7", features = ["backtraces"] }
-sql = { path = "../sql" }
-storage = { path = "../storage" }
-store-api = { path = "../store-api" }
-substrait = { path = "../common/substrait" }
-table = { path = "../table" }
-table-procedure = { path = "../table-procedure" }
-tokio.workspace = true
+sql = { workspace = true }
+storage = { workspace = true }
+store-api = { workspace = true }
+substrait = { workspace = true }
+table = { workspace = true }
+table-procedure = { workspace = true }
 tokio-stream = { version = "0.1", features = ["net"] }
+tokio.workspace = true
 toml.workspace = true
 tonic.workspace = true
 tower = { version = "0.4", features = ["full"] }
 tower-http = { version = "0.3", features = ["full"] }
 url = "2.3.1"
+uuid.workspace = true
 
 [dev-dependencies]
 axum-test-helper = { git = "https://github.com/sunng87/axum-test-helper.git", branch = "patch-1" }
-client = { path = "../client" }
-common-test-util = { path = "../common/test-util" }
-common-query = { path = "../common/query" }
+client = { workspace = true }
+common-query = { workspace = true }
+common-test-util = { workspace = true }
 datafusion-common.workspace = true
+mito = { workspace = true, features = ["test"] }
+session = { workspace = true }

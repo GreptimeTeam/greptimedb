@@ -25,6 +25,7 @@ use common_base::paths::{CLUSTER_DIR, WAL_DIR};
 use common_base::Plugins;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID};
 use common_error::ext::BoxedError;
+use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
 use common_meta::heartbeat::handler::HandlerGroupExecutor;
@@ -32,7 +33,7 @@ use common_meta::key::TableMetadataManager;
 use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::store::state_store::ObjectStateStore;
 use common_procedure::ProcedureManagerRef;
-use common_telemetry::logging::info;
+use common_telemetry::logging::{debug, info};
 use file_table_engine::engine::immutable::ImmutableFileTableEngine;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use log_store::LogConfig;
@@ -43,7 +44,7 @@ use mito::engine::MitoEngine;
 use object_store::{util, ObjectStore};
 use query::query_engine::{QueryEngineFactory, QueryEngineRef};
 use servers::Mode;
-use session::context::QueryContext;
+use session::context::QueryContextBuilder;
 use snafu::prelude::*;
 use storage::compaction::{CompactionHandler, CompactionSchedulerRef};
 use storage::config::EngineConfig as StorageEngineConfig;
@@ -55,7 +56,6 @@ use table::engine::{TableEngine, TableEngineProcedureRef};
 use table::requests::FlushTableRequest;
 use table::table::numbers::NumbersTable;
 use table::table::TableIdProviderRef;
-use table::Table;
 
 use crate::datanode::{DatanodeOptions, ObjectStoreConfig, ProcedureConfig, WalConfig};
 use crate::error::{
@@ -63,9 +63,11 @@ use crate::error::{
     MissingNodeIdSnafu, NewCatalogSnafu, OpenLogStoreSnafu, RecoverProcedureSnafu, Result,
     ShutdownInstanceSnafu, StartProcedureManagerSnafu, StopProcedureManagerSnafu,
 };
+use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
 use crate::heartbeat::handler::close_region::CloseRegionHandler;
 use crate::heartbeat::handler::open_region::OpenRegionHandler;
 use crate::heartbeat::HeartbeatTask;
+use crate::row_inserter::RowInserter;
 use crate::sql::{SqlHandler, SqlRequest};
 use crate::store;
 
@@ -80,7 +82,9 @@ pub struct Instance {
     pub(crate) sql_handler: SqlHandler,
     pub(crate) catalog_manager: CatalogManagerRef,
     pub(crate) table_id_provider: Option<TableIdProviderRef>,
+    row_inserter: RowInserter,
     procedure_manager: ProcedureManagerRef,
+    greptimedb_telemetry_task: Arc<GreptimeDBTelemetryTask>,
 }
 
 pub type InstanceRef = Arc<Instance>;
@@ -128,7 +132,7 @@ impl Instance {
                         state: "region_alive_keepers is not provided when building heartbeat task",
                     })?;
                 let handlers_executor = HandlerGroupExecutor::new(vec![
-                    Arc::new(ParseMailboxMessageHandler::default()),
+                    Arc::new(ParseMailboxMessageHandler),
                     Arc::new(OpenRegionHandler::new(
                         catalog_manager.clone(),
                         engine_manager.clone(),
@@ -161,8 +165,11 @@ impl Instance {
         compaction_scheduler: CompactionSchedulerRef<RaftEngineLogStore>,
         plugins: Arc<Plugins>,
     ) -> Result<(InstanceRef, Option<HeartbeatTask>)> {
-        let object_store = store::new_object_store(&opts.storage.store).await?;
-        let log_store = Arc::new(create_log_store(&opts.storage.store, &opts.wal).await?);
+        let data_home = util::normalize_dir(&opts.storage.data_home);
+        info!("The working home directory is: {}", data_home);
+        let object_store = store::new_object_store(&data_home, &opts.storage.store).await?;
+        let log_store =
+            Arc::new(create_log_store(&data_home, &opts.storage.store, &opts.wal).await?);
 
         let mito_engine = Arc::new(DefaultEngine::new(
             TableEngineConfig {
@@ -205,14 +212,14 @@ impl Instance {
         let (catalog_manager, table_id_provider, region_alive_keepers) = match opts.mode {
             Mode::Standalone => {
                 if opts.enable_memory_catalog {
-                    let catalog = Arc::new(catalog::local::MemoryCatalogManager::default());
-                    let table = NumbersTable::new(MIN_USER_TABLE_ID);
+                    let catalog = catalog::local::MemoryCatalogManager::with_default_setup();
+                    let table = NumbersTable::table(MIN_USER_TABLE_ID);
 
                     let _ = catalog
                         .register_table(RegisterTableRequest {
                             table_id: MIN_USER_TABLE_ID,
                             table_name: table.table_info().name.to_string(),
-                            table: Arc::new(table),
+                            table,
                             catalog: DEFAULT_CATALOG_NAME.to_string(),
                             schema: DEFAULT_SCHEMA_NAME.to_string(),
                         })
@@ -254,7 +261,6 @@ impl Instance {
                 let catalog_manager = Arc::new(RemoteCatalogManager::new(
                     engine_manager.clone(),
                     opts.node_id.context(MissingNodeIdSnafu)?,
-                    kv_backend.clone(),
                     region_alive_keepers.clone(),
                     Arc::new(TableMetadataManager::new(kv_backend)),
                 ));
@@ -275,10 +281,14 @@ impl Instance {
             plugins,
         );
         let query_engine = factory.query_engine();
-
         let procedure_manager =
             create_procedure_manager(opts.node_id.unwrap_or(0), &opts.procedure, object_store)
                 .await?;
+        let sql_handler = SqlHandler::new(
+            engine_manager.clone(),
+            catalog_manager.clone(),
+            procedure_manager.clone(),
+        );
         // Register all procedures.
         // Register procedures of the mito engine.
         mito_engine.register_procedure_loaders(&*procedure_manager);
@@ -291,17 +301,22 @@ impl Instance {
             mito_engine.clone(),
             &*procedure_manager,
         );
+        let row_inserter = RowInserter::new(catalog_manager.clone());
+        let greptimedb_telemetry_task = get_greptimedb_telemetry_task(
+            Some(opts.storage.data_home.clone()),
+            &opts.mode,
+            opts.enable_telemetry,
+        )
+        .await;
 
         let instance = Arc::new(Self {
             query_engine: query_engine.clone(),
-            sql_handler: SqlHandler::new(
-                engine_manager.clone(),
-                catalog_manager.clone(),
-                procedure_manager.clone(),
-            ),
+            sql_handler,
             catalog_manager: catalog_manager.clone(),
             table_id_provider,
+            row_inserter,
             procedure_manager,
+            greptimedb_telemetry_task,
         });
 
         let heartbeat_task = Instance::build_heartbeat_task(
@@ -330,6 +345,13 @@ impl Instance {
         self.procedure_manager
             .start()
             .context(StartProcedureManagerSnafu)?;
+        let _ = self
+            .greptimedb_telemetry_task
+            .start(common_runtime::bg_runtime())
+            .map_err(|e| {
+                debug!("Failed to start greptimedb telemetry task: {}", e);
+            });
+
         Ok(())
     }
 
@@ -368,14 +390,14 @@ impl Instance {
                 })
             })
             .collect::<Vec<_>>();
-        let flush_result = futures::future::try_join_all(
-            flush_requests
-                .into_iter()
-                .map(|request| self.sql_handler.execute(request, QueryContext::arc())),
-        )
-        .await
-        .map_err(BoxedError::new)
-        .context(ShutdownInstanceSnafu);
+        let flush_result =
+            futures::future::try_join_all(flush_requests.into_iter().map(|request| {
+                self.sql_handler
+                    .execute(request, QueryContextBuilder::default().build())
+            }))
+            .await
+            .map_err(BoxedError::new)
+            .context(ShutdownInstanceSnafu);
         info!("Flushed all tables result: {}", flush_result.is_ok());
         let _ = flush_result?;
 
@@ -433,13 +455,14 @@ async fn new_metasrv_client(node_id: u64, meta_config: &MetaClientOptions) -> Re
 }
 
 pub(crate) async fn create_log_store(
+    data_home: &str,
     store_config: &ObjectStoreConfig,
     wal_config: &WalConfig,
 ) -> Result<RaftEngineLogStore> {
     let wal_dir = match (&wal_config.dir, store_config) {
         (Some(dir), _) => dir.to_string(),
-        (None, ObjectStoreConfig::File(file_config)) => {
-            format!("{}{WAL_DIR}", util::normalize_dir(&file_config.data_home))
+        (None, ObjectStoreConfig::File(_file_config)) => {
+            format!("{}{WAL_DIR}", data_home)
         }
         _ => return error::MissingWalDirConfigSnafu {}.fail(),
     };

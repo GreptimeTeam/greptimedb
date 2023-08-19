@@ -59,7 +59,7 @@ impl TestEnv {
         let compaction_scheduler = Arc::new(NoopCompactionScheduler::default());
         let storage_engine = EngineImpl::new(
             StorageEngineConfig::default(),
-            Arc::new(NoopLogStore::default()),
+            Arc::new(NoopLogStore),
             object_store.clone(),
             compaction_scheduler,
         )
@@ -83,7 +83,7 @@ impl TestEnv {
         let state_store = Arc::new(ObjectStateStore::new(object_store));
         let procedure_manager = Arc::new(LocalManager::new(config, state_store));
 
-        let catalog_manager = Arc::new(MemoryCatalogManager::default());
+        let catalog_manager = MemoryCatalogManager::with_default_setup();
 
         TestEnv {
             dir,

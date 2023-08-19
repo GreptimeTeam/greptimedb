@@ -20,6 +20,7 @@ use common_error::status_code::StatusCode;
 use datafusion::parquet;
 use datatypes::arrow::error::ArrowError;
 use datatypes::value::Value;
+use servers::define_into_tonic_status;
 use snafu::{Location, Snafu};
 use store_api::storage::RegionNumber;
 
@@ -209,6 +210,12 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to split delete request, source: {}", source))]
+    SplitDelete {
+        source: partition::error::Error,
+        location: Location,
+    },
+
     #[snafu(display("Failed to create table info, source: {}", source))]
     CreateTableInfo {
         #[snafu(backtrace)]
@@ -266,8 +273,8 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Cannot find primary key column by name: {}", msg))]
-    PrimaryKeyNotFound { msg: String, location: Location },
+    #[snafu(display("Cannot find column by name: {}", msg))]
+    ColumnNotFound { msg: String, location: Location },
 
     #[snafu(display("Failed to execute statement, source: {}", source))]
     ExecuteStatement {
@@ -406,6 +413,12 @@ pub enum Error {
     #[snafu(display("Unrecognized table option: {}", source))]
     UnrecognizedTableOption {
         #[snafu(backtrace)]
+        source: table::error::Error,
+    },
+
+    #[snafu(display("Missing time index column: {}", source))]
+    MissingTimeIndexColumn {
+        location: Location,
         source: table::error::Error,
     },
 
@@ -578,6 +591,15 @@ pub enum Error {
         source: common_meta::error::Error,
         location: Location,
     },
+
+    #[snafu(display("Failed to pass permission check, source: {}", source))]
+    Permission {
+        source: auth::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Empty data: {}", msg))]
+    EmptyData { msg: String, location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -592,16 +614,19 @@ impl ErrorExt for Error {
             | Error::CatalogNotFound { .. }
             | Error::SchemaNotFound { .. }
             | Error::SchemaExists { .. }
-            | Error::PrimaryKeyNotFound { .. }
+            | Error::ColumnNotFound { .. }
             | Error::MissingMetasrvOpts { .. }
             | Error::BuildRegex { .. }
             | Error::InvalidSchema { .. }
             | Error::PrepareImmutableTable { .. }
             | Error::BuildCsvConfig { .. }
             | Error::ProjectSchema { .. }
-            | Error::UnsupportedFormat { .. } => StatusCode::InvalidArguments,
+            | Error::UnsupportedFormat { .. }
+            | Error::EmptyData { .. } => StatusCode::InvalidArguments,
 
             Error::NotSupported { .. } => StatusCode::Unsupported,
+
+            Error::Permission { source, .. } => source.status_code(),
 
             Error::HandleHeartbeatResponse { source, .. }
             | Error::TableMetadataManager { source, .. } => source.status_code(),
@@ -635,6 +660,8 @@ impl ErrorExt for Error {
             Error::ColumnDataType { source } | Error::InvalidColumnDef { source, .. } => {
                 source.status_code()
             }
+
+            Error::MissingTimeIndexColumn { source, .. } => source.status_code(),
 
             Error::FindDatanode { .. }
             | Error::CreateTableRoute { .. }
@@ -685,7 +712,8 @@ impl ErrorExt for Error {
             Error::DeserializePartition { source, .. }
             | Error::FindTablePartitionRule { source, .. }
             | Error::FindTableRoute { source, .. }
-            | Error::SplitInsert { source, .. } => source.status_code(),
+            | Error::SplitInsert { source, .. }
+            | Error::SplitDelete { source, .. } => source.status_code(),
 
             Error::UnrecognizedTableOption { .. } => StatusCode::InvalidArguments,
 
@@ -711,8 +739,4 @@ impl ErrorExt for Error {
     }
 }
 
-impl From<Error> for tonic::Status {
-    fn from(err: Error) -> Self {
-        tonic::Status::new(tonic::Code::Internal, err.to_string())
-    }
-}
+define_into_tonic_status!(Error);

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod datanode;
 pub mod grpc;
 pub mod influxdb;
 pub mod mysql;
@@ -29,3 +30,5 @@ pub use otlp::OtlpOptions;
 pub use postgres::PostgresOptions;
 pub use prom_store::PromStoreOptions;
 pub use prometheus::PrometheusOptions;
+
+pub use self::datanode::DatanodeOptions;

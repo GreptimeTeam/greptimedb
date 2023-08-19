@@ -12,9 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod interval;
+
+use std::collections::HashMap;
 use std::ops::Deref;
 
 use chrono::{NaiveDate, NaiveDateTime};
+use common_time::Interval;
 use datafusion_common::ScalarValue;
 use datatypes::prelude::{ConcreteDataType, Value};
 use datatypes::schema::Schema;
@@ -25,6 +29,7 @@ use pgwire::api::Type;
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 use query::plan::LogicalPlan;
 
+use self::interval::PgInterval;
 use crate::error::{self, Error, Result};
 use crate::SqlPlan;
 
@@ -97,6 +102,7 @@ pub(super) fn encode_value(value: &Value, builder: &mut DataRowEncoder) -> PgWir
                 })))
             }
         }
+        Value::Interval(v) => builder.encode_field(&PgInterval::from(*v)),
         Value::List(_) => Err(PgWireError::ApiError(Box::new(Error::Internal {
             err_msg: format!(
                 "cannot write value {:?} in postgres protocol: unimplemented",
@@ -122,6 +128,7 @@ pub(super) fn type_gt_to_pg(origin: &ConcreteDataType) -> Result<Type> {
         &ConcreteDataType::DateTime(_) => Ok(Type::TIMESTAMP),
         &ConcreteDataType::Timestamp(_) => Ok(Type::TIMESTAMP),
         &ConcreteDataType::Time(_) => Ok(Type::TIME),
+        &ConcreteDataType::Interval(_) => Ok(Type::INTERVAL),
         &ConcreteDataType::List(_) | &ConcreteDataType::Dictionary(_) => error::InternalSnafu {
             err_msg: format!("not implemented for column datatype {origin:?}"),
         }
@@ -158,35 +165,42 @@ pub(super) fn parameter_to_string(portal: &Portal<SqlPlan>, idx: usize) -> PgWir
     match param_type {
         &Type::VARCHAR | &Type::TEXT => Ok(format!(
             "'{}'",
-            portal.parameter::<String>(idx)?.as_deref().unwrap_or("")
+            portal
+                .parameter::<String>(idx, param_type)?
+                .as_deref()
+                .unwrap_or("")
         )),
         &Type::BOOL => Ok(portal
-            .parameter::<bool>(idx)?
+            .parameter::<bool>(idx, param_type)?
             .map(|v| v.to_string())
             .unwrap_or_else(|| "".to_owned())),
         &Type::INT4 => Ok(portal
-            .parameter::<i32>(idx)?
+            .parameter::<i32>(idx, param_type)?
             .map(|v| v.to_string())
             .unwrap_or_else(|| "".to_owned())),
         &Type::INT8 => Ok(portal
-            .parameter::<i64>(idx)?
+            .parameter::<i64>(idx, param_type)?
             .map(|v| v.to_string())
             .unwrap_or_else(|| "".to_owned())),
         &Type::FLOAT4 => Ok(portal
-            .parameter::<f32>(idx)?
+            .parameter::<f32>(idx, param_type)?
             .map(|v| v.to_string())
             .unwrap_or_else(|| "".to_owned())),
         &Type::FLOAT8 => Ok(portal
-            .parameter::<f64>(idx)?
+            .parameter::<f64>(idx, param_type)?
             .map(|v| v.to_string())
             .unwrap_or_else(|| "".to_owned())),
         &Type::DATE => Ok(portal
-            .parameter::<NaiveDate>(idx)?
+            .parameter::<NaiveDate>(idx, param_type)?
             .map(|v| v.format("%Y-%m-%d").to_string())
             .unwrap_or_else(|| "".to_owned())),
         &Type::TIMESTAMP => Ok(portal
-            .parameter::<NaiveDateTime>(idx)?
+            .parameter::<NaiveDateTime>(idx, param_type)?
             .map(|v| v.format("%Y-%m-%d %H:%M:%S%.6f").to_string())
+            .unwrap_or_else(|| "".to_owned())),
+        &Type::INTERVAL => Ok(portal
+            .parameter::<PgInterval>(idx, param_type)?
+            .map(|v| v.to_string())
             .unwrap_or_else(|| "".to_owned())),
         _ => Err(invalid_parameter_error(
             "unsupported_parameter_type",
@@ -242,22 +256,30 @@ pub(super) fn parameters_to_scalar_values(
             )),
         ));
     }
-    if client_param_types.len() != param_count {
-        return Err(invalid_parameter_error(
-            "invalid_parameter_count",
-            Some(&format!(
-                "Expected: {}, found: {}",
-                client_param_types.len(),
-                param_count
-            )),
-        ));
-    }
 
-    for (idx, client_type) in client_param_types.iter().enumerate() {
-        let Some(Some(server_type)) = param_types.get(&format!("${}", idx + 1)) else { continue };
-        let value = match client_type {
+    for idx in 0..param_count {
+        let server_type =
+            if let Some(Some(server_infer_type)) = param_types.get(&format!("${}", idx + 1)) {
+                server_infer_type
+            } else {
+                // at the moment we require type information inferenced by
+                // server so here we return error if the type is unknown from
+                // server-side.
+                //
+                // It might be possible to parse the parameter just using client
+                // specified type, we will implement that if there is a case.
+                return Err(invalid_parameter_error("unknown_parameter_type", None));
+            };
+
+        let client_type = if let Some(client_given_type) = client_param_types.get(idx) {
+            client_given_type.clone()
+        } else {
+            type_gt_to_pg(server_type).map_err(|e| PgWireError::ApiError(Box::new(e)))?
+        };
+
+        let value = match &client_type {
             &Type::VARCHAR | &Type::TEXT => {
-                let data = portal.parameter::<String>(idx)?;
+                let data = portal.parameter::<String>(idx, &client_type)?;
                 match server_type {
                     ConcreteDataType::String(_) => ScalarValue::Utf8(data),
                     _ => {
@@ -272,7 +294,7 @@ pub(super) fn parameters_to_scalar_values(
                 }
             }
             &Type::BOOL => {
-                let data = portal.parameter::<bool>(idx)?;
+                let data = portal.parameter::<bool>(idx, &client_type)?;
                 match server_type {
                     ConcreteDataType::Boolean(_) => ScalarValue::Boolean(data),
                     _ => {
@@ -287,7 +309,7 @@ pub(super) fn parameters_to_scalar_values(
                 }
             }
             &Type::INT2 => {
-                let data = portal.parameter::<i16>(idx)?;
+                let data = portal.parameter::<i16>(idx, &client_type)?;
                 match server_type {
                     ConcreteDataType::Int8(_) => ScalarValue::Int8(data.map(|n| n as i8)),
                     ConcreteDataType::Int16(_) => ScalarValue::Int16(data),
@@ -313,7 +335,7 @@ pub(super) fn parameters_to_scalar_values(
                 }
             }
             &Type::INT4 => {
-                let data = portal.parameter::<i32>(idx)?;
+                let data = portal.parameter::<i32>(idx, &client_type)?;
                 match server_type {
                     ConcreteDataType::Int8(_) => ScalarValue::Int8(data.map(|n| n as i8)),
                     ConcreteDataType::Int16(_) => ScalarValue::Int16(data.map(|n| n as i16)),
@@ -339,7 +361,7 @@ pub(super) fn parameters_to_scalar_values(
                 }
             }
             &Type::INT8 => {
-                let data = portal.parameter::<i64>(idx)?;
+                let data = portal.parameter::<i64>(idx, &client_type)?;
                 match server_type {
                     ConcreteDataType::Int8(_) => ScalarValue::Int8(data.map(|n| n as i8)),
                     ConcreteDataType::Int16(_) => ScalarValue::Int16(data.map(|n| n as i16)),
@@ -365,7 +387,7 @@ pub(super) fn parameters_to_scalar_values(
                 }
             }
             &Type::FLOAT4 => {
-                let data = portal.parameter::<f32>(idx)?;
+                let data = portal.parameter::<f32>(idx, &client_type)?;
                 match server_type {
                     ConcreteDataType::Int8(_) => ScalarValue::Int8(data.map(|n| n as i8)),
                     ConcreteDataType::Int16(_) => ScalarValue::Int16(data.map(|n| n as i16)),
@@ -389,7 +411,7 @@ pub(super) fn parameters_to_scalar_values(
                 }
             }
             &Type::FLOAT8 => {
-                let data = portal.parameter::<f64>(idx)?;
+                let data = portal.parameter::<f64>(idx, &client_type)?;
                 match server_type {
                     ConcreteDataType::Int8(_) => ScalarValue::Int8(data.map(|n| n as i8)),
                     ConcreteDataType::Int16(_) => ScalarValue::Int16(data.map(|n| n as i16)),
@@ -413,7 +435,7 @@ pub(super) fn parameters_to_scalar_values(
                 }
             }
             &Type::TIMESTAMP => {
-                let data = portal.parameter::<NaiveDateTime>(idx)?;
+                let data = portal.parameter::<NaiveDateTime>(idx, &client_type)?;
                 match server_type {
                     ConcreteDataType::Timestamp(unit) => match *unit {
                         TimestampType::Second(_) => {
@@ -447,7 +469,7 @@ pub(super) fn parameters_to_scalar_values(
                 }
             }
             &Type::DATE => {
-                let data = portal.parameter::<NaiveDate>(idx)?;
+                let data = portal.parameter::<NaiveDate>(idx, &client_type)?;
                 match server_type {
                     ConcreteDataType::Date(_) => ScalarValue::Date32(data.map(|d| {
                         (d - NaiveDate::from_ymd_opt(1970, 1, 1).unwrap()).num_days() as i32
@@ -463,8 +485,25 @@ pub(super) fn parameters_to_scalar_values(
                     }
                 }
             }
+            &Type::INTERVAL => {
+                let data = portal.parameter::<PgInterval>(idx, &client_type)?;
+                match server_type {
+                    ConcreteDataType::Interval(_) => {
+                        ScalarValue::IntervalMonthDayNano(data.map(|i| Interval::from(i).to_i128()))
+                    }
+                    _ => {
+                        return Err(invalid_parameter_error(
+                            "invalid_parameter_type",
+                            Some(&format!(
+                                "Expected: {}, found: {}",
+                                server_type, client_type
+                            )),
+                        ));
+                    }
+                }
+            }
             &Type::BYTEA => {
-                let data = portal.parameter::<Vec<u8>>(idx)?;
+                let data = portal.parameter::<Vec<u8>>(idx, &client_type)?;
                 match server_type {
                     ConcreteDataType::String(_) => {
                         ScalarValue::Utf8(data.map(|d| String::from_utf8_lossy(&d).to_string()))
@@ -486,10 +525,27 @@ pub(super) fn parameters_to_scalar_values(
                 Some(&format!("Found type: {}", client_type)),
             ))?,
         };
+
         results.push(value);
     }
 
     Ok(results)
+}
+
+pub(super) fn param_types_to_pg_types(
+    param_types: &HashMap<String, Option<ConcreteDataType>>,
+) -> Result<Vec<Type>> {
+    let param_count = param_types.len();
+    let mut types = Vec::with_capacity(param_count);
+    for i in 0..param_count {
+        if let Some(Some(param_type)) = param_types.get(&format!("${}", i + 1)) {
+            let pg_type = type_gt_to_pg(param_type)?;
+            types.push(pg_type);
+        } else {
+            types.push(Type::UNKNOWN);
+        }
+    }
+    Ok(types)
 }
 
 #[cfg(test)]
@@ -527,6 +583,11 @@ mod test {
             ),
             ColumnSchema::new("dates", ConcreteDataType::date_datatype(), true),
             ColumnSchema::new("times", ConcreteDataType::time_second_datatype(), true),
+            ColumnSchema::new(
+                "intervals",
+                ConcreteDataType::interval_month_day_nano_datatype(),
+                true,
+            ),
         ];
         let pg_field_info = vec![
             FieldInfo::new("nulls".into(), None, None, Type::UNKNOWN, FieldFormat::Text),
@@ -576,6 +637,13 @@ mod test {
             ),
             FieldInfo::new("dates".into(), None, None, Type::DATE, FieldFormat::Text),
             FieldInfo::new("times".into(), None, None, Type::TIME, FieldFormat::Text),
+            FieldInfo::new(
+                "intervals".into(),
+                None,
+                None,
+                Type::INTERVAL,
+                FieldFormat::Text,
+            ),
         ];
         let schema = Schema::new(column_schemas);
         let fs = schema_to_pg(&schema, &Format::UnifiedText).unwrap();
@@ -671,6 +739,13 @@ mod test {
                 Type::TIMESTAMP,
                 FieldFormat::Text,
             ),
+            FieldInfo::new(
+                "intervals".into(),
+                None,
+                None,
+                Type::INTERVAL,
+                FieldFormat::Text,
+            ),
         ];
 
         let values = vec![
@@ -700,6 +775,7 @@ mod test {
             Value::Time(1001i64.into()),
             Value::DateTime(1000001i64.into()),
             Value::Timestamp(1000001i64.into()),
+            Value::Interval(1000001i128.into()),
         ];
         let mut builder = DataRowEncoder::new(Arc::new(schema));
         for i in values.iter() {

@@ -20,8 +20,7 @@ use catalog::remote::CachedMetaKvBackend;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO_ENGINE};
 use common_meta::ident::TableIdent;
 use common_meta::key::table_name::{TableNameKey, TableNameValue};
-use common_meta::key::table_region::RegionDistribution;
-use common_meta::key::TableMetaKey;
+use common_meta::key::{RegionDistribution, TableMetaKey};
 use common_meta::rpc::router::TableRoute;
 use common_meta::rpc::KeyValue;
 use common_meta::RegionIdent;
@@ -31,6 +30,7 @@ use common_telemetry::info;
 use frontend::catalog::FrontendCatalogManager;
 use frontend::error::Result as FrontendResult;
 use frontend::instance::Instance;
+use futures::TryStreamExt;
 use meta_srv::error::Result as MetaResult;
 use meta_srv::metasrv::{SelectorContext, SelectorRef};
 use meta_srv::procedure::region_failover::{RegionFailoverContext, RegionFailoverProcedure};
@@ -79,13 +79,18 @@ macro_rules! region_failover_tests {
 }
 
 pub async fn test_region_failover(store_type: StorageType) {
+    if store_type == StorageType::File {
+        // Region failover doesn't make sense when using local file storage.
+        return;
+    }
     common_telemetry::init_default_ut_logging();
+    info!("Running region failover test for {}", store_type);
 
     let mut logical_timer = 1685508715000;
 
     let cluster_name = "test_region_failover";
 
-    let (store_config, _guard) = get_test_store_config(&store_type, cluster_name);
+    let (store_config, _guard) = get_test_store_config(&store_type);
 
     let datanodes = 5u64;
     let cluster = GreptimeDbClusterBuilder::new(cluster_name)
@@ -107,7 +112,7 @@ pub async fn test_region_failover(store_type: StorageType) {
     let cache_key = TableNameKey::new("greptime", "public", "my_table").as_raw_key();
 
     let cache = get_table_cache(&frontend, &cache_key).unwrap();
-    let table_name_value = TableNameValue::try_from_raw_value(cache.unwrap().value).unwrap();
+    let table_name_value = TableNameValue::try_from_raw_value(&cache.unwrap().value).unwrap();
     let table_id = table_name_value.table_id();
     assert!(get_route_cache(&frontend, table_id).is_some());
 
@@ -261,18 +266,18 @@ async fn find_region_distribution(
 ) -> RegionDistribution {
     let manager = cluster.meta_srv.table_metadata_manager();
     let region_distribution = manager
-        .table_region_manager()
-        .get(table_id)
+        .table_route_manager()
+        .get_region_distribution(table_id)
         .await
         .unwrap()
-        .unwrap()
-        .region_distribution;
+        .unwrap();
 
     // test DatanodeTableValues match the table region distribution
     for datanode_id in cluster.datanode_instances.keys() {
         let mut actual = manager
             .datanode_table_manager()
             .tables(*datanode_id)
+            .try_collect::<Vec<_>>()
             .await
             .unwrap()
             .into_iter()

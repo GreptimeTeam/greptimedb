@@ -72,17 +72,19 @@ mod test {
             )
             .await;
         let output = output.remove(0).unwrap();
-        let Output::Stream(stream) = output else { unreachable!() };
+        let Output::Stream(stream) = output else {
+            unreachable!()
+        };
         let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
         assert_eq!(
             recordbatches.pretty_print().unwrap(),
             "\
-+------------+-------+------------+---------------------+----------------+
-| resource   | scope | host       | greptime_timestamp  | greptime_value |
-+------------+-------+------------+---------------------+----------------+
-| greptimedb | otel  | testserver | 1970-01-01T00:00:00 | 105.0          |
-| greptimedb | otel  | testsevrer | 1970-01-01T00:00:00 | 100.0          |
-+------------+-------+------------+---------------------+----------------+",
++------------+-------+--------------------+------------+---------------------+----------------+
+| resource   | scope | telemetry_sdk_name | host       | greptime_timestamp  | greptime_value |
++------------+-------+--------------------+------------+---------------------+----------------+
+| greptimedb | otel  | java               | testserver | 1970-01-01T00:00:00 | 105.0          |
+| greptimedb | otel  | java               | testsevrer | 1970-01-01T00:00:00 | 100.0          |
++------------+-------+--------------------+------------+---------------------+----------------+",
         );
     }
 
@@ -113,7 +115,10 @@ mod test {
                         data: Some(metric::Data::Gauge(gauge)),
                     }],
                     scope: Some(InstrumentationScope {
-                        attributes: vec![keyvalue("scope", "otel")],
+                        attributes: vec![
+                            keyvalue("scope", "otel"),
+                            keyvalue("telemetry.sdk.name", "java"),
+                        ],
                         ..Default::default()
                     }),
                     ..Default::default()

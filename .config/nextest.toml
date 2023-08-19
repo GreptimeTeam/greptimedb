@@ -1,2 +1,3 @@
 [profile.default]
 slow-timeout = { period = "60s", terminate-after = 3, grace-period = "30s" }
+retries = { backoff = "exponential", count = 3, delay = "10s", jitter = true }

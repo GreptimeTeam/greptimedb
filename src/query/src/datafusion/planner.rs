@@ -27,7 +27,7 @@ use datafusion::physical_plan::udf::ScalarUDF;
 use datafusion::sql::planner::ContextProvider;
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::{DataFusionError, OwnedTableReference};
-use datafusion_expr::TableSource;
+use datafusion_expr::{TableSource, WindowUDF};
 use datafusion_physical_expr::var_provider::{is_system_variables, VarType};
 use datafusion_sql::parser::Statement as DfStatement;
 use session::context::QueryContextRef;
@@ -113,6 +113,10 @@ impl ContextProvider for DfContextProviderAdapter {
                 create_aggregate_function(func.name(), func.args_count(), func.create()).into(),
             )
         })
+    }
+
+    fn get_window_meta(&self, _name: &str) -> Option<Arc<WindowUDF>> {
+        None
     }
 
     fn get_variable_type(&self, variable_names: &[String]) -> Option<DataType> {

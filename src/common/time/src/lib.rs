@@ -14,7 +14,9 @@
 
 pub mod date;
 pub mod datetime;
+pub mod duration;
 pub mod error;
+pub mod interval;
 pub mod range;
 pub mod time;
 pub mod timestamp;
@@ -24,6 +26,8 @@ pub mod util;
 
 pub use date::Date;
 pub use datetime::DateTime;
+pub use duration::Duration;
+pub use interval::Interval;
 pub use range::RangeMillis;
 pub use timestamp::Timestamp;
 pub use timestamp_millis::TimestampMillis;

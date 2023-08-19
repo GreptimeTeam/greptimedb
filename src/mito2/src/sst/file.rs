@@ -16,7 +16,7 @@
 
 use std::fmt;
 use std::str::FromStr;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use common_time::Timestamp;
@@ -25,6 +25,8 @@ use serde::{Deserialize, Serialize};
 use snafu::{ResultExt, Snafu};
 use store_api::storage::RegionId;
 use uuid::Uuid;
+
+use crate::sst::file_purger::{FilePurgerRef, PurgeRequest};
 
 /// Type to store SST level.
 pub type Level = u8;
@@ -99,8 +101,8 @@ pub struct FileHandle {
 impl fmt::Debug for FileHandle {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("FileHandle")
-            .field("file_id", &self.inner.meta.file_id)
             .field("region_id", &self.inner.meta.region_id)
+            .field("file_id", &self.inner.meta.file_id)
             .field("time_range", &self.inner.meta.time_range)
             .field("size", &self.inner.meta.file_size)
             .field("level", &self.inner.meta.level)
@@ -129,6 +131,18 @@ struct FileHandleInner {
     meta: FileMeta,
     compacting: AtomicBool,
     deleted: AtomicBool,
+    file_purger: FilePurgerRef,
+}
+
+impl Drop for FileHandleInner {
+    fn drop(&mut self) {
+        if self.deleted.load(Ordering::Relaxed) {
+            self.file_purger.send_request(PurgeRequest {
+                region_id: self.meta.region_id,
+                file_id: self.meta.file_id,
+            });
+        }
+    }
 }
 
 #[cfg(test)]

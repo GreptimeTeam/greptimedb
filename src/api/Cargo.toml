@@ -5,11 +5,10 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-arrow-flight.workspace = true
-common-base = { path = "../common/base" }
-common-error = { path = "../common/error" }
-common-time = { path = "../common/time" }
-datatypes = { path = "../datatypes" }
+common-base = { workspace = true }
+common-error = { workspace = true }
+common-time = { workspace = true }
+datatypes = { workspace = true }
 greptime-proto.workspace = true
 prost.workspace = true
 snafu = { version = "0.7", features = ["backtraces"] }
@@ -17,3 +16,6 @@ tonic.workspace = true
 
 [build-dependencies]
 tonic-build = "0.9"
+
+[dev-dependencies]
+paste = "1.0"

@@ -1,0 +1,24 @@
+show databases;
+
++-----------------------+
+| Schemas               |
++-----------------------+
+| information_schema    |
+| public                |
+| test_public_schema    |
+| upper_case_table_name |
++-----------------------+
+
+use information_schema;
+
+Affected Rows: 0
+
+show tables;
+
++---------+
+| Tables  |
++---------+
+| columns |
+| tables  |
++---------+
+

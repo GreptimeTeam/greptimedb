@@ -8,48 +8,45 @@ license.workspace = true
 testing = []
 
 [dependencies]
-api = { path = "../api" }
+api = { workspace = true }
 arc-swap = "1.0"
 arrow-schema.workspace = true
 async-stream.workspace = true
 async-trait = "0.1"
-backoff = { version = "0.4", features = ["tokio"] }
-common-catalog = { path = "../common/catalog" }
-common-error = { path = "../common/error" }
-common-grpc = { path = "../common/grpc" }
-common-meta = { path = "../common/meta" }
-common-query = { path = "../common/query" }
-common-recordbatch = { path = "../common/recordbatch" }
-common-runtime = { path = "../common/runtime" }
-common-telemetry = { path = "../common/telemetry" }
-common-time = { path = "../common/time" }
+common-catalog = { workspace = true }
+common-error = { workspace = true }
+common-grpc = { workspace = true }
+common-meta = { workspace = true }
+common-query = { workspace = true }
+common-recordbatch = { workspace = true }
+common-runtime = { workspace = true }
+common-telemetry = { workspace = true }
+common-time = { workspace = true }
 dashmap = "5.4"
 datafusion.workspace = true
-datatypes = { path = "../datatypes" }
+datatypes = { workspace = true }
 futures = "0.3"
 futures-util.workspace = true
-key-lock = "0.1"
 lazy_static.workspace = true
-meta-client = { path = "../meta-client" }
+meta-client = { workspace = true }
 metrics.workspace = true
 moka = { version = "0.11", features = ["future"] }
 parking_lot = "0.12"
 regex.workspace = true
-serde = "1.0"
+serde.workspace = true
 serde_json = "1.0"
-session = { path = "../session" }
+session = { workspace = true }
 snafu = { version = "0.7", features = ["backtraces"] }
-storage = { path = "../storage" }
-store-api = { path = "../store-api" }
-table = { path = "../table" }
+store-api = { workspace = true }
+table = { workspace = true }
 tokio.workspace = true
 
 [dev-dependencies]
-catalog = { path = ".", features = ["testing"] }
-common-test-util = { path = "../common/test-util" }
+catalog = { workspace = true, features = ["testing"] }
 chrono.workspace = true
-log-store = { path = "../log-store" }
-mito = { path = "../mito", features = ["test"] }
-object-store = { path = "../object-store" }
-storage = { path = "../storage" }
+common-test-util = { workspace = true }
+log-store = { workspace = true }
+mito = { workspace = true, features = ["test"] }
+object-store = { workspace = true }
+storage = { workspace = true }
 tokio.workspace = true

@@ -24,14 +24,14 @@ use common_telemetry::timer;
 use promql_parser::parser::ast::{Extension as NodeExtension, ExtensionExpr};
 use promql_parser::parser::Expr::Extension;
 use promql_parser::parser::{EvalStmt, Expr, ValueType};
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use sql::dialect::GreptimeDbDialect;
 use sql::parser::ParserContext;
 use sql::statements::statement::Statement;
 
 use crate::error::{
-    MultipleStatementsSnafu, ParseFloatSnafu, ParseTimestampSnafu, QueryParseSnafu, Result,
-    UnimplementedSnafu,
+    AddSystemTimeOverflowSnafu, MultipleStatementsSnafu, ParseFloatSnafu, ParseTimestampSnafu,
+    QueryParseSnafu, Result, UnimplementedSnafu,
 };
 use crate::metrics::{METRIC_PARSE_PROMQL_ELAPSED, METRIC_PARSE_SQL_ELAPSED};
 
@@ -177,24 +177,17 @@ impl QueryLanguageParser {
         }
 
         // try float format
-        timestamp
+        let secs = timestamp
             .parse::<f64>()
             .context(ParseFloatSnafu { raw: timestamp })
-            .map(|float| {
-                let duration = Duration::from_secs_f64(float);
-                SystemTime::UNIX_EPOCH
-                    .checked_add(duration)
-                    .unwrap_or(max_system_timestamp())
-            })
             // also report rfc3339 error if float parsing fails
-            .map_err(|_| rfc3339_result.unwrap_err())
-    }
-}
+            .map_err(|_| rfc3339_result.unwrap_err())?;
 
-fn max_system_timestamp() -> SystemTime {
-    SystemTime::UNIX_EPOCH
-        .checked_add(Duration::from_secs(std::i64::MAX as u64))
-        .unwrap()
+        let duration = Duration::from_secs_f64(secs);
+        SystemTime::UNIX_EPOCH
+            .checked_add(duration)
+            .context(AddSystemTimeOverflowSnafu { duration })
+    }
 }
 
 macro_rules! define_node_ast_extension {
@@ -292,11 +285,6 @@ mod test {
             ("0.000", SystemTime::UNIX_EPOCH),
             ("00", SystemTime::UNIX_EPOCH),
             (
-                // i64::MAX + 1
-                "9223372036854775808.000",
-                max_system_timestamp(),
-            ),
-            (
                 "2015-07-01T20:10:51.781Z",
                 SystemTime::UNIX_EPOCH
                     .checked_add(Duration::from_secs_f64(1435781451.781))
@@ -320,6 +308,14 @@ mod test {
             // assert difference < 0.1 second
             assert!(result.abs_diff(expected) < 100);
         }
+
+        // i64::MAX + 1
+        let timestamp = "9223372036854775808.000";
+        let result = QueryLanguageParser::parse_promql_timestamp(timestamp);
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Failed to add duration '9223372036854775808s' to SystemTime, overflowed"
+        );
     }
 
     #[test]
@@ -331,20 +327,33 @@ mod test {
             step: "1d".to_string(),
         };
 
+        #[cfg(not(windows))]
         let expected = String::from(
             "\
             Promql(EvalStmt { \
                 expr: VectorSelector(VectorSelector { \
                     name: Some(\"http_request\"), \
                     matchers: Matchers { \
-                        matchers: {Matcher { \
-                            op: Equal, \
-                            name: \"__name__\", \
-                            value: \"http_request\" \
-                    }} }, \
+                        matchers: [] }, \
                     offset: None, at: None }), \
                 start: SystemTime { tv_sec: 1644772440, tv_nsec: 0 }, \
                 end: SystemTime { tv_sec: 1676308440, tv_nsec: 0 }, \
+                interval: 86400s, \
+                lookback_delta: 300s \
+            })",
+        );
+
+        // Windows has different debug output for SystemTime.
+        #[cfg(windows)]
+        let expected = String::from(
+            "\
+            Promql(EvalStmt { \
+                expr: VectorSelector(VectorSelector { \
+                    name: Some(\"http_request\"), \
+                    matchers: Matchers { matchers: [] }, \
+                    offset: None, at: None }), \
+                start: SystemTime { intervals: 132892460400000000 }, \
+                end: SystemTime { intervals: 133207820400000000 }, \
                 interval: 86400s, \
                 lookback_delta: 300s \
             })",

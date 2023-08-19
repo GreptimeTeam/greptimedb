@@ -22,8 +22,10 @@ mod tests {
     use common_base::Plugins;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_meta::key::table_name::TableNameKey;
+    use common_meta::rpc::router::region_distribution;
     use common_query::Output;
     use common_recordbatch::RecordBatches;
+    use common_telemetry::debug;
     use frontend::error::{self, Error, Result};
     use frontend::instance::Instance;
     use query::parser::QueryLanguageParser;
@@ -141,7 +143,9 @@ mod tests {
 
     async fn create_table(instance: &Instance, sql: &str) {
         let output = query(instance, sql).await;
-        let Output::AffectedRows(x) = output else { unreachable!() };
+        let Output::AffectedRows(x) = output else {
+            unreachable!()
+        };
         assert_eq!(x, 0);
     }
 
@@ -153,12 +157,16 @@ mod tests {
                                 ('MOSS', 100000000, 10000000000, 2335190400000)
                                 "#;
         let output = query(instance, sql).await;
-        let Output::AffectedRows(x) = output else { unreachable!() };
+        let Output::AffectedRows(x) = output else {
+            unreachable!()
+        };
         assert_eq!(x, 4);
 
         let sql = "SELECT * FROM demo WHERE ts > cast(1000000000 as timestamp) ORDER BY host"; // use nanoseconds as where condition
         let output = query(instance, sql).await;
-        let Output::Stream(s) = output else { unreachable!() };
+        let Output::Stream(s) = output else {
+            unreachable!()
+        };
         let batches = common_recordbatch::util::collect_batches(s).await.unwrap();
         let pretty_print = batches.pretty_print().unwrap();
         let expected = "\
@@ -189,15 +197,17 @@ mod tests {
             .unwrap()
             .unwrap()
             .table_id();
+        debug!("Reading table {table_id}");
 
-        let table_region_value = manager
-            .table_region_manager()
+        let table_route_value = manager
+            .table_route_manager()
             .get(table_id)
             .await
             .unwrap()
             .unwrap();
-        let region_to_dn_map = table_region_value
-            .region_distribution
+
+        let region_to_dn_map = region_distribution(&table_route_value.region_routes)
+            .unwrap()
             .iter()
             .map(|(k, v)| (v[0], *k))
             .collect::<HashMap<u32, u64>>();
@@ -213,7 +223,9 @@ mod tests {
                 .await
                 .unwrap();
             let output = engine.execute(plan, QueryContext::arc()).await.unwrap();
-            let Output::Stream(stream) = output else { unreachable!() };
+            let Output::Stream(stream) = output else {
+                unreachable!()
+            };
             let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
             let actual = recordbatches.pretty_print().unwrap();
 
@@ -225,7 +237,9 @@ mod tests {
     async fn drop_table(instance: &Instance) {
         let sql = "DROP TABLE demo";
         let output = query(instance, sql).await;
-        let Output::AffectedRows(x) = output else { unreachable!() };
+        let Output::AffectedRows(x) = output else {
+            unreachable!()
+        };
         assert_eq!(x, 1);
     }
 
@@ -362,7 +376,7 @@ mod tests {
         let mut instance = standalone.instance;
 
         let plugins = Plugins::new();
-        let hook = Arc::new(DisableDBOpHook::default());
+        let hook = Arc::new(DisableDBOpHook);
         plugins.insert::<SqlQueryInterceptorRef<Error>>(hook.clone());
         Arc::make_mut(&mut instance).set_plugins(Arc::new(plugins));
 

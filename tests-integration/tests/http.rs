@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::BTreeMap;
+
+use auth::user_provider_from_option;
 use axum::http::StatusCode;
 use axum_test_helper::TestClient;
 use common_error::status_code::StatusCode as ErrorCode;
@@ -20,7 +23,8 @@ use servers::http::handler::HealthResponse;
 use servers::http::{JsonOutput, JsonResponse};
 use servers::prometheus::{PrometheusJsonResponse, PrometheusResponse};
 use tests_integration::test_util::{
-    setup_test_http_app, setup_test_http_app_with_frontend, setup_test_prom_app_with_frontend,
+    setup_test_http_app, setup_test_http_app_with_frontend,
+    setup_test_http_app_with_frontend_and_user_provider, setup_test_prom_app_with_frontend,
     StorageType,
 };
 
@@ -53,6 +57,7 @@ macro_rules! http_tests {
             http_test!(
                 $service,
 
+                test_http_auth,
                 test_sql_api,
                 test_prometheus_promql_api,
                 test_prom_http_api,
@@ -65,6 +70,50 @@ macro_rules! http_tests {
             );
         )*
     };
+}
+
+pub async fn test_http_auth(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+
+    let user_provider = user_provider_from_option(
+        &"static_user_provider:cmd:greptime_user=greptime_pwd".to_string(),
+    )
+    .unwrap();
+
+    let (app, mut guard) = setup_test_http_app_with_frontend_and_user_provider(
+        store_type,
+        "sql_api",
+        Some(user_provider),
+    )
+    .await;
+    let client = TestClient::new(app);
+
+    // 1. no auth
+    let res = client
+        .get("/v1/sql?db=public&sql=show tables;")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+
+    // 2. wrong auth
+    let res = client
+        .get("/v1/sql?db=public&sql=show tables;")
+        .header("Authorization", "basic Z3JlcHRpbWVfdXNlcjp3cm9uZ19wd2Q=")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+
+    // 3. right auth
+    let res = client
+        .get("/v1/sql?db=public&sql=show tables;")
+        .header(
+            "Authorization",
+            "basic Z3JlcHRpbWVfdXNlcjpncmVwdGltZV9wd2Q=",
+        )
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    guard.remove_all().await;
 }
 
 pub async fn test_sql_api(store_type: StorageType) {
@@ -294,10 +343,13 @@ pub async fn test_prom_http_api(store_type: StorageType) {
     let client = TestClient::new(app);
 
     // instant query
-    let res = client.get("/api/v1/query?query=up&time=1").send().await;
+    let res = client
+        .get("/v1/prometheus/query?query=up&time=1")
+        .send()
+        .await;
     assert_eq!(res.status(), StatusCode::OK);
     let res = client
-        .post("/api/v1/query?query=up&time=1")
+        .post("/v1/prometheus/query?query=up&time=1")
         .header("Content-Type", "application/x-www-form-urlencoded")
         .send()
         .await;
@@ -305,28 +357,31 @@ pub async fn test_prom_http_api(store_type: StorageType) {
 
     // range query
     let res = client
-        .get("/api/v1/query_range?query=up&start=1&end=100&step=5")
+        .get("/v1/prometheus/query_range?query=up&start=1&end=100&step=5")
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
     let res = client
-        .post("/api/v1/query_range?query=up&start=1&end=100&step=5")
+        .post("/v1/prometheus/query_range?query=up&start=1&end=100&step=5")
         .header("Content-Type", "application/x-www-form-urlencoded")
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
 
     // labels
-    let res = client.get("/api/v1/labels?match[]=demo").send().await;
+    let res = client
+        .get("/v1/prometheus/labels?match[]=demo")
+        .send()
+        .await;
     assert_eq!(res.status(), StatusCode::OK);
     let res = client
-        .post("/api/v1/labels?match[]=up")
+        .post("/v1/prometheus/labels?match[]=up")
         .header("Content-Type", "application/x-www-form-urlencoded")
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
     let res = client
-        .get("/api/v1/labels?match[]=demo&start=0")
+        .get("/v1/prometheus/labels?match[]=demo&start=0")
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
@@ -340,14 +395,18 @@ pub async fn test_prom_http_api(store_type: StorageType) {
         .unwrap()
     );
 
+    // labels without match[] param
+    let res = client.get("/v1/prometheus/labels").send().await;
+    assert_eq!(res.status(), StatusCode::OK);
+
     // labels query with multiple match[] params
     let res = client
-        .get("/api/v1/labels?match[]=up&match[]=down")
+        .get("/v1/prometheus/labels?match[]=up&match[]=down")
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
     let res = client
-        .post("/api/v1/labels?match[]=up&match[]=down")
+        .post("/v1/prometheus/labels?match[]=up&match[]=down")
         .header("Content-Type", "application/x-www-form-urlencoded")
         .send()
         .await;
@@ -355,22 +414,31 @@ pub async fn test_prom_http_api(store_type: StorageType) {
 
     // series
     let res = client
-        .get("/api/v1/series?match[]=demo&start=0&end=0")
+        .get("/v1/prometheus/series?match[]=demo&start=0&end=0")
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
     let body = serde_json::from_str::<PrometheusJsonResponse>(&res.text().await).unwrap();
     assert_eq!(body.status, "success");
-    assert_eq!(
-        body.data,
-        serde_json::from_value::<PrometheusResponse>(json!(
-            [{"__name__" : "demo","ts":"1970-01-01 00:00:00+0000","cpu":"1.1","host":"host1","memory":"2.2"}]
-        ))
-        .unwrap()
-    );
+
+    let PrometheusResponse::Series(mut series) = body.data else {
+        unreachable!()
+    };
+    let actual = series
+        .remove(0)
+        .into_iter()
+        .collect::<BTreeMap<String, String>>();
+    let expected = BTreeMap::from([
+        ("__name__".to_string(), "demo".to_string()),
+        ("ts".to_string(), "1970-01-01 00:00:00+0000".to_string()),
+        ("cpu".to_string(), "1.1".to_string()),
+        ("host".to_string(), "host1".to_string()),
+        ("memory".to_string(), "2.2".to_string()),
+    ]);
+    assert_eq!(actual, expected);
 
     let res = client
-        .post("/api/v1/series?match[]=up&match[]=down")
+        .post("/v1/prometheus/series?match[]=up&match[]=down")
         .header("Content-Type", "application/x-www-form-urlencoded")
         .send()
         .await;
@@ -378,7 +446,10 @@ pub async fn test_prom_http_api(store_type: StorageType) {
 
     // label values
     // should return error if there is no match[]
-    let res = client.get("/api/v1/label/instance/values").send().await;
+    let res = client
+        .get("/v1/prometheus/label/instance/values")
+        .send()
+        .await;
     assert_eq!(res.status(), StatusCode::OK);
     let prom_resp = res.json::<PrometheusJsonResponse>().await;
     assert_eq!(prom_resp.status, "error");
@@ -387,7 +458,7 @@ pub async fn test_prom_http_api(store_type: StorageType) {
 
     // single match[]
     let res = client
-        .get("/api/v1/label/host/values?match[]=demo&start=0&end=600")
+        .get("/v1/prometheus/label/host/values?match[]=demo&start=0&end=600")
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
@@ -400,7 +471,18 @@ pub async fn test_prom_http_api(store_type: StorageType) {
 
     // multiple match[]
     let res = client
-        .get("/api/v1/label/instance/values?match[]=up&match[]=system_metrics")
+        .get("/v1/prometheus/label/instance/values?match[]=up&match[]=system_metrics")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let prom_resp = res.json::<PrometheusJsonResponse>().await;
+    assert_eq!(prom_resp.status, "success");
+    assert!(prom_resp.error.is_none());
+    assert!(prom_resp.error_type.is_none());
+
+    // query `__name__` without match[]
+    let res = client
+        .get("/v1/prometheus/label/__name__/values")
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
@@ -529,6 +611,7 @@ pub async fn test_config_api(store_type: StorageType) {
     enable_memory_catalog = false
     rpc_addr = "127.0.0.1:3001"
     rpc_runtime_size = 8
+    enable_telemetry = true
 
     [heartbeat]
     interval_millis = 5000

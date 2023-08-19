@@ -44,7 +44,7 @@ const MILLISECOND_VARIATION: u64 = 3;
 const MICROSECOND_VARIATION: u64 = 6;
 const NANOSECOND_VARIATION: u64 = 9;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[enum_dispatch(DataType)]
 pub enum TimeType {
     Second(TimeSecondType),
@@ -88,7 +88,7 @@ impl TimeType {
 macro_rules! impl_data_type_for_time {
     ($unit: ident,$arrow_type: ident, $type: ty) => {
         paste! {
-            #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+            #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
             pub struct [<Time $unit Type>];
 
             impl DataType for [<Time $unit Type>] {
@@ -202,19 +202,19 @@ mod tests {
     fn test_as_arrow_datatype() {
         assert_eq!(
             ArrowDataType::Time32(ArrowTimeUnit::Second),
-            TimeSecondType::default().as_arrow_type()
+            TimeSecondType.as_arrow_type()
         );
         assert_eq!(
             ArrowDataType::Time32(ArrowTimeUnit::Millisecond),
-            TimeMillisecondType::default().as_arrow_type()
+            TimeMillisecondType.as_arrow_type()
         );
         assert_eq!(
             ArrowDataType::Time64(ArrowTimeUnit::Microsecond),
-            TimeMicrosecondType::default().as_arrow_type()
+            TimeMicrosecondType.as_arrow_type()
         );
         assert_eq!(
             ArrowDataType::Time64(ArrowTimeUnit::Nanosecond),
-            TimeNanosecondType::default().as_arrow_type()
+            TimeNanosecondType.as_arrow_type()
         );
     }
 }

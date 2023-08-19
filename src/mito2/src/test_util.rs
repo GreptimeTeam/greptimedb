@@ -16,6 +16,9 @@
 
 use std::sync::Arc;
 
+use api::greptime_proto::v1;
+use api::v1::value::ValueData;
+use api::v1::SemanticType;
 use common_datasource::compression::CompressionType;
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
 use datatypes::prelude::ConcreteDataType;
@@ -23,28 +26,40 @@ use datatypes::schema::ColumnSchema;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use log_store::test_util::log_store_util;
 use object_store::services::Fs;
-use object_store::util::join_dir;
 use object_store::ObjectStore;
+use store_api::metadata::{ColumnMetadata, RegionMetadataRef};
 use store_api::storage::RegionId;
 
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
 use crate::error::Result;
-use crate::manifest::manager::RegionManifestManager;
-use crate::manifest::options::RegionManifestOptions;
-use crate::metadata::{ColumnMetadata, RegionMetadata, SemanticType};
-use crate::worker::request::{CreateRequest, RegionOptions};
+use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
+use crate::request::{CreateRequest, RegionOptions};
 use crate::worker::WorkerGroup;
 
 /// Env to test mito engine.
 pub struct TestEnv {
     /// Path to store data.
     data_home: TempDir,
+    // TODO(yingwen): Maybe provide a way to close the log store.
+}
+
+impl Default for TestEnv {
+    fn default() -> Self {
+        TestEnv::new()
+    }
 }
 
 impl TestEnv {
+    /// Returns a new env with empty prefix for test.
+    pub fn new() -> TestEnv {
+        TestEnv {
+            data_home: create_temp_dir(""),
+        }
+    }
+
     /// Returns a new env with specific `prefix` for test.
-    pub fn new(prefix: &str) -> TestEnv {
+    pub fn with_prefix(prefix: &str) -> TestEnv {
         TestEnv {
             data_home: create_temp_dir(prefix),
         }
@@ -65,9 +80,9 @@ impl TestEnv {
     }
 
     async fn create_log_and_object_store(&self) -> (RaftEngineLogStore, ObjectStore) {
-        let data_home = self.data_home.path().to_str().unwrap();
-        let wal_path = join_dir(data_home, "wal");
-        let data_path = join_dir(data_home, "data");
+        let data_home = self.data_home.path();
+        let wal_path = data_home.join("wal");
+        let data_path = data_home.join("data").as_path().display().to_string();
 
         let log_store = log_store_util::create_tmp_local_file_log_store(&wal_path).await;
         let mut builder = Fs::default();
@@ -77,28 +92,42 @@ impl TestEnv {
         (log_store, object_store)
     }
 
+    /// If `initial_metadata` is `Some`, creates a new manifest. If `initial_metadata`
+    /// is `None`, opens an existing manifest and returns `None` if no such manifest.
     pub async fn create_manifest_manager(
         &self,
         compress_type: CompressionType,
-        checkpoint_interval: u64,
-        initial_metadata: Option<RegionMetadata>,
-    ) -> Result<RegionManifestManager> {
-        let data_home = self.data_home.path().to_str().unwrap();
-        let manifest_dir = join_dir(data_home, "manifest");
+        checkpoint_distance: u64,
+        initial_metadata: Option<RegionMetadataRef>,
+    ) -> Result<Option<RegionManifestManager>> {
+        let data_home = self.data_home.path();
+        let manifest_dir = data_home.join("manifest").as_path().display().to_string();
 
         let mut builder = Fs::default();
-        let _ = builder.root(&manifest_dir);
+        builder.root(&manifest_dir);
         let object_store = ObjectStore::new(builder).unwrap().finish();
+
+        // The "manifest_dir" here should be the relative path from the `object_store`'s root.
+        // Otherwise the OpenDal's list operation would fail with "StripPrefixError". This is
+        // because the `object_store`'s root path is "canonicalize"d; and under the Windows,
+        // canonicalize a path will prepend "\\?\" to it. This behavior will cause the original
+        // happen-to-be-working list on an absolute path failed on Windows.
+        let manifest_dir = "/".to_string();
 
         let manifest_opts = RegionManifestOptions {
             manifest_dir,
             object_store,
             compress_type,
-            checkpoint_interval,
-            initial_metadata,
+            checkpoint_distance,
         };
 
-        RegionManifestManager::new(manifest_opts).await
+        if let Some(metadata) = initial_metadata {
+            RegionManifestManager::new(metadata, manifest_opts)
+                .await
+                .map(Some)
+        } else {
+            RegionManifestManager::open(manifest_opts).await
+        }
     }
 }
 
@@ -198,5 +227,22 @@ impl CreateRequestBuilder {
             create_if_not_exists: self.create_if_not_exists,
             options: RegionOptions::default(),
         }
+    }
+}
+
+// TODO(yingwen): Support conversion in greptime-proto.
+/// Creates value for i64.
+#[cfg(test)]
+pub(crate) fn i64_value(data: i64) -> v1::Value {
+    v1::Value {
+        value_data: Some(ValueData::I64Value(data)),
+    }
+}
+
+/// Creates value for timestamp millis.
+#[cfg(test)]
+pub(crate) fn ts_ms_value(data: i64) -> v1::Value {
+    v1::Value {
+        value_data: Some(ValueData::TsMillisecondValue(data)),
     }
 }

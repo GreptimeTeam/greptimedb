@@ -378,7 +378,7 @@ mod tests {
         assert_eq!(expected, actions);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_fs_region_manifest_checkpoint_compress() {
         let duration = Duration::from_millis(50);
         let manifest = new_fs_manifest(true, Some(duration)).await;
@@ -583,5 +583,96 @@ mod tests {
         }
 
         manifest.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_region_manifest_truncate() {
+        common_telemetry::init_default_ut_logging();
+
+        let manifest = new_fs_manifest(false, None).await;
+        let region_meta = Arc::new(build_region_meta());
+        let committed_sequence = 99;
+
+        let file = FileId::random();
+        let file_ids = vec![FileId::random(), FileId::random()];
+
+        // Save some actions.
+        let actions: Vec<RegionMetaActionList> = vec![
+            RegionMetaActionList::with_action(RegionMetaAction::Change(RegionChange {
+                metadata: region_meta.as_ref().into(),
+                committed_sequence: 1,
+            })),
+            RegionMetaActionList::new(vec![
+                RegionMetaAction::Edit(build_region_edit(2, &[file], &[])),
+                RegionMetaAction::Edit(build_region_edit(3, &file_ids, &[file])),
+            ]),
+            RegionMetaActionList::with_action(RegionMetaAction::Truncate(RegionTruncate {
+                region_id: 0.into(),
+                committed_sequence,
+            })),
+            RegionMetaActionList::with_action(RegionMetaAction::Change(RegionChange {
+                metadata: region_meta.as_ref().into(),
+                committed_sequence: 1,
+            })),
+        ];
+
+        for action in actions {
+            manifest.update(action).await.unwrap();
+        }
+
+        // Scan manifest.
+        let mut iter = manifest.scan(0, MAX_VERSION).await.unwrap();
+
+        let (v, action_list) = iter.next_action().await.unwrap().unwrap();
+        info!("action_list = {:?}", action_list.actions);
+        assert_eq!(0, v);
+        assert_eq!(2, action_list.actions.len());
+        let protocol = &action_list.actions[0];
+        assert!(matches!(
+            protocol,
+            RegionMetaAction::Protocol(ProtocolAction { .. })
+        ));
+
+        let change = &action_list.actions[1];
+        assert!(matches!(
+            change,
+            RegionMetaAction::Change(RegionChange {
+                committed_sequence: 1,
+                ..
+            })
+        ));
+
+        let (v, action_list) = iter.next_action().await.unwrap().unwrap();
+        assert_eq!(1, v);
+        assert_eq!(2, action_list.actions.len());
+        assert!(matches!(&action_list.actions[0], RegionMetaAction::Edit(_)));
+        assert!(matches!(&action_list.actions[1], RegionMetaAction::Edit(_)));
+
+        let (v, action_list) = iter.next_action().await.unwrap().unwrap();
+        assert_eq!(2, v);
+        assert_eq!(1, action_list.actions.len());
+        let truncate = &action_list.actions[0];
+        assert!(matches!(
+            truncate,
+            RegionMetaAction::Truncate(RegionTruncate {
+                committed_sequence: 99,
+                ..
+            })
+        ));
+
+        let (v, action_list) = iter.next_action().await.unwrap().unwrap();
+        assert_eq!(3, v);
+        assert_eq!(1, action_list.actions.len());
+        let change = &action_list.actions[0];
+        assert!(matches!(
+            change,
+            RegionMetaAction::Change(RegionChange {
+                committed_sequence: 1,
+                ..
+            })
+        ));
+
+        // Reach end
+        assert!(iter.next_action().await.unwrap().is_none());
     }
 }

@@ -257,7 +257,9 @@ impl<'a> TimeRangePredicateBuilder<'a> {
         low: &DfExpr,
         high: &DfExpr,
     ) -> Option<TimestampRange> {
-        let DfExpr::Column(col) = expr else { return None; };
+        let DfExpr::Column(col) = expr else {
+            return None;
+        };
         if col.name != self.ts_col_name {
             return None;
         }
@@ -288,7 +290,9 @@ impl<'a> TimeRangePredicateBuilder<'a> {
         if negated {
             return None;
         }
-        let DfExpr::Column(col) = expr else { return None; };
+        let DfExpr::Column(col) = expr else {
+            return None;
+        };
         if col.name != self.ts_col_name {
             return None;
         }

@@ -15,7 +15,6 @@
 use std::fmt::Formatter;
 use std::sync::Arc;
 
-use api::v1::DeleteRequest;
 use client::Database;
 use common_meta::table_name::TableName;
 use common_query::prelude::Expr;
@@ -47,15 +46,11 @@ impl DatanodeInstance {
         Self { table, db }
     }
 
-    pub(crate) async fn grpc_delete(&self, request: DeleteRequest) -> client::Result<u32> {
-        self.db.delete(request).await
-    }
-
     pub(crate) async fn grpc_table_scan(&self, plan: TableScanPlan) -> Result<RecordBatches> {
         let logical_plan = self.build_logical_plan(&plan)?;
 
         let substrait_plan = DFLogicalSubstraitConvertor
-            .encode(logical_plan)
+            .encode(&logical_plan)
             .context(error::EncodeSubstraitLogicalPlanSnafu)?;
 
         let result = self
@@ -63,7 +58,9 @@ impl DatanodeInstance {
             .logical_plan(substrait_plan.to_vec(), None)
             .await
             .context(error::RequestDatanodeSnafu)?;
-        let Output::RecordBatches(record_batches) = result else { unreachable!() };
+        let Output::RecordBatches(record_batches) = result else {
+            unreachable!()
+        };
         Ok(record_batches)
     }
 

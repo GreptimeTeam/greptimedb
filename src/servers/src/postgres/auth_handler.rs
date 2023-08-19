@@ -13,8 +13,11 @@
 // limitations under the License.
 
 use std::fmt::Debug;
+use std::sync::Exclusive;
 
+use ::auth::{userinfo_by_name, Identity, Password, UserInfoRef, UserProviderRef};
 use async_trait::async_trait;
+use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
 use futures::{Sink, SinkExt};
 use metrics::increment_counter;
@@ -24,12 +27,10 @@ use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 use pgwire::messages::response::ErrorResponse;
 use pgwire::messages::startup::Authentication;
 use pgwire::messages::{PgWireBackendMessage, PgWireFrontendMessage};
-use session::context::UserInfo;
 use session::Session;
 use snafu::IntoError;
 
 use super::PostgresServerHandler;
-use crate::auth::{Identity, Password, UserProviderRef};
 use crate::error::{AuthSnafu, Result};
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 
@@ -72,26 +73,26 @@ impl LoginInfo {
 }
 
 impl PgLoginVerifier {
-    async fn auth(&self, login: &LoginInfo, password: &str) -> Result<bool> {
+    async fn auth(&self, login: &LoginInfo, password: &str) -> Result<Option<UserInfoRef>> {
         let user_provider = match &self.user_provider {
             Some(provider) => provider,
-            None => return Ok(false),
+            None => return Ok(None),
         };
 
         let user_name = match &login.user {
             Some(name) => name,
-            None => return Ok(false),
+            None => return Ok(None),
         };
         let catalog = match &login.catalog {
             Some(name) => name,
-            None => return Ok(false),
+            None => return Ok(None),
         };
         let schema = match &login.schema {
             Some(name) => name,
-            None => return Ok(false),
+            None => return Ok(None),
         };
 
-        if let Err(e) = user_provider
+        match user_provider
             .auth(
                 Identity::UserId(user_name, None),
                 Password::PlainText(password.to_string().into()),
@@ -100,16 +101,17 @@ impl PgLoginVerifier {
             )
             .await
         {
-            increment_counter!(
-                crate::metrics::METRIC_AUTH_FAILURE,
-                &[(
-                    crate::metrics::METRIC_CODE_LABEL,
-                    format!("{}", e.status_code())
-                )]
-            );
-            Err(AuthSnafu.into_error(e))
-        } else {
-            Ok(true)
+            Err(e) => {
+                increment_counter!(
+                    crate::metrics::METRIC_AUTH_FAILURE,
+                    &[(
+                        crate::metrics::METRIC_CODE_LABEL,
+                        format!("{}", e.status_code())
+                    )]
+                );
+                Err(AuthSnafu.into_error(e))
+            }
+            Ok(user_info) => Ok(Some(user_info)),
         }
     }
 }
@@ -124,9 +126,7 @@ where
     if let Some(current_schema) = client.metadata().get(super::METADATA_SCHEMA) {
         session.set_schema(current_schema.clone());
     }
-    if let Some(username) = client.metadata().get(super::METADATA_USER) {
-        session.set_user_info(UserInfo::new(username));
-    }
+    // set userinfo outside
 }
 
 #[async_trait]
@@ -152,7 +152,7 @@ impl StartupHandler for PostgresServerHandler {
                 auth::save_startup_parameters_to_metadata(client, startup);
 
                 // check if db is valid
-                match resolve_db_info(client, self.query_handler.clone()).await? {
+                match resolve_db_info(Exclusive::new(client), self.query_handler.clone()).await? {
                     DbResolution::Resolved(catalog, schema) => {
                         let metadata = client.metadata_mut();
                         let _ = metadata.insert(super::METADATA_CATALOG.to_owned(), catalog);
@@ -172,6 +172,9 @@ impl StartupHandler for PostgresServerHandler {
                         ))
                         .await?;
                 } else {
+                    self.session.set_user_info(userinfo_by_name(
+                        client.metadata().get(super::METADATA_USER).cloned(),
+                    ));
                     set_client_info(client, &self.session);
                     auth::finish_authentication(client, self.param_provider.as_ref()).await;
                 }
@@ -186,7 +189,12 @@ impl StartupHandler for PostgresServerHandler {
 
                 // do authenticate
                 let auth_result = self.login_verifier.auth(&login_info, pwd.password()).await;
-                if !matches!(auth_result, Ok(true)) {
+
+                if let Ok(Some(user_info)) = auth_result {
+                    self.session.set_user_info(user_info);
+                    set_client_info(client, &self.session);
+                    auth::finish_authentication(client, self.param_provider.as_ref()).await;
+                } else {
                     return send_error(
                         client,
                         "FATAL",
@@ -195,8 +203,6 @@ impl StartupHandler for PostgresServerHandler {
                     )
                     .await;
                 }
-                set_client_info(client, &self.session);
-                auth::finish_authentication(client, self.param_provider.as_ref()).await;
             }
             _ => {}
         }
@@ -225,15 +231,15 @@ enum DbResolution {
 
 /// A function extracted to resolve lifetime and readability issues:
 async fn resolve_db_info<C>(
-    client: &mut C,
+    client: Exclusive<&mut C>,
     query_handler: ServerSqlQueryHandlerRef,
 ) -> PgWireResult<DbResolution>
 where
     C: ClientInfo + Unpin + Send,
 {
-    let db_ref = client.metadata().get(super::METADATA_DATABASE);
+    let db_ref = client.into_inner().metadata().get(super::METADATA_DATABASE);
     if let Some(db) = db_ref {
-        let (catalog, schema) = crate::parse_catalog_and_schema_from_client_database_name(db);
+        let (catalog, schema) = parse_catalog_and_schema_from_db_string(db);
         if query_handler
             .is_valid_schema(catalog, schema)
             .await

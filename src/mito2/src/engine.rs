@@ -14,20 +14,22 @@
 
 //! Mito region engine.
 
-#[cfg(test)]
-mod tests;
+// TODO: migrate test to RegionRequest
+// #[cfg(test)]
+// mod tests;
 
 use std::sync::Arc;
 
+use common_query::Output;
 use object_store::ObjectStore;
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
+use store_api::region_request::RegionRequest;
 use store_api::storage::RegionId;
 
 use crate::config::MitoConfig;
 use crate::error::{RecvSnafu, Result};
-pub use crate::worker::request::CreateRequest;
-use crate::worker::request::{RegionRequest, RequestBody};
+use crate::request::RegionTask;
 use crate::worker::WorkerGroup;
 
 /// Region engine implementation for timeseries data.
@@ -51,19 +53,43 @@ impl MitoEngine {
     }
 
     /// Stop the engine.
+    ///
+    /// Stopping the engine doesn't stop the underlying log store as other components might
+    /// still use it.
     pub async fn stop(&self) -> Result<()> {
         self.inner.stop().await
     }
 
-    /// Creates a new region.
-    pub async fn create_region(&self, request: CreateRequest) -> Result<()> {
-        self.inner.create_region(request).await
+    pub async fn handle_request(
+        &self,
+        region_id: RegionId,
+        request: RegionRequest,
+    ) -> Result<Output> {
+        self.inner.handle_request(region_id, request).await?;
+        Ok(Output::AffectedRows(0))
     }
 
     /// Returns true if the specific region exists.
     pub fn is_region_exists(&self, region_id: RegionId) -> bool {
         self.inner.workers.is_region_exists(region_id)
     }
+
+    // /// Write to a region.
+    // pub async fn write_region(&self, write_request: WriteRequest) -> Result<()> {
+    // write_request.validate()?;
+    // RequestValidator::write_request(&write_request)?;
+
+    // TODO(yingwen): Fill default values.
+    // We need to fill default values before writing it to WAL so we can get
+    // the same default value after reopening the region.
+
+    // let metadata = region.metadata();
+
+    // write_request.fill_missing_columns(&metadata)?;
+    //     self.inner
+    //         .handle_request_body(RequestBody::Write(write_request))
+    //         .await
+    // }
 }
 
 /// Inner struct of [MitoEngine].
@@ -89,9 +115,10 @@ impl EngineInner {
         self.workers.stop().await
     }
 
-    /// Creates a new region.
-    async fn create_region(&self, create_request: CreateRequest) -> Result<()> {
-        let (request, receiver) = RegionRequest::from_body(RequestBody::Create(create_request));
+    // TODO(yingwen): return `Output` instead of `Result<()>`.
+    /// Handles [RequestBody] and return its executed result.
+    async fn handle_request(&self, region_id: RegionId, request: RegionRequest) -> Result<()> {
+        let (request, receiver) = RegionTask::from_request(region_id, request);
         self.workers.submit_to_worker(request).await?;
 
         receiver.await.context(RecvSnafu)?

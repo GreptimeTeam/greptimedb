@@ -89,7 +89,7 @@ impl FlightService for FlightHandler {
         let request =
             GreptimeRequest::decode(ticket.as_ref()).context(error::InvalidFlightTicketSnafu)?;
 
-        let output = self.handler.handle_request(request).await??;
+        let output = self.handler.handle_request(request).await?;
 
         let stream = to_flight_data_stream(output);
         Ok(Response::new(stream))

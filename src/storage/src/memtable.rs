@@ -22,11 +22,12 @@ use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use api::v1::OpType;
 use common_time::range::TimestampRange;
 use common_time::Timestamp;
 use datatypes::vectors::VectorRef;
 use metrics::{decrement_gauge, increment_gauge};
-use store_api::storage::{consts, OpType, SequenceNumber};
+use store_api::storage::{consts, SequenceNumber};
 
 use crate::error::Result;
 use crate::flush::FlushStrategyRef;

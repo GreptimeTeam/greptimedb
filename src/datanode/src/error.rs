@@ -18,8 +18,9 @@ use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_procedure::ProcedureId;
 use serde_json::error::Error as JsonError;
+use servers::define_into_tonic_status;
 use snafu::{Location, Snafu};
-use store_api::storage::RegionNumber;
+use store_api::storage::{RegionId, RegionNumber};
 use table::error::Error as TableError;
 
 /// Business error of datanode.
@@ -477,10 +478,83 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "Invalid insert row len, table: {}, expected: {}, actual: {}",
+        table_name,
+        expected,
+        actual
+    ))]
+    InvalidInsertRowLen {
+        table_name: String,
+        expected: usize,
+        actual: usize,
+        location: Location,
+    },
+
+    #[snafu(display("Column datatype error, source: {}", source))]
+    ColumnDataType {
+        location: Location,
+        source: api::error::Error,
+    },
+
+    #[snafu(display("Failed to create vector, source: {}", source))]
+    CreateVector {
+        location: Location,
+        source: datatypes::error::Error,
+    },
+
     #[snafu(display("Unexpected, violated: {}", violated))]
     Unexpected {
         violated: String,
         location: Location,
+    },
+
+    #[snafu(display(
+        "Failed to handle request for region {}, source: {}, location: {}",
+        region_id,
+        source,
+        location
+    ))]
+    HandleRegionRequest {
+        region_id: RegionId,
+        location: Location,
+        source: BoxedError,
+    },
+
+    #[snafu(display("RegionId {} not found, location: {}", region_id, location))]
+    RegionNotFound {
+        region_id: RegionId,
+        location: Location,
+    },
+
+    #[snafu(display("Region engine {} is not registered, location: {}", name, location))]
+    RegionEngineNotFound { name: String, location: Location },
+
+    #[snafu(display("Unsupported gRPC request, kind: {}, location: {}", kind, location))]
+    UnsupportedGrpcRequest { kind: String, location: Location },
+
+    #[snafu(display(
+        "Unsupported output type, expected: {}, location: {}",
+        expected,
+        location
+    ))]
+    UnsupportedOutput {
+        expected: String,
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Failed to get metadata from engine {} for region_id {}, location: {}, source: {}",
+        engine,
+        region_id,
+        location,
+        source
+    ))]
+    GetRegionMetadata {
+        engine: String,
+        region_id: RegionId,
+        location: Location,
+        source: BoxedError,
     },
 }
 
@@ -508,6 +582,7 @@ impl ErrorExt for Error {
             TableEngineNotFound { source, .. } | EngineProcedureNotFound { source, .. } => {
                 source.status_code()
             }
+            CreateVector { source, .. } => source.status_code(),
             TableNotFound { .. } => StatusCode::TableNotFound,
             ColumnNotFound { .. } => StatusCode::TableColumnNotFound,
 
@@ -534,7 +609,9 @@ impl ErrorExt for Error {
             | MissingMetasrvOpts { .. }
             | ColumnNoneDefaultValue { .. }
             | MissingWalDirConfig { .. }
-            | PrepareImmutableTable { .. } => StatusCode::InvalidArguments,
+            | PrepareImmutableTable { .. }
+            | InvalidInsertRowLen { .. }
+            | ColumnDataType { .. } => StatusCode::InvalidArguments,
 
             EncodeJson { .. } | DecodeJson { .. } | PayloadNotExist { .. } | Unexpected { .. } => {
                 StatusCode::Unexpected
@@ -559,7 +636,11 @@ impl ErrorExt for Error {
             | MissingInsertBody { .. }
             | ShutdownInstance { .. }
             | CloseTableEngine { .. }
-            | JoinTask { .. } => StatusCode::Internal,
+            | JoinTask { .. }
+            | RegionNotFound { .. }
+            | RegionEngineNotFound { .. }
+            | UnsupportedOutput { .. }
+            | GetRegionMetadata { .. } => StatusCode::Internal,
 
             StartServer { source, .. }
             | ShutdownServer { source, .. }
@@ -570,7 +651,9 @@ impl ErrorExt for Error {
             OpenLogStore { source, .. } => source.status_code(),
             RuntimeResource { .. } => StatusCode::RuntimeResourcesExhausted,
             MetaClientInit { source, .. } => source.status_code(),
-            TableIdProviderNotFound { .. } => StatusCode::Unsupported,
+            TableIdProviderNotFound { .. } | UnsupportedGrpcRequest { .. } => {
+                StatusCode::Unsupported
+            }
             BumpTableId { source, .. } => source.status_code(),
             ColumnDefaultValue { source, .. } => source.status_code(),
             UnrecognizedTableOption { .. } => StatusCode::InvalidArguments,
@@ -581,6 +664,7 @@ impl ErrorExt for Error {
             StartProcedureManager { source } | StopProcedureManager { source } => {
                 source.status_code()
             }
+            HandleRegionRequest { source, .. } => source.status_code(),
         }
     }
 
@@ -589,11 +673,7 @@ impl ErrorExt for Error {
     }
 }
 
-impl From<Error> for tonic::Status {
-    fn from(err: Error) -> Self {
-        tonic::Status::from_error(Box::new(err))
-    }
-}
+define_into_tonic_status!(Error);
 
 #[cfg(test)]
 mod tests {

@@ -67,6 +67,7 @@ impl TableGlobalValue {
     }
 }
 
+#[deprecated(since = "0.4.0", note = "Please use the CatalogNameKey instead")]
 pub struct CatalogKey {
     pub catalog_name: String,
 }
@@ -95,6 +96,7 @@ impl CatalogKey {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CatalogValue;
 
+#[deprecated(since = "0.4.0", note = "Please use the SchemaNameKey instead")]
 pub struct SchemaKey {
     pub catalog_name: String,
     pub schema_name: String,
@@ -154,6 +156,7 @@ define_catalog_value!(TableGlobalValue, CatalogValue, SchemaValue);
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     #[test]

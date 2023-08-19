@@ -2,6 +2,7 @@
 CARGO_PROFILE ?=
 FEATURES ?=
 TARGET_DIR ?=
+TARGET ?=
 CARGO_BUILD_OPTS := --locked
 IMAGE_REGISTRY ?= docker.io
 IMAGE_NAMESPACE ?= greptime
@@ -11,26 +12,41 @@ BUILDX_BUILDER_NAME ?= gtbuilder
 BASE_IMAGE ?= ubuntu
 RUST_TOOLCHAIN ?= $(shell cat rust-toolchain.toml | grep channel | cut -d'"' -f2)
 CARGO_REGISTRY_CACHE ?= ${HOME}/.cargo/registry
+ARCH := $(shell uname -m | sed 's/x86_64/amd64/' | sed 's/aarch64/arm64/')
+OUTPUT_DIR := $(shell if [ "$(RELEASE)" = "true" ]; then echo "release"; elif [ ! -z "$(CARGO_PROFILE)" ]; then echo "$(CARGO_PROFILE)" ; else echo "debug"; fi)
 
 # The arguments for running integration tests.
 ETCD_VERSION ?= v3.5.9
 ETCD_IMAGE ?= quay.io/coreos/etcd:${ETCD_VERSION}
 RETRY_COUNT ?= 3
-BUILD_JOBS ?= $(shell expr $$(nproc) / 2)
+NEXTEST_OPTS := --retries ${RETRY_COUNT}
+BUILD_JOBS ?= $(shell which nproc 1>/dev/null && expr $$(nproc) / 2) # If nproc is not available, we don't set the build jobs.
 ifeq ($(BUILD_JOBS), 0) # If the number of cores is less than 2, set the build jobs to 1.
   BUILD_JOBS := 1
 endif
 
-ifdef CARGO_PROFILE
+ifneq ($(strip $(BUILD_JOBS)),)
+	NEXTEST_OPTS += --build-jobs=${BUILD_JOBS}
+endif
+
+ifneq ($(strip $(CARGO_PROFILE)),)
 	CARGO_BUILD_OPTS += --profile ${CARGO_PROFILE}
 endif
 
-ifdef FEATURES
+ifneq ($(strip $(FEATURES)),)
 	CARGO_BUILD_OPTS += --features ${FEATURES}
 endif
 
-ifdef TARGET_DIR
+ifneq ($(strip $(TARGET_DIR)),)
 	CARGO_BUILD_OPTS += --target-dir ${TARGET_DIR}
+endif
+
+ifneq ($(strip $(TARGET)),)
+	CARGO_BUILD_OPTS += --target ${TARGET}
+endif
+
+ifneq ($(strip $(RELEASE)),)
+	CARGO_BUILD_OPTS += --release
 endif
 
 ifeq ($(BUILDX_MULTI_PLATFORM_BUILD), true)
@@ -42,26 +58,20 @@ endif
 ##@ Build
 
 .PHONY: build
-build: ## Build debug version greptime. If USE_DEV_BUILDER is true, the binary will be built in dev-builder.
-ifeq ($(USE_DEV_BUILDER), true)
-	docker run --network=host \
-	-v ${PWD}:/greptimedb -v ${CARGO_REGISTRY_CACHE}:/root/.cargo/registry \
-	-w /greptimedb ${IMAGE_REGISTRY}/${IMAGE_NAMESPACE}/dev-builder:latest \
-	make build CARGO_PROFILE=${CARGO_PROFILE} FEATURES=${FEATURES} TARGET_DIR=${TARGET_DIR}
-else
+build: ## Build debug version greptime.
 	cargo build ${CARGO_BUILD_OPTS}
-endif
 
-.PHONY: release
-release:  ## Build release version greptime. If USE_DEV_BUILDER is true, the binary will be built in dev-builder.
-ifeq ($(USE_DEV_BUILDER), true)
+.POHNY: build-by-dev-builder
+build-by-dev-builder: ## Build greptime by dev-builder.
 	docker run --network=host \
 	-v ${PWD}:/greptimedb -v ${CARGO_REGISTRY_CACHE}:/root/.cargo/registry \
-	-w /greptimedb ${IMAGE_REGISTRY}/${IMAGE_NAMESPACE}/dev-builder:latest \
-	make release CARGO_PROFILE=${CARGO_PROFILE} FEATURES=${FEATURES} TARGET_DIR=${TARGET_DIR}
-else
-	cargo build --release ${CARGO_BUILD_OPTS}
-endif
+	-w /greptimedb ${IMAGE_REGISTRY}/${IMAGE_NAMESPACE}/dev-builder-${BASE_IMAGE}:latest \
+	make build \
+	CARGO_PROFILE=${CARGO_PROFILE} \
+	FEATURES=${FEATURES} \
+	TARGET_DIR=${TARGET_DIR} \
+	TARGET=${TARGET} \
+	RELEASE=${RELEASE}
 
 .PHONY: clean
 clean: ## Clean the project.
@@ -73,37 +83,34 @@ fmt: ## Format all the Rust code.
 
 .PHONY: fmt-toml
 fmt-toml: ## Format all TOML files.
-	taplo format --option "indent_string=    "
+	taplo format
 
 .PHONY: check-toml
 check-toml: ## Check all TOML files.
-	taplo format --check --option "indent_string=    "
+	taplo format --check
 
 .PHONY: docker-image
-docker-image: multi-platform-buildx ## Build docker image.
+docker-image: build-by-dev-builder ## Build docker image.
+	mkdir -p ${ARCH} && \
+	cp ./target/${OUTPUT_DIR}/greptime ${ARCH}/greptime && \
+	docker build -f docker/ci/${BASE_IMAGE}/Dockerfile -t ${IMAGE_REGISTRY}/${IMAGE_NAMESPACE}/greptimedb:${IMAGE_TAG} . && \
+	rm -r ${ARCH}
+
+.PHONY: docker-image-buildx
+docker-image-buildx: multi-platform-buildx ## Build docker image by buildx.
 	docker buildx build --builder ${BUILDX_BUILDER_NAME} \
-	  --build-arg="CARGO_PROFILE=${CARGO_PROFILE}" --build-arg="FEATURES=${FEATURES}" \
-	  -f docker/${BASE_IMAGE}/Dockerfile \
+	  --build-arg="CARGO_PROFILE=${CARGO_PROFILE}" \
+	  --build-arg="FEATURES=${FEATURES}" \
+	  --build-arg="OUTPUT_DIR=${OUTPUT_DIR}" \
+	  -f docker/buildx/${BASE_IMAGE}/Dockerfile \
 	  -t ${IMAGE_REGISTRY}/${IMAGE_NAMESPACE}/greptimedb:${IMAGE_TAG} ${BUILDX_MULTI_PLATFORM_BUILD_OPTS} .
-
-.PHONY: build-greptime-by-buildx
-build-greptime-by-buildx: multi-platform-buildx ## Build greptime binary by docker buildx. The binary will be copied to the current directory.
-	docker buildx build --builder ${BUILDX_BUILDER_NAME} \
-	  --target=builder \
-	  --build-arg="CARGO_PROFILE=${CARGO_PROFILE}" --build-arg="FEATURES=${FEATURES}" \
-	  -f docker/${BASE_IMAGE}/Dockerfile \
-	  -t ${IMAGE_REGISTRY}/${IMAGE_NAMESPACE}/greptimedb-builder:${IMAGE_TAG} ${BUILDX_MULTI_PLATFORM_BUILD_OPTS} .
-
-	docker run --rm -v ${PWD}:/data \
-      --entrypoint cp ${IMAGE_REGISTRY}/${IMAGE_NAMESPACE}/greptimedb-builder:${IMAGE_TAG} \
-      /out/target/${CARGO_PROFILE}/greptime /data/greptime
 
 .PHONY: dev-builder
 dev-builder: multi-platform-buildx ## Build dev-builder image.
 	docker buildx build --builder ${BUILDX_BUILDER_NAME} \
 	--build-arg="RUST_TOOLCHAIN=${RUST_TOOLCHAIN}" \
-	-f docker/dev-builder/Dockerfile \
-	-t ${IMAGE_REGISTRY}/${IMAGE_NAMESPACE}/dev-builder:${IMAGE_TAG} ${BUILDX_MULTI_PLATFORM_BUILD_OPTS} .
+	-f docker/dev-builder/${BASE_IMAGE}/Dockerfile \
+	-t ${IMAGE_REGISTRY}/${IMAGE_NAMESPACE}/dev-builder-${BASE_IMAGE}:${IMAGE_TAG} ${BUILDX_MULTI_PLATFORM_BUILD_OPTS} .
 
 .PHONY: multi-platform-buildx
 multi-platform-buildx: ## Create buildx multi-platform builder.
@@ -111,7 +118,7 @@ multi-platform-buildx: ## Create buildx multi-platform builder.
 
 ##@ Test
 test: nextest ## Run unit and integration tests.
-	cargo nextest run --retries ${RETRY_COUNT} --build-jobs=${BUILD_JOBS}
+	cargo nextest run ${NEXTEST_OPTS}
 
 .PHONY: nextest ## Install nextest tools.
 nextest:
@@ -127,7 +134,7 @@ check: ## Cargo check all the targets.
 
 .PHONY: clippy
 clippy: ## Check clippy rules.
-	cargo clippy --workspace --all-targets -- -D warnings
+	cargo clippy --workspace --all-targets -F pyo3_backend -- -D warnings
 
 .PHONY: fmt-check
 fmt-check: ## Check code format.
@@ -145,7 +152,7 @@ stop-etcd: ## Stop single node etcd for testing purpose.
 run-it-in-container: start-etcd ## Run integration tests in dev-builder.
 	docker run --network=host \
 	-v ${PWD}:/greptimedb -v ${CARGO_REGISTRY_CACHE}:/root/.cargo/registry -v /tmp:/tmp \
-	-w /greptimedb ${IMAGE_REGISTRY}/${IMAGE_NAMESPACE}/dev-builder:latest \
+	-w /greptimedb ${IMAGE_REGISTRY}/${IMAGE_NAMESPACE}/dev-builder-${BASE_IMAGE}:latest \
 	make test sqlness-test BUILD_JOBS=${BUILD_JOBS}
 
 ##@ General

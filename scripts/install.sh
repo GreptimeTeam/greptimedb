@@ -61,7 +61,16 @@ if [ -n "${OS_TYPE}" ] && [ -n "${ARCH_TYPE}" ]; then
     fi
 
     echo "Downloading ${BIN}, OS: ${OS_TYPE}, Arch: ${ARCH_TYPE}, Version: ${VERSION}"
+    PACKAGE_NAME="${BIN}-${OS_TYPE}-${ARCH_TYPE}-${VERSION}.tar.gz"
 
-    wget "https://github.com/${GITHUB_ORG}/${GITHUB_REPO}/releases/download/${VERSION}/${BIN}-${OS_TYPE}-${ARCH_TYPE}.tgz"
-    tar xvf ${BIN}-${OS_TYPE}-${ARCH_TYPE}.tgz && rm ${BIN}-${OS_TYPE}-${ARCH_TYPE}.tgz && echo "Run './${BIN} --help' to get started"
+    if [ -n "${PACKAGE_NAME}" ]; then
+      wget "https://github.com/${GITHUB_ORG}/${GITHUB_REPO}/releases/download/${VERSION}/${PACKAGE_NAME}"
+
+      # Extract the binary and clean the rest.
+      tar xvf "${PACKAGE_NAME}" && \
+      mv "${PACKAGE_NAME%.tar.gz}/${BIN}" "${PWD}" && \
+      rm -r "${PACKAGE_NAME}" && \
+      rm -r "${PACKAGE_NAME%.tar.gz}" && \
+      echo "Run './${BIN} --help' to get started"
+    fi
 fi

@@ -135,6 +135,10 @@ impl Table for MemTable {
         self.info.clone()
     }
 
+    fn table_type(&self) -> TableType {
+        self.info.table_type
+    }
+
     async fn scan_to_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream> {
         let df_recordbatch = if let Some(indices) = request.projection {
             self.recordbatch

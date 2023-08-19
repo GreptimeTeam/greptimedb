@@ -175,17 +175,16 @@ impl DistInserter {
 
 #[cfg(test)]
 mod tests {
-    use api::v1::column::{SemanticType, Values};
-    use api::v1::{Column, ColumnDataType, InsertRequest as GrpcInsertRequest};
+    use api::v1::column::Values;
+    use api::v1::{Column, ColumnDataType, InsertRequest as GrpcInsertRequest, SemanticType};
     use client::client_manager::DatanodeClients;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-    use common_meta::helper::{CatalogKey, CatalogValue, SchemaKey, SchemaValue};
-    use common_meta::key::table_name::TableNameKey;
-    use common_meta::key::table_region::RegionDistribution;
+    use common_meta::key::catalog_name::{CatalogManager, CatalogNameKey};
+    use common_meta::key::schema_name::{SchemaManager, SchemaNameKey};
     use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
     use common_meta::kv_backend::memory::MemoryKvBackend;
-    use common_meta::kv_backend::{KvBackend, KvBackendRef};
-    use common_meta::rpc::store::PutRequest;
+    use common_meta::kv_backend::KvBackendRef;
+    use common_meta::rpc::router::{Region, RegionRoute};
     use datatypes::prelude::{ConcreteDataType, VectorRef};
     use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, Schema};
     use datatypes::vectors::Int32Vector;
@@ -198,24 +197,17 @@ mod tests {
     async fn prepare_mocked_backend() -> KvBackendRef {
         let backend = Arc::new(MemoryKvBackend::default());
 
-        let default_catalog = CatalogKey {
-            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
-        }
-        .to_string();
-        let req = PutRequest::new()
-            .with_key(default_catalog.as_bytes())
-            .with_value(CatalogValue.as_bytes().unwrap());
-        backend.put(req).await.unwrap();
+        let catalog_manager = CatalogManager::new(backend.clone());
+        let schema_manager = SchemaManager::new(backend.clone());
 
-        let default_schema = SchemaKey {
-            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
-            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
-        }
-        .to_string();
-        let req = PutRequest::new()
-            .with_key(default_schema.as_bytes())
-            .with_value(SchemaValue.as_bytes().unwrap());
-        backend.put(req).await.unwrap();
+        catalog_manager
+            .create(CatalogNameKey::default())
+            .await
+            .unwrap();
+        schema_manager
+            .create(SchemaNameKey::default())
+            .await
+            .unwrap();
 
         backend
     }
@@ -248,26 +240,25 @@ mod tests {
             .unwrap()
             .into();
 
-        let key = TableNameKey::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, table_name);
-        assert!(table_metadata_manager
-            .table_name_manager()
-            .create(&key, table_id)
-            .await
-            .is_ok());
+        let region_route_factory = |region_id: u64, peer: u64| RegionRoute {
+            region: Region {
+                id: region_id.into(),
+                ..Default::default()
+            },
+            leader_peer: Some(Peer {
+                id: peer,
+                addr: String::new(),
+            }),
+            follower_peers: vec![],
+        };
 
-        assert!(table_metadata_manager
-            .table_info_manager()
-            .compare_and_put(table_id, None, table_info)
-            .await
-            .is_ok());
-
-        let _ = table_metadata_manager
-            .table_region_manager()
-            .compare_and_put(
-                1,
-                None,
-                RegionDistribution::from([(1, vec![1]), (2, vec![2]), (3, vec![3])]),
-            )
+        let region_routes = vec![
+            region_route_factory(1, 1),
+            region_route_factory(2, 2),
+            region_route_factory(3, 3),
+        ];
+        table_metadata_manager
+            .create_table_metadata(table_info, region_routes)
             .await
             .unwrap();
     }
@@ -319,6 +310,7 @@ mod tests {
         ];
 
         let mut inserts = inserter.split_inserts(requests).await.unwrap();
+
         assert_eq!(inserts.len(), 3);
 
         let new_grpc_insert_request = |column_values: Vec<i32>,

@@ -17,9 +17,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::vec;
 
+use common_test_util::find_workspace_path;
 use datafusion::assert_batches_eq;
+use datafusion::datasource::physical_plan::{FileOpener, FileScanConfig, FileStream, ParquetExec};
 use datafusion::execution::context::TaskContext;
-use datafusion::physical_plan::file_format::{FileOpener, FileScanConfig, FileStream, ParquetExec};
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::prelude::SessionContext;
@@ -71,7 +72,7 @@ async fn test_json_opener() {
         CompressionType::Uncompressed,
     );
 
-    let path = &test_util::get_data_dir("tests/json/basic.json")
+    let path = &find_workspace_path("/src/common/datasource/tests/json/basic.json")
         .display()
         .to_string();
     let tests = [
@@ -111,7 +112,7 @@ async fn test_csv_opener() {
     let store = test_store("/");
 
     let schema = test_basic_schema();
-    let path = &test_util::get_data_dir("tests/csv/basic.csv")
+    let path = &find_workspace_path("/src/common/datasource/tests/csv/basic.csv")
         .display()
         .to_string();
     let csv_conf = CsvConfigBuilder::default()
@@ -160,7 +161,7 @@ async fn test_parquet_exec() {
 
     let schema = test_basic_schema();
 
-    let path = &test_util::get_data_dir("tests/parquet/basic.parquet")
+    let path = &find_workspace_path("/src/common/datasource/tests/parquet/basic.parquet")
         .display()
         .to_string();
     let base_config = scan_config(schema.clone(), None, path);
@@ -181,7 +182,7 @@ async fn test_parquet_exec() {
         .await;
 
     assert_batches_eq!(
-        vec![
+        [
             "+-----+-------+",
             "| num | str   |",
             "+-----+-------+",
@@ -196,14 +197,15 @@ async fn test_parquet_exec() {
 
 #[tokio::test]
 async fn test_orc_opener() {
-    let root = test_util::get_data_dir("tests/orc").display().to_string();
+    let root = find_workspace_path("/src/common/datasource/tests/orc")
+        .display()
+        .to_string();
     let store = test_store(&root);
-    let orc = OrcFormat::default();
-    let schema = orc.infer_schema(&store, "test.orc").await.unwrap();
+    let schema = OrcFormat.infer_schema(&store, "test.orc").await.unwrap();
     let schema = Arc::new(schema);
 
     let orc_opener = OrcOpener::new(store.clone(), schema.clone(), None);
-    let path = &test_util::get_data_dir("/test.orc").display().to_string();
+    let path = "test.orc";
 
     let tests = [
         Test {

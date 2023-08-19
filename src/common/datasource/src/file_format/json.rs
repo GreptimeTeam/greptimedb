@@ -26,8 +26,8 @@ use arrow::record_batch::RecordBatch;
 use arrow_schema::Schema;
 use async_trait::async_trait;
 use common_runtime;
+use datafusion::datasource::physical_plan::{FileMeta, FileOpenFuture, FileOpener};
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
-use datafusion::physical_plan::file_format::{FileMeta, FileOpenFuture, FileOpener};
 use datafusion::physical_plan::SendableRecordBatchStream;
 use object_store::ObjectStore;
 use snafu::ResultExt;
@@ -167,12 +167,16 @@ impl DfRecordBatchEncoder for json::Writer<SharedBuffer, LineDelimited> {
 
 #[cfg(test)]
 mod tests {
+    use common_test_util::find_workspace_path;
+
     use super::*;
     use crate::file_format::{FileFormat, FORMAT_COMPRESSION_TYPE, FORMAT_SCHEMA_INFER_MAX_RECORD};
-    use crate::test_util::{self, format_schema, test_store};
+    use crate::test_util::{format_schema, test_store};
 
     fn test_data_root() -> String {
-        test_util::get_data_dir("tests/json").display().to_string()
+        find_workspace_path("/src/common/datasource/tests/json")
+            .display()
+            .to_string()
     }
 
     #[tokio::test]

@@ -20,8 +20,8 @@ use arrow::compute::cast;
 use arrow_schema::{ArrowError, Schema, SchemaRef};
 use async_trait::async_trait;
 use datafusion::arrow::record_batch::RecordBatch as DfRecordBatch;
+use datafusion::datasource::physical_plan::{FileMeta, FileOpenFuture, FileOpener};
 use datafusion::error::{DataFusionError, Result as DfResult};
-use datafusion::physical_plan::file_format::{FileMeta, FileOpenFuture, FileOpener};
 use datafusion::physical_plan::RecordBatchStream;
 use futures::{Stream, StreamExt, TryStreamExt};
 use object_store::ObjectStore;
@@ -188,19 +188,22 @@ impl FileOpener for OrcOpener {
 
 #[cfg(test)]
 mod tests {
+    use common_test_util::find_workspace_path;
+
     use super::*;
     use crate::file_format::FileFormat;
-    use crate::test_util::{self, format_schema, test_store};
+    use crate::test_util::{format_schema, test_store};
 
     fn test_data_root() -> String {
-        test_util::get_data_dir("tests/orc").display().to_string()
+        find_workspace_path("/src/common/datasource/tests/orc")
+            .display()
+            .to_string()
     }
 
     #[tokio::test]
     async fn test_orc_infer_schema() {
-        let orc = OrcFormat::default();
         let store = test_store(&test_data_root());
-        let schema = orc.infer_schema(&store, "test.orc").await.unwrap();
+        let schema = OrcFormat.infer_schema(&store, "test.orc").await.unwrap();
         let formatted: Vec<_> = format_schema(schema);
 
         assert_eq!(

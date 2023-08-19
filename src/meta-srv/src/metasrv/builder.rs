@@ -25,7 +25,9 @@ use common_procedure::ProcedureManagerRef;
 use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
 use crate::ddl::{DdlManager, DdlManagerRef};
 use crate::error::Result;
+use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
 use crate::handler::mailbox_handler::MailboxHandler;
+use crate::handler::publish_heartbeat_handler::PublishHeartbeatHandler;
 use crate::handler::region_lease_handler::RegionLeaseHandler;
 use crate::handler::{
     CheckLeaderHandler, CollectStatsHandler, HeartbeatHandlerGroup, HeartbeatMailbox,
@@ -40,6 +42,7 @@ use crate::metasrv::{
 };
 use crate::procedure::region_failover::RegionFailoverManager;
 use crate::procedure::state_store::MetaStateStore;
+use crate::pubsub::{PublishRef, SubscribeManagerRef};
 use crate::selector::lease_based::LeaseBasedSelector;
 use crate::sequence::Sequence;
 use crate::service::mailbox::MailboxRef;
@@ -59,6 +62,7 @@ pub struct MetaSrvBuilder {
     lock: Option<DistLockRef>,
     metadata_service: Option<MetadataServiceRef>,
     datanode_clients: Option<Arc<DatanodeClients>>,
+    pubsub: Option<(PublishRef, SubscribeManagerRef)>,
 }
 
 impl MetaSrvBuilder {
@@ -74,6 +78,7 @@ impl MetaSrvBuilder {
             lock: None,
             metadata_service: None,
             datanode_clients: None,
+            pubsub: None,
         }
     }
 
@@ -127,6 +132,11 @@ impl MetaSrvBuilder {
         self
     }
 
+    pub fn pubsub(mut self, publish: PublishRef, subscribe_manager: SubscribeManagerRef) -> Self {
+        self.pubsub = Some((publish, subscribe_manager));
+        self
+    }
+
     pub async fn build(self) -> Result<MetaSrv> {
         let started = Arc::new(AtomicBool::new(false));
 
@@ -141,6 +151,7 @@ impl MetaSrvBuilder {
             lock,
             metadata_service,
             datanode_clients,
+            pubsub,
         } = self;
 
         let options = options.unwrap_or_default();
@@ -155,15 +166,17 @@ impl MetaSrvBuilder {
         let mailbox = build_mailbox(&kv_store, &pushers);
         let procedure_manager = build_procedure_manager(&options, &kv_store);
         let table_id_sequence = Arc::new(Sequence::new(TABLE_ID_SEQ, 1024, 10, kv_store.clone()));
+        let table_metadata_manager = Arc::new(TableMetadataManager::new(KvBackendAdapter::wrap(
+            kv_store.clone(),
+        )));
         let metadata_service = metadata_service
-            .unwrap_or_else(|| Arc::new(DefaultMetadataService::new(kv_store.clone())));
+            .unwrap_or_else(|| Arc::new(DefaultMetadataService::new(table_metadata_manager)));
         let lock = lock.unwrap_or_else(|| Arc::new(MemLock::default()));
         let table_metadata_manager = build_table_metadata_manager(&kv_store);
         let ddl_manager = build_ddl_manager(
             &options,
             datanode_clients,
             &procedure_manager,
-            &kv_store,
             &mailbox,
             &table_metadata_manager,
         );
@@ -200,23 +213,31 @@ impl MetaSrvBuilder {
                 };
 
                 let group = HeartbeatHandlerGroup::new(pushers);
-                group.add_handler(ResponseHeaderHandler::default()).await;
+                group.add_handler(ResponseHeaderHandler).await;
                 // `KeepLeaseHandler` should preferably be in front of `CheckLeaderHandler`,
                 // because even if the current meta-server node is no longer the leader it can
                 // still help the datanode to keep lease.
-                group.add_handler(KeepLeaseHandler::default()).await;
-                group.add_handler(CheckLeaderHandler::default()).await;
-                group.add_handler(OnLeaderStartHandler::default()).await;
-                group.add_handler(CollectStatsHandler::default()).await;
-                group.add_handler(MailboxHandler::default()).await;
+                group.add_handler(KeepLeaseHandler).await;
+                group.add_handler(CheckLeaderHandler).await;
+                group.add_handler(OnLeaderStartHandler).await;
+                group.add_handler(CollectStatsHandler).await;
+                group.add_handler(MailboxHandler).await;
                 if let Some(region_failover_handler) = region_failover_handler {
                     group.add_handler(region_failover_handler).await;
                 }
-                group.add_handler(RegionLeaseHandler::default()).await;
+                group.add_handler(RegionLeaseHandler).await;
                 group.add_handler(PersistStatsHandler::default()).await;
+                if let Some((publish, _)) = pubsub.as_ref() {
+                    group
+                        .add_handler(PublishHeartbeatHandler::new(publish.clone()))
+                        .await;
+                }
                 group
             }
         };
+
+        let enable_telemetry = options.enable_telemetry;
+        let metasrv_home = options.data_home.to_string();
 
         Ok(MetaSrv {
             started,
@@ -224,7 +245,7 @@ impl MetaSrvBuilder {
             in_memory,
             kv_store,
             leader_cached_kv_store,
-            meta_peer_client,
+            meta_peer_client: meta_peer_client.clone(),
             table_id_sequence,
             selector,
             handler_group,
@@ -235,6 +256,13 @@ impl MetaSrvBuilder {
             mailbox,
             ddl_manager,
             table_metadata_manager,
+            greptimedb_telemetry_task: get_greptimedb_telemetry_task(
+                Some(metasrv_home),
+                meta_peer_client,
+                enable_telemetry,
+            )
+            .await,
+            pubsub,
         })
     }
 }
@@ -287,7 +315,6 @@ fn build_ddl_manager(
     options: &MetaSrvOptions,
     datanode_clients: Option<Arc<DatanodeClients>>,
     procedure_manager: &ProcedureManagerRef,
-    kv_store: &KvStoreRef,
     mailbox: &MailboxRef,
     table_metadata_manager: &TableMetadataManagerRef,
 ) -> DdlManagerRef {
@@ -305,7 +332,6 @@ fn build_ddl_manager(
     // TODO(weny): considers to modify the default config of procedure manager
     Arc::new(DdlManager::new(
         procedure_manager.clone(),
-        kv_store.clone(),
         datanode_clients,
         mailbox.clone(),
         options.server_addr.clone(),

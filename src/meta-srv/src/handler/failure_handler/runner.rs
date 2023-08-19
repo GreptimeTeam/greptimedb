@@ -88,8 +88,12 @@ impl FailureDetectRunner {
     }
 
     async fn start_with(&mut self, failure_detectors: Arc<FailureDetectorContainer>) {
-        let Some(mut heartbeat_rx) = self.heartbeat_rx.take() else { return };
-        let Some(mut control_rx) = self.control_rx.take() else { return };
+        let Some(mut heartbeat_rx) = self.heartbeat_rx.take() else {
+            return;
+        };
+        let Some(mut control_rx) = self.control_rx.take() else {
+            return;
+        };
 
         let container = failure_detectors.clone();
         let receiver_handle = common_runtime::spawn_bg(async move {
@@ -218,9 +222,7 @@ impl FailureDetectorContainer {
         &self,
         ident: RegionIdent,
     ) -> impl DerefMut<Target = PhiAccrualFailureDetector> + '_ {
-        self.0
-            .entry(ident)
-            .or_insert_with(PhiAccrualFailureDetector::default)
+        self.0.entry(ident).or_default()
     }
 
     pub(crate) fn iter(&self) -> Box<dyn Iterator<Item = FailureDetectorEntry> + '_> {

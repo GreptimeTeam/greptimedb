@@ -29,8 +29,11 @@ use api::v1::alter_expr::Kind;
 use api::v1::ddl_request::Expr as DdlExpr;
 use api::v1::greptime_request::Request;
 use api::v1::meta::Role;
-use api::v1::{AddColumns, AlterExpr, Column, DdlRequest, InsertRequest, InsertRequests};
+use api::v1::{
+    AddColumns, AlterExpr, Column, DdlRequest, InsertRequest, InsertRequests, RowInsertRequests,
+};
 use async_trait::async_trait;
+use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use catalog::remote::CachedMetaKvBackend;
 use catalog::CatalogManagerRef;
 use client::client_manager::DatanodeClients;
@@ -43,8 +46,7 @@ use common_meta::heartbeat::handler::HandlerGroupExecutor;
 use common_meta::key::TableMetadataManager;
 use common_query::Output;
 use common_telemetry::logging::{debug, info};
-use common_telemetry::timer;
-use datafusion::sql::sqlparser::ast::ObjectName;
+use common_telemetry::{error, timer};
 use datanode::instance::sql::table_idents_to_full_name;
 use datanode::instance::InstanceRef as DnInstanceRef;
 use datatypes::schema::Schema;
@@ -58,7 +60,7 @@ use query::query_engine::options::{validate_catalog_and_schema, QueryOptions};
 use query::query_engine::DescribeResult;
 use query::{QueryEngineFactory, QueryEngineRef};
 use servers::error as server_error;
-use servers::error::{ExecuteQuerySnafu, ParsePromQLSnafu};
+use servers::error::{AuthSnafu, ExecuteQuerySnafu, ParsePromQLSnafu};
 use servers::interceptor::{
     PromQueryInterceptor, PromQueryInterceptorRef, SqlQueryInterceptor, SqlQueryInterceptorRef,
 };
@@ -75,19 +77,22 @@ use sql::dialect::Dialect;
 use sql::parser::ParserContext;
 use sql::statements::copy::CopyTable;
 use sql::statements::statement::Statement;
+use sqlparser::ast::ObjectName;
+use table::engine::TableReference;
 
 use crate::catalog::FrontendCatalogManager;
 use crate::error::{
     self, Error, ExecLogicalPlanSnafu, ExecutePromqlSnafu, ExternalSnafu,
-    InvalidInsertRequestSnafu, MissingMetasrvOptsSnafu, ParseSqlSnafu, PlanStatementSnafu, Result,
-    SqlExecInterceptedSnafu,
+    InvalidInsertRequestSnafu, MissingMetasrvOptsSnafu, ParseSqlSnafu, PermissionSnafu,
+    PlanStatementSnafu, Result, SqlExecInterceptedSnafu,
 };
-use crate::expr_factory::{CreateExprFactoryRef, DefaultCreateExprFactory};
+use crate::expr_factory::CreateExprFactory;
 use crate::frontend::FrontendOptions;
 use crate::heartbeat::handler::invalidate_table_cache::InvalidateTableCacheHandler;
 use crate::heartbeat::HeartbeatTask;
 use crate::instance::standalone::StandaloneGrpcQueryHandler;
 use crate::metrics;
+use crate::row_inserter::RowInserter;
 use crate::script::ScriptExecutor;
 use crate::server::{start_server, ServerHandlers, Services};
 use crate::statement::StatementExecutor;
@@ -119,16 +124,13 @@ pub struct Instance {
     statement_executor: Arc<StatementExecutor>,
     query_engine: QueryEngineRef,
     grpc_query_handler: GrpcQueryHandlerRef<Error>,
-
-    create_expr_factory: CreateExprFactoryRef,
-
+    create_expr_factory: CreateExprFactory,
     /// plugins: this map holds extensions to customize query or auth
     /// behaviours.
     plugins: Arc<Plugins>,
-
     servers: Arc<ServerHandlers>,
-
     heartbeat_task: Option<HeartbeatTask>,
+    row_inserter: Arc<RowInserter>,
 }
 
 impl Instance {
@@ -193,7 +195,7 @@ impl Instance {
         plugins.insert::<StatementExecutorRef>(statement_executor.clone());
 
         let handlers_executor = HandlerGroupExecutor::new(vec![
-            Arc::new(ParseMailboxMessageHandler::default()),
+            Arc::new(ParseMailboxMessageHandler),
             Arc::new(InvalidateTableCacheHandler::new(
                 meta_backend,
                 partition_manager,
@@ -208,16 +210,26 @@ impl Instance {
 
         common_telemetry::init_node_id(opts.node_id.clone());
 
+        let create_expr_factory = CreateExprFactory;
+
+        let row_inserter = Arc::new(RowInserter::new(
+            MITO_ENGINE.to_string(),
+            catalog_manager.clone(),
+            create_expr_factory,
+            dist_instance.clone(),
+        ));
+
         Ok(Instance {
             catalog_manager,
             script_executor,
-            create_expr_factory: Arc::new(DefaultCreateExprFactory),
+            create_expr_factory,
             statement_executor,
             query_engine,
             grpc_query_handler: dist_instance,
             plugins: plugins.clone(),
             servers: Arc::new(HashMap::new()),
             heartbeat_task,
+            row_inserter,
         })
     }
 
@@ -270,16 +282,27 @@ impl Instance {
             dn_instance.clone(),
         ));
 
+        let create_expr_factory = CreateExprFactory;
+        let grpc_query_handler = StandaloneGrpcQueryHandler::arc(dn_instance.clone());
+
+        let row_inserter = Arc::new(RowInserter::new(
+            MITO_ENGINE.to_string(),
+            catalog_manager.clone(),
+            create_expr_factory,
+            grpc_query_handler.clone(),
+        ));
+
         Ok(Instance {
             catalog_manager: catalog_manager.clone(),
             script_executor,
-            create_expr_factory: Arc::new(DefaultCreateExprFactory),
+            create_expr_factory,
             statement_executor,
             query_engine,
-            grpc_query_handler: StandaloneGrpcQueryHandler::arc(dn_instance.clone()),
+            grpc_query_handler,
             plugins: Default::default(),
             servers: Arc::new(HashMap::new()),
             heartbeat_task: None,
+            row_inserter,
         })
     }
 
@@ -292,6 +315,15 @@ impl Instance {
 
     pub fn catalog_manager(&self) -> &CatalogManagerRef {
         &self.catalog_manager
+    }
+
+    // Handle batch inserts with row-format
+    pub async fn handle_row_inserts(
+        &self,
+        requests: RowInsertRequests,
+        ctx: QueryContextRef,
+    ) -> Result<Output> {
+        self.row_inserter.handle_inserts(requests, ctx).await
     }
 
     /// Handle batch inserts
@@ -317,8 +349,8 @@ impl Instance {
         ctx: QueryContextRef,
         request: &InsertRequest,
     ) -> Result<()> {
-        let catalog_name = &ctx.current_catalog();
-        let schema_name = &ctx.current_schema();
+        let catalog_name = &ctx.current_catalog().to_owned();
+        let schema_name = &ctx.current_schema().to_owned();
         let table_name = &request.table_name;
         let columns = &request.columns;
 
@@ -374,14 +406,14 @@ impl Instance {
         columns: &[Column],
         engine: &str,
     ) -> Result<Output> {
-        let catalog_name = &ctx.current_catalog();
-        let schema_name = &ctx.current_schema();
+        let catalog_name = ctx.current_catalog();
+        let schema_name = ctx.current_schema();
 
         // Create table automatically, build schema from data.
-        let create_expr = self
-            .create_expr_factory
-            .create_expr_by_columns(catalog_name, schema_name, table_name, columns, engine)
-            .await?;
+        let table_name = TableReference::full(catalog_name, schema_name, table_name);
+        let create_expr =
+            self.create_expr_factory
+                .create_table_expr_by_columns(&table_name, columns, engine)?;
 
         info!(
             "Try to create table: {} automatically with request: {:?}",
@@ -409,8 +441,8 @@ impl Instance {
             add_columns, table_name
         );
         let expr = AlterExpr {
-            catalog_name: ctx.current_catalog(),
-            schema_name: ctx.current_schema(),
+            catalog_name: ctx.current_catalog().to_owned(),
+            schema_name: ctx.current_schema().to_owned(),
             table_name: table_name.to_string(),
             kind: Some(Kind::AddColumns(add_columns)),
             ..Default::default()
@@ -488,6 +520,9 @@ impl SqlQueryHandler for Instance {
             Err(e) => return vec![Err(e)],
         };
 
+        let checker_ref = self.plugins.get::<PermissionCheckerRef>();
+        let checker = checker_ref.as_ref();
+
         match parse_stmt(query.as_ref(), query_ctx.sql_dialect())
             .and_then(|stmts| query_interceptor.post_parsing(stmts, query_ctx.clone()))
         {
@@ -501,6 +536,18 @@ impl SqlQueryHandler for Instance {
                         results.push(Err(e));
                         break;
                     }
+
+                    if let Err(e) = checker
+                        .check_permission(
+                            query_ctx.current_user(),
+                            PermissionReq::SqlStatement(&stmt),
+                        )
+                        .context(PermissionSnafu)
+                    {
+                        results.push(Err(e));
+                        break;
+                    }
+
                     match self.query_statement(stmt, query_ctx.clone()).await {
                         Ok(output) => {
                             let output_result =
@@ -508,6 +555,9 @@ impl SqlQueryHandler for Instance {
                             results.push(output_result);
                         }
                         Err(e) => {
+                            let redacted = sql::util::redact_sql_secrets(query.as_ref());
+                            error!(e; "Failed to execute query: {redacted}");
+
                             results.push(Err(e));
                             break;
                         }
@@ -523,6 +573,8 @@ impl SqlQueryHandler for Instance {
 
     async fn do_exec_plan(&self, plan: LogicalPlan, query_ctx: QueryContextRef) -> Result<Output> {
         let _timer = timer!(metrics::METRIC_EXEC_PLAN_ELAPSED);
+        // plan should be prepared before exec
+        // we'll do check there
         self.query_engine
             .execute(plan, query_ctx)
             .await
@@ -534,6 +586,7 @@ impl SqlQueryHandler for Instance {
         query: &PromQuery,
         query_ctx: QueryContextRef,
     ) -> Vec<Result<Output>> {
+        // check will be done in prometheus handler's do_query
         let result = PrometheusHandler::do_query(self, query, query_ctx)
             .await
             .with_context(|_| ExecutePromqlSnafu {
@@ -551,6 +604,12 @@ impl SqlQueryHandler for Instance {
             stmt,
             Statement::Insert(_) | Statement::Query(_) | Statement::Delete(_)
         ) {
+            self.plugins
+                .get::<PermissionCheckerRef>()
+                .as_ref()
+                .check_permission(query_ctx.current_user(), PermissionReq::SqlStatement(&stmt))
+                .context(PermissionSnafu)?;
+
             let plan = self
                 .query_engine
                 .planner()
@@ -588,6 +647,12 @@ impl PrometheusHandler for Instance {
             .get::<PromQueryInterceptorRef<server_error::Error>>();
         interceptor.pre_execute(query, query_ctx.clone())?;
 
+        self.plugins
+            .get::<PermissionCheckerRef>()
+            .as_ref()
+            .check_permission(query_ctx.current_user(), PermissionReq::PromQuery)
+            .context(AuthSnafu)?;
+
         let stmt = QueryLanguageParser::parse_promql(query).with_context(|_| ParsePromQLSnafu {
             query: query.clone(),
         })?;
@@ -602,6 +667,10 @@ impl PrometheusHandler for Instance {
             })?;
 
         Ok(interceptor.post_execute(output, query_ctx)?)
+    }
+
+    fn catalog_manager(&self) -> CatalogManagerRef {
+        self.catalog_manager.clone()
     }
 }
 
@@ -639,7 +708,7 @@ pub fn check_permission(
         }
         Statement::ShowTables(stmt) => {
             if let Some(database) = &stmt.database {
-                validate_catalog_and_schema(&query_ctx.current_catalog(), database, query_ctx)
+                validate_catalog_and_schema(query_ctx.current_catalog(), database, query_ctx)
                     .map_err(BoxedError::new)
                     .context(SqlExecInterceptedSnafu)?;
             }

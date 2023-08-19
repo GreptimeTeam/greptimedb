@@ -12,11 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_procedure::{watcher, ProcedureWithId};
 use common_query::Output;
+use common_telemetry::logging::info;
+use snafu::ResultExt;
 use table::engine::TableReference;
 use table::requests::TruncateTableRequest;
+use table_procedure::TruncateTableProcedure;
 
-use crate::error::Result;
+use crate::error::{self, Result};
 use crate::sql::SqlHandler;
 
 impl SqlHandler {
@@ -28,8 +32,32 @@ impl SqlHandler {
             table: &table_name,
         };
 
-        let _table = self.get_table(&table_ref).await?;
-        // TODO(DevilExileSu): implement truncate table-procedure.
+        let table = self.get_table(&table_ref).await?;
+        let engine_procedure = self.engine_procedure(table)?;
+
+        let procedure = TruncateTableProcedure::new(
+            req.clone(),
+            self.catalog_manager.clone(),
+            engine_procedure,
+        );
+
+        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+        let procedure_id = procedure_with_id.id;
+
+        info!(
+            "Truncate table {}, table_id {} by procedure {}",
+            table_ref, req.table_id, procedure_id
+        );
+
+        let mut watcher = self
+            .procedure_manager
+            .submit(procedure_with_id)
+            .await
+            .context(error::SubmitProcedureSnafu { procedure_id })?;
+
+        watcher::wait(&mut watcher)
+            .await
+            .context(error::WaitProcedureSnafu { procedure_id })?;
         Ok(Output::AffectedRows(0))
     }
 }
@@ -39,6 +67,7 @@ mod tests {
     use api::v1::greptime_request::Request;
     use api::v1::query_request::Query;
     use api::v1::QueryRequest;
+    use common_recordbatch::RecordBatches;
     use datatypes::prelude::ConcreteDataType;
     use query::parser::{QueryLanguageParser, QueryStatement};
     use query::query_engine::SqlStatementExecutor;
@@ -50,6 +79,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_truncate_table_by_procedure() {
+        common_telemetry::init_default_ut_logging();
         let instance = MockInstance::new("truncate_table_by_procedure").await;
 
         // Create table first.
@@ -90,5 +120,24 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(output, Output::AffectedRows(0)));
+
+        // Verify table is empty.
+        let query = Request::Query(QueryRequest {
+            query: Some(Query::Sql("SELECT * FROM demo".to_string())),
+        });
+
+        let output = instance
+            .inner()
+            .do_query(query, QueryContext::arc())
+            .await
+            .unwrap();
+        if let Output::Stream(stream) = output {
+            let output = RecordBatches::try_collect(stream)
+                .await
+                .unwrap()
+                .pretty_print()
+                .unwrap();
+            assert_eq!("++\n++", output)
+        }
     }
 }

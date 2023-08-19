@@ -78,7 +78,7 @@ impl HeartbeatStream {
     /// Fetch the next message from this stream.
     #[inline]
     pub async fn message(&mut self) -> Result<Option<HeartbeatResponse>> {
-        let res = self.stream.message().await.context(error::TonicStatusSnafu);
+        let res = self.stream.message().await.map_err(error::Error::from);
         if let Ok(Some(heartbeat)) = &res {
             util::check_response_header(heartbeat.header.as_ref())
                 .context(InvalidResponseHeaderSnafu)?;
@@ -107,7 +107,7 @@ impl Client {
         inner.start(urls).await
     }
 
-    pub async fn ask_leader(&mut self) -> Result<()> {
+    pub async fn ask_leader(&mut self) -> Result<String> {
         let inner = self.inner.read().await;
         inner.ask_leader().await
     }
@@ -169,7 +169,7 @@ impl Inner {
         Ok(())
     }
 
-    async fn ask_leader(&self) -> Result<()> {
+    async fn ask_leader(&self) -> Result<String> {
         ensure!(
             self.is_started(),
             error::IllegalGrpcClientStateSnafu {
@@ -177,8 +177,7 @@ impl Inner {
             }
         );
 
-        let _ = self.ask_leader.as_ref().unwrap().ask_leader().await;
-        Ok(())
+        self.ask_leader.as_ref().unwrap().ask_leader().await
     }
 
     async fn heartbeat(&self) -> Result<(HeartbeatSender, HeartbeatStream)> {
@@ -215,13 +214,13 @@ impl Inner {
         let mut stream = leader
             .heartbeat(receiver)
             .await
-            .context(error::TonicStatusSnafu)?
+            .map_err(error::Error::from)?
             .into_inner();
 
         let res = stream
             .message()
             .await
-            .context(error::TonicStatusSnafu)?
+            .map_err(error::Error::from)?
             .context(error::CreateHeartbeatStreamSnafu)?;
         info!("Success to create heartbeat stream to server: {:#?}", res);
 

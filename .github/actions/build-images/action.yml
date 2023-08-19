@@ -1,0 +1,62 @@
+name: Group for building greptimedb images
+description: Group for building greptimedb images
+inputs:
+  image-registry:
+    description: The image registry to store the images
+    required: true
+  image-namespace:
+    description: The namespace of the image registry to store the images
+    required: true
+  image-name:
+    description: The name of the image to build
+    required: false
+    default: greptimedb
+  image-registry-username:
+    description: The username to login to the image registry
+    required: true
+  image-registry-password:
+    description: The password to login to the image registry
+    required: true
+  version:
+    description: Version of the artifact
+    required: true
+  push-latest-tag:
+    description: Whether to push the latest tag
+    required: false
+    default: 'true'
+  dev-mode:
+    description: Enable dev mode, only build standard greptime
+    required: false
+    default: 'false'
+runs:
+  using: composite
+  steps:
+    - name: Build and push standard images to dockerhub
+      uses: ./.github/actions/build-greptime-images
+      with: # The image will be used as '${{ inputs.image-registry }}/${{ inputs.image-namespace }}/${{ inputs.image-name }}:${{ inputs.version }}'
+        image-registry: ${{ inputs.image-registry }}
+        image-namespace: ${{ inputs.image-namespace }}
+        image-registry-username: ${{ inputs.image-registry-username }}
+        image-registry-password: ${{ inputs.image-registry-password }}
+        image-name: ${{ inputs.image-name }}
+        image-tag: ${{ inputs.version }}
+        docker-file: docker/ci/ubuntu/Dockerfile
+        amd64-artifact-name: greptime-linux-amd64-pyo3-${{ inputs.version }}
+        arm64-artifact-name: greptime-linux-arm64-pyo3-${{ inputs.version }}
+        platforms: linux/amd64,linux/arm64
+        push-latest-tag: ${{ inputs.push-latest-tag }}
+
+    - name: Build and push centos images to dockerhub
+      if: ${{ inputs.dev-mode == 'false' }}
+      uses: ./.github/actions/build-greptime-images
+      with:
+        image-registry: ${{ inputs.image-registry }}
+        image-namespace: ${{ inputs.image-namespace }}
+        image-registry-username: ${{ inputs.image-registry-username }}
+        image-registry-password: ${{ inputs.image-registry-password }}
+        image-name: ${{ inputs.image-name }}-centos
+        image-tag: ${{ inputs.version }}
+        docker-file: docker/ci/centos/Dockerfile
+        amd64-artifact-name: greptime-linux-amd64-centos-${{ inputs.version }}
+        platforms: linux/amd64
+        push-latest-tag: ${{ inputs.push-latest-tag }}

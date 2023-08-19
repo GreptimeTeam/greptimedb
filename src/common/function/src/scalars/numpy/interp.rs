@@ -291,7 +291,7 @@ mod tests {
         ];
         let vector = interp(&args).unwrap();
         assert_eq!(4, vector.len());
-        let res = vec![3.0, 3.0, 2.5, 0.0];
+        let res = [3.0, 3.0, 2.5, 0.0];
         for (i, item) in res.iter().enumerate().take(vector.len()) {
             assert!(matches!(vector.get(i),Value::Float64(v) if v==*item));
         }
@@ -305,7 +305,7 @@ mod tests {
         let left = vec![-1];
         let right = vec![2];
 
-        let expect = vec![-1.0, 3.0, 2.5, 2.0, 0.0, 2.0];
+        let expect = [-1.0, 3.0, 2.5, 2.0, 0.0, 2.0];
 
         let args: Vec<VectorRef> = vec![
             Arc::new(Float64Vector::from_vec(x)),

@@ -12,19 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use api::v1::meta::{
     Partition as PbPartition, Peer as PbPeer, Region as PbRegion, RegionRoute as PbRegionRoute,
     RouteRequest as PbRouteRequest, RouteResponse as PbRouteResponse, Table as PbTable,
     TableId as PbTableId, TableRoute as PbTableRoute, TableRouteValue as PbTableRouteValue,
 };
-use serde::{Deserialize, Serialize, Serializer};
+use serde::ser::SerializeSeq;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use snafu::OptionExt;
 use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::TableId;
 
 use crate::error::{self, Result};
+use crate::key::RegionDistribution;
 use crate::peer::Peer;
 use crate::rpc::util;
 use crate::table_name::TableName;
@@ -72,11 +74,67 @@ impl TryFrom<PbRouteResponse> for RouteResponse {
     }
 }
 
+pub fn region_distribution(region_routes: &[RegionRoute]) -> Result<RegionDistribution> {
+    let mut regions_id_map = RegionDistribution::new();
+    for route in region_routes.iter() {
+        let node_id = route
+            .leader_peer
+            .as_ref()
+            .context(error::UnexpectedSnafu {
+                err_msg: "leader not found",
+            })?
+            .id;
+
+        let region_id = route.region.id.region_number();
+        regions_id_map.entry(node_id).or_default().push(region_id);
+    }
+    for (_, regions) in regions_id_map.iter_mut() {
+        // id asc
+        regions.sort()
+    }
+    Ok(regions_id_map)
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct TableRoute {
     pub table: Table,
     pub region_routes: Vec<RegionRoute>,
     region_leaders: HashMap<RegionNumber, Option<Peer>>,
+}
+
+pub fn find_leaders(region_routes: &[RegionRoute]) -> HashSet<Peer> {
+    region_routes
+        .iter()
+        .flat_map(|x| &x.leader_peer)
+        .cloned()
+        .collect()
+}
+
+pub fn find_leader_regions(region_routes: &[RegionRoute], datanode: &Peer) -> Vec<RegionNumber> {
+    region_routes
+        .iter()
+        .filter_map(|x| {
+            if let Some(peer) = &x.leader_peer {
+                if peer == datanode {
+                    return Some(x.region.id.region_number());
+                }
+            }
+            None
+        })
+        .collect()
+}
+
+pub fn extract_all_peers(region_routes: &[RegionRoute]) -> Vec<Peer> {
+    let mut peers = region_routes
+        .iter()
+        .flat_map(|x| x.leader_peer.iter().chain(x.follower_peers.iter()))
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    peers.sort_by_key(|x| x.id);
+
+    peers
 }
 
 impl TableRoute {
@@ -85,7 +143,6 @@ impl TableRoute {
             .iter()
             .map(|x| (x.region.id.region_number(), x.leader_peer.clone()))
             .collect::<HashMap<_, _>>();
-
         Self {
             table,
             region_routes,
@@ -193,25 +250,11 @@ impl TableRoute {
     }
 
     pub fn find_leaders(&self) -> HashSet<Peer> {
-        self.region_routes
-            .iter()
-            .flat_map(|x| &x.leader_peer)
-            .cloned()
-            .collect()
+        find_leaders(&self.region_routes)
     }
 
     pub fn find_leader_regions(&self, datanode: &Peer) -> Vec<RegionNumber> {
-        self.region_routes
-            .iter()
-            .filter_map(|x| {
-                if let Some(peer) = &x.leader_peer {
-                    if peer == datanode {
-                        return Some(x.region.id.region_number());
-                    }
-                }
-                None
-            })
-            .collect()
+        find_leader_regions(&self.region_routes, datanode)
     }
 
     pub fn find_region_leader(&self, region_number: RegionNumber) -> Option<&Peer> {
@@ -223,6 +266,7 @@ impl TableRoute {
 
 impl TryFrom<PbTableRouteValue> for TableRoute {
     type Error = error::Error;
+
     fn try_from(pb: PbTableRouteValue) -> Result<Self> {
         TableRoute::try_from_raw(
             &pb.peers,
@@ -233,11 +277,24 @@ impl TryFrom<PbTableRouteValue> for TableRoute {
     }
 }
 
+impl TryFrom<TableRoute> for PbTableRouteValue {
+    type Error = error::Error;
+
+    fn try_from(table_route: TableRoute) -> Result<Self> {
+        let (peers, table_route) = table_route.try_into_raw()?;
+
+        Ok(PbTableRouteValue {
+            peers,
+            table_route: Some(table_route),
+        })
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct Table {
     pub id: u64,
     pub table_name: TableName,
-    #[serde(serialize_with = "as_utf8")]
+    #[serde(serialize_with = "as_utf8", deserialize_with = "from_utf8")]
     pub table_schema: Vec<u8>,
 }
 
@@ -281,7 +338,7 @@ pub struct Region {
     pub id: RegionId,
     pub name: String,
     pub partition: Option<Partition>,
-    pub attrs: HashMap<String, String>,
+    pub attrs: BTreeMap<String, String>,
 }
 
 impl From<PbRegion> for Region {
@@ -290,7 +347,7 @@ impl From<PbRegion> for Region {
             id: r.id.into(),
             name: r.name,
             partition: r.partition.map(Into::into),
-            attrs: r.attrs,
+            attrs: r.attrs.into_iter().collect::<BTreeMap<_, _>>(),
         }
     }
 }
@@ -301,16 +358,16 @@ impl From<Region> for PbRegion {
             id: region.id.into(),
             name: region.name,
             partition: region.partition.map(Into::into),
-            attrs: region.attrs,
+            attrs: region.attrs.into_iter().collect::<HashMap<_, _>>(),
         }
     }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct Partition {
-    #[serde(serialize_with = "as_utf8_vec")]
+    #[serde(serialize_with = "as_utf8_vec", deserialize_with = "from_utf8_vec")]
     pub column_list: Vec<Vec<u8>>,
-    #[serde(serialize_with = "as_utf8_vec")]
+    #[serde(serialize_with = "as_utf8_vec", deserialize_with = "from_utf8_vec")]
     pub value_list: Vec<Vec<u8>>,
 }
 
@@ -322,19 +379,37 @@ fn as_utf8<S: Serializer>(val: &[u8], serializer: S) -> std::result::Result<S::O
     )
 }
 
+pub fn from_utf8<'de, D>(deserializer: D) -> std::result::Result<Vec<u8>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let s = String::deserialize(deserializer)?;
+
+    Ok(s.into_bytes())
+}
+
 fn as_utf8_vec<S: Serializer>(
     val: &[Vec<u8>],
     serializer: S,
 ) -> std::result::Result<S::Ok, S::Error> {
-    serializer.serialize_str(
-        val.iter()
-            .map(|v| {
-                String::from_utf8(v.clone()).unwrap_or_else(|_| "<unknown-not-UTF8>".to_string())
-            })
-            .collect::<Vec<String>>()
-            .join(",")
-            .as_str(),
-    )
+    let mut seq = serializer.serialize_seq(Some(val.len()))?;
+    for v in val {
+        seq.serialize_element(&String::from_utf8_lossy(v))?;
+    }
+    seq.end()
+}
+
+pub fn from_utf8_vec<'de, D>(deserializer: D) -> std::result::Result<Vec<Vec<u8>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let values = Vec::<String>::deserialize(deserializer)?;
+
+    let values = values
+        .into_iter()
+        .map(|value| value.into_bytes())
+        .collect::<Vec<_>>();
+    Ok(values)
 }
 
 impl From<Partition> for PbPartition {
@@ -364,6 +439,19 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn test_de_serialize_partition() {
+        let p = Partition {
+            column_list: vec![b"a".to_vec(), b"b".to_vec()],
+            value_list: vec![b"hi".to_vec(), b",".to_vec()],
+        };
+
+        let output = serde_json::to_string(&p).unwrap();
+        let got: Partition = serde_json::from_str(&output).unwrap();
+
+        assert_eq!(got, p);
+    }
 
     #[test]
     fn test_route_request_trans() {
@@ -513,7 +601,7 @@ mod tests {
                         id: 1.into(),
                         name: "r1".to_string(),
                         partition: None,
-                        attrs: HashMap::new(),
+                        attrs: BTreeMap::new(),
                     },
                     leader_peer: Some(Peer::new(2, "a2")),
                     follower_peers: vec![Peer::new(1, "a1"), Peer::new(3, "a3")],
@@ -523,7 +611,7 @@ mod tests {
                         id: 2.into(),
                         name: "r2".to_string(),
                         partition: None,
-                        attrs: HashMap::new(),
+                        attrs: BTreeMap::new(),
                     },
                     leader_peer: Some(Peer::new(1, "a1")),
                     follower_peers: vec![Peer::new(2, "a2"), Peer::new(3, "a3")],

@@ -16,22 +16,25 @@ use std::sync::{Arc, Weak};
 
 use arrow_schema::SchemaRef as ArrowSchemaRef;
 use common_catalog::consts::{
-    SEMANTIC_TYPE_FIELD, SEMANTIC_TYPE_PRIMARY_KEY, SEMANTIC_TYPE_TIME_INDEX,
+    INFORMATION_SCHEMA_COLUMNS_TABLE_ID, INFORMATION_SCHEMA_NAME, SEMANTIC_TYPE_FIELD,
+    SEMANTIC_TYPE_PRIMARY_KEY, SEMANTIC_TYPE_TIME_INDEX,
 };
 use common_error::ext::BoxedError;
 use common_query::physical_plan::TaskContext;
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
-use datafusion::datasource::streaming::PartitionStream as DfPartitionStream;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter as DfRecordBatchStreamAdapter;
+use datafusion::physical_plan::streaming::PartitionStream as DfPartitionStream;
 use datafusion::physical_plan::SendableRecordBatchStream as DfSendableRecordBatchStream;
 use datatypes::prelude::{ConcreteDataType, DataType};
 use datatypes::scalars::ScalarVectorBuilder;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::vectors::{StringVectorBuilder, VectorRef};
 use snafu::{OptionExt, ResultExt};
+use store_api::storage::TableId;
 
-use super::InformationStreamBuilder;
+use super::tables::InformationSchemaTables;
+use super::{InformationTable, COLUMNS, TABLES};
 use crate::error::{
     CreateRecordBatchSnafu, InternalSnafu, Result, UpgradeWeakCatalogManagerRefSnafu,
 };
@@ -52,19 +55,22 @@ const SEMANTIC_TYPE: &str = "semantic_type";
 
 impl InformationSchemaColumns {
     pub(super) fn new(catalog_name: String, catalog_manager: Weak<dyn CatalogManager>) -> Self {
-        let schema = Arc::new(Schema::new(vec![
+        Self {
+            schema: Self::schema(),
+            catalog_name,
+            catalog_manager,
+        }
+    }
+
+    fn schema() -> SchemaRef {
+        Arc::new(Schema::new(vec![
             ColumnSchema::new(TABLE_CATALOG, ConcreteDataType::string_datatype(), false),
             ColumnSchema::new(TABLE_SCHEMA, ConcreteDataType::string_datatype(), false),
             ColumnSchema::new(TABLE_NAME, ConcreteDataType::string_datatype(), false),
             ColumnSchema::new(COLUMN_NAME, ConcreteDataType::string_datatype(), false),
             ColumnSchema::new(DATA_TYPE, ConcreteDataType::string_datatype(), false),
             ColumnSchema::new(SEMANTIC_TYPE, ConcreteDataType::string_datatype(), false),
-        ]));
-        Self {
-            schema,
-            catalog_name,
-            catalog_manager,
-        }
+        ]))
     }
 
     fn builder(&self) -> InformationSchemaColumnsBuilder {
@@ -76,7 +82,15 @@ impl InformationSchemaColumns {
     }
 }
 
-impl InformationStreamBuilder for InformationSchemaColumns {
+impl InformationTable for InformationSchemaColumns {
+    fn table_id(&self) -> TableId {
+        INFORMATION_SCHEMA_COLUMNS_TABLE_ID
+    }
+
+    fn table_name(&self) -> &'static str {
+        COLUMNS
+    }
+
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }
@@ -153,9 +167,28 @@ impl InformationSchemaColumnsBuilder {
                 .table_names(&catalog_name, &schema_name)
                 .await?
             {
-                let Some(table) = catalog_manager.table(&catalog_name, &schema_name, &table_name).await? else { continue };
-                let keys = &table.table_info().meta.primary_key_indices;
-                let schema = table.schema();
+                let (keys, schema) = if let Some(table) = catalog_manager
+                    .table(&catalog_name, &schema_name, &table_name)
+                    .await?
+                {
+                    let keys = &table.table_info().meta.primary_key_indices;
+                    let schema = table.schema();
+                    (keys.clone(), schema)
+                } else {
+                    // TODO: this specific branch is only a workaround for FrontendCatalogManager.
+                    if schema_name == INFORMATION_SCHEMA_NAME {
+                        if table_name == COLUMNS {
+                            (vec![], InformationSchemaColumns::schema())
+                        } else if table_name == TABLES {
+                            (vec![], InformationSchemaTables::schema())
+                        } else {
+                            continue;
+                        }
+                    } else {
+                        continue;
+                    }
+                };
+
                 for (idx, column) in schema.column_schemas().iter().enumerate() {
                     let semantic_type = if column.is_time_index() {
                         SEMANTIC_TYPE_TIME_INDEX

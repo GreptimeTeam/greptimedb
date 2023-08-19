@@ -164,7 +164,7 @@ mod tests {
         };
         let partition: MetaPartition = def.try_into().unwrap();
         assert_eq!(
-            r#"{"column_list":"a,b","value_list":"\"MaxValue\",{\"Value\":{\"Int32\":1}}"}"#,
+            r#"{"column_list":["a","b"],"value_list":["\"MaxValue\"","{\"Value\":{\"Int32\":1}}"]}"#,
             serde_json::to_string(&partition).unwrap(),
         );
 

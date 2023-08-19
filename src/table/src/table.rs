@@ -47,9 +47,7 @@ pub trait Table: Send + Sync {
     fn table_info(&self) -> TableInfoRef;
 
     /// Get the type of this table for metadata/catalog purposes.
-    fn table_type(&self) -> TableType {
-        TableType::Base
-    }
+    fn table_type(&self) -> TableType;
 
     /// Insert values into table.
     ///
@@ -127,6 +125,13 @@ pub trait Table: Send + Sync {
         let _ = (region_number, wait);
         UnsupportedSnafu {
             operation: "COMPACTION",
+        }
+        .fail()?
+    }
+
+    async fn truncate(&self) -> Result<()> {
+        UnsupportedSnafu {
+            operation: "TRUNCATE",
         }
         .fail()?
     }

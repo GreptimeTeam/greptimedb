@@ -12,6 +12,8 @@ select * where "a" = "A";
 
 select TO_UNIXTIME('2023-03-01T06:35:02Z');
 
+select TO_UNIXTIME('    2023-03-01T06:35:02Z    ');
+
 select TO_UNIXTIME(2);
 
 create table test_unixtime(a int, b timestamp time index);
@@ -29,3 +31,9 @@ select b from test_unixtime;
 select TO_UNIXTIME(b) from test_unixtime;
 
 DROP TABLE test_unixtime;
+
+select INTERVAL '1 year 2 months 3 days 4 hours 5 minutes 6 seconds 100 microseconds';
+
+select INTERVAL '1 year 2 months 3 days 4 hours' + INTERVAL '1 year';
+
+select INTERVAL '1 year 2 months 3 days 4 hours' - INTERVAL '1 year';

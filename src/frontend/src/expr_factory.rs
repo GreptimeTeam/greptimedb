@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::alter_expr::Kind;
@@ -22,6 +21,7 @@ use api::v1::{
     DropColumns, RenameTable,
 };
 use common_error::ext::BoxedError;
+use common_grpc_expr::util::ColumnExpr;
 use datanode::instance::sql::table_idents_to_full_name;
 use datatypes::schema::ColumnSchema;
 use file_table_engine::table::immutable::ImmutableFileTableOptions;
@@ -33,49 +33,51 @@ use sql::statements::alter::{AlterTable, AlterTableOperation};
 use sql::statements::create::{CreateExternalTable, CreateTable, TIME_INDEX};
 use sql::statements::{column_def_to_schema, sql_column_def_to_grpc_column_def};
 use sql::util::to_lowercase_options_map;
+use table::engine::TableReference;
 use table::requests::{TableOptions, IMMUTABLE_TABLE_META_KEY};
 
 use crate::error::{
-    self, BuildCreateExprOnInsertionSnafu, ColumnDataTypeSnafu,
-    ConvertColumnDefaultConstraintSnafu, ExternalSnafu, IllegalPrimaryKeysDefSnafu,
-    InvalidSqlSnafu, ParseSqlSnafu, Result,
+    BuildCreateExprOnInsertionSnafu, ColumnDataTypeSnafu, ConvertColumnDefaultConstraintSnafu,
+    EncodeJsonSnafu, ExternalSnafu, IllegalPrimaryKeysDefSnafu, InvalidSqlSnafu, NotSupportedSnafu,
+    ParseSqlSnafu, PrepareImmutableTableSnafu, Result, UnrecognizedTableOptionSnafu,
 };
 
-pub type CreateExprFactoryRef = Arc<dyn CreateExprFactory + Send + Sync>;
+#[derive(Debug, Copy, Clone)]
+pub struct CreateExprFactory;
 
-#[async_trait::async_trait]
-pub trait CreateExprFactory {
-    async fn create_expr_by_columns(
+impl CreateExprFactory {
+    pub fn create_table_expr_by_columns(
         &self,
-        catalog_name: &str,
-        schema_name: &str,
-        table_name: &str,
-        columns: &[Column],
-        engine: &str,
-    ) -> crate::error::Result<CreateTableExpr>;
-}
-
-#[derive(Debug)]
-pub struct DefaultCreateExprFactory;
-
-#[async_trait::async_trait]
-impl CreateExprFactory for DefaultCreateExprFactory {
-    async fn create_expr_by_columns(
-        &self,
-        catalog_name: &str,
-        schema_name: &str,
-        table_name: &str,
+        table_name: &TableReference<'_>,
         columns: &[Column],
         engine: &str,
     ) -> Result<CreateTableExpr> {
-        let table_id = None;
-        let create_expr = common_grpc_expr::build_create_expr_from_insertion(
-            catalog_name,
-            schema_name,
-            table_id,
+        let column_exprs = ColumnExpr::from_columns(columns);
+        let create_expr = common_grpc_expr::util::build_create_table_expr(
+            None,
             table_name,
-            columns,
+            column_exprs,
             engine,
+            "Created on insertion",
+        )
+        .context(BuildCreateExprOnInsertionSnafu)?;
+
+        Ok(create_expr)
+    }
+
+    pub fn create_table_expr_by_column_schemas(
+        &self,
+        table_name: &TableReference<'_>,
+        column_schemas: &[api::v1::ColumnSchema],
+        engine: &str,
+    ) -> Result<CreateTableExpr> {
+        let column_exprs = ColumnExpr::from_column_schemas(column_schemas);
+        let create_expr = common_grpc_expr::util::build_create_table_expr(
+            None,
+            table_name,
+            column_exprs,
+            engine,
+            "Created on insertion",
         )
         .context(BuildCreateExprOnInsertionSnafu)?;
 
@@ -90,18 +92,18 @@ pub(crate) async fn create_external_expr(
     let (catalog_name, schema_name, table_name) =
         table_idents_to_full_name(&create.name, query_ctx)
             .map_err(BoxedError::new)
-            .context(error::ExternalSnafu)?;
+            .context(ExternalSnafu)?;
 
     let mut options = create.options;
 
     let (files, schema) = prepare_immutable_file_table_files_and_schema(&options, &create.columns)
         .await
-        .context(error::PrepareImmutableTableSnafu)?;
+        .context(PrepareImmutableTableSnafu)?;
 
     let meta = ImmutableFileTableOptions { files };
     let _ = options.insert(
         IMMUTABLE_TABLE_META_KEY.to_string(),
-        serde_json::to_string(&meta).context(error::EncodeJsonSnafu)?,
+        serde_json::to_string(&meta).context(EncodeJsonSnafu)?,
     );
 
     let expr = CreateTableExpr {
@@ -126,12 +128,12 @@ pub fn create_to_expr(create: &CreateTable, query_ctx: QueryContextRef) -> Resul
     let (catalog_name, schema_name, table_name) =
         table_idents_to_full_name(&create.name, query_ctx)
             .map_err(BoxedError::new)
-            .context(error::ExternalSnafu)?;
+            .context(ExternalSnafu)?;
 
     let time_index = find_time_index(&create.constraints)?;
     let table_options = HashMap::from(
         &TableOptions::try_from(&to_lowercase_options_map(&create.options))
-            .context(error::UnrecognizedTableOptionSnafu)?,
+            .context(UnrecognizedTableOptionSnafu)?,
     );
     let expr = CreateTableExpr {
         catalog_name,
@@ -201,7 +203,7 @@ fn find_primary_keys(
     Ok(primary_keys)
 }
 
-pub fn find_time_index(constraints: &[TableConstraint]) -> crate::error::Result<String> {
+pub fn find_time_index(constraints: &[TableConstraint]) -> Result<String> {
     let time_index = constraints
         .iter()
         .filter_map(|constraint| match constraint {
@@ -229,10 +231,7 @@ pub fn find_time_index(constraints: &[TableConstraint]) -> crate::error::Result<
     Ok(time_index.first().unwrap().to_string())
 }
 
-fn columns_to_expr(
-    column_defs: &[ColumnDef],
-    time_index: &str,
-) -> crate::error::Result<Vec<api::v1::ColumnDef>> {
+fn columns_to_expr(column_defs: &[ColumnDef], time_index: &str) -> Result<Vec<api::v1::ColumnDef>> {
     let column_schemas = column_defs
         .iter()
         .map(|c| column_def_to_schema(c, c.name.to_string() == time_index).context(ParseSqlSnafu))
@@ -254,7 +253,7 @@ pub(crate) fn column_schemas_to_defs(
 
     column_schemas
         .iter()
-        .zip(column_datatypes.into_iter())
+        .zip(column_datatypes)
         .map(|(schema, datatype)| {
             Ok(api::v1::ColumnDef {
                 name: schema.name.clone(),
@@ -286,7 +285,7 @@ pub(crate) fn to_alter_expr(
 
     let kind = match alter_table.alter_operation() {
         AlterTableOperation::AddConstraint(_) => {
-            return error::NotSupportedSnafu {
+            return NotSupportedSnafu {
                 feat: "ADD CONSTRAINT",
             }
             .fail();
@@ -341,7 +340,9 @@ mod tests {
             .pop()
             .unwrap();
 
-        let Statement::CreateTable(create_table) = stmt else { unreachable!() };
+        let Statement::CreateTable(create_table) = stmt else {
+            unreachable!()
+        };
         let expr = create_to_expr(&create_table, QueryContext::arc()).unwrap();
         assert_eq!("3days", expr.table_options.get("ttl").unwrap());
         assert_eq!(

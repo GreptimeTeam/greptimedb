@@ -30,8 +30,8 @@ use datafusion::logical_expr::{EmptyRelation, Expr, LogicalPlan, UserDefinedLogi
 use datafusion::physical_expr::PhysicalSortExpr;
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
-    DisplayFormatType, ExecutionPlan, Partitioning, RecordBatchStream, SendableRecordBatchStream,
-    Statistics,
+    DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, RecordBatchStream,
+    SendableRecordBatchStream, Statistics,
 };
 use datafusion::sql::TableReference;
 use futures::{Stream, StreamExt};
@@ -115,7 +115,11 @@ impl RangeManipulate {
         // process time index column
         // the raw timestamp field is preserved. And a new timestamp_range field is appended to the last.
         let Some(ts_col_index) = input_schema.index_of_column_by_name(None, time_index)? else {
-            return Err(datafusion::common::field_not_found(None::<TableReference>, time_index, input_schema.as_ref()))
+            return Err(datafusion::common::field_not_found(
+                None::<TableReference>,
+                time_index,
+                input_schema.as_ref(),
+            ));
         };
         let ts_col_field = columns[ts_col_index].field();
         let timestamp_range_field = Field::new(
@@ -128,7 +132,11 @@ impl RangeManipulate {
         // process value columns
         for name in field_columns {
             let Some(index) = input_schema.index_of_column_by_name(None, name)? else {
-                return Err(datafusion::common::field_not_found(None::<TableReference>, name, input_schema.as_ref()))
+                return Err(datafusion::common::field_not_found(
+                    None::<TableReference>,
+                    name,
+                    input_schema.as_ref(),
+                ));
             };
             columns[index] = DFField::from(RangeArray::convert_field(columns[index].field()));
         }
@@ -321,18 +329,6 @@ impl ExecutionPlan for RangeManipulateExec {
         }))
     }
 
-    fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match t {
-            DisplayFormatType::Default => {
-                write!(
-                    f,
-                    "PromRangeManipulateExec: req range=[{}..{}], interval=[{}], eval range=[{}], time index=[{}]",
-                   self.start, self.end, self.interval, self.range, self.time_index_column
-                )
-            }
-        }
-    }
-
     fn metrics(&self) -> Option<MetricsSet> {
         Some(self.metric.clone_inner())
     }
@@ -353,6 +349,20 @@ impl ExecutionPlan for RangeManipulateExec {
             // TODO(ruihang): support this column statistics
             column_statistics: None,
             is_exact: false,
+        }
+    }
+}
+
+impl DisplayAs for RangeManipulateExec {
+    fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match t {
+            DisplayFormatType::Default | DisplayFormatType::Verbose => {
+                write!(
+                    f,
+                    "PromRangeManipulateExec: req range=[{}..{}], interval=[{}], eval range=[{}], time index=[{}]",
+                   self.start, self.end, self.interval, self.range, self.time_index_column
+                )
+            }
         }
     }
 }
@@ -490,7 +500,6 @@ mod test {
         ArrowPrimitiveType, DataType, Field, Int64Type, Schema, TimestampMillisecondType,
     };
     use datafusion::common::ToDFSchema;
-    use datafusion::from_slice::FromSlice;
     use datafusion::physical_plan::memory::MemoryExec;
     use datafusion::prelude::SessionContext;
     use datatypes::arrow::array::TimestampMillisecondArray;
@@ -506,13 +515,13 @@ mod test {
             Field::new("value_2", DataType::Float64, true),
             Field::new("path", DataType::Utf8, true),
         ]));
-        let timestamp_column = Arc::new(TimestampMillisecondArray::from_slice([
+        let timestamp_column = Arc::new(TimestampMillisecondArray::from(vec![
             0, 30_000, 60_000, 90_000, 120_000, // every 30s
             180_000, 240_000, // every 60s
             241_000, 271_000, 291_000, // others
         ])) as _;
-        let field_column: ArrayRef = Arc::new(Float64Array::from_slice([1.0; 10])) as _;
-        let path_column = Arc::new(StringArray::from_slice(["foo"; 10])) as _;
+        let field_column: ArrayRef = Arc::new(Float64Array::from(vec![1.0; 10])) as _;
+        let path_column = Arc::new(StringArray::from(vec!["foo"; 10])) as _;
         let data = RecordBatch::try_new(
             schema.clone(),
             vec![

@@ -14,7 +14,9 @@
 
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
+use common_error::{GREPTIME_ERROR_CODE, GREPTIME_ERROR_MSG};
 use snafu::{Location, Snafu};
+use tonic::Status;
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
@@ -22,11 +24,8 @@ pub enum Error {
     #[snafu(display("Illegal GRPC client state: {}", err_msg))]
     IllegalGrpcClientState { err_msg: String, location: Location },
 
-    #[snafu(display("Tonic internal error, source: {}", source))]
-    TonicStatus {
-        source: tonic::Status,
-        location: Location,
-    },
+    #[snafu(display("{}", msg))]
+    MetaServer { code: StatusCode, msg: String },
 
     #[snafu(display("Failed to ask leader from all endpoints"))]
     AskLeader { location: Location },
@@ -79,7 +78,6 @@ impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
             Error::IllegalGrpcClientState { .. }
-            | Error::TonicStatus { .. }
             | Error::AskLeader { .. }
             | Error::NoLeader { .. }
             | Error::NotStarted { .. }
@@ -87,9 +85,37 @@ impl ErrorExt for Error {
             | Error::CreateHeartbeatStream { .. }
             | Error::CreateChannel { .. } => StatusCode::Internal,
 
+            Error::MetaServer { code, .. } => *code,
+
             Error::InvalidResponseHeader { source, .. }
             | Error::ConvertMetaRequest { source, .. }
             | Error::ConvertMetaResponse { source, .. } => source.status_code(),
         }
+    }
+}
+
+// FIXME(dennis): partial duplicated with src/client/src/error.rs
+impl From<Status> for Error {
+    fn from(e: Status) -> Self {
+        fn get_metadata_value(s: &Status, key: &str) -> Option<String> {
+            s.metadata()
+                .get(key)
+                .and_then(|v| String::from_utf8(v.as_bytes().to_vec()).ok())
+        }
+
+        let code = get_metadata_value(&e, GREPTIME_ERROR_CODE)
+            .and_then(|s| {
+                if let Ok(code) = s.parse::<u32>() {
+                    StatusCode::from_u32(code)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(StatusCode::Internal);
+
+        let msg =
+            get_metadata_value(&e, GREPTIME_ERROR_MSG).unwrap_or_else(|| e.message().to_string());
+
+        Self::MetaServer { code, msg }
     }
 }

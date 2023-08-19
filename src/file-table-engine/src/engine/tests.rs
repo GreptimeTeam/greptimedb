@@ -17,7 +17,9 @@ use std::sync::Arc;
 
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, IMMUTABLE_FILE_ENGINE};
 use table::engine::{EngineContext, TableEngine, TableEngineProcedure};
-use table::requests::{AlterKind, AlterTableRequest, DropTableRequest, OpenTableRequest};
+use table::requests::{
+    AlterKind, AlterTableRequest, DropTableRequest, OpenTableRequest, TruncateTableRequest,
+};
 use table::{error as table_error, Table};
 
 use crate::config::EngineConfig;
@@ -215,4 +217,30 @@ async fn test_create_drop_table_procedure() {
         .get_table(&engine_ctx, table_id)
         .unwrap()
         .is_none());
+}
+
+#[tokio::test]
+async fn test_truncate_table() {
+    common_telemetry::init_default_ut_logging();
+    let TestEngineComponents {
+        table_engine,
+        dir: _dir,
+        table_ref,
+        ..
+    } = test_util::setup_test_engine_and_table("test_truncate_table").await;
+
+    let truncate_req = TruncateTableRequest {
+        catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+        schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+        table_name: TEST_TABLE_NAME.to_string(),
+        table_id: table_ref.table_info().ident.table_id,
+    };
+
+    let unsupported = table_engine
+        .truncate_table(&EngineContext::default(), truncate_req)
+        .await
+        .err()
+        .unwrap();
+
+    assert_matches!(unsupported, table_error::Error::Unsupported { .. })
 }

@@ -19,6 +19,8 @@ use promql::extension_plan::{
     EmptyMetric, InstantManipulate, RangeManipulate, SeriesDivide, SeriesNormalize,
 };
 
+use crate::dist_plan::MergeScanLogicalPlan;
+
 #[allow(dead_code)]
 pub enum Commutativity {
     Commutative,
@@ -27,6 +29,7 @@ pub enum Commutativity {
     TransformedCommutative(Option<Transformer>),
     NonCommutative,
     Unimplemented,
+    CheckPartition,
     /// For unrelated plans like DDL
     Unsupported,
 }
@@ -36,7 +39,15 @@ pub struct Categorizer {}
 impl Categorizer {
     pub fn check_plan(plan: &LogicalPlan) -> Commutativity {
         match plan {
-            LogicalPlan::Projection(_) => Commutativity::Unimplemented,
+            LogicalPlan::Projection(proj) => {
+                for expr in &proj.expr {
+                    let commutativity = Self::check_expr(expr);
+                    if !matches!(commutativity, Commutativity::Commutative) {
+                        return commutativity;
+                    }
+                }
+                Commutativity::Commutative
+            }
             // TODO(ruihang): Change this to Commutative once Like is supported in substrait
             LogicalPlan::Filter(filter) => Self::check_expr(&filter.predicate),
             LogicalPlan::Window(_) => Commutativity::Unimplemented,
@@ -44,7 +55,7 @@ impl Categorizer {
                 // check all children exprs and uses the strictest level
                 Commutativity::Unimplemented
             }
-            LogicalPlan::Sort(_) => Commutativity::NonCommutative,
+            LogicalPlan::Sort(_) => Commutativity::Unimplemented,
             LogicalPlan::Join(_) => Commutativity::NonCommutative,
             LogicalPlan::CrossJoin(_) => Commutativity::NonCommutative,
             LogicalPlan::Repartition(_) => {
@@ -52,7 +63,7 @@ impl Categorizer {
                 Commutativity::Unimplemented
             }
             LogicalPlan::Union(_) => Commutativity::Unimplemented,
-            LogicalPlan::TableScan(_) => Commutativity::NonCommutative,
+            LogicalPlan::TableScan(_) => Commutativity::CheckPartition,
             LogicalPlan::EmptyRelation(_) => Commutativity::NonCommutative,
             LogicalPlan::Subquery(_) => Commutativity::Unimplemented,
             LogicalPlan::SubqueryAlias(_) => Commutativity::Unimplemented,
@@ -60,7 +71,7 @@ impl Categorizer {
             LogicalPlan::Extension(extension) => {
                 Self::check_extension_plan(extension.node.as_ref() as _)
             }
-            LogicalPlan::Distinct(_) => Commutativity::PartialCommutative,
+            LogicalPlan::Distinct(_) => Commutativity::Unimplemented,
             LogicalPlan::Unnest(_) => Commutativity::Commutative,
             LogicalPlan::Statement(_) => Commutativity::Unsupported,
             LogicalPlan::Values(_) => Commutativity::Unsupported,
@@ -79,7 +90,8 @@ impl Categorizer {
                 || name == InstantManipulate::name()
                 || name == SeriesNormalize::name()
                 || name == RangeManipulate::name()
-                || name == SeriesDivide::name() =>
+                || name == SeriesDivide::name()
+                || name == MergeScanLogicalPlan::name() =>
             {
                 Commutativity::Commutative
             }
@@ -89,8 +101,7 @@ impl Categorizer {
 
     pub fn check_expr(expr: &Expr) -> Commutativity {
         match expr {
-            Expr::Alias(_, _)
-            | Expr::Column(_)
+            Expr::Column(_)
             | Expr::ScalarVariable(_, _)
             | Expr::Literal(_)
             | Expr::BinaryExpr(_)
@@ -107,7 +118,6 @@ impl Categorizer {
             | Expr::Exists(_) => Commutativity::Commutative,
 
             Expr::Like(_)
-            | Expr::ILike(_)
             | Expr::SimilarTo(_)
             | Expr::IsUnknown(_)
             | Expr::IsNotUnknown(_)
@@ -124,7 +134,9 @@ impl Categorizer {
             | Expr::InSubquery(_)
             | Expr::ScalarSubquery(_)
             | Expr::Wildcard => Commutativity::Unimplemented,
-            Expr::QualifiedWildcard { .. }
+
+            Expr::Alias(_)
+            | Expr::QualifiedWildcard { .. }
             | Expr::GroupingSet(_)
             | Expr::Placeholder(_)
             | Expr::OuterReferenceColumn(_, _) => Commutativity::Unimplemented,

@@ -109,9 +109,9 @@ impl DatafusionQueryEngine {
             }
         );
 
-        let default_catalog = query_ctx.current_catalog();
-        let default_schema = query_ctx.current_schema();
-        let table_name = dml.table_name.resolve(&default_catalog, &default_schema);
+        let default_catalog = &query_ctx.current_catalog().to_owned();
+        let default_schema = &query_ctx.current_schema().to_owned();
+        let table_name = dml.table_name.resolve(default_catalog, default_schema);
         let table = self.find_table(&table_name).await?;
 
         let output = self
@@ -146,6 +146,9 @@ impl DatafusionQueryEngine {
         table: &TableRef,
         column_vectors: HashMap<String, VectorRef>,
     ) -> Result<usize> {
+        let catalog_name = table_name.catalog.to_string();
+        let schema_name = table_name.schema.to_string();
+        let table_name = table_name.table.to_string();
         let table_schema = table.schema();
         let ts_column = table_schema
             .timestamp_column()
@@ -165,6 +168,9 @@ impl DatafusionQueryEngine {
             .collect::<HashMap<_, _>>();
 
         let request = DeleteRequest {
+            catalog_name,
+            schema_name,
+            table_name,
             key_column_values: column_vectors,
         };
 
@@ -507,7 +513,7 @@ mod tests {
             schema: DEFAULT_SCHEMA_NAME.to_string(),
             table_name: NUMBERS_TABLE_NAME.to_string(),
             table_id: NUMBERS_TABLE_ID,
-            table: Arc::new(NumbersTable::default()),
+            table: NumbersTable::table(NUMBERS_TABLE_ID),
         };
         let _ = catalog_manager.register_table(req).await.unwrap();
 
@@ -654,7 +660,9 @@ mod tests {
         let columns = vec![builder.to_vector()];
         let record_batch = RecordBatch::new(schema, columns).unwrap();
         let output = execute_show_with_filter(record_batch, None).await.unwrap();
-        let Output::RecordBatches(record_batches) = output else {unreachable!()};
+        let Output::RecordBatches(record_batches) = output else {
+            unreachable!()
+        };
         let expected = "\
 +----------------+
 | Tables         |
@@ -682,12 +690,18 @@ mod tests {
         )
         .unwrap()[0]
             .clone();
-        let Statement::ShowTables(ShowTables { kind, .. }) = statement else {unreachable!()};
-        let ShowKind::Where(filter) = kind else {unreachable!()};
+        let Statement::ShowTables(ShowTables { kind, .. }) = statement else {
+            unreachable!()
+        };
+        let ShowKind::Where(filter) = kind else {
+            unreachable!()
+        };
         let output = execute_show_with_filter(record_batch, Some(filter))
             .await
             .unwrap();
-        let Output::RecordBatches(record_batches) = output else {unreachable!()};
+        let Output::RecordBatches(record_batches) = output else {
+            unreachable!()
+        };
         let expected = "\
 +---------+
 | Tables  |

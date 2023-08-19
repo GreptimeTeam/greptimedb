@@ -18,7 +18,9 @@ use std::time::Instant;
 use api::helper::request_type;
 use api::v1::auth_header::AuthScheme;
 use api::v1::{Basic, GreptimeRequest, RequestHeader};
+use auth::{Identity, Password, UserInfoRef, UserProviderRef};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_query::Output;
@@ -28,15 +30,11 @@ use metrics::{histogram, increment_counter};
 use session::context::{QueryContextBuilder, QueryContextRef};
 use snafu::{OptionExt, ResultExt};
 
-use crate::auth::{Identity, Password, UserProviderRef};
 use crate::error::Error::UnsupportedAuthScheme;
-use crate::error::{
-    AuthSnafu, InvalidQuerySnafu, JoinTaskSnafu, NotFoundAuthHeaderSnafu, Result as InternalResult,
-};
-use crate::grpc::TonicResult;
+use crate::error::{AuthSnafu, InvalidQuerySnafu, JoinTaskSnafu, NotFoundAuthHeaderSnafu, Result};
 use crate::metrics::{
-    METRIC_AUTH_FAILURE, METRIC_CODE_LABEL, METRIC_SERVER_GRPC_DB_REQUEST_TIMER,
-    METRIC_STATUS_LABEL, METRIC_TYPE_LABEL,
+    METRIC_AUTH_FAILURE, METRIC_CODE_LABEL, METRIC_DB_LABEL, METRIC_SERVER_GRPC_DB_REQUEST_TIMER,
+    METRIC_TYPE_LABEL,
 };
 use crate::query_handler::grpc::ServerGrpcQueryHandlerRef;
 
@@ -59,18 +57,16 @@ impl GreptimeRequestHandler {
         }
     }
 
-    pub(crate) async fn handle_request(
-        &self,
-        request: GreptimeRequest,
-    ) -> TonicResult<InternalResult<Output>> {
+    pub(crate) async fn handle_request(&self, request: GreptimeRequest) -> Result<Output> {
         let query = request.request.context(InvalidQuerySnafu {
             reason: "Expecting non-empty GreptimeRequest.",
         })?;
 
         let header = request.header.as_ref();
         let query_ctx = create_query_context(header);
+        let user_info = auth(self.user_provider.clone(), header, &query_ctx).await?;
+        query_ctx.set_current_user(user_info);
 
-        let _ = self.auth(header, &query_ctx).await?;
         let handler = self.handler.clone();
         let request_type = request_type(&query);
         let db = query_ctx.get_db_string();
@@ -95,53 +91,53 @@ impl GreptimeRequestHandler {
             })
         });
 
-        let output = handle.await.context(JoinTaskSnafu).map_err(|e| {
+        handle.await.context(JoinTaskSnafu).map_err(|e| {
             timer.record(e.status_code());
             e
-        })?;
-        Ok(output)
+        })?
     }
+}
 
-    async fn auth(
-        &self,
-        header: Option<&RequestHeader>,
-        query_ctx: &QueryContextRef,
-    ) -> TonicResult<InternalResult<()>> {
-        let Some(user_provider) = self.user_provider.as_ref() else { return Ok(Ok(())) };
+pub(crate) async fn auth(
+    user_provider: Option<UserProviderRef>,
+    header: Option<&RequestHeader>,
+    query_ctx: &QueryContextRef,
+) -> Result<Option<UserInfoRef>> {
+    let Some(user_provider) = user_provider else {
+        return Ok(None);
+    };
 
-        let auth_scheme = header
-            .and_then(|header| {
-                header
-                    .authorization
-                    .as_ref()
-                    .and_then(|x| x.auth_scheme.clone())
-            })
-            .context(NotFoundAuthHeaderSnafu)?;
+    let auth_scheme = header
+        .and_then(|header| {
+            header
+                .authorization
+                .as_ref()
+                .and_then(|x| x.auth_scheme.clone())
+        })
+        .context(NotFoundAuthHeaderSnafu)?;
 
-        let res = match auth_scheme {
-            AuthScheme::Basic(Basic { username, password }) => user_provider
-                .auth(
-                    Identity::UserId(&username, None),
-                    Password::PlainText(password.into()),
-                    &query_ctx.current_catalog(),
-                    &query_ctx.current_schema(),
-                )
-                .await
-                .context(AuthSnafu),
-            AuthScheme::Token(_) => Err(UnsupportedAuthScheme {
-                name: "Token AuthScheme".to_string(),
-            }),
-        }
-        .map(|_| ())
-        .map_err(|e| {
-            increment_counter!(
-                METRIC_AUTH_FAILURE,
-                &[(METRIC_CODE_LABEL, format!("{}", e.status_code()))]
-            );
-            e
-        });
-        Ok(res)
+    match auth_scheme {
+        AuthScheme::Basic(Basic { username, password }) => user_provider
+            .auth(
+                Identity::UserId(&username, None),
+                Password::PlainText(password.into()),
+                query_ctx.current_catalog(),
+                query_ctx.current_schema(),
+            )
+            .await
+            .context(AuthSnafu),
+        AuthScheme::Token(_) => Err(UnsupportedAuthScheme {
+            name: "Token AuthScheme".to_string(),
+        }),
     }
+    .map(Some)
+    .map_err(|e| {
+        increment_counter!(
+            METRIC_AUTH_FAILURE,
+            &[(METRIC_CODE_LABEL, format!("{}", e.status_code()))]
+        );
+        e
+    })
 }
 
 pub(crate) fn create_query_context(header: Option<&RequestHeader>) -> QueryContextRef {
@@ -150,7 +146,7 @@ pub(crate) fn create_query_context(header: Option<&RequestHeader>) -> QueryConte
             // We provide dbname field in newer versions of protos/sdks
             // parse dbname from header in priority
             if !header.dbname.is_empty() {
-                crate::parse_catalog_and_schema_from_client_database_name(&header.dbname)
+                parse_catalog_and_schema_from_db_string(&header.dbname)
             } else {
                 (
                     if !header.catalog.is_empty() {
@@ -208,9 +204,9 @@ impl Drop for RequestTimer {
             METRIC_SERVER_GRPC_DB_REQUEST_TIMER,
             self.start.elapsed(),
             &[
-                (METRIC_CODE_LABEL, std::mem::take(&mut self.db)),
+                (METRIC_DB_LABEL, std::mem::take(&mut self.db)),
                 (METRIC_TYPE_LABEL, self.request_type.to_string()),
-                (METRIC_STATUS_LABEL, self.status_code.to_string())
+                (METRIC_CODE_LABEL, self.status_code.to_string())
             ]
         );
     }

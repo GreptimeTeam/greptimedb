@@ -474,7 +474,10 @@ impl ProcedureManager for LocalManager {
             if message.parent_id.is_none() {
                 // This is the root procedure. We only submit the root procedure as it will
                 // submit sub-procedures to the manager.
-                let Some(loaded_procedure) = self.manager_ctx.load_one_procedure_from_message(*procedure_id, message) else {
+                let Some(loaded_procedure) = self
+                    .manager_ctx
+                    .load_one_procedure_from_message(*procedure_id, message)
+                else {
                     // Try to load other procedures.
                     continue;
                 };

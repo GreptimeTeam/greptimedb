@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use auth::UserProviderRef;
 use clap::Parser;
 use common_base::Plugins;
 use common_telemetry::logging;
@@ -21,9 +22,8 @@ use frontend::frontend::FrontendOptions;
 use frontend::instance::{FrontendInstance, Instance as FeInstance};
 use frontend::service_config::{InfluxdbOptions, PrometheusOptions};
 use meta_client::MetaClientOptions;
-use servers::auth::UserProviderRef;
 use servers::tls::{TlsMode, TlsOption};
-use servers::{auth, Mode};
+use servers::Mode;
 use snafu::ResultExt;
 
 use crate::error::{self, IllegalAuthConfigSnafu, Result, StartCatalogManagerSnafu};
@@ -236,10 +236,10 @@ mod tests {
     use std::io::Write;
     use std::time::Duration;
 
+    use auth::{Identity, Password, UserProviderRef};
     use common_base::readable_size::ReadableSize;
     use common_test_util::temp_dir::create_named_temp_file;
     use frontend::service_config::GrpcOptions;
-    use servers::auth::{Identity, Password, UserProviderRef};
 
     use super::*;
     use crate::options::ENV_VAR_SEP;
@@ -257,8 +257,10 @@ mod tests {
             ..Default::default()
         };
 
-        let Options::Frontend(opts) =
-            command.load_options(TopLevelOptions::default()).unwrap() else { unreachable!() };
+        let Options::Frontend(opts) = command.load_options(TopLevelOptions::default()).unwrap()
+        else {
+            unreachable!()
+        };
 
         assert_eq!(opts.http_options.as_ref().unwrap().addr, "127.0.0.1:1234");
         assert_eq!(
@@ -323,8 +325,10 @@ mod tests {
             ..Default::default()
         };
 
-        let Options::Frontend(fe_opts) =
-            command.load_options(TopLevelOptions::default()).unwrap() else {unreachable!()};
+        let Options::Frontend(fe_opts) = command.load_options(TopLevelOptions::default()).unwrap()
+        else {
+            unreachable!()
+        };
         assert_eq!(Mode::Distributed, fe_opts.mode);
         assert_eq!(
             "127.0.0.1:4000".to_string(),
@@ -404,10 +408,10 @@ mod tests {
 
         let env_prefix = "FRONTEND_UT";
         temp_env::with_vars(
-            vec![
+            [
                 (
                     // mysql_options.addr = 127.0.0.1:14002
-                    vec![
+                    [
                         env_prefix.to_string(),
                         "mysql_options".to_uppercase(),
                         "addr".to_uppercase(),
@@ -417,7 +421,7 @@ mod tests {
                 ),
                 (
                     // mysql_options.runtime_size = 11
-                    vec![
+                    [
                         env_prefix.to_string(),
                         "mysql_options".to_uppercase(),
                         "runtime_size".to_uppercase(),
@@ -427,7 +431,7 @@ mod tests {
                 ),
                 (
                     // http_options.addr = 127.0.0.1:24000
-                    vec![
+                    [
                         env_prefix.to_string(),
                         "http_options".to_uppercase(),
                         "addr".to_uppercase(),
@@ -437,7 +441,7 @@ mod tests {
                 ),
                 (
                     // meta_client_options.metasrv_addrs = 127.0.0.1:3001,127.0.0.1:3002,127.0.0.1:3003
-                    vec![
+                    [
                         env_prefix.to_string(),
                         "meta_client_options".to_uppercase(),
                         "metasrv_addrs".to_uppercase(),
@@ -458,8 +462,10 @@ mod tests {
                     log_dir: None,
                     log_level: Some("error".to_string()),
                 };
-                let Options::Frontend(fe_opts) =
-                    command.load_options(top_level_opts).unwrap() else {unreachable!()};
+                let Options::Frontend(fe_opts) = command.load_options(top_level_opts).unwrap()
+                else {
+                    unreachable!()
+                };
 
                 // Should be read from env, env > default values.
                 assert_eq!(fe_opts.mysql_options.as_ref().unwrap().runtime_size, 11);

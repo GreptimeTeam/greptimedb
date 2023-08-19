@@ -43,9 +43,11 @@ use table::engine::{
 use table::metadata::{TableId, TableInfo, TableVersion};
 use table::requests::{
     AlterTableRequest, CloseTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest,
+    TruncateTableRequest,
 };
 use table::{error as table_error, Result as TableResult, Table, TableRef};
 
+use self::procedure::TruncateMitoTable;
 use crate::config::EngineConfig;
 use crate::engine::procedure::{AlterMitoTable, CreateMitoTable, DropMitoTable, TableCreator};
 use crate::error::{
@@ -184,6 +186,14 @@ impl<S: StorageEngine> TableEngine for MitoEngine<S> {
     async fn close(&self) -> TableResult<()> {
         self.inner.close().await
     }
+
+    async fn truncate_table(
+        &self,
+        _ctx: &EngineContext,
+        request: TruncateTableRequest,
+    ) -> TableResult<bool> {
+        self.inner.truncate_table(request).await
+    }
 }
 
 impl<S: StorageEngine> TableEngineProcedure for MitoEngine<S> {
@@ -224,6 +234,19 @@ impl<S: StorageEngine> TableEngineProcedure for MitoEngine<S> {
     ) -> TableResult<BoxedProcedure> {
         let procedure = Box::new(
             DropMitoTable::new(request, self.inner.clone())
+                .map_err(BoxedError::new)
+                .context(table_error::TableOperationSnafu)?,
+        );
+        Ok(procedure)
+    }
+
+    fn truncate_table_procedure(
+        &self,
+        _ctx: &EngineContext,
+        request: TruncateTableRequest,
+    ) -> TableResult<BoxedProcedure> {
+        let procedure = Box::new(
+            TruncateMitoTable::new(request, self.inner.clone())
                 .map_err(BoxedError::new)
                 .context(table_error::TableOperationSnafu)?,
         );
@@ -413,9 +436,13 @@ impl<S: StorageEngine> MitoEngineInner<S> {
         let table_dir = table_dir(catalog_name, schema_name, table_id);
 
         let Some((manifest, table_info)) = self
-                            .recover_table_manifest_and_info(table_name, &table_dir)
-                            .await.map_err(BoxedError::new)
-                            .context(table_error::TableOperationSnafu)? else { return Ok(None) };
+            .recover_table_manifest_and_info(table_name, &table_dir)
+            .await
+            .map_err(BoxedError::new)
+            .context(table_error::TableOperationSnafu)?
+        else {
+            return Ok(None);
+        };
 
         let compaction_strategy = CompactionStrategy::from(&table_info.meta.options.extra_options);
         let opts = OpenOptions {
@@ -619,9 +646,12 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             self.object_store.clone(),
             self.compress_type,
         );
-        let  Some(table_info) =
+        let Some(table_info) =
             MitoTable::<<S as StorageEngine>::Region>::recover_table_info(table_name, &manifest)
-                .await? else { return Ok(None) };
+                .await?
+        else {
+            return Ok(None);
+        };
 
         Ok(Some((manifest, table_info)))
     }
@@ -703,6 +733,23 @@ impl<S: StorageEngine> MitoEngineInner<S> {
 
         // Partial closed
         Ok(CloseTableResult::PartialClosed(removed_regions))
+    }
+
+    async fn truncate_table(&self, request: TruncateTableRequest) -> TableResult<bool> {
+        let _lock = self.table_mutex.lock(request.table_id).await;
+
+        let table_id = request.table_id;
+        if let Some(table) = self.get_mito_table(table_id) {
+            table
+                .truncate()
+                .await
+                .map_err(BoxedError::new)
+                .context(table_error::TableOperationSnafu)?;
+
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 }
 

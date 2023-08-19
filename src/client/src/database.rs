@@ -17,7 +17,7 @@ use api::v1::ddl_request::Expr as DdlExpr;
 use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
 use api::v1::{
-    AlterExpr, AuthHeader, CompactTableExpr, CreateTableExpr, DdlRequest, DeleteRequest,
+    AlterExpr, AuthHeader, CompactTableExpr, CreateTableExpr, DdlRequest, DeleteRequests,
     DropTableExpr, FlushTableExpr, GreptimeRequest, InsertRequests, PromRangeQuery, QueryRequest,
     RequestHeader, TruncateTableExpr,
 };
@@ -132,9 +132,9 @@ impl Database {
         Ok(stream_inserter)
     }
 
-    pub async fn delete(&self, request: DeleteRequest) -> Result<u32> {
+    pub async fn delete(&self, request: DeleteRequests) -> Result<u32> {
         let _timer = timer!(metrics::METRIC_GRPC_DELETE);
-        self.handle(Request::Delete(request)).await
+        self.handle(Request::Deletes(request)).await
     }
 
     async fn handle(&self, request: Request) -> Result<u32> {
@@ -342,105 +342,10 @@ pub struct FlightContext {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
-    use api::helper::ColumnDataTypeWrapper;
     use api::v1::auth_header::AuthScheme;
-    use api::v1::{AuthHeader, Basic, Column};
-    use common_grpc::select::{null_mask, values};
-    use common_grpc_expr::column_to_vector;
-    use datatypes::prelude::{Vector, VectorRef};
-    use datatypes::vectors::{
-        BinaryVector, BooleanVector, DateTimeVector, DateVector, Float32Vector, Float64Vector,
-        Int16Vector, Int32Vector, Int64Vector, Int8Vector, StringVector, UInt16Vector,
-        UInt32Vector, UInt64Vector, UInt8Vector,
-    };
+    use api::v1::{AuthHeader, Basic};
 
     use crate::database::FlightContext;
-
-    #[test]
-    fn test_column_to_vector() {
-        let mut column = create_test_column(Arc::new(BooleanVector::from(vec![true])));
-        column.datatype = -100;
-        let result = column_to_vector(&column, 1);
-        assert!(result.is_err());
-        assert_eq!(
-            result.unwrap_err().to_string(),
-            "Column datatype error, source: Unknown proto column datatype: -100"
-        );
-
-        macro_rules! test_with_vector {
-            ($vector: expr) => {
-                let vector = Arc::new($vector);
-                let column = create_test_column(vector.clone());
-                let result = column_to_vector(&column, vector.len() as u32).unwrap();
-                assert_eq!(result, vector as VectorRef);
-            };
-        }
-
-        test_with_vector!(BooleanVector::from(vec![Some(true), None, Some(false)]));
-        test_with_vector!(Int8Vector::from(vec![Some(i8::MIN), None, Some(i8::MAX)]));
-        test_with_vector!(Int16Vector::from(vec![
-            Some(i16::MIN),
-            None,
-            Some(i16::MAX)
-        ]));
-        test_with_vector!(Int32Vector::from(vec![
-            Some(i32::MIN),
-            None,
-            Some(i32::MAX)
-        ]));
-        test_with_vector!(Int64Vector::from(vec![
-            Some(i64::MIN),
-            None,
-            Some(i64::MAX)
-        ]));
-        test_with_vector!(UInt8Vector::from(vec![Some(u8::MIN), None, Some(u8::MAX)]));
-        test_with_vector!(UInt16Vector::from(vec![
-            Some(u16::MIN),
-            None,
-            Some(u16::MAX)
-        ]));
-        test_with_vector!(UInt32Vector::from(vec![
-            Some(u32::MIN),
-            None,
-            Some(u32::MAX)
-        ]));
-        test_with_vector!(UInt64Vector::from(vec![
-            Some(u64::MIN),
-            None,
-            Some(u64::MAX)
-        ]));
-        test_with_vector!(Float32Vector::from(vec![
-            Some(f32::MIN),
-            None,
-            Some(f32::MAX)
-        ]));
-        test_with_vector!(Float64Vector::from(vec![
-            Some(f64::MIN),
-            None,
-            Some(f64::MAX)
-        ]));
-        test_with_vector!(BinaryVector::from(vec![
-            Some(b"".to_vec()),
-            None,
-            Some(b"hello".to_vec())
-        ]));
-        test_with_vector!(StringVector::from(vec![Some(""), None, Some("foo"),]));
-        test_with_vector!(DateVector::from(vec![Some(1), None, Some(3)]));
-        test_with_vector!(DateTimeVector::from(vec![Some(4), None, Some(6)]));
-    }
-
-    fn create_test_column(vector: VectorRef) -> Column {
-        let wrapper: ColumnDataTypeWrapper = vector.data_type().try_into().unwrap();
-        Column {
-            column_name: "test".to_string(),
-            semantic_type: 1,
-            values: Some(values(&[vector.clone()]).unwrap()),
-            null_mask: null_mask(&[vector.clone()], vector.len()),
-            datatype: wrapper.datatype() as i32,
-        }
-    }
 
     #[test]
     fn test_flight_ctx() {

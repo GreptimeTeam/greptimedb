@@ -22,7 +22,6 @@ use common_meta::ident::TableIdent;
 use common_meta::instruction::{Instruction, InstructionReply, SimpleReply};
 use common_meta::key::table_info::TableInfoKey;
 use common_meta::key::table_name::TableNameKey;
-use common_meta::key::table_region::TableRegionKey;
 use common_meta::key::TableMetaKey;
 use common_telemetry::error;
 use partition::manager::TableRouteCacheInvalidatorRef;
@@ -44,7 +43,9 @@ impl HeartbeatResponseHandler for InvalidateTableCacheHandler {
 
     async fn handle(&self, ctx: &mut HeartbeatResponseHandlerContext) -> MetaResult<HandleControl> {
         // TODO(weny): considers introducing a macro
-        let Some((meta, Instruction::InvalidateTableCache(table_ident))) = ctx.incoming_message.take() else {
+        let Some((meta, Instruction::InvalidateTableCache(table_ident))) =
+            ctx.incoming_message.take()
+        else {
             unreachable!("InvalidateTableCacheHandler: should be guarded by 'is_acceptable'");
         };
 
@@ -86,10 +87,6 @@ impl InvalidateTableCacheHandler {
         let table_id = table_ident.table_id;
         self.backend_cache_invalidator
             .invalidate_key(&TableInfoKey::new(table_id).as_raw_key())
-            .await;
-
-        self.backend_cache_invalidator
-            .invalidate_key(&TableRegionKey::new(table_id).as_raw_key())
             .await;
 
         self.backend_cache_invalidator

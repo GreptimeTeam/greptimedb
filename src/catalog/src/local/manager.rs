@@ -43,7 +43,6 @@ use crate::error::{
     SystemCatalogTypeMismatchSnafu, TableEngineNotFoundSnafu, TableExistsSnafu, TableNotExistSnafu,
     TableNotFoundSnafu, UnimplementedSnafu,
 };
-use crate::information_schema::InformationSchemaProvider;
 use crate::local::memory::MemoryCatalogManager;
 use crate::system::{
     decode_system_catalog, Entry, SystemCatalogTable, TableEntry, ENTRY_TYPE_INDEX, KEY_INDEX,
@@ -51,9 +50,8 @@ use crate::system::{
 };
 use crate::tables::SystemCatalog;
 use crate::{
-    handle_system_table_request, CatalogManager, CatalogManagerRef, DeregisterSchemaRequest,
-    DeregisterTableRequest, RegisterSchemaRequest, RegisterSystemTableRequest,
-    RegisterTableRequest, RenameTableRequest,
+    handle_system_table_request, CatalogManager, DeregisterSchemaRequest, DeregisterTableRequest,
+    RegisterSchemaRequest, RegisterSystemTableRequest, RegisterTableRequest, RenameTableRequest,
 };
 
 /// A `CatalogManager` consists of a system catalog and a bunch of user catalogs.
@@ -118,11 +116,18 @@ impl LocalCatalogManager {
     }
 
     async fn init_system_catalog(&self) -> Result<()> {
+        // register default catalog and default schema
+        self.catalogs
+            .register_catalog_sync(DEFAULT_CATALOG_NAME.to_string())?;
+        self.catalogs.register_schema_sync(RegisterSchemaRequest {
+            catalog: DEFAULT_CATALOG_NAME.to_string(),
+            schema: DEFAULT_SCHEMA_NAME.to_string(),
+        })?;
+
         // register SystemCatalogTable
-        let _ = self
-            .catalogs
+        self.catalogs
             .register_catalog_sync(SYSTEM_CATALOG_NAME.to_string())?;
-        let _ = self.catalogs.register_schema_sync(RegisterSchemaRequest {
+        self.catalogs.register_schema_sync(RegisterSchemaRequest {
             catalog: SYSTEM_CATALOG_NAME.to_string(),
             schema: INFORMATION_SCHEMA_NAME.to_string(),
         })?;
@@ -133,29 +138,18 @@ impl LocalCatalogManager {
             table_id: SYSTEM_CATALOG_TABLE_ID,
             table: self.system.information_schema.system.clone(),
         };
-        let _ = self.catalogs.register_table(register_table_req).await?;
-
-        // register default catalog and default schema
-        let _ = self
-            .catalogs
-            .register_catalog_sync(DEFAULT_CATALOG_NAME.to_string())?;
-        let _ = self.catalogs.register_schema_sync(RegisterSchemaRequest {
-            catalog: DEFAULT_CATALOG_NAME.to_string(),
-            schema: DEFAULT_SCHEMA_NAME.to_string(),
-        })?;
+        self.catalogs.register_table(register_table_req).await?;
 
         // Add numbers table for test
-        let numbers_table = Arc::new(NumbersTable::default());
         let register_number_table_req = RegisterTableRequest {
             catalog: DEFAULT_CATALOG_NAME.to_string(),
             schema: DEFAULT_SCHEMA_NAME.to_string(),
             table_name: NUMBERS_TABLE_NAME.to_string(),
             table_id: NUMBERS_TABLE_ID,
-            table: numbers_table,
+            table: NumbersTable::table(NUMBERS_TABLE_ID),
         };
 
-        let _ = self
-            .catalogs
+        self.catalogs
             .register_table(register_number_table_req)
             .await?;
 
@@ -230,9 +224,8 @@ impl LocalCatalogManager {
         for entry in entries {
             match entry {
                 Entry::Catalog(c) => {
-                    let _ = self
-                        .catalogs
-                        .register_catalog_if_absent(c.catalog_name.clone());
+                    self.catalogs
+                        .register_catalog_sync(c.catalog_name.clone())?;
                     info!("Register catalog: {}", c.catalog_name);
                 }
                 Entry::Schema(s) => {
@@ -548,13 +541,6 @@ impl CatalogManager for LocalCatalogManager {
         schema_name: &str,
         table_name: &str,
     ) -> Result<Option<TableRef>> {
-        if schema_name == INFORMATION_SCHEMA_NAME {
-            let manager: CatalogManagerRef = self.catalogs.clone() as _;
-            let provider =
-                InformationSchemaProvider::new(catalog_name.to_string(), Arc::downgrade(&manager));
-            return provider.table(table_name);
-        }
-
         self.catalogs
             .table(catalog_name, schema_name, table_name)
             .await
@@ -584,8 +570,8 @@ impl CatalogManager for LocalCatalogManager {
         self.catalogs.table_names(catalog_name, schema_name).await
     }
 
-    async fn register_catalog(&self, name: String) -> Result<bool> {
-        self.catalogs.register_catalog(name).await
+    async fn register_catalog(self: Arc<Self>, name: String) -> Result<bool> {
+        self.catalogs.clone().register_catalog(name).await
     }
 
     fn as_any(&self) -> &dyn Any {

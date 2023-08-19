@@ -16,14 +16,29 @@ use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_meta::peer::Peer;
 use common_runtime::JoinError;
+use servers::define_into_tonic_status;
 use snafu::{Location, Snafu};
 use tokio::sync::mpsc::error::SendError;
 use tonic::codegen::http;
-use tonic::Code;
+
+use crate::pubsub::Message;
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
+    #[snafu(display("Failed to list catalogs: {}", source))]
+    ListCatalogs {
+        location: Location,
+        source: BoxedError,
+    },
+
+    #[snafu(display("Failed to list {}'s schemas: {}", catalog, source))]
+    ListSchemas {
+        location: Location,
+        catalog: String,
+        source: BoxedError,
+    },
+
     #[snafu(display("Failed to join a future: {}", source))]
     Join {
         location: Location,
@@ -104,7 +119,11 @@ pub enum Error {
     #[snafu(display("Empty key is not allowed"))]
     EmptyKey { location: Location },
 
-    #[snafu(display("Failed to execute via Etcd, source: {}", source))]
+    #[snafu(display(
+        "Failed to execute via Etcd, source: {}, location: {}",
+        source,
+        location
+    ))]
     EtcdFailed {
         source: etcd_client::Error,
         location: Location,
@@ -213,8 +232,17 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Table route not found: {}", key))]
-    TableRouteNotFound { key: String, location: Location },
+    #[snafu(display("Table route not found: {}", table_name))]
+    TableRouteNotFound {
+        table_name: String,
+        location: Location,
+    },
+
+    #[snafu(display("Table info not found: {}", table_name))]
+    TableInfoNotFound {
+        table_name: String,
+        location: Location,
+    },
 
     #[snafu(display("Table route corrupted, key: {}, reason: {}", key, reason))]
     CorruptedTableRoute {
@@ -459,17 +487,40 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to update table route: {}", source))]
+    UpdateTableRoute {
+        source: common_meta::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to get table info error: {}", source))]
+    GetFullTableInfo {
+        source: common_meta::error::Error,
+        location: Location,
+    },
+
     #[snafu(display("Invalid heartbeat request: {}", err_msg))]
     InvalidHeartbeatRequest { err_msg: String, location: Location },
+
+    #[snafu(display("Failed to publish message: {:?}", source))]
+    PublishMessage {
+        source: SendError<Message>,
+        location: Location,
+    },
+
+    #[snafu(display("Too many partitions, location: {}", location))]
+    TooManyPartitions { location: Location },
+
+    #[snafu(display("Unsupported operation {}, location: {}", operation, location))]
+    Unsupported {
+        operation: String,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-impl From<Error> for tonic::Status {
-    fn from(err: Error) -> Self {
-        tonic::Status::new(Code::Internal, err.to_string())
-    }
-}
+define_into_tonic_status!(Error);
 
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
@@ -495,7 +546,6 @@ impl ErrorExt for Error {
             | Error::SendShutdownSignal { .. }
             | Error::ParseAddr { .. }
             | Error::SchemaAlreadyExists { .. }
-            | Error::TableAlreadyExists { .. }
             | Error::PusherNotFound { .. }
             | Error::PushMessage { .. }
             | Error::MailboxClosed { .. }
@@ -506,7 +556,10 @@ impl ErrorExt for Error {
             | Error::UpdateTableMetadata { .. }
             | Error::NoEnoughAvailableDatanode { .. }
             | Error::ConvertGrpcExpr { .. }
-            | Error::Join { .. } => StatusCode::Internal,
+            | Error::PublishMessage { .. }
+            | Error::Join { .. }
+            | Error::Unsupported { .. } => StatusCode::Internal,
+            Error::TableAlreadyExists { .. } => StatusCode::TableAlreadyExists,
             Error::EmptyKey { .. }
             | Error::MissingRequiredParameter { .. }
             | Error::MissingRequestHeader { .. }
@@ -516,13 +569,15 @@ impl ErrorExt for Error {
             | Error::ParseNum { .. }
             | Error::UnsupportedSelectorType { .. }
             | Error::InvalidArguments { .. }
-            | Error::InvalidHeartbeatRequest { .. } => StatusCode::InvalidArguments,
+            | Error::InvalidHeartbeatRequest { .. }
+            | Error::TooManyPartitions { .. } => StatusCode::InvalidArguments,
             Error::LeaseKeyFromUtf8 { .. }
             | Error::LeaseValueFromUtf8 { .. }
             | Error::StatKeyFromUtf8 { .. }
             | Error::StatValueFromUtf8 { .. }
             | Error::UnexpectedSequenceValue { .. }
             | Error::TableRouteNotFound { .. }
+            | Error::TableInfoNotFound { .. }
             | Error::CorruptedTableRoute { .. }
             | Error::NextSequence { .. }
             | Error::SequenceOutOfRange { .. }
@@ -546,6 +601,10 @@ impl ErrorExt for Error {
                 source.status_code()
             }
 
+            Error::ListCatalogs { source, .. } | Error::ListSchemas { source, .. } => {
+                source.status_code()
+            }
+
             Error::RegionFailoverCandidatesNotFound { .. } => StatusCode::RuntimeResourcesExhausted,
 
             Error::RegisterProcedureLoader { source, .. } => source.status_code(),
@@ -553,7 +612,9 @@ impl ErrorExt for Error {
             Error::TableRouteConversion { source, .. }
             | Error::ConvertProtoData { source, .. }
             | Error::TableMetadataManager { source, .. }
-            | Error::ConvertEtcdTxnObject { source, .. } => source.status_code(),
+            | Error::UpdateTableRoute { source, .. }
+            | Error::ConvertEtcdTxnObject { source, .. }
+            | Error::GetFullTableInfo { source, .. } => source.status_code(),
 
             Error::Other { source, .. } => source.status_code(),
         }

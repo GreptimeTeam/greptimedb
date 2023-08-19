@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::str::Utf8Error;
+
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use serde_json::error::Error as JsonError;
@@ -22,6 +24,12 @@ use table::metadata::TableId;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
+    #[snafu(display("Failed to decode protobuf, source: {}", source))]
+    DecodeProto {
+        location: Location,
+        source: prost::DecodeError,
+    },
+
     #[snafu(display("Failed to encode object into json, source: {}", source))]
     EncodeJson {
         location: Location,
@@ -66,6 +74,22 @@ pub enum Error {
     TableAlreadyExists {
         table_id: TableId,
         location: Location,
+    },
+
+    #[snafu(display("Catalog already exists, catalog: {}", catalog))]
+    CatalogAlreadyExists { catalog: String, location: Location },
+
+    #[snafu(display("Schema already exists, catalog:{}, schema: {}", catalog, schema))]
+    SchemaAlreadyExists {
+        catalog: String,
+        schema: String,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to convert raw key to str, source: {}", source))]
+    ConvertRawKey {
+        location: Location,
+        source: Utf8Error,
     },
 
     #[snafu(display("Table does not exist, table_name: {}", table_name))]
@@ -113,6 +137,9 @@ pub enum Error {
         source: common_catalog::error::Error,
         location: Location,
     },
+
+    #[snafu(display("External error: {}", err_msg))]
+    External { location: Location, err_msg: String },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -128,18 +155,23 @@ impl ErrorExt for Error {
             | InvalidProtoMsg { .. }
             | InvalidTableMetadata { .. }
             | MoveRegion { .. }
-            | Unexpected { .. } => StatusCode::Unexpected,
+            | Unexpected { .. }
+            | External { .. } => StatusCode::Unexpected,
 
             SendMessage { .. }
             | GetKvCache { .. }
             | CacheNotGet { .. }
             | TableAlreadyExists { .. }
+            | CatalogAlreadyExists { .. }
+            | SchemaAlreadyExists { .. }
             | TableNotExist { .. }
             | RenameTable { .. } => StatusCode::Internal,
 
-            EncodeJson { .. } | DecodeJson { .. } | PayloadNotExist { .. } => {
-                StatusCode::Unexpected
-            }
+            EncodeJson { .. }
+            | DecodeJson { .. }
+            | PayloadNotExist { .. }
+            | ConvertRawKey { .. }
+            | DecodeProto { .. } => StatusCode::Unexpected,
 
             MetaSrv { source, .. } => source.status_code(),
 
