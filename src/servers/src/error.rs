@@ -333,7 +333,7 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Column: {:?}, {:?} incompatible, expected: {:?}, actual: {:?}",
+        "Column: {}, {} incompatible, expected: {}, actual: {}",
         column_name,
         datatype,
         expected,

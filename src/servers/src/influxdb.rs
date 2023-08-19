@@ -236,9 +236,7 @@ fn parse_tags<'a>(
             one_row.push(to_value(ValueData::StringValue(v.to_string())));
         } else {
             check_schema(ColumnDataType::String, SemanticType::Tag, &schema[*index])?;
-            // unwrap is safe here
-            one_row.get_mut(*index).unwrap().value_data =
-                Some(ValueData::StringValue(v.to_string()));
+            one_row[*index].value_data = Some(ValueData::StringValue(v.to_string()));
         }
     }
 
@@ -273,8 +271,7 @@ fn parse_fields<'a>(
             one_row.push(to_value(value));
         } else {
             check_schema(datatype, SemanticType::Field, &schema[*index])?;
-            // unwrap is safe here
-            one_row.get_mut(*index).unwrap().value_data = Some(value);
+            one_row[*index].value_data = Some(value);
         }
     }
 
@@ -318,8 +315,7 @@ fn parse_ts(
             SemanticType::Timestamp,
             &schema[*index],
         )?;
-        // unwrap is safe here
-        one_row.get_mut(*index).unwrap().value_data = Some(ValueData::TsMillisecondValue(ts));
+        one_row[*index].value_data = Some(ValueData::TsMillisecondValue(ts));
     }
 
     Ok(())
@@ -354,6 +350,7 @@ fn check_schema(
     Ok(())
 }
 
+// TODO(jeremy): impl From<ValueData> for Value
 #[inline]
 fn to_value(value: ValueData) -> Value {
     Value {
