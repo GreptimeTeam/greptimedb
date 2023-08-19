@@ -22,6 +22,7 @@ pub mod frontend;
 pub mod heartbeat;
 pub mod instance;
 pub(crate) mod metrics;
+mod row_inserter;
 mod script;
 mod server;
 pub mod service_config;

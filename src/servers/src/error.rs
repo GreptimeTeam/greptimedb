@@ -328,6 +328,21 @@ pub enum Error {
         actual: opensrv_mysql::ColumnType,
         location: Location,
     },
+
+    #[snafu(display(
+        "Column: {}, {} incompatible, expected: {}, actual: {}",
+        column_name,
+        datatype,
+        expected,
+        actual
+    ))]
+    IncompatibleSchema {
+        column_name: String,
+        datatype: String,
+        expected: i32,
+        actual: i32,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -371,7 +386,8 @@ impl ErrorExt for Error {
             | InvalidPrepareStatement { .. }
             | DataFrame { .. }
             | PreparedStmtTypeMismatch { .. }
-            | TimePrecision { .. } => StatusCode::InvalidArguments,
+            | TimePrecision { .. }
+            | IncompatibleSchema { .. } => StatusCode::InvalidArguments,
 
             InfluxdbLinesWrite { source, .. }
             | PromSeriesWrite { source, .. }

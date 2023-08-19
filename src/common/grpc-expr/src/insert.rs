@@ -23,6 +23,7 @@ use datatypes::data_type::{ConcreteDataType, DataType};
 use datatypes::prelude::VectorRef;
 use datatypes::schema::SchemaRef;
 use snafu::{ensure, ResultExt};
+use table::engine::TableReference;
 use table::metadata::TableId;
 use table::requests::InsertRequest;
 
@@ -47,12 +48,11 @@ pub fn build_create_expr_from_insertion(
     columns: &[Column],
     engine: &str,
 ) -> Result<CreateTableExpr> {
+    let table_name = TableReference::full(catalog_name, schema_name, table_name);
     let column_exprs = ColumnExpr::from_columns(columns);
     util::build_create_table_expr(
-        catalog_name,
-        schema_name,
         table_id,
-        table_name,
+        &table_name,
         column_exprs,
         engine,
         "Created on insertion",

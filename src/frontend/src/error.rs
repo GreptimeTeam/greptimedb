@@ -597,6 +597,9 @@ pub enum Error {
         source: auth::error::Error,
         location: Location,
     },
+
+    #[snafu(display("Empty data: {}", msg))]
+    EmptyData { msg: String, location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -618,7 +621,8 @@ impl ErrorExt for Error {
             | Error::PrepareImmutableTable { .. }
             | Error::BuildCsvConfig { .. }
             | Error::ProjectSchema { .. }
-            | Error::UnsupportedFormat { .. } => StatusCode::InvalidArguments,
+            | Error::UnsupportedFormat { .. }
+            | Error::EmptyData { .. } => StatusCode::InvalidArguments,
 
             Error::NotSupported { .. } => StatusCode::Unsupported,
 

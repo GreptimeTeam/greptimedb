@@ -666,7 +666,7 @@ impl GrpcQueryHandler for DistInstance {
         match request {
             Request::Inserts(requests) => self.handle_dist_insert(requests, ctx).await,
             Request::RowInserts(_) | Request::RowDeletes(_) => NotSupportedSnafu {
-                feat: "row insert/delete",
+                feat: "row inserts/deletes",
             }
             .fail(),
             Request::Deletes(requests) => self.handle_dist_delete(requests, ctx).await,

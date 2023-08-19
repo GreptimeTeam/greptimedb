@@ -478,6 +478,31 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "Invalid insert row len, table: {}, expected: {}, actual: {}",
+        table_name,
+        expected,
+        actual
+    ))]
+    InvalidInsertRowLen {
+        table_name: String,
+        expected: usize,
+        actual: usize,
+        location: Location,
+    },
+
+    #[snafu(display("Column datatype error, source: {}", source))]
+    ColumnDataType {
+        location: Location,
+        source: api::error::Error,
+    },
+
+    #[snafu(display("Failed to create vector, source: {}", source))]
+    CreateVector {
+        location: Location,
+        source: datatypes::error::Error,
+    },
+
     #[snafu(display("Unexpected, violated: {}", violated))]
     Unexpected {
         violated: String,
@@ -557,6 +582,7 @@ impl ErrorExt for Error {
             TableEngineNotFound { source, .. } | EngineProcedureNotFound { source, .. } => {
                 source.status_code()
             }
+            CreateVector { source, .. } => source.status_code(),
             TableNotFound { .. } => StatusCode::TableNotFound,
             ColumnNotFound { .. } => StatusCode::TableColumnNotFound,
 
@@ -583,7 +609,9 @@ impl ErrorExt for Error {
             | MissingMetasrvOpts { .. }
             | ColumnNoneDefaultValue { .. }
             | MissingWalDirConfig { .. }
-            | PrepareImmutableTable { .. } => StatusCode::InvalidArguments,
+            | PrepareImmutableTable { .. }
+            | InvalidInsertRowLen { .. }
+            | ColumnDataType { .. } => StatusCode::InvalidArguments,
 
             EncodeJson { .. } | DecodeJson { .. } | PayloadNotExist { .. } | Unexpected { .. } => {
                 StatusCode::Unexpected
