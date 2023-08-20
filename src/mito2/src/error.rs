@@ -350,12 +350,8 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display(
-        "Failed to build snapshot for values, source: {}, location: {}",
-        source,
-        location
-    ))]
-    SnapshotValues {
+    #[snafu(display("Failed to compact values, source: {}, location: {}", source, location))]
+    CompactValues {
         source: datatypes::error::Error,
         location: Location,
     },
@@ -415,7 +411,7 @@ impl ErrorExt for Error {
             ConvertVector { source, .. } => source.status_code(),
             PrimaryKeyLengthMismatch { .. } => StatusCode::InvalidArguments,
             SortValues { .. } => StatusCode::Unexpected,
-            SnapshotValues { source, .. } => source.status_code(),
+            CompactValues { source, .. } => source.status_code(),
         }
     }
 

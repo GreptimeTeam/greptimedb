@@ -31,7 +31,7 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ScanRequest;
 
 use crate::error::{
-    ConvertVectorSnafu, PrimaryKeyLengthMismatchSnafu, Result, SnapshotValuesSnafu, SortValuesSnafu,
+    CompactValuesSnafu, ConvertVectorSnafu, PrimaryKeyLengthMismatchSnafu, Result, SortValuesSnafu,
 };
 use crate::memtable::{BoxedBatchIterator, KeyValues, Memtable, MemtableId};
 use crate::read::{Batch, BatchBuilder, BatchColumn};
@@ -103,12 +103,13 @@ impl Memtable for TimeSeriesMemtable {
     }
 }
 
-type BucketIndex = (u8, usize);
+/// Index of series, including bucket index part (u8) and series index inside the bucket (usize).  
+type SeriesIndex = (u8, usize);
 
 struct SeriesSet {
     region_metadata: RegionMetadataRef,
     bucket_num: u8,
-    indices: Arc<RwLock<BTreeMap<Vec<u8>, BucketIndex>>>,
+    indices: Arc<RwLock<BTreeMap<Vec<u8>, SeriesIndex>>>,
     buckets: Arc<Vec<Bucket>>,
 }
 
@@ -131,7 +132,7 @@ impl SeriesSet {
 
 impl SeriesSet {
     /// Returns [Series] at given bucket and index.
-    fn get_bucket_by_index(&self, idx: &BucketIndex) -> Option<Arc<RwLock<Series>>> {
+    fn get_bucket_by_index(&self, idx: &SeriesIndex) -> Option<Arc<RwLock<Series>>> {
         debug_assert!((idx.0 as usize) < self.buckets.len());
         self.buckets[idx.0 as usize].get_series(idx.1)
     }
@@ -145,10 +146,10 @@ impl SeriesSet {
         let bucket_idx = self.hash_primary_key(&primary_key);
         let bucket = &self.buckets[bucket_idx as usize];
         let s = Arc::new(RwLock::new(Series::new(self.region_metadata.clone())));
-        let series_index = bucket.add_series(s.clone());
         let mut indices = self.indices.write().unwrap();
         match indices.entry(primary_key) {
             Entry::Vacant(v) => {
+                let series_index = bucket.add_series(s.clone());
                 v.insert((bucket_idx, series_index));
                 s
             }
@@ -176,7 +177,7 @@ impl SeriesSet {
 
 struct Iter {
     metadata: RegionMetadataRef,
-    indices: Arc<RwLock<BTreeMap<Vec<u8>, BucketIndex>>>,
+    indices: Arc<RwLock<BTreeMap<Vec<u8>, SeriesIndex>>>,
     buckets: Arc<Vec<Bucket>>,
     last_key: Option<Vec<u8>>,
 }
@@ -282,21 +283,21 @@ impl Series {
             builder
                 .timestamp
                 .extend_slice_of(&*v.timestamp, 0, len)
-                .context(SnapshotValuesSnafu)?;
+                .context(CompactValuesSnafu)?;
             builder
                 .sequence
                 .extend_slice_of(&*v.sequence, 0, len)
-                .context(SnapshotValuesSnafu)?;
+                .context(CompactValuesSnafu)?;
 
             builder
                 .op_type
                 .extend_slice_of(&*v.op_type, 0, len)
-                .context(SnapshotValuesSnafu)?;
+                .context(CompactValuesSnafu)?;
 
             for (idx, f) in v.fields.iter().enumerate() {
                 builder.fields[idx]
                     .extend_slice_of(&**f, 0, len)
-                    .context(SnapshotValuesSnafu)?;
+                    .context(CompactValuesSnafu)?;
             }
         }
 
@@ -683,12 +684,15 @@ mod tests {
         let set = Arc::new(SeriesSet::new(schema, 3));
 
         let concurrency = 32;
+        let pk_num = concurrency * 2;
         let mut handles = Vec::with_capacity(concurrency);
         for i in 0..concurrency {
             let set = set.clone();
             let handle = std::thread::spawn(move || {
                 for j in i * 100..(i + 1) * 100 {
-                    let series = set.get_or_add_series("pk-0".as_bytes().to_vec());
+                    let pk = j % pk_num;
+                    let primary_key = format!("pk-{}", pk).as_bytes().to_vec();
+                    let series = set.get_or_add_series(primary_key);
                     let mut guard = series.write().unwrap();
                     guard.push(
                         ts_value_ref(j as i64),
@@ -704,49 +708,45 @@ mod tests {
             h.join().unwrap();
         }
 
-        let series = set.get_or_add_series("pk-0".as_bytes().to_vec());
-        let mut guard = series.write().unwrap();
-        let values = guard.compact().unwrap();
-        let sequences = values
-            .sequence
-            .iter_data()
-            .map(|v| v.unwrap() as i64)
-            .collect::<Vec<_>>();
+        let mut timestamps = Vec::with_capacity(concurrency * 100);
+        let mut sequences = Vec::with_capacity(concurrency * 100);
+        let mut op_types = Vec::with_capacity(concurrency * 100);
+        let mut v0 = Vec::with_capacity(concurrency * 100);
+
+        for i in 0..pk_num {
+            let pk = format!("pk-{}", i).as_bytes().to_vec();
+            let series = set.get_or_add_series(pk);
+            let mut guard = series.write().unwrap();
+            let values = guard.compact().unwrap();
+            timestamps.extend(values.sequence.iter_data().map(|v| v.unwrap() as i64));
+            sequences.extend(values.sequence.iter_data().map(|v| v.unwrap() as i64));
+            op_types.extend(values.op_type.iter_data().map(|v| v.unwrap()));
+            v0.extend(
+                values
+                    .fields
+                    .get(0)
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<Int64Vector>()
+                    .unwrap()
+                    .iter_data()
+                    .map(|v| v.unwrap()),
+            );
+        }
+
         let expected_sequence = (0..(concurrency * 100) as i64).collect::<HashSet<_>>();
         assert_eq!(
             expected_sequence,
             sequences.iter().copied().collect::<HashSet<_>>()
         );
 
-        values
-            .op_type
-            .iter_data()
-            .all(|op| op == Some(OpType::Put as u8));
-        let timestamps = values
-            .timestamp
-            .as_any()
-            .downcast_ref::<TimestampMillisecondVector>()
-            .unwrap()
-            .iter_data()
-            .map(|ts| ts.unwrap().0.value())
-            .collect::<Vec<_>>();
+        op_types.iter().all(|op| *op == OpType::Put as u8);
         assert_eq!(
             expected_sequence,
             timestamps.iter().copied().collect::<HashSet<_>>()
         );
 
         assert_eq!(timestamps, sequences);
-
-        let v0 = values
-            .fields
-            .get(0)
-            .unwrap()
-            .as_any()
-            .downcast_ref::<Int64Vector>()
-            .unwrap()
-            .iter_data()
-            .map(|v| v.unwrap())
-            .collect::<Vec<_>>();
         assert_eq!(v0, timestamps);
     }
 
