@@ -12,14 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, Bound};
 use std::fmt::{Debug, Formatter};
-use std::ops::RangeFull;
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, RwLock};
 
 use api::v1::OpType;
-use common_telemetry::info;
 use datatypes::arrow;
 use datatypes::arrow::row::RowConverter;
 use datatypes::data_type::DataType;
@@ -28,10 +27,13 @@ use datatypes::value::ValueRef;
 use datatypes::vectors::{
     Helper, UInt64Vector, UInt64VectorBuilder, UInt8Vector, UInt8VectorBuilder,
 };
+use snafu::{ensure, ResultExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ScanRequest;
 
-use crate::error;
+use crate::error::{
+    ConvertVectorSnafu, PrimaryKeyLengthMismatchSnafu, Result, SnapshotValuesSnafu, SortValuesSnafu,
+};
 use crate::memtable::{BoxedBatchIterator, KeyValues, Memtable, MemtableId};
 use crate::read::{Batch, BatchBuilder, BatchColumn};
 use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
@@ -75,10 +77,16 @@ impl Memtable for TimeSeriesMemtable {
         self.id
     }
 
-    fn write(&self, kvs: &KeyValues) -> crate::error::Result<()> {
+    fn write(&self, kvs: &KeyValues) -> Result<()> {
         for kv in kvs.iter() {
-            assert_eq!(kv.num_primary_keys(), self.row_codec.num_fields());
-            let primary_key_encoded = self.row_codec.encode(kv.primary_keys()).unwrap();
+            ensure!(
+                kv.num_primary_keys() == self.row_codec.num_fields(),
+                PrimaryKeyLengthMismatchSnafu {
+                    expect: self.row_codec.num_fields(),
+                    actual: kv.num_primary_keys()
+                }
+            );
+            let primary_key_encoded = self.row_codec.encode(kv.primary_keys())?;
             let fields = kv.fields().collect();
             let series = self.series_set.get_or_add_series(primary_key_encoded);
             let mut guard = series.write().unwrap();
@@ -125,18 +133,28 @@ impl SeriesSet {
 }
 
 impl SeriesSet {
+    /// Returns [Series] at given bucket and index.
+    fn get_bucket_by_index(&self, idx: &BucketIndex) -> Option<Arc<RwLock<Series>>> {
+        self.buckets[idx.0 as usize].get_series(idx.1)
+    }
+
     fn get_or_add_series(&self, primary_key: Vec<u8>) -> Arc<RwLock<Series>> {
+        if let Some(idx) = self.indices.read().unwrap().get(&primary_key) {
+            // safety: series must exist at given index.
+            return self.get_bucket_by_index(idx).unwrap();
+        };
+        let bucket_idx = self.hash_primary_key(&primary_key);
+        let bucket = &self.buckets[bucket_idx as usize];
+        let s = Arc::new(RwLock::new(Series::new(self.region_metadata.clone())));
+        let series_index = bucket.add_series(s.clone());
         let mut indices = self.indices.write().unwrap();
-        if let Some(idx) = indices.get(&primary_key) {
-            self.buckets[idx.0 as usize].get_series(idx.1).unwrap()
-        } else {
-            let bucket_idx = self.hash_primary_key(&primary_key);
-            let bucket = &self.buckets[bucket_idx as usize];
-            let s = Arc::new(RwLock::new(Series::new(self.region_metadata.clone())));
-            let series_index = bucket.add_series(s.clone());
-            // let mut indices = self.indices.write().unwrap();
-            indices.insert(primary_key, (bucket_idx, series_index));
-            s
+        match indices.entry(primary_key) {
+            Entry::Vacant(v) => {
+                v.insert((bucket_idx, series_index));
+                s
+            }
+            // safety: series must exist at given index.
+            Entry::Occupied(v) => self.get_bucket_by_index(v.get()).unwrap(),
         }
     }
 
@@ -163,30 +181,27 @@ struct Iter {
 }
 
 impl Iterator for Iter {
-    type Item = error::Result<Batch>;
+    type Item = Result<Batch>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let map = self.indices.read().unwrap();
         let mut range = match &self.last_key {
-            None => {
-                info!("First range, range full");
-                map.range::<Vec<u8>, RangeFull>(..)
-            }
+            None => map.range::<Vec<u8>, _>(..),
             Some(last_key) => {
-                info!("range from {:02X?}", last_key);
                 map.range::<Vec<u8>, _>((Bound::Excluded(last_key), Bound::Unbounded))
             }
         };
 
         if let Some((primary_key, bucket)) = range.next() {
-            info!("Primary key: {:02X?}", primary_key);
             self.last_key = Some(primary_key.to_vec());
             let Some(b) = self.buckets.get(bucket.0 as usize) else {
-                panic!()
+                panic!("Cannot find series at {:?}", bucket);
             };
-            let series = b.get_series(bucket.1).unwrap();
+            let Some(series) = b.get_series(bucket.1) else {
+                panic!("Cannot find series at {:?}", bucket);
+            };
             let values = series.write().unwrap().snapshot();
-            Some(Ok(values.to_batch(primary_key, &self.metadata)))
+            Some(values.and_then(|v| v.to_batch(primary_key, &self.metadata)))
         } else {
             None
         }
@@ -249,7 +264,7 @@ impl Series {
         self.frozen.push(Values::from(builder));
     }
 
-    fn snapshot(&mut self) -> Values {
+    fn snapshot(&mut self) -> Result<Values> {
         self.freeze();
 
         let values = self.frozen.clone();
@@ -261,26 +276,28 @@ impl Series {
             builder
                 .timestamp
                 .extend_slice_of(&*v.timestamp, 0, len)
-                .unwrap();
+                .context(SnapshotValuesSnafu)?;
             builder
                 .sequence
                 .extend_slice_of(&*v.sequence, 0, len)
-                .unwrap();
+                .context(SnapshotValuesSnafu)?;
 
             builder
                 .op_type
                 .extend_slice_of(&*v.op_type, 0, len)
-                .unwrap();
+                .context(SnapshotValuesSnafu)?;
 
             for (idx, f) in v.fields.iter().enumerate() {
-                builder.fields[idx].extend_slice_of(&**f, 0, len).unwrap();
+                builder.fields[idx]
+                    .extend_slice_of(&**f, 0, len)
+                    .context(SnapshotValuesSnafu)?;
             }
         }
 
         let values = Values::from(builder);
         self.frozen = vec![values.clone()];
 
-        values
+        Ok(values)
     }
 }
 
@@ -337,7 +354,7 @@ struct Values {
 
 impl Values {
     /// Sorts values in place by `timestamp, sequence, op_type`.
-    fn sort_in_place(&mut self) -> error::Result<()> {
+    fn sort_in_place(&mut self) -> Result<()> {
         let mut arrays = Vec::with_capacity(3 + self.fields.len());
         arrays.push(self.timestamp.to_arrow_array());
         arrays.push(self.sequence.to_arrow_array());
@@ -348,8 +365,10 @@ impl Values {
             .iter()
             .map(|arr| datatypes::arrow::row::SortField::new(arr.data_type().clone()))
             .collect();
-        let mut converter = RowConverter::new(fields).unwrap();
-        let rows = converter.convert_columns(&arrays).unwrap();
+        let mut converter = RowConverter::new(fields).context(SortValuesSnafu)?;
+        let rows = converter
+            .convert_columns(&arrays)
+            .context(SortValuesSnafu)?;
         let mut sort_pairs = rows.iter().enumerate().collect::<Vec<_>>();
         sort_pairs.sort_unstable_by(|(_, a), (_, b)| a.cmp(b));
         let indices = datatypes::arrow::array::UInt32Array::from_iter_values(
@@ -360,16 +379,18 @@ impl Values {
             .into_iter()
             .map(|arr| arrow::compute::take(&arr, &indices, None))
             .collect::<arrow::error::Result<Vec<_>>>()
-            .unwrap();
+            .context(SortValuesSnafu)?;
 
-        self.timestamp = Helper::try_into_vector(&res[0]).unwrap();
-        self.sequence = Arc::new(UInt64Vector::try_from_arrow_array(&res[1]).unwrap());
-        self.op_type = Arc::new(UInt8Vector::try_from_arrow_array(&res[2]).unwrap());
-        self.fields = Helper::try_into_vectors(&res[3..]).unwrap();
+        self.timestamp = Helper::try_into_vector(&res[0]).context(ConvertVectorSnafu)?;
+        self.sequence =
+            Arc::new(UInt64Vector::try_from_arrow_array(&res[1]).context(ConvertVectorSnafu)?);
+        self.op_type =
+            Arc::new(UInt8Vector::try_from_arrow_array(&res[2]).context(ConvertVectorSnafu)?);
+        self.fields = Helper::try_into_vectors(&res[3..]).context(ConvertVectorSnafu)?;
         Ok(())
     }
 
-    pub fn to_batch(&self, primary_key: &[u8], metadata: &RegionMetadataRef) -> Batch {
+    pub fn to_batch(&self, primary_key: &[u8], metadata: &RegionMetadataRef) -> Result<Batch> {
         let builder = BatchBuilder::with_required_columns(
             primary_key.to_vec(),
             self.timestamp.clone(),
@@ -386,7 +407,7 @@ impl Values {
             })
             .collect();
 
-        builder.with_fields(fields).build().unwrap()
+        builder.with_fields(fields).build()
     }
 }
 
@@ -420,6 +441,8 @@ impl From<ValueBuilder> for Values {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use api::helper::ColumnDataTypeWrapper;
     use api::v1::value::ValueData;
     use api::v1::{Row, Rows, SemanticType};
@@ -523,7 +546,7 @@ mod tests {
         assert_eq!(2, series.active.timestamp.len());
         assert_eq!(0, series.frozen.len());
 
-        let values = series.snapshot();
+        let values = series.snapshot().unwrap();
         check_values(values, &[(1, 0, 1, 1, 10.1), (2, 0, 1, 2, 10.2)]);
         assert_eq!(0, series.active.timestamp.len());
         assert_eq!(1, series.frozen.len());
@@ -662,16 +685,102 @@ mod tests {
     }
 
     #[test]
+    fn test_series_set_concurrency() {
+        let schema = schema_for_test();
+        let set = Arc::new(SeriesSet::new(schema, 3));
+
+        let concurrency = 32;
+        let mut handles = Vec::with_capacity(concurrency);
+        for i in 0..concurrency {
+            let set = set.clone();
+            let handle = std::thread::spawn(move || {
+                for j in i * 100..(i + 1) * 100 {
+                    let series = set.get_or_add_series("pk-0".as_bytes().to_vec());
+                    let mut guard = series.write().unwrap();
+                    guard.push(
+                        ts_value_ref(j as i64),
+                        j as u64,
+                        OpType::Put,
+                        field_value_ref(j as i64, j as f64),
+                    );
+                }
+            });
+            handles.push(handle);
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let series = set.get_or_add_series("pk-0".as_bytes().to_vec());
+        let mut guard = series.write().unwrap();
+        let values = guard.snapshot().unwrap();
+        let sequences = values
+            .sequence
+            .iter_data()
+            .map(|v| v.unwrap() as i64)
+            .collect::<Vec<_>>();
+        let expected_sequence = (0..(concurrency * 100) as i64).collect::<HashSet<_>>();
+        assert_eq!(
+            expected_sequence,
+            sequences.iter().copied().collect::<HashSet<_>>()
+        );
+
+        values
+            .op_type
+            .iter_data()
+            .all(|op| op == Some(OpType::Put as u8));
+        let timestamps = values
+            .timestamp
+            .as_any()
+            .downcast_ref::<TimestampMillisecondVector>()
+            .unwrap()
+            .iter_data()
+            .map(|ts| ts.unwrap().0.value())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            expected_sequence,
+            timestamps.iter().copied().collect::<HashSet<_>>()
+        );
+
+        assert_eq!(timestamps, sequences);
+
+        let v0 = values
+            .fields
+            .get(0)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Vector>()
+            .unwrap()
+            .iter_data()
+            .map(|v| v.unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(v0, timestamps);
+    }
+
+    #[test]
     fn test_memtable() {
         common_telemetry::init_default_ut_logging();
         let schema = schema_for_test();
         let kvs = build_key_values(&schema);
         let memtable = TimeSeriesMemtable::new(schema, 42);
-
         memtable.write(&kvs).unwrap();
-
         let mut x = memtable.iter(ScanRequest::default());
-        let batch = x.next().unwrap().unwrap();
-        println!("batch: {:?}", batch);
+
+        let expected_ts = kvs
+            .iter()
+            .map(|kv| kv.timestamp().as_timestamp().unwrap().unwrap().value())
+            .collect::<HashSet<_>>();
+
+        let mut read = HashSet::new();
+        while let Some(res) = x.next() {
+            let batch = res.unwrap();
+            let ts = batch
+                .timestamps()
+                .as_any()
+                .downcast_ref::<TimestampMillisecondVector>()
+                .unwrap();
+            read.extend(ts.iter_data().map(|v| v.unwrap().0.value()));
+        }
+        assert_eq!(expected_ts, read);
     }
 }
