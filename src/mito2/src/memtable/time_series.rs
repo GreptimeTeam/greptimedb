@@ -15,7 +15,6 @@
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, Bound};
 use std::fmt::{Debug, Formatter};
-use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, RwLock};
 
 use api::v1::OpType;
@@ -38,12 +37,12 @@ use crate::memtable::{BoxedBatchIterator, KeyValues, Memtable, MemtableId};
 use crate::read::{Batch, BatchBuilder, BatchColumn};
 use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
 
+/// Memtable implementation that group rows by to their primary key.
 pub struct TimeSeriesMemtable {
     id: MemtableId,
     region_metadata: RegionMetadataRef,
     row_codec: McmpRowCodec,
     series_set: SeriesSet,
-    allocated: AtomicUsize,
 }
 
 impl TimeSeriesMemtable {
@@ -54,14 +53,12 @@ impl TimeSeriesMemtable {
                 .map(|c| SortField::new(c.column_schema.data_type.clone()))
                 .collect(),
         );
-
         let series_set = SeriesSet::new(region_metadata.clone(), 10);
         Self {
             id,
             region_metadata,
             series_set,
             row_codec,
-            allocated: Default::default(),
         }
     }
 }
@@ -138,6 +135,7 @@ impl SeriesSet {
         self.buckets[idx.0 as usize].get_series(idx.1)
     }
 
+    /// Returns the series for given primary key, or create a new series if not already exist.
     fn get_or_add_series(&self, primary_key: Vec<u8>) -> Arc<RwLock<Series>> {
         if let Some(idx) = self.indices.read().unwrap().get(&primary_key) {
             // safety: series must exist at given index.
@@ -158,6 +156,7 @@ impl SeriesSet {
         }
     }
 
+    /// Iterates all series in [SeriesSet].
     fn iter_series(&self) -> Iter {
         Iter {
             metadata: self.region_metadata.clone(),
@@ -167,6 +166,7 @@ impl SeriesSet {
         }
     }
 
+    /// Hash primary key to find the index of bucket.
     fn hash_primary_key(&self, primary_key: &[u8]) -> u8 {
         let x: u32 = primary_key.iter().map(|v| *v as u32).sum();
         (x % self.bucket_num as u32) as u8
@@ -193,7 +193,7 @@ impl Iterator for Iter {
         };
 
         if let Some((primary_key, bucket)) = range.next() {
-            self.last_key = Some(primary_key.to_vec());
+            self.last_key = Some(primary_key.clone());
             let Some(b) = self.buckets.get(bucket.0 as usize) else {
                 panic!("Cannot find series at {:?}", bucket);
             };
@@ -621,7 +621,7 @@ mod tests {
         )
     }
 
-    fn build_key_values(schema: &RegionMetadataRef) -> KeyValues {
+    fn build_key_values(schema: &RegionMetadataRef, len: usize) -> KeyValues {
         let column_schema = schema
             .column_metadatas
             .iter()
@@ -634,51 +634,33 @@ mod tests {
             })
             .collect();
 
+        let rows = (0..len)
+            .map(|i| Row {
+                values: vec![
+                    api::v1::Value {
+                        value_data: Some(ValueData::StringValue(i.to_string())),
+                    },
+                    api::v1::Value {
+                        value_data: Some(ValueData::I64Value(i as i64)),
+                    },
+                    api::v1::Value {
+                        value_data: Some(ValueData::TsMillisecondValue(i as i64)),
+                    },
+                    api::v1::Value {
+                        value_data: Some(ValueData::I64Value(i as i64)),
+                    },
+                    api::v1::Value {
+                        value_data: Some(ValueData::F64Value(i as f64)),
+                    },
+                ],
+            })
+            .collect();
         let mutation = api::v1::Mutation {
             op_type: 1,
             sequence: 0,
             rows: Some(Rows {
                 schema: column_schema,
-                rows: vec![
-                    Row {
-                        values: vec![
-                            api::v1::Value {
-                                value_data: Some(ValueData::StringValue("1".to_string())),
-                            },
-                            api::v1::Value {
-                                value_data: Some(ValueData::I64Value(1)),
-                            },
-                            api::v1::Value {
-                                value_data: Some(ValueData::TsMillisecondValue(1)),
-                            },
-                            api::v1::Value {
-                                value_data: Some(ValueData::I64Value(1)),
-                            },
-                            api::v1::Value {
-                                value_data: Some(ValueData::F64Value(1.0)),
-                            },
-                        ],
-                    },
-                    Row {
-                        values: vec![
-                            api::v1::Value {
-                                value_data: Some(ValueData::StringValue("1".to_string())),
-                            },
-                            api::v1::Value {
-                                value_data: Some(ValueData::I64Value(1)),
-                            },
-                            api::v1::Value {
-                                value_data: Some(ValueData::TsMillisecondValue(2)),
-                            },
-                            api::v1::Value {
-                                value_data: Some(ValueData::I64Value(2)),
-                            },
-                            api::v1::Value {
-                                value_data: Some(ValueData::F64Value(2.0)),
-                            },
-                        ],
-                    },
-                ],
+                rows,
             }),
         };
         KeyValues::new(schema.as_ref(), mutation).unwrap()
@@ -761,26 +743,30 @@ mod tests {
     fn test_memtable() {
         common_telemetry::init_default_ut_logging();
         let schema = schema_for_test();
-        let kvs = build_key_values(&schema);
+        let kvs = build_key_values(&schema, 100);
         let memtable = TimeSeriesMemtable::new(schema, 42);
         memtable.write(&kvs).unwrap();
-        let mut x = memtable.iter(ScanRequest::default());
 
         let expected_ts = kvs
             .iter()
             .map(|kv| kv.timestamp().as_timestamp().unwrap().unwrap().value())
             .collect::<HashSet<_>>();
 
-        let mut read = HashSet::new();
-        while let Some(res) = x.next() {
-            let batch = res.unwrap();
-            let ts = batch
-                .timestamps()
-                .as_any()
-                .downcast_ref::<TimestampMillisecondVector>()
-                .unwrap();
-            read.extend(ts.iter_data().map(|v| v.unwrap().0.value()));
-        }
+        let iter = memtable.iter(ScanRequest::default());
+        let read = iter
+            .flat_map(|batch| {
+                batch
+                    .unwrap()
+                    .timestamps()
+                    .as_any()
+                    .downcast_ref::<TimestampMillisecondVector>()
+                    .unwrap()
+                    .iter_data()
+                    .collect::<Vec<_>>()
+                    .into_iter()
+            })
+            .map(|v| v.unwrap().0.value())
+            .collect::<HashSet<_>>();
         assert_eq!(expected_ts, read);
     }
 }

@@ -213,7 +213,7 @@ impl McmpRowCodec {
     }
 
     /// Estimated length for encoded bytes.
-    fn estimated_length(&self) -> usize {
+    pub fn estimated_size(&self) -> usize {
         self.fields.iter().map(|f| f.estimated_size()).sum()
     }
 }
@@ -223,7 +223,7 @@ impl RowCodec for McmpRowCodec {
     where
         I: Iterator<Item = ValueRef<'a>>,
     {
-        let mut bytes = Vec::with_capacity(self.estimated_length());
+        let mut bytes = Vec::with_capacity(self.estimated_size());
         let mut serializer = Serializer::new(&mut bytes);
         for (value, field) in row.zip(self.fields.iter()) {
             field.serialize(&mut serializer, &value)?;
