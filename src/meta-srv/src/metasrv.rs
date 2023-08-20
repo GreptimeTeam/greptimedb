@@ -22,7 +22,8 @@ use api::v1::meta::Peer;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
 use common_grpc::channel_manager;
 use common_meta::ddl::DdlTaskExecutorRef;
-use common_meta::key::TableMetadataManagerRef;
+use common_meta::key::{TableMetadataManagerRef, MAINTENANCE_KEY};
+use common_meta::rpc::store::PutRequest;
 use common_meta::sequence::SequenceRef;
 use common_procedure::options::ProcedureConfig;
 use common_procedure::ProcedureManagerRef;
@@ -288,6 +289,14 @@ impl MetaSrv {
                 .context(RecoverProcedureSnafu)?;
         }
 
+        if self.kv_store.exists(MAINTENANCE_KEY).await? {
+            let req = PutRequest {
+                key: Vec::from(MAINTENANCE_KEY),
+                value: vec![],
+                prev_kv: false,
+            };
+            self.in_memory.put(req).await?;
+        }
         info!("MetaSrv started");
         Ok(())
     }

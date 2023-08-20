@@ -106,6 +106,9 @@ impl HeartbeatHandler for RegionFailureHandler {
 
 #[cfg(test)]
 mod tests {
+
+    use common_meta::key::MAINTENANCE_KEY;
+
     use super::*;
     use crate::handler::node_stat::{RegionStat, Stat};
     use crate::metasrv::builder::MetaSrvBuilder;
@@ -154,5 +157,63 @@ mod tests {
         handler.handle(req, &mut ctx, acc).await.unwrap();
         let dump = handler.failure_detect_runner.dump().await;
         assert_eq!(dump.iter().collect::<Vec<_>>().len(), 0);
+    }
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_maintenance_mode() {
+        let region_failover_manager = create_region_failover_manager();
+        let in_memory = region_failover_manager.create_context().in_memory.clone();
+        let handler = RegionFailureHandler::try_new(None, region_failover_manager.clone())
+            .await
+            .unwrap();
+
+        let req = &HeartbeatRequest::default();
+
+        let builder = MetaSrvBuilder::new();
+        let metasrv = builder.build().await.unwrap();
+        let mut ctx = metasrv.new_ctx();
+        ctx.is_infancy = false;
+
+        let acc = &mut HeartbeatAccumulator::default();
+        fn new_region_stat(region_id: u64) -> RegionStat {
+            RegionStat {
+                id: region_id,
+                rcus: 0,
+                wcus: 0,
+                approximate_bytes: 0,
+                approximate_rows: 0,
+            }
+        }
+        acc.stat = Some(Stat {
+            cluster_id: 1,
+            id: 42,
+            region_stats: vec![new_region_stat(1), new_region_stat(2), new_region_stat(3)],
+            timestamp_millis: 1000,
+            ..Default::default()
+        });
+
+        handler.handle(req, &mut ctx, acc).await.unwrap();
+        let dump = handler.failure_detect_runner.dump().await;
+        assert_eq!(dump.iter().collect::<Vec<_>>().len(), 3);
+
+        let kv_req = common_meta::rpc::store::PutRequest {
+            key: Vec::from(MAINTENANCE_KEY),
+            value: vec![],
+            prev_kv: false,
+        };
+
+        let _ = in_memory.put(kv_req.clone()).await.unwrap();
+
+        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+        let dump = handler.failure_detect_runner.dump().await;
+        let maintenance_node = region_failover_manager.is_maintenance_node().await.unwrap();
+        assert_eq!(dump.iter().collect::<Vec<_>>().len(), 0);
+        assert!(maintenance_node);
+
+        let _ = in_memory
+            .delete(kv_req.key.as_slice(), false)
+            .await
+            .unwrap();
+        let maintenance_node = region_failover_manager.is_maintenance_node().await.unwrap();
+        assert!(!maintenance_node);
     }
 }

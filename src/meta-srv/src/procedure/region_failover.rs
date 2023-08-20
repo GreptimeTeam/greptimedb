@@ -27,7 +27,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use common_meta::ident::TableIdent;
 use common_meta::key::datanode_table::DatanodeTableKey;
-use common_meta::key::TableMetadataManagerRef;
+use common_meta::key::{TableMetadataManagerRef, MAINTENANCE_KEY};
 use common_meta::{ClusterId, RegionIdent};
 use common_procedure::error::{
     Error as ProcedureError, FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu,
@@ -158,6 +158,10 @@ impl RegionFailoverManager {
     }
 
     pub(crate) async fn do_region_failover(&self, failed_region: &RegionIdent) -> Result<()> {
+        if self.is_maintenance_node().await? {
+            return Ok(());
+        }
+
         let Some(guard) = self.insert_running_procedures(failed_region) else {
             warn!("Region failover procedure for region {failed_region} is already running!");
             return Ok(());
@@ -235,6 +239,10 @@ impl RegionFailoverManager {
                     .any(|region| *region == failed_region.region_number)
             })
             .unwrap_or_default())
+    }
+    #[allow(dead_code)]
+    pub(crate) async fn is_maintenance_node(&self) -> Result<bool> {
+        self.in_memory.exists(MAINTENANCE_KEY).await
     }
 }
 

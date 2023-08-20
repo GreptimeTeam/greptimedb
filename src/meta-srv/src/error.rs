@@ -222,6 +222,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to parse bool: {}, source: {}", err_msg, source))]
+    ParseBool {
+        err_msg: String,
+        source: std::str::ParseBoolError,
+        location: Location,
+    },
+
     #[snafu(display("Invalid arguments: {}", err_msg))]
     InvalidArguments { err_msg: String, location: Location },
 
@@ -570,6 +577,7 @@ impl ErrorExt for Error {
             | Error::InvalidStatKey { .. }
             | Error::InvalidInactiveRegionKey { .. }
             | Error::ParseNum { .. }
+            | Error::ParseBool { .. }
             | Error::UnsupportedSelectorType { .. }
             | Error::InvalidArguments { .. }
             | Error::InvalidHeartbeatRequest { .. }
