@@ -132,6 +132,7 @@ impl SeriesSet {
 impl SeriesSet {
     /// Returns [Series] at given bucket and index.
     fn get_bucket_by_index(&self, idx: &BucketIndex) -> Option<Arc<RwLock<Series>>> {
+        debug_assert!((idx.0 as usize) < self.buckets.len());
         self.buckets[idx.0 as usize].get_series(idx.1)
     }
 
@@ -200,7 +201,7 @@ impl Iterator for Iter {
             let Some(series) = b.get_series(bucket.1) else {
                 panic!("Cannot find series at {:?}", bucket);
             };
-            let values = series.write().unwrap().snapshot();
+            let values = series.write().unwrap().compact();
             Some(values.and_then(|v| v.to_batch(primary_key, &self.metadata)))
         } else {
             None
@@ -208,6 +209,7 @@ impl Iterator for Iter {
     }
 }
 
+/// Bucket holds a set of [Series] which alleviate lock contention between series.
 struct Bucket {
     region_metadata: RegionMetadataRef,
     series: RwLock<Vec<Arc<RwLock<Series>>>>,
@@ -238,6 +240,7 @@ impl Bucket {
     }
 }
 
+/// A `Series` holds a list of field values of some given primary key.
 struct Series {
     region_metadata: RegionMetadataRef,
     active: ValueBuilder,
@@ -258,13 +261,16 @@ impl Series {
         self.active.push(ts, sequence, op_type as u8, values);
     }
 
+    /// Freezes the active part and push it to `frozen`.
     fn freeze(&mut self) {
         let mut builder = ValueBuilder::new(self.region_metadata.clone(), 32);
         std::mem::swap(&mut self.active, &mut builder);
         self.frozen.push(Values::from(builder));
     }
 
-    fn snapshot(&mut self) -> Result<Values> {
+    /// Freezes active part to frozen part and compact frozen part to reduce memory fragmentation.
+    /// Returns the frozen and compacted values.
+    fn compact(&mut self) -> Result<Values> {
         self.freeze();
 
         let values = self.frozen.clone();
@@ -301,6 +307,7 @@ impl Series {
     }
 }
 
+/// `ValueBuilder` holds all the vector builders for field columns.
 struct ValueBuilder {
     region_metadata: RegionMetadataRef,
     timestamp: Box<dyn MutableVector>,
@@ -333,6 +340,8 @@ impl ValueBuilder {
         }
     }
 
+    /// Pushes a new row to `ValueBuilder`.
+    /// We don't need primary keys since they've already be encoded.
     fn push(&mut self, ts: ValueRef, sequence: u64, op_type: u8, fields: Vec<ValueRef>) {
         debug_assert_eq!(fields.len(), self.fields.len());
         self.timestamp.push_value_ref(ts);
@@ -344,6 +353,7 @@ impl ValueBuilder {
     }
 }
 
+/// [Values] holds an immutable vectors of field columns, including `sequence` and `op_typee`.
 #[derive(Clone)]
 struct Values {
     timestamp: VectorRef,
@@ -390,6 +400,7 @@ impl Values {
         Ok(())
     }
 
+    /// Converts [Values] to `Batch`.
     pub fn to_batch(&self, primary_key: &[u8], metadata: &RegionMetadataRef) -> Result<Batch> {
         let builder = BatchBuilder::with_required_columns(
             primary_key.to_vec(),
@@ -546,7 +557,7 @@ mod tests {
         assert_eq!(2, series.active.timestamp.len());
         assert_eq!(0, series.frozen.len());
 
-        let values = series.snapshot().unwrap();
+        let values = series.compact().unwrap();
         check_values(values, &[(1, 0, 1, 1, 10.1), (2, 0, 1, 2, 10.2)]);
         assert_eq!(0, series.active.timestamp.len());
         assert_eq!(1, series.frozen.len());
@@ -695,7 +706,7 @@ mod tests {
 
         let series = set.get_or_add_series("pk-0".as_bytes().to_vec());
         let mut guard = series.write().unwrap();
-        let values = guard.snapshot().unwrap();
+        let values = guard.compact().unwrap();
         let sequences = values
             .sequence
             .iter_data()
