@@ -385,7 +385,7 @@ impl MetaClient {
 mod tests {
     use api::v1::meta::{HeartbeatRequest, Peer};
     use meta_srv::metasrv::SelectorContext;
-    use meta_srv::selector::{Namespace, Selector};
+    use meta_srv::selector::{Namespace, Selector, SelectorOptions};
     use meta_srv::Result as MetaResult;
 
     use super::*;
@@ -547,7 +547,12 @@ mod tests {
         type Context = SelectorContext;
         type Output = Vec<Peer>;
 
-        async fn select(&self, _ns: Namespace, _ctx: &Self::Context) -> MetaResult<Self::Output> {
+        async fn select(
+            &self,
+            _ns: Namespace,
+            _ctx: &Self::Context,
+            _opts: SelectorOptions,
+        ) -> MetaResult<Self::Output> {
             Ok(vec![
                 Peer {
                     id: 0,

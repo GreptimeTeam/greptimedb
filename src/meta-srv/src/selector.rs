@@ -12,8 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod common;
 pub mod lease_based;
 pub mod load_based;
+mod weight_compute;
+mod weighted_choose;
 
 use serde::{Deserialize, Serialize};
 
@@ -27,7 +30,28 @@ pub trait Selector: Send + Sync {
     type Context;
     type Output;
 
-    async fn select(&self, ns: Namespace, ctx: &Self::Context) -> Result<Self::Output>;
+    async fn select(
+        &self,
+        ns: Namespace,
+        ctx: &Self::Context,
+        opts: SelectorOptions,
+    ) -> Result<Self::Output>;
+}
+
+pub struct SelectorOptions {
+    /// Minimum number of selected results.
+    pub min_required_items: usize,
+    /// Whether duplicates are allowed in the selected result, default false.
+    pub allow_duplication: bool,
+}
+
+impl Default for SelectorOptions {
+    fn default() -> Self {
+        Self {
+            min_required_items: 1,
+            allow_duplication: false,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]

@@ -45,6 +45,15 @@ pub struct LeaseKey {
     pub node_id: u64,
 }
 
+impl From<&StatKey> for LeaseKey {
+    fn from(stat_key: &StatKey) -> Self {
+        LeaseKey {
+            cluster_id: stat_key.cluster_id,
+            node_id: stat_key.node_id,
+        }
+    }
+}
+
 impl FromStr for LeaseKey {
     type Err = error::Error;
 
@@ -197,6 +206,11 @@ impl StatValue {
     /// Get the latest number of regions.
     pub fn region_num(&self) -> Option<u64> {
         self.stats.last().map(|x| x.region_num)
+    }
+
+    /// Get the latest node addr.
+    pub fn node_addr(&self) -> Option<String> {
+        self.stats.last().map(|x| x.addr.clone())
     }
 }
 
@@ -366,6 +380,32 @@ mod tests {
     }
 
     #[test]
+    fn test_get_addr_from_stat_val() {
+        let empty = StatValue { stats: vec![] };
+        let addr = empty.node_addr();
+        assert!(addr.is_none());
+
+        let stat_val = StatValue {
+            stats: vec![
+                Stat {
+                    addr: "1".to_string(),
+                    ..Default::default()
+                },
+                Stat {
+                    addr: "2".to_string(),
+                    ..Default::default()
+                },
+                Stat {
+                    addr: "3".to_string(),
+                    ..Default::default()
+                },
+            ],
+        };
+        let addr = stat_val.node_addr().unwrap();
+        assert_eq!("3", addr);
+    }
+
+    #[test]
     fn test_get_region_num_from_stat_val() {
         let empty = StatValue { stats: vec![] };
         let region_num = empty.region_num();
@@ -425,5 +465,17 @@ mod tests {
         let new_key: InactiveRegionKey = key_bytes.try_into().unwrap();
 
         assert_eq!(new_key, key);
+    }
+
+    #[test]
+    fn test_stat_key_to_lease_key() {
+        let stat_key = StatKey {
+            cluster_id: 1,
+            node_id: 101,
+        };
+
+        let lease_key: LeaseKey = (&stat_key).into();
+        assert_eq!(1, lease_key.cluster_id);
+        assert_eq!(101, lease_key.node_id);
     }
 }
