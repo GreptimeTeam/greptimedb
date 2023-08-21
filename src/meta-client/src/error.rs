@@ -66,8 +66,8 @@ pub enum Error {
         source: common_meta::error::Error,
     },
 
-    #[snafu(display("Retry exceeded max times, message: {}", msg))]
-    RetryTimesExceeded { msg: String },
+    #[snafu(display("Retry exceeded max times({}), message: {}", times, msg))]
+    RetryTimesExceeded { times: usize, msg: String },
 }
 
 #[allow(dead_code)]

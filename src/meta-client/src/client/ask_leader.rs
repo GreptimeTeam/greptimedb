@@ -119,6 +119,7 @@ impl AskLeader {
 
         error::RetryTimesExceededSnafu {
             msg: "Failed to ask leader",
+            times: self.max_retry,
         }
         .fail()
     }
