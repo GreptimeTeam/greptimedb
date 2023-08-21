@@ -29,7 +29,7 @@ use store_api::region_request::{
     RegionAlterRequest, RegionCloseRequest, RegionCompactRequest, RegionCreateRequest,
     RegionDropRequest, RegionFlushRequest, RegionOpenRequest, RegionRequest,
 };
-use store_api::storage::{ColumnId, CompactionStrategy, RegionId};
+use store_api::storage::{CompactionStrategy, RegionId};
 use tokio::sync::oneshot::{self, Receiver, Sender};
 
 use crate::config::DEFAULT_WRITE_BUFFER_SIZE;
@@ -56,41 +56,6 @@ impl Default for RegionOptions {
             compaction_strategy: CompactionStrategy::LeveledTimeWindow,
         }
     }
-}
-
-/// Create region request.
-#[derive(Debug)]
-pub struct CreateRequest {
-    /// Region to create.
-    pub region_id: RegionId,
-    /// Data directory of the region.
-    pub region_dir: String,
-    /// Columns in this region.
-    pub column_metadatas: Vec<ColumnMetadata>,
-    /// Columns in the primary key.
-    pub primary_key: Vec<ColumnId>,
-    /// Create region if not exists.
-    pub create_if_not_exists: bool,
-    /// Options of the created region.
-    pub options: RegionOptions,
-}
-
-/// Open region request.
-#[derive(Debug)]
-pub struct OpenRequest {
-    /// Region to open.
-    pub region_id: RegionId,
-    /// Data directory of the region.
-    pub region_dir: String,
-    /// Options of the created region.
-    pub options: RegionOptions,
-}
-
-/// Close region request.
-#[derive(Debug)]
-pub struct CloseRequest {
-    /// Region to close.
-    pub region_id: RegionId,
 }
 
 /// Request to write a region.
