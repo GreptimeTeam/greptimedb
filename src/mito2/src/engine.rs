@@ -14,9 +14,8 @@
 
 //! Mito region engine.
 
-// TODO: migrate test to RegionRequest
-// #[cfg(test)]
-// mod tests;
+#[cfg(test)]
+mod tests;
 
 use std::sync::Arc;
 
