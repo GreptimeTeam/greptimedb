@@ -564,7 +564,9 @@ pub enum Source {
 impl Source {
     /// Returns next [Batch] from this data source.
     pub(crate) async fn next_batch(&mut self) -> Result<Option<Batch>> {
-        unimplemented!()
+        match self {
+            Source::Reader(reader) => reader.next_batch().await,
+        }
     }
 
     /// Returns the metadata of the source region.
@@ -613,6 +615,7 @@ mod tests {
     use super::*;
     use crate::error::Error;
 
+    // TODO(yingwen): replace with test util.
     fn new_batch_builder(
         timestamps: &[i64],
         sequences: &[u64],

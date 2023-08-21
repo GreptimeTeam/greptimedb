@@ -331,12 +331,155 @@ impl Ord for CompareFirst {
 
 #[cfg(test)]
 mod tests {
+    use api::v1::OpType;
+
     use super::*;
+    use crate::test_util::{new_batch, VecBatchReader};
 
     #[tokio::test]
     async fn test_merge_reader_empty() {
         let mut reader = MergeReaderBuilder::new().build().await.unwrap();
         assert!(reader.next_batch().await.unwrap().is_none());
         assert!(reader.next_batch().await.unwrap().is_none());
+    }
+
+    async fn check_merge_result(reader: &mut MergeReader, expect: &[Batch]) {
+        let mut result = Vec::new();
+        while let Some(batch) = reader.next_batch().await.unwrap() {
+            result.push(batch);
+        }
+
+        assert_eq!(expect, result);
+    }
+
+    #[tokio::test]
+    async fn test_merge_non_overlapping() {
+        let reader1 = VecBatchReader::new(&[
+            new_batch(
+                b"k1",
+                &[1, 2],
+                &[11, 12],
+                &[OpType::Put, OpType::Put],
+                &[21, 22],
+            ),
+            new_batch(
+                b"k1",
+                &[7, 8],
+                &[17, 18],
+                &[OpType::Put, OpType::Delete],
+                &[27, 28],
+            ),
+            new_batch(
+                b"k2",
+                &[2, 3],
+                &[12, 13],
+                &[OpType::Delete, OpType::Put],
+                &[22, 23],
+            ),
+        ]);
+        let reader2 = VecBatchReader::new(&[new_batch(
+            b"k1",
+            &[4, 5],
+            &[14, 15],
+            &[OpType::Put, OpType::Put],
+            &[24, 25],
+        )]);
+        let mut reader = MergeReaderBuilder::new()
+            .push_batch_reader(Box::new(reader1))
+            .push_batch_reader(Box::new(reader2))
+            .build()
+            .await
+            .unwrap();
+        check_merge_result(
+            &mut reader,
+            &[
+                new_batch(
+                    b"k1",
+                    &[1, 2, 4, 5, 7],
+                    &[11, 12, 14, 15, 17],
+                    &[
+                        OpType::Put,
+                        OpType::Put,
+                        OpType::Put,
+                        OpType::Put,
+                        OpType::Put,
+                    ],
+                    &[21, 22, 24, 25, 27],
+                ),
+                new_batch(b"k2", &[3], &[13], &[OpType::Put], &[23]),
+            ],
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_merge_overlapping() {
+        let reader1 = VecBatchReader::new(&[
+            new_batch(
+                b"k1",
+                &[1, 2],
+                &[11, 12],
+                &[OpType::Put, OpType::Put],
+                &[21, 22],
+            ),
+            new_batch(
+                b"k1",
+                &[4, 5],
+                &[14, 15],
+                // This override 4 and deletes 5.
+                &[OpType::Put, OpType::Delete],
+                &[24, 25],
+            ),
+            new_batch(
+                b"k2",
+                &[2, 3],
+                &[12, 13],
+                // This delete 2.
+                &[OpType::Delete, OpType::Put],
+                &[22, 23],
+            ),
+        ]);
+        let reader2 = VecBatchReader::new(&[
+            new_batch(
+                b"k1",
+                &[3, 4, 5],
+                &[10, 10, 10],
+                &[OpType::Put, OpType::Put, OpType::Put],
+                &[33, 34, 35],
+            ),
+            new_batch(
+                b"k2",
+                &[1, 10],
+                &[11, 20],
+                &[OpType::Put, OpType::Put],
+                &[21, 30],
+            ),
+        ]);
+        let mut reader = MergeReaderBuilder::new()
+            .push_batch_reader(Box::new(reader1))
+            .push_batch_reader(Box::new(reader2))
+            .build()
+            .await
+            .unwrap();
+        check_merge_result(
+            &mut reader,
+            &[
+                new_batch(
+                    b"k1",
+                    &[1, 2, 3, 4],
+                    &[11, 12, 10, 14],
+                    &[OpType::Put, OpType::Put, OpType::Put, OpType::Put],
+                    &[21, 22, 33, 24],
+                ),
+                new_batch(
+                    b"k2",
+                    &[1, 3, 10],
+                    &[11, 13, 20],
+                    &[OpType::Put, OpType::Put, OpType::Put],
+                    &[21, 23, 30],
+                ),
+            ],
+        )
+        .await;
     }
 }

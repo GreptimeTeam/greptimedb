@@ -18,9 +18,10 @@ use std::sync::Arc;
 
 use api::greptime_proto::v1;
 use api::v1::value::ValueData;
-use api::v1::SemanticType;
+use api::v1::{OpType, SemanticType};
 use common_datasource::compression::CompressionType;
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
+use datatypes::arrow::array::{TimestampMillisecondArray, UInt64Array, UInt8Array};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
@@ -34,6 +35,7 @@ use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
 use crate::error::Result;
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
+use crate::read::{Batch, BatchBuilder, BatchReader, BoxedBatchReader};
 use crate::request::{CreateRequest, RegionOptions};
 use crate::worker::WorkerGroup;
 
@@ -245,4 +247,65 @@ pub(crate) fn ts_ms_value(data: i64) -> v1::Value {
     v1::Value {
         value_data: Some(ValueData::TsMillisecondValue(data)),
     }
+}
+
+/// A reader for test that pop [Batch] from a vector.
+pub struct VecBatchReader {
+    batches: Vec<Batch>,
+}
+
+impl VecBatchReader {
+    pub fn new(batches: &[Batch]) -> VecBatchReader {
+        let batches = batches.iter().rev().cloned().collect();
+
+        VecBatchReader { batches }
+    }
+}
+
+#[async_trait::async_trait]
+impl BatchReader for VecBatchReader {
+    async fn next_batch(&mut self) -> Result<Option<Batch>> {
+        Ok(self.batches.pop())
+    }
+}
+
+pub fn new_batch_builder(
+    primary_key: &[u8],
+    timestamps: &[i64],
+    sequences: &[u64],
+    op_types: &[OpType],
+    field: &[u64],
+) -> BatchBuilder {
+    let mut builder = BatchBuilder::new(primary_key.to_vec());
+    builder
+        .timestamps_array(Arc::new(TimestampMillisecondArray::from_iter_values(
+            timestamps.iter().copied(),
+        )))
+        .unwrap()
+        .sequences_array(Arc::new(UInt64Array::from_iter_values(
+            sequences.iter().copied(),
+        )))
+        .unwrap()
+        .op_types_array(Arc::new(UInt8Array::from_iter_values(
+            op_types.iter().map(|v| *v as u8),
+        )))
+        .unwrap()
+        .push_field_array(
+            1,
+            Arc::new(UInt64Array::from_iter_values(field.iter().copied())),
+        )
+        .unwrap();
+    builder
+}
+
+pub fn new_batch(
+    primary_key: &[u8],
+    timestamps: &[i64],
+    sequences: &[u64],
+    op_types: &[OpType],
+    field: &[u64],
+) -> Batch {
+    new_batch_builder(primary_key, timestamps, sequences, op_types, field)
+        .build()
+        .unwrap()
 }
