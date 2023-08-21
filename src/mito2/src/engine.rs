@@ -29,7 +29,7 @@ use store_api::storage::RegionId;
 
 use crate::config::MitoConfig;
 use crate::error::{RecvSnafu, Result};
-use crate::request::RegionTask;
+use crate::request::{RegionTask, RequestBody};
 use crate::worker::WorkerGroup;
 
 /// Region engine implementation for timeseries data.
@@ -118,7 +118,8 @@ impl EngineInner {
     // TODO(yingwen): return `Output` instead of `Result<()>`.
     /// Handles [RequestBody] and return its executed result.
     async fn handle_request(&self, region_id: RegionId, request: RegionRequest) -> Result<()> {
-        let (request, receiver) = RegionTask::from_request(region_id, request);
+        let body = RequestBody::try_from_region_request(region_id, request)?;
+        let (request, receiver) = RegionTask::from_request(region_id, body);
         self.workers.submit_to_worker(request).await?;
 
         receiver.await.context(RecvSnafu)?

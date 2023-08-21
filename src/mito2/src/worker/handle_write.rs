@@ -111,7 +111,7 @@ fn maybe_fill_missing_columns(request: &mut WriteRequest, metadata: &RegionMetad
     if let Err(e) = request.check_schema(metadata) {
         if e.is_fill_default() {
             // TODO(yingwen): Add metrics for this case.
-            // We need to fill default value again. The write request may be a request
+            // We need to fill default value. The write request may be a request
             // sent before changing the schema.
             request.fill_missing_columns(metadata)?;
         } else {

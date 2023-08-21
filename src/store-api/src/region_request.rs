@@ -21,7 +21,7 @@ use crate::storage::{AlterRequest, ColumnId, ScanRequest};
 
 #[derive(Debug)]
 pub enum RegionRequest {
-    Write(RegionWriteRequest),
+    Put(RegionPutRequest),
     Delete(RegionDeleteRequest),
     Create(RegionCreateRequest),
     Drop(RegionDropRequest),
@@ -32,10 +32,10 @@ pub enum RegionRequest {
     Compact(RegionCompactRequest),
 }
 
-/// Request to write a region.
+/// Request to put data into a region.
 #[derive(Debug)]
-pub struct RegionWriteRequest {
-    /// Rows to write.
+pub struct RegionPutRequest {
+    /// Rows to put.
     pub rows: Rows,
 }
 
@@ -44,9 +44,12 @@ pub struct RegionReadRequest {
     pub request: ScanRequest,
 }
 
+/// Request to delete data from a region.
 #[derive(Debug)]
 pub struct RegionDeleteRequest {
-    /// Rows to write.
+    /// Keys to rows to delete.
+    ///
+    /// Including primary keys and time indexs.
     pub rows: Rows,
 }
 
