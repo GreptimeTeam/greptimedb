@@ -59,6 +59,7 @@ impl MitoEngine {
         self.inner.stop().await
     }
 
+    /// Handle requests that modify a region.
     pub async fn handle_request(
         &self,
         region_id: RegionId,
