@@ -31,41 +31,86 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ScanRequest;
 
 use crate::error::{
-    CompactValuesSnafu, ConvertVectorSnafu, PrimaryKeyLengthMismatchSnafu, Result, SortValuesSnafu,
+    CompactValuesSnafu, ConvertVectorSnafu, InvalidMemtableConfigSnafu,
+    PrimaryKeyLengthMismatchSnafu, Result, SortValuesSnafu,
 };
 use crate::memtable::{BoxedBatchIterator, KeyValues, Memtable, MemtableId};
 use crate::read::{Batch, BatchBuilder, BatchColumn};
 use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
 
+/// Config for [TimeSeriesMemtable].
+#[derive(Debug)]
+pub struct TimeSeriesMemtableConfig {
+    /// The bucket num for memtable.
+    pub bucket_num: usize,
+    /// The initial capacity for each [ValueBuilder] in series.
+    pub initial_builder_capacity: usize,
+}
+
+impl TimeSeriesMemtableConfig {
+    fn validate(&self) -> Result<()> {
+        ensure!(
+            self.bucket_num < 256,
+            InvalidMemtableConfigSnafu {
+                config: format!("{:?}", self),
+            }
+        );
+        Ok(())
+    }
+}
+
+impl Default for TimeSeriesMemtableConfig {
+    fn default() -> Self {
+        Self {
+            bucket_num: 16,
+            initial_builder_capacity: 128,
+        }
+    }
+}
+
 /// Memtable implementation that groups rows by their primary key.
 pub struct TimeSeriesMemtable {
     id: MemtableId,
+    config: TimeSeriesMemtableConfig,
     region_metadata: RegionMetadataRef,
     row_codec: McmpRowCodec,
     series_set: SeriesSet,
 }
 
 impl TimeSeriesMemtable {
-    pub fn new(region_metadata: RegionMetadataRef, id: MemtableId) -> Self {
+    pub fn new(
+        region_metadata: RegionMetadataRef,
+        id: MemtableId,
+        config: Option<TimeSeriesMemtableConfig>,
+    ) -> Result<Self> {
         let row_codec = McmpRowCodec::new(
             region_metadata
                 .primary_key_columns()
                 .map(|c| SortField::new(c.column_schema.data_type.clone()))
                 .collect(),
         );
-        let series_set = SeriesSet::new(region_metadata.clone(), 10);
-        Self {
+        let config = config.unwrap_or_default();
+        config.validate()?;
+        let series_set = SeriesSet::new(
+            region_metadata.clone(),
+            config.bucket_num as u8,
+            config.initial_builder_capacity,
+        );
+        Ok(Self {
             id,
+            config,
             region_metadata,
             series_set,
             row_codec,
-        }
+        })
     }
 }
 
 impl Debug for TimeSeriesMemtable {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TimeSeriesMemtable").finish()
+        f.debug_struct("TimeSeriesMemtable")
+            .field("config", &self.config)
+            .finish()
     }
 }
 
@@ -107,6 +152,7 @@ impl Memtable for TimeSeriesMemtable {
 type SeriesIndex = (u8, usize);
 
 struct SeriesSet {
+    initial_builder_capacity: usize,
     region_metadata: RegionMetadataRef,
     bucket_num: u8,
     indices: Arc<RwLock<BTreeMap<Vec<u8>, SeriesIndex>>>,
@@ -114,7 +160,11 @@ struct SeriesSet {
 }
 
 impl SeriesSet {
-    fn new(region_metadata: RegionMetadataRef, bucket_num: u8) -> Self {
+    fn new(
+        region_metadata: RegionMetadataRef,
+        bucket_num: u8,
+        initial_builder_capacity: usize,
+    ) -> Self {
         let buckets = Arc::new(
             (0..bucket_num)
                 .map(|_| Bucket::new(region_metadata.clone()))
@@ -122,6 +172,7 @@ impl SeriesSet {
         );
 
         Self {
+            initial_builder_capacity,
             region_metadata,
             bucket_num,
             indices: Default::default(),
@@ -145,7 +196,10 @@ impl SeriesSet {
         };
         let bucket_idx = self.hash_primary_key(&primary_key);
         let bucket = &self.buckets[bucket_idx as usize];
-        let s = Arc::new(RwLock::new(Series::new(self.region_metadata.clone())));
+        let s = Arc::new(RwLock::new(Series::new(
+            self.region_metadata.clone(),
+            self.initial_builder_capacity,
+        )));
         let mut indices = self.indices.write().unwrap();
         match indices.entry(primary_key) {
             Entry::Vacant(v) => {
@@ -243,16 +297,18 @@ impl Bucket {
 
 /// A `Series` holds a list of field values of some given primary key.
 struct Series {
+    initial_builder_capacity: usize,
     region_metadata: RegionMetadataRef,
     active: ValueBuilder,
     frozen: Vec<Values>,
 }
 
 impl Series {
-    fn new(region_metadata: RegionMetadataRef) -> Self {
+    fn new(region_metadata: RegionMetadataRef, initial_builder_capacity: usize) -> Self {
         Self {
+            initial_builder_capacity,
             region_metadata: region_metadata.clone(),
-            active: ValueBuilder::new(region_metadata, 32),
+            active: ValueBuilder::new(region_metadata, initial_builder_capacity),
             frozen: vec![],
         }
     }
@@ -264,7 +320,8 @@ impl Series {
 
     /// Freezes the active part and push it to `frozen`.
     fn freeze(&mut self) {
-        let mut builder = ValueBuilder::new(self.region_metadata.clone(), 32);
+        let mut builder =
+            ValueBuilder::new(self.region_metadata.clone(), self.initial_builder_capacity);
         std::mem::swap(&mut self.active, &mut builder);
         self.frozen.push(Values::from(builder));
     }
@@ -552,7 +609,7 @@ mod tests {
     #[test]
     fn test_series() {
         let region_metadata = schema_for_test();
-        let mut series = Series::new(region_metadata);
+        let mut series = Series::new(region_metadata, 32);
         series.push(ts_value_ref(1), 0, OpType::Put, field_value_ref(1, 10.1));
         series.push(ts_value_ref(2), 0, OpType::Put, field_value_ref(2, 10.2));
         assert_eq!(2, series.active.timestamp.len());
@@ -681,7 +738,7 @@ mod tests {
     #[test]
     fn test_series_set_concurrency() {
         let schema = schema_for_test();
-        let set = Arc::new(SeriesSet::new(schema, 3));
+        let set = Arc::new(SeriesSet::new(schema, 3, 32));
 
         let concurrency = 32;
         let pk_num = concurrency * 2;
@@ -755,7 +812,7 @@ mod tests {
         common_telemetry::init_default_ut_logging();
         let schema = schema_for_test();
         let kvs = build_key_values(&schema, 100);
-        let memtable = TimeSeriesMemtable::new(schema, 42);
+        let memtable = TimeSeriesMemtable::new(schema, 42, None).unwrap();
         memtable.write(&kvs).unwrap();
 
         let expected_ts = kvs

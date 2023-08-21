@@ -355,6 +355,9 @@ pub enum Error {
         source: datatypes::error::Error,
         location: Location,
     },
+
+    #[snafu(display("Memtable config is not valid: {}, location: {}", config, location))]
+    InvalidMemtableConfig { config: String, location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -412,6 +415,7 @@ impl ErrorExt for Error {
             PrimaryKeyLengthMismatch { .. } => StatusCode::InvalidArguments,
             SortValues { .. } => StatusCode::Unexpected,
             CompactValues { source, .. } => source.status_code(),
+            InvalidMemtableConfig { .. } => StatusCode::InvalidArguments,
         }
     }
 
