@@ -65,6 +65,9 @@ pub enum Error {
         location: Location,
         source: common_meta::error::Error,
     },
+
+    #[snafu(display("Retry exceeded max times"))]
+    RetryTimesExceeded {},
 }
 
 #[allow(dead_code)]
@@ -83,7 +86,8 @@ impl ErrorExt for Error {
             | Error::NotStarted { .. }
             | Error::SendHeartbeat { .. }
             | Error::CreateHeartbeatStream { .. }
-            | Error::CreateChannel { .. } => StatusCode::Internal,
+            | Error::CreateChannel { .. }
+            | Error::RetryTimesExceeded { .. } => StatusCode::Internal,
 
             Error::MetaServer { code, .. } => *code,
 

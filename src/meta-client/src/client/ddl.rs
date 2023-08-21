@@ -21,7 +21,6 @@ use common_telemetry::{info, warn};
 use snafu::{ensure, ResultExt};
 use tokio::sync::RwLock;
 use tonic::transport::Channel;
-use tonic::Code;
 
 use crate::client::ask_leader::AskLeader;
 use crate::client::Id;
@@ -34,12 +33,13 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn new(id: Id, role: Role, channel_manager: ChannelManager) -> Self {
+    pub fn new(id: Id, role: Role, channel_manager: ChannelManager, max_retry: usize) -> Self {
         let inner = Arc::new(RwLock::new(Inner {
             id,
             role,
             channel_manager,
             ask_leader: None,
+            max_retry,
         }));
 
         Self { inner }
@@ -75,6 +75,7 @@ struct Inner {
     role: Role,
     channel_manager: ChannelManager,
     ask_leader: Option<AskLeader>,
+    max_retry: usize,
 }
 
 impl Inner {
@@ -100,6 +101,7 @@ impl Inner {
             self.role,
             peers,
             self.channel_manager.clone(),
+            self.max_retry,
         ));
 
         Ok(())
@@ -132,7 +134,8 @@ impl Inner {
 
         req.set_header(self.id, self.role);
         let ask_leader = self.ask_leader.as_ref().unwrap();
-        loop {
+        let mut times = 0;
+        while times < self.max_retry {
             if let Some(leader) = &ask_leader.get_leader() {
                 let mut client = self.make_client(leader)?;
 
@@ -147,7 +150,10 @@ impl Inner {
                         if let Some(header) = res.header.as_ref() {
                             if let Some(err) = header.error.as_ref() {
                                 if err.code == ErrorCode::NotLeader as i32 {
-                                    let _ = ask_leader.ask_leader().await?;
+                                    warn!("Failed to submitting ddl to {leader}, not a leader");
+                                    let leader = ask_leader.ask_leader().await?;
+                                    info!("DDL client updated to new leader addr: {leader}");
+                                    times += 1;
                                     continue;
                                 }
                             }
@@ -156,11 +162,10 @@ impl Inner {
                     }
                     // The leader may be unreachable.
                     Err(err) => {
-                        warn!(
-                            "Submitting ddl to {leader} is unreachable, try to update leader addr"
-                        );
+                        warn!("Failed to submitting ddl to {leader}, source: {err}");
                         let leader = ask_leader.ask_leader().await?;
                         info!("DDL client updated to new leader addr: {leader}");
+                        times += 1;
                         continue;
                     }
                 }
@@ -168,5 +173,7 @@ impl Inner {
                 return Err(err);
             }
         }
+
+        error::RetryTimesExceededSnafu.fail()
     }
 }
