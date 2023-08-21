@@ -37,7 +37,7 @@ use crate::memtable::{BoxedBatchIterator, KeyValues, Memtable, MemtableId};
 use crate::read::{Batch, BatchBuilder, BatchColumn};
 use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
 
-/// Memtable implementation that group rows by to their primary key.
+/// Memtable implementation that groups rows by their primary key.
 pub struct TimeSeriesMemtable {
     id: MemtableId,
     region_metadata: RegionMetadataRef,

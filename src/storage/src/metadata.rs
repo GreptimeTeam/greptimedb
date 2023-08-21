@@ -483,12 +483,6 @@ impl ColumnsMetadata {
         self.columns.iter().take(self.row_key_end)
     }
 
-    /// Returns an iterator to all primary key columns.
-    /// Primary key columns do not contain timestamp columns.
-    pub fn iter_primary_key_columns(&self) -> impl Iterator<Item = &ColumnMetadata> {
-        self.columns.iter().take(self.timestamp_key_index)
-    }
-
     /// Returns an iterator to all value columns (internal columns are excluded).
     pub fn iter_field_columns(&self) -> impl Iterator<Item = &ColumnMetadata> {
         self.columns[self.row_key_end..self.user_column_end].iter()
@@ -1069,15 +1063,6 @@ mod tests {
             .map(|column| &column.desc.name)
             .collect();
         assert_eq!(["k1", "ts"], &row_key_names[..]);
-
-        let primary_key_names = metadata
-            .columns
-            .iter_primary_key_columns()
-            .map(|c| &c.desc.name)
-            .collect::<Vec<_>>();
-
-        assert_eq!(["k1"], &primary_key_names[..]);
-
         // 1 value column
         assert_eq!(1, metadata.columns.num_field_columns());
         let value_names: Vec<_> = metadata

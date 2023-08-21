@@ -91,11 +91,6 @@ impl RegionSchema {
     }
 
     #[inline]
-    pub fn primary_key_columns(&self) -> impl Iterator<Item = &ColumnMetadata> {
-        self.columns.iter_primary_key_columns()
-    }
-
-    #[inline]
     pub fn field_columns(&self) -> impl Iterator<Item = &ColumnMetadata> {
         self.columns.iter_field_columns()
     }
