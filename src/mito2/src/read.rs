@@ -14,7 +14,7 @@
 
 //! Common structs and utilities for reading data.
 
-mod merge;
+pub mod merge;
 
 use std::sync::Arc;
 
@@ -610,8 +610,6 @@ impl<T: BatchReader + ?Sized> BatchReader for Box<T> {
 
 #[cfg(test)]
 mod tests {
-    use datatypes::arrow::array::{TimestampMillisecondArray, UInt64Array, UInt8Array};
-
     use super::*;
     use crate::error::Error;
     use crate::test_util::new_batch_builder;

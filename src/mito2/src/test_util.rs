@@ -35,7 +35,7 @@ use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
 use crate::error::Result;
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
-use crate::read::{Batch, BatchBuilder, BatchReader, BoxedBatchReader};
+use crate::read::{Batch, BatchBuilder, BatchReader};
 use crate::request::{CreateRequest, RegionOptions};
 use crate::worker::WorkerGroup;
 
