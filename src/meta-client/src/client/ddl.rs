@@ -21,6 +21,7 @@ use common_telemetry::{info, warn};
 use snafu::{ensure, ResultExt};
 use tokio::sync::RwLock;
 use tonic::transport::Channel;
+use tonic::Code;
 
 use crate::client::ask_leader::AskLeader;
 use crate::client::Id;
@@ -139,11 +140,7 @@ impl Inner {
             if let Some(leader) = &ask_leader.get_leader() {
                 let mut client = self.make_client(leader)?;
 
-                match client
-                    .submit_ddl_task(req.clone())
-                    .await
-                    .map_err(error::Error::from)
-                {
+                match client.submit_ddl_task(req.clone()).await {
                     Ok(res) => {
                         let res = res.into_inner();
 
@@ -160,13 +157,17 @@ impl Inner {
                         }
                         return Ok(res);
                     }
-                    // The leader may be unreachable.
                     Err(err) => {
-                        warn!("Failed to submitting ddl to {leader}, source: {err}");
-                        let leader = ask_leader.ask_leader().await?;
-                        info!("DDL client updated to new leader addr: {leader}");
-                        times += 1;
-                        continue;
+                        // The leader may be unreachable.
+                        if err.code() == Code::Unavailable || err.code() == Code::DeadlineExceeded {
+                            warn!("Failed to submitting ddl to {leader}, source: {err}");
+                            let leader = ask_leader.ask_leader().await?;
+                            info!("DDL client updated to new leader addr: {leader}");
+                            times += 1;
+                            continue;
+                        } else {
+                            return Err(error::Error::from(err));
+                        }
                     }
                 }
             } else if let Err(err) = ask_leader.ask_leader().await {
@@ -175,7 +176,7 @@ impl Inner {
         }
 
         error::RetryTimesExceededSnafu {
-            msg: "Failed to submit DDL client",
+            msg: "Failed to submit DDL task",
         }
         .fail()
     }
