@@ -52,16 +52,10 @@ impl DatanodeInstance {
             .encode(&logical_plan)
             .context(error::EncodeSubstraitLogicalPlanSnafu)?;
 
-        let output = self
-            .db
+        self.db
             .logical_plan(substrait_plan.to_vec(), None)
             .await
-            .context(error::RequestDatanodeSnafu)?;
-
-        match output {
-            Output::Stream(_) => Ok(output),
-            _ => unreachable!(),
-        }
+            .context(error::RequestDatanodeSnafu)
     }
 
     fn build_logical_plan(&self, table_scan: &TableScanPlan) -> Result<LogicalPlan> {
