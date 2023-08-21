@@ -24,10 +24,11 @@ use object_store::ObjectStore;
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
 use store_api::region_request::RegionRequest;
-use store_api::storage::RegionId;
+use store_api::storage::{RegionId, ScanRequest};
 
 use crate::config::MitoConfig;
 use crate::error::{RecvSnafu, Result};
+use crate::read::stream_builder::RecordBatchStreamBuilder;
 use crate::request::{RegionTask, RequestBody};
 use crate::worker::WorkerGroup;
 
@@ -106,5 +107,14 @@ impl EngineInner {
         self.workers.submit_to_worker(request).await?;
 
         receiver.await.context(RecvSnafu)?
+    }
+
+    /// Return a record batch stream builder to execute the query.
+    fn handle_query(
+        &self,
+        region_id: RegionId,
+        request: ScanRequest,
+    ) -> Result<RecordBatchStreamBuilder> {
+        unimplemented!()
     }
 }

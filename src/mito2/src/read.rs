@@ -15,6 +15,7 @@
 //! Common structs and utilities for reading data.
 
 pub mod merge;
+pub mod stream_builder;
 
 use std::sync::Arc;
 
