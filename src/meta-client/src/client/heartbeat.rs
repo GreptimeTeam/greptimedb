@@ -93,8 +93,13 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn new(id: Id, role: Role, channel_manager: ChannelManager) -> Self {
-        let inner = Arc::new(RwLock::new(Inner::new(id, role, channel_manager)));
+    pub fn new(id: Id, role: Role, channel_manager: ChannelManager, max_retry: usize) -> Self {
+        let inner = Arc::new(RwLock::new(Inner::new(
+            id,
+            role,
+            channel_manager,
+            max_retry,
+        )));
         Self { inner }
     }
 
@@ -130,15 +135,17 @@ struct Inner {
     role: Role,
     channel_manager: ChannelManager,
     ask_leader: Option<AskLeader>,
+    max_retry: usize,
 }
 
 impl Inner {
-    fn new(id: Id, role: Role, channel_manager: ChannelManager) -> Self {
+    fn new(id: Id, role: Role, channel_manager: ChannelManager, max_retry: usize) -> Self {
         Self {
             id,
             role,
             channel_manager,
             ask_leader: None,
+            max_retry,
         }
     }
 
@@ -164,6 +171,7 @@ impl Inner {
             self.role,
             peers,
             self.channel_manager.clone(),
+            self.max_retry,
         ));
 
         Ok(())
@@ -251,7 +259,7 @@ mod test {
 
     #[tokio::test]
     async fn test_start_client() {
-        let mut client = Client::new((0, 0), Role::Datanode, ChannelManager::default());
+        let mut client = Client::new((0, 0), Role::Datanode, ChannelManager::default(), 3);
         assert!(!client.is_started().await);
         client
             .start(&["127.0.0.1:1000", "127.0.0.1:1001"])
@@ -262,7 +270,7 @@ mod test {
 
     #[tokio::test]
     async fn test_already_start() {
-        let mut client = Client::new((0, 0), Role::Datanode, ChannelManager::default());
+        let mut client = Client::new((0, 0), Role::Datanode, ChannelManager::default(), 3);
         client
             .start(&["127.0.0.1:1000", "127.0.0.1:1001"])
             .await
