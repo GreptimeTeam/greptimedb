@@ -394,6 +394,8 @@ impl RegionTask {
 }
 
 /// Request body of a region task.
+///
+/// It validates requests outside of workers.
 #[derive(Debug)]
 pub(crate) enum RequestBody {
     Write(WriteRequest),
@@ -431,20 +433,6 @@ impl RequestBody {
         };
 
         Ok(body)
-    }
-}
-
-/// Mito Region Engine's request validator
-pub(crate) struct RequestValidator;
-
-impl RequestValidator {
-    /// Validate the [WriteRequest].
-    pub fn write_request(_write_request: &WriteRequest) -> Result<()> {
-        // - checks whether the request is too large.
-        // - checks whether each row in rows has the same schema.
-        // - checks whether each column match the schema in Rows.
-        // - checks rows don't have duplicate columns.
-        unimplemented!()
     }
 }
 
