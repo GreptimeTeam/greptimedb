@@ -174,6 +174,9 @@ impl Inner {
             }
         }
 
-        error::RetryTimesExceededSnafu.fail()
+        error::RetryTimesExceededSnafu {
+            msg: "Failed to submit DDL client",
+        }
+        .fail()
     }
 }

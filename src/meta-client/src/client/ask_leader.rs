@@ -117,7 +117,10 @@ impl AskLeader {
             }
         }
 
-        error::RetryTimesExceededSnafu {}.fail()
+        error::RetryTimesExceededSnafu {
+            msg: "Failed to ask leader",
+        }
+        .fail()
     }
 
     fn create_asker(&self, addr: impl AsRef<str>) -> Result<HeartbeatClient<Channel>> {
