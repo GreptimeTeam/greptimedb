@@ -18,6 +18,7 @@ use std::sync::Arc;
 use common_datasource::compression::CompressionType;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
+use common_runtime::JoinError;
 use datatypes::arrow::error::ArrowError;
 use datatypes::prelude::ConcreteDataType;
 use prost::{DecodeError, EncodeError};
@@ -331,6 +332,28 @@ pub enum Error {
         location: Location,
         source: datatypes::error::Error,
     },
+
+    #[snafu(display(
+        "Invaild scheduler sender, location: {}",
+        location,
+    ))]
+    InvalidFlumeSender {
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Invaild state location: {}",
+        location,
+    ))]
+    InvalidState {
+        location: Location,
+    },
+
+    #[snafu(display("Invalid handle state, {}, location: {}", source, location))]
+    InvalidHandleState {
+        source: JoinError,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -385,6 +408,9 @@ impl ErrorExt for Error {
             InvalidBatch { .. } => StatusCode::InvalidArguments,
             InvalidRecordBatch { .. } => StatusCode::InvalidArguments,
             ConvertVector { source, .. } => source.status_code(),
+            InvalidFlumeSender { .. } => StatusCode::InvalidArguments,
+            InvalidState { .. } => StatusCode::InvalidArguments,
+            InvalidHandleState { .. } => StatusCode::InvalidArguments,
         }
     }
 

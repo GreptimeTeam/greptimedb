@@ -18,10 +18,14 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 
 use common_telemetry::info;
+use snafu::ResultExt;
+use snafu::OptionExt;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::error::Result;
+use crate::error::{
+    Result, InvalidFlumeSenderSnafu, InvalidStateSnafu, InvalidHandleStateSnafu,
+};
 
 pub type Job = Pin<Box<dyn Future<Output = ()> + Send>>;
 
@@ -37,7 +41,7 @@ const CONSUMER_NUM: u8 = 2;
 #[async_trait::async_trait]
 pub trait Scheduler {
     /// Schedules a Job
-    async fn schedule(&mut self, req: Job) -> Result<()>;
+    async fn schedule(&self, req: Job) -> Result<()>;
 
     /// Stops scheduler. If `await_termination` is set to true, the scheduler will
     /// wait until all tasks are processed.
@@ -70,7 +74,7 @@ impl LocalScheduler {
             let child = token.child_token().clone();
             let receiver = rx.clone();
             let state = Arc::clone(&state);
-            let handle = tokio::spawn(async move {
+            let handle = common_runtime::spawn_bg(async move {
                 while state.load(Ordering::Relaxed) == STATE_RUNNING {
                     info!("Task scheduler loop.");
                     tokio::select! {
@@ -111,9 +115,12 @@ impl LocalScheduler {
 
 #[async_trait::async_trait]
 impl Scheduler for LocalScheduler {
-    async fn schedule(&mut self, req: Job) -> Result<()> {
-        self.sender.as_mut().unwrap().send_async(req).await.unwrap();
-        Ok(())
+    async fn schedule(&self, req: Job) -> Result<()> {
+        self.sender.as_ref().context(InvalidStateSnafu)?
+            .send_async(req)
+            .await
+            .map_err(|_| InvalidFlumeSenderSnafu {}.build()
+        )
     }
 
     async fn stop(&mut self, await_termination: bool) -> Result<()> {
@@ -128,7 +135,7 @@ impl Scheduler for LocalScheduler {
 
         for handle in &mut self.handles {
             if let Some(handle) = handle.take() {
-                handle.await.unwrap();
+                handle.await.context(InvalidHandleStateSnafu)?;
             }
         }
         Ok(())
@@ -151,32 +158,6 @@ mod tests {
     use tokio::sync::Barrier;
 
     use super::*;
-
-    #[tokio::test]
-    async fn test_scheduler() {
-        let mut local = LocalScheduler::new(3, 3);
-
-        local
-            .schedule(Box::pin(async move {
-                tokio::time::sleep(Duration::from_secs(1)).await;
-            }))
-            .await
-            .unwrap();
-
-        local
-            .schedule(Box::pin(async move {
-                tokio::time::sleep(Duration::from_secs(1)).await;
-            }))
-            .await
-            .unwrap();
-
-        local
-            .schedule(Box::pin(async move {
-                tokio::time::sleep(Duration::from_secs(1)).await;
-            }))
-            .await
-            .unwrap();
-    }
 
     #[tokio::test]
     async fn test_sum_cap() {
@@ -225,7 +206,7 @@ mod tests {
         let task_size = 1000;
 
         let barrier = Arc::new(Barrier::new(task_size + 1));
-        let mut local: LocalScheduler = LocalScheduler::new(20, task_size + 1);
+        let local: LocalScheduler = LocalScheduler::new(10, task_size + 1);
 
         for _ in 0..task_size {
             let barrier_clone = barrier.clone();
