@@ -28,18 +28,14 @@ use datatypes::schema::{Schema, SchemaRef};
 use futures::ready;
 use snafu::ResultExt;
 
-use crate::error::{self, Error, Result};
+use crate::error::{self, Result};
 use crate::{
     DfRecordBatch, DfSendableRecordBatchStream, RecordBatch, RecordBatchStream,
     SendableRecordBatchStream, Stream,
 };
 
-type FutureStream = Pin<
-    Box<
-        dyn std::future::Future<Output = std::result::Result<SendableRecordBatchStream, Error>>
-            + Send,
-    >,
->;
+type FutureStream =
+    Pin<Box<dyn std::future::Future<Output = Result<SendableRecordBatchStream>> + Send>>;
 
 /// ParquetRecordBatchStream -> DataFusion RecordBatchStream
 pub struct ParquetRecordBatchStreamAdapter<T> {
