@@ -14,7 +14,7 @@
 
 use std::any::Any;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use api::v1::region::QueryRequest;
 use async_trait::async_trait;
@@ -49,24 +49,56 @@ use crate::error::{
     UnsupportedOutputSnafu,
 };
 
+#[derive(Clone)]
 pub struct RegionServer {
-    engines: HashMap<String, RegionEngineRef>,
-    region_map: DashMap<RegionId, RegionEngineRef>,
-    query_engine: QueryEngineRef,
+    inner: Arc<RegionServerInner>,
 }
 
 impl RegionServer {
     pub fn new(query_engine: QueryEngineRef) -> Self {
         Self {
-            engines: HashMap::new(),
+            inner: Arc::new(RegionServerInner::new(query_engine)),
+        }
+    }
+
+    pub fn register_engine(&mut self, engine: RegionEngineRef) {
+        self.inner.register_engine(engine);
+    }
+
+    pub async fn handle_request(
+        &self,
+        region_id: RegionId,
+        request: RegionRequest,
+    ) -> Result<Output> {
+        self.inner.handle_request(region_id, request).await
+    }
+
+    pub async fn handle_read(&self, request: QueryRequest) -> Result<SendableRecordBatchStream> {
+        self.inner.handle_read(request).await
+    }
+}
+
+struct RegionServerInner {
+    engines: RwLock<HashMap<String, RegionEngineRef>>,
+    region_map: DashMap<RegionId, RegionEngineRef>,
+    query_engine: QueryEngineRef,
+}
+
+impl RegionServerInner {
+    pub fn new(query_engine: QueryEngineRef) -> Self {
+        Self {
+            engines: RwLock::new(HashMap::new()),
             region_map: DashMap::new(),
             query_engine,
         }
     }
 
-    pub fn register_engine(&mut self, engine: RegionEngineRef) {
+    pub fn register_engine(&self, engine: RegionEngineRef) {
         let engine_name = engine.name();
-        self.engines.insert(engine_name.to_string(), engine);
+        self.engines
+            .write()
+            .unwrap()
+            .insert(engine_name.to_string(), engine);
     }
 
     pub async fn handle_request(
@@ -90,6 +122,8 @@ impl RegionServer {
         let engine = match &region_change {
             RegionChange::Register(engine_type) => self
                 .engines
+                .read()
+                .unwrap()
                 .get(engine_type)
                 .with_context(|| RegionEngineNotFoundSnafu { name: engine_type })?
                 .clone(),

@@ -71,6 +71,8 @@ impl Services {
             let grpc_server = GrpcServer::new(
                 ServerGrpcQueryHandlerAdaptor::arc(instance.clone()),
                 Some(instance.clone()),
+                None,
+                None,
                 user_provider.clone(),
                 grpc_runtime,
             );

@@ -15,6 +15,8 @@
 use std::pin::Pin;
 use std::sync::Arc;
 
+use api::v1::region::region_server_server::RegionServer as RegionServerService;
+use api::v1::region::{RegionRequest, RegionResponse};
 use api::v1::GreptimeRequest;
 use arrow_flight::flight_service_server::FlightService;
 use arrow_flight::{
@@ -22,13 +24,37 @@ use arrow_flight::{
     HandshakeRequest, HandshakeResponse, PutResult, SchemaResult, Ticket,
 };
 use async_trait::async_trait;
+use auth::UserProviderRef;
 use common_grpc::flight::{FlightEncoder, FlightMessage};
 use common_query::Output;
+use common_runtime::Runtime;
 use futures::Stream;
 use prost::Message;
 use snafu::ResultExt;
 use tonic::{Request, Response, Status, Streaming};
 
-use crate::error;
-use crate::grpc::handler::GreptimeRequestHandler;
+use crate::error::Result;
+use crate::grpc::greptime_handler::GreptimeRequestHandler;
 use crate::grpc::TonicResult;
+
+#[async_trait]
+pub trait RegionServerHandler: Send + Sync {
+    async fn handle(&self, request: RegionRequest) -> Result<RegionResponse>;
+}
+
+#[derive(Clone)]
+pub struct RegionServerRequestHandler {
+    handler: Arc<dyn RegionServerHandler>,
+    user_provider: Option<UserProviderRef>,
+    runtime: Arc<Runtime>,
+}
+
+#[async_trait]
+impl RegionServerService for RegionServerRequestHandler {
+    async fn handle(
+        &self,
+        request: Request<RegionRequest>,
+    ) -> TonicResult<Response<RegionResponse>> {
+        todo!()
+    }
+}

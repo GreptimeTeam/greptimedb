@@ -33,7 +33,7 @@ use tonic::{Request, Response, Status, Streaming};
 
 use crate::error;
 use crate::grpc::flight::stream::FlightRecordBatchStream;
-use crate::grpc::handler::GreptimeRequestHandler;
+use crate::grpc::greptime_handler::GreptimeRequestHandler;
 use crate::grpc::TonicResult;
 
 type TonicStream<T> = Pin<Box<dyn Stream<Item = TonicResult<T>> + Send + Sync + 'static>>;
@@ -47,11 +47,23 @@ pub trait FlightCraft: Send + Sync + 'static {
     ) -> TonicResult<Response<TonicStream<FlightData>>>;
 }
 
+pub type FlightCraftRef = Arc<dyn FlightCraft>;
+
 pub struct FlightCraftWrapper<T: FlightCraft>(pub T);
 
 impl<T: FlightCraft> From<T> for FlightCraftWrapper<T> {
     fn from(t: T) -> Self {
         Self(t)
+    }
+}
+
+#[async_trait]
+impl FlightCraft for FlightCraftRef {
+    async fn do_get(
+        &self,
+        request: Request<Ticket>,
+    ) -> TonicResult<Response<TonicStream<FlightData>>> {
+        (**self).do_get(request).await
     }
 }
 
@@ -130,7 +142,7 @@ impl<T: FlightCraft> FlightService for FlightCraftWrapper<T> {
 }
 
 #[async_trait]
-impl FlightCraft for Arc<GreptimeRequestHandler> {
+impl FlightCraft for GreptimeRequestHandler {
     async fn do_get(
         &self,
         request: Request<Ticket>,

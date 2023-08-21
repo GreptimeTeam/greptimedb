@@ -38,6 +38,7 @@ use meta_srv::metasrv::{MetaSrv, MetaSrvOptions};
 use meta_srv::mocks::MockInfo;
 use meta_srv::service::store::kv::{KvBackendAdapter, KvStoreRef};
 use meta_srv::service::store::memory::MemStore;
+use servers::grpc::greptime_handler::GreptimeRequestHandler;
 use servers::grpc::GrpcServer;
 use servers::query_handler::grpc::ServerGrpcQueryHandlerAdaptor;
 use servers::Mode;
@@ -287,8 +288,15 @@ async fn create_datanode_client(datanode_instance: Arc<DatanodeInstance>) -> (St
 
     // create a mock datanode grpc service, see example here:
     // https://github.com/hyperium/tonic/blob/master/examples/src/mock/mock.rs
+    let query_handler = Arc::new(GreptimeRequestHandler::new(
+        ServerGrpcQueryHandlerAdaptor::arc(datanode_instance.clone()),
+        None,
+        runtime.clone(),
+    ));
     let grpc_server = GrpcServer::new(
         ServerGrpcQueryHandlerAdaptor::arc(datanode_instance),
+        None,
+        Some(query_handler),
         None,
         None,
         runtime,

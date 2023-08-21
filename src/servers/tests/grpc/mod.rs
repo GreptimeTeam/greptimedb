@@ -25,7 +25,7 @@ use client::{Client, Database, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_runtime::{Builder as RuntimeBuilder, Runtime};
 use servers::error::{Result, StartGrpcSnafu, TcpBindSnafu};
 use servers::grpc::flight::FlightCraftWrapper;
-use servers::grpc::handler::GreptimeRequestHandler;
+use servers::grpc::greptime_handler::GreptimeRequestHandler;
 use servers::query_handler::grpc::ServerGrpcQueryHandlerRef;
 use servers::server::Server;
 use snafu::ResultExt;
@@ -55,11 +55,11 @@ impl MockGrpcServer {
     }
 
     fn create_service(&self) -> FlightServiceServer<impl FlightService> {
-        let service: FlightCraftWrapper<_> = Arc::new(GreptimeRequestHandler::new(
+        let service: FlightCraftWrapper<_> = GreptimeRequestHandler::new(
             self.query_handler.clone(),
             self.user_provider.clone(),
             self.runtime.clone(),
-        ))
+        )
         .into();
         FlightServiceServer::new(service)
     }

@@ -55,6 +55,8 @@ impl Services {
                 ServerGrpcQueryHandlerAdaptor::arc(instance),
                 None,
                 None,
+                None,
+                None,
                 grpc_runtime,
             ),
             http_server: HttpServerBuilder::new(opts.http_opts.clone())

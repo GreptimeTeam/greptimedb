@@ -14,9 +14,10 @@
 
 mod database;
 pub mod flight;
-pub mod handler;
+pub mod greptime_handler;
+mod handler;
 pub mod prom_query_gateway;
-pub mod region_server_flight;
+pub mod region_server;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -24,6 +25,7 @@ use std::sync::Arc;
 use api::v1::greptime_database_server::{GreptimeDatabase, GreptimeDatabaseServer};
 use api::v1::health_check_server::{HealthCheck, HealthCheckServer};
 use api::v1::prometheus_gateway_server::{PrometheusGateway, PrometheusGatewayServer};
+use api::v1::region::region_server_server::RegionServerServer;
 use api::v1::{HealthCheckRequest, HealthCheckResponse};
 use arrow_flight::flight_service_server::{FlightService, FlightServiceServer};
 use async_trait::async_trait;
@@ -38,15 +40,14 @@ use tokio::sync::oneshot::{self, Receiver, Sender};
 use tokio::sync::Mutex;
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::{Request, Response, Status};
+use tonic_reflection::server::{ServerReflection, ServerReflectionServer};
 
-use self::flight::FlightCraftWrapper;
+use self::flight::{FlightCraftRef, FlightCraftWrapper};
 use self::prom_query_gateway::PrometheusGatewayService;
-use crate::error::{
-    AlreadyStartedSnafu, GrpcReflectionServiceSnafu, InternalSnafu, Result, StartGrpcSnafu,
-    TcpBindSnafu,
-};
+use self::region_server::RegionServerRequestHandler;
+use crate::error::{AlreadyStartedSnafu, InternalSnafu, Result, StartGrpcSnafu, TcpBindSnafu};
 use crate::grpc::database::DatabaseService;
-use crate::grpc::handler::GreptimeRequestHandler;
+use crate::grpc::greptime_handler::GreptimeRequestHandler;
 use crate::prometheus::PrometheusHandlerRef;
 use crate::query_handler::grpc::ServerGrpcQueryHandlerRef;
 use crate::server::Server;
@@ -54,46 +55,65 @@ use crate::server::Server;
 type TonicResult<T> = std::result::Result<T, Status>;
 
 pub struct GrpcServer {
+    // states
     shutdown_tx: Mutex<Option<Sender<()>>>,
-    request_handler: Arc<GreptimeRequestHandler>,
-    /// Handler for Prometheus-compatible PromQL queries. Only present for frontend server.
-    prometheus_handler: Option<PrometheusHandlerRef>,
-
     /// gRPC serving state receiver. Only present if the gRPC server is started.
     /// Used to wait for the server to stop, performing the old blocking fashion.
     serve_state: Mutex<Option<Receiver<Result<()>>>>,
+
+    // handlers
+    /// Handler for [GreptimeDatabase] service.
+    database_handler: Option<GreptimeRequestHandler>,
+    /// Handler for Prometheus-compatible PromQL queries ([PrometheusGateway]). Only present for frontend server.
+    prometheus_handler: Option<PrometheusHandlerRef>,
+    /// Handler for [FlightService].
+    flight_handler: Option<FlightCraftRef>,
+    /// Handler for [RegionServer].
+    region_server_handler: Option<RegionServerRequestHandler>,
 }
 
 impl GrpcServer {
     pub fn new(
         query_handler: ServerGrpcQueryHandlerRef,
         prometheus_handler: Option<PrometheusHandlerRef>,
+        flight_handler: Option<FlightCraftRef>,
+        region_server_handler: Option<RegionServerRequestHandler>,
         user_provider: Option<UserProviderRef>,
         runtime: Arc<Runtime>,
     ) -> Self {
-        let request_handler = Arc::new(GreptimeRequestHandler::new(
-            query_handler,
-            user_provider,
-            runtime,
-        ));
+        let database_handler = GreptimeRequestHandler::new(query_handler, user_provider, runtime);
         Self {
             shutdown_tx: Mutex::new(None),
-            request_handler,
-            prometheus_handler,
             serve_state: Mutex::new(None),
+            database_handler: Some(database_handler),
+            prometheus_handler,
+            flight_handler,
+            region_server_handler,
         }
     }
 
+    #[cfg(feature = "testing")]
     pub fn create_flight_service(&self) -> FlightServiceServer<impl FlightService> {
-        FlightServiceServer::new(FlightCraftWrapper(self.request_handler.clone()))
+        FlightServiceServer::new(FlightCraftWrapper(self.database_handler.clone().unwrap()))
     }
 
+    #[cfg(feature = "testing")]
     pub fn create_database_service(&self) -> GreptimeDatabaseServer<impl GreptimeDatabase> {
-        GreptimeDatabaseServer::new(DatabaseService::new(self.request_handler.clone()))
+        GreptimeDatabaseServer::new(DatabaseService::new(self.database_handler.clone().unwrap()))
     }
 
     pub fn create_healthcheck_service(&self) -> HealthCheckServer<impl HealthCheck> {
         HealthCheckServer::new(HealthCheckHandler)
+    }
+
+    pub fn create_reflection_service(&self) -> ServerReflectionServer<impl ServerReflection> {
+        tonic_reflection::server::Builder::configure()
+            .register_encoded_file_descriptor_set(api::v1::GREPTIME_GRPC_DESC)
+            .with_service_name("greptime.v1.GreptimeDatabase")
+            .with_service_name("greptime.v1.HealthCheck")
+            .with_service_name("greptime.v1.RegionServer")
+            .build()
+            .unwrap()
     }
 
     pub fn create_prom_query_gateway_service(
@@ -168,22 +188,26 @@ impl Server for GrpcServer {
             (listener, addr)
         };
 
-        let reflection_service = tonic_reflection::server::Builder::configure()
-            .register_encoded_file_descriptor_set(api::v1::GREPTIME_GRPC_DESC)
-            .with_service_name("greptime.v1.GreptimeDatabase")
-            .with_service_name("greptime.v1.HealthCheck")
-            .build()
-            .context(GrpcReflectionServiceSnafu)?;
-
         let mut builder = tonic::transport::Server::builder()
-            .add_service(self.create_flight_service())
-            .add_service(self.create_database_service())
-            .add_service(self.create_healthcheck_service());
+            .add_service(self.create_healthcheck_service())
+            .add_service(self.create_reflection_service());
+        if let Some(database_handler) = &self.database_handler {
+            builder = builder.add_service(GreptimeDatabaseServer::new(DatabaseService::new(
+                database_handler.clone(),
+            )))
+        }
         if let Some(prometheus_handler) = &self.prometheus_handler {
             builder = builder
                 .add_service(self.create_prom_query_gateway_service(prometheus_handler.clone()))
         }
-        let builder = builder.add_service(reflection_service);
+        if let Some(flight_handler) = &self.flight_handler {
+            builder = builder.add_service(FlightServiceServer::new(FlightCraftWrapper(
+                flight_handler.clone(),
+            )))
+        }
+        if let Some(region_server_handler) = &self.region_server_handler {
+            builder = builder.add_service(RegionServerServer::new(region_server_handler.clone()))
+        }
 
         let (serve_state_tx, serve_state_rx) = oneshot::channel();
         let mut serve_state = self.serve_state.lock().await;
