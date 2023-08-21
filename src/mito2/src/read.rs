@@ -614,35 +614,7 @@ mod tests {
 
     use super::*;
     use crate::error::Error;
-
-    // TODO(yingwen): replace with test util.
-    fn new_batch_builder(
-        timestamps: &[i64],
-        sequences: &[u64],
-        op_types: &[OpType],
-        field: &[u64],
-    ) -> BatchBuilder {
-        let mut builder = BatchBuilder::new(b"test".to_vec());
-        builder
-            .timestamps_array(Arc::new(TimestampMillisecondArray::from_iter_values(
-                timestamps.iter().copied(),
-            )))
-            .unwrap()
-            .sequences_array(Arc::new(UInt64Array::from_iter_values(
-                sequences.iter().copied(),
-            )))
-            .unwrap()
-            .op_types_array(Arc::new(UInt8Array::from_iter_values(
-                op_types.iter().map(|v| *v as u8),
-            )))
-            .unwrap()
-            .push_field_array(
-                1,
-                Arc::new(UInt64Array::from_iter_values(field.iter().copied())),
-            )
-            .unwrap();
-        builder
-    }
+    use crate::test_util::new_batch_builder;
 
     fn new_batch(
         timestamps: &[i64],
@@ -650,7 +622,7 @@ mod tests {
         op_types: &[OpType],
         field: &[u64],
     ) -> Batch {
-        new_batch_builder(timestamps, sequences, op_types, field)
+        new_batch_builder(b"test", timestamps, sequences, op_types, field)
             .build()
             .unwrap()
     }
