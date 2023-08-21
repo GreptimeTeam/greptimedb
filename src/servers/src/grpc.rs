@@ -16,6 +16,7 @@ mod database;
 pub mod flight;
 pub mod handler;
 pub mod prom_query_gateway;
+pub mod region_server_flight;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -38,13 +39,13 @@ use tokio::sync::Mutex;
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::{Request, Response, Status};
 
+use self::flight::FlightCraftWrapper;
 use self::prom_query_gateway::PrometheusGatewayService;
 use crate::error::{
     AlreadyStartedSnafu, GrpcReflectionServiceSnafu, InternalSnafu, Result, StartGrpcSnafu,
     TcpBindSnafu,
 };
 use crate::grpc::database::DatabaseService;
-use crate::grpc::flight::FlightHandler;
 use crate::grpc::handler::GreptimeRequestHandler;
 use crate::prometheus::PrometheusHandlerRef;
 use crate::query_handler::grpc::ServerGrpcQueryHandlerRef;
@@ -84,7 +85,7 @@ impl GrpcServer {
     }
 
     pub fn create_flight_service(&self) -> FlightServiceServer<impl FlightService> {
-        FlightServiceServer::new(FlightHandler::new(self.request_handler.clone()))
+        FlightServiceServer::new(FlightCraftWrapper(self.request_handler.clone()))
     }
 
     pub fn create_database_service(&self) -> GreptimeDatabaseServer<impl GreptimeDatabase> {
