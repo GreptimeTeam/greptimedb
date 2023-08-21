@@ -16,7 +16,7 @@ use std::ops::Deref;
 
 use common_error::ext::BoxedError;
 use common_query::Output;
-use common_recordbatch::RecordBatch;
+use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
 use datatypes::prelude::{ConcreteDataType, Value};
 use datatypes::schema::SchemaRef;
 use futures::StreamExt;
@@ -52,8 +52,8 @@ pub async fn write_output<W: AsyncWrite + Send + Sync + Unpin>(
 }
 
 struct QueryResult {
-    recordbatches: Vec<RecordBatch>,
     schema: SchemaRef,
+    stream: SendableRecordBatchStream,
 }
 
 pub struct MysqlResultWriter<'a, W: AsyncWrite + Unpin> {
@@ -81,37 +81,17 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
         // a local variable.
         match output {
             Ok(output) => match output {
-                Output::Stream(mut stream) => {
-                    let schema = stream.schema().clone();
-                    match create_mysql_column_def(&schema) {
-                        Ok(column_def) => {
-                            // The RowWriter's lifetime is bound to `column_def` thus we can't use finish_one()
-                            // to return a new QueryResultWriter.
-                            let mut row_writer = self.writer.start(&column_def).await?;
-                            while let Some(record_batch) = stream.next().await {
-                                match record_batch {
-                                    Ok(record_batch) => {
-                                        Self::write_recordbatch(
-                                            &mut row_writer,
-                                            &record_batch,
-                                            self.query_context.clone(),
-                                        )
-                                        .await?
-                                    }
-                                    Err(e) => {
-                                        return Err(e).map_err(BoxedError::new).context(OtherSnafu);
-                                    }
-                                }
-                            }
-                            row_writer.finish().await?;
-                        }
-                        Err(error) => Self::write_query_error(error, self.writer).await?,
-                    }
+                Output::Stream(stream) => {
+                    let query_result = QueryResult {
+                        schema: stream.schema(),
+                        stream,
+                    };
+                    Self::write_query_result(query_result, self.writer, self.query_context).await?;
                 }
                 Output::RecordBatches(recordbatches) => {
                     let query_result = QueryResult {
                         schema: recordbatches.schema(),
-                        recordbatches: recordbatches.take(),
+                        stream: recordbatches.as_stream(),
                     };
                     Self::write_query_result(query_result, self.writer, self.query_context).await?;
                 }
@@ -148,7 +128,7 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
     }
 
     async fn write_query_result(
-        query_result: QueryResult,
+        mut query_result: QueryResult,
         writer: QueryResultWriter<'a, W>,
         query_context: QueryContextRef,
     ) -> Result<()> {
@@ -157,9 +137,20 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
                 // The RowWriter's lifetime is bound to `column_def` thus we can't use finish_one()
                 // to return a new QueryResultWriter.
                 let mut row_writer = writer.start(&column_def).await?;
-                for recordbatch in &query_result.recordbatches {
-                    Self::write_recordbatch(&mut row_writer, recordbatch, query_context.clone())
-                        .await?;
+                while let Some(record_batch) = query_result.stream.next().await {
+                    match record_batch {
+                        Ok(record_batch) => {
+                            Self::write_recordbatch(
+                                &mut row_writer,
+                                &record_batch,
+                                query_context.clone(),
+                            )
+                            .await?
+                        }
+                        Err(e) => {
+                            return Err(e).map_err(BoxedError::new).context(OtherSnafu);
+                        }
+                    }
                 }
                 row_writer.finish().await?;
                 Ok(())

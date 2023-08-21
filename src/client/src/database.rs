@@ -315,9 +315,10 @@ impl Database {
         });
 
         let Some(first_flight_message) = flight_message_stream.next().await else {
-            // TODO(niebayes): figure out whether this returning emtpy is okay or not.
-            // return Ok(Output::RecordBatches(RecordBatches::empty()));
-            unreachable!()
+            return IllegalFlightMessagesSnafu {
+                reason: "Expect the response not to be empty",
+            }
+            .fail();
         };
 
         let first_flight_message = first_flight_message?;
