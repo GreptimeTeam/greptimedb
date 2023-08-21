@@ -133,17 +133,18 @@ impl MigrateTableMetadata {
         );
 
         while let Some((key, value)) = stream.try_next().await.context(error::IterStreamSnafu)? {
-            self.migrate_table_route_key(value).await?;
+            let table_id = self.migrate_table_route_key(value).await?;
             keys.push(key);
+            keys.push(TableRegionKey::new(table_id).as_raw_key())
         }
 
-        info!("Total migrated TableRouteKeys: {}", keys.len());
+        info!("Total migrated TableRouteKeys: {}", keys.len() / 2);
         self.delete_migrated_keys(keys).await;
 
         Ok(())
     }
 
-    async fn migrate_table_route_key(&self, value: TableRouteValue) -> Result<()> {
+    async fn migrate_table_route_key(&self, value: TableRouteValue) -> Result<u32> {
         let table_route = TableRoute::try_from_raw(
             &value.peers,
             value.table_route.expect("expected table_route"),
@@ -152,7 +153,8 @@ impl MigrateTableMetadata {
 
         let new_table_value = NextTableRouteValue::new(table_route.region_routes);
 
-        let new_key = NextTableRouteKey::new(table_route.table.id as u32);
+        let table_id = table_route.table.id as u32;
+        let new_key = NextTableRouteKey::new(table_id);
         info!("Creating '{new_key}'");
 
         if self.dryrun {
@@ -168,7 +170,7 @@ impl MigrateTableMetadata {
                 .unwrap();
         }
 
-        Ok(())
+        Ok(table_id)
     }
 
     async fn migrate_schema_keys(&self) -> Result<()> {
@@ -310,7 +312,7 @@ impl MigrateTableMetadata {
 
     async fn delete_migrated_keys(&self, keys: Vec<Vec<u8>>) {
         for keys in keys.chunks(PAGE_SIZE) {
-            info!("Deleting {} TableGlobalKeys", keys.len());
+            info!("Deleting {} keys", keys.len());
             let req = BatchDeleteRequest {
                 keys: keys.to_vec(),
                 prev_kv: false,
