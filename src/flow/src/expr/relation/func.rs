@@ -1,3 +1,4 @@
+use datatypes::value::Value;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize, Hash)]
@@ -39,4 +40,11 @@ pub enum AggregateFunc {
     Count,
     Any,
     All,
+}
+
+impl AggregateFunc {
+    pub fn eval<I>(&self, values: I)->Value
+    where I: IntoIterator<Item = Value>{
+        todo!()
+    }
 }

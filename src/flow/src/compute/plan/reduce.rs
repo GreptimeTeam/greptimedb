@@ -56,7 +56,6 @@ pub fn convert_indexes_to_skips(mut indexes: Vec<usize>) -> Vec<usize> {
     indexes
 }
 
-/// TODO(discord9): Reduce Plan
 /// A `ReducePlan` provides a concise description for how we will
 /// execute a given reduce expression.
 ///
