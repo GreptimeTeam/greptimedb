@@ -128,7 +128,7 @@ impl Inner {
     async fn lock(&self, mut req: LockRequest) -> Result<LockResponse> {
         let mut client = self.random_client()?;
         req.set_header(self.id, self.role);
-        let res = client.lock(req).await.context(error::TonicStatusSnafu)?;
+        let res = client.lock(req).await.map_err(error::Error::from)?;
 
         Ok(res.into_inner())
     }
@@ -136,7 +136,7 @@ impl Inner {
     async fn unlock(&self, mut req: UnlockRequest) -> Result<UnlockResponse> {
         let mut client = self.random_client()?;
         req.set_header(self.id, self.role);
-        let res = client.unlock(req).await.context(error::TonicStatusSnafu)?;
+        let res = client.unlock(req).await.map_err(error::Error::from)?;
 
         Ok(res.into_inner())
     }

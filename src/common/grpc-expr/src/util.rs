@@ -19,39 +19,45 @@ use api::v1::{
 };
 use datatypes::schema::Schema;
 use snafu::{ensure, OptionExt};
+use table::engine::TableReference;
 use table::metadata::TableId;
 
 use crate::error::{
     DuplicatedColumnNameSnafu, DuplicatedTimestampColumnSnafu, MissingTimestampColumnSnafu, Result,
 };
 
-pub struct ColumnExpr {
-    pub column_name: String,
+pub struct ColumnExpr<'a> {
+    pub column_name: &'a str,
     pub datatype: i32,
     pub semantic_type: i32,
 }
 
-impl ColumnExpr {
+impl<'a> ColumnExpr<'a> {
     #[inline]
-    pub fn from_columns(columns: &[Column]) -> Vec<Self> {
+    pub fn from_columns(columns: &'a [Column]) -> Vec<Self> {
         columns.iter().map(Self::from).collect()
+    }
+
+    #[inline]
+    pub fn from_column_schemas(schemas: &'a [ColumnSchema]) -> Vec<Self> {
+        schemas.iter().map(Self::from).collect()
     }
 }
 
-impl From<&Column> for ColumnExpr {
-    fn from(column: &Column) -> Self {
+impl<'a> From<&'a Column> for ColumnExpr<'a> {
+    fn from(column: &'a Column) -> Self {
         Self {
-            column_name: column.column_name.clone(),
+            column_name: &column.column_name,
             datatype: column.datatype,
             semantic_type: column.semantic_type,
         }
     }
 }
 
-impl From<&ColumnSchema> for ColumnExpr {
-    fn from(schema: &ColumnSchema) -> Self {
+impl<'a> From<&'a ColumnSchema> for ColumnExpr<'a> {
+    fn from(schema: &'a ColumnSchema) -> Self {
         Self {
-            column_name: schema.column_name.clone(),
+            column_name: &schema.column_name,
             datatype: schema.datatype,
             semantic_type: schema.semantic_type,
         }
@@ -59,10 +65,8 @@ impl From<&ColumnSchema> for ColumnExpr {
 }
 
 pub fn build_create_table_expr(
-    catalog_name: &str,
-    schema_name: &str,
     table_id: Option<TableId>,
-    table_name: &str,
+    table_name: &TableReference<'_>,
     column_exprs: Vec<ColumnExpr>,
     engine: &str,
     desc: &str,
@@ -77,8 +81,8 @@ pub fn build_create_table_expr(
     let mut distinct_names = HashSet::with_capacity(column_exprs.len());
     for ColumnExpr { column_name, .. } in &column_exprs {
         ensure!(
-            distinct_names.insert(column_name),
-            DuplicatedColumnNameSnafu { name: column_name }
+            distinct_names.insert(*column_name),
+            DuplicatedColumnNameSnafu { name: *column_name }
         );
     }
 
@@ -94,16 +98,16 @@ pub fn build_create_table_expr(
     {
         let mut is_nullable = true;
         match semantic_type {
-            v if v == SemanticType::Tag as i32 => primary_keys.push(column_name.clone()),
+            v if v == SemanticType::Tag as i32 => primary_keys.push(column_name.to_string()),
             v if v == SemanticType::Timestamp as i32 => {
                 ensure!(
                     time_index.is_none(),
                     DuplicatedTimestampColumnSnafu {
                         exists: time_index.unwrap(),
-                        duplicated: &column_name,
+                        duplicated: column_name,
                     }
                 );
-                time_index = Some(column_name.clone());
+                time_index = Some(column_name.to_string());
                 // Timestamp column must not be null.
                 is_nullable = false;
             }
@@ -111,7 +115,7 @@ pub fn build_create_table_expr(
         }
 
         let column_def = ColumnDef {
-            name: column_name,
+            name: column_name.to_string(),
             datatype,
             is_nullable,
             default_constraint: vec![],
@@ -120,13 +124,13 @@ pub fn build_create_table_expr(
     }
 
     let time_index = time_index.context(MissingTimestampColumnSnafu {
-        msg: format!("table is {}", table_name),
+        msg: format!("table is {}", table_name.table),
     })?;
 
     let expr = CreateTableExpr {
-        catalog_name: catalog_name.to_string(),
-        schema_name: schema_name.to_string(),
-        table_name: table_name.to_string(),
+        catalog_name: table_name.catalog.to_string(),
+        schema_name: table_name.schema.to_string(),
+        table_name: table_name.table.to_string(),
         desc: desc.to_string(),
         column_defs,
         time_index,
@@ -148,11 +152,11 @@ pub fn extract_new_columns(
 ) -> Result<Option<AddColumns>> {
     let columns_to_add = column_exprs
         .into_iter()
-        .filter(|expr| schema.column_schema_by_name(&expr.column_name).is_none())
+        .filter(|expr| schema.column_schema_by_name(expr.column_name).is_none())
         .map(|expr| {
             let is_key = expr.semantic_type == SemanticType::Tag as i32;
             let column_def = Some(ColumnDef {
-                name: expr.column_name,
+                name: expr.column_name.to_string(),
                 datatype: expr.datatype,
                 is_nullable: true,
                 default_constraint: vec![],
@@ -170,7 +174,7 @@ pub fn extract_new_columns(
     } else {
         let mut distinct_names = HashSet::with_capacity(columns_to_add.len());
         for add_column in &columns_to_add {
-            let name = &add_column.column_def.as_ref().unwrap().name;
+            let name = add_column.column_def.as_ref().unwrap().name.as_str();
             ensure!(
                 distinct_names.insert(name),
                 DuplicatedColumnNameSnafu { name }

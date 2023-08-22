@@ -141,7 +141,7 @@ impl Inner {
     async fn range(&self, mut req: RangeRequest) -> Result<RangeResponse> {
         let mut client = self.random_client()?;
         req.set_header(self.id, self.role);
-        let res = client.range(req).await.context(error::TonicStatusSnafu)?;
+        let res = client.range(req).await.map_err(error::Error::from)?;
 
         Ok(res.into_inner())
     }
@@ -149,7 +149,7 @@ impl Inner {
     async fn put(&self, mut req: PutRequest) -> Result<PutResponse> {
         let mut client = self.random_client()?;
         req.set_header(self.id, self.role);
-        let res = client.put(req).await.context(error::TonicStatusSnafu)?;
+        let res = client.put(req).await.map_err(error::Error::from)?;
 
         Ok(res.into_inner())
     }
@@ -158,10 +158,7 @@ impl Inner {
         let mut client = self.random_client()?;
         req.set_header(self.id, self.role);
 
-        let res = client
-            .batch_get(req)
-            .await
-            .context(error::TonicStatusSnafu)?;
+        let res = client.batch_get(req).await.map_err(error::Error::from)?;
 
         Ok(res.into_inner())
     }
@@ -169,10 +166,7 @@ impl Inner {
     async fn batch_put(&self, mut req: BatchPutRequest) -> Result<BatchPutResponse> {
         let mut client = self.random_client()?;
         req.set_header(self.id, self.role);
-        let res = client
-            .batch_put(req)
-            .await
-            .context(error::TonicStatusSnafu)?;
+        let res = client.batch_put(req).await.map_err(error::Error::from)?;
 
         Ok(res.into_inner())
     }
@@ -180,10 +174,7 @@ impl Inner {
     async fn batch_delete(&self, mut req: BatchDeleteRequest) -> Result<BatchDeleteResponse> {
         let mut client = self.random_client()?;
         req.set_header(self.id, self.role);
-        let res = client
-            .batch_delete(req)
-            .await
-            .context(error::TonicStatusSnafu)?;
+        let res = client.batch_delete(req).await.map_err(error::Error::from)?;
 
         Ok(res.into_inner())
     }
@@ -197,7 +188,7 @@ impl Inner {
         let res = client
             .compare_and_put(req)
             .await
-            .context(error::TonicStatusSnafu)?;
+            .map_err(error::Error::from)?;
 
         Ok(res.into_inner())
     }
@@ -205,10 +196,7 @@ impl Inner {
     async fn delete_range(&self, mut req: DeleteRangeRequest) -> Result<DeleteRangeResponse> {
         let mut client = self.random_client()?;
         req.set_header(self.id, self.role);
-        let res = client
-            .delete_range(req)
-            .await
-            .context(error::TonicStatusSnafu)?;
+        let res = client.delete_range(req).await.map_err(error::Error::from)?;
 
         Ok(res.into_inner())
     }
@@ -216,10 +204,7 @@ impl Inner {
     async fn move_value(&self, mut req: MoveValueRequest) -> Result<MoveValueResponse> {
         let mut client = self.random_client()?;
         req.set_header(self.id, self.role);
-        let res = client
-            .move_value(req)
-            .await
-            .context(error::TonicStatusSnafu)?;
+        let res = client.move_value(req).await.map_err(error::Error::from)?;
 
         Ok(res.into_inner())
     }

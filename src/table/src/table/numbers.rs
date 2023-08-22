@@ -12,11 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::any::Any;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, NUMBERS_TABLE_ID};
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_error::ext::BoxedError;
 use common_recordbatch::error::Result as RecordBatchResult;
 use common_recordbatch::{RecordBatch, RecordBatchStream, SendableRecordBatchStream};
 use datafusion::arrow::record_batch::RecordBatch as DfRecordBatch;
@@ -25,11 +25,14 @@ use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
 use futures::task::{Context, Poll};
 use futures::Stream;
-use store_api::storage::{RegionNumber, ScanRequest};
+use store_api::data_source::DataSource;
+use store_api::storage::ScanRequest;
 
-use crate::error::Result;
-use crate::metadata::{TableId, TableInfoBuilder, TableInfoRef, TableMetaBuilder, TableType};
-use crate::table::Table;
+use crate::metadata::{
+    FilterPushDownType, TableId, TableInfoBuilder, TableInfoRef, TableMetaBuilder, TableType,
+};
+use crate::thin_table::{ThinTable, ThinTableAdapter};
+use crate::TableRef;
 
 const NUMBER_COLUMN: &str = "number";
 
@@ -37,92 +40,78 @@ pub const NUMBERS_TABLE_NAME: &str = "numbers";
 
 /// numbers table for test
 #[derive(Debug, Clone)]
-pub struct NumbersTable {
-    table_id: TableId,
-    schema: SchemaRef,
-    name: String,
-    engine: String,
-}
+pub struct NumbersTable;
 
 impl NumbersTable {
-    pub fn new(table_id: TableId) -> Self {
-        NumbersTable::with_name(table_id, NUMBERS_TABLE_NAME.to_string())
+    pub fn table(table_id: TableId) -> TableRef {
+        Self::table_with_name(table_id, NUMBERS_TABLE_NAME.to_string())
     }
 
-    pub fn with_name(table_id: TableId, name: String) -> Self {
+    pub fn table_with_name(table_id: TableId, name: String) -> TableRef {
+        let schema = Self::schema();
+        let thin_table = ThinTable::new(
+            schema.clone(),
+            Self::table_info(table_id, name, "test_engine".to_string()),
+            TableType::Temporary,
+            FilterPushDownType::Unsupported,
+        );
+        let data_source = Arc::new(NumbersDataSource::new(schema));
+        Arc::new(ThinTableAdapter::new(thin_table, data_source))
+    }
+
+    pub fn schema() -> SchemaRef {
         let column_schemas = vec![ColumnSchema::new(
             NUMBER_COLUMN,
             ConcreteDataType::uint32_datatype(),
             false,
         )];
-        Self {
-            table_id,
-            name,
-            engine: "test_engine".to_string(),
-            schema: Arc::new(
-                SchemaBuilder::try_from_columns(column_schemas)
-                    .unwrap()
-                    .build()
-                    .unwrap(),
-            ),
-        }
+        let schema = SchemaBuilder::try_from_columns(column_schemas)
+            .unwrap()
+            .build()
+            .unwrap();
+        Arc::new(schema)
+    }
+
+    pub fn table_info(table_id: TableId, name: String, engine: String) -> TableInfoRef {
+        let table_meta = TableMetaBuilder::default()
+            .schema(Self::schema())
+            .region_numbers(vec![0])
+            .primary_key_indices(vec![0])
+            .next_column_id(1)
+            .engine(engine)
+            .build()
+            .unwrap();
+        let table_info = TableInfoBuilder::default()
+            .table_id(table_id)
+            .name(name)
+            .catalog_name(DEFAULT_CATALOG_NAME)
+            .schema_name(DEFAULT_SCHEMA_NAME)
+            .table_version(0)
+            .table_type(TableType::Temporary)
+            .meta(table_meta)
+            .build()
+            .unwrap();
+        Arc::new(table_info)
     }
 }
 
-impl Default for NumbersTable {
-    fn default() -> Self {
-        NumbersTable::new(NUMBERS_TABLE_ID)
+struct NumbersDataSource {
+    schema: SchemaRef,
+}
+
+impl NumbersDataSource {
+    pub fn new(schema: SchemaRef) -> Self {
+        Self { schema }
     }
 }
 
-#[async_trait::async_trait]
-impl Table for NumbersTable {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn schema(&self) -> SchemaRef {
-        self.schema.clone()
-    }
-
-    fn table_info(&self) -> TableInfoRef {
-        Arc::new(
-            TableInfoBuilder::default()
-                .table_id(self.table_id)
-                .name(&self.name)
-                .catalog_name(DEFAULT_CATALOG_NAME)
-                .schema_name(DEFAULT_SCHEMA_NAME)
-                .table_version(0)
-                .table_type(TableType::Temporary)
-                .meta(
-                    TableMetaBuilder::default()
-                        .schema(self.schema.clone())
-                        .region_numbers(vec![0])
-                        .primary_key_indices(vec![0])
-                        .next_column_id(1)
-                        .engine(&self.engine)
-                        .build()
-                        .unwrap(),
-                )
-                .build()
-                .unwrap(),
-        )
-    }
-
-    fn table_type(&self) -> TableType {
-        TableType::Temporary
-    }
-
-    async fn scan_to_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream> {
+impl DataSource for NumbersDataSource {
+    fn get_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream, BoxedError> {
         Ok(Box::pin(NumbersStream {
             limit: request.limit.unwrap_or(100) as u32,
             schema: self.schema.clone(),
             already_run: false,
         }))
-    }
-
-    async fn flush(&self, _region_number: Option<RegionNumber>, _wait: Option<bool>) -> Result<()> {
-        Ok(())
     }
 }
 

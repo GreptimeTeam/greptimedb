@@ -2629,6 +2629,7 @@ dependencies = [
  "axum",
  "axum-macros",
  "axum-test-helper",
+ "bytes",
  "catalog",
  "client",
  "common-base",
@@ -4150,7 +4151,7 @@ checksum = "d2fabcfbdc87f4758337ca535fb41a6d701b65693ce38287d856d1674551ec9b"
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=fa79839bbb304e0e7097e1cc4bcac9a63b3e496a#fa79839bbb304e0e7097e1cc4bcac9a63b3e496a"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=c30a2607be4044502094b25c408171a666a8ff6d#c30a2607be4044502094b25c408171a666a8ff6d"
 dependencies = [
  "prost",
  "serde",
@@ -9273,6 +9274,7 @@ dependencies = [
  "common-error",
  "common-grpc",
  "common-query",
+ "common-recordbatch",
  "common-time",
  "serde",
  "sqlness",
@@ -9283,13 +9285,13 @@ dependencies = [
 [[package]]
 name = "sqlparser"
 version = "0.34.0"
-source = "git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=c3814f08afa19786b13d72b1731a1e8b3cac4ab9#c3814f08afa19786b13d72b1731a1e8b3cac4ab9"
+source = "git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=296a4f6c73b129d6f565a42a2e5e53c6bc2b9da4#296a4f6c73b129d6f565a42a2e5e53c6bc2b9da4"
 dependencies = [
  "lazy_static",
  "log",
  "regex",
  "sqlparser 0.35.0",
- "sqlparser_derive 0.1.1 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=c3814f08afa19786b13d72b1731a1e8b3cac4ab9)",
+ "sqlparser_derive 0.1.1 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=296a4f6c73b129d6f565a42a2e5e53c6bc2b9da4)",
 ]
 
 [[package]]
@@ -9316,7 +9318,7 @@ dependencies = [
 [[package]]
 name = "sqlparser_derive"
 version = "0.1.1"
-source = "git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=c3814f08afa19786b13d72b1731a1e8b3cac4ab9#c3814f08afa19786b13d72b1731a1e8b3cac4ab9"
+source = "git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=296a4f6c73b129d6f565a42a2e5e53c6bc2b9da4#296a4f6c73b129d6f565a42a2e5e53c6bc2b9da4"
 dependencies = [
  "proc-macro2",
  "quote",

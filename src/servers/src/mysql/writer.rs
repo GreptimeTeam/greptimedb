@@ -14,10 +14,12 @@
 
 use std::ops::Deref;
 
+use common_error::ext::BoxedError;
 use common_query::Output;
-use common_recordbatch::{util, RecordBatch};
+use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
 use datatypes::prelude::{ConcreteDataType, Value};
 use datatypes::schema::SchemaRef;
+use futures::StreamExt;
 use metrics::increment_counter;
 use opensrv_mysql::{
     Column, ColumnFlags, ColumnType, ErrorKind, OkResponse, QueryResultWriter, RowWriter,
@@ -26,7 +28,7 @@ use session::context::QueryContextRef;
 use snafu::prelude::*;
 use tokio::io::AsyncWrite;
 
-use crate::error::{self, Error, Result};
+use crate::error::{self, Error, OtherSnafu, Result};
 use crate::metrics::*;
 
 /// Try to write multiple output to the writer if possible.
@@ -50,8 +52,8 @@ pub async fn write_output<W: AsyncWrite + Send + Sync + Unpin>(
 }
 
 struct QueryResult {
-    recordbatches: Vec<RecordBatch>,
     schema: SchemaRef,
+    stream: SendableRecordBatchStream,
 }
 
 pub struct MysqlResultWriter<'a, W: AsyncWrite + Unpin> {
@@ -80,20 +82,16 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
         match output {
             Ok(output) => match output {
                 Output::Stream(stream) => {
-                    let schema = stream.schema().clone();
-                    let recordbatches = util::collect(stream)
-                        .await
-                        .context(error::CollectRecordbatchSnafu)?;
                     let query_result = QueryResult {
-                        recordbatches,
-                        schema,
+                        schema: stream.schema(),
+                        stream,
                     };
                     Self::write_query_result(query_result, self.writer, self.query_context).await?;
                 }
                 Output::RecordBatches(recordbatches) => {
                     let query_result = QueryResult {
                         schema: recordbatches.schema(),
-                        recordbatches: recordbatches.take(),
+                        stream: recordbatches.as_stream(),
                     };
                     Self::write_query_result(query_result, self.writer, self.query_context).await?;
                 }
@@ -130,7 +128,7 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
     }
 
     async fn write_query_result(
-        query_result: QueryResult,
+        mut query_result: QueryResult,
         writer: QueryResultWriter<'a, W>,
         query_context: QueryContextRef,
     ) -> Result<()> {
@@ -139,9 +137,20 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
                 // The RowWriter's lifetime is bound to `column_def` thus we can't use finish_one()
                 // to return a new QueryResultWriter.
                 let mut row_writer = writer.start(&column_def).await?;
-                for recordbatch in &query_result.recordbatches {
-                    Self::write_recordbatch(&mut row_writer, recordbatch, query_context.clone())
-                        .await?;
+                while let Some(record_batch) = query_result.stream.next().await {
+                    match record_batch {
+                        Ok(record_batch) => {
+                            Self::write_recordbatch(
+                                &mut row_writer,
+                                &record_batch,
+                                query_context.clone(),
+                            )
+                            .await?
+                        }
+                        Err(e) => {
+                            return Err(e).map_err(BoxedError::new).context(OtherSnafu);
+                        }
+                    }
                 }
                 row_writer.finish().await?;
                 Ok(())

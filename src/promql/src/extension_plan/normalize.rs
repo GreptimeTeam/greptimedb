@@ -26,7 +26,7 @@ use datafusion::logical_expr::{EmptyRelation, Expr, LogicalPlan, UserDefinedLogi
 use datafusion::physical_expr::PhysicalSortExpr;
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, RecordBatchStream,
+    DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, Partitioning, RecordBatchStream,
     SendableRecordBatchStream,
 };
 use datatypes::arrow::array::TimestampMillisecondArray;
@@ -164,6 +164,10 @@ impl ExecutionPlan for SeriesNormalizeExec {
 
     fn schema(&self) -> SchemaRef {
         self.input.schema()
+    }
+
+    fn required_input_distribution(&self) -> Vec<Distribution> {
+        vec![Distribution::SinglePartition]
     }
 
     fn output_partitioning(&self) -> Partitioning {

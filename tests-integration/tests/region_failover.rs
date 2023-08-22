@@ -112,7 +112,7 @@ pub async fn test_region_failover(store_type: StorageType) {
     let cache_key = TableNameKey::new("greptime", "public", "my_table").as_raw_key();
 
     let cache = get_table_cache(&frontend, &cache_key).unwrap();
-    let table_name_value = TableNameValue::try_from_raw_value(cache.unwrap().value).unwrap();
+    let table_name_value = TableNameValue::try_from_raw_value(&cache.unwrap().value).unwrap();
     let table_id = table_name_value.table_id();
     assert!(get_route_cache(&frontend, table_id).is_some());
 

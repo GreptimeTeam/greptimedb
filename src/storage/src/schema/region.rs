@@ -131,7 +131,7 @@ impl RegionSchema {
     }
 
     #[inline]
-    pub(crate) fn timestamp_index(&self) -> usize {
+    pub fn timestamp_index(&self) -> usize {
         self.store_schema.timestamp_index()
     }
 
@@ -146,7 +146,7 @@ impl RegionSchema {
     }
 
     #[inline]
-    pub(crate) fn column_metadata(&self, idx: usize) -> &ColumnMetadata {
+    pub fn column_metadata(&self, idx: usize) -> &ColumnMetadata {
         self.columns.column_metadata(idx)
     }
 

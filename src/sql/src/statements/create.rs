@@ -149,14 +149,18 @@ impl Display for PartitionEntry {
 
 impl Display for Partitions {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            r#"PARTITION BY RANGE COLUMNS ({}) (
-{}
-)"#,
-            format_list_comma!(self.column_list),
-            format_list_indent!(self.entries),
-        )
+        if !self.column_list.is_empty() {
+            write!(
+                f,
+                r#"PARTITION BY RANGE COLUMNS ({}) (
+                    {}
+                )"#,
+                format_list_comma!(self.column_list),
+                format_list_indent!(self.entries),
+            )
+        } else {
+            write!(f, "")
+        }
     }
 }
 
@@ -247,15 +251,55 @@ CREATE TABLE IF NOT EXISTS demo (
   PRIMARY KEY (ts, host)
 )
 PARTITION BY RANGE COLUMNS (ts) (
-  PARTITION r0 VALUES LESS THAN (5),
+                      PARTITION r0 VALUES LESS THAN (5),
   PARTITION r1 VALUES LESS THAN (9),
   PARTITION r2 VALUES LESS THAN (MAXVALUE)
-)
+                )
 ENGINE=mito
 WITH(
   regions = 1,
   ttl = '7d'
 )"#,
+                    &new_sql
+                );
+
+                let new_result =
+                    ParserContext::create_with_dialect(&new_sql, &GreptimeDbDialect {}).unwrap();
+                assert_eq!(result, new_result);
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn test_display_empty_partition_column() {
+        let sql = r"create table if not exists demo(
+            host string,
+            ts bigint,
+            cpu double default 0,
+            memory double,
+            TIME INDEX (ts),
+            PRIMARY KEY(ts, host)
+            );
+        ";
+        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap();
+        assert_eq!(1, result.len());
+
+        match &result[0] {
+            Statement::CreateTable(c) => {
+                let new_sql = format!("\n{}", c);
+                assert_eq!(
+                    r#"
+CREATE TABLE IF NOT EXISTS demo (
+  host STRING,
+  ts BIGINT,
+  cpu DOUBLE DEFAULT 0,
+  memory DOUBLE,
+  TIME INDEX (ts),
+  PRIMARY KEY (ts, host)
+)
+ENGINE=mito
+"#,
                     &new_sql
                 );
 

@@ -87,3 +87,9 @@ impl LogicalPlan {
             .map(LogicalPlan::DfPlan)
     }
 }
+
+impl From<DfLogicalPlan> for LogicalPlan {
+    fn from(plan: DfLogicalPlan) -> Self {
+        Self::DfPlan(plan)
+    }
+}

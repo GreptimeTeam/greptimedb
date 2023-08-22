@@ -20,6 +20,7 @@ use common_error::status_code::StatusCode;
 use datafusion::parquet;
 use datatypes::arrow::error::ArrowError;
 use datatypes::value::Value;
+use servers::define_into_tonic_status;
 use snafu::{Location, Snafu};
 use store_api::storage::RegionNumber;
 
@@ -512,7 +513,7 @@ pub enum Error {
     },
 
     #[snafu(display("Failed to read record batch, source: {}", source))]
-    ReadRecordBatch {
+    ReadDfRecordBatch {
         source: datafusion::error::DataFusionError,
         location: Location,
     },
@@ -596,6 +597,21 @@ pub enum Error {
         source: auth::error::Error,
         location: Location,
     },
+
+    #[snafu(display("Empty data: {}", msg))]
+    EmptyData { msg: String, location: Location },
+
+    #[snafu(display("Failed to read record batch, source: {}", source))]
+    ReadRecordBatch {
+        source: common_recordbatch::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to build column vectors, source: {}", source))]
+    BuildColumnVectors {
+        source: common_recordbatch::error::Error,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -617,7 +633,8 @@ impl ErrorExt for Error {
             | Error::PrepareImmutableTable { .. }
             | Error::BuildCsvConfig { .. }
             | Error::ProjectSchema { .. }
-            | Error::UnsupportedFormat { .. } => StatusCode::InvalidArguments,
+            | Error::UnsupportedFormat { .. }
+            | Error::EmptyData { .. } => StatusCode::InvalidArguments,
 
             Error::NotSupported { .. } => StatusCode::Unsupported,
 
@@ -673,7 +690,7 @@ impl ErrorExt for Error {
 
             Error::JoinTask { .. }
             | Error::BuildParquetRecordBatchStream { .. }
-            | Error::ReadRecordBatch { .. }
+            | Error::ReadDfRecordBatch { .. }
             | Error::BuildFileStream { .. }
             | Error::WriteStreamToFile { .. }
             | Error::Unexpected { .. } => StatusCode::Unexpected,
@@ -726,6 +743,10 @@ impl ErrorExt for Error {
 
             Error::WriteParquet { source, .. } => source.status_code(),
             Error::InvalidCopyParameter { .. } => StatusCode::InvalidArguments,
+
+            Error::ReadRecordBatch { source, .. } | Error::BuildColumnVectors { source, .. } => {
+                source.status_code()
+            }
         }
     }
 
@@ -734,8 +755,4 @@ impl ErrorExt for Error {
     }
 }
 
-impl From<Error> for tonic::Status {
-    fn from(err: Error) -> Self {
-        tonic::Status::new(tonic::Code::Internal, err.to_string())
-    }
-}
+define_into_tonic_status!(Error);

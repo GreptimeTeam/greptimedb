@@ -141,13 +141,12 @@ impl LocalCatalogManager {
         self.catalogs.register_table(register_table_req).await?;
 
         // Add numbers table for test
-        let numbers_table = Arc::new(NumbersTable::default());
         let register_number_table_req = RegisterTableRequest {
             catalog: DEFAULT_CATALOG_NAME.to_string(),
             schema: DEFAULT_SCHEMA_NAME.to_string(),
             table_name: NUMBERS_TABLE_NAME.to_string(),
             table_id: NUMBERS_TABLE_ID,
-            table: numbers_table,
+            table: NumbersTable::table(NUMBERS_TABLE_ID),
         };
 
         self.catalogs
