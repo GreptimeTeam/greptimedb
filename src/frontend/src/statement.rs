@@ -228,7 +228,7 @@ impl StatementExecutor {
                     .map_err(BoxedError::new)
                     .context(TableOperationSnafu)
                     .context(InsertSnafu { table_name })?;
-                Ok(affected_rows as usize)
+                Ok(affected_rows)
             }
             None => {
                 let table_ref = TableReference::full(
