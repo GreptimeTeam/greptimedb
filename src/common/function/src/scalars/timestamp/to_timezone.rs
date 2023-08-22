@@ -214,7 +214,7 @@ mod tests {
 
     #[test]
     fn test_string_to_timezone() {
-        let f = ToTimeZoneFunction::default();
+        let f = ToTimeZoneFunction;
         assert_eq!("to_timezone", f.name());
 
         assert_eq!(
@@ -260,7 +260,7 @@ mod tests {
 
     #[test]
     fn test_i64_to_timezone() {
-        let f = ToTimeZoneFunction::default();
+        let f = ToTimeZoneFunction;
         assert_eq!("to_timezone", f.name());
 
         assert_eq!(
@@ -302,7 +302,7 @@ mod tests {
 
     #[test]
     fn test_timestamp_to_timezone() {
-        let f = ToTimeZoneFunction::default();
+        let f = ToTimeZoneFunction  ;
         assert_eq!("to_timezone", f.name());
 
         assert_eq!(
