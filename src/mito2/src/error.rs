@@ -375,12 +375,19 @@ pub enum Error {
     #[snafu(display("Invalid flume sender, location: {}", location,))]
     InvalidFlumeSender { location: Location },
 
-    #[snafu(display("Invalid scheduler state location: {}", location,))]
+    #[snafu(display("Invalid scheduler state, location: {}", location))]
     InvalidSchedulerState { location: Location },
 
     #[snafu(display("Failed to stop scheduler, source: {}", source))]
-    StopScheduler {
-        source: JoinError,
+    StopScheduler { source: JoinError },
+
+    #[snafu(display(
+        "Failed to build scan predicate, location: {}, source: {}",
+        location,
+        source
+    ))]
+    BuildPredicate {
+        source: table::error::Error,
         location: Location,
     },
 }
@@ -444,6 +451,7 @@ impl ErrorExt for Error {
             InvalidFlumeSender { .. } => StatusCode::InvalidArguments,
             InvalidSchedulerState { .. } => StatusCode::InvalidArguments,
             StopScheduler { .. } => StatusCode::Internal,
+            BuildPredicate { source, .. } => source.status_code(),
         }
     }
 

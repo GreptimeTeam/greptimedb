@@ -239,7 +239,7 @@ impl RegionWriteCtx {
     fn write_memtable(&mut self) {
         debug_assert_eq!(self.notifiers.len(), self.wal_entry.mutations.len());
 
-        let mutable = self.version.memtables.mutable();
+        let mutable = &self.version.memtables.mutable;
         // Takes mutations from the wal entry.
         let mutations = mem::take(&mut self.wal_entry.mutations);
         for (mutation, notify) in mutations.into_iter().zip(&mut self.notifiers) {

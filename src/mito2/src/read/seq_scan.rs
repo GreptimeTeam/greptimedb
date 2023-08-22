@@ -14,8 +14,7 @@
 
 //! Sequential scan.
 
-use common_query::logical_plan::Expr;
-use common_recordbatch::{OrderOption, SendableRecordBatchStream};
+use common_recordbatch::SendableRecordBatchStream;
 use common_time::range::TimestampRange;
 use object_store::ObjectStore;
 use store_api::metadata::RegionMetadataRef;
@@ -64,37 +63,37 @@ impl SeqScan {
     }
 
     /// Set projection.
-    pub fn projection(&mut self, projection: Option<Vec<ColumnId>>) -> &mut Self {
+    pub fn with_projection(mut self, projection: Option<Vec<ColumnId>>) -> Self {
         self.projection = projection;
         self
     }
 
     /// Set time range filter for time index.
-    pub fn time_range(&mut self, time_range: Option<TimestampRange>) -> &mut Self {
+    pub fn with_time_range(mut self, time_range: Option<TimestampRange>) -> Self {
         self.time_range = time_range;
         self
     }
 
     /// Set predicate to push down.
-    pub fn predicate(&mut self, predicate: Option<Predicate>) -> &mut Self {
+    pub fn with_predicate(mut self, predicate: Option<Predicate>) -> Self {
         self.predicate = predicate;
         self
     }
 
     /// Set memtables to read.
-    pub fn memtables(&mut self, memtables: Vec<MemtableRef>) -> &mut Self {
+    pub fn with_memtables(mut self, memtables: Vec<MemtableRef>) -> Self {
         self.memtables = memtables;
         self
     }
 
     /// Set files to read.
-    pub fn files(&mut self, files: Vec<FileHandle>) -> &mut Self {
+    pub fn with_files(mut self, files: Vec<FileHandle>) -> Self {
         self.files = files;
         self
     }
 
     /// Builds a stream for the query.
-    pub fn build(&mut self) -> SendableRecordBatchStream {
+    pub fn build(&self) -> SendableRecordBatchStream {
         unimplemented!()
     }
 }

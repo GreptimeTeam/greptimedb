@@ -22,9 +22,9 @@ use crate::memtable::MemtableRef;
 #[derive(Debug)]
 pub(crate) struct MemtableVersion {
     /// Mutable memtable.
-    mutable: MemtableRef,
+    pub(crate) mutable: MemtableRef,
     /// Immutable memtables.
-    immutables: Vec<MemtableRef>,
+    pub(crate) immutables: Vec<MemtableRef>,
 }
 
 pub(crate) type MemtableVersionRef = Arc<MemtableVersion>;
@@ -38,8 +38,11 @@ impl MemtableVersion {
         }
     }
 
-    /// Returns the mutable memtable.
-    pub(crate) fn mutable(&self) -> &MemtableRef {
-        &self.mutable
+    /// Lists mutable and immutable memtables.
+    pub(crate) fn list_memtables(&self) -> Vec<MemtableRef> {
+        let mut memtables = Vec::with_capacity(self.immutables.len() + 1);
+        memtables.push(self.mutable.clone());
+        memtables.extend_from_slice(&self.immutables);
+        memtables
     }
 }

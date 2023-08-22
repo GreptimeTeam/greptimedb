@@ -35,6 +35,11 @@ impl SstVersion {
             levels: new_level_meta_vec(),
         }
     }
+
+    /// Returns a slice to metadatas of all levels.
+    pub(crate) fn levels(&self) -> &[LevelMeta] {
+        &self.levels
+    }
 }
 
 // We only has fixed number of level, so we use array to hold elements. This implementation
@@ -44,9 +49,9 @@ type LevelMetaArray = [LevelMeta; MAX_LEVEL as usize];
 /// Metadata of files in the same SST level.
 pub struct LevelMeta {
     /// Level number.
-    level: Level,
+    pub level: Level,
     /// Handles of SSTs in this level.
-    files: HashMap<FileId, FileHandle>,
+    pub files: HashMap<FileId, FileHandle>,
 }
 
 impl LevelMeta {
