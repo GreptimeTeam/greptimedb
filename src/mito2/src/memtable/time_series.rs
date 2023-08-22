@@ -320,10 +320,12 @@ impl Series {
 
     /// Freezes the active part and push it to `frozen`.
     fn freeze(&mut self) {
-        let mut builder =
-            ValueBuilder::new(self.region_metadata.clone(), self.initial_builder_capacity);
-        std::mem::swap(&mut self.active, &mut builder);
-        self.frozen.push(Values::from(builder));
+        if self.active.len() != 0 {
+            let mut builder =
+                ValueBuilder::new(self.region_metadata.clone(), self.initial_builder_capacity);
+            std::mem::swap(&mut self.active, &mut builder);
+            self.frozen.push(Values::from(builder));
+        }
     }
 
     /// Freezes active part to frozen part and compact frozen part to reduce memory fragmentation.
@@ -331,36 +333,43 @@ impl Series {
     fn compact(&mut self) -> Result<Values> {
         self.freeze();
 
-        let values = self.frozen.clone();
-        let total_len: usize = values.iter().map(|v| v.timestamp.len()).sum();
-        let mut builder = ValueBuilder::new(self.region_metadata.clone(), total_len);
+        let mut frozen = self.frozen.clone();
+        let values = if frozen.len() == 1 {
+            frozen.pop().unwrap()
+        } else {
+            // TODO(hl): We should keep track of min/max timestamps for each values and avoid
+            // cloning and sorting when values do not overlap with each other.
 
-        for v in values {
-            let len = v.timestamp.len();
-            builder
-                .timestamp
-                .extend_slice_of(&*v.timestamp, 0, len)
-                .context(CompactValuesSnafu)?;
-            builder
-                .sequence
-                .extend_slice_of(&*v.sequence, 0, len)
-                .context(CompactValuesSnafu)?;
+            let total_len: usize = frozen.iter().map(|v| v.timestamp.len()).sum();
+            let mut builder = ValueBuilder::new(self.region_metadata.clone(), total_len);
 
-            builder
-                .op_type
-                .extend_slice_of(&*v.op_type, 0, len)
-                .context(CompactValuesSnafu)?;
-
-            for (idx, f) in v.fields.iter().enumerate() {
-                builder.fields[idx]
-                    .extend_slice_of(&**f, 0, len)
+            for v in frozen {
+                let len = v.timestamp.len();
+                builder
+                    .timestamp
+                    .extend_slice_of(&*v.timestamp, 0, len)
                     .context(CompactValuesSnafu)?;
+                builder
+                    .sequence
+                    .extend_slice_of(&*v.sequence, 0, len)
+                    .context(CompactValuesSnafu)?;
+
+                builder
+                    .op_type
+                    .extend_slice_of(&*v.op_type, 0, len)
+                    .context(CompactValuesSnafu)?;
+
+                for (idx, f) in v.fields.iter().enumerate() {
+                    builder.fields[idx]
+                        .extend_slice_of(&**f, 0, len)
+                        .context(CompactValuesSnafu)?;
+                }
             }
-        }
 
-        let values = Values::from(builder);
-        self.frozen = vec![values.clone()];
-
+            let values = Values::from(builder);
+            self.frozen = vec![values.clone()];
+            values
+        };
         Ok(values)
     }
 }
@@ -408,6 +417,14 @@ impl ValueBuilder {
         for (idx, field_value) in fields.into_iter().enumerate() {
             self.fields[idx].push_value_ref(field_value);
         }
+    }
+
+    /// Returns the length of [ValueBuilder]
+    fn len(&self) -> usize {
+        let timestamp_len = self.timestamp.len();
+        debug_assert_eq!(timestamp_len, self.op_type.len());
+        debug_assert_eq!(timestamp_len, self.sequence.len());
+        timestamp_len
     }
 }
 
