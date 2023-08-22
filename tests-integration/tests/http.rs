@@ -641,7 +641,6 @@ pub async fn test_config_api(store_type: StorageType) {
     [storage.manifest]
     checkpoint_margin = 10
     gc_duration = "10m"
-    checkpoint_on_startup = false
     compress = false
 
     [storage.flush]

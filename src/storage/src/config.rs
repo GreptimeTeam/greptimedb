@@ -29,7 +29,6 @@ pub const DEFAULT_PICKER_SCHEDULE_INTERVAL: u32 = 5 * 60 * 1000;
 
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
-    pub manifest_checkpoint_on_startup: bool,
     pub compress_manifest: bool,
     pub manifest_checkpoint_margin: Option<u16>,
     pub manifest_gc_duration: Option<Duration>,
@@ -55,7 +54,6 @@ pub struct EngineConfig {
 impl Default for EngineConfig {
     fn default() -> Self {
         Self {
-            manifest_checkpoint_on_startup: false,
             compress_manifest: false,
             manifest_checkpoint_margin: Some(10),
             manifest_gc_duration: Some(Duration::from_secs(30)),
