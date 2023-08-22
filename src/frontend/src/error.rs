@@ -513,7 +513,7 @@ pub enum Error {
     },
 
     #[snafu(display("Failed to read record batch, source: {}", source))]
-    ReadRecordBatch {
+    ReadDfRecordBatch {
         source: datafusion::error::DataFusionError,
         location: Location,
     },
@@ -600,6 +600,18 @@ pub enum Error {
 
     #[snafu(display("Empty data: {}", msg))]
     EmptyData { msg: String, location: Location },
+
+    #[snafu(display("Failed to read record batch, source: {}", source))]
+    ReadRecordBatch {
+        source: common_recordbatch::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to build column vectors, source: {}", source))]
+    BuildColumnVectors {
+        source: common_recordbatch::error::Error,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -678,7 +690,7 @@ impl ErrorExt for Error {
 
             Error::JoinTask { .. }
             | Error::BuildParquetRecordBatchStream { .. }
-            | Error::ReadRecordBatch { .. }
+            | Error::ReadDfRecordBatch { .. }
             | Error::BuildFileStream { .. }
             | Error::WriteStreamToFile { .. }
             | Error::Unexpected { .. } => StatusCode::Unexpected,
@@ -731,6 +743,10 @@ impl ErrorExt for Error {
 
             Error::WriteParquet { source, .. } => source.status_code(),
             Error::InvalidCopyParameter { .. } => StatusCode::InvalidArguments,
+
+            Error::ReadRecordBatch { source, .. } | Error::BuildColumnVectors { source, .. } => {
+                source.status_code()
+            }
         }
     }
 

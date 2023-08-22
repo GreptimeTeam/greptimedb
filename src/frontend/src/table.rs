@@ -36,12 +36,11 @@ use snafu::prelude::*;
 use store_api::storage::ScanRequest;
 use table::error::TableOperationSnafu;
 use table::metadata::{FilterPushDownType, TableInfoRef, TableType};
-use table::requests::{DeleteRequest, InsertRequest};
+use table::requests::DeleteRequest;
 use table::Table;
 
 use crate::catalog::FrontendCatalogManager;
 use crate::instance::distributed::deleter::DistDeleter;
-use crate::instance::distributed::inserter::DistInserter;
 use crate::table::scan::{DatanodeInstance, TableScanPlan};
 
 pub mod delete;
@@ -71,20 +70,6 @@ impl Table for DistTable {
 
     fn table_type(&self) -> TableType {
         self.table_info.table_type
-    }
-
-    async fn insert(&self, request: InsertRequest) -> table::Result<usize> {
-        let inserter = DistInserter::new(
-            request.catalog_name.clone(),
-            request.schema_name.clone(),
-            self.catalog_manager.clone(),
-        );
-        let affected_rows = inserter
-            .insert(vec![request])
-            .await
-            .map_err(BoxedError::new)
-            .context(TableOperationSnafu)?;
-        Ok(affected_rows as usize)
     }
 
     // TODO(ruihang): DistTable should not call this method directly
@@ -291,6 +276,7 @@ pub(crate) mod test {
     use partition::PartitionRuleRef;
     use store_api::storage::RegionNumber;
     use table::meter_insert_request;
+    use table::requests::InsertRequest;
 
     use super::*;
 

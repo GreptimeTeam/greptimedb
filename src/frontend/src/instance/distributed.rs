@@ -57,6 +57,7 @@ use sql::statements::create::{PartitionEntry, Partitions};
 use sql::statements::statement::Statement;
 use sql::statements::{self, sql_value_to_value};
 use store_api::storage::RegionNumber;
+use table::error::TableOperationSnafu;
 use table::metadata::{RawTableInfo, RawTableMeta, TableId, TableIdent, TableInfo, TableType};
 use table::requests::{AlterTableRequest, TableOptions};
 use table::TableRef;
@@ -373,26 +374,24 @@ impl DistInstance {
                 self.drop_table(table_name).await
             }
             Statement::Insert(insert) => {
-                let (catalog, schema, table) =
+                let (catalog, schema, _) =
                     table_idents_to_full_name(insert.table_name(), query_ctx.clone())
                         .map_err(BoxedError::new)
                         .context(error::ExternalSnafu)?;
-
-                let table = self
-                    .catalog_manager
-                    .table(&catalog, &schema, &table)
-                    .await
-                    .context(CatalogSnafu)?
-                    .context(TableNotFoundSnafu { table_name: table })?;
 
                 let insert_request =
                     SqlHandler::insert_to_request(self.catalog_manager.clone(), &insert, query_ctx)
                         .await
                         .context(InvokeDatanodeSnafu)?;
 
-                Ok(Output::AffectedRows(
-                    table.insert(insert_request).await.context(TableSnafu)?,
-                ))
+                let inserter = DistInserter::new(catalog, schema, self.catalog_manager.clone());
+                let affected_rows = inserter
+                    .insert(vec![insert_request])
+                    .await
+                    .map_err(BoxedError::new)
+                    .context(TableOperationSnafu)
+                    .context(TableSnafu)?;
+                Ok(Output::AffectedRows(affected_rows as usize))
             }
             Statement::ShowCreateTable(show) => {
                 let (catalog, schema, table) =
