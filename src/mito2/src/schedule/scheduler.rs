@@ -56,6 +56,16 @@ pub struct LocalScheduler {
     state: Arc<AtomicU8>,
 }
 
+/// Stop will wait for all tasks to complete, in order to avoid the drop self.sender (drop makes the function must be mutable,
+/// but we want it to be immutable only), We will use the try_recv return value (either the channel is empty or the sender is all dropped) 
+/// to determine whether all tasks are complete.
+/// 
+/// The compromise above means that we cannot use asynchronous send because send_async is not aware of changes in the scheduler state while it is being polled. 
+/// It is possible that after the task is completed, the asynchronous send is still scheduled and continues to send the task (because there is no drop sender).
+/// 
+/// So using synchronous sending for now, to not block the entire thread using flume::unbounded()
+/// 
+/// TODO(zhuziyi): Wrap the Future returned by send_async so that the status of the scheduler is checked first when it is polling
 impl LocalScheduler {
     /// cap: flume bounded cap
     /// rev_num: the number of bounded receiver
