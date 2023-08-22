@@ -76,11 +76,6 @@ enable = true
 # Whether to enable Prometheus remote write and read in HTTP API, true by default.
 enable = true
 
-# Prometheus protocol options
-[prometheus_options]
-# Prometheus API server address, "127.0.0.1:4004" by default.
-addr = "127.0.0.1:4004"
-
 # WAL options.
 [wal]
 # WAL data directory
