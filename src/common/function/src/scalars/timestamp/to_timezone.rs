@@ -302,7 +302,7 @@ mod tests {
 
     #[test]
     fn test_timestamp_to_timezone() {
-        let f = ToTimeZoneFunction  ;
+        let f = ToTimeZoneFunction;
         assert_eq!("to_timezone", f.name());
 
         assert_eq!(
