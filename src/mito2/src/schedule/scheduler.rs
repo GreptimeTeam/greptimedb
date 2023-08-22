@@ -18,13 +18,13 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 
 use common_telemetry::info;
-use snafu::ResultExt;
-use snafu::OptionExt;
+use snafu::{ensure, ResultExt};
+use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::{
-    Result, InvalidFlumeSenderSnafu, InvalidStateSnafu, InvalidHandleStateSnafu,
+    InvalidFlumeSenderSnafu, InvalidSchedulerStateSnafu, Result, StopSchedulerSnafu,
 };
 
 pub type Job = Pin<Box<dyn Future<Output = ()> + Send>>;
@@ -43,17 +43,16 @@ pub trait Scheduler {
     /// Schedules a Job
     async fn schedule(&self, req: Job) -> Result<()>;
 
-    /// Stops scheduler. If `await_termination` is set to true, the scheduler will
-    /// wait until all tasks are processed.
-    async fn stop(&mut self, await_termination: bool) -> Result<()>;
+    /// Stops scheduler. If `await_termination` is set to true, the scheduler will wait until all tasks are processed.
+    async fn stop(&self, await_termination: bool) -> Result<()>;
 }
 
 /// Request scheduler based on local state.
 pub struct LocalScheduler {
     /// Sends jobs to flume bounded channel
-    sender: Option<flume::Sender<Job>>,
+    sender: flume::Sender<Job>,
     /// Task handles
-    handles: Vec<Option<JoinHandle<()>>>,
+    handles: tokio::sync::Mutex<Vec<JoinHandle<()>>>,
     /// Token used to halt the scheduler
     cancel_token: CancellationToken,
     /// State of scheduler
@@ -62,15 +61,15 @@ pub struct LocalScheduler {
 
 impl LocalScheduler {
     /// cap: flume bounded cap
-    /// num: the number of bounded receiver
-    pub fn new(cap: usize, num: usize) -> Self {
+    /// rev_num: the number of bounded receiver
+    pub fn new(cap: usize, rev_num: usize) -> Self {
         let (tx, rx) = flume::bounded(cap);
         let token = CancellationToken::new();
         let state = Arc::new(AtomicU8::new(STATE_RUNNING));
 
-        let mut handles = Vec::with_capacity(num);
+        let mut handles = Vec::with_capacity(rev_num);
 
-        for _ in 0..num {
+        for _ in 0..rev_num {
             let child = token.child_token().clone();
             let receiver = rx.clone();
             let state = Arc::clone(&state);
@@ -80,29 +79,30 @@ impl LocalScheduler {
                     tokio::select! {
                         _ = child.cancelled() => {
                             info!("Task scheduler cancelled.");
+                            // Wait all task finished
+                            if state.load(Ordering::Relaxed) == STATE_AWAIT_TERMINATION {
+                                while let Ok(req) = receiver.try_recv() {
+                                    req.await;
+                                }
+                                state.store(STATE_STOP, Ordering::Relaxed);
+                            }
                             return;
                         }
                         req_opt = receiver.recv_async() =>{
-                            if let Ok(req) = req_opt{
+                            if let Ok(req) = req_opt {
                                 req.await;
                             }
                         }
                     }
                 }
-                // For correctness, we need to handle all tasks
-                if state.load(Ordering::Relaxed) == STATE_AWAIT_TERMINATION {
-                    while let Ok(req) = receiver.recv() {
-                        req.await;
-                    }
-                }
             });
-            handles.push(Some(handle));
+            handles.push(handle);
         }
 
         Self {
-            sender: Some(tx),
+            sender: tx,
             cancel_token: token,
-            handles,
+            handles: Mutex::new(handles),
             state,
         }
     }
@@ -116,14 +116,21 @@ impl LocalScheduler {
 #[async_trait::async_trait]
 impl Scheduler for LocalScheduler {
     async fn schedule(&self, req: Job) -> Result<()> {
-        self.sender.as_ref().context(InvalidStateSnafu)?
+        ensure!(
+            self.state.load(Ordering::Relaxed) == STATE_RUNNING,
+            InvalidSchedulerStateSnafu
+        );
+        self.sender
             .send_async(req)
             .await
-            .map_err(|_| InvalidFlumeSenderSnafu {}.build()
-        )
+            .map_err(|_| InvalidFlumeSenderSnafu {}.build())
     }
 
-    async fn stop(&mut self, await_termination: bool) -> Result<()> {
+    async fn stop(&self, await_termination: bool) -> Result<()> {
+        ensure!(
+            self.state.load(Ordering::Relaxed) == STATE_RUNNING,
+            InvalidSchedulerStateSnafu
+        );
         let state = if await_termination {
             STATE_AWAIT_TERMINATION
         } else {
@@ -131,13 +138,11 @@ impl Scheduler for LocalScheduler {
         };
         self.state.store(state, Ordering::Relaxed);
         self.cancel_token.cancel();
-        let _ = self.sender.take();
 
-        for handle in &mut self.handles {
-            if let Some(handle) = handle.take() {
-                handle.await.context(InvalidHandleStateSnafu)?;
-            }
+        for handle in self.handles.lock().await.drain(..) {
+            handle.await.context(StopSchedulerSnafu)?;
         }
+
         Ok(())
     }
 }
@@ -153,9 +158,9 @@ impl Drop for LocalScheduler {
 mod tests {
     use std::sync::atomic::AtomicI32;
     use std::sync::Arc;
-    use std::time::Duration;
 
     use tokio::sync::Barrier;
+    use tokio::time::Duration;
 
     use super::*;
 
@@ -163,19 +168,19 @@ mod tests {
     async fn test_sum_cap() {
         let task_size = 1000;
         let sum = Arc::new(AtomicI32::new(0));
-        let mut local = LocalScheduler::new(3, task_size);
+        let local = LocalScheduler::new(3, task_size);
 
         for _ in 0..task_size {
             let sum = Arc::clone(&sum);
             local
                 .schedule(Box::pin(async move {
+                    tokio::time::sleep(Duration::from_micros(1)).await;
                     sum.fetch_add(1, Ordering::Relaxed);
                 }))
                 .await
                 .unwrap();
         }
         local.stop(true).await.unwrap();
-
         assert_eq!(sum.load(Ordering::Relaxed), 1000);
     }
 
@@ -183,7 +188,7 @@ mod tests {
     async fn test_sum_consumer_num() {
         let task_size = 1000;
         let sum = Arc::new(AtomicI32::new(0));
-        let mut local = LocalScheduler::new(task_size, 3);
+        let local = LocalScheduler::new(task_size, 3);
 
         for _ in 0..task_size {
             let sum = Arc::clone(&sum);
@@ -195,7 +200,6 @@ mod tests {
                 .unwrap();
         }
 
-        tokio::time::sleep(Duration::from_millis(1)).await;
         local.stop(true).await.unwrap();
 
         assert_eq!(sum.load(Ordering::Relaxed), 1000);
@@ -217,7 +221,46 @@ mod tests {
                 .await
                 .unwrap();
         }
-
         barrier.wait().await;
+        local.stop(true).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_scheduler_continous_stop() {
+        let sum = Arc::new(AtomicI32::new(0));
+        let local = Arc::new(LocalScheduler::new(1000, 1000));
+
+        let barrier = Arc::new(Barrier::new(2));
+        let barrier_clone = barrier.clone();
+        let local_stop = local.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(1000)).await;
+            while local_stop.stop(true).await.is_ok() {}
+            barrier_clone.wait().await;
+        });
+
+        let target = Arc::new(AtomicI32::new(0));
+        let local_task = local.clone();
+        let target_clone = Arc::clone(&target);
+        let sum_clone = Arc::clone(&sum);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                let sum_c = Arc::clone(&sum_clone);
+                let ok = local_task
+                    .schedule(Box::pin(async move {
+                        sum_c.fetch_add(1, Ordering::Relaxed);
+                    }))
+                    .await
+                    .is_ok();
+                if ok {
+                    target_clone.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    break;
+                }
+            }
+        });
+        barrier.wait().await;
+        assert_eq!(sum.load(Ordering::Relaxed), target.load(Ordering::Relaxed));
     }
 }

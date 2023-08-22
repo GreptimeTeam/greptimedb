@@ -333,24 +333,14 @@ pub enum Error {
         source: datatypes::error::Error,
     },
 
-    #[snafu(display(
-        "Invaild scheduler sender, location: {}",
-        location,
-    ))]
-    InvalidFlumeSender {
-        location: Location,
-    },
+    #[snafu(display("Invaild scheduler sender, location: {}", location,))]
+    InvalidFlumeSender { location: Location },
 
-    #[snafu(display(
-        "Invaild state location: {}",
-        location,
-    ))]
-    InvalidState {
-        location: Location,
-    },
+    #[snafu(display("Invaild state location: {}", location,))]
+    InvalidSchedulerState { location: Location },
 
-    #[snafu(display("Invalid handle state, {}, location: {}", source, location))]
-    InvalidHandleState {
+    #[snafu(display("Failed to stop scheduler, source: {}", source))]
+    StopScheduler {
         source: JoinError,
         location: Location,
     },
@@ -409,8 +399,8 @@ impl ErrorExt for Error {
             InvalidRecordBatch { .. } => StatusCode::InvalidArguments,
             ConvertVector { source, .. } => source.status_code(),
             InvalidFlumeSender { .. } => StatusCode::InvalidArguments,
-            InvalidState { .. } => StatusCode::InvalidArguments,
-            InvalidHandleState { .. } => StatusCode::InvalidArguments,
+            InvalidSchedulerState { .. } => StatusCode::InvalidArguments,
+            StopScheduler { .. } => StatusCode::Internal,
         }
     }
 
