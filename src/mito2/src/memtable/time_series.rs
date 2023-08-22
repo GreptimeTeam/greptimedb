@@ -37,47 +37,28 @@ use crate::memtable::{BoxedBatchIterator, KeyValues, Memtable, MemtableId};
 use crate::read::{Batch, BatchBuilder, BatchColumn};
 use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
 
-/// Config for [TimeSeriesMemtable].
-#[derive(Debug)]
-pub struct TimeSeriesMemtableConfig {
-    /// The initial capacity for each [ValueBuilder] in series.
-    pub initial_builder_capacity: usize,
-}
-
-impl Default for TimeSeriesMemtableConfig {
-    fn default() -> Self {
-        Self {
-            initial_builder_capacity: 128,
-        }
-    }
-}
+/// Initial vector builder capacity.
+const INITIAL_BUILDER_CAPACITY: usize = 32;
 
 /// Memtable implementation that groups rows by their primary key.
 pub struct TimeSeriesMemtable {
     id: MemtableId,
-    config: TimeSeriesMemtableConfig,
     region_metadata: RegionMetadataRef,
     row_codec: McmpRowCodec,
     series_set: SeriesSet,
 }
 
 impl TimeSeriesMemtable {
-    pub fn new(
-        region_metadata: RegionMetadataRef,
-        id: MemtableId,
-        config: Option<TimeSeriesMemtableConfig>,
-    ) -> Result<Self> {
+    pub fn new(region_metadata: RegionMetadataRef, id: MemtableId) -> Result<Self> {
         let row_codec = McmpRowCodec::new(
             region_metadata
                 .primary_key_columns()
                 .map(|c| SortField::new(c.column_schema.data_type.clone()))
                 .collect(),
         );
-        let config = config.unwrap_or_default();
-        let series_set = SeriesSet::new(region_metadata.clone(), config.initial_builder_capacity);
+        let series_set = SeriesSet::new(region_metadata.clone());
         Ok(Self {
             id,
-            config,
             region_metadata,
             series_set,
             row_codec,
@@ -87,9 +68,7 @@ impl TimeSeriesMemtable {
 
 impl Debug for TimeSeriesMemtable {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TimeSeriesMemtable")
-            .field("config", &self.config)
-            .finish()
+        f.debug_struct("TimeSeriesMemtable").finish()
     }
 }
 
@@ -128,16 +107,15 @@ impl Memtable for TimeSeriesMemtable {
 }
 
 type SeriesRwLockMap = RwLock<BTreeMap<Vec<u8>, Arc<RwLock<Series>>>>;
+
 struct SeriesSet {
-    initial_builder_capacity: usize,
     region_metadata: RegionMetadataRef,
     series: Arc<SeriesRwLockMap>,
 }
 
 impl SeriesSet {
-    fn new(region_metadata: RegionMetadataRef, initial_builder_capacity: usize) -> Self {
+    fn new(region_metadata: RegionMetadataRef) -> Self {
         Self {
-            initial_builder_capacity,
             region_metadata,
             series: Default::default(),
         }
@@ -150,10 +128,7 @@ impl SeriesSet {
         if let Some(series) = self.series.read().unwrap().get(&primary_key) {
             return series.clone();
         };
-        let s = Arc::new(RwLock::new(Series::new(
-            self.region_metadata.clone(),
-            self.initial_builder_capacity,
-        )));
+        let s = Arc::new(RwLock::new(Series::new(&self.region_metadata)));
         let mut indices = self.series.write().unwrap();
         match indices.entry(primary_key) {
             Entry::Vacant(v) => {
@@ -195,7 +170,7 @@ impl Iterator for Iter {
 
         if let Some((primary_key, series)) = range.next() {
             self.last_key = Some(primary_key.clone());
-            let values = series.write().unwrap().compact();
+            let values = series.write().unwrap().compact(&self.metadata);
             Some(values.and_then(|v| v.to_batch(primary_key, &self.metadata)))
         } else {
             None
@@ -236,18 +211,14 @@ impl Bucket {
 
 /// A `Series` holds a list of field values of some given primary key.
 struct Series {
-    initial_builder_capacity: usize,
-    region_metadata: RegionMetadataRef,
     active: ValueBuilder,
     frozen: Vec<Values>,
 }
 
 impl Series {
-    fn new(region_metadata: RegionMetadataRef, initial_builder_capacity: usize) -> Self {
+    fn new(region_metadata: &RegionMetadataRef) -> Self {
         Self {
-            initial_builder_capacity,
-            region_metadata: region_metadata.clone(),
-            active: ValueBuilder::new(region_metadata, initial_builder_capacity),
+            active: ValueBuilder::new(region_metadata, INITIAL_BUILDER_CAPACITY),
             frozen: vec![],
         }
     }
@@ -258,10 +229,9 @@ impl Series {
     }
 
     /// Freezes the active part and push it to `frozen`.
-    fn freeze(&mut self) {
+    fn freeze(&mut self, region_metadata: &RegionMetadataRef) {
         if self.active.len() != 0 {
-            let mut builder =
-                ValueBuilder::new(self.region_metadata.clone(), self.initial_builder_capacity);
+            let mut builder = ValueBuilder::new(region_metadata, INITIAL_BUILDER_CAPACITY);
             std::mem::swap(&mut self.active, &mut builder);
             self.frozen.push(Values::from(builder));
         }
@@ -269,8 +239,8 @@ impl Series {
 
     /// Freezes active part to frozen part and compact frozen part to reduce memory fragmentation.
     /// Returns the frozen and compacted values.
-    fn compact(&mut self) -> Result<Values> {
-        self.freeze();
+    fn compact(&mut self, region_metadata: &RegionMetadataRef) -> Result<Values> {
+        self.freeze(region_metadata);
 
         let mut frozen = self.frozen.clone();
         let values = if frozen.len() == 1 {
@@ -280,7 +250,7 @@ impl Series {
             // cloning and sorting when values do not overlap with each other.
 
             let total_len: usize = frozen.iter().map(|v| v.timestamp.len()).sum();
-            let mut builder = ValueBuilder::new(self.region_metadata.clone(), total_len);
+            let mut builder = ValueBuilder::new(region_metadata, total_len);
 
             for v in frozen {
                 let len = v.timestamp.len();
@@ -315,7 +285,6 @@ impl Series {
 
 /// `ValueBuilder` holds all the vector builders for field columns.
 struct ValueBuilder {
-    region_metadata: RegionMetadataRef,
     timestamp: Box<dyn MutableVector>,
     sequence: UInt64VectorBuilder,
     op_type: UInt8VectorBuilder,
@@ -323,7 +292,7 @@ struct ValueBuilder {
 }
 
 impl ValueBuilder {
-    fn new(region_metadata: RegionMetadataRef, capacity: usize) -> Self {
+    fn new(region_metadata: &RegionMetadataRef, capacity: usize) -> Self {
         let timestamp = region_metadata
             .time_index_column()
             .column_schema
@@ -338,7 +307,6 @@ impl ValueBuilder {
             .collect();
 
         Self {
-            region_metadata,
             timestamp,
             sequence,
             op_type,
@@ -385,19 +353,21 @@ impl Values {
         arrays.push(self.op_type.to_arrow_array());
         arrays.extend(self.fields.iter().map(|f| f.to_arrow_array()));
 
+        // only sort by timestamp and sequence.
         let fields = arrays
             .iter()
-            .map(|arr| datatypes::arrow::row::SortField::new(arr.data_type().clone()))
+            .take(2)
+            .map(|v| arrow::row::SortField::new(v.data_type().clone()))
             .collect();
+
         let mut converter = RowConverter::new(fields).context(SortValuesSnafu)?;
         let rows = converter
-            .convert_columns(&arrays)
+            .convert_columns(&arrays[0..2])
             .context(SortValuesSnafu)?;
         let mut sort_pairs = rows.iter().enumerate().collect::<Vec<_>>();
         sort_pairs.sort_unstable_by(|(_, a), (_, b)| a.cmp(b));
-        let indices = datatypes::arrow::array::UInt32Array::from_iter_values(
-            sort_pairs.iter().map(|(i, _)| *i as u32),
-        );
+        let indices =
+            arrow::array::UInt32Array::from_iter_values(sort_pairs.iter().map(|(i, _)| *i as u32));
 
         let res = arrays
             .into_iter()
@@ -565,13 +535,13 @@ mod tests {
     #[test]
     fn test_series() {
         let region_metadata = schema_for_test();
-        let mut series = Series::new(region_metadata, 32);
+        let mut series = Series::new(&region_metadata);
         series.push(ts_value_ref(1), 0, OpType::Put, field_value_ref(1, 10.1));
         series.push(ts_value_ref(2), 0, OpType::Put, field_value_ref(2, 10.2));
         assert_eq!(2, series.active.timestamp.len());
         assert_eq!(0, series.frozen.len());
 
-        let values = series.compact().unwrap();
+        let values = series.compact(&region_metadata).unwrap();
         check_values(values, &[(1, 0, 1, 1, 10.1), (2, 0, 1, 2, 10.2)]);
         assert_eq!(0, series.active.timestamp.len());
         assert_eq!(1, series.frozen.len());
@@ -694,7 +664,7 @@ mod tests {
     #[test]
     fn test_series_set_concurrency() {
         let schema = schema_for_test();
-        let set = Arc::new(SeriesSet::new(schema, 32));
+        let set = Arc::new(SeriesSet::new(schema.clone()));
 
         let concurrency = 32;
         let pk_num = concurrency * 2;
@@ -730,7 +700,7 @@ mod tests {
             let pk = format!("pk-{}", i).as_bytes().to_vec();
             let series = set.get_or_add_series(pk);
             let mut guard = series.write().unwrap();
-            let values = guard.compact().unwrap();
+            let values = guard.compact(&schema).unwrap();
             timestamps.extend(values.sequence.iter_data().map(|v| v.unwrap() as i64));
             sequences.extend(values.sequence.iter_data().map(|v| v.unwrap() as i64));
             op_types.extend(values.op_type.iter_data().map(|v| v.unwrap()));
@@ -768,7 +738,7 @@ mod tests {
         common_telemetry::init_default_ut_logging();
         let schema = schema_for_test();
         let kvs = build_key_values(&schema, 100);
-        let memtable = TimeSeriesMemtable::new(schema, 42, None).unwrap();
+        let memtable = TimeSeriesMemtable::new(schema, 42).unwrap();
         memtable.write(&kvs).unwrap();
 
         let expected_ts = kvs
