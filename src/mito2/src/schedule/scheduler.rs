@@ -57,14 +57,14 @@ pub struct LocalScheduler {
 }
 
 /// Stop will wait for all tasks to complete, in order to avoid the drop self.sender (drop makes the function must be mutable,
-/// but we want it to be immutable only), We will use the try_recv return value (either the channel is empty or the sender is all dropped) 
+/// but we want it to be immutable only), We will use the try_recv return value (either the channel is empty or the sender is all dropped)
 /// to determine whether all tasks are complete.
-/// 
-/// The compromise above means that we cannot use asynchronous send because send_async is not aware of changes in the scheduler state while it is being polled. 
+///
+/// The compromise above means that we cannot use asynchronous send because send_async is not aware of changes in the scheduler state while it is being polled.
 /// It is possible that after the task is completed, the asynchronous send is still scheduled and continues to send the task (because there is no drop sender).
-/// 
+///
 /// So using synchronous sending for now, to not block the entire thread using flume::unbounded()
-/// 
+///
 /// TODO(zhuziyi): Wrap the Future returned by send_async so that the status of the scheduler is checked first when it is polling
 impl LocalScheduler {
     /// cap: flume bounded cap
@@ -77,7 +77,7 @@ impl LocalScheduler {
         let mut handles = Vec::with_capacity(rev_num);
 
         for _ in 0..rev_num {
-            let child = token.child_token().clone();
+            let child = token.child_token();
             let receiver = rx.clone();
             let state = Arc::clone(&state);
             let handle = common_runtime::spawn_bg(async move {
@@ -176,10 +176,10 @@ mod tests {
         let local = LocalScheduler::new(task_size);
 
         for _ in 0..task_size {
-            let sum = Arc::clone(&sum);
+            let sum_clone = sum.clone();
             local
                 .schedule(Box::pin(async move {
-                    sum.fetch_add(1, Ordering::Relaxed);
+                    sum_clone.fetch_add(1, Ordering::Relaxed);
                 }))
                 .await
                 .unwrap();
@@ -195,7 +195,7 @@ mod tests {
         let local = LocalScheduler::new(3);
         let mut target = 0;
         for _ in 0..task_size {
-            let sum_clone = Arc::clone(&sum);
+            let sum_clone = sum.clone();
             let ok = local
                 .schedule(Box::pin(async move {
                     sum_clone.fetch_add(1, Ordering::Relaxed);
@@ -246,12 +246,12 @@ mod tests {
 
         let target = Arc::new(AtomicI32::new(0));
         let local_task = local.clone();
-        let target_clone = Arc::clone(&target);
-        let sum_clone = Arc::clone(&sum);
+        let target_clone = target.clone();
+        let sum_clone = sum.clone();
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_millis(10)).await;
-                let sum_c = Arc::clone(&sum_clone);
+                let sum_c = sum_clone.clone();
                 let ok = local_task
                     .schedule(Box::pin(async move {
                         sum_c.fetch_add(1, Ordering::Relaxed);
