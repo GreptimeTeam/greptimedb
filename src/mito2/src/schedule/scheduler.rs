@@ -68,20 +68,20 @@ pub struct LocalScheduler {
 /// TODO(zhuziyi): Wrap the Future returned by send_async so that the status of the scheduler is checked first when it is polling
 impl LocalScheduler {
     /// cap: flume bounded cap
-    /// rev_num: the number of bounded receiver
-    pub fn new(rev_num: usize) -> Self {
+    /// concurrency: the number of bounded receiver
+    pub fn new(concurrency: usize) -> Self {
         let (tx, rx) = flume::unbounded();
         let token = CancellationToken::new();
         let state = Arc::new(AtomicU8::new(STATE_RUNNING));
 
-        let mut handles = Vec::with_capacity(rev_num);
+        let mut handles = Vec::with_capacity(concurrency);
 
-        for _ in 0..rev_num {
+        for _ in 0..concurrency {
             let child = token.child_token();
             let receiver = rx.clone();
-            let state = Arc::clone(&state);
+            let state_clone = state.clone();
             let handle = common_runtime::spawn_bg(async move {
-                while state.load(Ordering::Relaxed) == STATE_RUNNING {
+                while state_clone.load(Ordering::Relaxed) == STATE_RUNNING {
                     tokio::select! {
                         _ = child.cancelled() => {
                             break;
@@ -94,11 +94,11 @@ impl LocalScheduler {
                     }
                 }
                 // When task scheduler is cancelled, we will wait all task finished
-                if state.load(Ordering::Relaxed) == STATE_AWAIT_TERMINATION {
+                if state_clone.load(Ordering::Relaxed) == STATE_AWAIT_TERMINATION {
                     while let Ok(req) = receiver.try_recv() {
                         req.await;
                     }
-                    state.store(STATE_STOP, Ordering::Relaxed);
+                    state_clone.store(STATE_STOP, Ordering::Relaxed);
                 }
             });
             handles.push(handle);
@@ -143,9 +143,11 @@ impl Scheduler for LocalScheduler {
         self.state.store(state, Ordering::Relaxed);
         self.cancel_token.cancel();
 
-        for handle in self.handles.lock().await.drain(..) {
-            handle.await.context(StopSchedulerSnafu)?;
-        }
+        futures::future::join_all(self.handles.lock().await.drain(..))
+        .await
+        .into_iter()
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .context(StopSchedulerSnafu)?;
 
         Ok(())
     }
@@ -154,7 +156,7 @@ impl Scheduler for LocalScheduler {
 impl Drop for LocalScheduler {
     fn drop(&mut self) {
         if self.state.load(Ordering::Relaxed) != STATE_STOP {
-            logging::debug!("scheduler must be stopped before dropping, which means the state of scheduler must be STATE_STOP");
+            logging::error!("scheduler must be stopped before dropping, which means the state of scheduler must be STATE_STOP");
         }
     }
 }
