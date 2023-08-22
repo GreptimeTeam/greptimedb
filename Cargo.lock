@@ -9241,6 +9241,7 @@ dependencies = [
  "common-error",
  "common-grpc",
  "common-query",
+ "common-recordbatch",
  "common-time",
  "serde",
  "sqlness",

@@ -17,6 +17,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::ext::BoxedError;
 use common_recordbatch::error::Result as RecordBatchResult;
 use common_recordbatch::{RecordBatch, RecordBatchStream, SendableRecordBatchStream};
@@ -54,8 +55,8 @@ impl MemTable {
             table_name,
             recordbatch,
             1,
-            "greptime".to_string(),
-            "public".to_string(),
+            DEFAULT_CATALOG_NAME.to_string(),
+            DEFAULT_SCHEMA_NAME.to_string(),
             regions,
         )
     }
