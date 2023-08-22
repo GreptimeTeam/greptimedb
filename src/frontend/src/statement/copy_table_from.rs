@@ -310,7 +310,7 @@ impl StatementExecutor {
             let mut pending = vec![];
 
             while let Some(r) = stream.next().await {
-                let record_batch = r.context(error::ReadRecordBatchSnafu)?;
+                let record_batch = r.context(error::ReadDfRecordBatchSnafu)?;
                 let vectors =
                     Helper::try_into_vectors(record_batch.columns()).context(IntoVectorsSnafu)?;
 
@@ -322,7 +322,7 @@ impl StatementExecutor {
                     .zip(vectors)
                     .collect::<HashMap<_, _>>();
 
-                pending.push(table.insert(InsertRequest {
+                pending.push(self.send_insert_request(InsertRequest {
                     catalog_name: req.catalog_name.to_string(),
                     schema_name: req.schema_name.to_string(),
                     table_name: req.table_name.to_string(),
@@ -332,14 +332,12 @@ impl StatementExecutor {
                 }));
 
                 if pending_mem_size as u64 >= pending_mem_threshold {
-                    rows_inserted +=
-                        batch_insert(&mut pending, &mut pending_mem_size, &req.table_name).await?;
+                    rows_inserted += batch_insert(&mut pending, &mut pending_mem_size).await?;
                 }
             }
 
             if !pending.is_empty() {
-                rows_inserted +=
-                    batch_insert(&mut pending, &mut pending_mem_size, &req.table_name).await?;
+                rows_inserted += batch_insert(&mut pending, &mut pending_mem_size).await?;
             }
         }
 
@@ -349,16 +347,11 @@ impl StatementExecutor {
 
 /// Executes all pending inserts all at once, drain pending requests and reset pending bytes.
 async fn batch_insert(
-    pending: &mut Vec<impl Future<Output = table::error::Result<usize>>>,
+    pending: &mut Vec<impl Future<Output = Result<usize>>>,
     pending_bytes: &mut usize,
-    table_name: &str,
 ) -> Result<usize> {
     let batch = pending.drain(..);
-    let res: usize = futures::future::try_join_all(batch)
-        .await
-        .context(error::InsertSnafu { table_name })?
-        .iter()
-        .sum();
+    let res: usize = futures::future::try_join_all(batch).await?.iter().sum();
     *pending_bytes = 0;
     Ok(res)
 }

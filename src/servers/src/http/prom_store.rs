@@ -13,9 +13,11 @@
 // limitations under the License.
 
 use api::prom_store::remote::{ReadRequest, WriteRequest};
+use auth::UserInfoRef;
 use axum::extract::{Query, RawBody, State};
 use axum::http::{header, StatusCode};
 use axum::response::IntoResponse;
+use axum::Extension;
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use common_telemetry::timer;
 use hyper::Body;
@@ -46,6 +48,7 @@ impl Default for DatabaseQuery {
 pub async fn remote_write(
     State(handler): State<PromStoreProtocolHandlerRef>,
     Query(params): Query<DatabaseQuery>,
+    user_info: Extension<UserInfoRef>,
     RawBody(body): RawBody,
 ) -> Result<(StatusCode, ())> {
     let request = decode_remote_write_request(body).await?;
@@ -59,6 +62,7 @@ pub async fn remote_write(
     );
 
     let ctx = QueryContext::with_db_name(params.db.as_ref());
+    ctx.set_current_user(Some(user_info.0));
     handler.write(request, ctx).await?;
     Ok((StatusCode::NO_CONTENT, ()))
 }
@@ -80,6 +84,7 @@ impl IntoResponse for PromStoreResponse {
 pub async fn remote_read(
     State(handler): State<PromStoreProtocolHandlerRef>,
     Query(params): Query<DatabaseQuery>,
+    user_info: Extension<UserInfoRef>,
     RawBody(body): RawBody,
 ) -> Result<PromStoreResponse> {
     let request = decode_remote_read_request(body).await?;
@@ -93,6 +98,7 @@ pub async fn remote_read(
     );
 
     let ctx = QueryContext::with_db_name(params.db.as_ref());
+    ctx.set_current_user(Some(user_info.0));
     handler.read(request, ctx).await
 }
 

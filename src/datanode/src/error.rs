@@ -18,6 +18,7 @@ use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_procedure::ProcedureId;
 use serde_json::error::Error as JsonError;
+use servers::define_into_tonic_status;
 use snafu::{Location, Snafu};
 use store_api::storage::{RegionId, RegionNumber};
 use table::error::Error as TableError;
@@ -477,6 +478,31 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "Invalid insert row len, table: {}, expected: {}, actual: {}",
+        table_name,
+        expected,
+        actual
+    ))]
+    InvalidInsertRowLen {
+        table_name: String,
+        expected: usize,
+        actual: usize,
+        location: Location,
+    },
+
+    #[snafu(display("Column datatype error, source: {}", source))]
+    ColumnDataType {
+        location: Location,
+        source: api::error::Error,
+    },
+
+    #[snafu(display("Failed to create vector, source: {}", source))]
+    CreateVector {
+        location: Location,
+        source: datatypes::error::Error,
+    },
+
     #[snafu(display("Unexpected, violated: {}", violated))]
     Unexpected {
         violated: String,
@@ -556,6 +582,7 @@ impl ErrorExt for Error {
             TableEngineNotFound { source, .. } | EngineProcedureNotFound { source, .. } => {
                 source.status_code()
             }
+            CreateVector { source, .. } => source.status_code(),
             TableNotFound { .. } => StatusCode::TableNotFound,
             ColumnNotFound { .. } => StatusCode::TableColumnNotFound,
 
@@ -582,7 +609,9 @@ impl ErrorExt for Error {
             | MissingMetasrvOpts { .. }
             | ColumnNoneDefaultValue { .. }
             | MissingWalDirConfig { .. }
-            | PrepareImmutableTable { .. } => StatusCode::InvalidArguments,
+            | PrepareImmutableTable { .. }
+            | InvalidInsertRowLen { .. }
+            | ColumnDataType { .. } => StatusCode::InvalidArguments,
 
             EncodeJson { .. } | DecodeJson { .. } | PayloadNotExist { .. } | Unexpected { .. } => {
                 StatusCode::Unexpected
@@ -644,11 +673,7 @@ impl ErrorExt for Error {
     }
 }
 
-impl From<Error> for tonic::Status {
-    fn from(err: Error) -> Self {
-        tonic::Status::from_error(Box::new(err))
-    }
-}
+define_into_tonic_status!(Error);
 
 #[cfg(test)]
 mod tests {

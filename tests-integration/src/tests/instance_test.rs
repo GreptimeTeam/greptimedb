@@ -80,38 +80,57 @@ async fn test_create_database_and_insert_query(instance: Arc<dyn MockInstance>) 
 #[apply(both_instances_cases)]
 async fn test_show_create_table(instance: Arc<dyn MockInstance>) {
     let frontend = instance.frontend();
-
-    let output = execute_sql(
-        &frontend,
+    let sql = if instance.is_distributed_mode() {
         r#"create table demo(
-             host STRING,
-             cpu DOUBLE,
-             memory DOUBLE,
-             ts bigint,
-             TIME INDEX(ts)
-)"#,
-    )
-    .await;
+    host STRING,
+    cpu DOUBLE,
+    memory DOUBLE,
+    ts bigint,
+    TIME INDEX(ts)
+)
+PARTITION BY RANGE COLUMNS (ts) (
+    PARTITION r0 VALUES LESS THAN (1),
+    PARTITION r1 VALUES LESS THAN (10),
+    PARTITION r2 VALUES LESS THAN (100),
+    PARTITION r3 VALUES LESS THAN (MAXVALUE),
+)"#
+    } else {
+        r#"create table demo(
+    host STRING,
+    cpu DOUBLE,
+    memory DOUBLE,
+    ts bigint,
+    TIME INDEX(ts)
+)"#
+    };
+    let output = execute_sql(&frontend, sql).await;
     assert!(matches!(output, Output::AffectedRows(0)));
 
     let output = execute_sql(&frontend, "show create table demo").await;
 
     let expected = if instance.is_distributed_mode() {
         "\
-+-------+-----------------------------------+
-| Table | Create Table                      |
-+-------+-----------------------------------+
-| demo  | CREATE TABLE IF NOT EXISTS demo ( |
-|       |   host STRING NULL,               |
-|       |   cpu DOUBLE NULL,                |
-|       |   memory DOUBLE NULL,             |
-|       |   ts BIGINT NOT NULL,             |
-|       |   TIME INDEX (ts)                 |
-|       | )                                 |
-|       |                                   |
-|       | ENGINE=mito                       |
-|       |                                   |
-+-------+-----------------------------------+"
++-------+----------------------------------------------------------+
+| Table | Create Table                                             |
++-------+----------------------------------------------------------+
+| demo  | CREATE TABLE IF NOT EXISTS demo (                        |
+|       |   host STRING NULL,                                      |
+|       |   cpu DOUBLE NULL,                                       |
+|       |   memory DOUBLE NULL,                                    |
+|       |   ts BIGINT NOT NULL,                                    |
+|       |   TIME INDEX (ts)                                        |
+|       | )                                                        |
+|       | PARTITION BY RANGE COLUMNS (ts) (                        |
+|       |                       PARTITION r0 VALUES LESS THAN (1), |
+|       |   PARTITION r1 VALUES LESS THAN (10),                    |
+|       |   PARTITION r2 VALUES LESS THAN (100),                   |
+|       |   PARTITION r3 VALUES LESS THAN (MAXVALUE)               |
+|       |                 )                                        |
+|       | ENGINE=mito                                              |
+|       | WITH(                                                    |
+|       |   regions = 4                                            |
+|       | )                                                        |
++-------+----------------------------------------------------------+"
     } else {
         "\
 +-------+-----------------------------------+

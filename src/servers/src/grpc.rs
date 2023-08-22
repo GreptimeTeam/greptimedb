@@ -56,6 +56,8 @@ type TonicResult<T> = std::result::Result<T, Status>;
 pub struct GrpcServer {
     // states
     shutdown_tx: Mutex<Option<Sender<()>>>,
+    user_provider: Option<UserProviderRef>,
+
     /// gRPC serving state receiver. Only present if the gRPC server is started.
     /// Used to wait for the server to stop, performing the old blocking fashion.
     serve_state: Mutex<Option<Receiver<Result<()>>>>,
@@ -87,6 +89,7 @@ impl GrpcServer {
         });
         Self {
             shutdown_tx: Mutex::new(None),
+            user_provider,
             serve_state: Mutex::new(None),
             database_handler: Some(database_handler),
             prometheus_handler,
@@ -123,7 +126,10 @@ impl GrpcServer {
         &self,
         handler: PrometheusHandlerRef,
     ) -> PrometheusGatewayServer<impl PrometheusGateway> {
-        PrometheusGatewayServer::new(PrometheusGatewayService::new(handler))
+        PrometheusGatewayServer::new(PrometheusGatewayService::new(
+            handler,
+            self.user_provider.clone(),
+        ))
     }
 
     pub async fn wait_for_serve(&self) -> Result<()> {

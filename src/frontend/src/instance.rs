@@ -29,7 +29,9 @@ use api::v1::alter_expr::Kind;
 use api::v1::ddl_request::Expr as DdlExpr;
 use api::v1::greptime_request::Request;
 use api::v1::meta::Role;
-use api::v1::{AddColumns, AlterExpr, Column, DdlRequest, InsertRequest, InsertRequests};
+use api::v1::{
+    AddColumns, AlterExpr, Column, DdlRequest, InsertRequest, InsertRequests, RowInsertRequests,
+};
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use catalog::remote::CachedMetaKvBackend;
@@ -76,6 +78,7 @@ use sql::parser::ParserContext;
 use sql::statements::copy::CopyTable;
 use sql::statements::statement::Statement;
 use sqlparser::ast::ObjectName;
+use table::engine::TableReference;
 
 use crate::catalog::FrontendCatalogManager;
 use crate::error::{
@@ -83,12 +86,13 @@ use crate::error::{
     InvalidInsertRequestSnafu, MissingMetasrvOptsSnafu, ParseSqlSnafu, PermissionSnafu,
     PlanStatementSnafu, Result, SqlExecInterceptedSnafu,
 };
-use crate::expr_factory::{CreateExprFactoryRef, DefaultCreateExprFactory};
+use crate::expr_factory::CreateExprFactory;
 use crate::frontend::FrontendOptions;
 use crate::heartbeat::handler::invalidate_table_cache::InvalidateTableCacheHandler;
 use crate::heartbeat::HeartbeatTask;
 use crate::instance::standalone::StandaloneGrpcQueryHandler;
 use crate::metrics;
+use crate::row_inserter::RowInserter;
 use crate::script::ScriptExecutor;
 use crate::server::{start_server, ServerHandlers, Services};
 use crate::statement::StatementExecutor;
@@ -120,16 +124,13 @@ pub struct Instance {
     statement_executor: Arc<StatementExecutor>,
     query_engine: QueryEngineRef,
     grpc_query_handler: GrpcQueryHandlerRef<Error>,
-
-    create_expr_factory: CreateExprFactoryRef,
-
+    create_expr_factory: CreateExprFactory,
     /// plugins: this map holds extensions to customize query or auth
     /// behaviours.
     plugins: Arc<Plugins>,
-
     servers: Arc<ServerHandlers>,
-
     heartbeat_task: Option<HeartbeatTask>,
+    row_inserter: Arc<RowInserter>,
 }
 
 impl Instance {
@@ -209,16 +210,26 @@ impl Instance {
 
         common_telemetry::init_node_id(opts.node_id.clone());
 
+        let create_expr_factory = CreateExprFactory;
+
+        let row_inserter = Arc::new(RowInserter::new(
+            MITO_ENGINE.to_string(),
+            catalog_manager.clone(),
+            create_expr_factory,
+            dist_instance.clone(),
+        ));
+
         Ok(Instance {
             catalog_manager,
             script_executor,
-            create_expr_factory: Arc::new(DefaultCreateExprFactory),
+            create_expr_factory,
             statement_executor,
             query_engine,
             grpc_query_handler: dist_instance,
             plugins: plugins.clone(),
             servers: Arc::new(HashMap::new()),
             heartbeat_task,
+            row_inserter,
         })
     }
 
@@ -271,16 +282,27 @@ impl Instance {
             dn_instance.clone(),
         ));
 
+        let create_expr_factory = CreateExprFactory;
+        let grpc_query_handler = StandaloneGrpcQueryHandler::arc(dn_instance.clone());
+
+        let row_inserter = Arc::new(RowInserter::new(
+            MITO_ENGINE.to_string(),
+            catalog_manager.clone(),
+            create_expr_factory,
+            grpc_query_handler.clone(),
+        ));
+
         Ok(Instance {
             catalog_manager: catalog_manager.clone(),
             script_executor,
-            create_expr_factory: Arc::new(DefaultCreateExprFactory),
+            create_expr_factory,
             statement_executor,
             query_engine,
-            grpc_query_handler: StandaloneGrpcQueryHandler::arc(dn_instance.clone()),
+            grpc_query_handler,
             plugins: Default::default(),
             servers: Arc::new(HashMap::new()),
             heartbeat_task: None,
+            row_inserter,
         })
     }
 
@@ -293,6 +315,15 @@ impl Instance {
 
     pub fn catalog_manager(&self) -> &CatalogManagerRef {
         &self.catalog_manager
+    }
+
+    // Handle batch inserts with row-format
+    pub async fn handle_row_inserts(
+        &self,
+        requests: RowInsertRequests,
+        ctx: QueryContextRef,
+    ) -> Result<Output> {
+        self.row_inserter.handle_inserts(requests, ctx).await
     }
 
     /// Handle batch inserts
@@ -379,10 +410,10 @@ impl Instance {
         let schema_name = ctx.current_schema();
 
         // Create table automatically, build schema from data.
-        let create_expr = self
-            .create_expr_factory
-            .create_expr_by_columns(catalog_name, schema_name, table_name, columns, engine)
-            .await?;
+        let table_name = TableReference::full(catalog_name, schema_name, table_name);
+        let create_expr =
+            self.create_expr_factory
+                .create_table_expr_by_columns(&table_name, columns, engine)?;
 
         info!(
             "Try to create table: {} automatically with request: {:?}",

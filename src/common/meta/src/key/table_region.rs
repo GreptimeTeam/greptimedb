@@ -20,7 +20,7 @@ use store_api::storage::RegionNumber;
 use table::metadata::TableId;
 
 use super::TABLE_REGION_KEY_PREFIX;
-use crate::error::{InvalidTableMetadataSnafu, Result, SerdeJsonSnafu};
+use crate::error::{Result, SerdeJsonSnafu};
 use crate::key::TableMetaKey;
 use crate::{impl_table_meta_key, impl_table_meta_value, DatanodeId};
 
@@ -88,7 +88,7 @@ mod tests {
 
         assert_eq!(value.try_as_raw_value().unwrap(), literal);
         assert_eq!(
-            TableRegionValue::try_from_raw_value(literal.to_vec()).unwrap(),
+            TableRegionValue::try_from_raw_value(literal).unwrap(),
             value,
         );
     }

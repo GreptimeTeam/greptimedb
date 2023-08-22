@@ -391,7 +391,7 @@ struct Get {
 }
 
 impl TryFrom<RangeRequest> for Get {
-    type Error = error::Error;
+    type Error = Error;
 
     fn try_from(req: RangeRequest) -> Result<Self> {
         let RangeRequest {
@@ -428,7 +428,7 @@ struct Put {
 }
 
 impl TryFrom<PutRequest> for Put {
-    type Error = error::Error;
+    type Error = Error;
 
     fn try_from(req: PutRequest) -> Result<Self> {
         let PutRequest {
@@ -456,7 +456,7 @@ struct BatchGet {
 }
 
 impl TryFrom<BatchGetRequest> for BatchGet {
-    type Error = error::Error;
+    type Error = Error;
 
     fn try_from(req: BatchGetRequest) -> Result<Self> {
         let BatchGetRequest { keys } = req;
@@ -476,7 +476,7 @@ struct BatchPut {
 }
 
 impl TryFrom<BatchPutRequest> for BatchPut {
-    type Error = error::Error;
+    type Error = Error;
 
     fn try_from(req: BatchPutRequest) -> Result<Self> {
         let BatchPutRequest { kvs, prev_kv } = req;
@@ -499,7 +499,7 @@ struct BatchDelete {
 }
 
 impl TryFrom<BatchDeleteRequest> for BatchDelete {
-    type Error = error::Error;
+    type Error = Error;
 
     fn try_from(req: BatchDeleteRequest) -> Result<Self> {
         let BatchDeleteRequest { keys, prev_kv } = req;
@@ -524,7 +524,7 @@ struct CompareAndPut {
 }
 
 impl TryFrom<CompareAndPutRequest> for CompareAndPut {
-    type Error = error::Error;
+    type Error = Error;
 
     fn try_from(req: CompareAndPutRequest) -> Result<Self> {
         let CompareAndPutRequest { key, expect, value } = req;
@@ -544,7 +544,7 @@ struct Delete {
 }
 
 impl TryFrom<DeleteRangeRequest> for Delete {
-    type Error = error::Error;
+    type Error = Error;
 
     fn try_from(req: DeleteRangeRequest) -> Result<Self> {
         let DeleteRangeRequest {
@@ -577,7 +577,7 @@ struct MoveValue {
 }
 
 impl TryFrom<MoveValueRequest> for MoveValue {
-    type Error = error::Error;
+    type Error = Error;
 
     fn try_from(req: MoveValueRequest) -> Result<Self> {
         let MoveValueRequest { from_key, to_key } = req;

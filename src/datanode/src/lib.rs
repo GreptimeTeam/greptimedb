@@ -24,6 +24,7 @@ pub mod metrics;
 #[cfg(any(test, feature = "testing"))]
 mod mock;
 pub mod region_server;
+mod row_inserter;
 pub mod server;
 pub mod sql;
 mod store;

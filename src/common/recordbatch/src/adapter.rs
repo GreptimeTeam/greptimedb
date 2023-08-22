@@ -34,13 +34,8 @@ use crate::{
     SendableRecordBatchStream, Stream,
 };
 
-type FutureStream = Pin<
-    Box<
-        dyn std::future::Future<
-                Output = std::result::Result<DfSendableRecordBatchStream, DataFusionError>,
-            > + Send,
-    >,
->;
+type FutureStream =
+    Pin<Box<dyn std::future::Future<Output = Result<SendableRecordBatchStream>> + Send>>;
 
 /// ParquetRecordBatchStream -> DataFusion RecordBatchStream
 pub struct ParquetRecordBatchStreamAdapter<T> {
@@ -223,7 +218,7 @@ impl Stream for RecordBatchStreamAdapter {
 
 enum AsyncRecordBatchStreamAdapterState {
     Uninit(FutureStream),
-    Ready(DfSendableRecordBatchStream),
+    Ready(SendableRecordBatchStream),
     Failed,
 }
 
@@ -261,17 +256,12 @@ impl Stream for AsyncRecordBatchStreamAdapter {
                         }
                         Err(e) => {
                             self.state = AsyncRecordBatchStreamAdapterState::Failed;
-                            return Poll::Ready(Some(
-                                Err(e).context(error::InitRecordbatchStreamSnafu),
-                            ));
+                            return Poll::Ready(Some(Err(e)));
                         }
                     };
                 }
                 AsyncRecordBatchStreamAdapterState::Ready(stream) => {
-                    return Poll::Ready(ready!(Pin::new(stream).poll_next(cx)).map(|x| {
-                        let df_record_batch = x.context(error::PollStreamSnafu)?;
-                        RecordBatch::try_from_df_record_batch(self.schema(), df_record_batch)
-                    }))
+                    return Poll::Ready(ready!(Pin::new(stream).poll_next(cx)))
                 }
                 AsyncRecordBatchStreamAdapterState::Failed => return Poll::Ready(None),
             }
@@ -330,12 +320,7 @@ mod test {
         ) -> FutureStream {
             Box::pin(async move {
                 maybe_recordbatches
-                    .map(|items| {
-                        Box::pin(DfRecordBatchStreamAdapter::new(Box::pin(
-                            MaybeErrorRecordBatchStream { items },
-                        ))) as _
-                    })
-                    .map_err(|e| DataFusionError::External(Box::new(e)))
+                    .map(|items| Box::pin(MaybeErrorRecordBatchStream { items }) as _)
             })
         }
 
@@ -372,7 +357,7 @@ mod test {
         let result = RecordBatches::try_collect(Box::pin(adapter)).await;
         assert_eq!(
             result.unwrap_err().to_string(),
-            "Failed to poll stream, source: External error: External error, source: Unknown"
+            "External error, source: Unknown",
         );
 
         let failed_to_init_stream =
@@ -382,7 +367,7 @@ mod test {
         let result = RecordBatches::try_collect(Box::pin(adapter)).await;
         assert_eq!(
             result.unwrap_err().to_string(),
-            "Failed to init Recordbatch stream, source: External error: External error, source: Internal"
+            "External error, source: Internal",
         );
     }
 }

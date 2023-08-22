@@ -71,7 +71,9 @@ impl<'a> RangeExprRewriter<'a> {
 fn parse_str_expr(args: &[Expr], i: usize) -> DFResult<&str> {
     match args.get(i) {
         Some(Expr::Literal(ScalarValue::Utf8(Some(str)))) => Ok(str.as_str()),
-        _ => Err(DataFusionError::Plan("Illegal str expr in range_fn".into())),
+        _ => Err(DataFusionError::Plan(
+            "Illegal argument in range select query".into(),
+        )),
     }
 }
 
@@ -79,8 +81,18 @@ fn parse_expr_list(args: &[Expr], start: usize, len: usize) -> DFResult<Vec<Expr
     let mut outs = Vec::with_capacity(len);
     for i in start..start + len {
         outs.push(match &args.get(i) {
-            Some(Expr::Column(_)) | Some(Expr::BinaryExpr(_)) => args[i].clone(),
-            _ => return Err(DataFusionError::Plan("Illegal expr in range_fn".into())),
+            Some(
+                Expr::Column(_)
+                | Expr::Literal(_)
+                | Expr::BinaryExpr(_)
+                | Expr::ScalarFunction(_)
+                | Expr::ScalarUDF(_),
+            ) => args[i].clone(),
+            _ => {
+                return Err(DataFusionError::Plan(
+                    "Illegal expr argument in range select query".into(),
+                ))
+            }
         });
     }
     Ok(outs)
@@ -276,10 +288,7 @@ impl RangePlanRewriter {
                             table: table_ref.to_string(),
                         })?;
                 // assert time_index's datatype is timestamp
-                if let ConcreteDataType::Timestamp(datatypes::types::TimestampType::Millisecond(
-                    _,
-                )) = time_index_column.data_type
-                {
+                if let ConcreteDataType::Timestamp(_) = time_index_column.data_type {
                     default_by = table
                         .table_info()
                         .meta

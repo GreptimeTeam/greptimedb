@@ -45,6 +45,9 @@ use crate::error::{ConvertMetaResponseSnafu, Result};
 
 pub type Id = (u64, u64);
 
+const DEFAULT_ASK_LEADER_MAX_RETRY: usize = 3;
+const DEFAULT_SUBMIT_DDL_MAX_RETRY: usize = 3;
+
 #[derive(Clone, Debug, Default)]
 pub struct MetaClientBuilder {
     id: Id,
@@ -130,7 +133,12 @@ impl MetaClientBuilder {
         let mgr = client.channel_manager.clone();
 
         if self.enable_heartbeat {
-            client.heartbeat = Some(HeartbeatClient::new(self.id, self.role, mgr.clone()));
+            client.heartbeat = Some(HeartbeatClient::new(
+                self.id,
+                self.role,
+                mgr.clone(),
+                DEFAULT_ASK_LEADER_MAX_RETRY,
+            ));
         }
         if self.enable_router {
             client.router = Some(RouterClient::new(self.id, self.role, mgr.clone()));
@@ -143,7 +151,12 @@ impl MetaClientBuilder {
         }
         if self.enable_ddl {
             let mgr = self.ddl_channel_manager.unwrap_or(mgr);
-            client.ddl = Some(DdlClient::new(self.id, self.role, mgr));
+            client.ddl = Some(DdlClient::new(
+                self.id,
+                self.role,
+                mgr,
+                DEFAULT_SUBMIT_DDL_MAX_RETRY,
+            ));
         }
 
         client

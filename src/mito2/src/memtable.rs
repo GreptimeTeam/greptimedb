@@ -14,6 +14,8 @@
 
 //! Memtables are write buffers for regions.
 
+pub mod time_series;
+
 pub mod key_values;
 pub(crate) mod version;
 
@@ -22,14 +24,18 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use store_api::metadata::RegionMetadataRef;
+use store_api::storage::ScanRequest;
 
 use crate::error::Result;
 pub use crate::memtable::key_values::KeyValues;
+use crate::read::Batch;
 
 /// Id for memtables.
 ///
 /// Should be unique under the same region.
 pub type MemtableId = u32;
+
+pub type BoxedBatchIterator = Box<dyn Iterator<Item = Result<Batch>>>;
 
 /// In memory write buffer.
 pub trait Memtable: Send + Sync + fmt::Debug {
@@ -38,6 +44,8 @@ pub trait Memtable: Send + Sync + fmt::Debug {
 
     /// Write key values into the memtable.
     fn write(&self, kvs: &KeyValues) -> Result<()>;
+
+    fn iter(&self, req: ScanRequest) -> BoxedBatchIterator;
 }
 
 pub type MemtableRef = Arc<dyn Memtable>;
@@ -72,6 +80,10 @@ impl Memtable for EmptyMemtable {
 
     fn write(&self, _kvs: &KeyValues) -> Result<()> {
         Ok(())
+    }
+
+    fn iter(&self, _req: ScanRequest) -> BoxedBatchIterator {
+        Box::new(std::iter::empty())
     }
 }
 

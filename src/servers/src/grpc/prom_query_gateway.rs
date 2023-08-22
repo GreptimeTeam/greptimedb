@@ -21,6 +21,7 @@ use api::v1::prometheus_gateway_server::PrometheusGateway;
 use api::v1::promql_request::Promql;
 use api::v1::{PromqlRequest, PromqlResponse, ResponseHeader};
 use async_trait::async_trait;
+use auth::UserProviderRef;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_telemetry::timer;
@@ -32,7 +33,7 @@ use snafu::OptionExt;
 use tonic::{Request, Response};
 
 use crate::error::InvalidQuerySnafu;
-use crate::grpc::greptime_handler::create_query_context;
+use crate::grpc::greptime_handler::{auth, create_query_context};
 use crate::grpc::TonicResult;
 use crate::prometheus::{
     retrieve_metric_name_and_result_type, PrometheusHandlerRef, PrometheusJsonResponse,
@@ -40,6 +41,7 @@ use crate::prometheus::{
 
 pub struct PrometheusGatewayService {
     handler: PrometheusHandlerRef,
+    user_provider: Option<UserProviderRef>,
 }
 
 #[async_trait]
@@ -74,9 +76,13 @@ impl PrometheusGateway for PrometheusGatewayService {
             }
         };
 
-        let query_context = create_query_context(inner.header.as_ref());
+        let header = inner.header.as_ref();
+        let query_ctx = create_query_context(header);
+        let user_info = auth(self.user_provider.clone(), header, &query_ctx).await?;
+        query_ctx.set_current_user(user_info);
+
         let json_response = self
-            .handle_inner(prom_query, query_context, is_range_query)
+            .handle_inner(prom_query, query_ctx, is_range_query)
             .await;
         let json_bytes = serde_json::to_string(&json_response).unwrap().into_bytes();
 
@@ -94,8 +100,11 @@ impl PrometheusGateway for PrometheusGatewayService {
 }
 
 impl PrometheusGatewayService {
-    pub fn new(handler: PrometheusHandlerRef) -> Self {
-        Self { handler }
+    pub fn new(handler: PrometheusHandlerRef, user_provider: Option<UserProviderRef>) -> Self {
+        Self {
+            handler,
+            user_provider,
+        }
     }
 
     async fn handle_inner(

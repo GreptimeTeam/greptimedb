@@ -38,7 +38,9 @@ SHOW CREATE TABLE system_metrics;
 |                |   PARTITION r2 VALUES LESS THAN (MAXVALUE)               |
 |                |                 )                                        |
 |                | ENGINE=mito                                              |
-|                |                                                          |
+|                | WITH(                                                    |
+|                |   regions = 3                                            |
+|                | )                                                        |
 +----------------+----------------------------------------------------------+
 
 DROP TABLE system_metrics;
@@ -62,7 +64,9 @@ show create table table_without_partition;
 |                         | )                                                       |
 |                         |                                                         |
 |                         | ENGINE=mito                                             |
-|                         |                                                         |
+|                         | WITH(                                                   |
+|                         |   regions = 1                                           |
+|                         | )                                                       |
 +-------------------------+---------------------------------------------------------+
 
 drop table table_without_partition;

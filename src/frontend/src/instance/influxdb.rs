@@ -27,7 +27,7 @@ use crate::instance::Instance;
 impl InfluxdbLineProtocolHandler for Instance {
     async fn exec(
         &self,
-        request: &InfluxdbRequest,
+        request: InfluxdbRequest,
         ctx: QueryContextRef,
     ) -> servers::error::Result<()> {
         self.plugins

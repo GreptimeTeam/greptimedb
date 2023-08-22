@@ -22,23 +22,22 @@ use datatypes::value::ValueRef;
 use memcomparable::{Deserializer, Serializer};
 use paste::paste;
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, ResultExt};
+use snafu::ResultExt;
 
 use crate::error;
-use crate::error::{
-    FieldTypeMismatchSnafu, NotSupportedFieldSnafu, Result, RowLengthMismatchSnafu,
-    SerializeFieldSnafu,
-};
+use crate::error::{FieldTypeMismatchSnafu, NotSupportedFieldSnafu, Result, SerializeFieldSnafu};
 
 /// Row value encoder/decoder.
 pub trait RowCodec {
     /// Encodes rows to bytes.
-    fn encode<'a, I>(&self, rows: I) -> Result<Vec<u8>>
+    /// # Note
+    /// Ensure the length of row iterator matches the length of fields.
+    fn encode<'a, I>(&self, row: I) -> Result<Vec<u8>>
     where
-        I: Iterator<Item = &'a [ValueRef<'a>]>;
+        I: Iterator<Item = ValueRef<'a>>;
 
     /// Decode row values from bytes.
-    fn decode(&self, bytes: &[u8]) -> Result<Vec<Vec<Value>>>;
+    fn decode(&self, bytes: &[u8]) -> Result<Vec<Value>>;
 }
 
 pub struct SortField {
@@ -209,48 +208,37 @@ impl McmpRowCodec {
         Self { fields }
     }
 
+    pub fn num_fields(&self) -> usize {
+        self.fields.len()
+    }
+
     /// Estimated length for encoded bytes.
-    fn estimated_length(&self) -> usize {
+    pub fn estimated_size(&self) -> usize {
         self.fields.iter().map(|f| f.estimated_size()).sum()
     }
 }
 
 impl RowCodec for McmpRowCodec {
-    fn encode<'a, I>(&self, rows: I) -> Result<Vec<u8>>
+    fn encode<'a, I>(&self, row: I) -> Result<Vec<u8>>
     where
-        I: Iterator<Item = &'a [ValueRef<'a>]>,
+        I: Iterator<Item = ValueRef<'a>>,
     {
-        let mut bytes = Vec::with_capacity(self.estimated_length());
-        let mut serializer = memcomparable::Serializer::new(&mut bytes);
-
-        for row in rows {
-            ensure!(
-                row.len() == self.fields.len(),
-                RowLengthMismatchSnafu {
-                    expect: self.fields.len(),
-                    actual: row.len(),
-                }
-            );
-
-            for (value, field) in row.iter().zip(self.fields.iter()) {
-                field.serialize(&mut serializer, value)?;
-            }
+        let mut bytes = Vec::with_capacity(self.estimated_size());
+        let mut serializer = Serializer::new(&mut bytes);
+        for (value, field) in row.zip(self.fields.iter()) {
+            field.serialize(&mut serializer, &value)?;
         }
         Ok(bytes)
     }
 
-    fn decode(&self, bytes: &[u8]) -> Result<Vec<Vec<Value>>> {
-        let mut deserializer = memcomparable::Deserializer::new(bytes);
-        let mut res = vec![];
-        while deserializer.has_remaining() {
-            let mut values = Vec::with_capacity(self.fields.len());
-            for f in &self.fields {
-                let value = f.deserialize(&mut deserializer)?;
-                values.push(value);
-            }
-            res.push(values);
+    fn decode(&self, bytes: &[u8]) -> Result<Vec<Value>> {
+        let mut deserializer = Deserializer::new(bytes);
+        let mut values = Vec::with_capacity(self.fields.len());
+        for f in &self.fields {
+            let value = f.deserialize(&mut deserializer)?;
+            values.push(value);
         }
-        Ok(res)
+        Ok(values)
     }
 }
 
@@ -262,7 +250,7 @@ mod tests {
 
     use super::*;
 
-    fn check_encode_and_decode(data_types: &[ConcreteDataType], rows: &[Vec<Value>]) {
+    fn check_encode_and_decode(data_types: &[ConcreteDataType], row: Vec<Value>) {
         let encoder = McmpRowCodec::new(
             data_types
                 .iter()
@@ -270,19 +258,11 @@ mod tests {
                 .collect::<Vec<_>>(),
         );
 
-        let value_ref = rows
-            .iter()
-            .map(|row| row.iter().map(|v| v.as_value_ref()).collect::<Vec<_>>())
-            .collect::<Vec<_>>();
-        let result = encoder
-            .encode(value_ref.iter().map(|r| r.as_slice()))
-            .unwrap();
-        let decoded = encoder.decode(&result).unwrap();
-        assert_eq!(value_ref.len(), decoded.len());
+        let value_ref = row.iter().map(|v| v.as_value_ref()).collect::<Vec<_>>();
 
-        for (i, row) in rows.iter().enumerate() {
-            assert_eq!(row, decoded.get(i).unwrap() as &[Value]);
-        }
+        let result = encoder.encode(value_ref.iter().cloned()).unwrap();
+        let decoded = encoder.decode(&result).unwrap();
+        assert_eq!(decoded, row);
     }
 
     #[test]
@@ -293,11 +273,10 @@ mod tests {
         ]);
         let values = [Value::String("abcdefgh".into()), Value::Int64(128)];
         let value_ref = values.iter().map(|v| v.as_value_ref()).collect::<Vec<_>>();
-        let result = encoder.encode(std::iter::once(&value_ref as _)).unwrap();
+        let result = encoder.encode(value_ref.iter().cloned()).unwrap();
 
         let decoded = encoder.decode(&result).unwrap();
-        assert_eq!(1, decoded.len());
-        assert_eq!(&values, decoded.get(0).unwrap() as &[Value]);
+        assert_eq!(&values, &decoded as &[Value]);
     }
 
     #[test]
@@ -307,10 +286,10 @@ mod tests {
                 ConcreteDataType::timestamp_millisecond_datatype(),
                 ConcreteDataType::int64_datatype(),
             ],
-            &[vec![
+            vec![
                 Value::Timestamp(Timestamp::new_millisecond(42)),
                 Value::Int64(43),
-            ]],
+            ],
         );
     }
 
@@ -321,10 +300,10 @@ mod tests {
                 ConcreteDataType::binary_datatype(),
                 ConcreteDataType::int64_datatype(),
             ],
-            &[vec![
+            vec![
                 Value::Binary(Bytes::from("hello".as_bytes())),
                 Value::Int64(43),
-            ]],
+            ],
         );
     }
 
@@ -332,12 +311,18 @@ mod tests {
     fn test_memcmp_string() {
         check_encode_and_decode(
             &[ConcreteDataType::string_datatype()],
-            &[
-                vec![Value::String(StringBytes::from("hello"))],
-                vec![Value::Null],
-                vec![Value::String("".into())],
-                vec![Value::String("world".into())],
-            ],
+            vec![Value::String(StringBytes::from("hello"))],
+        );
+
+        check_encode_and_decode(&[ConcreteDataType::string_datatype()], vec![Value::Null]);
+
+        check_encode_and_decode(
+            &[ConcreteDataType::string_datatype()],
+            vec![Value::String("".into())],
+        );
+        check_encode_and_decode(
+            &[ConcreteDataType::string_datatype()],
+            vec![Value::String("world".into())],
         );
     }
 
@@ -348,7 +333,7 @@ mod tests {
                 ConcreteDataType::string_datatype(),
                 ConcreteDataType::int32_datatype(),
             ],
-            &[vec![Value::String(StringBytes::from("abcd")), Value::Null]],
+            vec![Value::String(StringBytes::from("abcd")), Value::Null],
         )
     }
 
@@ -360,19 +345,33 @@ mod tests {
                 ConcreteDataType::int64_datatype(),
                 ConcreteDataType::boolean_datatype(),
             ],
-            &[
-                vec![
-                    Value::String("hello".into()),
-                    Value::Int64(42),
-                    Value::Boolean(false),
-                ],
-                vec![
-                    Value::String("world".into()),
-                    Value::Int64(43),
-                    Value::Boolean(true),
-                ],
-                vec![Value::Null, Value::Int64(43), Value::Boolean(true)],
+            vec![
+                Value::String("hello".into()),
+                Value::Int64(42),
+                Value::Boolean(false),
             ],
+        );
+
+        check_encode_and_decode(
+            &[
+                ConcreteDataType::string_datatype(),
+                ConcreteDataType::int64_datatype(),
+                ConcreteDataType::boolean_datatype(),
+            ],
+            vec![
+                Value::String("world".into()),
+                Value::Int64(43),
+                Value::Boolean(true),
+            ],
+        );
+
+        check_encode_and_decode(
+            &[
+                ConcreteDataType::string_datatype(),
+                ConcreteDataType::int64_datatype(),
+                ConcreteDataType::boolean_datatype(),
+            ],
+            vec![Value::Null, Value::Int64(43), Value::Boolean(true)],
         );
     }
 }
