@@ -121,6 +121,7 @@ impl DistInstance {
         info!("Successfully created distributed table '{table_name}' with table id {table_id}");
 
         table_info.ident.table_id = table_id;
+
         let table_info = Arc::new(table_info.try_into().context(error::CreateTableInfoSnafu)?);
 
         create_table.table_id = Some(api::v1::TableId { id: table_id });
