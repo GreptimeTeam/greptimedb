@@ -612,6 +612,9 @@ pub enum Error {
         source: common_recordbatch::error::Error,
         location: Location,
     },
+
+    #[snafu(display("Failed to find immutable file location in table options"))]
+    FindImmutableFileLocation { location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -619,7 +622,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Error::ParseAddr { .. }
+            Error::FindImmutableFileLocation { .. }
+            | Error::ParseAddr { .. }
             | Error::InvalidSql { .. }
             | Error::InvalidInsertRequest { .. }
             | Error::IllegalPrimaryKeysDef { .. }
