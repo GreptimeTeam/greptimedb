@@ -36,11 +36,9 @@ use snafu::prelude::*;
 use store_api::storage::ScanRequest;
 use table::error::TableOperationSnafu;
 use table::metadata::{FilterPushDownType, TableInfoRef, TableType};
-use table::requests::DeleteRequest;
 use table::Table;
 
 use crate::catalog::FrontendCatalogManager;
-use crate::instance::distributed::deleter::DistDeleter;
 use crate::table::scan::{DatanodeInstance, TableScanPlan};
 
 pub mod delete;
@@ -137,20 +135,6 @@ impl Table for DistTable {
         filters: &[&Expr],
     ) -> table::Result<Vec<FilterPushDownType>> {
         Ok(vec![FilterPushDownType::Inexact; filters.len()])
-    }
-
-    async fn delete(&self, request: DeleteRequest) -> table::Result<usize> {
-        let deleter = DistDeleter::new(
-            request.catalog_name.clone(),
-            request.schema_name.clone(),
-            self.catalog_manager.clone(),
-        );
-        let affected_rows = deleter
-            .delete(vec![request])
-            .await
-            .map_err(BoxedError::new)
-            .context(TableOperationSnafu)?;
-        Ok(affected_rows)
     }
 }
 
