@@ -144,10 +144,10 @@ impl Scheduler for LocalScheduler {
         self.cancel_token.cancel();
 
         futures::future::join_all(self.handles.lock().await.drain(..))
-        .await
-        .into_iter()
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .context(StopSchedulerSnafu)?;
+            .await
+            .into_iter()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .context(StopSchedulerSnafu)?;
 
         Ok(())
     }
