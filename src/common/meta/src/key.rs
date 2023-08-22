@@ -218,10 +218,10 @@ impl TableMetadataManager {
         mut table_info: RawTableInfo,
         region_routes: Vec<RegionRoute>,
     ) -> Result<()> {
-        let mut region_numbers = vec![];
-        for region in region_routes.iter() {
-            region_numbers.push(region.region.id.region_number());
-        }
+        let region_numbers = region_routes
+            .iter()
+            .map(|region| region.region.id.region_number())
+            .collect::<Vec<_>>();
         table_info.meta.region_numbers = region_numbers;
         let table_id = table_info.ident.table_id;
 
