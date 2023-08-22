@@ -15,10 +15,10 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use common_telemetry::logging;
-use snafu::{ensure, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -38,7 +38,7 @@ const STATE_AWAIT_TERMINATION: u8 = 2;
 #[async_trait::async_trait]
 pub trait Scheduler {
     /// Schedules a Job
-    async fn schedule(&self, req: Job) -> Result<()>;
+    fn schedule(&self, req: Job) -> Result<()>;
 
     /// Stops scheduler. If `await_termination` is set to true, the scheduler will wait until all tasks are processed.
     async fn stop(&self, await_termination: bool) -> Result<()>;
@@ -47,25 +47,15 @@ pub trait Scheduler {
 /// Request scheduler based on local state.
 pub struct LocalScheduler {
     /// Sends jobs to flume bounded channel
-    sender: flume::Sender<Job>,
+    sender: RwLock<Option<flume::Sender<Job>>>,
     /// Task handles
-    handles: tokio::sync::Mutex<Vec<JoinHandle<()>>>,
+    handles: Mutex<Vec<JoinHandle<()>>>,
     /// Token used to halt the scheduler
     cancel_token: CancellationToken,
     /// State of scheduler
     state: Arc<AtomicU8>,
 }
 
-// Stop will wait for all tasks to complete, in order to avoid the drop self.sender (drop makes the function must be mutable,
-// but we want it to be immutable only), We will use the try_recv return value (either the channel is empty or the sender is all dropped)
-// to determine whether all tasks are complete.
-
-// The compromise above means that we cannot use asynchronous send because send_async is not aware of changes in the scheduler state while it is being polled.
-// It is possible that after the task is completed, the asynchronous send is still scheduled and continues to send the task (because there is no drop sender).
-
-// So using synchronous sending for now, to not block the entire thread using flume::unbounded()
-
-// TODO(zhuziyi): Wrap the Future returned by send_async so that the status of the scheduler is checked first when it is polling
 impl LocalScheduler {
     /// cap: flume bounded cap
     /// concurrency: the number of bounded receiver
@@ -95,7 +85,8 @@ impl LocalScheduler {
                 }
                 // When task scheduler is cancelled, we will wait all task finished
                 if state_clone.load(Ordering::Relaxed) == STATE_AWAIT_TERMINATION {
-                    while let Ok(req) = receiver.try_recv() {
+                    // recv_async waits until all sender's been dropped.
+                    while let Ok(req) = receiver.recv_async().await {
                         req.await;
                     }
                     state_clone.store(STATE_STOP, Ordering::Relaxed);
@@ -105,7 +96,7 @@ impl LocalScheduler {
         }
 
         Self {
-            sender: tx,
+            sender: RwLock::new(Some(tx)),
             cancel_token: token,
             handles: Mutex::new(handles),
             state,
@@ -120,12 +111,16 @@ impl LocalScheduler {
 
 #[async_trait::async_trait]
 impl Scheduler for LocalScheduler {
-    async fn schedule(&self, req: Job) -> Result<()> {
+    fn schedule(&self, req: Job) -> Result<()> {
         ensure!(
             self.state.load(Ordering::Relaxed) == STATE_RUNNING,
             InvalidSchedulerStateSnafu
         );
         self.sender
+            .read()
+            .unwrap()
+            .as_ref()
+            .context(InvalidSchedulerStateSnafu)?
             .send(req)
             .map_err(|_| InvalidFlumeSenderSnafu {}.build())
     }
@@ -140,6 +135,7 @@ impl Scheduler for LocalScheduler {
         } else {
             STATE_STOP
         };
+        self.sender.write().unwrap().take();
         self.state.store(state, Ordering::Relaxed);
         self.cancel_token.cancel();
 
@@ -183,7 +179,6 @@ mod tests {
                 .schedule(Box::pin(async move {
                     sum_clone.fetch_add(1, Ordering::Relaxed);
                 }))
-                .await
                 .unwrap();
         }
         local.stop(true).await.unwrap();
@@ -202,7 +197,6 @@ mod tests {
                 .schedule(Box::pin(async move {
                     sum_clone.fetch_add(1, Ordering::Relaxed);
                 }))
-                .await
                 .is_ok();
             if ok {
                 target += 1;
@@ -225,7 +219,6 @@ mod tests {
                 .schedule(Box::pin(async move {
                     barrier_clone.wait().await;
                 }))
-                .await
                 .unwrap();
         }
         barrier.wait().await;
@@ -257,7 +250,6 @@ mod tests {
                     .schedule(Box::pin(async move {
                         sum_c.fetch_add(1, Ordering::Relaxed);
                     }))
-                    .await
                     .is_ok();
                 if ok {
                     target_clone.fetch_add(1, Ordering::Relaxed);
