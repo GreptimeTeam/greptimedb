@@ -205,28 +205,18 @@ impl RangePlanRewriter {
                 if range_rewriter.by.is_empty() {
                     range_rewriter.by = default_by;
                 }
+                let range_select = RangeSelect::try_new(
+                    input.clone(),
+                    range_rewriter.range_fn,
+                    range_rewriter.align,
+                    time_index,
+                    range_rewriter.by,
+                    &new_expr,
+                )?;
+                let no_additional_project = range_select.schema_project.is_some();
                 let range_plan = LogicalPlan::Extension(Extension {
-                    node: Arc::new(RangeSelect::try_new(
-                        input.clone(),
-                        range_rewriter.range_fn,
-                        range_rewriter.align,
-                        time_index,
-                        range_rewriter.by,
-                    )?),
+                    node: Arc::new(range_select),
                 });
-                // If the result of the project plan happens to be the schema of the range plan, no project plan is required
-                // that need project is identical to range plan schema.
-                // 1. all exprs in project must belong to range schema
-                // 2. range schema and project exprs must have same size
-                let all_in_range_schema = new_expr.iter().all(|expr| {
-                    if let Expr::Column(column) = expr {
-                        range_plan.schema().has_column(column)
-                    } else {
-                        false
-                    }
-                });
-                let no_additional_project =
-                    all_in_range_schema && new_expr.len() == range_plan.schema().fields().len();
                 if no_additional_project {
                     Ok(Some(range_plan))
                 } else {
@@ -417,7 +407,7 @@ mod test {
     async fn range_no_project() {
         let query = r#"SELECT timestamp, tag_0, tag_1, avg(field_0 + field_1) RANGE '5m' FROM test ALIGN '1h' by (tag_0,tag_1);"#;
         let expected = String::from(
-            "RangeSelect: range_exprs=[RangeFn { expr:AVG(test.field_0 + test.field_1) range:300s fill: }], align=3600s time_index=timestamp [AVG(test.field_0 + test.field_1):Float64;N, timestamp:Timestamp(Millisecond, None), tag_0:Utf8, tag_1:Utf8]\
+            "RangeSelect: range_exprs=[RangeFn { expr:AVG(test.field_0 + test.field_1) range:300s fill: }], align=3600s time_index=timestamp [timestamp:Timestamp(Millisecond, None), tag_0:Utf8, tag_1:Utf8, AVG(test.field_0 + test.field_1):Float64;N]\
             \n  TableScan: test [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, tag_4:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N, field_1:Float64;N, field_2:Float64;N, field_3:Float64;N, field_4:Float64;N]"
         );
         query_plan_compare(query, expected).await;

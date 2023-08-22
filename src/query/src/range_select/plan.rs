@@ -84,6 +84,14 @@ pub struct RangeSelect {
     pub by: Vec<Expr>,
     pub schema: DFSchemaRef,
     pub by_schema: DFSchemaRef,
+    /// If the `schema` of the `RangeSelect` happens to be the same as the content of the upper-level Projection Plan,
+    /// the final output needs to be `project` through `schema_project`,
+    /// so that we can omit the upper-level Projection Plan.
+    pub schema_project: Option<Vec<usize>>,
+    /// The schema before run projection, follow the order of `range expr | time index | by columns`
+    /// `schema_before_project  ----  schema_project ----> schema`
+    /// if `schema_project==None` then `schema_before_project==schema`
+    pub schema_before_project: DFSchemaRef,
 }
 
 impl RangeSelect {
@@ -93,6 +101,7 @@ impl RangeSelect {
         align: Duration,
         time_index: Expr,
         by: Vec<Expr>,
+        projection_expr: &[Expr],
     ) -> Result<Self> {
         let mut fields = range_expr
             .iter()
@@ -118,18 +127,63 @@ impl RangeSelect {
         let by_fields =
             exprlist_to_fields(by.iter().collect::<Vec<_>>(), &input).context(DataFusionSnafu)?;
         fields.extend(by_fields.clone());
-        let schema = DFSchema::new_with_metadata(fields, input.schema().metadata().clone())
-            .context(DataFusionSnafu)?;
-        let by_schema = DFSchema::new_with_metadata(by_fields, input.schema().metadata().clone())
-            .context(DataFusionSnafu)?;
+        let schema_before_project = Arc::new(
+            DFSchema::new_with_metadata(fields, input.schema().metadata().clone())
+                .context(DataFusionSnafu)?,
+        );
+        let by_schema = Arc::new(
+            DFSchema::new_with_metadata(by_fields, input.schema().metadata().clone())
+                .context(DataFusionSnafu)?,
+        );
+        // If the result of the project plan happens to be the schema of the range plan, no project plan is required
+        // that need project is identical to range plan schema.
+        // 1. all exprs in project must belong to range schema
+        // 2. range schema and project exprs must have same size
+        let range_schema_fields = schema_before_project.fields();
+        let schema_project = if projection_expr.len() == range_schema_fields.len() {
+            let mut project_map = Vec::with_capacity(projection_expr.len());
+            for project_expr in projection_expr {
+                if let Expr::Column(column) = project_expr {
+                    for (i, v) in range_schema_fields.iter().enumerate() {
+                        if v.qualifier() == column.relation.as_ref() && v.name().eq(&column.name) {
+                            project_map.push(i);
+                            break;
+                        }
+                    }
+                } else {
+                    break;
+                }
+            }
+            if project_map.len() == projection_expr.len() {
+                Some(project_map)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let schema = if let Some(project) = &schema_project {
+            let project_field = project
+                .iter()
+                .map(|i| schema_before_project.fields()[*i].clone())
+                .collect();
+            Arc::new(
+                DFSchema::new_with_metadata(project_field, input.schema().metadata().clone())
+                    .context(DataFusionSnafu)?,
+            )
+        } else {
+            schema_before_project.clone()
+        };
         Ok(Self {
             input,
             range_expr,
             align,
             time_index: time_index_name,
-            schema: Arc::new(schema),
-            by_schema: Arc::new(by_schema),
+            schema,
+            by_schema,
             by,
+            schema_project,
+            schema_before_project,
         })
     }
 }
@@ -179,6 +233,8 @@ impl UserDefinedLogicalNodeCore for RangeSelect {
             schema: self.schema.clone(),
             by: self.by.clone(),
             by_schema: self.by_schema.clone(),
+            schema_project: self.schema_project.clone(),
+            schema_before_project: self.schema_before_project.clone(),
         }
     }
 }
@@ -204,7 +260,7 @@ impl RangeSelect {
         session_state: &SessionState,
     ) -> DfResult<Arc<dyn ExecutionPlan>> {
         let fields: Vec<_> = self
-            .schema
+            .schema_before_project
             .fields()
             .iter()
             .map(|field| Field::new(field.name(), field.data_type().clone(), field.is_nullable()))
@@ -270,6 +326,12 @@ impl RangeSelect {
                 })
             })
             .collect::<DfResult<Vec<_>>>()?;
+        let schema_before_project = Arc::new(Schema::new(fields));
+        let schema = if let Some(project) = &self.schema_project {
+            Arc::new(schema_before_project.project(project)?)
+        } else {
+            schema_before_project.clone()
+        };
         Ok(Arc::new(RangeSelectExec {
             input: exec_input,
             range_exec,
@@ -281,9 +343,11 @@ impl RangeSelect {
                 session_state,
             )?,
             time_index: self.time_index.clone(),
-            schema: Arc::new(Schema::new(fields)),
+            schema,
             by_schema: Arc::new(Schema::new(by_fields)),
             metric: ExecutionPlanMetricsSet::new(),
+            schema_before_project,
+            schema_project: self.schema_project.clone(),
         }))
     }
 }
@@ -305,6 +369,8 @@ pub struct RangeSelectExec {
     schema: SchemaRef,
     by_schema: SchemaRef,
     metric: ExecutionPlanMetricsSet,
+    schema_project: Option<Vec<usize>>,
+    schema_before_project: SchemaRef,
 }
 
 impl DisplayAs for RangeSelectExec {
@@ -367,6 +433,8 @@ impl ExecutionPlan for RangeSelectExec {
             schema: self.schema.clone(),
             by_schema: self.by_schema.clone(),
             metric: self.metric.clone(),
+            schema_before_project: self.schema_before_project.clone(),
+            schema_project: self.schema_project.clone(),
         }))
     }
 
@@ -405,6 +473,8 @@ impl ExecutionPlan for RangeSelectExec {
             row_converter,
             modify_map: HashMap::new(),
             metric: baseline_metric,
+            schema_project: self.schema_project.clone(),
+            schema_before_project: self.schema_before_project.clone(),
         }))
     }
 
@@ -441,6 +511,8 @@ struct RangeSelectStream {
     /// The number of rows of the final output
     output_num_rows: usize,
     metric: BaselineMetrics,
+    schema_project: Option<Vec<usize>>,
+    schema_before_project: SchemaRef,
 }
 
 struct SeriesState {
@@ -604,11 +676,20 @@ impl RangeSelectStream {
             columns.push(ScalarValue::iter_to_array(column_scalar)?);
         }
         let ts_column = ts_builder.finish();
-        // output schema follow the order of range expr | time index | by columns
-        let ts_column = compute::cast(&ts_column, self.schema.field(columns.len()).data_type())?;
+        // output schema before project follow the order of range expr | time index | by columns
+        let ts_column = compute::cast(
+            &ts_column,
+            self.schema_before_project.field(columns.len()).data_type(),
+        )?;
         columns.push(ts_column);
         columns.extend(self.row_converter.convert_rows(by_rows)?);
-        Ok(RecordBatch::try_new(self.schema(), columns)?)
+        let output = RecordBatch::try_new(self.schema_before_project.clone(), columns)?;
+        let project_output = if let Some(project) = &self.schema_project {
+            output.project(project)?
+        } else {
+            output
+        };
+        Ok(project_output)
     }
 }
 
@@ -718,6 +799,12 @@ mod test {
         expected: String,
     ) {
         let memory_exec = Arc::new(prepare_test_data());
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("MIN(value)", DataType::Int64, true),
+            Field::new("MAX(value)", DataType::Int64, true),
+            Field::new(TIME_INDEX_COLUMN, TimestampMillisecondType::DATA_TYPE, true),
+            Field::new("host", DataType::Utf8, true),
+        ]));
         let range_select_exec = Arc::new(RangeSelectExec {
             input: memory_exec,
             range_exec: vec![
@@ -743,12 +830,9 @@ mod test {
             align,
             by: vec![Arc::new(Column::new("host", 2))],
             time_index: TIME_INDEX_COLUMN.to_string(),
-            schema: Arc::new(Schema::new(vec![
-                Field::new("MIN(value)", DataType::Int64, true),
-                Field::new("MAX(value)", DataType::Int64, true),
-                Field::new(TIME_INDEX_COLUMN, TimestampMillisecondType::DATA_TYPE, true),
-                Field::new("host", DataType::Utf8, true),
-            ])),
+            schema: schema.clone(),
+            schema_before_project: schema.clone(),
+            schema_project: None,
             by_schema: Arc::new(Schema::new(vec![Field::new("host", DataType::Utf8, true)])),
             metric: ExecutionPlanMetricsSet::new(),
         });
