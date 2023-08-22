@@ -2623,6 +2623,7 @@ name = "datanode"
 version = "0.3.2"
 dependencies = [
  "api",
+ "arrow-flight",
  "async-compat",
  "async-stream",
  "async-trait",

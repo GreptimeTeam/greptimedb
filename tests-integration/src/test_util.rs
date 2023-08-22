@@ -49,6 +49,7 @@ use object_store::services::{Azblob, Gcs, Oss, S3};
 use object_store::test_util::TempFolder;
 use object_store::ObjectStore;
 use secrecy::ExposeSecret;
+use servers::grpc::greptime_handler::GreptimeRequestHandler;
 use servers::grpc::GrpcServer;
 use servers::http::{HttpOptions, HttpServerBuilder};
 use servers::metrics_handler::MetricsHandler;
@@ -583,9 +584,16 @@ pub async fn setup_grpc_server_with_user_provider(
         heartbeat.start().await.unwrap();
     }
     let fe_instance_ref = Arc::new(fe_instance);
+    let flight_handler = Arc::new(GreptimeRequestHandler::new(
+        ServerGrpcQueryHandlerAdaptor::arc(fe_instance_ref.clone()),
+        user_provider.clone(),
+        runtime.clone(),
+    ));
     let fe_grpc_server = Arc::new(GrpcServer::new(
         ServerGrpcQueryHandlerAdaptor::arc(fe_instance_ref.clone()),
         Some(fe_instance_ref.clone()),
+        Some(flight_handler),
+        None,
         user_provider,
         runtime,
     ));
