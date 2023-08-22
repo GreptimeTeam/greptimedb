@@ -30,13 +30,14 @@ use datatypes::prelude::{ConcreteDataType, ScalarVectorBuilder, VectorRef};
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::vectors::{StringVectorBuilder, UInt32VectorBuilder};
 use snafu::{OptionExt, ResultExt};
+use store_api::storage::TableId;
 use table::metadata::TableType;
 
 use super::{COLUMNS, TABLES};
 use crate::error::{
     CreateRecordBatchSnafu, InternalSnafu, Result, UpgradeWeakCatalogManagerRefSnafu,
 };
-use crate::information_schema::InformationStreamBuilder;
+use crate::information_schema::InformationTable;
 use crate::CatalogManager;
 
 pub(super) struct InformationSchemaTables {
@@ -74,7 +75,15 @@ impl InformationSchemaTables {
     }
 }
 
-impl InformationStreamBuilder for InformationSchemaTables {
+impl InformationTable for InformationSchemaTables {
+    fn table_id(&self) -> TableId {
+        INFORMATION_SCHEMA_TABLES_TABLE_ID
+    }
+
+    fn table_name(&self) -> &'static str {
+        TABLES
+    }
+
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }

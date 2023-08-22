@@ -110,12 +110,10 @@ impl CreateTableProcedure {
         );
 
         let table_id = self.table_info().ident.table_id as TableId;
-
         let manager = &self.context.table_metadata_manager;
 
         let raw_table_info = self.table_info().clone();
         let region_routes = self.region_routes().clone();
-
         manager
             .create_table_metadata(raw_table_info, region_routes)
             .await

@@ -16,11 +16,13 @@ mod backup;
 mod copy_table_from;
 mod copy_table_to;
 mod describe;
+mod insert;
 mod show;
 mod tql;
 
 use std::collections::HashMap;
 use std::str::FromStr;
+use std::sync::Arc;
 
 use catalog::CatalogManagerRef;
 use common_error::ext::BoxedError;
@@ -36,14 +38,16 @@ use snafu::{OptionExt, ResultExt};
 use sql::statements::copy::{CopyDatabaseArgument, CopyTable, CopyTableArgument};
 use sql::statements::statement::Statement;
 use table::engine::TableReference;
-use table::requests::{CopyDatabaseRequest, CopyDirection, CopyTableRequest};
+use table::error::TableOperationSnafu;
+use table::requests::{CopyDatabaseRequest, CopyDirection, CopyTableRequest, InsertRequest};
 use table::TableRef;
 
-use crate::error;
+use crate::catalog::FrontendCatalogManager;
 use crate::error::{
-    CatalogSnafu, ExecLogicalPlanSnafu, ExecuteStatementSnafu, ExternalSnafu, PlanStatementSnafu,
-    Result, TableNotFoundSnafu,
+    self, CatalogSnafu, ExecLogicalPlanSnafu, ExecuteStatementSnafu, ExternalSnafu, InsertSnafu,
+    PlanStatementSnafu, Result, TableNotFoundSnafu,
 };
+use crate::instance::distributed::inserter::DistInserter;
 use crate::statement::backup::{COPY_DATABASE_TIME_END_KEY, COPY_DATABASE_TIME_START_KEY};
 
 #[derive(Clone)]
@@ -83,19 +87,7 @@ impl StatementExecutor {
                 self.plan_exec(QueryStatement::Sql(stmt), query_ctx).await
             }
 
-            // For performance consideration, only requests that can't extract values is executed by query engine.
-            // Plain insert ("insert with literal values") is still executed directly in statement.
-            Statement::Insert(insert) => {
-                if insert.can_extract_values() {
-                    self.sql_stmt_executor
-                        .execute_sql(Statement::Insert(insert), query_ctx)
-                        .await
-                        .context(ExecuteStatementSnafu)
-                } else {
-                    self.plan_exec(QueryStatement::Sql(Statement::Insert(insert)), query_ctx)
-                        .await
-                }
-            }
+            Statement::Insert(insert) => self.insert(insert, query_ctx).await,
 
             Statement::Tql(tql) => self.execute_tql(tql, query_ctx).await,
 
@@ -161,6 +153,47 @@ impl StatementExecutor {
             .with_context(|| TableNotFoundSnafu {
                 table_name: table_ref.to_string(),
             })
+    }
+
+    // TODO(zhongzc): A middle state that eliminates calls to table.insert,
+    // For DistTable, its insert is not invoked; for MitoTable, it is still called but eventually eliminated.
+    async fn send_insert_request(&self, request: InsertRequest) -> Result<usize> {
+        let frontend_catalog_manager = self
+            .catalog_manager
+            .as_any()
+            .downcast_ref::<FrontendCatalogManager>();
+
+        let table_name = request.table_name.clone();
+        match frontend_catalog_manager {
+            Some(frontend_catalog_manager) => {
+                let inserter = DistInserter::new(
+                    request.catalog_name.clone(),
+                    request.schema_name.clone(),
+                    Arc::new(frontend_catalog_manager.clone()),
+                );
+                let affected_rows = inserter
+                    .insert(vec![request])
+                    .await
+                    .map_err(BoxedError::new)
+                    .context(TableOperationSnafu)
+                    .context(InsertSnafu { table_name })?;
+                Ok(affected_rows as usize)
+            }
+            None => {
+                let table_ref = TableReference::full(
+                    &request.catalog_name,
+                    &request.schema_name,
+                    &request.table_name,
+                );
+                let affected_rows = self
+                    .get_table(&table_ref)
+                    .await?
+                    .insert(request)
+                    .await
+                    .context(InsertSnafu { table_name })?;
+                Ok(affected_rows)
+            }
+        }
     }
 }
 

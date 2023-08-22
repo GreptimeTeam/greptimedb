@@ -98,7 +98,7 @@ impl Inner {
     async fn route(&self, mut req: RouteRequest) -> Result<RouteResponse> {
         let mut client = self.random_client()?;
         req.set_header(self.id, self.role);
-        let res = client.route(req).await.context(error::TonicStatusSnafu)?;
+        let res = client.route(req).await.map_err(error::Error::from)?;
 
         Ok(res.into_inner())
     }

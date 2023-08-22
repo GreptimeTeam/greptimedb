@@ -352,6 +352,30 @@ pub enum Error {
         location: Location,
         source: datatypes::error::Error,
     },
+
+    #[snafu(display(
+        "Primary key length mismatch, expect: {}, actual: {}, location: {}",
+        expect,
+        actual,
+        location
+    ))]
+    PrimaryKeyLengthMismatch {
+        expect: usize,
+        actual: usize,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to sort values source: {}, location: {}", source, location))]
+    SortValues {
+        source: ArrowError,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to compact values, source: {}, location: {}", source, location))]
+    CompactValues {
+        source: datatypes::error::Error,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -408,6 +432,9 @@ impl ErrorExt for Error {
             ConvertVector { source, .. } => source.status_code(),
             ComputeArrow { .. } => StatusCode::Internal,
             ComputeVector { .. } => StatusCode::Internal,
+            PrimaryKeyLengthMismatch { .. } => StatusCode::InvalidArguments,
+            SortValues { .. } => StatusCode::Unexpected,
+            CompactValues { source, .. } => source.status_code(),
         }
     }
 

@@ -16,7 +16,7 @@ use std::any::Any;
 use std::sync::Arc;
 
 use arrow_schema::{Schema as ArrowSchema, SchemaRef as ArrowSchemaRef};
-use async_stream::try_stream;
+use async_stream::stream;
 use client::client_manager::DatanodeClients;
 use client::Database;
 use common_base::bytes::Bytes;
@@ -149,11 +149,14 @@ impl MergeScanExec {
         let trace_id = context.task_id().and_then(|id| id.parse().ok());
         let metric = MergeScanMetric::new(&self.metric);
 
-        let stream = try_stream! {
+        let stream = Box::pin(stream!({
+            let _finish_timer = metric.finish_time().timer();
+            let mut ready_timer = metric.ready_time().timer();
+            let mut first_consume_timer = Some(metric.first_consume_time().timer());
+
             for peer in peers {
                 let client = clients.get_client(&peer).await;
                 let database = Database::new(&table.catalog_name, &table.schema_name, client);
-                let _timer = metric.grpc_time().timer();
                 let output: Output = database
                     .logical_plan(substrait_plan.clone(), trace_id)
                     .await
@@ -161,37 +164,34 @@ impl MergeScanExec {
                     .map_err(BoxedError::new)
                     .context(ExternalSnafu)?;
 
-                match output {
-                    Output::AffectedRows(_) => {
-                        Err(BoxedError::new(
-                            UnexpectedOutputKindSnafu {
-                                expected: "RecordBatches or Stream",
-                                got: "AffectedRows",
-                            }
-                            .build(),
-                        ))
-                        .context(ExternalSnafu)?;
+                let Output::Stream(mut stream) = output else {
+                    yield UnexpectedOutputKindSnafu {
+                        expected: "Stream",
+                        got: "RecordBatches or AffectedRows",
                     }
-                    Output::RecordBatches(record_batches) => {
-                        for batch in record_batches.into_iter() {
-                            metric.record_output_batch_rows(batch.num_rows());
-                            yield Self::remove_metadata_from_record_batch(batch);
-                        }
-                    }
-                    Output::Stream(mut stream) => {
-                        while let Some(batch) = stream.next().await {
-                            let batch = batch?;
-                            metric.record_output_batch_rows(batch.num_rows());
-                            yield Self::remove_metadata_from_record_batch(batch);
-                        }
+                    .fail()
+                    .map_err(BoxedError::new)
+                    .context(ExternalSnafu);
+                    return;
+                };
+
+                ready_timer.stop();
+
+                while let Some(batch) = stream.next().await {
+                    let batch = batch?;
+                    metric.record_output_batch_rows(batch.num_rows());
+                    yield Ok(Self::remove_metadata_from_record_batch(batch));
+
+                    if let Some(first_consume_timer) = first_consume_timer.as_mut().take() {
+                        first_consume_timer.stop();
                     }
                 }
             }
-        };
+        }));
 
         Ok(Box::pin(RecordBatchStreamAdaptor {
             schema: self.schema.clone(),
-            stream: Box::pin(stream),
+            stream,
             output_ordering: None,
         }))
     }
@@ -285,8 +285,12 @@ impl DisplayAs for MergeScanExec {
 
 #[derive(Debug, Clone)]
 struct MergeScanMetric {
-    /// Nanosecond spent on fetching data from remote
-    grpc_time: Time,
+    /// Nanosecond elapsed till the scan operator is ready to emit data
+    ready_time: Time,
+    /// Nanosecond elapsed till the first record batch emitted from the scan operator gets consumed
+    first_consume_time: Time,
+    /// Nanosecond elapsed till the scan operator finished execution
+    finish_time: Time,
     /// Count of rows fetched from remote
     output_rows: Count,
 }
@@ -294,13 +298,23 @@ struct MergeScanMetric {
 impl MergeScanMetric {
     pub fn new(metric: &ExecutionPlanMetricsSet) -> Self {
         Self {
-            grpc_time: MetricBuilder::new(metric).subset_time("gRPC", 1),
+            ready_time: MetricBuilder::new(metric).subset_time("ready_time", 1),
+            first_consume_time: MetricBuilder::new(metric).subset_time("first_consume_time", 1),
+            finish_time: MetricBuilder::new(metric).subset_time("finish_time", 1),
             output_rows: MetricBuilder::new(metric).output_rows(1),
         }
     }
 
-    pub fn grpc_time(&self) -> &Time {
-        &self.grpc_time
+    pub fn ready_time(&self) -> &Time {
+        &self.ready_time
+    }
+
+    pub fn first_consume_time(&self) -> &Time {
+        &self.first_consume_time
+    }
+
+    pub fn finish_time(&self) -> &Time {
+        &self.finish_time
     }
 
     pub fn record_output_batch_rows(&self, num_rows: usize) {

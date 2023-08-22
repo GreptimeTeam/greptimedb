@@ -64,7 +64,7 @@ monitor1,host=host2 memory=1027";
             precision: None,
             lines: lines.to_string(),
         };
-        assert!(instance.exec(&request, QueryContext::arc()).await.is_ok());
+        assert!(instance.exec(request, QueryContext::arc()).await.is_ok());
 
         let mut output = instance
             .do_query(
@@ -93,7 +93,7 @@ monitor1,host=host2 memory=1027 1663840496400340001";
             precision: None,
             lines: lines.to_string(),
         };
-        instance.exec(&request, QueryContext::arc()).await.unwrap();
+        instance.exec(request, QueryContext::arc()).await.unwrap();
 
         let mut output = instance
             .do_query(

@@ -38,6 +38,7 @@ pub struct AskLeader {
     role: Role,
     leadership_group: Arc<RwLock<LeadershipGroup>>,
     channel_manager: ChannelManager,
+    max_retry: usize,
 }
 
 impl AskLeader {
@@ -46,6 +47,7 @@ impl AskLeader {
         role: Role,
         peers: impl Into<Vec<String>>,
         channel_manager: ChannelManager,
+        max_retry: usize,
     ) -> Self {
         let leadership_group = Arc::new(RwLock::new(LeadershipGroup {
             leader: None,
@@ -56,6 +58,7 @@ impl AskLeader {
             role,
             leadership_group,
             channel_manager,
+            max_retry,
         }
     }
 
@@ -63,7 +66,7 @@ impl AskLeader {
         self.leadership_group.read().unwrap().leader.clone()
     }
 
-    pub async fn ask_leader(&self) -> Result<String> {
+    async fn ask_leader_inner(&self) -> Result<String> {
         let mut peers = {
             let leadership_group = self.leadership_group.read().unwrap();
             leadership_group.peers.clone()
@@ -97,6 +100,28 @@ impl AskLeader {
         leadership_group.leader = Some(leader.clone());
 
         Ok(leader)
+    }
+
+    pub async fn ask_leader(&self) -> Result<String> {
+        let mut times = 0;
+        while times < self.max_retry {
+            match self.ask_leader_inner().await {
+                Ok(res) => {
+                    return Ok(res);
+                }
+                Err(err) => {
+                    warn!("Failed to ask leader, source: {err}, retry {times} times");
+                    times += 1;
+                    continue;
+                }
+            }
+        }
+
+        error::RetryTimesExceededSnafu {
+            msg: "Failed to ask leader",
+            times: self.max_retry,
+        }
+        .fail()
     }
 
     fn create_asker(&self, addr: impl AsRef<str>) -> Result<HeartbeatClient<Channel>> {

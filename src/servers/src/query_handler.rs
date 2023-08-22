@@ -62,7 +62,7 @@ pub trait ScriptHandler {
 pub trait InfluxdbLineProtocolHandler {
     /// A successful request will not return a response.
     /// Only on error will the socket return a line of data.
-    async fn exec(&self, request: &InfluxdbRequest, ctx: QueryContextRef) -> Result<()>;
+    async fn exec(&self, request: InfluxdbRequest, ctx: QueryContextRef) -> Result<()>;
 }
 
 #[async_trait]

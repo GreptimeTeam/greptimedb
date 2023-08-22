@@ -24,7 +24,8 @@ use datafusion::common::{DFSchema, DFSchemaRef};
 use datafusion::error::Result as DataFusionResult;
 use datafusion::execution::context::TaskContext;
 use datafusion::logical_expr::{EmptyRelation, Expr, LogicalPlan, UserDefinedLogicalNodeCore};
-use datafusion::physical_expr::PhysicalSortExpr;
+use datafusion::physical_expr::{PhysicalSortExpr, PhysicalSortRequirement};
+use datafusion::physical_plan::expressions::Column as ColumnExpr;
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, Partitioning, RecordBatchStream,
@@ -136,7 +137,19 @@ impl ExecutionPlan for SeriesDivideExec {
         vec![Distribution::SinglePartition]
     }
 
-    // TODO(ruihang): specify required input ordering
+    fn required_input_ordering(&self) -> Vec<Option<Vec<PhysicalSortRequirement>>> {
+        let input_schema = self.input.schema();
+        let exprs = self
+            .tag_columns
+            .iter()
+            .map(|tag| PhysicalSortRequirement {
+                // Safety: the tag column names is verified in the planning phase
+                expr: Arc::new(ColumnExpr::new_with_schema(tag, &input_schema).unwrap()),
+                options: None,
+            })
+            .collect();
+        vec![Some(exprs)]
+    }
 
     fn output_ordering(&self) -> Option<&[PhysicalSortExpr]> {
         self.input.output_ordering()
