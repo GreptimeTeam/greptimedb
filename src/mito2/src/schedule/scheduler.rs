@@ -239,8 +239,8 @@ mod tests {
         let barrier_clone = barrier.clone();
         let local_stop = local.clone();
         tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(1000)).await;
-            while local_stop.stop(true).await.is_ok() {}
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            local_stop.stop(false).await.unwrap();
             barrier_clone.wait().await;
         });
 
@@ -250,7 +250,6 @@ mod tests {
         let sum_clone = sum.clone();
         tokio::spawn(async move {
             loop {
-                tokio::time::sleep(Duration::from_millis(10)).await;
                 let sum_c = sum_clone.clone();
                 let ok = local_task
                     .schedule(Box::pin(async move {
@@ -263,6 +262,7 @@ mod tests {
                 } else {
                     break;
                 }
+                tokio::task::yield_now().await;
             }
         });
         barrier.wait().await;
