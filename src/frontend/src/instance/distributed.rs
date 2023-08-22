@@ -122,9 +122,6 @@ impl DistInstance {
 
         table_info.ident.table_id = table_id;
 
-        // TODO: Fetch a latest region_numbers from MetaSrv so that FrontCatalogManager can use a latest one.
-        // Though the table_info has a region_numbers, it is created before DistInstance sends a create-table request to MetaSrv.
-        // So, the region_numbers is empty.
         let table_info = Arc::new(table_info.try_into().context(error::CreateTableInfoSnafu)?);
 
         create_table.table_id = Some(api::v1::TableId { id: table_id });
