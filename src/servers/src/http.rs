@@ -550,7 +550,7 @@ impl HttpServer {
 
         if let Some(prometheus_handler) = self.prometheus_handler.clone() {
             router = router.nest(
-                &format!("/{HTTP_API_VERSION}/prometheus"),
+                &format!("/{HTTP_API_VERSION}/prometheus/api/v1"),
                 self.route_prometheus(prometheus_handler),
             );
         }
