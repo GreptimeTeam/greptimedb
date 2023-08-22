@@ -408,7 +408,6 @@ mod tests {
             [storage.manifest]
             checkpoint_margin = 9
             gc_duration = '7s'
-            checkpoint_on_startup = true
 
             [http_options]
             addr = "127.0.0.1:4000"

@@ -202,17 +202,6 @@ mod tests {
                     Some("42s"),
                 ),
                 (
-                    // storage.manifest.checkpoint_on_startup = true
-                    [
-                        env_prefix.to_string(),
-                        "storage".to_uppercase(),
-                        "manifest".to_uppercase(),
-                        "checkpoint_on_startup".to_uppercase(),
-                    ]
-                    .join(ENV_VAR_SEP),
-                    Some("true"),
-                ),
-                (
                     // wal.dir = /other/wal/dir
                     [
                         env_prefix.to_string(),
@@ -253,7 +242,6 @@ mod tests {
                     opts.storage.manifest.gc_duration,
                     Some(Duration::from_secs(42))
                 );
-                assert!(opts.storage.manifest.checkpoint_on_startup);
                 assert_eq!(
                     opts.meta_client_options.unwrap().metasrv_addrs,
                     vec![
