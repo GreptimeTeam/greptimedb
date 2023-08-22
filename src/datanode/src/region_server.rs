@@ -80,7 +80,7 @@ impl RegionServer {
             RegionRequest::Create(create) => RegionChange::Register(create.engine.clone()),
             RegionRequest::Open(open) => RegionChange::Register(open.engine.clone()),
             RegionRequest::Close(_) | RegionRequest::Drop(_) => RegionChange::Deregisters,
-            RegionRequest::Write(_)
+            RegionRequest::Put(_)
             | RegionRequest::Delete(_)
             | RegionRequest::Alter(_)
             | RegionRequest::Flush(_)

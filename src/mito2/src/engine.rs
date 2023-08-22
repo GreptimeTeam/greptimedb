@@ -14,9 +14,8 @@
 
 //! Mito region engine.
 
-// TODO: migrate test to RegionRequest
-// #[cfg(test)]
-// mod tests;
+#[cfg(test)]
+mod tests;
 
 use std::sync::Arc;
 
@@ -29,7 +28,7 @@ use store_api::storage::RegionId;
 
 use crate::config::MitoConfig;
 use crate::error::{RecvSnafu, Result};
-use crate::request::RegionTask;
+use crate::request::{RegionTask, RequestBody};
 use crate::worker::WorkerGroup;
 
 /// Region engine implementation for timeseries data.
@@ -60,6 +59,7 @@ impl MitoEngine {
         self.inner.stop().await
     }
 
+    /// Handle requests that modify a region.
     pub async fn handle_request(
         &self,
         region_id: RegionId,
@@ -73,23 +73,6 @@ impl MitoEngine {
     pub fn is_region_exists(&self, region_id: RegionId) -> bool {
         self.inner.workers.is_region_exists(region_id)
     }
-
-    // /// Write to a region.
-    // pub async fn write_region(&self, write_request: WriteRequest) -> Result<()> {
-    // write_request.validate()?;
-    // RequestValidator::write_request(&write_request)?;
-
-    // TODO(yingwen): Fill default values.
-    // We need to fill default values before writing it to WAL so we can get
-    // the same default value after reopening the region.
-
-    // let metadata = region.metadata();
-
-    // write_request.fill_missing_columns(&metadata)?;
-    //     self.inner
-    //         .handle_request_body(RequestBody::Write(write_request))
-    //         .await
-    // }
 }
 
 /// Inner struct of [MitoEngine].
@@ -118,7 +101,8 @@ impl EngineInner {
     // TODO(yingwen): return `Output` instead of `Result<()>`.
     /// Handles [RequestBody] and return its executed result.
     async fn handle_request(&self, region_id: RegionId, request: RegionRequest) -> Result<()> {
-        let (request, receiver) = RegionTask::from_request(region_id, request);
+        let body = RequestBody::try_from_region_request(region_id, request)?;
+        let (request, receiver) = RegionTask::from_request(region_id, body);
         self.workers.submit_to_worker(request).await?;
 
         receiver.await.context(RecvSnafu)?

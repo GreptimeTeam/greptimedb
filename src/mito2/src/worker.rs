@@ -30,7 +30,6 @@ use futures::future::try_join_all;
 use object_store::ObjectStore;
 use snafu::{ensure, ResultExt};
 use store_api::logstore::LogStore;
-use store_api::region_request::RegionRequest;
 use store_api::storage::RegionId;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{mpsc, Mutex};
@@ -39,7 +38,7 @@ use crate::config::MitoConfig;
 use crate::error::{JoinSnafu, Result, WorkerStoppedSnafu};
 use crate::memtable::{DefaultMemtableBuilder, MemtableBuilderRef};
 use crate::region::{MitoRegionRef, RegionMap, RegionMapRef};
-use crate::request::{RegionTask, WorkerRequest};
+use crate::request::{RegionTask, RequestBody, SenderWriteRequest, WorkerRequest};
 use crate::wal::Wal;
 
 /// Identifier for a worker.
@@ -335,16 +334,16 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     ///
     /// `buffer` should be empty.
     async fn handle_requests(&mut self, buffer: &mut RequestBuffer) {
-        let write_requests = Vec::with_capacity(buffer.len());
+        let mut write_requests = Vec::with_capacity(buffer.len());
         let mut ddl_requests = Vec::with_capacity(buffer.len());
         for worker_req in buffer.drain(..) {
             match worker_req {
                 WorkerRequest::Region(task) => {
-                    if matches!(task.request, RegionRequest::Write(_)) {
-                        // write_requests.push(SenderWriteRequest {
-                        //     sender: task.sender,
-                        //     request: task.request.into_write_request(),
-                        // });
+                    if let RequestBody::Write(write_request) = task.body {
+                        write_requests.push(SenderWriteRequest {
+                            sender: task.sender,
+                            request: write_request,
+                        });
                     } else {
                         ddl_requests.push(task);
                     }
@@ -374,16 +373,15 @@ impl<S> RegionWorkerLoop<S> {
         }
 
         for task in ddl_tasks {
-            let res: std::result::Result<(), crate::error::Error> = match task.request {
-                RegionRequest::Create(req) => self.handle_create_request(task.region_id, req).await,
-                RegionRequest::Open(req) => self.handle_open_request(task.region_id, req).await,
-                RegionRequest::Close(_) => self.handle_close_request(task.region_id).await,
-                RegionRequest::Write(_)
-                | RegionRequest::Delete(_)
-                | RegionRequest::Drop(_)
-                | RegionRequest::Alter(_)
-                | RegionRequest::Flush(_)
-                | RegionRequest::Compact(_) => unreachable!(),
+            let res: std::result::Result<(), crate::error::Error> = match task.body {
+                RequestBody::Create(req) => self.handle_create_request(task.region_id, req).await,
+                RequestBody::Open(req) => self.handle_open_request(task.region_id, req).await,
+                RequestBody::Close(_) => self.handle_close_request(task.region_id).await,
+                RequestBody::Write(_)
+                | RequestBody::Drop(_)
+                | RequestBody::Alter(_)
+                | RequestBody::Flush(_)
+                | RequestBody::Compact(_) => unreachable!(),
             };
 
             if let Some(sender) = task.sender {
