@@ -32,11 +32,11 @@ use snafu::ResultExt;
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::error;
-use crate::grpc::flight::stream::FlightRecordBatchStream;
+pub use crate::grpc::flight::stream::FlightRecordBatchStream;
 use crate::grpc::greptime_handler::GreptimeRequestHandler;
 use crate::grpc::TonicResult;
 
-type TonicStream<T> = Pin<Box<dyn Stream<Item = TonicResult<T>> + Send + Sync + 'static>>;
+pub type TonicStream<T> = Pin<Box<dyn Stream<Item = TonicResult<T>> + Send + Sync + 'static>>;
 
 /// A subset of [FlightService]
 #[async_trait]
@@ -153,7 +153,8 @@ impl FlightCraft for GreptimeRequestHandler {
 
         let output = self.handle_request(request).await?;
 
-        let stream = to_flight_data_stream(output);
+        let stream: Pin<Box<dyn Stream<Item = Result<FlightData, Status>> + Send + Sync>> =
+            to_flight_data_stream(output);
         Ok(Response::new(stream))
     }
 }

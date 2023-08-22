@@ -9,6 +9,7 @@ testing = ["meta-srv/mock"]
 
 [dependencies]
 api = { workspace = true }
+arrow-flight.workspace = true
 async-compat = "0.2"
 async-stream.workspace = true
 async-trait.workspace = true
