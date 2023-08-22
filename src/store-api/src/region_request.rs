@@ -49,7 +49,7 @@ pub struct RegionReadRequest {
 pub struct RegionDeleteRequest {
     /// Keys to rows to delete.
     ///
-    /// Including primary keys and time indexs.
+    /// Each row only contains primary key columns and a time index column.
     pub rows: Rows,
 }
 
