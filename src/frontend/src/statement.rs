@@ -40,7 +40,9 @@ use sql::statements::copy::{CopyDatabaseArgument, CopyTable, CopyTableArgument};
 use sql::statements::statement::Statement;
 use table::engine::TableReference;
 use table::error::TableOperationSnafu;
-use table::requests::{CopyDatabaseRequest, CopyDirection, CopyTableRequest, InsertRequest, DeleteRequest};
+use table::requests::{
+    CopyDatabaseRequest, CopyDirection, CopyTableRequest, DeleteRequest, InsertRequest,
+};
 use table::TableRef;
 
 use crate::catalog::FrontendCatalogManager;
