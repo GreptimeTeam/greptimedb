@@ -43,7 +43,7 @@ use tonic_reflection::server::{ServerReflection, ServerReflectionServer};
 
 use self::flight::{FlightCraftRef, FlightCraftWrapper};
 use self::prom_query_gateway::PrometheusGatewayService;
-use self::region_server::RegionServerRequestHandler;
+use self::region_server::{RegionServerHandlerRef, RegionServerRequestHandler};
 use crate::error::{AlreadyStartedSnafu, InternalSnafu, Result, StartGrpcSnafu, TcpBindSnafu};
 use crate::grpc::database::DatabaseService;
 use crate::grpc::greptime_handler::GreptimeRequestHandler;
@@ -76,11 +76,15 @@ impl GrpcServer {
         query_handler: ServerGrpcQueryHandlerRef,
         prometheus_handler: Option<PrometheusHandlerRef>,
         flight_handler: Option<FlightCraftRef>,
-        region_server_handler: Option<RegionServerRequestHandler>,
+        region_server_handler: Option<RegionServerHandlerRef>,
         user_provider: Option<UserProviderRef>,
         runtime: Arc<Runtime>,
     ) -> Self {
-        let database_handler = GreptimeRequestHandler::new(query_handler, user_provider, runtime);
+        let database_handler =
+            GreptimeRequestHandler::new(query_handler, user_provider.clone(), runtime.clone());
+        let region_server_handler = region_server_handler.map(|handler| {
+            RegionServerRequestHandler::new(handler, user_provider.clone(), runtime.clone())
+        });
         Self {
             shutdown_tx: Mutex::new(None),
             serve_state: Mutex::new(None),
@@ -202,6 +206,11 @@ impl Server for GrpcServer {
         if let Some(flight_handler) = &self.flight_handler {
             builder = builder.add_service(FlightServiceServer::new(FlightCraftWrapper(
                 flight_handler.clone(),
+            )))
+        } else {
+            // TODO(ruihang): this is a temporary workaround before region server is ready.
+            builder = builder.add_service(FlightServiceServer::new(FlightCraftWrapper(
+                self.database_handler.clone().unwrap(),
             )))
         }
         if let Some(region_server_handler) = &self.region_server_handler {

@@ -45,6 +45,8 @@ pub trait RegionServerHandler: Send + Sync {
     async fn handle(&self, request: RequestBody) -> Result<RegionResponse>;
 }
 
+pub type RegionServerHandlerRef = Arc<dyn RegionServerHandler>;
+
 #[derive(Clone)]
 pub struct RegionServerRequestHandler {
     handler: Arc<dyn RegionServerHandler>,
@@ -53,6 +55,18 @@ pub struct RegionServerRequestHandler {
 }
 
 impl RegionServerRequestHandler {
+    pub fn new(
+        handler: Arc<dyn RegionServerHandler>,
+        user_provider: Option<UserProviderRef>,
+        runtime: Arc<Runtime>,
+    ) -> Self {
+        Self {
+            handler,
+            user_provider,
+            runtime,
+        }
+    }
+
     async fn handle(&self, request: RegionRequest) -> Result<RegionResponse> {
         let query = request.request.context(InvalidQuerySnafu {
             reason: "Expecting non-empty GreptimeRequest.",
