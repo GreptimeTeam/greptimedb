@@ -226,7 +226,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_scheduler_continous_stop() {
+    async fn test_scheduler_continuous_stop() {
         let sum = Arc::new(AtomicI32::new(0));
         let local = Arc::new(LocalScheduler::new(1000, 1000));
 

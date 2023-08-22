@@ -333,10 +333,10 @@ pub enum Error {
         source: datatypes::error::Error,
     },
 
-    #[snafu(display("Invaild scheduler sender, location: {}", location,))]
+    #[snafu(display("Invalid flume sender, location: {}", location,))]
     InvalidFlumeSender { location: Location },
 
-    #[snafu(display("Invaild state location: {}", location,))]
+    #[snafu(display("Invalid scheduler state location: {}", location,))]
     InvalidSchedulerState { location: Location },
 
     #[snafu(display("Failed to stop scheduler, source: {}", source))]
