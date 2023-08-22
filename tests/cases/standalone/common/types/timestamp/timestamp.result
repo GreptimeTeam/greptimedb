@@ -97,7 +97,7 @@ SELECT t%t FROM timestamp;
 
 Error: 1003(Internal), Invalid argument error: column types must match schema types, expected Interval(DayTime) but found Timestamp(Millisecond, None) at column index 0
 
--- It can't run on distributed mode,uncomment it when the issue is fixed: https://github.com/GreptimeTeam/greptimedb/issues/2071 --
+-- TODO(dennis): It can't run on distributed mode, uncomment it when the issue is fixed: https://github.com/GreptimeTeam/greptimedb/issues/2071 --
 -- SELECT t-t FROM timestamp; --
 SELECT EXTRACT(YEAR from TIMESTAMP '1992-01-01 01:01:01');
 
