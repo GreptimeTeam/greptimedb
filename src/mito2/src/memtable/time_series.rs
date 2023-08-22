@@ -31,8 +31,7 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ScanRequest;
 
 use crate::error::{
-    CompactValuesSnafu, ConvertVectorSnafu, InvalidMemtableConfigSnafu,
-    PrimaryKeyLengthMismatchSnafu, Result, SortValuesSnafu,
+    CompactValuesSnafu, ConvertVectorSnafu, PrimaryKeyLengthMismatchSnafu, Result, SortValuesSnafu,
 };
 use crate::memtable::{BoxedBatchIterator, KeyValues, Memtable, MemtableId};
 use crate::read::{Batch, BatchBuilder, BatchColumn};
@@ -41,28 +40,13 @@ use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
 /// Config for [TimeSeriesMemtable].
 #[derive(Debug)]
 pub struct TimeSeriesMemtableConfig {
-    /// The bucket num for memtable.
-    pub bucket_num: usize,
     /// The initial capacity for each [ValueBuilder] in series.
     pub initial_builder_capacity: usize,
-}
-
-impl TimeSeriesMemtableConfig {
-    fn validate(&self) -> Result<()> {
-        ensure!(
-            self.bucket_num < 256,
-            InvalidMemtableConfigSnafu {
-                config: format!("{:?}", self),
-            }
-        );
-        Ok(())
-    }
 }
 
 impl Default for TimeSeriesMemtableConfig {
     fn default() -> Self {
         Self {
-            bucket_num: 16,
             initial_builder_capacity: 128,
         }
     }
@@ -90,12 +74,7 @@ impl TimeSeriesMemtable {
                 .collect(),
         );
         let config = config.unwrap_or_default();
-        config.validate()?;
-        let series_set = SeriesSet::new(
-            region_metadata.clone(),
-            config.bucket_num as u8,
-            config.initial_builder_capacity,
-        );
+        let series_set = SeriesSet::new(region_metadata.clone(), config.initial_builder_capacity);
         Ok(Self {
             id,
             config,
@@ -148,67 +127,41 @@ impl Memtable for TimeSeriesMemtable {
     }
 }
 
-/// Index of series, including bucket index part (u8) and series index inside the bucket (usize).  
-type SeriesIndex = (u8, usize);
-
+type SeriesRwLockMap = RwLock<BTreeMap<Vec<u8>, Arc<RwLock<Series>>>>;
 struct SeriesSet {
     initial_builder_capacity: usize,
     region_metadata: RegionMetadataRef,
-    bucket_num: u8,
-    indices: Arc<RwLock<BTreeMap<Vec<u8>, SeriesIndex>>>,
-    buckets: Arc<Vec<Bucket>>,
+    series: Arc<SeriesRwLockMap>,
 }
 
 impl SeriesSet {
-    fn new(
-        region_metadata: RegionMetadataRef,
-        bucket_num: u8,
-        initial_builder_capacity: usize,
-    ) -> Self {
-        let buckets = Arc::new(
-            (0..bucket_num)
-                .map(|_| Bucket::new(region_metadata.clone()))
-                .collect(),
-        );
-
+    fn new(region_metadata: RegionMetadataRef, initial_builder_capacity: usize) -> Self {
         Self {
             initial_builder_capacity,
             region_metadata,
-            bucket_num,
-            indices: Default::default(),
-            buckets,
+            series: Default::default(),
         }
     }
 }
 
 impl SeriesSet {
-    /// Returns [Series] at given bucket and index.
-    fn get_bucket_by_index(&self, idx: &SeriesIndex) -> Option<Arc<RwLock<Series>>> {
-        debug_assert!((idx.0 as usize) < self.buckets.len());
-        self.buckets[idx.0 as usize].get_series(idx.1)
-    }
-
     /// Returns the series for given primary key, or create a new series if not already exist.
     fn get_or_add_series(&self, primary_key: Vec<u8>) -> Arc<RwLock<Series>> {
-        if let Some(idx) = self.indices.read().unwrap().get(&primary_key) {
-            // safety: series must exist at given index.
-            return self.get_bucket_by_index(idx).unwrap();
+        if let Some(series) = self.series.read().unwrap().get(&primary_key) {
+            return series.clone();
         };
-        let bucket_idx = self.hash_primary_key(&primary_key);
-        let bucket = &self.buckets[bucket_idx as usize];
         let s = Arc::new(RwLock::new(Series::new(
             self.region_metadata.clone(),
             self.initial_builder_capacity,
         )));
-        let mut indices = self.indices.write().unwrap();
+        let mut indices = self.series.write().unwrap();
         match indices.entry(primary_key) {
             Entry::Vacant(v) => {
-                let series_index = bucket.add_series(s.clone());
-                v.insert((bucket_idx, series_index));
+                v.insert(s.clone());
                 s
             }
             // safety: series must exist at given index.
-            Entry::Occupied(v) => self.get_bucket_by_index(v.get()).unwrap(),
+            Entry::Occupied(v) => v.get().clone(),
         }
     }
 
@@ -216,23 +169,15 @@ impl SeriesSet {
     fn iter_series(&self) -> Iter {
         Iter {
             metadata: self.region_metadata.clone(),
-            indices: self.indices.clone(),
-            buckets: self.buckets.clone(),
+            series: self.series.clone(),
             last_key: None,
         }
-    }
-
-    /// Hash primary key to find the index of bucket.
-    fn hash_primary_key(&self, primary_key: &[u8]) -> u8 {
-        let x: u32 = primary_key.iter().map(|v| *v as u32).sum();
-        (x % self.bucket_num as u32) as u8
     }
 }
 
 struct Iter {
     metadata: RegionMetadataRef,
-    indices: Arc<RwLock<BTreeMap<Vec<u8>, SeriesIndex>>>,
-    buckets: Arc<Vec<Bucket>>,
+    series: Arc<SeriesRwLockMap>,
     last_key: Option<Vec<u8>>,
 }
 
@@ -240,7 +185,7 @@ impl Iterator for Iter {
     type Item = Result<Batch>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let map = self.indices.read().unwrap();
+        let map = self.series.read().unwrap();
         let mut range = match &self.last_key {
             None => map.range::<Vec<u8>, _>(..),
             Some(last_key) => {
@@ -248,14 +193,8 @@ impl Iterator for Iter {
             }
         };
 
-        if let Some((primary_key, bucket)) = range.next() {
+        if let Some((primary_key, series)) = range.next() {
             self.last_key = Some(primary_key.clone());
-            let Some(b) = self.buckets.get(bucket.0 as usize) else {
-                panic!("Cannot find series at {:?}", bucket);
-            };
-            let Some(series) = b.get_series(bucket.1) else {
-                panic!("Cannot find series at {:?}", bucket);
-            };
             let values = series.write().unwrap().compact();
             Some(values.and_then(|v| v.to_batch(primary_key, &self.metadata)))
         } else {
@@ -755,7 +694,7 @@ mod tests {
     #[test]
     fn test_series_set_concurrency() {
         let schema = schema_for_test();
-        let set = Arc::new(SeriesSet::new(schema, 3, 32));
+        let set = Arc::new(SeriesSet::new(schema, 32));
 
         let concurrency = 32;
         let pk_num = concurrency * 2;
