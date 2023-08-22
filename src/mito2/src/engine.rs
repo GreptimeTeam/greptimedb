@@ -28,7 +28,6 @@ use store_api::storage::{RegionId, ScanRequest};
 
 use crate::config::MitoConfig;
 use crate::error::{RecvSnafu, Result};
-use crate::read::stream_builder::RecordBatchStreamBuilder;
 use crate::request::{RegionTask, RequestBody};
 use crate::worker::WorkerGroup;
 
@@ -109,12 +108,12 @@ impl EngineInner {
         receiver.await.context(RecvSnafu)?
     }
 
-    /// Return a record batch stream builder to execute the query.
-    fn handle_query(
-        &self,
-        region_id: RegionId,
-        request: ScanRequest,
-    ) -> Result<RecordBatchStreamBuilder> {
-        unimplemented!()
-    }
+    // /// Return a record batch stream builder to execute the query.
+    // fn handle_query(
+    //     &self,
+    //     region_id: RegionId,
+    //     request: ScanRequest,
+    // ) -> Result<RecordBatchStreamBuilder> {
+    //     unimplemented!()
+    // }
 }

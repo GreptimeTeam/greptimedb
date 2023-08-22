@@ -12,71 +12,72 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Provides a builder to build a stream to query the engine.
+//! Sequential scan.
 
 use common_query::logical_plan::Expr;
 use common_recordbatch::{OrderOption, SendableRecordBatchStream};
+use common_time::range::TimestampRange;
 use object_store::ObjectStore;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ColumnId;
+use table::predicate::Predicate;
 
 use crate::memtable::MemtableRef;
 use crate::sst::file::FileHandle;
 
-/// Builder to construct a [SendableRecordBatchStream] for a query.
-pub struct RecordBatchStreamBuilder {
-    /// Metadata of the region when the builder created.
+/// Scans a region and returns rows in a sorted sequence.
+///
+/// The output order is always `order by primary key, time index`.
+pub struct SeqScan {
+    /// Metadata of the region to scan.
     metadata: RegionMetadataRef,
-    /// Projection to push down.
-    projection: Option<Vec<ColumnId>>,
-    /// Filters to push down.
-    filters: Vec<Expr>,
-    /// Required output ordering.
-    output_ordering: Option<Vec<OrderOption>>,
-    /// Memtables to scan.
-    memtables: Vec<MemtableRef>,
-    /// Handles to SST files to scan.
-    files: Vec<FileHandle>,
     /// Directory of SST files.
     file_dir: String,
     /// Object store that stores SST files.
     object_store: ObjectStore,
+
+    /// Projection to push down.
+    projection: Option<Vec<ColumnId>>,
+    /// Time range filter for time index.
+    time_range: Option<TimestampRange>,
+    /// Predicate to push down.
+    predicate: Option<Predicate>,
+    /// Memtables to scan.
+    memtables: Vec<MemtableRef>,
+    /// Handles to SST files to scan.
+    files: Vec<FileHandle>,
 }
 
-impl RecordBatchStreamBuilder {
-    /// Creates a new builder.
-    pub fn new(
-        metadata: RegionMetadataRef,
-        file_dir: &str,
-        object_store: ObjectStore,
-    ) -> RecordBatchStreamBuilder {
-        RecordBatchStreamBuilder {
+impl SeqScan {
+    /// Creates a new [SeqScan].
+    pub fn new(metadata: RegionMetadataRef, file_dir: &str, object_store: ObjectStore) -> SeqScan {
+        SeqScan {
             metadata,
-            projection: None,
-            filters: Vec::new(),
-            output_ordering: None,
-            memtables: Vec::new(),
-            files: Vec::new(),
             file_dir: file_dir.to_string(),
             object_store,
+            projection: None,
+            time_range: None,
+            predicate: None,
+            memtables: Vec::new(),
+            files: Vec::new(),
         }
     }
 
-    /// Pushes down projection
+    /// Set projection.
     pub fn projection(&mut self, projection: Option<Vec<ColumnId>>) -> &mut Self {
         self.projection = projection;
         self
     }
 
-    /// Pushes down filters.
-    pub fn filters(&mut self, filters: Vec<Expr>) -> &mut Self {
-        self.filters = filters;
+    /// Set time range filter for time index.
+    pub fn time_range(&mut self, time_range: Option<TimestampRange>) -> &mut Self {
+        self.time_range = time_range;
         self
     }
 
-    /// Set required output ordering.
-    pub fn output_ordering(&mut self, ordering: Option<Vec<OrderOption>>) -> &mut Self {
-        self.output_ordering = ordering;
+    /// Set predicate to push down.
+    pub fn predicate(&mut self, predicate: Option<Predicate>) -> &mut Self {
+        self.predicate = predicate;
         self
     }
 

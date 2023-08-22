@@ -15,7 +15,8 @@
 //! Common structs and utilities for reading data.
 
 pub mod merge;
-pub mod stream_builder;
+mod scan_region;
+pub mod seq_scan;
 
 use std::sync::Arc;
 
