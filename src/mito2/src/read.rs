@@ -117,7 +117,7 @@ impl Batch {
             return None;
         }
 
-        self.get_timestamp(0)
+        Some(self.get_timestamp(0))
     }
 
     /// Returns the last timestamp in the batch or `None` if the batch is empty.
@@ -126,7 +126,7 @@ impl Batch {
             return None;
         }
 
-        self.get_timestamp(self.timestamps.len() - 1)
+        Some(self.get_timestamp(self.timestamps.len() - 1))
     }
 
     /// Returns the first sequence in the batch or `None` if the batch is empty.
@@ -135,7 +135,7 @@ impl Batch {
             return None;
         }
 
-        self.get_sequence(0)
+        Some(self.get_sequence(0))
     }
 
     /// Returns the last sequence in the batch or `None` if the batch is empty.
@@ -144,7 +144,7 @@ impl Batch {
             return None;
         }
 
-        self.get_sequence(self.sequences.len() - 1)
+        Some(self.get_sequence(self.sequences.len() - 1))
     }
 
     /// Slice the batch, returning a new batch.
@@ -331,13 +331,13 @@ impl Batch {
     /// Gets a timestamp at given `index`.
     ///
     /// # Panics
-    /// Panics if `index` is out-of-bound
-    fn get_timestamp(&self, index: usize) -> Option<Timestamp> {
+    /// Panics if `index` is out-of-bound or the timestamp vector returns null.
+    fn get_timestamp(&self, index: usize) -> Timestamp {
         match self.timestamps.get_ref(index) {
-            ValueRef::Timestamp(timestamp) => Some(timestamp),
+            ValueRef::Timestamp(timestamp) => timestamp,
             // Int64 is always millisecond.
             // TODO(yingwen): Don't allow using int64 as time index.
-            ValueRef::Int64(v) => Some(Timestamp::new_millisecond(v)),
+            ValueRef::Int64(v) => Timestamp::new_millisecond(v),
             // We have check the data type is timestamp compatible in the [BatchBuilder] so it's safe to panic.
             value => panic!("{:?} is not a timestamp", value),
         }
@@ -346,10 +346,10 @@ impl Batch {
     /// Gets a sequence at given `index`.
     ///
     /// # Panics
-    /// Panics if `index` is out-of-bound
-    fn get_sequence(&self, index: usize) -> Option<SequenceNumber> {
-        // Sequences is not null so it actually returns Some.
-        self.sequences.get_data(index)
+    /// Panics if `index` is out-of-bound or the sequence vector returns null.
+    fn get_sequence(&self, index: usize) -> SequenceNumber {
+        // Safety: sequences is not null so it actually returns Some.
+        self.sequences.get_data(index).unwrap()
     }
 }
 

@@ -22,14 +22,11 @@ use base64::DecodeError;
 use catalog;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
-use common_error::{GREPTIME_ERROR_CODE, GREPTIME_ERROR_MSG};
 use common_telemetry::logging;
 use datatypes::prelude::ConcreteDataType;
 use query::parser::PromQuery;
 use serde_json::json;
-use snafu::{ErrorCompat, Location, Snafu};
-use tonic::codegen::http::{HeaderMap, HeaderValue};
-use tonic::metadata::MetadataMap;
+use snafu::{Location, Snafu};
 use tonic::Code;
 
 #[derive(Debug, Snafu)]
@@ -331,6 +328,21 @@ pub enum Error {
         actual: opensrv_mysql::ColumnType,
         location: Location,
     },
+
+    #[snafu(display(
+        "Column: {}, {} incompatible, expected: {}, actual: {}",
+        column_name,
+        datatype,
+        expected,
+        actual
+    ))]
+    IncompatibleSchema {
+        column_name: String,
+        datatype: String,
+        expected: i32,
+        actual: i32,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -374,7 +386,8 @@ impl ErrorExt for Error {
             | InvalidPrepareStatement { .. }
             | DataFrame { .. }
             | PreparedStmtTypeMismatch { .. }
-            | TimePrecision { .. } => StatusCode::InvalidArguments,
+            | TimePrecision { .. }
+            | IncompatibleSchema { .. } => StatusCode::InvalidArguments,
 
             InfluxdbLinesWrite { source, .. }
             | PromSeriesWrite { source, .. }
@@ -429,7 +442,7 @@ impl ErrorExt for Error {
 }
 
 /// Returns the tonic [Code] of a [StatusCode].
-fn status_to_tonic_code(status_code: StatusCode) -> Code {
+pub fn status_to_tonic_code(status_code: StatusCode) -> Code {
     match status_code {
         StatusCode::Success => Code::Ok,
         StatusCode::Unknown => Code::Unknown,
@@ -455,23 +468,40 @@ fn status_to_tonic_code(status_code: StatusCode) -> Code {
     }
 }
 
-impl From<Error> for tonic::Status {
-    fn from(err: Error) -> Self {
-        let mut headers = HeaderMap::<HeaderValue>::with_capacity(2);
+#[macro_export]
+macro_rules! define_into_tonic_status {
+    ($Error: ty) => {
+        impl From<$Error> for tonic::Status {
+            fn from(err: $Error) -> Self {
+                use common_error::{GREPTIME_ERROR_CODE, GREPTIME_ERROR_MSG};
+                use snafu::ErrorCompat;
+                use tonic::codegen::http::{HeaderMap, HeaderValue};
+                use tonic::metadata::MetadataMap;
 
-        // If either of the status_code or error msg cannot convert to valid HTTP header value
-        // (which is a very rare case), just ignore. Client will use Tonic status code and message.
-        let status_code = err.status_code();
-        headers.insert(GREPTIME_ERROR_CODE, HeaderValue::from(status_code as u32));
-        let root_error = err.iter_chain().last().unwrap();
-        if let Ok(err_msg) = HeaderValue::from_bytes(root_error.to_string().as_bytes()) {
-            let _ = headers.insert(GREPTIME_ERROR_MSG, err_msg);
+                let mut headers = HeaderMap::<HeaderValue>::with_capacity(2);
+
+                // If either of the status_code or error msg cannot convert to valid HTTP header value
+                // (which is a very rare case), just ignore. Client will use Tonic status code and message.
+                let status_code = err.status_code();
+                headers.insert(GREPTIME_ERROR_CODE, HeaderValue::from(status_code as u32));
+                let root_error = err.iter_chain().last().unwrap();
+
+                if let Ok(err_msg) = HeaderValue::from_bytes(root_error.to_string().as_bytes()) {
+                    let _ = headers.insert(GREPTIME_ERROR_MSG, err_msg);
+                }
+
+                let metadata = MetadataMap::from_headers(headers);
+                tonic::Status::with_metadata(
+                    $crate::error::status_to_tonic_code(status_code),
+                    err.to_string(),
+                    metadata,
+                )
+            }
         }
-
-        let metadata = MetadataMap::from_headers(headers);
-        tonic::Status::with_metadata(status_to_tonic_code(status_code), err.to_string(), metadata)
-    }
+    };
 }
+
+define_into_tonic_status!(Error);
 
 impl From<std::io::Error> for Error {
     fn from(e: std::io::Error) -> Self {

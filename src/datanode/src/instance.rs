@@ -56,7 +56,6 @@ use table::engine::{TableEngine, TableEngineProcedureRef};
 use table::requests::FlushTableRequest;
 use table::table::numbers::NumbersTable;
 use table::table::TableIdProviderRef;
-use table::Table;
 
 use crate::datanode::{DatanodeOptions, ObjectStoreConfig, ProcedureConfig, WalConfig};
 use crate::error::{
@@ -68,6 +67,7 @@ use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
 use crate::heartbeat::handler::close_region::CloseRegionHandler;
 use crate::heartbeat::handler::open_region::OpenRegionHandler;
 use crate::heartbeat::HeartbeatTask;
+use crate::row_inserter::RowInserter;
 use crate::sql::{SqlHandler, SqlRequest};
 use crate::store;
 
@@ -82,6 +82,7 @@ pub struct Instance {
     pub(crate) sql_handler: SqlHandler,
     pub(crate) catalog_manager: CatalogManagerRef,
     pub(crate) table_id_provider: Option<TableIdProviderRef>,
+    row_inserter: RowInserter,
     procedure_manager: ProcedureManagerRef,
     greptimedb_telemetry_task: Arc<GreptimeDBTelemetryTask>,
 }
@@ -212,13 +213,13 @@ impl Instance {
             Mode::Standalone => {
                 if opts.enable_memory_catalog {
                     let catalog = catalog::local::MemoryCatalogManager::with_default_setup();
-                    let table = NumbersTable::new(MIN_USER_TABLE_ID);
+                    let table = NumbersTable::table(MIN_USER_TABLE_ID);
 
                     let _ = catalog
                         .register_table(RegisterTableRequest {
                             table_id: MIN_USER_TABLE_ID,
                             table_name: table.table_info().name.to_string(),
-                            table: Arc::new(table),
+                            table,
                             catalog: DEFAULT_CATALOG_NAME.to_string(),
                             schema: DEFAULT_SCHEMA_NAME.to_string(),
                         })
@@ -280,10 +281,14 @@ impl Instance {
             plugins,
         );
         let query_engine = factory.query_engine();
-
         let procedure_manager =
             create_procedure_manager(opts.node_id.unwrap_or(0), &opts.procedure, object_store)
                 .await?;
+        let sql_handler = SqlHandler::new(
+            engine_manager.clone(),
+            catalog_manager.clone(),
+            procedure_manager.clone(),
+        );
         // Register all procedures.
         // Register procedures of the mito engine.
         mito_engine.register_procedure_loaders(&*procedure_manager);
@@ -296,23 +301,22 @@ impl Instance {
             mito_engine.clone(),
             &*procedure_manager,
         );
+        let row_inserter = RowInserter::new(catalog_manager.clone());
+        let greptimedb_telemetry_task = get_greptimedb_telemetry_task(
+            Some(opts.storage.data_home.clone()),
+            &opts.mode,
+            opts.enable_telemetry,
+        )
+        .await;
 
         let instance = Arc::new(Self {
             query_engine: query_engine.clone(),
-            sql_handler: SqlHandler::new(
-                engine_manager.clone(),
-                catalog_manager.clone(),
-                procedure_manager.clone(),
-            ),
+            sql_handler,
             catalog_manager: catalog_manager.clone(),
             table_id_provider,
+            row_inserter,
             procedure_manager,
-            greptimedb_telemetry_task: get_greptimedb_telemetry_task(
-                Some(opts.storage.data_home.clone()),
-                &opts.mode,
-                opts.enable_telemetry,
-            )
-            .await,
+            greptimedb_telemetry_task,
         });
 
         let heartbeat_task = Instance::build_heartbeat_task(

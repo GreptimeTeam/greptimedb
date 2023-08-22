@@ -97,7 +97,7 @@ pub async fn influxdb_write(
 
     let request = InfluxdbRequest { precision, lines };
 
-    handler.exec(&request, ctx).await?;
+    handler.exec(request, ctx).await?;
 
     Ok((StatusCode::NO_CONTENT, ()))
 }

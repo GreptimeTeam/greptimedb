@@ -70,7 +70,7 @@ use table_name::{TableNameKey, TableNameManager, TableNameValue};
 use self::catalog_name::{CatalogManager, CatalogNameValue};
 use self::schema_name::{SchemaManager, SchemaNameValue};
 use self::table_route::{TableRouteManager, TableRouteValue};
-use crate::error::{self, Error, InvalidTableMetadataSnafu, Result, SerdeJsonSnafu};
+use crate::error::{self, Result, SerdeJsonSnafu};
 #[allow(deprecated)]
 pub use crate::key::table_route::{TableRouteKey, TABLE_ROUTE_PREFIX};
 use crate::kv_backend::txn::Txn;
@@ -215,9 +215,14 @@ impl TableMetadataManager {
     /// The caller MUST ensure it has the exclusive access to `TableNameKey`.
     pub async fn create_table_metadata(
         &self,
-        table_info: RawTableInfo,
+        mut table_info: RawTableInfo,
         region_routes: Vec<RegionRoute>,
     ) -> Result<()> {
+        let region_numbers = region_routes
+            .iter()
+            .map(|region| region.region.id.region_number())
+            .collect::<Vec<_>>();
+        table_info.meta.region_numbers = region_numbers;
         let table_id = table_info.ident.table_id;
 
         // Creates table name.
@@ -477,15 +482,8 @@ macro_rules! impl_table_meta_value {
     ($($val_ty: ty), *) => {
         $(
             impl $val_ty {
-                pub fn try_from_raw_value_ref(raw_value: &[u8]) -> Result<Self> {
+                pub fn try_from_raw_value(raw_value: &[u8]) -> Result<Self> {
                     serde_json::from_slice(raw_value).context(SerdeJsonSnafu)
-                }
-
-                pub fn try_from_raw_value(raw_value: Vec<u8>) -> Result<Self> {
-                    let raw_value = String::from_utf8(raw_value).map_err(|e| {
-                        InvalidTableMetadataSnafu { err_msg: e.to_string() }.build()
-                    })?;
-                    serde_json::from_str(&raw_value).context(SerdeJsonSnafu)
                 }
 
                 pub fn try_as_raw_value(&self) -> Result<Vec<u8>> {
@@ -495,21 +493,6 @@ macro_rules! impl_table_meta_value {
         )*
     }
 }
-
-macro_rules! impl_try_from {
-    ($($val_ty: ty), *) => {
-        $(
-            impl<'a> TryFrom<&'a Vec<u8>> for $val_ty {
-                type Error = Error;
-                fn try_from(value: &'a Vec<u8>) -> Result<Self> {
-                    serde_json::from_slice(value).context(SerdeJsonSnafu)
-                }
-            }
-        )*
-    };
-}
-
-impl_try_from! {TableInfoValue, TableRouteValue, DatanodeTableValue}
 
 impl_table_meta_value! {
     CatalogNameValue,
@@ -546,7 +529,7 @@ mod tests {
         assert_eq!(removed, to_removed_key(key));
     }
 
-    fn new_test_table_info() -> TableInfo {
+    fn new_test_table_info(region_numbers: impl Iterator<Item = u32>) -> TableInfo {
         let column_schemas = vec![
             ColumnSchema::new("col1", ConcreteDataType::int32_datatype(), true),
             ColumnSchema::new(
@@ -568,6 +551,7 @@ mod tests {
             .primary_key_indices(vec![0])
             .engine("engine")
             .next_column_id(3)
+            .region_numbers(region_numbers.collect::<Vec<_>>())
             .build()
             .unwrap();
         TableInfoBuilder::default()
@@ -600,9 +584,10 @@ mod tests {
     async fn test_create_table_metadata() {
         let mem_kv = Arc::new(MemoryKvBackend::default());
         let table_metadata_manager = TableMetadataManager::new(mem_kv);
-        let table_info: RawTableInfo = new_test_table_info().into();
         let region_route = new_test_region_route();
         let region_routes = vec![region_route.clone()];
+        let table_info: RawTableInfo =
+            new_test_table_info(region_routes.iter().map(|r| r.region.id.region_number())).into();
         // creates metadata.
         table_metadata_manager
             .create_table_metadata(table_info.clone(), region_routes.clone())
@@ -634,11 +619,12 @@ mod tests {
     async fn test_delete_table_metadata() {
         let mem_kv = Arc::new(MemoryKvBackend::default());
         let table_metadata_manager = TableMetadataManager::new(mem_kv);
-        let table_info: RawTableInfo = new_test_table_info().into();
-        let table_id = table_info.ident.table_id;
         let region_route = new_test_region_route();
-        let datanode_id = 2;
         let region_routes = vec![region_route.clone()];
+        let table_info: RawTableInfo =
+            new_test_table_info(region_routes.iter().map(|r| r.region.id.region_number())).into();
+        let table_id = table_info.ident.table_id;
+        let datanode_id = 2;
         let table_route_value = TableRouteValue::new(region_routes.clone());
 
         // creates metadata.
@@ -704,10 +690,11 @@ mod tests {
     async fn test_rename_table() {
         let mem_kv = Arc::new(MemoryKvBackend::default());
         let table_metadata_manager = TableMetadataManager::new(mem_kv);
-        let table_info: RawTableInfo = new_test_table_info().into();
-        let table_id = table_info.ident.table_id;
         let region_route = new_test_region_route();
         let region_routes = vec![region_route.clone()];
+        let table_info: RawTableInfo =
+            new_test_table_info(region_routes.iter().map(|r| r.region.id.region_number())).into();
+        let table_id = table_info.ident.table_id;
         // creates metadata.
         table_metadata_manager
             .create_table_metadata(table_info.clone(), region_routes.clone())
@@ -768,10 +755,11 @@ mod tests {
     async fn test_update_table_info() {
         let mem_kv = Arc::new(MemoryKvBackend::default());
         let table_metadata_manager = TableMetadataManager::new(mem_kv);
-        let table_info: RawTableInfo = new_test_table_info().into();
-        let table_id = table_info.ident.table_id;
         let region_route = new_test_region_route();
         let region_routes = vec![region_route.clone()];
+        let table_info: RawTableInfo =
+            new_test_table_info(region_routes.iter().map(|r| r.region.id.region_number())).into();
+        let table_id = table_info.ident.table_id;
         // creates metadata.
         table_metadata_manager
             .create_table_metadata(table_info.clone(), region_routes.clone())
@@ -833,9 +821,10 @@ mod tests {
     async fn test_update_table_route() {
         let mem_kv = Arc::new(MemoryKvBackend::default());
         let table_metadata_manager = TableMetadataManager::new(mem_kv);
-        let table_info: RawTableInfo = new_test_table_info().into();
         let region_route = new_test_region_route();
         let region_routes = vec![region_route.clone()];
+        let table_info: RawTableInfo =
+            new_test_table_info(region_routes.iter().map(|r| r.region.id.region_number())).into();
         let table_id = table_info.ident.table_id;
         let current_table_route_value = TableRouteValue::new(region_routes.clone());
         // creates metadata.

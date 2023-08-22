@@ -25,8 +25,11 @@ use api::v1::{ColumnDataType, ColumnSchema, OpType, Rows, Value};
 use common_base::readable_size::ReadableSize;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::metadata::{ColumnMetadata, RegionMetadata};
-use store_api::region_request::RegionRequest;
-use store_api::storage::{ColumnId, CompactionStrategy, RegionId};
+use store_api::region_request::{
+    RegionAlterRequest, RegionCloseRequest, RegionCompactRequest, RegionCreateRequest,
+    RegionDropRequest, RegionFlushRequest, RegionOpenRequest, RegionRequest,
+};
+use store_api::storage::{CompactionStrategy, RegionId};
 use tokio::sync::oneshot::{self, Receiver, Sender};
 
 use crate::config::DEFAULT_WRITE_BUFFER_SIZE;
@@ -53,41 +56,6 @@ impl Default for RegionOptions {
             compaction_strategy: CompactionStrategy::LeveledTimeWindow,
         }
     }
-}
-
-/// Create region request.
-#[derive(Debug)]
-pub struct CreateRequest {
-    /// Region to create.
-    pub region_id: RegionId,
-    /// Data directory of the region.
-    pub region_dir: String,
-    /// Columns in this region.
-    pub column_metadatas: Vec<ColumnMetadata>,
-    /// Columns in the primary key.
-    pub primary_key: Vec<ColumnId>,
-    /// Create region if not exists.
-    pub create_if_not_exists: bool,
-    /// Options of the created region.
-    pub options: RegionOptions,
-}
-
-/// Open region request.
-#[derive(Debug)]
-pub struct OpenRequest {
-    /// Region to open.
-    pub region_id: RegionId,
-    /// Data directory of the region.
-    pub region_dir: String,
-    /// Options of the created region.
-    pub options: RegionOptions,
-}
-
-/// Close region request.
-#[derive(Debug)]
-pub struct CloseRequest {
-    /// Region to close.
-    pub region_id: RegionId,
 }
 
 /// Request to write a region.
@@ -160,6 +128,7 @@ impl WriteRequest {
         self.name_to_index.get(name).copied()
     }
 
+    // TODO(yingwen): Check delete schema.
     /// Checks schema of rows is compatible with schema of the region.
     ///
     /// If column with default value is missing, it returns a special [FillDefault](crate::error::Error::FillDefault)
@@ -366,22 +335,22 @@ pub(crate) struct RegionTask {
     /// with an enum if we need to carry more information.
     pub(crate) sender: Option<Sender<Result<()>>>,
     /// Request body.
-    pub(crate) request: RegionRequest,
+    pub(crate) body: RequestBody,
     /// Region identifier.
     pub(crate) region_id: RegionId,
 }
 
 impl RegionTask {
-    /// Creates a [RegionTask] and a receiver from [RegionRequest].
+    /// Creates a [RegionTask] and a receiver from request body.
     pub(crate) fn from_request(
         region_id: RegionId,
-        request: RegionRequest,
+        body: RequestBody,
     ) -> (RegionTask, Receiver<Result<()>>) {
         let (sender, receiver) = oneshot::channel();
         (
             RegionTask {
                 sender: Some(sender),
-                request,
+                body,
                 region_id,
             },
             receiver,
@@ -389,17 +358,46 @@ impl RegionTask {
     }
 }
 
-/// Mito Region Engine's request validator
-pub(crate) struct RequestValidator;
+/// Request body of a region task.
+///
+/// It validates requests outside of workers.
+#[derive(Debug)]
+pub(crate) enum RequestBody {
+    Write(WriteRequest),
+    Create(RegionCreateRequest),
+    Drop(RegionDropRequest),
+    Open(RegionOpenRequest),
+    Close(RegionCloseRequest),
+    Alter(RegionAlterRequest),
+    Flush(RegionFlushRequest),
+    Compact(RegionCompactRequest),
+}
 
-impl RequestValidator {
-    /// Validate the [WriteRequest].
-    pub fn write_request(_write_request: &WriteRequest) -> Result<()> {
-        // - checks whether the request is too large.
-        // - checks whether each row in rows has the same schema.
-        // - checks whether each column match the schema in Rows.
-        // - checks rows don't have duplicate columns.
-        unimplemented!()
+impl RequestBody {
+    /// Convert request body from [RegionRequest].
+    pub(crate) fn try_from_region_request(
+        region_id: RegionId,
+        value: RegionRequest,
+    ) -> Result<RequestBody> {
+        let body = match value {
+            RegionRequest::Put(v) => {
+                let write_request = WriteRequest::new(region_id, OpType::Put, v.rows)?;
+                RequestBody::Write(write_request)
+            }
+            RegionRequest::Delete(v) => {
+                let write_request = WriteRequest::new(region_id, OpType::Delete, v.rows)?;
+                RequestBody::Write(write_request)
+            }
+            RegionRequest::Create(v) => RequestBody::Create(v),
+            RegionRequest::Drop(v) => RequestBody::Drop(v),
+            RegionRequest::Open(v) => RequestBody::Open(v),
+            RegionRequest::Close(v) => RequestBody::Close(v),
+            RegionRequest::Alter(v) => RequestBody::Alter(v),
+            RegionRequest::Flush(v) => RequestBody::Flush(v),
+            RegionRequest::Compact(v) => RequestBody::Compact(v),
+        };
+
+        Ok(body)
     }
 }
 

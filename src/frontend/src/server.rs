@@ -183,7 +183,7 @@ impl Services {
 
             let http_server = http_server_builder
                 .with_metrics_handler(MetricsHandler)
-                .with_script_handler(instance.clone())
+                .with_script_handler(instance)
                 .with_configurator(plugins.get::<ConfiguratorRef>())
                 .with_greptime_config_options(opts.to_toml_string())
                 .build();

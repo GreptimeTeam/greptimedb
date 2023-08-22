@@ -16,8 +16,8 @@ use std::sync::{Arc, Weak};
 
 use arrow_schema::SchemaRef as ArrowSchemaRef;
 use common_catalog::consts::{
-    INFORMATION_SCHEMA_NAME, SEMANTIC_TYPE_FIELD, SEMANTIC_TYPE_PRIMARY_KEY,
-    SEMANTIC_TYPE_TIME_INDEX,
+    INFORMATION_SCHEMA_COLUMNS_TABLE_ID, INFORMATION_SCHEMA_NAME, SEMANTIC_TYPE_FIELD,
+    SEMANTIC_TYPE_PRIMARY_KEY, SEMANTIC_TYPE_TIME_INDEX,
 };
 use common_error::ext::BoxedError;
 use common_query::physical_plan::TaskContext;
@@ -31,9 +31,10 @@ use datatypes::scalars::ScalarVectorBuilder;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::vectors::{StringVectorBuilder, VectorRef};
 use snafu::{OptionExt, ResultExt};
+use store_api::storage::TableId;
 
 use super::tables::InformationSchemaTables;
-use super::{InformationStreamBuilder, COLUMNS, TABLES};
+use super::{InformationTable, COLUMNS, TABLES};
 use crate::error::{
     CreateRecordBatchSnafu, InternalSnafu, Result, UpgradeWeakCatalogManagerRefSnafu,
 };
@@ -81,7 +82,15 @@ impl InformationSchemaColumns {
     }
 }
 
-impl InformationStreamBuilder for InformationSchemaColumns {
+impl InformationTable for InformationSchemaColumns {
+    fn table_id(&self) -> TableId {
+        INFORMATION_SCHEMA_COLUMNS_TABLE_ID
+    }
+
+    fn table_name(&self) -> &'static str {
+        COLUMNS
+    }
+
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }

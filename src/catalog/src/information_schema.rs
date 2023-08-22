@@ -15,30 +15,27 @@
 mod columns;
 mod tables;
 
-use std::any::Any;
 use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 
-use async_trait::async_trait;
-use common_catalog::consts::{
-    INFORMATION_SCHEMA_COLUMNS_TABLE_ID, INFORMATION_SCHEMA_NAME,
-    INFORMATION_SCHEMA_TABLES_TABLE_ID,
-};
+use common_catalog::consts::INFORMATION_SCHEMA_NAME;
 use common_error::ext::BoxedError;
 use common_recordbatch::{RecordBatchStreamAdaptor, SendableRecordBatchStream};
 use datatypes::schema::SchemaRef;
 use futures_util::StreamExt;
 use snafu::ResultExt;
+use store_api::data_source::DataSource;
 use store_api::storage::{ScanRequest, TableId};
-use table::data_source::DataSource;
 use table::error::{SchemaConversionSnafu, TablesRecordBatchSnafu};
-use table::metadata::{TableIdent, TableInfoBuilder, TableMetaBuilder, TableType};
-use table::{Result as TableResult, Table, TableRef};
+use table::metadata::{
+    FilterPushDownType, TableInfoBuilder, TableInfoRef, TableMetaBuilder, TableType,
+};
+use table::thin_table::{ThinTable, ThinTableAdapter};
+use table::TableRef;
 
 use self::columns::InformationSchemaColumns;
 use crate::error::Result;
 use crate::information_schema::tables::InformationSchemaTables;
-use crate::table_factory::TableFactory;
 use crate::CatalogManager;
 
 pub const TABLES: &str = "tables";
@@ -63,192 +60,119 @@ impl InformationSchemaProvider {
         catalog_name: String,
         catalog_manager: Weak<dyn CatalogManager>,
     ) -> HashMap<String, TableRef> {
+        let provider = Self::new(catalog_name, catalog_manager);
+
         let mut schema = HashMap::new();
-
-        schema.insert(
-            TABLES.to_string(),
-            Arc::new(InformationTable::new(
-                catalog_name.clone(),
-                INFORMATION_SCHEMA_TABLES_TABLE_ID,
-                TABLES.to_string(),
-                Arc::new(InformationSchemaTables::new(
-                    catalog_name.clone(),
-                    catalog_manager.clone(),
-                )),
-            )) as _,
-        );
-        schema.insert(
-            COLUMNS.to_string(),
-            Arc::new(InformationTable::new(
-                catalog_name.clone(),
-                INFORMATION_SCHEMA_COLUMNS_TABLE_ID,
-                COLUMNS.to_string(),
-                Arc::new(InformationSchemaColumns::new(catalog_name, catalog_manager)),
-            )) as _,
-        );
-
+        schema.insert(TABLES.to_owned(), provider.table(TABLES).unwrap());
+        schema.insert(COLUMNS.to_owned(), provider.table(COLUMNS).unwrap());
         schema
     }
 
-    pub fn table(&self, name: &str) -> Result<Option<TableRef>> {
-        let (stream_builder, table_id) = match name.to_ascii_lowercase().as_ref() {
-            TABLES => (
-                Arc::new(InformationSchemaTables::new(
-                    self.catalog_name.clone(),
-                    self.catalog_manager.clone(),
-                )) as _,
-                INFORMATION_SCHEMA_TABLES_TABLE_ID,
-            ),
-            COLUMNS => (
-                Arc::new(InformationSchemaColumns::new(
-                    self.catalog_name.clone(),
-                    self.catalog_manager.clone(),
-                )) as _,
-                INFORMATION_SCHEMA_COLUMNS_TABLE_ID,
-            ),
-            _ => {
-                return Ok(None);
-            }
-        };
+    pub fn table(&self, name: &str) -> Option<TableRef> {
+        self.information_table(name).map(|table| {
+            let schema = table.schema();
+            let table_info = Self::table_info(self.catalog_name.clone(), &table);
+            let table_type = table.table_type();
+            let filter_pushdown = FilterPushDownType::Unsupported;
+            let thin_table = ThinTable::new(schema, table_info, table_type, filter_pushdown);
 
-        Ok(Some(Arc::new(InformationTable::new(
-            self.catalog_name.clone(),
-            table_id,
-            name.to_string(),
-            stream_builder,
-        ))))
+            let data_source = Arc::new(InformationTableDataSource::new(table));
+            Arc::new(ThinTableAdapter::new(thin_table, data_source)) as _
+        })
     }
 
-    pub fn table_factory(&self, name: &str) -> Result<Option<TableFactory>> {
-        let (stream_builder, table_id) = match name.to_ascii_lowercase().as_ref() {
-            TABLES => (
-                Arc::new(InformationSchemaTables::new(
-                    self.catalog_name.clone(),
-                    self.catalog_manager.clone(),
-                )) as _,
-                INFORMATION_SCHEMA_TABLES_TABLE_ID,
-            ),
-            COLUMNS => (
-                Arc::new(InformationSchemaColumns::new(
-                    self.catalog_name.clone(),
-                    self.catalog_manager.clone(),
-                )) as _,
-                INFORMATION_SCHEMA_COLUMNS_TABLE_ID,
-            ),
-            _ => {
-                return Ok(None);
-            }
-        };
-        let data_source = Arc::new(InformationTable::new(
-            self.catalog_name.clone(),
-            table_id,
-            name.to_string(),
-            stream_builder,
-        ));
-
-        Ok(Some(Arc::new(move || data_source.clone())))
-    }
-}
-
-// TODO(ruihang): make it a more generic trait:
-// https://github.com/GreptimeTeam/greptimedb/pull/1639#discussion_r1205001903
-pub trait InformationStreamBuilder: Send + Sync {
-    fn to_stream(&self) -> Result<SendableRecordBatchStream>;
-
-    fn schema(&self) -> SchemaRef;
-}
-
-pub struct InformationTable {
-    catalog_name: String,
-    table_id: TableId,
-    name: String,
-    stream_builder: Arc<dyn InformationStreamBuilder>,
-}
-
-impl InformationTable {
-    pub fn new(
-        catalog_name: String,
-        table_id: TableId,
-        name: String,
-        stream_builder: Arc<dyn InformationStreamBuilder>,
-    ) -> Self {
-        Self {
-            catalog_name,
-            table_id,
-            name,
-            stream_builder,
+    fn information_table(&self, name: &str) -> Option<InformationTableRef> {
+        match name.to_ascii_lowercase().as_str() {
+            TABLES => Some(Arc::new(InformationSchemaTables::new(
+                self.catalog_name.clone(),
+                self.catalog_manager.clone(),
+            )) as _),
+            COLUMNS => Some(Arc::new(InformationSchemaColumns::new(
+                self.catalog_name.clone(),
+                self.catalog_manager.clone(),
+            )) as _),
+            _ => None,
         }
     }
-}
 
-#[async_trait]
-impl Table for InformationTable {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn schema(&self) -> SchemaRef {
-        self.stream_builder.schema()
-    }
-
-    fn table_info(&self) -> table::metadata::TableInfoRef {
+    fn table_info(catalog_name: String, table: &InformationTableRef) -> TableInfoRef {
         let table_meta = TableMetaBuilder::default()
-            .schema(self.stream_builder.schema())
+            .schema(table.schema())
             .primary_key_indices(vec![])
             .next_column_id(0)
             .build()
             .unwrap();
-        Arc::new(
-            TableInfoBuilder::default()
-                .ident(TableIdent {
-                    table_id: self.table_id,
-                    version: 0,
-                })
-                .name(self.name.clone())
-                .catalog_name(self.catalog_name.clone())
-                .schema_name(INFORMATION_SCHEMA_NAME.to_string())
-                .meta(table_meta)
-                .table_type(TableType::Temporary)
-                .build()
-                .unwrap(),
-        )
+        let table_info = TableInfoBuilder::default()
+            .table_id(table.table_id())
+            .name(table.table_name().to_owned())
+            .catalog_name(catalog_name)
+            .schema_name(INFORMATION_SCHEMA_NAME.to_owned())
+            .meta(table_meta)
+            .table_type(table.table_type())
+            .build()
+            .unwrap();
+        Arc::new(table_info)
     }
+}
+
+trait InformationTable {
+    fn table_id(&self) -> TableId;
+
+    fn table_name(&self) -> &'static str;
+
+    fn schema(&self) -> SchemaRef;
+
+    fn to_stream(&self) -> Result<SendableRecordBatchStream>;
 
     fn table_type(&self) -> TableType {
         TableType::Temporary
     }
+}
 
-    async fn scan_to_stream(&self, request: ScanRequest) -> TableResult<SendableRecordBatchStream> {
-        self.get_stream(request)
+type InformationTableRef = Arc<dyn InformationTable + Send + Sync>;
+
+struct InformationTableDataSource {
+    table: InformationTableRef,
+}
+
+impl InformationTableDataSource {
+    fn new(table: InformationTableRef) -> Self {
+        Self { table }
+    }
+
+    fn try_project(&self, projection: &[usize]) -> std::result::Result<SchemaRef, BoxedError> {
+        let schema = self
+            .table
+            .schema()
+            .try_project(projection)
+            .context(SchemaConversionSnafu)
+            .map_err(BoxedError::new)?;
+        Ok(Arc::new(schema))
     }
 }
 
-impl DataSource for InformationTable {
-    fn get_stream(&self, request: ScanRequest) -> TableResult<SendableRecordBatchStream> {
+impl DataSource for InformationTableDataSource {
+    fn get_stream(
+        &self,
+        request: ScanRequest,
+    ) -> std::result::Result<SendableRecordBatchStream, BoxedError> {
         let projection = request.projection;
-        let projected_schema = if let Some(projection) = &projection {
-            Arc::new(
-                self.schema()
-                    .try_project(projection)
-                    .context(SchemaConversionSnafu)?,
-            )
-        } else {
-            self.schema()
+        let projected_schema = match &projection {
+            Some(projection) => self.try_project(projection)?,
+            None => self.table.schema(),
         };
+
         let stream = self
-            .stream_builder
+            .table
             .to_stream()
             .map_err(BoxedError::new)
-            .context(TablesRecordBatchSnafu)?
-            .map(move |batch| {
-                batch.and_then(|batch| {
-                    if let Some(projection) = &projection {
-                        batch.try_project(projection)
-                    } else {
-                        Ok(batch)
-                    }
-                })
+            .context(TablesRecordBatchSnafu)
+            .map_err(BoxedError::new)?
+            .map(move |batch| match &projection {
+                Some(p) => batch.and_then(|b| b.try_project(p)),
+                None => batch,
             });
+
         let stream = RecordBatchStreamAdaptor {
             schema: projected_schema,
             stream: Box::pin(stream),

@@ -53,7 +53,7 @@ impl GrpcQueryHandler for DummyInstance {
 
 #[async_trait]
 impl InfluxdbLineProtocolHandler for DummyInstance {
-    async fn exec(&self, request: &InfluxdbRequest, ctx: QueryContextRef) -> Result<()> {
+    async fn exec(&self, request: InfluxdbRequest, ctx: QueryContextRef) -> Result<()> {
         let requests: InsertRequests = request.try_into()?;
         for expr in requests.inserts {
             let _ = self

@@ -169,6 +169,13 @@ impl RegionMetadata {
             .map(|index| &self.column_metadatas[index])
     }
 
+    pub fn primary_key_columns(&self) -> impl Iterator<Item = &ColumnMetadata> {
+        // safety: RegionMetadata::validate ensures every primary key exists.
+        self.primary_key
+            .iter()
+            .map(|id| self.column_by_id(*id).unwrap())
+    }
+
     /// Returns all field columns.
     pub fn field_columns(&self) -> impl Iterator<Item = &ColumnMetadata> {
         self.column_metadatas

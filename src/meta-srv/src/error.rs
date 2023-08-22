@@ -16,10 +16,10 @@ use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_meta::peer::Peer;
 use common_runtime::JoinError;
+use servers::define_into_tonic_status;
 use snafu::{Location, Snafu};
 use tokio::sync::mpsc::error::SendError;
 use tonic::codegen::http;
-use tonic::Code;
 
 use crate::pubsub::Message;
 
@@ -520,11 +520,7 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-impl From<Error> for tonic::Status {
-    fn from(err: Error) -> Self {
-        tonic::Status::new(Code::Internal, err.to_string())
-    }
-}
+define_into_tonic_status!(Error);
 
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
@@ -550,7 +546,6 @@ impl ErrorExt for Error {
             | Error::SendShutdownSignal { .. }
             | Error::ParseAddr { .. }
             | Error::SchemaAlreadyExists { .. }
-            | Error::TableAlreadyExists { .. }
             | Error::PusherNotFound { .. }
             | Error::PushMessage { .. }
             | Error::MailboxClosed { .. }
@@ -564,6 +559,7 @@ impl ErrorExt for Error {
             | Error::PublishMessage { .. }
             | Error::Join { .. }
             | Error::Unsupported { .. } => StatusCode::Internal,
+            Error::TableAlreadyExists { .. } => StatusCode::TableAlreadyExists,
             Error::EmptyKey { .. }
             | Error::MissingRequiredParameter { .. }
             | Error::MissingRequestHeader { .. }

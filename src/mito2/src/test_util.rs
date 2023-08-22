@@ -14,6 +14,7 @@
 
 //! Utilities for testing.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::greptime_proto::v1;
@@ -29,14 +30,13 @@ use log_store::test_util::log_store_util;
 use object_store::services::Fs;
 use object_store::ObjectStore;
 use store_api::metadata::{ColumnMetadata, RegionMetadataRef};
-use store_api::storage::RegionId;
+use store_api::region_request::RegionCreateRequest;
 
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
 use crate::error::Result;
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::read::{Batch, BatchBuilder, BatchReader};
-use crate::request::{CreateRequest, RegionOptions};
 use crate::worker::WorkerGroup;
 
 /// Env to test mito engine.
@@ -133,9 +133,8 @@ impl TestEnv {
     }
 }
 
-/// Builder to mock a [CreateRequest].
+/// Builder to mock a [RegionCreateRequest].
 pub struct CreateRequestBuilder {
-    region_id: RegionId,
     region_dir: String,
     tag_num: usize,
     field_num: usize,
@@ -145,7 +144,6 @@ pub struct CreateRequestBuilder {
 impl Default for CreateRequestBuilder {
     fn default() -> Self {
         CreateRequestBuilder {
-            region_id: RegionId::default(),
             region_dir: "test".to_string(),
             tag_num: 1,
             field_num: 1,
@@ -155,11 +153,8 @@ impl Default for CreateRequestBuilder {
 }
 
 impl CreateRequestBuilder {
-    pub fn new(region_id: RegionId) -> CreateRequestBuilder {
-        CreateRequestBuilder {
-            region_id,
-            ..Default::default()
-        }
+    pub fn new() -> CreateRequestBuilder {
+        CreateRequestBuilder::default()
     }
 
     pub fn region_dir(mut self, value: &str) -> Self {
@@ -182,7 +177,7 @@ impl CreateRequestBuilder {
         self
     }
 
-    pub fn build(&self) -> CreateRequest {
+    pub fn build(&self) -> RegionCreateRequest {
         let mut column_id = 0;
         let mut column_metadatas = Vec::with_capacity(self.tag_num + self.field_num + 1);
         let mut primary_key = Vec::with_capacity(self.tag_num);
@@ -221,13 +216,14 @@ impl CreateRequestBuilder {
             column_id,
         });
 
-        CreateRequest {
-            region_id: self.region_id,
-            region_dir: self.region_dir.clone(),
+        RegionCreateRequest {
+            // We use empty engine name as we already locates the engine.
+            engine: String::new(),
             column_metadatas,
             primary_key,
             create_if_not_exists: self.create_if_not_exists,
-            options: RegionOptions::default(),
+            options: HashMap::default(),
+            region_dir: self.region_dir.clone(),
         }
     }
 }

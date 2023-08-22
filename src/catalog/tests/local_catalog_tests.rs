@@ -24,7 +24,6 @@ mod tests {
     use mito::config::EngineConfig;
     use table::engine::manager::MemoryTableEngineManager;
     use table::table::numbers::NumbersTable;
-    use table::TableRef;
     use tokio::sync::Mutex;
 
     async fn create_local_catalog_manager(
@@ -49,13 +48,12 @@ mod tests {
         // register table
         let table_name = "test_table";
         let table_id = 42;
-        let table = Arc::new(NumbersTable::new(table_id));
         let request = RegisterTableRequest {
             catalog: DEFAULT_CATALOG_NAME.to_string(),
             schema: DEFAULT_SCHEMA_NAME.to_string(),
             table_name: table_name.to_string(),
             table_id,
-            table: table.clone(),
+            table: NumbersTable::table(table_id),
         };
         assert!(catalog_manager.register_table(request).await.unwrap());
 
@@ -89,7 +87,7 @@ mod tests {
             schema: DEFAULT_SCHEMA_NAME.to_string(),
             table_name: "test_table".to_string(),
             table_id: 42,
-            table: Arc::new(NumbersTable::new(42)),
+            table: NumbersTable::table(42),
         };
         assert!(catalog_manager
             .register_table(request.clone())
@@ -105,7 +103,7 @@ mod tests {
                 schema: DEFAULT_SCHEMA_NAME.to_string(),
                 table_name: "test_table".to_string(),
                 table_id: 43,
-                table: Arc::new(NumbersTable::new(43)),
+                table: NumbersTable::table(43),
             })
             .await
             .unwrap_err();
@@ -124,7 +122,7 @@ mod tests {
             rt.block_on(async { create_local_catalog_manager().await.unwrap() });
         let catalog_manager = Arc::new(catalog_manager);
 
-        let succeed: Arc<Mutex<Option<TableRef>>> = Arc::new(Mutex::new(None));
+        let succeed = Arc::new(Mutex::new(None));
 
         let mut handles = Vec::with_capacity(8);
         for i in 0..8 {
@@ -132,20 +130,21 @@ mod tests {
             let succeed = succeed.clone();
             let handle = rt.spawn(async move {
                 let table_id = 42 + i;
-                let table = Arc::new(NumbersTable::new(table_id));
+                let table = NumbersTable::table(table_id);
+                let table_info = table.table_info();
                 let req = RegisterTableRequest {
                     catalog: DEFAULT_CATALOG_NAME.to_string(),
                     schema: DEFAULT_SCHEMA_NAME.to_string(),
                     table_name: "test_table".to_string(),
                     table_id,
-                    table: table.clone(),
+                    table,
                 };
                 match catalog.register_table(req).await {
                     Ok(res) => {
                         if res {
                             let mut succeed = succeed.lock().await;
                             info!("Successfully registered table: {}", table_id);
-                            *succeed = Some(table);
+                            *succeed = Some(table_info);
                         }
                     }
                     Err(_) => {
@@ -161,7 +160,7 @@ mod tests {
                 handle.await.unwrap();
             }
             let guard = succeed.lock().await;
-            let table = guard.as_ref().unwrap();
+            let table_info = guard.as_ref().unwrap();
             let table_registered = catalog_manager
                 .table(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "test_table")
                 .await
@@ -169,7 +168,7 @@ mod tests {
                 .unwrap();
             assert_eq!(
                 table_registered.table_info().ident.table_id,
-                table.table_info().ident.table_id
+                table_info.ident.table_id
             );
         });
     }

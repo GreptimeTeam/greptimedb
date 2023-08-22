@@ -249,6 +249,7 @@ impl<T: LogicalPrimitiveType> PrimitiveVector<T> {
     /// Slice the batch, returning a new batch.
     ///
     /// # Panics
+    /// This function panics if `offset + length > self.len()`.
     pub fn get_slice(&self, offset: usize, length: usize) -> Self {
         let data = self.array.to_data().slice(offset, length);
         Self::from_array_data(data)

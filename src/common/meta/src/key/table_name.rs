@@ -205,7 +205,7 @@ impl TableNameManager {
         self.kv_backend
             .get(&raw_key)
             .await?
-            .map(|x| TableNameValue::try_from_raw_value(x.value))
+            .map(|x| TableNameValue::try_from_raw_value(&x.value))
             .transpose()
     }
 
@@ -227,7 +227,7 @@ impl TableNameManager {
         for kv in resp.kvs {
             res.push((
                 TableNameKey::strip_table_name(kv.key())?,
-                TableNameValue::try_from_raw_value(kv.value)?,
+                TableNameValue::try_from_raw_value(&kv.value)?,
             ))
         }
         Ok(res)
@@ -283,9 +283,6 @@ mod tests {
         let literal = br#"{"table_id":1}"#;
 
         assert_eq!(value.try_as_raw_value().unwrap(), literal);
-        assert_eq!(
-            TableNameValue::try_from_raw_value(literal.to_vec()).unwrap(),
-            value
-        );
+        assert_eq!(TableNameValue::try_from_raw_value(literal).unwrap(), value);
     }
 }

@@ -17,6 +17,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+use datafusion::arrow::compute::cast;
 use datafusion::arrow::datatypes::SchemaRef as DfSchemaRef;
 use datafusion::error::Result as DfResult;
 use datafusion::parquet::arrow::async_reader::{AsyncFileReader, ParquetRecordBatchStream};
@@ -33,22 +34,33 @@ use crate::{
     SendableRecordBatchStream, Stream,
 };
 
-type FutureStream = Pin<
-    Box<
-        dyn std::future::Future<
-                Output = std::result::Result<DfSendableRecordBatchStream, DataFusionError>,
-            > + Send,
-    >,
->;
+type FutureStream =
+    Pin<Box<dyn std::future::Future<Output = Result<SendableRecordBatchStream>> + Send>>;
 
 /// ParquetRecordBatchStream -> DataFusion RecordBatchStream
 pub struct ParquetRecordBatchStreamAdapter<T> {
     stream: ParquetRecordBatchStream<T>,
+    output_schema: DfSchemaRef,
+    projection: Vec<usize>,
 }
 
 impl<T: Unpin + AsyncFileReader + Send + 'static> ParquetRecordBatchStreamAdapter<T> {
-    pub fn new(stream: ParquetRecordBatchStream<T>) -> Self {
-        Self { stream }
+    pub fn new(
+        output_schema: DfSchemaRef,
+        stream: ParquetRecordBatchStream<T>,
+        projection: Option<Vec<usize>>,
+    ) -> Self {
+        let projection = if let Some(projection) = projection {
+            projection
+        } else {
+            (0..output_schema.fields().len()).collect()
+        };
+
+        Self {
+            stream,
+            output_schema,
+            projection,
+        }
     }
 }
 
@@ -66,6 +78,29 @@ impl<T: Unpin + AsyncFileReader + Send + 'static> Stream for ParquetRecordBatchS
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let batch = futures::ready!(Pin::new(&mut self.stream).poll_next(cx))
             .map(|r| r.map_err(|e| DataFusionError::External(Box::new(e))));
+
+        let projected_schema = self.output_schema.project(&self.projection)?;
+        let batch = batch.map(|b| {
+            b.and_then(|b| {
+                let mut columns = Vec::with_capacity(self.projection.len());
+                for idx in self.projection.iter() {
+                    let column = b.column(*idx);
+                    let field = self.output_schema.field(*idx);
+
+                    if column.data_type() != field.data_type() {
+                        let output = cast(&column, field.data_type())?;
+                        columns.push(output)
+                    } else {
+                        columns.push(column.clone())
+                    }
+                }
+
+                let record_batch = DfRecordBatch::try_new(projected_schema.into(), columns)?;
+
+                Ok(record_batch)
+            })
+        });
+
         Poll::Ready(batch)
     }
 
@@ -75,7 +110,8 @@ impl<T: Unpin + AsyncFileReader + Send + 'static> Stream for ParquetRecordBatchS
     }
 }
 
-/// Greptime SendableRecordBatchStream -> DataFusion RecordBatchStream
+/// Greptime SendableRecordBatchStream -> DataFusion RecordBatchStream.
+/// The reverse one is [RecordBatchStreamAdapter].
 pub struct DfRecordBatchStreamAdapter {
     stream: SendableRecordBatchStream,
 }
@@ -112,7 +148,8 @@ impl Stream for DfRecordBatchStreamAdapter {
     }
 }
 
-/// DataFusion [SendableRecordBatchStream](DfSendableRecordBatchStream) -> Greptime [RecordBatchStream]
+/// DataFusion [SendableRecordBatchStream](DfSendableRecordBatchStream) -> Greptime [RecordBatchStream].
+/// The reverse one is [DfRecordBatchStreamAdapter]
 pub struct RecordBatchStreamAdapter {
     schema: SchemaRef,
     stream: DfSendableRecordBatchStream,
@@ -181,7 +218,7 @@ impl Stream for RecordBatchStreamAdapter {
 
 enum AsyncRecordBatchStreamAdapterState {
     Uninit(FutureStream),
-    Ready(DfSendableRecordBatchStream),
+    Ready(SendableRecordBatchStream),
     Failed,
 }
 
@@ -219,17 +256,12 @@ impl Stream for AsyncRecordBatchStreamAdapter {
                         }
                         Err(e) => {
                             self.state = AsyncRecordBatchStreamAdapterState::Failed;
-                            return Poll::Ready(Some(
-                                Err(e).context(error::InitRecordbatchStreamSnafu),
-                            ));
+                            return Poll::Ready(Some(Err(e)));
                         }
                     };
                 }
                 AsyncRecordBatchStreamAdapterState::Ready(stream) => {
-                    return Poll::Ready(ready!(Pin::new(stream).poll_next(cx)).map(|x| {
-                        let df_record_batch = x.context(error::PollStreamSnafu)?;
-                        RecordBatch::try_from_df_record_batch(self.schema(), df_record_batch)
-                    }))
+                    return Poll::Ready(ready!(Pin::new(stream).poll_next(cx)))
                 }
                 AsyncRecordBatchStreamAdapterState::Failed => return Poll::Ready(None),
             }
@@ -288,12 +320,7 @@ mod test {
         ) -> FutureStream {
             Box::pin(async move {
                 maybe_recordbatches
-                    .map(|items| {
-                        Box::pin(DfRecordBatchStreamAdapter::new(Box::pin(
-                            MaybeErrorRecordBatchStream { items },
-                        ))) as _
-                    })
-                    .map_err(|e| DataFusionError::External(Box::new(e)))
+                    .map(|items| Box::pin(MaybeErrorRecordBatchStream { items }) as _)
             })
         }
 
@@ -330,7 +357,7 @@ mod test {
         let result = RecordBatches::try_collect(Box::pin(adapter)).await;
         assert_eq!(
             result.unwrap_err().to_string(),
-            "Failed to poll stream, source: External error: External error, source: Unknown"
+            "External error, source: Unknown",
         );
 
         let failed_to_init_stream =
@@ -340,7 +367,7 @@ mod test {
         let result = RecordBatches::try_collect(Box::pin(adapter)).await;
         assert_eq!(
             result.unwrap_err().to_string(),
-            "Failed to init Recordbatch stream, source: External error: External error, source: Internal"
+            "External error, source: Internal",
         );
     }
 }

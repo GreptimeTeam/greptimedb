@@ -13,7 +13,6 @@
 // limitations under the License.
 #![feature(assert_matches)]
 
-pub mod data_source;
 pub mod engine;
 pub mod error;
 pub mod metadata;
@@ -22,6 +21,7 @@ pub mod requests;
 pub mod stats;
 pub mod table;
 pub mod test_util;
+pub mod thin_table;
 
 pub use store_api::storage::RegionStat;
 
