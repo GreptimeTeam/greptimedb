@@ -43,10 +43,7 @@ impl RowDistInserter {
         }
     }
 
-    async fn split_by_partition(
-        &self,
-        requests: RowInsertRequests,
-    ) -> Result<HashMap<Peer, RowInsertRequests>> {
+    async fn split(&self, requests: RowInsertRequests) -> Result<HashMap<Peer, RowInsertRequests>> {
         let partition_manager = self.catalog_manager.partition_manager();
 
         for req in requests.inserts {
