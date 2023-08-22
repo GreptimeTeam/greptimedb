@@ -309,7 +309,12 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Invalid parquet SST file {}, reason: {}", file, reason))]
+    #[snafu(display(
+        "Invalid parquet SST file {}, location: {}, reason: {}",
+        file,
+        location,
+        reason
+    ))]
     InvalidParquet {
         file: String,
         reason: String,
@@ -328,6 +333,22 @@ pub enum Error {
         source
     ))]
     ConvertVector {
+        location: Location,
+        source: datatypes::error::Error,
+    },
+
+    #[snafu(display(
+        "Failed to compute arrow arrays, location: {}, source: {}",
+        location,
+        source
+    ))]
+    ComputeArrow {
+        location: Location,
+        source: datatypes::arrow::error::ArrowError,
+    },
+
+    #[snafu(display("Failed to compute vector, location: {}, source: {}", location, source))]
+    ComputeVector {
         location: Location,
         source: datatypes::error::Error,
     },
@@ -409,6 +430,8 @@ impl ErrorExt for Error {
             InvalidBatch { .. } => StatusCode::InvalidArguments,
             InvalidRecordBatch { .. } => StatusCode::InvalidArguments,
             ConvertVector { source, .. } => source.status_code(),
+            ComputeArrow { .. } => StatusCode::Internal,
+            ComputeVector { .. } => StatusCode::Internal,
             PrimaryKeyLengthMismatch { .. } => StatusCode::InvalidArguments,
             SortValues { .. } => StatusCode::Unexpected,
             CompactValues { source, .. } => source.status_code(),

@@ -230,7 +230,8 @@ impl<T: LogicalPrimitiveType> PrimitiveVector<T> {
         }
     }
 
-    pub(crate) fn as_arrow(&self) -> &PrimitiveArray<T::ArrowPrimitive> {
+    /// Get the inner arrow array.
+    pub fn as_arrow(&self) -> &PrimitiveArray<T::ArrowPrimitive> {
         &self.array
     }
 
@@ -245,7 +246,11 @@ impl<T: LogicalPrimitiveType> PrimitiveVector<T> {
     }
 
     // To distinguish with `Vector::slice()`.
-    fn get_slice(&self, offset: usize, length: usize) -> Self {
+    /// Slice the batch, returning a new batch.
+    ///
+    /// # Panics
+    /// This function panics if `offset + length > self.len()`.
+    pub fn get_slice(&self, offset: usize, length: usize) -> Self {
         let data = self.array.to_data().slice(offset, length);
         Self::from_array_data(data)
     }
@@ -295,8 +300,7 @@ impl<T: LogicalPrimitiveType> Vector for PrimitiveVector<T> {
     }
 
     fn slice(&self, offset: usize, length: usize) -> VectorRef {
-        let data = self.array.to_data().slice(offset, length);
-        Arc::new(Self::from_array_data(data))
+        Arc::new(self.get_slice(offset, length))
     }
 
     fn get(&self, index: usize) -> Value {
