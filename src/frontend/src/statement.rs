@@ -16,7 +16,7 @@ mod backup;
 mod copy_table_from;
 mod copy_table_to;
 mod describe;
-mod insert;
+mod dml;
 mod show;
 mod tql;
 
@@ -31,6 +31,7 @@ use common_time::range::TimestampRange;
 use common_time::Timestamp;
 use datanode::instance::sql::{idents_to_full_database_name, table_idents_to_full_name};
 use query::parser::QueryStatement;
+use query::plan::LogicalPlan;
 use query::query_engine::SqlStatementExecutorRef;
 use query::QueryEngineRef;
 use session::context::QueryContextRef;
@@ -39,7 +40,9 @@ use sql::statements::copy::{CopyDatabaseArgument, CopyTable, CopyTableArgument};
 use sql::statements::statement::Statement;
 use table::engine::TableReference;
 use table::error::TableOperationSnafu;
-use table::requests::{CopyDatabaseRequest, CopyDirection, CopyTableRequest, InsertRequest};
+use table::requests::{
+    CopyDatabaseRequest, CopyDirection, CopyTableRequest, DeleteRequest, InsertRequest,
+};
 use table::TableRef;
 
 use crate::catalog::FrontendCatalogManager;
@@ -47,6 +50,7 @@ use crate::error::{
     self, CatalogSnafu, ExecLogicalPlanSnafu, ExecuteStatementSnafu, ExternalSnafu, InsertSnafu,
     PlanStatementSnafu, Result, TableNotFoundSnafu,
 };
+use crate::instance::distributed::deleter::DistDeleter;
 use crate::instance::distributed::inserter::DistInserter;
 use crate::statement::backup::{COPY_DATABASE_TIME_END_KEY, COPY_DATABASE_TIME_START_KEY};
 
@@ -83,11 +87,13 @@ impl StatementExecutor {
 
     pub async fn execute_sql(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Output> {
         match stmt {
-            Statement::Query(_) | Statement::Explain(_) | Statement::Delete(_) => {
+            Statement::Query(_) | Statement::Explain(_) => {
                 self.plan_exec(QueryStatement::Sql(stmt), query_ctx).await
             }
 
             Statement::Insert(insert) => self.insert(insert, query_ctx).await,
+
+            Statement::Delete(delete) => self.delete(delete, query_ctx).await,
 
             Statement::Tql(tql) => self.execute_tql(tql, query_ctx).await,
 
@@ -128,12 +134,16 @@ impl StatementExecutor {
         }
     }
 
-    async fn plan_exec(&self, stmt: QueryStatement, query_ctx: QueryContextRef) -> Result<Output> {
-        let planner = self.query_engine.planner();
-        let plan = planner
-            .plan(stmt, query_ctx.clone())
+    async fn plan(&self, stmt: QueryStatement, query_ctx: QueryContextRef) -> Result<LogicalPlan> {
+        self.query_engine
+            .planner()
+            .plan(stmt, query_ctx)
             .await
-            .context(PlanStatementSnafu)?;
+            .context(PlanStatementSnafu)
+    }
+
+    async fn plan_exec(&self, stmt: QueryStatement, query_ctx: QueryContextRef) -> Result<Output> {
+        let plan = self.plan(stmt, query_ctx.clone()).await?;
         self.query_engine
             .execute(plan, query_ctx)
             .await
@@ -189,6 +199,47 @@ impl StatementExecutor {
                     .get_table(&table_ref)
                     .await?
                     .insert(request)
+                    .await
+                    .context(InsertSnafu { table_name })?;
+                Ok(affected_rows)
+            }
+        }
+    }
+
+    // TODO(zhongzc): A middle state that eliminates calls to table.delete,
+    // For DistTable, its delete is not invoked; for MitoTable, it is still called but eventually eliminated.
+    async fn send_delete_request(&self, request: DeleteRequest) -> Result<usize> {
+        let frontend_catalog_manager = self
+            .catalog_manager
+            .as_any()
+            .downcast_ref::<FrontendCatalogManager>();
+
+        let table_name = request.table_name.clone();
+        match frontend_catalog_manager {
+            Some(frontend_catalog_manager) => {
+                let inserter = DistDeleter::new(
+                    request.catalog_name.clone(),
+                    request.schema_name.clone(),
+                    Arc::new(frontend_catalog_manager.clone()),
+                );
+                let affected_rows = inserter
+                    .delete(vec![request])
+                    .await
+                    .map_err(BoxedError::new)
+                    .context(TableOperationSnafu)
+                    .context(InsertSnafu { table_name })?;
+                Ok(affected_rows)
+            }
+            None => {
+                let table_ref = TableReference::full(
+                    &request.catalog_name,
+                    &request.schema_name,
+                    &request.table_name,
+                );
+                let affected_rows = self
+                    .get_table(&table_ref)
+                    .await?
+                    .delete(request)
                     .await
                     .context(InsertSnafu { table_name })?;
                 Ok(affected_rows)
