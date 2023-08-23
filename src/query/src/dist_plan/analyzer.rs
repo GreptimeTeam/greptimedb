@@ -44,6 +44,7 @@ impl AnalyzerRule for DistPlannerAnalyzer {
     }
 }
 
+/// Status of the rewriter to mark if the current pass is expanded
 #[derive(Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 enum RewriterStatus {
     #[default]
@@ -53,10 +54,14 @@ enum RewriterStatus {
 
 #[derive(Debug, Default)]
 struct MagicRewriter {
+    /// Current level in the tree
     level: usize,
+    /// Simulated stack for the `rewrite` recursion
     stack: Vec<(LogicalPlan, usize)>,
+    /// Stages to be expanded
     stage: Vec<LogicalPlan>,
     status: RewriterStatus,
+    /// Partition columns of the table in current pass
     partition_cols: Option<Vec<String>>,
 }
 
@@ -124,6 +129,7 @@ impl MagicRewriter {
 
     fn maybe_set_partitions(&mut self, plan: &LogicalPlan) {
         if self.partition_cols.is_some() {
+            // only need to set once
             return;
         }
 
@@ -152,12 +158,18 @@ impl MagicRewriter {
             }
         }
     }
+
+    /// pop one stack item and reduce the level by 1
+    fn pop_stack(&mut self) {
+        self.level -= 1;
+        self.stack.pop();
+    }
 }
 
 impl TreeNodeRewriter for MagicRewriter {
     type N = LogicalPlan;
 
-    // descend
+    /// descend
     fn pre_visit<'a>(&'a mut self, node: &'a Self::N) -> DfResult<RewriteRecursion> {
         self.level += 1;
         self.stack.push((node.clone(), self.level));
@@ -168,12 +180,13 @@ impl TreeNodeRewriter for MagicRewriter {
         Ok(RewriteRecursion::Continue)
     }
 
-    // ascend
+    /// ascend
+    ///
+    /// Besure to call `pop_stack` before returning
     fn mutate(&mut self, node: Self::N) -> DfResult<Self::N> {
         // only expand once on each ascending
         if self.is_expanded() {
-            self.level -= 1;
-            self.stack.pop();
+            self.pop_stack();
             return Ok(node);
         }
 
@@ -188,14 +201,13 @@ impl TreeNodeRewriter for MagicRewriter {
             }
             self.set_expanded();
 
-            self.level -= 1;
-            self.stack.pop();
+            self.pop_stack();
             return Ok(node);
         };
 
-        // TODO: avoid this clone
+        // TODO(ruihang): avoid this clone
         if self.should_expand(&parent.clone()) {
-            // TODO: does this work for nodes with multiple children?;
+            // TODO(ruihang): does this work for nodes with multiple children?;
             // replace the current node with expanded one
             let mut node = MergeScanLogicalPlan::new(node, false).into_logical_plan();
             // expand stages
@@ -204,13 +216,11 @@ impl TreeNodeRewriter for MagicRewriter {
             }
             self.set_expanded();
 
-            self.level -= 1;
-            self.stack.pop();
+            self.pop_stack();
             return Ok(node);
         }
 
-        self.level -= 1;
-        self.stack.pop();
+        self.pop_stack();
         Ok(node)
     }
 }
