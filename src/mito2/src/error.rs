@@ -366,12 +366,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to sort values source: {}, location: {}", source, location))]
-    SortValues {
-        source: ArrowError,
-        location: Location,
-    },
-
     #[snafu(display("Failed to compact values, source: {}, location: {}", source, location))]
     CompactValues {
         source: datatypes::error::Error,
@@ -446,7 +440,6 @@ impl ErrorExt for Error {
             ComputeArrow { .. } => StatusCode::Internal,
             ComputeVector { .. } => StatusCode::Internal,
             PrimaryKeyLengthMismatch { .. } => StatusCode::InvalidArguments,
-            SortValues { .. } => StatusCode::Unexpected,
             CompactValues { source, .. } => source.status_code(),
             InvalidFlumeSender { .. } => StatusCode::InvalidArguments,
             InvalidSchedulerState { .. } => StatusCode::InvalidArguments,
