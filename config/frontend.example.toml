@@ -53,10 +53,6 @@ enable = true
 [prom_store_options]
 enable = true
 
-# Prometheus protocol options, see `standalone.example.toml`.
-[prometheus_options]
-addr = "127.0.0.1:4004"
-
 # Metasrv client options, see `datanode.example.toml`.
 [meta_client_options]
 metasrv_addrs = ["127.0.0.1:3002"]

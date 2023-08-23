@@ -24,7 +24,6 @@ use frontend::frontend::FrontendOptions;
 use frontend::instance::{FrontendInstance, Instance as FeInstance};
 use frontend::service_config::{
     GrpcOptions, InfluxdbOptions, MysqlOptions, OpentsdbOptions, PostgresOptions, PromStoreOptions,
-    PrometheusOptions,
 };
 use serde::{Deserialize, Serialize};
 use servers::http::HttpOptions;
@@ -91,7 +90,6 @@ pub struct StandaloneOptions {
     pub opentsdb_options: Option<OpentsdbOptions>,
     pub influxdb_options: Option<InfluxdbOptions>,
     pub prom_store_options: Option<PromStoreOptions>,
-    pub prometheus_options: Option<PrometheusOptions>,
     pub wal: WalConfig,
     pub storage: StorageConfig,
     pub procedure: ProcedureConfig,
@@ -111,7 +109,6 @@ impl Default for StandaloneOptions {
             opentsdb_options: Some(OpentsdbOptions::default()),
             influxdb_options: Some(InfluxdbOptions::default()),
             prom_store_options: Some(PromStoreOptions::default()),
-            prometheus_options: Some(PrometheusOptions::default()),
             wal: WalConfig::default(),
             storage: StorageConfig::default(),
             procedure: ProcedureConfig::default(),
@@ -131,7 +128,6 @@ impl StandaloneOptions {
             opentsdb_options: self.opentsdb_options,
             influxdb_options: self.influxdb_options,
             prom_store_options: self.prom_store_options,
-            prometheus_options: self.prometheus_options,
             meta_client_options: None,
             logging: self.logging,
             ..Default::default()
@@ -192,8 +188,6 @@ struct StartCommand {
     rpc_addr: Option<String>,
     #[clap(long)]
     mysql_addr: Option<String>,
-    #[clap(long)]
-    prom_addr: Option<String>,
     #[clap(long)]
     postgres_addr: Option<String>,
     #[clap(long)]
@@ -269,10 +263,6 @@ impl StartCommand {
                 mysql_opts.addr = addr.clone();
                 mysql_opts.tls = tls_opts.clone();
             }
-        }
-
-        if let Some(addr) = &self.prom_addr {
-            opts.prometheus_options = Some(PrometheusOptions { addr: addr.clone() })
         }
 
         if let Some(addr) = &self.postgres_addr {

@@ -176,7 +176,9 @@ impl Services {
                 opts.prom_store_options,
                 Some(PromStoreOptions { enable: true })
             ) {
-                let _ = http_server_builder.with_prom_handler(instance.clone());
+                let _ = http_server_builder
+                    .with_prom_handler(instance.clone())
+                    .with_prometheus_handler(instance.clone());
             }
 
             if matches!(opts.otlp_options, Some(OtlpOptions { enable: true })) {
