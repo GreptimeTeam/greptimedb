@@ -25,8 +25,7 @@ use crate::read::{Batch, BatchReader, BoxedBatchReader, Source};
 
 /// Reader to merge sorted batches.
 ///
-/// The merge reader merges [Batch]es from multiple sources that yields sorted batches.
-/// Batches from each source **must** obey the following rules:
+/// The merge reader merges [Batch]es from multiple sources that yield sorted batches.
 /// 1. Batch is ordered by primary key, time index, sequence desc, op type desc (we can
 /// ignore op type as sequence is already unique).
 /// 2. Batch doesn't have duplicate elements (element with same key).
