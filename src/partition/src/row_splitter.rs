@@ -38,7 +38,7 @@ impl RowSplitter {
         // No partition
         let partition_columns = self.partition_rule.partition_columns();
         if partition_columns.is_empty() {
-            return Ok(iter::once((0, req)).collect());
+            return Ok(HashMap::from([(0, req)]));
         }
 
         // No data
