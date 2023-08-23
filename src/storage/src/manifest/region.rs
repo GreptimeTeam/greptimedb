@@ -44,8 +44,10 @@ pub struct RegionManifestCheckpointer {
 
 impl RegionManifestCheckpointer {
     pub(crate) fn set_flushed_manifest_version(&self, manifest_version: ManifestVersion) {
+        let current = self.flushed_manifest_version.load(Ordering::Relaxed);
+
         self.flushed_manifest_version
-            .store(manifest_version, Ordering::Relaxed);
+            .store(current.max(manifest_version), Ordering::Relaxed);
     }
 }
 
@@ -81,6 +83,12 @@ impl Checkpointer for RegionManifestCheckpointer {
         if start_version >= end_version {
             return Ok(None);
         }
+
+        info!("Begin to do region manifest checkpoint, path: {}, start_version: {}, end_version: {}, flushed_manifest_version: {}",
+              manifest.manifest_store().path(),
+              start_version,
+              end_version,
+              self.flushed_manifest_version.load(Ordering::Relaxed));
 
         let mut iter = manifest.scan(start_version, end_version).await?;
 
@@ -135,7 +143,11 @@ impl Checkpointer for RegionManifestCheckpointer {
             }
         }
 
-        info!("Region manifest checkpoint, start_version: {}, last_version: {}, compacted actions: {}", start_version, last_version, compacted_actions);
+        info!("Region manifest checkpoint, path: {}, start_version: {}, last_version: {}, compacted actions: {}",
+              manifest.manifest_store().path(),
+              start_version,
+              last_version,
+              compacted_actions);
 
         Ok(Some(checkpoint))
     }

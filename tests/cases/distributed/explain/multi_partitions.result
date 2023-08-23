@@ -1,0 +1,38 @@
+CREATE TABLE demo(
+    host STRING,
+    ts TIMESTAMP,
+    cpu DOUBLE NULL,
+    memory DOUBLE NULL,
+    disk_util DOUBLE DEFAULT 9.9,
+    TIME INDEX (ts),
+    PRIMARY KEY(host)
+)
+PARTITION BY RANGE COLUMNS (host) (
+    PARTITION r0 VALUES LESS THAN ('550-A'),
+    PARTITION r1 VALUES LESS THAN ('550-W'),
+    PARTITION r2 VALUES LESS THAN (MAXVALUE),
+);
+
+Affected Rows: 0
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (peer-.*) REDACTED
+explain SELECT * FROM demo WHERE ts > cast(1000000000 as timestamp) ORDER BY host;
+
++-+-+
+| plan_type_| plan_|
++-+-+
+| logical_plan_| Sort: demo.host ASC NULLS LAST_|
+|_|_MergeScan [is_placeholder=false]_|
+| physical_plan | SortExec: expr=[host@0 ASC NULLS LAST]_|
+|_|_MergeScanExec: peers=[REDACTED
+|_|_|
++-+-+
+
+drop table demo;
+
+Affected Rows: 1
+

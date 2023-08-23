@@ -18,6 +18,7 @@ use std::sync::Arc;
 use common_datasource::compression::CompressionType;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
+use common_runtime::JoinError;
 use datatypes::arrow::error::ArrowError;
 use datatypes::prelude::ConcreteDataType;
 use prost::{DecodeError, EncodeError};
@@ -365,15 +366,21 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to sort values source: {}, location: {}", source, location))]
-    SortValues {
-        source: ArrowError,
-        location: Location,
-    },
-
     #[snafu(display("Failed to compact values, source: {}, location: {}", source, location))]
     CompactValues {
         source: datatypes::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Invalid flume sender, location: {}", location,))]
+    InvalidFlumeSender { location: Location },
+
+    #[snafu(display("Invalid scheduler state location: {}", location,))]
+    InvalidSchedulerState { location: Location },
+
+    #[snafu(display("Failed to stop scheduler, source: {}", source))]
+    StopScheduler {
+        source: JoinError,
         location: Location,
     },
 }
@@ -433,8 +440,10 @@ impl ErrorExt for Error {
             ComputeArrow { .. } => StatusCode::Internal,
             ComputeVector { .. } => StatusCode::Internal,
             PrimaryKeyLengthMismatch { .. } => StatusCode::InvalidArguments,
-            SortValues { .. } => StatusCode::Unexpected,
             CompactValues { source, .. } => source.status_code(),
+            InvalidFlumeSender { .. } => StatusCode::InvalidArguments,
+            InvalidSchedulerState { .. } => StatusCode::InvalidArguments,
+            StopScheduler { .. } => StatusCode::Internal,
         }
     }
 

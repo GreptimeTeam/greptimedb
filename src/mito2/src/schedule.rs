@@ -12,28 +12,4 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use serde::{Deserialize, Serialize};
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct PrometheusOptions {
-    pub addr: String,
-}
-
-impl Default for PrometheusOptions {
-    fn default() -> Self {
-        Self {
-            addr: "127.0.0.1:4004".to_string(),
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::PrometheusOptions;
-
-    #[test]
-    fn test_prometheus_options() {
-        let default = PrometheusOptions::default();
-        assert_eq!(default.addr, "127.0.0.1:4004".to_string());
-    }
-}
+pub mod scheduler;

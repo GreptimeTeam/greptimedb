@@ -30,7 +30,7 @@ use super::TonicResult;
 use crate::error;
 
 #[pin_project(PinnedDrop)]
-pub(super) struct FlightRecordBatchStream {
+pub struct FlightRecordBatchStream {
     #[pin]
     rx: mpsc::Receiver<Result<FlightMessage, tonic::Status>>,
     join_handle: JoinHandle<()>,
@@ -39,7 +39,7 @@ pub(super) struct FlightRecordBatchStream {
 }
 
 impl FlightRecordBatchStream {
-    pub(super) fn new(recordbatches: SendableRecordBatchStream) -> Self {
+    pub fn new(recordbatches: SendableRecordBatchStream) -> Self {
         let (tx, rx) = mpsc::channel::<TonicResult<FlightMessage>>(1);
         let join_handle =
             common_runtime::spawn_read(

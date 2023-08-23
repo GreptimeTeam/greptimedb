@@ -33,7 +33,7 @@ use snafu::OptionExt;
 use tonic::{Request, Response};
 
 use crate::error::InvalidQuerySnafu;
-use crate::grpc::handler::{auth, create_query_context};
+use crate::grpc::greptime_handler::{auth, create_query_context};
 use crate::grpc::TonicResult;
 use crate::prometheus::{
     retrieve_metric_name_and_result_type, PrometheusHandlerRef, PrometheusJsonResponse,

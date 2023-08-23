@@ -31,6 +31,7 @@ use crate::error::{
     WaitForGrpcServingSnafu,
 };
 use crate::instance::InstanceRef;
+use crate::region_server::RegionServer;
 
 pub mod grpc;
 
@@ -42,6 +43,9 @@ pub struct Services {
 
 impl Services {
     pub async fn try_new(instance: InstanceRef, opts: &DatanodeOptions) -> Result<Self> {
+        // TODO(ruihang): remove database service once region server is ready.
+        let enable_region_server = option_env!("ENABLE_REGION_SERVER").is_some();
+
         let grpc_runtime = Arc::new(
             RuntimeBuilder::default()
                 .worker_threads(opts.rpc_runtime_size)
@@ -50,10 +54,24 @@ impl Services {
                 .context(RuntimeResourceSnafu)?,
         );
 
+        let region_server = RegionServer::new(instance.query_engine());
+        let flight_handler = if enable_region_server {
+            Some(Arc::new(region_server.clone()) as _)
+        } else {
+            None
+        };
+        let region_server_handler = if enable_region_server {
+            Some(Arc::new(region_server.clone()) as _)
+        } else {
+            None
+        };
+
         Ok(Self {
             grpc_server: GrpcServer::new(
                 ServerGrpcQueryHandlerAdaptor::arc(instance),
                 None,
+                flight_handler,
+                region_server_handler,
                 None,
                 grpc_runtime,
             ),

@@ -8,6 +8,7 @@ license.workspace = true
 dashboard = []
 mem-prof = ["dep:common-mem-prof"]
 pprof = ["dep:pprof"]
+testing = []
 
 [dependencies]
 aide = { version = "0.9", features = ["axum"] }

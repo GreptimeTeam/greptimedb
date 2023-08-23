@@ -76,11 +76,6 @@ enable = true
 # Whether to enable Prometheus remote write and read in HTTP API, true by default.
 enable = true
 
-# Prometheus protocol options
-[prometheus_options]
-# Prometheus API server address, "127.0.0.1:4004" by default.
-addr = "127.0.0.1:4004"
-
 # WAL options.
 [wal]
 # WAL data directory
@@ -121,8 +116,6 @@ max_purge_tasks = 32
 checkpoint_margin = 10
 # Region manifest logs and checkpoints gc execution duration
 gc_duration = '10m'
-# Whether to try creating a manifest checkpoint on region opening
-checkpoint_on_startup = false
 
 # Storage flush options
 [storage.flush]

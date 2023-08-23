@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Handler for Greptime Database service. It's implemented by frontend.
+
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -38,6 +40,7 @@ use crate::metrics::{
 };
 use crate::query_handler::grpc::ServerGrpcQueryHandlerRef;
 
+#[derive(Clone)]
 pub struct GreptimeRequestHandler {
     handler: ServerGrpcQueryHandlerRef,
     user_provider: Option<UserProviderRef>,
@@ -174,7 +177,7 @@ pub(crate) fn create_query_context(header: Option<&RequestHeader>) -> QueryConte
 /// Histogram timer for handling gRPC request.
 ///
 /// The timer records the elapsed time with [StatusCode::Success] on drop.
-struct RequestTimer {
+pub(crate) struct RequestTimer {
     start: Instant,
     db: String,
     request_type: &'static str,
@@ -183,7 +186,7 @@ struct RequestTimer {
 
 impl RequestTimer {
     /// Returns a new timer.
-    fn new(db: String, request_type: &'static str) -> RequestTimer {
+    pub fn new(db: String, request_type: &'static str) -> RequestTimer {
         RequestTimer {
             start: Instant::now(),
             db,
@@ -193,7 +196,7 @@ impl RequestTimer {
     }
 
     /// Consumes the timer and record the elapsed time with specific `status_code`.
-    fn record(mut self, status_code: StatusCode) {
+    pub fn record(mut self, status_code: StatusCode) {
         self.status_code = status_code;
     }
 }

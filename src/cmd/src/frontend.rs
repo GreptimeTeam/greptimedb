@@ -20,7 +20,7 @@ use common_base::Plugins;
 use common_telemetry::logging;
 use frontend::frontend::FrontendOptions;
 use frontend::instance::{FrontendInstance, Instance as FeInstance};
-use frontend::service_config::{InfluxdbOptions, PrometheusOptions};
+use frontend::service_config::InfluxdbOptions;
 use meta_client::MetaClientOptions;
 use servers::tls::{TlsMode, TlsOption};
 use servers::Mode;
@@ -99,8 +99,6 @@ pub struct StartCommand {
     #[clap(long)]
     mysql_addr: Option<String>,
     #[clap(long)]
-    prom_addr: Option<String>,
-    #[clap(long)]
     postgres_addr: Option<String>,
     #[clap(long)]
     opentsdb_addr: Option<String>,
@@ -169,10 +167,6 @@ impl StartCommand {
                 mysql_opts.addr = addr.clone();
                 mysql_opts.tls = tls_opts.clone();
             }
-        }
-
-        if let Some(addr) = &self.prom_addr {
-            opts.prometheus_options = Some(PrometheusOptions { addr: addr.clone() });
         }
 
         if let Some(addr) = &self.postgres_addr {
@@ -248,7 +242,6 @@ mod tests {
     fn test_try_from_start_command() {
         let command = StartCommand {
             http_addr: Some("127.0.0.1:1234".to_string()),
-            prom_addr: Some("127.0.0.1:4444".to_string()),
             mysql_addr: Some("127.0.0.1:5678".to_string()),
             postgres_addr: Some("127.0.0.1:5432".to_string()),
             opentsdb_addr: Some("127.0.0.1:4321".to_string()),
@@ -275,10 +268,6 @@ mod tests {
         assert_eq!(
             opts.opentsdb_options.as_ref().unwrap().addr,
             "127.0.0.1:4321"
-        );
-        assert_eq!(
-            opts.prometheus_options.as_ref().unwrap().addr,
-            "127.0.0.1:4444"
         );
 
         let default_opts = FrontendOptions::default();

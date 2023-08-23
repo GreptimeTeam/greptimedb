@@ -63,7 +63,7 @@ impl Categorizer {
                 Commutativity::Unimplemented
             }
             LogicalPlan::Union(_) => Commutativity::Unimplemented,
-            LogicalPlan::TableScan(_) => Commutativity::CheckPartition,
+            LogicalPlan::TableScan(_) => Commutativity::Commutative,
             LogicalPlan::EmptyRelation(_) => Commutativity::NonCommutative,
             LogicalPlan::Subquery(_) => Commutativity::Unimplemented,
             LogicalPlan::SubqueryAlias(_) => Commutativity::Unimplemented,

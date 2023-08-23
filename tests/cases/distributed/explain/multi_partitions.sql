@@ -1,0 +1,23 @@
+CREATE TABLE demo(
+    host STRING,
+    ts TIMESTAMP,
+    cpu DOUBLE NULL,
+    memory DOUBLE NULL,
+    disk_util DOUBLE DEFAULT 9.9,
+    TIME INDEX (ts),
+    PRIMARY KEY(host)
+)
+PARTITION BY RANGE COLUMNS (host) (
+    PARTITION r0 VALUES LESS THAN ('550-A'),
+    PARTITION r1 VALUES LESS THAN ('550-W'),
+    PARTITION r2 VALUES LESS THAN (MAXVALUE),
+);
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (peer-.*) REDACTED
+explain SELECT * FROM demo WHERE ts > cast(1000000000 as timestamp) ORDER BY host;
+
+drop table demo;

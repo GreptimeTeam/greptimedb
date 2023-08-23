@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
-
 use api::v1::greptime_database_server::GreptimeDatabase;
 use api::v1::greptime_response::Response as RawResponse;
 use api::v1::{AffectedRows, GreptimeRequest, GreptimeResponse, ResponseHeader};
@@ -23,15 +21,15 @@ use common_query::Output;
 use futures::StreamExt;
 use tonic::{Request, Response, Status, Streaming};
 
-use crate::grpc::handler::GreptimeRequestHandler;
+use crate::grpc::greptime_handler::GreptimeRequestHandler;
 use crate::grpc::TonicResult;
 
 pub(crate) struct DatabaseService {
-    handler: Arc<GreptimeRequestHandler>,
+    handler: GreptimeRequestHandler,
 }
 
 impl DatabaseService {
-    pub(crate) fn new(handler: Arc<GreptimeRequestHandler>) -> Self {
+    pub(crate) fn new(handler: GreptimeRequestHandler) -> Self {
         Self { handler }
     }
 }
