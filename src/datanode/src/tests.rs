@@ -173,7 +173,10 @@ async fn test_open_region_handler() {
         InstructionReply::OpenRegion(SimpleReply { result: true, .. })
     );
 
-    let keeper = region_alive_keepers.find_keeper(table_ident).await.unwrap();
+    let keeper = region_alive_keepers
+        .find_keeper(table_ident.table_id)
+        .await
+        .unwrap();
     let deadline = keeper.deadline(0).await.unwrap();
     assert!(deadline <= Instant::now() + Duration::from_secs(20));
 
@@ -203,7 +206,7 @@ async fn test_open_region_handler() {
     );
 
     assert!(region_alive_keepers
-        .find_keeper(&non_exist_table_ident)
+        .find_keeper(non_exist_table_ident.table_id)
         .await
         .is_none());
 
@@ -222,7 +225,7 @@ async fn test_open_region_handler() {
     assert_test_table_not_found(instance.inner()).await;
 
     assert!(region_alive_keepers
-        .find_keeper(table_ident)
+        .find_keeper(table_ident.table_id)
         .await
         .is_none());
 

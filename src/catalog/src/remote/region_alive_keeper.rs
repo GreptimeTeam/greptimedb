@@ -29,6 +29,7 @@ use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionNumber;
 use table::engine::manager::TableEngineManagerRef;
 use table::engine::{CloseTableResult, EngineContext, TableEngineRef};
+use table::metadata::TableId;
 use table::requests::CloseTableRequest;
 use table::TableRef;
 use tokio::sync::{mpsc, oneshot, Mutex};
@@ -40,7 +41,7 @@ use crate::error::{Result, TableEngineNotFoundSnafu};
 /// [RegionAliveKeepers] manages all [RegionAliveKeeper] in a scope of tables.
 pub struct RegionAliveKeepers {
     table_engine_manager: TableEngineManagerRef,
-    keepers: Arc<Mutex<HashMap<TableIdent, Arc<RegionAliveKeeper>>>>,
+    keepers: Arc<Mutex<HashMap<TableId, Arc<RegionAliveKeeper>>>>,
     heartbeat_interval_millis: u64,
     started: AtomicBool,
 
@@ -65,12 +66,13 @@ impl RegionAliveKeepers {
         }
     }
 
-    pub async fn find_keeper(&self, table_ident: &TableIdent) -> Option<Arc<RegionAliveKeeper>> {
-        self.keepers.lock().await.get(table_ident).cloned()
+    pub async fn find_keeper(&self, table_id: TableId) -> Option<Arc<RegionAliveKeeper>> {
+        self.keepers.lock().await.get(&table_id).cloned()
     }
 
     pub async fn register_table(&self, table_ident: TableIdent, table: TableRef) -> Result<()> {
-        let keeper = self.find_keeper(&table_ident).await;
+        let table_id = table_ident.table_id;
+        let keeper = self.find_keeper(table_id).await;
         if keeper.is_some() {
             return Ok(());
         }
@@ -92,7 +94,7 @@ impl RegionAliveKeepers {
         }
 
         let mut keepers = self.keepers.lock().await;
-        let _ = keepers.insert(table_ident.clone(), keeper.clone());
+        let _ = keepers.insert(table_id, keeper.clone());
 
         if self.started.load(Ordering::Relaxed) {
             keeper.start().await;
@@ -108,15 +110,16 @@ impl RegionAliveKeepers {
         &self,
         table_ident: &TableIdent,
     ) -> Option<Arc<RegionAliveKeeper>> {
-        self.keepers.lock().await.remove(table_ident).map(|x| {
+        let table_id = table_ident.table_id;
+        self.keepers.lock().await.remove(&table_id).map(|x| {
             info!("Deregister RegionAliveKeeper for table {table_ident}");
             x
         })
     }
 
     pub async fn register_region(&self, region_ident: &RegionIdent) {
-        let table_ident = &region_ident.table_ident;
-        let Some(keeper) = self.find_keeper(table_ident).await else {
+        let table_id = region_ident.table_ident.table_id;
+        let Some(keeper) = self.find_keeper(table_id).await else {
             // Alive keeper could be affected by lagging msg, just warn and ignore.
             warn!("Alive keeper for region {region_ident} is not found!");
             return;
@@ -125,8 +128,8 @@ impl RegionAliveKeepers {
     }
 
     pub async fn deregister_region(&self, region_ident: &RegionIdent) {
-        let table_ident = &region_ident.table_ident;
-        let Some(keeper) = self.find_keeper(table_ident).await else {
+        let table_id = region_ident.table_ident.table_id;
+        let Some(keeper) = self.find_keeper(table_id).await else {
             // Alive keeper could be affected by lagging msg, just warn and ignore.
             warn!("Alive keeper for region {region_ident} is not found!");
             return;
@@ -178,7 +181,8 @@ impl HeartbeatResponseHandler for RegionAliveKeepers {
                 }
             };
 
-            let Some(keeper) = self.keepers.lock().await.get(&table_ident).cloned() else {
+            let table_id = table_ident.table_id;
+            let Some(keeper) = self.keepers.lock().await.get(&table_id).cloned() else {
                 // Alive keeper could be affected by lagging msg, just warn and ignore.
                 warn!("Alive keeper for table {table_ident} is not found!");
                 continue;
@@ -547,7 +551,11 @@ mod test {
             .register_table(table_ident.clone(), table)
             .await
             .unwrap();
-        assert!(keepers.keepers.lock().await.contains_key(&table_ident));
+        assert!(keepers
+            .keepers
+            .lock()
+            .await
+            .contains_key(&table_ident.table_id));
 
         (table_ident, keepers)
     }
@@ -602,7 +610,7 @@ mod test {
             .keepers
             .lock()
             .await
-            .get(&table_ident)
+            .get(&table_ident.table_id)
             .cloned()
             .unwrap();
 
@@ -649,7 +657,7 @@ mod test {
             })
             .await;
         let mut regions = keepers
-            .find_keeper(&table_ident)
+            .find_keeper(table_ident.table_id)
             .await
             .unwrap()
             .countdown_task_handles

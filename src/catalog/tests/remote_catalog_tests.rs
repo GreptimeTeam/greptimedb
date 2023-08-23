@@ -396,7 +396,7 @@ mod tests {
         assert!(catalog_manager.register_table(request).await.unwrap());
 
         let keeper = region_alive_keepers
-            .find_keeper(&table_before)
+            .find_keeper(table_before.table_id)
             .await
             .unwrap();
         let deadline = keeper.deadline(0).await.unwrap();
@@ -435,7 +435,7 @@ mod tests {
         assert!(catalog_manager.register_table(request).await.unwrap());
 
         let keeper = region_alive_keepers
-            .find_keeper(&table_after)
+            .find_keeper(table_after.table_id)
             .await
             .unwrap();
         let deadline = keeper.deadline(0).await.unwrap();
@@ -443,7 +443,7 @@ mod tests {
         assert!(deadline <= Instant::now() + Duration::from_secs(20));
 
         let keeper = region_alive_keepers
-            .find_keeper(&table_before)
+            .find_keeper(table_before.table_id)
             .await
             .unwrap();
         let deadline = keeper.deadline(0).await.unwrap();
