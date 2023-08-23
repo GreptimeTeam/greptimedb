@@ -14,16 +14,18 @@
 
 //! Scans a region according to the scan request.
 
+use std::collections::HashMap;
+
 use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::debug;
 use common_time::range::TimestampRange;
 use object_store::ObjectStore;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadata;
 use store_api::storage::{ColumnId, ScanRequest};
 use table::predicate::{Predicate, TimeRangePredicateBuilder};
 
-use crate::error::{BuildPredicateSnafu, Result};
+use crate::error::{BuildPredicateSnafu, InvalidRequestSnafu, Result};
 use crate::read::seq_scan::SeqScan;
 use crate::region::version::VersionRef;
 use crate::sst::file::FileHandle;
@@ -156,11 +158,23 @@ fn file_in_range(file: &FileHandle, predicate: &TimestampRange) -> bool {
     file_ts_range.intersects(predicate)
 }
 
-// TODO(yingwen): Remove this once scan
 /// Map projection indices to column ids.
 fn projection_indices_to_ids(
     metadata: &RegionMetadata,
     projection: &[usize],
 ) -> Result<Vec<ColumnId>> {
-    todo!()
+    let mut column_ids = Vec::with_capacity(projection.len());
+    // For each projection index, we get the column id.
+    for idx in projection {
+        let column_id = metadata
+            .column_metadatas
+            .get(*idx)
+            .context(InvalidRequestSnafu {
+                region_id: metadata.region_id,
+                reason: format!("Index {} out of bound", idx),
+            })?
+            .column_id;
+        column_ids.push(column_id);
+    }
+    Ok(column_ids)
 }
