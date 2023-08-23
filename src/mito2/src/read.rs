@@ -31,7 +31,6 @@ use datatypes::vectors::{
     BooleanVector, Helper, UInt32Vector, UInt64Vector, UInt8Vector, Vector, VectorRef,
 };
 use snafu::{ensure, OptionExt, ResultExt};
-use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, SequenceNumber};
 
 use crate::error::{
@@ -569,12 +568,7 @@ impl Source {
         }
     }
 
-    /// Returns the metadata of the source region.
-    pub(crate) fn metadata(&self) -> RegionMetadataRef {
-        unimplemented!()
-    }
-
-    // TODO(yingwen): Maybe remove this method.
+    // TODO(yingwen): Remove this method once we support collecting stats in the writer.
     /// Returns statisics of fetched batches.
     pub(crate) fn stats(&self) -> SourceStats {
         unimplemented!()

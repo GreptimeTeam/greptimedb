@@ -21,6 +21,7 @@ use parquet::file::metadata::KeyValue;
 use parquet::file::properties::WriterProperties;
 use parquet::schema::types::ColumnPath;
 use snafu::ResultExt;
+use store_api::metadata::RegionMetadataRef;
 use store_api::storage::consts::SEQUENCE_COLUMN_NAME;
 
 use crate::error::{InvalidMetadataSnafu, Result};
@@ -35,15 +36,23 @@ pub struct ParquetWriter<'a> {
     file_path: &'a str,
     /// Input data source.
     source: Source,
+    /// Region metadata of the source and the target SST.
+    metadata: RegionMetadataRef,
     object_store: ObjectStore,
 }
 
 impl<'a> ParquetWriter<'a> {
     /// Creates a new parquet SST writer.
-    pub fn new(file_path: &'a str, source: Source, object_store: ObjectStore) -> ParquetWriter {
+    pub fn new(
+        file_path: &'a str,
+        metadata: RegionMetadataRef,
+        source: Source,
+        object_store: ObjectStore,
+    ) -> ParquetWriter {
         ParquetWriter {
             file_path,
             source,
+            metadata,
             object_store,
         }
     }
@@ -52,11 +61,9 @@ impl<'a> ParquetWriter<'a> {
     ///
     /// Returns the [SstInfo] if the SST is written.
     pub async fn write_all(&mut self, opts: &WriteOptions) -> Result<Option<SstInfo>> {
-        let metadata = self.source.metadata();
-
-        let json = metadata.to_json().context(InvalidMetadataSnafu)?;
+        let json = self.metadata.to_json().context(InvalidMetadataSnafu)?;
         let key_value_meta = KeyValue::new(PARQUET_METADATA_KEY.to_string(), json);
-        let ts_column = metadata.time_index_column();
+        let ts_column = self.metadata.time_index_column();
 
         // TODO(yingwen): Find and set proper column encoding for internal columns: op type and tsid.
         let props_builder = WriterProperties::builder()
@@ -78,7 +85,7 @@ impl<'a> ParquetWriter<'a> {
             );
         let writer_props = props_builder.build();
 
-        let write_format = WriteFormat::new(metadata);
+        let write_format = WriteFormat::new(self.metadata.clone());
         let mut buffered_writer = BufferedWriter::try_new(
             self.file_path.to_string(),
             self.object_store.clone(),
