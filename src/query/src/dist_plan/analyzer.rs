@@ -159,6 +159,7 @@ impl ExpandState {
     }
 }
 
+#[derive(Debug)]
 struct CommutativeVisitor {
     next_stage: Vec<LogicalPlan>,
     // hash of the stop node
@@ -325,7 +326,7 @@ mod test {
         let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
         let expected = [
             "Aggregate: groupBy=[[]], aggr=[[AVG(t.number)]]",
-            "  TableScan: t",
+            "  MergeScan [is_placeholder=false]",
         ]
         .join("\n");
         assert_eq!(expected, format!("{:?}", result));
@@ -352,7 +353,7 @@ mod test {
         let expected = [
             "Sort: t.number ASC NULLS LAST",
             "  Distinct:",
-            "    TableScan: t",
+            "    MergeScan [is_placeholder=false]",
         ]
         .join("\n");
         assert_eq!(expected, format!("{:?}", result));
@@ -374,7 +375,11 @@ mod test {
 
         let config = ConfigOptions::default();
         let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
-        let expected = ["Limit: skip=0, fetch=1", "  TableScan: t"].join("\n");
+        let expected = [
+            "Limit: skip=0, fetch=1",
+            "  MergeScan [is_placeholder=false]",
+        ]
+        .join("\n");
         assert_eq!(expected, format!("{:?}", result));
     }
 }
