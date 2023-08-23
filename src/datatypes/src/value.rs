@@ -441,6 +441,56 @@ impl Ord for Value {
     }
 }
 
+macro_rules! impl_try_from_value {
+    ($Variant: ident, $Type: ident) => {
+        impl TryFrom<Value> for $Type {
+            type Error = ();
+
+            #[inline]
+            fn try_from(from: Value) -> std::result::Result<Self, Self::Error> {
+                match from {
+                    Value::$Variant(v) => Ok(v.into()),
+                    _ => Err(()),
+                }
+            }
+        }
+
+        impl TryFrom<Value> for Option<$Type> {
+            type Error = ();
+
+            #[inline]
+            fn try_from(from: Value) -> std::result::Result<Self, Self::Error> {
+                match from {
+                    Value::$Variant(v) => Ok(Some(v.into())),
+                    Value::Null => Ok(None),
+                    _ => Err(()),
+                }
+            }
+        }
+    };
+}
+
+impl_try_from_value!(Boolean, bool);
+impl_try_from_value!(UInt8, u8);
+impl_try_from_value!(UInt16, u16);
+impl_try_from_value!(UInt32, u32);
+impl_try_from_value!(UInt64, u64);
+impl_try_from_value!(Int8, i8);
+impl_try_from_value!(Int16, i16);
+impl_try_from_value!(Int32, i32);
+impl_try_from_value!(Int64, i64);
+impl_try_from_value!(Float32, f32);
+impl_try_from_value!(Float64, f64);
+impl_try_from_value!(Float32, OrderedF32);
+impl_try_from_value!(Float64, OrderedF64);
+impl_try_from_value!(String, StringBytes);
+impl_try_from_value!(Binary, Bytes);
+impl_try_from_value!(Date, Date);
+impl_try_from_value!(Time, Time);
+impl_try_from_value!(DateTime, DateTime);
+impl_try_from_value!(Timestamp, Timestamp);
+impl_try_from_value!(Interval, Interval);
+
 macro_rules! impl_value_from {
     ($Variant: ident, $Type: ident) => {
         impl From<$Type> for Value {
@@ -471,6 +521,8 @@ impl_value_from!(Int32, i32);
 impl_value_from!(Int64, i64);
 impl_value_from!(Float32, f32);
 impl_value_from!(Float64, f64);
+impl_value_from!(Float32, OrderedF32);
+impl_value_from!(Float64, OrderedF64);
 impl_value_from!(String, StringBytes);
 impl_value_from!(Binary, Bytes);
 impl_value_from!(Date, Date);
