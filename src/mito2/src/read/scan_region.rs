@@ -14,6 +14,7 @@
 
 //! Scans a region according to the scan request.
 
+use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::debug;
 use common_time::range::TimestampRange;
 use object_store::ObjectStore;
@@ -26,6 +27,22 @@ use crate::error::{BuildPredicateSnafu, Result};
 use crate::read::seq_scan::SeqScan;
 use crate::region::version::VersionRef;
 use crate::sst::file::FileHandle;
+
+/// A scanner scans a region and returns a [SendableRecordBatchStream].
+pub(crate) enum Scanner {
+    /// Sequential scan.
+    Seq(SeqScan),
+    // TODO(yingwen): Support windowed scan and chained scan.
+}
+
+impl Scanner {
+    /// Returns a [SendableRecordBatchStream] to retrieve scan results.
+    pub(crate) fn scan(&self) -> SendableRecordBatchStream {
+        match self {
+            Scanner::Seq(seq_scan) => seq_scan.build()
+        }
+    }
+}
 
 /// Helper to scans a region by [ScanRequest].
 pub(crate) struct ScanRegion {
@@ -53,6 +70,11 @@ impl ScanRegion {
             object_store,
             request,
         }
+    }
+
+    /// Returns a [Scanner] to scan the region.
+    pub(crate) fn scanner(&self) -> Result<Scanner> {
+        self.seq_scan().map(Scanner::Seq)
     }
 
     /// Scan sequentailly.
