@@ -38,8 +38,6 @@ from
   AND t_10.vin = t_9.vin 
 where 
   t_1.vin is not null 
-  and t_1.ts >= '1970-01-01 08:00:00' 
-  and t_1.ts < '1970-01-01 08:16:39' 
 order by t_1.ts desc 
 limit 1;
 

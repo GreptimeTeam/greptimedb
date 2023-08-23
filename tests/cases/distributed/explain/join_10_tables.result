@@ -67,8 +67,6 @@ from
   AND t_10.vin = t_9.vin 
 where 
   t_1.vin is not null 
-  and t_1.ts >= '1970-01-01 08:00:00' 
-  and t_1.ts < '1970-01-01 08:16:39' 
 order by t_1.ts desc 
 limit 1;
 
@@ -86,9 +84,9 @@ limit 1;
 |_|_Inner Join: t_3.ts = t_4.ts, t_3.vin = t_4.vin_|
 |_|_Inner Join: t_2.ts = t_3.ts, t_2.vin = t_3.vin_|
 |_|_Inner Join: t_1.ts = t_2.ts, t_1.vin = t_2.vin_|
-|_|_Filter: t_1.vin IS NOT NULL AND t_1.ts >= TimestampMillisecond(0, None) AND t_1.ts < TimestampMillisecond(999000, None) |
+|_|_Filter: t_1.vin IS NOT NULL_|
 |_|_MergeScan [is_placeholder=false]_|
-|_|_Filter: t_2.vin IS NOT NULL AND t_2.ts >= TimestampMillisecond(0, None) AND t_2.ts < TimestampMillisecond(999000, None) |
+|_|_Filter: t_2.vin IS NOT NULL_|
 |_|_MergeScan [is_placeholder=false]_|
 |_|_MergeScan [is_placeholder=false]_|
 |_|_MergeScan [is_placeholder=false]_|
@@ -122,13 +120,13 @@ limit 1;
 |_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_RepartitionExec: partitioning=REDACTED
 |_|_CoalesceBatchesExec: target_batch_size=8192_|
-|_|_FilterExec: vin@1 IS NOT NULL AND ts@0 >= 0 AND ts@0 < 999000_|
+|_|_FilterExec: vin@1 IS NOT NULL_|
 |_|_RepartitionExec: partitioning=REDACTED
 |_|_MergeScanExec: peers=[REDACTED
 |_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_RepartitionExec: partitioning=REDACTED
 |_|_CoalesceBatchesExec: target_batch_size=8192_|
-|_|_FilterExec: vin@1 IS NOT NULL AND ts@0 >= 0 AND ts@0 < 999000_|
+|_|_FilterExec: vin@1 IS NOT NULL_|
 |_|_RepartitionExec: partitioning=REDACTED
 |_|_MergeScanExec: peers=[REDACTED
 |_|_CoalesceBatchesExec: target_batch_size=8192_|
