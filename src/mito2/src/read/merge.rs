@@ -213,7 +213,8 @@ impl BatchMerger {
             // are not overlapping.
         }
 
-        // Filter rows by op type.
+        // Filter rows by op type. Currently, the reader only removes deleted rows but doesn't filter
+        // rows by sequence for simplicity and performance reason.
         batch.filter_deleted()?;
 
         Ok(Some(batch))
