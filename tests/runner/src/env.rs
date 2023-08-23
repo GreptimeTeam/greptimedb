@@ -203,6 +203,7 @@ impl Env {
 
         let mut process = Command::new(program)
             .current_dir(util::get_binary_dir("debug"))
+            .env("TZ", "UTC")
             .args(args)
             .stdout(log_file)
             .spawn()
