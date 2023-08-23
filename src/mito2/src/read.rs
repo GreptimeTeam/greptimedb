@@ -36,6 +36,7 @@ use store_api::storage::{ColumnId, SequenceNumber};
 use crate::error::{
     ComputeArrowSnafu, ComputeVectorSnafu, ConvertVectorSnafu, InvalidBatchSnafu, Result,
 };
+use crate::memtable::BoxedBatchIterator;
 
 /// Storage internal representation of a batch of rows
 /// for a primary key (time series).
@@ -558,6 +559,8 @@ pub struct SourceStats {
 pub enum Source {
     /// Source from a [BoxedBatchReader].
     Reader(BoxedBatchReader),
+    /// Source from a [BoxedBatchIterator].
+    Iter(BoxedBatchIterator),
 }
 
 impl Source {
@@ -565,6 +568,7 @@ impl Source {
     pub(crate) async fn next_batch(&mut self) -> Result<Option<Batch>> {
         match self {
             Source::Reader(reader) => reader.next_batch().await,
+            Source::Iter(iter) => iter.next().transpose(),
         }
     }
 

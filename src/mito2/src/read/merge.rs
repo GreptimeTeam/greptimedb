@@ -21,6 +21,7 @@ use std::mem;
 use async_trait::async_trait;
 
 use crate::error::Result;
+use crate::memtable::BoxedBatchIterator;
 use crate::read::{Batch, BatchReader, BoxedBatchReader, Source};
 
 /// Reader to merge sorted batches.
@@ -118,6 +119,12 @@ impl MergeReaderBuilder {
     /// Pushs a batch reader to sources.
     pub fn push_batch_reader(&mut self, reader: BoxedBatchReader) -> &mut Self {
         self.sources.push(Source::Reader(reader));
+        self
+    }
+
+    /// Push a batch iterator to sources.
+    pub fn push_batch_iter(&mut self, iter: BoxedBatchIterator) -> &mut Self {
+        self.sources.push(Source::Iter(iter));
         self
     }
 
@@ -386,7 +393,7 @@ mod tests {
         )]);
         let mut reader = MergeReaderBuilder::new()
             .push_batch_reader(Box::new(reader1))
-            .push_batch_reader(Box::new(reader2))
+            .push_batch_iter(Box::new(reader2))
             .build()
             .await
             .unwrap();
@@ -457,7 +464,7 @@ mod tests {
         ]);
         let mut reader = MergeReaderBuilder::new()
             .push_batch_reader(Box::new(reader1))
-            .push_batch_reader(Box::new(reader2))
+            .push_batch_iter(Box::new(reader2))
             .build()
             .await
             .unwrap();

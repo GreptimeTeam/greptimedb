@@ -265,6 +265,14 @@ impl BatchReader for VecBatchReader {
     }
 }
 
+impl Iterator for VecBatchReader {
+    type Item = Result<Batch>;
+
+    fn next(&mut self) -> Option<Result<Batch>> {
+        self.batches.pop().map(Ok)
+    }
+}
+
 pub fn new_batch_builder(
     primary_key: &[u8],
     timestamps: &[i64],
