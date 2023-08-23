@@ -99,9 +99,7 @@ impl RowDistInserter {
                         })?;
                 inserts
                     .entry(peer.clone())
-                    .or_insert_with(|| RowInsertRequests {
-                        inserts: Vec::new(),
-                    })
+                    .or_default()
                     .inserts
                     .push(insert);
             }
