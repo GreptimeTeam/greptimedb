@@ -1,12 +1,13 @@
-use differential_dataflow::ExchangeData;
 use std::hash::Hash;
+
+use differential_dataflow::ExchangeData;
 
 use crate::repr::Row;
 
 /// Used to make possibly-validating code generic: think of this as a kind of `MaybeResult`,
 /// specialized for use in compute.  Validation code will only run when the error constructor is
 /// Some.
-pub(super) trait MaybeValidatingRow<T, E>: ExchangeData +  Hash {
+pub(super) trait MaybeValidatingRow<T, E>: ExchangeData + Hash {
     fn ok(t: T) -> Self;
     fn into_error() -> Option<fn(E) -> Self>;
 }

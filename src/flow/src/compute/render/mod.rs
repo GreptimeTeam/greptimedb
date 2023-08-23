@@ -21,8 +21,8 @@ use crate::expr::Id;
 use crate::repr::{self, Row};
 use crate::storage::errors::DataflowError;
 
-mod reduce;
 mod error;
+mod reduce;
 
 /// Assemble the "compute"  side of a dataflow, i.e. all but the sources.
 ///
