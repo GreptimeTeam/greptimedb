@@ -15,8 +15,11 @@
 use std::sync::{Arc, Mutex};
 
 use datafusion::datasource::DefaultTableSource;
+use datafusion::error::Result as DfResult;
 use datafusion_common::config::ConfigOptions;
-use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeVisitor, VisitRecursion};
+use datafusion_common::tree_node::{
+    RewriteRecursion, Transformed, TreeNode, TreeNodeRewriter, TreeNodeVisitor, VisitRecursion,
+};
 use datafusion_expr::{Extension, LogicalPlan};
 use datafusion_optimizer::analyzer::AnalyzerRule;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
@@ -41,16 +44,18 @@ impl AnalyzerRule for DistPlannerAnalyzer {
         plan: LogicalPlan,
         _config: &ConfigOptions,
     ) -> datafusion_common::Result<LogicalPlan> {
-        // (1) transform up merge scan
-        let mut visitor = CommutativeVisitor::new();
-        let _ = plan.visit(&mut visitor)?;
-        let state = ExpandState::new();
-        let plan = plan.transform_down(&|plan| Self::expand(plan, &visitor, &state))?;
+        // // (1) transform up merge scan
+        // let mut visitor = CommutativeVisitor::new();
+        // let _ = plan.visit(&mut visitor)?;
+        // let state = ExpandState::new();
+        // let plan = plan.transform_down(&|plan| Self::expand(plan, &visitor, &state))?;
 
-        // (2) remove placeholder merge scan
-        let plan = plan.transform(&Self::remove_placeholder_merge_scan)?;
+        // // (2) remove placeholder merge scan
+        // let plan = plan.transform(&Self::remove_placeholder_merge_scan)?;
 
-        Ok(plan)
+        // Ok(plan)
+        let mut rewriter = MagicRewriter::default();
+        plan.rewrite(&mut rewriter)
     }
 }
 
@@ -263,6 +268,161 @@ impl CommutativeVisitor {
             stop_node: None,
             current_partition_cols: None,
         }
+    }
+}
+
+#[derive(Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+enum RewriterStatus {
+    #[default]
+    Unexpanded,
+    Expanded,
+}
+
+#[derive(Debug, Default)]
+struct MagicRewriter {
+    level: usize,
+    stack: Vec<(LogicalPlan, usize)>,
+    stage: Vec<LogicalPlan>,
+    status: RewriterStatus,
+}
+
+impl MagicRewriter {
+    fn get_parent(&self) -> Option<&LogicalPlan> {
+        // level starts from 1, it's safe to minus by 1
+        self.stack
+            .iter()
+            .rev()
+            .find(|(_, level)| *level == self.level - 1)
+            .map(|(node, _)| node)
+    }
+
+    /// Return true if should stop and expand. The input plan is the parent node of current node
+    fn should_expand(&mut self, plan: &LogicalPlan) -> bool {
+        if DFLogicalSubstraitConvertor.encode(plan).is_err() {
+            common_telemetry::info!(
+                "substrait error: {:?}",
+                DFLogicalSubstraitConvertor.encode(plan)
+            );
+            return true;
+        }
+
+        match Categorizer::check_plan(plan) {
+            Commutativity::Commutative => {}
+            Commutativity::PartialCommutative => {
+                if let Some(plan) = partial_commutative_transformer(plan) {
+                    self.stage.push(plan)
+                }
+            }
+            Commutativity::ConditionalCommutative(transformer) => {
+                if let Some(transformer) = transformer
+                    && let Some(plan) = transformer(plan) {
+                    self.stage.push(plan)
+                }
+            },
+            Commutativity::TransformedCommutative(transformer) => {
+                if let Some(transformer) = transformer
+                    && let Some(plan) = transformer(plan) {
+                    self.stage.push(plan)
+                }
+            },
+            // Commutativity::CheckPartition => {
+            //     if let Some(partition_cols) = &self.current_partition_cols
+            //         && partition_cols.is_empty() {
+            //         // no partition columns, and can be encoded skip
+            //         return Ok(VisitRecursion::Continue);
+            //     } else {
+            //         self.stop_node = Some(utils::hash_plan(plan));
+            //         return Ok(VisitRecursion::Stop);
+            //     }
+            // },
+            Commutativity::CheckPartition|
+            Commutativity::NonCommutative
+            | Commutativity::Unimplemented
+            | Commutativity::Unsupported => {
+                // self.stop_node = Some(utils::hash_plan(plan));
+                // return Ok(VisitRecursion::Stop);
+                return true;
+            }
+        }
+
+        false
+    }
+
+    fn is_expanded(&self) -> bool {
+        self.status == RewriterStatus::Expanded
+    }
+
+    fn set_expanded(&mut self) {
+        self.status = RewriterStatus::Expanded;
+    }
+
+    fn set_unexpanded(&mut self) {
+        self.status = RewriterStatus::Unexpanded;
+    }
+}
+
+impl TreeNodeRewriter for MagicRewriter {
+    type N = LogicalPlan;
+
+    // descend
+    fn pre_visit<'a>(&'a mut self, node: &'a Self::N) -> DfResult<RewriteRecursion> {
+        self.level += 1;
+        self.stack.push((node.clone(), self.level));
+        // decendening will clear the stage
+        self.stage.clear();
+        self.set_unexpanded();
+        common_telemetry::info!("[DEBUG] pre visit: {:?}", node);
+        Ok(RewriteRecursion::Continue)
+    }
+
+    // ascend
+    fn mutate(&mut self, node: Self::N) -> DfResult<Self::N> {
+        // only expand once on each ascending
+        if self.is_expanded() {
+            self.level -= 1;
+            self.stack.pop();
+            return Ok(node);
+        }
+
+        common_telemetry::info!("[DEBUG] mutate: {:?}", node);
+
+        let Some(parent) = self.get_parent() else {
+            // add merge scan as the new root
+            let mut node = MergeScanLogicalPlan::new(node, false).into_logical_plan();
+            // expand stages
+            for new_stage in self.stage.drain(..) {
+                node = new_stage.with_new_inputs(&[node])?
+            }
+            self.set_expanded();
+
+            self.level -= 1;
+            self.stack.pop();
+            return Ok(node);
+        };
+
+        common_telemetry::trace!("[DEBUG] parent: {:?}", parent);
+
+        // TODO: avoid this clone
+        if self.should_expand(&parent.clone()) {
+            common_telemetry::info!("[DEBUG] node before expand: {:?}", node);
+            // TODO: does this work for nodes with multiple children?;
+            // replace the current node with expanded one
+            let mut node = MergeScanLogicalPlan::new(node, false).into_logical_plan();
+            // expand stages
+            for new_stage in self.stage.drain(..) {
+                node = new_stage.with_new_inputs(&[node])?
+            }
+            common_telemetry::info!("[DEBUG] expanded node: {:?}", node);
+            self.set_expanded();
+
+            self.level -= 1;
+            self.stack.pop();
+            return Ok(node);
+        }
+
+        self.level -= 1;
+        self.stack.pop();
+        Ok(node)
     }
 }
 
