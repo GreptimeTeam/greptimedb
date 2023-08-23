@@ -49,6 +49,7 @@ pub struct SeqScan {
 
 impl SeqScan {
     /// Creates a new [SeqScan].
+    #[must_use]
     pub fn new(metadata: RegionMetadataRef, file_dir: &str, object_store: ObjectStore) -> SeqScan {
         SeqScan {
             metadata,
@@ -63,39 +64,47 @@ impl SeqScan {
     }
 
     /// Set projection.
+    #[must_use]
     pub fn with_projection(mut self, projection: Option<Vec<ColumnId>>) -> Self {
         self.projection = projection;
         self
     }
 
     /// Set time range filter for time index.
+    #[must_use]
     pub fn with_time_range(mut self, time_range: Option<TimestampRange>) -> Self {
         self.time_range = time_range;
         self
     }
 
     /// Set predicate to push down.
+    #[must_use]
     pub fn with_predicate(mut self, predicate: Option<Predicate>) -> Self {
         self.predicate = predicate;
         self
     }
 
     /// Set memtables to read.
+    #[must_use]
     pub fn with_memtables(mut self, memtables: Vec<MemtableRef>) -> Self {
         self.memtables = memtables;
         self
     }
 
     /// Set files to read.
+    #[must_use]
     pub fn with_files(mut self, files: Vec<FileHandle>) -> Self {
         self.files = files;
         self
     }
 
     /// Builds a stream for the query.
+    #[must_use]
     pub fn build(&self) -> SendableRecordBatchStream {
         // Scans all memtables and SSTs.
         // Builds a merge reader to merge results.
+
+        //
         unimplemented!()
     }
 }

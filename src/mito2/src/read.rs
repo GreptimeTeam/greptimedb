@@ -17,6 +17,7 @@
 pub mod merge;
 pub(crate) mod scan_region;
 pub mod seq_scan;
+pub(crate) mod stream;
 
 use std::sync::Arc;
 

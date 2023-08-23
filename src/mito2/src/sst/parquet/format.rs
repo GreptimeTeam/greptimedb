@@ -23,6 +23,8 @@
 //! ```text
 //! field 0, field 1, ..., field N, time index, primary key, sequence, op type
 //! ```
+//!
+//! We stores fields in the same order as [RegionMetadata::field_columns()](store_api::metadata::RegionMetadata::field_columns()).
 
 use std::collections::HashMap;
 use std::sync::Arc;

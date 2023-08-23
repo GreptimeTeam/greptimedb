@@ -14,9 +14,7 @@
 
 //! Scans a region according to the scan request.
 
-use std::collections::HashMap;
-
-use common_recordbatch::SendableRecordBatchStream;
+use common_recordbatch::{SendableRecordBatchStream};
 use common_telemetry::debug;
 use common_time::range::TimestampRange;
 use object_store::ObjectStore;

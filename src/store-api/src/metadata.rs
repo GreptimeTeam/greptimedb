@@ -169,6 +169,7 @@ impl RegionMetadata {
             .map(|index| &self.column_metadatas[index])
     }
 
+    /// Returns all primary key columns.
     pub fn primary_key_columns(&self) -> impl Iterator<Item = &ColumnMetadata> {
         // safety: RegionMetadata::validate ensures every primary key exists.
         self.primary_key
@@ -181,6 +182,20 @@ impl RegionMetadata {
         self.column_metadatas
             .iter()
             .filter(|column| column.semantic_type == SemanticType::Field)
+    }
+
+    /// Returns a column's index in primary key if it is a primary key column.
+    ///
+    /// This does a linear search.
+    pub fn primary_key_index(&self, column_id: ColumnId) -> Option<usize> {
+        self.primary_key.iter().position(|id| *id == column_id)
+    }
+
+    /// Returns a column's index in fields if it is a field column.
+    ///
+    /// This does a linear search.
+    pub fn field_index(&self, column_id: ColumnId) -> Option<usize> {
+        self.field_columns().position(|column| column.column_id == column_id)
     }
 
     /// Checks whether the metadata is valid.
