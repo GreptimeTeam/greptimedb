@@ -21,13 +21,15 @@ use std::sync::Arc;
 
 use common_query::Output;
 use object_store::ObjectStore;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use store_api::logstore::LogStore;
 use store_api::region_request::RegionRequest;
 use store_api::storage::{RegionId, ScanRequest};
 
 use crate::config::MitoConfig;
-use crate::error::{RecvSnafu, Result};
+use crate::error::{RecvSnafu, RegionNotFoundSnafu, Result};
+use crate::read::scan_region::ScanRegion;
+use crate::read::Scanner;
 use crate::request::{RegionTask, RequestBody};
 use crate::worker::WorkerGroup;
 
@@ -73,12 +75,19 @@ impl MitoEngine {
     pub fn is_region_exists(&self, region_id: RegionId) -> bool {
         self.inner.workers.is_region_exists(region_id)
     }
+
+    /// Handles the scan `request` and returns a [Scanner] for the `request`.
+    fn handle_query(&self, region_id: RegionId, request: ScanRequest) -> Result<Scanner> {
+        self.inner.handle_query(region_id, request)
+    }
 }
 
 /// Inner struct of [MitoEngine].
 struct EngineInner {
     /// Region workers group.
     workers: WorkerGroup,
+    /// Shared object store of all regions.
+    object_store: ObjectStore,
 }
 
 impl EngineInner {
@@ -89,7 +98,8 @@ impl EngineInner {
         object_store: ObjectStore,
     ) -> EngineInner {
         EngineInner {
-            workers: WorkerGroup::start(config, log_store, object_store),
+            workers: WorkerGroup::start(config, log_store, object_store.clone()),
+            object_store,
         }
     }
 
@@ -99,8 +109,9 @@ impl EngineInner {
     }
 
     // TODO(yingwen): return `Output` instead of `Result<()>`.
-    /// Handles [RequestBody] and return its executed result.
+    /// Handles [RegionRequest] and return its executed result.
     async fn handle_request(&self, region_id: RegionId, request: RegionRequest) -> Result<()> {
+        // We validate and then convert the `request` into an inner `RequestBody` for ease of handling.
         let body = RequestBody::try_from_region_request(region_id, request)?;
         let (request, receiver) = RegionTask::from_request(region_id, body);
         self.workers.submit_to_worker(request).await?;
@@ -108,12 +119,21 @@ impl EngineInner {
         receiver.await.context(RecvSnafu)?
     }
 
-    // /// Return a record batch stream builder to execute the query.
-    // fn handle_query(
-    //     &self,
-    //     region_id: RegionId,
-    //     request: ScanRequest,
-    // ) -> Result<RecordBatchStreamBuilder> {
-    //     unimplemented!()
-    // }
+    /// Handles the scan `request` and returns a [Scanner] for the `request`.
+    fn handle_query(&self, region_id: RegionId, request: ScanRequest) -> Result<Scanner> {
+        // Reading a region doesn't need to go through the region worker thread.
+        let region = self
+            .workers
+            .get_region(region_id)
+            .context(RegionNotFoundSnafu { region_id })?;
+        let version = region.version();
+        let scan_region = ScanRegion::new(
+            version,
+            region.region_dir.clone(),
+            self.object_store.clone(),
+            request,
+        );
+
+        scan_region.scanner()
+    }
 }

@@ -15,7 +15,7 @@
 //! Common structs and utilities for reading data.
 
 pub mod merge;
-mod scan_region;
+pub(crate) mod scan_region;
 pub mod seq_scan;
 
 use std::sync::Arc;
@@ -39,6 +39,7 @@ use crate::error::{
     ComputeArrowSnafu, ComputeVectorSnafu, ConvertVectorSnafu, InvalidBatchSnafu, Result,
 };
 use crate::memtable::BoxedBatchIterator;
+pub use crate::read::scan_region::Scanner;
 
 /// Storage internal representation of a batch of rows
 /// for a primary key (time series).

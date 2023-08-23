@@ -92,6 +92,7 @@ impl RegionOpener {
         Ok(MitoRegion {
             region_id,
             version_control,
+            region_dir: self.region_dir,
             manifest_manager,
         })
     }
@@ -133,6 +134,7 @@ impl RegionOpener {
         Ok(MitoRegion {
             region_id: self.region_id,
             version_control,
+            region_dir: self.region_dir,
             manifest_manager,
         })
     }
