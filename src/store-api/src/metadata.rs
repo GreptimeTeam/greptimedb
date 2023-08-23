@@ -195,7 +195,8 @@ impl RegionMetadata {
     ///
     /// This does a linear search.
     pub fn field_index(&self, column_id: ColumnId) -> Option<usize> {
-        self.field_columns().position(|column| column.column_id == column_id)
+        self.field_columns()
+            .position(|column| column.column_id == column_id)
     }
 
     /// Checks whether the metadata is valid.

@@ -14,42 +14,38 @@
 
 //! Record batch stream.
 
-use std::sync::Arc;
 use std::pin::Pin;
-use std::task::Context;
-use std::task::Poll;
+use std::sync::Arc;
+use std::task::{Context, Poll};
 
 use api::v1::SemanticType;
 use common_error::ext::BoxedError;
-use common_recordbatch::RecordBatchStream;
 use common_recordbatch::error::ExternalSnafu;
-use common_recordbatch::{RecordBatch};
+use common_recordbatch::{RecordBatch, RecordBatchStream};
 use datatypes::prelude::{ConcreteDataType, DataType};
-use datatypes::schema::{SchemaRef, Schema};
+use datatypes::schema::{Schema, SchemaRef};
 use datatypes::value::ValueRef;
 use datatypes::vectors::VectorRef;
 use futures::Stream;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadata;
+
+use crate::error::{InvalidRequestSnafu, Result};
 use crate::read::Batch;
-use crate::row_converter::{McmpRowCodec, SortField, RowCodec};
-use crate::error::Result;
+use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
 
 /// Record batch stream implementation.
 pub(crate) struct StreamImpl<S> {
     /// [Batch] stream.
     stream: S,
     /// Converts [Batch]es from the `stream` to [RecordBatch].
-    converter: BatchConverter,
+    mapper: ProjectionMapper,
 }
 
 impl<S> StreamImpl<S> {
     /// Returns a new stream from a batch stream.
-    pub(crate) fn new(stream: S, converter: BatchConverter) -> StreamImpl<S> {
-        StreamImpl {
-            stream,
-            converter,
-        }
+    pub(crate) fn new(stream: S, mapper: ProjectionMapper) -> StreamImpl<S> {
+        StreamImpl { stream, mapper }
     }
 }
 
@@ -59,11 +55,12 @@ impl<S: Stream<Item = Result<Batch>> + Unpin> Stream for StreamImpl<S> {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         match Pin::new(&mut self.stream).poll_next(cx) {
             Poll::Ready(Some(res)) => {
-                let record_batch = res.map_err(BoxedError::new).context(ExternalSnafu).and_then(|batch| {
-                    self.converter.convert(&batch)
-                });
+                let record_batch = res
+                    .map_err(BoxedError::new)
+                    .context(ExternalSnafu)
+                    .and_then(|batch| self.mapper.convert(&batch));
                 Poll::Ready(Some(record_batch))
-            },
+            }
             Poll::Ready(None) => Poll::Ready(None),
             Poll::Pending => Poll::Pending,
         }
@@ -72,12 +69,12 @@ impl<S: Stream<Item = Result<Batch>> + Unpin> Stream for StreamImpl<S> {
 
 impl<S: Stream<Item = Result<Batch>> + Unpin> RecordBatchStream for StreamImpl<S> {
     fn schema(&self) -> SchemaRef {
-        self.converter.output_schema.clone()
+        self.mapper.output_schema.clone()
     }
 }
 
-/// Converts a [Batch] to a [RecordBatch].
-pub(crate) struct BatchConverter {
+/// Handles projection and converts a projected [Batch] to a projected [RecordBatch].
+pub(crate) struct ProjectionMapper {
     /// Maps column in [RecordBatch] to index in [Batch].
     batch_indices: Vec<BatchIndex>,
     /// Decoder for primary key.
@@ -86,17 +83,23 @@ pub(crate) struct BatchConverter {
     output_schema: SchemaRef,
 }
 
-impl BatchConverter {
-    /// Returns a new converter with projection.
-    ///
-    /// # Panics
-    /// Panics if any index in `projection` is out of bound.
-    pub(crate) fn new(metadata: &RegionMetadata, projection: impl Iterator<Item = usize>) -> BatchConverter {
+impl ProjectionMapper {
+    /// Returns a new mapper with projection.
+    pub(crate) fn new(
+        metadata: &RegionMetadata,
+        projection: impl Iterator<Item = usize>,
+    ) -> Result<ProjectionMapper> {
         let mut batch_indices = Vec::with_capacity(projection.size_hint().0);
         let mut column_schemas = Vec::with_capacity(projection.size_hint().0);
         for idx in projection {
             // For each projection index, we get the column id for projection.
-            let column = &metadata.column_metadatas[idx];
+            let column = metadata
+                .column_metadatas
+                .get(idx)
+                .context(InvalidRequestSnafu {
+                    region_id: metadata.region_id,
+                    reason: format!("projection index {} is out of bound", idx),
+                })?;
 
             // Get column index in a batch by its semantic type and column id.
             let batch_index = match column.semantic_type {
@@ -104,7 +107,7 @@ impl BatchConverter {
                     // Safety: It is a primary key column.
                     let index = metadata.primary_key_index(column.column_id).unwrap();
                     BatchIndex::Tag(index)
-                },
+                }
                 SemanticType::Timestamp => BatchIndex::Timestamp,
                 SemanticType::Field => {
                     // Safety: It is a field column.
@@ -114,6 +117,7 @@ impl BatchConverter {
             };
             batch_indices.push(batch_index);
 
+            // Safety: idx is valid.
             column_schemas.push(metadata.schema.column_schemas()[idx].clone());
         }
 
@@ -126,39 +130,47 @@ impl BatchConverter {
         // Safety: Columns come from existing schema.
         let output_schema = Arc::new(Schema::new(column_schemas));
 
-        BatchConverter {
+        Ok(ProjectionMapper {
             batch_indices,
             codec,
             output_schema,
-        }
+        })
     }
 
-    /// Returns a new converter without projection.
-    pub(crate) fn all(metadata: &RegionMetadata) -> BatchConverter {
-        BatchConverter::new(metadata, 0..metadata.column_metadatas.len())
+    /// Returns a new mapper without projection.
+    pub(crate) fn all(metadata: &RegionMetadata) -> Result<ProjectionMapper> {
+        ProjectionMapper::new(metadata, 0..metadata.column_metadatas.len())
     }
 
     /// Converts a [Batch] to a [RecordBatch].
     ///
-    /// The batch must match the `projection` using to build the converter.
+    /// The batch must match the `projection` using to build the mapper.
     pub(crate) fn convert(&self, batch: &Batch) -> common_recordbatch::error::Result<RecordBatch> {
-        let pk_values = self.codec.decode(batch.primary_key()).map_err(BoxedError::new).context(ExternalSnafu)?;
+        let pk_values = self
+            .codec
+            .decode(batch.primary_key())
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?;
 
         let mut columns = Vec::with_capacity(self.output_schema.num_columns());
         let num_rows = batch.num_rows();
-        for (index, column_schema) in self.batch_indices.iter().zip(self.output_schema.column_schemas()) {
+        for (index, column_schema) in self
+            .batch_indices
+            .iter()
+            .zip(self.output_schema.column_schemas())
+        {
             match index {
                 BatchIndex::Tag(idx) => {
                     let value = pk_values[*idx].as_value_ref();
                     let vector = new_repeated_vector(&column_schema.data_type, value, num_rows)?;
                     columns.push(vector);
-                },
+                }
                 BatchIndex::Timestamp => {
                     columns.push(batch.timestamps().clone());
-                },
+                }
                 BatchIndex::Field(idx) => {
                     columns.push(batch.fields()[*idx].data.clone());
-                },
+                }
             }
         }
 
@@ -178,9 +190,16 @@ enum BatchIndex {
 }
 
 /// Returns a vector with repeated values.
-fn new_repeated_vector(data_type: &ConcreteDataType, value: ValueRef, num_rows: usize) -> common_recordbatch::error::Result<VectorRef> {
+fn new_repeated_vector(
+    data_type: &ConcreteDataType,
+    value: ValueRef,
+    num_rows: usize,
+) -> common_recordbatch::error::Result<VectorRef> {
     let mut mutable_vector = data_type.create_mutable_vector(1);
-    mutable_vector.try_push_value_ref(value).map_err(BoxedError::new).context(ExternalSnafu)?;
+    mutable_vector
+        .try_push_value_ref(value)
+        .map_err(BoxedError::new)
+        .context(ExternalSnafu)?;
     // This requires an addtional allocation. TODO(yingwen): Add a way to create repeated vector to data type.
     let base_vector = mutable_vector.to_vector();
     Ok(base_vector.replicate(&[num_rows]))

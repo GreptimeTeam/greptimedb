@@ -18,10 +18,10 @@ use common_recordbatch::SendableRecordBatchStream;
 use common_time::range::TimestampRange;
 use object_store::ObjectStore;
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::ColumnId;
 use table::predicate::Predicate;
 
 use crate::memtable::MemtableRef;
+use crate::read::stream::ProjectionMapper;
 use crate::sst::file::FileHandle;
 
 /// Scans a region and returns rows in a sorted sequence.
@@ -34,9 +34,9 @@ pub struct SeqScan {
     file_dir: String,
     /// Object store that stores SST files.
     object_store: ObjectStore,
+    /// Maps projected Batches to RecordBatches.
+    mapper: ProjectionMapper,
 
-    /// Projection to push down.
-    projection: Option<Vec<ColumnId>>,
     /// Time range filter for time index.
     time_range: Option<TimestampRange>,
     /// Predicate to push down.
@@ -50,12 +50,17 @@ pub struct SeqScan {
 impl SeqScan {
     /// Creates a new [SeqScan].
     #[must_use]
-    pub fn new(metadata: RegionMetadataRef, file_dir: &str, object_store: ObjectStore) -> SeqScan {
+    pub(crate) fn new(
+        metadata: RegionMetadataRef,
+        file_dir: &str,
+        object_store: ObjectStore,
+        mapper: ProjectionMapper,
+    ) -> SeqScan {
         SeqScan {
             metadata,
             file_dir: file_dir.to_string(),
             object_store,
-            projection: None,
+            mapper,
             time_range: None,
             predicate: None,
             memtables: Vec::new(),
@@ -63,37 +68,30 @@ impl SeqScan {
         }
     }
 
-    /// Set projection.
-    #[must_use]
-    pub fn with_projection(mut self, projection: Option<Vec<ColumnId>>) -> Self {
-        self.projection = projection;
-        self
-    }
-
     /// Set time range filter for time index.
     #[must_use]
-    pub fn with_time_range(mut self, time_range: Option<TimestampRange>) -> Self {
+    pub(crate) fn with_time_range(mut self, time_range: Option<TimestampRange>) -> Self {
         self.time_range = time_range;
         self
     }
 
     /// Set predicate to push down.
     #[must_use]
-    pub fn with_predicate(mut self, predicate: Option<Predicate>) -> Self {
+    pub(crate) fn with_predicate(mut self, predicate: Option<Predicate>) -> Self {
         self.predicate = predicate;
         self
     }
 
     /// Set memtables to read.
     #[must_use]
-    pub fn with_memtables(mut self, memtables: Vec<MemtableRef>) -> Self {
+    pub(crate) fn with_memtables(mut self, memtables: Vec<MemtableRef>) -> Self {
         self.memtables = memtables;
         self
     }
 
     /// Set files to read.
     #[must_use]
-    pub fn with_files(mut self, files: Vec<FileHandle>) -> Self {
+    pub(crate) fn with_files(mut self, files: Vec<FileHandle>) -> Self {
         self.files = files;
         self
     }

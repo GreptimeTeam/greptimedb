@@ -14,17 +14,17 @@
 
 //! Scans a region according to the scan request.
 
-use common_recordbatch::{SendableRecordBatchStream};
+use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::debug;
 use common_time::range::TimestampRange;
 use object_store::ObjectStore;
-use snafu::{OptionExt, ResultExt};
-use store_api::metadata::RegionMetadata;
-use store_api::storage::{ColumnId, ScanRequest};
+use snafu::ResultExt;
+use store_api::storage::ScanRequest;
 use table::predicate::{Predicate, TimeRangePredicateBuilder};
 
-use crate::error::{BuildPredicateSnafu, InvalidRequestSnafu, Result};
+use crate::error::{BuildPredicateSnafu, Result};
 use crate::read::seq_scan::SeqScan;
+use crate::read::stream::ProjectionMapper;
 use crate::region::version::VersionRef;
 use crate::sst::file::FileHandle;
 
@@ -110,19 +110,17 @@ impl ScanRegion {
             self.version.metadata.schema.clone(),
         )
         .context(BuildPredicateSnafu)?;
-        let projection = self
-            .request
-            .projection
-            .as_ref()
-            .map(|p| projection_indices_to_ids(&self.version.metadata, p))
-            .transpose()?;
+        let mapper = match &self.request.projection {
+            Some(p) => ProjectionMapper::new(&self.version.metadata, p.iter().copied())?,
+            None => ProjectionMapper::all(&self.version.metadata)?,
+        };
 
         let seq_scan = SeqScan::new(
             self.version.metadata.clone(),
             &self.file_dir,
             self.object_store.clone(),
+            mapper,
         )
-        .with_projection(projection)
         .with_time_range(Some(time_range))
         .with_predicate(Some(predicate))
         .with_memtables(memtables)
@@ -154,25 +152,4 @@ fn file_in_range(file: &FileHandle, predicate: &TimestampRange) -> bool {
     let (start, end) = file.time_range();
     let file_ts_range = TimestampRange::new_inclusive(Some(start), Some(end));
     file_ts_range.intersects(predicate)
-}
-
-/// Map projection indices to column ids.
-fn projection_indices_to_ids(
-    metadata: &RegionMetadata,
-    projection: &[usize],
-) -> Result<Vec<ColumnId>> {
-    let mut column_ids = Vec::with_capacity(projection.len());
-    // For each projection index, we get the column id.
-    for idx in projection {
-        let column_id = metadata
-            .column_metadatas
-            .get(*idx)
-            .context(InvalidRequestSnafu {
-                region_id: metadata.region_id,
-                reason: format!("Index {} out of bound", idx),
-            })?
-            .column_id;
-        column_ids.push(column_id);
-    }
-    Ok(column_ids)
 }
