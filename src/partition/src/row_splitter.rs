@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use std::iter;
 
 use api::helper;
 use api::v1::{ColumnSchema, Row, RowInsertRequest, Rows};
@@ -107,12 +106,12 @@ impl<'a> SplitReadRowHelper<'a> {
     }
 
     fn split_to_regions(&self) -> Result<HashMap<RegionNumber, Vec<usize>>> {
-        let mut regions_row_indexes = HashMap::new();
+        let mut regions_row_indexes: HashMap<RegionNumber, Vec<usize>> = HashMap::new();
         for (row_idx, values) in self.iter_partition_values().enumerate() {
             let region_number = self.partition_rule.find_region(&values)?;
             regions_row_indexes
                 .entry(region_number)
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(row_idx);
         }
 

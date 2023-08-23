@@ -75,7 +75,7 @@ impl RowDistInserter {
 
     async fn split(&self, requests: RowInsertRequests) -> Result<HashMap<Peer, RowInsertRequests>> {
         let partition_manager = self.catalog_manager.partition_manager();
-        let mut inserts = HashMap::new();
+        let mut inserts: HashMap<Peer, RowInsertRequests> = HashMap::new();
 
         for req in requests.inserts {
             let table_name = req.table_name.clone();
