@@ -21,12 +21,16 @@ pub mod region_server;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use api::v1::greptime_database_server::{GreptimeDatabase, GreptimeDatabaseServer};
+#[cfg(feature = "testing")]
+use api::v1::greptime_database_server::GreptimeDatabase;
+use api::v1::greptime_database_server::GreptimeDatabaseServer;
 use api::v1::health_check_server::{HealthCheck, HealthCheckServer};
 use api::v1::prometheus_gateway_server::{PrometheusGateway, PrometheusGatewayServer};
 use api::v1::region::region_server_server::RegionServerServer;
 use api::v1::{HealthCheckRequest, HealthCheckResponse};
-use arrow_flight::flight_service_server::{FlightService, FlightServiceServer};
+#[cfg(feature = "testing")]
+use arrow_flight::flight_service_server::FlightService;
+use arrow_flight::flight_service_server::FlightServiceServer;
 use async_trait::async_trait;
 use auth::UserProviderRef;
 use common_runtime::Runtime;
