@@ -18,15 +18,19 @@ use std::fmt::{Debug, Formatter};
 use std::sync::{Arc, RwLock};
 
 use api::v1::OpType;
+use datatypes::arrow;
+use datatypes::arrow::array::ArrayRef;
 use datatypes::data_type::DataType;
 use datatypes::prelude::{MutableVector, ScalarVectorBuilder, Vector, VectorRef};
 use datatypes::value::ValueRef;
-use datatypes::vectors::{UInt64Vector, UInt64VectorBuilder, UInt8Vector, UInt8VectorBuilder};
+use datatypes::vectors::{
+    Helper, UInt64Vector, UInt64VectorBuilder, UInt8Vector, UInt8VectorBuilder,
+};
 use snafu::{ensure, ResultExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ScanRequest;
 
-use crate::error::{CompactValuesSnafu, PrimaryKeyLengthMismatchSnafu, Result};
+use crate::error::{ComputeArrowSnafu, ConvertVectorSnafu, PrimaryKeyLengthMismatchSnafu, Result};
 use crate::memtable::{BoxedBatchIterator, KeyValues, Memtable, MemtableId};
 use crate::read::{Batch, BatchBuilder, BatchColumn};
 use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
@@ -237,39 +241,44 @@ impl Series {
         self.freeze(region_metadata);
 
         let mut frozen = self.frozen.clone();
-        let values = if frozen.len() == 1 {
+        let values = if frozen.is_empty() {
+            Values::new_empty(region_metadata)
+        } else if frozen.len() == 1 {
             frozen.pop().unwrap()
         } else {
             // TODO(hl): We should keep track of min/max timestamps for each values and avoid
             // cloning and sorting when values do not overlap with each other.
 
-            let total_len: usize = frozen.iter().map(|v| v.timestamp.len()).sum();
-            let mut builder = ValueBuilder::new(region_metadata, total_len);
+            let column_size = frozen.get(0).unwrap().fields.len() + 3;
 
-            for v in frozen {
-                let len = v.timestamp.len();
-                builder
-                    .timestamp
-                    .extend_slice_of(&*v.timestamp, 0, len)
-                    .context(CompactValuesSnafu)?;
-                builder
-                    .sequence
-                    .extend_slice_of(&*v.sequence, 0, len)
-                    .context(CompactValuesSnafu)?;
-
-                builder
-                    .op_type
-                    .extend_slice_of(&*v.op_type, 0, len)
-                    .context(CompactValuesSnafu)?;
-
-                for (idx, f) in v.fields.iter().enumerate() {
-                    builder.fields[idx]
-                        .extend_slice_of(&**f, 0, len)
-                        .context(CompactValuesSnafu)?;
-                }
+            if cfg!(debug_assertions) {
+                debug_assert!(frozen
+                    .iter()
+                    .zip(frozen.iter().skip(1))
+                    .all(|(prev, next)| { prev.fields.len() == next.fields.len() }));
             }
 
-            let values = Values::from(builder);
+            let mut arrays = frozen.iter().map(|v| v.iter_columns()).collect::<Vec<_>>();
+
+            let cols = (0..column_size)
+                .map(|_| {
+                    arrays
+                        .iter_mut()
+                        .map(|n| n.next().unwrap()) // safety: we've checked the length for every array
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+
+            let concatenated = cols
+                .into_iter()
+                .map(|col| {
+                    arrow::compute::concat(&col.iter().map(|a| a.as_ref()).collect::<Vec<_>>())
+                })
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .context(ComputeArrowSnafu)?;
+
+            debug_assert_eq!(concatenated.len(), column_size);
+            let values = Values::from_columns(&concatenated)?;
             self.frozen = vec![values.clone()];
             values
         };
@@ -322,10 +331,10 @@ impl ValueBuilder {
 
     /// Returns the length of [ValueBuilder]
     fn len(&self) -> usize {
-        let timestamp_len = self.timestamp.len();
-        debug_assert_eq!(timestamp_len, self.op_type.len());
-        debug_assert_eq!(timestamp_len, self.sequence.len());
-        timestamp_len
+        let sequence_len = self.sequence.len();
+        debug_assert_eq!(sequence_len, self.op_type.len());
+        debug_assert_eq!(sequence_len, self.timestamp.len());
+        sequence_len
     }
 }
 
@@ -339,6 +348,33 @@ struct Values {
 }
 
 impl Values {
+    pub fn new_empty(metadata: &RegionMetadataRef) -> Self {
+        let timestamp = metadata
+            .schema
+            .timestamp_column()
+            .unwrap()
+            .data_type
+            .create_mutable_vector(0)
+            .to_vector();
+        let sequence = Arc::new(UInt64Vector::from_vec(vec![]));
+        let op_type = Arc::new(UInt8Vector::from_vec(vec![]));
+        let fields = metadata
+            .field_columns()
+            .map(|f| {
+                f.column_schema
+                    .data_type
+                    .create_mutable_vector(0)
+                    .to_vector()
+            })
+            .collect();
+        Self {
+            timestamp,
+            sequence,
+            op_type,
+            fields,
+        }
+    }
+
     /// Converts [Values] to `Batch`, sorts the batch according to `timestamp, sequence` desc and
     /// keeps only the latest row for the same timestamp.
     pub fn to_batch(&self, primary_key: &[u8], metadata: &RegionMetadataRef) -> Result<Batch> {
@@ -361,6 +397,35 @@ impl Values {
         let mut batch = builder.with_fields(fields).build()?;
         batch.sort_and_dedup()?;
         Ok(batch)
+    }
+
+    /// Iterates all columns in [Values].
+    fn iter_columns(&self) -> impl Iterator<Item = ArrayRef> + '_ {
+        std::iter::once(self.timestamp.to_arrow_array())
+            .chain(std::iter::once(self.sequence.to_arrow_array()))
+            .chain(std::iter::once(self.op_type.to_arrow_array()))
+            .chain(self.fields.iter().map(|f| f.to_arrow_array()))
+    }
+
+    /// Builds a new [Values] instance from columns.
+    fn from_columns(cols: &[ArrayRef]) -> Result<Self> {
+        debug_assert!(cols.len() >= 3);
+        let timestamp =
+            Helper::try_into_vector(cols.get(0).unwrap()).context(ConvertVectorSnafu)?;
+        let sequence = Arc::new(
+            UInt64Vector::try_from_arrow_array(cols.get(1).unwrap()).context(ConvertVectorSnafu)?,
+        );
+        let op_type = Arc::new(
+            UInt8Vector::try_from_arrow_array(cols.get(2).unwrap()).context(ConvertVectorSnafu)?,
+        );
+        let fields = Helper::try_into_vectors(&cols[3..]).context(ConvertVectorSnafu)?;
+
+        Ok(Self {
+            timestamp,
+            sequence,
+            op_type,
+            fields,
+        })
     }
 }
 
