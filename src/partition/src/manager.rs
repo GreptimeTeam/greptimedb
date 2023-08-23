@@ -15,6 +15,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use api::v1::RowInsertRequest;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::TableRoute;
 use common_query::prelude::Expr;
@@ -31,6 +32,7 @@ use crate::error::{FindLeaderSnafu, Result};
 use crate::partition::{PartitionBound, PartitionDef, PartitionExpr};
 use crate::range::RangePartitionRule;
 use crate::route::TableRoutes;
+use crate::row_splitter::{RowInsertRequestSplits, RowSplitter};
 use crate::splitter::{DeleteRequestSplit, InsertRequestSplit, WriteSplitter};
 use crate::{error, PartitionRuleRef};
 
@@ -245,6 +247,17 @@ impl PartitionRuleManager {
         let partition_rule = self.find_table_partition_rule(table).await?;
         let splitter = WriteSplitter::with_partition_rule(partition_rule);
         splitter.split_insert(req, schema)
+    }
+
+    /// Split [RowInsertRequest] into [RowInsertRequestSplits] according to the partition rule
+    /// of given table.
+    pub async fn split_row_insert_request(
+        &self,
+        table: TableId,
+        req: RowInsertRequest,
+    ) -> Result<RowInsertRequestSplits> {
+        let partition_rule = self.find_table_partition_rule(table).await?;
+        RowSplitter::new(partition_rule).split(req)
     }
 
     pub async fn split_delete_request(

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::iter;
 
 use api::helper;
 use api::v1::{ColumnSchema, Row, RowInsertRequest, Rows};
@@ -22,7 +23,7 @@ use store_api::storage::RegionNumber;
 use crate::error::Result;
 use crate::PartitionRuleRef;
 
-pub type RowInsertRequestSplits = Vec<(RegionNumber, RowInsertRequest)>;
+pub type RowInsertRequestSplits = HashMap<RegionNumber, RowInsertRequest>;
 
 pub struct RowSplitter {
     partition_rule: PartitionRuleRef,
@@ -37,12 +38,12 @@ impl RowSplitter {
         // No partition
         let partition_columns = self.partition_rule.partition_columns();
         if partition_columns.is_empty() {
-            return Ok(vec![(0, req)]);
+            return Ok(iter::once((0, req)).collect());
         }
 
         // No data
         let Some(rows) = req.rows else {
-            return Ok(vec![]);
+            return Ok(HashMap::new());
         };
 
         SplitReadRowHelper::new(req.table_name, rows, &self.partition_rule).split_to_requests()
@@ -100,12 +101,12 @@ impl<'a> SplitReadRowHelper<'a> {
                 };
                 (region_number, req)
             })
-            .collect::<Vec<_>>();
+            .collect::<HashMap<_, _>>();
 
         Ok(request_splits)
     }
 
-    fn split_to_regions(&self) -> Result<Vec<(RegionNumber, Vec<usize>)>> {
+    fn split_to_regions(&self) -> Result<HashMap<RegionNumber, Vec<usize>>> {
         let mut regions_row_indexes = HashMap::new();
         for (row_idx, values) in self.iter_partition_values().enumerate() {
             let region_number = self.partition_rule.find_region(&values)?;
@@ -114,13 +115,6 @@ impl<'a> SplitReadRowHelper<'a> {
                 .or_insert_with(Vec::new)
                 .push(row_idx);
         }
-
-        // Sort by region number
-        let mut regions_row_indexes = regions_row_indexes
-            .into_iter()
-            .map(|(region_number, row_indexes)| (region_number, row_indexes))
-            .collect::<Vec<_>>();
-        regions_row_indexes.sort_by_key(|(region_number, _)| *region_number);
 
         Ok(regions_row_indexes)
     }
@@ -284,13 +278,8 @@ mod tests {
 
         assert_eq!(splits.len(), 2);
 
-        let region_num0 = splits[0].0;
-        let region_num1 = splits[1].0;
-        assert_eq!(region_num0, 0);
-        assert_eq!(region_num1, 1);
-
-        let req0 = &splits[0].1;
-        let req1 = &splits[1].1;
+        let req0 = &splits[&0];
+        let req1 = &splits[&1];
         assert_eq!(req0.region_number, 0);
         assert_eq!(req1.region_number, 1);
 
@@ -309,10 +298,7 @@ mod tests {
 
         assert_eq!(splits.len(), 1);
 
-        let region_num = splits[0].0;
-        assert_eq!(region_num, 1);
-
-        let req = &splits[0].1;
+        let req = &splits[&1];
         assert_eq!(req.region_number, 1);
 
         let rows = req.rows.as_ref().unwrap();
@@ -328,10 +314,7 @@ mod tests {
 
         assert_eq!(splits.len(), 1);
 
-        let region_num = splits[0].0;
-        assert_eq!(region_num, 0);
-
-        let req = &splits[0].1;
+        let req = &splits[&0];
         assert_eq!(req.region_number, 0);
 
         let rows = req.rows.as_ref().unwrap();
