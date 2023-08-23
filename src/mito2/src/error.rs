@@ -18,6 +18,7 @@ use std::sync::Arc;
 use common_datasource::compression::CompressionType;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
+use common_runtime::JoinError;
 use datatypes::arrow::error::ArrowError;
 use datatypes::prelude::ConcreteDataType;
 use prost::{DecodeError, EncodeError};
@@ -376,6 +377,18 @@ pub enum Error {
         source: datatypes::error::Error,
         location: Location,
     },
+
+    #[snafu(display("Invalid flume sender, location: {}", location,))]
+    InvalidFlumeSender { location: Location },
+
+    #[snafu(display("Invalid scheduler state location: {}", location,))]
+    InvalidSchedulerState { location: Location },
+
+    #[snafu(display("Failed to stop scheduler, source: {}", source))]
+    StopScheduler {
+        source: JoinError,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -435,6 +448,9 @@ impl ErrorExt for Error {
             PrimaryKeyLengthMismatch { .. } => StatusCode::InvalidArguments,
             SortValues { .. } => StatusCode::Unexpected,
             CompactValues { source, .. } => source.status_code(),
+            InvalidFlumeSender { .. } => StatusCode::InvalidArguments,
+            InvalidSchedulerState { .. } => StatusCode::InvalidArguments,
+            StopScheduler { .. } => StatusCode::Internal,
         }
     }
 

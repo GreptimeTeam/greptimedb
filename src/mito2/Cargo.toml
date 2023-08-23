@@ -33,6 +33,7 @@ dashmap = "5.4"
 datafusion-common.workspace = true
 datafusion.workspace = true
 datatypes = { workspace = true }
+flume = "0.10"
 futures.workspace = true
 lazy_static = "1.4"
 log-store = { workspace = true }
@@ -50,6 +51,7 @@ storage = { workspace = true }
 store-api = { workspace = true }
 strum = "0.21"
 table = { workspace = true }
+tokio-util.workspace = true
 tokio.workspace = true
 uuid.workspace = true
 
