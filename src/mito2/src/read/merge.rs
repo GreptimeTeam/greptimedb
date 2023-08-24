@@ -29,7 +29,7 @@ use crate::read::{Batch, BatchReader, BoxedBatchReader, Source};
 /// The merge reader merges [Batch]es from multiple sources that yield sorted batches.
 /// 1. Batch is ordered by primary key, time index, sequence desc, op type desc (we can
 /// ignore op type as sequence is already unique).
-/// 2. Batch doesn't have duplicate elements (element with same key).
+/// 2. Batch doesn't have duplicate elements (elements with the same primary key and time index).
 pub struct MergeReader {
     /// Holds a min-heap for all [Node]s. Each node yields batches from a `source`.
     ///
