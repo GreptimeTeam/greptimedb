@@ -44,7 +44,44 @@ impl Scanner {
     }
 }
 
+#[cfg_attr(doc, aquamarine::aquamarine)]
 /// Helper to scans a region by [ScanRequest].
+///
+/// [ScanRegion] collects SSTs and memtables to scan without actually reading them. It
+/// creates a [Scanner] to actually scan these targets in [Scanner::scan()].
+///
+/// ```mermaid
+/// classDiagram
+/// class ScanRegion {
+///     -VersionRef version
+///     -ScanRequest request
+///     ~scanner() Scanner
+///     ~seq_scan() SeqScan
+/// }
+/// class Scanner {
+///     <<enumeration>>
+///     SeqScan
+///     +scan() SendableRecordBatchStream
+/// }
+/// class SeqScan {
+///     -ProjectionMapper mapper
+///     -Option~TimeRange~ time_range
+///     -Option~Predicate~ predicate
+///     -Vec~MemtableRef~ memtables
+///     -Vec~FileHandle~ files
+///     +build() SendableRecordBatchStream
+/// }
+/// class ProjectionMapper {
+///     ~output_schema() SchemaRef
+///     ~convert(Batch) RecordBatch
+/// }
+/// ScanRegion -- Scanner
+/// ScanRegion o-- ScanRequest
+/// Scanner o-- SeqScan
+/// Scanner -- SendableRecordBatchStream
+/// SeqScan o-- ProjectionMapper
+/// SeqScan -- SendableRecordBatchStream
+/// ```
 pub(crate) struct ScanRegion {
     /// Version of the region at scan.
     version: VersionRef,
