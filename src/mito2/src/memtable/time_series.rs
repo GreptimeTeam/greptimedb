@@ -255,7 +255,7 @@ impl Series {
             // TODO(hl): We should keep track of min/max timestamps for each values and avoid
             // cloning and sorting when values do not overlap with each other.
 
-            let column_size = frozen.get(0).unwrap().fields.len() + 3;
+            let column_size = frozen[0].fields.len() + 3;
 
             if cfg!(debug_assertions) {
                 debug_assert!(frozen
@@ -264,24 +264,13 @@ impl Series {
                     .all(|(prev, next)| { prev.fields.len() == next.fields.len() }));
             }
 
-            let mut arrays = frozen.iter().map(|v| v.iter_columns()).collect::<Vec<_>>();
-
-            let cols = (0..column_size)
-                .map(|_| {
-                    arrays
-                        .iter_mut()
-                        .map(|n| n.next().unwrap()) // safety: we've checked the length for every array
-                        .collect::<Vec<_>>()
-                })
-                .collect::<Vec<_>>();
-
-            let concatenated = cols
-                .into_iter()
-                .map(|col| {
-                    arrow::compute::concat(&col.iter().map(|a| a.as_ref()).collect::<Vec<_>>())
-                })
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .context(ComputeArrowSnafu)?;
+            let  arrays = frozen.iter().map(|v| v.columns()).collect::<Vec<_>>();
+            let concatenated = (0..column_size).map(|i| {
+                let to_concat = arrays.iter().map(|a| {
+                    a[i].as_ref()
+                }).collect::<Vec<_>>();
+                arrow::compute::concat(&to_concat)
+            }).collect::<std::result::Result<Vec<_>,_>>().context(ComputeArrowSnafu)?;
 
             debug_assert_eq!(concatenated.len(), column_size);
             let values = Values::from_columns(&concatenated)?;
@@ -432,24 +421,26 @@ impl Values {
         Ok(batch)
     }
 
-    /// Iterates all columns in [Values].
-    fn iter_columns(&self) -> impl Iterator<Item = ArrayRef> + '_ {
-        std::iter::once(self.timestamp.to_arrow_array())
-            .chain(std::iter::once(self.sequence.to_arrow_array()))
-            .chain(std::iter::once(self.op_type.to_arrow_array()))
-            .chain(self.fields.iter().map(|f| f.to_arrow_array()))
+    /// Returns a vector of all columns converted to arrow [Array] in [Values].
+    fn columns(&self) -> Vec<ArrayRef> {
+        let mut res = Vec::with_capacity(3 + self.fields.len());
+        res.push(self.timestamp.to_arrow_array());
+        res.push(self.sequence.to_arrow_array());
+        res.push(self.op_type.to_arrow_array());
+        res.extend(self.fields.iter().map(|f| f.to_arrow_array()));
+        res
     }
 
     /// Builds a new [Values] instance from columns.
     fn from_columns(cols: &[ArrayRef]) -> Result<Self> {
         debug_assert!(cols.len() >= 3);
         let timestamp =
-            Helper::try_into_vector(cols.get(0).unwrap()).context(ConvertVectorSnafu)?;
+            Helper::try_into_vector(&cols[0]).context(ConvertVectorSnafu)?;
         let sequence = Arc::new(
-            UInt64Vector::try_from_arrow_array(cols.get(1).unwrap()).context(ConvertVectorSnafu)?,
+            UInt64Vector::try_from_arrow_array(&cols[1]).context(ConvertVectorSnafu)?,
         );
         let op_type = Arc::new(
-            UInt8Vector::try_from_arrow_array(cols.get(2).unwrap()).context(ConvertVectorSnafu)?,
+            UInt8Vector::try_from_arrow_array(&cols[2]).context(ConvertVectorSnafu)?,
         );
         let fields = Helper::try_into_vectors(&cols[3..]).context(ConvertVectorSnafu)?;
 
