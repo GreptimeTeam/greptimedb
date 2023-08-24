@@ -235,7 +235,7 @@ mod tests {
         let local_stop = local.clone();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(5)).await;
-            local_stop.stop(false).await.unwrap();
+            local_stop.stop(true).await.unwrap();
             barrier_clone.wait().await;
         });
 
