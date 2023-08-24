@@ -32,7 +32,7 @@ use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
 
 use crate::error;
-use crate::error::Result;
+use crate::error::{Error, Result, TryFromValueSnafu};
 use crate::prelude::*;
 use crate::type_id::LogicalTypeId;
 use crate::types::{IntervalType, ListType};
@@ -444,26 +444,32 @@ impl Ord for Value {
 macro_rules! impl_try_from_value {
     ($Variant: ident, $Type: ident) => {
         impl TryFrom<Value> for $Type {
-            type Error = ();
+            type Error = Error;
 
             #[inline]
             fn try_from(from: Value) -> std::result::Result<Self, Self::Error> {
                 match from {
                     Value::$Variant(v) => Ok(v.into()),
-                    _ => Err(()),
+                    _ => TryFromValueSnafu {
+                        reason: format!("{:?} is not a {}", from, stringify!($Type)),
+                    }
+                    .fail(),
                 }
             }
         }
 
         impl TryFrom<Value> for Option<$Type> {
-            type Error = ();
+            type Error = Error;
 
             #[inline]
             fn try_from(from: Value) -> std::result::Result<Self, Self::Error> {
                 match from {
                     Value::$Variant(v) => Ok(Some(v.into())),
                     Value::Null => Ok(None),
-                    _ => Err(()),
+                    _ => TryFromValueSnafu {
+                        reason: format!("{:?} is not a {}", from, stringify!($Type)),
+                    }
+                    .fail(),
                 }
             }
         }

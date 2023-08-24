@@ -115,6 +115,9 @@ pub enum Error {
 
     #[snafu(display("Column {} already exists", column))]
     DuplicateColumn { column: String, location: Location },
+
+    #[snafu(display("Failed to unpack value to given type: {}", reason))]
+    TryFromValue { reason: String, location: Location },
 }
 
 impl ErrorExt for Error {
