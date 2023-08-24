@@ -82,6 +82,18 @@ pub enum Error {
 
     #[snafu(display("Failed to cast type, msg: {}", msg))]
     CastType { msg: String, location: Location },
+
+    #[snafu(display("Failed to build DataFusion logical plan, source: {}", source))]
+    BuildDfLogicalPlan {
+        source: datafusion_common::DataFusionError,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to execute internal statement, source: {}", source))]
+    ExecuteInternalStatement {
+        source: query::error::Error,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -100,6 +112,8 @@ impl ErrorExt for Error {
             FindScript { source, .. } => source.status_code(),
             CollectRecords { source, .. } => source.status_code(),
             ScriptNotFound { .. } => StatusCode::InvalidArguments,
+            BuildDfLogicalPlan { .. } => StatusCode::Internal,
+            ExecuteInternalStatement { source, .. } => source.status_code(),
         }
     }
 
