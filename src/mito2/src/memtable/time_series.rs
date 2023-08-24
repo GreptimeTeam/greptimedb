@@ -247,9 +247,11 @@ impl Series {
         self.freeze(region_metadata);
 
         let mut frozen = self.frozen.clone();
-        let values = if frozen.is_empty() {
-            Values::new_empty(region_metadata)
-        } else if frozen.len() == 1 {
+
+        // Each series must contain at least one row
+        debug_assert!(!frozen.is_empty());
+
+        let values = if frozen.len() == 1 {
             frozen.pop().unwrap()
         } else {
             // TODO(hl): We should keep track of min/max timestamps for each values and avoid
@@ -264,13 +266,14 @@ impl Series {
                     .all(|(prev, next)| { prev.fields.len() == next.fields.len() }));
             }
 
-            let  arrays = frozen.iter().map(|v| v.columns()).collect::<Vec<_>>();
-            let concatenated = (0..column_size).map(|i| {
-                let to_concat = arrays.iter().map(|a| {
-                    a[i].as_ref()
-                }).collect::<Vec<_>>();
-                arrow::compute::concat(&to_concat)
-            }).collect::<std::result::Result<Vec<_>,_>>().context(ComputeArrowSnafu)?;
+            let arrays = frozen.iter().map(|v| v.columns()).collect::<Vec<_>>();
+            let concatenated = (0..column_size)
+                .map(|i| {
+                    let to_concat = arrays.iter().map(|a| a[i].as_ref()).collect::<Vec<_>>();
+                    arrow::compute::concat(&to_concat)
+                })
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .context(ComputeArrowSnafu)?;
 
             debug_assert_eq!(concatenated.len(), column_size);
             let values = Values::from_columns(&concatenated)?;
@@ -343,33 +346,6 @@ struct Values {
 }
 
 impl Values {
-    pub fn new_empty(metadata: &RegionMetadataRef) -> Self {
-        let timestamp = metadata
-            .schema
-            .timestamp_column()
-            .unwrap()
-            .data_type
-            .create_mutable_vector(0)
-            .to_vector();
-        let sequence = Arc::new(UInt64Vector::from_vec(vec![]));
-        let op_type = Arc::new(UInt8Vector::from_vec(vec![]));
-        let fields = metadata
-            .field_columns()
-            .map(|f| {
-                f.column_schema
-                    .data_type
-                    .create_mutable_vector(0)
-                    .to_vector()
-            })
-            .collect();
-        Self {
-            timestamp,
-            sequence,
-            op_type,
-            fields,
-        }
-    }
-
     /// Converts [Values] to `Batch`, sorts the batch according to `timestamp, sequence` desc and
     /// keeps only the latest row for the same timestamp.
     pub fn to_batch(
@@ -434,14 +410,11 @@ impl Values {
     /// Builds a new [Values] instance from columns.
     fn from_columns(cols: &[ArrayRef]) -> Result<Self> {
         debug_assert!(cols.len() >= 3);
-        let timestamp =
-            Helper::try_into_vector(&cols[0]).context(ConvertVectorSnafu)?;
-        let sequence = Arc::new(
-            UInt64Vector::try_from_arrow_array(&cols[1]).context(ConvertVectorSnafu)?,
-        );
-        let op_type = Arc::new(
-            UInt8Vector::try_from_arrow_array(&cols[2]).context(ConvertVectorSnafu)?,
-        );
+        let timestamp = Helper::try_into_vector(&cols[0]).context(ConvertVectorSnafu)?;
+        let sequence =
+            Arc::new(UInt64Vector::try_from_arrow_array(&cols[1]).context(ConvertVectorSnafu)?);
+        let op_type =
+            Arc::new(UInt8Vector::try_from_arrow_array(&cols[2]).context(ConvertVectorSnafu)?);
         let fields = Helper::try_into_vectors(&cols[3..]).context(ConvertVectorSnafu)?;
 
         Ok(Self {
