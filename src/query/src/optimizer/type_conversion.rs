@@ -276,14 +276,16 @@ fn timestamp_to_timestamp_ms_expr(val: i64, unit: TimeUnit) -> Expr {
 }
 
 fn string_to_timestamp_ms(string: &str) -> Result<ScalarValue> {
-    Ok(ScalarValue::TimestampMillisecond(
-        Some(
-            Timestamp::from_str(string)
-                .map(|t| t.value() / 1_000_000)
-                .map_err(|e| DataFusionError::External(Box::new(e)))?,
-        ),
-        None,
-    ))
+    let ts = Timestamp::from_str(string).map_err(|e| DataFusionError::External(Box::new(e)))?;
+
+    let value = Some(ts.value());
+    let scalar = match ts.unit() {
+        TimeUnit::Second => ScalarValue::TimestampSecond(value, None),
+        TimeUnit::Millisecond => ScalarValue::TimestampMillisecond(value, None),
+        TimeUnit::Microsecond => ScalarValue::TimestampMicrosecond(value, None),
+        TimeUnit::Nanosecond => ScalarValue::TimestampNanosecond(value, None),
+    };
+    Ok(scalar)
 }
 
 #[cfg(test)]
@@ -302,11 +304,11 @@ mod tests {
     fn test_string_to_timestamp_ms() {
         assert_eq!(
             string_to_timestamp_ms("2022-02-02 19:00:00+08:00").unwrap(),
-            ScalarValue::TimestampMillisecond(Some(1643799600000), None)
+            ScalarValue::TimestampSecond(Some(1643799600), None)
         );
         assert_eq!(
             string_to_timestamp_ms("2009-02-13 23:31:30Z").unwrap(),
-            ScalarValue::TimestampMillisecond(Some(1234567890000), None)
+            ScalarValue::TimestampSecond(Some(1234567890), None)
         );
     }
 
@@ -366,9 +368,10 @@ mod tests {
         let mut converter = TypeConverter { schema };
 
         assert_eq!(
-            Expr::Column(Column::from_name("ts")).gt(Expr::Literal(
-                ScalarValue::TimestampMillisecond(Some(1599514949000), None)
-            )),
+            Expr::Column(Column::from_name("ts")).gt(Expr::Literal(ScalarValue::TimestampSecond(
+                Some(1599514949),
+                None
+            ))),
             converter
                 .mutate(
                     Expr::Column(Column::from_name("ts")).gt(Expr::Literal(ScalarValue::Utf8(
@@ -440,7 +443,7 @@ mod tests {
             .unwrap();
         let expected = String::from(
             "Aggregate: groupBy=[[]], aggr=[[COUNT(column1)]]\
-            \n  Filter: column3 > TimestampMillisecond(-28800000, None)\
+            \n  Filter: column3 > TimestampSecond(-28800, None)\
             \n    Values: (Int64(1), Float64(1), TimestampMillisecond(1, None))",
         );
         assert_eq!(format!("{}", transformed_plan.display_indent()), expected);
