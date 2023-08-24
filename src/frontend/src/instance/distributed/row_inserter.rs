@@ -53,10 +53,12 @@ impl RowDistInserter {
         let requests = self.split(requests).await?;
         let results = future::try_join_all(requests.into_iter().map(|(peer, inserts)| {
             let datanode_clients = self.catalog_manager.datanode_clients();
-            let client = datanode_clients.get_client(&peer).await;
-            let database = Database::new(&self.catalog_name, &self.schema_name, client);
+            let catalog = self.catalog_name.clone();
+            let schema = self.schema_name.clone();
 
             common_runtime::spawn_write(async move {
+                let client = datanode_clients.get_client(&peer).await;
+                let database = Database::new(catalog, schema, client);
                 database
                     .row_insert(inserts)
                     .await
