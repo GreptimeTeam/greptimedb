@@ -20,7 +20,7 @@ use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, SchemaRef, COMMEN
 use humantime::format_duration;
 use snafu::ResultExt;
 use sql::ast::{
-    ColumnDef, ColumnOption, ColumnOptionDef, Expr, ObjectName, SqlOption, TableConstraint,
+    ColumnDef, ColumnOption, ColumnOptionDef, Expr, Ident, ObjectName, SqlOption, TableConstraint,
     Value as SqlValue,
 };
 use sql::dialect::GreptimeDbDialect;
@@ -31,6 +31,8 @@ use table::metadata::{TableInfoRef, TableMeta};
 use table::requests::IMMUTABLE_TABLE_META_KEY;
 
 use crate::error::{ConvertSqlTypeSnafu, ConvertSqlValueSnafu, Result, SqlSnafu};
+
+const BACK_QUOTE: char = '`';
 
 #[inline]
 fn number_value<T: Display>(n: T) -> SqlValue {
@@ -119,7 +121,7 @@ fn create_column_def(column_schema: &ColumnSchema) -> Result<ColumnDef> {
     }
 
     Ok(ColumnDef {
-        name: name[..].into(),
+        name: Ident::with_quote(BACK_QUOTE, name),
         data_type: statements::concrete_data_type_to_sql_data_type(&column_schema.data_type)
             .with_context(|_| ConvertSqlTypeSnafu {
                 datatype: column_schema.data_type.clone(),
@@ -135,14 +137,14 @@ fn create_table_constraints(schema: &SchemaRef, table_meta: &TableMeta) -> Vec<T
         let column_name = &timestamp_column.name;
         constraints.push(TableConstraint::Unique {
             name: Some(TIME_INDEX.into()),
-            columns: vec![column_name[..].into()],
+            columns: vec![Ident::with_quote(BACK_QUOTE, column_name)],
             is_primary: false,
         });
     }
     if !table_meta.primary_key_indices.is_empty() {
         let columns = table_meta
             .row_key_column_names()
-            .map(|name| name[..].into())
+            .map(|name| Ident::with_quote(BACK_QUOTE, name))
             .collect();
         constraints.push(TableConstraint::Unique {
             name: None,
@@ -171,7 +173,7 @@ pub fn create_table_stmt(table_info: &TableInfoRef) -> Result<CreateTable> {
     Ok(CreateTable {
         if_not_exists: true,
         table_id: table_info.ident.table_id,
-        name: ObjectName(vec![table_name[..].into()]),
+        name: ObjectName(vec![Ident::with_quote(BACK_QUOTE, table_name)]),
         columns,
         engine: table_meta.engine.clone(),
         constraints,
