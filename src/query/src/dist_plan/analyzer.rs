@@ -39,7 +39,7 @@ impl AnalyzerRule for DistPlannerAnalyzer {
         plan: LogicalPlan,
         _config: &ConfigOptions,
     ) -> datafusion_common::Result<LogicalPlan> {
-        let mut rewriter = MagicRewriter::default();
+        let mut rewriter = PlanRewriter::default();
         plan.rewrite(&mut rewriter)
     }
 }
@@ -53,7 +53,7 @@ enum RewriterStatus {
 }
 
 #[derive(Debug, Default)]
-struct MagicRewriter {
+struct PlanRewriter {
     /// Current level in the tree
     level: usize,
     /// Simulated stack for the `rewrite` recursion
@@ -65,7 +65,7 @@ struct MagicRewriter {
     partition_cols: Option<Vec<String>>,
 }
 
-impl MagicRewriter {
+impl PlanRewriter {
     fn get_parent(&self) -> Option<&LogicalPlan> {
         // level starts from 1, it's safe to minus by 1
         self.stack
@@ -166,7 +166,7 @@ impl MagicRewriter {
     }
 }
 
-impl TreeNodeRewriter for MagicRewriter {
+impl TreeNodeRewriter for PlanRewriter {
     type N = LogicalPlan;
 
     /// descend
