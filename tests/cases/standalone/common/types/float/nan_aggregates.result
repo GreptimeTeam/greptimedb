@@ -1,0 +1,91 @@
+-- description: Test aggregates on NaN values
+-- float --
+SELECT SUM('inf'::FLOAT), SUM('-inf'::FLOAT), SUM('nan'::FLOAT);
+
++------------------+-------------------+------------------+
+| SUM(Utf8("inf")) | SUM(Utf8("-inf")) | SUM(Utf8("nan")) |
++------------------+-------------------+------------------+
+| inf              | -inf              | NaN              |
++------------------+-------------------+------------------+
+
+SELECT MIN('inf'::FLOAT), MIN('-inf'::FLOAT), MIN('nan'::FLOAT);
+
++------------------+-------------------+------------------+
+| MIN(Utf8("inf")) | MIN(Utf8("-inf")) | MIN(Utf8("nan")) |
++------------------+-------------------+------------------+
+| inf              | -inf              | NaN              |
++------------------+-------------------+------------------+
+
+SELECT MAX('inf'::FLOAT), MAX('-inf'::FLOAT), MAX('nan'::FLOAT);
+
++------------------+-------------------+------------------+
+| MAX(Utf8("inf")) | MAX(Utf8("-inf")) | MAX(Utf8("nan")) |
++------------------+-------------------+------------------+
+| inf              | -inf              | NaN              |
++------------------+-------------------+------------------+
+
+CREATE TABLE floats(f FLOAT, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO floats VALUES ('inf'::FLOAT, 1), ('-inf'::FLOAT, 2), ('nan'::FLOAT, 3);
+
+Affected Rows: 3
+
+SELECT MIN(f), MAX(f) FROM floats;
+
++---------------+---------------+
+| MIN(floats.f) | MAX(floats.f) |
++---------------+---------------+
+| -inf          | NaN           |
++---------------+---------------+
+
+DROP TABLE floats;
+
+Affected Rows: 1
+
+-- double --
+SELECT SUM('inf'::DOUBLE), SUM('-inf'::DOUBLE), SUM('nan'::DOUBLE);
+
++------------------+-------------------+------------------+
+| SUM(Utf8("inf")) | SUM(Utf8("-inf")) | SUM(Utf8("nan")) |
++------------------+-------------------+------------------+
+| inf              | -inf              | NaN              |
++------------------+-------------------+------------------+
+
+SELECT MIN('inf'::DOUBLE), MIN('-inf'::DOUBLE), MIN('nan'::DOUBLE);
+
++------------------+-------------------+------------------+
+| MIN(Utf8("inf")) | MIN(Utf8("-inf")) | MIN(Utf8("nan")) |
++------------------+-------------------+------------------+
+| inf              | -inf              | NaN              |
++------------------+-------------------+------------------+
+
+SELECT MAX('inf'::DOUBLE), MAX('-inf'::DOUBLE), MAX('nan'::DOUBLE);
+
++------------------+-------------------+------------------+
+| MAX(Utf8("inf")) | MAX(Utf8("-inf")) | MAX(Utf8("nan")) |
++------------------+-------------------+------------------+
+| inf              | -inf              | NaN              |
++------------------+-------------------+------------------+
+
+CREATE TABLE doubles(f DOUBLE, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO doubles VALUES ('inf'::DOUBLE, 1), ('-inf'::DOUBLE, 2), ('nan'::DOUBLE, 3);
+
+Affected Rows: 3
+
+SELECT MIN(f), MAX(f) FROM doubles;
+
++----------------+----------------+
+| MIN(doubles.f) | MAX(doubles.f) |
++----------------+----------------+
+| -inf           | NaN            |
++----------------+----------------+
+
+DROP TABLE doubles;
+
+Affected Rows: 1
+

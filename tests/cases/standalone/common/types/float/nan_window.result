@@ -1,0 +1,131 @@
+-- description: Test NaN and inf in windowing functions
+-- grouping by inf and nan
+CREATE TABLE floats(f FLOAT, i INT, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO floats VALUES ('inf'::FLOAT, 1, 2), ('inf'::FLOAT, 7, 3), ('-inf'::FLOAT, 3, 4), ('nan'::FLOAT, 7, 5), ('nan'::FLOAT, 19, 6), ('-inf'::FLOAT, 2, 7);
+
+Affected Rows: 6
+
+SELECT f, SUM(i) OVER (PARTITION BY f) FROM floats ORDER BY f;
+
++------+------------------------------------------------------------------------------------------------+
+| f    | SUM(floats.i) PARTITION BY [floats.f] ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING |
++------+------------------------------------------------------------------------------------------------+
+| -inf | 5                                                                                              |
+| -inf | 5                                                                                              |
+| inf  | 8                                                                                              |
+| inf  | 8                                                                                              |
+| NaN  | 26                                                                                             |
+| NaN  | 26                                                                                             |
++------+------------------------------------------------------------------------------------------------+
+
+SELECT f, i, SUM(i) OVER (ORDER BY f, i) FROM floats ORDER BY f, i;
+
++------+----+-----------------------------------------------------------------------------------------------------------------------------+
+| f    | i  | SUM(floats.i) ORDER BY [floats.f ASC NULLS LAST, floats.i ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW |
++------+----+-----------------------------------------------------------------------------------------------------------------------------+
+| -inf | 2  | 2                                                                                                                           |
+| -inf | 3  | 5                                                                                                                           |
+| inf  | 1  | 6                                                                                                                           |
+| inf  | 7  | 13                                                                                                                          |
+| NaN  | 7  | 20                                                                                                                          |
+| NaN  | 19 | 39                                                                                                                          |
++------+----+-----------------------------------------------------------------------------------------------------------------------------+
+
+SELECT f, i, SUM(i) OVER (PARTITION BY f ORDER BY f, i) FROM floats ORDER BY f, i;
+
++------+----+-----------------------------------------------------------------------------------------------------------------------------------------------------+
+| f    | i  | SUM(floats.i) PARTITION BY [floats.f] ORDER BY [floats.f ASC NULLS LAST, floats.i ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW |
++------+----+-----------------------------------------------------------------------------------------------------------------------------------------------------+
+| -inf | 2  | 2                                                                                                                                                   |
+| -inf | 3  | 5                                                                                                                                                   |
+| inf  | 1  | 1                                                                                                                                                   |
+| inf  | 7  | 8                                                                                                                                                   |
+| NaN  | 7  | 7                                                                                                                                                   |
+| NaN  | 19 | 26                                                                                                                                                  |
++------+----+-----------------------------------------------------------------------------------------------------------------------------------------------------+
+
+SELECT i, f, SUM(i) OVER (ORDER BY i, f) FROM floats ORDER BY i, f;
+
++----+------+-----------------------------------------------------------------------------------------------------------------------------+
+| i  | f    | SUM(floats.i) ORDER BY [floats.i ASC NULLS LAST, floats.f ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW |
++----+------+-----------------------------------------------------------------------------------------------------------------------------+
+| 1  | inf  | 1                                                                                                                           |
+| 2  | -inf | 3                                                                                                                           |
+| 3  | -inf | 6                                                                                                                           |
+| 7  | inf  | 13                                                                                                                          |
+| 7  | NaN  | 20                                                                                                                          |
+| 19 | NaN  | 39                                                                                                                          |
++----+------+-----------------------------------------------------------------------------------------------------------------------------+
+
+DROP TABLE floats;
+
+Affected Rows: 1
+
+-- grouping by inf and nan
+CREATE TABLE doubles(f DOUBLE, i INT, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO doubles VALUES ('inf'::DOUBLE, 1, 2), ('inf'::DOUBLE, 7, 3), ('-inf'::DOUBLE, 3, 4), ('nan'::DOUBLE, 7, 5), ('nan'::DOUBLE, 19, 6), ('-inf'::DOUBLE, 2, 7);
+
+Affected Rows: 6
+
+SELECT f, SUM(i) OVER (PARTITION BY f) FROM doubles ORDER BY f;
+
++------+--------------------------------------------------------------------------------------------------+
+| f    | SUM(doubles.i) PARTITION BY [doubles.f] ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING |
++------+--------------------------------------------------------------------------------------------------+
+| -inf | 5                                                                                                |
+| -inf | 5                                                                                                |
+| inf  | 8                                                                                                |
+| inf  | 8                                                                                                |
+| NaN  | 26                                                                                               |
+| NaN  | 26                                                                                               |
++------+--------------------------------------------------------------------------------------------------+
+
+SELECT f, i, SUM(i) OVER (ORDER BY f, i) FROM doubles ORDER BY f, i;
+
++------+----+--------------------------------------------------------------------------------------------------------------------------------+
+| f    | i  | SUM(doubles.i) ORDER BY [doubles.f ASC NULLS LAST, doubles.i ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW |
++------+----+--------------------------------------------------------------------------------------------------------------------------------+
+| -inf | 2  | 2                                                                                                                              |
+| -inf | 3  | 5                                                                                                                              |
+| inf  | 1  | 6                                                                                                                              |
+| inf  | 7  | 13                                                                                                                             |
+| NaN  | 7  | 20                                                                                                                             |
+| NaN  | 19 | 39                                                                                                                             |
++------+----+--------------------------------------------------------------------------------------------------------------------------------+
+
+SELECT f, i, SUM(i) OVER (PARTITION BY f ORDER BY f, i) FROM doubles ORDER BY f, i;
+
++------+----+---------------------------------------------------------------------------------------------------------------------------------------------------------+
+| f    | i  | SUM(doubles.i) PARTITION BY [doubles.f] ORDER BY [doubles.f ASC NULLS LAST, doubles.i ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW |
++------+----+---------------------------------------------------------------------------------------------------------------------------------------------------------+
+| -inf | 2  | 2                                                                                                                                                       |
+| -inf | 3  | 5                                                                                                                                                       |
+| inf  | 1  | 1                                                                                                                                                       |
+| inf  | 7  | 8                                                                                                                                                       |
+| NaN  | 7  | 7                                                                                                                                                       |
+| NaN  | 19 | 26                                                                                                                                                      |
++------+----+---------------------------------------------------------------------------------------------------------------------------------------------------------+
+
+SELECT i, f, SUM(i) OVER (ORDER BY i, f) FROM doubles ORDER BY i, f;
+
++----+------+--------------------------------------------------------------------------------------------------------------------------------+
+| i  | f    | SUM(doubles.i) ORDER BY [doubles.i ASC NULLS LAST, doubles.f ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW |
++----+------+--------------------------------------------------------------------------------------------------------------------------------+
+| 1  | inf  | 1                                                                                                                              |
+| 2  | -inf | 3                                                                                                                              |
+| 3  | -inf | 6                                                                                                                              |
+| 7  | inf  | 13                                                                                                                             |
+| 7  | NaN  | 20                                                                                                                             |
+| 19 | NaN  | 39                                                                                                                             |
++----+------+--------------------------------------------------------------------------------------------------------------------------------+
+
+DROP TABLE doubles;
+
+Affected Rows: 1
+

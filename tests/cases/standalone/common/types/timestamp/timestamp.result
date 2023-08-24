@@ -1,0 +1,177 @@
+CREATE TABLE IF NOT EXISTS timestamp (t TIMESTAMP, ts TIMESTAMP time index DEFAULT current_timestamp());
+
+Affected Rows: 0
+
+INSERT INTO timestamp VALUES ('2008-01-01 00:00:01', 1), (NULL, 2), ('2007-01-01 00:00:01', 3), ('2008-02-01 00:00:01', 4), ('2008-01-02 00:00:01', 5), ('2008-01-01 10:00:00', 6), ('2008-01-01 00:10:00', 7), ('2008-01-01 00:00:10', 8);
+
+Affected Rows: 8
+
+SELECT timestamp '2017-07-23 13:10:11';
+
++-----------------------------+
+| Utf8("2017-07-23 13:10:11") |
++-----------------------------+
+| 2017-07-23T13:10:11         |
++-----------------------------+
+
+SELECT timestamp '2017-07-23T13:10:11',timestamp '2017-07-23T13:10:11Z';
+
++-----------------------------+------------------------------+
+| Utf8("2017-07-23T13:10:11") | Utf8("2017-07-23T13:10:11Z") |
++-----------------------------+------------------------------+
+| 2017-07-23T13:10:11         | 2017-07-23T13:10:11          |
++-----------------------------+------------------------------+
+
+SELECT timestamp '    2017-07-23     13:10:11    ';
+
++-----------------------------+
+| Utf8("2017-07-23 13:10:11") |
++-----------------------------+
+| 2017-07-23T13:10:11         |
++-----------------------------+
+
+SELECT timestamp '    2017-07-23     13:10:11    AA';
+
+Error: 3001(EngineExecuteQuery), Parser error: Invalid timezone "AA": 'AA' is not a valid timezone
+
+SELECT timestamp 'AA2017-07-23 13:10:11';
+
+Error: 3001(EngineExecuteQuery), Parser error: Error parsing timestamp from 'AA2017-07-23 13:10:11': error parsing date
+
+SELECT timestamp '2017-07-23A13:10:11';
+
+Error: 3001(EngineExecuteQuery), Parser error: Error parsing timestamp from '2017-07-23A13:10:11': invalid timestamp separator
+
+SELECT t FROM timestamp ORDER BY t;
+
++---------------------+
+| t                   |
++---------------------+
+| 2007-01-01T00:00:01 |
+| 2008-01-01T00:00:01 |
+| 2008-01-01T00:00:10 |
+| 2008-01-01T00:10:00 |
+| 2008-01-01T10:00:00 |
+| 2008-01-02T00:00:01 |
+| 2008-02-01T00:00:01 |
+|                     |
++---------------------+
+
+SELECT MIN(t) FROM timestamp;
+
++---------------------+
+| MIN(timestamp.t)    |
++---------------------+
+| 2007-01-01T00:00:01 |
++---------------------+
+
+SELECT MAX(t) FROM timestamp;
+
++---------------------+
+| MAX(timestamp.t)    |
++---------------------+
+| 2008-02-01T00:00:01 |
++---------------------+
+
+SELECT SUM(t) FROM timestamp;
+
+Error: 3000(PlanQuery), Error during planning: The function Sum does not support inputs of type Timestamp(Millisecond, None).
+
+SELECT AVG(t) FROM timestamp;
+
+Error: 3000(PlanQuery), Error during planning: The function Avg does not support inputs of type Timestamp(Millisecond, None).
+
+SELECT t+t FROM timestamp;
+
+Error: 1003(Internal), Cast error: Cannot perform arithmetic operation between array of type Timestamp(Millisecond, None) and array of type Timestamp(Millisecond, None)
+
+SELECT t*t FROM timestamp;
+
+Error: 1003(Internal), Invalid argument error: column types must match schema types, expected Interval(DayTime) but found Timestamp(Millisecond, None) at column index 0
+
+SELECT t/t FROM timestamp;
+
+Error: 1003(Internal), Invalid argument error: column types must match schema types, expected Interval(DayTime) but found Timestamp(Millisecond, None) at column index 0
+
+SELECT t%t FROM timestamp;
+
+Error: 1003(Internal), Invalid argument error: column types must match schema types, expected Interval(DayTime) but found Timestamp(Millisecond, None) at column index 0
+
+-- TODO(dennis): It can't run on distributed mode, uncomment it when the issue is fixed: https://github.com/GreptimeTeam/greptimedb/issues/2071 --
+-- SELECT t-t FROM timestamp; --
+SELECT EXTRACT(YEAR from TIMESTAMP '1992-01-01 01:01:01');
+
++-----------------------------------------------------+
+| date_part(Utf8("YEAR"),Utf8("1992-01-01 01:01:01")) |
++-----------------------------------------------------+
+| 1992.0                                              |
++-----------------------------------------------------+
+
+SELECT EXTRACT(YEAR from TIMESTAMP '1992-01-01 01:01:01'::DATE);
+
++-----------------------------------------------------+
+| date_part(Utf8("YEAR"),Utf8("1992-01-01 01:01:01")) |
++-----------------------------------------------------+
+| 1992.0                                              |
++-----------------------------------------------------+
+
+SELECT (TIMESTAMP '1992-01-01 01:01:01')::DATE;
+
++-----------------------------+
+| Utf8("1992-01-01 01:01:01") |
++-----------------------------+
+| 1992-01-01                  |
++-----------------------------+
+
+SELECT (TIMESTAMP '1992-01-01 01:01:01')::TIME;
+
++-----------------------------+
+| Utf8("1992-01-01 01:01:01") |
++-----------------------------+
+| 01:01:01                    |
++-----------------------------+
+
+SELECT t::DATE FROM timestamp WHERE EXTRACT(YEAR from t)=2007 ORDER BY 1;
+
++-------------+
+| timestamp.t |
++-------------+
+| 2007-01-01  |
++-------------+
+
+SELECT t::TIME FROM timestamp WHERE EXTRACT(YEAR from t)=2007 ORDER BY 1;
+
++-------------+
+| timestamp.t |
++-------------+
+| 00:00:01    |
++-------------+
+
+SELECT (DATE '1992-01-01')::TIMESTAMP;
+
++---------------------+
+| Utf8("1992-01-01")  |
++---------------------+
+| 1992-01-01T00:00:00 |
++---------------------+
+
+SELECT TIMESTAMP '2008-01-01 00:00:01.5'::VARCHAR;
+
++-------------------------------+
+| Utf8("2008-01-01 00:00:01.5") |
++-------------------------------+
+| 2008-01-01T00:00:01.500       |
++-------------------------------+
+
+SELECT TIMESTAMP '-8-01-01 00:00:01.5'::VARCHAR;
+
+Error: 3001(EngineExecuteQuery), Parser error: Error parsing timestamp from '-8-01-01 00:00:01.5': error parsing date
+
+SELECT TIMESTAMP '100000-01-01 00:00:01.5'::VARCHAR;
+
+Error: 3001(EngineExecuteQuery), Parser error: Error parsing timestamp from '100000-01-01 00:00:01.5': error parsing date
+
+DROP TABLE timestamp;
+
+Affected Rows: 1
+
