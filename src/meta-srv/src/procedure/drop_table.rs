@@ -13,10 +13,13 @@
 // limitations under the License.
 
 use api::v1::meta::MailboxMessage;
+use api::v1::region::region_request::Request as PbRegionRequest;
+use api::v1::region::DropRequest as PbDropRegionRequest;
 use api::v1::DropTableExpr;
 use async_trait::async_trait;
+use client::region::RegionClientBuilder;
 use client::Database;
-use common_catalog::consts::MITO_ENGINE;
+use common_catalog::consts::MITO2_ENGINE;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_meta::ident::TableIdent;
@@ -25,7 +28,7 @@ use common_meta::key::table_info::TableInfoValue;
 use common_meta::key::table_name::TableNameKey;
 use common_meta::key::table_route::TableRouteValue;
 use common_meta::rpc::ddl::DropTableTask;
-use common_meta::rpc::router::{find_leaders, RegionRoute};
+use common_meta::rpc::router::{find_leader_regions, find_leaders, RegionRoute};
 use common_meta::table_name::TableName;
 use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{
@@ -35,12 +38,15 @@ use common_telemetry::{debug, info};
 use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
+use store_api::storage::RegionId;
+use strum::AsRefStr;
 use table::engine::TableReference;
 use table::metadata::{RawTableInfo, TableId};
 
 use super::utils::handle_retry_error;
 use crate::ddl::DdlContext;
-use crate::error::{self, Result, TableMetadataManagerSnafu};
+use crate::error::{self, BuildRegionClientSnafu, Result, TableMetadataManagerSnafu};
+use crate::metrics;
 use crate::procedure::utils::handle_request_datanode_error;
 use crate::service::mailbox::BroadcastChannel;
 pub struct DropTableProcedure {
@@ -118,14 +124,14 @@ impl DropTableProcedure {
     /// Broadcasts invalidate table cache instruction.
     async fn on_broadcast(&mut self) -> Result<Status> {
         let table_name = self.data.table_name();
+        let engine = &self.data.table_info().meta.engine;
 
         let table_ident = TableIdent {
             catalog: table_name.catalog_name,
             schema: table_name.schema_name,
             table: table_name.table_name,
             table_id: self.data.task.table_id,
-            // TODO(weny): retrieves the engine from the upper.
-            engine: MITO_ENGINE.to_string(),
+            engine: engine.to_string(),
         };
         let instruction = Instruction::InvalidateTableCache(table_ident);
 
@@ -145,9 +151,63 @@ impl DropTableProcedure {
             .broadcast(&BroadcastChannel::Frontend, msg)
             .await?;
 
-        self.data.state = DropTableState::DatanodeDropTable;
+        self.data.state = if engine == MITO2_ENGINE {
+            DropTableState::DatanodeDropRegions
+        } else {
+            DropTableState::DatanodeDropTable
+        };
 
         Ok(Status::executing(true))
+    }
+
+    async fn on_datanode_drop_regions(&self) -> Result<Status> {
+        let table_id = self.data.table_id();
+        let table_ref = self.data.table_ref();
+
+        let region_routes = &self.data.region_routes();
+        let leaders = find_leaders(region_routes);
+        let mut drop_region_tasks = Vec::with_capacity(leaders.len());
+
+        for datanode in leaders {
+            let client = self.context.datanode_clients.get_client(&datanode).await;
+
+            let mut builder = RegionClientBuilder::default();
+            builder.catalog(table_ref.catalog);
+            builder.schema(table_ref.schema);
+            builder.client(client);
+            let client = builder.build().with_context(|_| BuildRegionClientSnafu {
+                peer: datanode.clone(),
+            })?;
+
+            let regions = find_leader_regions(region_routes, &datanode);
+            let region_ids = regions
+                .iter()
+                .map(|region_number| RegionId::new(table_id, *region_number))
+                .collect::<Vec<_>>();
+
+            drop_region_tasks.push(common_runtime::spawn_bg(async move {
+                for region_id in region_ids {
+                    debug!("Dropping region {region_id} on Datanode {datanode:?}");
+
+                    let request = PbRegionRequest::Drop(PbDropRegionRequest {
+                        region_id: region_id.as_u64(),
+                    });
+
+                    if let Err(err) = client.handle(request).await {
+                        return Err(handle_request_datanode_error(datanode)(err));
+                    }
+                }
+                Ok(())
+            }));
+        }
+
+        join_all(drop_region_tasks)
+            .await
+            .into_iter()
+            .map(|e| e.context(error::JoinSnafu).flatten())
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok(Status::Done)
     }
 
     /// Executes drop table instruction on datanode.
@@ -202,11 +262,19 @@ impl Procedure for DropTableProcedure {
     }
 
     async fn execute(&mut self, _ctx: &ProcedureContext) -> ProcedureResult<Status> {
+        let state = &self.data.state;
+
+        let _timer = common_telemetry::timer!(
+            metrics::METRIC_META_PROCEDURE_DROP_TABLE,
+            &[("step", state.as_ref().to_string())]
+        );
+
         match self.data.state {
             DropTableState::Prepare => self.on_prepare().await,
             DropTableState::RemoveMetadata => self.on_remove_metadata().await,
             DropTableState::InvalidateTableCache => self.on_broadcast().await,
             DropTableState::DatanodeDropTable => self.on_datanode_drop_table().await,
+            DropTableState::DatanodeDropRegions => self.on_datanode_drop_regions().await,
         }
         .map_err(handle_retry_error)
     }
@@ -273,7 +341,7 @@ impl DropTableData {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, AsRefStr)]
 enum DropTableState {
     /// Prepares to drop the table
     Prepare,
@@ -283,4 +351,74 @@ enum DropTableState {
     InvalidateTableCache,
     /// Datanode drops the table
     DatanodeDropTable,
+    /// Drop regions on Datanode
+    DatanodeDropRegions,
+}
+
+#[cfg(test)]
+mod test {
+    use std::collections::HashSet;
+    use std::sync::{Arc, Mutex};
+
+    use super::*;
+    use crate::procedure::utils::mock::EchoRegionServer;
+    use crate::procedure::utils::test_data;
+
+    #[tokio::test]
+    async fn test_on_datanode_drop_regions() {
+        let drop_table_task = DropTableTask {
+            catalog: "my_catalog".to_string(),
+            schema: "my_schema".to_string(),
+            table: "my_table".to_string(),
+            table_id: 42,
+        };
+        let procedure = DropTableProcedure::new(
+            1,
+            drop_table_task,
+            TableRouteValue::new(test_data::new_region_routes()),
+            TableInfoValue::new(test_data::new_table_info()),
+            test_data::new_ddl_context(),
+        );
+
+        let (region_server, mut rx) = EchoRegionServer::new();
+
+        let datanodes = find_leaders(&procedure.data.table_route_value.region_routes);
+        for peer in datanodes {
+            let client = region_server.new_client(&peer);
+            procedure
+                .context
+                .datanode_clients
+                .insert_client(peer, client)
+                .await;
+        }
+
+        let expected_dropped_regions = Arc::new(Mutex::new(HashSet::from([
+            RegionId::new(42, 1),
+            RegionId::new(42, 2),
+            RegionId::new(42, 3),
+        ])));
+        let handle = tokio::spawn({
+            let expected_dropped_regions = expected_dropped_regions.clone();
+            let mut max_recv = expected_dropped_regions.lock().unwrap().len();
+            async move {
+                while let Some(PbRegionRequest::Drop(request)) = rx.recv().await {
+                    let region_id = RegionId::from_u64(request.region_id);
+
+                    expected_dropped_regions.lock().unwrap().remove(&region_id);
+
+                    max_recv -= 1;
+                    if max_recv == 0 {
+                        break;
+                    }
+                }
+            }
+        });
+
+        let status = procedure.on_datanode_drop_regions().await.unwrap();
+        assert!(matches!(status, Status::Done));
+
+        handle.await.unwrap();
+
+        assert!(expected_dropped_regions.lock().unwrap().is_empty());
+    }
 }
