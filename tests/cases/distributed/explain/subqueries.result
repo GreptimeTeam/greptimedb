@@ -1,4 +1,4 @@
-CREATE TABLE integers(i INTEGER, j BIGINT TIME INDEX);
+CREATE TABLE integers(i INTEGER, j TIMESTAMP TIME INDEX);
 
 Affected Rows: 0
 
@@ -65,7 +65,7 @@ EXPLAIN SELECT * FROM integers i1 WHERE EXISTS(SELECT i FROM integers WHERE i=i1
 |_|_|
 +-+-+
 
-create table other (i INTEGER, j BIGINT TIME INDEX);
+create table other (i INTEGER, j TIMESTAMP TIME INDEX);
 
 Affected Rows: 0
 
@@ -107,19 +107,19 @@ order by t.i desc;
 
 EXPLAIN INSERT INTO other SELECT i, 2 FROM integers WHERE i=(SELECT MAX(i) FROM integers);
 
-+--------------+------------------------------------------------------------+
-| plan_type    | plan                                                       |
-+--------------+------------------------------------------------------------+
-| logical_plan | Dml: op=[Insert] table=[other]                             |
-|              |   Projection: integers.i AS i, Int64(2) AS j               |
-|              |     Inner Join: integers.i = __scalar_sq_1.MAX(integers.i) |
-|              |       Projection: integers.i                               |
-|              |         MergeScan [is_placeholder=false]                   |
-|              |       SubqueryAlias: __scalar_sq_1                         |
-|              |         Aggregate: groupBy=[[]], aggr=[[MAX(integers.i)]]  |
-|              |           Projection: integers.i                           |
-|              |             MergeScan [is_placeholder=false]               |
-+--------------+------------------------------------------------------------+
++--------------+-------------------------------------------------------------------+
+| plan_type    | plan                                                              |
++--------------+-------------------------------------------------------------------+
+| logical_plan | Dml: op=[Insert] table=[other]                                    |
+|              |   Projection: integers.i AS i, TimestampMillisecond(2, None) AS j |
+|              |     Inner Join: integers.i = __scalar_sq_1.MAX(integers.i)        |
+|              |       Projection: integers.i                                      |
+|              |         MergeScan [is_placeholder=false]                          |
+|              |       SubqueryAlias: __scalar_sq_1                                |
+|              |         Aggregate: groupBy=[[]], aggr=[[MAX(integers.i)]]         |
+|              |           Projection: integers.i                                  |
+|              |             MergeScan [is_placeholder=false]                      |
++--------------+-------------------------------------------------------------------+
 
 drop table other;
 
