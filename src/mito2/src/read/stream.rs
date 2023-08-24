@@ -210,7 +210,7 @@ fn new_repeated_vector(
         .try_push_value_ref(value)
         .map_err(BoxedError::new)
         .context(ExternalSnafu)?;
-    // This requires an addtional allocation. TODO(yingwen): Add a way to create repeated vector to data type.
+    // This requires an additional allocation. TODO(yingwen): Add a way to create repeated vector to data type.
     let base_vector = mutable_vector.to_vector();
     Ok(base_vector.replicate(&[num_rows]))
 }
