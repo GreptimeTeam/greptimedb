@@ -45,7 +45,6 @@ impl AnalyzerRule for DistPlannerAnalyzer {
         _config: &ConfigOptions,
     ) -> datafusion_common::Result<LogicalPlan> {
         let plan = plan.transform(&Self::inspect_plan_with_subquery)?;
-        info!("[DEBUG] going to transform the outer plan");
         let mut rewriter = PlanRewriter::default();
         plan.rewrite(&mut rewriter)
     }
@@ -53,23 +52,17 @@ impl AnalyzerRule for DistPlannerAnalyzer {
 
 impl DistPlannerAnalyzer {
     fn inspect_plan_with_subquery(plan: LogicalPlan) -> DfResult<Transformed<LogicalPlan>> {
-        info!("[DEBUG] inspect_plan_with_subquery in plan: {:?}", plan);
         let exprs = plan
             .expressions()
             .into_iter()
             .map(|e| e.transform(&Self::tranform_subquery))
             .collect::<DfResult<Vec<_>>>()?;
 
-        let inputs = plan
-            .inputs()
-            .into_iter()
-            .map(|p| p.clone())
-            .collect::<Vec<_>>();
+        let inputs = plan.inputs().into_iter().cloned().collect::<Vec<_>>();
         Ok(Transformed::Yes(from_plan(&plan, &exprs, &inputs)?))
     }
 
     fn tranform_subquery(expr: Expr) -> DfResult<Transformed<Expr>> {
-        info!("[DEBUG] transforming expr {:?}", expr);
         match expr {
             Expr::Exists(exists) => Ok(Transformed::Yes(Expr::Exists(Exists {
                 subquery: Self::handle_subquery(exists.subquery)?,
@@ -103,8 +96,6 @@ impl DistPlannerAnalyzer {
                 .project(project_exprs)?
                 .build()?;
         }
-
-        info!("[DEBUG] rewrote subquery: {:?}", rewrote_subquery);
 
         Ok(Subquery {
             subquery: Arc::new(rewrote_subquery),
@@ -247,7 +238,6 @@ impl TreeNodeRewriter for PlanRewriter {
         self.set_unexpanded();
         self.partition_cols = None;
 
-        info!("[DEBUG] pre_visit: {:?}", node);
         Ok(RewriteRecursion::Continue)
     }
 
@@ -255,8 +245,6 @@ impl TreeNodeRewriter for PlanRewriter {
     ///
     /// Besure to call `pop_stack` before returning
     fn mutate(&mut self, node: Self::N) -> DfResult<Self::N> {
-        info!("[DEBUG] mutate: {:?}, state: {:?}", node, self);
-
         // only expand once on each ascending
         if self.is_expanded() {
             self.pop_stack();
@@ -278,11 +266,8 @@ impl TreeNodeRewriter for PlanRewriter {
             return Ok(node);
         };
 
-        info!("[DEBUG] parent: {:?}", parent);
-
         // TODO(ruihang): avoid this clone
         if self.should_expand(&parent.clone()) {
-            info!("[DEBUG] should expand");
             // TODO(ruihang): does this work for nodes with multiple children?;
             // replace the current node with expanded one
             let mut node = MergeScanLogicalPlan::new(node, false).into_logical_plan();
