@@ -614,7 +614,14 @@ impl PromPlanner {
                 let _ = result_set.remove(&col);
             }
 
-            self.ctx.field_columns = result_set.iter().cloned().collect();
+            // mask the field columns in context using computed result set
+            self.ctx.field_columns = self
+                .ctx
+                .field_columns
+                .drain(..)
+                .filter(|col| result_set.contains(col))
+                .collect();
+
             let exprs = result_set
                 .into_iter()
                 .map(|col| DfExpr::Column(col.into()))
