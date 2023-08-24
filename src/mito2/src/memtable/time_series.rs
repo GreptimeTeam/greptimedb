@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::collections::btree_map::Entry;
-use std::collections::{BTreeMap, Bound, HashMap};
+use std::collections::{BTreeMap, Bound, HashSet};
 use std::fmt::{Debug, Formatter};
 use std::sync::{Arc, RwLock};
 
@@ -94,11 +94,17 @@ impl Memtable for TimeSeriesMemtable {
     }
 
     fn iter(&self, req: ScanRequest) -> BoxedBatchIterator {
-        let projection = req.projection.map(|p| {
-            p.iter()
+        let projection = if let Some(projection) = &req.projection {
+            projection
+                .iter()
                 .map(|idx| self.region_metadata.column_metadatas[*idx].column_id)
-                .collect::<Vec<_>>()
-        });
+                .collect()
+        } else {
+            self.region_metadata
+                .field_columns()
+                .map(|c| c.column_id)
+                .collect()
+        };
 
         Box::new(self.series_set.iter_series(projection))
     }
@@ -139,7 +145,7 @@ impl SeriesSet {
     }
 
     /// Iterates all series in [SeriesSet].
-    fn iter_series(&self, projection: Option<Vec<ColumnId>>) -> Iter {
+    fn iter_series(&self, projection: HashSet<ColumnId>) -> Iter {
         Iter {
             metadata: self.region_metadata.clone(),
             series: self.series.clone(),
@@ -152,7 +158,7 @@ impl SeriesSet {
 struct Iter {
     metadata: RegionMetadataRef,
     series: Arc<SeriesRwLockMap>,
-    projection: Option<Vec<ColumnId>>,
+    projection: HashSet<ColumnId>,
     last_key: Option<Vec<u8>>,
 }
 
@@ -171,11 +177,7 @@ impl Iterator for Iter {
         if let Some((primary_key, series)) = range.next() {
             self.last_key = Some(primary_key.clone());
             let values = series.write().unwrap().compact(&self.metadata);
-            Some(
-                values.and_then(|v| {
-                    v.to_batch(primary_key, &self.metadata, self.projection.as_deref())
-                }),
-            )
+            Some(values.and_then(|v| v.to_batch(primary_key, &self.metadata, &self.projection)))
         } else {
             None
         }
@@ -352,7 +354,7 @@ impl Values {
         &self,
         primary_key: &[u8],
         metadata: &RegionMetadataRef,
-        projection: Option<&[ColumnId]>,
+        projection: &HashSet<ColumnId>,
     ) -> Result<Batch> {
         let builder = BatchBuilder::with_required_columns(
             primary_key.to_vec(),
@@ -361,36 +363,16 @@ impl Values {
             self.op_type.clone(),
         );
 
-        let fields = if let Some(projection) = projection {
-            let fields = metadata
-                .field_columns()
-                .zip(self.fields.iter())
-                .map(|(c, f)| {
-                    (
-                        c.column_id,
-                        BatchColumn {
-                            column_id: c.column_id,
-                            data: f.clone(),
-                        },
-                    )
-                })
-                .collect::<HashMap<_, _>>();
-
-            // simply ignore those columns which are not field.
-            projection
-                .iter()
-                .filter_map(|column_id| fields.get(column_id).cloned())
-                .collect()
-        } else {
-            metadata
-                .field_columns()
-                .zip(self.fields.iter())
-                .map(|(c, f)| BatchColumn {
-                    column_id: c.column_id,
+        let fields = metadata
+            .field_columns()
+            .zip(self.fields.iter())
+            .filter_map(|(c, f)| {
+                projection.get(&c.column_id).map(|c| BatchColumn {
+                    column_id: *c,
                     data: f.clone(),
                 })
-                .collect::<Vec<_>>()
-        };
+            })
+            .collect();
 
         let mut batch = builder.with_fields(fields).build()?;
         batch.sort_and_dedup()?;
@@ -607,7 +589,9 @@ mod tests {
             fields,
         };
 
-        let batch = values.to_batch(b"test", &schema, None).unwrap();
+        let batch = values
+            .to_batch(b"test", &schema, &[0, 1, 2, 3, 4].into_iter().collect())
+            .unwrap();
         check_value(
             &batch,
             vec![
