@@ -14,6 +14,7 @@
 
 pub mod deleter;
 pub(crate) mod inserter;
+pub(crate) mod row_inserter;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -23,7 +24,7 @@ use api::v1::ddl_request::Expr as DdlExpr;
 use api::v1::greptime_request::Request;
 use api::v1::{
     column_def, AlterExpr, CompactTableExpr, CreateDatabaseExpr, CreateTableExpr, DeleteRequests,
-    FlushTableExpr, InsertRequests, TruncateTableExpr,
+    FlushTableExpr, InsertRequests, RowInsertRequests, TruncateTableExpr,
 };
 use async_trait::async_trait;
 use catalog::{CatalogManager, DeregisterTableRequest, RegisterTableRequest};
@@ -72,6 +73,7 @@ use crate::error::{
 use crate::expr_factory;
 use crate::instance::distributed::deleter::DistDeleter;
 use crate::instance::distributed::inserter::DistInserter;
+use crate::instance::distributed::row_inserter::RowDistInserter;
 use crate::table::DistTable;
 
 const MAX_VALUE: &str = "MAXVALUE";
@@ -624,6 +626,20 @@ impl DistInstance {
         Ok(Output::AffectedRows(affected_rows as usize))
     }
 
+    async fn handle_row_dist_insert(
+        &self,
+        requests: RowInsertRequests,
+        ctx: QueryContextRef,
+    ) -> Result<Output> {
+        let inserter = RowDistInserter::new(
+            ctx.current_catalog().to_owned(),
+            ctx.current_schema().to_owned(),
+            self.catalog_manager.clone(),
+        );
+        let affected_rows = inserter.insert(requests).await?;
+        Ok(Output::AffectedRows(affected_rows as usize))
+    }
+
     async fn handle_dist_delete(
         &self,
         request: DeleteRequests,
@@ -664,8 +680,9 @@ impl GrpcQueryHandler for DistInstance {
     async fn do_query(&self, request: Request, ctx: QueryContextRef) -> Result<Output> {
         match request {
             Request::Inserts(requests) => self.handle_dist_insert(requests, ctx).await,
-            Request::RowInserts(_) | Request::RowDeletes(_) => NotSupportedSnafu {
-                feat: "row inserts/deletes",
+            Request::RowInserts(requests) => self.handle_row_dist_insert(requests, ctx).await,
+            Request::RowDeletes(_) => NotSupportedSnafu {
+                feat: "row deletes",
             }
             .fail(),
             Request::Deletes(requests) => self.handle_dist_delete(requests, ctx).await,
