@@ -82,6 +82,24 @@ pub enum Error {
 
     #[snafu(display("Failed to cast type, msg: {}", msg))]
     CastType { msg: String, location: Location },
+
+    #[snafu(display("Failed to parse internal SQL, source: {}", source))]
+    ParseInternalSQL {
+        source: query::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to plan internal statement, source: {}", source))]
+    PlanInternalStatement {
+        source: query::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to execute internal statement, source: {}", source))]
+    ExecuteInternalStatement {
+        source: query::error::Error,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -100,6 +118,9 @@ impl ErrorExt for Error {
             FindScript { source, .. } => source.status_code(),
             CollectRecords { source, .. } => source.status_code(),
             ScriptNotFound { .. } => StatusCode::InvalidArguments,
+            ParseInternalSQL { source, .. }
+            | PlanInternalStatement { source, .. }
+            | ExecuteInternalStatement { source, .. } => source.status_code(),
         }
     }
 

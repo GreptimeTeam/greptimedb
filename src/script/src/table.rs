@@ -24,7 +24,7 @@ use common_catalog::consts::{
 use common_catalog::format_full_table_name;
 use common_error::ext::BoxedError;
 use common_query::Output;
-use common_recordbatch::{util as record_util, RecordBatch};
+use common_recordbatch::{util as record_util, RecordBatch, SendableRecordBatchStream};
 use common_telemetry::logging;
 use common_time::util;
 use datatypes::prelude::{ConcreteDataType, ScalarVector};
@@ -32,15 +32,15 @@ use datatypes::schema::{ColumnSchema, RawSchema};
 use datatypes::vectors::{StringVector, TimestampMillisecondVector, Vector, VectorRef};
 use query::parser::QueryLanguageParser;
 use query::QueryEngineRef;
-use session::context::QueryContextBuilder;
+use session::context::{QueryContext, QueryContextBuilder};
 use snafu::{ensure, OptionExt, ResultExt};
-use store_api::storage::ScanRequest;
 use table::requests::{CreateTableRequest, InsertRequest, TableOptions};
 use table::TableRef;
 
 use crate::error::{
-    CastTypeSnafu, CollectRecordsSnafu, FindColumnInScriptsTableSnafu, FindScriptSnafu,
-    FindScriptsTableSnafu, InsertScriptSnafu, RegisterScriptsTableSnafu, Result,
+    CastTypeSnafu, CollectRecordsSnafu, ExecuteInternalStatementSnafu,
+    FindColumnInScriptsTableSnafu, FindScriptSnafu, FindScriptsTableSnafu, InsertScriptSnafu,
+    ParseInternalSQLSnafu, PlanInternalStatementSnafu, RegisterScriptsTableSnafu, Result,
     ScriptNotFoundSnafu, ScriptsTableNotFoundSnafu,
 };
 use crate::python::utils::block_on_async;
@@ -78,8 +78,7 @@ impl ScriptsTable {
         table: TableRef,
         query_engine: QueryEngineRef,
     ) -> catalog::error::Result<()> {
-        let rbs = table
-            .scan_to_stream(ScanRequest::default())
+        let rbs = Self::load_table_rows(&table, &query_engine)
             .await
             .map_err(BoxedError::new)
             .context(CompileScriptInternalSnafu)?;
@@ -291,6 +290,35 @@ impl ScriptsTable {
     #[inline]
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    async fn load_table_rows(
+        table: &TableRef,
+        query_engine: &QueryEngineRef,
+    ) -> Result<SendableRecordBatchStream> {
+        let table_info = table.table_info();
+        let sql = format!("SELECT * FROM {}", table_info.name.as_str());
+        let statement = QueryLanguageParser::parse_sql(&sql).context(ParseInternalSQLSnafu)?;
+
+        let ctx = QueryContext::with(
+            table_info.catalog_name.as_str(),
+            table_info.schema_name.as_str(),
+        );
+        let plan = query_engine
+            .planner()
+            .plan(statement, ctx.clone())
+            .await
+            .context(PlanInternalStatementSnafu)?;
+        let output = query_engine
+            .execute(plan, ctx)
+            .await
+            .context(ExecuteInternalStatementSnafu)?;
+        let stream = match output {
+            Output::Stream(stream) => stream,
+            Output::RecordBatches(record_batches) => record_batches.as_stream(),
+            _ => unreachable!(),
+        };
+        Ok(stream)
     }
 }
 
