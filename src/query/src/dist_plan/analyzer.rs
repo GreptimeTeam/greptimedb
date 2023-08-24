@@ -21,7 +21,7 @@ use datafusion_common::config::ConfigOptions;
 use datafusion_common::tree_node::{RewriteRecursion, Transformed, TreeNode, TreeNodeRewriter};
 use datafusion_expr::expr::{Exists, InSubquery};
 use datafusion_expr::utils::from_plan;
-use datafusion_expr::{Expr, LogicalPlan, Subquery};
+use datafusion_expr::{col, Expr, LogicalPlan, LogicalPlanBuilder, Subquery};
 use datafusion_optimizer::analyzer::AnalyzerRule;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::metadata::TableType;
@@ -90,12 +90,24 @@ impl DistPlannerAnalyzer {
 
     fn handle_subquery(subquery: Subquery) -> DfResult<Subquery> {
         let mut rewriter = PlanRewriter::default();
-        let rewrote_subquery = Arc::new(subquery.subquery.as_ref().clone().rewrite(&mut rewriter)?);
+        let mut rewrote_subquery = subquery.subquery.as_ref().clone().rewrite(&mut rewriter)?;
+        // Workaround. DF doesn't support the first plan in subquery to be an Extension
+        if matches!(rewrote_subquery, LogicalPlan::Extension(_)) {
+            let output_schema = rewrote_subquery.schema().clone();
+            let project_exprs = output_schema
+                .fields()
+                .iter()
+                .map(|f| col(f.name()))
+                .collect::<Vec<_>>();
+            rewrote_subquery = LogicalPlanBuilder::from(rewrote_subquery)
+                .project(project_exprs)?
+                .build()?;
+        }
 
         info!("[DEBUG] rewrote subquery: {:?}", rewrote_subquery);
 
         Ok(Subquery {
-            subquery: rewrote_subquery,
+            subquery: Arc::new(rewrote_subquery),
             outer_ref_columns: subquery.outer_ref_columns,
         })
     }
