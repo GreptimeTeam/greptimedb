@@ -37,40 +37,34 @@ use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
 
 /// Record batch stream implementation.
 pub(crate) struct StreamImpl<S> {
-    /// [Batch] stream.
+    /// [RecordBatch] stream.
     stream: S,
-    /// Converts [Batch]es from the `stream` to [RecordBatch].
-    mapper: ProjectionMapper,
+    /// Schema of returned record batches.
+    schema: SchemaRef,
 }
 
 impl<S> StreamImpl<S> {
-    /// Returns a new stream from a batch stream.
-    pub(crate) fn new(stream: S, mapper: ProjectionMapper) -> StreamImpl<S> {
-        StreamImpl { stream, mapper }
+    /// Returns a new stream from a record batch stream and its schema.
+    pub(crate) fn new(stream: S, schema: SchemaRef) -> StreamImpl<S> {
+        StreamImpl { stream, schema }
     }
 }
 
-impl<S: Stream<Item = Result<Batch>> + Unpin> Stream for StreamImpl<S> {
+impl<S: Stream<Item = common_recordbatch::error::Result<RecordBatch>> + Unpin> Stream
+    for StreamImpl<S>
+{
     type Item = common_recordbatch::error::Result<RecordBatch>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        match Pin::new(&mut self.stream).poll_next(cx) {
-            Poll::Ready(Some(res)) => {
-                let record_batch = res
-                    .map_err(BoxedError::new)
-                    .context(ExternalSnafu)
-                    .and_then(|batch| self.mapper.convert(&batch));
-                Poll::Ready(Some(record_batch))
-            }
-            Poll::Ready(None) => Poll::Ready(None),
-            Poll::Pending => Poll::Pending,
-        }
+        Pin::new(&mut self.stream).poll_next(cx)
     }
 }
 
-impl<S: Stream<Item = Result<Batch>> + Unpin> RecordBatchStream for StreamImpl<S> {
+impl<S: Stream<Item = common_recordbatch::error::Result<RecordBatch>> + Unpin> RecordBatchStream
+    for StreamImpl<S>
+{
     fn schema(&self) -> SchemaRef {
-        self.mapper.output_schema.clone()
+        self.schema.clone()
     }
 }
 
@@ -151,6 +145,11 @@ impl ProjectionMapper {
     /// Returns ids of projected columns.
     pub(crate) fn column_ids(&self) -> &[ColumnId] {
         &self.column_ids
+    }
+
+    /// Returns the schema of converted [RecordBatch].
+    pub(crate) fn output_schema(&self) -> SchemaRef {
+        self.output_schema.clone()
     }
 
     /// Converts a [Batch] to a [RecordBatch].

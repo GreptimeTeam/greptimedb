@@ -37,9 +37,9 @@ pub enum Scanner {
 
 impl Scanner {
     /// Returns a [SendableRecordBatchStream] to retrieve scan results.
-    pub fn scan(&self) -> SendableRecordBatchStream {
+    pub async fn scan(&self) -> Result<SendableRecordBatchStream> {
         match self {
-            Scanner::Seq(seq_scan) => seq_scan.build(),
+            Scanner::Seq(seq_scan) => seq_scan.build().await,
         }
     }
 }
@@ -73,12 +73,12 @@ impl ScanRegion {
     }
 
     /// Returns a [Scanner] to scan the region.
-    pub(crate) fn scanner(&self) -> Result<Scanner> {
+    pub(crate) fn scanner(self) -> Result<Scanner> {
         self.seq_scan().map(Scanner::Seq)
     }
 
     /// Scan sequentailly.
-    pub(crate) fn seq_scan(&self) -> Result<SeqScan> {
+    pub(crate) fn seq_scan(self) -> Result<SeqScan> {
         let time_range = self.build_time_range_predicate();
 
         let ssts = &self.version.ssts;
@@ -115,16 +115,11 @@ impl ScanRegion {
             None => ProjectionMapper::all(&self.version.metadata)?,
         };
 
-        let seq_scan = SeqScan::new(
-            self.version.metadata.clone(),
-            &self.file_dir,
-            self.object_store.clone(),
-            mapper,
-        )
-        .with_time_range(Some(time_range))
-        .with_predicate(Some(predicate))
-        .with_memtables(memtables)
-        .with_files(files);
+        let seq_scan = SeqScan::new(self.file_dir, self.object_store, mapper, self.request)
+            .with_time_range(Some(time_range))
+            .with_predicate(Some(predicate))
+            .with_memtables(memtables)
+            .with_files(files);
 
         Ok(seq_scan)
     }
