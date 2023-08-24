@@ -27,7 +27,7 @@ use crate::error::{
     InvalidFlumeSenderSnafu, InvalidSchedulerStateSnafu, Result, StopSchedulerSnafu,
 };
 
-pub type Job = Pin<Box<dyn Future<Output = ()> + Send>>;
+pub type Job = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
 
 ///The state of scheduler
 const STATE_RUNNING: u8 = 0;
@@ -78,7 +78,7 @@ impl LocalScheduler {
                         }
                         req_opt = receiver.recv_async() =>{
                             if let Ok(req) = req_opt {
-                                req.await;
+                                let _ = req.await;
                             }
                         }
                     }
@@ -87,7 +87,7 @@ impl LocalScheduler {
                 if state_clone.load(Ordering::Relaxed) == STATE_AWAIT_TERMINATION {
                     // recv_async waits until all sender's been dropped.
                     while let Ok(req) = receiver.recv_async().await {
-                        req.await;
+                        let _ = req.await;
                     }
                     state_clone.store(STATE_STOP, Ordering::Relaxed);
                 }
@@ -178,6 +178,7 @@ mod tests {
             local
                 .schedule(Box::pin(async move {
                     sum_clone.fetch_add(1, Ordering::Relaxed);
+                    Ok(())
                 }))
                 .unwrap();
         }
@@ -196,6 +197,7 @@ mod tests {
             let ok = local
                 .schedule(Box::pin(async move {
                     sum_clone.fetch_add(1, Ordering::Relaxed);
+                    Ok(())
                 }))
                 .is_ok();
             if ok {
@@ -218,6 +220,7 @@ mod tests {
             local
                 .schedule(Box::pin(async move {
                     barrier_clone.wait().await;
+                    Ok(())
                 }))
                 .unwrap();
         }
@@ -235,7 +238,7 @@ mod tests {
         let local_stop = local.clone();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(5)).await;
-            local_stop.stop(false).await.unwrap();
+            local_stop.stop(true).await.unwrap();
             barrier_clone.wait().await;
         });
 
@@ -249,6 +252,7 @@ mod tests {
                 let ok = local_task
                     .schedule(Box::pin(async move {
                         sum_c.fetch_add(1, Ordering::Relaxed);
+                        Ok(())
                     }))
                     .is_ok();
                 if ok {

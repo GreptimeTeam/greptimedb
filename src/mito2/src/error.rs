@@ -383,6 +383,12 @@ pub enum Error {
         source: JoinError,
         location: Location,
     },
+
+    #[snafu(display("Failed to delete SST file, source: {}", source))]
+    DeleteSst {
+        source: object_store::Error,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -444,6 +450,7 @@ impl ErrorExt for Error {
             InvalidFlumeSender { .. } => StatusCode::InvalidArguments,
             InvalidSchedulerState { .. } => StatusCode::InvalidArguments,
             StopScheduler { .. } => StatusCode::Internal,
+            DeleteSst { .. } => StatusCode::StorageUnavailable,
         }
     }
 

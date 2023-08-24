@@ -14,8 +14,12 @@
 
 use std::sync::Arc;
 
+use common_telemetry::{debug, error};
 use store_api::storage::RegionId;
 
+use crate::access::AccessLayer;
+use crate::error::Result;
+use crate::schedule::scheduler::{LocalScheduler, Scheduler};
 use crate::sst::file::FileId;
 
 /// Request to remove a file.
@@ -30,16 +34,105 @@ pub struct PurgeRequest {
 /// A worker to delete files in background.
 pub trait FilePurger: Send + Sync {
     /// Send a purge request to the background worker.
-    fn send_request(&self, request: PurgeRequest);
+    fn send_request(&self, request: PurgeRequest) -> Result<()>;
 }
 
 pub type FilePurgerRef = Arc<dyn FilePurger>;
 
-// TODO(yingwen): Remove this once we implement the real purger.
-/// A purger that does nothing.
-#[derive(Debug)]
-struct NoopPurger {}
+pub struct LocalFilePurger {
+    pub scheduler: Arc<LocalScheduler>,
 
-impl FilePurger for NoopPurger {
-    fn send_request(&self, _request: PurgeRequest) {}
+    pub sst_layer: Arc<AccessLayer>,
+}
+
+impl LocalFilePurger {
+    pub fn new(scheduler: Arc<LocalScheduler>, sst_layer: Arc<AccessLayer>) -> Self {
+        Self {
+            scheduler,
+            sst_layer,
+        }
+    }
+}
+
+impl FilePurger for LocalFilePurger {
+    fn send_request(&self, request: PurgeRequest) -> Result<()> {
+        let file_id = request.file_id;
+        let region_id = request.region_id;
+        let sst_layer = self.sst_layer.clone();
+
+        self.scheduler.schedule(Box::pin(async move {
+            sst_layer.delete_sst(file_id).await.map_err(|e| {
+                error!(e; "Failed to delete SST file, file: {}, region: {}", 
+                    file_id.as_parquet(), region_id);
+                e
+            })?;
+
+            debug!(
+                "Successfully deleted SST file: {}, region: {}",
+                file_id.as_parquet(),
+                region_id
+            );
+            Ok(())
+        }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use common_test_util::temp_dir::create_temp_dir;
+    use object_store::services::Fs;
+    use object_store::ObjectStore;
+
+    use super::*;
+    use crate::access::AccessLayer;
+    use crate::schedule::scheduler::LocalScheduler;
+    use crate::sst::file::{FileHandle, FileId, FileMeta, FileTimeRange};
+
+    #[tokio::test]
+    async fn test_file_purge() {
+        common_telemetry::init_default_ut_logging();
+
+        let dir = create_temp_dir("file-purge");
+        let mut builder = Fs::default();
+        let _ = builder.root(dir.path().to_str().unwrap());
+        let object_store = ObjectStore::new(builder).unwrap().finish();
+        let sst_file_id = FileId::random();
+        let sst_dir = "table1";
+        let path = format!("{}/{}", sst_dir, sst_file_id.as_parquet());
+
+        let _ = object_store.write(&path, vec![0; 4096]).await;
+
+        let scheduler = Arc::new(LocalScheduler::new(3));
+        let layer = Arc::new(AccessLayer::new(sst_dir, object_store.clone()));
+
+        let file_purger = Arc::new(LocalFilePurger::new(scheduler.clone(), layer));
+
+        let handle = FileHandle::new(
+            FileMeta {
+                region_id: 0.into(),
+                file_id: sst_file_id,
+                time_range: FileTimeRange::default(),
+                level: 0,
+                file_size: 4096,
+            },
+            file_purger,
+        );
+
+        {
+            // mark file as deleted and drop the handle, we expect the file is deleted.
+            handle.mark_deleted();
+            drop(handle);
+        }
+
+        scheduler.stop(true).await.unwrap();
+
+        assert!(!object_store
+            .is_exist(&format!(
+                "{}/{}",
+                "table1".to_string(),
+                sst_file_id.as_parquet()
+            ))
+            .await
+            .unwrap());
+    }
 }
