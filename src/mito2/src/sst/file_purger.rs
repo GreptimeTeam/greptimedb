@@ -127,11 +127,7 @@ mod tests {
         scheduler.stop(true).await.unwrap();
 
         assert!(!object_store
-            .is_exist(&format!(
-                "{}/{}",
-                sst_dir,
-                sst_file_id.as_parquet()
-            ))
+            .is_exist(&format!("{}/{}", sst_dir, sst_file_id.as_parquet()))
             .await
             .unwrap());
     }
