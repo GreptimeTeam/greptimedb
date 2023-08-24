@@ -27,21 +27,25 @@ use common_query::Output;
 use common_recordbatch::{util as record_util, RecordBatch, SendableRecordBatchStream};
 use common_telemetry::logging;
 use common_time::util;
+use datafusion::datasource::DefaultTableSource;
+use datafusion_common::TableReference;
+use datafusion_expr::LogicalPlanBuilder;
 use datatypes::prelude::{ConcreteDataType, ScalarVector};
 use datatypes::schema::{ColumnSchema, RawSchema};
 use datatypes::vectors::{StringVector, TimestampMillisecondVector, Vector, VectorRef};
 use query::parser::QueryLanguageParser;
+use query::plan::LogicalPlan;
 use query::QueryEngineRef;
-use session::context::{QueryContext, QueryContextBuilder};
+use session::context::QueryContextBuilder;
 use snafu::{ensure, OptionExt, ResultExt};
 use table::requests::{CreateTableRequest, InsertRequest, TableOptions};
+use table::table::adapter::DfTableProviderAdapter;
 use table::TableRef;
 
 use crate::error::{
-    CastTypeSnafu, CollectRecordsSnafu, ExecuteInternalStatementSnafu,
+    BuildDfLogicalPlanSnafu, CastTypeSnafu, CollectRecordsSnafu, ExecuteInternalStatementSnafu,
     FindColumnInScriptsTableSnafu, FindScriptSnafu, FindScriptsTableSnafu, InsertScriptSnafu,
-    ParseInternalSQLSnafu, PlanInternalStatementSnafu, RegisterScriptsTableSnafu, Result,
-    ScriptNotFoundSnafu, ScriptsTableNotFoundSnafu,
+    RegisterScriptsTableSnafu, Result, ScriptNotFoundSnafu, ScriptsTableNotFoundSnafu,
 };
 use crate::python::utils::block_on_async;
 use crate::python::PyScript;
@@ -78,7 +82,7 @@ impl ScriptsTable {
         table: TableRef,
         query_engine: QueryEngineRef,
     ) -> catalog::error::Result<()> {
-        let rbs = Self::load_table_rows(&table, &query_engine)
+        let rbs = Self::table_full_scan(table, &query_engine)
             .await
             .map_err(BoxedError::new)
             .context(CompileScriptInternalSnafu)?;
@@ -292,25 +296,30 @@ impl ScriptsTable {
         &self.name
     }
 
-    async fn load_table_rows(
-        table: &TableRef,
+    async fn table_full_scan(
+        table: TableRef,
         query_engine: &QueryEngineRef,
     ) -> Result<SendableRecordBatchStream> {
         let table_info = table.table_info();
-        let sql = format!("SELECT * FROM {}", table_info.name.as_str());
-        let statement = QueryLanguageParser::parse_sql(&sql).context(ParseInternalSQLSnafu)?;
-
-        let ctx = QueryContext::with(
-            table_info.catalog_name.as_str(),
-            table_info.schema_name.as_str(),
+        let table_name = TableReference::full(
+            table_info.catalog_name.clone(),
+            table_info.schema_name.clone(),
+            table_info.name.clone(),
         );
-        let plan = query_engine
-            .planner()
-            .plan(statement, ctx.clone())
-            .await
-            .context(PlanInternalStatementSnafu)?;
+
+        let table_provider = Arc::new(DfTableProviderAdapter::new(table));
+        let table_source = Arc::new(DefaultTableSource::new(table_provider));
+
+        let plan = LogicalPlanBuilder::scan(table_name, table_source, None)
+            .context(BuildDfLogicalPlanSnafu)?
+            .build()
+            .context(BuildDfLogicalPlanSnafu)?;
+
         let output = query_engine
-            .execute(plan, ctx)
+            .execute(
+                LogicalPlan::DfPlan(plan),
+                QueryContextBuilder::default().build(),
+            )
             .await
             .context(ExecuteInternalStatementSnafu)?;
         let stream = match output {

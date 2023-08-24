@@ -83,15 +83,9 @@ pub enum Error {
     #[snafu(display("Failed to cast type, msg: {}", msg))]
     CastType { msg: String, location: Location },
 
-    #[snafu(display("Failed to parse internal SQL, source: {}", source))]
-    ParseInternalSQL {
-        source: query::error::Error,
-        location: Location,
-    },
-
-    #[snafu(display("Failed to plan internal statement, source: {}", source))]
-    PlanInternalStatement {
-        source: query::error::Error,
+    #[snafu(display("Failed to build DataFusion logical plan, source: {}", source))]
+    BuildDfLogicalPlan {
+        source: datafusion_common::DataFusionError,
         location: Location,
     },
 
@@ -118,9 +112,8 @@ impl ErrorExt for Error {
             FindScript { source, .. } => source.status_code(),
             CollectRecords { source, .. } => source.status_code(),
             ScriptNotFound { .. } => StatusCode::InvalidArguments,
-            ParseInternalSQL { source, .. }
-            | PlanInternalStatement { source, .. }
-            | ExecuteInternalStatement { source, .. } => source.status_code(),
+            BuildDfLogicalPlan { .. } => StatusCode::Internal,
+            ExecuteInternalStatement { source, .. } => source.status_code(),
         }
     }
 
