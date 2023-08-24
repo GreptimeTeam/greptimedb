@@ -37,6 +37,7 @@ use tokio::sync::{mpsc, Mutex};
 
 use crate::config::MitoConfig;
 use crate::error::{JoinSnafu, Result, WorkerStoppedSnafu};
+use crate::flush::WriteBufferManagerRef;
 use crate::memtable::time_series::TimeSeriesMemtableBuilder;
 use crate::memtable::MemtableBuilderRef;
 use crate::region::{MitoRegionRef, RegionMap, RegionMapRef};
@@ -96,6 +97,7 @@ impl WorkerGroup {
         config: MitoConfig,
         log_store: Arc<S>,
         object_store: ObjectStore,
+        write_buffer_manager: WriteBufferManagerRef,
     ) -> WorkerGroup {
         assert!(config.num_workers.is_power_of_two());
         let config = Arc::new(config);
@@ -107,6 +109,7 @@ impl WorkerGroup {
                     config.clone(),
                     log_store.clone(),
                     object_store.clone(),
+                    write_buffer_manager.clone(),
                 )
             })
             .collect();
@@ -177,6 +180,7 @@ impl RegionWorker {
         config: Arc<MitoConfig>,
         log_store: Arc<S>,
         object_store: ObjectStore,
+        write_buffer_manager: WriteBufferManagerRef,
     ) -> RegionWorker {
         let regions = Arc::new(RegionMap::default());
         let (sender, receiver) = mpsc::channel(config.worker_channel_size);
@@ -191,6 +195,7 @@ impl RegionWorker {
             object_store,
             running: running.clone(),
             memtable_builder: Arc::new(TimeSeriesMemtableBuilder::default()),
+            write_buffer_manager,
         };
         let handle = common_runtime::spawn_write(async move {
             worker_thread.run().await;
@@ -295,6 +300,8 @@ struct RegionWorkerLoop<S> {
     running: Arc<AtomicBool>,
     /// Memtable builder for each region.
     memtable_builder: MemtableBuilderRef,
+    /// Engine write buffer manager.
+    write_buffer_manager: WriteBufferManagerRef,
 }
 
 impl<S: LogStore> RegionWorkerLoop<S> {

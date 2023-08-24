@@ -33,6 +33,7 @@ use store_api::storage::{RegionId, ScanRequest};
 
 use crate::config::MitoConfig;
 use crate::error::{RecvSnafu, RegionNotFoundSnafu, Result};
+use crate::flush::WriteBufferManagerImpl;
 use crate::read::scan_region::{ScanRegion, Scanner};
 use crate::request::{RegionTask, RequestBody};
 use crate::worker::WorkerGroup;
@@ -105,8 +106,15 @@ impl EngineInner {
         log_store: Arc<S>,
         object_store: ObjectStore,
     ) -> EngineInner {
+        let write_buffer_manager = Arc::new(WriteBufferManagerImpl {});
+
         EngineInner {
-            workers: WorkerGroup::start(config, log_store, object_store.clone()),
+            workers: WorkerGroup::start(
+                config,
+                log_store,
+                object_store.clone(),
+                write_buffer_manager,
+            ),
             object_store,
         }
     }
