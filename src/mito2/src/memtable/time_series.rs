@@ -28,7 +28,7 @@ use datatypes::vectors::{
 };
 use snafu::{ensure, ResultExt};
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::{ColumnId, ScanRequest, SequenceNumber};
+use store_api::storage::{ColumnId, ScanRequest};
 
 use crate::error::{ComputeArrowSnafu, ConvertVectorSnafu, PrimaryKeyLengthMismatchSnafu, Result};
 use crate::memtable::{BoxedBatchIterator, KeyValues, Memtable, MemtableId};
@@ -100,7 +100,7 @@ impl Memtable for TimeSeriesMemtable {
                 .collect::<Vec<_>>()
         });
 
-        Box::new(self.series_set.iter_series(projection, req.sequence))
+        Box::new(self.series_set.iter_series(projection))
     }
 }
 
@@ -139,16 +139,11 @@ impl SeriesSet {
     }
 
     /// Iterates all series in [SeriesSet].
-    fn iter_series(
-        &self,
-        projection: Option<Vec<ColumnId>>,
-        sequence: Option<SequenceNumber>,
-    ) -> Iter {
+    fn iter_series(&self, projection: Option<Vec<ColumnId>>) -> Iter {
         Iter {
             metadata: self.region_metadata.clone(),
             series: self.series.clone(),
             projection,
-            sequence,
             last_key: None,
         }
     }
@@ -158,7 +153,6 @@ struct Iter {
     metadata: RegionMetadataRef,
     series: Arc<SeriesRwLockMap>,
     projection: Option<Vec<ColumnId>>,
-    sequence: Option<SequenceNumber>,
     last_key: Option<Vec<u8>>,
 }
 
