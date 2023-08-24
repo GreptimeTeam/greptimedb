@@ -47,7 +47,7 @@ impl Default for DatabaseQuery {
 pub async fn remote_write(
     State(handler): State<PromStoreProtocolHandlerRef>,
     Query(params): Query<DatabaseQuery>,
-    query_ctx: Extension<QueryContextRef>,
+    Extension(query_ctx): Extension<QueryContextRef>,
     RawBody(body): RawBody,
 ) -> Result<(StatusCode, ())> {
     let request = decode_remote_write_request(body).await?;
@@ -60,7 +60,7 @@ pub async fn remote_write(
         )]
     );
 
-    handler.write(request, query_ctx.0).await?;
+    handler.write(request, query_ctx).await?;
     Ok((StatusCode::NO_CONTENT, ()))
 }
 
@@ -81,7 +81,7 @@ impl IntoResponse for PromStoreResponse {
 pub async fn remote_read(
     State(handler): State<PromStoreProtocolHandlerRef>,
     Query(params): Query<DatabaseQuery>,
-    query_ctx: Extension<QueryContextRef>,
+    Extension(query_ctx): Extension<QueryContextRef>,
     RawBody(body): RawBody,
 ) -> Result<PromStoreResponse> {
     let request = decode_remote_read_request(body).await?;
@@ -93,7 +93,7 @@ pub async fn remote_read(
             params.db.clone().unwrap_or_default()
         )]
     );
-    handler.read(request, query_ctx.0).await
+    handler.read(request, query_ctx).await
 }
 
 async fn decode_remote_write_request(body: Body) -> Result<WriteRequest> {

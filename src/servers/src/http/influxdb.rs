@@ -43,7 +43,7 @@ pub async fn influxdb_health() -> Result<impl IntoResponse> {
 pub async fn influxdb_write_v1(
     State(handler): State<InfluxdbLineProtocolHandlerRef>,
     Query(mut params): Query<HashMap<String, String>>,
-    query_ctx: Extension<QueryContextRef>,
+    Extension(query_ctx): Extension<QueryContextRef>,
     lines: String,
 ) -> Result<impl IntoResponse> {
     let db = params
@@ -55,14 +55,14 @@ pub async fn influxdb_write_v1(
         .map(|val| parse_time_precision(val))
         .transpose()?;
 
-    influxdb_write(&db, precision, lines, handler, query_ctx.0).await
+    influxdb_write(&db, precision, lines, handler, query_ctx).await
 }
 
 #[axum_macros::debug_handler]
 pub async fn influxdb_write_v2(
     State(handler): State<InfluxdbLineProtocolHandlerRef>,
     Query(mut params): Query<HashMap<String, String>>,
-    query_ctx: Extension<QueryContextRef>,
+    Extension(query_ctx): Extension<QueryContextRef>,
     lines: String,
 ) -> Result<impl IntoResponse> {
     let db = params
@@ -74,7 +74,7 @@ pub async fn influxdb_write_v2(
         .map(|val| parse_time_precision(val))
         .transpose()?;
 
-    influxdb_write(&db, precision, lines, handler, query_ctx.0).await
+    influxdb_write(&db, precision, lines, handler, query_ctx).await
 }
 
 pub async fn influxdb_write(

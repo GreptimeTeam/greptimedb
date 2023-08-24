@@ -31,18 +31,15 @@ use crate::query_handler::OpenTelemetryProtocolHandlerRef;
 #[axum_macros::debug_handler]
 pub async fn metrics(
     State(handler): State<OpenTelemetryProtocolHandlerRef>,
-    query_ctx: Extension<QueryContextRef>,
+    Extension(query_ctx): Extension<QueryContextRef>,
     RawBody(body): RawBody,
 ) -> Result<OtlpResponse> {
     let _timer = timer!(
         crate::metrics::METRIC_HTTP_OPENTELEMETRY_ELAPSED,
-        &[(crate::metrics::METRIC_DB_LABEL, query_ctx.0.get_db_string())]
+        &[(crate::metrics::METRIC_DB_LABEL, query_ctx.get_db_string())]
     );
     let request = parse_body(body).await?;
-    handler
-        .metrics(request, query_ctx.0)
-        .await
-        .map(OtlpResponse)
+    handler.metrics(request, query_ctx).await.map(OtlpResponse)
 }
 
 async fn parse_body(body: Body) -> Result<ExportMetricsServiceRequest> {

@@ -41,7 +41,7 @@ pub struct SqlQuery {
 pub async fn sql(
     State(state): State<ApiState>,
     Query(query_params): Query<SqlQuery>,
-    query_ctx: Extension<QueryContextRef>,
+    Extension(query_ctx): Extension<QueryContextRef>,
     Form(form_params): Form<SqlQuery>,
 ) -> Json<JsonResponse> {
     let sql_handler = &state.sql_handler;
@@ -58,7 +58,7 @@ pub async fn sql(
     );
 
     let resp = if let Some(sql) = &sql {
-        JsonResponse::from_output(sql_handler.do_query(sql, query_ctx.0).await).await
+        JsonResponse::from_output(sql_handler.do_query(sql, query_ctx).await).await
     } else {
         JsonResponse::with_error(
             "sql parameter is required.".to_string(),
@@ -94,7 +94,7 @@ impl From<PromqlQuery> for PromQuery {
 pub async fn promql(
     State(state): State<ApiState>,
     Query(params): Query<PromqlQuery>,
-    query_ctx: Extension<QueryContextRef>,
+    Extension(query_ctx): Extension<QueryContextRef>,
 ) -> Json<JsonResponse> {
     let sql_handler = &state.sql_handler;
     let exec_start = Instant::now();
@@ -109,8 +109,7 @@ pub async fn promql(
 
     let prom_query = params.into();
     let resp =
-        JsonResponse::from_output(sql_handler.do_promql_query(&prom_query, query_ctx.0).await)
-            .await;
+        JsonResponse::from_output(sql_handler.do_promql_query(&prom_query, query_ctx).await).await;
 
     Json(resp.with_execution_time(exec_start.elapsed().as_millis()))
 }

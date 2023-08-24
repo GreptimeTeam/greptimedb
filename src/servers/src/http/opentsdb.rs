@@ -77,14 +77,13 @@ pub enum OpentsdbPutResponse {
 pub async fn put(
     State(opentsdb_handler): State<OpentsdbProtocolHandlerRef>,
     Query(params): Query<HashMap<String, String>>,
-    query_ctx: Extension<QueryContextRef>,
+    Extension(ctx): Extension<QueryContextRef>,
     RawBody(body): RawBody,
 ) -> Result<(HttpStatusCode, Json<OpentsdbPutResponse>)> {
     let summary = params.contains_key("summary");
     let details = params.contains_key("details");
 
     let data_points = parse_data_points(body).await?;
-    let ctx = query_ctx.0;
 
     let response = if !summary && !details {
         for data_point in data_points.into_iter() {
