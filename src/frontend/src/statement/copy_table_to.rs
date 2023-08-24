@@ -12,22 +12,32 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use common_base::readable_size::ReadableSize;
 use common_datasource::file_format::csv::stream_to_csv;
 use common_datasource::file_format::json::stream_to_json;
 use common_datasource::file_format::Format;
 use common_datasource::object_store::{build_backend, parse_url};
+use common_query::Output;
 use common_recordbatch::adapter::DfRecordBatchStreamAdapter;
 use common_recordbatch::SendableRecordBatchStream;
+use datafusion::datasource::DefaultTableSource;
+use datafusion_common::TableReference as DfTableReference;
+use datafusion_expr::LogicalPlanBuilder;
 use object_store::ObjectStore;
+use query::plan::LogicalPlan;
+use session::context::QueryContextRef;
 use snafu::ResultExt;
 use storage::sst::SstInfo;
 use storage::{ParquetWriter, Source};
-use store_api::storage::ScanRequest;
 use table::engine::TableReference;
 use table::requests::CopyTableRequest;
+use table::table::adapter::DfTableProviderAdapter;
 
-use crate::error::{self, Result, WriteParquetSnafu};
+use crate::error::{
+    self, BuildDfLogicalPlanSnafu, ExecLogicalPlanSnafu, Result, WriteParquetSnafu,
+};
 use crate::statement::StatementExecutor;
 
 impl StatementExecutor {
@@ -72,15 +82,17 @@ impl StatementExecutor {
         }
     }
 
-    pub(crate) async fn copy_table_to(&self, req: CopyTableRequest) -> Result<usize> {
-        let table_ref = TableReference {
-            catalog: &req.catalog_name,
-            schema: &req.schema_name,
-            table: &req.table_name,
-        };
+    pub(crate) async fn copy_table_to(
+        &self,
+        req: CopyTableRequest,
+        query_ctx: QueryContextRef,
+    ) -> Result<usize> {
+        let table_ref = TableReference::full(&req.catalog_name, &req.schema_name, &req.table_name);
         let table = self.get_table(&table_ref).await?;
 
         let format = Format::try_from(&req.with).context(error::ParseFileFormatSnafu)?;
+
+        let df_table_ref = DfTableReference::from(table_ref);
 
         let filters = table
             .schema()
@@ -91,20 +103,33 @@ impl StatementExecutor {
                     req.timestamp_range.as_ref(),
                 )
             })
+            .map(|filter| filter.df_expr().clone())
             .into_iter()
             .collect::<Vec<_>>();
 
-        let scan_req = ScanRequest {
+        let table_provider = Arc::new(DfTableProviderAdapter::new(table));
+        let table_source = Arc::new(DefaultTableSource::new(table_provider));
+
+        let plan = LogicalPlanBuilder::scan_with_filters(
+            df_table_ref.to_owned_reference(),
+            table_source,
+            None,
             filters,
-            ..Default::default()
+        )
+        .context(BuildDfLogicalPlanSnafu)?
+        .build()
+        .context(BuildDfLogicalPlanSnafu)?;
+
+        let output = self
+            .query_engine
+            .execute(LogicalPlan::DfPlan(plan), query_ctx)
+            .await
+            .context(ExecLogicalPlanSnafu)?;
+        let stream = match output {
+            Output::Stream(stream) => stream,
+            Output::RecordBatches(record_batches) => record_batches.as_stream(),
+            _ => unreachable!(),
         };
-        let stream =
-            table
-                .scan_to_stream(scan_req)
-                .await
-                .with_context(|_| error::CopyTableSnafu {
-                    table_name: table_ref.to_string(),
-                })?;
 
         let (_schema, _host, path) = parse_url(&req.location).context(error::ParseUrlSnafu)?;
         let object_store =

@@ -15,6 +15,7 @@
 use common_datasource::file_format::Format;
 use common_query::Output;
 use common_telemetry::info;
+use session::context::QueryContextBuilder;
 use snafu::{ensure, ResultExt};
 use table::requests::{CopyDatabaseRequest, CopyDirection, CopyTableRequest};
 
@@ -75,7 +76,9 @@ impl StatementExecutor {
                     pattern: None,
                     direction: CopyDirection::Export,
                     timestamp_range: req.time_range,
-                })
+                },
+                QueryContextBuilder::default().build(),
+            )
                 .await?;
             exported_rows += exported;
         }
