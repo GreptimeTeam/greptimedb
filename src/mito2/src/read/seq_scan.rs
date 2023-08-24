@@ -108,7 +108,6 @@ impl SeqScan {
     }
 
     /// Builds a stream for the query.
-    #[must_use]
     pub async fn build(&self) -> Result<SendableRecordBatchStream> {
         // Scans all memtables and SSTs. Builds a merge reader to merge results.
         let mut builder = MergeReaderBuilder::new();
@@ -123,7 +122,7 @@ impl SeqScan {
                 self.object_store.clone(),
             )
             .predicate(self.predicate.clone())
-            .time_range(self.time_range.clone())
+            .time_range(self.time_range)
             .projection(Some(self.mapper.column_ids().to_vec()))
             .build()
             .await?;
