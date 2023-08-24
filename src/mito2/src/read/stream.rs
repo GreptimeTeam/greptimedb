@@ -29,6 +29,7 @@ use datatypes::vectors::VectorRef;
 use futures::Stream;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadata;
+use store_api::storage::ColumnId;
 
 use crate::error::{InvalidRequestSnafu, Result};
 use crate::read::Batch;
@@ -81,6 +82,8 @@ pub(crate) struct ProjectionMapper {
     codec: McmpRowCodec,
     /// Schema for converted [RecordBatch].
     output_schema: SchemaRef,
+    /// Id of columns to project.
+    column_ids: Vec<ColumnId>,
 }
 
 impl ProjectionMapper {
@@ -89,8 +92,10 @@ impl ProjectionMapper {
         metadata: &RegionMetadata,
         projection: impl Iterator<Item = usize>,
     ) -> Result<ProjectionMapper> {
-        let mut batch_indices = Vec::with_capacity(projection.size_hint().0);
-        let mut column_schemas = Vec::with_capacity(projection.size_hint().0);
+        let projection_len = projection.size_hint().0;
+        let mut batch_indices = Vec::with_capacity(projection_len);
+        let mut column_schemas = Vec::with_capacity(projection_len);
+        let mut column_ids = Vec::with_capacity(projection_len);
         for idx in projection {
             // For each projection index, we get the column id for projection.
             let column = metadata
@@ -116,7 +121,7 @@ impl ProjectionMapper {
                 }
             };
             batch_indices.push(batch_index);
-
+            column_ids.push(column.column_id);
             // Safety: idx is valid.
             column_schemas.push(metadata.schema.column_schemas()[idx].clone());
         }
@@ -134,12 +139,18 @@ impl ProjectionMapper {
             batch_indices,
             codec,
             output_schema,
+            column_ids,
         })
     }
 
     /// Returns a new mapper without projection.
     pub(crate) fn all(metadata: &RegionMetadata) -> Result<ProjectionMapper> {
         ProjectionMapper::new(metadata, 0..metadata.column_metadatas.len())
+    }
+
+    /// Returns ids of projected columns.
+    pub(crate) fn column_ids(&self) -> &[ColumnId] {
+        &self.column_ids
     }
 
     /// Converts a [Batch] to a [RecordBatch].

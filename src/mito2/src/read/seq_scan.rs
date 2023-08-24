@@ -99,9 +99,7 @@ impl SeqScan {
     /// Builds a stream for the query.
     #[must_use]
     pub fn build(&self) -> SendableRecordBatchStream {
-        // Scans all memtables and SSTs.
-        // Builds a merge reader to merge results.
-
+        // Scans all memtables and SSTs. Builds a merge reader to merge results.
         //
         unimplemented!()
     }
