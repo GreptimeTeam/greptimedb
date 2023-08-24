@@ -150,10 +150,7 @@ impl DistInstance {
             }
         );
 
-        // Since the table information created on meta does not go through KvBackend, so we
-        // manually invalidate the cache here.
-        //
-        // TODO(fys): when the meta invalidation cache mechanism is established, remove it.
+        // Invalidates local cache ASAP.
         self.catalog_manager
             .invalidate_table(
                 &table_name.catalog_name,
@@ -193,10 +190,7 @@ impl DistInstance {
             .await
             .context(CatalogSnafu)?;
 
-        // Since the table information dropped on meta does not go through KvBackend, so we
-        // manually invalidate the cache here.
-        //
-        // TODO(fys): when the meta invalidation cache mechanism is established, remove it.
+        // Invalidates local cache ASAP.
         self.catalog_manager()
             .invalidate_table(
                 &table_name.catalog_name,
@@ -555,6 +549,11 @@ impl DistInstance {
             .submit_ddl_task(req)
             .await
             .context(error::RequestMetaSnafu)?;
+
+        // Invalidates local cache ASAP.
+        self.catalog_manager()
+            .invalidate_table(catalog_name, schema_name, table_name, table_id)
+            .await;
 
         Ok(Output::AffectedRows(0))
     }
