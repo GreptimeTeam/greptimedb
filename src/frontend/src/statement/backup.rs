@@ -66,19 +66,20 @@ impl StatementExecutor {
             );
 
             let exported = self
-                .copy_table_to(CopyTableRequest {
-                    catalog_name: req.catalog_name.clone(),
-                    schema_name: req.schema_name.clone(),
-                    table_name,
-                    location: table_file,
-                    with: req.with.clone(),
-                    connection: req.connection.clone(),
-                    pattern: None,
-                    direction: CopyDirection::Export,
-                    timestamp_range: req.time_range,
-                },
-                QueryContextBuilder::default().build(),
-            )
+                .copy_table_to(
+                    CopyTableRequest {
+                        catalog_name: req.catalog_name.clone(),
+                        schema_name: req.schema_name.clone(),
+                        table_name,
+                        location: table_file,
+                        with: req.with.clone(),
+                        connection: req.connection.clone(),
+                        pattern: None,
+                        direction: CopyDirection::Export,
+                        timestamp_range: req.time_range,
+                    },
+                    QueryContextBuilder::default().build(),
+                )
                 .await?;
             exported_rows += exported;
         }

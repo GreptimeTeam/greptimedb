@@ -106,9 +106,10 @@ impl StatementExecutor {
             Statement::Copy(sql::statements::copy::Copy::CopyTable(stmt)) => {
                 let req = to_copy_table_request(stmt, query_ctx.clone())?;
                 match req.direction {
-                    CopyDirection::Export => {
-                        self.copy_table_to(req, query_ctx).await.map(Output::AffectedRows)
-                    }
+                    CopyDirection::Export => self
+                        .copy_table_to(req, query_ctx)
+                        .await
+                        .map(Output::AffectedRows),
                     CopyDirection::Import => {
                         self.copy_table_from(req).await.map(Output::AffectedRows)
                     }
