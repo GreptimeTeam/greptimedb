@@ -14,6 +14,8 @@
 
 //! Common structs and utilities for reading data.
 
+pub mod merge;
+
 use std::sync::Arc;
 
 use api::v1::OpType;
@@ -29,12 +31,12 @@ use datatypes::vectors::{
     BooleanVector, Helper, UInt32Vector, UInt64Vector, UInt8Vector, Vector, VectorRef,
 };
 use snafu::{ensure, OptionExt, ResultExt};
-use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, SequenceNumber};
 
 use crate::error::{
     ComputeArrowSnafu, ComputeVectorSnafu, ConvertVectorSnafu, InvalidBatchSnafu, Result,
 };
+use crate::memtable::BoxedBatchIterator;
 
 /// Storage internal representation of a batch of rows
 /// for a primary key (time series).
@@ -109,7 +111,7 @@ impl Batch {
         self.num_rows() == 0
     }
 
-    /// Returns the first timestamp in the batch.
+    /// Returns the first timestamp in the batch or `None` if the batch is empty.
     pub fn first_timestamp(&self) -> Option<Timestamp> {
         if self.timestamps.is_empty() {
             return None;
@@ -118,7 +120,7 @@ impl Batch {
         Some(self.get_timestamp(0))
     }
 
-    /// Returns the last timestamp in the batch.
+    /// Returns the last timestamp in the batch or `None` if the batch is empty.
     pub fn last_timestamp(&self) -> Option<Timestamp> {
         if self.timestamps.is_empty() {
             return None;
@@ -554,20 +556,23 @@ pub struct SourceStats {
 /// Async [Batch] reader and iterator wrapper.
 ///
 /// This is the data source for SST writers or internal readers.
-pub enum Source {}
+pub enum Source {
+    /// Source from a [BoxedBatchReader].
+    Reader(BoxedBatchReader),
+    /// Source from a [BoxedBatchIterator].
+    Iter(BoxedBatchIterator),
+}
 
 impl Source {
     /// Returns next [Batch] from this data source.
     pub(crate) async fn next_batch(&mut self) -> Result<Option<Batch>> {
-        unimplemented!()
+        match self {
+            Source::Reader(reader) => reader.next_batch().await,
+            Source::Iter(iter) => iter.next().transpose(),
+        }
     }
 
-    /// Returns the metadata of the source region.
-    pub(crate) fn metadata(&self) -> RegionMetadataRef {
-        unimplemented!()
-    }
-
-    // TODO(yingwen): Maybe remove this method.
+    // TODO(yingwen): Remove this method once we support collecting stats in the writer.
     /// Returns statisics of fetched batches.
     pub(crate) fn stats(&self) -> SourceStats {
         unimplemented!()
@@ -603,38 +608,9 @@ impl<T: BatchReader + ?Sized> BatchReader for Box<T> {
 
 #[cfg(test)]
 mod tests {
-    use datatypes::arrow::array::{TimestampMillisecondArray, UInt64Array, UInt8Array};
-
     use super::*;
     use crate::error::Error;
-
-    fn new_batch_builder(
-        timestamps: &[i64],
-        sequences: &[u64],
-        op_types: &[OpType],
-        field: &[u64],
-    ) -> BatchBuilder {
-        let mut builder = BatchBuilder::new(b"test".to_vec());
-        builder
-            .timestamps_array(Arc::new(TimestampMillisecondArray::from_iter_values(
-                timestamps.iter().copied(),
-            )))
-            .unwrap()
-            .sequences_array(Arc::new(UInt64Array::from_iter_values(
-                sequences.iter().copied(),
-            )))
-            .unwrap()
-            .op_types_array(Arc::new(UInt8Array::from_iter_values(
-                op_types.iter().map(|v| *v as u8),
-            )))
-            .unwrap()
-            .push_field_array(
-                1,
-                Arc::new(UInt64Array::from_iter_values(field.iter().copied())),
-            )
-            .unwrap();
-        builder
-    }
+    use crate::test_util::new_batch_builder;
 
     fn new_batch(
         timestamps: &[i64],
@@ -642,7 +618,7 @@ mod tests {
         op_types: &[OpType],
         field: &[u64],
     ) -> Batch {
-        new_batch_builder(timestamps, sequences, op_types, field)
+        new_batch_builder(b"test", timestamps, sequences, op_types, field)
             .build()
             .unwrap()
     }

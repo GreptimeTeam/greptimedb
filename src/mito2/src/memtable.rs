@@ -35,7 +35,7 @@ use crate::read::Batch;
 /// Should be unique under the same region.
 pub type MemtableId = u32;
 
-pub type BoxedBatchIterator = Box<dyn Iterator<Item = Result<Batch>>>;
+pub type BoxedBatchIterator = Box<dyn Iterator<Item = Result<Batch>> + Send + Sync>;
 
 /// In memory write buffer.
 pub trait Memtable: Send + Sync + fmt::Debug {
