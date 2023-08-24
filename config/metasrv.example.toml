@@ -26,7 +26,7 @@ enable_telemetry = true
 # Procedure storage options.
 [procedure]
 # Procedure max retry time.
-max_retry_times = 3
+max_retry_times = 12
 # Initial retry delay of procedures, increases exponentially
 retry_delay = "500ms"
 
