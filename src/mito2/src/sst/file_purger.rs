@@ -129,7 +129,7 @@ mod tests {
         assert!(!object_store
             .is_exist(&format!(
                 "{}/{}",
-                "table1".to_string(),
+                sst_dir,
                 sst_file_id.as_parquet()
             ))
             .await
