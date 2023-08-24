@@ -56,7 +56,22 @@ SELECT i1.i,i2.i FROM integers i1 LEFT OUTER JOIN integers i2 ON 1=1 WHERE i1.i>
 
 SELECT i1.i,i2.i FROM integers i1 LEFT OUTER JOIN integers i2 ON 1=0 WHERE i2.i IS NOT NULL ORDER BY 2;
 
-Error: 1003(Internal), This feature is not implemented: Unsupported expression: IsNotNull(Column(Column { relation: Some(Full { catalog: "greptime", schema: "public", table: "integers" }), name: "i" }))
++---+---+
+| i | i |
++---+---+
+| 1 | 1 |
+| 2 | 1 |
+| 3 | 1 |
+|   | 1 |
+| 1 | 2 |
+| 2 | 2 |
+| 3 | 2 |
+|   | 2 |
+| 1 | 3 |
+| 2 | 3 |
+| 3 | 3 |
+|   | 3 |
++---+---+
 
 SELECT i1.i,i2.i FROM integers i1 LEFT OUTER JOIN integers i2 ON 1=0 WHERE i2.i>1 ORDER BY 2;
 
@@ -75,7 +90,22 @@ SELECT i1.i,i2.i FROM integers i1 LEFT OUTER JOIN integers i2 ON 1=0 WHERE i2.i>
 
 SELECT i1.i,i2.i FROM integers i1 LEFT OUTER JOIN integers i2 ON 1=0 WHERE CASE WHEN i2.i IS NULL THEN False ELSE True END ORDER BY 2;
 
-Error: 1003(Internal), This feature is not implemented: Unsupported expression: IsNotNull(Column(Column { relation: Some(Full { catalog: "greptime", schema: "public", table: "integers" }), name: "i" }))
++---+---+
+| i | i |
++---+---+
+| 1 | 1 |
+| 2 | 1 |
+| 3 | 1 |
+|   | 1 |
+| 1 | 2 |
+| 2 | 2 |
+| 3 | 2 |
+|   | 2 |
+| 1 | 3 |
+| 2 | 3 |
+| 3 | 3 |
+|   | 3 |
++---+---+
 
 SELECT DISTINCT i1.i,i2.i FROM integers i1 LEFT OUTER JOIN integers i2 ON 1=0 WHERE i2.i IS NULL ORDER BY 1;
 
