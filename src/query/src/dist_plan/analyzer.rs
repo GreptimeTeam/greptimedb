@@ -55,14 +55,14 @@ impl DistPlannerAnalyzer {
         let exprs = plan
             .expressions()
             .into_iter()
-            .map(|e| e.transform(&Self::tranform_subquery))
+            .map(|e| e.transform(&Self::transform_subquery))
             .collect::<DfResult<Vec<_>>>()?;
 
         let inputs = plan.inputs().into_iter().cloned().collect::<Vec<_>>();
         Ok(Transformed::Yes(from_plan(&plan, &exprs, &inputs)?))
     }
 
-    fn tranform_subquery(expr: Expr) -> DfResult<Transformed<Expr>> {
+    fn transform_subquery(expr: Expr) -> DfResult<Transformed<Expr>> {
         match expr {
             Expr::Exists(exists) => Ok(Transformed::Yes(Expr::Exists(Exists {
                 subquery: Self::handle_subquery(exists.subquery)?,
