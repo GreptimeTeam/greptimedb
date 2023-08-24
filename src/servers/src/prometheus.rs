@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use axum::extract::{Path, Query, State};
-use axum::{Form, Json};
+use axum::{Extension, Form, Json};
 use catalog::CatalogManagerRef;
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use common_catalog::parse_catalog_and_schema_from_db_string;
@@ -40,7 +40,7 @@ use query::parser::{PromQuery, DEFAULT_LOOKBACK_STRING};
 use schemars::JsonSchema;
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
-use session::context::{QueryContext, QueryContextRef};
+use session::context::QueryContextRef;
 use snafu::{Location, OptionExt, ResultExt};
 
 use crate::error::{
@@ -315,6 +315,7 @@ pub struct InstantQuery {
 pub async fn instant_query(
     State(handler): State<PrometheusHandlerRef>,
     Query(params): Query<InstantQuery>,
+    Extension(query_ctx): Extension<QueryContextRef>,
     Form(form_params): Form<InstantQuery>,
 ) -> Json<PrometheusJsonResponse> {
     let _timer = timer!(crate::metrics::METRIC_HTTP_PROMQL_INSTANT_QUERY_ELAPSED);
@@ -329,8 +330,6 @@ pub async fn instant_query(
         end: time,
         step: "1s".to_string(),
     };
-
-    let query_ctx = QueryContext::with_db_name(params.db.as_ref());
 
     let result = handler.do_query(&prom_query, query_ctx).await;
     let (metric_name, result_type) = match retrieve_metric_name_and_result_type(&prom_query.query) {
@@ -356,6 +355,7 @@ pub struct RangeQuery {
 pub async fn range_query(
     State(handler): State<PrometheusHandlerRef>,
     Query(params): Query<RangeQuery>,
+    Extension(query_ctx): Extension<QueryContextRef>,
     Form(form_params): Form<RangeQuery>,
 ) -> Json<PrometheusJsonResponse> {
     let _timer = timer!(crate::metrics::METRIC_HTTP_PROMQL_RANGE_QUERY_ELAPSED);
@@ -365,8 +365,6 @@ pub async fn range_query(
         end: params.end.or(form_params.end).unwrap_or_default(),
         step: params.step.or(form_params.step).unwrap_or_default(),
     };
-
-    let query_ctx = QueryContext::with_db_name(params.db.as_ref());
 
     let result = handler.do_query(&prom_query, query_ctx).await;
     let metric_name = match retrieve_metric_name_and_result_type(&prom_query.query) {
@@ -426,13 +424,13 @@ impl<'de> Deserialize<'de> for Matches {
 pub async fn labels_query(
     State(handler): State<PrometheusHandlerRef>,
     Query(params): Query<LabelsQuery>,
+    Extension(query_ctx): Extension<QueryContextRef>,
     Form(form_params): Form<LabelsQuery>,
 ) -> Json<PrometheusJsonResponse> {
     let _timer = timer!(crate::metrics::METRIC_HTTP_PROMQL_LABEL_QUERY_ELAPSED);
 
     let db = &params.db.unwrap_or(DEFAULT_SCHEMA_NAME.to_string());
     let (catalog, schema) = parse_catalog_and_schema_from_db_string(db);
-    let query_ctx = QueryContext::with(catalog, schema);
 
     let mut queries = params.matches.0;
     if queries.is_empty() {
@@ -692,6 +690,7 @@ pub struct LabelValueQuery {
 pub async fn label_values_query(
     State(handler): State<PrometheusHandlerRef>,
     Path(label_name): Path<String>,
+    Extension(query_ctx): Extension<QueryContextRef>,
     Query(params): Query<LabelValueQuery>,
 ) -> Json<PrometheusJsonResponse> {
     let _timer = timer!(crate::metrics::METRIC_HTTP_PROMQL_LABEL_VALUE_QUERY_ELAPSED);
@@ -717,7 +716,6 @@ pub async fn label_values_query(
 
     let start = params.start.unwrap_or_else(yesterday_rfc3339);
     let end = params.end.unwrap_or_else(current_time_rfc3339);
-    let query_ctx = QueryContext::with(catalog, schema);
 
     let mut label_values = HashSet::new();
 
@@ -818,6 +816,7 @@ pub struct SeriesQuery {
 pub async fn series_query(
     State(handler): State<PrometheusHandlerRef>,
     Query(params): Query<SeriesQuery>,
+    Extension(query_ctx): Extension<QueryContextRef>,
     Form(form_params): Form<SeriesQuery>,
 ) -> Json<PrometheusJsonResponse> {
     let _timer = timer!(crate::metrics::METRIC_HTTP_PROMQL_SERIES_QUERY_ELAPSED);
@@ -836,8 +835,6 @@ pub async fn series_query(
         .end
         .or(form_params.end)
         .unwrap_or_else(current_time_rfc3339);
-
-    let query_ctx = QueryContext::with_db_name(params.db.as_ref());
 
     let mut series = Vec::new();
     for query in queries {
