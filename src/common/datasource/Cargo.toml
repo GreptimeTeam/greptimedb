@@ -27,7 +27,7 @@ orc-rust = "0.2"
 paste = "1.0"
 regex = "1.7"
 snafu.workspace = true
-strum = { version = "0.21", features = ["derive"] }
+strum.workspace = true
 tokio-util.workspace = true
 tokio.workspace = true
 url = "2.3"

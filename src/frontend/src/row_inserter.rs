@@ -17,6 +17,7 @@ use api::v1::ddl_request::Expr;
 use api::v1::greptime_request::Request;
 use api::v1::{AlterExpr, ColumnSchema, DdlRequest, Row, RowInsertRequest, RowInsertRequests};
 use catalog::CatalogManagerRef;
+use common_catalog::consts::default_engine;
 use common_grpc_expr::util::{extract_new_columns, ColumnExpr};
 use common_query::Output;
 use common_telemetry::info;
@@ -30,7 +31,6 @@ use crate::error::{CatalogSnafu, EmptyDataSnafu, Error, FindNewColumnsOnInsertio
 use crate::expr_factory::CreateExprFactory;
 
 pub struct RowInserter {
-    engine_name: String,
     catalog_manager: CatalogManagerRef,
     create_expr_factory: CreateExprFactory,
     grpc_query_handler: GrpcQueryHandlerRef<Error>,
@@ -38,13 +38,11 @@ pub struct RowInserter {
 
 impl RowInserter {
     pub fn new(
-        engine_name: String,
         catalog_manager: CatalogManagerRef,
         create_expr_factory: CreateExprFactory,
         grpc_query_handler: GrpcQueryHandlerRef<Error>,
     ) -> Self {
         Self {
-            engine_name,
             catalog_manager,
             create_expr_factory,
             grpc_query_handler,
@@ -105,7 +103,7 @@ impl RowInserter {
         let (column_schemas, _) = extract_schema_and_rows(req)?;
         let create_table_expr = self
             .create_expr_factory
-            .create_table_expr_by_column_schemas(table_name, column_schemas, &self.engine_name)?;
+            .create_table_expr_by_column_schemas(table_name, column_schemas, default_engine())?;
 
         let req = Request::Ddl(DdlRequest {
             expr: Some(Expr::CreateTable(create_table_expr)),

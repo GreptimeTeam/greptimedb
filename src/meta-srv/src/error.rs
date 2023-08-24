@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use client::region::RegionClientBuilderError;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_meta::peer::Peer;
@@ -516,6 +517,16 @@ pub enum Error {
         operation: String,
         location: Location,
     },
+
+    #[snafu(display("Failed to build region client to {peer}, source: {source}, at {location}"))]
+    BuildRegionClient {
+        peer: Peer,
+        source: RegionClientBuilderError,
+        location: Location,
+    },
+
+    #[snafu(display("Primary key '{key}' not found when creating region request, at {location}"))]
+    PrimaryKeyNotFound { key: String, location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -558,6 +569,7 @@ impl ErrorExt for Error {
             | Error::ConvertGrpcExpr { .. }
             | Error::PublishMessage { .. }
             | Error::Join { .. }
+            | Error::BuildRegionClient { .. }
             | Error::Unsupported { .. } => StatusCode::Internal,
             Error::TableAlreadyExists { .. } => StatusCode::TableAlreadyExists,
             Error::EmptyKey { .. }
@@ -570,6 +582,7 @@ impl ErrorExt for Error {
             | Error::UnsupportedSelectorType { .. }
             | Error::InvalidArguments { .. }
             | Error::InvalidHeartbeatRequest { .. }
+            | Error::PrimaryKeyNotFound { .. }
             | Error::TooManyPartitions { .. } => StatusCode::InvalidArguments,
             Error::LeaseKeyFromUtf8 { .. }
             | Error::LeaseValueFromUtf8 { .. }

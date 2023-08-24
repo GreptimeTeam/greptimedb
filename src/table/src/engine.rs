@@ -18,7 +18,7 @@ use std::sync::Arc;
 use common_base::paths::DATA_DIR;
 use common_procedure::BoxedProcedure;
 use datafusion_common::TableReference as DfTableReference;
-use store_api::storage::RegionNumber;
+use store_api::storage::{RegionId, RegionNumber};
 
 use crate::error::{self, Result};
 use crate::metadata::TableId;
@@ -198,6 +198,14 @@ pub fn table_dir(catalog_name: &str, schema_name: &str, table_id: TableId) -> St
     format!("{DATA_DIR}{catalog_name}/{schema_name}/{table_id}/")
 }
 
+pub fn region_dir(catalog_name: &str, schema_name: &str, region_id: RegionId) -> String {
+    format!(
+        "{}{}",
+        table_dir(catalog_name, schema_name, region_id.table_id()),
+        region_name(region_id.table_id(), region_id.region_number())
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -211,5 +219,14 @@ mod tests {
         };
 
         assert_eq!("greptime.public.test", table_ref.to_string());
+    }
+
+    #[test]
+    fn test_region_dir() {
+        let region_id = RegionId::new(42, 1);
+        assert_eq!(
+            region_dir("my_catalog", "my_schema", region_id),
+            "data/my_catalog/my_schema/42/42_0000000001"
+        );
     }
 }

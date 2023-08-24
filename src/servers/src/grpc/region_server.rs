@@ -14,7 +14,6 @@
 
 use std::sync::Arc;
 
-use api::helper::region_request_type;
 use api::v1::auth_header::AuthScheme;
 use api::v1::region::region_server::Region as RegionServer;
 use api::v1::region::{region_request, RegionRequest, RegionResponse};
@@ -77,9 +76,8 @@ impl RegionServerRequestHandler {
         query_ctx.set_current_user(user_info);
 
         let handler = self.handler.clone();
-        let request_type = region_request_type(&query);
-        let db = query_ctx.get_db_string();
-        let timer = RequestTimer::new(db.clone(), request_type);
+        let request_type = query.as_ref().to_string();
+        let timer = RequestTimer::new(query_ctx.get_db_string(), request_type);
 
         // Executes requests in another runtime to
         // 1. prevent the execution from being cancelled unexpected by Tonic runtime;
