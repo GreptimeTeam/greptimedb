@@ -24,6 +24,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use common_query::Output;
 use common_runtime::JoinHandle;
 use common_telemetry::{error, info, warn};
 use futures::future::try_join_all;
@@ -373,7 +374,7 @@ impl<S> RegionWorkerLoop<S> {
         }
 
         for task in ddl_tasks {
-            let res: std::result::Result<(), crate::error::Error> = match task.body {
+            let res: std::result::Result<Output, crate::error::Error> = match task.body {
                 RequestBody::Create(req) => self.handle_create_request(task.region_id, req).await,
                 RequestBody::Open(req) => self.handle_open_request(task.region_id, req).await,
                 RequestBody::Close(_) => self.handle_close_request(task.region_id).await,
