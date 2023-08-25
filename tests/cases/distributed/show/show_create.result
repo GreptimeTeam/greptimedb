@@ -22,15 +22,15 @@ SHOW CREATE TABLE system_metrics;
 +----------------+-----------------------------------------------------------+
 | Table          | Create Table                                              |
 +----------------+-----------------------------------------------------------+
-| system_metrics | CREATE TABLE IF NOT EXISTS `system_metrics` (             |
-|                |   `id` INT UNSIGNED NULL,                                 |
-|                |   `host` STRING NULL,                                     |
-|                |   `cpu` DOUBLE NULL,                                      |
-|                |   `disk` FLOAT NULL,                                      |
-|                |   `n` INT NULL,                                           |
-|                |   `ts` TIMESTAMP(3) NOT NULL DEFAULT current_timestamp(), |
-|                |   TIME INDEX (`ts`),                                      |
-|                |   PRIMARY KEY (`id`, `host`)                              |
+| system_metrics | CREATE TABLE IF NOT EXISTS "system_metrics" (             |
+|                |   "id" INT UNSIGNED NULL,                                 |
+|                |   "host" STRING NULL,                                     |
+|                |   "cpu" DOUBLE NULL,                                      |
+|                |   "disk" FLOAT NULL,                                      |
+|                |   "n" INT NULL,                                           |
+|                |   "ts" TIMESTAMP(3) NOT NULL DEFAULT current_timestamp(), |
+|                |   TIME INDEX ("ts"),                                      |
+|                |   PRIMARY KEY ("id", "host")                              |
 |                | )                                                         |
 |                | PARTITION BY RANGE COLUMNS (n) (                          |
 |                |                       PARTITION r0 VALUES LESS THAN (5),  |
@@ -58,9 +58,9 @@ show create table table_without_partition;
 +-------------------------+-----------------------------------------------------------+
 | Table                   | Create Table                                              |
 +-------------------------+-----------------------------------------------------------+
-| table_without_partition | CREATE TABLE IF NOT EXISTS `table_without_partition` (    |
-|                         |   `ts` TIMESTAMP(3) NOT NULL DEFAULT current_timestamp(), |
-|                         |   TIME INDEX (`ts`)                                       |
+| table_without_partition | CREATE TABLE IF NOT EXISTS "table_without_partition" (    |
+|                         |   "ts" TIMESTAMP(3) NOT NULL DEFAULT current_timestamp(), |
+|                         |   TIME INDEX ("ts")                                       |
 |                         | )                                                         |
 |                         |                                                           |
 |                         | ENGINE=mito                                               |

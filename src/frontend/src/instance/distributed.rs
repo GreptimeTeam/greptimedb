@@ -403,7 +403,8 @@ impl DistInstance {
                     .context(TableNotFoundSnafu { table_name: &table })?;
                 let table_name = TableName::new(catalog, schema, table);
 
-                self.show_create_table(table_name, table_ref).await
+                self.show_create_table(table_name, table_ref, query_ctx.clone())
+                    .await
             }
             Statement::TruncateTable(stmt) => {
                 let (catalog, schema, table) =
@@ -420,7 +421,12 @@ impl DistInstance {
         }
     }
 
-    async fn show_create_table(&self, table_name: TableName, table: TableRef) -> Result<Output> {
+    async fn show_create_table(
+        &self,
+        table_name: TableName,
+        table: TableRef,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
         let partitions = self
             .catalog_manager
             .partition_manager()
@@ -432,7 +438,8 @@ impl DistInstance {
 
         let partitions = create_partitions_stmt(partitions)?;
 
-        query::sql::show_create_table(table, partitions).context(error::ExecuteStatementSnafu)
+        query::sql::show_create_table(table, partitions, query_ctx)
+            .context(error::ExecuteStatementSnafu)
     }
 
     /// Handles distributed database creation

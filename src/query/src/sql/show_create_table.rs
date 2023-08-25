@@ -32,8 +32,6 @@ use table::requests::IMMUTABLE_TABLE_META_KEY;
 
 use crate::error::{ConvertSqlTypeSnafu, ConvertSqlValueSnafu, Result, SqlSnafu};
 
-const BACK_QUOTE: char = '`';
-
 #[inline]
 fn number_value<T: Display>(n: T) -> SqlValue {
     SqlValue::Number(format!("{}", n), false)
@@ -92,7 +90,7 @@ fn column_option_def(option: ColumnOption) -> ColumnOptionDef {
     ColumnOptionDef { name: None, option }
 }
 
-fn create_column_def(column_schema: &ColumnSchema) -> Result<ColumnDef> {
+fn create_column_def(column_schema: &ColumnSchema, quote_style: char) -> Result<ColumnDef> {
     let name = &column_schema.name;
     let mut options = Vec::with_capacity(2);
 
@@ -121,7 +119,7 @@ fn create_column_def(column_schema: &ColumnSchema) -> Result<ColumnDef> {
     }
 
     Ok(ColumnDef {
-        name: Ident::with_quote(BACK_QUOTE, name),
+        name: Ident::with_quote(quote_style, name),
         data_type: statements::concrete_data_type_to_sql_data_type(&column_schema.data_type)
             .with_context(|_| ConvertSqlTypeSnafu {
                 datatype: column_schema.data_type.clone(),
@@ -131,20 +129,24 @@ fn create_column_def(column_schema: &ColumnSchema) -> Result<ColumnDef> {
     })
 }
 
-fn create_table_constraints(schema: &SchemaRef, table_meta: &TableMeta) -> Vec<TableConstraint> {
+fn create_table_constraints(
+    schema: &SchemaRef,
+    table_meta: &TableMeta,
+    quote_style: char,
+) -> Vec<TableConstraint> {
     let mut constraints = Vec::with_capacity(2);
     if let Some(timestamp_column) = schema.timestamp_column() {
         let column_name = &timestamp_column.name;
         constraints.push(TableConstraint::Unique {
             name: Some(TIME_INDEX.into()),
-            columns: vec![Ident::with_quote(BACK_QUOTE, column_name)],
+            columns: vec![Ident::with_quote(quote_style, column_name)],
             is_primary: false,
         });
     }
     if !table_meta.primary_key_indices.is_empty() {
         let columns = table_meta
             .row_key_column_names()
-            .map(|name| Ident::with_quote(BACK_QUOTE, name))
+            .map(|name| Ident::with_quote(quote_style, name))
             .collect();
         constraints.push(TableConstraint::Unique {
             name: None,
@@ -157,7 +159,7 @@ fn create_table_constraints(schema: &SchemaRef, table_meta: &TableMeta) -> Vec<T
 }
 
 /// Create a CreateTable statement from table info.
-pub fn create_table_stmt(table_info: &TableInfoRef) -> Result<CreateTable> {
+pub fn create_table_stmt(table_info: &TableInfoRef, quote_style: char) -> Result<CreateTable> {
     let table_meta = &table_info.meta;
     let table_name = &table_info.name;
     let schema = &table_info.meta.schema;
@@ -165,15 +167,15 @@ pub fn create_table_stmt(table_info: &TableInfoRef) -> Result<CreateTable> {
     let columns = schema
         .column_schemas()
         .iter()
-        .map(create_column_def)
+        .map(|c| create_column_def(c, quote_style))
         .collect::<Result<Vec<_>>>()?;
 
-    let constraints = create_table_constraints(schema, table_meta);
+    let constraints = create_table_constraints(schema, table_meta, quote_style);
 
     Ok(CreateTable {
         if_not_exists: true,
         table_id: table_info.ident.table_id,
-        name: ObjectName(vec![Ident::with_quote(BACK_QUOTE, table_name)]),
+        name: ObjectName(vec![Ident::with_quote(quote_style, table_name)]),
         columns,
         engine: table_meta.engine.clone(),
         constraints,
@@ -248,19 +250,19 @@ mod tests {
                 .unwrap(),
         );
 
-        let stmt = create_table_stmt(&info).unwrap();
+        let stmt = create_table_stmt(&info, '"').unwrap();
 
         let sql = format!("\n{}", stmt);
         assert_eq!(
             r#"
-CREATE TABLE IF NOT EXISTS system_metrics (
-  id INT UNSIGNED NULL,
-  host STRING NULL,
-  cpu DOUBLE NULL,
-  disk FLOAT NULL,
-  ts TIMESTAMP(3) NOT NULL DEFAULT current_timestamp(),
-  TIME INDEX (ts),
-  PRIMARY KEY (id, host)
+CREATE TABLE IF NOT EXISTS "system_metrics" (
+  "id" INT UNSIGNED NULL,
+  "host" STRING NULL,
+  "cpu" DOUBLE NULL,
+  "disk" FLOAT NULL,
+  "ts" TIMESTAMP(3) NOT NULL DEFAULT current_timestamp(),
+  TIME INDEX ("ts"),
+  PRIMARY KEY ("id", "host")
 )
 ENGINE=mito
 WITH(
@@ -317,14 +319,14 @@ WITH(
                 .unwrap(),
         );
 
-        let stmt = create_table_stmt(&info).unwrap();
+        let stmt = create_table_stmt(&info, '"').unwrap();
 
         let sql = format!("\n{}", stmt);
         assert_eq!(
             r#"
-CREATE EXTERNAL TABLE IF NOT EXISTS system_metrics (
-  host STRING NULL,
-  cpu DOUBLE NULL,
+CREATE EXTERNAL TABLE IF NOT EXISTS "system_metrics" (
+  "host" STRING NULL,
+  "cpu" DOUBLE NULL,
 
 )
 ENGINE=file

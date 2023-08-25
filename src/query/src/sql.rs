@@ -182,11 +182,28 @@ pub async fn show_tables(
     }
 }
 
-pub fn show_create_table(table: TableRef, partitions: Option<Partitions>) -> Result<Output> {
+pub fn show_create_table(
+    table: TableRef,
+    partitions: Option<Partitions>,
+    query_ctx: QueryContextRef,
+) -> Result<Output> {
     let table_info = table.table_info();
     let table_name = &table_info.name;
-    let mut stmt = show_create_table::create_table_stmt(&table_info)?;
-    stmt.partitions = partitions;
+
+    // Default to double quote and fallback to back quote
+    let quote_style = if query_ctx.sql_dialect().is_delimited_identifier_start('"') {
+        '"'
+    } else if query_ctx.sql_dialect().is_delimited_identifier_start('\'') {
+        '\''
+    } else {
+        '`'
+    };
+
+    let mut stmt = show_create_table::create_table_stmt(&table_info, quote_style)?;
+    stmt.partitions = partitions.map(|mut p| {
+        p.set_quote(quote_style);
+        p
+    });
     let sql = format!("{}", stmt);
     let columns = vec![
         Arc::new(StringVector::from(vec![table_name.clone()])) as _,
