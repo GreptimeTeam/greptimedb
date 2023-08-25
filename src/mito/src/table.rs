@@ -394,10 +394,12 @@ fn column_qualified_name(table_name: &str, region_name: &str, column_name: &str)
 
 impl<R: Region> MitoTable<R> {
     pub(crate) fn new(
-        table_info: TableInfo,
+        mut table_info: TableInfo,
         regions: HashMap<RegionNumber, R>,
         manifest: TableManifest,
     ) -> Self {
+        // `TableInfo` is recovered from the file, which may contain incorrect content. We align it to real regions.
+        table_info.meta.region_numbers = regions.keys().copied().collect::<Vec<_>>();
         Self {
             table_info: ArcSwap::new(Arc::new(table_info)),
             regions: ArcSwap::new(Arc::new(regions)),
@@ -567,6 +569,16 @@ impl<R: Region> MitoTable<R> {
             Arc::new(regions)
         });
 
+        let _ = self.table_info.rcu(|info| {
+            let mut info = TableInfo::clone(info);
+
+            info.meta
+                .region_numbers
+                .retain(|r| !region_numbers.contains(r));
+
+            Arc::new(info)
+        });
+
         Ok(removed)
     }
 
@@ -644,6 +656,14 @@ impl<R: Region> MitoTable<R> {
                 .or_insert_with(|| region.clone());
 
             Arc::new(regions)
+        });
+
+        let _ = self.table_info.rcu(|info| {
+            let mut info = TableInfo::clone(info);
+
+            info.meta.region_numbers.push(region_number);
+
+            Arc::new(info)
         });
 
         info!(
