@@ -139,29 +139,20 @@ impl RangeSelect {
         // that need project is identical to range plan schema.
         // 1. all exprs in project must belong to range schema
         // 2. range schema and project exprs must have same size
-        let range_schema_fields = schema_before_project.fields();
-        let schema_project = if projection_expr.len() == range_schema_fields.len() {
-            let mut project_map = Vec::with_capacity(projection_expr.len());
-            for project_expr in projection_expr {
+        let schema_project = projection_expr
+            .iter()
+            .map(|project_expr| {
                 if let Expr::Column(column) = project_expr {
-                    for (i, v) in range_schema_fields.iter().enumerate() {
-                        if v.qualifier() == column.relation.as_ref() && v.name().eq(&column.name) {
-                            project_map.push(i);
-                            break;
-                        }
-                    }
+                    schema_before_project
+                        .index_of_column_by_name(column.relation.as_ref(), &column.name)
+                        .unwrap_or(None)
+                        .ok_or(())
                 } else {
-                    break;
+                    Err(())
                 }
-            }
-            if project_map.len() == projection_expr.len() {
-                Some(project_map)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+            })
+            .collect::<std::result::Result<Vec<usize>, ()>>()
+            .ok();
         let schema = if let Some(project) = &schema_project {
             let project_field = project
                 .iter()
