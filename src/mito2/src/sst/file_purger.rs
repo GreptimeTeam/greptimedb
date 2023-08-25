@@ -14,10 +14,10 @@
 
 use std::sync::Arc;
 
-use common_telemetry::{debug, error};
+use common_telemetry::{info, error};
 use store_api::storage::RegionId;
 
-use crate::access::AccessLayer;
+use crate::access::AccessLayerRef;
 use crate::schedule::scheduler::{LocalScheduler, Scheduler};
 use crate::sst::file::FileId;
 
@@ -39,13 +39,13 @@ pub trait FilePurger: Send + Sync {
 pub type FilePurgerRef = Arc<dyn FilePurger>;
 
 pub struct LocalFilePurger {
-    pub scheduler: Arc<LocalScheduler>,
+    scheduler: Arc<LocalScheduler>,
 
-    pub sst_layer: Arc<AccessLayer>,
+    sst_layer: AccessLayerRef,
 }
 
 impl LocalFilePurger {
-    pub fn new(scheduler: Arc<LocalScheduler>, sst_layer: Arc<AccessLayer>) -> Self {
+    pub fn new(scheduler: Arc<LocalScheduler>, sst_layer: AccessLayerRef) -> Self {
         Self {
             scheduler,
             sst_layer,
@@ -59,24 +59,22 @@ impl FilePurger for LocalFilePurger {
         let region_id = request.region_id;
         let sst_layer = self.sst_layer.clone();
 
-        let _ = self
+        if let Err(e) = self
             .scheduler
             .schedule(Box::pin(async move {
                 if let Err(e) = sst_layer.delete_sst(file_id).await {
                     error!(e; "Failed to delete SST file, file: {}, region: {}", 
                         file_id.as_parquet(), region_id);
                 } else {
-                    debug!(
+                    info!(
                         "Successfully deleted SST file: {}, region: {}",
                         file_id.as_parquet(),
                         region_id
                     );
                 }
-            }))
-            .map_err(|e| {
-                error!(e; "Failed to schedule the file purge request");
-                e
-            });
+            })) {
+            error!(e; "Failed to schedule the file purge request");
+        }
     }
 }
 
@@ -87,7 +85,7 @@ mod tests {
     use object_store::ObjectStore;
 
     use super::*;
-    use crate::access::AccessLayer;
+    use crate::access::FsAccessLayer;
     use crate::schedule::scheduler::LocalScheduler;
     use crate::sst::file::{FileHandle, FileId, FileMeta, FileTimeRange};
 
@@ -106,7 +104,7 @@ mod tests {
         let _ = object_store.write(&path, vec![0; 4096]).await;
 
         let scheduler = Arc::new(LocalScheduler::new(3));
-        let layer = Arc::new(AccessLayer::new(sst_dir, object_store.clone()));
+        let layer = Arc::new(FsAccessLayer::new(sst_dir, object_store.clone()));
 
         let file_purger = Arc::new(LocalFilePurger::new(scheduler.clone(), layer));
 

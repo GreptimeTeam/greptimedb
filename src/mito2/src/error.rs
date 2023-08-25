@@ -27,6 +27,7 @@ use store_api::manifest::ManifestVersion;
 use store_api::storage::RegionId;
 
 use crate::worker::WorkerId;
+use crate::sst::file::FileId;
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
@@ -384,8 +385,9 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to delete SST file, source: {}", source))]
+    #[snafu(display("Failed to delete SST file, file id: {}, source: {}", file_id, source))]
     DeleteSst {
+        file_id: FileId,
         source: object_store::Error,
         location: Location,
     },
