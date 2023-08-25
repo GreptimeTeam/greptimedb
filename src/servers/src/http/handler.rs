@@ -29,6 +29,7 @@ use session::context::QueryContextRef;
 
 use crate::http::{ApiState, GreptimeOptionsConfigState, JsonResponse};
 use crate::metrics_handler::MetricsHandler;
+use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
 pub struct SqlQuery {
@@ -55,23 +56,8 @@ pub async fn sql(
     );
 
     let resp = if let Some(sql) = &sql {
-        match sql_handler
-            .is_valid_schema(query_ctx.current_catalog(), query_ctx.current_schema())
-            .await
-        {
-            Ok(false) => {
-                return Json(JsonResponse::with_error(
-                    format!("Database not found: {db}"),
-                    StatusCode::DatabaseNotFound,
-                ))
-            }
-            Err(e) => {
-                return Json(JsonResponse::with_error(
-                    format!("Error checking database: {db}, {e}"),
-                    StatusCode::Internal,
-                ))
-            }
-            _ => {}
+        if let Some(resp) = validate_schema(sql_handler.clone(), query_ctx.clone()).await {
+            return Json(resp);
         }
 
         JsonResponse::from_output(sql_handler.do_query(sql, query_ctx).await).await
@@ -120,23 +106,8 @@ pub async fn promql(
         &[(crate::metrics::METRIC_DB_LABEL, db.clone())]
     );
 
-    match sql_handler
-        .is_valid_schema(query_ctx.current_catalog(), query_ctx.current_schema())
-        .await
-    {
-        Ok(false) => {
-            return Json(JsonResponse::with_error(
-                format!("Database not found: {db}"),
-                StatusCode::DatabaseNotFound,
-            ))
-        }
-        Err(e) => {
-            return Json(JsonResponse::with_error(
-                format!("Error checking database: {db}, {e}"),
-                StatusCode::Internal,
-            ))
-        }
-        _ => {}
+    if let Some(resp) = validate_schema(sql_handler.clone(), query_ctx.clone()).await {
+        return Json(resp);
     }
 
     let prom_query = params.into();
@@ -213,4 +184,27 @@ pub async fn status() -> Json<StatusResponse<'static>> {
 #[axum_macros::debug_handler]
 pub async fn config(State(state): State<GreptimeOptionsConfigState>) -> Response {
     (axum::http::StatusCode::OK, state.greptime_config_options).into_response()
+}
+
+async fn validate_schema(
+    sql_handler: ServerSqlQueryHandlerRef,
+    query_ctx: QueryContextRef,
+) -> Option<JsonResponse> {
+    match sql_handler
+        .is_valid_schema(query_ctx.current_catalog(), query_ctx.current_schema())
+        .await
+    {
+        Ok(false) => Some(JsonResponse::with_error(
+            format!("Database not found: {}", query_ctx.get_db_string()),
+            StatusCode::DatabaseNotFound,
+        )),
+        Err(e) => Some(JsonResponse::with_error(
+            format!(
+                "Error checking database: {}, {e}",
+                query_ctx.get_db_string()
+            ),
+            StatusCode::Internal,
+        )),
+        _ => None,
+    }
 }
