@@ -26,6 +26,7 @@ use servers::http::{
     JsonOutput,
 };
 use servers::metrics_handler::MetricsHandler;
+use session::context::QueryContext;
 use table::test_util::MemTable;
 
 use crate::{
@@ -36,13 +37,15 @@ use crate::{
 #[tokio::test]
 async fn test_sql_not_provided() {
     let sql_handler = create_testing_sql_query_handler(MemTable::default_numbers_table());
+    let ctx = QueryContext::arc();
+    ctx.set_current_user(Some(auth::userinfo_by_name(None)));
     let Json(json) = http_handler::sql(
         State(ApiState {
             sql_handler,
             script_handler: None,
         }),
         Query(http_handler::SqlQuery::default()),
-        axum::Extension(auth::userinfo_by_name(None)),
+        axum::Extension(ctx),
         Form(http_handler::SqlQuery::default()),
     )
     .await;
@@ -61,13 +64,15 @@ async fn test_sql_output_rows() {
     let query = create_query();
     let sql_handler = create_testing_sql_query_handler(MemTable::default_numbers_table());
 
+    let ctx = QueryContext::arc();
+    ctx.set_current_user(Some(auth::userinfo_by_name(None)));
     let Json(json) = http_handler::sql(
         State(ApiState {
             sql_handler,
             script_handler: None,
         }),
         query,
-        axum::Extension(auth::userinfo_by_name(None)),
+        axum::Extension(ctx),
         Form(http_handler::SqlQuery::default()),
     )
     .await;
@@ -107,13 +112,16 @@ async fn test_sql_form() {
     let form = create_form();
     let sql_handler = create_testing_sql_query_handler(MemTable::default_numbers_table());
 
+    let ctx = QueryContext::arc();
+    ctx.set_current_user(Some(auth::userinfo_by_name(None)));
+
     let Json(json) = http_handler::sql(
         State(ApiState {
             sql_handler,
             script_handler: None,
         }),
         Query(http_handler::SqlQuery::default()),
-        axum::Extension(auth::userinfo_by_name(None)),
+        axum::Extension(ctx),
         form,
     )
     .await;

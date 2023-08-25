@@ -19,8 +19,9 @@ use api::v1::greptime_request::Request;
 use api::v1::{CompactTableExpr, DdlRequest, FlushTableExpr};
 use axum::extract::{Query, RawBody, State};
 use axum::http::StatusCode;
+use axum::Extension;
 use common_catalog::consts::DEFAULT_CATALOG_NAME;
-use session::context::QueryContext;
+use session::context::QueryContextRef;
 use snafu::OptionExt;
 
 use crate::error;
@@ -31,6 +32,7 @@ use crate::query_handler::grpc::ServerGrpcQueryHandlerRef;
 pub async fn flush(
     State(grpc_handler): State<ServerGrpcQueryHandlerRef>,
     Query(params): Query<HashMap<String, String>>,
+    Extension(query_ctx): Extension<QueryContextRef>,
     RawBody(_): RawBody,
 ) -> Result<(StatusCode, ())> {
     let catalog_name = params
@@ -64,9 +66,7 @@ pub async fn flush(
         })),
     });
 
-    grpc_handler
-        .do_query(request, QueryContext::with(&catalog_name, &schema_name))
-        .await?;
+    grpc_handler.do_query(request, query_ctx).await?;
     Ok((StatusCode::NO_CONTENT, ()))
 }
 
@@ -74,6 +74,7 @@ pub async fn flush(
 pub async fn compact(
     State(grpc_handler): State<ServerGrpcQueryHandlerRef>,
     Query(params): Query<HashMap<String, String>>,
+    Extension(query_ctx): Extension<QueryContextRef>,
     RawBody(_): RawBody,
 ) -> Result<(StatusCode, ())> {
     let catalog_name = params
@@ -106,8 +107,6 @@ pub async fn compact(
         })),
     });
 
-    grpc_handler
-        .do_query(request, QueryContext::with(&catalog_name, &schema_name))
-        .await?;
+    grpc_handler.do_query(request, query_ctx).await?;
     Ok((StatusCode::NO_CONTENT, ()))
 }

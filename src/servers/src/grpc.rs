@@ -51,7 +51,7 @@ use self::region_server::{RegionServerHandlerRef, RegionServerRequestHandler};
 use crate::error::{AlreadyStartedSnafu, InternalSnafu, Result, StartGrpcSnafu, TcpBindSnafu};
 use crate::grpc::database::DatabaseService;
 use crate::grpc::greptime_handler::GreptimeRequestHandler;
-use crate::prometheus::PrometheusHandlerRef;
+use crate::prometheus_handler::PrometheusHandlerRef;
 use crate::query_handler::grpc::ServerGrpcQueryHandlerRef;
 use crate::server::Server;
 

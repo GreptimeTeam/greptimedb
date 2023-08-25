@@ -22,13 +22,13 @@ pub mod opentsdb;
 pub mod otlp;
 mod pprof;
 pub mod prom_store;
+pub mod prometheus;
 pub mod script;
 
 #[cfg(feature = "dashboard")]
 mod dashboard;
 
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use aide::axum::{routing as apirouting, ApiRouter, IntoApiResponse};
@@ -43,8 +43,6 @@ use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Json};
 use axum::{routing, BoxError, Extension, Router};
 use common_base::readable_size::ReadableSize;
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_query::Output;
@@ -55,7 +53,6 @@ use futures::FutureExt;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use session::context::QueryContext;
 use snafu::{ensure, ResultExt};
 use tokio::sync::oneshot::{self, Sender};
 use tokio::sync::Mutex;
@@ -69,15 +66,15 @@ use self::influxdb::{influxdb_health, influxdb_ping, influxdb_write_v1, influxdb
 use crate::configurator::ConfiguratorRef;
 use crate::error::{AlreadyStartedSnafu, Result, StartHttpSnafu};
 use crate::http::admin::{compact, flush};
+use crate::http::prometheus::{
+    instant_query, label_values_query, labels_query, range_query, series_query,
+};
 use crate::metrics::{
     METRIC_CODE_LABEL, METRIC_HTTP_REQUESTS_ELAPSED, METRIC_HTTP_REQUESTS_TOTAL,
     METRIC_METHOD_LABEL, METRIC_PATH_LABEL,
 };
 use crate::metrics_handler::MetricsHandler;
-use crate::prometheus::{
-    instant_query, label_values_query, labels_query, range_query, series_query,
-    PrometheusHandlerRef,
-};
+use crate::prometheus_handler::PrometheusHandlerRef;
 use crate::query_handler::grpc::ServerGrpcQueryHandlerRef;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 use crate::query_handler::{
@@ -85,36 +82,6 @@ use crate::query_handler::{
     PromStoreProtocolHandlerRef, ScriptHandlerRef,
 };
 use crate::server::Server;
-
-/// create query context from database name information, catalog and schema are
-/// resolved from the name
-pub(crate) async fn query_context_from_db(
-    query_handler: ServerSqlQueryHandlerRef,
-    db: Option<String>,
-) -> std::result::Result<Arc<QueryContext>, JsonResponse> {
-    let (catalog, schema) = if let Some(db) = &db {
-        let (catalog, schema) = parse_catalog_and_schema_from_db_string(db);
-
-        match query_handler.is_valid_schema(catalog, schema).await {
-            Ok(true) => (catalog, schema),
-            Ok(false) => {
-                return Err(JsonResponse::with_error(
-                    format!("Database not found: {db}"),
-                    StatusCode::DatabaseNotFound,
-                ))
-            }
-            Err(e) => {
-                return Err(JsonResponse::with_error(
-                    format!("Error checking database: {db}, {e}"),
-                    StatusCode::Internal,
-                ))
-            }
-        }
-    } else {
-        (DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME)
-    };
-    Ok(QueryContext::with(catalog, schema))
-}
 
 pub const HTTP_API_VERSION: &str = "v1";
 pub const HTTP_API_PREFIX: &str = "/v1/";
