@@ -15,11 +15,12 @@
 use std::sync::Arc;
 
 use auth::tests::MockUserProvider;
-use auth::{UserInfoRef, UserProvider};
+use auth::UserProvider;
 use axum::body::BoxBody;
 use axum::http;
 use hyper::Request;
 use servers::http::authorize::HttpAuth;
+use session::context::QueryContextRef;
 use tower_http::auth::AsyncAuthorizeRequest;
 
 #[tokio::test]
@@ -28,8 +29,9 @@ async fn test_http_auth() {
 
     // base64encode("username:password") == "dXNlcm5hbWU6cGFzc3dvcmQ="
     let req = mock_http_request(Some("Basic dXNlcm5hbWU6cGFzc3dvcmQ="), None).unwrap();
-    let auth_res = http_auth.authorize(req).await.unwrap();
-    let user_info: &UserInfoRef = auth_res.extensions().get().unwrap();
+    let req = http_auth.authorize(req).await.unwrap();
+    let ctx: &QueryContextRef = req.extensions().get().unwrap();
+    let user_info = ctx.current_user().unwrap();
     let default = auth::userinfo_by_name(None);
     assert_eq!(default.username(), user_info.username());
 
@@ -40,7 +42,8 @@ async fn test_http_auth() {
     // base64encode("greptime:greptime") == "Z3JlcHRpbWU6Z3JlcHRpbWU="
     let req = mock_http_request(Some("Basic Z3JlcHRpbWU6Z3JlcHRpbWU="), None).unwrap();
     let req = http_auth.authorize(req).await.unwrap();
-    let user_info: &UserInfoRef = req.extensions().get().unwrap();
+    let ctx: &QueryContextRef = req.extensions().get().unwrap();
+    let user_info = ctx.current_user().unwrap();
     let default = auth::userinfo_by_name(None);
     assert_eq!(default.username(), user_info.username());
 
@@ -70,7 +73,8 @@ async fn test_schema_validating() {
     )
     .unwrap();
     let req = http_auth.authorize(req).await.unwrap();
-    let user_info: &UserInfoRef = req.extensions().get().unwrap();
+    let ctx: &QueryContextRef = req.extensions().get().unwrap();
+    let user_info = ctx.current_user().unwrap();
     let default = auth::userinfo_by_name(None);
     assert_eq!(default.username(), user_info.username());
 
