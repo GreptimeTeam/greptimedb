@@ -4,12 +4,12 @@ Affected Rows: 0
 
 DESC TABLE test_alt_table;
 
-+-------+-------+------+---------+---------------+
-| Field | Type  | Null | Default | Semantic Type |
-+-------+-------+------+---------+---------------+
-| i     | Int32 | YES  |         | FIELD         |
-| j     | Int64 | NO   |         | TIME INDEX    |
-+-------+-------+------+---------+---------------+
++-------+-------+-----+------+---------+---------------+
+| Field | Type  | Key | Null | Default | Semantic Type |
++-------+-------+-----+------+---------+---------------+
+| i     | Int32 |     | YES  |         | FIELD         |
+| j     | Int64 | PRI | NO   |         | TIMESTAMP     |
++-------+-------+-----+------+---------+---------------+
 
 ALTER TABLE test_alt_table ADD COLUMN k INTEGER;
 
@@ -17,13 +17,13 @@ Affected Rows: 0
 
 DESC TABLE test_alt_table;
 
-+-------+-------+------+---------+---------------+
-| Field | Type  | Null | Default | Semantic Type |
-+-------+-------+------+---------+---------------+
-| i     | Int32 | YES  |         | FIELD         |
-| j     | Int64 | NO   |         | TIME INDEX    |
-| k     | Int32 | YES  |         | FIELD         |
-+-------+-------+------+---------+---------------+
++-------+-------+-----+------+---------+---------------+
+| Field | Type  | Key | Null | Default | Semantic Type |
++-------+-------+-----+------+---------+---------------+
+| i     | Int32 |     | YES  |         | FIELD         |
+| j     | Int64 | PRI | NO   |         | TIMESTAMP     |
+| k     | Int32 |     | YES  |         | FIELD         |
++-------+-------+-----+------+---------+---------------+
 
 -- SQLNESS ARG restart=true
 ALTER TABLE test_alt_table ADD COLUMN m INTEGER;
@@ -32,14 +32,14 @@ Affected Rows: 0
 
 DESC TABLE test_alt_table;
 
-+-------+-------+------+---------+---------------+
-| Field | Type  | Null | Default | Semantic Type |
-+-------+-------+------+---------+---------------+
-| i     | Int32 | YES  |         | FIELD         |
-| j     | Int64 | NO   |         | TIME INDEX    |
-| k     | Int32 | YES  |         | FIELD         |
-| m     | Int32 | YES  |         | FIELD         |
-+-------+-------+------+---------+---------------+
++-------+-------+-----+------+---------+---------------+
+| Field | Type  | Key | Null | Default | Semantic Type |
++-------+-------+-----+------+---------+---------------+
+| i     | Int32 |     | YES  |         | FIELD         |
+| j     | Int64 | PRI | NO   |         | TIMESTAMP     |
+| k     | Int32 |     | YES  |         | FIELD         |
+| m     | Int32 |     | YES  |         | FIELD         |
++-------+-------+-----+------+---------+---------------+
 
 DROP TABLE test_alt_table;
 
