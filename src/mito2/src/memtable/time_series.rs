@@ -31,13 +31,9 @@ use snafu::{ensure, ResultExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, ScanRequest};
 
-use crate::error::{
-    CompactValuesSnafu, ComputeArrowSnafu, ConvertVectorSnafu, PrimaryKeyLengthMismatchSnafu,
-    PrimaryKeyLengthMismatchSnafu, Result, Result,
-};
+use crate::error::{ComputeArrowSnafu, ConvertVectorSnafu, PrimaryKeyLengthMismatchSnafu, Result};
 use crate::memtable::{
-    BoxedBatchIterator, BoxedBatchIterator, KeyValues, KeyValues, Memtable, Memtable,
-    MemtableBuilder, MemtableId, MemtableId, MemtableRef,
+    BoxedBatchIterator, KeyValues, Memtable, MemtableBuilder, MemtableId, MemtableRef,
 };
 use crate::read::{Batch, BatchBuilder, BatchColumn};
 use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
@@ -768,7 +764,7 @@ mod tests {
         common_telemetry::init_default_ut_logging();
         let schema = schema_for_test();
         let kvs = build_key_values(&schema, "hello".to_string(), 42, 100);
-        let memtable = TimeSeriesMemtable::new(schema, 42).unwrap();
+        let memtable = TimeSeriesMemtable::new(schema, 42);
         memtable.write(&kvs).unwrap();
 
         let expected_ts = kvs
@@ -799,7 +795,7 @@ mod tests {
         common_telemetry::init_default_ut_logging();
         let schema = schema_for_test();
         let kvs = build_key_values(&schema, "hello".to_string(), 42, 100);
-        let memtable = TimeSeriesMemtable::new(schema, 42).unwrap();
+        let memtable = TimeSeriesMemtable::new(schema, 42);
         memtable.write(&kvs).unwrap();
 
         let iter = memtable.iter(ScanRequest {

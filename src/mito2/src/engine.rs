@@ -65,8 +65,7 @@ impl MitoEngine {
         region_id: RegionId,
         request: RegionRequest,
     ) -> Result<Output> {
-        let output = self.inner.handle_request(region_id, request).await?;
-        Ok(output)
+        self.inner.handle_request(region_id, request).await
     }
 
     /// Returns true if the specific region exists.
