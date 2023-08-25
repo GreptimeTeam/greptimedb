@@ -48,16 +48,32 @@ pub async fn sql(
 
     let start = Instant::now();
     let sql = query_params.sql.or(form_params.sql);
-    let db = query_params.db.or(form_params.db);
+    let db = query_ctx.get_db_string();
     let _timer = timer!(
         crate::metrics::METRIC_HTTP_SQL_ELAPSED,
-        &[(
-            crate::metrics::METRIC_DB_LABEL,
-            db.clone().unwrap_or_default()
-        )]
+        &[(crate::metrics::METRIC_DB_LABEL, db.clone())]
     );
 
     let resp = if let Some(sql) = &sql {
+        match sql_handler
+            .is_valid_schema(query_ctx.current_catalog(), query_ctx.current_schema())
+            .await
+        {
+            Ok(false) => {
+                return Json(JsonResponse::with_error(
+                    format!("Database not found: {db}"),
+                    StatusCode::DatabaseNotFound,
+                ))
+            }
+            Err(e) => {
+                return Json(JsonResponse::with_error(
+                    format!("Error checking database: {db}, {e}"),
+                    StatusCode::Internal,
+                ))
+            }
+            _ => {}
+        }
+
         JsonResponse::from_output(sql_handler.do_query(sql, query_ctx).await).await
     } else {
         JsonResponse::with_error(
@@ -98,14 +114,30 @@ pub async fn promql(
 ) -> Json<JsonResponse> {
     let sql_handler = &state.sql_handler;
     let exec_start = Instant::now();
-    let db = params.db.clone();
+    let db = query_ctx.get_db_string();
     let _timer = timer!(
         crate::metrics::METRIC_HTTP_PROMQL_ELAPSED,
-        &[(
-            crate::metrics::METRIC_DB_LABEL,
-            db.clone().unwrap_or_default()
-        )]
+        &[(crate::metrics::METRIC_DB_LABEL, db.clone())]
     );
+
+    match sql_handler
+        .is_valid_schema(query_ctx.current_catalog(), query_ctx.current_schema())
+        .await
+    {
+        Ok(false) => {
+            return Json(JsonResponse::with_error(
+                format!("Database not found: {db}"),
+                StatusCode::DatabaseNotFound,
+            ))
+        }
+        Err(e) => {
+            return Json(JsonResponse::with_error(
+                format!("Error checking database: {db}, {e}"),
+                StatusCode::Internal,
+            ))
+        }
+        _ => {}
+    }
 
     let prom_query = params.into();
     let resp =
