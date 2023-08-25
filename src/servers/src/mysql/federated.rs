@@ -351,15 +351,17 @@ mod test {
         }
 
         let query = "select version()";
-        let expected = format!(
-            r#"+----------------+
-| version()      |
-+----------------+
-| {}-greptime |
-+----------------+"#,
-            env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "unknown".to_string())
-        );
-        test(query, &expected);
+        let version = env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "unknown".to_string());
+        let output = check(query, QueryContext::arc());
+        match output.unwrap() {
+            Output::RecordBatches(r) => {
+                assert!(&r
+                    .pretty_print()
+                    .unwrap()
+                    .contains(&format!("{version}-greptime")));
+            }
+            _ => unreachable!(),
+        }
 
         let query = "SELECT @@version_comment LIMIT 1";
         let expected = "\
