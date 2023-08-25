@@ -372,8 +372,11 @@ pub enum Error {
     #[snafu(display("Invalid scheduler state, location: {}", location))]
     InvalidSchedulerState { location: Location },
 
-    #[snafu(display("Failed to stop scheduler, source: {}", source))]
-    StopScheduler { source: JoinError },
+    #[snafu(display("Failed to stop scheduler, location: {}, source: {}", location, source))]
+    StopScheduler {
+        source: JoinError,
+        location: Location,
+    },
 
     #[snafu(display(
         "Failed to build scan predicate, location: {}, source: {}",

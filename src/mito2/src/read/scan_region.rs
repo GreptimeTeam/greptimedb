@@ -29,7 +29,7 @@ use crate::region::version::VersionRef;
 use crate::sst::file::FileHandle;
 
 /// A scanner scans a region and returns a [SendableRecordBatchStream].
-pub enum Scanner {
+pub(crate) enum Scanner {
     /// Sequential scan.
     Seq(SeqScan),
     // TODO(yingwen): Support windowed scan and chained scan.
@@ -37,7 +37,7 @@ pub enum Scanner {
 
 impl Scanner {
     /// Returns a [SendableRecordBatchStream] to retrieve scan results.
-    pub async fn scan(&self) -> Result<SendableRecordBatchStream> {
+    pub(crate) async fn scan(&self) -> Result<SendableRecordBatchStream> {
         match self {
             Scanner::Seq(seq_scan) => seq_scan.build().await,
         }

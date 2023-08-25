@@ -24,7 +24,7 @@ pub(crate) struct MemtableVersion {
     /// Mutable memtable.
     pub(crate) mutable: MemtableRef,
     /// Immutable memtables.
-    pub(crate) immutables: Vec<MemtableRef>,
+    immutables: Vec<MemtableRef>,
 }
 
 pub(crate) type MemtableVersionRef = Arc<MemtableVersion>;

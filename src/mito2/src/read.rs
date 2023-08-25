@@ -16,7 +16,7 @@
 
 pub mod merge;
 pub(crate) mod scan_region;
-pub mod seq_scan;
+pub(crate) mod seq_scan;
 pub(crate) mod stream;
 
 use std::sync::Arc;
@@ -40,7 +40,6 @@ use crate::error::{
     ComputeArrowSnafu, ComputeVectorSnafu, ConvertVectorSnafu, InvalidBatchSnafu, Result,
 };
 use crate::memtable::BoxedBatchIterator;
-pub use crate::read::scan_region::Scanner;
 
 /// Storage internal representation of a batch of rows
 /// for a primary key (time series).

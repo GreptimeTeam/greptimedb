@@ -28,8 +28,7 @@ use store_api::storage::{RegionId, ScanRequest};
 
 use crate::config::MitoConfig;
 use crate::error::{RecvSnafu, RegionNotFoundSnafu, Result};
-use crate::read::scan_region::ScanRegion;
-use crate::read::Scanner;
+use crate::read::scan_region::{ScanRegion, Scanner};
 use crate::request::{RegionTask, RequestBody};
 use crate::worker::WorkerGroup;
 
