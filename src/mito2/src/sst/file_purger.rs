@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use common_telemetry::{info, error};
+use common_telemetry::{error, info};
 use store_api::storage::RegionId;
 
 use crate::access::AccessLayerRef;
@@ -59,20 +59,18 @@ impl FilePurger for LocalFilePurger {
         let region_id = request.region_id;
         let sst_layer = self.sst_layer.clone();
 
-        if let Err(e) = self
-            .scheduler
-            .schedule(Box::pin(async move {
-                if let Err(e) = sst_layer.delete_sst(file_id).await {
-                    error!(e; "Failed to delete SST file, file: {}, region: {}", 
-                        file_id.as_parquet(), region_id);
-                } else {
-                    info!(
-                        "Successfully deleted SST file: {}, region: {}",
-                        file_id.as_parquet(),
-                        region_id
-                    );
-                }
-            })) {
+        if let Err(e) = self.scheduler.schedule(Box::pin(async move {
+            if let Err(e) = sst_layer.delete_sst(file_id).await {
+                error!(e; "Failed to delete SST file, file: {}, region: {}", 
+                    file_id.as_parquet(), region_id);
+            } else {
+                info!(
+                    "Successfully deleted SST file: {}, region: {}",
+                    file_id.as_parquet(),
+                    region_id
+                );
+            }
+        })) {
             error!(e; "Failed to schedule the file purge request");
         }
     }

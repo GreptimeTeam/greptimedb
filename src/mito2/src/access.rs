@@ -54,8 +54,6 @@ impl FsAccessLayer {
         self.object_store
             .delete(&path)
             .await
-            .context(DeleteSstSnafu {
-                file_id,
-            })
+            .context(DeleteSstSnafu { file_id })
     }
 }

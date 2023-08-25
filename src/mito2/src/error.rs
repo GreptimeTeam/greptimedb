@@ -26,8 +26,8 @@ use snafu::{Location, Snafu};
 use store_api::manifest::ManifestVersion;
 use store_api::storage::RegionId;
 
-use crate::worker::WorkerId;
 use crate::sst::file::FileId;
+use crate::worker::WorkerId;
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
