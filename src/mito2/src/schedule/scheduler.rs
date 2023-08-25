@@ -125,6 +125,7 @@ impl Scheduler for LocalScheduler {
             .map_err(|_| InvalidFlumeSenderSnafu {}.build())
     }
 
+    /// if await_termination is true, scheduler will wait all tasks finished before stopping
     async fn stop(&self, await_termination: bool) -> Result<()> {
         ensure!(
             self.state.load(Ordering::Relaxed) == STATE_RUNNING,
@@ -235,7 +236,7 @@ mod tests {
         let local_stop = local.clone();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(5)).await;
-            local_stop.stop(false).await.unwrap();
+            local_stop.stop(true).await.unwrap();
             barrier_clone.wait().await;
         });
 
