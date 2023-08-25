@@ -32,7 +32,7 @@ SHOW CREATE TABLE system_metrics;
 |                |   TIME INDEX ("ts"),                                      |
 |                |   PRIMARY KEY ("id", "host")                              |
 |                | )                                                         |
-|                | PARTITION BY RANGE COLUMNS (n) (                          |
+|                | PARTITION BY RANGE COLUMNS ("n") (                        |
 |                |                       PARTITION r0 VALUES LESS THAN (5),  |
 |                |   PARTITION r1 VALUES LESS THAN (9),                      |
 |                |   PARTITION r2 VALUES LESS THAN (MAXVALUE)                |
