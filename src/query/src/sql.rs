@@ -49,12 +49,14 @@ const SCHEMAS_COLUMN: &str = "Schemas";
 const TABLES_COLUMN: &str = "Tables";
 const COLUMN_NAME_COLUMN: &str = "Field";
 const COLUMN_TYPE_COLUMN: &str = "Type";
+const COLUMN_KEY_COLUMN: &str = "Key";
 const COLUMN_NULLABLE_COLUMN: &str = "Null";
 const COLUMN_DEFAULT_COLUMN: &str = "Default";
 const COLUMN_SEMANTIC_TYPE_COLUMN: &str = "Semantic Type";
 
 const NULLABLE_YES: &str = "YES";
 const NULLABLE_NO: &str = "NO";
+const PRI_KEY: &str = "PRI";
 
 static DESCRIBE_TABLE_OUTPUT_SCHEMA: Lazy<Arc<Schema>> = Lazy::new(|| {
     Arc::new(Schema::new(vec![
@@ -68,6 +70,7 @@ static DESCRIBE_TABLE_OUTPUT_SCHEMA: Lazy<Arc<Schema>> = Lazy::new(|| {
             ConcreteDataType::string_datatype(),
             false,
         ),
+        ColumnSchema::new(COLUMN_KEY_COLUMN, ConcreteDataType::string_datatype(), true),
         ColumnSchema::new(
             COLUMN_NULLABLE_COLUMN,
             ConcreteDataType::string_datatype(),
@@ -204,6 +207,7 @@ pub fn describe_table(table: TableRef) -> Result<Output> {
     let columns = vec![
         describe_column_names(columns_schemas),
         describe_column_types(columns_schemas),
+        describe_column_keys(columns_schemas, &table_info.meta.primary_key_indices),
         describe_column_nullables(columns_schemas),
         describe_column_defaults(columns_schemas),
         describe_column_semantic_types(columns_schemas, &table_info.meta.primary_key_indices),
@@ -222,6 +226,21 @@ fn describe_column_names(columns_schemas: &[ColumnSchema]) -> VectorRef {
 fn describe_column_types(columns_schemas: &[ColumnSchema]) -> VectorRef {
     Arc::new(StringVector::from_iterator(
         columns_schemas.iter().map(|cs| cs.data_type.name()),
+    ))
+}
+
+fn describe_column_keys(
+    columns_schemas: &[ColumnSchema],
+    primary_key_indices: &[usize],
+) -> VectorRef {
+    Arc::new(StringVector::from_iterator(
+        columns_schemas.iter().enumerate().map(|(i, cs)| {
+            if cs.is_time_index() || primary_key_indices.contains(&i) {
+                PRI_KEY
+            } else {
+                ""
+            }
+        }),
     ))
 }
 
@@ -253,20 +272,16 @@ fn describe_column_semantic_types(
     columns_schemas: &[ColumnSchema],
     primary_key_indices: &[usize],
 ) -> VectorRef {
-    Arc::new(StringVector::from(
-        columns_schemas
-            .iter()
-            .enumerate()
-            .map(|(i, cs)| {
-                if primary_key_indices.contains(&i) {
-                    String::from(SEMANTIC_TYPE_PRIMARY_KEY)
-                } else if cs.is_time_index() {
-                    String::from(SEMANTIC_TYPE_TIME_INDEX)
-                } else {
-                    String::from(SEMANTIC_TYPE_FIELD)
-                }
-            })
-            .collect::<Vec<String>>(),
+    Arc::new(StringVector::from_iterator(
+        columns_schemas.iter().enumerate().map(|(i, cs)| {
+            if primary_key_indices.contains(&i) {
+                SEMANTIC_TYPE_PRIMARY_KEY
+            } else if cs.is_time_index() {
+                SEMANTIC_TYPE_TIME_INDEX
+            } else {
+                SEMANTIC_TYPE_FIELD
+            }
+        }),
     ))
 }
 
@@ -403,6 +418,7 @@ mod test {
         let expected_columns = vec![
             Arc::new(StringVector::from(vec!["t1", "t2"])) as _,
             Arc::new(StringVector::from(vec!["UInt32", "TimestampMillisecond"])) as _,
+            Arc::new(StringVector::from(vec!["", "PRI"])) as _,
             Arc::new(StringVector::from(vec![NULLABLE_YES, NULLABLE_NO])) as _,
             Arc::new(StringVector::from(vec!["", "current_timestamp()"])) as _,
             Arc::new(StringVector::from(vec![

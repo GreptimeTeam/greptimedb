@@ -552,16 +552,16 @@ async fn test_execute_query_external_table_parquet(instance: Arc<dyn MockInstanc
 
     let output = execute_sql(&instance, &format!("desc table {table_name};")).await;
     let expect = "\
-+------------+-----------------+------+---------+---------------+
-| Field      | Type            | Null | Default | Semantic Type |
-+------------+-----------------+------+---------+---------------+
-| c_int      | Int64           | YES  |         | FIELD         |
-| c_float    | Float64         | YES  |         | FIELD         |
-| c_string   | Float64         | YES  |         | FIELD         |
-| c_bool     | Boolean         | YES  |         | FIELD         |
-| c_date     | Date            | YES  |         | FIELD         |
-| c_datetime | TimestampSecond | YES  |         | FIELD         |
-+------------+-----------------+------+---------+---------------+";
++------------+-----------------+-----+------+---------+---------------+
+| Field      | Type            | Key | Null | Default | Semantic Type |
++------------+-----------------+-----+------+---------+---------------+
+| c_int      | Int64           |     | YES  |         | FIELD         |
+| c_float    | Float64         |     | YES  |         | FIELD         |
+| c_string   | Float64         |     | YES  |         | FIELD         |
+| c_bool     | Boolean         |     | YES  |         | FIELD         |
+| c_date     | Date            |     | YES  |         | FIELD         |
+| c_datetime | TimestampSecond |     | YES  |         | FIELD         |
++------------+-----------------+-----+------+---------+---------------+";
     check_output_stream(output, expect).await;
 
     let output = execute_sql(&instance, &format!("select * from {table_name};")).await;
@@ -617,30 +617,30 @@ async fn test_execute_query_external_table_orc(instance: Arc<dyn MockInstance>) 
 
     let output = execute_sql(&instance, &format!("desc table {table_name};")).await;
     let expect = "\
-+------------------------+---------------------+------+---------+---------------+
-| Field                  | Type                | Null | Default | Semantic Type |
-+------------------------+---------------------+------+---------+---------------+
-| double_a               | Float64             | YES  |         | FIELD         |
-| a                      | Float32             | YES  |         | FIELD         |
-| b                      | Boolean             | YES  |         | FIELD         |
-| str_direct             | String              | YES  |         | FIELD         |
-| d                      | String              | YES  |         | FIELD         |
-| e                      | String              | YES  |         | FIELD         |
-| f                      | String              | YES  |         | FIELD         |
-| int_short_repeated     | Int32               | YES  |         | FIELD         |
-| int_neg_short_repeated | Int32               | YES  |         | FIELD         |
-| int_delta              | Int32               | YES  |         | FIELD         |
-| int_neg_delta          | Int32               | YES  |         | FIELD         |
-| int_direct             | Int32               | YES  |         | FIELD         |
-| int_neg_direct         | Int32               | YES  |         | FIELD         |
-| bigint_direct          | Int64               | YES  |         | FIELD         |
-| bigint_neg_direct      | Int64               | YES  |         | FIELD         |
-| bigint_other           | Int64               | YES  |         | FIELD         |
-| utf8_increase          | String              | YES  |         | FIELD         |
-| utf8_decrease          | String              | YES  |         | FIELD         |
-| timestamp_simple       | TimestampNanosecond | YES  |         | FIELD         |
-| date_simple            | Date                | YES  |         | FIELD         |
-+------------------------+---------------------+------+---------+---------------+";
++------------------------+---------------------+-----+------+---------+---------------+
+| Field                  | Type                | Key | Null | Default | Semantic Type |
++------------------------+---------------------+-----+------+---------+---------------+
+| double_a               | Float64             |     | YES  |         | FIELD         |
+| a                      | Float32             |     | YES  |         | FIELD         |
+| b                      | Boolean             |     | YES  |         | FIELD         |
+| str_direct             | String              |     | YES  |         | FIELD         |
+| d                      | String              |     | YES  |         | FIELD         |
+| e                      | String              |     | YES  |         | FIELD         |
+| f                      | String              |     | YES  |         | FIELD         |
+| int_short_repeated     | Int32               |     | YES  |         | FIELD         |
+| int_neg_short_repeated | Int32               |     | YES  |         | FIELD         |
+| int_delta              | Int32               |     | YES  |         | FIELD         |
+| int_neg_delta          | Int32               |     | YES  |         | FIELD         |
+| int_direct             | Int32               |     | YES  |         | FIELD         |
+| int_neg_direct         | Int32               |     | YES  |         | FIELD         |
+| bigint_direct          | Int64               |     | YES  |         | FIELD         |
+| bigint_neg_direct      | Int64               |     | YES  |         | FIELD         |
+| bigint_other           | Int64               |     | YES  |         | FIELD         |
+| utf8_increase          | String              |     | YES  |         | FIELD         |
+| utf8_decrease          | String              |     | YES  |         | FIELD         |
+| timestamp_simple       | TimestampNanosecond |     | YES  |         | FIELD         |
+| date_simple            | Date                |     | YES  |         | FIELD         |
++------------------------+---------------------+-----+------+---------+---------------+";
     check_output_stream(output, expect).await;
 
     let output = execute_sql(&instance, &format!("select * from {table_name};")).await;
@@ -692,16 +692,16 @@ async fn test_execute_query_external_table_csv(instance: Arc<dyn MockInstance>) 
 
     let output = execute_sql(&instance, &format!("desc table {table_name};")).await;
     let expect = "\
-+------------+-----------------+------+---------+---------------+
-| Field      | Type            | Null | Default | Semantic Type |
-+------------+-----------------+------+---------+---------------+
-| c_int      | Int64           | YES  |         | FIELD         |
-| c_float    | Float64         | YES  |         | FIELD         |
-| c_string   | Float64         | YES  |         | FIELD         |
-| c_bool     | Boolean         | YES  |         | FIELD         |
-| c_date     | Date            | YES  |         | FIELD         |
-| c_datetime | TimestampSecond | YES  |         | FIELD         |
-+------------+-----------------+------+---------+---------------+";
++------------+-----------------+-----+------+---------+---------------+
+| Field      | Type            | Key | Null | Default | Semantic Type |
++------------+-----------------+-----+------+---------+---------------+
+| c_int      | Int64           |     | YES  |         | FIELD         |
+| c_float    | Float64         |     | YES  |         | FIELD         |
+| c_string   | Float64         |     | YES  |         | FIELD         |
+| c_bool     | Boolean         |     | YES  |         | FIELD         |
+| c_date     | Date            |     | YES  |         | FIELD         |
+| c_datetime | TimestampSecond |     | YES  |         | FIELD         |
++------------+-----------------+-----+------+---------+---------------+";
     check_output_stream(output, expect).await;
 
     let output = execute_sql(&instance, &format!("select * from {table_name};")).await;
@@ -738,17 +738,17 @@ async fn test_execute_query_external_table_json(instance: Arc<dyn MockInstance>)
 
     let output = execute_sql(&instance, &format!("desc table {table_name};")).await;
     let expect = "\
-+-------+---------+------+---------+---------------+
-| Field | Type    | Null | Default | Semantic Type |
-+-------+---------+------+---------+---------------+
-| a     | Int64   | YES  |         | FIELD         |
-| b     | Float64 | YES  |         | FIELD         |
-| c     | Boolean | YES  |         | FIELD         |
-| d     | String  | YES  |         | FIELD         |
-| e     | Int64   | YES  |         | FIELD         |
-| f     | String  | YES  |         | FIELD         |
-| g     | String  | YES  |         | FIELD         |
-+-------+---------+------+---------+---------------+";
++-------+---------+-----+------+---------+---------------+
+| Field | Type    | Key | Null | Default | Semantic Type |
++-------+---------+-----+------+---------+---------------+
+| a     | Int64   |     | YES  |         | FIELD         |
+| b     | Float64 |     | YES  |         | FIELD         |
+| c     | Boolean |     | YES  |         | FIELD         |
+| d     | String  |     | YES  |         | FIELD         |
+| e     | Int64   |     | YES  |         | FIELD         |
+| f     | String  |     | YES  |         | FIELD         |
+| g     | String  |     | YES  |         | FIELD         |
++-------+---------+-----+------+---------+---------------+";
     check_output_stream(output, expect).await;
 
     let output = execute_sql(&instance, &format!("select * from {table_name};")).await;
@@ -798,17 +798,17 @@ async fn test_execute_query_external_table_json_with_schame(instance: Arc<dyn Mo
 
     let output = execute_sql(&instance, &format!("desc table {table_name};")).await;
     let expect = "\
-+-------+-----------------+------+---------+---------------+
-| Field | Type            | Null | Default | Semantic Type |
-+-------+-----------------+------+---------+---------------+
-| a     | Int64           | YES  |         | FIELD         |
-| b     | Float64         | YES  |         | FIELD         |
-| c     | Boolean         | YES  |         | FIELD         |
-| d     | String          | YES  |         | FIELD         |
-| e     | TimestampSecond | YES  |         | FIELD         |
-| f     | Float64         | YES  |         | FIELD         |
-| g     | TimestampSecond | YES  |         | FIELD         |
-+-------+-----------------+------+---------+---------------+";
++-------+-----------------+-----+------+---------+---------------+
+| Field | Type            | Key | Null | Default | Semantic Type |
++-------+-----------------+-----+------+---------+---------------+
+| a     | Int64           |     | YES  |         | FIELD         |
+| b     | Float64         |     | YES  |         | FIELD         |
+| c     | Boolean         |     | YES  |         | FIELD         |
+| d     | String          |     | YES  |         | FIELD         |
+| e     | TimestampSecond |     | YES  |         | FIELD         |
+| f     | Float64         |     | YES  |         | FIELD         |
+| g     | TimestampSecond |     | YES  |         | FIELD         |
++-------+-----------------+-----+------+---------+---------------+";
     check_output_stream(output, expect).await;
 
     let output = execute_sql(&instance, &format!("select * from {table_name};")).await;
@@ -1517,12 +1517,12 @@ async fn test_information_schema_dot_columns(instance: Arc<dyn MockInstance>) {
 | greptime      | information_schema | columns    | column_name   | String               | FIELD         |
 | greptime      | information_schema | columns    | data_type     | String               | FIELD         |
 | greptime      | information_schema | columns    | semantic_type | String               | FIELD         |
-| greptime      | public             | numbers    | number        | UInt32               | PRIMARY KEY   |
-| greptime      | public             | scripts    | schema        | String               | PRIMARY KEY   |
-| greptime      | public             | scripts    | name          | String               | PRIMARY KEY   |
+| greptime      | public             | numbers    | number        | UInt32               | TAG           |
+| greptime      | public             | scripts    | schema        | String               | TAG           |
+| greptime      | public             | scripts    | name          | String               | TAG           |
 | greptime      | public             | scripts    | script        | String               | FIELD         |
 | greptime      | public             | scripts    | engine        | String               | FIELD         |
-| greptime      | public             | scripts    | timestamp     | TimestampMillisecond | TIME INDEX    |
+| greptime      | public             | scripts    | timestamp     | TimestampMillisecond | TIMESTAMP     |
 | greptime      | public             | scripts    | gmt_created   | TimestampMillisecond | FIELD         |
 | greptime      | public             | scripts    | gmt_modified  | TimestampMillisecond | FIELD         |
 | greptime      | information_schema | tables     | table_catalog | String               | FIELD         |
@@ -1540,7 +1540,7 @@ async fn test_information_schema_dot_columns(instance: Arc<dyn MockInstance>) {
 +-----------------+--------------------+---------------+---------------+-----------+---------------+
 | table_catalog   | table_schema       | table_name    | column_name   | data_type | semantic_type |
 +-----------------+--------------------+---------------+---------------+-----------+---------------+
-| another_catalog | another_schema     | another_table | i             | Int64     | TIME INDEX    |
+| another_catalog | another_schema     | another_table | i             | Int64     | TIMESTAMP     |
 | another_catalog | information_schema | columns       | table_catalog | String    | FIELD         |
 | another_catalog | information_schema | columns       | table_schema  | String    | FIELD         |
 | another_catalog | information_schema | columns       | table_name    | String    | FIELD         |

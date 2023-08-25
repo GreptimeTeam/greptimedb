@@ -29,12 +29,12 @@ select * from information_schema.columns order by table_schema, table_name;
 | greptime      | information_schema | tables     | table_type    | String               | FIELD         |
 | greptime      | information_schema | tables     | table_id      | UInt32               | FIELD         |
 | greptime      | information_schema | tables     | engine        | String               | FIELD         |
-| greptime      | public             | numbers    | number        | UInt32               | PRIMARY KEY   |
-| greptime      | public             | scripts    | schema        | String               | PRIMARY KEY   |
-| greptime      | public             | scripts    | name          | String               | PRIMARY KEY   |
+| greptime      | public             | numbers    | number        | UInt32               | TAG           |
+| greptime      | public             | scripts    | schema        | String               | TAG           |
+| greptime      | public             | scripts    | name          | String               | TAG           |
 | greptime      | public             | scripts    | script        | String               | FIELD         |
 | greptime      | public             | scripts    | engine        | String               | FIELD         |
-| greptime      | public             | scripts    | timestamp     | TimestampMillisecond | TIME INDEX    |
+| greptime      | public             | scripts    | timestamp     | TimestampMillisecond | TIMESTAMP     |
 | greptime      | public             | scripts    | gmt_created   | TimestampMillisecond | FIELD         |
 | greptime      | public             | scripts    | gmt_modified  | TimestampMillisecond | FIELD         |
 +---------------+--------------------+------------+---------------+----------------------+---------------+
@@ -89,7 +89,7 @@ order by table_schema, table_name;
 +---------------+--------------+------------+-------------+-----------+---------------+
 | table_catalog | table_schema | table_name | column_name | data_type | semantic_type |
 +---------------+--------------+------------+-------------+-----------+---------------+
-| greptime      | my_db        | foo        | ts          | Int64     | TIME INDEX    |
+| greptime      | my_db        | foo        | ts          | Int64     | TIMESTAMP     |
 +---------------+--------------+------------+-------------+-----------+---------------+
 
 use public;
