@@ -12,228 +12,41 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::any::Any;
 use std::sync::Arc;
 
-use async_trait::async_trait;
-use client::Database;
 use common_error::ext::BoxedError;
-use common_meta::table_name::TableName;
-use common_query::error::Result as QueryResult;
-use common_query::logical_plan::Expr;
-use common_query::physical_plan::{PhysicalPlan, PhysicalPlanRef};
-use common_query::Output;
-use common_recordbatch::adapter::AsyncRecordBatchStreamAdapter;
-use common_recordbatch::error::{
-    ExternalSnafu as RecordBatchExternalSnafu, Result as RecordBatchResult,
-};
-use common_recordbatch::{RecordBatchStreamAdaptor, SendableRecordBatchStream};
-use datafusion::execution::context::TaskContext;
-use datafusion::physical_plan::Partitioning;
-use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
-use futures_util::StreamExt;
-use snafu::prelude::*;
+use common_recordbatch::SendableRecordBatchStream;
+use store_api::data_source::DataSource;
 use store_api::storage::ScanRequest;
-use table::error::TableOperationSnafu;
-use table::metadata::{FilterPushDownType, TableInfoRef, TableType};
-use table::Table;
+use table::metadata::{FilterPushDownType, TableInfoRef};
+use table::thin_table::{ThinTable, ThinTableAdapter};
+use table::TableRef;
 
-use crate::catalog::FrontendCatalogManager;
-use crate::table::scan::{DatanodeInstance, TableScanPlan};
+use crate::error::NotSupportedSnafu;
 
 pub mod delete;
 pub mod insert;
-pub(crate) mod scan;
 
 #[derive(Clone)]
-pub struct DistTable {
-    table_name: TableName,
-    table_info: TableInfoRef,
-    catalog_manager: Arc<FrontendCatalogManager>,
-}
-
-#[async_trait]
-impl Table for DistTable {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn schema(&self) -> SchemaRef {
-        self.table_info.meta.schema.clone()
-    }
-
-    fn table_info(&self) -> TableInfoRef {
-        self.table_info.clone()
-    }
-
-    fn table_type(&self) -> TableType {
-        self.table_info.table_type
-    }
-
-    // TODO(ruihang): DistTable should not call this method directly
-    async fn scan_to_stream(
-        &self,
-        request: ScanRequest,
-    ) -> table::Result<SendableRecordBatchStream> {
-        let partition_manager = self.catalog_manager.partition_manager();
-        let datanode_clients = self.catalog_manager.datanode_clients();
-
-        let table_id = self.table_info.table_id();
-        let partition_rule = partition_manager
-            .find_table_partition_rule(table_id)
-            .await
-            .map_err(BoxedError::new)
-            .context(TableOperationSnafu)?;
-
-        let regions = partition_manager
-            .find_regions_by_filters(partition_rule, &request.filters)
-            .map_err(BoxedError::new)
-            .context(TableOperationSnafu)?;
-        let datanodes = partition_manager
-            .find_region_datanodes(table_id, regions)
-            .await
-            .map_err(BoxedError::new)
-            .context(TableOperationSnafu)?;
-
-        let table_name = &self.table_name;
-        let mut partition_execs = Vec::with_capacity(datanodes.len());
-        for (datanode, _regions) in datanodes.iter() {
-            let client = datanode_clients.get_client(datanode).await;
-            let db = Database::new(&table_name.catalog_name, &table_name.schema_name, client);
-            let datanode_instance = DatanodeInstance::new(Arc::new(self.clone()) as _, db);
-
-            partition_execs.push(Arc::new(PartitionExec {
-                table_name: table_name.clone(),
-                datanode_instance,
-                projection: request.projection.clone(),
-                filters: request.filters.clone(),
-                limit: request.limit,
-            }));
-        }
-
-        let stream = Box::pin(async_stream::stream!({
-            for partition_exec in partition_execs {
-                let mut stream = partition_exec.scan_to_stream().await?;
-                while let Some(record_batch) = stream.next().await {
-                    yield record_batch;
-                }
-            }
-        }));
-
-        let schema = project_schema(self.schema(), request.projection.as_ref());
-        let stream = RecordBatchStreamAdaptor {
-            schema,
-            stream,
-            output_ordering: None,
-        };
-
-        Ok(Box::pin(stream))
-    }
-
-    fn supports_filters_pushdown(
-        &self,
-        filters: &[&Expr],
-    ) -> table::Result<Vec<FilterPushDownType>> {
-        Ok(vec![FilterPushDownType::Inexact; filters.len()])
-    }
-}
+pub struct DistTable;
 
 impl DistTable {
-    pub fn new(
-        table_name: TableName,
-        table_info: TableInfoRef,
-        catalog_manager: Arc<FrontendCatalogManager>,
-    ) -> Self {
-        Self {
-            table_name,
-            table_info,
-            catalog_manager,
+    pub fn table(table_info: TableInfoRef) -> TableRef {
+        let thin_table = ThinTable::new(table_info, FilterPushDownType::Inexact);
+        let data_source = Arc::new(DummyDataSource);
+        Arc::new(ThinTableAdapter::new(thin_table, data_source))
+    }
+}
+
+pub struct DummyDataSource;
+
+impl DataSource for DummyDataSource {
+    fn get_stream(&self, _request: ScanRequest) -> Result<SendableRecordBatchStream, BoxedError> {
+        NotSupportedSnafu {
+            feat: "get stream from a distributed table",
         }
-    }
-}
-
-fn project_schema(table_schema: SchemaRef, projection: Option<&Vec<usize>>) -> SchemaRef {
-    if let Some(projection) = projection {
-        let columns = table_schema.column_schemas();
-        let projected = projection
-            .iter()
-            .map(|x| columns[*x].clone())
-            .collect::<Vec<ColumnSchema>>();
-        Arc::new(Schema::new(projected))
-    } else {
-        table_schema
-    }
-}
-
-#[derive(Debug)]
-struct DistTableScan {
-    schema: SchemaRef,
-    partition_execs: Vec<Arc<PartitionExec>>,
-}
-
-impl PhysicalPlan for DistTableScan {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn schema(&self) -> SchemaRef {
-        self.schema.clone()
-    }
-
-    fn output_partitioning(&self) -> Partitioning {
-        Partitioning::UnknownPartitioning(self.partition_execs.len())
-    }
-
-    fn children(&self) -> Vec<PhysicalPlanRef> {
-        vec![]
-    }
-
-    fn with_new_children(&self, _children: Vec<PhysicalPlanRef>) -> QueryResult<PhysicalPlanRef> {
-        unimplemented!()
-    }
-
-    fn execute(
-        &self,
-        partition: usize,
-        _context: Arc<TaskContext>,
-    ) -> QueryResult<SendableRecordBatchStream> {
-        let exec = self.partition_execs[partition].clone();
-        let stream = Box::pin(async move { exec.scan_to_stream().await });
-        let stream = AsyncRecordBatchStreamAdapter::new(self.schema(), stream);
-        Ok(Box::pin(stream))
-    }
-}
-
-#[derive(Debug)]
-struct PartitionExec {
-    table_name: TableName,
-    datanode_instance: DatanodeInstance,
-    projection: Option<Vec<usize>>,
-    filters: Vec<Expr>,
-    limit: Option<usize>,
-}
-
-impl PartitionExec {
-    async fn scan_to_stream(&self) -> RecordBatchResult<SendableRecordBatchStream> {
-        let plan: TableScanPlan = TableScanPlan {
-            table_name: self.table_name.clone(),
-            projection: self.projection.clone(),
-            filters: self.filters.clone(),
-            limit: self.limit,
-        };
-
-        let output = self
-            .datanode_instance
-            .grpc_table_scan(plan)
-            .await
-            .map_err(BoxedError::new)
-            .context(RecordBatchExternalSnafu)?;
-
-        let Output::Stream(stream) = output else {
-            unreachable!()
-        };
-
-        Ok(stream)
+        .fail()
+        .map_err(BoxedError::new)
     }
 }
 
@@ -245,6 +58,8 @@ pub(crate) mod test {
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_meta::peer::Peer;
     use common_meta::rpc::router::{Region, RegionRoute, Table, TableRoute};
+    use common_meta::table_name::TableName;
+    use common_query::prelude::Expr;
     use datafusion_expr::expr_fn::{and, binary_expr, col, or};
     use datafusion_expr::{lit, Operator};
     use meta_client::client::MetaClient;

@@ -129,11 +129,7 @@ impl DistInstance {
 
         create_table.table_id = Some(api::v1::TableId { id: table_id });
 
-        let table = Arc::new(DistTable::new(
-            table_name.clone(),
-            table_info,
-            self.catalog_manager.clone(),
-        ));
+        let table = DistTable::table(table_info);
 
         let request = RegisterTableRequest {
             catalog: table_name.catalog_name.clone(),
