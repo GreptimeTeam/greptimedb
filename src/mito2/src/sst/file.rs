@@ -147,7 +147,7 @@ struct FileHandleInner {
 impl Drop for FileHandleInner {
     fn drop(&mut self) {
         if self.deleted.load(Ordering::Relaxed) {
-            let _ = self.file_purger.send_request(PurgeRequest {
+            self.file_purger.send_request(PurgeRequest {
                 region_id: self.meta.region_id,
                 file_id: self.meta.file_id,
             });

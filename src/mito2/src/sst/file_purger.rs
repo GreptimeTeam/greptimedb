@@ -18,7 +18,6 @@ use common_telemetry::{debug, error};
 use store_api::storage::RegionId;
 
 use crate::access::AccessLayer;
-use crate::error::Result;
 use crate::schedule::scheduler::{LocalScheduler, Scheduler};
 use crate::sst::file::FileId;
 
@@ -34,7 +33,7 @@ pub struct PurgeRequest {
 /// A worker to delete files in background.
 pub trait FilePurger: Send + Sync {
     /// Send a purge request to the background worker.
-    fn send_request(&self, request: PurgeRequest) -> Result<()>;
+    fn send_request(&self, request: PurgeRequest);
 }
 
 pub type FilePurgerRef = Arc<dyn FilePurger>;
@@ -55,25 +54,29 @@ impl LocalFilePurger {
 }
 
 impl FilePurger for LocalFilePurger {
-    fn send_request(&self, request: PurgeRequest) -> Result<()> {
+    fn send_request(&self, request: PurgeRequest) {
         let file_id = request.file_id;
         let region_id = request.region_id;
         let sst_layer = self.sst_layer.clone();
 
-        self.scheduler.schedule(Box::pin(async move {
-            sst_layer.delete_sst(file_id).await.map_err(|e| {
-                error!(e; "Failed to delete SST file, file: {}, region: {}", 
-                    file_id.as_parquet(), region_id);
+        let _ = self
+            .scheduler
+            .schedule(Box::pin(async move {
+                if let Err(e) = sst_layer.delete_sst(file_id).await {
+                    error!(e; "Failed to delete SST file, file: {}, region: {}", 
+                        file_id.as_parquet(), region_id);
+                } else {
+                    debug!(
+                        "Successfully deleted SST file: {}, region: {}",
+                        file_id.as_parquet(),
+                        region_id
+                    );
+                }
+            }))
+            .map_err(|e| {
+                error!(e; "Failed to schedule the file purge request");
                 e
-            })?;
-
-            debug!(
-                "Successfully deleted SST file: {}, region: {}",
-                file_id.as_parquet(),
-                region_id
-            );
-            Ok(())
-        }))
+            });
     }
 }
 
@@ -107,21 +110,19 @@ mod tests {
 
         let file_purger = Arc::new(LocalFilePurger::new(scheduler.clone(), layer));
 
-        let handle = FileHandle::new(
-            FileMeta {
-                region_id: 0.into(),
-                file_id: sst_file_id,
-                time_range: FileTimeRange::default(),
-                level: 0,
-                file_size: 4096,
-            },
-            file_purger,
-        );
-
         {
+            let handle = FileHandle::new(
+                FileMeta {
+                    region_id: 0.into(),
+                    file_id: sst_file_id,
+                    time_range: FileTimeRange::default(),
+                    level: 0,
+                    file_size: 4096,
+                },
+                file_purger,
+            );
             // mark file as deleted and drop the handle, we expect the file is deleted.
             handle.mark_deleted();
-            drop(handle);
         }
 
         scheduler.stop(true).await.unwrap();

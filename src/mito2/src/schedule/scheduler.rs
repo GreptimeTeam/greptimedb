@@ -27,7 +27,7 @@ use crate::error::{
     InvalidFlumeSenderSnafu, InvalidSchedulerStateSnafu, Result, StopSchedulerSnafu,
 };
 
-pub type Job = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
+pub type Job = Pin<Box<dyn Future<Output = ()> + Send>>;
 
 ///The state of scheduler
 const STATE_RUNNING: u8 = 0;
@@ -78,7 +78,7 @@ impl LocalScheduler {
                         }
                         req_opt = receiver.recv_async() =>{
                             if let Ok(req) = req_opt {
-                                let _ = req.await;
+                                req.await;
                             }
                         }
                     }
@@ -178,7 +178,6 @@ mod tests {
             local
                 .schedule(Box::pin(async move {
                     sum_clone.fetch_add(1, Ordering::Relaxed);
-                    Ok(())
                 }))
                 .unwrap();
         }
@@ -197,7 +196,6 @@ mod tests {
             let ok = local
                 .schedule(Box::pin(async move {
                     sum_clone.fetch_add(1, Ordering::Relaxed);
-                    Ok(())
                 }))
                 .is_ok();
             if ok {
@@ -220,7 +218,6 @@ mod tests {
             local
                 .schedule(Box::pin(async move {
                     barrier_clone.wait().await;
-                    Ok(())
                 }))
                 .unwrap();
         }
@@ -252,7 +249,6 @@ mod tests {
                 let ok = local_task
                     .schedule(Box::pin(async move {
                         sum_c.fetch_add(1, Ordering::Relaxed);
-                        Ok(())
                     }))
                     .is_ok();
                 if ok {
