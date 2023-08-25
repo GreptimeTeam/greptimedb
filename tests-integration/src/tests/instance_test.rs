@@ -109,18 +109,17 @@ PARTITION BY RANGE COLUMNS (ts) (
     let output = execute_sql(&frontend, "show create table demo").await;
 
     let expected = if instance.is_distributed_mode() {
-        "\
-+-------+----------------------------------------------------------+
+        r#"+-------+----------------------------------------------------------+
 | Table | Create Table                                             |
 +-------+----------------------------------------------------------+
-| demo  | CREATE TABLE IF NOT EXISTS demo (                        |
-|       |   host STRING NULL,                                      |
-|       |   cpu DOUBLE NULL,                                       |
-|       |   memory DOUBLE NULL,                                    |
-|       |   ts BIGINT NOT NULL,                                    |
-|       |   TIME INDEX (ts)                                        |
+| demo  | CREATE TABLE IF NOT EXISTS "demo" (                      |
+|       |   "host" STRING NULL,                                    |
+|       |   "cpu" DOUBLE NULL,                                     |
+|       |   "memory" DOUBLE NULL,                                  |
+|       |   "ts" BIGINT NOT NULL,                                  |
+|       |   TIME INDEX ("ts")                                      |
 |       | )                                                        |
-|       | PARTITION BY RANGE COLUMNS (ts) (                        |
+|       | PARTITION BY RANGE COLUMNS ("ts") (                      |
 |       |                       PARTITION r0 VALUES LESS THAN (1), |
 |       |   PARTITION r1 VALUES LESS THAN (10),                    |
 |       |   PARTITION r2 VALUES LESS THAN (100),                   |
@@ -130,24 +129,23 @@ PARTITION BY RANGE COLUMNS (ts) (
 |       | WITH(                                                    |
 |       |   regions = 4                                            |
 |       | )                                                        |
-+-------+----------------------------------------------------------+"
++-------+----------------------------------------------------------+"#
     } else {
-        "\
-+-------+-----------------------------------+
-| Table | Create Table                      |
-+-------+-----------------------------------+
-| demo  | CREATE TABLE IF NOT EXISTS demo ( |
-|       |   host STRING NULL,               |
-|       |   cpu DOUBLE NULL,                |
-|       |   memory DOUBLE NULL,             |
-|       |   ts BIGINT NOT NULL,             |
-|       |   TIME INDEX (ts)                 |
-|       | )                                 |
-|       | ENGINE=mito                       |
-|       | WITH(                             |
-|       |   regions = 1                     |
-|       | )                                 |
-+-------+-----------------------------------+"
+        r#"+-------+-------------------------------------+
+| Table | Create Table                        |
++-------+-------------------------------------+
+| demo  | CREATE TABLE IF NOT EXISTS "demo" ( |
+|       |   "host" STRING NULL,               |
+|       |   "cpu" DOUBLE NULL,                |
+|       |   "memory" DOUBLE NULL,             |
+|       |   "ts" BIGINT NOT NULL,             |
+|       |   TIME INDEX ("ts")                 |
+|       | )                                   |
+|       | ENGINE=mito                         |
+|       | WITH(                               |
+|       |   regions = 1                       |
+|       | )                                   |
++-------+-------------------------------------+"#
     };
 
     check_output_stream(output, expected).await;

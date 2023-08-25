@@ -130,6 +130,15 @@ pub struct Partitions {
     pub entries: Vec<PartitionEntry>,
 }
 
+impl Partitions {
+    /// set quotes to all [Ident]s from column list
+    pub fn set_quote(&mut self, quote_style: char) {
+        self.column_list
+            .iter_mut()
+            .for_each(|c| c.quote_style = Some(quote_style));
+    }
+}
+
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct PartitionEntry {
     pub name: Ident,

@@ -141,7 +141,8 @@ impl Instance {
                 let table_ref = TableReference::full(&catalog, &schema, &table);
                 let table = self.sql_handler.get_table(&table_ref).await?;
 
-                query::sql::show_create_table(table, None).context(ExecuteStatementSnafu)
+                query::sql::show_create_table(table, None, query_ctx.clone())
+                    .context(ExecuteStatementSnafu)
             }
             Statement::TruncateTable(truncate_table) => {
                 let (catalog_name, schema_name, table_name) =
