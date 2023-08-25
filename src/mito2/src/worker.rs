@@ -37,7 +37,8 @@ use tokio::sync::{mpsc, Mutex};
 
 use crate::config::MitoConfig;
 use crate::error::{JoinSnafu, Result, WorkerStoppedSnafu};
-use crate::memtable::{DefaultMemtableBuilder, MemtableBuilderRef};
+use crate::memtable::time_series::TimeSeriesMemtableBuilder;
+use crate::memtable::MemtableBuilderRef;
 use crate::region::{MitoRegionRef, RegionMap, RegionMapRef};
 use crate::request::{RegionTask, RequestBody, SenderWriteRequest, WorkerRequest};
 use crate::wal::Wal;
@@ -189,7 +190,7 @@ impl RegionWorker {
             wal: Wal::new(log_store),
             object_store,
             running: running.clone(),
-            memtable_builder: Arc::new(DefaultMemtableBuilder::default()),
+            memtable_builder: Arc::new(TimeSeriesMemtableBuilder::default()),
         };
         let handle = common_runtime::spawn_write(async move {
             worker_thread.run().await;

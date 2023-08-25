@@ -15,6 +15,7 @@
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, Bound, HashSet};
 use std::fmt::{Debug, Formatter};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 
 use api::v1::OpType;
@@ -30,13 +31,31 @@ use snafu::{ensure, ResultExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, ScanRequest};
 
-use crate::error::{ComputeArrowSnafu, ConvertVectorSnafu, PrimaryKeyLengthMismatchSnafu, Result};
-use crate::memtable::{BoxedBatchIterator, KeyValues, Memtable, MemtableId};
+use crate::error::{
+    CompactValuesSnafu, ComputeArrowSnafu, ConvertVectorSnafu, PrimaryKeyLengthMismatchSnafu,
+    PrimaryKeyLengthMismatchSnafu, Result, Result,
+};
+use crate::memtable::{
+    BoxedBatchIterator, BoxedBatchIterator, KeyValues, KeyValues, Memtable, Memtable,
+    MemtableBuilder, MemtableId, MemtableId, MemtableRef,
+};
 use crate::read::{Batch, BatchBuilder, BatchColumn};
 use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
 
 /// Initial vector builder capacity.
 const INITIAL_BUILDER_CAPACITY: usize = 32;
+
+#[derive(Debug, Default)]
+pub struct TimeSeriesMemtableBuilder {
+    id: AtomicU32,
+}
+
+impl MemtableBuilder for TimeSeriesMemtableBuilder {
+    fn build(&self, metadata: &RegionMetadataRef) -> MemtableRef {
+        let id = self.id.fetch_add(1, Ordering::Relaxed);
+        Arc::new(TimeSeriesMemtable::new(metadata.clone(), id))
+    }
+}
 
 /// Memtable implementation that groups rows by their primary key.
 pub struct TimeSeriesMemtable {
@@ -47,7 +66,7 @@ pub struct TimeSeriesMemtable {
 }
 
 impl TimeSeriesMemtable {
-    pub fn new(region_metadata: RegionMetadataRef, id: MemtableId) -> Result<Self> {
+    pub fn new(region_metadata: RegionMetadataRef, id: MemtableId) -> Self {
         let row_codec = McmpRowCodec::new(
             region_metadata
                 .primary_key_columns()
@@ -55,12 +74,12 @@ impl TimeSeriesMemtable {
                 .collect(),
         );
         let series_set = SeriesSet::new(region_metadata.clone());
-        Ok(Self {
+        Self {
             id,
             region_metadata,
             series_set,
             row_codec,
-        })
+        }
     }
 }
 
