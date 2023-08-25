@@ -321,10 +321,10 @@ mod tests {
                 ConcreteDataType::duration_millisecond_datatype(),
                 ConcreteDataType::int64_datatype(),
             ],
-            &[vec![
+            vec![
                 Value::Duration(Duration::new_millisecond(44)),
                 Value::Int64(45),
-            ]],
+            ],
         )
     }
 

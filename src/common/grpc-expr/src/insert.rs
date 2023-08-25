@@ -368,6 +368,38 @@ mod tests {
     }
 
     #[test]
+    fn test_to_table_insert_request() {
+        let (columns, row_count) = mock_insert_batch();
+        let request = GrpcInsertRequest {
+            table_name: "demo".to_string(),
+            columns,
+            row_count,
+            region_number: 0,
+        };
+        let insert_req = to_table_insert_request("greptime", "public", request).unwrap();
+
+        assert_eq!("greptime", insert_req.catalog_name);
+        assert_eq!("public", insert_req.schema_name);
+        assert_eq!("demo", insert_req.table_name);
+
+        let host = insert_req.columns_values.get("host").unwrap();
+        assert_eq!(Value::String("host1".into()), host.get(0));
+        assert_eq!(Value::String("host2".into()), host.get(1));
+
+        let cpu = insert_req.columns_values.get("cpu").unwrap();
+        assert_eq!(Value::Float64(0.31.into()), cpu.get(0));
+        assert_eq!(Value::Null, cpu.get(1));
+
+        let memory = insert_req.columns_values.get("memory").unwrap();
+        assert_eq!(Value::Null, memory.get(0));
+        assert_eq!(Value::Float64(0.1.into()), memory.get(1));
+
+        let ts = insert_req.columns_values.get("ts").unwrap();
+        assert_eq!(Value::Timestamp(Timestamp::new_millisecond(100)), ts.get(0));
+        assert_eq!(Value::Timestamp(Timestamp::new_millisecond(101)), ts.get(1));
+    }
+
+    #[test]
     fn test_is_null() {
         let null_mask = BitVec::from_slice(&[0b0000_0001, 0b0000_1000]);
 
