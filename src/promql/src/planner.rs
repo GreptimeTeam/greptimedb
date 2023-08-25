@@ -98,6 +98,16 @@ impl PromPlannerContext {
             ..Default::default()
         }
     }
+
+    /// Reset all planner states
+    fn reset(&mut self) {
+        self.table_name = None;
+        self.time_index_column = None;
+        self.field_columns = vec![];
+        self.tag_columns = vec![];
+        self.field_column_matcher = None;
+        self.range = None;
+    }
 }
 
 pub struct PromPlanner {
@@ -473,6 +483,9 @@ impl PromPlanner {
     /// Extract metric name from `__name__` matcher and set it into [PromPlannerContext].
     /// Returns a new [Matchers] that doesn't contains metric name matcher.
     ///
+    /// Each call to this function means new selector is started. Thus the context will be reset
+    /// at first.
+    ///
     /// Name rule:
     /// - if `name` is some, then the matchers MUST NOT contains `__name__` matcher.
     /// - if `name` is none, then the matchers MAY contains NONE OR MULTIPLE `__name__` matchers.
@@ -481,6 +494,7 @@ impl PromPlanner {
         label_matchers: &Matchers,
         name: &Option<String>,
     ) -> Result<Matchers> {
+        self.ctx.reset();
         let metric_name;
         if let Some(name) = name.clone() {
             metric_name = Some(name);
@@ -600,7 +614,14 @@ impl PromPlanner {
                 let _ = result_set.remove(&col);
             }
 
-            self.ctx.field_columns = result_set.iter().cloned().collect();
+            // mask the field columns in context using computed result set
+            self.ctx.field_columns = self
+                .ctx
+                .field_columns
+                .drain(..)
+                .filter(|col| result_set.contains(col))
+                .collect();
+
             let exprs = result_set
                 .into_iter()
                 .map(|col| DfExpr::Column(col.into()))
