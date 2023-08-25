@@ -14,9 +14,7 @@
 
 //! prom supply the prometheus HTTP API Server compliance
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::Arc;
 
-use async_trait::async_trait;
 use axum::extract::{Path, Query, State};
 use axum::{Extension, Form, Json};
 use catalog::CatalogManagerRef;
@@ -47,17 +45,7 @@ use crate::error::{
     CollectRecordbatchSnafu, Error, InternalSnafu, InvalidQuerySnafu, Result, UnexpectedResultSnafu,
 };
 use crate::prom_store::{FIELD_COLUMN_NAME, METRIC_NAME_LABEL, TIMESTAMP_COLUMN_NAME};
-
-pub const PROMETHEUS_API_VERSION: &str = "v1";
-
-pub type PrometheusHandlerRef = Arc<dyn PrometheusHandler + Send + Sync>;
-
-#[async_trait]
-pub trait PrometheusHandler {
-    async fn do_query(&self, query: &PromQuery, query_ctx: QueryContextRef) -> Result<Output>;
-
-    fn catalog_manager(&self) -> CatalogManagerRef;
-}
+use crate::prometheus_handler::PrometheusHandlerRef;
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
 pub struct PromSeries {

@@ -22,6 +22,7 @@ pub mod opentsdb;
 pub mod otlp;
 mod pprof;
 pub mod prom_store;
+pub mod prometheus;
 pub mod script;
 
 #[cfg(feature = "dashboard")]
@@ -65,15 +66,15 @@ use self::influxdb::{influxdb_health, influxdb_ping, influxdb_write_v1, influxdb
 use crate::configurator::ConfiguratorRef;
 use crate::error::{AlreadyStartedSnafu, Result, StartHttpSnafu};
 use crate::http::admin::{compact, flush};
+use crate::http::prometheus::{
+    instant_query, label_values_query, labels_query, range_query, series_query,
+};
 use crate::metrics::{
     METRIC_CODE_LABEL, METRIC_HTTP_REQUESTS_ELAPSED, METRIC_HTTP_REQUESTS_TOTAL,
     METRIC_METHOD_LABEL, METRIC_PATH_LABEL,
 };
 use crate::metrics_handler::MetricsHandler;
-use crate::prometheus::{
-    instant_query, label_values_query, labels_query, range_query, series_query,
-    PrometheusHandlerRef,
-};
+use crate::prometheus_handler::PrometheusHandlerRef;
 use crate::query_handler::grpc::ServerGrpcQueryHandlerRef;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 use crate::query_handler::{

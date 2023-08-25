@@ -24,7 +24,7 @@ use client::{Client, Database, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::consts::{MIN_USER_TABLE_ID, MITO_ENGINE};
 use common_query::Output;
 use common_recordbatch::RecordBatches;
-use servers::prometheus::{PromData, PromSeries, PrometheusJsonResponse, PrometheusResponse};
+use servers::http::prometheus::{PromData, PromSeries, PrometheusJsonResponse, PrometheusResponse};
 use servers::server::Server;
 use tests_integration::test_util::{
     setup_grpc_server, setup_grpc_server_with_user_provider, StorageType,

@@ -35,7 +35,7 @@ pub mod opentsdb;
 pub mod otlp;
 pub mod postgres;
 pub mod prom_store;
-pub mod prometheus;
+pub mod prometheus_handler;
 pub mod query_handler;
 pub mod server;
 mod shutdown;
