@@ -366,12 +366,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to compact values, source: {}, location: {}", source, location))]
-    CompactValues {
-        source: datatypes::error::Error,
-        location: Location,
-    },
-
     #[snafu(display("Invalid flume sender, location: {}", location,))]
     InvalidFlumeSender { location: Location },
 
@@ -440,7 +434,6 @@ impl ErrorExt for Error {
             ComputeArrow { .. } => StatusCode::Internal,
             ComputeVector { .. } => StatusCode::Internal,
             PrimaryKeyLengthMismatch { .. } => StatusCode::InvalidArguments,
-            CompactValues { source, .. } => source.status_code(),
             InvalidFlumeSender { .. } => StatusCode::InvalidArguments,
             InvalidSchedulerState { .. } => StatusCode::InvalidArguments,
             StopScheduler { .. } => StatusCode::Internal,
