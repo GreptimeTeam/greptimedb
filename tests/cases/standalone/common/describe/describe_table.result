@@ -10,47 +10,47 @@ Affected Rows: 0
 
 describe table host_load1;
 
-+-----------+----------------------+------+---------+---------------+
-| Field     | Type                 | Null | Default | Semantic Type |
-+-----------+----------------------+------+---------+---------------+
-| ts        | TimestampMillisecond | NO   |         | TIME INDEX    |
-| collector | String               | YES  |         | PRIMARY KEY   |
-| host      | String               | YES  |         | PRIMARY KEY   |
-| val       | Float64              | YES  |         | FIELD         |
-+-----------+----------------------+------+---------+---------------+
++-----------+----------------------+-----+------+---------+---------------+
+| Field     | Type                 | Key | Null | Default | Semantic Type |
++-----------+----------------------+-----+------+---------+---------------+
+| ts        | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
+| collector | String               | PRI | YES  |         | TAG           |
+| host      | String               | PRI | YES  |         | TAG           |
+| val       | Float64              |     | YES  |         | FIELD         |
++-----------+----------------------+-----+------+---------+---------------+
 
 describe host_load1;
 
-+-----------+----------------------+------+---------+---------------+
-| Field     | Type                 | Null | Default | Semantic Type |
-+-----------+----------------------+------+---------+---------------+
-| ts        | TimestampMillisecond | NO   |         | TIME INDEX    |
-| collector | String               | YES  |         | PRIMARY KEY   |
-| host      | String               | YES  |         | PRIMARY KEY   |
-| val       | Float64              | YES  |         | FIELD         |
-+-----------+----------------------+------+---------+---------------+
++-----------+----------------------+-----+------+---------+---------------+
+| Field     | Type                 | Key | Null | Default | Semantic Type |
++-----------+----------------------+-----+------+---------+---------------+
+| ts        | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
+| collector | String               | PRI | YES  |         | TAG           |
+| host      | String               | PRI | YES  |         | TAG           |
+| val       | Float64              |     | YES  |         | FIELD         |
++-----------+----------------------+-----+------+---------+---------------+
 
 desc table host_load1;
 
-+-----------+----------------------+------+---------+---------------+
-| Field     | Type                 | Null | Default | Semantic Type |
-+-----------+----------------------+------+---------+---------------+
-| ts        | TimestampMillisecond | NO   |         | TIME INDEX    |
-| collector | String               | YES  |         | PRIMARY KEY   |
-| host      | String               | YES  |         | PRIMARY KEY   |
-| val       | Float64              | YES  |         | FIELD         |
-+-----------+----------------------+------+---------+---------------+
++-----------+----------------------+-----+------+---------+---------------+
+| Field     | Type                 | Key | Null | Default | Semantic Type |
++-----------+----------------------+-----+------+---------+---------------+
+| ts        | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
+| collector | String               | PRI | YES  |         | TAG           |
+| host      | String               | PRI | YES  |         | TAG           |
+| val       | Float64              |     | YES  |         | FIELD         |
++-----------+----------------------+-----+------+---------+---------------+
 
 desc host_load1;
 
-+-----------+----------------------+------+---------+---------------+
-| Field     | Type                 | Null | Default | Semantic Type |
-+-----------+----------------------+------+---------+---------------+
-| ts        | TimestampMillisecond | NO   |         | TIME INDEX    |
-| collector | String               | YES  |         | PRIMARY KEY   |
-| host      | String               | YES  |         | PRIMARY KEY   |
-| val       | Float64              | YES  |         | FIELD         |
-+-----------+----------------------+------+---------+---------------+
++-----------+----------------------+-----+------+---------+---------------+
+| Field     | Type                 | Key | Null | Default | Semantic Type |
++-----------+----------------------+-----+------+---------+---------------+
+| ts        | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
+| collector | String               | PRI | YES  |         | TAG           |
+| host      | String               | PRI | YES  |         | TAG           |
+| val       | Float64              |     | YES  |         | FIELD         |
++-----------+----------------------+-----+------+---------+---------------+
 
 drop table host_load1;
 

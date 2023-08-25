@@ -28,13 +28,13 @@ SELECT ts, host, min(val) RANGE '10s', max(val) RANGE '10s' FROM host ALIGN '5s'
 
 SELECT ts, host, min(val / 2.0)/2 RANGE '10s', max(val / 2.0)/2 RANGE '10s' FROM host ALIGN '5s' ORDER BY host, ts;
 
-SELECT ts, host, covar(val, val) RANGE '10s' FROM host ALIGN '5s' ORDER BY host, ts;
+SELECT ts, covar(val, val) RANGE '10s', host FROM host ALIGN '5s' ORDER BY host, ts;
 
-SELECT ts, host, covar(sin(val), cos(val)) RANGE '10s' FROM host ALIGN '5s' ORDER BY host, ts;
+SELECT covar(ceil(val), floor(val)) RANGE '10s', ts, host FROM host ALIGN '5s' ORDER BY host, ts;
 
 SELECT ts, host, covar((sin(val) + cos(val))/2.0 + 1.0, 2.0) RANGE '10s' FROM host ALIGN '5s' ORDER BY host, ts;
 
-SELECT ts, host, min(val) RANGE '10s', max(val) RANGE '10s' FROM host ALIGN '1000s' ORDER BY host, ts;
+SELECT ts, min(val) RANGE '10s', host, max(val) RANGE '10s' FROM host ALIGN '1000s' ORDER BY host, ts;
 
 SELECT ts, host, min(val) RANGE '10s', max(val) RANGE '5s' FROM host ALIGN '5s' ORDER BY host, ts;
 

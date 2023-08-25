@@ -19,6 +19,7 @@ use std::mem;
 use std::sync::Arc;
 
 use api::v1::{Mutation, WalEntry};
+use common_query::Output;
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
 use store_api::metadata::RegionMetadata;
@@ -123,7 +124,7 @@ fn maybe_fill_missing_columns(request: &mut WriteRequest, metadata: &RegionMetad
 }
 
 /// Send result to the request.
-fn send_result(sender: Option<Sender<Result<()>>>, res: Result<()>) {
+fn send_result(sender: Option<Sender<Result<Output>>>, res: Result<Output>) {
     if let Some(sender) = sender {
         // Ignore send result.
         let _ = sender.send(res);
@@ -135,13 +136,19 @@ struct WriteNotify {
     /// Error to send to the waiter.
     err: Option<Arc<Error>>,
     /// Sender to send write result to the waiter for this mutation.
-    sender: Option<Sender<Result<()>>>,
+    sender: Option<Sender<Result<Output>>>,
+    /// Number of rows to be written.
+    num_rows: usize,
 }
 
 impl WriteNotify {
     /// Creates a new notify from the `sender`.
-    fn new(sender: Option<Sender<Result<()>>>) -> WriteNotify {
-        WriteNotify { err: None, sender }
+    fn new(sender: Option<Sender<Result<Output>>>, num_rows: usize) -> WriteNotify {
+        WriteNotify {
+            err: None,
+            sender,
+            num_rows,
+        }
     }
 
     /// Send result to the waiter.
@@ -154,7 +161,7 @@ impl WriteNotify {
             let _ = sender.send(Err(err.clone()).context(WriteGroupSnafu));
         } else {
             // Send success result.
-            let _ = sender.send(Ok(()));
+            let _ = sender.send(Ok(Output::AffectedRows(self.num_rows)));
         }
     }
 }
@@ -208,7 +215,7 @@ impl RegionWriteCtx {
 
     /// Push [SenderWriteRequest] to the context.
     fn push_sender_request(&mut self, sender_req: SenderWriteRequest) {
-        let num_rows = sender_req.request.rows.rows.len() as u64;
+        let num_rows = sender_req.request.rows.rows.len();
 
         self.wal_entry.mutations.push(Mutation {
             op_type: sender_req.request.op_type as i32,
@@ -216,10 +223,11 @@ impl RegionWriteCtx {
             rows: Some(sender_req.request.rows),
         });
         // Notifiers are 1:1 map to mutations.
-        self.notifiers.push(WriteNotify::new(sender_req.sender));
+        self.notifiers
+            .push(WriteNotify::new(sender_req.sender, num_rows));
 
         // Increase sequence number.
-        self.next_sequence += num_rows;
+        self.next_sequence += num_rows as u64;
     }
 
     /// Encode and add WAL entry to the writer.

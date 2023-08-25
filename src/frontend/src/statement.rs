@@ -104,11 +104,12 @@ impl StatementExecutor {
             Statement::ShowTables(stmt) => self.show_tables(stmt, query_ctx).await,
 
             Statement::Copy(sql::statements::copy::Copy::CopyTable(stmt)) => {
-                let req = to_copy_table_request(stmt, query_ctx)?;
+                let req = to_copy_table_request(stmt, query_ctx.clone())?;
                 match req.direction {
-                    CopyDirection::Export => {
-                        self.copy_table_to(req).await.map(Output::AffectedRows)
-                    }
+                    CopyDirection::Export => self
+                        .copy_table_to(req, query_ctx)
+                        .await
+                        .map(Output::AffectedRows),
                     CopyDirection::Import => {
                         self.copy_table_from(req).await.map(Output::AffectedRows)
                     }

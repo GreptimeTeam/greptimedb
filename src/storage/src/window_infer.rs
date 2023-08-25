@@ -23,17 +23,21 @@ use crate::memtable::MemtableStats;
 use crate::sst::FileMeta;
 
 /// A set of predefined time windows.
-const TIME_WINDOW_SIZE: [i64; 10] = [
-    1,                // 1 second
-    60,               // 1 minute
-    60 * 10,          // 10 minutes
-    60 * 30,          // 30 minutes
-    60 * 60,          // 1 hour
-    2 * 60 * 60,      // 2 hours
-    6 * 60 * 60,      // 6 hours
-    12 * 60 * 60,     // 12 hours
-    24 * 60 * 60,     // 1 day
-    7 * 24 * 60 * 60, // 1 week
+const TIME_WINDOW_SIZE: [i64; 14] = [
+    1,                            // 1 second
+    60,                           // 1 minute
+    60 * 10,                      // 10 minutes
+    60 * 30,                      // 30 minutes
+    60 * 60,                      // 1 hour
+    2 * 60 * 60,                  // 2 hours
+    6 * 60 * 60,                  // 6 hours
+    12 * 60 * 60,                 // 12 hours
+    24 * 60 * 60,                 // 1 day
+    7 * 24 * 60 * 60,             // 1 week
+    30 * 24 * 60 * 60,            // 1 month
+    12 * 30 * 24 * 60 * 60,       // 1 year
+    10 * 12 * 30 * 24 * 60 * 60,  // 10 years
+    100 * 12 * 30 * 24 * 60 * 60, // 100 years
 ];
 
 /// [WindowInfer] infers the time windows that can be used to optimize table scans ordered by
@@ -180,14 +184,8 @@ mod tests {
         assert_eq!(12 * 60 * 60, duration_to_window_size(21601, 21601));
         assert_eq!(24 * 60 * 60, duration_to_window_size(43201, 43201));
         assert_eq!(7 * 24 * 60 * 60, duration_to_window_size(604799, 604799));
-        assert_eq!(
-            7 * 24 * 60 * 60,
-            duration_to_window_size(31535999, 31535999)
-        );
-        assert_eq!(
-            7 * 24 * 60 * 60,
-            duration_to_window_size(i64::MAX, i64::MAX)
-        );
+        assert_eq!(311040000, duration_to_window_size(31535999, 31535999));
+        assert_eq!(3110400000, duration_to_window_size(i64::MAX, i64::MAX));
     }
 
     #[test]

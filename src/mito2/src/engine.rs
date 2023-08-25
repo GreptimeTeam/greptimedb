@@ -67,8 +67,7 @@ impl MitoEngine {
         region_id: RegionId,
         request: RegionRequest,
     ) -> Result<Output> {
-        self.inner.handle_request(region_id, request).await?;
-        Ok(Output::AffectedRows(0))
+        self.inner.handle_request(region_id, request).await
     }
 
     /// Returns true if the specific region exists.
@@ -108,9 +107,8 @@ impl EngineInner {
         self.workers.stop().await
     }
 
-    // TODO(yingwen): return `Output` instead of `Result<()>`.
-    /// Handles [RegionRequest] and return its executed result.
-    async fn handle_request(&self, region_id: RegionId, request: RegionRequest) -> Result<()> {
+    /// Handles [RequestBody] and return its executed result.
+    async fn handle_request(&self, region_id: RegionId, request: RegionRequest) -> Result<Output> {
         // We validate and then convert the `request` into an inner `RequestBody` for ease of handling.
         let body = RequestBody::try_from_region_request(region_id, request)?;
         let (request, receiver) = RegionTask::from_request(region_id, body);

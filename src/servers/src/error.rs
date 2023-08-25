@@ -65,7 +65,12 @@ pub enum Error {
         source: std::io::Error,
     },
 
-    #[snafu(display("Failed to execute query: {}, source: {}", query, source))]
+    #[snafu(display(
+        "Failed to execute query, source: {}, query: {}, location: {}",
+        source,
+        query,
+        location
+    ))]
     ExecuteQuery {
         query: String,
         location: Location,

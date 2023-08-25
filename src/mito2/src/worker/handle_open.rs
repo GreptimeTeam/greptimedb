@@ -16,6 +16,7 @@
 
 use std::sync::Arc;
 
+use common_query::Output;
 use common_telemetry::info;
 use store_api::region_request::RegionOpenRequest;
 use store_api::storage::RegionId;
@@ -29,9 +30,9 @@ impl<S> RegionWorkerLoop<S> {
         &mut self,
         region_id: RegionId,
         request: RegionOpenRequest,
-    ) -> Result<()> {
+    ) -> Result<Output> {
         if self.regions.is_region_exists(region_id) {
-            return Ok(());
+            return Ok(Output::AffectedRows(0));
         }
 
         info!("Try to open region {}", region_id);
@@ -51,6 +52,6 @@ impl<S> RegionWorkerLoop<S> {
         // Insert the MitoRegion into the RegionMap.
         self.regions.insert_region(Arc::new(region));
 
-        Ok(())
+        Ok(Output::AffectedRows(0))
     }
 }

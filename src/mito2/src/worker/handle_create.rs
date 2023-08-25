@@ -16,6 +16,7 @@
 
 use std::sync::Arc;
 
+use common_query::Output;
 use common_telemetry::info;
 use snafu::{ensure, ResultExt};
 use store_api::metadata::RegionMetadataBuilder;
@@ -31,7 +32,7 @@ impl<S> RegionWorkerLoop<S> {
         &mut self,
         region_id: RegionId,
         request: RegionCreateRequest,
-    ) -> Result<()> {
+    ) -> Result<Output> {
         // Checks whether the table exists.
         if self.regions.is_region_exists(region_id) {
             ensure!(
@@ -40,7 +41,7 @@ impl<S> RegionWorkerLoop<S> {
             );
 
             // Region already exists.
-            return Ok(());
+            return Ok(Output::AffectedRows(0));
         }
 
         // Convert the request into a RegionMetadata and validate it.
@@ -70,6 +71,6 @@ impl<S> RegionWorkerLoop<S> {
         // Insert the MitoRegion into the RegionMap.
         self.regions.insert_region(Arc::new(region));
 
-        Ok(())
+        Ok(Output::AffectedRows(0))
     }
 }

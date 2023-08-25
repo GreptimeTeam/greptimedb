@@ -4,12 +4,12 @@ Affected Rows: 0
 
 DESC TABLE t;
 
-+-------+-------+------+---------+---------------+
-| Field | Type  | Null | Default | Semantic Type |
-+-------+-------+------+---------+---------------+
-| i     | Int32 | YES  |         | FIELD         |
-| j     | Int64 | NO   |         | TIME INDEX    |
-+-------+-------+------+---------+---------------+
++-------+-------+-----+------+---------+---------------+
+| Field | Type  | Key | Null | Default | Semantic Type |
++-------+-------+-----+------+---------+---------------+
+| i     | Int32 |     | YES  |         | FIELD         |
+| j     | Int64 | PRI | NO   |         | TIMESTAMP     |
++-------+-------+-----+------+---------+---------------+
 
 INSERT INTO TABLE t VALUES (1, 1), (3, 3), (NULL, 4);
 
@@ -43,12 +43,12 @@ Affected Rows: 0
 
 DESC TABLE new_table;
 
-+-------+-------+------+---------+---------------+
-| Field | Type  | Null | Default | Semantic Type |
-+-------+-------+------+---------+---------------+
-| i     | Int32 | YES  |         | FIELD         |
-| j     | Int64 | NO   |         | TIME INDEX    |
-+-------+-------+------+---------+---------------+
++-------+-------+-----+------+---------+---------------+
+| Field | Type  | Key | Null | Default | Semantic Type |
++-------+-------+-----+------+---------+---------------+
+| i     | Int32 |     | YES  |         | FIELD         |
+| j     | Int64 | PRI | NO   |         | TIMESTAMP     |
++-------+-------+-----+------+---------+---------------+
 
 -- SQLNESS ARG restart=true
 SELECT * FROM new_table;

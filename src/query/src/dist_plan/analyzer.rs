@@ -12,11 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
+use common_telemetry::info;
 use datafusion::datasource::DefaultTableSource;
 use datafusion::error::Result as DfResult;
 use datafusion_common::config::ConfigOptions;
-use datafusion_common::tree_node::{RewriteRecursion, TreeNode, TreeNodeRewriter};
-use datafusion_expr::LogicalPlan;
+use datafusion_common::tree_node::{RewriteRecursion, Transformed, TreeNode, TreeNodeRewriter};
+use datafusion_expr::expr::{Exists, InSubquery};
+use datafusion_expr::utils::from_plan;
+use datafusion_expr::{col, Expr, LogicalPlan, LogicalPlanBuilder, Subquery};
 use datafusion_optimizer::analyzer::AnalyzerRule;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::metadata::TableType;
@@ -39,8 +44,63 @@ impl AnalyzerRule for DistPlannerAnalyzer {
         plan: LogicalPlan,
         _config: &ConfigOptions,
     ) -> datafusion_common::Result<LogicalPlan> {
+        let plan = plan.transform(&Self::inspect_plan_with_subquery)?;
         let mut rewriter = PlanRewriter::default();
         plan.rewrite(&mut rewriter)
+    }
+}
+
+impl DistPlannerAnalyzer {
+    fn inspect_plan_with_subquery(plan: LogicalPlan) -> DfResult<Transformed<LogicalPlan>> {
+        let exprs = plan
+            .expressions()
+            .into_iter()
+            .map(|e| e.transform(&Self::transform_subquery))
+            .collect::<DfResult<Vec<_>>>()?;
+
+        let inputs = plan.inputs().into_iter().cloned().collect::<Vec<_>>();
+        Ok(Transformed::Yes(from_plan(&plan, &exprs, &inputs)?))
+    }
+
+    fn transform_subquery(expr: Expr) -> DfResult<Transformed<Expr>> {
+        match expr {
+            Expr::Exists(exists) => Ok(Transformed::Yes(Expr::Exists(Exists {
+                subquery: Self::handle_subquery(exists.subquery)?,
+                negated: exists.negated,
+            }))),
+            Expr::InSubquery(in_subquery) => Ok(Transformed::Yes(Expr::InSubquery(InSubquery {
+                expr: in_subquery.expr,
+                subquery: Self::handle_subquery(in_subquery.subquery)?,
+                negated: in_subquery.negated,
+            }))),
+            Expr::ScalarSubquery(scalar_subquery) => Ok(Transformed::Yes(Expr::ScalarSubquery(
+                Self::handle_subquery(scalar_subquery)?,
+            ))),
+
+            _ => Ok(Transformed::No(expr)),
+        }
+    }
+
+    fn handle_subquery(subquery: Subquery) -> DfResult<Subquery> {
+        let mut rewriter = PlanRewriter::default();
+        let mut rewrote_subquery = subquery.subquery.as_ref().clone().rewrite(&mut rewriter)?;
+        // Workaround. DF doesn't support the first plan in subquery to be an Extension
+        if matches!(rewrote_subquery, LogicalPlan::Extension(_)) {
+            let output_schema = rewrote_subquery.schema().clone();
+            let project_exprs = output_schema
+                .fields()
+                .iter()
+                .map(|f| col(f.name()))
+                .collect::<Vec<_>>();
+            rewrote_subquery = LogicalPlanBuilder::from(rewrote_subquery)
+                .project(project_exprs)?
+                .build()?;
+        }
+
+        Ok(Subquery {
+            subquery: Arc::new(rewrote_subquery),
+            outer_ref_columns: subquery.outer_ref_columns,
+        })
     }
 }
 
@@ -78,7 +138,7 @@ impl PlanRewriter {
     /// Return true if should stop and expand. The input plan is the parent node of current node
     fn should_expand(&mut self, plan: &LogicalPlan) -> bool {
         if DFLogicalSubstraitConvertor.encode(plan).is_err() {
-            common_telemetry::info!(
+            info!(
                 "substrait error: {:?}",
                 DFLogicalSubstraitConvertor.encode(plan)
             );
@@ -177,6 +237,7 @@ impl TreeNodeRewriter for PlanRewriter {
         self.stage.clear();
         self.set_unexpanded();
         self.partition_cols = None;
+
         Ok(RewriteRecursion::Continue)
     }
 
@@ -230,6 +291,7 @@ mod test {
     use std::sync::Arc;
 
     use datafusion::datasource::DefaultTableSource;
+    use datafusion_common::JoinType;
     use datafusion_expr::{avg, col, lit, Expr, LogicalPlanBuilder};
     use table::table::adapter::DfTableProviderAdapter;
     use table::table::numbers::NumbersTable;
@@ -341,6 +403,43 @@ mod test {
             "  MergeScan [is_placeholder=false]",
         ]
         .join("\n");
+        assert_eq!(expected, format!("{:?}", result));
+    }
+
+    #[test]
+    fn transform_unalighed_join_with_alias() {
+        let left = NumbersTable::table(0);
+        let right = NumbersTable::table(1);
+        let left_source = Arc::new(DefaultTableSource::new(Arc::new(
+            DfTableProviderAdapter::new(left),
+        )));
+        let right_source = Arc::new(DefaultTableSource::new(Arc::new(
+            DfTableProviderAdapter::new(right),
+        )));
+
+        let right_plan = LogicalPlanBuilder::scan_with_filters("t", right_source, None, vec![])
+            .unwrap()
+            .alias("right")
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let plan = LogicalPlanBuilder::scan_with_filters("t", left_source, None, vec![])
+            .unwrap()
+            .join_using(right_plan, JoinType::LeftSemi, vec!["number"])
+            .unwrap()
+            .limit(0, Some(1))
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let config = ConfigOptions::default();
+        let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+        let expected = "Limit: skip=0, fetch=1\
+            \n  LeftSemi Join: Using t.number = right.number\
+            \n    MergeScan [is_placeholder=false]\
+            \n    SubqueryAlias: right\
+            \n      MergeScan [is_placeholder=false]";
         assert_eq!(expected, format!("{:?}", result));
     }
 }

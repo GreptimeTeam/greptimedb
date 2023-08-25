@@ -64,12 +64,12 @@ Affected Rows: 0
 
 DESC TABLE test_unixtime;
 
-+-------+----------------------+------+---------+---------------+
-| Field | Type                 | Null | Default | Semantic Type |
-+-------+----------------------+------+---------+---------------+
-| a     | Int32                | YES  |         | FIELD         |
-| b     | TimestampMillisecond | NO   |         | TIME INDEX    |
-+-------+----------------------+------+---------+---------------+
++-------+----------------------+-----+------+---------+---------------+
+| Field | Type                 | Key | Null | Default | Semantic Type |
++-------+----------------------+-----+------+---------+---------------+
+| a     | Int32                |     | YES  |         | FIELD         |
+| b     | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
++-------+----------------------+-----+------+---------+---------------+
 
 insert into test_unixtime values(27, 27);
 
