@@ -48,14 +48,11 @@ impl NumbersTable {
     }
 
     pub fn table_with_name(table_id: TableId, name: String) -> TableRef {
-        let schema = Self::schema();
         let thin_table = ThinTable::new(
-            schema.clone(),
             Self::table_info(table_id, name, "test_engine".to_string()),
-            TableType::Temporary,
             FilterPushDownType::Unsupported,
         );
-        let data_source = Arc::new(NumbersDataSource::new(schema));
+        let data_source = Arc::new(NumbersDataSource::new(Self::schema()));
         Arc::new(ThinTableAdapter::new(thin_table, data_source))
     }
 

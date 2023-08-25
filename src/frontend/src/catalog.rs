@@ -38,7 +38,6 @@ use common_meta::key::table_info::TableInfoKey;
 use common_meta::key::table_name::TableNameKey;
 use common_meta::key::{TableMetaKey, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
-use common_meta::table_name::TableName;
 use common_telemetry::debug;
 use futures_util::TryStreamExt;
 use partition::manager::PartitionRuleManagerRef;
@@ -417,12 +416,7 @@ impl CatalogManager for FrontendCatalogManager {
                 .try_into()
                 .context(catalog_err::InvalidTableInfoInCatalogSnafu)?,
         );
-        let table = Arc::new(DistTable::new(
-            TableName::new(catalog, schema, table_name),
-            table_info,
-            Arc::new(self.clone()),
-        ));
-        Ok(Some(table))
+        Ok(Some(DistTable::table(table_info)))
     }
 
     fn as_any(&self) -> &dyn Any {
