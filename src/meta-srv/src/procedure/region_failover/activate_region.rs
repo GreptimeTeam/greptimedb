@@ -85,7 +85,7 @@ impl ActivateRegion {
     }
 
     async fn handle_response(
-        self,
+        &self,
         mailbox_receiver: MailboxReceiver,
         failed_region: &RegionIdent,
     ) -> Result<Box<dyn State>> {
@@ -102,7 +102,7 @@ impl ActivateRegion {
                     .fail();
                 };
                 if result {
-                    Ok(Box::new(UpdateRegionMetadata::new(self.candidate)))
+                    Ok(Box::new(UpdateRegionMetadata::new(self.candidate.clone())))
                 } else {
                     // The region could be just indeed cannot be opened by the candidate, retry
                     // would be in vain. Then why not just end the failover procedure? Because we
@@ -131,7 +131,7 @@ impl ActivateRegion {
 #[typetag::serde]
 impl State for ActivateRegion {
     async fn next(
-        mut self: Box<Self>,
+        &mut self,
         ctx: &RegionFailoverContext,
         failed_region: &RegionIdent,
     ) -> Result<Box<dyn State>> {
