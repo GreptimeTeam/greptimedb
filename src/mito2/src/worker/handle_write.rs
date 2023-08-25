@@ -231,8 +231,11 @@ impl RegionWriteCtx {
     }
 
     /// Encode and add WAL entry to the writer.
-    fn add_wal_entry<S: LogStore>(&self, wal_writer: &mut WalWriter<S>) -> Result<()> {
-        wal_writer.add_entry(self.region.region_id, self.next_entry_id, &self.wal_entry)
+    fn add_wal_entry<S: LogStore>(&mut self, wal_writer: &mut WalWriter<S>) -> Result<()> {
+        wal_writer.add_entry(self.region.region_id, self.next_entry_id, &self.wal_entry)?;
+        // We only call this method one time, but we still bump next entry id for consistency.
+        self.next_entry_id += 1;
+        Ok(())
     }
 
     /// Sets error and marks all write operations are failed.
@@ -259,5 +262,11 @@ impl RegionWriteCtx {
                 notify.err = Some(Arc::new(e));
             }
         }
+
+        // Updates region sequence and entry id. Since we stores last sequence and entry id in region, we need
+        // to decrease `next_sequence` and `next_entry_id` by 1.
+        self.region
+            .version_control
+            .set_sequence_and_entry_id(self.next_sequence - 1, self.next_entry_id - 1);
     }
 }
