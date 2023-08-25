@@ -12,21 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Record batch stream.
+//! Utilities for projection.
 
-use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
 
 use api::v1::SemanticType;
 use common_error::ext::BoxedError;
 use common_recordbatch::error::ExternalSnafu;
-use common_recordbatch::{RecordBatch, RecordBatchStream};
+use common_recordbatch::RecordBatch;
 use datatypes::prelude::{ConcreteDataType, DataType};
 use datatypes::schema::{Schema, SchemaRef};
 use datatypes::value::ValueRef;
 use datatypes::vectors::VectorRef;
-use futures::Stream;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadata;
 use store_api::storage::ColumnId;
@@ -34,39 +31,6 @@ use store_api::storage::ColumnId;
 use crate::error::{InvalidRequestSnafu, Result};
 use crate::read::Batch;
 use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
-
-/// Record batch stream implementation.
-pub(crate) struct StreamImpl<S> {
-    /// [RecordBatch] stream.
-    stream: S,
-    /// Schema of returned record batches.
-    schema: SchemaRef,
-}
-
-impl<S> StreamImpl<S> {
-    /// Returns a new stream from a record batch stream and its schema.
-    pub(crate) fn new(stream: S, schema: SchemaRef) -> StreamImpl<S> {
-        StreamImpl { stream, schema }
-    }
-}
-
-impl<S: Stream<Item = common_recordbatch::error::Result<RecordBatch>> + Unpin> Stream
-    for StreamImpl<S>
-{
-    type Item = common_recordbatch::error::Result<RecordBatch>;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        Pin::new(&mut self.stream).poll_next(cx)
-    }
-}
-
-impl<S: Stream<Item = common_recordbatch::error::Result<RecordBatch>> + Unpin> RecordBatchStream
-    for StreamImpl<S>
-{
-    fn schema(&self) -> SchemaRef {
-        self.schema.clone()
-    }
-}
 
 /// Handles projection and converts a projected [Batch] to a projected [RecordBatch].
 pub(crate) struct ProjectionMapper {
@@ -210,7 +174,8 @@ fn new_repeated_vector(
         .try_push_value_ref(value)
         .map_err(BoxedError::new)
         .context(ExternalSnafu)?;
-    // This requires an additional allocation. TODO(yingwen): Add a way to create repeated vector to data type.
+    // This requires an additional allocation.
+    // TODO(yingwen): Add a way to create repeated vector to data type.
     let base_vector = mutable_vector.to_vector();
     Ok(base_vector.replicate(&[num_rows]))
 }

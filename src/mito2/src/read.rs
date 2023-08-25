@@ -15,9 +15,9 @@
 //! Common structs and utilities for reading data.
 
 pub mod merge;
+pub(crate) mod projection;
 pub(crate) mod scan_region;
 pub(crate) mod seq_scan;
-pub(crate) mod stream;
 
 use std::sync::Arc;
 

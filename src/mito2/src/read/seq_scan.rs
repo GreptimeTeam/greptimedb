@@ -19,7 +19,7 @@ use std::sync::Arc;
 use async_stream::try_stream;
 use common_error::ext::BoxedError;
 use common_recordbatch::error::ExternalSnafu;
-use common_recordbatch::SendableRecordBatchStream;
+use common_recordbatch::{RecordBatchStreamAdaptor, SendableRecordBatchStream};
 use common_time::range::TimestampRange;
 use object_store::ObjectStore;
 use snafu::ResultExt;
@@ -29,7 +29,7 @@ use table::predicate::Predicate;
 use crate::error::Result;
 use crate::memtable::MemtableRef;
 use crate::read::merge::MergeReaderBuilder;
-use crate::read::stream::{ProjectionMapper, StreamImpl};
+use crate::read::projection::ProjectionMapper;
 use crate::read::BatchReader;
 use crate::sst::file::FileHandle;
 use crate::sst::parquet::reader::ParquetReaderBuilder;
@@ -136,9 +136,9 @@ impl SeqScan {
                 yield mapper.convert(&batch)?;
             }
         };
-        let stream = Box::pin(StreamImpl::new(
-            Box::pin(stream),
+        let stream = Box::pin(RecordBatchStreamAdaptor::new(
             self.mapper.output_schema(),
+            Box::pin(stream),
         ));
 
         Ok(stream)

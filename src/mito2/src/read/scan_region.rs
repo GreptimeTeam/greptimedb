@@ -23,8 +23,8 @@ use store_api::storage::ScanRequest;
 use table::predicate::{Predicate, TimeRangePredicateBuilder};
 
 use crate::error::{BuildPredicateSnafu, Result};
+use crate::read::projection::ProjectionMapper;
 use crate::read::seq_scan::SeqScan;
-use crate::read::stream::ProjectionMapper;
 use crate::region::version::VersionRef;
 use crate::sst::file::FileHandle;
 
