@@ -52,7 +52,7 @@ pub async fn sql(
     let db = query_ctx.get_db_string();
     let _timer = timer!(
         crate::metrics::METRIC_HTTP_SQL_ELAPSED,
-        &[(crate::metrics::METRIC_DB_LABEL, db.clone())]
+        &[(crate::metrics::METRIC_DB_LABEL, db)]
     );
 
     let resp = if let Some(sql) = &sql {
@@ -103,7 +103,7 @@ pub async fn promql(
     let db = query_ctx.get_db_string();
     let _timer = timer!(
         crate::metrics::METRIC_HTTP_PROMQL_ELAPSED,
-        &[(crate::metrics::METRIC_DB_LABEL, db.clone())]
+        &[(crate::metrics::METRIC_DB_LABEL, db)]
     );
 
     if let Some(resp) = validate_schema(sql_handler.clone(), query_ctx.clone()).await {
