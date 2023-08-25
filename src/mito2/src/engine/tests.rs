@@ -236,7 +236,7 @@ fn column_metadata_to_column_schema(metadata: &ColumnMetadata) -> api::v1::Colum
 }
 
 fn build_rows(num_rows: usize) -> Vec<Row> {
-    let values = (0..num_rows)
+    (0..num_rows)
         .map(|i| api::v1::Row {
             values: vec![
                 api::v1::Value {
@@ -250,8 +250,7 @@ fn build_rows(num_rows: usize) -> Vec<Row> {
                 },
             ],
         })
-        .collect();
-    values
+        .collect()
 }
 
 #[tokio::test]
@@ -265,7 +264,7 @@ async fn test_write_to_region() {
     let column_schemas = request
         .column_metadatas
         .iter()
-        .map(|c| column_metadata_to_column_schema(c))
+        .map(column_metadata_to_column_schema)
         .collect::<Vec<_>>();
     engine
         .handle_request(region_id, RegionRequest::Create(request))
