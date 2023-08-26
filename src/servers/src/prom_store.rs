@@ -20,7 +20,9 @@ use std::hash::{Hash, Hasher};
 
 use api::prom_store::remote::label_matcher::Type as MatcherType;
 use api::prom_store::remote::{Label, Query, Sample, TimeSeries, WriteRequest};
-use api::v1::{InsertRequest as GrpcInsertRequest, InsertRequests};
+use api::v1::{
+    InsertRequest as GrpcInsertRequest, InsertRequests, RowInsertRequest, RowInsertRequests, Rows,
+};
 use common_grpc::writer::{LinesWriter, Precision};
 use common_recordbatch::{RecordBatch, RecordBatches};
 use common_time::timestamp::TimeUnit;
@@ -34,6 +36,7 @@ use snafu::{ensure, OptionExt, ResultExt};
 use snap::raw::{Decoder, Encoder};
 
 use crate::error::{self, Result};
+use crate::row_writer::{self, MultiTableData};
 
 pub const TIMESTAMP_COLUMN_NAME: &str = "greptime_timestamp";
 pub const FIELD_COLUMN_NAME: &str = "greptime_value";
@@ -298,6 +301,81 @@ fn recordbatch_to_timeseries(table: &str, recordbatch: RecordBatch) -> Result<Ve
     }
 
     Ok(timeseries_map.into_values().collect())
+}
+
+pub fn to_grpc_row_insert_requests(request: WriteRequest) -> Result<(RowInsertRequests, usize)> {
+    let mut multi_table_data = MultiTableData::new();
+
+    for series in &request.timeseries {
+        let table_name = &series
+            .labels
+            .iter()
+            .find(|label| {
+                // The metric name is a special label
+                label.name == METRIC_NAME_LABEL
+            })
+            .context(error::InvalidPromRemoteRequestSnafu {
+                msg: "missing '__name__' label in times-eries",
+            })?
+            .value;
+
+        // The metric name is a special label,
+        // num_columns = labels.len() - 1 + 1 (value) + 1 (timestamp)
+        let num_columns = series.labels.len() + 1;
+
+        let table_data = multi_table_data.get_or_default_table_data(
+            table_name,
+            num_columns,
+            series.samples.len(),
+        );
+
+        for Sample { value, timestamp } in &series.samples {
+            let mut one_row = vec![api::v1::Value { value_data: None }; table_data.num_columns()];
+
+            // labels
+            let kvs = series
+                .labels
+                .iter()
+                .skip_while(|label| label.name == METRIC_NAME_LABEL)
+                .map(|label| (label.name.as_str(), label.value.as_str()));
+            row_writer::write_tags(table_data, kvs, &mut one_row)?;
+            // value
+            row_writer::write_f64(table_data, FIELD_COLUMN_NAME, *value, &mut one_row)?;
+            // timestamp
+            row_writer::write_ts_millis(
+                table_data,
+                TIMESTAMP_COLUMN_NAME,
+                Some(*timestamp),
+                &mut one_row,
+            )?;
+            table_data.add_row(one_row);
+        }
+    }
+
+    let mut sample_counts = 0;
+    let inserts = multi_table_data
+        .into_iter()
+        .map(|(table_name, table_data)| {
+            let num_columns = table_data.num_columns();
+            sample_counts += table_data.num_rows();
+            let (schema, mut rows) = table_data.into_data();
+            for row in rows.iter_mut() {
+                if num_columns > row.values.len() {
+                    row.values
+                        .resize(num_columns, api::v1::Value { value_data: None });
+                }
+            }
+
+            RowInsertRequest {
+                table_name: table_name.to_string(),
+                rows: Some(Rows { schema, rows }),
+                ..Default::default()
+            }
+        })
+        .collect::<Vec<_>>();
+    let row_insert_requests = RowInsertRequests { inserts };
+
+    Ok((row_insert_requests, sample_counts))
 }
 
 pub fn to_grpc_insert_requests(request: WriteRequest) -> Result<(InsertRequests, usize)> {

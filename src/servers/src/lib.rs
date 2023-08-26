@@ -37,6 +37,7 @@ pub mod postgres;
 pub mod prom_store;
 pub mod prometheus;
 pub mod query_handler;
+mod row_writer;
 pub mod server;
 mod shutdown;
 pub mod tls;
