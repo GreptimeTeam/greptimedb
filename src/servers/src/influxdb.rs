@@ -16,7 +16,7 @@ use std::collections::HashMap;
 
 use api::v1::value::ValueData;
 use api::v1::{
-    ColumnDataType, InsertRequest as GrpcInsertRequest, InsertRequests, RowInsertRequests, Value,
+    ColumnDataType, InsertRequest as GrpcInsertRequest, InsertRequests, RowInsertRequests,
 };
 use common_grpc::writer::{LinesWriter, Precision};
 use common_time::timestamp::TimeUnit;
@@ -154,7 +154,7 @@ impl TryFrom<InfluxdbRequest> for RowInsertRequests {
             let num_columns = tags.as_ref().map(|x| x.len()).unwrap_or(0) + fields.len() + 1;
 
             let table_data = multi_table_data.get_or_default_table_data(table_name, num_columns, 0);
-            let mut one_row = vec![Value { value_data: None }; table_data.num_columns()];
+            let mut one_row = table_data.alloc_one_row();
 
             // tags
             if let Some(tags) = tags {

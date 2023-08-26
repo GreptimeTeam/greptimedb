@@ -65,6 +65,11 @@ impl TableData<'_> {
     }
 
     #[inline]
+    pub fn alloc_one_row(&self) -> Vec<Value> {
+        vec![Value { value_data: None }; self.num_columns()]
+    }
+
+    #[inline]
     pub fn add_row(&mut self, values: Vec<Value>) {
         self.rows.push(Row { values })
     }

@@ -328,7 +328,7 @@ pub fn to_grpc_row_insert_requests(request: WriteRequest) -> Result<(RowInsertRe
         );
 
         for Sample { value, timestamp } in &series.samples {
-            let mut one_row = vec![api::v1::Value { value_data: None }; table_data.num_columns()];
+            let mut one_row = table_data.alloc_one_row();
 
             // labels
             let kvs = series
@@ -346,6 +346,7 @@ pub fn to_grpc_row_insert_requests(request: WriteRequest) -> Result<(RowInsertRe
                 Some(*timestamp),
                 &mut one_row,
             )?;
+
             table_data.add_row(one_row);
         }
     }
