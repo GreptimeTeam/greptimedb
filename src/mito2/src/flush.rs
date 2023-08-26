@@ -87,12 +87,11 @@ impl WriteBufferManager for WriteBufferManagerImpl {
 pub(crate) struct RegionFlushRequest {
     /// Region to flush.
     region_id: RegionId,
-    /// Max memtable id in these memtables,
-    /// used to remove immutable memtables in current version.
-    max_memtable_id: MemtableId,
+    /// Memtable id to flush.
+    memtable_id: MemtableId,
     /// Last sequence of data to be flushed.
     flush_sequence: SequenceNumber,
-    // TODO(yingwen): result sender, memtables to flush.
+    // TODO(yingwen): result sender.
 }
 
 /// Manages background flushes of a worker.

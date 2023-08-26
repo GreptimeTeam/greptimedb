@@ -30,7 +30,7 @@ use store_api::storage::SequenceNumber;
 
 use crate::flush::RegionMemtableStats;
 use crate::memtable::version::{MemtableVersion, MemtableVersionRef};
-use crate::memtable::MemtableRef;
+use crate::memtable::{MemtableBuilderRef, MemtableId, MemtableRef};
 use crate::sst::version::{SstVersion, SstVersionRef};
 use crate::wal::EntryId;
 
@@ -65,6 +65,30 @@ impl VersionControl {
         let mut data = self.data.write().unwrap();
         data.committed_sequence = seq;
         data.last_entry_id = entry_id;
+    }
+
+    /// Freeze the mutable memtable and returns the id of the freezed memtable.
+    ///
+    /// If the mutable memtable is empty or there is already an immutable memtable, returns `None`.
+    pub(crate) fn freeze_mutable(&self, builder: &MemtableBuilderRef) -> Option<MemtableId> {
+        let version = self.current().version;
+        if version.memtables.mutable.is_empty() || version.memtables.immutable.is_some() {
+            return None;
+        }
+        let new_mutable = builder.build(&version.metadata);
+        let mutable_id = version.memtables.mutable.id();
+        // Safety: Immutable memtable is None.
+        let new_memtables = version.memtables.freeze_mutable(new_mutable).unwrap();
+        // Create a new version with memtable switched.
+        let new_version = Arc::new(
+            VersionBuilder::from_version(version)
+                .memtables(new_memtables)
+                .build(),
+        );
+
+        let mut version_data = self.data.write().unwrap();
+        version_data.version = new_version;
+        Some(mutable_id)
     }
 }
 
@@ -112,23 +136,45 @@ impl Version {
 /// Version builder.
 pub(crate) struct VersionBuilder {
     metadata: RegionMetadataRef,
-    /// Mutable memtable.
-    mutable: MemtableRef,
+    memtables: MemtableVersionRef,
+    ssts: SstVersionRef,
+    flushed_entry_id: EntryId,
 }
 
 impl VersionBuilder {
     /// Returns a new builder.
     pub(crate) fn new(metadata: RegionMetadataRef, mutable: MemtableRef) -> VersionBuilder {
-        VersionBuilder { metadata, mutable }
+        VersionBuilder {
+            metadata,
+            memtables: Arc::new(MemtableVersion::new(mutable)),
+            ssts: Arc::new(SstVersion::new()),
+            flushed_entry_id: 0,
+        }
+    }
+
+    /// Returns a new builder from an existing version.
+    pub(crate) fn from_version(version: VersionRef) -> VersionBuilder {
+        VersionBuilder {
+            metadata: version.metadata.clone(),
+            memtables: version.memtables.clone(),
+            ssts: version.ssts.clone(),
+            flushed_entry_id: version.flushed_entry_id,
+        }
+    }
+
+    /// Sets memtables.
+    pub(crate) fn memtables(mut self, memtables: MemtableVersion) -> VersionBuilder {
+        self.memtables = Arc::new(memtables);
+        self
     }
 
     /// Builds a new [Version] from the builder.
     pub(crate) fn build(self) -> Version {
         Version {
             metadata: self.metadata,
-            memtables: Arc::new(MemtableVersion::new(self.mutable)),
-            ssts: Arc::new(SstVersion::new()),
-            flushed_entry_id: 0,
+            memtables: self.memtables,
+            ssts: self.ssts,
+            flushed_entry_id: self.flushed_entry_id,
         }
     }
 }
