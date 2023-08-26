@@ -16,8 +16,7 @@ use std::collections::HashMap;
 
 use api::v1::value::ValueData;
 use api::v1::{
-    ColumnDataType, InsertRequest as GrpcInsertRequest, InsertRequests, RowInsertRequest,
-    RowInsertRequests, Rows, Value,
+    ColumnDataType, InsertRequest as GrpcInsertRequest, InsertRequests, RowInsertRequests, Value,
 };
 use common_grpc::writer::{LinesWriter, Precision};
 use common_time::timestamp::TimeUnit;
@@ -192,26 +191,7 @@ impl TryFrom<InfluxdbRequest> for RowInsertRequests {
             table_data.add_row(one_row);
         }
 
-        let inserts = multi_table_data
-            .into_iter()
-            .map(|(table_name, table_data)| {
-                let num_columns = table_data.num_columns();
-                let (schema, mut rows) = table_data.into_data();
-                for row in rows.iter_mut() {
-                    if num_columns > row.values.len() {
-                        row.values.resize(num_columns, Value { value_data: None });
-                    }
-                }
-
-                RowInsertRequest {
-                    table_name: table_name.to_string(),
-                    rows: Some(Rows { schema, rows }),
-                    ..Default::default()
-                }
-            })
-            .collect::<Vec<_>>();
-
-        Ok(RowInsertRequests { inserts })
+        Ok(multi_table_data.into_row_insert_requests().0)
     }
 }
 
@@ -228,7 +208,7 @@ fn unwrap_or_default_precision(precision: Option<Precision>) -> Precision {
 mod tests {
     use api::v1::column::Values;
     use api::v1::value::ValueData;
-    use api::v1::{Column, ColumnDataType, SemanticType};
+    use api::v1::{Column, ColumnDataType, Rows, SemanticType};
     use common_base::BitVec;
 
     use super::*;

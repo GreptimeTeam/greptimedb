@@ -15,7 +15,10 @@
 use std::collections::HashMap;
 
 use api::v1::value::ValueData;
-use api::v1::{ColumnDataType, ColumnSchema, Row, SemanticType, Value};
+use api::v1::{
+    ColumnDataType, ColumnSchema, Row, RowInsertRequest, RowInsertRequests, Rows, SemanticType,
+    Value,
+};
 use common_grpc::writer;
 use common_grpc::writer::Precision;
 use common_time::timestamp::TimeUnit;
@@ -66,7 +69,7 @@ impl TableData<'_> {
         self.rows.push(Row { values })
     }
 
-    pub fn into_data(self) -> (Vec<ColumnSchema>, Vec<Row>) {
+    pub fn into_schema_and_rows(self) -> (Vec<ColumnSchema>, Vec<Row>) {
         (self.schema, self.rows)
     }
 }
@@ -93,8 +96,31 @@ impl<'a> MultiTableData<'a> {
             .or_insert_with(|| TableData::new(num_columns, num_rows))
     }
 
-    pub fn into_iter(self) -> impl Iterator<Item = (&'a str, TableData<'a>)> {
-        self.table_data_map.into_iter()
+    pub fn into_row_insert_requests(self) -> (RowInsertRequests, usize) {
+        let mut total_rows = 0;
+        let inserts = self
+            .table_data_map
+            .into_iter()
+            .map(|(table_name, table_data)| {
+                total_rows += table_data.num_rows();
+                let num_columns = table_data.num_columns();
+                let (schema, mut rows) = table_data.into_schema_and_rows();
+                for row in rows.iter_mut() {
+                    if num_columns > row.values.len() {
+                        row.values.resize(num_columns, Value { value_data: None });
+                    }
+                }
+
+                RowInsertRequest {
+                    table_name: table_name.to_string(),
+                    rows: Some(Rows { schema, rows }),
+                    ..Default::default()
+                }
+            })
+            .collect::<Vec<_>>();
+        let row_insert_requests = RowInsertRequests { inserts };
+
+        (row_insert_requests, total_rows)
     }
 }
 

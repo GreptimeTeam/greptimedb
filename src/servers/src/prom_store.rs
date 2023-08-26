@@ -20,9 +20,7 @@ use std::hash::{Hash, Hasher};
 
 use api::prom_store::remote::label_matcher::Type as MatcherType;
 use api::prom_store::remote::{Label, Query, Sample, TimeSeries, WriteRequest};
-use api::v1::{
-    InsertRequest as GrpcInsertRequest, InsertRequests, RowInsertRequest, RowInsertRequests, Rows,
-};
+use api::v1::{InsertRequest as GrpcInsertRequest, InsertRequests, RowInsertRequests};
 use common_grpc::writer::{LinesWriter, Precision};
 use common_recordbatch::{RecordBatch, RecordBatches};
 use common_time::timestamp::TimeUnit;
@@ -352,30 +350,7 @@ pub fn to_grpc_row_insert_requests(request: WriteRequest) -> Result<(RowInsertRe
         }
     }
 
-    let mut sample_counts = 0;
-    let inserts = multi_table_data
-        .into_iter()
-        .map(|(table_name, table_data)| {
-            let num_columns = table_data.num_columns();
-            sample_counts += table_data.num_rows();
-            let (schema, mut rows) = table_data.into_data();
-            for row in rows.iter_mut() {
-                if num_columns > row.values.len() {
-                    row.values
-                        .resize(num_columns, api::v1::Value { value_data: None });
-                }
-            }
-
-            RowInsertRequest {
-                table_name: table_name.to_string(),
-                rows: Some(Rows { schema, rows }),
-                ..Default::default()
-            }
-        })
-        .collect::<Vec<_>>();
-    let row_insert_requests = RowInsertRequests { inserts };
-
-    Ok((row_insert_requests, sample_counts))
+    Ok(multi_table_data.into_row_insert_requests())
 }
 
 pub fn to_grpc_insert_requests(request: WriteRequest) -> Result<(InsertRequests, usize)> {
