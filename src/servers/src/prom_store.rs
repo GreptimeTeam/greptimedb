@@ -528,6 +528,7 @@ mod tests {
     use std::sync::Arc;
 
     use api::prom_store::remote::LabelMatcher;
+    use api::v1::{ColumnDataType, Row, SemanticType};
     use datafusion::prelude::SessionContext;
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::{Float64Vector, StringVector, TimestampMillisecondVector};
@@ -640,6 +641,141 @@ mod tests {
         let display_string = format!("{}", plan.display_indent());
 
         assert_eq!("Filter: ?table?.greptime_timestamp >= TimestampMillisecond(1000, None) AND ?table?.greptime_timestamp <= TimestampMillisecond(2000, None) AND regexp_match(?table?.job, Utf8(\"*prom*\")) IS NOT NULL AND ?table?.instance != Utf8(\"localhost\")\n  TableScan: ?table?", display_string);
+    }
+
+    fn column_schemas_with(
+        mut kts_iter: Vec<(&str, ColumnDataType, SemanticType)>,
+    ) -> Vec<api::v1::ColumnSchema> {
+        kts_iter.push((
+            "greptime_value",
+            ColumnDataType::Float64,
+            SemanticType::Field,
+        ));
+        kts_iter.push((
+            "greptime_timestamp",
+            ColumnDataType::TimestampMillisecond,
+            SemanticType::Timestamp,
+        ));
+
+        kts_iter
+            .into_iter()
+            .map(|(k, t, s)| api::v1::ColumnSchema {
+                column_name: k.to_string(),
+                datatype: t as i32,
+                semantic_type: s as i32,
+            })
+            .collect()
+    }
+
+    fn make_row_with_label(l1: &str, value: f64, timestamp: i64) -> Row {
+        Row {
+            values: vec![
+                api::v1::Value {
+                    value_data: Some(api::v1::value::ValueData::StringValue(l1.to_string())),
+                },
+                api::v1::Value {
+                    value_data: Some(api::v1::value::ValueData::F64Value(value)),
+                },
+                api::v1::Value {
+                    value_data: Some(api::v1::value::ValueData::TsMillisecondValue(timestamp)),
+                },
+            ],
+        }
+    }
+
+    fn make_row_with_2_labels(l1: &str, l2: &str, value: f64, timestamp: i64) -> Row {
+        Row {
+            values: vec![
+                api::v1::Value {
+                    value_data: Some(api::v1::value::ValueData::StringValue(l1.to_string())),
+                },
+                api::v1::Value {
+                    value_data: Some(api::v1::value::ValueData::StringValue(l2.to_string())),
+                },
+                api::v1::Value {
+                    value_data: Some(api::v1::value::ValueData::F64Value(value)),
+                },
+                api::v1::Value {
+                    value_data: Some(api::v1::value::ValueData::TsMillisecondValue(timestamp)),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn test_write_request_to_row_insert_exprs() {
+        let write_request = WriteRequest {
+            timeseries: mock_timeseries(),
+            ..Default::default()
+        };
+
+        let mut exprs = to_grpc_row_insert_requests(write_request)
+            .unwrap()
+            .0
+            .inserts;
+        exprs.sort_unstable_by(|l, r| l.table_name.cmp(&r.table_name));
+        assert_eq!(3, exprs.len());
+        assert_eq!("metric1", exprs[0].table_name);
+        assert_eq!("metric2", exprs[1].table_name);
+        assert_eq!("metric3", exprs[2].table_name);
+
+        let rows = exprs[0].rows.as_ref().unwrap();
+        let schema = &rows.schema;
+        let rows = &rows.rows;
+        assert_eq!(2, rows.len());
+        assert_eq!(3, schema.len());
+        assert_eq!(
+            column_schemas_with(vec![("job", ColumnDataType::String, SemanticType::Tag)]),
+            *schema
+        );
+        assert_eq!(
+            &vec![
+                make_row_with_label("spark", 1.0, 1000),
+                make_row_with_label("spark", 2.0, 2000),
+            ],
+            rows
+        );
+
+        let rows = exprs[1].rows.as_ref().unwrap();
+        let schema = &rows.schema;
+        let rows = &rows.rows;
+        assert_eq!(2, rows.len());
+        assert_eq!(4, schema.len());
+        assert_eq!(
+            column_schemas_with(vec![
+                ("instance", ColumnDataType::String, SemanticType::Tag),
+                ("idc", ColumnDataType::String, SemanticType::Tag)
+            ]),
+            *schema
+        );
+        assert_eq!(
+            &vec![
+                make_row_with_2_labels("test_host1", "z001", 3.0, 1000),
+                make_row_with_2_labels("test_host1", "z001", 4.0, 2000),
+            ],
+            rows
+        );
+
+        let rows = exprs[2].rows.as_ref().unwrap();
+        let schema = &rows.schema;
+        let rows = &rows.rows;
+        assert_eq!(3, rows.len());
+        assert_eq!(4, schema.len());
+        assert_eq!(
+            column_schemas_with(vec![
+                ("idc", ColumnDataType::String, SemanticType::Tag),
+                ("app", ColumnDataType::String, SemanticType::Tag)
+            ]),
+            *schema
+        );
+        assert_eq!(
+            &vec![
+                make_row_with_2_labels("z002", "biz", 5.0, 1000),
+                make_row_with_2_labels("z002", "biz", 6.0, 2000),
+                make_row_with_2_labels("z002", "biz", 7.0, 3000),
+            ],
+            rows
+        );
     }
 
     #[test]
