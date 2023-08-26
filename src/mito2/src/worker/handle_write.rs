@@ -89,7 +89,7 @@ impl<S> RegionWorkerLoop<S> {
                 };
 
                 // A new region to write, checks whether we need to flush this region.
-                self.maybe_flush_region(&region);
+                self.flush_region_if_full(&region);
                 // Checks whether the region is stalling.
                 let region_ctx_opt = if self.flush_scheduler.is_stalling(region_id) {
                     // We use `None` to represent the region exists but is stalling so
@@ -139,7 +139,7 @@ impl<S> RegionWorkerLoop<S> {
 
     /// Returns true if the engine needs to reject some write requests.
     fn should_reject_write(&self) -> bool {
-        // If memory usage reaches high watermark (we should also consider pending flush requests) returns true.
+        // If memory usage reaches high threshold (we should also consider pending flush requests) returns true.
         unimplemented!()
     }
 }

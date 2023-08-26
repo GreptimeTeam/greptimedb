@@ -14,6 +14,7 @@
 
 //! Handling flush related requests.
 
+use crate::flush::{FlushReason, RegionFlushTask};
 use crate::region::MitoRegionRef;
 use crate::worker::RegionWorkerLoop;
 
@@ -30,18 +31,25 @@ impl<S> RegionWorkerLoop<S> {
         self.find_regions_to_flush();
     }
 
+    /// Find some regions to flush to reduce write buffer usage.
     pub(crate) fn find_regions_to_flush(&self) {
         unimplemented!()
     }
 
-    pub(crate) fn maybe_flush_region(&mut self, region: &MitoRegionRef) {
+    /// Flush a region if it meets flush requirements.
+    pub(crate) fn flush_region_if_full(&mut self, region: &MitoRegionRef) {
         let version_data = region.version_control.current();
         if self
             .write_buffer_manager
             .should_flush_region(version_data.version.mutable_stats())
         {
             // We need to flush this region.
-            self.flush_scheduler.schedule_flush(region)
+            let task = RegionFlushTask {
+                region_id: region.region_id,
+                reason: FlushReason::MemtableFull,
+                sender: None,
+            };
+            self.flush_scheduler.schedule_flush(region, task);
         }
     }
 }

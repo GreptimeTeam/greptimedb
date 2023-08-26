@@ -18,7 +18,9 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use store_api::storage::{RegionId, SequenceNumber};
+use tokio::sync::oneshot::Sender;
 
+use crate::error::Result;
 use crate::memtable::MemtableId;
 use crate::region::MitoRegionRef;
 use crate::request::{RegionTask, SenderWriteRequest};
@@ -84,36 +86,54 @@ impl WriteBufferManager for WriteBufferManagerImpl {
     }
 }
 
-pub(crate) struct RegionFlushRequest {
+/// Reason of a flush task.
+pub enum FlushReason {
+    /// Other reasons.
+    Others,
+    /// Memtable is full.
+    MemtableFull,
+    /// Engine reaches flush threshold.
+    EngineFull,
+    // TODO(yingwen): Alter, manually.
+}
+
+/// Task to flush a region.
+pub(crate) struct RegionFlushTask {
     /// Region to flush.
-    region_id: RegionId,
-    /// Memtable id to flush.
-    memtable_id: MemtableId,
-    /// Last sequence of data to be flushed.
-    flush_sequence: SequenceNumber,
-    // TODO(yingwen): result sender.
+    pub(crate) region_id: RegionId,
+    /// Reason to flush.
+    pub(crate) reason: FlushReason,
+    /// Flush result sender.
+    pub(crate) sender: Option<Sender<Result<()>>>,
 }
 
 /// Manages background flushes of a worker.
 #[derive(Default)]
 pub(crate) struct FlushScheduler {
-    queue: VecDeque<RegionFlushRequest>,
+    /// Pending flush tasks.
+    queue: VecDeque<RegionFlushTask>,
     region_status: HashMap<RegionId, FlushStatus>,
+    /// Number of running flush jobs.
+    num_flush_running: usize,
 }
 
 impl FlushScheduler {
+    /// Returns true if the region is stalling.
     pub(crate) fn is_stalling(&self, region_id: RegionId) -> bool {
-        unimplemented!()
-    }
-
-    pub(crate) fn schedule_flush(&self, region: &MitoRegionRef) {
         todo!()
     }
 
+    /// Schedules a flush `task` for specific `region`.
+    pub(crate) fn schedule_flush(&self, region: &MitoRegionRef, task: RegionFlushTask) {
+        todo!()
+    }
+
+    /// Add write `request` to pending queue.
     pub(crate) fn add_write_request_to_pending(&mut self, request: SenderWriteRequest) {
         todo!()
     }
 
+    /// Add ddl `task` to pending queue.
     pub(crate) fn add_ddl_request_to_pending(&mut self, region_id: RegionId, task: RegionTask) {
         todo!()
     }
@@ -123,8 +143,8 @@ impl FlushScheduler {
 struct FlushStatus {
     /// Current region.
     region: MitoRegionRef,
-    /// Current running flush job.
-    flushing: Option<RegionFlushRequest>,
+    /// Current running flush task.
+    flushing: Option<RegionFlushTask>,
     /// The number of flush requests waiting in queue.
     num_queueing: usize,
     /// The region is stalling.
