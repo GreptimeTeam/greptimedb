@@ -30,6 +30,9 @@ pub trait WriteBufferManager: Send + Sync + std::fmt::Debug {
     /// Returns whether to trigger the engine.
     fn should_flush_engine(&self) -> bool;
 
+    /// Returns whether the mutable memtable of this region needs to flush.
+    fn should_flush_region(&self, stats: RegionMemtableStats) -> bool;
+
     /// Reserves `mem` bytes.
     fn reserve_mem(&self, mem: usize);
 
@@ -48,11 +51,24 @@ pub trait WriteBufferManager: Send + Sync + std::fmt::Debug {
 
 pub type WriteBufferManagerRef = Arc<dyn WriteBufferManager>;
 
+/// Statistics of a region's memtable.
+#[derive(Debug)]
+pub struct RegionMemtableStats {
+    /// Size of the mutable memtable.
+    pub bytes_mutable: usize,
+    /// Write buffer size of the region.
+    pub write_buffer_size: usize,
+}
+
 #[derive(Debug)]
 pub struct WriteBufferManagerImpl {}
 
 impl WriteBufferManager for WriteBufferManagerImpl {
     fn should_flush_engine(&self) -> bool {
+        todo!()
+    }
+
+    fn should_flush_region(&self, _stats: RegionMemtableStats) -> bool {
         todo!()
     }
 
@@ -96,7 +112,7 @@ impl FlushScheduler {
         unimplemented!()
     }
 
-    pub(crate) fn schedule_flush(&self, region: MitoRegionRef, request: RegionFlushRequest) {
+    pub(crate) fn schedule_flush(&self, region: &MitoRegionRef) {
         todo!()
     }
 

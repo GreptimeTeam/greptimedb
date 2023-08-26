@@ -14,6 +14,7 @@
 
 //! Handling flush related requests.
 
+use crate::region::MitoRegionRef;
 use crate::worker::RegionWorkerLoop;
 
 impl<S> RegionWorkerLoop<S> {
@@ -33,7 +34,14 @@ impl<S> RegionWorkerLoop<S> {
         unimplemented!()
     }
 
-    pub(crate) fn flush_region(&self) {
-        unimplemented!()
+    pub(crate) fn maybe_flush_region(&mut self, region: &MitoRegionRef) {
+        let version_data = region.version_control.current();
+        if self
+            .write_buffer_manager
+            .should_flush_region(version_data.version.mutable_stats())
+        {
+            // We need to flush this region.
+            self.flush_scheduler.schedule_flush(region)
+        }
     }
 }

@@ -35,7 +35,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return;
         }
 
-        // Make room for write.
+        // Flush this worker if the engine needs to flush.
         self.maybe_flush_worker();
 
         if self.should_reject_write() {
@@ -48,21 +48,21 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         // Write to WAL.
         let mut wal_writer = self.wal.writer();
-        for region_ctx in region_ctxs.values_mut() {
+        for region_ctx in region_ctxs.values_mut().filter_map(|v| v.as_mut()) {
             if let Err(e) = region_ctx.add_wal_entry(&mut wal_writer).map_err(Arc::new) {
                 region_ctx.set_error(e);
             }
         }
         if let Err(e) = wal_writer.write_to_wal().await.map_err(Arc::new) {
             // Failed to write wal.
-            for mut region_ctx in region_ctxs.into_values() {
+            for mut region_ctx in region_ctxs.into_values().filter_map(|v| v) {
                 region_ctx.set_error(e.clone());
             }
             return;
         }
 
         // Write to memtables.
-        for mut region_ctx in region_ctxs.into_values() {
+        for mut region_ctx in region_ctxs.into_values().filter_map(|v| v) {
             region_ctx.write_memtable();
         }
     }
@@ -73,17 +73,11 @@ impl<S> RegionWorkerLoop<S> {
     fn prepare_region_write_ctx(
         &mut self,
         write_requests: Vec<SenderWriteRequest>,
-    ) -> HashMap<RegionId, RegionWriteCtx> {
+    ) -> HashMap<RegionId, Option<RegionWriteCtx>> {
+        // Region write contexts. If a region is stalling, the value of the map is `None`.
         let mut region_ctxs = HashMap::new();
         for mut sender_req in write_requests {
             let region_id = sender_req.request.region_id;
-
-            // If this region is stalling, we need to add requests to pending queue.
-            if self.flush_scheduler.is_stalling(region_id) {
-                self.flush_scheduler
-                    .add_write_request_to_pending(sender_req);
-                continue;
-            }
 
             // Checks whether the region exists.
             if let hash_map::Entry::Vacant(e) = region_ctxs.entry(region_id) {
@@ -94,15 +88,34 @@ impl<S> RegionWorkerLoop<S> {
                     continue;
                 };
 
-                // Initialize the context.
-                e.insert(RegionWriteCtx::new(
-                    region.region_id,
-                    &region.version_control,
-                ));
+                // A new region to write, checks whether we need to flush this region.
+                self.maybe_flush_region(&region);
+                // Checks whether the region is stalling.
+                let region_ctx_opt = if self.flush_scheduler.is_stalling(region_id) {
+                    // We use `None` to represent the region exists but is stalling so
+                    // there is no write context for it.
+                    None
+                } else {
+                    // Initialize the context.
+                    Some(RegionWriteCtx::new(
+                        region.region_id,
+                        &region.version_control,
+                    ))
+                };
+
+                e.insert(region_ctx_opt);
             }
 
             // Safety: Now we ensure the region exists.
-            let region_ctx = region_ctxs.get_mut(&region_id).unwrap();
+            let region_ctx_opt = region_ctxs.get_mut(&region_id).unwrap();
+
+            let Some(region_ctx) = region_ctx_opt else {
+                // If this region is stalling, we need to add requests to pending queue
+                // and write to the region later.
+                self.flush_scheduler
+                    .add_write_request_to_pending(sender_req);
+                continue;
+            };
 
             // Checks whether request schema is compatible with region schema.
             if let Err(e) =

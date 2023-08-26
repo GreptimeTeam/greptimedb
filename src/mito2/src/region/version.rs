@@ -28,6 +28,7 @@ use std::sync::{Arc, RwLock};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::SequenceNumber;
 
+use crate::flush::RegionMemtableStats;
 use crate::memtable::version::{MemtableVersion, MemtableVersionRef};
 use crate::memtable::MemtableRef;
 use crate::sst::version::{SstVersion, SstVersionRef};
@@ -100,6 +101,13 @@ pub(crate) struct Version {
 }
 
 pub(crate) type VersionRef = Arc<Version>;
+
+impl Version {
+    /// Returns statistics of the mutable memtable.
+    pub(crate) fn mutable_stats(&self) -> RegionMemtableStats {
+        todo!()
+    }
+}
 
 /// Version builder.
 pub(crate) struct VersionBuilder {
