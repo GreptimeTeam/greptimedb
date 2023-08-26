@@ -60,32 +60,27 @@ pub struct RegionMemtableStats {
     pub write_buffer_size: usize,
 }
 
+// TODO(yingwen): Implements the manager.
 #[derive(Debug)]
 pub struct WriteBufferManagerImpl {}
 
 impl WriteBufferManager for WriteBufferManagerImpl {
     fn should_flush_engine(&self) -> bool {
-        todo!()
+        false
     }
 
     fn should_flush_region(&self, _stats: RegionMemtableStats) -> bool {
-        todo!()
+        false
     }
 
-    fn reserve_mem(&self, _mem: usize) {
-        todo!()
-    }
+    fn reserve_mem(&self, _mem: usize) {}
 
-    fn schedule_free_mem(&self, _mem: usize) {
-        todo!()
-    }
+    fn schedule_free_mem(&self, _mem: usize) {}
 
-    fn free_mem(&self, _mem: usize) {
-        todo!()
-    }
+    fn free_mem(&self, _mem: usize) {}
 
     fn memory_usage(&self) -> usize {
-        todo!()
+        0
     }
 }
 
