@@ -14,7 +14,7 @@
 
 //! Flush related utilities and structs.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{hash_map, HashMap, VecDeque};
 use std::sync::Arc;
 
 use store_api::storage::{RegionId, SequenceNumber};
@@ -24,6 +24,8 @@ use crate::error::Result;
 use crate::memtable::MemtableId;
 use crate::region::MitoRegionRef;
 use crate::request::{RegionTask, SenderWriteRequest};
+
+const FLUSH_JOB_LIMIT: usize = 4;
 
 /// Global write buffer (memtable) manager.
 ///
@@ -107,14 +109,35 @@ pub(crate) struct RegionFlushTask {
     pub(crate) sender: Option<Sender<Result<()>>>,
 }
 
+impl RegionFlushTask {
+    /// Consumes the task and notify the sender the job is success.
+    fn on_success(self) {
+        if let Some(sender) = self.sender {
+            let _ = sender.send(Ok(()));
+        }
+    }
+}
+
 /// Manages background flushes of a worker.
-#[derive(Default)]
 pub(crate) struct FlushScheduler {
     /// Pending flush tasks.
     queue: VecDeque<RegionFlushTask>,
     region_status: HashMap<RegionId, FlushStatus>,
     /// Number of running flush jobs.
     num_flush_running: usize,
+    /// Max number of background flush jobs.
+    job_limit: usize,
+}
+
+impl Default for FlushScheduler {
+    fn default() -> Self {
+        FlushScheduler {
+            queue: VecDeque::new(),
+            region_status: HashMap::new(),
+            num_flush_running: 0,
+            job_limit: FLUSH_JOB_LIMIT,
+        }
+    }
 }
 
 impl FlushScheduler {
@@ -124,7 +147,40 @@ impl FlushScheduler {
     }
 
     /// Schedules a flush `task` for specific `region`.
-    pub(crate) fn schedule_flush(&self, region: &MitoRegionRef, task: RegionFlushTask) {
+    pub(crate) fn schedule_flush(&mut self, region: &MitoRegionRef, task: RegionFlushTask) {
+        debug_assert_eq!(region.region_id, task.region_id);
+
+        let version = region.version_control.current().version;
+        if version.memtables.mutable.is_empty() && version.memtables.immutable.is_none() {
+            debug_assert!(!self.region_status.contains_key(&region.region_id));
+            // The region has nothing to flush.
+            task.on_success();
+            return;
+        }
+
+        let flush_status = self
+            .region_status
+            .entry(region.region_id)
+            .or_insert_with(|| FlushStatus::new(region.clone()));
+        // Checks whether we can flush the region now.
+        if flush_status.flushing_task.is_some() {
+            // There is already a flush job running.
+            flush_status.stalling = true;
+            self.queue.push_back(task);
+            return;
+        }
+
+        // Checks flush job limit.
+        debug_assert!(self.num_flush_running <= self.job_limit);
+        if !self.queue.is_empty() || self.num_flush_running >= self.job_limit {
+            debug_assert!(self.num_flush_running == self.job_limit);
+            // We reach job limit.
+            self.queue.push_back(task);
+            return;
+        }
+
+        // We can submit the flush job.
+
         todo!()
     }
 
@@ -144,7 +200,7 @@ struct FlushStatus {
     /// Current region.
     region: MitoRegionRef,
     /// Current running flush task.
-    flushing: Option<RegionFlushTask>,
+    flushing_task: Option<RegionFlushTask>,
     /// The number of flush requests waiting in queue.
     num_queueing: usize,
     /// The region is stalling.
@@ -153,4 +209,17 @@ struct FlushStatus {
     pending_writes: Vec<SenderWriteRequest>,
     /// Pending ddl tasks.
     pending_ddls: Vec<RegionTask>,
+}
+
+impl FlushStatus {
+    fn new(region: MitoRegionRef) -> FlushStatus {
+        FlushStatus {
+            region,
+            flushing_task: None,
+            num_queueing: 0,
+            stalling: false,
+            pending_writes: Vec::new(),
+            pending_ddls: Vec::new(),
+        }
+    }
 }
