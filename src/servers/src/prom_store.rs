@@ -313,7 +313,7 @@ pub fn to_grpc_row_insert_requests(request: WriteRequest) -> Result<(RowInsertRe
                 label.name == METRIC_NAME_LABEL
             })
             .context(error::InvalidPromRemoteRequestSnafu {
-                msg: "missing '__name__' label in times-eries",
+                msg: "missing '__name__' label in time-series",
             })?
             .value;
 
