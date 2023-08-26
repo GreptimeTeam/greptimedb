@@ -16,6 +16,7 @@
 
 mod handle_close;
 mod handle_create;
+mod handle_flush;
 mod handle_open;
 mod handle_write;
 
@@ -37,7 +38,7 @@ use tokio::sync::{mpsc, Mutex};
 
 use crate::config::MitoConfig;
 use crate::error::{JoinSnafu, Result, WorkerStoppedSnafu};
-use crate::flush::WriteBufferManagerRef;
+use crate::flush::{FlushScheduler, WriteBufferManagerRef};
 use crate::memtable::time_series::TimeSeriesMemtableBuilder;
 use crate::memtable::MemtableBuilderRef;
 use crate::region::{MitoRegionRef, RegionMap, RegionMapRef};
@@ -196,6 +197,7 @@ impl RegionWorker {
             running: running.clone(),
             memtable_builder: Arc::new(TimeSeriesMemtableBuilder::default()),
             write_buffer_manager,
+            flush_scheduler: FlushScheduler::default(),
         };
         let handle = common_runtime::spawn_write(async move {
             worker_thread.run().await;
@@ -300,8 +302,11 @@ struct RegionWorkerLoop<S> {
     running: Arc<AtomicBool>,
     /// Memtable builder for each region.
     memtable_builder: MemtableBuilderRef,
+
     /// Engine write buffer manager.
     write_buffer_manager: WriteBufferManagerRef,
+    /// Schedules background flush requests.
+    flush_scheduler: FlushScheduler,
 }
 
 impl<S: LogStore> RegionWorkerLoop<S> {

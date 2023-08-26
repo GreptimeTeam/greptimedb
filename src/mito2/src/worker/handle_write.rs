@@ -35,6 +35,15 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return;
         }
 
+        // Make room for write.
+        self.maybe_flush_worker();
+
+        if self.should_reject_write() {
+            // The memory pressure is still too high, reject write requests.
+            reject_write_requests(write_requests);
+            return;
+        }
+
         let mut region_ctxs = self.prepare_region_write_ctx(write_requests);
 
         // Write to WAL.
@@ -62,12 +71,20 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 impl<S> RegionWorkerLoop<S> {
     /// Validates and groups requests by region.
     fn prepare_region_write_ctx(
-        &self,
+        &mut self,
         write_requests: Vec<SenderWriteRequest>,
     ) -> HashMap<RegionId, RegionWriteCtx> {
         let mut region_ctxs = HashMap::new();
         for mut sender_req in write_requests {
             let region_id = sender_req.request.region_id;
+
+            // If this region is stalling, we need to add requests to pending queue.
+            if self.flush_scheduler.is_stalling(region_id) {
+                self.flush_scheduler
+                    .add_write_request_to_pending(sender_req);
+                continue;
+            }
+
             // Checks whether the region exists.
             if let hash_map::Entry::Vacant(e) = region_ctxs.entry(region_id) {
                 let Some(region) = self.regions.get_region(region_id) else {
@@ -106,6 +123,17 @@ impl<S> RegionWorkerLoop<S> {
 
         region_ctxs
     }
+
+    /// Returns true if the engine needs to reject some write requests.
+    fn should_reject_write(&self) -> bool {
+        // If memory usage reaches high watermark (we should also consider pending flush requests) returns true.
+        unimplemented!()
+    }
+}
+
+/// Send rejected error to all `write_requests`.
+fn reject_write_requests(_write_requests: Vec<SenderWriteRequest>) {
+    unimplemented!()
 }
 
 /// Checks the schema and fill missing columns.

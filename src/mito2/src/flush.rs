@@ -14,7 +14,14 @@
 
 //! Flush related utilities and structs.
 
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
+
+use store_api::storage::{RegionId, SequenceNumber};
+
+use crate::memtable::MemtableId;
+use crate::region::MitoRegionRef;
+use crate::request::{RegionTask, SenderWriteRequest};
 
 /// Global write buffer (memtable) manager.
 ///
@@ -34,6 +41,9 @@ pub trait WriteBufferManager: Send + Sync + std::fmt::Debug {
 
     /// We have freed `mem` bytes.
     fn free_mem(&self, mem: usize);
+
+    /// Returns the total memory used by memtables.
+    fn memory_usage(&self) -> usize;
 }
 
 pub type WriteBufferManagerRef = Arc<dyn WriteBufferManager>;
@@ -57,4 +67,60 @@ impl WriteBufferManager for WriteBufferManagerImpl {
     fn free_mem(&self, _mem: usize) {
         todo!()
     }
+
+    fn memory_usage(&self) -> usize {
+        todo!()
+    }
+}
+
+pub(crate) struct RegionFlushRequest {
+    /// Region to flush.
+    region_id: RegionId,
+    /// Max memtable id in these memtables,
+    /// used to remove immutable memtables in current version.
+    max_memtable_id: MemtableId,
+    /// Last sequence of data to be flushed.
+    flush_sequence: SequenceNumber,
+    // TODO(yingwen): result sender, memtables to flush.
+}
+
+/// Manages background flushes of a worker.
+#[derive(Default)]
+pub(crate) struct FlushScheduler {
+    queue: VecDeque<RegionFlushRequest>,
+    region_status: HashMap<RegionId, FlushStatus>,
+}
+
+impl FlushScheduler {
+    pub(crate) fn is_stalling(&self, region_id: RegionId) -> bool {
+        unimplemented!()
+    }
+
+    pub(crate) fn schedule_flush(&self, region: MitoRegionRef, request: RegionFlushRequest) {
+        todo!()
+    }
+
+    pub(crate) fn add_write_request_to_pending(&mut self, request: SenderWriteRequest) {
+        todo!()
+    }
+
+    pub(crate) fn add_ddl_request_to_pending(&mut self, region_id: RegionId, task: RegionTask) {
+        todo!()
+    }
+}
+
+/// Flush status of a region.
+struct FlushStatus {
+    /// Current region.
+    region: MitoRegionRef,
+    /// Current running flush job.
+    flushing: Option<RegionFlushRequest>,
+    /// The number of flush requests waiting in queue.
+    num_queueing: usize,
+    /// The region is stalling.
+    stalling: bool,
+    /// Pending write requests.
+    pending_writes: Vec<SenderWriteRequest>,
+    /// Pending ddl tasks.
+    pending_ddls: Vec<RegionTask>,
 }

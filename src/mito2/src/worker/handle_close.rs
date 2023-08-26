@@ -32,6 +32,8 @@ impl<S> RegionWorkerLoop<S> {
         region.stop().await?;
         self.regions.remove_region(region_id);
 
+        // TODO(yingwen): Clean flush status.
+
         info!("Region {} closed", region_id);
 
         Ok(Output::AffectedRows(0))
