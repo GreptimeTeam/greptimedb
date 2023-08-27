@@ -165,17 +165,19 @@ async fn replay_memtable<S: LogStore>(
     flushed_sequence: SequenceNumber,
     version_control: VersionControlRef,
 ) -> Result<()> {
-    let mut region_writer_ctx = RegionWriteCtx::new(region_id, version_control);
-
     let mut notify_waiter = vec![];
-    let mut wal_stream = wal.scan(region_id, flushed_sequence)?;
-    while let Some(res) = wal_stream.next().await {
-        let (_, entry) = res?;
-        for mutation in entry.mutations.into_iter() {
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            region_writer_ctx.push_mutation(mutation.op_type, mutation.rows, Some(tx));
-            notify_waiter.push(rx);
+    {
+        let mut region_writer_ctx = RegionWriteCtx::new(region_id, version_control);
+        let mut wal_stream = wal.scan(region_id, flushed_sequence)?;
+        while let Some(res) = wal_stream.next().await {
+            let (_, entry) = res?;
+            for mutation in entry.mutations.into_iter() {
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                region_writer_ctx.push_mutation(mutation.op_type, mutation.rows, Some(tx));
+                notify_waiter.push(rx);
+            }
         }
+        region_writer_ctx.write_memtable();
     }
 
     let rows_replayed: usize = futures::future::try_join_all(notify_waiter)

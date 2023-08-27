@@ -68,10 +68,18 @@ impl TestEnv {
     }
 
     /// Creates a new engine with specific config under this env.
-    pub async fn create_engine(&self, config: MitoConfig) -> MitoEngine {
+    pub async fn create_engine(
+        &self,
+        config: MitoConfig,
+    ) -> (MitoEngine, Arc<RaftEngineLogStore>, ObjectStore) {
         let (log_store, object_store) = self.create_log_and_object_store().await;
 
-        MitoEngine::new(config, Arc::new(log_store), object_store)
+        let logstore = Arc::new(log_store);
+        (
+            MitoEngine::new(config, logstore.clone(), object_store.clone()),
+            logstore,
+            object_store,
+        )
     }
 
     /// Creates a new [WorkerGroup] with specific config under this env.
