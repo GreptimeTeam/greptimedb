@@ -26,7 +26,7 @@ use api::v1::greptime_database_server::GreptimeDatabase;
 use api::v1::greptime_database_server::GreptimeDatabaseServer;
 use api::v1::health_check_server::{HealthCheck, HealthCheckServer};
 use api::v1::prometheus_gateway_server::{PrometheusGateway, PrometheusGatewayServer};
-use api::v1::region::region_server_server::RegionServerServer;
+use api::v1::region::region_server::RegionServer;
 use api::v1::{HealthCheckRequest, HealthCheckResponse};
 #[cfg(feature = "testing")]
 use arrow_flight::flight_service_server::FlightService;
@@ -224,7 +224,7 @@ impl Server for GrpcServer {
             )))
         }
         if let Some(region_server_handler) = &self.region_server_handler {
-            builder = builder.add_service(RegionServerServer::new(region_server_handler.clone()))
+            builder = builder.add_service(RegionServer::new(region_server_handler.clone()))
         }
 
         let (serve_state_tx, serve_state_rx) = oneshot::channel();

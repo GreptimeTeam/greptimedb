@@ -16,8 +16,7 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 
-use api::v1::region::region_request::Request as RequestBody;
-use api::v1::region::{QueryRequest, RegionResponse};
+use api::v1::region::{region_request, QueryRequest, RegionResponse};
 use arrow_flight::{FlightData, Ticket};
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -88,7 +87,7 @@ impl RegionServer {
 
 #[async_trait]
 impl RegionServerHandler for RegionServer {
-    async fn handle(&self, _request: RequestBody) -> ServerResult<RegionResponse> {
+    async fn handle(&self, _request: region_request::Body) -> ServerResult<RegionResponse> {
         todo!()
     }
 }

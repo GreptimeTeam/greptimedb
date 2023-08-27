@@ -16,9 +16,8 @@ use std::sync::Arc;
 
 use api::helper::region_request_type;
 use api::v1::auth_header::AuthScheme;
-use api::v1::region::region_request::Request as RequestBody;
-use api::v1::region::region_server_server::RegionServer as RegionServerService;
-use api::v1::region::{RegionRequest, RegionResponse};
+use api::v1::region::region_server::Region as RegionServer;
+use api::v1::region::{region_request, RegionRequest, RegionResponse};
 use api::v1::{Basic, RequestHeader};
 use async_trait::async_trait;
 use auth::{Identity, Password, UserInfoRef, UserProviderRef};
@@ -42,7 +41,7 @@ use crate::metrics::{METRIC_AUTH_FAILURE, METRIC_CODE_LABEL};
 
 #[async_trait]
 pub trait RegionServerHandler: Send + Sync {
-    async fn handle(&self, request: RequestBody) -> Result<RegionResponse>;
+    async fn handle(&self, request: region_request::Body) -> Result<RegionResponse>;
 }
 
 pub type RegionServerHandlerRef = Arc<dyn RegionServerHandler>;
@@ -68,7 +67,7 @@ impl RegionServerRequestHandler {
     }
 
     async fn handle(&self, request: RegionRequest) -> Result<RegionResponse> {
-        let query = request.request.context(InvalidQuerySnafu {
+        let query = request.body.context(InvalidQuerySnafu {
             reason: "Expecting non-empty GreptimeRequest.",
         })?;
 
@@ -183,7 +182,7 @@ pub(crate) fn create_query_context(header: Option<&RequestHeader>) -> QueryConte
 }
 
 #[async_trait]
-impl RegionServerService for RegionServerRequestHandler {
+impl RegionServer for RegionServerRequestHandler {
     async fn handle(
         &self,
         request: Request<RegionRequest>,
@@ -191,5 +190,12 @@ impl RegionServerService for RegionServerRequestHandler {
         let request = request.into_inner();
         let response = self.handle(request).await?;
         Ok(Response::new(response))
+    }
+
+    async fn handle_requests(
+        &self,
+        _request: tonic::Request<tonic::Streaming<RegionRequest>>,
+    ) -> TonicResult<Response<RegionResponse>> {
+        unimplemented!()
     }
 }
