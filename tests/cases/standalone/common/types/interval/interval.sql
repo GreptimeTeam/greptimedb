@@ -15,6 +15,11 @@ SELECT INTERVAL '6 years' / 2;
 
 SELECT INTERVAL '6 years' = INTERVAL '72 months';
 
+SELECT arrow_typeof(INTERVAL '1 month');
+
+-- INTERVAL + TIME CONSTANT
+SELECT current_time() + INTERVAL '1 hour';
+
 -- table with interval type test
 CREATE TABLE IF NOT EXISTS intervals(
   ts TIMESTAMP TIME INDEX,
@@ -61,6 +66,7 @@ SELECT TIMESTAMP '1992-09-20 11:30:00.123456' + interval_value as new_value from
 
 -- TIMESTAMP CONSTANT - INTERVAL
 SELECT TIMESTAMP '1992-09-20 11:30:00.123456' - interval_value as new_value from intervals;
+
 
 -- Interval type does not support aggregation functions.
 SELECT MIN(interval_value) from intervals;

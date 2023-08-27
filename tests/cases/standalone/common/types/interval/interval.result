@@ -51,6 +51,19 @@ SELECT INTERVAL '6 years' = INTERVAL '72 months';
 
 Error: 3000(PlanQuery), This feature is not implemented: Unsupported interval operator: Eq
 
+SELECT arrow_typeof(INTERVAL '1 month');
+
++---------------------------------------------------------------------+
+| arrow_typeof(IntervalMonthDayNano("79228162514264337593543950336")) |
++---------------------------------------------------------------------+
+| Interval(MonthDayNano)                                              |
++---------------------------------------------------------------------+
+
+-- INTERVAL + TIME CONSTANT
+SELECT current_time() + INTERVAL '1 hour';
+
+Error: 3000(PlanQuery), Error during planning: Cannot coerce arithmetic expression Time64(Nanosecond) + Interval(MonthDayNano) to valid types
+
 -- table with interval type test
 CREATE TABLE IF NOT EXISTS intervals(
   ts TIMESTAMP TIME INDEX,
