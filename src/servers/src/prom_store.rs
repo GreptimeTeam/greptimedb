@@ -331,11 +331,13 @@ pub fn to_grpc_row_insert_requests(request: WriteRequest) -> Result<(RowInsertRe
             let mut one_row = table_data.alloc_one_row();
 
             // labels
-            let kvs = series
-                .labels
-                .iter()
-                .skip_while(|label| label.name == METRIC_NAME_LABEL)
-                .map(|label| (label.name.as_str(), label.value.as_str()));
+            let kvs = series.labels.iter().filter_map(|label| {
+                if label.name == METRIC_NAME_LABEL {
+                    None
+                } else {
+                    Some((label.name.as_str(), label.value.as_str()))
+                }
+            });
             row_writer::write_tags(table_data, kvs, &mut one_row)?;
             // value
             row_writer::write_f64(table_data, FIELD_COLUMN_NAME, *value, &mut one_row)?;

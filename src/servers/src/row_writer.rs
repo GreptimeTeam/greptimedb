@@ -36,21 +36,9 @@ pub struct TableData<'a> {
 impl TableData<'_> {
     pub fn new(num_columns: usize, num_rows: usize) -> Self {
         Self {
-            schema: if num_columns > 0 {
-                Vec::with_capacity(num_columns)
-            } else {
-                Vec::new()
-            },
-            rows: if num_rows > 0 {
-                Vec::with_capacity(num_rows)
-            } else {
-                Vec::new()
-            },
-            column_indexes: if num_columns > 0 {
-                HashMap::with_capacity(num_columns)
-            } else {
-                HashMap::new()
-            },
+            schema: Vec::with_capacity(num_columns),
+            rows: Vec::with_capacity(num_rows),
+            column_indexes: HashMap::with_capacity(num_columns),
         }
     }
 
@@ -101,6 +89,7 @@ impl<'a> MultiTableData<'a> {
             .or_insert_with(|| TableData::new(num_columns, num_rows))
     }
 
+    /// Returns the request and number of rows in it.
     pub fn into_row_insert_requests(self) -> (RowInsertRequests, usize) {
         let mut total_rows = 0;
         let inserts = self
@@ -110,7 +99,7 @@ impl<'a> MultiTableData<'a> {
                 total_rows += table_data.num_rows();
                 let num_columns = table_data.num_columns();
                 let (schema, mut rows) = table_data.into_schema_and_rows();
-                for row in rows.iter_mut() {
+                for row in &mut rows {
                     if num_columns > row.values.len() {
                         row.values.resize(num_columns, Value { value_data: None });
                     }
