@@ -30,8 +30,8 @@ use crate::test_util::{CreateRequestBuilder, TestEnv};
 
 #[tokio::test]
 async fn test_engine_new_stop() {
-    let env = TestEnv::with_prefix("engine-stop");
-    let (engine, _, _) = env.create_engine(MitoConfig::default()).await;
+    let mut env = TestEnv::with_prefix("engine-stop");
+    let engine = env.create_engine(MitoConfig::default()).await;
 
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new().build();
@@ -57,8 +57,8 @@ async fn test_engine_new_stop() {
 
 #[tokio::test]
 async fn test_engine_create_new_region() {
-    let env = TestEnv::with_prefix("new-region");
-    let (engine, _, _) = env.create_engine(MitoConfig::default()).await;
+    let mut env = TestEnv::with_prefix("new-region");
+    let engine = env.create_engine(MitoConfig::default()).await;
 
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new().build();
@@ -72,8 +72,8 @@ async fn test_engine_create_new_region() {
 
 #[tokio::test]
 async fn test_engine_create_region_if_not_exists() {
-    let env = TestEnv::with_prefix("create-not-exists");
-    let (engine, _, _) = env.create_engine(MitoConfig::default()).await;
+    let mut env = TestEnv::with_prefix("create-not-exists");
+    let engine = env.create_engine(MitoConfig::default()).await;
 
     let region_id = RegionId::new(1, 1);
     let builder = CreateRequestBuilder::new().create_if_not_exists(true);
@@ -91,8 +91,8 @@ async fn test_engine_create_region_if_not_exists() {
 
 #[tokio::test]
 async fn test_engine_create_existing_region() {
-    let env = TestEnv::with_prefix("create-existing");
-    let (engine, _, _) = env.create_engine(MitoConfig::default()).await;
+    let mut env = TestEnv::with_prefix("create-existing");
+    let engine = env.create_engine(MitoConfig::default()).await;
 
     let region_id = RegionId::new(1, 1);
     let builder = CreateRequestBuilder::new();
@@ -114,8 +114,8 @@ async fn test_engine_create_existing_region() {
 
 #[tokio::test]
 async fn test_engine_open_empty() {
-    let env = TestEnv::with_prefix("open-empty");
-    let (engine, _, _) = env.create_engine(MitoConfig::default()).await;
+    let mut env = TestEnv::with_prefix("open-empty");
+    let engine = env.create_engine(MitoConfig::default()).await;
 
     let err = engine
         .handle_request(
@@ -136,8 +136,8 @@ async fn test_engine_open_empty() {
 
 #[tokio::test]
 async fn test_engine_open_existing() {
-    let env = TestEnv::with_prefix("open-exiting");
-    let (engine, _, _) = env.create_engine(MitoConfig::default()).await;
+    let mut env = TestEnv::with_prefix("open-exiting");
+    let engine = env.create_engine(MitoConfig::default()).await;
 
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new().build();
@@ -162,8 +162,8 @@ async fn test_engine_open_existing() {
 
 #[tokio::test]
 async fn test_engine_close_region() {
-    let env = TestEnv::with_prefix("close");
-    let (engine, _, _) = env.create_engine(MitoConfig::default()).await;
+    let mut env = TestEnv::with_prefix("close");
+    let engine = env.create_engine(MitoConfig::default()).await;
 
     let region_id = RegionId::new(1, 1);
     // It's okay to close a region doesn't exist.
@@ -194,8 +194,8 @@ async fn test_engine_close_region() {
 
 #[tokio::test]
 async fn test_engine_reopen_region() {
-    let env = TestEnv::with_prefix("reopen-region");
-    let (engine, _, _) = env.create_engine(MitoConfig::default()).await;
+    let mut env = TestEnv::with_prefix("reopen-region");
+    let engine = env.create_engine(MitoConfig::default()).await;
 
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new().build();
@@ -256,8 +256,8 @@ fn build_rows(num_rows: usize) -> Vec<Row> {
 
 #[tokio::test]
 async fn test_write_to_region() {
-    let env = TestEnv::with_prefix("write-to-region");
-    let (engine, _, _) = env.create_engine(MitoConfig::default()).await;
+    let mut env = TestEnv::with_prefix("write-to-region");
+    let engine = env.create_engine(MitoConfig::default()).await;
 
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new().build();
@@ -290,8 +290,8 @@ async fn test_write_to_region() {
 #[tokio::test]
 async fn test_region_replay() {
     common_telemetry::init_default_ut_logging();
-    let env = TestEnv::with_prefix("region-replay");
-    let (engine, logstore, object_store) = env.create_engine(MitoConfig::default()).await;
+    let mut env = TestEnv::with_prefix("region-replay");
+    let engine = env.create_engine(MitoConfig::default()).await;
 
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new().build();
@@ -321,11 +321,13 @@ async fn test_region_replay() {
     };
     assert_eq!(num_rows, rows_inserted);
 
-    // logstore.stop().await.unwrap();
     engine.stop().await.unwrap();
-    // drop(logstore);
 
-    let engine = MitoEngine::new(MitoConfig::default(), logstore, object_store);
+    let engine = MitoEngine::new(
+        MitoConfig::default(),
+        env.get_logstore().unwrap(),
+        env.get_object_store().unwrap(),
+    );
 
     let open_region = engine
         .handle_request(
