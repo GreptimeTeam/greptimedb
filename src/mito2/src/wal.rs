@@ -40,7 +40,7 @@ pub type WalEntryStream<'a> = BoxStream<'a, Result<(EntryId, WalEntry)>>;
 /// Write ahead log.
 ///
 /// All regions in the engine shares the same WAL instance.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Wal<S> {
     /// The underlying log store.
     store: Arc<S>,
@@ -50,6 +50,12 @@ impl<S> Wal<S> {
     /// Creates a new [Wal] from the log store.
     pub fn new(store: Arc<S>) -> Self {
         Self { store }
+    }
+
+    pub fn cloned(&self) -> Wal<S> {
+        Wal {
+            store: self.store.clone(),
+        }
     }
 }
 

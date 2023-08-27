@@ -16,41 +16,50 @@
 
 use std::sync::Arc;
 
+use common_query::Output;
+use common_telemetry::info;
+use futures::StreamExt;
 use object_store::util::join_dir;
 use object_store::ObjectStore;
-use snafu::{ensure, OptionExt};
+use snafu::{ensure, OptionExt, ResultExt};
+use store_api::logstore::LogStore;
 use store_api::metadata::RegionMetadata;
-use store_api::storage::RegionId;
+use store_api::storage::{RegionId, SequenceNumber};
 
 use crate::config::MitoConfig;
-use crate::error::{RegionCorruptedSnafu, RegionNotFoundSnafu, Result};
+use crate::error::{RecvSnafu, RegionCorruptedSnafu, RegionNotFoundSnafu, Result};
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::memtable::MemtableBuilderRef;
-use crate::region::version::{VersionBuilder, VersionControl};
+use crate::region::version::{VersionBuilder, VersionControl, VersionControlRef};
 use crate::region::MitoRegion;
+use crate::region_writer::RegionWriteCtx;
+use crate::wal::Wal;
 
 /// Builder to create a new [MitoRegion] or open an existing one.
-pub(crate) struct RegionOpener {
+pub(crate) struct RegionOpener<S> {
     region_id: RegionId,
     metadata: Option<RegionMetadata>,
     memtable_builder: MemtableBuilderRef,
     object_store: ObjectStore,
     region_dir: String,
+    wal: Wal<S>,
 }
 
-impl RegionOpener {
+impl<S: LogStore> RegionOpener<S> {
     /// Returns a new opener.
     pub(crate) fn new(
         region_id: RegionId,
         memtable_builder: MemtableBuilderRef,
         object_store: ObjectStore,
-    ) -> RegionOpener {
+        wal: Wal<S>,
+    ) -> RegionOpener<S> {
         RegionOpener {
             region_id,
             metadata: None,
             memtable_builder,
             object_store,
             region_dir: String::new(),
+            wal,
         }
     }
 
@@ -125,19 +134,69 @@ impl RegionOpener {
             }
         );
 
+        let region_id = metadata.region_id;
         let mutable = self.memtable_builder.build(&metadata);
         let version = VersionBuilder::new(metadata, mutable).build();
+        let flushed_sequence = version.flushed_sequence;
+
         let version_control = Arc::new(VersionControl::new(version));
+        replay_memtable(
+            &self.wal,
+            region_id,
+            flushed_sequence,
+            version_control.clone(),
+        )
+        .await?;
 
-        // TODO(yingwen): Replay.
-
-        Ok(MitoRegion {
+        let region = MitoRegion {
             region_id: self.region_id,
             version_control,
             region_dir: self.region_dir,
             manifest_manager,
-        })
+        };
+        Ok(region)
     }
+}
+
+/// Replays the mutations from WAL and inserts mutations to memtable of given region.
+async fn replay_memtable<S: LogStore>(
+    wal: &Wal<S>,
+    region_id: RegionId,
+    flushed_sequence: SequenceNumber,
+    version_control: VersionControlRef,
+) -> Result<()> {
+    let mut region_writer_ctx = RegionWriteCtx::new(region_id, version_control);
+
+    let mut notify_waiter = vec![];
+    let mut wal_stream = wal.scan(region_id, flushed_sequence)?;
+    while let Some(res) = wal_stream.next().await {
+        let (_, entry) = res?;
+        for mutation in entry.mutations.into_iter() {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            region_writer_ctx.push_mutation(mutation.op_type, mutation.rows, Some(tx));
+            notify_waiter.push(rx);
+        }
+    }
+
+    let rows_replayed: usize = futures::future::try_join_all(notify_waiter)
+        .await
+        .context(RecvSnafu)?
+        .into_iter()
+        .collect::<Result<Vec<Output>>>()?
+        .into_iter()
+        .map(|output| {
+            let Output::AffectedRows(rows_inserted) = output else {
+                unreachable!("Only expect affected rows during WAL replay.")
+            };
+            rows_inserted
+        })
+        .sum();
+
+    info!(
+        "Replay WAL for region: {}, rows recovered: {}",
+        region_id, rows_replayed
+    );
+    Ok(())
 }
 
 /// Returns the directory to the manifest files.

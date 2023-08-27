@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 use common_query::Output;
 use common_telemetry::info;
+use store_api::logstore::LogStore;
 use store_api::region_request::RegionOpenRequest;
 use store_api::storage::RegionId;
 
@@ -25,7 +26,7 @@ use crate::error::Result;
 use crate::region::opener::RegionOpener;
 use crate::worker::RegionWorkerLoop;
 
-impl<S> RegionWorkerLoop<S> {
+impl<S: LogStore> RegionWorkerLoop<S> {
     pub(crate) async fn handle_open_request(
         &mut self,
         region_id: RegionId,
@@ -42,6 +43,7 @@ impl<S> RegionWorkerLoop<S> {
             region_id,
             self.memtable_builder.clone(),
             self.object_store.clone(),
+            self.wal.cloned(),
         )
         .region_dir(&request.region_dir)
         .open(&self.config)
