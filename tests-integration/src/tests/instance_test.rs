@@ -551,7 +551,7 @@ async fn test_execute_query_external_table_parquet(instance: Arc<dyn MockInstanc
     let output = execute_sql(&instance, &format!("desc table {table_name};")).await;
     let expect = "\
 +------------+-----------------+-----+------+---------+---------------+
-| Field      | Type            | Key | Null | Default | Semantic Type |
+| Column     | Type            | Key | Null | Default | Semantic Type |
 +------------+-----------------+-----+------+---------+---------------+
 | c_int      | Int64           |     | YES  |         | FIELD         |
 | c_float    | Float64         |     | YES  |         | FIELD         |
@@ -616,7 +616,7 @@ async fn test_execute_query_external_table_orc(instance: Arc<dyn MockInstance>) 
     let output = execute_sql(&instance, &format!("desc table {table_name};")).await;
     let expect = "\
 +------------------------+---------------------+-----+------+---------+---------------+
-| Field                  | Type                | Key | Null | Default | Semantic Type |
+| Column                 | Type                | Key | Null | Default | Semantic Type |
 +------------------------+---------------------+-----+------+---------+---------------+
 | double_a               | Float64             |     | YES  |         | FIELD         |
 | a                      | Float32             |     | YES  |         | FIELD         |
@@ -691,7 +691,7 @@ async fn test_execute_query_external_table_csv(instance: Arc<dyn MockInstance>) 
     let output = execute_sql(&instance, &format!("desc table {table_name};")).await;
     let expect = "\
 +------------+-----------------+-----+------+---------+---------------+
-| Field      | Type            | Key | Null | Default | Semantic Type |
+| Column     | Type            | Key | Null | Default | Semantic Type |
 +------------+-----------------+-----+------+---------+---------------+
 | c_int      | Int64           |     | YES  |         | FIELD         |
 | c_float    | Float64         |     | YES  |         | FIELD         |
@@ -736,17 +736,17 @@ async fn test_execute_query_external_table_json(instance: Arc<dyn MockInstance>)
 
     let output = execute_sql(&instance, &format!("desc table {table_name};")).await;
     let expect = "\
-+-------+---------+-----+------+---------+---------------+
-| Field | Type    | Key | Null | Default | Semantic Type |
-+-------+---------+-----+------+---------+---------------+
-| a     | Int64   |     | YES  |         | FIELD         |
-| b     | Float64 |     | YES  |         | FIELD         |
-| c     | Boolean |     | YES  |         | FIELD         |
-| d     | String  |     | YES  |         | FIELD         |
-| e     | Int64   |     | YES  |         | FIELD         |
-| f     | String  |     | YES  |         | FIELD         |
-| g     | String  |     | YES  |         | FIELD         |
-+-------+---------+-----+------+---------+---------------+";
++--------+---------+-----+------+---------+---------------+
+| Column | Type    | Key | Null | Default | Semantic Type |
++--------+---------+-----+------+---------+---------------+
+| a      | Int64   |     | YES  |         | FIELD         |
+| b      | Float64 |     | YES  |         | FIELD         |
+| c      | Boolean |     | YES  |         | FIELD         |
+| d      | String  |     | YES  |         | FIELD         |
+| e      | Int64   |     | YES  |         | FIELD         |
+| f      | String  |     | YES  |         | FIELD         |
+| g      | String  |     | YES  |         | FIELD         |
++--------+---------+-----+------+---------+---------------+";
     check_output_stream(output, expect).await;
 
     let output = execute_sql(&instance, &format!("select * from {table_name};")).await;
@@ -796,17 +796,17 @@ async fn test_execute_query_external_table_json_with_schame(instance: Arc<dyn Mo
 
     let output = execute_sql(&instance, &format!("desc table {table_name};")).await;
     let expect = "\
-+-------+-----------------+-----+------+---------+---------------+
-| Field | Type            | Key | Null | Default | Semantic Type |
-+-------+-----------------+-----+------+---------+---------------+
-| a     | Int64           |     | YES  |         | FIELD         |
-| b     | Float64         |     | YES  |         | FIELD         |
-| c     | Boolean         |     | YES  |         | FIELD         |
-| d     | String          |     | YES  |         | FIELD         |
-| e     | TimestampSecond |     | YES  |         | FIELD         |
-| f     | Float64         |     | YES  |         | FIELD         |
-| g     | TimestampSecond |     | YES  |         | FIELD         |
-+-------+-----------------+-----+------+---------+---------------+";
++--------+-----------------+-----+------+---------+---------------+
+| Column | Type            | Key | Null | Default | Semantic Type |
++--------+-----------------+-----+------+---------+---------------+
+| a      | Int64           |     | YES  |         | FIELD         |
+| b      | Float64         |     | YES  |         | FIELD         |
+| c      | Boolean         |     | YES  |         | FIELD         |
+| d      | String          |     | YES  |         | FIELD         |
+| e      | TimestampSecond |     | YES  |         | FIELD         |
+| f      | Float64         |     | YES  |         | FIELD         |
+| g      | TimestampSecond |     | YES  |         | FIELD         |
++--------+-----------------+-----+------+---------+---------------+";
     check_output_stream(output, expect).await;
 
     let output = execute_sql(&instance, &format!("select * from {table_name};")).await;
