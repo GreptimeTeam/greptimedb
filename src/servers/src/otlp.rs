@@ -87,7 +87,9 @@ fn encode_metrics(
                 encode_summary(name, summary, resource_attrs, scope_attrs).map(Some)
             }
             // TODO(sunng87) leave histogram for next release
-            metric::Data::Histogram(_hist) => Ok(None),
+            metric::Data::Histogram(hist) => {
+                encode_histogram(name, hist, resource_attrs, scope_attrs).map(Some)
+            }
             metric::Data::ExponentialHistogram(_hist) => Ok(None),
         }
     } else {
@@ -212,36 +214,60 @@ fn encode_sum(
     })
 }
 
-// TODO(sunng87): we may need better implementation for histogram
-#[allow(dead_code)]
-fn encode_histogram(name: &str, hist: &Histogram) -> Result<InsertRequest> {
+fn encode_histogram(
+    name: &str,
+    hist: &Histogram,
+    resource_attrs: Option<&Vec<KeyValue>>,
+    scope_attrs: Option<&Vec<KeyValue>>,
+) -> Result<InsertRequest> {
     let mut lines = LinesWriter::with_lines(hist.data_points.len());
 
     for data_point in &hist.data_points {
-        for attr in &data_point.attributes {
-            write_attribute(&mut lines, attr)?;
-        }
+        write_attributes(&mut lines, resource_attrs)?;
+        write_attributes(&mut lines, scope_attrs)?;
+        write_attributes(&mut lines, Some(data_point.attributes.as_ref()))?;
 
         write_timestamp(&mut lines, data_point.time_unix_nano as i64)?;
 
         for (idx, count) in data_point.bucket_counts.iter().enumerate() {
-            // here we don't store bucket boundary
+            let le_column_name = &format!("greptime_bucket_{}_le", idx);
+            if let Some(upper_bounds) = data_point.explicit_bounds.get(idx) {
+                lines
+                    .write_f64(le_column_name, *upper_bounds)
+                    .context(error::OtlpMetricsWriteSnafu)?;
+            } else if idx == data_point.explicit_bounds.len() {
+                // The last bucket
+                lines
+                    .write_f64(le_column_name, f64::INFINITY)
+                    .context(error::OtlpMetricsWriteSnafu)?;
+            }
+
             lines
-                .write_u64(&format!("bucket_{}", idx), *count)
+                .write_u64(&format!("greptime_bucket_{}_value", idx), *count)
                 .context(error::OtlpMetricsWriteSnafu)?;
         }
 
         if let Some(min) = data_point.min {
             lines
-                .write_f64("min", min)
+                .write_f64("greptime_min", min)
                 .context(error::OtlpMetricsWriteSnafu)?;
         }
 
         if let Some(max) = data_point.max {
             lines
-                .write_f64("max", max)
+                .write_f64("greptime_max", max)
                 .context(error::OtlpMetricsWriteSnafu)?;
         }
+
+        if let Some(sum) = data_point.sum {
+            lines
+                .write_f64("greptime_sum", sum)
+                .context(error::OtlpMetricsWriteSnafu)?;
+        }
+
+        lines
+            .write_u64("greptime_count", data_point.count)
+            .context(error::OtlpMetricsWriteSnafu)?;
 
         lines.commit();
     }
@@ -358,7 +384,7 @@ mod tests {
     use opentelemetry_proto::tonic::common::v1::{AnyValue, KeyValue};
     use opentelemetry_proto::tonic::metrics::v1::number_data_point::Value;
     use opentelemetry_proto::tonic::metrics::v1::summary_data_point::ValueAtQuantile;
-    use opentelemetry_proto::tonic::metrics::v1::NumberDataPoint;
+    use opentelemetry_proto::tonic::metrics::v1::{HistogramDataPoint, NumberDataPoint};
 
     use super::*;
 
@@ -516,6 +542,65 @@ mod tests {
                 "greptime_p90",
                 "greptime_p95",
                 "greptime_count"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_encode_histogram() {
+        let data_points = vec![HistogramDataPoint {
+            attributes: vec![keyvalue("host", "testserver")],
+            time_unix_nano: 100,
+            start_time_unix_nano: 23,
+            count: 25,
+            sum: Some(100.),
+            max: Some(200.),
+            min: Some(0.03),
+            bucket_counts: vec![2, 4, 6, 9, 4],
+            explicit_bounds: vec![0.1, 1., 10., 100.],
+            ..Default::default()
+        }];
+
+        let histogram = Histogram {
+            data_points,
+            aggregation_temporality: AggregationTemporality::Delta.into(),
+        };
+        let inserts = encode_histogram(
+            "histo",
+            &histogram,
+            Some(&vec![keyvalue("resource", "app")]),
+            Some(&vec![keyvalue("scope", "otel")]),
+        )
+        .unwrap();
+
+        assert_eq!(inserts.table_name, "histo");
+        assert_eq!(inserts.row_count, 1);
+        assert_eq!(inserts.columns.len(), 18);
+        assert_eq!(
+            inserts
+                .columns
+                .iter()
+                .map(|c| &c.column_name)
+                .collect::<Vec<&String>>(),
+            vec![
+                "resource",
+                "scope",
+                "host",
+                "greptime_timestamp",
+                "greptime_bucket_0_le",
+                "greptime_bucket_0_value",
+                "greptime_bucket_1_le",
+                "greptime_bucket_1_value",
+                "greptime_bucket_2_le",
+                "greptime_bucket_2_value",
+                "greptime_bucket_3_le",
+                "greptime_bucket_3_value",
+                "greptime_bucket_4_le",
+                "greptime_bucket_4_value",
+                "greptime_min",
+                "greptime_max",
+                "greptime_sum",
+                "greptime_count",
             ]
         );
     }
