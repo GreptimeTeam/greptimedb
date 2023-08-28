@@ -16,7 +16,7 @@ use api::v1::region::region_request::Body as PbRegionRequest;
 use api::v1::region::{ColumnDef, CreateRequest as PbCreateRegionRequest};
 use api::v1::SemanticType;
 use async_trait::async_trait;
-use client::region::RegionClientBuilder;
+use client::region::RegionRequester;
 use client::Database;
 use common_catalog::consts::MITO2_ENGINE;
 use common_error::ext::ErrorExt;
@@ -38,9 +38,7 @@ use table::metadata::{RawTableInfo, TableId};
 
 use super::utils::{handle_request_datanode_error, handle_retry_error};
 use crate::ddl::DdlContext;
-use crate::error::{
-    self, BuildRegionClientSnafu, PrimaryKeyNotFoundSnafu, Result, TableMetadataManagerSnafu,
-};
+use crate::error::{self, PrimaryKeyNotFoundSnafu, Result, TableMetadataManagerSnafu};
 use crate::metrics;
 
 pub struct CreateTableProcedure {
@@ -191,15 +189,7 @@ impl CreateTableProcedure {
         let mut create_table_tasks = Vec::with_capacity(leaders.len());
 
         for datanode in leaders {
-            let client = self.context.datanode_clients.get_client(&datanode).await;
-
-            let mut builder = RegionClientBuilder::default();
-            builder.catalog(catalog);
-            builder.schema(schema);
-            builder.client(client);
-            let client = builder.build().with_context(|_| BuildRegionClientSnafu {
-                peer: datanode.clone(),
-            })?;
+            let clients = self.context.datanode_clients.clone();
 
             let regions = find_leader_regions(region_routes, &datanode);
             let requests = regions
@@ -217,7 +207,10 @@ impl CreateTableProcedure {
 
             create_table_tasks.push(common_runtime::spawn_bg(async move {
                 for request in requests {
-                    if let Err(err) = client.handle(request).await {
+                    let client = clients.get_client(&datanode).await;
+                    let requester = RegionRequester::new(client);
+
+                    if let Err(err) = requester.handle(request).await {
                         return Err(handle_request_datanode_error(datanode)(err));
                     }
                 }
@@ -593,7 +586,7 @@ mod test {
             let (client, server) = tokio::io::duplex(1024);
 
             let handler =
-                RegionServerRequestHandler::new(Arc::new(self.clone()), None, self.runtime.clone());
+                RegionServerRequestHandler::new(Arc::new(self.clone()), self.runtime.clone());
 
             tokio::spawn(async move {
                 Server::builder()

@@ -12,12 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::region::{region_request, RegionRequest, RegionResponse};
-use api::v1::{AuthHeader, RequestHeader, ResponseHeader};
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use api::v1::region::{region_request, RegionRequest, RegionRequestHeader, RegionResponse};
+use api::v1::ResponseHeader;
 use common_error::status_code::StatusCode;
 use common_telemetry::timer;
-use derive_builder::Builder;
 use snafu::OptionExt;
 
 use crate::error::{IllegalDatabaseResponseSnafu, Result, ServerSnafu};
@@ -25,39 +23,28 @@ use crate::{metrics, Client};
 
 type AffectedRows = u64;
 
-#[derive(Debug, Builder)]
-pub struct RegionClient {
-    #[builder(setter(into), default = "DEFAULT_CATALOG_NAME.to_string()")]
-    catalog: String,
-
-    #[builder(setter(into), default = "DEFAULT_SCHEMA_NAME.to_string()")]
-    schema: String,
-
-    #[builder(default)]
-    authorization: Option<AuthHeader>,
-
-    #[builder(setter(into), default)]
-    dbname: String,
-
-    #[builder(setter(strip_option), default)]
+#[derive(Debug)]
+pub struct RegionRequester {
     trace_id: Option<u64>,
-
-    #[builder(setter(strip_option), default)]
     span_id: Option<u64>,
-
     client: Client,
 }
 
-impl RegionClient {
-    pub async fn handle(&self, request: region_request::Body) -> Result<AffectedRows> {
+impl RegionRequester {
+    pub fn new(client: Client) -> Self {
+        // TODO(LFC): Pass in trace_id and span_id from some context when we have it.
+        Self {
+            trace_id: None,
+            span_id: None,
+            client,
+        }
+    }
+
+    pub async fn handle(self, request: region_request::Body) -> Result<AffectedRows> {
         let request_type = request.as_ref().to_string();
 
         let request = RegionRequest {
-            header: Some(RequestHeader {
-                catalog: self.catalog.clone(),
-                schema: self.schema.clone(),
-                authorization: self.authorization.clone(),
-                dbname: self.dbname.clone(),
+            header: Some(RegionRequestHeader {
                 trace_id: self.trace_id,
                 span_id: self.span_id,
             }),
@@ -110,29 +97,6 @@ mod test {
 
     use super::*;
     use crate::Error::{IllegalDatabaseResponse, Server};
-
-    #[test]
-    fn test_build_region_client() {
-        let result = RegionClientBuilder::default().build();
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("`client` must be initialized"));
-
-        let mut builder = RegionClientBuilder::default();
-        builder.schema("my_schema");
-        builder.trace_id(42);
-        builder.client(Client::new());
-
-        let client = builder.build().unwrap();
-
-        assert_eq!(client.catalog, DEFAULT_CATALOG_NAME);
-        assert_eq!(client.schema, "my_schema");
-        assert_eq!(client.dbname, "");
-        assert_eq!(client.trace_id, Some(42));
-        assert!(client.authorization.is_none());
-        assert!(client.span_id.is_none());
-    }
 
     #[test]
     fn test_check_response_header() {
