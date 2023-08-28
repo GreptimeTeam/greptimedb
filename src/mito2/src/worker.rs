@@ -42,7 +42,9 @@ use crate::flush::{FlushScheduler, WriteBufferManagerRef};
 use crate::memtable::time_series::TimeSeriesMemtableBuilder;
 use crate::memtable::MemtableBuilderRef;
 use crate::region::{MitoRegionRef, RegionMap, RegionMapRef};
-use crate::request::{RegionTask, RequestBody, SenderWriteRequest, WorkerRequest};
+use crate::request::{
+    DdlRequest, RegionTask, RequestBody, SenderDdlRequest, SenderWriteRequest, WorkerRequest,
+};
 use crate::wal::Wal;
 
 /// Identifier for a worker.
@@ -352,16 +354,22 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let mut ddl_requests = Vec::with_capacity(buffer.len());
         for worker_req in buffer.drain(..) {
             match worker_req {
-                WorkerRequest::Region(task) => {
-                    if let RequestBody::Write(write_request) = task.body {
+                WorkerRequest::Region(task) => match task.body {
+                    RequestBody::Write(write_request) => {
                         write_requests.push(SenderWriteRequest {
                             sender: task.sender,
                             request: write_request,
                         });
-                    } else {
-                        ddl_requests.push(task);
                     }
-                }
+                    RequestBody::Ddl(ddl) => {
+                        ddl_requests.push(SenderDdlRequest {
+                            region_id: task.region_id,
+                            sender: task.sender,
+                            request: ddl,
+                        });
+                    }
+                    RequestBody::Background(_) => todo!(),
+                },
                 // We receive a stop signal, but we still want to process remaining
                 // requests. The worker thread will then check the running flag and
                 // then exit.
@@ -379,24 +387,23 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     }
 
     /// Takes and handles all ddl requests.
-    async fn handle_ddl_requests(&mut self, ddl_tasks: Vec<RegionTask>) {
-        if ddl_tasks.is_empty() {
+    async fn handle_ddl_requests(&mut self, ddl_requests: Vec<SenderDdlRequest>) {
+        if ddl_requests.is_empty() {
             return;
         }
 
-        for task in ddl_tasks {
-            let res: std::result::Result<Output, crate::error::Error> = match task.body {
-                RequestBody::Create(req) => self.handle_create_request(task.region_id, req).await,
-                RequestBody::Open(req) => self.handle_open_request(task.region_id, req).await,
-                RequestBody::Close(_) => self.handle_close_request(task.region_id).await,
-                RequestBody::Write(_)
-                | RequestBody::Drop(_)
-                | RequestBody::Alter(_)
-                | RequestBody::Flush(_)
-                | RequestBody::Compact(_) => unreachable!(),
+        for ddl in ddl_requests {
+            let res = match ddl.request {
+                DdlRequest::Create(req) => self.handle_create_request(ddl.region_id, req).await,
+                DdlRequest::Open(req) => self.handle_open_request(ddl.region_id, req).await,
+                DdlRequest::Close(_) => self.handle_close_request(ddl.region_id).await,
+                DdlRequest::Alter(_)
+                | DdlRequest::Drop(_)
+                | DdlRequest::Flush(_)
+                | DdlRequest::Compact(_) => todo!(),
             };
 
-            if let Some(sender) = task.sender {
+            if let Some(sender) = ddl.sender {
                 // Ignore send result.
                 let _ = sender.send(res);
             }

@@ -34,7 +34,8 @@ use store_api::storage::{CompactionStrategy, RegionId};
 use tokio::sync::oneshot::{self, Receiver, Sender};
 
 use crate::config::DEFAULT_WRITE_BUFFER_SIZE;
-use crate::error::{CreateDefaultSnafu, FillDefaultSnafu, InvalidRequestSnafu, Result};
+use crate::error::{CreateDefaultSnafu, Error, FillDefaultSnafu, InvalidRequestSnafu, Result};
+use crate::sst::file::FileMeta;
 
 /// Options that affect the entire region.
 ///
@@ -365,14 +366,12 @@ impl RegionTask {
 /// It validates requests outside of workers.
 #[derive(Debug)]
 pub(crate) enum RequestBody {
+    /// Write to a region.
     Write(WriteRequest),
-    Create(RegionCreateRequest),
-    Drop(RegionDropRequest),
-    Open(RegionOpenRequest),
-    Close(RegionCloseRequest),
-    Alter(RegionAlterRequest),
-    Flush(RegionFlushRequest),
-    Compact(RegionCompactRequest),
+    /// DDL request.
+    Ddl(DdlRequest),
+    /// Requests from internal background jobs:
+    Background(BackgroundRequest),
 }
 
 impl RequestBody {
@@ -390,17 +389,70 @@ impl RequestBody {
                 let write_request = WriteRequest::new(region_id, OpType::Delete, v.rows)?;
                 RequestBody::Write(write_request)
             }
-            RegionRequest::Create(v) => RequestBody::Create(v),
-            RegionRequest::Drop(v) => RequestBody::Drop(v),
-            RegionRequest::Open(v) => RequestBody::Open(v),
-            RegionRequest::Close(v) => RequestBody::Close(v),
-            RegionRequest::Alter(v) => RequestBody::Alter(v),
-            RegionRequest::Flush(v) => RequestBody::Flush(v),
-            RegionRequest::Compact(v) => RequestBody::Compact(v),
+            RegionRequest::Create(v) => RequestBody::Ddl(DdlRequest::Create(v)),
+            RegionRequest::Drop(v) => RequestBody::Ddl(DdlRequest::Drop(v)),
+            RegionRequest::Open(v) => RequestBody::Ddl(DdlRequest::Open(v)),
+            RegionRequest::Close(v) => RequestBody::Ddl(DdlRequest::Close(v)),
+            RegionRequest::Alter(v) => RequestBody::Ddl(DdlRequest::Alter(v)),
+            RegionRequest::Flush(v) => RequestBody::Ddl(DdlRequest::Flush(v)),
+            RegionRequest::Compact(v) => RequestBody::Ddl(DdlRequest::Compact(v)),
         };
 
         Ok(body)
     }
+}
+
+/// DDL request to a region.
+#[derive(Debug)]
+pub(crate) enum DdlRequest {
+    /// Create a region.
+    Create(RegionCreateRequest),
+    /// Drop a region.
+    Drop(RegionDropRequest),
+    /// Open a region.
+    Open(RegionOpenRequest),
+    /// Close a region.
+    Close(RegionCloseRequest),
+    /// Alter metadata of a region.
+    Alter(RegionAlterRequest),
+    /// Flush a region.
+    Flush(RegionFlushRequest),
+    /// Compact a region.
+    Compact(RegionCompactRequest),
+}
+
+/// Sender and Ddl request.
+#[derive(Debug)]
+pub(crate) struct SenderDdlRequest {
+    /// Region id of the request.
+    pub(crate) region_id: RegionId,
+    /// Result sender.
+    pub(crate) sender: Option<Sender<Result<Output>>>,
+    /// Ddl request.
+    pub(crate) request: DdlRequest,
+}
+
+/// Notification from a background job.
+#[derive(Debug)]
+pub(crate) enum BackgroundRequest {
+    /// Flush is finished.
+    FlushFinished(FlushFinishedRequest),
+    /// Flush is failed.
+    FlushFailed(FlushFailedRequest),
+}
+
+/// A flush job is finished.
+#[derive(Debug)]
+pub(crate) struct FlushFinishedRequest {
+    /// Meta of the flushed SST.
+    pub(crate) file_meta: FileMeta,
+}
+
+/// A flush job is failed.
+#[derive(Debug)]
+pub(crate) struct FlushFailedRequest {
+    /// The reason of a failed flush job.
+    pub(crate) error: Error,
 }
 
 #[cfg(test)]
