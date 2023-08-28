@@ -25,3 +25,4 @@ pub const METRIC_GRPC_FLUSH_TABLE: &str = "grpc.flush_table";
 pub const METRIC_GRPC_COMPACT_TABLE: &str = "grpc.compact_table";
 pub const METRIC_GRPC_TRUNCATE_TABLE: &str = "grpc.truncate_table";
 pub const METRIC_GRPC_DO_GET: &str = "grpc.do_get";
+pub(crate) const METRIC_REGION_REQUEST_GRPC: &str = "grpc.region_request";

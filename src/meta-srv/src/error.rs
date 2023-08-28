@@ -516,6 +516,9 @@ pub enum Error {
         operation: String,
         location: Location,
     },
+
+    #[snafu(display("Primary key '{key}' not found when creating region request, at {location}"))]
+    PrimaryKeyNotFound { key: String, location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -570,6 +573,7 @@ impl ErrorExt for Error {
             | Error::UnsupportedSelectorType { .. }
             | Error::InvalidArguments { .. }
             | Error::InvalidHeartbeatRequest { .. }
+            | Error::PrimaryKeyNotFound { .. }
             | Error::TooManyPartitions { .. } => StatusCode::InvalidArguments,
             Error::LeaseKeyFromUtf8 { .. }
             | Error::LeaseValueFromUtf8 { .. }

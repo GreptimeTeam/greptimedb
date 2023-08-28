@@ -158,7 +158,7 @@ mod tests {
 
     use super::super::tests::{TestingEnv, TestingEnvBuilder};
     use super::{State, *};
-    use crate::table_routes::tests::new_region_route;
+    use crate::test_util::new_region_route;
 
     #[tokio::test]
     async fn test_next_state() {
