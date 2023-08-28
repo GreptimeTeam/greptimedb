@@ -89,6 +89,12 @@ pub enum Error {
         source: BoxedError,
     },
 
+    #[snafu(display("{source}"))]
+    ExecuteGrpcRequest {
+        location: Location,
+        source: BoxedError,
+    },
+
     #[snafu(display("Failed to check database validity, source: {}", source))]
     CheckDatabaseValidity {
         location: Location,
@@ -374,6 +380,7 @@ impl ErrorExt for Error {
             | ExecuteQuery { source, .. }
             | ExecutePlan { source, .. }
             | ExecuteGrpcQuery { source, .. }
+            | ExecuteGrpcRequest { source, .. }
             | CheckDatabaseValidity { source, .. } => source.status_code(),
 
             NotSupported { .. }

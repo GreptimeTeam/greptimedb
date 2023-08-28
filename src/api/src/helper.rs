@@ -56,6 +56,10 @@ impl ColumnDataTypeWrapper {
         Ok(Self(datatype))
     }
 
+    pub fn new(datatype: ColumnDataType) -> Self {
+        Self(datatype)
+    }
+
     pub fn datatype(&self) -> ColumnDataType {
         self.0
     }
@@ -335,7 +339,7 @@ pub fn region_request_type(request: &region_request::Body) -> &'static str {
         region_request::Body::Inserts(_) => "region.inserts",
         region_request::Body::Deletes(_) => "region.deletes",
         region_request::Body::Create(_) => "region.create",
-        region_request::Body::Drop(_) => "region.drop  ",
+        region_request::Body::Drop(_) => "region.drop",
         region_request::Body::Open(_) => "region.open",
         region_request::Body::Close(_) => "region.close",
         region_request::Body::Alter(_) => "region.alter",

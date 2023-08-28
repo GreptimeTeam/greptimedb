@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use api::v1::region::region_request;
 use api::v1::Rows;
 
-use crate::metadata::ColumnMetadata;
+use crate::metadata::{ColumnMetadata, MetadataError};
 use crate::storage::{AlterRequest, ColumnId, RegionId, ScanRequest};
 
 #[derive(Debug)]
@@ -37,63 +37,78 @@ pub enum RegionRequest {
 impl RegionRequest {
     /// Convert [Body](region_request::Body) to a group of [RegionRequest] with region id.
     /// Inserts/Deletes request might become multiple requests. Others are one-to-one.
-    pub fn from_request_body(body: region_request::Body) -> Vec<(RegionId, Self)> {
+    // TODO: implement alter request
+    #[allow(unreachable_code)]
+    pub fn from_request_body(
+        body: region_request::Body,
+    ) -> Result<Vec<(RegionId, Self)>, MetadataError> {
         match body {
-            region_request::Body::Inserts(inserts) => inserts
+            region_request::Body::Inserts(inserts) => Ok(inserts
                 .requests
                 .into_iter()
-                .map(|r| {
-                    (
-                        r.region_id.into(),
-                        Self::Put(RegionPutRequest { rows: todo!() }),
-                    )
+                .filter_map(|r| {
+                    let region_id = r.region_id.into();
+                    r.rows
+                        .map(|rows| (region_id, Self::Put(RegionPutRequest { rows })))
                 })
-                .collect(),
-            region_request::Body::Deletes(deletes) => todo!(),
+                .collect()),
+            region_request::Body::Deletes(deletes) => Ok(deletes
+                .requests
+                .into_iter()
+                .filter_map(|r| {
+                    let region_id = r.region_id.into();
+                    r.rows
+                        .map(|rows| (region_id, Self::Delete(RegionDeleteRequest { rows })))
+                })
+                .collect()),
             region_request::Body::Create(create) => {
-                vec![(
+                let column_metadatas = create
+                    .column_defs
+                    .into_iter()
+                    .map(ColumnMetadata::from_column_def)
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(vec![(
                     create.region_id.into(),
                     Self::Create(RegionCreateRequest {
                         engine: create.engine,
-                        column_metadatas: todo!(),
+                        column_metadatas,
                         primary_key: create.primary_key,
                         create_if_not_exists: create.create_if_not_exists,
                         options: create.options,
                         region_dir: create.region_dir,
                     }),
-                )]
+                )])
             }
-            region_request::Body::Drop(drop) => {
-                vec![(drop.region_id.into(), Self::Drop(RegionDropRequest {}))]
-            }
-            region_request::Body::Open(open) => {
-                vec![(
-                    open.region_id.into(),
-                    Self::Open(RegionOpenRequest {
-                        engine: open.engine,
-                        region_dir: open.region_dir,
-                        options: open.options,
-                    }),
-                )]
-            }
-            region_request::Body::Close(close) => {
-                vec![(close.region_id.into(), Self::Close(RegionCloseRequest {}))]
-            }
-            region_request::Body::Alter(alter) => {
-                vec![(
-                    alter.region_id.into(),
-                    Self::Alter(RegionAlterRequest { request: todo!() }),
-                )]
-            }
-            region_request::Body::Flush(flush) => {
-                vec![(flush.region_id.into(), Self::Flush(RegionFlushRequest {}))]
-            }
-            region_request::Body::Compact(compact) => {
-                vec![(
-                    compact.region_id.into(),
-                    Self::Compact(RegionCompactRequest {}),
-                )]
-            }
+            region_request::Body::Drop(drop) => Ok(vec![(
+                drop.region_id.into(),
+                Self::Drop(RegionDropRequest {}),
+            )]),
+            region_request::Body::Open(open) => Ok(vec![(
+                open.region_id.into(),
+                Self::Open(RegionOpenRequest {
+                    engine: open.engine,
+                    region_dir: open.region_dir,
+                    options: open.options,
+                }),
+            )]),
+            region_request::Body::Close(close) => Ok(vec![(
+                close.region_id.into(),
+                Self::Close(RegionCloseRequest {}),
+            )]),
+            region_request::Body::Alter(alter) => Ok(vec![(
+                alter.region_id.into(),
+                Self::Alter(RegionAlterRequest {
+                    request: unimplemented!(),
+                }),
+            )]),
+            region_request::Body::Flush(flush) => Ok(vec![(
+                flush.region_id.into(),
+                Self::Flush(RegionFlushRequest {}),
+            )]),
+            region_request::Body::Compact(compact) => Ok(vec![(
+                compact.region_id.into(),
+                Self::Compact(RegionCompactRequest {}),
+            )]),
         }
     }
 }

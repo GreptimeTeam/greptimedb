@@ -20,12 +20,14 @@ use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use api::helper::ColumnDataTypeWrapper;
+use api::v1::region::ColumnDef;
 use api::v1::SemanticType;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use datatypes::arrow::datatypes::FieldRef;
 use datatypes::prelude::DataType;
-use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
+use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, Schema, SchemaRef};
 use serde::de::Error;
 use serde::{Deserialize, Deserializer, Serialize};
 use snafu::{ensure, Location, OptionExt, ResultExt, Snafu};
@@ -43,6 +45,32 @@ pub struct ColumnMetadata {
     pub semantic_type: SemanticType,
     /// Immutable and unique id of a region.
     pub column_id: ColumnId,
+}
+
+impl ColumnMetadata {
+    /// Construct `Self` from protobuf struct [ColumnDef]
+    pub fn from_column_def(column_def: ColumnDef) -> Result<Self> {
+        let semantic_type = column_def.semantic_type();
+        let column_id = column_def.column_id;
+
+        let default_constrain = if column_def.default_constraint.is_empty() {
+            None
+        } else {
+            Some(
+                ColumnDefaultConstraint::try_from(column_def.default_constraint.as_slice())
+                    .context(ConvertDatatypesSnafu)?,
+            )
+        };
+        let data_type = ColumnDataTypeWrapper::new(column_def.datatype()).into();
+        let column_schema = ColumnSchema::new(column_def.name, data_type, column_def.is_nullable)
+            .with_default_constraint(default_constrain)
+            .context(ConvertDatatypesSnafu)?;
+        Ok(Self {
+            column_schema,
+            semantic_type,
+            column_id,
+        })
+    }
 }
 
 #[cfg_attr(doc, aquamarine::aquamarine)]
@@ -443,6 +471,16 @@ pub enum MetadataError {
     SerdeJson {
         location: Location,
         source: serde_json::Error,
+    },
+
+    #[snafu(display(
+        "Failed to convert with struct from datatypes, location: {}, source: {}",
+        location,
+        source
+    ))]
+    ConvertDatatypes {
+        location: Location,
+        source: datatypes::error::Error,
     },
 }
 

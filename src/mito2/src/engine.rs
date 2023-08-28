@@ -141,8 +141,8 @@ impl RegionEngine for MitoEngine {
     /// Handle substrait query and return a stream of record batches
     async fn handle_query(
         &self,
-        region_id: RegionId,
-        request: ScanRequest,
+        _region_id: RegionId,
+        _request: ScanRequest,
     ) -> std::result::Result<SendableRecordBatchStream, BoxedError> {
         todo!()
     }

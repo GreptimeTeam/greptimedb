@@ -17,13 +17,17 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 
 use api::v1::region::{region_request, QueryRequest, RegionResponse};
+use api::v1::{ResponseHeader, Status};
 use arrow_flight::{FlightData, Ticket};
 use async_trait::async_trait;
 use bytes::Bytes;
+use common_error::ext::BoxedError;
+use common_error::status_code::StatusCode;
 use common_query::logical_plan::Expr;
 use common_query::physical_plan::DfPhysicalPlanAdapter;
 use common_query::{DfPhysicalPlan, Output};
 use common_recordbatch::SendableRecordBatchStream;
+use common_runtime::Runtime;
 use common_telemetry::info;
 use dashmap::DashMap;
 use datafusion::catalog::schema::SchemaProvider;
@@ -34,10 +38,10 @@ use datafusion::execution::context::SessionState;
 use datafusion_common::DataFusionError;
 use datafusion_expr::{Expr as DfExpr, TableType};
 use datatypes::arrow::datatypes::SchemaRef;
+use futures_util::future::try_join_all;
 use prost::Message;
 use query::QueryEngineRef;
-use servers::error as servers_error;
-use servers::error::Result as ServerResult;
+use servers::error::{self as servers_error, ExecuteGrpcRequestSnafu, Result as ServerResult};
 use servers::grpc::flight::{FlightCraft, FlightRecordBatchStream, TonicStream};
 use servers::grpc::region_server::RegionServerHandler;
 use session::context::QueryContext;
@@ -51,9 +55,9 @@ use table::table::scan::StreamScanAdapter;
 use tonic::{Request, Response, Result as TonicResult};
 
 use crate::error::{
-    DecodeLogicalPlanSnafu, ExecuteLogicalPlanSnafu, GetRegionMetadataSnafu,
-    HandleRegionRequestSnafu, RegionEngineNotFoundSnafu, RegionNotFoundSnafu, Result,
-    UnsupportedOutputSnafu,
+    BuildRegionRequestsSnafu, DecodeLogicalPlanSnafu, ExecuteLogicalPlanSnafu,
+    GetRegionMetadataSnafu, HandleRegionRequestSnafu, RegionEngineNotFoundSnafu,
+    RegionNotFoundSnafu, Result, UnsupportedOutputSnafu,
 };
 
 #[derive(Clone)]
@@ -62,9 +66,9 @@ pub struct RegionServer {
 }
 
 impl RegionServer {
-    pub fn new(query_engine: QueryEngineRef) -> Self {
+    pub fn new(query_engine: QueryEngineRef, runtime: Arc<Runtime>) -> Self {
         Self {
-            inner: Arc::new(RegionServerInner::new(query_engine)),
+            inner: Arc::new(RegionServerInner::new(query_engine, runtime)),
         }
     }
 
@@ -88,17 +92,46 @@ impl RegionServer {
 #[async_trait]
 impl RegionServerHandler for RegionServer {
     async fn handle(&self, request: region_request::Body) -> ServerResult<RegionResponse> {
-        match request {
-            region_request::Body::Inserts(inserts) => todo!(),
-            region_request::Body::Deletes(deletes) => todo!(),
-            region_request::Body::Create(create) => todo!(),
-            region_request::Body::Drop(drop) => todo!(),
-            region_request::Body::Open(open) => todo!(),
-            region_request::Body::Close(close) => todo!(),
-            region_request::Body::Alter(alter) => todo!(),
-            region_request::Body::Flush(flush) => todo!(),
-            region_request::Body::Compact(compact) => todo!(),
+        let requests = RegionRequest::from_request_body(request)
+            .context(BuildRegionRequestsSnafu)
+            .map_err(BoxedError::new)
+            .context(ExecuteGrpcRequestSnafu)?;
+        let join_tasks = requests.into_iter().map(|(region_id, req)| {
+            let handle = self.clone();
+            self.inner
+                .runtime
+                .spawn(async move { handle.handle_request(region_id, req).await })
+        });
+
+        let results = try_join_all(join_tasks)
+            .await
+            .context(servers_error::JoinTaskSnafu)?;
+
+        // merge results by simply sum up affected rows.
+        // only insert/delete will have multiple results.
+        let mut affected_rows = 0;
+        for result in results {
+            match result
+                .map_err(BoxedError::new)
+                .context(servers_error::ExecuteGrpcRequestSnafu)?
+            {
+                Output::AffectedRows(rows) => affected_rows += rows,
+                Output::Stream(_) | Output::RecordBatches(_) => {
+                    // TODO: change the output type to only contains `affected_rows`
+                    unreachable!()
+                }
+            }
         }
+
+        Ok(RegionResponse {
+            header: Some(ResponseHeader {
+                status: Some(Status {
+                    status_code: StatusCode::Success as _,
+                    ..Default::default()
+                }),
+            }),
+            affected_rows: affected_rows as _,
+        })
     }
 }
 
@@ -123,14 +156,16 @@ struct RegionServerInner {
     engines: RwLock<HashMap<String, RegionEngineRef>>,
     region_map: DashMap<RegionId, RegionEngineRef>,
     query_engine: QueryEngineRef,
+    runtime: Arc<Runtime>,
 }
 
 impl RegionServerInner {
-    pub fn new(query_engine: QueryEngineRef) -> Self {
+    pub fn new(query_engine: QueryEngineRef, runtime: Arc<Runtime>) -> Self {
         Self {
             engines: RwLock::new(HashMap::new()),
             region_map: DashMap::new(),
             query_engine,
+            runtime,
         }
     }
 
