@@ -353,7 +353,7 @@ async fn test_region_replay() {
 // for series with multiple points and other cases.
 #[tokio::test]
 async fn test_write_query_region() {
-    let env = TestEnv::new();
+    let mut env = TestEnv::new();
     let engine = env.create_engine(MitoConfig::default()).await;
 
     let region_id = RegionId::new(1, 1);

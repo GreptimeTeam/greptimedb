@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::mem;
 use std::sync::Arc;
 
 use api::v1::{Mutation, Rows, WalEntry};
@@ -27,11 +28,56 @@ use crate::region::version::{VersionControlData, VersionControlRef, VersionRef};
 use crate::wal::{EntryId, WalWriter};
 
 /// Context to keep region metadata and buffer write requests.
+
+/// Notifier to notify write result on drop.
+struct WriteNotify {
+    /// Error to send to the waiter.
+    err: Option<Arc<Error>>,
+    /// Sender to send write result to the waiter for this mutation.
+    sender: Option<Sender<Result<Output>>>,
+    /// Number of rows to be written.
+    num_rows: usize,
+}
+
+impl WriteNotify {
+    /// Creates a new notify from the `sender`.
+    fn new(sender: Option<Sender<Result<Output>>>, num_rows: usize) -> WriteNotify {
+        WriteNotify {
+            err: None,
+            sender,
+            num_rows,
+        }
+    }
+
+    /// Send result to the waiter.
+    fn notify_result(&mut self) {
+        let Some(sender) = self.sender.take() else {
+            return;
+        };
+        if let Some(err) = &self.err {
+            // Try to send the error to waiters.
+            let _ = sender.send(Err(err.clone()).context(WriteGroupSnafu));
+        } else {
+            // Send success result.
+            let _ = sender.send(Ok(Output::AffectedRows(self.num_rows)));
+        }
+    }
+}
+
+impl Drop for WriteNotify {
+    fn drop(&mut self) {
+        self.notify_result();
+    }
+}
+
+/// Context to keep region metadata and buffer write requests.
 pub(crate) struct RegionWriteCtx {
     /// Id of region to write.
     region_id: RegionId,
     /// Version of the region while creating the context.
     version: VersionRef,
+    /// VersionControl of the region.
+    version_control: VersionControlRef,
     /// Next sequence number to write.
     ///
     /// The context assigns a unique sequence number for each row.
@@ -61,6 +107,7 @@ impl RegionWriteCtx {
         RegionWriteCtx {
             region_id,
             version,
+            version_control: version_control.clone(),
             next_sequence: committed_sequence + 1,
             next_entry_id: last_entry_id + 1,
             wal_entry: WalEntry::default(),
@@ -91,12 +138,18 @@ impl RegionWriteCtx {
     }
 
     /// Encode and add WAL entry to the writer.
-    pub(crate) fn add_wal_entry<S: LogStore>(&self, wal_writer: &mut WalWriter<S>) -> Result<()> {
-        wal_writer.add_entry(self.region_id, self.next_entry_id, &self.wal_entry)
+    pub(crate) fn add_wal_entry<S: LogStore>(
+        &mut self,
+        wal_writer: &mut WalWriter<S>,
+    ) -> Result<()> {
+        wal_writer.add_entry(self.region_id, self.next_entry_id, &self.wal_entry)?;
+        // We only call this method one time, but we still bump next entry id for consistency.
+        self.next_entry_id += 1;
+        Ok(())
     }
 
-    pub(crate) fn version(&self) -> VersionRef {
-        self.version.clone()
+    pub(crate) fn version(&self) -> &VersionRef {
+        &self.version
     }
 
     /// Sets error and marks all write operations are failed.
@@ -111,9 +164,9 @@ impl RegionWriteCtx {
     pub(crate) fn write_memtable(&mut self) {
         debug_assert_eq!(self.notifiers.len(), self.wal_entry.mutations.len());
 
-        let mutable = self.version.memtables.mutable();
+        let mutable = &self.version.memtables.mutable;
         // Takes mutations from the wal entry.
-        let mutations = std::mem::take(&mut self.wal_entry.mutations);
+        let mutations = mem::take(&mut self.wal_entry.mutations);
         for (mutation, notify) in mutations.into_iter().zip(&mut self.notifiers) {
             // Write mutation to the memtable.
             let Some(kvs) = KeyValues::new(&self.version.metadata, mutation) else {
@@ -123,46 +176,10 @@ impl RegionWriteCtx {
                 notify.err = Some(Arc::new(e));
             }
         }
-    }
-}
 
-/// Notifier to notify write result on drop.
-pub(crate) struct WriteNotify {
-    /// Error to send to the waiter.
-    err: Option<Arc<Error>>,
-    /// Sender to send write result to the waiter for this mutation.
-    sender: Option<Sender<Result<Output>>>,
-    /// Number of rows to be written.
-    num_rows: usize,
-}
-
-impl WriteNotify {
-    /// Creates a new notify from the `sender`.
-    pub(crate) fn new(sender: Option<Sender<Result<Output>>>, num_rows: usize) -> WriteNotify {
-        WriteNotify {
-            err: None,
-            sender,
-            num_rows,
-        }
-    }
-
-    /// Send result to the waiter.
-    fn notify_result(&mut self) {
-        let Some(sender) = self.sender.take() else {
-            return;
-        };
-        if let Some(err) = &self.err {
-            // Try to send the error to waiters.
-            let _ = sender.send(Err(err.clone()).context(WriteGroupSnafu));
-        } else {
-            // Send success result.
-            let _ = sender.send(Ok(Output::AffectedRows(self.num_rows)));
-        }
-    }
-}
-
-impl Drop for WriteNotify {
-    fn drop(&mut self) {
-        self.notify_result();
+        // Updates region sequence and entry id. Since we stores last sequence and entry id in region, we need
+        // to decrease `next_sequence` and `next_entry_id` by 1.
+        self.version_control
+            .set_sequence_and_entry_id(self.next_sequence - 1, self.next_entry_id - 1);
     }
 }
