@@ -20,7 +20,7 @@ use common_catalog::consts::{
     SYSTEM_CATALOG_NAME, SYSTEM_CATALOG_TABLE_ID, SYSTEM_CATALOG_TABLE_NAME,
 };
 use common_recordbatch::SendableRecordBatchStream;
-use common_telemetry::{debug, logging};
+use common_telemetry::{debug, warn};
 use common_time::util;
 use datatypes::prelude::{ConcreteDataType, ScalarVector, VectorRef};
 use datatypes::schema::{ColumnSchema, RawSchema};
@@ -111,21 +111,21 @@ impl SystemCatalogTable {
     ) -> Result<()> {
         let deletion_request = build_table_deletion_request(request, table_id);
         self.0
-        .insert(deletion_request)
-        .await
-        .map(|x| {
-            if x != 1 {
-                let table = common_catalog::format_full_table_name(
-                    &request.catalog,
-                    &request.schema,
-                    &request.table_name
-                );
-                logging::warn!("Failed to delete table record from information_schema, unexpected returned result: {x}, table: {table}");
-            }
-        })
-        .with_context(|_| DeregisterTableSnafu {
-            request: request.clone(),
-        })
+            .insert(deletion_request)
+            .await
+            .map(|x| {
+                if x != 1 {
+                    let table = common_catalog::format_full_table_name(
+                        &request.catalog,
+                        &request.schema,
+                        &request.table_name
+                    );
+                    warn!("Failed to delete table record from information_schema, unexpected returned result: {x}, table: {table}");
+                }
+            })
+            .with_context(|_| DeregisterTableSnafu {
+                request: request.clone(),
+            })
     }
 
     pub async fn register_schema(&self, catalog: String, schema: String) -> Result<usize> {
