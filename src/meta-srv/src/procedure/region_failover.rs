@@ -214,7 +214,7 @@ impl RegionFailoverManager {
 #[derive(Serialize, Deserialize, Debug)]
 struct Node {
     failed_region: RegionIdent,
-    state: Option<Box<dyn State>>,
+    state: Box<dyn State>,
 }
 
 /// The "Context" of region failover procedure state machine.
@@ -233,7 +233,7 @@ pub struct RegionFailoverContext {
 #[typetag::serde(tag = "region_failover_state")]
 trait State: Sync + Send + Debug {
     async fn next(
-        mut self: Box<Self>,
+        &mut self,
         ctx: &RegionFailoverContext,
         failed_region: &RegionIdent,
     ) -> Result<Box<dyn State>>;
@@ -304,7 +304,7 @@ impl RegionFailoverProcedure {
         let state = RegionFailoverStart::new();
         let node = Node {
             failed_region,
-            state: Some(Box::new(state)),
+            state: Box::new(state),
         };
         Self { node, context }
     }
@@ -322,25 +322,18 @@ impl Procedure for RegionFailoverProcedure {
     }
 
     async fn execute(&mut self, _ctx: &ProcedureContext) -> ProcedureResult<Status> {
-        if let Some(state) = self.node.state.take() {
-            let next_state = state
-                .next(&self.context, &self.node.failed_region)
-                .await
-                .map_err(|e| {
-                    if matches!(e, Error::RetryLater { .. }) {
-                        ProcedureError::retry_later(e)
-                    } else {
-                        ProcedureError::external(e)
-                    }
-                })?;
-            self.node.state = Some(next_state);
-        }
-        Ok(self
-            .node
-            .state
-            .as_ref()
-            .map(|s| s.status())
-            .unwrap_or(Status::Done))
+        let state = &mut self.node.state;
+        *state = state
+            .next(&self.context, &self.node.failed_region)
+            .await
+            .map_err(|e| {
+                if matches!(e, Error::RetryLater { .. }) {
+                    ProcedureError::retry_later(e)
+                } else {
+                    ProcedureError::external(e)
+                }
+            })?;
+        Ok(state.status())
     }
 
     fn dump(&self) -> ProcedureResult<String> {
@@ -362,6 +355,7 @@ impl Procedure for RegionFailoverProcedure {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::sync::Mutex;
 
     use api::v1::meta::mailbox_message::Payload;
     use api::v1::meta::{HeartbeatResponse, MailboxMessage, Peer, RequestHeader};
@@ -370,7 +364,8 @@ mod tests {
     use common_meta::instruction::{Instruction, InstructionReply, SimpleReply};
     use common_meta::key::TableMetadataManager;
     use common_meta::DatanodeId;
-    use common_procedure::BoxedProcedure;
+    use common_procedure::{BoxedProcedure, ProcedureId};
+    use common_procedure_test::MockContextProvider;
     use rand::prelude::SliceRandom;
     use tokio::sync::mpsc::Receiver;
 
@@ -452,6 +447,11 @@ mod tests {
             Self { selector: None }
         }
 
+        fn with_selector(mut self, selector: SelectorRef) -> Self {
+            self.selector = Some(selector);
+            self
+        }
+
         pub async fn build(self) -> TestingEnv {
             let in_memory = Arc::new(MemStore::new());
             let kv_store: KvStoreRef = Arc::new(MemStore::new());
@@ -531,8 +531,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_region_failover_procedure() {
-        common_telemetry::init_default_ut_logging();
-
         let mut env = TestingEnvBuilder::new().build().await;
         let failed_region = env.failed_region(1).await;
 
@@ -662,7 +660,7 @@ mod tests {
         let state = RegionFailoverStart::new();
         let node = Node {
             failed_region,
-            state: Some(Box::new(state)),
+            state: Box::new(state),
         };
         let procedure = RegionFailoverProcedure {
             node,
@@ -677,7 +675,76 @@ mod tests {
         let n: Node = serde_json::from_str(&s).unwrap();
         assert_eq!(
             format!("{n:?}"),
-            r#"Node { failed_region: RegionIdent { cluster_id: 0, datanode_id: 1, table_ident: TableIdent { catalog: "greptime", schema: "public", table: "my_table", table_id: 1, engine: "mito" }, region_number: 1 }, state: Some(RegionFailoverStart { failover_candidate: None }) }"#
+            r#"Node { failed_region: RegionIdent { cluster_id: 0, datanode_id: 1, table_ident: TableIdent { catalog: "greptime", schema: "public", table: "my_table", table_id: 1, engine: "mito" }, region_number: 1 }, state: RegionFailoverStart { failover_candidate: None } }"#
+        );
+    }
+
+    #[tokio::test]
+    async fn test_state_not_changed_upon_failure() {
+        struct MySelector {
+            peers: Arc<Mutex<Vec<Option<Peer>>>>,
+        }
+
+        #[async_trait]
+        impl Selector for MySelector {
+            type Context = SelectorContext;
+            type Output = Vec<Peer>;
+
+            async fn select(&self, _ns: Namespace, _ctx: &Self::Context) -> Result<Self::Output> {
+                let mut peers = self.peers.lock().unwrap();
+                Ok(if let Some(Some(peer)) = peers.pop() {
+                    vec![peer]
+                } else {
+                    vec![]
+                })
+            }
+        }
+
+        // Returns a valid peer the second time called "select".
+        let selector = MySelector {
+            peers: Arc::new(Mutex::new(vec![
+                Some(Peer {
+                    id: 42,
+                    addr: "".to_string(),
+                }),
+                None,
+            ])),
+        };
+
+        let env = TestingEnvBuilder::new()
+            .with_selector(Arc::new(selector))
+            .build()
+            .await;
+        let failed_region = env.failed_region(1).await;
+
+        let state = RegionFailoverStart::new();
+        let node = Node {
+            failed_region,
+            state: Box::new(state),
+        };
+        let mut procedure = RegionFailoverProcedure {
+            node,
+            context: env.context,
+        };
+
+        let ctx = ProcedureContext {
+            procedure_id: ProcedureId::random(),
+            provider: Arc::new(MockContextProvider::default()),
+        };
+
+        let result = procedure.execute(&ctx).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().is_retry_later());
+        assert_eq!(
+            r#"{"region_failover_state":"RegionFailoverStart","failover_candidate":null}"#,
+            serde_json::to_string(&procedure.node.state).unwrap()
+        );
+
+        let result = procedure.execute(&ctx).await;
+        assert!(matches!(result, Ok(Status::Executing { persist: true })));
+        assert_eq!(
+            r#"{"region_failover_state":"DeactivateRegion","candidate":{"id":42,"addr":""},"region_lease_expiry_seconds":40}"#,
+            serde_json::to_string(&procedure.node.state).unwrap()
         );
     }
 }
