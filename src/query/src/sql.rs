@@ -47,7 +47,7 @@ use crate::error::{self, Result};
 
 const SCHEMAS_COLUMN: &str = "Schemas";
 const TABLES_COLUMN: &str = "Tables";
-const COLUMN_NAME_COLUMN: &str = "Field";
+const COLUMN_NAME_COLUMN: &str = "Column";
 const COLUMN_TYPE_COLUMN: &str = "Type";
 const COLUMN_KEY_COLUMN: &str = "Key";
 const COLUMN_NULLABLE_COLUMN: &str = "Null";
