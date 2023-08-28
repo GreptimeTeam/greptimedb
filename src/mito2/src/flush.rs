@@ -223,7 +223,9 @@ impl FlushScheduler {
     }
 }
 
-/// Flush status of a region.
+/// Flush status of a region scheduled by the [FlushScheduler].
+///
+/// Tracks running and pending flusht tasks and all pending requests of a region.
 struct FlushStatus {
     /// Current region.
     region: MitoRegionRef,
