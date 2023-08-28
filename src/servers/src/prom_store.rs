@@ -20,7 +20,7 @@ use std::hash::{Hash, Hasher};
 
 use api::prom_store::remote::label_matcher::Type as MatcherType;
 use api::prom_store::remote::{Label, Query, Sample, TimeSeries, WriteRequest};
-use api::v1::{InsertRequest as GrpcInsertRequest, InsertRequests};
+use api::v1::{InsertRequest as GrpcInsertRequest, InsertRequests, RowInsertRequests};
 use common_grpc::writer::{LinesWriter, Precision};
 use common_recordbatch::{RecordBatch, RecordBatches};
 use common_time::timestamp::TimeUnit;
@@ -34,6 +34,7 @@ use snafu::{ensure, OptionExt, ResultExt};
 use snap::raw::{Decoder, Encoder};
 
 use crate::error::{self, Result};
+use crate::row_writer::{self, MultiTableData};
 
 pub const TIMESTAMP_COLUMN_NAME: &str = "greptime_timestamp";
 pub const FIELD_COLUMN_NAME: &str = "greptime_value";
@@ -300,6 +301,61 @@ fn recordbatch_to_timeseries(table: &str, recordbatch: RecordBatch) -> Result<Ve
     Ok(timeseries_map.into_values().collect())
 }
 
+pub fn to_grpc_row_insert_requests(request: WriteRequest) -> Result<(RowInsertRequests, usize)> {
+    let mut multi_table_data = MultiTableData::new();
+
+    for series in &request.timeseries {
+        let table_name = &series
+            .labels
+            .iter()
+            .find(|label| {
+                // The metric name is a special label
+                label.name == METRIC_NAME_LABEL
+            })
+            .context(error::InvalidPromRemoteRequestSnafu {
+                msg: "missing '__name__' label in time-series",
+            })?
+            .value;
+
+        // The metric name is a special label,
+        // num_columns = labels.len() - 1 + 1 (value) + 1 (timestamp)
+        let num_columns = series.labels.len() + 1;
+
+        let table_data = multi_table_data.get_or_default_table_data(
+            table_name,
+            num_columns,
+            series.samples.len(),
+        );
+
+        for Sample { value, timestamp } in &series.samples {
+            let mut one_row = table_data.alloc_one_row();
+
+            // labels
+            let kvs = series.labels.iter().filter_map(|label| {
+                if label.name == METRIC_NAME_LABEL {
+                    None
+                } else {
+                    Some((label.name.as_str(), label.value.as_str()))
+                }
+            });
+            row_writer::write_tags(table_data, kvs, &mut one_row)?;
+            // value
+            row_writer::write_f64(table_data, FIELD_COLUMN_NAME, *value, &mut one_row)?;
+            // timestamp
+            row_writer::write_ts_millis(
+                table_data,
+                TIMESTAMP_COLUMN_NAME,
+                Some(*timestamp),
+                &mut one_row,
+            )?;
+
+            table_data.add_row(one_row);
+        }
+    }
+
+    Ok(multi_table_data.into_row_insert_requests())
+}
+
 pub fn to_grpc_insert_requests(request: WriteRequest) -> Result<(InsertRequests, usize)> {
     let mut writers: HashMap<String, LinesWriter> = HashMap::new();
     for timeseries in &request.timeseries {
@@ -450,6 +506,7 @@ mod tests {
     use std::sync::Arc;
 
     use api::prom_store::remote::LabelMatcher;
+    use api::v1::{ColumnDataType, Row, SemanticType};
     use datafusion::prelude::SessionContext;
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::{Float64Vector, StringVector, TimestampMillisecondVector};
@@ -562,6 +619,141 @@ mod tests {
         let display_string = format!("{}", plan.display_indent());
 
         assert_eq!("Filter: ?table?.greptime_timestamp >= TimestampMillisecond(1000, None) AND ?table?.greptime_timestamp <= TimestampMillisecond(2000, None) AND regexp_match(?table?.job, Utf8(\"*prom*\")) IS NOT NULL AND ?table?.instance != Utf8(\"localhost\")\n  TableScan: ?table?", display_string);
+    }
+
+    fn column_schemas_with(
+        mut kts_iter: Vec<(&str, ColumnDataType, SemanticType)>,
+    ) -> Vec<api::v1::ColumnSchema> {
+        kts_iter.push((
+            "greptime_value",
+            ColumnDataType::Float64,
+            SemanticType::Field,
+        ));
+        kts_iter.push((
+            "greptime_timestamp",
+            ColumnDataType::TimestampMillisecond,
+            SemanticType::Timestamp,
+        ));
+
+        kts_iter
+            .into_iter()
+            .map(|(k, t, s)| api::v1::ColumnSchema {
+                column_name: k.to_string(),
+                datatype: t as i32,
+                semantic_type: s as i32,
+            })
+            .collect()
+    }
+
+    fn make_row_with_label(l1: &str, value: f64, timestamp: i64) -> Row {
+        Row {
+            values: vec![
+                api::v1::Value {
+                    value_data: Some(api::v1::value::ValueData::StringValue(l1.to_string())),
+                },
+                api::v1::Value {
+                    value_data: Some(api::v1::value::ValueData::F64Value(value)),
+                },
+                api::v1::Value {
+                    value_data: Some(api::v1::value::ValueData::TsMillisecondValue(timestamp)),
+                },
+            ],
+        }
+    }
+
+    fn make_row_with_2_labels(l1: &str, l2: &str, value: f64, timestamp: i64) -> Row {
+        Row {
+            values: vec![
+                api::v1::Value {
+                    value_data: Some(api::v1::value::ValueData::StringValue(l1.to_string())),
+                },
+                api::v1::Value {
+                    value_data: Some(api::v1::value::ValueData::StringValue(l2.to_string())),
+                },
+                api::v1::Value {
+                    value_data: Some(api::v1::value::ValueData::F64Value(value)),
+                },
+                api::v1::Value {
+                    value_data: Some(api::v1::value::ValueData::TsMillisecondValue(timestamp)),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn test_write_request_to_row_insert_exprs() {
+        let write_request = WriteRequest {
+            timeseries: mock_timeseries(),
+            ..Default::default()
+        };
+
+        let mut exprs = to_grpc_row_insert_requests(write_request)
+            .unwrap()
+            .0
+            .inserts;
+        exprs.sort_unstable_by(|l, r| l.table_name.cmp(&r.table_name));
+        assert_eq!(3, exprs.len());
+        assert_eq!("metric1", exprs[0].table_name);
+        assert_eq!("metric2", exprs[1].table_name);
+        assert_eq!("metric3", exprs[2].table_name);
+
+        let rows = exprs[0].rows.as_ref().unwrap();
+        let schema = &rows.schema;
+        let rows = &rows.rows;
+        assert_eq!(2, rows.len());
+        assert_eq!(3, schema.len());
+        assert_eq!(
+            column_schemas_with(vec![("job", ColumnDataType::String, SemanticType::Tag)]),
+            *schema
+        );
+        assert_eq!(
+            &vec![
+                make_row_with_label("spark", 1.0, 1000),
+                make_row_with_label("spark", 2.0, 2000),
+            ],
+            rows
+        );
+
+        let rows = exprs[1].rows.as_ref().unwrap();
+        let schema = &rows.schema;
+        let rows = &rows.rows;
+        assert_eq!(2, rows.len());
+        assert_eq!(4, schema.len());
+        assert_eq!(
+            column_schemas_with(vec![
+                ("instance", ColumnDataType::String, SemanticType::Tag),
+                ("idc", ColumnDataType::String, SemanticType::Tag)
+            ]),
+            *schema
+        );
+        assert_eq!(
+            &vec![
+                make_row_with_2_labels("test_host1", "z001", 3.0, 1000),
+                make_row_with_2_labels("test_host1", "z001", 4.0, 2000),
+            ],
+            rows
+        );
+
+        let rows = exprs[2].rows.as_ref().unwrap();
+        let schema = &rows.schema;
+        let rows = &rows.rows;
+        assert_eq!(3, rows.len());
+        assert_eq!(4, schema.len());
+        assert_eq!(
+            column_schemas_with(vec![
+                ("idc", ColumnDataType::String, SemanticType::Tag),
+                ("app", ColumnDataType::String, SemanticType::Tag)
+            ]),
+            *schema
+        );
+        assert_eq!(
+            &vec![
+                make_row_with_2_labels("z002", "biz", 5.0, 1000),
+                make_row_with_2_labels("z002", "biz", 6.0, 2000),
+                make_row_with_2_labels("z002", "biz", 7.0, 3000),
+            ],
+            rows
+        );
     }
 
     #[test]
