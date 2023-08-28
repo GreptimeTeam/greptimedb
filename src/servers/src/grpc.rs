@@ -26,7 +26,7 @@ use api::v1::greptime_database_server::GreptimeDatabase;
 use api::v1::greptime_database_server::GreptimeDatabaseServer;
 use api::v1::health_check_server::{HealthCheck, HealthCheckServer};
 use api::v1::prometheus_gateway_server::{PrometheusGateway, PrometheusGatewayServer};
-use api::v1::region::region_server_server::RegionServerServer;
+use api::v1::region::region_server::RegionServer;
 use api::v1::{HealthCheckRequest, HealthCheckResponse};
 #[cfg(feature = "testing")]
 use arrow_flight::flight_service_server::FlightService;
@@ -51,7 +51,7 @@ use self::region_server::{RegionServerHandlerRef, RegionServerRequestHandler};
 use crate::error::{AlreadyStartedSnafu, InternalSnafu, Result, StartGrpcSnafu, TcpBindSnafu};
 use crate::grpc::database::DatabaseService;
 use crate::grpc::greptime_handler::GreptimeRequestHandler;
-use crate::prometheus::PrometheusHandlerRef;
+use crate::prometheus_handler::PrometheusHandlerRef;
 use crate::query_handler::grpc::ServerGrpcQueryHandlerRef;
 use crate::server::Server;
 
@@ -88,9 +88,8 @@ impl GrpcServer {
     ) -> Self {
         let database_handler =
             GreptimeRequestHandler::new(query_handler, user_provider.clone(), runtime.clone());
-        let region_server_handler = region_server_handler.map(|handler| {
-            RegionServerRequestHandler::new(handler, user_provider.clone(), runtime.clone())
-        });
+        let region_server_handler =
+            region_server_handler.map(|handler| RegionServerRequestHandler::new(handler, runtime));
         Self {
             shutdown_tx: Mutex::new(None),
             user_provider,
@@ -224,7 +223,7 @@ impl Server for GrpcServer {
             )))
         }
         if let Some(region_server_handler) = &self.region_server_handler {
-            builder = builder.add_service(RegionServerServer::new(region_server_handler.clone()))
+            builder = builder.add_service(RegionServer::new(region_server_handler.clone()))
         }
 
         let (serve_state_tx, serve_state_rx) = oneshot::channel();

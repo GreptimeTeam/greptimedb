@@ -4,12 +4,12 @@ Affected Rows: 0
 
 DESC TABLE t;
 
-+-------+-------+------+---------+---------------+
-| Field | Type  | Null | Default | Semantic Type |
-+-------+-------+------+---------+---------------+
-| i     | Int32 | YES  |         | FIELD         |
-| j     | Int64 | NO   |         | TIME INDEX    |
-+-------+-------+------+---------+---------------+
++--------+-------+-----+------+---------+---------------+
+| Column | Type  | Key | Null | Default | Semantic Type |
++--------+-------+-----+------+---------+---------------+
+| i      | Int32 |     | YES  |         | FIELD         |
+| j      | Int64 | PRI | NO   |         | TIMESTAMP     |
++--------+-------+-----+------+---------+---------------+
 
 ALTER TABLE t ADD COLUMN k INTEGER;
 
@@ -17,24 +17,24 @@ Affected Rows: 0
 
 DESC TABLE t;
 
-+-------+-------+------+---------+---------------+
-| Field | Type  | Null | Default | Semantic Type |
-+-------+-------+------+---------+---------------+
-| i     | Int32 | YES  |         | FIELD         |
-| j     | Int64 | NO   |         | TIME INDEX    |
-| k     | Int32 | YES  |         | FIELD         |
-+-------+-------+------+---------+---------------+
++--------+-------+-----+------+---------+---------------+
+| Column | Type  | Key | Null | Default | Semantic Type |
++--------+-------+-----+------+---------+---------------+
+| i      | Int32 |     | YES  |         | FIELD         |
+| j      | Int64 | PRI | NO   |         | TIMESTAMP     |
+| k      | Int32 |     | YES  |         | FIELD         |
++--------+-------+-----+------+---------+---------------+
 
 -- SQLNESS ARG restart=true
 DESC TABLE t;
 
-+-------+-------+------+---------+---------------+
-| Field | Type  | Null | Default | Semantic Type |
-+-------+-------+------+---------+---------------+
-| i     | Int32 | YES  |         | FIELD         |
-| j     | Int64 | NO   |         | TIME INDEX    |
-| k     | Int32 | YES  |         | FIELD         |
-+-------+-------+------+---------+---------------+
++--------+-------+-----+------+---------+---------------+
+| Column | Type  | Key | Null | Default | Semantic Type |
++--------+-------+-----+------+---------+---------------+
+| i      | Int32 |     | YES  |         | FIELD         |
+| j      | Int64 | PRI | NO   |         | TIMESTAMP     |
+| k      | Int32 |     | YES  |         | FIELD         |
++--------+-------+-----+------+---------+---------------+
 
 ALTER TABLE t ADD COLUMN m INTEGER;
 
@@ -42,14 +42,14 @@ Affected Rows: 0
 
 DESC TABLE t;
 
-+-------+-------+------+---------+---------------+
-| Field | Type  | Null | Default | Semantic Type |
-+-------+-------+------+---------+---------------+
-| i     | Int32 | YES  |         | FIELD         |
-| j     | Int64 | NO   |         | TIME INDEX    |
-| k     | Int32 | YES  |         | FIELD         |
-| m     | Int32 | YES  |         | FIELD         |
-+-------+-------+------+---------+---------------+
++--------+-------+-----+------+---------+---------------+
+| Column | Type  | Key | Null | Default | Semantic Type |
++--------+-------+-----+------+---------+---------------+
+| i      | Int32 |     | YES  |         | FIELD         |
+| j      | Int64 | PRI | NO   |         | TIMESTAMP     |
+| k      | Int32 |     | YES  |         | FIELD         |
+| m      | Int32 |     | YES  |         | FIELD         |
++--------+-------+-----+------+---------+---------------+
 
 INSERT INTO t VALUES (1, 2, 3, 4);
 
@@ -69,15 +69,15 @@ Affected Rows: 0
 
 DESC TABLE t;
 
-+-------+-------+------+---------+---------------+
-| Field | Type  | Null | Default | Semantic Type |
-+-------+-------+------+---------+---------------+
-| n     | Int32 | YES  |         | FIELD         |
-| i     | Int32 | YES  |         | FIELD         |
-| j     | Int64 | NO   |         | TIME INDEX    |
-| k     | Int32 | YES  |         | FIELD         |
-| m     | Int32 | YES  |         | FIELD         |
-+-------+-------+------+---------+---------------+
++--------+-------+-----+------+---------+---------------+
+| Column | Type  | Key | Null | Default | Semantic Type |
++--------+-------+-----+------+---------+---------------+
+| n      | Int32 |     | YES  |         | FIELD         |
+| i      | Int32 |     | YES  |         | FIELD         |
+| j      | Int64 | PRI | NO   |         | TIMESTAMP     |
+| k      | Int32 |     | YES  |         | FIELD         |
+| m      | Int32 |     | YES  |         | FIELD         |
++--------+-------+-----+------+---------+---------------+
 
 SELECT * FROM t;
 
@@ -97,16 +97,16 @@ Affected Rows: 0
 
 DESC TABLE t;
 
-+-------+-------+------+---------+---------------+
-| Field | Type  | Null | Default | Semantic Type |
-+-------+-------+------+---------+---------------+
-| n     | Int32 | YES  |         | FIELD         |
-| i     | Int32 | YES  |         | FIELD         |
-| j     | Int64 | NO   |         | TIME INDEX    |
-| y     | Int32 | YES  |         | FIELD         |
-| k     | Int32 | YES  |         | FIELD         |
-| m     | Int32 | YES  |         | FIELD         |
-+-------+-------+------+---------+---------------+
++--------+-------+-----+------+---------+---------------+
+| Column | Type  | Key | Null | Default | Semantic Type |
++--------+-------+-----+------+---------+---------------+
+| n      | Int32 |     | YES  |         | FIELD         |
+| i      | Int32 |     | YES  |         | FIELD         |
+| j      | Int64 | PRI | NO   |         | TIMESTAMP     |
+| y      | Int32 |     | YES  |         | FIELD         |
+| k      | Int32 |     | YES  |         | FIELD         |
+| m      | Int32 |     | YES  |         | FIELD         |
++--------+-------+-----+------+---------+---------------+
 
 SELECT * FROM t;
 
@@ -124,17 +124,17 @@ Affected Rows: 0
 
 DESC TABLE t;
 
-+-------+-------+------+---------+---------------+
-| Field | Type  | Null | Default | Semantic Type |
-+-------+-------+------+---------+---------------+
-| a     | Int32 | YES  |         | FIELD         |
-| n     | Int32 | YES  |         | FIELD         |
-| i     | Int32 | YES  |         | FIELD         |
-| j     | Int64 | NO   |         | TIME INDEX    |
-| y     | Int32 | YES  |         | FIELD         |
-| k     | Int32 | YES  |         | FIELD         |
-| m     | Int32 | YES  |         | FIELD         |
-+-------+-------+------+---------+---------------+
++--------+-------+-----+------+---------+---------------+
+| Column | Type  | Key | Null | Default | Semantic Type |
++--------+-------+-----+------+---------+---------------+
+| a      | Int32 |     | YES  |         | FIELD         |
+| n      | Int32 |     | YES  |         | FIELD         |
+| i      | Int32 |     | YES  |         | FIELD         |
+| j      | Int64 | PRI | NO   |         | TIMESTAMP     |
+| y      | Int32 |     | YES  |         | FIELD         |
+| k      | Int32 |     | YES  |         | FIELD         |
+| m      | Int32 |     | YES  |         | FIELD         |
++--------+-------+-----+------+---------+---------------+
 
 ALTER TABLE t ADD COLUMN b INTEGER AFTER j;
 
@@ -142,18 +142,18 @@ Affected Rows: 0
 
 DESC TABLE t;
 
-+-------+-------+------+---------+---------------+
-| Field | Type  | Null | Default | Semantic Type |
-+-------+-------+------+---------+---------------+
-| a     | Int32 | YES  |         | FIELD         |
-| n     | Int32 | YES  |         | FIELD         |
-| i     | Int32 | YES  |         | FIELD         |
-| j     | Int64 | NO   |         | TIME INDEX    |
-| b     | Int32 | YES  |         | FIELD         |
-| y     | Int32 | YES  |         | FIELD         |
-| k     | Int32 | YES  |         | FIELD         |
-| m     | Int32 | YES  |         | FIELD         |
-+-------+-------+------+---------+---------------+
++--------+-------+-----+------+---------+---------------+
+| Column | Type  | Key | Null | Default | Semantic Type |
++--------+-------+-----+------+---------+---------------+
+| a      | Int32 |     | YES  |         | FIELD         |
+| n      | Int32 |     | YES  |         | FIELD         |
+| i      | Int32 |     | YES  |         | FIELD         |
+| j      | Int64 | PRI | NO   |         | TIMESTAMP     |
+| b      | Int32 |     | YES  |         | FIELD         |
+| y      | Int32 |     | YES  |         | FIELD         |
+| k      | Int32 |     | YES  |         | FIELD         |
+| m      | Int32 |     | YES  |         | FIELD         |
++--------+-------+-----+------+---------+---------------+
 
 SELECT * FROM t;
 

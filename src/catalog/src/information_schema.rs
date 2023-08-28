@@ -70,11 +70,9 @@ impl InformationSchemaProvider {
 
     pub fn table(&self, name: &str) -> Option<TableRef> {
         self.information_table(name).map(|table| {
-            let schema = table.schema();
             let table_info = Self::table_info(self.catalog_name.clone(), &table);
-            let table_type = table.table_type();
             let filter_pushdown = FilterPushDownType::Unsupported;
-            let thin_table = ThinTable::new(schema, table_info, table_type, filter_pushdown);
+            let thin_table = ThinTable::new(table_info, filter_pushdown);
 
             let data_source = Arc::new(InformationTableDataSource::new(table));
             Arc::new(ThinTableAdapter::new(thin_table, data_source)) as _

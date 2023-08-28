@@ -58,6 +58,13 @@ impl VersionControl {
     pub(crate) fn current(&self) -> VersionControlData {
         self.data.read().unwrap().clone()
     }
+
+    /// Updates committed sequence and entry id.
+    pub(crate) fn set_sequence_and_entry_id(&self, seq: SequenceNumber, entry_id: EntryId) {
+        let mut data = self.data.write().unwrap();
+        data.committed_sequence = seq;
+        data.last_entry_id = entry_id;
+    }
 }
 
 pub(crate) type VersionControlRef = Arc<VersionControl>;
@@ -87,8 +94,8 @@ pub(crate) struct Version {
     pub(crate) memtables: MemtableVersionRef,
     /// SSTs of the region.
     pub(crate) ssts: SstVersionRef,
-    /// Inclusive max sequence of flushed data.
-    pub(crate) flushed_sequence: SequenceNumber,
+    /// Inclusive max WAL entry id of flushed data.
+    pub(crate) flushed_entry_id: EntryId,
     // TODO(yingwen): RegionOptions.
 }
 
@@ -113,7 +120,7 @@ impl VersionBuilder {
             metadata: self.metadata,
             memtables: Arc::new(MemtableVersion::new(self.mutable)),
             ssts: Arc::new(SstVersion::new()),
-            flushed_sequence: 0,
+            flushed_entry_id: 0,
         }
     }
 }

@@ -202,13 +202,26 @@ impl Stream for SimpleRecordBatchStream {
 }
 
 /// Adapt a [Stream] of [RecordBatch] to a [RecordBatchStream].
-pub struct RecordBatchStreamAdaptor {
+pub struct RecordBatchStreamAdaptor<S> {
     pub schema: SchemaRef,
-    pub stream: Pin<Box<dyn Stream<Item = Result<RecordBatch>> + Send>>,
+    pub stream: S,
     pub output_ordering: Option<Vec<OrderOption>>,
 }
 
-impl RecordBatchStream for RecordBatchStreamAdaptor {
+impl<S> RecordBatchStreamAdaptor<S> {
+    /// Creates a RecordBatchStreamAdaptor without output ordering requirement.
+    pub fn new(schema: SchemaRef, stream: S) -> RecordBatchStreamAdaptor<S> {
+        RecordBatchStreamAdaptor {
+            schema,
+            stream,
+            output_ordering: None,
+        }
+    }
+}
+
+impl<S: Stream<Item = Result<RecordBatch>> + Unpin> RecordBatchStream
+    for RecordBatchStreamAdaptor<S>
+{
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }
@@ -218,7 +231,7 @@ impl RecordBatchStream for RecordBatchStreamAdaptor {
     }
 }
 
-impl Stream for RecordBatchStreamAdaptor {
+impl<S: Stream<Item = Result<RecordBatch>> + Unpin> Stream for RecordBatchStreamAdaptor<S> {
     type Item = Result<RecordBatch>;
 
     fn poll_next(mut self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Option<Self::Item>> {

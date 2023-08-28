@@ -37,7 +37,6 @@ use greptime_proto::v1;
 use greptime_proto::v1::ddl_request::Expr;
 use greptime_proto::v1::greptime_request::Request;
 use greptime_proto::v1::query_request::Query;
-use greptime_proto::v1::region::region_request;
 use greptime_proto::v1::value::ValueData;
 use greptime_proto::v1::{DdlRequest, IntervalMonthDayNano, QueryRequest, SemanticType};
 use snafu::prelude::*;
@@ -54,6 +53,10 @@ impl ColumnDataTypeWrapper {
         let datatype = ColumnDataType::from_i32(datatype)
             .context(error::UnknownColumnDataTypeSnafu { datatype })?;
         Ok(Self(datatype))
+    }
+
+    pub fn new(datatype: ColumnDataType) -> Self {
+        Self(datatype)
     }
 
     pub fn datatype(&self) -> ColumnDataType {
@@ -326,21 +329,6 @@ fn query_request_type(request: &QueryRequest) -> &'static str {
         Some(Query::LogicalPlan(_)) => "query.logical_plan",
         Some(Query::PromRangeQuery(_)) => "query.prom_range",
         None => "query.empty",
-    }
-}
-
-/// Returns the type name of the [RegionRequest].
-pub fn region_request_type(request: &region_request::Request) -> &'static str {
-    match request {
-        region_request::Request::Inserts(_) => "region.inserts",
-        region_request::Request::Deletes(_) => "region.deletes",
-        region_request::Request::Create(_) => "region.create",
-        region_request::Request::Drop(_) => "region.drop  ",
-        region_request::Request::Open(_) => "region.open",
-        region_request::Request::Close(_) => "region.close",
-        region_request::Request::Alter(_) => "region.alter",
-        region_request::Request::Flush(_) => "region.flush",
-        region_request::Request::Compact(_) => "region.compact",
     }
 }
 

@@ -23,6 +23,7 @@ use api::helper::{
 };
 use api::v1::{ColumnDataType, ColumnSchema, OpType, Rows, Value};
 use common_base::readable_size::ReadableSize;
+use common_query::Output;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::metadata::{ColumnMetadata, RegionMetadata};
 use store_api::region_request::{
@@ -313,7 +314,7 @@ pub(crate) fn validate_proto_value(
 /// Sender and write request.
 pub(crate) struct SenderWriteRequest {
     /// Result sender.
-    pub(crate) sender: Option<Sender<Result<()>>>,
+    pub(crate) sender: Option<Sender<Result<Output>>>,
     pub(crate) request: WriteRequest,
 }
 
@@ -333,7 +334,7 @@ pub(crate) struct RegionTask {
     ///
     /// Now the result is a `Result<()>`, but we could replace the empty tuple
     /// with an enum if we need to carry more information.
-    pub(crate) sender: Option<Sender<Result<()>>>,
+    pub(crate) sender: Option<Sender<Result<Output>>>,
     /// Request body.
     pub(crate) body: RequestBody,
     /// Region identifier.
@@ -345,7 +346,7 @@ impl RegionTask {
     pub(crate) fn from_request(
         region_id: RegionId,
         body: RequestBody,
-    ) -> (RegionTask, Receiver<Result<()>>) {
+    ) -> (RegionTask, Receiver<Result<Output>>) {
         let (sender, receiver) = oneshot::channel();
         (
             RegionTask {

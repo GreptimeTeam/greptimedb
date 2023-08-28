@@ -24,24 +24,28 @@ use common_catalog::consts::{
 use common_catalog::format_full_table_name;
 use common_error::ext::BoxedError;
 use common_query::Output;
-use common_recordbatch::{util as record_util, RecordBatch};
+use common_recordbatch::{util as record_util, RecordBatch, SendableRecordBatchStream};
 use common_telemetry::logging;
 use common_time::util;
+use datafusion::datasource::DefaultTableSource;
+use datafusion_common::TableReference;
+use datafusion_expr::LogicalPlanBuilder;
 use datatypes::prelude::{ConcreteDataType, ScalarVector};
 use datatypes::schema::{ColumnSchema, RawSchema};
 use datatypes::vectors::{StringVector, TimestampMillisecondVector, Vector, VectorRef};
 use query::parser::QueryLanguageParser;
+use query::plan::LogicalPlan;
 use query::QueryEngineRef;
 use session::context::QueryContextBuilder;
 use snafu::{ensure, OptionExt, ResultExt};
-use store_api::storage::ScanRequest;
 use table::requests::{CreateTableRequest, InsertRequest, TableOptions};
+use table::table::adapter::DfTableProviderAdapter;
 use table::TableRef;
 
 use crate::error::{
-    CastTypeSnafu, CollectRecordsSnafu, FindColumnInScriptsTableSnafu, FindScriptSnafu,
-    FindScriptsTableSnafu, InsertScriptSnafu, RegisterScriptsTableSnafu, Result,
-    ScriptNotFoundSnafu, ScriptsTableNotFoundSnafu,
+    BuildDfLogicalPlanSnafu, CastTypeSnafu, CollectRecordsSnafu, ExecuteInternalStatementSnafu,
+    FindColumnInScriptsTableSnafu, FindScriptSnafu, FindScriptsTableSnafu, InsertScriptSnafu,
+    RegisterScriptsTableSnafu, Result, ScriptNotFoundSnafu, ScriptsTableNotFoundSnafu,
 };
 use crate::python::utils::block_on_async;
 use crate::python::PyScript;
@@ -78,8 +82,7 @@ impl ScriptsTable {
         table: TableRef,
         query_engine: QueryEngineRef,
     ) -> catalog::error::Result<()> {
-        let rbs = table
-            .scan_to_stream(ScanRequest::default())
+        let rbs = Self::table_full_scan(table, &query_engine)
             .await
             .map_err(BoxedError::new)
             .context(CompileScriptInternalSnafu)?;
@@ -291,6 +294,40 @@ impl ScriptsTable {
     #[inline]
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    async fn table_full_scan(
+        table: TableRef,
+        query_engine: &QueryEngineRef,
+    ) -> Result<SendableRecordBatchStream> {
+        let table_info = table.table_info();
+        let table_name = TableReference::full(
+            table_info.catalog_name.clone(),
+            table_info.schema_name.clone(),
+            table_info.name.clone(),
+        );
+
+        let table_provider = Arc::new(DfTableProviderAdapter::new(table));
+        let table_source = Arc::new(DefaultTableSource::new(table_provider));
+
+        let plan = LogicalPlanBuilder::scan(table_name, table_source, None)
+            .context(BuildDfLogicalPlanSnafu)?
+            .build()
+            .context(BuildDfLogicalPlanSnafu)?;
+
+        let output = query_engine
+            .execute(
+                LogicalPlan::DfPlan(plan),
+                QueryContextBuilder::default().build(),
+            )
+            .await
+            .context(ExecuteInternalStatementSnafu)?;
+        let stream = match output {
+            Output::Stream(stream) => stream,
+            Output::RecordBatches(record_batches) => record_batches.as_stream(),
+            _ => unreachable!(),
+        };
+        Ok(stream)
     }
 }
 

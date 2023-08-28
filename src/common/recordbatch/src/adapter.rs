@@ -286,6 +286,7 @@ mod test {
     use snafu::IntoError;
 
     use super::*;
+    use crate::error::Error;
     use crate::RecordBatches;
 
     #[tokio::test]
@@ -354,20 +355,24 @@ mod test {
                 .into_error(BoxedError::new(MockError::new(StatusCode::Unknown)))),
         ]));
         let adapter = AsyncRecordBatchStreamAdapter::new(schema.clone(), poll_err_stream);
-        let result = RecordBatches::try_collect(Box::pin(adapter)).await;
-        assert_eq!(
-            result.unwrap_err().to_string(),
-            "External error, source: Unknown",
+        let err = RecordBatches::try_collect(Box::pin(adapter))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::External { .. }),
+            "unexpected err {err}"
         );
 
         let failed_to_init_stream =
             new_future_stream(Err(error::ExternalSnafu
                 .into_error(BoxedError::new(MockError::new(StatusCode::Internal)))));
         let adapter = AsyncRecordBatchStreamAdapter::new(schema.clone(), failed_to_init_stream);
-        let result = RecordBatches::try_collect(Box::pin(adapter)).await;
-        assert_eq!(
-            result.unwrap_err().to_string(),
-            "External error, source: Internal",
+        let err = RecordBatches::try_collect(Box::pin(adapter))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::External { .. }),
+            "unexpected err {err}"
         );
     }
 }

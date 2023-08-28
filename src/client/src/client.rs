@@ -17,6 +17,7 @@ use std::sync::Arc;
 use api::v1::greptime_database_client::GreptimeDatabaseClient;
 use api::v1::health_check_client::HealthCheckClient;
 use api::v1::prometheus_gateway_client::PrometheusGatewayClient;
+use api::v1::region::region_client::RegionClient as PbRegionClient;
 use api::v1::HealthCheckRequest;
 use arrow_flight::flight_service_client::FlightServiceClient;
 use common_grpc::channel_manager::ChannelManager;
@@ -80,11 +81,6 @@ impl Inner {
 impl Client {
     pub fn new() -> Self {
         Default::default()
-    }
-
-    pub fn with_manager(channel_manager: ChannelManager) -> Self {
-        let inner = Arc::new(Inner::with_manager(channel_manager));
-        Self { inner }
     }
 
     pub fn with_urls<U, A>(urls: A) -> Self
@@ -155,6 +151,11 @@ impl Client {
         Ok(DatabaseClient {
             inner: GreptimeDatabaseClient::new(channel),
         })
+    }
+
+    pub(crate) fn raw_region_client(&self) -> Result<PbRegionClient<Channel>> {
+        let (_, channel) = self.find_channel()?;
+        Ok(PbRegionClient::new(channel))
     }
 
     pub fn make_prometheus_gateway_client(&self) -> Result<PrometheusGatewayClient<Channel>> {

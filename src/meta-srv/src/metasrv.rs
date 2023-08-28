@@ -16,6 +16,7 @@ pub mod builder;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use api::v1::meta::Peer;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
@@ -79,7 +80,10 @@ impl Default for MetaSrvOptions {
                 dir: format!("{METASRV_HOME}/logs"),
                 ..Default::default()
             },
-            procedure: ProcedureConfig::default(),
+            procedure: ProcedureConfig {
+                max_retry_times: 12,
+                retry_delay: Duration::from_millis(500),
+            },
             datanode: DatanodeOptions::default(),
             enable_telemetry: true,
             data_home: METASRV_HOME.to_string(),

@@ -14,16 +14,14 @@
 
 use std::collections::HashMap;
 
-use auth::UserInfoRef;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Extension;
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
-use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_grpc::writer::Precision;
 use common_telemetry::timer;
-use session::context::QueryContext;
+use session::context::QueryContextRef;
 
 use crate::error::{Result, TimePrecisionSnafu};
 use crate::influxdb::InfluxdbRequest;
@@ -45,7 +43,7 @@ pub async fn influxdb_health() -> Result<impl IntoResponse> {
 pub async fn influxdb_write_v1(
     State(handler): State<InfluxdbLineProtocolHandlerRef>,
     Query(mut params): Query<HashMap<String, String>>,
-    user_info: Extension<UserInfoRef>,
+    Extension(query_ctx): Extension<QueryContextRef>,
     lines: String,
 ) -> Result<impl IntoResponse> {
     let db = params
@@ -57,14 +55,14 @@ pub async fn influxdb_write_v1(
         .map(|val| parse_time_precision(val))
         .transpose()?;
 
-    influxdb_write(&db, precision, lines, handler, user_info.0).await
+    influxdb_write(&db, precision, lines, handler, query_ctx).await
 }
 
 #[axum_macros::debug_handler]
 pub async fn influxdb_write_v2(
     State(handler): State<InfluxdbLineProtocolHandlerRef>,
     Query(mut params): Query<HashMap<String, String>>,
-    user_info: Extension<UserInfoRef>,
+    Extension(query_ctx): Extension<QueryContextRef>,
     lines: String,
 ) -> Result<impl IntoResponse> {
     let db = params
@@ -76,7 +74,7 @@ pub async fn influxdb_write_v2(
         .map(|val| parse_time_precision(val))
         .transpose()?;
 
-    influxdb_write(&db, precision, lines, handler, user_info.0).await
+    influxdb_write(&db, precision, lines, handler, query_ctx).await
 }
 
 pub async fn influxdb_write(
@@ -84,19 +82,14 @@ pub async fn influxdb_write(
     precision: Option<Precision>,
     lines: String,
     handler: InfluxdbLineProtocolHandlerRef,
-    user_info: UserInfoRef,
+    ctx: QueryContextRef,
 ) -> Result<impl IntoResponse> {
     let _timer = timer!(
         crate::metrics::METRIC_HTTP_INFLUXDB_WRITE_ELAPSED,
         &[(crate::metrics::METRIC_DB_LABEL, db.to_string())]
     );
 
-    let (catalog, schema) = parse_catalog_and_schema_from_db_string(db);
-    let ctx = QueryContext::with(catalog, schema);
-    ctx.set_current_user(Some(user_info));
-
     let request = InfluxdbRequest { precision, lines };
-
     handler.exec(request, ctx).await?;
 
     Ok((StatusCode::NO_CONTENT, ()))

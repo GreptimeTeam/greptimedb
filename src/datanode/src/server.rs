@@ -54,7 +54,7 @@ impl Services {
                 .context(RuntimeResourceSnafu)?,
         );
 
-        let region_server = RegionServer::new(instance.query_engine());
+        let region_server = RegionServer::new(instance.query_engine(), grpc_runtime.clone());
         let flight_handler = if enable_region_server {
             Some(Arc::new(region_server.clone()) as _)
         } else {

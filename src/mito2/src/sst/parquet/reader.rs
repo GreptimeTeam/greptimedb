@@ -68,22 +68,22 @@ impl ParquetReaderBuilder {
     }
 
     /// Attaches the predicate to the builder.
-    pub fn predicate(mut self, predicate: Predicate) -> ParquetReaderBuilder {
-        self.predicate = Some(predicate);
+    pub fn predicate(mut self, predicate: Option<Predicate>) -> ParquetReaderBuilder {
+        self.predicate = predicate;
         self
     }
 
     /// Attaches the time range to the builder.
-    pub fn time_range(mut self, time_range: TimestampRange) -> ParquetReaderBuilder {
-        self.time_range = Some(time_range);
+    pub fn time_range(mut self, time_range: Option<TimestampRange>) -> ParquetReaderBuilder {
+        self.time_range = time_range;
         self
     }
 
     /// Attaches the projection to the builder.
     ///
     /// The reader only applies the projection to fields.
-    pub fn projection(mut self, projection: Vec<ColumnId>) -> ParquetReaderBuilder {
-        self.projection = Some(projection);
+    pub fn projection(mut self, projection: Option<Vec<ColumnId>>) -> ParquetReaderBuilder {
+        self.projection = projection;
         self
     }
 

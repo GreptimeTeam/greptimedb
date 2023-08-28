@@ -144,7 +144,7 @@ async fn handle_create_table_task(
         .submit_create_table_task(cluster_id, create_table_task, region_routes)
         .await?;
 
-    info!("Table: {table_id} is dropped via procedure_id {id:?}");
+    info!("Table: {table_id} is created via procedure_id {id:?}");
 
     Ok(SubmitDdlTaskResponse {
         key: id.to_string().into(),
@@ -238,6 +238,8 @@ async fn handle_drop_table_task(
         )
         .await?;
 
+    info!("Table: {table_id} is dropped via procedure_id {id:?}");
+
     Ok(SubmitDdlTaskResponse {
         key: id.to_string().into(),
         ..Default::default()
@@ -289,7 +291,7 @@ async fn handle_alter_table_task(
         )
         .await?;
 
-    info!("Table: {table_id} is altering via procedure_id {id:?}");
+    info!("Table: {table_id} is altered via procedure_id {id:?}");
 
     Ok(SubmitDdlTaskResponse {
         key: id.to_string().into(),

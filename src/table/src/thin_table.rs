@@ -29,23 +29,14 @@ use crate::Table;
 /// The `ThinTable` struct will replace the `Table` trait.
 /// TODO(zhongzc): After completion, perform renaming and documentation work.
 pub struct ThinTable {
-    schema: SchemaRef,
     table_info: TableInfoRef,
-    table_type: TableType,
     filter_pushdown: FilterPushDownType,
 }
 
 impl ThinTable {
-    pub fn new(
-        schema: SchemaRef,
-        table_info: TableInfoRef,
-        table_type: TableType,
-        filter_pushdown: FilterPushDownType,
-    ) -> Self {
+    pub fn new(table_info: TableInfoRef, filter_pushdown: FilterPushDownType) -> Self {
         Self {
-            schema,
             table_info,
-            table_type,
             filter_pushdown,
         }
     }
@@ -69,7 +60,7 @@ impl Table for ThinTableAdapter {
     }
 
     fn schema(&self) -> SchemaRef {
-        self.table.schema.clone()
+        self.table.table_info.meta.schema.clone()
     }
 
     fn table_info(&self) -> TableInfoRef {
@@ -77,7 +68,7 @@ impl Table for ThinTableAdapter {
     }
 
     fn table_type(&self) -> TableType {
-        self.table.table_type
+        self.table.table_info.table_type
     }
 
     async fn scan_to_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream> {

@@ -29,6 +29,16 @@ use crate::error::{ArithmeticOverflowSnafu, Error, ParseTimestampSnafu, Timestam
 use crate::timezone::TimeZone;
 use crate::util::{div_ceil, format_utc_datetime, local_datetime_to_utc};
 
+/// Timestamp represents the value of units(seconds/milliseconds/microseconds/nanoseconds) elapsed
+/// since UNIX epoch. The valid value range of [Timestamp] depends on it's unit (all in UTC time zone):
+/// - for [TimeUnit::Second]: [-262144-01-01 00:00:00, +262143-12-31 23:59:59]
+/// - for [TimeUnit::Millisecond]: [-262144-01-01 00:00:00.000, +262143-12-31 23:59:59.999]
+/// - for [TimeUnit::Microsecond]: [-262144-01-01 00:00:00.000000, +262143-12-31 23:59:59.999999]
+/// - for [TimeUnit::Nanosecond]: [1677-09-21 00:12:43.145225, 2262-04-11 23:47:16.854775807]
+///
+/// # Note:
+/// For values out of range, you can still store these timestamps, but while performing arithmetic
+/// or formatting operations, it will return an error or just overflow.
 #[derive(Debug, Clone, Default, Copy, Serialize, Deserialize)]
 pub struct Timestamp {
     value: i64,
@@ -169,6 +179,28 @@ impl Timestamp {
         (sec_div, nsec)
     }
 
+    /// Creates a new Timestamp instance from seconds and nanoseconds parts.
+    /// Returns None if overflow.
+    fn from_splits(sec: i64, nsec: u32) -> Option<Self> {
+        if nsec == 0 {
+            Some(Timestamp::new_second(sec))
+        } else if nsec % 1_000_000 == 0 {
+            let millis = nsec / 1_000_000;
+            sec.checked_mul(1000)
+                .and_then(|v| v.checked_add(millis as i64))
+                .map(Timestamp::new_millisecond)
+        } else if nsec % 1000 == 0 {
+            let micros = nsec / 1000;
+            sec.checked_mul(1_000_000)
+                .and_then(|v| v.checked_add(micros as i64))
+                .map(Timestamp::new_microsecond)
+        } else {
+            sec.checked_mul(1_000_000_000)
+                .and_then(|v| v.checked_add(nsec as i64))
+                .map(Timestamp::new_nanosecond)
+        }
+    }
+
     /// Format timestamp to ISO8601 string. If the timestamp exceeds what chrono timestamp can
     /// represent, this function simply print the timestamp unit and value in plain string.
     pub fn to_iso8601_string(&self) -> String {
@@ -205,6 +237,12 @@ impl Timestamp {
         let (sec, nsec) = self.split();
         NaiveDateTime::from_timestamp_opt(sec, nsec)
     }
+
+    pub fn from_chrono_datetime(ndt: NaiveDateTime) -> Option<Self> {
+        let sec = ndt.timestamp();
+        let nsec = ndt.timestamp_subsec_nanos();
+        Timestamp::from_splits(sec, nsec)
+    }
 }
 
 impl FromStr for Timestamp {
@@ -225,13 +263,16 @@ impl FromStr for Timestamp {
         // RFC3339 timestamp (with a T)
         let s = s.trim();
         if let Ok(ts) = DateTime::parse_from_rfc3339(s) {
-            return Ok(Timestamp::new(ts.timestamp_nanos(), TimeUnit::Nanosecond));
+            return Timestamp::from_chrono_datetime(ts.naive_utc())
+                .context(ParseTimestampSnafu { raw: s });
         }
         if let Ok(ts) = DateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f%:z") {
-            return Ok(Timestamp::new(ts.timestamp_nanos(), TimeUnit::Nanosecond));
+            return Timestamp::from_chrono_datetime(ts.naive_utc())
+                .context(ParseTimestampSnafu { raw: s });
         }
         if let Ok(ts) = Utc.datetime_from_str(s, "%Y-%m-%d %H:%M:%S%.fZ") {
-            return Ok(Timestamp::new(ts.timestamp_nanos(), TimeUnit::Nanosecond));
+            return Timestamp::from_chrono_datetime(ts.naive_utc())
+                .context(ParseTimestampSnafu { raw: s });
         }
 
         if let Ok(ts) = NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S") {
@@ -264,7 +305,7 @@ fn naive_datetime_to_timestamp(
     match local_datetime_to_utc(&datetime) {
         LocalResult::None => ParseTimestampSnafu { raw: s }.fail(),
         LocalResult::Single(utc) | LocalResult::Ambiguous(utc, _) => {
-            Ok(Timestamp::new(utc.timestamp_nanos(), TimeUnit::Nanosecond))
+            Timestamp::from_chrono_datetime(utc).context(ParseTimestampSnafu { raw: s })
         }
     }
 }
@@ -608,11 +649,7 @@ mod tests {
     // but expected timestamp is in UTC timezone
     fn check_from_str(s: &str, expect: &str) {
         let ts = Timestamp::from_str(s).unwrap();
-        let time = NaiveDateTime::from_timestamp_opt(
-            ts.value / 1_000_000_000,
-            (ts.value % 1_000_000_000) as u32,
-        )
-        .unwrap();
+        let time = ts.to_chrono_datetime().unwrap();
         assert_eq!(expect, time.to_string());
     }
 
@@ -1048,5 +1085,71 @@ mod tests {
             TimeUnit::Nanosecond,
             TimeUnit::from(ArrowTimeUnit::Nanosecond)
         );
+    }
+
+    fn check_conversion(ts: Timestamp, valid: bool) {
+        let Some(t2) = ts.to_chrono_datetime() else {
+            if valid {
+                panic!("Cannot convert {:?} to Chrono NaiveDateTime", ts);
+            }
+            return;
+        };
+        let Some(t3) = Timestamp::from_chrono_datetime(t2) else {
+            if valid {
+                panic!("Cannot convert Chrono NaiveDateTime {:?} to Timestamp", t2);
+            }
+            return;
+        };
+
+        assert_eq!(t3, ts);
+    }
+
+    #[test]
+    fn test_from_naive_date_time() {
+        let min_sec = Timestamp::new_second(-8334632851200);
+        let max_sec = Timestamp::new_second(8210298412799);
+        check_conversion(min_sec, true);
+        check_conversion(Timestamp::new_second(min_sec.value - 1), false);
+        check_conversion(max_sec, true);
+        check_conversion(Timestamp::new_second(max_sec.value + 1), false);
+
+        let min_millis = Timestamp::new_millisecond(-8334632851200000);
+        let max_millis = Timestamp::new_millisecond(8210298412799999);
+        check_conversion(min_millis, true);
+        check_conversion(Timestamp::new_millisecond(min_millis.value - 1), false);
+        check_conversion(max_millis, true);
+        check_conversion(Timestamp::new_millisecond(max_millis.value + 1), false);
+
+        let min_micros = Timestamp::new_microsecond(-8334632851200000000);
+        let max_micros = Timestamp::new_microsecond(8210298412799999999);
+        check_conversion(min_micros, true);
+        check_conversion(Timestamp::new_microsecond(min_micros.value - 1), false);
+        check_conversion(max_micros, true);
+        check_conversion(Timestamp::new_microsecond(max_micros.value + 1), false);
+
+        let min_nanos = Timestamp::new_nanosecond(-9223372036854775000);
+        let max_nanos = Timestamp::new_nanosecond(i64::MAX);
+        check_conversion(min_nanos, true);
+        check_conversion(Timestamp::new_nanosecond(min_nanos.value - 1), false);
+        check_conversion(max_nanos, true);
+    }
+
+    #[test]
+    fn test_parse_timestamp_range() {
+        let valid_strings = vec![
+            "-262144-01-01 00:00:00Z",
+            "+262143-12-31 23:59:59Z",
+            "-262144-01-01 00:00:00Z",
+            "+262143-12-31 23:59:59.999Z",
+            "-262144-01-01 00:00:00Z",
+            "+262143-12-31 23:59:59.999999Z",
+            "1677-09-21 00:12:43.145225Z",
+            "2262-04-11 23:47:16.854775807Z",
+            "+100000-01-01 00:00:01.5Z",
+        ];
+
+        for s in valid_strings {
+            Timestamp::from_str(s).unwrap();
+        }
     }
 }

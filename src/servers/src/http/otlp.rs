@@ -12,39 +12,34 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use auth::UserInfoRef;
 use axum::extract::{RawBody, State};
 use axum::http::header;
 use axum::response::IntoResponse;
-use axum::{Extension, TypedHeader};
+use axum::Extension;
 use common_telemetry::timer;
 use hyper::Body;
 use opentelemetry_proto::tonic::collector::metrics::v1::{
     ExportMetricsServiceRequest, ExportMetricsServiceResponse,
 };
 use prost::Message;
-use session::context::QueryContext;
+use session::context::QueryContextRef;
 use snafu::prelude::*;
 
 use crate::error::{self, Result};
-use crate::http::header::GreptimeDbName;
 use crate::query_handler::OpenTelemetryProtocolHandlerRef;
 
 #[axum_macros::debug_handler]
 pub async fn metrics(
     State(handler): State<OpenTelemetryProtocolHandlerRef>,
-    TypedHeader(db): TypedHeader<GreptimeDbName>,
-    user_info: Extension<UserInfoRef>,
+    Extension(query_ctx): Extension<QueryContextRef>,
     RawBody(body): RawBody,
 ) -> Result<OtlpResponse> {
-    let ctx = QueryContext::with_db_name(db.value());
-    ctx.set_current_user(Some(user_info.0));
     let _timer = timer!(
         crate::metrics::METRIC_HTTP_OPENTELEMETRY_ELAPSED,
-        &[(crate::metrics::METRIC_DB_LABEL, ctx.get_db_string())]
+        &[(crate::metrics::METRIC_DB_LABEL, query_ctx.get_db_string())]
     );
     let request = parse_body(body).await?;
-    handler.metrics(request, ctx).await.map(OtlpResponse)
+    handler.metrics(request, query_ctx).await.map(OtlpResponse)
 }
 
 async fn parse_body(body: Body) -> Result<ExportMetricsServiceRequest> {

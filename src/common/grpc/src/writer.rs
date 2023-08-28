@@ -18,9 +18,11 @@ use std::fmt::Display;
 use api::helper::values_with_capacity;
 use api::v1::{Column, ColumnDataType, SemanticType};
 use common_base::BitVec;
+use common_time::timestamp::TimeUnit;
 use snafu::ensure;
 
 use crate::error::{Result, TypeMismatchSnafu};
+use crate::Error;
 
 type ColumnName = String;
 
@@ -256,6 +258,24 @@ impl Display for Precision {
             Precision::Minute => write!(f, "Precision::Minute"),
             Precision::Hour => write!(f, "Precision::Hour"),
         }
+    }
+}
+
+impl TryFrom<Precision> for TimeUnit {
+    type Error = Error;
+
+    fn try_from(precision: Precision) -> std::result::Result<Self, Self::Error> {
+        Ok(match precision {
+            Precision::Second => TimeUnit::Second,
+            Precision::Millisecond => TimeUnit::Millisecond,
+            Precision::Microsecond => TimeUnit::Microsecond,
+            Precision::Nanosecond => TimeUnit::Nanosecond,
+            _ => {
+                return Err(Error::NotSupported {
+                    feat: format!("convert {precision} into TimeUnit"),
+                })
+            }
+        })
     }
 }
 

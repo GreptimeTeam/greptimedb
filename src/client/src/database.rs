@@ -19,7 +19,7 @@ use api::v1::query_request::Query;
 use api::v1::{
     AlterExpr, AuthHeader, CompactTableExpr, CreateTableExpr, DdlRequest, DeleteRequests,
     DropTableExpr, FlushTableExpr, GreptimeRequest, InsertRequests, PromRangeQuery, QueryRequest,
-    RequestHeader, TruncateTableExpr,
+    RequestHeader, RowInsertRequests, TruncateTableExpr,
 };
 use arrow_flight::Ticket;
 use async_stream::stream;
@@ -113,6 +113,11 @@ impl Database {
     pub async fn insert(&self, requests: InsertRequests) -> Result<u32> {
         let _timer = timer!(metrics::METRIC_GRPC_INSERT);
         self.handle(Request::Inserts(requests)).await
+    }
+
+    pub async fn row_insert(&self, requests: RowInsertRequests) -> Result<u32> {
+        let _timer = timer!(metrics::METRIC_GRPC_INSERT);
+        self.handle(Request::RowInserts(requests)).await
     }
 
     pub fn streaming_inserter(&self) -> Result<StreamInserter> {

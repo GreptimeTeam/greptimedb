@@ -1,0 +1,137 @@
+-- description: Test NaN and inf as aggregate groups
+-- float
+CREATE TABLE floats(f FLOAT, i INT, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO floats VALUES ('inf'::FLOAT, 1, 2), ('inf'::FLOAT, 7, 3), ('-inf'::FLOAT, 3, 4), ('nan'::FLOAT, 7, 5), ('nan'::FLOAT, 19, 6), ('-inf'::FLOAT, 2, 7);
+
+Affected Rows: 6
+
+SELECT f, SUM(i) FROM floats GROUP BY f ORDER BY f;
+
++------+---------------+
+| f    | SUM(floats.i) |
++------+---------------+
+| -inf | 5             |
+| inf  | 8             |
+| NaN  | 26            |
++------+---------------+
+
+SELECT SUM(f) FROM floats WHERE f > 0 AND f != 'nan'::FLOAT;
+
++---------------+
+| SUM(floats.f) |
++---------------+
+| inf           |
++---------------+
+
+SELECT SUM(f) FROM floats WHERE f < 0;
+
++---------------+
+| SUM(floats.f) |
++---------------+
+| -inf          |
++---------------+
+
+SELECT SUM(f) FROM floats;
+
++---------------+
+| SUM(floats.f) |
++---------------+
+| NaN           |
++---------------+
+
+DROP TABLE floats;
+
+Affected Rows: 1
+
+-- double
+CREATE TABLE doubles(f DOUBLE, i INT, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO doubles VALUES ('inf'::DOUBLE, 1, 2), ('inf'::DOUBLE, 7, 3), ('-inf'::DOUBLE, 3, 4), ('nan'::DOUBLE, 7, 5), ('nan'::DOUBLE, 19, 6), ('-inf'::DOUBLE, 2, 7);
+
+Affected Rows: 6
+
+SELECT f, SUM(i) FROM doubles GROUP BY f ORDER BY f;
+
++------+----------------+
+| f    | SUM(doubles.i) |
++------+----------------+
+| -inf | 5              |
+| inf  | 8              |
+| NaN  | 26             |
++------+----------------+
+
+SELECT SUM(f) FROM doubles WHERE f > 0 AND f != 'nan'::DOUBLE;
+
++----------------+
+| SUM(doubles.f) |
++----------------+
+| inf            |
++----------------+
+
+SELECT SUM(f) FROM doubles WHERE f < 0;
+
++----------------+
+| SUM(doubles.f) |
++----------------+
+| -inf           |
++----------------+
+
+SELECT SUM(f) FROM doubles;
+
++----------------+
+| SUM(doubles.f) |
++----------------+
+| NaN            |
++----------------+
+
+DROP TABLE doubles;
+
+Affected Rows: 1
+
+-- float double
+CREATE TABLE floats_doubles (f FLOAT, d DOUBLE, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO floats_doubles VALUES (2e38, 1e308, 1), (2e38, 1e308, 2), (-1e38, 0, 3), (-1e38, 0, 4);
+
+Affected Rows: 4
+
+SELECT * FROM floats_doubles;
+
++---------+---------+-------------------------+
+| f       | d       | ts                      |
++---------+---------+-------------------------+
+| 2.0e38  | 1.0e308 | 1970-01-01T00:00:00.001 |
+| 2.0e38  | 1.0e308 | 1970-01-01T00:00:00.002 |
+| -1.0e38 | 0.0     | 1970-01-01T00:00:00.003 |
+| -1.0e38 | 0.0     | 1970-01-01T00:00:00.004 |
++---------+---------+-------------------------+
+
+-- not out of range --
+SELECT SUM(f) FROM floats_doubles WHERE f > 0;
+
++-----------------------+
+| SUM(floats_doubles.f) |
++-----------------------+
+| 3.999999872114277e38  |
++-----------------------+
+
+-- not out of range, but INF --
+SELECT SUM(d) FROM floats_doubles WHERE d > 0;
+
++-----------------------+
+| SUM(floats_doubles.d) |
++-----------------------+
+| inf                   |
++-----------------------+
+
+DROP TABLE floats_doubles;
+
+Affected Rows: 1
+

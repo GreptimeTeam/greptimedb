@@ -65,7 +65,12 @@ pub enum Error {
         source: std::io::Error,
     },
 
-    #[snafu(display("Failed to execute query: {}, source: {}", query, source))]
+    #[snafu(display(
+        "Failed to execute query, source: {}, query: {}, location: {}",
+        source,
+        query,
+        location
+    ))]
     ExecuteQuery {
         query: String,
         location: Location,
@@ -80,6 +85,12 @@ pub enum Error {
 
     #[snafu(display("{source}"))]
     ExecuteGrpcQuery {
+        location: Location,
+        source: BoxedError,
+    },
+
+    #[snafu(display("{source}"))]
+    ExecuteGrpcRequest {
         location: Location,
         source: BoxedError,
     },
@@ -369,6 +380,7 @@ impl ErrorExt for Error {
             | ExecuteQuery { source, .. }
             | ExecutePlan { source, .. }
             | ExecuteGrpcQuery { source, .. }
+            | ExecuteGrpcRequest { source, .. }
             | CheckDatabaseValidity { source, .. } => source.status_code(),
 
             NotSupported { .. }

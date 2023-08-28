@@ -14,6 +14,7 @@
 
 pub mod deleter;
 pub(crate) mod inserter;
+pub(crate) mod row_inserter;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -23,7 +24,7 @@ use api::v1::ddl_request::Expr as DdlExpr;
 use api::v1::greptime_request::Request;
 use api::v1::{
     column_def, AlterExpr, CompactTableExpr, CreateDatabaseExpr, CreateTableExpr, DeleteRequests,
-    FlushTableExpr, InsertRequests, TruncateTableExpr,
+    FlushTableExpr, InsertRequests, RowInsertRequests, TruncateTableExpr,
 };
 use async_trait::async_trait;
 use catalog::{CatalogManager, DeregisterTableRequest, RegisterTableRequest};
@@ -72,6 +73,7 @@ use crate::error::{
 use crate::expr_factory;
 use crate::instance::distributed::deleter::DistDeleter;
 use crate::instance::distributed::inserter::DistInserter;
+use crate::instance::distributed::row_inserter::RowDistInserter;
 use crate::table::DistTable;
 
 const MAX_VALUE: &str = "MAXVALUE";
@@ -127,11 +129,7 @@ impl DistInstance {
 
         create_table.table_id = Some(api::v1::TableId { id: table_id });
 
-        let table = Arc::new(DistTable::new(
-            table_name.clone(),
-            table_info,
-            self.catalog_manager.clone(),
-        ));
+        let table = DistTable::table(table_info);
 
         let request = RegisterTableRequest {
             catalog: table_name.catalog_name.clone(),
@@ -150,10 +148,7 @@ impl DistInstance {
             }
         );
 
-        // Since the table information created on meta does not go through KvBackend, so we
-        // manually invalidate the cache here.
-        //
-        // TODO(fys): when the meta invalidation cache mechanism is established, remove it.
+        // Invalidates local cache ASAP.
         self.catalog_manager
             .invalidate_table(
                 &table_name.catalog_name,
@@ -193,10 +188,7 @@ impl DistInstance {
             .await
             .context(CatalogSnafu)?;
 
-        // Since the table information dropped on meta does not go through KvBackend, so we
-        // manually invalidate the cache here.
-        //
-        // TODO(fys): when the meta invalidation cache mechanism is established, remove it.
+        // Invalidates local cache ASAP.
         self.catalog_manager()
             .invalidate_table(
                 &table_name.catalog_name,
@@ -407,7 +399,8 @@ impl DistInstance {
                     .context(TableNotFoundSnafu { table_name: &table })?;
                 let table_name = TableName::new(catalog, schema, table);
 
-                self.show_create_table(table_name, table_ref).await
+                self.show_create_table(table_name, table_ref, query_ctx.clone())
+                    .await
             }
             Statement::TruncateTable(stmt) => {
                 let (catalog, schema, table) =
@@ -424,7 +417,12 @@ impl DistInstance {
         }
     }
 
-    async fn show_create_table(&self, table_name: TableName, table: TableRef) -> Result<Output> {
+    async fn show_create_table(
+        &self,
+        table_name: TableName,
+        table: TableRef,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
         let partitions = self
             .catalog_manager
             .partition_manager()
@@ -436,7 +434,8 @@ impl DistInstance {
 
         let partitions = create_partitions_stmt(partitions)?;
 
-        query::sql::show_create_table(table, partitions).context(error::ExecuteStatementSnafu)
+        query::sql::show_create_table(table, partitions, query_ctx)
+            .context(error::ExecuteStatementSnafu)
     }
 
     /// Handles distributed database creation
@@ -556,6 +555,11 @@ impl DistInstance {
             .await
             .context(error::RequestMetaSnafu)?;
 
+        // Invalidates local cache ASAP.
+        self.catalog_manager()
+            .invalidate_table(catalog_name, schema_name, table_name, table_id)
+            .await;
+
         Ok(Output::AffectedRows(0))
     }
 
@@ -625,6 +629,20 @@ impl DistInstance {
         Ok(Output::AffectedRows(affected_rows as usize))
     }
 
+    async fn handle_row_dist_insert(
+        &self,
+        requests: RowInsertRequests,
+        ctx: QueryContextRef,
+    ) -> Result<Output> {
+        let inserter = RowDistInserter::new(
+            ctx.current_catalog().to_owned(),
+            ctx.current_schema().to_owned(),
+            self.catalog_manager.clone(),
+        );
+        let affected_rows = inserter.insert(requests).await?;
+        Ok(Output::AffectedRows(affected_rows as usize))
+    }
+
     async fn handle_dist_delete(
         &self,
         request: DeleteRequests,
@@ -665,8 +683,9 @@ impl GrpcQueryHandler for DistInstance {
     async fn do_query(&self, request: Request, ctx: QueryContextRef) -> Result<Output> {
         match request {
             Request::Inserts(requests) => self.handle_dist_insert(requests, ctx).await,
-            Request::RowInserts(_) | Request::RowDeletes(_) => NotSupportedSnafu {
-                feat: "row inserts/deletes",
+            Request::RowInserts(requests) => self.handle_row_dist_insert(requests, ctx).await,
+            Request::RowDeletes(_) => NotSupportedSnafu {
+                feat: "row deletes",
             }
             .fail(),
             Request::Deletes(requests) => self.handle_dist_delete(requests, ctx).await,

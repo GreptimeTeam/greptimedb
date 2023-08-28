@@ -125,6 +125,7 @@ impl Scheduler for LocalScheduler {
             .map_err(|_| InvalidFlumeSenderSnafu {}.build())
     }
 
+    /// if await_termination is true, scheduler will wait all tasks finished before stopping
     async fn stop(&self, await_termination: bool) -> Result<()> {
         ensure!(
             self.state.load(Ordering::Relaxed) == STATE_RUNNING,

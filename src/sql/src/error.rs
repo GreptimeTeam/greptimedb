@@ -57,7 +57,7 @@ pub enum Error {
     UnsupportedDefaultValue { column_name: String, expr: Expr },
 
     // Syntax error from sql parser.
-    #[snafu(display("Syntax error, sql: {}, source: {}", sql, source))]
+    #[snafu(display("Syntax error, source: {}, sql: {}", source, sql))]
     Syntax { sql: String, source: ParserError },
 
     #[snafu(display("Missing time index constraint"))]

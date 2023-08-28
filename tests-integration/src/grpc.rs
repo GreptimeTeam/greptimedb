@@ -30,12 +30,10 @@ mod test {
     use common_query::Output;
     use common_recordbatch::RecordBatches;
     use frontend::instance::Instance;
-    use frontend::table::DistTable;
     use query::parser::QueryLanguageParser;
     use servers::query_handler::grpc::GrpcQueryHandler;
     use session::context::QueryContext;
     use store_api::storage::RegionNumber;
-    use table::Table;
     use tests::{has_parquet_file, test_region_dir};
 
     use crate::tests;
@@ -332,7 +330,6 @@ CREATE TABLE {table_name} (
             .await
             .unwrap()
             .unwrap();
-        let table = table.as_any().downcast_ref::<DistTable>().unwrap();
         let table_id = table.table_info().table_id();
 
         let table_route_value = instance
@@ -627,7 +624,6 @@ CREATE TABLE {table_name} (
             .await
             .unwrap()
             .unwrap();
-        let table = table.as_any().downcast_ref::<DistTable>().unwrap();
         let table_id = table.table_info().ident.table_id;
         let table_route_value = instance
             .table_metadata_manager()

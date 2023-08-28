@@ -31,9 +31,11 @@ pub mod error;
 pub mod manifest;
 #[allow(dead_code)]
 pub mod memtable;
+#[allow(dead_code)]
 pub mod read;
 #[allow(dead_code)]
 mod region;
+mod region_write_ctx;
 #[allow(dead_code)]
 pub mod request;
 #[allow(dead_code)]

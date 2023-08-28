@@ -91,7 +91,7 @@ impl RegionFailoverStart {
 #[typetag::serde]
 impl State for RegionFailoverStart {
     async fn next(
-        mut self: Box<Self>,
+        &mut self,
         ctx: &RegionFailoverContext,
         failed_region: &RegionIdent,
     ) -> Result<Box<dyn State>> {
