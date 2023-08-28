@@ -19,7 +19,7 @@ use store_api::storage::RegionId;
 
 use crate::flush::{FlushReason, RegionFlushTask};
 use crate::region::MitoRegionRef;
-use crate::request::{FlushFailedRequest, FlushFinishedRequest};
+use crate::request::{FlushFailed, FlushFinished};
 use crate::worker::RegionWorkerLoop;
 
 impl<S> RegionWorkerLoop<S> {
@@ -37,7 +37,7 @@ impl<S> RegionWorkerLoop<S> {
     pub(crate) async fn handle_flush_finished(
         &mut self,
         _region_id: RegionId,
-        _request: FlushFinishedRequest,
+        _request: FlushFinished,
     ) {
         // TODO(yingwen):
         // 1. check region existence
@@ -51,7 +51,7 @@ impl<S> RegionWorkerLoop<S> {
     pub(crate) async fn handle_flush_failed(
         &mut self,
         _region_id: RegionId,
-        _request: FlushFailedRequest,
+        _request: FlushFailed,
     ) {
         // TODO(yingwen): fail all pending requests.
         unimplemented!()

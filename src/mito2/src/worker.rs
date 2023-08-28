@@ -41,7 +41,7 @@ use crate::flush::{FlushScheduler, WriteBufferManagerRef};
 use crate::memtable::time_series::TimeSeriesMemtableBuilder;
 use crate::memtable::MemtableBuilderRef;
 use crate::region::{MitoRegionRef, RegionMap, RegionMapRef};
-use crate::request::{BackgroundRequest, DdlRequest, SenderDdlRequest, WorkerRequest};
+use crate::request::{BackgroundNotify, DdlRequest, SenderDdlRequest, WorkerRequest};
 use crate::wal::Wal;
 
 /// Identifier for a worker.
@@ -356,9 +356,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 WorkerRequest::Ddl(sender_req) => {
                     ddl_requests.push(sender_req);
                 }
-                WorkerRequest::Background { region_id, request } => {
-                    // For background request, we handle it directly.
-                    self.handle_background_request(region_id, request).await;
+                WorkerRequest::Background { region_id, notify } => {
+                    // For background notify, we handle it directly.
+                    self.handle_background_notify(region_id, notify).await;
                 }
                 // We receive a stop signal, but we still want to process remaining
                 // requests. The worker thread will then check the running flag and
@@ -403,16 +403,12 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
 impl<S> RegionWorkerLoop<S> {
     /// Handles region background request
-    async fn handle_background_request(
-        &mut self,
-        region_id: RegionId,
-        bg_request: BackgroundRequest,
-    ) {
-        match bg_request {
-            BackgroundRequest::FlushFinished(req) => {
+    async fn handle_background_notify(&mut self, region_id: RegionId, notify: BackgroundNotify) {
+        match notify {
+            BackgroundNotify::FlushFinished(req) => {
                 self.handle_flush_finished(region_id, req).await
             }
-            BackgroundRequest::FlushFailed(req) => self.handle_flush_failed(region_id, req).await,
+            BackgroundNotify::FlushFailed(req) => self.handle_flush_failed(region_id, req).await,
         }
     }
 

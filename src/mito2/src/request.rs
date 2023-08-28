@@ -332,8 +332,8 @@ pub(crate) enum WorkerRequest {
     Background {
         /// Id of the region to send.
         region_id: RegionId,
-        /// Request from a background job.
-        request: BackgroundRequest,
+        /// Internal notification.
+        notify: BackgroundNotify,
     },
 
     /// Notify a worker to stop.
@@ -435,23 +435,23 @@ pub(crate) struct SenderDdlRequest {
 
 /// Notification from a background job.
 #[derive(Debug)]
-pub(crate) enum BackgroundRequest {
+pub(crate) enum BackgroundNotify {
     /// Flush is finished.
-    FlushFinished(FlushFinishedRequest),
+    FlushFinished(FlushFinished),
     /// Flush is failed.
-    FlushFailed(FlushFailedRequest),
+    FlushFailed(FlushFailed),
 }
 
-/// A flush job is finished.
+/// Notifies a flush job is finished.
 #[derive(Debug)]
-pub(crate) struct FlushFinishedRequest {
+pub(crate) struct FlushFinished {
     /// Meta of the flushed SST.
     pub(crate) file_meta: FileMeta,
 }
 
-/// A flush job is failed.
+/// Notifies a flush job is failed.
 #[derive(Debug)]
-pub(crate) struct FlushFailedRequest {
+pub(crate) struct FlushFailed {
     /// The reason of a failed flush job.
     pub(crate) error: Error,
 }
