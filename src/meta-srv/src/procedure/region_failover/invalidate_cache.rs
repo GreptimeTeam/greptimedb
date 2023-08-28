@@ -58,7 +58,7 @@ impl InvalidateCache {
 #[typetag::serde]
 impl State for InvalidateCache {
     async fn next(
-        mut self: Box<Self>,
+        &mut self,
         ctx: &RegionFailoverContext,
         failed_region: &RegionIdent,
     ) -> Result<Box<dyn State>> {
@@ -108,12 +108,11 @@ mod tests {
             let _ = heartbeat_receivers.insert(frontend_id, rx);
         }
 
-        let state = InvalidateCache;
         let table_ident: TableIdent = failed_region.clone().into();
 
         // lexicographical order
         // frontend-4,5,6,7
-        let next_state = Box::new(state)
+        let next_state = InvalidateCache
             .next(&context, &failed_region)
             .await
             .unwrap();

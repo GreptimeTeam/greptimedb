@@ -26,12 +26,8 @@ pub(super) struct RegionFailoverEnd;
 #[async_trait]
 #[typetag::serde]
 impl State for RegionFailoverEnd {
-    async fn next(
-        mut self: Box<Self>,
-        _: &RegionFailoverContext,
-        _: &RegionIdent,
-    ) -> Result<Box<dyn State>> {
-        Ok(self)
+    async fn next(&mut self, _: &RegionFailoverContext, _: &RegionIdent) -> Result<Box<dyn State>> {
+        Ok(Box::new(RegionFailoverEnd))
     }
 
     fn status(&self) -> Status {

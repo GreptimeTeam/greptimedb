@@ -29,6 +29,7 @@ pub mod error;
 pub mod manifest;
 #[allow(dead_code)]
 pub mod memtable;
+#[allow(dead_code)]
 pub mod read;
 #[allow(dead_code)]
 mod region;

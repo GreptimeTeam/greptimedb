@@ -75,6 +75,9 @@ pub enum Error {
         location: Location,
         source: datatypes::error::Error,
     },
+
+    #[snafu(display("Not supported: {}", feat))]
+    NotSupported { feat: String },
 }
 
 impl ErrorExt for Error {
@@ -83,7 +86,8 @@ impl ErrorExt for Error {
             Error::InvalidTlsConfig { .. }
             | Error::InvalidConfigFilePath { .. }
             | Error::TypeMismatch { .. }
-            | Error::InvalidFlightData { .. } => StatusCode::InvalidArguments,
+            | Error::InvalidFlightData { .. }
+            | Error::NotSupported { .. } => StatusCode::InvalidArguments,
 
             Error::CreateChannel { .. }
             | Error::Conversion { .. }

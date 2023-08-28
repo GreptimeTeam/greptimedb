@@ -154,9 +154,9 @@ impl PromStoreProtocolHandler for Instance {
             .as_ref()
             .check_permission(ctx.current_user(), PermissionReq::PromStoreWrite)
             .context(AuthSnafu)?;
-        let (requests, samples) = prom_store::to_grpc_insert_requests(request)?;
+        let (requests, samples) = prom_store::to_grpc_row_insert_requests(request)?;
         let _ = self
-            .handle_inserts(requests, ctx)
+            .handle_row_inserts(requests, ctx)
             .await
             .map_err(BoxedError::new)
             .context(error::ExecuteGrpcQuerySnafu)?;

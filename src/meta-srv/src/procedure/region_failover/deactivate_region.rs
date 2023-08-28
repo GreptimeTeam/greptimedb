@@ -76,7 +76,7 @@ impl DeactivateRegion {
     }
 
     async fn handle_response(
-        self,
+        &self,
         ctx: &RegionFailoverContext,
         mailbox_receiver: MailboxReceiver,
         failed_region: &RegionIdent,
@@ -98,7 +98,7 @@ impl DeactivateRegion {
                         .deregister_inactive_region(failed_region)
                         .await?;
 
-                    Ok(Box::new(ActivateRegion::new(self.candidate)))
+                    Ok(Box::new(ActivateRegion::new(self.candidate.clone())))
                 } else {
                     // Under rare circumstances would a Datanode fail to close a Region.
                     // So simply retry.
@@ -114,7 +114,7 @@ impl DeactivateRegion {
                 // resides might be unreachable. So we wait for the region lease to expire. The
                 // region would be closed by its own [RegionAliveKeeper].
                 self.wait_for_region_lease_expiry().await;
-                Ok(Box::new(ActivateRegion::new(self.candidate)))
+                Ok(Box::new(ActivateRegion::new(self.candidate.clone())))
             }
             Err(e) => Err(e),
         }
@@ -132,7 +132,7 @@ impl DeactivateRegion {
 #[typetag::serde]
 impl State for DeactivateRegion {
     async fn next(
-        mut self: Box<Self>,
+        &mut self,
         ctx: &RegionFailoverContext,
         failed_region: &RegionIdent,
     ) -> Result<Box<dyn State>> {
@@ -144,7 +144,7 @@ impl State for DeactivateRegion {
             Err(Error::PusherNotFound { .. }) => {
                 // See the mailbox received timeout situation comments above.
                 self.wait_for_region_lease_expiry().await;
-                return Ok(Box::new(ActivateRegion::new(self.candidate)));
+                return Ok(Box::new(ActivateRegion::new(self.candidate.clone())));
             }
             Err(e) => return Err(e),
         };

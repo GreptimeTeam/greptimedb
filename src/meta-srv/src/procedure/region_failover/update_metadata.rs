@@ -131,7 +131,7 @@ fn pretty_log_table_route_change(
 #[typetag::serde]
 impl State for UpdateRegionMetadata {
     async fn next(
-        mut self: Box<Self>,
+        &mut self,
         ctx: &RegionFailoverContext,
         failed_region: &RegionIdent,
     ) -> Result<Box<dyn State>> {
@@ -165,12 +165,9 @@ mod tests {
         let env = TestingEnvBuilder::new().build().await;
         let failed_region = env.failed_region(1).await;
 
-        let state = UpdateRegionMetadata::new(Peer::new(2, ""));
+        let mut state = UpdateRegionMetadata::new(Peer::new(2, ""));
 
-        let next_state = Box::new(state)
-            .next(&env.context, &failed_region)
-            .await
-            .unwrap();
+        let next_state = state.next(&env.context, &failed_region).await.unwrap();
         assert_eq!(format!("{next_state:?}"), "InvalidateCache");
     }
 
