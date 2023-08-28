@@ -80,8 +80,7 @@ impl FilePurger for LocalFilePurger {
 mod tests {
     use common_test_util::temp_dir::create_temp_dir;
     use object_store::services::Fs;
-    use object_store::ObjectStore;
-    use object_store::util;
+    use object_store::{util, ObjectStore};
 
     use super::*;
     use crate::access_layer::AccessLayer;
