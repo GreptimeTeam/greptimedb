@@ -87,8 +87,18 @@ impl RegionServer {
 
 #[async_trait]
 impl RegionServerHandler for RegionServer {
-    async fn handle(&self, _request: region_request::Body) -> ServerResult<RegionResponse> {
-        todo!()
+    async fn handle(&self, request: region_request::Body) -> ServerResult<RegionResponse> {
+        match request {
+            region_request::Body::Inserts(inserts) => todo!(),
+            region_request::Body::Deletes(deletes) => todo!(),
+            region_request::Body::Create(create) => todo!(),
+            region_request::Body::Drop(drop) => todo!(),
+            region_request::Body::Open(open) => todo!(),
+            region_request::Body::Close(close) => todo!(),
+            region_request::Body::Alter(alter) => todo!(),
+            region_request::Body::Flush(flush) => todo!(),
+            region_request::Body::Compact(compact) => todo!(),
+        }
     }
 }
 
