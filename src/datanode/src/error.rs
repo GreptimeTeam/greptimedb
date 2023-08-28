@@ -556,6 +556,16 @@ pub enum Error {
         location: Location,
         source: BoxedError,
     },
+
+    #[snafu(display(
+        "Failed to build region requests, location:{}, source: {}",
+        location,
+        source
+    ))]
+    BuildRegionRequests {
+        location: Location,
+        source: store_api::metadata::MetadataError,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -569,6 +579,7 @@ impl ErrorExt for Error {
             | ExecuteStatement { source, .. }
             | ExecuteLogicalPlan { source, .. } => source.status_code(),
 
+            BuildRegionRequests { source, .. } => source.status_code(),
             HandleHeartbeatResponse { source, .. } => source.status_code(),
 
             DecodeLogicalPlan { source, .. } => source.status_code(),

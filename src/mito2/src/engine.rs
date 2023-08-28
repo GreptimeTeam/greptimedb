@@ -19,10 +19,15 @@ mod tests;
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
+use common_error::ext::BoxedError;
 use common_query::Output;
+use common_recordbatch::SendableRecordBatchStream;
 use object_store::ObjectStore;
 use snafu::{OptionExt, ResultExt};
 use store_api::logstore::LogStore;
+use store_api::metadata::RegionMetadataRef;
+use store_api::region_engine::RegionEngine;
 use store_api::region_request::RegionRequest;
 use store_api::storage::{RegionId, ScanRequest};
 
@@ -106,6 +111,15 @@ impl EngineInner {
         self.workers.stop().await
     }
 
+    fn get_metadata(&self, region_id: RegionId) -> Result<RegionMetadataRef> {
+        // Reading a region doesn't need to go through the region worker thread.
+        let region = self
+            .workers
+            .get_region(region_id)
+            .context(RegionNotFoundSnafu { region_id })?;
+        Ok(region.metadata())
+    }
+
     /// Handles [RequestBody] and return its executed result.
     async fn handle_request(&self, region_id: RegionId, request: RegionRequest) -> Result<Output> {
         // We validate and then convert the `request` into an inner `RequestBody` for ease of handling.
@@ -132,5 +146,40 @@ impl EngineInner {
         );
 
         scan_region.scanner()
+    }
+}
+
+#[async_trait]
+impl RegionEngine for MitoEngine {
+    fn name(&self) -> &str {
+        "MitoEngine"
+    }
+
+    async fn handle_request(
+        &self,
+        region_id: RegionId,
+        request: RegionRequest,
+    ) -> std::result::Result<Output, BoxedError> {
+        self.inner
+            .handle_request(region_id, request)
+            .await
+            .map_err(BoxedError::new)
+    }
+
+    /// Handle substrait query and return a stream of record batches
+    async fn handle_query(
+        &self,
+        _region_id: RegionId,
+        _request: ScanRequest,
+    ) -> std::result::Result<SendableRecordBatchStream, BoxedError> {
+        todo!()
+    }
+
+    /// Retrieve region's metadata.
+    async fn get_metadata(
+        &self,
+        region_id: RegionId,
+    ) -> std::result::Result<RegionMetadataRef, BoxedError> {
+        self.inner.get_metadata(region_id).map_err(BoxedError::new)
     }
 }

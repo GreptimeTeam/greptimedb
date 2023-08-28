@@ -56,6 +56,10 @@ impl ColumnDataTypeWrapper {
         Ok(Self(datatype))
     }
 
+    pub fn new(datatype: ColumnDataType) -> Self {
+        Self(datatype)
+    }
+
     pub fn datatype(&self) -> ColumnDataType {
         self.0
     }
@@ -330,17 +334,17 @@ fn query_request_type(request: &QueryRequest) -> &'static str {
 }
 
 /// Returns the type name of the [RegionRequest].
-pub fn region_request_type(request: &region_request::Request) -> &'static str {
+pub fn region_request_type(request: &region_request::Body) -> &'static str {
     match request {
-        region_request::Request::Inserts(_) => "region.inserts",
-        region_request::Request::Deletes(_) => "region.deletes",
-        region_request::Request::Create(_) => "region.create",
-        region_request::Request::Drop(_) => "region.drop  ",
-        region_request::Request::Open(_) => "region.open",
-        region_request::Request::Close(_) => "region.close",
-        region_request::Request::Alter(_) => "region.alter",
-        region_request::Request::Flush(_) => "region.flush",
-        region_request::Request::Compact(_) => "region.compact",
+        region_request::Body::Inserts(_) => "region.inserts",
+        region_request::Body::Deletes(_) => "region.deletes",
+        region_request::Body::Create(_) => "region.create",
+        region_request::Body::Drop(_) => "region.drop",
+        region_request::Body::Open(_) => "region.open",
+        region_request::Body::Close(_) => "region.close",
+        region_request::Body::Alter(_) => "region.alter",
+        region_request::Body::Flush(_) => "region.flush",
+        region_request::Body::Compact(_) => "region.compact",
     }
 }
 
