@@ -142,7 +142,8 @@ impl<S> RegionWorkerLoop<S> {
     /// Returns true if the engine needs to reject some write requests.
     fn should_reject_write(&self) -> bool {
         // If memory usage reaches high threshold (we should also consider pending flush requests) returns true.
-        unimplemented!()
+        // TODO(yingwen): Implement this.
+        false
     }
 }
 

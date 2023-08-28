@@ -129,7 +129,11 @@ pub(crate) type VersionRef = Arc<Version>;
 impl Version {
     /// Returns statistics of the mutable memtable.
     pub(crate) fn mutable_stats(&self) -> RegionMemtableStats {
-        todo!()
+        // TODO(yingwen): Get from memtable.
+        RegionMemtableStats {
+            bytes_mutable: 0,
+            write_buffer_size: 0,
+        }
     }
 }
 
