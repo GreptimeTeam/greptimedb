@@ -128,6 +128,11 @@ impl FileHandle {
         join_path(file_dir, &self.file_id().as_parquet())
     }
 
+    /// Returns the time range of the file.
+    pub fn time_range(&self) -> FileTimeRange {
+        self.inner.meta.time_range
+    }
+
     /// Mark the file as deleted and will delete it on drop asynchronously
     #[inline]
     pub fn mark_deleted(&self) {

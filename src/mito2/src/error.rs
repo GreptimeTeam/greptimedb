@@ -385,6 +385,16 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "Failed to build scan predicate, location: {}, source: {}",
+        location,
+        source
+    ))]
+    BuildPredicate {
+        source: table::error::Error,
+        location: Location,
+    },
+
     #[snafu(display("Failed to delete SST file, file id: {}, source: {}", file_id, source))]
     DeleteSst {
         file_id: FileId,
@@ -452,6 +462,7 @@ impl ErrorExt for Error {
             InvalidFlumeSender { .. } => StatusCode::InvalidArguments,
             InvalidSchedulerState { .. } => StatusCode::InvalidArguments,
             StopScheduler { .. } => StatusCode::Internal,
+            BuildPredicate { source, .. } => source.status_code(),
             DeleteSst { .. } => StatusCode::StorageUnavailable,
         }
     }
