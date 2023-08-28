@@ -245,7 +245,7 @@ impl CatalogManager for MemoryCatalogManager {
 }
 
 impl MemoryCatalogManager {
-    /// Create a manager with some default setups
+    /// Creates a manager with some default setups
     /// (e.g. default catalog/schema and information schema)
     pub fn with_default_setup() -> Arc<Self> {
         let manager = Arc::new(Self {
@@ -267,19 +267,7 @@ impl MemoryCatalogManager {
         manager
     }
 
-    /// Registers a catalog and return the catalog already exist
-    pub fn register_catalog_if_absent(&self, name: String) -> bool {
-        let mut catalogs = self.catalogs.write().unwrap();
-        let entry = catalogs.entry(name);
-        match entry {
-            Entry::Occupied(_) => true,
-            Entry::Vacant(v) => {
-                let _ = v.insert(HashMap::new());
-                false
-            }
-        }
-    }
-
+    /// Registers a catalog if it does not exist and returns false if the schema exists.
     pub fn register_catalog_sync(self: &Arc<Self>, name: String) -> Result<bool> {
         let mut catalogs = self.catalogs.write().unwrap();
 
@@ -294,6 +282,9 @@ impl MemoryCatalogManager {
         }
     }
 
+    /// Registers a schema if it does not exist.
+    /// It returns an error if the catalog does not exist,
+    /// and returns false if the schema exists.
     pub fn register_schema_sync(&self, request: RegisterSchemaRequest) -> Result<bool> {
         let mut catalogs = self.catalogs.write().unwrap();
         let catalog = catalogs
@@ -312,6 +303,7 @@ impl MemoryCatalogManager {
         }
     }
 
+    /// Registers a schema and returns an error if the catalog or schema does not exist.
     pub fn register_table_sync(&self, request: RegisterTableRequest) -> Result<bool> {
         let mut catalogs = self.catalogs.write().unwrap();
         let schema = catalogs
@@ -524,10 +516,14 @@ mod tests {
     }
 
     #[test]
-    pub fn test_register_if_absent() {
+    pub fn test_register_catalog_sync() {
         let list = MemoryCatalogManager::with_default_setup();
-        assert!(!list.register_catalog_if_absent("test_catalog".to_string(),));
-        assert!(list.register_catalog_if_absent("test_catalog".to_string()));
+        assert!(list
+            .register_catalog_sync("test_catalog".to_string())
+            .unwrap());
+        assert!(!list
+            .register_catalog_sync("test_catalog".to_string())
+            .unwrap());
     }
 
     #[tokio::test]

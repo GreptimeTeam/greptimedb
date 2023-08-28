@@ -15,9 +15,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use catalog::error::Error as CatalogError;
+use catalog::error::{Error as CatalogError, Result as CatalogResult};
 use catalog::remote::region_alive_keeper::RegionAliveKeepers;
-use catalog::{CatalogManagerRef, RegisterTableRequest};
+use catalog::{CatalogManagerRef, RegisterSchemaRequest, RegisterTableRequest};
 use common_catalog::format_full_table_name;
 use common_meta::error::Result as MetaResult;
 use common_meta::heartbeat::handler::{
@@ -30,6 +30,7 @@ use store_api::storage::RegionNumber;
 use table::engine::manager::TableEngineManagerRef;
 use table::engine::EngineContext;
 use table::requests::OpenTableRequest;
+use table::Table;
 
 use crate::error::{self, Result};
 
@@ -157,6 +158,45 @@ impl OpenRegionHandler {
         Ok(false)
     }
 
+    async fn register_table(
+        &self,
+        request: &OpenTableRequest,
+        table: Arc<dyn Table>,
+    ) -> CatalogResult<bool> {
+        if !self
+            .catalog_manager
+            .catalog_exist(&request.catalog_name)
+            .await?
+        {
+            self.catalog_manager
+                .clone()
+                .register_catalog(request.catalog_name.to_string())
+                .await?;
+        }
+
+        if !self
+            .catalog_manager
+            .schema_exist(&request.catalog_name, &request.schema_name)
+            .await?
+        {
+            self.catalog_manager
+                .register_schema(RegisterSchemaRequest {
+                    catalog: request.catalog_name.to_string(),
+                    schema: request.schema_name.to_string(),
+                })
+                .await?;
+        }
+
+        let request = RegisterTableRequest {
+            catalog: request.catalog_name.to_string(),
+            schema: request.schema_name.to_string(),
+            table_name: request.table_name.to_string(),
+            table_id: request.table_id,
+            table,
+        };
+        self.catalog_manager.register_table(request).await
+    }
+
     async fn open_region_inner(&self, engine: String, request: OpenTableRequest) -> Result<bool> {
         let OpenTableRequest {
             catalog_name,
@@ -187,14 +227,8 @@ impl OpenRegionHandler {
                 table_name: format_full_table_name(catalog_name, schema_name, table_name),
             })?
         {
-            let request = RegisterTableRequest {
-                catalog: request.catalog_name.clone(),
-                schema: request.schema_name.clone(),
-                table_name: request.table_name.clone(),
-                table_id: request.table_id,
-                table,
-            };
-            let result = self.catalog_manager.register_table(request).await;
+            let result = self.register_table(&request, table).await;
+
             match result {
                 Ok(_) | Err(CatalogError::TableExists { .. }) => Ok(true),
                 e => e.with_context(|_| error::RegisterTableSnafu {

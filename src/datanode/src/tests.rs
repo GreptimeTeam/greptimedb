@@ -182,8 +182,8 @@ async fn test_open_region_handler() {
 
     // Opens a non-exist table
     let non_exist_table_ident = TableIdent {
-        catalog: "greptime".to_string(),
-        schema: "public".to_string(),
+        catalog: "foo".to_string(),
+        schema: "non-exist".to_string(),
         table: "non-exist".to_string(),
         table_id: 2024,
         engine: "mito".to_string(),
