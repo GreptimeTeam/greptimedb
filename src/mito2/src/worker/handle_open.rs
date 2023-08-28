@@ -43,10 +43,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             region_id,
             self.memtable_builder.clone(),
             self.object_store.clone(),
-            self.wal.cloned(),
         )
         .region_dir(&request.region_dir)
-        .open(&self.config)
+        .open(&self.config, &self.wal)
         .await?;
 
         info!("Region {} is opened", region_id);

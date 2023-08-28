@@ -27,7 +27,6 @@ use crate::region::version::{VersionControlData, VersionControlRef, VersionRef};
 use crate::wal::{EntryId, WalWriter};
 
 /// Context to keep region metadata and buffer write requests.
-///
 pub(crate) struct RegionWriteCtx {
     /// Id of region to write.
     region_id: RegionId,
@@ -52,7 +51,7 @@ pub(crate) struct RegionWriteCtx {
 
 impl RegionWriteCtx {
     /// Returns an empty context.
-    pub(crate) fn new(region_id: RegionId, version_control: VersionControlRef) -> RegionWriteCtx {
+    pub(crate) fn new(region_id: RegionId, version_control: &VersionControlRef) -> RegionWriteCtx {
         let VersionControlData {
             version,
             committed_sequence,

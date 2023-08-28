@@ -51,12 +51,6 @@ impl<S> Wal<S> {
     pub fn new(store: Arc<S>) -> Self {
         Self { store }
     }
-
-    pub fn cloned(&self) -> Wal<S> {
-        Wal {
-            store: self.store.clone(),
-        }
-    }
 }
 
 impl<S: LogStore> Wal<S> {

@@ -24,7 +24,7 @@ use store_api::storage::RegionId;
 use tokio::sync::oneshot::Sender;
 
 use crate::error::{RegionNotFoundSnafu, Result};
-use crate::region_writer::RegionWriteCtx;
+use crate::region_write_ctx::RegionWriteCtx;
 use crate::request::{SenderWriteRequest, WriteRequest};
 use crate::worker::RegionWorkerLoop;
 
@@ -80,7 +80,7 @@ impl<S> RegionWorkerLoop<S> {
                 // Initialize the context.
                 e.insert(RegionWriteCtx::new(
                     region.region_id,
-                    region.version_control.clone(),
+                    &region.version_control,
                 ));
             }
 
