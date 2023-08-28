@@ -20,15 +20,15 @@ use snafu::ResultExt;
 use crate::error::{DeleteSstSnafu, Result};
 use crate::sst::file::FileId;
 
-pub type AccessLayerRef = Arc<FsAccessLayer>;
+pub type AccessLayerRef = Arc<AccessLayer>;
 
 /// Sst access layer.
-pub struct FsAccessLayer {
+pub struct AccessLayer {
     sst_dir: String,
     object_store: ObjectStore,
 }
 
-impl std::fmt::Debug for FsAccessLayer {
+impl std::fmt::Debug for AccessLayer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AccessLayer")
             .field("sst_dir", &self.sst_dir)
@@ -36,16 +36,16 @@ impl std::fmt::Debug for FsAccessLayer {
     }
 }
 
-impl FsAccessLayer {
-    pub fn new(sst_dir: &str, object_store: ObjectStore) -> FsAccessLayer {
-        FsAccessLayer {
-            sst_dir: util::normalize_dir(sst_dir),
+impl AccessLayer {
+    pub fn new(sst_dir: &str, object_store: ObjectStore) -> AccessLayer {
+        AccessLayer {
+            sst_dir: sst_dir.to_string(),
             object_store,
         }
     }
 
     fn sst_file_path(&self, file_name: &str) -> String {
-        format!("{}{}", self.sst_dir, file_name)
+        util::join_path(&self.sst_dir, file_name)
     }
 
     /// Deletes a SST file with given file id.

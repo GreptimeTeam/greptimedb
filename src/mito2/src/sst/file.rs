@@ -128,6 +128,7 @@ impl FileHandle {
         join_path(file_dir, &self.file_id().as_parquet())
     }
 
+    /// Mark the file as deleted and will delete it on drop asynchronously
     #[inline]
     pub fn mark_deleted(&self) {
         self.inner.deleted.store(true, Ordering::Relaxed);

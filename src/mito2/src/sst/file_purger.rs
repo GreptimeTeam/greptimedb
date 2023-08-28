@@ -17,7 +17,7 @@ use std::sync::Arc;
 use common_telemetry::{error, info};
 use store_api::storage::RegionId;
 
-use crate::access::AccessLayerRef;
+use crate::access_layer::AccessLayerRef;
 use crate::schedule::scheduler::{LocalScheduler, Scheduler};
 use crate::sst::file::FileId;
 
@@ -81,9 +81,10 @@ mod tests {
     use common_test_util::temp_dir::create_temp_dir;
     use object_store::services::Fs;
     use object_store::ObjectStore;
+    use object_store::util;
 
     use super::*;
-    use crate::access::FsAccessLayer;
+    use crate::access_layer::AccessLayer;
     use crate::schedule::scheduler::LocalScheduler;
     use crate::sst::file::{FileHandle, FileId, FileMeta, FileTimeRange};
 
@@ -97,12 +98,12 @@ mod tests {
         let object_store = ObjectStore::new(builder).unwrap().finish();
         let sst_file_id = FileId::random();
         let sst_dir = "table1";
-        let path = format!("{}/{}", sst_dir, sst_file_id.as_parquet());
+        let path = util::join_path(sst_dir, &sst_file_id.as_parquet());
 
-        let _ = object_store.write(&path, vec![0; 4096]).await;
+        object_store.write(&path, vec![0; 4096]).await.unwrap();
 
         let scheduler = Arc::new(LocalScheduler::new(3));
-        let layer = Arc::new(FsAccessLayer::new(sst_dir, object_store.clone()));
+        let layer = Arc::new(AccessLayer::new(sst_dir, object_store.clone()));
 
         let file_purger = Arc::new(LocalFilePurger::new(scheduler.clone(), layer));
 
