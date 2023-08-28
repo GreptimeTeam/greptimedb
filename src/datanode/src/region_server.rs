@@ -92,15 +92,15 @@ impl RegionServer {
 #[async_trait]
 impl RegionServerHandler for RegionServer {
     async fn handle(&self, request: region_request::Body) -> ServerResult<RegionResponse> {
-        let requests = RegionRequest::from_request_body(request)
+        let requests = RegionRequest::try_from_request_body(request)
             .context(BuildRegionRequestsSnafu)
             .map_err(BoxedError::new)
             .context(ExecuteGrpcRequestSnafu)?;
         let join_tasks = requests.into_iter().map(|(region_id, req)| {
-            let handle = self.clone();
+            let self_to_move = self.clone();
             self.inner
                 .runtime
-                .spawn(async move { handle.handle_request(region_id, req).await })
+                .spawn(async move { self_to_move.handle_request(region_id, req).await })
         });
 
         let results = try_join_all(join_tasks)

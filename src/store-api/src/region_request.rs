@@ -39,7 +39,7 @@ impl RegionRequest {
     /// Inserts/Deletes request might become multiple requests. Others are one-to-one.
     // TODO: implement alter request
     #[allow(unreachable_code)]
-    pub fn from_request_body(
+    pub fn try_from_request_body(
         body: region_request::Body,
     ) -> Result<Vec<(RegionId, Self)>, MetadataError> {
         match body {
@@ -65,7 +65,7 @@ impl RegionRequest {
                 let column_metadatas = create
                     .column_defs
                     .into_iter()
-                    .map(ColumnMetadata::from_column_def)
+                    .map(ColumnMetadata::try_from_column_def)
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok(vec![(
                     create.region_id.into(),

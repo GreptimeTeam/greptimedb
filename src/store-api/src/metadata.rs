@@ -49,7 +49,7 @@ pub struct ColumnMetadata {
 
 impl ColumnMetadata {
     /// Construct `Self` from protobuf struct [ColumnDef]
-    pub fn from_column_def(column_def: ColumnDef) -> Result<Self> {
+    pub fn try_from_column_def(column_def: ColumnDef) -> Result<Self> {
         let semantic_type = column_def.semantic_type();
         let column_id = column_def.column_id;
 
