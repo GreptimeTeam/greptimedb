@@ -122,6 +122,11 @@ impl FileHandle {
     pub fn file_path(&self, file_dir: &str) -> String {
         join_path(file_dir, &self.file_id().as_parquet())
     }
+
+    /// Returns the time range of the file.
+    pub fn time_range(&self) -> FileTimeRange {
+        self.inner.meta.time_range
+    }
 }
 
 /// Inner data of [FileHandle].

@@ -58,6 +58,13 @@ impl VersionControl {
     pub(crate) fn current(&self) -> VersionControlData {
         self.data.read().unwrap().clone()
     }
+
+    /// Updates committed sequence and entry id.
+    pub(crate) fn set_sequence_and_entry_id(&self, seq: SequenceNumber, entry_id: EntryId) {
+        let mut data = self.data.write().unwrap();
+        data.committed_sequence = seq;
+        data.last_entry_id = entry_id;
+    }
 }
 
 pub(crate) type VersionControlRef = Arc<VersionControl>;

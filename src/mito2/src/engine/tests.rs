@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::value::ValueData;
 use api::v1::{Row, Rows};
+use common_recordbatch::RecordBatches;
 use store_api::metadata::ColumnMetadata;
 use store_api::region_request::{RegionCloseRequest, RegionOpenRequest, RegionPutRequest};
 use store_api::storage::RegionId;
@@ -246,7 +247,7 @@ fn build_rows(num_rows: usize) -> Vec<Row> {
                     value_data: Some(ValueData::F64Value(i as f64)),
                 },
                 api::v1::Value {
-                    value_data: Some(ValueData::TsMillisecondValue(i as i64)),
+                    value_data: Some(ValueData::TsMillisecondValue(i as i64 * 1000)),
                 },
             ],
         })
@@ -284,4 +285,48 @@ async fn test_write_to_region() {
         unreachable!()
     };
     assert_eq!(num_rows, rows_inserted);
+}
+
+// TODO(yingwen): build_rows() only generate one point for each series. We need to add tests
+// for series with multiple points and other cases.
+#[tokio::test]
+async fn test_write_query_region() {
+    let env = TestEnv::new();
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+
+    let column_schemas = request
+        .column_metadatas
+        .iter()
+        .map(column_metadata_to_column_schema)
+        .collect::<Vec<_>>();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let rows = Rows {
+        schema: column_schemas,
+        rows: build_rows(3),
+    };
+    engine
+        .handle_request(region_id, RegionRequest::Put(RegionPutRequest { rows }))
+        .await
+        .unwrap();
+
+    let request = ScanRequest::default();
+    let scanner = engine.handle_query(region_id, request).unwrap();
+    let stream = scanner.scan().await.unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    let expected = "\
++-------+---------+---------------------+
+| tag_0 | field_0 | ts                  |
++-------+---------+---------------------+
+| 0     | 0.0     | 1970-01-01T00:00:00 |
+| 1     | 1.0     | 1970-01-01T00:00:01 |
+| 2     | 2.0     | 1970-01-01T00:00:02 |
++-------+---------+---------------------+";
+    assert_eq!(expected, batches.pretty_print().unwrap());
 }
