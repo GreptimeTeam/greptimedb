@@ -55,14 +55,14 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         }
         if let Err(e) = wal_writer.write_to_wal().await.map_err(Arc::new) {
             // Failed to write wal.
-            for mut region_ctx in region_ctxs.into_values().filter_map(|v| v) {
+            for mut region_ctx in region_ctxs.into_values().flatten() {
                 region_ctx.set_error(e.clone());
             }
             return;
         }
 
         // Write to memtables.
-        for mut region_ctx in region_ctxs.into_values().filter_map(|v| v) {
+        for mut region_ctx in region_ctxs.into_values().flatten() {
             region_ctx.write_memtable();
         }
     }
