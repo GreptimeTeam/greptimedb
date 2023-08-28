@@ -191,11 +191,4 @@ impl RegionServer for RegionServerRequestHandler {
         let response = self.handle(request).await?;
         Ok(Response::new(response))
     }
-
-    async fn handle_requests(
-        &self,
-        _request: tonic::Request<tonic::Streaming<RegionRequest>>,
-    ) -> TonicResult<Response<RegionResponse>> {
-        unimplemented!()
-    }
 }
