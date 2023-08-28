@@ -14,16 +14,15 @@
 
 //! Flush related utilities and structs.
 
-use std::collections::{hash_map, HashMap, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
-use store_api::storage::{RegionId, SequenceNumber};
+use store_api::storage::RegionId;
 use tokio::sync::oneshot::Sender;
 
 use crate::error::Result;
-use crate::memtable::MemtableId;
 use crate::region::MitoRegionRef;
-use crate::request::{RegionTask, SenderWriteRequest};
+use crate::request::{SenderDdlRequest, SenderWriteRequest};
 
 const FLUSH_JOB_LIMIT: usize = 4;
 
@@ -202,22 +201,21 @@ impl FlushScheduler {
         Err(request)
     }
 
-    /// Add ddl `task` to pending queue.
+    /// Add ddl request to pending queue.
     ///
     /// Returns error if region is not stalling.
     pub(crate) fn add_ddl_request_to_pending(
         &mut self,
-        region_id: RegionId,
-        task: RegionTask,
-    ) -> Result<(), RegionTask> {
-        if let Some(status) = self.region_status.get_mut(&task.region_id) {
+        request: SenderDdlRequest,
+    ) -> Result<(), SenderDdlRequest> {
+        if let Some(status) = self.region_status.get_mut(&request.region_id) {
             if status.stalling {
-                status.pending_ddls.push(task);
+                status.pending_ddls.push(request);
                 return Ok(());
             }
         }
 
-        Err(task)
+        Err(request)
     }
 }
 
@@ -233,8 +231,8 @@ struct FlushStatus {
     stalling: bool,
     /// Pending write requests.
     pending_writes: Vec<SenderWriteRequest>,
-    /// Pending ddl tasks.
-    pending_ddls: Vec<RegionTask>,
+    /// Pending ddl requests.
+    pending_ddls: Vec<SenderDdlRequest>,
 }
 
 impl FlushStatus {

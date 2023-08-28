@@ -322,83 +322,84 @@ pub(crate) struct SenderWriteRequest {
 
 /// Request sent to a worker
 pub(crate) enum WorkerRequest {
-    /// Region request.
-    Region(RegionTask),
+    /// Write to a region.
+    Write(SenderWriteRequest),
+
+    /// Ddl request to a region.
+    Ddl(SenderDdlRequest),
+
+    /// Notifications from internal background jobs.
+    Background {
+        /// Id of the region to send.
+        region_id: RegionId,
+        /// Request from a background job.
+        request: BackgroundRequest,
+    },
 
     /// Notify a worker to stop.
     Stop,
 }
 
-/// Request to modify a region.
-#[derive(Debug)]
-pub(crate) struct RegionTask {
-    /// Sender to send result.
-    ///
-    /// Now the result is a `Result<()>`, but we could replace the empty tuple
-    /// with an enum if we need to carry more information.
-    pub(crate) sender: Option<Sender<Result<Output>>>,
-    /// Request body.
-    pub(crate) body: RequestBody,
-    /// Region identifier.
-    pub(crate) region_id: RegionId,
-}
-
-impl RegionTask {
-    /// Creates a [RegionTask] and a receiver from request body.
-    pub(crate) fn from_request(
-        region_id: RegionId,
-        body: RequestBody,
-    ) -> (RegionTask, Receiver<Result<Output>>) {
-        let (sender, receiver) = oneshot::channel();
-        (
-            RegionTask {
-                sender: Some(sender),
-                body,
-                region_id,
-            },
-            receiver,
-        )
-    }
-}
-
-/// Request body of a region task.
-///
-/// It validates requests outside of workers.
-#[derive(Debug)]
-pub(crate) enum RequestBody {
-    /// Write to a region.
-    Write(WriteRequest),
-    /// DDL request.
-    Ddl(DdlRequest),
-    /// Requests from internal background jobs:
-    Background(BackgroundRequest),
-}
-
-impl RequestBody {
-    /// Convert request body from [RegionRequest].
+impl WorkerRequest {
+    /// Converts request from a [RegionRequest].
     pub(crate) fn try_from_region_request(
         region_id: RegionId,
         value: RegionRequest,
-    ) -> Result<RequestBody> {
-        let body = match value {
+    ) -> Result<(WorkerRequest, Receiver<Result<Output>>)> {
+        let (sender, receiver) = oneshot::channel();
+        let worker_request = match value {
             RegionRequest::Put(v) => {
                 let write_request = WriteRequest::new(region_id, OpType::Put, v.rows)?;
-                RequestBody::Write(write_request)
+                WorkerRequest::Write(SenderWriteRequest {
+                    sender: Some(sender),
+                    request: write_request,
+                })
             }
             RegionRequest::Delete(v) => {
                 let write_request = WriteRequest::new(region_id, OpType::Delete, v.rows)?;
-                RequestBody::Write(write_request)
+                WorkerRequest::Write(SenderWriteRequest {
+                    sender: Some(sender),
+                    request: write_request,
+                })
             }
-            RegionRequest::Create(v) => RequestBody::Ddl(DdlRequest::Create(v)),
-            RegionRequest::Drop(v) => RequestBody::Ddl(DdlRequest::Drop(v)),
-            RegionRequest::Open(v) => RequestBody::Ddl(DdlRequest::Open(v)),
-            RegionRequest::Close(v) => RequestBody::Ddl(DdlRequest::Close(v)),
-            RegionRequest::Alter(v) => RequestBody::Ddl(DdlRequest::Alter(v)),
-            RegionRequest::Flush(v) => RequestBody::Ddl(DdlRequest::Flush(v)),
-            RegionRequest::Compact(v) => RequestBody::Ddl(DdlRequest::Compact(v)),
+            RegionRequest::Create(v) => WorkerRequest::Ddl(SenderDdlRequest {
+                region_id,
+                sender: Some(sender),
+                request: DdlRequest::Create(v),
+            }),
+            RegionRequest::Drop(v) => WorkerRequest::Ddl(SenderDdlRequest {
+                region_id,
+                sender: Some(sender),
+                request: DdlRequest::Drop(v),
+            }),
+            RegionRequest::Open(v) => WorkerRequest::Ddl(SenderDdlRequest {
+                region_id,
+                sender: Some(sender),
+                request: DdlRequest::Open(v),
+            }),
+            RegionRequest::Close(v) => WorkerRequest::Ddl(SenderDdlRequest {
+                region_id,
+                sender: Some(sender),
+                request: DdlRequest::Close(v),
+            }),
+            RegionRequest::Alter(v) => WorkerRequest::Ddl(SenderDdlRequest {
+                region_id,
+                sender: Some(sender),
+                request: DdlRequest::Alter(v),
+            }),
+            RegionRequest::Flush(v) => WorkerRequest::Ddl(SenderDdlRequest {
+                region_id,
+                sender: Some(sender),
+                request: DdlRequest::Flush(v),
+            }),
+            RegionRequest::Compact(v) => WorkerRequest::Ddl(SenderDdlRequest {
+                region_id,
+                sender: Some(sender),
+                request: DdlRequest::Compact(v),
+            }),
         };
 
-        Ok(body)
+        Ok((worker_request, receiver))
     }
 }
 

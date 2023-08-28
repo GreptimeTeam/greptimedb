@@ -25,7 +25,6 @@ use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use common_query::Output;
 use common_runtime::JoinHandle;
 use common_telemetry::{error, info, warn};
 use futures::future::try_join_all;
@@ -42,9 +41,7 @@ use crate::flush::{FlushScheduler, WriteBufferManagerRef};
 use crate::memtable::time_series::TimeSeriesMemtableBuilder;
 use crate::memtable::MemtableBuilderRef;
 use crate::region::{MitoRegionRef, RegionMap, RegionMapRef};
-use crate::request::{
-    DdlRequest, RegionTask, RequestBody, SenderDdlRequest, SenderWriteRequest, WorkerRequest,
-};
+use crate::request::{BackgroundRequest, DdlRequest, SenderDdlRequest, WorkerRequest};
 use crate::wal::Wal;
 
 /// Identifier for a worker.
@@ -130,8 +127,12 @@ impl WorkerGroup {
     }
 
     /// Submit a request to a worker in the group.
-    pub(crate) async fn submit_to_worker(&self, task: RegionTask) -> Result<()> {
-        self.worker(task.region_id).submit_request(task).await
+    pub(crate) async fn submit_to_worker(
+        &self,
+        region_id: RegionId,
+        request: WorkerRequest,
+    ) -> Result<()> {
+        self.worker(region_id).submit_request(request).await
     }
 
     /// Returns true if the specific region exists.
@@ -215,14 +216,9 @@ impl RegionWorker {
     }
 
     /// Submit request to background worker thread.
-    async fn submit_request(&self, request: RegionTask) -> Result<()> {
+    async fn submit_request(&self, request: WorkerRequest) -> Result<()> {
         ensure!(self.is_running(), WorkerStoppedSnafu { id: self.id });
-        if self
-            .sender
-            .send(WorkerRequest::Region(request))
-            .await
-            .is_err()
-        {
+        if self.sender.send(request).await.is_err() {
             warn!(
                 "Worker {} is already exited but the running flag is still true",
                 self.id
@@ -354,22 +350,16 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let mut ddl_requests = Vec::with_capacity(buffer.len());
         for worker_req in buffer.drain(..) {
             match worker_req {
-                WorkerRequest::Region(task) => match task.body {
-                    RequestBody::Write(write_request) => {
-                        write_requests.push(SenderWriteRequest {
-                            sender: task.sender,
-                            request: write_request,
-                        });
-                    }
-                    RequestBody::Ddl(ddl) => {
-                        ddl_requests.push(SenderDdlRequest {
-                            region_id: task.region_id,
-                            sender: task.sender,
-                            request: ddl,
-                        });
-                    }
-                    RequestBody::Background(_) => todo!(),
-                },
+                WorkerRequest::Write(sender_req) => {
+                    write_requests.push(sender_req);
+                }
+                WorkerRequest::Ddl(sender_req) => {
+                    ddl_requests.push(sender_req);
+                }
+                WorkerRequest::Background { region_id, request } => {
+                    // For background request, we handle it directly.
+                    self.handle_background_request(region_id, request).await;
+                }
                 // We receive a stop signal, but we still want to process remaining
                 // requests. The worker thread will then check the running flag and
                 // then exit.
@@ -412,6 +402,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 }
 
 impl<S> RegionWorkerLoop<S> {
+    /// Handles region background request
+    async fn handle_background_request(&mut self, region_id: RegionId, request: BackgroundRequest) {
+        todo!()
+    }
+
     // Clean up the worker.
     async fn clean(&self) {
         // Closes remaining regions.
