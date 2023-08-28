@@ -114,7 +114,7 @@ impl ScanRegion {
         self.seq_scan().map(Scanner::Seq)
     }
 
-    /// Scan sequentailly.
+    /// Scan sequentially.
     pub(crate) fn seq_scan(self) -> Result<SeqScan> {
         let time_range = self.build_time_range_predicate();
 
