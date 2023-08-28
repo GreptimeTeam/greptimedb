@@ -67,7 +67,7 @@ impl VersionControl {
         data.last_entry_id = entry_id;
     }
 
-    /// Freeze the mutable memtable and returns the id of the freezed memtable.
+    /// Freezes the mutable memtable and returns the id of the frozen memtable.
     ///
     /// If the mutable memtable is empty or there is already an immutable memtable, returns `None`.
     pub(crate) fn freeze_mutable(&self, builder: &MemtableBuilderRef) -> Option<MemtableId> {

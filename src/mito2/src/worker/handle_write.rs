@@ -48,21 +48,21 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         // Write to WAL.
         let mut wal_writer = self.wal.writer();
-        for region_ctx in region_ctxs.values_mut().filter_map(|v| v.as_mut()) {
+        for region_ctx in region_ctxs.values_mut().filter_map(|v| v.write_ctx_mut()) {
             if let Err(e) = region_ctx.add_wal_entry(&mut wal_writer).map_err(Arc::new) {
                 region_ctx.set_error(e);
             }
         }
         if let Err(e) = wal_writer.write_to_wal().await.map_err(Arc::new) {
             // Failed to write wal.
-            for mut region_ctx in region_ctxs.into_values().flatten() {
+            for mut region_ctx in region_ctxs.into_values().filter_map(|v| v.into_write_ctx()) {
                 region_ctx.set_error(e.clone());
             }
             return;
         }
 
         // Write to memtables.
-        for mut region_ctx in region_ctxs.into_values().flatten() {
+        for mut region_ctx in region_ctxs.into_values().filter_map(|v| v.into_write_ctx()) {
             region_ctx.write_memtable();
         }
     }
@@ -73,13 +73,13 @@ impl<S> RegionWorkerLoop<S> {
     fn prepare_region_write_ctx(
         &mut self,
         write_requests: Vec<SenderWriteRequest>,
-    ) -> HashMap<RegionId, Option<RegionWriteCtx>> {
-        // Region write contexts. If a region is stalling, the value of the map is `None`.
+    ) -> HashMap<RegionId, MaybeStalling> {
+        // Initialize region write context map.
         let mut region_ctxs = HashMap::new();
         for mut sender_req in write_requests {
             let region_id = sender_req.request.region_id;
 
-            // Checks whether the region exists.
+            // Checks whether the region exists and is it stalling.
             if let hash_map::Entry::Vacant(e) = region_ctxs.entry(region_id) {
                 let Some(region) = self.regions.get_region(region_id) else {
                     // No such region.
@@ -91,25 +91,25 @@ impl<S> RegionWorkerLoop<S> {
                 // A new region to write, checks whether we need to flush this region.
                 self.flush_region_if_full(&region);
                 // Checks whether the region is stalling.
-                let region_ctx_opt = if self.flush_scheduler.is_stalling(region_id) {
-                    // We use `None` to represent the region exists but is stalling so
-                    // there is no write context for it.
-                    None
+                let maybe_stalling = if self.flush_scheduler.is_stalling(region_id) {
+                    // Region is stalling so there is no write context for it.
+                    MaybeStalling::Stalling
                 } else {
                     // Initialize the context.
-                    Some(RegionWriteCtx::new(
+                    MaybeStalling::Writable(RegionWriteCtx::new(
                         region.region_id,
                         &region.version_control,
                     ))
                 };
 
-                e.insert(region_ctx_opt);
+                e.insert(maybe_stalling);
             }
 
             // Safety: Now we ensure the region exists.
-            let region_ctx_opt = region_ctxs.get_mut(&region_id).unwrap();
+            let maybe_stalling = region_ctxs.get_mut(&region_id).unwrap();
 
-            let Some(region_ctx) = region_ctx_opt else {
+            // Get stalling status of a region.
+            let MaybeStalling::Writable(region_ctx) = maybe_stalling else {
                 // If this region is stalling, we need to add requests to pending queue
                 // and write to the region later.
                 // Safety: We have checked the region is stalling.
@@ -144,6 +144,32 @@ impl<S> RegionWorkerLoop<S> {
         // If memory usage reaches high threshold (we should also consider pending flush requests) returns true.
         // TODO(yingwen): Implement this.
         false
+    }
+}
+
+/// An entry to store the write context or stalling flag.
+enum MaybeStalling {
+    /// The region is writable.
+    Writable(RegionWriteCtx),
+    /// The region is stalling and we should not write to it.
+    Stalling,
+}
+
+impl MaybeStalling {
+    /// Converts itself to a [RegionWriteCtx] if it is writable.
+    fn into_write_ctx(self) -> Option<RegionWriteCtx> {
+        match self {
+            MaybeStalling::Writable(v) => Some(v),
+            MaybeStalling::Stalling => None,
+        }
+    }
+
+    /// Gets a mutable reference of [RegionWriteCtx] if it is writable.
+    fn write_ctx_mut(&mut self) -> Option<&mut RegionWriteCtx> {
+        match self {
+            MaybeStalling::Writable(v) => Some(v),
+            MaybeStalling::Stalling => None,
+        }
     }
 }
 

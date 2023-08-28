@@ -406,19 +406,12 @@ impl WorkerRequest {
 /// DDL request to a region.
 #[derive(Debug)]
 pub(crate) enum DdlRequest {
-    /// Create a region.
     Create(RegionCreateRequest),
-    /// Drop a region.
     Drop(RegionDropRequest),
-    /// Open a region.
     Open(RegionOpenRequest),
-    /// Close a region.
     Close(RegionCloseRequest),
-    /// Alter metadata of a region.
     Alter(RegionAlterRequest),
-    /// Flush a region.
     Flush(RegionFlushRequest),
-    /// Compact a region.
     Compact(RegionCompactRequest),
 }
 
