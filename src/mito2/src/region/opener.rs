@@ -23,7 +23,7 @@ use object_store::ObjectStore;
 use snafu::{ensure, OptionExt};
 use store_api::logstore::LogStore;
 use store_api::metadata::RegionMetadata;
-use store_api::storage::{RegionId, SequenceNumber};
+use store_api::storage::RegionId;
 
 use crate::config::MitoConfig;
 use crate::error::{RegionCorruptedSnafu, RegionNotFoundSnafu, Result};
@@ -32,7 +32,7 @@ use crate::memtable::MemtableBuilderRef;
 use crate::region::version::{VersionBuilder, VersionControl, VersionControlRef};
 use crate::region::MitoRegion;
 use crate::region_write_ctx::RegionWriteCtx;
-use crate::wal::Wal;
+use crate::wal::{EntryId, Wal};
 
 /// Builder to create a new [MitoRegion] or open an existing one.
 pub(crate) struct RegionOpener {
@@ -137,7 +137,7 @@ impl RegionOpener {
         let region_id = metadata.region_id;
         let mutable = self.memtable_builder.build(&metadata);
         let version = VersionBuilder::new(metadata, mutable).build();
-        let flushed_sequence = version.flushed_sequence;
+        let flushed_sequence = version.flushed_entry_id;
         let version_control = Arc::new(VersionControl::new(version));
         replay_memtable(wal, region_id, flushed_sequence, &version_control).await?;
 
@@ -155,14 +155,16 @@ impl RegionOpener {
 async fn replay_memtable<S: LogStore>(
     wal: &Wal<S>,
     region_id: RegionId,
-    flushed_sequence: SequenceNumber,
+    flushed_entry_id: EntryId,
     version_control: &VersionControlRef,
 ) -> Result<()> {
     let mut rows_replayed = 0;
+    let mut last_entry_id = EntryId::MIN;
     let mut region_write_ctx = RegionWriteCtx::new(region_id, version_control);
-    let mut wal_stream = wal.scan(region_id, flushed_sequence)?;
+    let mut wal_stream = wal.scan(region_id, flushed_entry_id)?;
     while let Some(res) = wal_stream.next().await {
-        let (_, entry) = res?;
+        let (entry_id, entry) = res?;
+        last_entry_id = last_entry_id.max(entry_id);
         for mutation in entry.mutations {
             rows_replayed += mutation
                 .rows
@@ -172,11 +174,14 @@ async fn replay_memtable<S: LogStore>(
             region_write_ctx.push_mutation(mutation.op_type, mutation.rows, None);
         }
     }
+
+    // set next_entry_id and write to memtable.
+    region_write_ctx.set_next_entry_id(last_entry_id + 1);
     region_write_ctx.write_memtable();
 
     info!(
-        "Replay WAL for region: {}, rows recovered: {}",
-        region_id, rows_replayed
+        "Replay WAL for region: {}, rows recovered: {}, last entry id: {}",
+        region_id, rows_replayed, last_entry_id
     );
     Ok(())
 }

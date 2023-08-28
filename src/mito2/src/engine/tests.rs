@@ -26,6 +26,7 @@ use store_api::storage::RegionId;
 
 use super::*;
 use crate::error::Error;
+use crate::region::version::VersionControlData;
 use crate::test_util::{CreateRequestBuilder, TestEnv};
 
 #[tokio::test]
@@ -236,8 +237,8 @@ fn column_metadata_to_column_schema(metadata: &ColumnMetadata) -> api::v1::Colum
     }
 }
 
-fn build_rows(num_rows: usize) -> Vec<Row> {
-    (0..num_rows)
+fn build_rows(start: usize, end: usize) -> Vec<Row> {
+    (start..end)
         .map(|i| api::v1::Row {
             values: vec![
                 api::v1::Value {
@@ -275,7 +276,7 @@ async fn test_write_to_region() {
     let num_rows = 42;
     let rows = Rows {
         schema: column_schemas,
-        rows: build_rows(num_rows),
+        rows: build_rows(0, num_rows),
     };
     let output = engine
         .handle_request(region_id, RegionRequest::Put(RegionPutRequest { rows }))
@@ -307,10 +308,9 @@ async fn test_region_replay() {
         .await
         .unwrap();
 
-    let num_rows = 42;
     let rows = Rows {
-        schema: column_schemas,
-        rows: build_rows(num_rows),
+        schema: column_schemas.clone(),
+        rows: build_rows(0, 20),
     };
     let output = engine
         .handle_request(region_id, RegionRequest::Put(RegionPutRequest { rows }))
@@ -319,7 +319,20 @@ async fn test_region_replay() {
     let Output::AffectedRows(rows_inserted) = output else {
         unreachable!()
     };
-    assert_eq!(num_rows, rows_inserted);
+    assert_eq!(20, rows_inserted);
+
+    let rows = Rows {
+        schema: column_schemas,
+        rows: build_rows(20, 42),
+    };
+    let output = engine
+        .handle_request(region_id, RegionRequest::Put(RegionPutRequest { rows }))
+        .await
+        .unwrap();
+    let Output::AffectedRows(rows_inserted) = output else {
+        unreachable!()
+    };
+    assert_eq!(22, rows_inserted);
 
     engine.stop().await.unwrap();
 
@@ -345,7 +358,22 @@ async fn test_region_replay() {
     };
     assert_eq!(0, rows);
 
-    // TODO(hl): assert that all written rows have been recovered.
+    let request = ScanRequest::default();
+    let scanner = engine.handle_query(region_id, request).unwrap();
+    let stream = scanner.scan().await.unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    assert_eq!(42, batches.iter().map(|b| b.num_rows()).sum::<usize>());
+
+    let region = engine.get_region(region_id).unwrap();
+    let VersionControlData {
+        committed_sequence,
+        last_entry_id,
+        ..
+    } = region.version_control.current();
+
+    assert_eq!(42, committed_sequence);
+    assert_eq!(2, last_entry_id);
+
     engine.stop().await.unwrap();
 }
 
@@ -371,7 +399,7 @@ async fn test_write_query_region() {
 
     let rows = Rows {
         schema: column_schemas,
-        rows: build_rows(3),
+        rows: build_rows(0, 3),
     };
     engine
         .handle_request(region_id, RegionRequest::Put(RegionPutRequest { rows }))

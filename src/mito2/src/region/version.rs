@@ -94,8 +94,8 @@ pub(crate) struct Version {
     pub(crate) memtables: MemtableVersionRef,
     /// SSTs of the region.
     pub(crate) ssts: SstVersionRef,
-    /// Inclusive max sequence of flushed data.
-    pub(crate) flushed_sequence: SequenceNumber,
+    /// Inclusive max WAL entry id of flushed data.
+    pub(crate) flushed_entry_id: EntryId,
     // TODO(yingwen): RegionOptions.
 }
 
@@ -120,7 +120,7 @@ impl VersionBuilder {
             metadata: self.metadata,
             memtables: Arc::new(MemtableVersion::new(self.mutable)),
             ssts: Arc::new(SstVersion::new()),
-            flushed_sequence: 0,
+            flushed_entry_id: 0,
         }
     }
 }

@@ -160,6 +160,11 @@ impl RegionWriteCtx {
         }
     }
 
+    /// Updates next entry id.
+    pub(crate) fn set_next_entry_id(&mut self, next_entry_id: EntryId) {
+        self.next_entry_id = next_entry_id
+    }
+
     /// Consumes mutations and writes them into mutable memtable.
     pub(crate) fn write_memtable(&mut self) {
         debug_assert_eq!(self.notifiers.len(), self.wal_entry.mutations.len());

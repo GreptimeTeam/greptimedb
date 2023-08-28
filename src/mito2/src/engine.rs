@@ -78,6 +78,11 @@ impl MitoEngine {
     fn handle_query(&self, region_id: RegionId, request: ScanRequest) -> Result<Scanner> {
         self.inner.handle_query(region_id, request)
     }
+
+    #[cfg(test)]
+    pub(crate) fn get_region(&self, id: RegionId) -> Option<crate::region::MitoRegionRef> {
+        self.inner.workers.get_region(id)
+    }
 }
 
 /// Inner struct of [MitoEngine].
