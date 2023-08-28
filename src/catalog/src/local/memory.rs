@@ -267,7 +267,7 @@ impl MemoryCatalogManager {
         manager
     }
 
-    /// Registers a catalog if it does not exist and returns true if it already exists.
+    /// Registers a catalog if it does not exist and returns false if the schema exists.
     pub fn register_catalog_sync(self: &Arc<Self>, name: String) -> Result<bool> {
         let mut catalogs = self.catalogs.write().unwrap();
 
@@ -284,7 +284,7 @@ impl MemoryCatalogManager {
 
     /// Registers a schema if it does not exist.
     /// It returns an error if the catalog does not exist,
-    /// and returns true if the schema exists.
+    /// and returns false if the schema exists.
     pub fn register_schema_sync(&self, request: RegisterSchemaRequest) -> Result<bool> {
         let mut catalogs = self.catalogs.write().unwrap();
         let catalog = catalogs
@@ -516,12 +516,12 @@ mod tests {
     }
 
     #[test]
-    pub fn test_register_if_absent() {
+    pub fn test_register_catalog_sync() {
         let list = MemoryCatalogManager::with_default_setup();
-        assert!(!list
+        assert!(list
             .register_catalog_sync("test_catalog".to_string())
             .unwrap());
-        assert!(list
+        assert!(!list
             .register_catalog_sync("test_catalog".to_string())
             .unwrap());
     }

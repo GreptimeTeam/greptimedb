@@ -163,17 +163,29 @@ impl OpenRegionHandler {
         request: &OpenTableRequest,
         table: Arc<dyn Table>,
     ) -> CatalogResult<bool> {
-        self.catalog_manager
-            .clone()
-            .register_catalog(request.catalog_name.to_string())
-            .await?;
+        if !self
+            .catalog_manager
+            .catalog_exist(&request.catalog_name)
+            .await?
+        {
+            self.catalog_manager
+                .clone()
+                .register_catalog(request.catalog_name.to_string())
+                .await?;
+        }
 
-        self.catalog_manager
-            .register_schema(RegisterSchemaRequest {
-                catalog: request.catalog_name.to_string(),
-                schema: request.schema_name.to_string(),
-            })
-            .await?;
+        if !self
+            .catalog_manager
+            .schema_exist(&request.catalog_name, &request.schema_name)
+            .await?
+        {
+            self.catalog_manager
+                .register_schema(RegisterSchemaRequest {
+                    catalog: request.catalog_name.to_string(),
+                    schema: request.schema_name.to_string(),
+                })
+                .await?;
+        }
 
         let request = RegisterTableRequest {
             catalog: request.catalog_name.to_string(),
