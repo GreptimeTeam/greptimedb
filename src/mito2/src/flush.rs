@@ -158,6 +158,7 @@ impl FlushScheduler {
             return;
         }
 
+        // Add this region to status map.
         let flush_status = self
             .region_status
             .entry(region.region_id)
@@ -179,19 +180,44 @@ impl FlushScheduler {
             return;
         }
 
-        // We can submit the flush job.
+        // TODO(yingwen): Submit the flush job to job scheduler.
 
         todo!()
     }
 
     /// Add write `request` to pending queue.
-    pub(crate) fn add_write_request_to_pending(&mut self, request: SenderWriteRequest) {
-        todo!()
+    ///
+    /// Returns error if region is not stalling.
+    pub(crate) fn add_write_request_to_pending(
+        &mut self,
+        request: SenderWriteRequest,
+    ) -> Result<(), SenderWriteRequest> {
+        if let Some(status) = self.region_status.get_mut(&request.request.region_id) {
+            if status.stalling {
+                status.pending_writes.push(request);
+                return Ok(());
+            }
+        }
+
+        Err(request)
     }
 
     /// Add ddl `task` to pending queue.
-    pub(crate) fn add_ddl_request_to_pending(&mut self, region_id: RegionId, task: RegionTask) {
-        todo!()
+    ///
+    /// Returns error if region is not stalling.
+    pub(crate) fn add_ddl_request_to_pending(
+        &mut self,
+        region_id: RegionId,
+        task: RegionTask,
+    ) -> Result<(), RegionTask> {
+        if let Some(status) = self.region_status.get_mut(&task.region_id) {
+            if status.stalling {
+                status.pending_ddls.push(task);
+                return Ok(());
+            }
+        }
+
+        Err(task)
     }
 }
 

@@ -112,8 +112,10 @@ impl<S> RegionWorkerLoop<S> {
             let Some(region_ctx) = region_ctx_opt else {
                 // If this region is stalling, we need to add requests to pending queue
                 // and write to the region later.
+                // Safety: We have checked the region is stalling.
                 self.flush_scheduler
-                    .add_write_request_to_pending(sender_req);
+                    .add_write_request_to_pending(sender_req)
+                    .unwrap();
                 continue;
             };
 

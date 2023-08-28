@@ -312,6 +312,7 @@ pub(crate) fn validate_proto_value(
 }
 
 /// Sender and write request.
+#[derive(Debug)]
 pub(crate) struct SenderWriteRequest {
     /// Result sender.
     pub(crate) sender: Option<Sender<Result<Output>>>,
