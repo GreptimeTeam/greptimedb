@@ -14,11 +14,49 @@
 
 //! Handling flush related requests.
 
+use store_api::region_request::RegionFlushRequest;
+use store_api::storage::RegionId;
+
 use crate::flush::{FlushReason, RegionFlushTask};
 use crate::region::MitoRegionRef;
+use crate::request::{FlushFailedRequest, FlushFinishedRequest};
 use crate::worker::RegionWorkerLoop;
 
 impl<S> RegionWorkerLoop<S> {
+    /// Handles manual flush request.
+    pub(crate) async fn handle_flush(
+        &mut self,
+        _region_id: RegionId,
+        _request: RegionFlushRequest,
+    ) {
+        // TODO(yingwen): schedule flush.
+        unimplemented!()
+    }
+
+    /// On region flush job finished.
+    pub(crate) async fn handle_flush_finished(
+        &mut self,
+        _region_id: RegionId,
+        _request: FlushFinishedRequest,
+    ) {
+        // TODO(yingwen):
+        // 1. check region existence
+        // 2. write manifest
+        // 3. update region metadata.
+        // 4. handle all pending requests.
+        unimplemented!()
+    }
+
+    /// On region flush job failed.
+    pub(crate) async fn handle_flush_failed(
+        &mut self,
+        _region_id: RegionId,
+        _request: FlushFailedRequest,
+    ) {
+        // TODO(yingwen): fail all pending requests.
+        unimplemented!()
+    }
+
     /// Checks whether the engine reaches flush threshold. If so, finds regions in this
     /// worker to flush.
     pub(crate) fn maybe_flush_worker(&self) {

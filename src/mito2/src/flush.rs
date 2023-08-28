@@ -142,7 +142,11 @@ impl Default for FlushScheduler {
 impl FlushScheduler {
     /// Returns true if the region is stalling.
     pub(crate) fn is_stalling(&self, region_id: RegionId) -> bool {
-        todo!()
+        if let Some(status) = self.region_status.get(&region_id) {
+            return status.stalling;
+        }
+
+        false
     }
 
     /// Schedules a flush `task` for specific `region`.

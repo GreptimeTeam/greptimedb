@@ -403,8 +403,17 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
 impl<S> RegionWorkerLoop<S> {
     /// Handles region background request
-    async fn handle_background_request(&mut self, region_id: RegionId, request: BackgroundRequest) {
-        todo!()
+    async fn handle_background_request(
+        &mut self,
+        region_id: RegionId,
+        bg_request: BackgroundRequest,
+    ) {
+        match bg_request {
+            BackgroundRequest::FlushFinished(req) => {
+                self.handle_flush_finished(region_id, req).await
+            }
+            BackgroundRequest::FlushFailed(req) => self.handle_flush_failed(region_id, req).await,
+        }
     }
 
     // Clean up the worker.
