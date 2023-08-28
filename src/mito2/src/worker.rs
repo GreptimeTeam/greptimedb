@@ -365,9 +365,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         self.handle_ddl_requests(ddl_requests).await;
     }
-}
 
-impl<S> RegionWorkerLoop<S> {
     /// Takes and handles all ddl requests.
     async fn handle_ddl_requests(&mut self, ddl_tasks: Vec<RegionTask>) {
         if ddl_tasks.is_empty() {
@@ -392,7 +390,9 @@ impl<S> RegionWorkerLoop<S> {
             }
         }
     }
+}
 
+impl<S> RegionWorkerLoop<S> {
     // Clean up the worker.
     async fn clean(&self) {
         // Closes remaining regions.
