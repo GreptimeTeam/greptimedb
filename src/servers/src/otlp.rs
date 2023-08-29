@@ -45,55 +45,58 @@ pub fn to_grpc_insert_requests(
     request: ExportMetricsServiceRequest,
 ) -> Result<(InsertRequests, usize)> {
     let mut insert_batch = Vec::new();
-    let mut rows = 0;
 
     for resource in request.resource_metrics {
         let resource_attrs = resource.resource.map(|r| r.attributes);
         for scope in resource.scope_metrics {
             let scope_attrs = scope.scope.map(|s| s.attributes);
             for metric in scope.metrics {
-                if let Some(insert) =
-                    encode_metrics(&metric, resource_attrs.as_ref(), scope_attrs.as_ref())?
-                {
-                    rows += insert.row_count;
-                    insert_batch.push(insert);
-                }
+                let inserts =
+                    encode_metrics(&metric, resource_attrs.as_ref(), scope_attrs.as_ref())?;
+
+                insert_batch.extend(inserts);
             }
         }
     }
 
+    let rows = insert_batch
+        .iter()
+        .map(|i| i.row_count as usize)
+        .sum::<usize>();
     let inserts = InsertRequests {
         inserts: insert_batch,
     };
 
-    Ok((inserts, rows as usize))
+    Ok((inserts, rows))
 }
 
 fn encode_metrics(
     metric: &Metric,
     resource_attrs: Option<&Vec<KeyValue>>,
     scope_attrs: Option<&Vec<KeyValue>>,
-) -> Result<Option<InsertRequest>> {
+) -> Result<Vec<InsertRequest>> {
     let name = &metric.name;
     // note that we don't store description or unit, we might want to deal with
     // these fields in the future.
     if let Some(data) = &metric.data {
         match data {
             metric::Data::Gauge(gauge) => {
-                encode_gauge(name, gauge, resource_attrs, scope_attrs).map(Some)
+                encode_gauge(name, gauge, resource_attrs, scope_attrs).map(|i| vec![i])
             }
-            metric::Data::Sum(sum) => encode_sum(name, sum, resource_attrs, scope_attrs).map(Some),
+            metric::Data::Sum(sum) => {
+                encode_sum(name, sum, resource_attrs, scope_attrs).map(|i| vec![i])
+            }
             metric::Data::Summary(summary) => {
-                encode_summary(name, summary, resource_attrs, scope_attrs).map(Some)
+                encode_summary(name, summary, resource_attrs, scope_attrs).map(|i| vec![i])
             }
             // TODO(sunng87) leave histogram for next release
             metric::Data::Histogram(hist) => {
-                encode_histogram(name, hist, resource_attrs, scope_attrs).map(Some)
+                encode_histogram(name, hist, resource_attrs, scope_attrs)
             }
-            metric::Data::ExponentialHistogram(_hist) => Ok(None),
+            metric::Data::ExponentialHistogram(_hist) => Ok(vec![]),
         }
     } else {
-        Ok(None)
+        Ok(vec![])
     }
 }
 
@@ -214,70 +217,114 @@ fn encode_sum(
     })
 }
 
+const HISTOGRAM_LE_COLUMN: &str = "le";
+
+fn write_tags_and_timestamp(
+    lines: &mut LinesWriter,
+    resource_attrs: Option<&Vec<KeyValue>>,
+    scope_attrs: Option<&Vec<KeyValue>>,
+    data_point_attrs: Option<&Vec<KeyValue>>,
+    timestamp_nanos: i64,
+) -> Result<()> {
+    write_attributes(lines, resource_attrs)?;
+    write_attributes(lines, scope_attrs)?;
+    write_attributes(lines, data_point_attrs)?;
+
+    write_timestamp(lines, timestamp_nanos)?;
+
+    Ok(())
+}
+
 fn encode_histogram(
     name: &str,
     hist: &Histogram,
     resource_attrs: Option<&Vec<KeyValue>>,
     scope_attrs: Option<&Vec<KeyValue>>,
-) -> Result<InsertRequest> {
-    let mut lines = LinesWriter::with_lines(hist.data_points.len());
+) -> Result<Vec<InsertRequest>> {
+    let normalized_name = normalize_otlp_name(name);
+    let bucket_table_name = format!("{}_bucket", normalized_name);
+    let sum_table_name = format!("{}_sum", normalized_name);
+    let count_table_name = format!("{}_count", normalized_name);
+
+    let data_points_len = hist.data_points.len();
+    let mut bucket_lines =
+        LinesWriter::with_lines(hist.data_points.iter().map(|p| p.bucket_counts.len()).sum());
+    let mut sum_lines = LinesWriter::with_lines(data_points_len);
+    let mut count_lines = LinesWriter::with_lines(data_points_len);
 
     for data_point in &hist.data_points {
-        write_attributes(&mut lines, resource_attrs)?;
-        write_attributes(&mut lines, scope_attrs)?;
-        write_attributes(&mut lines, Some(data_point.attributes.as_ref()))?;
-
-        write_timestamp(&mut lines, data_point.time_unix_nano as i64)?;
+        write_tags_and_timestamp(
+            &mut bucket_lines,
+            resource_attrs,
+            scope_attrs,
+            Some(data_point.attributes.as_ref()),
+            data_point.time_unix_nano as i64,
+        )?;
 
         for (idx, count) in data_point.bucket_counts.iter().enumerate() {
-            let le_column_name = &format!("greptime_bucket_{}_le", idx);
             if let Some(upper_bounds) = data_point.explicit_bounds.get(idx) {
-                lines
-                    .write_f64(le_column_name, *upper_bounds)
+                bucket_lines
+                    .write_f64(HISTOGRAM_LE_COLUMN, *upper_bounds)
                     .context(error::OtlpMetricsWriteSnafu)?;
             } else if idx == data_point.explicit_bounds.len() {
                 // The last bucket
-                lines
-                    .write_f64(le_column_name, f64::INFINITY)
+                bucket_lines
+                    .write_f64(HISTOGRAM_LE_COLUMN, f64::INFINITY)
                     .context(error::OtlpMetricsWriteSnafu)?;
             }
 
-            lines
-                .write_u64(&format!("greptime_bucket_{}_value", idx), *count)
+            bucket_lines
+                .write_u64(GREPTIME_VALUE, *count)
                 .context(error::OtlpMetricsWriteSnafu)?;
-        }
 
-        if let Some(min) = data_point.min {
-            lines
-                .write_f64("greptime_min", min)
-                .context(error::OtlpMetricsWriteSnafu)?;
-        }
-
-        if let Some(max) = data_point.max {
-            lines
-                .write_f64("greptime_max", max)
-                .context(error::OtlpMetricsWriteSnafu)?;
+            bucket_lines.commit();
         }
 
         if let Some(sum) = data_point.sum {
-            lines
-                .write_f64("greptime_sum", sum)
+            write_tags_and_timestamp(
+                &mut sum_lines,
+                resource_attrs,
+                scope_attrs,
+                Some(data_point.attributes.as_ref()),
+                data_point.time_unix_nano as i64,
+            )?;
+
+            sum_lines
+                .write_f64(GREPTIME_VALUE, sum)
                 .context(error::OtlpMetricsWriteSnafu)?;
+            sum_lines.commit();
         }
 
-        lines
-            .write_u64("greptime_count", data_point.count)
+        write_tags_and_timestamp(
+            &mut count_lines,
+            resource_attrs,
+            scope_attrs,
+            Some(data_point.attributes.as_ref()),
+            data_point.time_unix_nano as i64,
+        )?;
+
+        count_lines
+            .write_u64(GREPTIME_VALUE, data_point.count)
             .context(error::OtlpMetricsWriteSnafu)?;
 
-        lines.commit();
+        count_lines.commit();
     }
 
+    let bucket_insert = insert_request_from_lines(bucket_lines, bucket_table_name);
+    let sum_insert = insert_request_from_lines(sum_lines, sum_table_name);
+    let count_insert = insert_request_from_lines(count_lines, count_table_name);
+
+    Ok(vec![bucket_insert, sum_insert, count_insert])
+}
+
+fn insert_request_from_lines(lines: LinesWriter, name: String) -> InsertRequest {
     let (columns, row_count) = lines.finish();
-    Ok(InsertRequest {
-        table_name: normalize_otlp_name(name),
+    InsertRequest {
+        table_name: name,
+        region_number: 0,
         columns,
         row_count,
-    })
+    }
 }
 
 #[allow(dead_code)]
@@ -573,11 +620,14 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(inserts.table_name, "histo");
-        assert_eq!(inserts.row_count, 1);
-        assert_eq!(inserts.columns.len(), 18);
+        assert_eq!(3, inserts.len());
+
+        // bucket table
+        assert_eq!(inserts[0].table_name, "histo_bucket");
+        assert_eq!(inserts[0].row_count, 5);
+        assert_eq!(inserts[0].columns.len(), 6);
         assert_eq!(
-            inserts
+            inserts[0]
                 .columns
                 .iter()
                 .map(|c| &c.column_name)
@@ -587,20 +637,44 @@ mod tests {
                 "scope",
                 "host",
                 "greptime_timestamp",
-                "greptime_bucket_0_le",
-                "greptime_bucket_0_value",
-                "greptime_bucket_1_le",
-                "greptime_bucket_1_value",
-                "greptime_bucket_2_le",
-                "greptime_bucket_2_value",
-                "greptime_bucket_3_le",
-                "greptime_bucket_3_value",
-                "greptime_bucket_4_le",
-                "greptime_bucket_4_value",
-                "greptime_min",
-                "greptime_max",
-                "greptime_sum",
-                "greptime_count",
+                "le",
+                "greptime_value",
+            ]
+        );
+
+        assert_eq!(inserts[1].table_name, "histo_sum");
+        assert_eq!(inserts[1].row_count, 1);
+        assert_eq!(inserts[1].columns.len(), 5);
+        assert_eq!(
+            inserts[1]
+                .columns
+                .iter()
+                .map(|c| &c.column_name)
+                .collect::<Vec<&String>>(),
+            vec![
+                "resource",
+                "scope",
+                "host",
+                "greptime_timestamp",
+                "greptime_value",
+            ]
+        );
+
+        assert_eq!(inserts[2].table_name, "histo_count");
+        assert_eq!(inserts[2].row_count, 1);
+        assert_eq!(inserts[2].columns.len(), 5);
+        assert_eq!(
+            inserts[2]
+                .columns
+                .iter()
+                .map(|c| &c.column_name)
+                .collect::<Vec<&String>>(),
+            vec![
+                "resource",
+                "scope",
+                "host",
+                "greptime_timestamp",
+                "greptime_value",
             ]
         );
     }
