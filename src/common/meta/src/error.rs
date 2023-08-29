@@ -140,6 +140,9 @@ pub enum Error {
 
     #[snafu(display("External error: {}", err_msg))]
     External { location: Location, err_msg: String },
+
+    #[snafu(display("Invalid heartbeat response, location: {}", location))]
+    InvalidHeartbeatResponse { location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -156,7 +159,8 @@ impl ErrorExt for Error {
             | InvalidTableMetadata { .. }
             | MoveRegion { .. }
             | Unexpected { .. }
-            | External { .. } => StatusCode::Unexpected,
+            | External { .. }
+            | InvalidHeartbeatResponse { .. } => StatusCode::Unexpected,
 
             SendMessage { .. }
             | GetKvCache { .. }
