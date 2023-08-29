@@ -385,12 +385,12 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         for ddl in ddl_requests {
             let res = match ddl.request {
                 DdlRequest::Create(req) => self.handle_create_request(ddl.region_id, req).await,
+                DdlRequest::Drop(_) => todo!(),
                 DdlRequest::Open(req) => self.handle_open_request(ddl.region_id, req).await,
                 DdlRequest::Close(_) => self.handle_close_request(ddl.region_id).await,
-                DdlRequest::Alter(_)
-                | DdlRequest::Drop(_)
-                | DdlRequest::Flush(_)
-                | DdlRequest::Compact(_) => todo!(),
+                DdlRequest::Alter(_) => todo!(),
+                DdlRequest::Flush(req) => self.handle_flush_request(ddl.region_id, req).await,
+                DdlRequest::Compact(_) => todo!(),
             };
 
             if let Some(sender) = ddl.sender {

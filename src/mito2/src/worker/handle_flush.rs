@@ -14,9 +14,11 @@
 
 //! Handling flush related requests.
 
+use common_query::Output;
 use store_api::region_request::RegionFlushRequest;
 use store_api::storage::RegionId;
 
+use crate::error::Result;
 use crate::flush::{FlushReason, RegionFlushTask};
 use crate::region::MitoRegionRef;
 use crate::request::{FlushFailed, FlushFinished};
@@ -24,11 +26,11 @@ use crate::worker::RegionWorkerLoop;
 
 impl<S> RegionWorkerLoop<S> {
     /// Handles manual flush request.
-    pub(crate) async fn handle_flush(
+    pub(crate) async fn handle_flush_request(
         &mut self,
         _region_id: RegionId,
         _request: RegionFlushRequest,
-    ) {
+    ) -> Result<Output> {
         // TODO(yingwen): schedule flush.
         unimplemented!()
     }
@@ -44,6 +46,7 @@ impl<S> RegionWorkerLoop<S> {
         // 2. write manifest
         // 3. update region metadata.
         // 4. handle all pending requests.
+        // 5. schedule next flush.
         unimplemented!()
     }
 
