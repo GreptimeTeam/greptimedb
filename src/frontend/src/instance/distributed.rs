@@ -34,7 +34,7 @@ use client::Database;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::format_full_table_name;
 use common_error::ext::BoxedError;
-use common_meta::key::schema_name::SchemaNameKey;
+use common_meta::key::schema_name::{SchemaNameKey, SchemaNameValue};
 use common_meta::peer::Peer;
 use common_meta::rpc::ddl::{DdlTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse};
 use common_meta::rpc::router::{Partition, Partition as MetaPartition, RouteRequest};
@@ -478,10 +478,12 @@ impl DistInstance {
             }
         );
 
+        let schema_value =
+            SchemaNameValue::try_from(&expr.options).context(error::TableMetadataManagerSnafu)?;
         self.catalog_manager
             .table_metadata_manager_ref()
             .schema_manager()
-            .create(schema)
+            .create(schema, Some(schema_value))
             .await
             .context(error::TableMetadataManagerSnafu)?;
 

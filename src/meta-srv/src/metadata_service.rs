@@ -90,7 +90,7 @@ impl MetadataService for DefaultMetadataService {
         if !exist {
             self.table_metadata_manager
                 .schema_manager()
-                .create(schema)
+                .create(schema, None)
                 .await
                 .context(error::TableMetadataManagerSnafu)?;
 
