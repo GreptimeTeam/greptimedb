@@ -32,6 +32,10 @@ inputs:
     description: Upload to S3
     required: false
     default: 'true'
+  upload-latest-artifacts:
+    description: Upload the latest artifacts to S3
+    required: false
+    default: 'true'
   working-dir:
     description: Working directory to build the artifacts
     required: false
@@ -59,4 +63,5 @@ runs:
         aws-secret-access-key: ${{ inputs.aws-secret-access-key }}
         aws-region: ${{ inputs.aws-region }}
         upload-to-s3: ${{ inputs.upload-to-s3 }}
+        upload-latest-artifacts: ${{ inputs.upload-latest-artifacts }}
         working-dir: ${{ inputs.working-dir }}
