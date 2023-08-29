@@ -202,7 +202,6 @@ impl HeartbeatTask {
                         }
                     }
                     _ = &mut sleep => {
-                        // let (region_num, region_stats) = datanode_stat(&catalog_manager_clone).await;
                         let (region_num,region_stats) = Self::load_stats(&catalog_manager_clone, &region_server_clone).await;
                         let req = HeartbeatRequest {
                             peer: Some(Peer {
