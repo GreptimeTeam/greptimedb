@@ -48,9 +48,8 @@ pub mod mock {
     use std::io::Error;
     use std::sync::Arc;
 
-    use api::v1::region::region_request::Request as PbRegionRequest;
-    use api::v1::region::region_server_server::RegionServerServer;
-    use api::v1::region::RegionResponse;
+    use api::v1::region::region_server::RegionServer;
+    use api::v1::region::{region_request, RegionResponse};
     use api::v1::{ResponseHeader, Status as PbStatus};
     use async_trait::async_trait;
     use client::Client;
@@ -66,11 +65,11 @@ pub mod mock {
     #[derive(Clone)]
     pub struct EchoRegionServer {
         runtime: Arc<Runtime>,
-        received_requests: mpsc::Sender<PbRegionRequest>,
+        received_requests: mpsc::Sender<region_request::Body>,
     }
 
     impl EchoRegionServer {
-        pub fn new() -> (Self, mpsc::Receiver<PbRegionRequest>) {
+        pub fn new() -> (Self, mpsc::Receiver<region_request::Body>) {
             let (tx, rx) = mpsc::channel(10);
             (
                 Self {
@@ -85,11 +84,11 @@ pub mod mock {
             let (client, server) = tokio::io::duplex(1024);
 
             let handler =
-                RegionServerRequestHandler::new(Arc::new(self.clone()), None, self.runtime.clone());
+                RegionServerRequestHandler::new(Arc::new(self.clone()), self.runtime.clone());
 
             tokio::spawn(async move {
                 Server::builder()
-                    .add_service(RegionServerServer::new(handler))
+                    .add_service(RegionServer::new(handler))
                     .serve_with_incoming(futures::stream::iter(vec![Ok::<_, Error>(server)]))
                     .await
             });
@@ -111,7 +110,10 @@ pub mod mock {
 
     #[async_trait]
     impl RegionServerHandler for EchoRegionServer {
-        async fn handle(&self, request: PbRegionRequest) -> servers::error::Result<RegionResponse> {
+        async fn handle(
+            &self,
+            request: region_request::Body,
+        ) -> servers::error::Result<RegionResponse> {
             self.received_requests.send(request).await.unwrap();
 
             Ok(RegionResponse {
@@ -179,7 +181,12 @@ pub mod test_data {
                             false,
                         ),
                         ColumnSchema::new(
-                            "my_tag_column".to_string(),
+                            "my_tag1".to_string(),
+                            ConcreteDataType::string_datatype(),
+                            true,
+                        ),
+                        ColumnSchema::new(
+                            "my_tag2".to_string(),
                             ConcreteDataType::string_datatype(),
                             true,
                         ),
@@ -192,7 +199,7 @@ pub mod test_data {
                     timestamp_index: Some(0),
                     version: 0,
                 },
-                primary_key_indices: vec![1],
+                primary_key_indices: vec![1, 2],
                 value_indices: vec![2],
                 engine: MITO2_ENGINE.to_string(),
                 next_column_id: 3,

@@ -372,14 +372,7 @@ mod test {
     use std::collections::{HashMap, HashSet};
     use std::sync::{Arc, Mutex};
 
-    use api::v1::{
-        ColumnDataType, ColumnDef as PbColumnDef, CreateTableExpr,
-    };
-    use chrono::DateTime;
-    use datatypes::prelude::ConcreteDataType;
-    use datatypes::schema::{ColumnSchema, RawSchema};
-    use table::metadata::{RawTableMeta, TableIdent, TableType};
-    use table::requests::TableOptions;
+    use api::v1::{ColumnDataType, ColumnDef as PbColumnDef, CreateTableExpr};
 
     use super::*;
     use crate::procedure::utils::mock::EchoRegionServer;
@@ -424,52 +417,6 @@ mod test {
             table_id: None,
             region_numbers: vec![1, 2, 3],
             engine: MITO2_ENGINE.to_string(),
-        };
-
-        let raw_table_info = RawTableInfo {
-            ident: TableIdent::new(42),
-            name: "my_table".to_string(),
-            desc: Some("blabla".to_string()),
-            catalog_name: "my_catalog".to_string(),
-            schema_name: "my_schema".to_string(),
-            meta: RawTableMeta {
-                schema: RawSchema {
-                    column_schemas: vec![
-                        ColumnSchema::new(
-                            "ts".to_string(),
-                            ConcreteDataType::timestamp_millisecond_datatype(),
-                            false,
-                        ),
-                        ColumnSchema::new(
-                            "my_tag1".to_string(),
-                            ConcreteDataType::string_datatype(),
-                            true,
-                        ),
-                        ColumnSchema::new(
-                            "my_tag2".to_string(),
-                            ConcreteDataType::string_datatype(),
-                            true,
-                        ),
-                        ColumnSchema::new(
-                            "my_field_column".to_string(),
-                            ConcreteDataType::int32_datatype(),
-                            true,
-                        ),
-                    ],
-                    timestamp_index: Some(0),
-                    version: 0,
-                },
-                primary_key_indices: vec![1, 2],
-                value_indices: vec![2],
-                engine: MITO2_ENGINE.to_string(),
-                next_column_id: 3,
-                region_numbers: vec![1, 2, 3],
-                engine_options: HashMap::new(),
-                options: TableOptions::default(),
-                created_on: DateTime::default(),
-                partition_key_indices: vec![],
-            },
-            table_type: TableType::Base,
         };
 
         CreateTableProcedure::new(

@@ -13,11 +13,10 @@
 // limitations under the License.
 
 use api::v1::meta::MailboxMessage;
-use api::v1::region::region_request::Request as PbRegionRequest;
-use api::v1::region::DropRequest as PbDropRegionRequest;
+use api::v1::region::{region_request, DropRequest as PbDropRegionRequest};
 use api::v1::DropTableExpr;
 use async_trait::async_trait;
-use client::region::RegionClientBuilder;
+use client::region::RegionRequester;
 use client::Database;
 use common_catalog::consts::MITO2_ENGINE;
 use common_error::ext::ErrorExt;
@@ -45,7 +44,7 @@ use table::metadata::{RawTableInfo, TableId};
 
 use super::utils::handle_retry_error;
 use crate::ddl::DdlContext;
-use crate::error::{self, BuildRegionClientSnafu, Result, TableMetadataManagerSnafu};
+use crate::error::{self, Result, TableMetadataManagerSnafu};
 use crate::metrics;
 use crate::procedure::utils::handle_request_datanode_error;
 use crate::service::mailbox::BroadcastChannel;
@@ -162,22 +161,13 @@ impl DropTableProcedure {
 
     async fn on_datanode_drop_regions(&self) -> Result<Status> {
         let table_id = self.data.table_id();
-        let table_ref = self.data.table_ref();
 
         let region_routes = &self.data.region_routes();
         let leaders = find_leaders(region_routes);
         let mut drop_region_tasks = Vec::with_capacity(leaders.len());
 
         for datanode in leaders {
-            let client = self.context.datanode_clients.get_client(&datanode).await;
-
-            let mut builder = RegionClientBuilder::default();
-            builder.catalog(table_ref.catalog);
-            builder.schema(table_ref.schema);
-            builder.client(client);
-            let client = builder.build().with_context(|_| BuildRegionClientSnafu {
-                peer: datanode.clone(),
-            })?;
+            let clients = self.context.datanode_clients.clone();
 
             let regions = find_leader_regions(region_routes, &datanode);
             let region_ids = regions
@@ -189,11 +179,14 @@ impl DropTableProcedure {
                 for region_id in region_ids {
                     debug!("Dropping region {region_id} on Datanode {datanode:?}");
 
-                    let request = PbRegionRequest::Drop(PbDropRegionRequest {
+                    let request = region_request::Body::Drop(PbDropRegionRequest {
                         region_id: region_id.as_u64(),
                     });
 
-                    if let Err(err) = client.handle(request).await {
+                    let client = clients.get_client(&datanode).await;
+                    let requester = RegionRequester::new(client);
+
+                    if let Err(err) = requester.handle(request).await {
                         return Err(handle_request_datanode_error(datanode)(err));
                     }
                 }
@@ -401,7 +394,7 @@ mod test {
             let expected_dropped_regions = expected_dropped_regions.clone();
             let mut max_recv = expected_dropped_regions.lock().unwrap().len();
             async move {
-                while let Some(PbRegionRequest::Drop(request)) = rx.recv().await {
+                while let Some(region_request::Body::Drop(request)) = rx.recv().await {
                     let region_id = RegionId::from_u64(request.region_id);
 
                     expected_dropped_regions.lock().unwrap().remove(&region_id);
