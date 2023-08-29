@@ -17,15 +17,21 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
+use common_telemetry::error;
 use object_store::ObjectStore;
-use store_api::storage::RegionId;
+use store_api::storage::{RegionId, ScanRequest};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::error::Result;
-use crate::memtable::MemtableBuilderRef;
+use crate::error::{Error, Result};
+use crate::memtable::{MemtableBuilderRef, MemtableRef};
+use crate::region::version::VersionRef;
 use crate::region::MitoRegionRef;
-use crate::request::{SenderDdlRequest, SenderWriteRequest, WorkerRequest};
-use crate::schedule::scheduler::SchedulerRef;
+use crate::request::{
+    BackgroundNotify, FlushFailed, FlushFinished, SenderDdlRequest, SenderWriteRequest,
+    WorkerRequest,
+};
+use crate::schedule::scheduler::{Job, SchedulerRef};
+use crate::sst::file::{FileId, FileMeta};
 
 /// Global write buffer (memtable) manager.
 ///
@@ -105,6 +111,77 @@ impl RegionFlushTask {
             let _ = sender.send(Ok(()));
         }
     }
+
+    /// Converts the flush task into a background job.
+    fn into_flush_job(self, region: &MitoRegionRef) -> Job {
+        // Get a version of this region before creating a job so we
+        // always have a consistent memtable list.
+        let version = region.version();
+
+        Box::pin(async move {
+            self.do_flush(version).await;
+        })
+    }
+
+    /// Runs the flush task.
+    async fn do_flush(mut self, version: VersionRef) {
+        let immutables = version.memtables.immutables();
+        let worker_request = match self.flush_memtables(immutables).await {
+            Ok(file_metas) => {
+                let flush_finished = FlushFinished {
+                    file_metas,
+                    sender: self.sender.take(),
+                };
+                WorkerRequest::Background {
+                    region_id: self.region_id,
+                    notify: BackgroundNotify::FlushFinished(flush_finished),
+                }
+            }
+            Err(e) => {
+                error!(e; "Failed to flush region {}", self.region_id);
+                self.send_error(e);
+                WorkerRequest::Background {
+                    region_id: self.region_id,
+                    notify: BackgroundNotify::FlushFailed(FlushFailed {}),
+                }
+            }
+        };
+        self.send_worker_request(worker_request).await;
+    }
+
+    /// Flushes memtables to SSTs.
+    async fn flush_memtables(&self, memtables: &[MemtableRef]) -> Result<Vec<FileMeta>> {
+        for mem in memtables {
+            if mem.is_empty() {
+                // Skip empty memtables.
+                continue;
+            }
+
+            let file_id = FileId::random();
+            let iter = mem.iter(ScanRequest::default());
+            // TODO(yingwen): Get access layer.
+        }
+
+        todo!()
+    }
+
+    /// Notify flush job status.
+    async fn send_worker_request(&self, request: WorkerRequest) {
+        if let Err(e) = self.request_sender.send(request).await {
+            error!(
+                "Failed to notify flush job status for region {}, request: {:?}",
+                self.region_id, e.0
+            );
+        }
+    }
+
+    /// Send flush error to waiter.
+    fn send_error(&mut self, err: Error) {
+        if let Some(sender) = self.sender.take() {
+            // Ignore send result.
+            let _ = sender.send(Err(err));
+        }
+    }
 }
 
 /// Manages background flushes of a worker.
@@ -166,10 +243,11 @@ impl FlushScheduler {
             .entry(region.region_id)
             .or_insert_with(|| FlushStatus::new(region.clone()));
         // Checks whether we can flush the region now.
-        if flush_status.flushing_task.is_some() {
+        if flush_status.flushing {
             // There is already a flush job running, mark as stalling.
             flush_status.stalling = true;
             self.queue.push_back(task);
+            flush_status.num_queueing += 1;
             return Ok(());
         }
 
@@ -178,18 +256,23 @@ impl FlushScheduler {
             debug_assert!(self.has_flush_running);
             // We reach job limit.
             self.queue.push_back(task);
+            flush_status.num_queueing += 1;
             return Ok(());
         }
 
-        // Now we can flush the region, try to freeze the mutable memtable.
+        // Now we can flush the region.
         region
             .version_control
-            .maybe_freeze_mutable(&task.memtable_builder);
-        // Flush the immutable memtable.
-
+            .freeze_mutable(&task.memtable_builder);
+        // Submit a flush job.
+        let job = task.into_flush_job(region);
+        self.scheduler.schedule(job).map_err(|e| {
+            error!(e; "Failed to schedule flush job for region {}", region.region_id);
+            e
+        })?;
         self.has_flush_running = true;
 
-        todo!()
+        Ok(())
     }
 
     /// Add write `request` to pending queue.
@@ -233,8 +316,8 @@ impl FlushScheduler {
 struct FlushStatus {
     /// Current region.
     region: MitoRegionRef,
-    /// Current running flush task.
-    flushing_task: Option<RegionFlushTask>,
+    /// There is a flush task running.
+    flushing: bool,
     /// The number of flush requests waiting in queue.
     num_queueing: usize,
     /// The region is stalling.
@@ -249,7 +332,7 @@ impl FlushStatus {
     fn new(region: MitoRegionRef) -> FlushStatus {
         FlushStatus {
             region,
-            flushing_task: None,
+            flushing: false,
             num_queueing: 0,
             stalling: false,
             pending_writes: Vec::new(),

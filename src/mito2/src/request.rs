@@ -34,7 +34,7 @@ use store_api::storage::{CompactionStrategy, RegionId};
 use tokio::sync::oneshot::{self, Receiver, Sender};
 
 use crate::config::DEFAULT_WRITE_BUFFER_SIZE;
-use crate::error::{CreateDefaultSnafu, Error, FillDefaultSnafu, InvalidRequestSnafu, Result};
+use crate::error::{CreateDefaultSnafu, FillDefaultSnafu, InvalidRequestSnafu, Result};
 use crate::sst::file::FileMeta;
 
 /// Options that affect the entire region.
@@ -321,6 +321,7 @@ pub(crate) struct SenderWriteRequest {
 }
 
 /// Request sent to a worker
+#[derive(Debug)]
 pub(crate) enum WorkerRequest {
     /// Write to a region.
     Write(SenderWriteRequest),
@@ -438,16 +439,15 @@ pub(crate) enum BackgroundNotify {
 /// Notifies a flush job is finished.
 #[derive(Debug)]
 pub(crate) struct FlushFinished {
-    /// Meta of the flushed SST.
-    pub(crate) file_meta: FileMeta,
+    /// Meta of the flushed SSTs.
+    pub(crate) file_metas: Vec<FileMeta>,
+    /// Flush result sender.
+    pub(crate) sender: Option<oneshot::Sender<Result<()>>>,
 }
 
 /// Notifies a flush job is failed.
 #[derive(Debug)]
-pub(crate) struct FlushFailed {
-    /// The reason of a failed flush job.
-    pub(crate) error: Error,
-}
+pub(crate) struct FlushFailed {}
 
 #[cfg(test)]
 mod tests {
