@@ -80,9 +80,6 @@ pub enum Error {
         attempt_index: u64,
         location: Location,
     },
-
-    #[snafu(display("Unsupported operation: {}, location: {}", reason, location))]
-    UnsupportedOperation { reason: String, location: Location },
 }
 
 impl ErrorExt for Error {
