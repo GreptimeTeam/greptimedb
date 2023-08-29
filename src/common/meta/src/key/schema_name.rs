@@ -159,6 +159,14 @@ impl SchemaManager {
         Ok(self.kv_backend.get(&raw_key).await?.is_some())
     }
 
+    pub async fn get(&self, schema: SchemaNameKey<'_>) -> Result<Option<SchemaNameValue>> {
+        let raw_key = schema.as_raw_key();
+        let value = self.kv_backend.get(&raw_key).await?;
+        value
+            .map(|v| SchemaNameValue::try_from_raw_value(v.value.as_ref()))
+            .transpose()
+    }
+
     /// Returns a schema stream, it lists all schemas belong to the target `catalog`.
     pub async fn schema_names(&self, catalog: &str) -> BoxStream<'static, Result<String>> {
         let start_key = SchemaNameKey::range_start_key(catalog);
