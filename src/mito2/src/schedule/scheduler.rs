@@ -44,6 +44,8 @@ pub trait Scheduler {
     async fn stop(&self, await_termination: bool) -> Result<()>;
 }
 
+type SchedulerRef = Arc<dyn Scheduler + Send>;
+
 /// Request scheduler based on local state.
 pub struct LocalScheduler {
     /// Sends jobs to flume bounded channel
@@ -57,7 +59,8 @@ pub struct LocalScheduler {
 }
 
 impl LocalScheduler {
-    /// cap: flume bounded cap
+    /// Starts a new scheduler.
+    ///
     /// concurrency: the number of bounded receiver
     pub fn new(concurrency: usize) -> Self {
         let (tx, rx) = flume::unbounded();
@@ -153,7 +156,11 @@ impl Scheduler for LocalScheduler {
 impl Drop for LocalScheduler {
     fn drop(&mut self) {
         if self.state.load(Ordering::Relaxed) != STATE_STOP {
-            logging::error!("scheduler must be stopped before dropping, which means the state of scheduler must be STATE_STOP");
+            logging::warn!("scheduler should be stopped before dropping, which means the state of scheduler must be STATE_STOP");
+
+            // We didn't call `stop()` so we cancel all background workers here..
+            self.sender.write().unwrap().take();
+            self.cancel_token.cancel();
         }
     }
 }
