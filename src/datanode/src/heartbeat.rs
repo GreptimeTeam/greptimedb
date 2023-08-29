@@ -18,20 +18,25 @@ use std::time::Duration;
 
 use api::v1::meta::{HeartbeatRequest, NodeStat, Peer, RegionStat, TableIdent};
 use catalog::remote::region_alive_keeper::RegionAliveKeepers;
-use catalog::{datanode_stat, CatalogManagerRef};
+use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
 use common_meta::heartbeat::handler::{
-    HeartbeatResponseHandlerContext, HeartbeatResponseHandlerExecutorRef,
+    HandlerGroupExecutor, HeartbeatResponseHandlerContext, HeartbeatResponseHandlerExecutorRef,
 };
 use common_meta::heartbeat::mailbox::{HeartbeatMailbox, MailboxRef};
 use common_meta::heartbeat::utils::outgoing_message_to_mailbox_message;
 use common_telemetry::{debug, error, info, trace, warn};
 use meta_client::client::{HeartbeatSender, MetaClient};
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
+use table::engine::manager::MemoryTableEngineManager;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
+use self::handler::RegionHeartbeatResponseHandler;
 use crate::datanode::DatanodeOptions;
-use crate::error::{self, MetaClientInitSnafu, Result};
+use crate::error::{
+    self, MetaClientInitSnafu, MissingMetasrvOptsSnafu, MissingNodeIdSnafu, Result,
+};
+use crate::instance::new_metasrv_client;
 use crate::region_server::RegionServer;
 
 pub(crate) mod handler;
@@ -43,10 +48,7 @@ pub struct HeartbeatTask {
     server_hostname: Option<String>,
     running: Arc<AtomicBool>,
     meta_client: Arc<MetaClient>,
-    // TODO: remove this field
-    catalog_manager: Option<CatalogManagerRef>,
-    // TODO: remove optional
-    region_server: Option<RegionServer>,
+    region_server: RegionServer,
     interval: u64,
     resp_handler_executor: HeartbeatResponseHandlerExecutorRef,
     region_alive_keepers: Arc<RegionAliveKeepers>,
@@ -60,31 +62,44 @@ impl Drop for HeartbeatTask {
 
 impl HeartbeatTask {
     /// Create a new heartbeat task instance.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        node_id: u64,
+    pub async fn try_new(
         opts: &DatanodeOptions,
-        meta_client: Arc<MetaClient>,
-        catalog_manager: Option<CatalogManagerRef>,
+        // TODO: remove optional
         region_server: Option<RegionServer>,
-        resp_handler_executor: HeartbeatResponseHandlerExecutorRef,
-        heartbeat_interval_millis: u64,
-        region_alive_keepers: Arc<RegionAliveKeepers>,
-    ) -> Self {
-        Self {
-            node_id,
+    ) -> Result<Self> {
+        let meta_client = new_metasrv_client(
+            opts.node_id.context(MissingNodeIdSnafu)?,
+            opts.meta_client_options
+                .as_ref()
+                .context(MissingMetasrvOptsSnafu)?,
+        )
+        .await?;
+
+        let region_server = region_server.unwrap();
+
+        let region_alive_keepers = Arc::new(RegionAliveKeepers::new(
+            Arc::new(MemoryTableEngineManager::new_empty()),
+            opts.heartbeat.interval_millis,
+        ));
+        let resp_handler_executor = Arc::new(HandlerGroupExecutor::new(vec![
+            Arc::new(ParseMailboxMessageHandler),
+            Arc::new(RegionHeartbeatResponseHandler::new(region_server.clone())),
+            region_alive_keepers.clone(),
+        ]));
+
+        Ok(Self {
+            node_id: opts.node_id.unwrap_or(0),
             // We use datanode's start time millis as the node's epoch.
             node_epoch: common_time::util::current_time_millis() as u64,
             server_addr: opts.rpc_addr.clone(),
             server_hostname: opts.rpc_hostname.clone(),
             running: Arc::new(AtomicBool::new(false)),
-            meta_client,
-            catalog_manager,
+            meta_client: Arc::new(meta_client),
             region_server,
-            interval: heartbeat_interval_millis,
+            interval: opts.heartbeat.interval_millis,
             resp_handler_executor,
             region_alive_keepers,
-        }
+        })
     }
 
     pub async fn create_streams(
@@ -151,7 +166,6 @@ impl HeartbeatTask {
         self.region_alive_keepers.start().await;
 
         let meta_client = self.meta_client.clone();
-        let catalog_manager_clone = self.catalog_manager.clone();
         let region_server_clone = self.region_server.clone();
 
         let handler_executor = self.resp_handler_executor.clone();
@@ -202,7 +216,7 @@ impl HeartbeatTask {
                         }
                     }
                     _ = &mut sleep => {
-                        let (region_num,region_stats) = Self::load_stats(&catalog_manager_clone, &region_server_clone).await;
+                        let (region_num,region_stats) = Self::load_stats(&region_server_clone).await;
                         let req = HeartbeatRequest {
                             peer: Some(Peer {
                                 id: node_id,
@@ -249,34 +263,24 @@ impl HeartbeatTask {
         Ok(())
     }
 
-    async fn load_stats(
-        catalog_manager: &Option<CatalogManagerRef>,
-        region_server: &Option<RegionServer>,
-    ) -> (u64, Vec<RegionStat>) {
-        if let Some(catalog_manager) = catalog_manager {
-            // TODO: remove this branch
-            datanode_stat(catalog_manager).await
-        } else if let Some(region_server) = region_server {
-            let region_ids = region_server.opened_region_ids();
-            let region_stats = region_ids
-                .into_iter()
-                .map(|region_id| RegionStat {
-                    // TODO: scratch more info
-                    region_id: region_id.as_u64(),
-                    table_ident: Some(TableIdent {
-                        table_id: region_id.table_id(),
-                        table_name: None,
-                        engine: "MitoEngine".to_string(),
-                    }),
+    async fn load_stats(region_server: &RegionServer) -> (u64, Vec<RegionStat>) {
+        let region_ids = region_server.opened_region_ids();
+        let region_stats = region_ids
+            .into_iter()
+            .map(|region_id| RegionStat {
+                // TODO: scratch more info
+                region_id: region_id.as_u64(),
+                table_ident: Some(TableIdent {
+                    table_id: region_id.table_id(),
+                    table_name: None,
+                    engine: "MitoEngine".to_string(),
+                }),
 
-                    ..Default::default()
-                })
-                .collect::<Vec<_>>();
+                ..Default::default()
+            })
+            .collect::<Vec<_>>();
 
-            (region_stats.len() as _, region_stats)
-        } else {
-            (0, vec![])
-        }
+        (region_stats.len() as _, region_stats)
     }
 
     pub async fn close(&self) -> Result<()> {

@@ -35,11 +35,15 @@ pub mod open_region;
 
 /// Handler for [Instruction::OpenRegion] and [Instruction::CloseRegion].
 #[derive(Clone)]
-pub struct RegionHandler {
+pub struct RegionHeartbeatResponseHandler {
     region_server: RegionServer,
 }
 
-impl RegionHandler {
+impl RegionHeartbeatResponseHandler {
+    pub fn new(region_server: RegionServer) -> Self {
+        Self { region_server }
+    }
+
     fn instruction_to_request(instruction: Instruction) -> MetaResult<(RegionId, RegionRequest)> {
         match instruction {
             Instruction::OpenRegion(region_ident) => {
@@ -109,7 +113,7 @@ impl RegionHandler {
 }
 
 #[async_trait]
-impl HeartbeatResponseHandler for RegionHandler {
+impl HeartbeatResponseHandler for RegionHeartbeatResponseHandler {
     fn is_acceptable(&self, ctx: &HeartbeatResponseHandlerContext) -> bool {
         matches!(
             ctx.incoming_message.as_ref(),

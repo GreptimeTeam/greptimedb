@@ -435,16 +435,20 @@ impl Datanode {
 
         let region_server = RegionServer::new(query_engine, runtime);
 
+        // build optional things with different modes
         let services = match opts.mode {
-            Mode::Distributed => Some(Services::try_new(region_server, &opts).await?),
+            Mode::Distributed => Some(Services::try_new(region_server.clone(), &opts).await?),
             Mode::Standalone => None,
         };
+        let heartbeat_task = match opts.mode {
+            Mode::Distributed => Some(HeartbeatTask::try_new(&opts, Some(region_server)).await?),
+            Mode::Standalone => None,
+        };
+
         Ok(Self {
             opts,
             services,
-            // TODO: construct heartbeat task from region server with
-            // correct meta client and alive keeper
-            heartbeat_task: None,
+            heartbeat_task,
         })
     }
 
