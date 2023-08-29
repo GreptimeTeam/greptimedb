@@ -89,10 +89,10 @@ fn encode_metrics(
             metric::Data::Summary(summary) => {
                 encode_summary(name, summary, resource_attrs, scope_attrs).map(|i| vec![i])
             }
-            // TODO(sunng87) leave histogram for next release
             metric::Data::Histogram(hist) => {
                 encode_histogram(name, hist, resource_attrs, scope_attrs)
             }
+            // TODO(sunng87) leave ExponentialHistogram for next release
             metric::Data::ExponentialHistogram(_hist) => Ok(vec![]),
         }
     } else {
@@ -169,21 +169,20 @@ fn encode_gauge(
 ) -> Result<InsertRequest> {
     let mut lines = LinesWriter::with_lines(gauge.data_points.len());
     for data_point in &gauge.data_points {
-        write_attributes(&mut lines, resource_attrs)?;
-        write_attributes(&mut lines, scope_attrs)?;
-        write_attributes(&mut lines, Some(data_point.attributes.as_ref()))?;
-        write_timestamp(&mut lines, data_point.time_unix_nano as i64)?;
+        write_tags_and_timestamp(
+            &mut lines,
+            resource_attrs,
+            scope_attrs,
+            Some(data_point.attributes.as_ref()),
+            data_point.time_unix_nano as i64,
+        )?;
+
         write_data_point_value(&mut lines, GREPTIME_VALUE, &data_point.value)?;
 
         lines.commit();
     }
 
-    let (columns, row_count) = lines.finish();
-    Ok(InsertRequest {
-        table_name: normalize_otlp_name(name),
-        columns,
-        row_count,
-    })
+    Ok(insert_request_from_lines(lines, normalize_otlp_name(name)))
 }
 
 /// encode this sum metric
@@ -198,23 +197,19 @@ fn encode_sum(
     let mut lines = LinesWriter::with_lines(sum.data_points.len());
 
     for data_point in &sum.data_points {
-        write_attributes(&mut lines, resource_attrs)?;
-        write_attributes(&mut lines, scope_attrs)?;
-        write_attributes(&mut lines, Some(data_point.attributes.as_ref()))?;
-
-        write_timestamp(&mut lines, data_point.time_unix_nano as i64)?;
-
+        write_tags_and_timestamp(
+            &mut lines,
+            resource_attrs,
+            scope_attrs,
+            Some(data_point.attributes.as_ref()),
+            data_point.time_unix_nano as i64,
+        )?;
         write_data_point_value(&mut lines, GREPTIME_VALUE, &data_point.value)?;
 
         lines.commit();
     }
 
-    let (columns, row_count) = lines.finish();
-    Ok(InsertRequest {
-        table_name: normalize_otlp_name(name),
-        columns,
-        row_count,
-    })
+    Ok(insert_request_from_lines(lines, normalize_otlp_name(name)))
 }
 
 const HISTOGRAM_LE_COLUMN: &str = "le";
@@ -235,6 +230,17 @@ fn write_tags_and_timestamp(
     Ok(())
 }
 
+/// Encode histogram data. This function returns 3 insert requests for 3 tables.
+///
+/// The implementation has been following Prometheus histogram table format:
+///
+/// - A `%metric%_bucket` table including `le` tag that stores bucket upper
+/// limit, and `greptime_value` for bucket count
+/// - A `%metric%_sum` table storing sum of samples
+/// -  A `%metric%_count` table storing count of samples.
+///
+/// By its Prometheus compatibility, we hope to be able to use prometheus
+/// quantile functions on this table.
 fn encode_histogram(
     name: &str,
     hist: &Histogram,
@@ -321,7 +327,6 @@ fn insert_request_from_lines(lines: LinesWriter, name: String) -> InsertRequest 
     let (columns, row_count) = lines.finish();
     InsertRequest {
         table_name: name,
-        region_number: 0,
         columns,
         row_count,
     }
@@ -394,11 +399,13 @@ fn encode_summary(
     let mut lines = LinesWriter::with_lines(summary.data_points.len());
 
     for data_point in &summary.data_points {
-        write_attributes(&mut lines, resource_attrs)?;
-        write_attributes(&mut lines, scope_attrs)?;
-        write_attributes(&mut lines, Some(data_point.attributes.as_ref()))?;
-
-        write_timestamp(&mut lines, data_point.time_unix_nano as i64)?;
+        write_tags_and_timestamp(
+            &mut lines,
+            resource_attrs,
+            scope_attrs,
+            Some(data_point.attributes.as_ref()),
+            data_point.time_unix_nano as i64,
+        )?;
 
         for quantile in &data_point.quantile_values {
             // here we don't store bucket boundary
@@ -417,12 +424,7 @@ fn encode_summary(
         lines.commit();
     }
 
-    let (columns, row_count) = lines.finish();
-    Ok(InsertRequest {
-        table_name: normalize_otlp_name(name),
-        columns,
-        row_count,
-    })
+    Ok(insert_request_from_lines(lines, normalize_otlp_name(name)))
 }
 
 #[cfg(test)]
