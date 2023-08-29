@@ -38,7 +38,7 @@ SELECT SUM(-1) FROM numbers WHERE number>10000 limit 1000;
 |                |
 +----------------+
 
-CREATE TABLE bigints(b BIGINT TIME INDEX);
+CREATE TABLE bigints(b TIMESTAMP TIME INDEX);
 
 Affected Rows: 0
 
@@ -48,13 +48,9 @@ Affected Rows: 3
 
 SELECT SUM(b) FROM bigints;
 
-+----------------------+
-| SUM(bigints.b)       |
-+----------------------+
-| -9223372036854774807 |
-+----------------------+
+Error: 3000(PlanQuery), Error during planning: The function Sum does not support inputs of type Timestamp(Millisecond, None).
 
-CREATE TABLE doubles(n DOUBLE, ts BIGINT TIME INDEX);
+CREATE TABLE doubles(n DOUBLE, ts TIMESTAMP TIME INDEX);
 
 Affected Rows: 0
 

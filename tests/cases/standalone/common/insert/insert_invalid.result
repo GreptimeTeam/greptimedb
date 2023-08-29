@@ -1,52 +1,48 @@
 CREATE TABLE strings(i STRING, t BIGINT, time index(t));
 
-Affected Rows: 0
+Error: 1004(InvalidArguments), Invalid column option, column name: t, error: time index column data type should be timestamp
 
 INSERT INTO strings VALUES ('â‚(', 1);
 
-Affected Rows: 1
+Error: 4001(TableNotFound), Table not found: greptime.public.strings
 
 INSERT INTO strings VALUES (3, 4);
 
-Error: 2000(InvalidSyntax), Failed to parse value: Fail to parse number 3, invalid column type: String(StringType)
+Error: 4001(TableNotFound), Table not found: greptime.public.strings
 
 SELECT * FROM strings WHERE i = 'â‚(';
 
-+-----+---+
-| i   | t |
-+-----+---+
-| â‚( | 1 |
-+-----+---+
+Error: 3000(PlanQuery), Error during planning: Table not found: greptime.public.strings
 
 CREATE TABLE a(i integer, j BIGINT, time index(j));
 
-Affected Rows: 0
+Error: 1004(InvalidArguments), Invalid column option, column name: j, error: time index column data type should be timestamp
 
 INSERT INTO a VALUES (1, 2);
 
-Affected Rows: 1
+Error: 4001(TableNotFound), Table not found: greptime.public.a
 
 INSERT INTO a VALUES (1);
 
-Error: 1004(InvalidArguments), Columns and values number mismatch, columns: 2, values: 1
+Error: 4001(TableNotFound), Table not found: greptime.public.a
 
 INSERT INTO a VALUES (1,2,3);
 
-Error: 1004(InvalidArguments), Columns and values number mismatch, columns: 2, values: 3
+Error: 4001(TableNotFound), Table not found: greptime.public.a
 
 INSERT INTO a VALUES (1,2),(3);
 
-Error: 1004(InvalidArguments), Columns and values number mismatch, columns: 2, values: 1
+Error: 4001(TableNotFound), Table not found: greptime.public.a
 
 INSERT INTO a VALUES (1,2),(3,4,5);
 
-Error: 1004(InvalidArguments), Columns and values number mismatch, columns: 2, values: 3
+Error: 4001(TableNotFound), Table not found: greptime.public.a
 
 DROP TABLE strings;
 
-Affected Rows: 1
+Error: 4001(TableNotFound), Table not found: greptime.public.strings
 
 DROP TABLE a;
 
-Affected Rows: 1
+Error: 4001(TableNotFound), Table not found: greptime.public.a
 

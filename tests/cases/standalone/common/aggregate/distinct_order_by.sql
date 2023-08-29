@@ -1,4 +1,4 @@
-CREATE TABLE integers(i BIGINT TIME INDEX);
+CREATE TABLE integers(i TIMESTAMP TIME INDEX);
 
 INSERT INTO integers VALUES (1), (2), (3);
 

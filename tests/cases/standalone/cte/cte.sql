@@ -1,4 +1,4 @@
-create table a(i bigint time index);
+create table a(i TIMESTAMP TIME INDEX);
 
 insert into a values (42);
 

@@ -1,4 +1,4 @@
-CREATE TABLE integers(i BIGINT TIME INDEX);
+CREATE TABLE integers(i TIMESTAMP TIME INDEX);
 
 Affected Rows: 0
 
@@ -8,12 +8,7 @@ Affected Rows: 3
 
 SELECT DISTINCT i%2 FROM integers ORDER BY 1;
 
-+-----------------------+
-| integers.i % Int64(2) |
-+-----------------------+
-| 0                     |
-| 1                     |
-+-----------------------+
+Error: 3000(PlanQuery), Error during planning: Cannot coerce arithmetic expression Timestamp(Millisecond, None) % Int64 to valid types
 
 -- TODO(LFC): Failed to run under new DataFusion
 -- expected:
@@ -25,41 +20,41 @@ SELECT DISTINCT i%2 FROM integers ORDER BY 1;
 --  +-----------------------+
 SELECT DISTINCT i % 2 FROM integers WHERE i<3 ORDER BY i;
 
-Error: 3000(PlanQuery), Error during planning: For SELECT DISTINCT, ORDER BY expressions i must appear in select list
+Error: 3000(PlanQuery), Error during planning: Cannot coerce arithmetic expression Timestamp(Millisecond, None) % Int64 to valid types
 
 SELECT DISTINCT ON (1) i % 2, i FROM integers WHERE i<3 ORDER BY i;
 
-Error: 3000(PlanQuery), This feature is not implemented: DISTINCT ON Exprs not supported
+Error: 3000(PlanQuery), Error during planning: Cannot coerce arithmetic expression Timestamp(Millisecond, None) % Int64 to valid types
 
 SELECT DISTINCT integers.i FROM integers ORDER BY i DESC;
 
-+---+
-| i |
-+---+
-| 3 |
-| 2 |
-| 1 |
-+---+
++-------------------------+
+| i                       |
++-------------------------+
+| 1970-01-01T00:00:00.003 |
+| 1970-01-01T00:00:00.002 |
+| 1970-01-01T00:00:00.001 |
++-------------------------+
 
 SELECT DISTINCT i FROM integers ORDER BY integers.i DESC;
 
-+---+
-| i |
-+---+
-| 3 |
-| 2 |
-| 1 |
-+---+
++-------------------------+
+| i                       |
++-------------------------+
+| 1970-01-01T00:00:00.003 |
+| 1970-01-01T00:00:00.002 |
+| 1970-01-01T00:00:00.001 |
++-------------------------+
 
 SELECT DISTINCT integers.i FROM integers ORDER BY integers.i DESC;
 
-+---+
-| i |
-+---+
-| 3 |
-| 2 |
-| 1 |
-+---+
++-------------------------+
+| i                       |
++-------------------------+
+| 1970-01-01T00:00:00.003 |
+| 1970-01-01T00:00:00.002 |
+| 1970-01-01T00:00:00.001 |
++-------------------------+
 
 DROP TABLE integers;
 
