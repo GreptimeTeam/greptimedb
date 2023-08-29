@@ -29,7 +29,7 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::storage::SequenceNumber;
 
 use crate::memtable::version::{MemtableVersion, MemtableVersionRef};
-use crate::memtable::{MemtableBuilderRef, MemtableId, MemtableRef};
+use crate::memtable::{MemtableBuilderRef, MemtableRef};
 use crate::sst::version::{SstVersion, SstVersionRef};
 use crate::wal::EntryId;
 
@@ -66,10 +66,10 @@ impl VersionControl {
         data.last_entry_id = entry_id;
     }
 
-    /// Freezes the mutable memtable if there is no immutable memtable.
+    /// Freezes the mutable memtable if it is not empty.
     pub(crate) fn maybe_freeze_mutable(&self, builder: &MemtableBuilderRef) {
         let version = self.current().version;
-        if version.memtables.mutable.is_empty() || version.memtables.immutable.is_some() {
+        if version.memtables.mutable.is_empty() {
             return;
         }
         let new_mutable = builder.build(&version.metadata);

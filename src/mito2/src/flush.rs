@@ -153,7 +153,7 @@ impl FlushScheduler {
         debug_assert_eq!(region.region_id, task.region_id);
 
         let version = region.version_control.current().version;
-        if version.memtables.mutable.is_empty() && version.memtables.immutable.is_none() {
+        if version.memtables.mutable.is_empty() && version.memtables.immutables().is_empty() {
             debug_assert!(!self.region_status.contains_key(&region.region_id));
             // The region has nothing to flush.
             task.on_success();
@@ -182,7 +182,9 @@ impl FlushScheduler {
         }
 
         // Now we can flush the region, try to freeze the mutable memtable.
-        region.version_control.maybe_freeze_mutable(&task.memtable_builder);
+        region
+            .version_control
+            .maybe_freeze_mutable(&task.memtable_builder);
         // Flush the immutable memtable.
 
         self.has_flush_running = true;
