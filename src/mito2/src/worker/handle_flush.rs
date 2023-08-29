@@ -17,7 +17,6 @@
 use store_api::region_request::RegionFlushRequest;
 use store_api::storage::RegionId;
 
-use crate::flush::{FlushReason, RegionFlushTask};
 use crate::region::MitoRegionRef;
 use crate::request::{FlushFailed, FlushFinished};
 use crate::worker::RegionWorkerLoop;
@@ -75,19 +74,7 @@ impl<S> RegionWorkerLoop<S> {
     }
 
     /// Flush a region if it meets flush requirements.
-    pub(crate) fn flush_region_if_full(&mut self, region: &MitoRegionRef) {
-        let version_data = region.version_control.current();
-        if self
-            .write_buffer_manager
-            .should_flush_region(version_data.version.mutable_stats())
-        {
-            // We need to flush this region.
-            let task = RegionFlushTask {
-                region_id: region.region_id,
-                reason: FlushReason::MemtableFull,
-                sender: None,
-            };
-            self.flush_scheduler.schedule_flush(region, task);
-        }
+    pub(crate) fn flush_region_if_full(&mut self, _region: &MitoRegionRef) {
+        // Now we does nothing.
     }
 }
