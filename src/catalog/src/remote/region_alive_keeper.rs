@@ -530,7 +530,7 @@ mod test {
             table_id: 1,
             engine: "MockTableEngine".to_string(),
         };
-        let table = Arc::new(EmptyTable::new(CreateTableRequest {
+        let table = EmptyTable::table(CreateTableRequest {
             id: 1,
             catalog_name: catalog.to_string(),
             schema_name: schema.to_string(),
@@ -546,7 +546,7 @@ mod test {
             create_if_not_exists: false,
             table_options: TableOptions::default(),
             engine: "MockTableEngine".to_string(),
-        }));
+        });
         keepers
             .register_table(table_ident.clone(), table)
             .await

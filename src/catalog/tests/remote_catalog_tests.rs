@@ -379,7 +379,7 @@ mod tests {
             schema: table_before.schema.clone(),
             table_name: table_before.table.clone(),
             table_id: table_before.table_id,
-            table: Arc::new(EmptyTable::new(CreateTableRequest {
+            table: EmptyTable::table(CreateTableRequest {
                 id: table_before.table_id,
                 catalog_name: table_before.catalog.clone(),
                 schema_name: table_before.schema.clone(),
@@ -391,7 +391,7 @@ mod tests {
                 create_if_not_exists: false,
                 table_options: Default::default(),
                 engine: MITO_ENGINE.to_string(),
-            })),
+            }),
         };
         assert!(catalog_manager.register_table(request).await.unwrap());
 
@@ -418,7 +418,7 @@ mod tests {
             schema: table_after.schema.clone(),
             table_name: table_after.table.clone(),
             table_id: table_after.table_id,
-            table: Arc::new(EmptyTable::new(CreateTableRequest {
+            table: EmptyTable::table(CreateTableRequest {
                 id: table_after.table_id,
                 catalog_name: table_after.catalog.clone(),
                 schema_name: table_after.schema.clone(),
@@ -430,7 +430,7 @@ mod tests {
                 create_if_not_exists: false,
                 table_options: Default::default(),
                 engine: MITO_ENGINE.to_string(),
-            })),
+            }),
         };
         assert!(catalog_manager.register_table(request).await.unwrap());
 

@@ -60,7 +60,7 @@ async fn test_datafusion_query_engine() -> Result<()> {
         (0..100).collect::<Vec<_>>(),
     ))];
     let recordbatch = RecordBatch::new(schema, columns).unwrap();
-    let table = Arc::new(MemTable::new("numbers", recordbatch));
+    let table = MemTable::table("numbers", recordbatch);
 
     let limit = 10;
     let table_provider = Arc::new(DfTableProviderAdapter::new(table.clone()));

@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use async_trait::async_trait;
 use common_procedure::BoxedProcedure;
@@ -53,7 +52,7 @@ impl TableEngine for MockTableEngine {
         let schema_name = request.schema_name.clone();
         let table_name = request.table_name.clone();
 
-        let table_ref = Arc::new(EmptyTable::new(request));
+        let table_ref = EmptyTable::table(request);
 
         let _ = self
             .tables
