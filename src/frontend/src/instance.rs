@@ -38,7 +38,7 @@ use catalog::remote::CachedMetaKvBackend;
 use catalog::CatalogManagerRef;
 use client::client_manager::DatanodeClients;
 use common_base::Plugins;
-use common_catalog::consts::MITO_ENGINE;
+use common_catalog::consts::default_engine;
 use common_error::ext::BoxedError;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
@@ -213,7 +213,6 @@ impl Instance {
         let create_expr_factory = CreateExprFactory;
 
         let row_inserter = Arc::new(RowInserter::new(
-            MITO_ENGINE.to_string(),
             catalog_manager.clone(),
             create_expr_factory,
             dist_instance.clone(),
@@ -286,7 +285,6 @@ impl Instance {
         let grpc_query_handler = StandaloneGrpcQueryHandler::arc(dn_instance.clone());
 
         let row_inserter = Arc::new(RowInserter::new(
-            MITO_ENGINE.to_string(),
             catalog_manager.clone(),
             create_expr_factory,
             grpc_query_handler.clone(),
@@ -366,7 +364,7 @@ impl Instance {
                     catalog_name, schema_name, table_name,
                 );
                 let _ = self
-                    .create_table_by_columns(ctx, table_name, columns, MITO_ENGINE)
+                    .create_table_by_columns(ctx, table_name, columns, default_engine())
                     .await?;
                 info!(
                     "Successfully created table on insertion: {}.{}.{}",

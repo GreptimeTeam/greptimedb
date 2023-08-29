@@ -35,6 +35,7 @@ use store_api::region_request::RegionCreateRequest;
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
 use crate::error::Result;
+use crate::flush::WriteBufferManagerImpl;
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::read::{Batch, BatchBuilder, BatchReader};
 use crate::worker::WorkerGroup;
@@ -43,7 +44,8 @@ use crate::worker::WorkerGroup;
 pub struct TestEnv {
     /// Path to store data.
     data_home: TempDir,
-    // TODO(yingwen): Maybe provide a way to close the log store.
+    logstore: Option<Arc<RaftEngineLogStore>>,
+    object_store: Option<ObjectStore>,
 }
 
 impl Default for TestEnv {
@@ -57,6 +59,8 @@ impl TestEnv {
     pub fn new() -> TestEnv {
         TestEnv {
             data_home: create_temp_dir(""),
+            logstore: None,
+            object_store: None,
         }
     }
 
@@ -64,21 +68,39 @@ impl TestEnv {
     pub fn with_prefix(prefix: &str) -> TestEnv {
         TestEnv {
             data_home: create_temp_dir(prefix),
+            logstore: None,
+            object_store: None,
         }
     }
 
+    pub fn get_logstore(&self) -> Option<Arc<RaftEngineLogStore>> {
+        self.logstore.clone()
+    }
+
+    pub fn get_object_store(&self) -> Option<ObjectStore> {
+        self.object_store.clone()
+    }
+
     /// Creates a new engine with specific config under this env.
-    pub async fn create_engine(&self, config: MitoConfig) -> MitoEngine {
+    pub async fn create_engine(&mut self, config: MitoConfig) -> MitoEngine {
         let (log_store, object_store) = self.create_log_and_object_store().await;
 
-        MitoEngine::new(config, Arc::new(log_store), object_store)
+        let logstore = Arc::new(log_store);
+        self.logstore = Some(logstore.clone());
+        self.object_store = Some(object_store.clone());
+        MitoEngine::new(config, logstore, object_store)
     }
 
     /// Creates a new [WorkerGroup] with specific config under this env.
     pub(crate) async fn create_worker_group(&self, config: MitoConfig) -> WorkerGroup {
         let (log_store, object_store) = self.create_log_and_object_store().await;
 
-        WorkerGroup::start(config, Arc::new(log_store), object_store)
+        WorkerGroup::start(
+            config,
+            Arc::new(log_store),
+            object_store,
+            Arc::new(WriteBufferManagerImpl {}),
+        )
     }
 
     async fn create_log_and_object_store(&self) -> (RaftEngineLogStore, ObjectStore) {

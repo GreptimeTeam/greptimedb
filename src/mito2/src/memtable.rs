@@ -45,7 +45,14 @@ pub trait Memtable: Send + Sync + fmt::Debug {
     /// Write key values into the memtable.
     fn write(&self, kvs: &KeyValues) -> Result<()>;
 
+    /// Scans the memtable for `req`.
     fn iter(&self, req: ScanRequest) -> BoxedBatchIterator;
+
+    /// Returns true if the memtable is empty.
+    fn is_empty(&self) -> bool;
+
+    /// Mark the memtable as immutable.
+    fn mark_immutable(&self);
 }
 
 pub type MemtableRef = Arc<dyn Memtable>;
@@ -85,6 +92,12 @@ impl Memtable for EmptyMemtable {
     fn iter(&self, _req: ScanRequest) -> BoxedBatchIterator {
         Box::new(std::iter::empty())
     }
+
+    fn is_empty(&self) -> bool {
+        true
+    }
+
+    fn mark_immutable(&self) {}
 }
 
 /// Default memtable builder.

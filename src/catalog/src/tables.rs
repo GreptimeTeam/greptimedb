@@ -16,16 +16,9 @@
 
 use std::sync::Arc;
 
-use common_telemetry::logging;
-use snafu::ResultExt;
 use table::metadata::TableId;
-use table::Table;
 
-use crate::error::{self, InsertCatalogRecordSnafu, Result as CatalogResult};
-use crate::system::{
-    build_schema_insert_request, build_table_deletion_request, build_table_insert_request,
-    SystemCatalogTable,
-};
+use crate::system::SystemCatalogTable;
 use crate::DeregisterTableRequest;
 
 pub struct InformationSchema {
@@ -54,36 +47,21 @@ impl SystemCatalog {
         table_id: TableId,
         engine: String,
     ) -> crate::error::Result<usize> {
-        let request = build_table_insert_request(catalog, schema, table_name, table_id, engine);
         self.information_schema
             .system
-            .insert(request)
+            .register_table(catalog, schema, table_name, table_id, engine)
             .await
-            .context(InsertCatalogRecordSnafu)
     }
 
     pub(crate) async fn deregister_table(
         &self,
         request: &DeregisterTableRequest,
         table_id: TableId,
-    ) -> CatalogResult<()> {
+    ) -> crate::error::Result<()> {
         self.information_schema
             .system
-            .insert(build_table_deletion_request(request, table_id))
+            .deregister_table(request, table_id)
             .await
-            .map(|x| {
-                if x != 1 {
-                    let table = common_catalog::format_full_table_name(
-                        &request.catalog,
-                        &request.schema,
-                        &request.table_name
-                    );
-                    logging::warn!("Failed to delete table record from information_schema, unexpected returned result: {x}, table: {table}");
-                }
-            })
-            .with_context(|_| error::DeregisterTableSnafu {
-                request: request.clone(),
-            })
     }
 
     pub async fn register_schema(
@@ -91,11 +69,9 @@ impl SystemCatalog {
         catalog: String,
         schema: String,
     ) -> crate::error::Result<usize> {
-        let request = build_schema_insert_request(catalog, schema);
         self.information_schema
             .system
-            .insert(request)
+            .register_schema(catalog, schema)
             .await
-            .context(InsertCatalogRecordSnafu)
     }
 }

@@ -15,6 +15,8 @@
 use std::sync::Arc;
 
 use common_meta::key::TableMetadataManager;
+use common_meta::peer::Peer;
+use common_meta::rpc::router::{Region, RegionRoute};
 use common_procedure::local::{LocalManager, ManagerConfig};
 
 use crate::cluster::MetaPeerClientBuilder;
@@ -27,6 +29,21 @@ use crate::selector::lease_based::LeaseBasedSelector;
 use crate::sequence::Sequence;
 use crate::service::store::kv::KvBackendAdapter;
 use crate::service::store::memory::MemStore;
+
+pub(crate) fn new_region_route(region_id: u64, peers: &[Peer], leader_node: u64) -> RegionRoute {
+    let region = Region {
+        id: region_id.into(),
+        ..Default::default()
+    };
+
+    let leader_peer = peers.iter().find(|peer| peer.id == leader_node).cloned();
+
+    RegionRoute {
+        region,
+        leader_peer,
+        follower_peers: vec![],
+    }
+}
 
 pub(crate) fn create_region_failover_manager() -> Arc<RegionFailoverManager> {
     let kv_store = Arc::new(MemStore::new());

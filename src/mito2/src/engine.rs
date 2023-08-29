@@ -33,8 +33,9 @@ use store_api::storage::{RegionId, ScanRequest};
 
 use crate::config::MitoConfig;
 use crate::error::{RecvSnafu, RegionNotFoundSnafu, Result};
+use crate::flush::WriteBufferManagerImpl;
 use crate::read::scan_region::{ScanRegion, Scanner};
-use crate::request::{RegionTask, RequestBody};
+use crate::request::WorkerRequest;
 use crate::worker::WorkerGroup;
 
 /// Region engine implementation for timeseries data.
@@ -83,6 +84,11 @@ impl MitoEngine {
     fn handle_query(&self, region_id: RegionId, request: ScanRequest) -> Result<Scanner> {
         self.inner.handle_query(region_id, request)
     }
+
+    #[cfg(test)]
+    pub(crate) fn get_region(&self, id: RegionId) -> Option<crate::region::MitoRegionRef> {
+        self.inner.workers.get_region(id)
+    }
 }
 
 /// Inner struct of [MitoEngine].
@@ -100,8 +106,15 @@ impl EngineInner {
         log_store: Arc<S>,
         object_store: ObjectStore,
     ) -> EngineInner {
+        let write_buffer_manager = Arc::new(WriteBufferManagerImpl {});
+
         EngineInner {
-            workers: WorkerGroup::start(config, log_store, object_store.clone()),
+            workers: WorkerGroup::start(
+                config,
+                log_store,
+                object_store.clone(),
+                write_buffer_manager,
+            ),
             object_store,
         }
     }
@@ -111,6 +124,9 @@ impl EngineInner {
         self.workers.stop().await
     }
 
+    /// Get metadata of a region.
+    ///
+    /// Returns error if the region doesn't exist.
     fn get_metadata(&self, region_id: RegionId) -> Result<RegionMetadataRef> {
         // Reading a region doesn't need to go through the region worker thread.
         let region = self
@@ -120,12 +136,10 @@ impl EngineInner {
         Ok(region.metadata())
     }
 
-    /// Handles [RequestBody] and return its executed result.
+    /// Handles [RegionRequest] and return its executed result.
     async fn handle_request(&self, region_id: RegionId, request: RegionRequest) -> Result<Output> {
-        // We validate and then convert the `request` into an inner `RequestBody` for ease of handling.
-        let body = RequestBody::try_from_region_request(region_id, request)?;
-        let (request, receiver) = RegionTask::from_request(region_id, body);
-        self.workers.submit_to_worker(request).await?;
+        let (request, receiver) = WorkerRequest::try_from_region_request(region_id, request)?;
+        self.workers.submit_to_worker(region_id, request).await?;
 
         receiver.await.context(RecvSnafu)?
     }

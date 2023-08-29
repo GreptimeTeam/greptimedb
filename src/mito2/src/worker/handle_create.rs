@@ -19,6 +19,7 @@ use std::sync::Arc;
 use common_query::Output;
 use common_telemetry::info;
 use snafu::{ensure, ResultExt};
+use store_api::logstore::LogStore;
 use store_api::metadata::RegionMetadataBuilder;
 use store_api::region_request::RegionCreateRequest;
 use store_api::storage::RegionId;
@@ -27,7 +28,7 @@ use crate::error::{InvalidMetadataSnafu, RegionExistsSnafu, Result};
 use crate::region::opener::RegionOpener;
 use crate::worker::RegionWorkerLoop;
 
-impl<S> RegionWorkerLoop<S> {
+impl<S: LogStore> RegionWorkerLoop<S> {
     pub(crate) async fn handle_create_request(
         &mut self,
         region_id: RegionId,

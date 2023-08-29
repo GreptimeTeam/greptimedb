@@ -25,6 +25,8 @@ pub mod config;
 pub mod engine;
 pub mod error;
 #[allow(dead_code)]
+mod flush;
+#[allow(dead_code)]
 #[allow(unused_variables)]
 pub mod manifest;
 #[allow(dead_code)]
@@ -33,6 +35,7 @@ pub mod memtable;
 pub mod read;
 #[allow(dead_code)]
 mod region;
+mod region_write_ctx;
 #[allow(dead_code)]
 pub mod request;
 #[allow(dead_code)]

@@ -37,7 +37,6 @@ use greptime_proto::v1;
 use greptime_proto::v1::ddl_request::Expr;
 use greptime_proto::v1::greptime_request::Request;
 use greptime_proto::v1::query_request::Query;
-use greptime_proto::v1::region::region_request;
 use greptime_proto::v1::value::ValueData;
 use greptime_proto::v1::{DdlRequest, IntervalMonthDayNano, QueryRequest, SemanticType};
 use snafu::prelude::*;
@@ -330,21 +329,6 @@ fn query_request_type(request: &QueryRequest) -> &'static str {
         Some(Query::LogicalPlan(_)) => "query.logical_plan",
         Some(Query::PromRangeQuery(_)) => "query.prom_range",
         None => "query.empty",
-    }
-}
-
-/// Returns the type name of the [RegionRequest].
-pub fn region_request_type(request: &region_request::Body) -> &'static str {
-    match request {
-        region_request::Body::Inserts(_) => "region.inserts",
-        region_request::Body::Deletes(_) => "region.deletes",
-        region_request::Body::Create(_) => "region.create",
-        region_request::Body::Drop(_) => "region.drop",
-        region_request::Body::Open(_) => "region.open",
-        region_request::Body::Close(_) => "region.close",
-        region_request::Body::Alter(_) => "region.alter",
-        region_request::Body::Flush(_) => "region.flush",
-        region_request::Body::Compact(_) => "region.compact",
     }
 }
 

@@ -83,7 +83,7 @@ sha1 = "0.10"
 snafu.workspace = true
 snap = "1"
 sql = { workspace = true }
-strum = { version = "0.24", features = ["derive"] }
+strum.workspace = true
 table = { workspace = true }
 tokio-rustls = "0.24"
 tokio-stream = { version = "0.1", features = ["net"] }

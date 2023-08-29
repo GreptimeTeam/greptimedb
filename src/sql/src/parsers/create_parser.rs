@@ -14,6 +14,7 @@
 
 use std::cmp::Ordering;
 
+use common_catalog::consts::default_engine;
 use itertools::Itertools;
 use once_cell::sync::Lazy;
 use snafu::{ensure, OptionExt, ResultExt};
@@ -143,7 +144,7 @@ impl<'a> ParserContext<'a> {
 
         let partitions = self.parse_partitions()?;
 
-        let engine = self.parse_table_engine(common_catalog::consts::MITO_ENGINE)?;
+        let engine = self.parse_table_engine(default_engine())?;
         let options = self
             .parser
             .parse_options(Keyword::WITH)

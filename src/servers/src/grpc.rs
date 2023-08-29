@@ -89,9 +89,8 @@ impl GrpcServer {
         let database_handler = query_handler.map(|handler| {
             GreptimeRequestHandler::new(handler, user_provider.clone(), runtime.clone())
         });
-        let region_server_handler = region_server_handler.map(|handler| {
-            RegionServerRequestHandler::new(handler, user_provider.clone(), runtime.clone())
-        });
+        let region_server_handler = region_server_handler
+            .map(|handler| RegionServerRequestHandler::new(handler, runtime.clone()));
         Self {
             shutdown_tx: Mutex::new(None),
             user_provider,

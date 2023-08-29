@@ -72,7 +72,7 @@ impl UpdateRegionMetadata {
         let mut new_region_routes = table_route_value.region_routes.clone();
 
         for region_route in new_region_routes.iter_mut() {
-            if region_route.region.id == failed_region.region_number as u64 {
+            if region_route.region.id.region_number() == failed_region.region_number {
                 region_route.leader_peer = Some(self.candidate.clone());
                 break;
             }
@@ -158,7 +158,7 @@ mod tests {
 
     use super::super::tests::{TestingEnv, TestingEnvBuilder};
     use super::{State, *};
-    use crate::table_routes::tests::new_region_route;
+    use crate::test_util::new_region_route;
 
     #[tokio::test]
     async fn test_next_state() {

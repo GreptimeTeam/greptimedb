@@ -72,7 +72,7 @@ pub(crate) async fn fetch_tables(
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use std::collections::{BTreeMap, HashMap};
+    use std::collections::HashMap;
 
     use chrono::DateTime;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO_ENGINE};
@@ -140,26 +140,5 @@ pub(crate) mod tests {
             .create_table_metadata(table_info, region_routes)
             .await
             .unwrap();
-    }
-
-    pub(crate) fn new_region_route(
-        region_number: u64,
-        peers: &[Peer],
-        leader_node: u64,
-    ) -> RegionRoute {
-        let region = Region {
-            id: region_number.into(),
-            name: "".to_string(),
-            partition: None,
-            attrs: BTreeMap::new(),
-        };
-
-        let leader_peer = peers.iter().find(|peer| peer.id == leader_node).cloned();
-
-        RegionRoute {
-            region,
-            leader_peer,
-            follower_peers: vec![],
-        }
     }
 }

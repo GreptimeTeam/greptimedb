@@ -11,7 +11,7 @@ Affected Rows: 0
 describe table host_load1;
 
 +-----------+----------------------+-----+------+---------+---------------+
-| Field     | Type                 | Key | Null | Default | Semantic Type |
+| Column    | Type                 | Key | Null | Default | Semantic Type |
 +-----------+----------------------+-----+------+---------+---------------+
 | ts        | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
 | collector | String               | PRI | YES  |         | TAG           |
@@ -22,7 +22,7 @@ describe table host_load1;
 describe host_load1;
 
 +-----------+----------------------+-----+------+---------+---------------+
-| Field     | Type                 | Key | Null | Default | Semantic Type |
+| Column    | Type                 | Key | Null | Default | Semantic Type |
 +-----------+----------------------+-----+------+---------+---------------+
 | ts        | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
 | collector | String               | PRI | YES  |         | TAG           |
@@ -33,7 +33,7 @@ describe host_load1;
 desc table host_load1;
 
 +-----------+----------------------+-----+------+---------+---------------+
-| Field     | Type                 | Key | Null | Default | Semantic Type |
+| Column    | Type                 | Key | Null | Default | Semantic Type |
 +-----------+----------------------+-----+------+---------+---------------+
 | ts        | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
 | collector | String               | PRI | YES  |         | TAG           |
@@ -44,7 +44,7 @@ desc table host_load1;
 desc host_load1;
 
 +-----------+----------------------+-----+------+---------+---------------+
-| Field     | Type                 | Key | Null | Default | Semantic Type |
+| Column    | Type                 | Key | Null | Default | Semantic Type |
 +-----------+----------------------+-----+------+---------+---------------+
 | ts        | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
 | collector | String               | PRI | YES  |         | TAG           |

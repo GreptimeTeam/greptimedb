@@ -136,7 +136,7 @@ impl LocalCatalogManager {
             schema: INFORMATION_SCHEMA_NAME.to_string(),
             table_name: SYSTEM_CATALOG_TABLE_NAME.to_string(),
             table_id: SYSTEM_CATALOG_TABLE_ID,
-            table: self.system.information_schema.system.clone(),
+            table: self.system.information_schema.system.as_table_ref(),
         };
         self.catalogs.register_table(register_table_req).await?;
 
