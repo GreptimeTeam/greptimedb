@@ -31,10 +31,10 @@ use crate::error::{
     AddEntryLogBatchSnafu, Error, FetchEntrySnafu, IllegalNamespaceSnafu, IllegalStateSnafu,
     OverrideCompactedEntrySnafu, RaftEngineSnafu, Result, StartGcTaskSnafu, StopGcTaskSnafu,
 };
+use crate::raft_engine::backend::SYSTEM_NAMESPACE;
 use crate::raft_engine::protos::logstore::{EntryImpl, NamespaceImpl as Namespace};
 
 const NAMESPACE_PREFIX: &str = "$sys/";
-const SYSTEM_NAMESPACE: u64 = 0;
 
 pub struct RaftEngineLogStore {
     config: LogConfig,
