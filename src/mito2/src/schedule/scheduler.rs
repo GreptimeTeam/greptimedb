@@ -36,7 +36,7 @@ const STATE_AWAIT_TERMINATION: u8 = 2;
 
 /// [Scheduler] defines a set of API to schedule Jobs
 #[async_trait::async_trait]
-pub trait Scheduler {
+pub trait Scheduler: Send + Sync {
     /// Schedules a Job
     fn schedule(&self, job: Job) -> Result<()>;
 
@@ -44,7 +44,7 @@ pub trait Scheduler {
     async fn stop(&self, await_termination: bool) -> Result<()>;
 }
 
-type SchedulerRef = Arc<dyn Scheduler + Send>;
+pub type SchedulerRef = Arc<dyn Scheduler>;
 
 /// Request scheduler based on local state.
 pub struct LocalScheduler {
