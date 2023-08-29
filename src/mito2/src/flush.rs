@@ -17,12 +17,14 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
+use object_store::ObjectStore;
 use store_api::storage::RegionId;
-use tokio::sync::oneshot::Sender;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::error::Result;
+use crate::memtable::MemtableBuilderRef;
 use crate::region::MitoRegionRef;
-use crate::request::{SenderDdlRequest, SenderWriteRequest};
+use crate::request::{SenderDdlRequest, SenderWriteRequest, WorkerRequest};
 use crate::schedule::scheduler::SchedulerRef;
 
 /// Global write buffer (memtable) manager.
@@ -88,7 +90,12 @@ pub(crate) struct RegionFlushTask {
     /// Reason to flush.
     pub(crate) reason: FlushReason,
     /// Flush result sender.
-    pub(crate) sender: Option<Sender<Result<()>>>,
+    pub(crate) sender: Option<oneshot::Sender<Result<()>>>,
+    /// Request sender to notify the worker.
+    pub(crate) request_sender: mpsc::Sender<WorkerRequest>,
+
+    pub(crate) object_store: ObjectStore,
+    pub(crate) memtable_builder: MemtableBuilderRef,
 }
 
 impl RegionFlushTask {
@@ -174,7 +181,9 @@ impl FlushScheduler {
             return Ok(());
         }
 
-        // Now we can submit this task directly.
+        // Now we can flush the region, try to freeze the mutable memtable.
+        region.version_control.maybe_freeze_mutable(&task.memtable_builder);
+        // Flush the immutable memtable.
 
         self.has_flush_running = true;
 

@@ -66,16 +66,13 @@ impl VersionControl {
         data.last_entry_id = entry_id;
     }
 
-    /// Freezes the mutable memtable and returns the id of the frozen memtable.
-    ///
-    /// If the mutable memtable is empty or there is already an immutable memtable, returns `None`.
-    pub(crate) fn freeze_mutable(&self, builder: &MemtableBuilderRef) -> Option<MemtableId> {
+    /// Freezes the mutable memtable if there is no immutable memtable.
+    pub(crate) fn maybe_freeze_mutable(&self, builder: &MemtableBuilderRef) {
         let version = self.current().version;
         if version.memtables.mutable.is_empty() || version.memtables.immutable.is_some() {
-            return None;
+            return;
         }
         let new_mutable = builder.build(&version.metadata);
-        let mutable_id = version.memtables.mutable.id();
         // Safety: Immutable memtable is None.
         let new_memtables = version.memtables.freeze_mutable(new_mutable).unwrap();
         // Create a new version with memtable switched.
@@ -87,7 +84,6 @@ impl VersionControl {
 
         let mut version_data = self.data.write().unwrap();
         version_data.version = new_version;
-        Some(mutable_id)
     }
 }
 

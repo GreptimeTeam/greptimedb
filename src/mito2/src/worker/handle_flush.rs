@@ -99,10 +99,6 @@ impl<S> RegionWorkerLoop<S> {
 
             let version = region.version();
             let region_mutable_size = version.memtables.mutable_bytes_usage();
-            if region_mutable_size == 0 {
-                // Memtable is empty.
-                continue;
-            }
             // Tracks region with max mutable memtable size.
             if region_mutable_size > max_mutable_size {
                 max_mem_region = Some(region);
@@ -111,11 +107,7 @@ impl<S> RegionWorkerLoop<S> {
 
             if region.last_flush_millis() < min_last_flush_time {
                 // If flush time of this region is earlier than `min_last_flush_time`, we can flush this region.
-                let task = RegionFlushTask {
-                    region_id: region.region_id,
-                    reason: FlushReason::EngineFull,
-                    sender: None,
-                };
+                let task = self.new_flush_task(region.region_id, FlushReason::EngineFull);
                 self.flush_scheduler.schedule_flush(region, task)?;
             }
         }
@@ -123,11 +115,7 @@ impl<S> RegionWorkerLoop<S> {
         // Flush memtable with max mutable memtable.
         if let Some(region) = max_mem_region {
             if !self.flush_scheduler.is_flush_requested(region.region_id) {
-                let task = RegionFlushTask {
-                    region_id: region.region_id,
-                    reason: FlushReason::EngineFull,
-                    sender: None,
-                };
+                let task = self.new_flush_task(region.region_id, FlushReason::EngineFull);
                 self.flush_scheduler.schedule_flush(region, task)?;
             }
         }
@@ -135,8 +123,14 @@ impl<S> RegionWorkerLoop<S> {
         Ok(())
     }
 
-    /// Flush a region with specific `reason`.
-    fn trigger_region_flush(&self, region: &MitoRegionRef, reason: FlushReason) -> Result<()> {
-        unimplemented!()
+    fn new_flush_task(&self, region_id: RegionId, reason: FlushReason) -> RegionFlushTask {
+        RegionFlushTask {
+            region_id,
+            reason,
+            sender: None,
+            request_sender: self.sender.clone(),
+            object_store: self.object_store.clone(),
+            memtable_builder: self.memtable_builder.clone(),
+        }
     }
 }

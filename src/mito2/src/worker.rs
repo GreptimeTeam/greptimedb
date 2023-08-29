@@ -189,6 +189,7 @@ impl<S: LogStore> WorkerStarter<S> {
             id: self.id,
             config: self.config,
             regions: regions.clone(),
+            sender: sender.clone(),
             receiver,
             wal: Wal::new(self.log_store),
             object_store: self.object_store,
@@ -301,6 +302,8 @@ struct RegionWorkerLoop<S> {
     config: Arc<MitoConfig>,
     /// Regions bound to the worker.
     regions: RegionMapRef,
+    /// Request sender.
+    sender: Sender<WorkerRequest>,
     /// Request receiver.
     receiver: Receiver<WorkerRequest>,
     /// WAL of the engine.
