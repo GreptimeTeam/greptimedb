@@ -97,26 +97,7 @@ impl CatalogManager for MemoryCatalogManager {
     }
 
     async fn deregister_table(&self, request: DeregisterTableRequest) -> Result<()> {
-        let mut catalogs = self.catalogs.write().unwrap();
-        let schema = catalogs
-            .get_mut(&request.catalog)
-            .with_context(|| CatalogNotFoundSnafu {
-                catalog_name: &request.catalog,
-            })?
-            .get_mut(&request.schema)
-            .with_context(|| SchemaNotFoundSnafu {
-                catalog: &request.catalog,
-                schema: &request.schema,
-            })?;
-        let result = schema.remove(&request.table_name);
-        if result.is_some() {
-            decrement_gauge!(
-                crate::metrics::METRIC_CATALOG_MANAGER_TABLE_COUNT,
-                1.0,
-                &[crate::metrics::db_label(&request.catalog, &request.schema)],
-            );
-        }
-        Ok(())
+        self.deregister_table_sync(request)
     }
 
     async fn register_schema(&self, request: RegisterSchemaRequest) -> Result<bool> {
@@ -282,6 +263,29 @@ impl MemoryCatalogManager {
         }
     }
 
+    pub fn deregister_table_sync(&self, request: DeregisterTableRequest) -> Result<()> {
+        let mut catalogs = self.catalogs.write().unwrap();
+        let schema = catalogs
+            .get_mut(&request.catalog)
+            .with_context(|| CatalogNotFoundSnafu {
+                catalog_name: &request.catalog,
+            })?
+            .get_mut(&request.schema)
+            .with_context(|| SchemaNotFoundSnafu {
+                catalog: &request.catalog,
+                schema: &request.schema,
+            })?;
+        let result = schema.remove(&request.table_name);
+        if result.is_some() {
+            decrement_gauge!(
+                crate::metrics::METRIC_CATALOG_MANAGER_TABLE_COUNT,
+                1.0,
+                &[crate::metrics::db_label(&request.catalog, &request.schema)],
+            );
+        }
+        Ok(())
+    }
+
     /// Registers a schema if it does not exist.
     /// It returns an error if the catalog does not exist,
     /// and returns false if the schema exists.
@@ -354,6 +358,34 @@ impl MemoryCatalogManager {
         };
         let _ = manager.register_table_sync(request).unwrap();
         manager
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    pub async fn try_new_with_table(table: TableRef) -> Result<Arc<Self>> {
+        let manager = Self::with_default_setup();
+        let catalog = &table.table_info().catalog_name;
+        let schema = &table.table_info().schema_name;
+
+        if !manager.catalog_exist(catalog).await? {
+            manager.register_catalog_sync(catalog.to_string())?;
+        }
+
+        if !manager.schema_exist(catalog, schema).await? {
+            manager.register_schema_sync(RegisterSchemaRequest {
+                catalog: catalog.to_string(),
+                schema: schema.to_string(),
+            })?;
+        }
+
+        let request = RegisterTableRequest {
+            catalog: catalog.to_string(),
+            schema: schema.to_string(),
+            table_name: table.table_info().name.clone(),
+            table_id: table.table_info().ident.table_id,
+            table,
+        };
+        let _ = manager.register_table_sync(request).unwrap();
+        Ok(manager)
     }
 }
 
