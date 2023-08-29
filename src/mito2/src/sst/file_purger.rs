@@ -93,7 +93,7 @@ mod tests {
 
         let dir = create_temp_dir("file-purge");
         let mut builder = Fs::default();
-        let _ = builder.root(dir.path().to_str().unwrap());
+        builder.root(dir.path().to_str().unwrap());
         let object_store = ObjectStore::new(builder).unwrap().finish();
         let sst_file_id = FileId::random();
         let sst_dir = "table1";
