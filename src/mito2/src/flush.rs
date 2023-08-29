@@ -23,8 +23,7 @@ use tokio::sync::oneshot::Sender;
 use crate::error::Result;
 use crate::region::MitoRegionRef;
 use crate::request::{SenderDdlRequest, SenderWriteRequest};
-
-const FLUSH_JOB_LIMIT: usize = 4;
+use crate::schedule::scheduler::SchedulerRef;
 
 /// Global write buffer (memtable) manager.
 ///
@@ -121,25 +120,26 @@ impl RegionFlushTask {
 pub(crate) struct FlushScheduler {
     /// Pending flush tasks.
     queue: VecDeque<RegionFlushTask>,
+    /// Tracks regions need to flush.
     region_status: HashMap<RegionId, FlushStatus>,
-    /// Number of running flush jobs.
-    num_flush_running: usize,
-    /// Max number of background flush jobs.
-    job_limit: usize,
-}
-
-impl Default for FlushScheduler {
-    fn default() -> Self {
-        FlushScheduler {
-            queue: VecDeque::new(),
-            region_status: HashMap::new(),
-            num_flush_running: 0,
-            job_limit: FLUSH_JOB_LIMIT,
-        }
-    }
+    // TODO(yingwen): Support global flush concurrency control. We can implement a global permits for this.
+    /// Has running flush job.
+    has_flush_running: bool,
+    /// Background job scheduler.
+    scheduler: SchedulerRef,
 }
 
 impl FlushScheduler {
+    /// Creates a new flush scheduler.
+    pub(crate) fn new(scheduler: SchedulerRef) -> FlushScheduler {
+        FlushScheduler {
+            queue: VecDeque::new(),
+            region_status: HashMap::new(),
+            has_flush_running: false,
+            scheduler,
+        }
+    }
+
     /// Returns true if the region is stalling.
     pub(crate) fn is_stalling(&self, region_id: RegionId) -> bool {
         if let Some(status) = self.region_status.get(&region_id) {
@@ -175,15 +175,15 @@ impl FlushScheduler {
         }
 
         // Checks flush job limit.
-        debug_assert!(self.num_flush_running <= self.job_limit);
-        if !self.queue.is_empty() || self.num_flush_running >= self.job_limit {
-            debug_assert!(self.num_flush_running == self.job_limit);
+        if !self.queue.is_empty() || self.has_flush_running {
+            debug_assert!(self.has_flush_running);
             // We reach job limit.
             self.queue.push_back(task);
             return;
         }
 
         // TODO(yingwen): Submit the flush job to job scheduler.
+        self.has_flush_running = true;
 
         todo!()
     }

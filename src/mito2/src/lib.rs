@@ -43,7 +43,7 @@ pub mod request;
 #[allow(dead_code)]
 mod row_converter;
 #[allow(dead_code)]
-mod schedule;
+pub(crate) mod schedule;
 #[allow(dead_code)]
 pub mod sst;
 pub mod wal;

@@ -20,6 +20,8 @@ use common_telemetry::warn;
 
 /// Default region worker num.
 const DEFAULT_NUM_WORKERS: usize = 1;
+/// Default max running background job.
+const DEFAULT_MAX_BG_JOB: usize = 4;
 /// Default region write buffer size.
 pub(crate) const DEFAULT_WRITE_BUFFER_SIZE: ReadableSize = ReadableSize::mb(32);
 
@@ -40,6 +42,10 @@ pub struct MitoConfig {
     pub manifest_checkpoint_distance: u64,
     /// Manifest compression type (default uncompressed).
     pub manifest_compress_type: CompressionType,
+
+    // Background job configs:
+    /// Max number of running background jobs.
+    pub max_background_jobs: usize,
 }
 
 impl Default for MitoConfig {
@@ -50,6 +56,7 @@ impl Default for MitoConfig {
             worker_request_batch_size: 64,
             manifest_checkpoint_distance: 10,
             manifest_compress_type: CompressionType::Uncompressed,
+            max_background_jobs: DEFAULT_MAX_BG_JOB,
         }
     }
 }
@@ -74,6 +81,11 @@ impl MitoConfig {
         if self.worker_channel_size == 0 {
             warn!("Sanitize channel size 0 to 1");
             self.worker_channel_size = 1;
+        }
+
+        if self.max_background_jobs == 0 {
+            warn!("Sanitize max background jobs 0 to {}", DEFAULT_MAX_BG_JOB);
+            self.max_background_jobs = DEFAULT_MAX_BG_JOB;
         }
     }
 }
