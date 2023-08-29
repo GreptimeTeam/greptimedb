@@ -91,6 +91,10 @@ impl RegionServer {
     pub fn opened_region_ids(&self) -> Vec<RegionId> {
         self.inner.region_map.iter().map(|e| *e.key()).collect()
     }
+
+    pub fn runtime(&self) -> Arc<Runtime> {
+        self.inner.runtime.clone()
+    }
 }
 
 #[async_trait]

@@ -60,6 +60,7 @@ impl Drop for HeartbeatTask {
 
 impl HeartbeatTask {
     /// Create a new heartbeat task instance.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         node_id: u64,
         opts: &DatanodeOptions,

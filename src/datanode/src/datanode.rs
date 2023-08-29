@@ -17,13 +17,16 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use catalog::local::MemoryCatalogManager;
 use common_base::readable_size::ReadableSize;
 use common_base::Plugins;
 use common_error::ext::BoxedError;
 pub use common_procedure::options::ProcedureConfig;
+use common_runtime::Runtime;
 use common_telemetry::info;
 use common_telemetry::logging::LoggingOptions;
 use meta_client::MetaClientOptions;
+use query::QueryEngineFactory;
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use servers::heartbeat_options::HeartbeatOptions;
@@ -36,9 +39,9 @@ use storage::config::{
 };
 use storage::scheduler::SchedulerConfig;
 
-use crate::error::{Result, ShutdownInstanceSnafu};
+use crate::error::{Result, RuntimeResourceSnafu, ShutdownInstanceSnafu};
 use crate::heartbeat::HeartbeatTask;
-use crate::instance::{Instance, InstanceRef};
+use crate::region_server::RegionServer;
 use crate::server::Services;
 
 pub const DEFAULT_OBJECT_STORE_CACHE_SIZE: ReadableSize = ReadableSize(1024);
@@ -407,38 +410,50 @@ impl DatanodeOptions {
 pub struct Datanode {
     opts: DatanodeOptions,
     services: Option<Services>,
-    instance: InstanceRef,
     heartbeat_task: Option<HeartbeatTask>,
 }
 
 impl Datanode {
     pub async fn new(opts: DatanodeOptions, plugins: Arc<Plugins>) -> Result<Datanode> {
-        let (instance, heartbeat_task) = Instance::with_opts(&opts, plugins).await?;
+        let query_engine_factory = QueryEngineFactory::new_with_plugins(
+            // query engine in datanode only executes plan with resolved table source.
+            MemoryCatalogManager::with_default_setup(),
+            false,
+            None,
+            None,
+            plugins,
+        );
+        let query_engine = query_engine_factory.query_engine();
+
+        let runtime = Arc::new(
+            Runtime::builder()
+                .worker_threads(opts.rpc_runtime_size)
+                .thread_name("io-handlers")
+                .build()
+                .context(RuntimeResourceSnafu)?,
+        );
+
+        let region_server = RegionServer::new(query_engine, runtime);
+
         let services = match opts.mode {
-            Mode::Distributed => Some(Services::try_new(instance.clone(), &opts).await?),
+            Mode::Distributed => Some(Services::try_new(region_server, &opts).await?),
             Mode::Standalone => None,
         };
         Ok(Self {
             opts,
             services,
-            instance,
-            heartbeat_task,
+            // TODO: construct heartbeat task from region server with
+            // correct meta client and alive keeper
+            heartbeat_task: None,
         })
     }
 
     pub async fn start(&mut self) -> Result<()> {
         info!("Starting datanode instance...");
-        self.start_instance().await?;
-        self.start_services().await
-    }
-
-    /// Start only the internal component of datanode.
-    pub async fn start_instance(&mut self) -> Result<()> {
-        let _ = self.instance.start().await;
         if let Some(task) = &self.heartbeat_task {
             task.start().await?;
         }
-        Ok(())
+        self.start_services().await
     }
 
     /// Start services of datanode. This method call will block until services are shutdown.
@@ -448,22 +463,6 @@ impl Datanode {
         } else {
             Ok(())
         }
-    }
-
-    pub fn get_instance(&self) -> InstanceRef {
-        self.instance.clone()
-    }
-
-    pub async fn shutdown_instance(&self) -> Result<()> {
-        if let Some(heartbeat_task) = &self.heartbeat_task {
-            heartbeat_task
-                .close()
-                .await
-                .map_err(BoxedError::new)
-                .context(ShutdownInstanceSnafu)?;
-        }
-        let _ = self.instance.shutdown().await;
-        Ok(())
     }
 
     async fn shutdown_services(&self) -> Result<()> {
@@ -477,7 +476,14 @@ impl Datanode {
     pub async fn shutdown(&self) -> Result<()> {
         // We must shutdown services first
         self.shutdown_services().await?;
-        self.shutdown_instance().await
+        if let Some(heartbeat_task) = &self.heartbeat_task {
+            heartbeat_task
+                .close()
+                .await
+                .map_err(BoxedError::new)
+                .context(ShutdownInstanceSnafu)?;
+        }
+        Ok(())
     }
 }
 

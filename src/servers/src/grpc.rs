@@ -79,15 +79,16 @@ pub struct GrpcServer {
 
 impl GrpcServer {
     pub fn new(
-        query_handler: ServerGrpcQueryHandlerRef,
+        query_handler: Option<ServerGrpcQueryHandlerRef>,
         prometheus_handler: Option<PrometheusHandlerRef>,
         flight_handler: Option<FlightCraftRef>,
         region_server_handler: Option<RegionServerHandlerRef>,
         user_provider: Option<UserProviderRef>,
         runtime: Arc<Runtime>,
     ) -> Self {
-        let database_handler =
-            GreptimeRequestHandler::new(query_handler, user_provider.clone(), runtime.clone());
+        let database_handler = query_handler.map(|handler| {
+            GreptimeRequestHandler::new(handler, user_provider.clone(), runtime.clone())
+        });
         let region_server_handler = region_server_handler.map(|handler| {
             RegionServerRequestHandler::new(handler, user_provider.clone(), runtime.clone())
         });
@@ -95,7 +96,7 @@ impl GrpcServer {
             shutdown_tx: Mutex::new(None),
             user_provider,
             serve_state: Mutex::new(None),
-            database_handler: Some(database_handler),
+            database_handler,
             prometheus_handler,
             flight_handler,
             region_server_handler,

@@ -111,11 +111,10 @@ impl RegionHandler {
 #[async_trait]
 impl HeartbeatResponseHandler for RegionHandler {
     fn is_acceptable(&self, ctx: &HeartbeatResponseHandlerContext) -> bool {
-        match ctx.incoming_message.as_ref() {
-            Some((_, Instruction::OpenRegion { .. }))
-            | Some((_, Instruction::CloseRegion { .. })) => true,
-            _ => false,
-        }
+        matches!(
+            ctx.incoming_message.as_ref(),
+            Some((_, Instruction::OpenRegion { .. })) | Some((_, Instruction::CloseRegion { .. }))
+        )
     }
 
     async fn handle(&self, ctx: &mut HeartbeatResponseHandlerContext) -> MetaResult<HandleControl> {
