@@ -15,10 +15,13 @@
 //! Handling flush related requests.
 
 use common_query::Output;
+use common_telemetry::error;
+use common_time::util::current_time_millis;
 use store_api::region_request::RegionFlushRequest;
 use store_api::storage::RegionId;
 
 use crate::error::Result;
+use crate::flush::{FlushReason, RegionFlushTask};
 use crate::region::MitoRegionRef;
 use crate::request::{FlushFailed, FlushFinished};
 use crate::worker::RegionWorkerLoop;
@@ -61,23 +64,79 @@ impl<S> RegionWorkerLoop<S> {
 
     /// Checks whether the engine reaches flush threshold. If so, finds regions in this
     /// worker to flush.
-    pub(crate) fn maybe_flush_worker(&self) {
+    pub(crate) fn maybe_flush_worker(&mut self) {
         if !self.write_buffer_manager.should_flush_engine() {
             // No need to flush worker.
             return;
         }
+
         // If the engine needs flush, each worker will find some regions to flush. We might
         // flush more memory than expect but it should be acceptable.
-        self.find_regions_to_flush();
-    }
-
-    /// Find some regions to flush to reduce write buffer usage.
-    pub(crate) fn find_regions_to_flush(&self) {
-        unimplemented!()
+        if let Err(e) = self.flush_regions_on_engine_full() {
+            error!(e; "Failed to flush worker");
+        }
     }
 
     /// Flush a region if it meets flush requirements.
     pub(crate) fn flush_region_if_full(&mut self, _region: &MitoRegionRef) {
         // Now we does nothing.
+    }
+
+    /// Find some regions to flush to reduce write buffer usage.
+    fn flush_regions_on_engine_full(&mut self) -> Result<()> {
+        let regions = self.regions.list_regions();
+        let now = current_time_millis();
+        let min_last_flush_time = now - self.config.auto_flush_interval.as_millis() as i64;
+        let mut max_mutable_size = 0;
+        // Region with max mutable memtable size.
+        let mut max_mem_region = None;
+
+        for region in &regions {
+            if self.flush_scheduler.is_flush_requested(region.region_id) {
+                // Already flushing.
+                continue;
+            }
+
+            let version = region.version();
+            let region_mutable_size = version.memtables.mutable_bytes_usage();
+            if region_mutable_size == 0 {
+                // Memtable is empty.
+                continue;
+            }
+            // Tracks region with max mutable memtable size.
+            if region_mutable_size > max_mutable_size {
+                max_mem_region = Some(region);
+                max_mutable_size = region_mutable_size;
+            }
+
+            if region.last_flush_millis() < min_last_flush_time {
+                // If flush time of this region is earlier than `min_last_flush_time`, we can flush this region.
+                let task = RegionFlushTask {
+                    region_id: region.region_id,
+                    reason: FlushReason::EngineFull,
+                    sender: None,
+                };
+                self.flush_scheduler.schedule_flush(region, task)?;
+            }
+        }
+
+        // Flush memtable with max mutable memtable.
+        if let Some(region) = max_mem_region {
+            if !self.flush_scheduler.is_flush_requested(region.region_id) {
+                let task = RegionFlushTask {
+                    region_id: region.region_id,
+                    reason: FlushReason::EngineFull,
+                    sender: None,
+                };
+                self.flush_scheduler.schedule_flush(region, task)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Flush a region with specific `reason`.
+    fn trigger_region_flush(&self, region: &MitoRegionRef, reason: FlushReason) -> Result<()> {
+        unimplemented!()
     }
 }

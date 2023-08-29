@@ -68,4 +68,10 @@ impl MemtableVersion {
             immutable: Some(self.mutable.clone()),
         })
     }
+
+    /// Returns the memory usage of the mutable memtable.
+    pub(crate) fn mutable_bytes_usage(&self) -> usize {
+        // TODO(yingwen): Get memtable usage.
+        0
+    }
 }

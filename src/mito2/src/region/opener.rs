@@ -14,9 +14,11 @@
 
 //! Region opener.
 
+use std::sync::atomic::AtomicI64;
 use std::sync::Arc;
 
 use common_telemetry::info;
+use common_time::util::current_time_millis;
 use futures::StreamExt;
 use object_store::util::join_dir;
 use object_store::ObjectStore;
@@ -99,6 +101,7 @@ impl RegionOpener {
             version_control,
             region_dir: self.region_dir,
             manifest_manager,
+            last_flush_millis: AtomicI64::new(current_time_millis()),
         })
     }
 
@@ -146,6 +149,7 @@ impl RegionOpener {
             version_control,
             region_dir: self.region_dir,
             manifest_manager,
+            last_flush_millis: AtomicI64::new(current_time_millis()),
         };
         Ok(region)
     }

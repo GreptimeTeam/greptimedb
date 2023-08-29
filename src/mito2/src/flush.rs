@@ -126,15 +126,23 @@ impl FlushScheduler {
 
     /// Returns true if the region is stalling.
     pub(crate) fn is_stalling(&self, region_id: RegionId) -> bool {
-        if let Some(status) = self.region_status.get(&region_id) {
-            return status.stalling;
-        }
+        self.region_status
+            .get(&region_id)
+            .map(|status| status.stalling)
+            .unwrap_or(false)
+    }
 
-        false
+    /// Returns true if the region already requested flush.
+    pub(crate) fn is_flush_requested(&self, region_id: RegionId) -> bool {
+        self.region_status.contains_key(&region_id)
     }
 
     /// Schedules a flush `task` for specific `region`.
-    pub(crate) fn schedule_flush(&mut self, region: &MitoRegionRef, task: RegionFlushTask) {
+    pub(crate) fn schedule_flush(
+        &mut self,
+        region: &MitoRegionRef,
+        task: RegionFlushTask,
+    ) -> Result<()> {
         debug_assert_eq!(region.region_id, task.region_id);
 
         let version = region.version_control.current().version;
@@ -142,7 +150,7 @@ impl FlushScheduler {
             debug_assert!(!self.region_status.contains_key(&region.region_id));
             // The region has nothing to flush.
             task.on_success();
-            return;
+            return Ok(());
         }
 
         // Add this region to status map.
@@ -152,10 +160,10 @@ impl FlushScheduler {
             .or_insert_with(|| FlushStatus::new(region.clone()));
         // Checks whether we can flush the region now.
         if flush_status.flushing_task.is_some() {
-            // There is already a flush job running.
+            // There is already a flush job running, mark as stalling.
             flush_status.stalling = true;
             self.queue.push_back(task);
-            return;
+            return Ok(());
         }
 
         // Checks flush job limit.
@@ -163,10 +171,11 @@ impl FlushScheduler {
             debug_assert!(self.has_flush_running);
             // We reach job limit.
             self.queue.push_back(task);
-            return;
+            return Ok(());
         }
 
-        // TODO(yingwen): Submit the flush job to job scheduler.
+        // Now we can submit this task directly.
+
         self.has_flush_running = true;
 
         todo!()

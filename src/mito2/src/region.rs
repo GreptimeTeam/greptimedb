@@ -18,9 +18,11 @@ pub(crate) mod opener;
 pub(crate) mod version;
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use common_telemetry::info;
+use common_time::util::current_time_millis;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::RegionId;
 
@@ -50,6 +52,8 @@ pub(crate) struct MitoRegion {
     pub(crate) region_dir: String,
     /// Manager to maintain manifest for this region.
     manifest_manager: RegionManifestManager,
+    /// Last flush time in millis.
+    last_flush_millis: AtomicI64,
 }
 
 pub(crate) type MitoRegionRef = Arc<MitoRegion>;
@@ -74,6 +78,17 @@ impl MitoRegion {
     pub(crate) fn version(&self) -> VersionRef {
         let version_data = self.version_control.current();
         version_data.version
+    }
+
+    /// Returns last flush timestamp in millis.
+    pub(crate) fn last_flush_millis(&self) -> i64 {
+        self.last_flush_millis.load(Ordering::Relaxed)
+    }
+
+    /// Update flush time to current time.
+    pub(crate) fn update_flush_millis(&self) {
+        let now = current_time_millis();
+        self.last_flush_millis.store(now, Ordering::Relaxed);
     }
 }
 
