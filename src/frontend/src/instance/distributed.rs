@@ -340,6 +340,7 @@ impl DistInstance {
                 let expr = CreateDatabaseExpr {
                     database_name: stmt.name.to_string(),
                     create_if_not_exists: stmt.if_not_exists,
+                    options: Default::default(),
                 };
                 self.handle_create_database(expr, query_ctx).await
             }

@@ -40,7 +40,7 @@ datatypes = { workspace = true }
 file-table-engine = { workspace = true }
 futures = "0.3"
 futures-util.workspace = true
-humantime-serde = "1.1"
+humantime-serde.workspace = true
 hyper = { version = "0.14", features = ["full"] }
 key-lock = "0.1"
 log-store = { workspace = true }

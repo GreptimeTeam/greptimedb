@@ -43,7 +43,14 @@ impl<'a> Default for SchemaNameKey<'a> {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+// #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+// pub struct SchemaNameValue {
+//     #[serde(default)]
+//     #[serde(with = "humantime_serde")]
+//     pub ttl: Option<Duration>,
+// }
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SchemaNameValue;
 
 impl<'a> SchemaNameKey<'a> {
