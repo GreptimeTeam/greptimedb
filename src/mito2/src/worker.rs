@@ -16,6 +16,7 @@
 
 mod handle_close;
 mod handle_create;
+mod handle_flush;
 mod handle_open;
 mod handle_write;
 
@@ -24,7 +25,6 @@ use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use common_query::Output;
 use common_runtime::JoinHandle;
 use common_telemetry::{error, info, warn};
 use futures::future::try_join_all;
@@ -37,10 +37,11 @@ use tokio::sync::{mpsc, Mutex};
 
 use crate::config::MitoConfig;
 use crate::error::{JoinSnafu, Result, WorkerStoppedSnafu};
+use crate::flush::{FlushScheduler, WriteBufferManagerRef};
 use crate::memtable::time_series::TimeSeriesMemtableBuilder;
 use crate::memtable::MemtableBuilderRef;
 use crate::region::{MitoRegionRef, RegionMap, RegionMapRef};
-use crate::request::{RegionTask, RequestBody, SenderWriteRequest, WorkerRequest};
+use crate::request::{BackgroundNotify, DdlRequest, SenderDdlRequest, WorkerRequest};
 use crate::wal::Wal;
 
 /// Identifier for a worker.
@@ -96,6 +97,7 @@ impl WorkerGroup {
         config: MitoConfig,
         log_store: Arc<S>,
         object_store: ObjectStore,
+        write_buffer_manager: WriteBufferManagerRef,
     ) -> WorkerGroup {
         assert!(config.num_workers.is_power_of_two());
         let config = Arc::new(config);
@@ -107,6 +109,7 @@ impl WorkerGroup {
                     config.clone(),
                     log_store.clone(),
                     object_store.clone(),
+                    write_buffer_manager.clone(),
                 )
             })
             .collect();
@@ -124,8 +127,12 @@ impl WorkerGroup {
     }
 
     /// Submit a request to a worker in the group.
-    pub(crate) async fn submit_to_worker(&self, task: RegionTask) -> Result<()> {
-        self.worker(task.region_id).submit_request(task).await
+    pub(crate) async fn submit_to_worker(
+        &self,
+        region_id: RegionId,
+        request: WorkerRequest,
+    ) -> Result<()> {
+        self.worker(region_id).submit_request(request).await
     }
 
     /// Returns true if the specific region exists.
@@ -177,6 +184,7 @@ impl RegionWorker {
         config: Arc<MitoConfig>,
         log_store: Arc<S>,
         object_store: ObjectStore,
+        write_buffer_manager: WriteBufferManagerRef,
     ) -> RegionWorker {
         let regions = Arc::new(RegionMap::default());
         let (sender, receiver) = mpsc::channel(config.worker_channel_size);
@@ -191,6 +199,8 @@ impl RegionWorker {
             object_store,
             running: running.clone(),
             memtable_builder: Arc::new(TimeSeriesMemtableBuilder::default()),
+            write_buffer_manager,
+            flush_scheduler: FlushScheduler::default(),
         };
         let handle = common_runtime::spawn_write(async move {
             worker_thread.run().await;
@@ -206,14 +216,9 @@ impl RegionWorker {
     }
 
     /// Submit request to background worker thread.
-    async fn submit_request(&self, request: RegionTask) -> Result<()> {
+    async fn submit_request(&self, request: WorkerRequest) -> Result<()> {
         ensure!(self.is_running(), WorkerStoppedSnafu { id: self.id });
-        if self
-            .sender
-            .send(WorkerRequest::Region(request))
-            .await
-            .is_err()
-        {
+        if self.sender.send(request).await.is_err() {
             warn!(
                 "Worker {} is already exited but the running flag is still true",
                 self.id
@@ -295,6 +300,11 @@ struct RegionWorkerLoop<S> {
     running: Arc<AtomicBool>,
     /// Memtable builder for each region.
     memtable_builder: MemtableBuilderRef,
+
+    /// Engine write buffer manager.
+    write_buffer_manager: WriteBufferManagerRef,
+    /// Schedules background flush requests.
+    flush_scheduler: FlushScheduler,
 }
 
 impl<S: LogStore> RegionWorkerLoop<S> {
@@ -340,15 +350,15 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let mut ddl_requests = Vec::with_capacity(buffer.len());
         for worker_req in buffer.drain(..) {
             match worker_req {
-                WorkerRequest::Region(task) => {
-                    if let RequestBody::Write(write_request) = task.body {
-                        write_requests.push(SenderWriteRequest {
-                            sender: task.sender,
-                            request: write_request,
-                        });
-                    } else {
-                        ddl_requests.push(task);
-                    }
+                WorkerRequest::Write(sender_req) => {
+                    write_requests.push(sender_req);
+                }
+                WorkerRequest::Ddl(sender_req) => {
+                    ddl_requests.push(sender_req);
+                }
+                WorkerRequest::Background { region_id, notify } => {
+                    // For background notify, we handle it directly.
+                    self.handle_background_notify(region_id, notify).await;
                 }
                 // We receive a stop signal, but we still want to process remaining
                 // requests. The worker thread will then check the running flag and
@@ -367,24 +377,23 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     }
 
     /// Takes and handles all ddl requests.
-    async fn handle_ddl_requests(&mut self, ddl_tasks: Vec<RegionTask>) {
-        if ddl_tasks.is_empty() {
+    async fn handle_ddl_requests(&mut self, ddl_requests: Vec<SenderDdlRequest>) {
+        if ddl_requests.is_empty() {
             return;
         }
 
-        for task in ddl_tasks {
-            let res: std::result::Result<Output, crate::error::Error> = match task.body {
-                RequestBody::Create(req) => self.handle_create_request(task.region_id, req).await,
-                RequestBody::Open(req) => self.handle_open_request(task.region_id, req).await,
-                RequestBody::Close(_) => self.handle_close_request(task.region_id).await,
-                RequestBody::Write(_)
-                | RequestBody::Drop(_)
-                | RequestBody::Alter(_)
-                | RequestBody::Flush(_)
-                | RequestBody::Compact(_) => unreachable!(),
+        for ddl in ddl_requests {
+            let res = match ddl.request {
+                DdlRequest::Create(req) => self.handle_create_request(ddl.region_id, req).await,
+                DdlRequest::Open(req) => self.handle_open_request(ddl.region_id, req).await,
+                DdlRequest::Close(_) => self.handle_close_request(ddl.region_id).await,
+                DdlRequest::Alter(_)
+                | DdlRequest::Drop(_)
+                | DdlRequest::Flush(_)
+                | DdlRequest::Compact(_) => todo!(),
             };
 
-            if let Some(sender) = task.sender {
+            if let Some(sender) = ddl.sender {
                 // Ignore send result.
                 let _ = sender.send(res);
             }
@@ -393,6 +402,16 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 }
 
 impl<S> RegionWorkerLoop<S> {
+    /// Handles region background request
+    async fn handle_background_notify(&mut self, region_id: RegionId, notify: BackgroundNotify) {
+        match notify {
+            BackgroundNotify::FlushFinished(req) => {
+                self.handle_flush_finished(region_id, req).await
+            }
+            BackgroundNotify::FlushFailed(req) => self.handle_flush_failed(region_id, req).await,
+        }
+    }
+
     // Clean up the worker.
     async fn clean(&self) {
         // Closes remaining regions.

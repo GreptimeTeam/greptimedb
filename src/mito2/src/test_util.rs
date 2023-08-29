@@ -35,6 +35,7 @@ use store_api::region_request::RegionCreateRequest;
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
 use crate::error::Result;
+use crate::flush::WriteBufferManagerImpl;
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::read::{Batch, BatchBuilder, BatchReader};
 use crate::worker::WorkerGroup;
@@ -94,7 +95,12 @@ impl TestEnv {
     pub(crate) async fn create_worker_group(&self, config: MitoConfig) -> WorkerGroup {
         let (log_store, object_store) = self.create_log_and_object_store().await;
 
-        WorkerGroup::start(config, Arc::new(log_store), object_store)
+        WorkerGroup::start(
+            config,
+            Arc::new(log_store),
+            object_store,
+            Arc::new(WriteBufferManagerImpl {}),
+        )
     }
 
     async fn create_log_and_object_store(&self) -> (RaftEngineLogStore, ObjectStore) {

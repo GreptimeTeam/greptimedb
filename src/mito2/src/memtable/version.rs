@@ -23,8 +23,8 @@ use crate::memtable::MemtableRef;
 pub(crate) struct MemtableVersion {
     /// Mutable memtable.
     pub(crate) mutable: MemtableRef,
-    /// Immutable memtables.
-    immutables: Vec<MemtableRef>,
+    /// Immutable memtable.
+    pub(crate) immutable: Option<MemtableRef>,
 }
 
 pub(crate) type MemtableVersionRef = Arc<MemtableVersion>;
@@ -34,15 +34,38 @@ impl MemtableVersion {
     pub(crate) fn new(mutable: MemtableRef) -> MemtableVersion {
         MemtableVersion {
             mutable,
-            immutables: vec![],
+            immutable: None,
         }
     }
 
     /// Lists mutable and immutable memtables.
     pub(crate) fn list_memtables(&self) -> Vec<MemtableRef> {
-        let mut memtables = Vec::with_capacity(self.immutables.len() + 1);
-        memtables.push(self.mutable.clone());
-        memtables.extend_from_slice(&self.immutables);
-        memtables
+        if let Some(immutable) = &self.immutable {
+            vec![self.mutable.clone(), immutable.clone()]
+        } else {
+            vec![self.mutable.clone()]
+        }
+    }
+
+    /// Returns a new [MemtableVersion] which switches the old mutable memtable to immutable
+    /// memtable.
+    ///
+    /// Returns `None` if immutable memtable is `Some`.
+    #[must_use]
+    pub(crate) fn freeze_mutable(&self, mutable: MemtableRef) -> Option<MemtableVersion> {
+        debug_assert!(self.mutable.is_empty());
+        if self.immutable.is_some() {
+            // There is already an immutable memtable.
+            return None;
+        }
+
+        // Marks the mutable memtable as immutable so it can free the memory usage from our
+        // soft limit.
+        self.mutable.mark_immutable();
+
+        Some(MemtableVersion {
+            mutable,
+            immutable: Some(self.mutable.clone()),
+        })
     }
 }

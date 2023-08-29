@@ -389,7 +389,7 @@ pub enum Error {
     },
 }
 
-pub type Result<T> = std::result::Result<T, Error>;
+pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 impl Error {
     /// Returns true if we need to fill default value for a region.
