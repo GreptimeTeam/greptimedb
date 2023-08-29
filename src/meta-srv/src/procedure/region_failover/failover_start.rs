@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use async_trait::async_trait;
+use common_catalog::format_full_table_name;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_meta::ident::TableIdent;
@@ -20,11 +21,11 @@ use common_meta::peer::Peer;
 use common_meta::RegionIdent;
 use common_telemetry::info;
 use serde::{Deserialize, Serialize};
-use snafu::ensure;
+use snafu::{ensure, OptionExt, ResultExt};
 
 use super::deactivate_region::DeactivateRegion;
 use super::{RegionFailoverContext, State};
-use crate::error::{RegionFailoverCandidatesNotFoundSnafu, Result, RetryLaterSnafu};
+use crate::error::{self, RegionFailoverCandidatesNotFoundSnafu, Result, RetryLaterSnafu};
 
 #[derive(Serialize, Deserialize, Debug)]
 pub(super) struct RegionFailoverStart {
@@ -36,6 +37,38 @@ impl RegionFailoverStart {
         Self {
             failover_candidate: None,
         }
+    }
+
+    async fn failed_region_exist(
+        &self,
+        ctx: &RegionFailoverContext,
+        failed_region: &RegionIdent,
+    ) -> Result<bool> {
+        let table_id = failed_region.table_ident.table_id;
+        let route = ctx
+            .table_metadata_manager
+            .table_route_manager()
+            .get(table_id)
+            .await
+            .context(error::TableMetadataManagerSnafu)?
+            .with_context(|| error::TableRouteNotFoundSnafu {
+                table_name: format_full_table_name(
+                    &failed_region.table_ident.catalog,
+                    &failed_region.table_ident.schema,
+                    &failed_region.table_ident.table,
+                ),
+            })?;
+
+        let failed_region = route.region_routes.iter().any(|route| {
+            route.region.id.region_number() == failed_region.region_number
+                && route
+                    .leader_peer
+                    .as_ref()
+                    .map(|route| route.id == failed_region.datanode_id)
+                    .unwrap_or_default()
+        });
+
+        Ok(failed_region)
     }
 
     async fn choose_candidate(
@@ -95,6 +128,15 @@ impl State for RegionFailoverStart {
         ctx: &RegionFailoverContext,
         failed_region: &RegionIdent,
     ) -> Result<Box<dyn State>> {
+        let exist = self.failed_region_exist(ctx, failed_region).await?;
+
+        ensure!(
+            exist,
+            error::FailedRegionNotFoundSnafu {
+                region: failed_region.to_string()
+            }
+        );
+
         let candidate = self
             .choose_candidate(ctx, failed_region)
             .await
