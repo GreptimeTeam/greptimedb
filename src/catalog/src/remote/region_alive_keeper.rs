@@ -274,7 +274,7 @@ impl RegionAliveKeeper {
                         ident.table_id
                     );
                 } else {
-                    warn!("Countdown task returns: {result:?}");
+                    debug!("Countdown task returns: {result:?}");
                 }
                 on_task_finished
             },
@@ -578,9 +578,7 @@ mod test {
             table_options: TableOptions::default(),
             engine: "MockTableEngine".to_string(),
         }));
-        let catalog_manager = MemoryCatalogManager::try_new_with_table(table.clone())
-            .await
-            .unwrap();
+        let catalog_manager = MemoryCatalogManager::new_with_table(table.clone());
         keepers
             .register_table(table_ident.clone(), table, catalog_manager)
             .await

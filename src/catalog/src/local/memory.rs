@@ -138,15 +138,7 @@ impl CatalogManager for MemoryCatalogManager {
     }
 
     async fn schema_exist(&self, catalog: &str, schema: &str) -> Result<bool> {
-        Ok(self
-            .catalogs
-            .read()
-            .unwrap()
-            .get(catalog)
-            .with_context(|| CatalogNotFoundSnafu {
-                catalog_name: catalog,
-            })?
-            .contains_key(schema))
+        self.schema_exist_sync(catalog, schema)
     }
 
     async fn table(
@@ -168,7 +160,7 @@ impl CatalogManager for MemoryCatalogManager {
     }
 
     async fn catalog_exist(&self, catalog: &str) -> Result<bool> {
-        Ok(self.catalogs.read().unwrap().get(catalog).is_some())
+        self.catalog_exist_sync(catalog)
     }
 
     async fn table_exist(&self, catalog: &str, schema: &str, table: &str) -> Result<bool> {
@@ -246,6 +238,22 @@ impl MemoryCatalogManager {
             .unwrap();
 
         manager
+    }
+
+    fn schema_exist_sync(&self, catalog: &str, schema: &str) -> Result<bool> {
+        Ok(self
+            .catalogs
+            .read()
+            .unwrap()
+            .get(catalog)
+            .with_context(|| CatalogNotFoundSnafu {
+                catalog_name: catalog,
+            })?
+            .contains_key(schema))
+    }
+
+    fn catalog_exist_sync(&self, catalog: &str) -> Result<bool> {
+        Ok(self.catalogs.read().unwrap().get(catalog).is_some())
     }
 
     /// Registers a catalog if it does not exist and returns false if the schema exists.
@@ -349,32 +357,20 @@ impl MemoryCatalogManager {
     #[cfg(any(test, feature = "testing"))]
     pub fn new_with_table(table: TableRef) -> Arc<Self> {
         let manager = Self::with_default_setup();
-        let request = RegisterTableRequest {
-            catalog: DEFAULT_CATALOG_NAME.to_string(),
-            schema: DEFAULT_SCHEMA_NAME.to_string(),
-            table_name: table.table_info().name.clone(),
-            table_id: table.table_info().ident.table_id,
-            table,
-        };
-        let _ = manager.register_table_sync(request).unwrap();
-        manager
-    }
-
-    #[cfg(any(test, feature = "testing"))]
-    pub async fn try_new_with_table(table: TableRef) -> Result<Arc<Self>> {
-        let manager = Self::with_default_setup();
         let catalog = &table.table_info().catalog_name;
         let schema = &table.table_info().schema_name;
 
-        if !manager.catalog_exist(catalog).await? {
-            manager.register_catalog_sync(catalog.to_string())?;
+        if !manager.catalog_exist_sync(catalog).unwrap() {
+            manager.register_catalog_sync(catalog.to_string()).unwrap();
         }
 
-        if !manager.schema_exist(catalog, schema).await? {
-            manager.register_schema_sync(RegisterSchemaRequest {
-                catalog: catalog.to_string(),
-                schema: schema.to_string(),
-            })?;
+        if !manager.schema_exist_sync(catalog, schema).unwrap() {
+            manager
+                .register_schema_sync(RegisterSchemaRequest {
+                    catalog: catalog.to_string(),
+                    schema: schema.to_string(),
+                })
+                .unwrap();
         }
 
         let request = RegisterTableRequest {
@@ -385,7 +381,7 @@ impl MemoryCatalogManager {
             table,
         };
         let _ = manager.register_table_sync(request).unwrap();
-        Ok(manager)
+        manager
     }
 }
 
