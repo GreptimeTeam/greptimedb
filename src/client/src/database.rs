@@ -17,9 +17,9 @@ use api::v1::ddl_request::Expr as DdlExpr;
 use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
 use api::v1::{
-    AlterExpr, AuthHeader, CreateTableExpr, DdlRequest, DeleteRequests,
-    DropTableExpr, GreptimeRequest, InsertRequests, PromRangeQuery, QueryRequest,
-    RequestHeader, RowInsertRequests, TruncateTableExpr,
+    AlterExpr, AuthHeader, CreateTableExpr, DdlRequest, DeleteRequests, DropTableExpr,
+    GreptimeRequest, InsertRequests, PromRangeQuery, QueryRequest, RequestHeader,
+    RowInsertRequests, TruncateTableExpr,
 };
 use arrow_flight::Ticket;
 use async_stream::stream;
@@ -178,11 +178,7 @@ impl Database {
         .await
     }
 
-    pub async fn logical_plan(
-        &self,
-        logical_plan: Vec<u8>,
-        trace_id: u64,
-    ) -> Result<Output> {
+    pub async fn logical_plan(&self, logical_plan: Vec<u8>, trace_id: u64) -> Result<Output> {
         let _timer = timer!(metrics::METRIC_GRPC_LOGICAL_PLAN);
         self.do_get(
             Request::Query(QueryRequest {

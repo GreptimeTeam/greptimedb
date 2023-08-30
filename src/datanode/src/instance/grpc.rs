@@ -724,7 +724,7 @@ mod test {
                             is_key: true,
                             location: Some(Location {
                                 location_type: LocationType::First.into(),
-                                after_cloumn_name: "".to_string(),
+                                after_column_name: "".to_string(),
                             }),
                         },
                         AddColumn {
@@ -737,7 +737,7 @@ mod test {
                             is_key: true,
                             location: Some(Location {
                                 location_type: LocationType::After.into(),
-                                after_cloumn_name: "a".to_string(),
+                                after_column_name: "a".to_string(),
                             }),
                         },
                     ],

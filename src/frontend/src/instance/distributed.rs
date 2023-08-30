@@ -23,17 +23,16 @@ use api::helper::ColumnDataTypeWrapper;
 use api::v1::ddl_request::Expr as DdlExpr;
 use api::v1::greptime_request::Request;
 use api::v1::{
-    column_def, AlterExpr, CreateDatabaseExpr, CreateTableExpr, DeleteRequests, InsertRequests, RowInsertRequests, TruncateTableExpr,
+    column_def, AlterExpr, CreateDatabaseExpr, CreateTableExpr, DeleteRequests, InsertRequests,
+    RowInsertRequests, TruncateTableExpr,
 };
 use async_trait::async_trait;
 use catalog::{CatalogManager, DeregisterTableRequest, RegisterTableRequest};
 use chrono::DateTime;
-use client::client_manager::DatanodeClients;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::format_full_table_name;
 use common_error::ext::BoxedError;
 use common_meta::key::schema_name::{SchemaNameKey, SchemaNameValue};
-use common_meta::peer::Peer;
 use common_meta::rpc::ddl::{DdlTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse};
 use common_meta::rpc::router::{Partition, Partition as MetaPartition};
 use common_meta::table_name::TableName;
@@ -63,10 +62,9 @@ use table::TableRef;
 use crate::catalog::FrontendCatalogManager;
 use crate::error::{
     self, AlterExprToRequestSnafu, CatalogSnafu, ColumnDataTypeSnafu, ColumnNotFoundSnafu,
-    DeserializePartitionSnafu, InvokeDatanodeSnafu, NotSupportedSnafu, ParseSqlSnafu,
-    RequestDatanodeSnafu, RequestMetaSnafu, Result, SchemaExistsSnafu, SchemaNotFoundSnafu,
-    TableAlreadyExistSnafu, TableMetadataManagerSnafu, TableNotFoundSnafu, TableSnafu,
-    UnrecognizedTableOptionSnafu,
+    DeserializePartitionSnafu, InvokeDatanodeSnafu, NotSupportedSnafu, ParseSqlSnafu, Result,
+    SchemaExistsSnafu, SchemaNotFoundSnafu, TableAlreadyExistSnafu, TableMetadataManagerSnafu,
+    TableNotFoundSnafu, TableSnafu, UnrecognizedTableOptionSnafu,
 };
 use crate::expr_factory;
 use crate::instance::distributed::deleter::DistDeleter;
@@ -80,19 +78,13 @@ const MAX_VALUE: &str = "MAXVALUE";
 pub struct DistInstance {
     meta_client: Arc<MetaClient>,
     pub(crate) catalog_manager: Arc<FrontendCatalogManager>,
-    datanode_clients: Arc<DatanodeClients>,
 }
 
 impl DistInstance {
-    pub fn new(
-        meta_client: Arc<MetaClient>,
-        catalog_manager: Arc<FrontendCatalogManager>,
-        datanode_clients: Arc<DatanodeClients>,
-    ) -> Self {
+    pub fn new(meta_client: Arc<MetaClient>, catalog_manager: Arc<FrontendCatalogManager>) -> Self {
         Self {
             meta_client,
             catalog_manager,
-            datanode_clients,
         }
     }
 

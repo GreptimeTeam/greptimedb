@@ -77,7 +77,7 @@ datafusion-substrait = { git = "https://github.com/waynexia/arrow-datafusion.git
 derive_builder = "0.12"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "a37ff7d81c1de3e8964c2725ff5c03156a07afa8" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "7fb5aa1095b62794c5c4333a1a2ed45da1c86a07" }
 humantime-serde = "1.1"
 itertools = "0.10"
 lazy_static = "1.4"

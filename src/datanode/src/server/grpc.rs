@@ -12,9 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::{
-    AlterExpr, CreateTableExpr, DropTableExpr, TruncateTableExpr,
-};
+use api::v1::{AlterExpr, CreateTableExpr, DropTableExpr, TruncateTableExpr};
 use common_catalog::consts::IMMUTABLE_FILE_ENGINE;
 use common_catalog::format_full_table_name;
 use common_grpc_expr::{alter_expr_to_request, create_expr_to_request};
@@ -22,8 +20,7 @@ use common_query::Output;
 use common_telemetry::info;
 use session::context::QueryContextRef;
 use snafu::prelude::*;
-use table::requests::{DropTableRequest, TruncateTableRequest,
-};
+use table::requests::{DropTableRequest, TruncateTableRequest};
 
 use crate::error::{
     AlterExprToRequestSnafu, BumpTableIdSnafu, CatalogSnafu, CreateExprToRequestSnafu,
