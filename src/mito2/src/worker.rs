@@ -413,9 +413,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
         }
     }
-}
 
-impl<S> RegionWorkerLoop<S> {
     /// Handles region background request
     async fn handle_background_notify(&mut self, region_id: RegionId, notify: BackgroundNotify) {
         match notify {
@@ -425,7 +423,9 @@ impl<S> RegionWorkerLoop<S> {
             BackgroundNotify::FlushFailed(req) => self.handle_flush_failed(region_id, req).await,
         }
     }
+}
 
+impl<S> RegionWorkerLoop<S> {
     // Clean up the worker.
     async fn clean(&self) {
         // Closes remaining regions.

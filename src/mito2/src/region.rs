@@ -52,7 +52,7 @@ pub(crate) struct MitoRegion {
     /// SSTs accessor for this region.
     pub(crate) access_layer: AccessLayerRef,
     /// Manager to maintain manifest for this region.
-    manifest_manager: RegionManifestManager,
+    pub(crate) manifest_manager: RegionManifestManager,
     /// Last flush time in millis.
     last_flush_millis: AtomicI64,
 }

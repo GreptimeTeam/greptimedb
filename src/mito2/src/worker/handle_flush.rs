@@ -17,14 +17,64 @@
 use common_query::Output;
 use common_telemetry::error;
 use common_time::util::current_time_millis;
+use store_api::logstore::LogStore;
 use store_api::region_request::RegionFlushRequest;
 use store_api::storage::RegionId;
 
-use crate::error::Result;
+use crate::error::{Result, RegionNotFoundSnafu};
 use crate::flush::{FlushReason, RegionFlushTask};
+use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::region::MitoRegionRef;
 use crate::request::{FlushFailed, FlushFinished};
 use crate::worker::RegionWorkerLoop;
+
+impl<S: LogStore> RegionWorkerLoop<S> {
+    /// On region flush job finished.
+    pub(crate) async fn handle_flush_finished(
+        &mut self,
+        region_id: RegionId,
+        mut request: FlushFinished,
+    ) {
+        let Some(region) = self.regions.get_region(region_id) else {
+            request.send_error(RegionNotFoundSnafu {
+                region_id,
+            }.build());
+            return;
+        };
+
+        // Write region edit to manifest.
+        let edit = RegionEdit {
+            files_to_add: std::mem::take(&mut request.file_metas),
+            files_to_remove: Vec::new(),
+            compaction_time_window: None,
+            flushed_entry_id: Some(request.flushed_entry_id),
+        };
+        let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit));
+        if let Err(e) = region.manifest_manager.update(action_list).await {
+            error!(e; "Failed to write manifest, region: {}", region_id);
+            // TODO(yingwen): Wrap a output sender type.
+            request.send_error(e);
+            return;
+        }
+
+        // TODO(yingwen): Apply edit to region's version.
+
+        // Delete wal.
+        if let Err(e) = self.wal.obsolete(region_id, request.flushed_entry_id).await {
+            error!(e; "Failed to write wal, region: {}", region_id);
+            request.send_error(e);
+            return;
+        }
+
+        // TODO(yingwen):
+        // 1. check region existence
+        // 2. write manifest
+        // 3. update region metadata.
+        // 4. handle all pending requests.
+        // 5. schedule next flush.
+        unimplemented!()
+    }
+}
 
 impl<S> RegionWorkerLoop<S> {
     /// Handles manual flush request.
@@ -33,22 +83,6 @@ impl<S> RegionWorkerLoop<S> {
         _region_id: RegionId,
         _request: RegionFlushRequest,
     ) -> Result<Output> {
-        // TODO(yingwen): schedule flush.
-        unimplemented!()
-    }
-
-    /// On region flush job finished.
-    pub(crate) async fn handle_flush_finished(
-        &mut self,
-        _region_id: RegionId,
-        _request: FlushFinished,
-    ) {
-        // TODO(yingwen):
-        // 1. check region existence
-        // 2. write manifest
-        // 3. update region metadata.
-        // 4. handle all pending requests.
-        // 5. schedule next flush.
         unimplemented!()
     }
 

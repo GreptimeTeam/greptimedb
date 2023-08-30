@@ -24,6 +24,7 @@ use api::helper::{
 use api::v1::{ColumnDataType, ColumnSchema, OpType, Rows, Value};
 use common_base::readable_size::ReadableSize;
 use common_query::Output;
+use smallvec::SmallVec;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::metadata::{ColumnMetadata, RegionMetadata};
 use store_api::region_request::{
@@ -34,8 +35,10 @@ use store_api::storage::{CompactionStrategy, RegionId};
 use tokio::sync::oneshot::{self, Receiver, Sender};
 
 use crate::config::DEFAULT_WRITE_BUFFER_SIZE;
-use crate::error::{CreateDefaultSnafu, FillDefaultSnafu, InvalidRequestSnafu, Result};
+use crate::error::{CreateDefaultSnafu, Error, FillDefaultSnafu, InvalidRequestSnafu, Result};
+use crate::memtable::MemtableId;
 use crate::sst::file::FileMeta;
+use crate::wal::EntryId;
 
 /// Options that affect the entire region.
 ///
@@ -441,8 +444,22 @@ pub(crate) enum BackgroundNotify {
 pub(crate) struct FlushFinished {
     /// Meta of the flushed SSTs.
     pub(crate) file_metas: Vec<FileMeta>,
+    /// Entry id of flushed data.
+    pub(crate) flushed_entry_id: EntryId,
+    /// Id of memtables to remove.
+    pub(crate) memtables_to_remove: SmallVec<[MemtableId; 2]>,
     /// Flush result sender.
     pub(crate) sender: Option<oneshot::Sender<Result<()>>>,
+}
+
+impl FlushFinished {
+    pub(crate) fn send_error(self, err: Error) {
+        // TODO(yingwen): We should remove these files.
+        if let Some(sender) = self.sender {
+            // Ignore send result.
+            let _ = sender.send(Err(err));
+        }
+    }
 }
 
 /// Notifies a flush job is failed.

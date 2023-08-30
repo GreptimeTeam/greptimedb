@@ -25,7 +25,7 @@ use crate::access_layer::AccessLayerRef;
 use crate::error::{Error, Result};
 use crate::memtable::MemtableBuilderRef;
 use crate::read::Source;
-use crate::region::version::VersionRef;
+use crate::region::version::{VersionRef, VersionControlData};
 use crate::region::MitoRegionRef;
 use crate::request::{
     BackgroundNotify, FlushFailed, FlushFinished, SenderDdlRequest, SenderWriteRequest,
@@ -118,19 +118,23 @@ impl RegionFlushTask {
     fn into_flush_job(self, region: &MitoRegionRef) -> Job {
         // Get a version of this region before creating a job so we
         // always have a consistent memtable list.
-        let version = region.version();
+        let version_data = region.version_control.current();
 
         Box::pin(async move {
-            self.do_flush(version).await;
+            self.do_flush(version_data).await;
         })
     }
 
     /// Runs the flush task.
-    async fn do_flush(mut self, version: VersionRef) {
-        let worker_request = match self.flush_memtables(&version).await {
+    async fn do_flush(mut self, version_data: VersionControlData) {
+        let worker_request = match self.flush_memtables(&version_data.version).await {
             Ok(file_metas) => {
+                let memtables_to_remove = version_data.version.memtables.immutables().iter().map(|m| m.id()).collect();
                 let flush_finished = FlushFinished {
                     file_metas,
+                    // The last entry has been flushed.
+                    flushed_entry_id: version_data.last_entry_id,
+                    memtables_to_remove,
                     sender: self.sender.take(),
                 };
                 WorkerRequest::Background {
@@ -284,6 +288,9 @@ impl FlushScheduler {
             // We reach job limit.
             self.queue.push_back(task);
             flush_status.num_queueing += 1;
+            if flush_status.num_queueing > 1 {
+                flush_status.stalling = true;
+            }
             return Ok(());
         }
 
@@ -300,6 +307,27 @@ impl FlushScheduler {
         self.has_flush_running = true;
 
         Ok(())
+    }
+
+    pub(crate) fn on_flush_success(&mut self, region_id: RegionId) {
+        let Some(flush_status) = self.region_status.get_mut(&region_id) else {
+            return;
+        };
+
+        self.has_flush_running = false;
+        flush_status.flushing = false;
+        if flush_status {
+            unimplemented!();
+        }
+
+        // if flush_status.num_queueing == 0 {
+        //     // No pending flush job.
+        //     //
+        // } else if flush_status.num_queueing == 1 {
+        //     // Only one flush job.
+        // }
+
+        unimplemented!()
     }
 
     /// Add write `request` to pending queue.
