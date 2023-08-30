@@ -76,7 +76,7 @@ impl<S> RegionWorkerLoop<S> {
 ///
 /// This task will keep running until finished. Any resource captured by it will
 /// not be released before then. Be sure to only pass weak reference if something
-/// is depended on ref-count machanism.
+/// is depended on ref-count mechanism.
 async fn later_drop_task(
     region_id: RegionId,
     region_path: String,
