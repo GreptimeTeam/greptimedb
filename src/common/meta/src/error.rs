@@ -54,6 +54,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to parse value {} into key {}", value, key))]
+    ParseOption {
+        key: String,
+        value: String,
+        location: Location,
+    },
+
     #[snafu(display("Corrupted table route data, err: {}", err_msg))]
     RouteInfoCorrupted { err_msg: String, location: Location },
 
@@ -151,6 +158,7 @@ impl ErrorExt for Error {
             IllegalServerState { .. } | EtcdTxnOpResponse { .. } => StatusCode::Internal,
 
             SerdeJson { .. }
+            | ParseOption { .. }
             | RouteInfoCorrupted { .. }
             | InvalidProtoMsg { .. }
             | InvalidTableMetadata { .. }
