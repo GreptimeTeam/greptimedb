@@ -127,6 +127,10 @@ impl FileHandle {
     pub fn time_range(&self) -> FileTimeRange {
         self.inner.meta.time_range
     }
+
+    pub fn mark_deleted(&self) {
+        self.inner.deleted.store(true, Ordering::Relaxed);
+    }
 }
 
 /// Inner data of [FileHandle].

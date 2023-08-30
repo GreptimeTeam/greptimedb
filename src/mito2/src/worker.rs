@@ -16,6 +16,7 @@
 
 mod handle_close;
 mod handle_create;
+mod handle_drop;
 mod handle_flush;
 mod handle_open;
 mod handle_write;

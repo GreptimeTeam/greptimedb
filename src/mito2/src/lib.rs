@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![feature(try_blocks)]
+
 //! # Mito
 //!
 //! Mito is the a region engine to store timeseries data.
