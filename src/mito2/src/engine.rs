@@ -144,12 +144,7 @@ impl EngineInner {
             .get_region(region_id)
             .context(RegionNotFoundSnafu { region_id })?;
         let version = region.version();
-        let scan_region = ScanRegion::new(
-            version,
-            region.region_dir.clone(),
-            self.object_store.clone(),
-            request,
-        );
+        let scan_region = ScanRegion::new(version, region.access_layer.clone(), request);
 
         scan_region.scanner()
     }

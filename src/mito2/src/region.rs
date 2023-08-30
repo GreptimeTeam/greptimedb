@@ -24,6 +24,7 @@ use common_telemetry::info;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::RegionId;
 
+use crate::access_layer::AccessLayerRef;
 use crate::error::Result;
 use crate::manifest::manager::RegionManifestManager;
 use crate::region::version::{VersionControlRef, VersionRef};
@@ -46,8 +47,8 @@ pub(crate) struct MitoRegion {
 
     /// Version controller for this region.
     pub(crate) version_control: VersionControlRef,
-    /// Data directory of the region.
-    pub(crate) region_dir: String,
+    /// SSTs accessor for this region.
+    pub(crate) access_layer: AccessLayerRef,
     /// Manager to maintain manifest for this region.
     manifest_manager: RegionManifestManager,
 }

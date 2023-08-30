@@ -25,6 +25,7 @@ use store_api::logstore::LogStore;
 use store_api::metadata::RegionMetadata;
 use store_api::storage::RegionId;
 
+use crate::access_layer::AccessLayer;
 use crate::config::MitoConfig;
 use crate::error::{RegionCorruptedSnafu, RegionNotFoundSnafu, Result};
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
@@ -82,7 +83,7 @@ impl RegionOpener {
         // Create a manifest manager for this region.
         let options = RegionManifestOptions {
             manifest_dir: new_manifest_dir(&self.region_dir),
-            object_store: self.object_store,
+            object_store: self.object_store.clone(),
             compress_type: config.manifest_compress_type,
             checkpoint_distance: config.manifest_checkpoint_distance,
         };
@@ -97,7 +98,7 @@ impl RegionOpener {
         Ok(MitoRegion {
             region_id,
             version_control,
-            region_dir: self.region_dir,
+            access_layer: Arc::new(AccessLayer::new(self.region_dir, self.object_store.clone())),
             manifest_manager,
         })
     }
@@ -112,7 +113,7 @@ impl RegionOpener {
     ) -> Result<MitoRegion> {
         let options = RegionManifestOptions {
             manifest_dir: new_manifest_dir(&self.region_dir),
-            object_store: self.object_store,
+            object_store: self.object_store.clone(),
             compress_type: config.manifest_compress_type,
             checkpoint_distance: config.manifest_checkpoint_distance,
         };
@@ -144,7 +145,7 @@ impl RegionOpener {
         let region = MitoRegion {
             region_id: self.region_id,
             version_control,
-            region_dir: self.region_dir,
+            access_layer: Arc::new(AccessLayer::new(self.region_dir, self.object_store)),
             manifest_manager,
         };
         Ok(region)
