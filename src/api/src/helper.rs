@@ -339,8 +339,6 @@ fn ddl_request_type(request: &DdlRequest) -> &'static str {
         Some(Expr::CreateTable(_)) => "ddl.create_table",
         Some(Expr::Alter(_)) => "ddl.alter",
         Some(Expr::DropTable(_)) => "ddl.drop_table",
-        Some(Expr::FlushTable(_)) => "ddl.flush_table",
-        Some(Expr::CompactTable(_)) => "ddl.compact_table",
         Some(Expr::TruncateTable(_)) => "ddl.truncate_table",
         None => "ddl.empty",
     }
