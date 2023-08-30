@@ -185,18 +185,28 @@ impl SchemaManager {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
     use crate::kv_backend::memory::MemoryKvBackend;
 
     #[test]
     fn test_serialization() {
         let key = SchemaNameKey::new("my-catalog", "my-schema");
-
         assert_eq!(key.to_string(), "__schema_name/my-catalog/my-schema");
 
         let parsed: SchemaNameKey<'_> = "__schema_name/my-catalog/my-schema".try_into().unwrap();
-
         assert_eq!(key, parsed);
+
+        let value = SchemaNameValue {
+            ttl: Some(Duration::from_secs(10)),
+        };
+        let mut opts: HashMap<String, String> = HashMap::new();
+        opts.insert("ttl".to_string(), "10s".to_string());
+        let from_value = SchemaNameValue::try_from(&opts).unwrap();
+        assert_eq!(value, from_value);
+
+        let parsed = SchemaNameValue::try_from_raw_value("{\"ttl\":\"10s\"}".as_bytes()).unwrap();
+        assert_eq!(value, parsed);
     }
 
     #[tokio::test]
