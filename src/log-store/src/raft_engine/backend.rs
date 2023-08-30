@@ -85,15 +85,12 @@ impl TxnService for RaftEngineBackend {
             }
 
             TxnOp::Delete(key) => {
-                let prev_value = engine_get(&engine, &key)?;
+                let prev = engine_get(&engine, &key)?;
                 batch.delete(SYSTEM_NAMESPACE, key);
-
-                let prev_kvs: Vec<_> = prev_value.into_iter().collect();
-                let deleted = prev_kvs.len() as i64;
-
+                let deleted = if prev.is_some() { 1 } else { 0 };
                 Ok(TxnOpResponse::ResponseDelete(DeleteRangeResponse {
                     deleted,
-                    prev_kvs,
+                    prev_kvs: vec![],
                 }))
             }
         };
@@ -155,6 +152,8 @@ impl KvBackend for RaftEngineBackend {
         } = req;
 
         let mut prev = None;
+        // Engine::write assures that one batch is written atomically. The read/write lock is
+        // just to prevent race condition between put and txn.
         let engine = self.engine.read().unwrap();
         if prev_kv {
             prev = engine_get(&engine, &key)?;
@@ -173,8 +172,9 @@ impl KvBackend for RaftEngineBackend {
             vec![]
         };
 
+        let engine = self.engine.read().unwrap();
         for kv in kvs {
-            if prev_kv && let Some(kv) = engine_get(&self.engine.read().unwrap(), &kv.key)? {
+            if prev_kv && let Some(kv) = engine_get(&engine, &kv.key)? {
                 prev_kvs.push(kv);
             }
             batch
@@ -182,11 +182,7 @@ impl KvBackend for RaftEngineBackend {
                 .context(RaftEngineSnafu)?;
         }
 
-        self.engine
-            .read()
-            .unwrap()
-            .write(&mut batch, false)
-            .context(RaftEngineSnafu)?;
+        engine.write(&mut batch, false).context(RaftEngineSnafu)?;
 
         Ok(BatchPutResponse { prev_kvs })
     }
@@ -197,7 +193,9 @@ impl KvBackend for RaftEngineBackend {
         };
         let engine = self.engine.read().unwrap();
         for key in req.keys {
-            let value = engine.get(SYSTEM_NAMESPACE, &key).unwrap();
+            let Some(value) = engine.get(SYSTEM_NAMESPACE, &key) else {
+                continue;
+            };
             response.kvs.push(KeyValue { key, value });
         }
         Ok(response)
@@ -215,7 +213,12 @@ impl KvBackend for RaftEngineBackend {
         let eq = existing
             .as_ref()
             .map(|kv| kv.value == expect)
-            .unwrap_or(false);
+            .unwrap_or_else(|| {
+                // if the associated value of key does not exist and expect is empty,
+                // then we still consider them as equal.
+                expect.is_empty()
+            });
+
         if eq {
             batch
                 .put(SYSTEM_NAMESPACE, key, value)
@@ -427,6 +430,27 @@ mod tests {
                 }
             })
             .collect()
+    }
+
+    #[tokio::test]
+    async fn test_compare_and_put_empty() {
+        let dir = create_temp_dir("compare_and_put_empty");
+        let backend = build_kv_backend(dir.path().to_str().unwrap().to_string());
+        let CompareAndPutResponse { success, prev_kv } = backend
+            .compare_and_put(CompareAndPutRequest {
+                key: b"hello".to_vec(),
+                expect: vec![],
+                value: b"world".to_vec(),
+            })
+            .await
+            .unwrap();
+        assert!(success);
+        assert!(prev_kv.is_none());
+
+        assert_eq!(
+            b"world".as_slice(),
+            &backend.get(b"hello").await.unwrap().unwrap().value
+        );
     }
 
     #[tokio::test]

@@ -318,9 +318,8 @@ impl<T: ErrorExt + Send + Sync> TxnService for MemoryKvBackend<T> {
 
         let do_txn = |txn_op| match txn_op {
             TxnOp::Put(key, value) => {
-                let prev_value = kvs.insert(key.clone(), value);
-                let prev_kv = prev_value.map(|value| KeyValue { key, value });
-                TxnOpResponse::ResponsePut(PutResponse { prev_kv })
+                kvs.insert(key.clone(), value);
+                TxnOpResponse::ResponsePut(PutResponse { prev_kv: None })
             }
 
             TxnOp::Get(key) => {
@@ -337,16 +336,11 @@ impl<T: ErrorExt + Send + Sync> TxnService for MemoryKvBackend<T> {
 
             TxnOp::Delete(key) => {
                 let prev_value = kvs.remove(&key);
-                let deleted = prev_value.as_ref().map(|x| x.len()).unwrap_or(0) as i64;
-
-                let prev_kvs = prev_value
-                    .into_iter()
-                    .map(|value| KeyValue {
-                        key: key.clone(),
-                        value,
-                    })
-                    .collect();
-                TxnOpResponse::ResponseDelete(DeleteRangeResponse { deleted, prev_kvs })
+                let deleted = if prev_value.is_some() { 1 } else { 0 };
+                TxnOpResponse::ResponseDelete(DeleteRangeResponse {
+                    deleted,
+                    prev_kvs: vec![],
+                })
             }
         };
 
