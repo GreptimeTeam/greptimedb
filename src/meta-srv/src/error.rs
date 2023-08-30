@@ -26,12 +26,6 @@ use crate::pubsub::Message;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
-    #[snafu(display(
-        "Failed to found failed region: {} in route, it may be already failover by another procedure",
-        region
-    ))]
-    FailedRegionNotFound { location: Location, region: String },
-
     #[snafu(display("Failed to list catalogs: {}", source))]
     ListCatalogs {
         location: Location,
@@ -567,8 +561,7 @@ impl ErrorExt for Error {
             | Error::ConvertGrpcExpr { .. }
             | Error::PublishMessage { .. }
             | Error::Join { .. }
-            | Error::Unsupported { .. }
-            | Error::FailedRegionNotFound { .. } => StatusCode::Internal,
+            | Error::Unsupported { .. } => StatusCode::Internal,
             Error::TableAlreadyExists { .. } => StatusCode::TableAlreadyExists,
             Error::EmptyKey { .. }
             | Error::MissingRequiredParameter { .. }
