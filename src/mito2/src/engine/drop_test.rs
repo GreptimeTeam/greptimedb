@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use object_store::util::join_path;
-use store_api::region_request::RegionRequest;
+use store_api::region_request::{RegionDropRequest, RegionRequest};
 use store_api::storage::RegionId;
 
 use crate::config::MitoConfig;
