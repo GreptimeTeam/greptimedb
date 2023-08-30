@@ -187,7 +187,9 @@ impl DropTableProcedure {
                     let requester = RegionRequester::new(client);
 
                     if let Err(err) = requester.handle(request).await {
-                        return Err(handle_request_datanode_error(datanode)(err));
+                        if err.status_code() != StatusCode::RegionNotFound {
+                            return Err(handle_request_datanode_error(datanode)(err));
+                        }
                     }
                 }
                 Ok(())
