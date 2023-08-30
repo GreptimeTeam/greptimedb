@@ -259,23 +259,23 @@ fn encode_histogram(
     let mut count_lines = LinesWriter::with_lines(data_points_len);
 
     for data_point in &hist.data_points {
-        write_tags_and_timestamp(
-            &mut bucket_lines,
-            resource_attrs,
-            scope_attrs,
-            Some(data_point.attributes.as_ref()),
-            data_point.time_unix_nano as i64,
-        )?;
-
         for (idx, count) in data_point.bucket_counts.iter().enumerate() {
+            write_tags_and_timestamp(
+                &mut bucket_lines,
+                resource_attrs,
+                scope_attrs,
+                Some(data_point.attributes.as_ref()),
+                data_point.time_unix_nano as i64,
+            )?;
+
             if let Some(upper_bounds) = data_point.explicit_bounds.get(idx) {
                 bucket_lines
-                    .write_f64(HISTOGRAM_LE_COLUMN, *upper_bounds)
+                    .write_tag(HISTOGRAM_LE_COLUMN, &upper_bounds.to_string())
                     .context(error::OtlpMetricsWriteSnafu)?;
             } else if idx == data_point.explicit_bounds.len() {
                 // The last bucket
                 bucket_lines
-                    .write_f64(HISTOGRAM_LE_COLUMN, f64::INFINITY)
+                    .write_tag(HISTOGRAM_LE_COLUMN, &f64::INFINITY.to_string())
                     .context(error::OtlpMetricsWriteSnafu)?;
             }
 
