@@ -1,8 +1,8 @@
-CREATE TABLE test (a TIMESTAMP TIME INDEX, b INTEGER);
+CREATE TABLE test (a INTEGER, b INTEGER, ts TIMESTAMP TIME INDEX);
 
 Affected Rows: 0
 
-INSERT INTO test VALUES (11, 22), (12, 21), (13, 22);
+INSERT INTO test VALUES (11, 22, 1), (12, 21, 2), (13, 22, 3);
 
 Affected Rows: 3
 
@@ -18,27 +18,27 @@ Error: 1003(Internal), Error during planning: Sort operation is not applicable t
 -- Ambiguous reference in union alias, give and error in duckdb, but works in greptimedb
 SELECT a AS k, b FROM test UNION SELECT a, b AS k FROM test ORDER BY k;
 
-+-------------------------+----+
-| k                       | b  |
-+-------------------------+----+
-| 1970-01-01T00:00:00.011 | 22 |
-| 1970-01-01T00:00:00.012 | 21 |
-| 1970-01-01T00:00:00.013 | 22 |
-+-------------------------+----+
++----+----+
+| k  | b  |
++----+----+
+| 11 | 22 |
+| 12 | 21 |
+| 13 | 22 |
++----+----+
 
 SELECT a AS k, b FROM test UNION SELECT a AS k, b FROM test ORDER BY k;
 
-+-------------------------+----+
-| k                       | b  |
-+-------------------------+----+
-| 1970-01-01T00:00:00.011 | 22 |
-| 1970-01-01T00:00:00.012 | 21 |
-| 1970-01-01T00:00:00.013 | 22 |
-+-------------------------+----+
++----+----+
+| k  | b  |
++----+----+
+| 11 | 22 |
+| 12 | 21 |
+| 13 | 22 |
++----+----+
 
 SELECT a % 2, b FROM test UNION SELECT b, a % 2 AS k ORDER BY a % 2;
 
-Error: 3000(PlanQuery), Error during planning: Cannot coerce arithmetic expression Timestamp(Millisecond, None) % Int64 to valid types
+Error: 3000(PlanQuery), No field named b.
 
 -- Works duckdb, but not work in greptimedb
 -- TODO(LFC): Failed to meet the expected error:
@@ -46,19 +46,19 @@ Error: 3000(PlanQuery), Error during planning: Cannot coerce arithmetic expressi
 --   Error: 3000(PlanQuery), Schema error: No field named 'a'. Valid fields are 'test.a % Int64(2)', 'b'.
 SELECT a % 2, b FROM test UNION SELECT a % 2 AS k, b FROM test ORDER BY a % 2;
 
-Error: 3000(PlanQuery), Error during planning: Cannot coerce arithmetic expression Timestamp(Millisecond, None) % Int64 to valid types
+Error: 3000(PlanQuery), Error during planning: For SELECT DISTINCT, ORDER BY expressions a must appear in select list
 
 SELECT a % 2, b FROM test UNION SELECT a % 2 AS k, b FROM test ORDER BY 3;
 
-Error: 3000(PlanQuery), Error during planning: Cannot coerce arithmetic expression Timestamp(Millisecond, None) % Int64 to valid types
+Error: 3000(PlanQuery), Error during planning: Order by column out of bounds, specified: 3, max: 2
 
 SELECT a % 2, b FROM test UNION SELECT a % 2 AS k, b FROM test ORDER BY -1;
 
-Error: 3000(PlanQuery), Error during planning: Cannot coerce arithmetic expression Timestamp(Millisecond, None) % Int64 to valid types
+Error: 1003(Internal), Error during planning: Sort operation is not applicable to scalar value -1
 
 SELECT a % 2, b FROM test UNION SELECT a % 2 AS k FROM test ORDER BY -1;
 
-Error: 3000(PlanQuery), Error during planning: Cannot coerce arithmetic expression Timestamp(Millisecond, None) % Int64 to valid types
+Error: 3000(PlanQuery), Error during planning: Union queries must have the same number of columns, (left is 2, right is 1)
 
 DROP TABLE test;
 

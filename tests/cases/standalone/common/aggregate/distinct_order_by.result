@@ -1,14 +1,19 @@
-CREATE TABLE integers(i TIMESTAMP TIME INDEX);
+CREATE TABLE integers(i bigint, ts TIMESTAMP TIME INDEX);
 
 Affected Rows: 0
 
-INSERT INTO integers VALUES (1), (2), (3);
+INSERT INTO integers VALUES (1, 1), (2, 2), (3, 3);
 
 Affected Rows: 3
 
 SELECT DISTINCT i%2 FROM integers ORDER BY 1;
 
-Error: 3000(PlanQuery), Error during planning: Cannot coerce arithmetic expression Timestamp(Millisecond, None) % Int64 to valid types
++-----------------------+
+| integers.i % Int64(2) |
++-----------------------+
+| 0                     |
+| 1                     |
++-----------------------+
 
 -- TODO(LFC): Failed to run under new DataFusion
 -- expected:
@@ -20,41 +25,41 @@ Error: 3000(PlanQuery), Error during planning: Cannot coerce arithmetic expressi
 --  +-----------------------+
 SELECT DISTINCT i % 2 FROM integers WHERE i<3 ORDER BY i;
 
-Error: 3000(PlanQuery), Error during planning: Cannot coerce arithmetic expression Timestamp(Millisecond, None) % Int64 to valid types
+Error: 3000(PlanQuery), Error during planning: For SELECT DISTINCT, ORDER BY expressions i must appear in select list
 
 SELECT DISTINCT ON (1) i % 2, i FROM integers WHERE i<3 ORDER BY i;
 
-Error: 3000(PlanQuery), Error during planning: Cannot coerce arithmetic expression Timestamp(Millisecond, None) % Int64 to valid types
+Error: 3000(PlanQuery), This feature is not implemented: DISTINCT ON Exprs not supported
 
 SELECT DISTINCT integers.i FROM integers ORDER BY i DESC;
 
-+-------------------------+
-| i                       |
-+-------------------------+
-| 1970-01-01T00:00:00.003 |
-| 1970-01-01T00:00:00.002 |
-| 1970-01-01T00:00:00.001 |
-+-------------------------+
++---+
+| i |
++---+
+| 3 |
+| 2 |
+| 1 |
++---+
 
 SELECT DISTINCT i FROM integers ORDER BY integers.i DESC;
 
-+-------------------------+
-| i                       |
-+-------------------------+
-| 1970-01-01T00:00:00.003 |
-| 1970-01-01T00:00:00.002 |
-| 1970-01-01T00:00:00.001 |
-+-------------------------+
++---+
+| i |
++---+
+| 3 |
+| 2 |
+| 1 |
++---+
 
 SELECT DISTINCT integers.i FROM integers ORDER BY integers.i DESC;
 
-+-------------------------+
-| i                       |
-+-------------------------+
-| 1970-01-01T00:00:00.003 |
-| 1970-01-01T00:00:00.002 |
-| 1970-01-01T00:00:00.001 |
-+-------------------------+
++---+
+| i |
++---+
+| 3 |
+| 2 |
+| 1 |
++---+
 
 DROP TABLE integers;
 

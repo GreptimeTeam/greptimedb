@@ -1,101 +1,213 @@
-CREATE TABLE test (a BIGINT, b INTEGER, time index(a));
+CREATE TABLE test (a INTEGER, b INTEGER, ts TIMESTAMP TIME INDEX);
 
-Error: 1004(InvalidArguments), Invalid column option, column name: a, error: time index column data type should be timestamp
+Affected Rows: 0
 
-INSERT INTO test VALUES (11, 22), (12, 21), (13, 22);
+INSERT INTO test VALUES (11, 22, 1), (12, 21, 2), (13, 22, 3);
 
-Error: 4001(TableNotFound), Table not found: greptime.public.test
+Affected Rows: 3
 
 select b from test where a = 12;
 
-Error: 3000(PlanQuery), Error during planning: Table not found: greptime.public.test
++----+
+| b  |
++----+
+| 21 |
++----+
 
 SELECT b FROM test ORDER BY a DESC;
 
-Error: 3000(PlanQuery), Error during planning: Table not found: greptime.public.test
++----+
+| b  |
++----+
+| 22 |
+| 21 |
+| 22 |
++----+
 
 SELECT a, b FROM test ORDER BY a;
 
-Error: 3000(PlanQuery), Error during planning: Table not found: greptime.public.test
++----+----+
+| a  | b  |
++----+----+
+| 11 | 22 |
+| 12 | 21 |
+| 13 | 22 |
++----+----+
 
 SELECT a, b FROM test ORDER BY a DESC;
 
-Error: 3000(PlanQuery), Error during planning: Table not found: greptime.public.test
++----+----+
+| a  | b  |
++----+----+
+| 13 | 22 |
+| 12 | 21 |
+| 11 | 22 |
++----+----+
 
 SELECT a, b FROM test ORDER BY b, a;
 
-Error: 3000(PlanQuery), Error during planning: Table not found: greptime.public.test
++----+----+
+| a  | b  |
++----+----+
+| 12 | 21 |
+| 11 | 22 |
+| 13 | 22 |
++----+----+
 
 SELECT a, b FROM test ORDER BY 2, 1;
 
-Error: 3000(PlanQuery), Error during planning: Table not found: greptime.public.test
++----+----+
+| a  | b  |
++----+----+
+| 12 | 21 |
+| 11 | 22 |
+| 13 | 22 |
++----+----+
 
 SELECT a, b FROM test ORDER BY b DESC, a;
 
-Error: 3000(PlanQuery), Error during planning: Table not found: greptime.public.test
++----+----+
+| a  | b  |
++----+----+
+| 11 | 22 |
+| 13 | 22 |
+| 12 | 21 |
++----+----+
 
 SELECT a, b FROM test ORDER BY b, a DESC;
 
-Error: 3000(PlanQuery), Error during planning: Table not found: greptime.public.test
++----+----+
+| a  | b  |
++----+----+
+| 12 | 21 |
+| 13 | 22 |
+| 11 | 22 |
++----+----+
 
 SELECT a, b FROM test ORDER BY b, a DESC LIMIT 1;
 
-Error: 3000(PlanQuery), Error during planning: Table not found: greptime.public.test
++----+----+
+| a  | b  |
++----+----+
+| 12 | 21 |
++----+----+
 
 SELECT a, b FROM test ORDER BY b, a DESC LIMIT 1 OFFSET 1;
 
-Error: 3000(PlanQuery), Error during planning: Table not found: greptime.public.test
++----+----+
+| a  | b  |
++----+----+
+| 13 | 22 |
++----+----+
 
 SELECT a, b FROM test ORDER BY b, a DESC OFFSET 1;
 
-Error: 3000(PlanQuery), Error during planning: Table not found: greptime.public.test
++----+----+
+| a  | b  |
++----+----+
+| 13 | 22 |
+| 11 | 22 |
++----+----+
 
 SELECT a, b FROM test WHERE a < 13 ORDER BY b;
 
-Error: 3000(PlanQuery), Error during planning: Table not found: greptime.public.test
++----+----+
+| a  | b  |
++----+----+
+| 12 | 21 |
+| 11 | 22 |
++----+----+
 
 SELECT a, b FROM test WHERE a < 13 ORDER BY 2;
 
-Error: 3000(PlanQuery), Error during planning: Table not found: greptime.public.test
++----+----+
+| a  | b  |
++----+----+
+| 12 | 21 |
+| 11 | 22 |
++----+----+
 
 SELECT a, b FROM test WHERE a < 13 ORDER BY b DESC;
 
-Error: 3000(PlanQuery), Error during planning: Table not found: greptime.public.test
++----+----+
+| a  | b  |
++----+----+
+| 11 | 22 |
+| 12 | 21 |
++----+----+
 
 SELECT b, a FROM test WHERE a < 13 ORDER BY b DESC;
 
-Error: 3000(PlanQuery), Error during planning: Table not found: greptime.public.test
++----+----+
+| b  | a  |
++----+----+
+| 22 | 11 |
+| 21 | 12 |
++----+----+
 
 SELECT b % 2 AS f, SUM(a) FROM test GROUP BY f ORDER BY b % 2;
 
-Error: 3000(PlanQuery), Error during planning: Table not found: greptime.public.test
++---+-------------+
+| f | SUM(test.a) |
++---+-------------+
+| 0 | 24          |
+| 1 | 12          |
++---+-------------+
 
 SELECT b % 2 AS f, a FROM test ORDER BY b % 2, a;
 
-Error: 3000(PlanQuery), Error during planning: Table not found: greptime.public.test
++---+----+
+| f | a  |
++---+----+
+| 0 | 11 |
+| 0 | 13 |
+| 1 | 12 |
++---+----+
 
 SELECT b % 2 AS f, SUM(a) FROM test GROUP BY f ORDER BY f;
 
-Error: 3000(PlanQuery), Error during planning: Table not found: greptime.public.test
++---+-------------+
+| f | SUM(test.a) |
++---+-------------+
+| 0 | 24          |
+| 1 | 12          |
++---+-------------+
 
 SELECT b % 2 AS f, SUM(a) FROM test GROUP BY f ORDER BY 1;
 
-Error: 3000(PlanQuery), Error during planning: Table not found: greptime.public.test
++---+-------------+
+| f | SUM(test.a) |
++---+-------------+
+| 0 | 24          |
+| 1 | 12          |
++---+-------------+
 
 SELECT a-10 AS k FROM test UNION SELECT a-10 AS l FROM test ORDER BY k;
 
-Error: 3000(PlanQuery), Error during planning: Table not found: greptime.public.test
++---+
+| k |
++---+
+| 1 |
+| 2 |
+| 3 |
++---+
 
 -- ORDER BY on alias in right-most query
 -- CONTROVERSIAL: SQLite allows both "k" and "l" to be referenced here, Postgres and MonetDB give an error.
 SELECT a-10 AS k FROM test UNION SELECT a-10 AS l FROM test ORDER BY l;
 
-Error: 3000(PlanQuery), Error during planning: Table not found: greptime.public.test
+Error: 3000(PlanQuery), No field named l. Valid fields are k.
 
 -- Not compatible with duckdb, work in gretimedb
 SELECT a-10 AS k FROM test UNION SELECT a-10 AS l FROM test ORDER BY 1-k;
 
-Error: 3000(PlanQuery), Error during planning: Table not found: greptime.public.test
++---+
+| k |
++---+
+| 3 |
+| 2 |
+| 1 |
++---+
 
 -- Not compatible with duckdb, give an error in greptimedb
 -- TODO(LFC): Failed to meet the expected error:
@@ -103,7 +215,7 @@ Error: 3000(PlanQuery), Error during planning: Table not found: greptime.public.
 --   Error: 3000(PlanQuery), Schema error: No field named 'a'. Valid fields are 'k'.
 SELECT a-10 AS k FROM test UNION SELECT a-10 AS l FROM test ORDER BY a-10;
 
-Error: 3000(PlanQuery), Error during planning: Table not found: greptime.public.test
+Error: 3000(PlanQuery), Error during planning: For SELECT DISTINCT, ORDER BY expressions a must appear in select list
 
 -- Not compatible with duckdb, give an error in greptimedb
 -- TODO(LFC): Failed to meet the expected error:
@@ -111,9 +223,9 @@ Error: 3000(PlanQuery), Error during planning: Table not found: greptime.public.
 --   Error: 3000(PlanQuery), Schema error: No field named 'a'. Valid fields are 'k'.
 SELECT a-10 AS k FROM test UNION SELECT a-11 AS l FROM test ORDER BY a-11;
 
-Error: 3000(PlanQuery), Error during planning: Table not found: greptime.public.test
+Error: 3000(PlanQuery), Error during planning: For SELECT DISTINCT, ORDER BY expressions a must appear in select list
 
 DROP TABLE test;
 
-Error: 4001(TableNotFound), Table not found: greptime.public.test
+Affected Rows: 1
 

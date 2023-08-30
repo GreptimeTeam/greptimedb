@@ -1,48 +1,52 @@
-CREATE TABLE strings(i STRING, t BIGINT, time index(t));
+CREATE TABLE strings(i STRING, t TIMESTAMP, time index(t));
 
-Error: 1004(InvalidArguments), Invalid column option, column name: t, error: time index column data type should be timestamp
+Affected Rows: 0
 
 INSERT INTO strings VALUES ('â‚(', 1);
 
-Error: 4001(TableNotFound), Table not found: greptime.public.strings
+Affected Rows: 1
 
 INSERT INTO strings VALUES (3, 4);
 
-Error: 4001(TableNotFound), Table not found: greptime.public.strings
+Error: 2000(InvalidSyntax), Failed to parse value: Fail to parse number 3, invalid column type: String(StringType)
 
 SELECT * FROM strings WHERE i = 'â‚(';
 
-Error: 3000(PlanQuery), Error during planning: Table not found: greptime.public.strings
++-----+-------------------------+
+| i   | t                       |
++-----+-------------------------+
+| â‚( | 1970-01-01T00:00:00.001 |
++-----+-------------------------+
 
-CREATE TABLE a(i integer, j BIGINT, time index(j));
+CREATE TABLE a(i integer, j TIMESTAMP, time index(j));
 
-Error: 1004(InvalidArguments), Invalid column option, column name: j, error: time index column data type should be timestamp
+Affected Rows: 0
 
 INSERT INTO a VALUES (1, 2);
 
-Error: 4001(TableNotFound), Table not found: greptime.public.a
+Affected Rows: 1
 
 INSERT INTO a VALUES (1);
 
-Error: 4001(TableNotFound), Table not found: greptime.public.a
+Error: 1004(InvalidArguments), Columns and values number mismatch, columns: 2, values: 1
 
 INSERT INTO a VALUES (1,2,3);
 
-Error: 4001(TableNotFound), Table not found: greptime.public.a
+Error: 1004(InvalidArguments), Columns and values number mismatch, columns: 2, values: 3
 
 INSERT INTO a VALUES (1,2),(3);
 
-Error: 4001(TableNotFound), Table not found: greptime.public.a
+Error: 1004(InvalidArguments), Columns and values number mismatch, columns: 2, values: 1
 
 INSERT INTO a VALUES (1,2),(3,4,5);
 
-Error: 4001(TableNotFound), Table not found: greptime.public.a
+Error: 1004(InvalidArguments), Columns and values number mismatch, columns: 2, values: 3
 
 DROP TABLE strings;
 
-Error: 4001(TableNotFound), Table not found: greptime.public.strings
+Affected Rows: 1
 
 DROP TABLE a;
 
-Error: 4001(TableNotFound), Table not found: greptime.public.a
+Affected Rows: 1
 
