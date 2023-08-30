@@ -38,7 +38,7 @@ impl<S> RegionWorkerLoop<S> {
             return RegionNotFoundSnafu { region_id }.fail();
         };
 
-        info!("Try to drop region {}", region_id);
+        info!("Try to drop region: {}", region_id);
         region.stop().await?;
 
         // write dropping marker
