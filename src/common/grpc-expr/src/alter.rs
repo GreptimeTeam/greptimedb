@@ -186,9 +186,9 @@ fn parse_location(location: Option<Location>) -> Result<Option<AddColumnLocation
         }) => Ok(Some(AddColumnLocation::First)),
         Some(Location {
             location_type: LOCATION_TYPE_AFTER,
-            after_cloumn_name,
+            after_column_name,
         }) => Ok(Some(AddColumnLocation::After {
-            column_name: after_cloumn_name,
+            column_name: after_column_name,
         })),
         Some(Location { location_type, .. }) => UnknownLocationTypeSnafu { location_type }.fail(),
         None => Ok(None),

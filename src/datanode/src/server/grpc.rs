@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use api::v1::{
-    AlterExpr, CompactTableExpr, CreateTableExpr, DropTableExpr, FlushTableExpr, TruncateTableExpr,
+    AlterExpr, CreateTableExpr, DropTableExpr, TruncateTableExpr,
 };
 use common_catalog::consts::IMMUTABLE_FILE_ENGINE;
 use common_catalog::format_full_table_name;
@@ -22,8 +22,7 @@ use common_query::Output;
 use common_telemetry::info;
 use session::context::QueryContextRef;
 use snafu::prelude::*;
-use table::requests::{
-    CompactTableRequest, DropTableRequest, FlushTableRequest, TruncateTableRequest,
+use table::requests::{DropTableRequest, TruncateTableRequest,
 };
 
 use crate::error::{
@@ -134,52 +133,6 @@ impl Instance {
         };
         self.sql_handler()
             .execute(SqlRequest::DropTable(req), ctx)
-            .await
-    }
-
-    pub(crate) async fn handle_flush_table(
-        &self,
-        expr: FlushTableExpr,
-        ctx: QueryContextRef,
-    ) -> Result<Output> {
-        let table_name = if expr.table_name.trim().is_empty() {
-            None
-        } else {
-            Some(expr.table_name)
-        };
-
-        let req = FlushTableRequest {
-            catalog_name: expr.catalog_name,
-            schema_name: expr.schema_name,
-            table_name,
-            region_number: expr.region_number,
-            wait: None,
-        };
-        self.sql_handler()
-            .execute(SqlRequest::FlushTable(req), ctx)
-            .await
-    }
-
-    pub(crate) async fn handle_compact_table(
-        &self,
-        expr: CompactTableExpr,
-        ctx: QueryContextRef,
-    ) -> Result<Output> {
-        let table_name = if expr.table_name.trim().is_empty() {
-            None
-        } else {
-            Some(expr.table_name)
-        };
-
-        let req = CompactTableRequest {
-            catalog_name: expr.catalog_name,
-            schema_name: expr.schema_name,
-            table_name,
-            region_number: expr.region_number,
-            wait: None,
-        };
-        self.sql_handler()
-            .execute(SqlRequest::CompactTable(req), ctx)
             .await
     }
 

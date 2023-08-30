@@ -146,7 +146,7 @@ impl MergeScanExec {
         let peers = self.peers.clone();
         let clients = self.clients.clone();
         let table = self.table.clone();
-        let trace_id = context.task_id().and_then(|id| id.parse().ok());
+        let trace_id = context.task_id().and_then(|id| id.parse().ok()).unwrap_or_default();
         let metric = MergeScanMetric::new(&self.metric);
 
         let stream = Box::pin(stream!({
