@@ -630,7 +630,7 @@ fn validate_time_index(create_table: &CreateTable) -> Result<()> {
         .columns
         .iter()
         .find(|c| c.name.value == *time_index_column_ident.value)
-        .context(InvalidTimeIndexSnafu {
+        .with_context(|| InvalidTimeIndexSnafu {
             msg: format!(
                 "time index column {} not found in columns",
                 time_index_column_ident
