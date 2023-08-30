@@ -31,9 +31,9 @@ use crate::sst::parquet::{SstInfo, WriteOptions, PARQUET_METADATA_KEY};
 use crate::sst::stream_writer::BufferedWriter;
 
 /// Parquet SST writer.
-pub struct ParquetWriter<'a> {
+pub struct ParquetWriter {
     /// SST output file path.
-    file_path: &'a str,
+    file_path: String,
     /// Input data source.
     source: Source,
     /// Region metadata of the source and the target SST.
@@ -41,10 +41,10 @@ pub struct ParquetWriter<'a> {
     object_store: ObjectStore,
 }
 
-impl<'a> ParquetWriter<'a> {
+impl ParquetWriter {
     /// Creates a new parquet SST writer.
     pub fn new(
-        file_path: &'a str,
+        file_path: String,
         metadata: RegionMetadataRef,
         source: Source,
         object_store: ObjectStore,
@@ -87,7 +87,7 @@ impl<'a> ParquetWriter<'a> {
 
         let write_format = WriteFormat::new(self.metadata.clone());
         let mut buffered_writer = BufferedWriter::try_new(
-            self.file_path.to_string(),
+            self.file_path.clone(),
             self.object_store.clone(),
             write_format.arrow_schema(),
             Some(writer_props),
