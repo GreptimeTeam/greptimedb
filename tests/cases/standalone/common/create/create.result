@@ -4,21 +4,21 @@ Error: 2000(InvalidSyntax), Missing time index constraint
 
 CREATE TABLE integers (i INT TIME INDEX);
 
-Error: 1004(InvalidArguments), Invalid column option, column name: i, error: time index column data type should be timestamp or bigint
+Error: 1004(InvalidArguments), Invalid column option, column name: i, error: time index column data type should be timestamp
 
-CREATE TABLE integers (i BIGINT TIME INDEX NULL);
+CREATE TABLE integers (i TIMESTAMP TIME INDEX NULL);
 
 Error: 1004(InvalidArguments), Invalid column option, column name: i, error: time index column can't be null
 
-CREATE TABLE integers (i BIGINT TIME INDEX, j BIGINT, TIME INDEX(j));
+CREATE TABLE integers (i TIMESTAMP TIME INDEX, j BIGINT, TIME INDEX(j));
 
 Error: 2000(InvalidSyntax), Invalid time index: expected only one time index constraint but actual 2
 
-CREATE TABLE integers (i BIGINT TIME INDEX, j BIGINT, TIME INDEX(i, j));
+CREATE TABLE integers (i TIMESTAMP TIME INDEX, j BIGINT, TIME INDEX(i, j));
 
 Error: 2000(InvalidSyntax), Invalid time index: it should contain only one column in time index
 
-CREATE TABLE integers (i BIGINT TIME INDEX);
+CREATE TABLE integers (i TIMESTAMP TIME INDEX);
 
 Affected Rows: 0
 
@@ -26,7 +26,7 @@ CREATE TABLE times (i TIMESTAMP TIME INDEX DEFAULT CURRENT_TIMESTAMP);
 
 Affected Rows: 0
 
-CREATE TABLE IF NOT EXISTS integers (i BIGINT TIME INDEX);
+CREATE TABLE IF NOT EXISTS integers (i TIMESTAMP TIME INDEX);
 
 Affected Rows: 0
 
@@ -34,43 +34,43 @@ CREATE TABLE test1 (i INTEGER, j INTEGER);
 
 Error: 2000(InvalidSyntax), Missing time index constraint
 
-CREATE TABLE test1 (i INTEGER, j BIGINT TIME INDEX NOT NULL);
+CREATE TABLE test1 (i INTEGER, j TIMESTAMP TIME INDEX NOT NULL);
 
 Affected Rows: 0
 
-CREATE TABLE test2 (i INTEGER, j BIGINT TIME INDEX NULL);
+CREATE TABLE test2 (i INTEGER, j TIMESTAMP TIME INDEX NULL);
 
 Error: 1004(InvalidArguments), Invalid column option, column name: j, error: time index column can't be null
 
-CREATE TABLE test2 (i INTEGER, j BIGINT TIME INDEX);
+CREATE TABLE test2 (i INTEGER, j TIMESTAMP TIME INDEX);
 
 Affected Rows: 0
 
 DESC TABLE integers;
 
-+--------+-------+-----+------+---------+---------------+
-| Column | Type  | Key | Null | Default | Semantic Type |
-+--------+-------+-----+------+---------+---------------+
-| i      | Int64 | PRI | NO   |         | TIMESTAMP     |
-+--------+-------+-----+------+---------+---------------+
++--------+----------------------+-----+------+---------+---------------+
+| Column | Type                 | Key | Null | Default | Semantic Type |
++--------+----------------------+-----+------+---------+---------------+
+| i      | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
++--------+----------------------+-----+------+---------+---------------+
 
 DESC TABLE test1;
 
-+--------+-------+-----+------+---------+---------------+
-| Column | Type  | Key | Null | Default | Semantic Type |
-+--------+-------+-----+------+---------+---------------+
-| i      | Int32 |     | YES  |         | FIELD         |
-| j      | Int64 | PRI | NO   |         | TIMESTAMP     |
-+--------+-------+-----+------+---------+---------------+
++--------+----------------------+-----+------+---------+---------------+
+| Column | Type                 | Key | Null | Default | Semantic Type |
++--------+----------------------+-----+------+---------+---------------+
+| i      | Int32                |     | YES  |         | FIELD         |
+| j      | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
++--------+----------------------+-----+------+---------+---------------+
 
 DESC TABLE test2;
 
-+--------+-------+-----+------+---------+---------------+
-| Column | Type  | Key | Null | Default | Semantic Type |
-+--------+-------+-----+------+---------+---------------+
-| i      | Int32 |     | YES  |         | FIELD         |
-| j      | Int64 | PRI | NO   |         | TIMESTAMP     |
-+--------+-------+-----+------+---------+---------------+
++--------+----------------------+-----+------+---------+---------------+
+| Column | Type                 | Key | Null | Default | Semantic Type |
++--------+----------------------+-----+------+---------+---------------+
+| i      | Int32                |     | YES  |         | FIELD         |
+| j      | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
++--------+----------------------+-----+------+---------+---------------+
 
 DROP TABLE integers;
 
@@ -88,33 +88,33 @@ DROP TABLE test2;
 
 Affected Rows: 1
 
-CREATE TABLE test_pk ("timestamp" BIGINT TIME INDEX, host STRING PRIMARY KEY, "value" DOUBLE);
+CREATE TABLE test_pk ("timestamp" TIMESTAMP TIME INDEX, host STRING PRIMARY KEY, "value" DOUBLE);
 
 Affected Rows: 0
 
 DESC TABLE test_pk;
 
-+-----------+---------+-----+------+---------+---------------+
-| Column    | Type    | Key | Null | Default | Semantic Type |
-+-----------+---------+-----+------+---------+---------------+
-| timestamp | Int64   | PRI | NO   |         | TIMESTAMP     |
-| host      | String  | PRI | YES  |         | TAG           |
-| value     | Float64 |     | YES  |         | FIELD         |
-+-----------+---------+-----+------+---------+---------------+
++-----------+----------------------+-----+------+---------+---------------+
+| Column    | Type                 | Key | Null | Default | Semantic Type |
++-----------+----------------------+-----+------+---------+---------------+
+| timestamp | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
+| host      | String               | PRI | YES  |         | TAG           |
+| value     | Float64              |     | YES  |         | FIELD         |
++-----------+----------------------+-----+------+---------+---------------+
 
 DROP TABLE test_pk;
 
 Affected Rows: 1
 
-CREATE TABLE test_multiple_pk_definitions ("timestamp" BIGINT TIME INDEX, host STRING PRIMARY KEY, "value" DOUBLE, PRIMARY KEY(host));
+CREATE TABLE test_multiple_pk_definitions ("timestamp" TIMESTAMP TIME INDEX, host STRING PRIMARY KEY, "value" DOUBLE, PRIMARY KEY(host));
 
 Error: 1004(InvalidArguments), Illegal primary keys definition: found definitions of primary keys in multiple places
 
-CREATE TABLE test_multiple_pk_definitions ("timestamp" BIGINT TIME INDEX, host STRING PRIMARY KEY, "value" DOUBLE, PRIMARY KEY(host), PRIMARY KEY(host));
+CREATE TABLE test_multiple_pk_definitions ("timestamp" TIMESTAMP TIME INDEX, host STRING PRIMARY KEY, "value" DOUBLE, PRIMARY KEY(host), PRIMARY KEY(host));
 
 Error: 1004(InvalidArguments), Illegal primary keys definition: found definitions of primary keys in multiple places
 
-CREATE TABLE test_multiple_inline_pk_definitions ("timestamp" BIGINT TIME INDEX, host STRING PRIMARY KEY, "value" DOUBLE PRIMARY KEY);
+CREATE TABLE test_multiple_inline_pk_definitions ("timestamp" TIMESTAMP TIME INDEX, host STRING PRIMARY KEY, "value" DOUBLE PRIMARY KEY);
 
 Error: 1004(InvalidArguments), Illegal primary keys definition: not allowed to inline multiple primary keys in columns options
 
