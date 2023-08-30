@@ -365,6 +365,7 @@ mod test {
             expr: Some(DdlExpr::CreateDatabase(CreateDatabaseExpr {
                 database_name: "my_database".to_string(),
                 create_if_not_exists: true,
+                options: Default::default(),
             })),
         });
         let output = instance.do_query(query, QueryContext::arc()).await.unwrap();
@@ -418,6 +419,7 @@ mod test {
             expr: Some(DdlExpr::CreateDatabase(CreateDatabaseExpr {
                 database_name: "my_database".to_string(),
                 create_if_not_exists: true,
+                options: Default::default(),
             })),
         });
         let output = instance.do_query(query, QueryContext::arc()).await.unwrap();
@@ -485,6 +487,7 @@ mod test {
             expr: Some(DdlExpr::CreateDatabase(CreateDatabaseExpr {
                 database_name: "my_database".to_string(),
                 create_if_not_exists: true,
+                options: Default::default(),
             })),
         });
         let output = instance.do_query(query, QueryContext::arc()).await.unwrap();
@@ -589,6 +592,7 @@ mod test {
             expr: Some(DdlExpr::CreateDatabase(CreateDatabaseExpr {
                 database_name: "my_database".to_string(),
                 create_if_not_exists: true,
+                options: Default::default(),
             })),
         });
         let output = instance.do_query(query, QueryContext::arc()).await.unwrap();
@@ -661,6 +665,7 @@ mod test {
             expr: Some(DdlExpr::CreateDatabase(CreateDatabaseExpr {
                 database_name: "my_database".to_string(),
                 create_if_not_exists: true,
+                options: Default::default(),
             })),
         });
         let output = instance.do_query(query, QueryContext::arc()).await.unwrap();

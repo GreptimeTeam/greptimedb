@@ -1837,6 +1837,7 @@ dependencies = [
  "datatypes",
  "etcd-client",
  "futures",
+ "humantime-serde",
  "hyper",
  "lazy_static",
  "prost",
@@ -4154,7 +4155,7 @@ checksum = "d2fabcfbdc87f4758337ca535fb41a6d701b65693ce38287d856d1674551ec9b"
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=ec2d346e09a2f6db3b1d0aaf010e89ed8a69eccc#ec2d346e09a2f6db3b1d0aaf010e89ed8a69eccc"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=4a277f27caa035a801d5b9c020a0449777736614#4a277f27caa035a801d5b9c020a0449777736614"
 dependencies = [
  "prost",
  "serde",

@@ -151,6 +151,7 @@ jobs:
           aws-access-key-id: ${{ secrets.AWS_CN_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_CN_SECRET_ACCESS_KEY }}
           aws-region: ${{ vars.AWS_RELEASE_BUCKET_REGION }}
+          upload-latest-artifacts: false
 
   build-linux-arm64-artifacts:
     name: Build linux-arm64 artifacts
@@ -174,6 +175,7 @@ jobs:
           aws-access-key-id: ${{ secrets.AWS_CN_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_CN_SECRET_ACCESS_KEY }}
           aws-region: ${{ vars.AWS_RELEASE_BUCKET_REGION }}
+          upload-latest-artifacts: false
 
   release-images-to-dockerhub:
     name: Build and push images to DockerHub

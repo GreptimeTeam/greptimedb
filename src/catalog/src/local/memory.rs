@@ -97,26 +97,7 @@ impl CatalogManager for MemoryCatalogManager {
     }
 
     async fn deregister_table(&self, request: DeregisterTableRequest) -> Result<()> {
-        let mut catalogs = self.catalogs.write().unwrap();
-        let schema = catalogs
-            .get_mut(&request.catalog)
-            .with_context(|| CatalogNotFoundSnafu {
-                catalog_name: &request.catalog,
-            })?
-            .get_mut(&request.schema)
-            .with_context(|| SchemaNotFoundSnafu {
-                catalog: &request.catalog,
-                schema: &request.schema,
-            })?;
-        let result = schema.remove(&request.table_name);
-        if result.is_some() {
-            decrement_gauge!(
-                crate::metrics::METRIC_CATALOG_MANAGER_TABLE_COUNT,
-                1.0,
-                &[crate::metrics::db_label(&request.catalog, &request.schema)],
-            );
-        }
-        Ok(())
+        self.deregister_table_sync(request)
     }
 
     async fn register_schema(&self, request: RegisterSchemaRequest) -> Result<bool> {
@@ -157,15 +138,7 @@ impl CatalogManager for MemoryCatalogManager {
     }
 
     async fn schema_exist(&self, catalog: &str, schema: &str) -> Result<bool> {
-        Ok(self
-            .catalogs
-            .read()
-            .unwrap()
-            .get(catalog)
-            .with_context(|| CatalogNotFoundSnafu {
-                catalog_name: catalog,
-            })?
-            .contains_key(schema))
+        self.schema_exist_sync(catalog, schema)
     }
 
     async fn table(
@@ -187,7 +160,7 @@ impl CatalogManager for MemoryCatalogManager {
     }
 
     async fn catalog_exist(&self, catalog: &str) -> Result<bool> {
-        Ok(self.catalogs.read().unwrap().get(catalog).is_some())
+        self.catalog_exist_sync(catalog)
     }
 
     async fn table_exist(&self, catalog: &str, schema: &str, table: &str) -> Result<bool> {
@@ -267,6 +240,22 @@ impl MemoryCatalogManager {
         manager
     }
 
+    fn schema_exist_sync(&self, catalog: &str, schema: &str) -> Result<bool> {
+        Ok(self
+            .catalogs
+            .read()
+            .unwrap()
+            .get(catalog)
+            .with_context(|| CatalogNotFoundSnafu {
+                catalog_name: catalog,
+            })?
+            .contains_key(schema))
+    }
+
+    fn catalog_exist_sync(&self, catalog: &str) -> Result<bool> {
+        Ok(self.catalogs.read().unwrap().get(catalog).is_some())
+    }
+
     /// Registers a catalog if it does not exist and returns false if the schema exists.
     pub fn register_catalog_sync(self: &Arc<Self>, name: String) -> Result<bool> {
         let mut catalogs = self.catalogs.write().unwrap();
@@ -280,6 +269,29 @@ impl MemoryCatalogManager {
             }
             Entry::Occupied(_) => Ok(false),
         }
+    }
+
+    pub fn deregister_table_sync(&self, request: DeregisterTableRequest) -> Result<()> {
+        let mut catalogs = self.catalogs.write().unwrap();
+        let schema = catalogs
+            .get_mut(&request.catalog)
+            .with_context(|| CatalogNotFoundSnafu {
+                catalog_name: &request.catalog,
+            })?
+            .get_mut(&request.schema)
+            .with_context(|| SchemaNotFoundSnafu {
+                catalog: &request.catalog,
+                schema: &request.schema,
+            })?;
+        let result = schema.remove(&request.table_name);
+        if result.is_some() {
+            decrement_gauge!(
+                crate::metrics::METRIC_CATALOG_MANAGER_TABLE_COUNT,
+                1.0,
+                &[crate::metrics::db_label(&request.catalog, &request.schema)],
+            );
+        }
+        Ok(())
     }
 
     /// Registers a schema if it does not exist.
@@ -345,9 +357,25 @@ impl MemoryCatalogManager {
     #[cfg(any(test, feature = "testing"))]
     pub fn new_with_table(table: TableRef) -> Arc<Self> {
         let manager = Self::with_default_setup();
+        let catalog = &table.table_info().catalog_name;
+        let schema = &table.table_info().schema_name;
+
+        if !manager.catalog_exist_sync(catalog).unwrap() {
+            manager.register_catalog_sync(catalog.to_string()).unwrap();
+        }
+
+        if !manager.schema_exist_sync(catalog, schema).unwrap() {
+            manager
+                .register_schema_sync(RegisterSchemaRequest {
+                    catalog: catalog.to_string(),
+                    schema: schema.to_string(),
+                })
+                .unwrap();
+        }
+
         let request = RegisterTableRequest {
-            catalog: DEFAULT_CATALOG_NAME.to_string(),
-            schema: DEFAULT_SCHEMA_NAME.to_string(),
+            catalog: catalog.to_string(),
+            schema: schema.to_string(),
             table_name: table.table_info().name.clone(),
             table_id: table.table_info().ident.table_id,
             table,

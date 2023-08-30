@@ -20,6 +20,7 @@ use api::v1::greptime_request::Request as GrpcRequest;
 use api::v1::meta::HeartbeatResponse;
 use api::v1::query_request::Query;
 use api::v1::QueryRequest;
+use catalog::local::MemoryCatalogManager;
 use catalog::remote::region_alive_keeper::RegionAliveKeepers;
 use catalog::CatalogManagerRef;
 use common_meta::heartbeat::handler::{
@@ -160,8 +161,10 @@ async fn test_open_region_handler() {
     let table_ident = &region_ident.table_ident;
 
     let table = prepare_table(instance.inner()).await;
+
+    let dummy_catalog_manager = MemoryCatalogManager::with_default_setup();
     region_alive_keepers
-        .register_table(table_ident.clone(), table)
+        .register_table(table_ident.clone(), table, dummy_catalog_manager)
         .await
         .unwrap();
 

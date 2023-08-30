@@ -69,6 +69,7 @@ mod test {
             expr: Some(DdlExpr::CreateDatabase(CreateDatabaseExpr {
                 database_name: "database_created_through_grpc".to_string(),
                 create_if_not_exists: true,
+                options: Default::default(),
             })),
         });
         let output = query(instance, request).await;
