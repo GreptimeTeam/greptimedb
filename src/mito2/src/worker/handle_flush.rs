@@ -107,7 +107,7 @@ impl<S> RegionWorkerLoop<S> {
 
             if region.last_flush_millis() < min_last_flush_time {
                 // If flush time of this region is earlier than `min_last_flush_time`, we can flush this region.
-                let task = self.new_flush_task(region.region_id, FlushReason::EngineFull);
+                let task = self.new_flush_task(region, FlushReason::EngineFull);
                 self.flush_scheduler.schedule_flush(region, task)?;
             }
         }
@@ -115,7 +115,7 @@ impl<S> RegionWorkerLoop<S> {
         // Flush memtable with max mutable memtable.
         if let Some(region) = max_mem_region {
             if !self.flush_scheduler.is_flush_requested(region.region_id) {
-                let task = self.new_flush_task(region.region_id, FlushReason::EngineFull);
+                let task = self.new_flush_task(region, FlushReason::EngineFull);
                 self.flush_scheduler.schedule_flush(region, task)?;
             }
         }
@@ -123,13 +123,13 @@ impl<S> RegionWorkerLoop<S> {
         Ok(())
     }
 
-    fn new_flush_task(&self, region_id: RegionId, reason: FlushReason) -> RegionFlushTask {
+    fn new_flush_task(&self, region: &MitoRegionRef, reason: FlushReason) -> RegionFlushTask {
         RegionFlushTask {
-            region_id,
+            region_id: region.region_id,
             reason,
             sender: None,
             request_sender: self.sender.clone(),
-            object_store: self.object_store.clone(),
+            access_layer: region.access_layer.clone(),
             memtable_builder: self.memtable_builder.clone(),
         }
     }

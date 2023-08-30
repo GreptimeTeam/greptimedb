@@ -17,13 +17,14 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
-use common_telemetry::error;
-use object_store::ObjectStore;
+use common_telemetry::{error, info};
 use store_api::storage::{RegionId, ScanRequest};
 use tokio::sync::{mpsc, oneshot};
 
+use crate::access_layer::AccessLayerRef;
 use crate::error::{Error, Result};
-use crate::memtable::{MemtableBuilderRef, MemtableRef};
+use crate::memtable::MemtableBuilderRef;
+use crate::read::Source;
 use crate::region::version::VersionRef;
 use crate::region::MitoRegionRef;
 use crate::request::{
@@ -32,6 +33,7 @@ use crate::request::{
 };
 use crate::schedule::scheduler::{Job, SchedulerRef};
 use crate::sst::file::{FileId, FileMeta};
+use crate::sst::parquet::WriteOptions;
 
 /// Global write buffer (memtable) manager.
 ///
@@ -100,7 +102,7 @@ pub(crate) struct RegionFlushTask {
     /// Request sender to notify the worker.
     pub(crate) request_sender: mpsc::Sender<WorkerRequest>,
 
-    pub(crate) object_store: ObjectStore,
+    pub(crate) access_layer: AccessLayerRef,
     pub(crate) memtable_builder: MemtableBuilderRef,
 }
 
@@ -125,8 +127,7 @@ impl RegionFlushTask {
 
     /// Runs the flush task.
     async fn do_flush(mut self, version: VersionRef) {
-        let immutables = version.memtables.immutables();
-        let worker_request = match self.flush_memtables(immutables).await {
+        let worker_request = match self.flush_memtables(&version).await {
             Ok(file_metas) => {
                 let flush_finished = FlushFinished {
                     file_metas,
@@ -149,8 +150,13 @@ impl RegionFlushTask {
         self.send_worker_request(worker_request).await;
     }
 
-    /// Flushes memtables to SSTs.
-    async fn flush_memtables(&self, memtables: &[MemtableRef]) -> Result<Vec<FileMeta>> {
+    /// Flushes memtables to level 0 SSTs.
+    async fn flush_memtables(&self, version: &VersionRef) -> Result<Vec<FileMeta>> {
+        // TODO(yingwen): Make it configurable.
+        let write_opts = WriteOptions::default();
+        let memtables = version.memtables.immutables();
+        let mut file_metas = Vec::with_capacity(memtables.len());
+
         for mem in memtables {
             if mem.is_empty() {
                 // Skip empty memtables.
@@ -159,10 +165,31 @@ impl RegionFlushTask {
 
             let file_id = FileId::random();
             let iter = mem.iter(ScanRequest::default());
-            // TODO(yingwen): Get access layer.
+            let source = Source::Iter(iter);
+            let mut writer = self
+                .access_layer
+                .write_sst(file_id, version.metadata.clone(), source);
+            let Some(sst_info) = writer.write_all(&write_opts).await? else {
+                // No data written.
+                continue;
+            };
+
+            file_metas.push(FileMeta {
+                region_id: version.metadata.region_id,
+                file_id,
+                time_range: sst_info.time_range,
+                level: 0,
+                file_size: sst_info.file_size,
+            });
         }
 
-        todo!()
+        let file_ids: Vec<_> = file_metas.iter().map(|f| f.file_id).collect();
+        info!(
+            "Successfully flush memtables, region: {}, files: {:?}",
+            version.metadata.region_id, file_ids
+        );
+
+        Ok(file_metas)
     }
 
     /// Notify flush job status.
