@@ -163,7 +163,13 @@ impl SchemaManager {
         let raw_key = schema.as_raw_key();
         let value = self.kv_backend.get(&raw_key).await?;
         value
-            .map(|v| SchemaNameValue::try_from_raw_value(v.value.as_ref()))
+            .map(|v| {
+                if v.value.is_empty() {
+                    Ok(SchemaNameValue::default())
+                } else {
+                    SchemaNameValue::try_from_raw_value(v.value.as_ref())
+                }
+            })
             .transpose()
     }
 
