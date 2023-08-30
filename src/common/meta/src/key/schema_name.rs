@@ -164,7 +164,7 @@ impl SchemaManager {
         let value = self.kv_backend.get(&raw_key).await?;
         value
             .map(|v| {
-                if v.value.is_empty() {
+                if v.value.is_empty() || v.value == "null".as_bytes() {
                     Ok(SchemaNameValue::default())
                 } else {
                     SchemaNameValue::try_from_raw_value(v.value.as_ref())
