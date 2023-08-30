@@ -15,6 +15,14 @@
 //! Mito region engine.
 
 #[cfg(test)]
+mod close_test;
+#[cfg(test)]
+mod create_test;
+#[cfg(test)]
+mod drop_test;
+#[cfg(test)]
+mod open_test;
+#[cfg(test)]
 mod tests;
 
 use std::sync::Arc;

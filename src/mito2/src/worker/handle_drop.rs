@@ -28,9 +28,8 @@ use tokio::time::sleep;
 
 use crate::error::{OpenDalSnafu, RegionNotFoundSnafu, Result};
 use crate::region::RegionMapRef;
-use crate::worker::RegionWorkerLoop;
+use crate::worker::{RegionWorkerLoop, DROPPING_MARKER_FILE};
 
-pub(crate) const DROPPING_MARKER_FILE: &str = ".dropping";
 const GC_TASK_INTERVAL_SEC: u64 = 5 * 60;
 
 impl<S> RegionWorkerLoop<S> {

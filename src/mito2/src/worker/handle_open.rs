@@ -26,8 +26,7 @@ use store_api::storage::RegionId;
 
 use crate::error::{OpenDalSnafu, RegionNotFoundSnafu, Result};
 use crate::region::opener::RegionOpener;
-use crate::worker::handle_drop::DROPPING_MARKER_FILE;
-use crate::worker::RegionWorkerLoop;
+use crate::worker::{RegionWorkerLoop, DROPPING_MARKER_FILE};
 
 impl<S: LogStore> RegionWorkerLoop<S> {
     pub(crate) async fn handle_open_request(

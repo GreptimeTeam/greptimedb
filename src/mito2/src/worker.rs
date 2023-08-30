@@ -48,6 +48,8 @@ use crate::wal::Wal;
 /// Identifier for a worker.
 pub(crate) type WorkerId = u32;
 
+pub(crate) const DROPPING_MARKER_FILE: &str = ".dropping";
+
 #[cfg_attr(doc, aquamarine::aquamarine)]
 /// A fixed size group of [RegionWorkers](RegionWorker).
 ///
@@ -392,10 +394,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 DdlRequest::Create(req) => self.handle_create_request(ddl.region_id, req).await,
                 DdlRequest::Open(req) => self.handle_open_request(ddl.region_id, req).await,
                 DdlRequest::Close(_) => self.handle_close_request(ddl.region_id).await,
-                DdlRequest::Alter(_)
-                | DdlRequest::Drop(_)
-                | DdlRequest::Flush(_)
-                | DdlRequest::Compact(_) => todo!(),
+                DdlRequest::Drop(_) => self.handle_drop_request(ddl.region_id).await,
+                DdlRequest::Alter(_) | DdlRequest::Flush(_) | DdlRequest::Compact(_) => todo!(),
             };
 
             if let Some(sender) = ddl.sender {
