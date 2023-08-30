@@ -882,7 +882,7 @@ fn create_table_info(
 }
 
 fn merge_options(mut table_opts: TableOptions, schema_opts: SchemaNameValue) -> TableOptions {
-    table_opts.ttl = schema_opts.ttl.or(table_opts.ttl);
+    table_opts.ttl = table_opts.ttl.or(schema_opts.ttl);
     table_opts
 }
 
