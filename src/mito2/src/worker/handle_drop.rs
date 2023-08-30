@@ -27,9 +27,10 @@ use store_api::storage::RegionId;
 use tokio::time::sleep;
 
 use crate::error::{OpenDalSnafu, RegionNotFoundSnafu, Result};
+use crate::region::RegionMapRef;
 use crate::worker::RegionWorkerLoop;
 
-const DROPING_MARKER_FILE: &str = ".dropping";
+pub(crate) const DROPING_MARKER_FILE: &str = ".dropping";
 const GC_TASK_INTERVAL_SEC: u64 = 5 * 60;
 
 impl<S> RegionWorkerLoop<S> {
@@ -50,6 +51,7 @@ impl<S> RegionWorkerLoop<S> {
 
         // remove this region from region map to prevent other requests from accessing this region
         self.regions.remove_region(region_id);
+        self.dropping_regions.insert_region(region.clone());
 
         // mark region version as dropped
         region.version_control.mark_dropped();
@@ -61,8 +63,9 @@ impl<S> RegionWorkerLoop<S> {
         // detach a background task to delete the region dir
         let region_dir = region.region_dir.clone();
         let object_store = self.object_store.clone();
+        let dropping_regions = self.dropping_regions.clone();
         common_runtime::spawn_bg(async move {
-            later_drop_task(region_dir, object_store).await;
+            later_drop_task(region_id, region_dir, object_store, dropping_regions).await;
         });
 
         Ok(Output::AffectedRows(0))
@@ -75,7 +78,12 @@ impl<S> RegionWorkerLoop<S> {
 /// This task will keep running until finished. Any resource captured by it will
 /// not be released before then. Be sure to only pass weak reference if something
 /// is depended on ref-count machanism.
-async fn later_drop_task(region_path: String, object_store: ObjectStore) {
+async fn later_drop_task(
+    region_id: RegionId,
+    region_path: String,
+    object_store: ObjectStore,
+    dropping_regions: RegionMapRef,
+) {
     loop {
         let result: Result<()> = try {
             sleep(Duration::from_secs(GC_TASK_INTERVAL_SEC)).await;
@@ -100,6 +108,7 @@ async fn later_drop_task(region_path: String, object_store: ObjectStore) {
                     .delete(&region_path)
                     .await
                     .context(OpenDalSnafu)?;
+                dropping_regions.remove_region(region_id);
                 info!("Region {} is dropped", region_path);
             }
         };

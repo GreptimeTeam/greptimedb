@@ -188,6 +188,7 @@ impl RegionWorker {
         write_buffer_manager: WriteBufferManagerRef,
     ) -> RegionWorker {
         let regions = Arc::new(RegionMap::default());
+        let dropping_regions = Arc::new(RegionMap::default());
         let (sender, receiver) = mpsc::channel(config.worker_channel_size);
 
         let running = Arc::new(AtomicBool::new(true));
@@ -195,6 +196,7 @@ impl RegionWorker {
             id,
             config,
             regions: regions.clone(),
+            dropping_regions,
             receiver,
             wal: Wal::new(log_store),
             object_store,
@@ -291,6 +293,8 @@ struct RegionWorkerLoop<S> {
     config: Arc<MitoConfig>,
     /// Regions bound to the worker.
     regions: RegionMapRef,
+    /// Regions that are not yet fully dropped.
+    dropping_regions: RegionMapRef,
     /// Request receiver.
     receiver: Receiver<WorkerRequest>,
     /// WAL of the engine.

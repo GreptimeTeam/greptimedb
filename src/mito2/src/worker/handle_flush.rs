@@ -44,6 +44,7 @@ impl<S> RegionWorkerLoop<S> {
         // 2. write manifest
         // 3. update region metadata.
         // 4. handle all pending requests.
+        // 5. remove flushed files if the region is dropped.
         unimplemented!()
     }
 
