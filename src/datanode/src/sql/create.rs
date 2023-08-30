@@ -279,7 +279,7 @@ mod tests {
                 "timestamp" BIGINT TIME INDEX,
                 "value" DOUBLE,
                 host STRING PRIMARY KEY
-            ) engine=mito with(regions=1, ttl='7days',write_buffer_size='32MB',some='other');"#;
+            ) engine=mito with(regions=1, ttl='7days',write_buffer_size='32MB');"#;
         let parsed_stmt = sql_to_statement(sql);
         let c = SqlHandler::create_to_request(42, parsed_stmt, &TableReference::bare("demo_table"))
             .unwrap();
@@ -289,7 +289,6 @@ mod tests {
             Some(ReadableSize::mb(32)),
             c.table_options.write_buffer_size
         );
-        assert_eq!("other", c.table_options.extra_options.get("some").unwrap());
     }
 
     #[tokio::test]

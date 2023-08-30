@@ -9237,6 +9237,7 @@ dependencies = [
  "regex",
  "snafu",
  "sqlparser 0.34.0",
+ "table",
 ]
 
 [[package]]
@@ -9848,6 +9849,7 @@ dependencies = [
  "chrono",
  "common-base",
  "common-catalog",
+ "common-datasource",
  "common-error",
  "common-procedure",
  "common-query",

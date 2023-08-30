@@ -103,6 +103,9 @@ pub enum Error {
         source: datatypes::error::Error,
     },
 
+    #[snafu(display("Invalid table option key: {}", key))]
+    InvalidTableOption { key: String, location: Location },
+
     #[snafu(display("Failed to serialize column default constraint, source: {}", source))]
     SerializeColumnDefaultConstraint {
         location: Location,
@@ -168,7 +171,8 @@ impl ErrorExt for Error {
             | ColumnTypeMismatch { .. }
             | InvalidTableName { .. }
             | InvalidSqlValue { .. }
-            | TimestampOverflow { .. } => StatusCode::InvalidArguments,
+            | TimestampOverflow { .. }
+            | InvalidTableOption { .. } => StatusCode::InvalidArguments,
 
             SerializeColumnDefaultConstraint { source, .. } => source.status_code(),
             ConvertToGrpcDataType { source, .. } => source.status_code(),

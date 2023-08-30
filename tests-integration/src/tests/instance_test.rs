@@ -78,46 +78,6 @@ async fn test_create_database_and_insert_query(instance: Arc<dyn MockInstance>) 
 }
 
 #[apply(both_instances_cases)]
-async fn test_error_when_including_unsupported_table_options_keys(instance: Arc<dyn MockInstance>) {
-    // External
-    let frontend = instance.frontend();
-    let format = "json";
-    let location = find_testing_resource("/tests/data/json/various_type.json");
-    let table_name = "various_type_json_with_schema";
-    let sql = &format!(
-        r#"CREATE EXTERNAL TABLE {table_name} (
-            a BIGINT NULL,
-            b DOUBLE NULL,
-            c BOOLEAN NULL,
-            d STRING NULL,
-            e TIMESTAMP(0) NULL,
-            f DOUBLE NULL,
-            g TIMESTAMP(0) NULL,
-          ) WITH (foo='bar', location='{location}', format='{format}');"#,
-    );
-
-    let result = try_execute_sql(&frontend, sql).await;
-    assert!(matches!(result, Err(Error::NotSupported { .. })));
-
-    // Not external
-    let sql = r#"create table demo(
-    host STRING,
-    cpu DOUBLE,
-    memory DOUBLE,
-    ts bigint,
-    TIME INDEX(ts)
-)
-ENGINE=mito
-WITH(
-    hello = 'world',
-    write_buffer_size = 1024
-)  
-"#;
-    let result = try_execute_sql(&frontend, sql).await;
-    assert!(matches!(result, Err(Error::NotSupported { .. })));
-}
-
-#[apply(both_instances_cases)]
 async fn test_show_create_table(instance: Arc<dyn MockInstance>) {
     let frontend = instance.frontend();
     let sql = if instance.is_distributed_mode() {
@@ -192,16 +152,38 @@ PARTITION BY RANGE COLUMNS (ts) (
 }
 
 #[apply(both_instances_cases)]
+async fn test_validate_external_table_options(instance: Arc<dyn MockInstance>) {
+    let frontend = instance.frontend();
+    let format = "json";
+    let location = find_testing_resource("/tests/data/json/various_type.json");
+    let table_name = "various_type_json_with_schema";
+    let sql = &format!(
+        r#"CREATE EXTERNAL TABLE {table_name} (
+            a BIGINT NULL,
+            b DOUBLE NULL,
+            c BOOLEAN NULL,
+            d STRING NULL,
+            e TIMESTAMP(0) NULL,
+            f DOUBLE NULL,
+            g TIMESTAMP(0) NULL,
+          ) WITH (foo='bar', location='{location}', format='{format}');"#,
+    );
+
+    let result = try_execute_sql(&frontend, sql).await;
+    assert!(matches!(result, Err(Error::ParseSql { .. })));
+}
+
+#[apply(both_instances_cases)]
 async fn test_show_create_external_table(instance: Arc<dyn MockInstance>) {
     let fe_instance = instance.frontend();
     let format = "csv";
-    let location = find_testing_resource("/tests/data/csv/");
+    let location = find_testing_resource("/tests/data/csv/various_type.csv");
     let table_name = "various_type_csv";
 
     let output = execute_sql(
         &fe_instance,
         &format!(
-            r#"create external table {table_name} with (location='{location}', format='{format}', pattern='various*');"#,
+            r#"create external table {table_name} with (location='{location}', format='{format}');"#,
         ),
     )
     .await;
@@ -233,7 +215,6 @@ ENGINE=file
 WITH(
   format = 'csv',
   location = '{location}',
-  pattern = 'various*',
   regions = 1
 )"#
         )
@@ -251,8 +232,7 @@ WITH(
 ENGINE=file
 WITH(
   format = 'csv',
-  location = '{location}',
-  pattern = 'various*'
+  location = '{location}'
 )"#
         )
     };

@@ -25,9 +25,6 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use catalog::CatalogManagerRef;
-use common_catalog::consts::MITO_ENGINE;
-use common_datasource::object_store::s3::is_supported_in_s3;
-use common_datasource::object_store::{parse_url, S3_SCHEMA};
 use common_error::ext::BoxedError;
 use common_query::Output;
 use common_time::range::TimestampRange;
@@ -41,21 +38,17 @@ use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
 use sql::statements::copy::{CopyDatabaseArgument, CopyTable, CopyTableArgument};
 use sql::statements::statement::Statement;
-use sql::util::to_lowercase_options_map;
 use table::engine::TableReference;
 use table::error::TableOperationSnafu;
 use table::requests::{
     CopyDatabaseRequest, CopyDirection, CopyTableRequest, DeleteRequest, InsertRequest,
-    IMMUTABLE_TABLE_FORMAT_KEY, IMMUTABLE_TABLE_LOCATION_KEY, IMMUTABLE_TABLE_PATTERN_KEY,
-    REGIONS_KEY, TTL_KEY, WRITE_BUFFER_SIZE_KEY,
 };
 use table::TableRef;
 
 use crate::catalog::FrontendCatalogManager;
 use crate::error::{
-    self, CatalogSnafu, ExecLogicalPlanSnafu, ExecuteStatementSnafu, ExternalSnafu,
-    FindImmutableFileLocationSnafu, InsertSnafu, ParseUrlSnafu, PlanStatementSnafu, Result,
-    TableNotFoundSnafu,
+    self, CatalogSnafu, ExecLogicalPlanSnafu, ExecuteStatementSnafu, ExternalSnafu, InsertSnafu,
+    PlanStatementSnafu, Result, TableNotFoundSnafu,
 };
 use crate::instance::distributed::deleter::DistDeleter;
 use crate::instance::distributed::inserter::DistInserter;
@@ -127,29 +120,9 @@ impl StatementExecutor {
                 self.copy_database(to_copy_database_request(arg, &query_ctx)?)
                     .await
             }
-
-            Statement::CreateTable(ref create_table) => {
-                validate_table_options_keys(
-                    &to_lowercase_options_map(&create_table.options),
-                    &create_table.engine,
-                )?;
-                self.sql_stmt_executor
-                    .execute_sql(stmt, query_ctx)
-                    .await
-                    .context(ExecuteStatementSnafu)
-            }
-            Statement::CreateExternalTable(ref create_external_table) => {
-                validate_table_options_keys(
-                    &create_external_table.options,
-                    &create_external_table.engine,
-                )?;
-                self.sql_stmt_executor
-                    .execute_sql(stmt, query_ctx)
-                    .await
-                    .context(ExecuteStatementSnafu)
-            }
-
-            Statement::CreateDatabase(_)
+            Statement::CreateTable(_)
+            | Statement::CreateExternalTable(_)
+            | Statement::CreateDatabase(_)
             | Statement::Alter(_)
             | Statement::DropTable(_)
             | Statement::TruncateTable(_)
@@ -351,113 +324,4 @@ fn extract_timestamp(map: &HashMap<String, String>, key: &str) -> Result<Option<
                 .map_err(|_| error::InvalidCopyParameterSnafu { key, value: v }.build())
         })
         .transpose()
-}
-
-fn validate_table_options_keys(
-    table_options: &HashMap<String, String>,
-    engine_name: &str,
-) -> Result<()> {
-    if engine_name == MITO_ENGINE {
-        for key in table_options.keys() {
-            if (key != WRITE_BUFFER_SIZE_KEY) && (key != TTL_KEY) && (key != REGIONS_KEY) {
-                return Err(error::Error::NotSupported {
-                    feat: format!(
-                        "table option key: {}, on table engine: {}",
-                        key, engine_name
-                    ),
-                });
-            }
-        }
-    } else {
-        let url = table_options
-            .get(IMMUTABLE_TABLE_LOCATION_KEY)
-            .context(FindImmutableFileLocationSnafu)?;
-        let (schema, _, _) = parse_url(url).context(ParseUrlSnafu)?;
-        for key in table_options.keys() {
-            if (key == IMMUTABLE_TABLE_FORMAT_KEY)
-                || (key == IMMUTABLE_TABLE_PATTERN_KEY)
-                || (key == IMMUTABLE_TABLE_LOCATION_KEY)
-            {
-                continue;
-            }
-
-            // Only s3 supports table options except the above ones.
-            if schema.to_uppercase().as_str() != S3_SCHEMA {
-                return Err(error::Error::NotSupported {
-                    feat: format!(
-                        "table option key: {}, on table engine: {}",
-                        key, engine_name
-                    ),
-                });
-            }
-            if !is_supported_in_s3(key) {
-                return Err(error::Error::NotSupported {
-                    feat: format!(
-                        "table option key: {}, on table engine: {}",
-                        key, engine_name
-                    ),
-                });
-            }
-        }
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use common_catalog::consts::{IMMUTABLE_FILE_ENGINE, MITO_ENGINE};
-
-    use super::*;
-    #[test]
-    fn test_validate_table_options_keys_when_creating_table() {
-        let mut options: HashMap<String, String> = HashMap::new();
-        options.insert(WRITE_BUFFER_SIZE_KEY.to_string(), "32MB".to_string());
-        options.insert(TTL_KEY.to_string(), "7d".to_string());
-        options.insert(REGIONS_KEY.to_string(), "1".to_string());
-        assert!(validate_table_options_keys(&options, MITO_ENGINE).is_ok());
-
-        let mut options: HashMap<String, String> = HashMap::new();
-        options.insert(WRITE_BUFFER_SIZE_KEY.to_string(), "32MB".to_string());
-        options.insert("hello".to_string(), "world".to_string());
-        assert!(validate_table_options_keys(&options, MITO_ENGINE).is_err());
-
-        let options: HashMap<String, String> = HashMap::new();
-        assert!(validate_table_options_keys(&options, MITO_ENGINE).is_ok());
-    }
-    #[test]
-    fn test_validate_table_options_keys_when_creating_external_table() {
-        // Not S3 storage
-        let mut options: HashMap<String, String> = HashMap::new();
-        options.insert(
-            IMMUTABLE_TABLE_LOCATION_KEY.to_string(),
-            "/tmp/".to_string(),
-        );
-        options.insert(
-            IMMUTABLE_TABLE_PATTERN_KEY.to_string(),
-            "foo*.csv".to_string(),
-        );
-        options.insert(IMMUTABLE_TABLE_FORMAT_KEY.to_string(), "csv".to_string());
-        assert!(validate_table_options_keys(&options, IMMUTABLE_FILE_ENGINE).is_ok());
-
-        let mut options: HashMap<String, String> = HashMap::new();
-        options.insert(
-            IMMUTABLE_TABLE_LOCATION_KEY.to_string(),
-            "/tmp/".to_string(),
-        );
-        options.insert("hello".to_string(), "world".to_string());
-        assert!(validate_table_options_keys(&options, IMMUTABLE_FILE_ENGINE).is_err());
-
-        let mut options: HashMap<String, String> = HashMap::new();
-        options.insert("hello".to_string(), "world".to_string());
-        assert!(validate_table_options_keys(&options, IMMUTABLE_FILE_ENGINE).is_err());
-
-        // S3
-        let mut options: HashMap<String, String> = HashMap::new();
-        options.insert(
-            IMMUTABLE_TABLE_LOCATION_KEY.to_string(),
-            "s3://bucket/to/path/".to_string(),
-        );
-        options.insert("region".to_string(), "us-east-1.".to_string());
-        assert!(validate_table_options_keys(&options, IMMUTABLE_FILE_ENGINE).is_ok());
-    }
 }

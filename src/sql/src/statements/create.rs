@@ -222,6 +222,7 @@ pub struct CreateExternalTable {
 #[cfg(test)]
 mod tests {
     use crate::dialect::GreptimeDbDialect;
+    use crate::error::Error::InvalidTableOption;
     use crate::parser::ParserContext;
     use crate::statements::statement::Statement;
 
@@ -318,5 +319,27 @@ ENGINE=mito
             }
             _ => unreachable!(),
         }
+    }
+
+    #[test]
+    fn test_validate_table_options() {
+        let sql = r"create table if not exists demo(
+            host string,
+            ts bigint,
+            cpu double default 0,
+            memory double,
+            TIME INDEX (ts),
+            PRIMARY KEY(ts, host)
+      )
+      PARTITION BY RANGE COLUMNS (ts) (
+        PARTITION r0 VALUES LESS THAN (5),
+        PARTITION r1 VALUES LESS THAN (9),
+        PARTITION r2 VALUES LESS THAN (MAXVALUE),
+      )
+      engine=mito
+      with(regions=1, ttl='7d', hello='world');
+";
+        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
+        assert!(matches!(result, Err(InvalidTableOption { .. })))
     }
 }

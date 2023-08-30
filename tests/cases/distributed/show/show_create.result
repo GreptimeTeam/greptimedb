@@ -101,5 +101,5 @@ WITH(
   write_buffer_size = 1024
 );
 
-Error: 1001(Unsupported), Not supported: table option key: foo, on table engine: mito
+Error: 1004(InvalidArguments), Invalid table option key: foo
 
