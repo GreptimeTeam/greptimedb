@@ -26,7 +26,7 @@ use store_api::storage::RegionId;
 
 use crate::error::{OpenDalSnafu, RegionNotFoundSnafu, Result};
 use crate::region::opener::RegionOpener;
-use crate::worker::handle_drop::DROPING_MARKER_FILE;
+use crate::worker::handle_drop::DROPPING_MARKER_FILE;
 use crate::worker::RegionWorkerLoop;
 
 impl<S: LogStore> RegionWorkerLoop<S> {
@@ -43,7 +43,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         if !self.dropping_regions.is_region_exists(region_id)
             && self
                 .object_store
-                .is_exist(&join_path(&request.region_dir, DROPING_MARKER_FILE))
+                .is_exist(&join_path(&request.region_dir, DROPPING_MARKER_FILE))
                 .await
                 .context(OpenDalSnafu)?
         {

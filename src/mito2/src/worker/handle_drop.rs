@@ -30,7 +30,7 @@ use crate::error::{OpenDalSnafu, RegionNotFoundSnafu, Result};
 use crate::region::RegionMapRef;
 use crate::worker::RegionWorkerLoop;
 
-pub(crate) const DROPING_MARKER_FILE: &str = ".dropping";
+pub(crate) const DROPPING_MARKER_FILE: &str = ".dropping";
 const GC_TASK_INTERVAL_SEC: u64 = 5 * 60;
 
 impl<S> RegionWorkerLoop<S> {
@@ -43,7 +43,7 @@ impl<S> RegionWorkerLoop<S> {
         region.stop().await?;
 
         // write dropping marker
-        let marker_path = join_path(&region.region_dir, DROPING_MARKER_FILE);
+        let marker_path = join_path(&region.region_dir, DROPPING_MARKER_FILE);
         self.object_store
             .write(&marker_path, vec![])
             .await
