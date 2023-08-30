@@ -1,8 +1,8 @@
-CREATE TABLE integers(i BIGINT TIME INDEX);
+CREATE TABLE integers(i bigint, ts TIMESTAMP TIME INDEX);
 
 Affected Rows: 0
 
-INSERT INTO integers VALUES (1), (2), (3);
+INSERT INTO integers VALUES (1, 1), (2, 2), (3, 3);
 
 Affected Rows: 3
 
