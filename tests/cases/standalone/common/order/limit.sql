@@ -1,4 +1,4 @@
-CREATE TABLE test (a BIGINT time index, b INTEGER);
+CREATE TABLE test (a TIMESTAMP TIME INDEX, b INTEGER);
 
 INSERT INTO test VALUES (11, 22), (12, 21), (13, 22);
 
@@ -16,7 +16,7 @@ SELECT a FROM test LIMIT SUM(42);
 
 SELECT a FROM test LIMIT row_number() OVER ();
 
-CREATE TABLE test2 (a STRING, ts BIGINT TIME INDEX);
+CREATE TABLE test2 (a STRING, ts TIMESTAMP TIME INDEX);
 
 INSERT INTO test2 VALUES ('Hello World', 1);
 
@@ -24,7 +24,7 @@ SELECT * FROM test2 LIMIT 3;
 
 select 1 limit date '1992-01-01';
 
-CREATE TABLE integers(i BIGINT TIME INDEX);
+CREATE TABLE integers(i TIMESTAMP TIME INDEX);
 
 INSERT INTO integers VALUES (1), (2), (3), (4), (5);
 

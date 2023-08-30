@@ -1,15 +1,15 @@
-CREATE TABLE t(i INTEGER, j BIGINT TIME INDEX);
+CREATE TABLE t(i INTEGER, j TIMESTAMP TIME INDEX);
 
 Affected Rows: 0
 
 DESC TABLE t;
 
-+--------+-------+-----+------+---------+---------------+
-| Column | Type  | Key | Null | Default | Semantic Type |
-+--------+-------+-----+------+---------+---------------+
-| i      | Int32 |     | YES  |         | FIELD         |
-| j      | Int64 | PRI | NO   |         | TIMESTAMP     |
-+--------+-------+-----+------+---------+---------------+
++--------+----------------------+-----+------+---------+---------------+
+| Column | Type                 | Key | Null | Default | Semantic Type |
++--------+----------------------+-----+------+---------+---------------+
+| i      | Int32                |     | YES  |         | FIELD         |
+| j      | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
++--------+----------------------+-----+------+---------+---------------+
 
 INSERT INTO TABLE t VALUES (1, 1), (3, 3), (NULL, 4);
 
@@ -17,13 +17,13 @@ Affected Rows: 3
 
 SELECT * from t;
 
-+---+---+
-| i | j |
-+---+---+
-| 1 | 1 |
-| 3 | 3 |
-|   | 4 |
-+---+---+
++---+-------------------------+
+| i | j                       |
++---+-------------------------+
+| 1 | 1970-01-01T00:00:00.001 |
+| 3 | 1970-01-01T00:00:00.003 |
+|   | 1970-01-01T00:00:00.004 |
++---+-------------------------+
 
 ALTER TABLE t RENAME new_table;
 
@@ -37,29 +37,29 @@ SELECT * FROM t;
 
 Error: 3000(PlanQuery), Error during planning: Table not found: greptime.public.t
 
-CREATE TABLE t(i INTEGER, j BIGINT TIME INDEX);
+CREATE TABLE t(i INTEGER, j TIMESTAMP TIME INDEX);
 
 Affected Rows: 0
 
 DESC TABLE new_table;
 
-+--------+-------+-----+------+---------+---------------+
-| Column | Type  | Key | Null | Default | Semantic Type |
-+--------+-------+-----+------+---------+---------------+
-| i      | Int32 |     | YES  |         | FIELD         |
-| j      | Int64 | PRI | NO   |         | TIMESTAMP     |
-+--------+-------+-----+------+---------+---------------+
++--------+----------------------+-----+------+---------+---------------+
+| Column | Type                 | Key | Null | Default | Semantic Type |
++--------+----------------------+-----+------+---------+---------------+
+| i      | Int32                |     | YES  |         | FIELD         |
+| j      | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
++--------+----------------------+-----+------+---------+---------------+
 
 -- SQLNESS ARG restart=true
 SELECT * FROM new_table;
 
-+---+---+
-| i | j |
-+---+---+
-| 1 | 1 |
-| 3 | 3 |
-|   | 4 |
-+---+---+
++---+-------------------------+
+| i | j                       |
++---+-------------------------+
+| 1 | 1970-01-01T00:00:00.001 |
+| 3 | 1970-01-01T00:00:00.003 |
+|   | 1970-01-01T00:00:00.004 |
++---+-------------------------+
 
 ALTER TABLE new_table RENAME new_table;
 

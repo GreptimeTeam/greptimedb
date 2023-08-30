@@ -19,7 +19,7 @@ use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_query::Output;
 use common_recordbatch::util;
 use common_telemetry::logging;
-use datatypes::vectors::{Int64Vector, StringVector, UInt64Vector, VectorRef};
+use datatypes::vectors::{StringVector, TimestampMillisecondVector, UInt64Vector, VectorRef};
 use frontend::error::{Error, Result};
 use frontend::instance::Instance;
 use rstest::rstest;
@@ -46,7 +46,7 @@ async fn test_create_database_and_insert_query(instance: Arc<dyn MockInstance>) 
              host STRING,
              cpu DOUBLE,
              memory DOUBLE,
-             ts bigint,
+             ts timestamp,
              TIME INDEX(ts)
 )"#,
     )
@@ -69,7 +69,9 @@ async fn test_create_database_and_insert_query(instance: Arc<dyn MockInstance>) 
             let batches = util::collect(s).await.unwrap();
             assert_eq!(1, batches[0].num_columns());
             assert_eq!(
-                Arc::new(Int64Vector::from_vec(vec![1655276557000_i64])) as VectorRef,
+                Arc::new(TimestampMillisecondVector::from_vec(vec![
+                    1655276557000_i64
+                ])) as VectorRef,
                 *batches[0].column(0)
             );
         }
@@ -85,7 +87,7 @@ async fn test_show_create_table(instance: Arc<dyn MockInstance>) {
     host STRING,
     cpu DOUBLE,
     memory DOUBLE,
-    ts bigint,
+    ts timestamp,
     TIME INDEX(ts)
 )
 PARTITION BY RANGE COLUMNS (ts) (
@@ -99,7 +101,7 @@ PARTITION BY RANGE COLUMNS (ts) (
     host STRING,
     cpu DOUBLE,
     memory DOUBLE,
-    ts bigint,
+    ts timestamp,
     TIME INDEX(ts)
 )"#
     };
@@ -116,7 +118,7 @@ PARTITION BY RANGE COLUMNS (ts) (
 |       |   "host" STRING NULL,                                    |
 |       |   "cpu" DOUBLE NULL,                                     |
 |       |   "memory" DOUBLE NULL,                                  |
-|       |   "ts" BIGINT NOT NULL,                                  |
+|       |   "ts" TIMESTAMP(3) NOT NULL,                            |
 |       |   TIME INDEX ("ts")                                      |
 |       | )                                                        |
 |       | PARTITION BY RANGE COLUMNS ("ts") (                      |
@@ -138,7 +140,7 @@ PARTITION BY RANGE COLUMNS (ts) (
 |       |   "host" STRING NULL,               |
 |       |   "cpu" DOUBLE NULL,                |
 |       |   "memory" DOUBLE NULL,             |
-|       |   "ts" BIGINT NOT NULL,             |
+|       |   "ts" TIMESTAMP(3) NOT NULL,       |
 |       |   TIME INDEX ("ts")                 |
 |       | )                                   |
 |       | ENGINE=mito                         |
@@ -166,7 +168,7 @@ async fn test_issue477_same_table_name_in_different_databases(instance: Arc<dyn 
         &instance,
         r#"create table a.demo(
              host STRING,
-             ts bigint,
+             ts timestamp,
              TIME INDEX(ts)
 )"#,
     )
@@ -177,7 +179,7 @@ async fn test_issue477_same_table_name_in_different_databases(instance: Arc<dyn 
         &instance,
         r#"create table b.demo(
              host STRING,
-             ts bigint,
+             ts timestamp,
              TIME INDEX(ts)
 )"#,
     )
@@ -232,7 +234,7 @@ async fn assert_query_result(instance: &Arc<Instance>, sql: &str, ts: i64, host:
                 *batches[0].column(0)
             );
             assert_eq!(
-                Arc::new(Int64Vector::from_vec(vec![ts])) as VectorRef,
+                Arc::new(TimestampMillisecondVector::from_vec(vec![ts])) as VectorRef,
                 *batches[0].column(1)
             );
         }
@@ -329,53 +331,6 @@ async fn test_execute_insert_by_select(instance: Arc<dyn MockInstance>) {
 | host2 | 88.8 | 333.3  | 2022-06-15T07:02:38 |
 +-------+------+--------+---------------------+";
     check_output_stream(output, expected).await;
-}
-
-#[apply(both_instances_cases)]
-async fn test_execute_insert_query_with_i64_timestamp(instance: Arc<dyn MockInstance>) {
-    let instance = instance.frontend();
-
-    assert!(matches!(execute_sql(
-        &instance,
-        "create table demo(host string, cpu double, memory double, ts bigint time index, primary key (host));",
-    ).await, Output::AffectedRows(0)));
-
-    let output = execute_sql(
-        &instance,
-        r#"insert into demo(host, cpu, memory, ts) values
-                           ('host1', 66.6, 1024, 1655276557000),
-                           ('host2', 88.8,  333.3, 1655276558000)
-                           "#,
-    )
-    .await;
-    assert!(matches!(output, Output::AffectedRows(2)));
-
-    let query_output = execute_sql(&instance, "select ts from demo order by ts limit 1").await;
-    match query_output {
-        Output::Stream(s) => {
-            let batches = util::collect(s).await.unwrap();
-            assert_eq!(1, batches[0].num_columns());
-            assert_eq!(
-                Arc::new(Int64Vector::from_vec(vec![1655276557000_i64,])) as VectorRef,
-                *batches[0].column(0)
-            );
-        }
-        _ => unreachable!(),
-    }
-
-    let query_output =
-        execute_sql(&instance, "select ts as time from demo order by ts limit 1").await;
-    match query_output {
-        Output::Stream(s) => {
-            let batches = util::collect(s).await.unwrap();
-            assert_eq!(1, batches[0].num_columns());
-            assert_eq!(
-                Arc::new(Int64Vector::from_vec(vec![1655276557000_i64,])) as VectorRef,
-                *batches[0].column(0)
-            );
-        }
-        _ => unreachable!(),
-    }
 }
 
 #[apply(both_instances_cases)]
@@ -1079,7 +1034,6 @@ async fn test_insert_with_default_value_for_type(instance: Arc<Instance>, type_n
 #[apply(standalone_instance_case)]
 async fn test_insert_with_default_value(instance: Arc<dyn MockInstance>) {
     test_insert_with_default_value_for_type(instance.frontend(), "timestamp").await;
-    test_insert_with_default_value_for_type(instance.frontend(), "bigint").await;
 }
 
 #[apply(both_instances_cases)]
@@ -1092,7 +1046,7 @@ async fn test_use_database(instance: Arc<dyn MockInstance>) {
     let query_ctx = QueryContext::with(DEFAULT_CATALOG_NAME, "db1");
     let output = execute_sql_with(
         &instance,
-        "create table tb1(col_i32 int, ts bigint, TIME INDEX(ts))",
+        "create table tb1(col_i32 int, ts timestamp, TIME INDEX(ts))",
         query_ctx.clone(),
     )
     .await;
@@ -1428,7 +1382,7 @@ async fn test_information_schema_dot_tables(instance: Arc<dyn MockInstance>) {
     let is_distributed_mode = instance.is_distributed_mode();
     let instance = instance.frontend();
 
-    let sql = "create table another_table(i bigint time index)";
+    let sql = "create table another_table(i timestamp time index)";
     let query_ctx = QueryContext::with("another_catalog", "another_schema");
     let output = execute_sql_with(&instance, sql, query_ctx.clone()).await;
     assert!(matches!(output, Output::AffectedRows(0)));
@@ -1495,7 +1449,7 @@ async fn test_information_schema_dot_tables(instance: Arc<dyn MockInstance>) {
 async fn test_information_schema_dot_columns(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
 
-    let sql = "create table another_table(i bigint time index)";
+    let sql = "create table another_table(i timestamp time index)";
     let query_ctx = QueryContext::with("another_catalog", "another_schema");
     let output = execute_sql_with(&instance, sql, query_ctx.clone()).await;
     assert!(matches!(output, Output::AffectedRows(0)));
@@ -1535,23 +1489,23 @@ async fn test_information_schema_dot_columns(instance: Arc<dyn MockInstance>) {
 
     let output = execute_sql_with(&instance, sql, query_ctx).await;
     let expected = "\
-+-----------------+--------------------+---------------+---------------+-----------+---------------+
-| table_catalog   | table_schema       | table_name    | column_name   | data_type | semantic_type |
-+-----------------+--------------------+---------------+---------------+-----------+---------------+
-| another_catalog | another_schema     | another_table | i             | Int64     | TIMESTAMP     |
-| another_catalog | information_schema | columns       | table_catalog | String    | FIELD         |
-| another_catalog | information_schema | columns       | table_schema  | String    | FIELD         |
-| another_catalog | information_schema | columns       | table_name    | String    | FIELD         |
-| another_catalog | information_schema | columns       | column_name   | String    | FIELD         |
-| another_catalog | information_schema | columns       | data_type     | String    | FIELD         |
-| another_catalog | information_schema | columns       | semantic_type | String    | FIELD         |
-| another_catalog | information_schema | tables        | table_catalog | String    | FIELD         |
-| another_catalog | information_schema | tables        | table_schema  | String    | FIELD         |
-| another_catalog | information_schema | tables        | table_name    | String    | FIELD         |
-| another_catalog | information_schema | tables        | table_type    | String    | FIELD         |
-| another_catalog | information_schema | tables        | table_id      | UInt32    | FIELD         |
-| another_catalog | information_schema | tables        | engine        | String    | FIELD         |
-+-----------------+--------------------+---------------+---------------+-----------+---------------+";
++-----------------+--------------------+---------------+---------------+----------------------+---------------+
+| table_catalog   | table_schema       | table_name    | column_name   | data_type            | semantic_type |
++-----------------+--------------------+---------------+---------------+----------------------+---------------+
+| another_catalog | another_schema     | another_table | i             | TimestampMillisecond | TIMESTAMP     |
+| another_catalog | information_schema | columns       | table_catalog | String               | FIELD         |
+| another_catalog | information_schema | columns       | table_schema  | String               | FIELD         |
+| another_catalog | information_schema | columns       | table_name    | String               | FIELD         |
+| another_catalog | information_schema | columns       | column_name   | String               | FIELD         |
+| another_catalog | information_schema | columns       | data_type     | String               | FIELD         |
+| another_catalog | information_schema | columns       | semantic_type | String               | FIELD         |
+| another_catalog | information_schema | tables        | table_catalog | String               | FIELD         |
+| another_catalog | information_schema | tables        | table_schema  | String               | FIELD         |
+| another_catalog | information_schema | tables        | table_name    | String               | FIELD         |
+| another_catalog | information_schema | tables        | table_type    | String               | FIELD         |
+| another_catalog | information_schema | tables        | table_id      | UInt32               | FIELD         |
+| another_catalog | information_schema | tables        | engine        | String               | FIELD         |
++-----------------+--------------------+---------------+---------------+----------------------+---------------+";
 
     check_output_stream(output, expected).await;
 }

@@ -1,4 +1,4 @@
-CREATE TABLE test1 (i INTEGER, j BIGINT TIME INDEX, k STRING DEFAULT 'blabla');
+CREATE TABLE test1 (i INTEGER, j TIMESTAMP TIME INDEX, k STRING DEFAULT 'blabla');
 
 Affected Rows: 0
 
@@ -20,16 +20,16 @@ Affected Rows: 4
 
 SELECT * FROM test1;
 
-+---+---+--------+
-| i | j | k      |
-+---+---+--------+
-|   | 1 | blabla |
-|   | 2 | blabla |
-|   | 3 | blabla |
-|   | 4 | blabla |
-+---+---+--------+
++---+-------------------------+--------+
+| i | j                       | k      |
++---+-------------------------+--------+
+|   | 1970-01-01T00:00:00.001 | blabla |
+|   | 1970-01-01T00:00:00.002 | blabla |
+|   | 1970-01-01T00:00:00.003 | blabla |
+|   | 1970-01-01T00:00:00.004 | blabla |
++---+-------------------------+--------+
 
-CREATE TABLE test2 (i INTEGER, j BIGINT TIME INDEX DEFAULT CURRENT_TIMESTAMP, k STRING DEFAULT 'blabla');
+CREATE TABLE test2 (i INTEGER, j TIMESTAMP TIME INDEX DEFAULT CURRENT_TIMESTAMP, k STRING DEFAULT 'blabla');
 
 Affected Rows: 0
 
@@ -43,18 +43,18 @@ Affected Rows: 3
 
 SELECT * FROM test2;
 
-+---+---+--------+
-| i | j | k      |
-+---+---+--------+
-| 1 | 1 | a      |
-|   | 2 | blabla |
-| 3 | 3 | b      |
-|   | 4 | blabla |
-| 5 | 5 | c      |
-| 6 | 6 | blabla |
-| 7 | 7 | d      |
-|   | 8 | e      |
-+---+---+--------+
++---+-------------------------+--------+
+| i | j                       | k      |
++---+-------------------------+--------+
+| 1 | 1970-01-01T00:00:00.001 | a      |
+|   | 1970-01-01T00:00:00.002 | blabla |
+| 3 | 1970-01-01T00:00:00.003 | b      |
+|   | 1970-01-01T00:00:00.004 | blabla |
+| 5 | 1970-01-01T00:00:00.005 | c      |
+| 6 | 1970-01-01T00:00:00.006 | blabla |
+| 7 | 1970-01-01T00:00:00.007 | d      |
+|   | 1970-01-01T00:00:00.008 | e      |
++---+-------------------------+--------+
 
 DROP TABLE test1;
 

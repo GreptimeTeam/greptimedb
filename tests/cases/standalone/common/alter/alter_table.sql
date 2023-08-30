@@ -1,4 +1,4 @@
-CREATE TABLE test_alt_table(i INTEGER, j BIGINT TIME INDEX);
+CREATE TABLE test_alt_table(i INTEGER, j TIMESTAMP TIME INDEX);
 
 DESC TABLE test_alt_table;
 
