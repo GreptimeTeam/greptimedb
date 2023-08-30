@@ -164,11 +164,8 @@ impl Instance {
             table_metadata_manager.clone(),
         );
 
-        let dist_instance = DistInstance::new(
-            meta_client.clone(),
-            Arc::new(catalog_manager.clone()),
-            datanode_clients.clone(),
-        );
+        let dist_instance =
+            DistInstance::new(meta_client.clone(), Arc::new(catalog_manager.clone()));
         let dist_instance = Arc::new(dist_instance);
 
         catalog_manager.set_dist_instance(dist_instance.clone());
