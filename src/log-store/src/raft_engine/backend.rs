@@ -251,8 +251,10 @@ impl KvBackend for RaftEngineBackend {
 
         let mut prev_kvs = vec![];
         let mut deleted = 0;
+
+        let engine = self.engine.read().unwrap();
         for kv in range_resp.kvs {
-            self.delete(&kv.key, false).await?;
+            engine_delete(&engine, &kv.key)?;
             if prev_kv {
                 prev_kvs.push(kv);
             }
