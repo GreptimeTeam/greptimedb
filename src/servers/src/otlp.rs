@@ -258,6 +258,7 @@ fn encode_histogram(
     let mut sum_lines = LinesWriter::with_lines(data_points_len);
     let mut count_lines = LinesWriter::with_lines(data_points_len);
 
+    let mut accumulated_count = 0;
     for data_point in &hist.data_points {
         for (idx, count) in data_point.bucket_counts.iter().enumerate() {
             write_tags_and_timestamp(
@@ -279,8 +280,9 @@ fn encode_histogram(
                     .context(error::OtlpMetricsWriteSnafu)?;
             }
 
+            accumulated_count += count;
             bucket_lines
-                .write_u64(GREPTIME_VALUE, *count)
+                .write_u64(GREPTIME_VALUE, accumulated_count)
                 .context(error::OtlpMetricsWriteSnafu)?;
 
             bucket_lines.commit();
