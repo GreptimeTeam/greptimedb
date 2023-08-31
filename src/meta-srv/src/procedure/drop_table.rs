@@ -175,7 +175,7 @@ impl DropTableProcedure {
                 .map(|region_number| RegionId::new(table_id, *region_number))
                 .collect::<Vec<_>>();
 
-            drop_region_tasks.push(common_runtime::spawn_bg(async move {
+            drop_region_tasks.push(async move {
                 for region_id in region_ids {
                     debug!("Dropping region {region_id} on Datanode {datanode:?}");
 
@@ -193,13 +193,12 @@ impl DropTableProcedure {
                     }
                 }
                 Ok(())
-            }));
+            });
         }
 
         join_all(drop_region_tasks)
             .await
             .into_iter()
-            .map(|e| e.context(error::JoinSnafu).flatten())
             .collect::<Result<Vec<_>>>()?;
 
         Ok(Status::Done)

@@ -198,16 +198,16 @@ impl CreateTableProcedure {
                 .map(|region_number| {
                     let region_id = RegionId::new(self.table_id(), *region_number);
 
-                    let mut create_table_request = request_template.clone();
-                    create_table_request.region_id = region_id.as_u64();
-                    create_table_request.catalog = catalog.to_string();
-                    create_table_request.schema = schema.to_string();
+                    let mut create_region_request = request_template.clone();
+                    create_region_request.region_id = region_id.as_u64();
+                    create_region_request.catalog = catalog.to_string();
+                    create_region_request.schema = schema.to_string();
 
                     PbRegionRequest::Create(create_region_request)
                 })
                 .collect::<Vec<_>>();
 
-            create_region_tasks.push(common_runtime::spawn_bg(async move {
+            create_region_tasks.push(async move {
                 for request in requests {
                     let client = clients.get_client(&datanode).await;
                     let requester = RegionRequester::new(client);
@@ -217,13 +217,12 @@ impl CreateTableProcedure {
                     }
                 }
                 Ok(())
-            }));
+            });
         }
 
         join_all(create_region_tasks)
             .await
             .into_iter()
-            .map(|e| e.context(error::JoinSnafu).flatten())
             .collect::<Result<Vec<_>>>()?;
 
         self.creator.data.state = CreateTableState::CreateMetadata;
