@@ -208,7 +208,7 @@ impl Instance {
             create_expr_factory,
             statement_executor,
             query_engine,
-            grpc_query_handler: dist_instance.clone(),
+            grpc_query_handler: dist_instance,
             plugins: plugins.clone(),
             servers: Arc::new(HashMap::new()),
             heartbeat_task,
