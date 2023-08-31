@@ -541,21 +541,6 @@ impl BatchBuilder {
     }
 }
 
-/// Collected [Source] statistics.
-#[derive(Debug, Clone)]
-pub struct SourceStats {
-    /// Number of rows fetched.
-    pub num_rows: usize,
-    /// Min timestamp from fetched batches.
-    ///
-    /// If no rows fetched, the value of the timestamp is i64::MIN.
-    pub min_timestamp: Timestamp,
-    /// Max timestamp from fetched batches.
-    ///
-    /// If no rows fetched, the value of the timestamp is i64::MAX.
-    pub max_timestamp: Timestamp,
-}
-
 /// Async [Batch] reader and iterator wrapper.
 ///
 /// This is the data source for SST writers or internal readers.
@@ -573,12 +558,6 @@ impl Source {
             Source::Reader(reader) => reader.next_batch().await,
             Source::Iter(iter) => iter.next().transpose(),
         }
-    }
-
-    // TODO(yingwen): Remove this method once we support collecting stats in the writer.
-    /// Returns statisics of fetched batches.
-    pub(crate) fn stats(&self) -> SourceStats {
-        unimplemented!()
     }
 }
 
