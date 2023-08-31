@@ -17,9 +17,9 @@ use api::v1::ddl_request::Expr as DdlExpr;
 use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
 use api::v1::{
-    AlterExpr, AuthHeader, CompactTableExpr, CreateTableExpr, DdlRequest, DeleteRequests,
-    DropTableExpr, FlushTableExpr, GreptimeRequest, InsertRequests, PromRangeQuery, QueryRequest,
-    RequestHeader, RowInsertRequests, TruncateTableExpr,
+    AlterExpr, AuthHeader, CreateTableExpr, DdlRequest, DeleteRequests, DropTableExpr,
+    GreptimeRequest, InsertRequests, PromRangeQuery, QueryRequest, RequestHeader,
+    RowInsertRequests, TruncateTableExpr,
 };
 use arrow_flight::Ticket;
 use async_stream::stream;
@@ -147,13 +147,13 @@ impl Database {
 
     async fn handle(&self, request: Request) -> Result<u32> {
         let mut client = self.client.make_database_client()?.inner;
-        let request = self.to_rpc_request(request, None);
+        let request = self.to_rpc_request(request, 0);
         let response = client.handle(request).await?.into_inner();
         from_grpc_response(response)
     }
 
     #[inline]
-    fn to_rpc_request(&self, request: Request, trace_id: Option<u64>) -> GreptimeRequest {
+    fn to_rpc_request(&self, request: Request, trace_id: u64) -> GreptimeRequest {
         GreptimeRequest {
             header: Some(RequestHeader {
                 catalog: self.catalog.clone(),
@@ -161,7 +161,7 @@ impl Database {
                 authorization: self.ctx.auth_header.clone(),
                 dbname: self.dbname.clone(),
                 trace_id,
-                span_id: None,
+                span_id: 0,
             }),
             request: Some(request),
         }
@@ -173,16 +173,12 @@ impl Database {
             Request::Query(QueryRequest {
                 query: Some(Query::Sql(sql.to_string())),
             }),
-            None,
+            0,
         )
         .await
     }
 
-    pub async fn logical_plan(
-        &self,
-        logical_plan: Vec<u8>,
-        trace_id: Option<u64>,
-    ) -> Result<Output> {
+    pub async fn logical_plan(&self, logical_plan: Vec<u8>, trace_id: u64) -> Result<Output> {
         let _timer = timer!(metrics::METRIC_GRPC_LOGICAL_PLAN);
         self.do_get(
             Request::Query(QueryRequest {
@@ -210,7 +206,7 @@ impl Database {
                     step: step.to_string(),
                 })),
             }),
-            None,
+            0,
         )
         .await
     }
@@ -221,7 +217,7 @@ impl Database {
             Request::Ddl(DdlRequest {
                 expr: Some(DdlExpr::CreateTable(expr)),
             }),
-            None,
+            0,
         )
         .await
     }
@@ -232,7 +228,7 @@ impl Database {
             Request::Ddl(DdlRequest {
                 expr: Some(DdlExpr::Alter(expr)),
             }),
-            None,
+            0,
         )
         .await
     }
@@ -243,29 +239,7 @@ impl Database {
             Request::Ddl(DdlRequest {
                 expr: Some(DdlExpr::DropTable(expr)),
             }),
-            None,
-        )
-        .await
-    }
-
-    pub async fn flush_table(&self, expr: FlushTableExpr) -> Result<Output> {
-        let _timer = timer!(metrics::METRIC_GRPC_FLUSH_TABLE);
-        self.do_get(
-            Request::Ddl(DdlRequest {
-                expr: Some(DdlExpr::FlushTable(expr)),
-            }),
-            None,
-        )
-        .await
-    }
-
-    pub async fn compact_table(&self, expr: CompactTableExpr) -> Result<Output> {
-        let _timer = timer!(metrics::METRIC_GRPC_COMPACT_TABLE);
-        self.do_get(
-            Request::Ddl(DdlRequest {
-                expr: Some(DdlExpr::CompactTable(expr)),
-            }),
-            None,
+            0,
         )
         .await
     }
@@ -276,12 +250,12 @@ impl Database {
             Request::Ddl(DdlRequest {
                 expr: Some(DdlExpr::TruncateTable(expr)),
             }),
-            None,
+            0,
         )
         .await
     }
 
-    async fn do_get(&self, request: Request, trace_id: Option<u64>) -> Result<Output> {
+    async fn do_get(&self, request: Request, trace_id: u64) -> Result<Output> {
         // FIXME(paomian): should be added some labels for metrics
         let _timer = timer!(metrics::METRIC_GRPC_DO_GET);
         let request = self.to_rpc_request(request, trace_id);

@@ -1,8 +1,8 @@
-CREATE TABLE test (a BIGINT TIME INDEX, b INTEGER);
+CREATE TABLE test (a INTEGER, b INTEGER, ts TIMESTAMP TIME INDEX);
 
 Affected Rows: 0
 
-INSERT INTO test VALUES (11, 22), (12, 21), (13, 22);
+INSERT INTO test VALUES (11, 22, 1), (12, 21, 2), (13, 22, 3);
 
 Affected Rows: 3
 

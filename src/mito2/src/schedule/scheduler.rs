@@ -158,7 +158,7 @@ impl Drop for LocalScheduler {
         if self.state.load(Ordering::Relaxed) != STATE_STOP {
             logging::warn!("scheduler should be stopped before dropping, which means the state of scheduler must be STATE_STOP");
 
-            // We didn't call `stop()` so we cancel all background workers here..
+            // We didn't call `stop()` so we cancel all background workers here.
             self.sender.write().unwrap().take();
             self.cancel_token.cancel();
         }
