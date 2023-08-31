@@ -54,6 +54,11 @@ impl AccessLayer {
         &self.region_dir
     }
 
+    /// Returns the object store of the layer.
+    pub fn object_store(&self) -> &ObjectStore {
+        &self.object_store
+    }
+
     /// Deletes a SST file with given file id.
     pub(crate) async fn delete_sst(&self, file_id: FileId) -> Result<()> {
         let path = self.sst_file_path(&file_id.as_parquet());
