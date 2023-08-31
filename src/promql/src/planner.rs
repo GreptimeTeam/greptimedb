@@ -269,7 +269,6 @@ impl PromPlanner {
 
                         let mut field_columns =
                             left_field_columns.iter().zip(right_field_columns.iter());
-                        // the new ctx.field_columns for the generated join plan
                         let join_plan = self.join_on_non_field_columns(
                             left_input,
                             right_input,
