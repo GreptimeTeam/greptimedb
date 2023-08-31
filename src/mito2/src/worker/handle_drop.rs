@@ -19,6 +19,7 @@ use std::time::Duration;
 use common_query::Output;
 use common_telemetry::info;
 use common_telemetry::tracing::warn;
+use futures::future::try_join_all;
 use futures::StreamExt;
 use object_store::util::join_path;
 use object_store::ObjectStore;
@@ -89,6 +90,8 @@ async fn later_drop_task(
 
             // list all files under the given region path to check if there are un-deleted parquet files
             let mut has_parquet_file = false;
+            // record all paths that neither ends with .parquet nor the marker file
+            let mut files_to_remove_first = vec![];
             let mut files = object_store
                 .list(&region_path)
                 .await
@@ -98,15 +101,27 @@ async fn later_drop_task(
                 if file.path().ends_with(".parquet") {
                     has_parquet_file = true;
                     break;
+                } else if !file.path().ends_with(DROPPING_MARKER_FILE) {
+                    files_to_remove_first.push(file.path().to_string());
                 }
             }
 
             if !has_parquet_file {
                 // no parquet file found, delete the region path
+                // first delete all files other than the marker
+                try_join_all(
+                    files_to_remove_first
+                        .iter()
+                        .map(|path| object_store.delete(path)),
+                )
+                .await
+                .context(OpenDalSnafu)?;
+                // then remove the marker with this dir
                 object_store
                     .delete(&region_path)
                     .await
                     .context(OpenDalSnafu)?;
+
                 dropping_regions.remove_region(region_id);
                 info!("Region {} is dropped", region_path);
             }
