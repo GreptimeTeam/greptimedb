@@ -30,6 +30,7 @@ use crate::access_layer::AccessLayerRef;
 use crate::error::Result;
 use crate::manifest::manager::RegionManifestManager;
 use crate::region::version::{VersionControlRef, VersionRef};
+use crate::sst::file_purger::FilePurgerRef;
 
 /// Type to store region version.
 pub type VersionNumber = u32;
@@ -53,6 +54,8 @@ pub(crate) struct MitoRegion {
     pub(crate) access_layer: AccessLayerRef,
     /// Manager to maintain manifest for this region.
     pub(crate) manifest_manager: RegionManifestManager,
+    /// SST file purger.
+    pub(crate) file_purger: FilePurgerRef,
     /// Last flush time in millis.
     last_flush_millis: AtomicI64,
 }

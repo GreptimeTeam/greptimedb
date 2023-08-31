@@ -12,13 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt;
 use std::sync::Arc;
 
 use common_telemetry::{error, info};
 use store_api::storage::RegionId;
 
 use crate::access_layer::AccessLayerRef;
-use crate::schedule::scheduler::{LocalScheduler, Scheduler};
+use crate::schedule::scheduler::SchedulerRef;
 use crate::sst::file::FileId;
 
 /// Request to remove a file.
@@ -31,7 +32,7 @@ pub struct PurgeRequest {
 }
 
 /// A worker to delete files in background.
-pub trait FilePurger: Send + Sync {
+pub trait FilePurger: Send + Sync + fmt::Debug {
     /// Send a purge request to the background worker.
     fn send_request(&self, request: PurgeRequest);
 }
@@ -39,13 +40,21 @@ pub trait FilePurger: Send + Sync {
 pub type FilePurgerRef = Arc<dyn FilePurger>;
 
 pub struct LocalFilePurger {
-    scheduler: Arc<LocalScheduler>,
+    scheduler: SchedulerRef,
 
     sst_layer: AccessLayerRef,
 }
 
+impl fmt::Debug for LocalFilePurger {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LocalFilePurger")
+            .field("sst_layer", &self.sst_layer)
+            .finish()
+    }
+}
+
 impl LocalFilePurger {
-    pub fn new(scheduler: Arc<LocalScheduler>, sst_layer: AccessLayerRef) -> Self {
+    pub fn new(scheduler: SchedulerRef, sst_layer: AccessLayerRef) -> Self {
         Self {
             scheduler,
             sst_layer,
@@ -84,7 +93,7 @@ mod tests {
 
     use super::*;
     use crate::access_layer::AccessLayer;
-    use crate::schedule::scheduler::LocalScheduler;
+    use crate::schedule::scheduler::{LocalScheduler, Scheduler};
     use crate::sst::file::{FileHandle, FileId, FileMeta, FileTimeRange};
 
     #[tokio::test]

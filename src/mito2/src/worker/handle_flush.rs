@@ -50,7 +50,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit));
         if let Err(e) = region.manifest_manager.update(action_list).await {
             error!(e; "Failed to write manifest, region: {}", region_id);
-            // TODO(yingwen): Wrap a output sender type.
             request.send_error(e);
             return;
         }
