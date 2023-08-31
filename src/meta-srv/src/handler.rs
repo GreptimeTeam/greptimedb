@@ -81,7 +81,7 @@ pub struct HeartbeatAccumulator {
     pub header: Option<ResponseHeader>,
     pub instructions: Vec<Instruction>,
     pub stat: Option<Stat>,
-    pub region_leases: Vec<RegionLease>,
+    pub region_lease: Option<RegionLease>,
 }
 
 impl HeartbeatAccumulator {
@@ -256,7 +256,7 @@ impl HeartbeatHandlerGroup {
         let header = std::mem::take(&mut acc.header);
         let res = HeartbeatResponse {
             header,
-            region_leases: acc.region_leases,
+            region_lease: acc.region_lease,
             ..Default::default()
         };
         Ok(res)
