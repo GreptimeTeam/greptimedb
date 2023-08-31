@@ -294,7 +294,7 @@ async fn create_datanode_client(datanode_instance: Arc<DatanodeInstance>) -> (St
         runtime.clone(),
     ));
     let grpc_server = GrpcServer::new(
-        ServerGrpcQueryHandlerAdaptor::arc(datanode_instance),
+        Some(ServerGrpcQueryHandlerAdaptor::arc(datanode_instance)),
         None,
         Some(query_handler),
         None,
