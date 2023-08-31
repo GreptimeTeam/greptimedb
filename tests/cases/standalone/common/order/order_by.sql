@@ -1,6 +1,6 @@
-CREATE TABLE test (a BIGINT, b INTEGER, time index(a));
+CREATE TABLE test (a INTEGER, b INTEGER, ts TIMESTAMP TIME INDEX);
 
-INSERT INTO test VALUES (11, 22), (12, 21), (13, 22);
+INSERT INTO test VALUES (11, 22, 1), (12, 21, 2), (13, 22, 3);
 
 select b from test where a = 12;
 

@@ -205,7 +205,7 @@ impl MigrateTableMetadata {
 
     async fn migrate_schema_key(&self, key: &v1SchemaKey) -> Result<()> {
         let new_key = SchemaNameKey::new(&key.catalog_name, &key.schema_name);
-        let schema_name_value = SchemaNameValue;
+        let schema_name_value = SchemaNameValue::default();
 
         info!("Creating '{new_key}'");
 

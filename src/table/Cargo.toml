@@ -27,7 +27,7 @@ datatypes = { workspace = true }
 derive_builder.workspace = true
 futures.workspace = true
 humantime = "2.1"
-humantime-serde = "1.1"
+humantime-serde.workspace = true
 paste = "1.0"
 serde.workspace = true
 snafu = { version = "0.7", features = ["backtraces"] }

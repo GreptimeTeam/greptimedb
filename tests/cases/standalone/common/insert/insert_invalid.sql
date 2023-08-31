@@ -1,4 +1,4 @@
-CREATE TABLE strings(i STRING, t BIGINT, time index(t));
+CREATE TABLE strings(i STRING, t TIMESTAMP, time index(t));
 
 INSERT INTO strings VALUES ('â‚(', 1);
 
@@ -6,7 +6,7 @@ INSERT INTO strings VALUES (3, 4);
 
 SELECT * FROM strings WHERE i = 'â‚(';
 
-CREATE TABLE a(i integer, j BIGINT, time index(j));
+CREATE TABLE a(i integer, j TIMESTAMP, time index(j));
 
 INSERT INTO a VALUES (1, 2);
 

@@ -26,6 +26,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use common_meta::ident::TableIdent;
+use common_meta::key::datanode_table::DatanodeTableKey;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::{ClusterId, RegionIdent};
 use common_procedure::error::{
@@ -168,6 +169,11 @@ impl RegionFailoverManager {
             return Ok(());
         }
 
+        if !self.failed_region_exists(failed_region).await? {
+            // The failed region could be failover by another procedure.
+            return Ok(());
+        }
+
         let context = self.create_context();
         let procedure = RegionFailoverProcedure::new(failed_region.clone(), context);
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
@@ -206,6 +212,27 @@ impl RegionFailoverManager {
             .await
             .context(TableMetadataManagerSnafu)?
             .is_some())
+    }
+
+    async fn failed_region_exists(&self, failed_region: &RegionIdent) -> Result<bool> {
+        let table_id = failed_region.table_ident.table_id;
+        let datanode_id = failed_region.datanode_id;
+
+        let value = self
+            .table_metadata_manager
+            .datanode_table_manager()
+            .get(&DatanodeTableKey::new(datanode_id, table_id))
+            .await
+            .context(TableMetadataManagerSnafu)?;
+
+        Ok(value
+            .map(|value| {
+                value
+                    .regions
+                    .iter()
+                    .any(|region| *region == failed_region.region_number)
+            })
+            .unwrap_or_default())
     }
 }
 

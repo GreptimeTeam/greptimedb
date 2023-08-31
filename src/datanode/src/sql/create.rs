@@ -276,7 +276,7 @@ mod tests {
     async fn test_create_table_with_options() {
         let sql = r#"
             CREATE TABLE demo_table (
-                "timestamp" BIGINT TIME INDEX,
+                "timestamp" timestamp TIME INDEX,
                 "value" DOUBLE,
                 host STRING PRIMARY KEY
             ) engine=mito with(regions=1, ttl='7days',write_buffer_size='32MB',some='other');"#;
@@ -297,7 +297,7 @@ mod tests {
         let parsed_stmt = sql_to_statement(
             r#"
             CREATE TABLE demo_table(
-                "timestamp" BIGINT TIME INDEX,
+                "timestamp" timestamp TIME INDEX,
                 "value" DOUBLE,
                 host STRING PRIMARY KEY
             ) engine=mito with(regions=1);"#,
@@ -335,7 +335,7 @@ mod tests {
     pub async fn test_multiple_primary_key_definitions() {
         let parsed_stmt = sql_to_statement(
             r#"create table demo_table (
-                      "timestamp" BIGINT TIME INDEX,
+                      "timestamp" timestamp TIME INDEX,
                       "value" DOUBLE,
                       host STRING PRIMARY KEY,
                       PRIMARY KEY(host)) engine=mito with(regions=1);"#,
@@ -350,7 +350,7 @@ mod tests {
     pub async fn test_multiple_inline_primary_key_definitions() {
         let parsed_stmt = sql_to_statement(
             r#"create table demo_table (
-                      "timestamp" BIGINT TIME INDEX,
+                      "timestamp" timestamp TIME INDEX,
                       "value" DOUBLE PRIMARY KEY,
                       host STRING PRIMARY KEY) engine=mito with(regions=1);"#,
         );
@@ -379,16 +379,13 @@ mod tests {
     /// Constraints specified, not column cannot be found.
     #[tokio::test]
     pub async fn test_key_not_found() {
-        let parsed_stmt = sql_to_statement(
-            r#"create table demo_table(
+        let sql = r#"create table demo_table(
                 host string,
-                TIME INDEX (ts)) engine=mito with(regions=1);"#,
-        );
+                TIME INDEX (ts)) engine=mito with(regions=1);"#;
 
-        let error =
-            SqlHandler::create_to_request(42, parsed_stmt, &TableReference::bare("demo_table"))
-                .unwrap_err();
-        assert_matches!(error, Error::KeyColumnNotFound { .. });
+        let res = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap_err();
+
+        assert_matches!(res, sql::error::Error::InvalidTimeIndex { .. });
     }
 
     #[tokio::test]

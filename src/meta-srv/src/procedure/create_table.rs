@@ -33,7 +33,7 @@ use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::RegionId;
 use strum::AsRefStr;
-use table::engine::{region_dir, TableReference};
+use table::engine::TableReference;
 use table::metadata::{RawTableInfo, TableId};
 
 use super::utils::{handle_request_datanode_error, handle_retry_error};
@@ -170,7 +170,8 @@ impl CreateTableProcedure {
             column_defs,
             primary_key,
             create_if_not_exists: true,
-            region_dir: "".to_string(),
+            catalog: String::new(),
+            schema: String::new(),
             options: create_table_expr.table_options.clone(),
         })
     }
@@ -199,7 +200,8 @@ impl CreateTableProcedure {
 
                     let mut create_table_request = request_template.clone();
                     create_table_request.region_id = region_id.as_u64();
-                    create_table_request.region_dir = region_dir(catalog, schema, region_id);
+                    create_table_request.catalog = catalog.to_string();
+                    create_table_request.schema = schema.to_string();
 
                     PbRegionRequest::Create(create_table_request)
                 })
@@ -562,7 +564,8 @@ mod test {
             ],
             primary_key: vec![2, 1],
             create_if_not_exists: true,
-            region_dir: "".to_string(),
+            catalog: String::new(),
+            schema: String::new(),
             options: HashMap::new(),
         };
         assert_eq!(template, expected);

@@ -216,8 +216,6 @@ impl Instance {
             DdlExpr::Alter(expr) => self.handle_alter(expr, query_ctx).await,
             DdlExpr::CreateDatabase(expr) => self.handle_create_database(expr, query_ctx).await,
             DdlExpr::DropTable(expr) => self.handle_drop_table(expr, query_ctx).await,
-            DdlExpr::FlushTable(expr) => self.handle_flush_table(expr, query_ctx).await,
-            DdlExpr::CompactTable(expr) => self.handle_compact_table(expr, query_ctx).await,
             DdlExpr::TruncateTable(expr) => self.handle_truncate_table(expr, query_ctx).await,
         }
     }
@@ -365,6 +363,7 @@ mod test {
             expr: Some(DdlExpr::CreateDatabase(CreateDatabaseExpr {
                 database_name: "my_database".to_string(),
                 create_if_not_exists: true,
+                options: Default::default(),
             })),
         });
         let output = instance.do_query(query, QueryContext::arc()).await.unwrap();
@@ -418,6 +417,7 @@ mod test {
             expr: Some(DdlExpr::CreateDatabase(CreateDatabaseExpr {
                 database_name: "my_database".to_string(),
                 create_if_not_exists: true,
+                options: Default::default(),
             })),
         });
         let output = instance.do_query(query, QueryContext::arc()).await.unwrap();
@@ -485,6 +485,7 @@ mod test {
             expr: Some(DdlExpr::CreateDatabase(CreateDatabaseExpr {
                 database_name: "my_database".to_string(),
                 create_if_not_exists: true,
+                options: Default::default(),
             })),
         });
         let output = instance.do_query(query, QueryContext::arc()).await.unwrap();
@@ -589,6 +590,7 @@ mod test {
             expr: Some(DdlExpr::CreateDatabase(CreateDatabaseExpr {
                 database_name: "my_database".to_string(),
                 create_if_not_exists: true,
+                options: Default::default(),
             })),
         });
         let output = instance.do_query(query, QueryContext::arc()).await.unwrap();
@@ -661,6 +663,7 @@ mod test {
             expr: Some(DdlExpr::CreateDatabase(CreateDatabaseExpr {
                 database_name: "my_database".to_string(),
                 create_if_not_exists: true,
+                options: Default::default(),
             })),
         });
         let output = instance.do_query(query, QueryContext::arc()).await.unwrap();
@@ -721,7 +724,7 @@ mod test {
                             is_key: true,
                             location: Some(Location {
                                 location_type: LocationType::First.into(),
-                                after_cloumn_name: "".to_string(),
+                                after_column_name: "".to_string(),
                             }),
                         },
                         AddColumn {
@@ -734,7 +737,7 @@ mod test {
                             is_key: true,
                             location: Some(Location {
                                 location_type: LocationType::After.into(),
-                                after_cloumn_name: "a".to_string(),
+                                after_column_name: "a".to_string(),
                             }),
                         },
                     ],

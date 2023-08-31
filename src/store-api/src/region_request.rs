@@ -18,6 +18,7 @@ use api::v1::region::region_request;
 use api::v1::Rows;
 
 use crate::metadata::{ColumnMetadata, MetadataError};
+use crate::path_utils::region_dir;
 use crate::storage::{AlterRequest, ColumnId, RegionId, ScanRequest};
 
 #[derive(Debug)]
@@ -67,15 +68,17 @@ impl RegionRequest {
                     .into_iter()
                     .map(ColumnMetadata::try_from_column_def)
                     .collect::<Result<Vec<_>, _>>()?;
+                let region_id = create.region_id.into();
+                let region_dir = region_dir(&create.catalog, &create.schema, region_id);
                 Ok(vec![(
-                    create.region_id.into(),
+                    region_id,
                     Self::Create(RegionCreateRequest {
                         engine: create.engine,
                         column_metadatas,
                         primary_key: create.primary_key,
                         create_if_not_exists: create.create_if_not_exists,
                         options: create.options,
-                        region_dir: create.region_dir,
+                        region_dir,
                     }),
                 )])
             }
@@ -83,14 +86,18 @@ impl RegionRequest {
                 drop.region_id.into(),
                 Self::Drop(RegionDropRequest {}),
             )]),
-            region_request::Body::Open(open) => Ok(vec![(
-                open.region_id.into(),
-                Self::Open(RegionOpenRequest {
-                    engine: open.engine,
-                    region_dir: open.region_dir,
-                    options: open.options,
-                }),
-            )]),
+            region_request::Body::Open(open) => {
+                let region_id = open.region_id.into();
+                let region_dir = region_dir(&open.catalog, &open.schema, region_id);
+                Ok(vec![(
+                    region_id,
+                    Self::Open(RegionOpenRequest {
+                        engine: open.engine,
+                        region_dir,
+                        options: open.options,
+                    }),
+                )])
+            }
             region_request::Body::Close(close) => Ok(vec![(
                 close.region_id.into(),
                 Self::Close(RegionCloseRequest {}),

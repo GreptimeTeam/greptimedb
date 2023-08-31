@@ -15,6 +15,7 @@ common-telemetry = { workspace = true }
 common-time = { workspace = true }
 etcd-client.workspace = true
 futures.workspace = true
+humantime-serde.workspace = true
 lazy_static.workspace = true
 prost.workspace = true
 regex.workspace = true

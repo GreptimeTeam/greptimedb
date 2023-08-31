@@ -25,8 +25,8 @@ type AffectedRows = u64;
 
 #[derive(Debug)]
 pub struct RegionRequester {
-    trace_id: Option<u64>,
-    span_id: Option<u64>,
+    trace_id: u64,
+    span_id: u64,
     client: Client,
 }
 
@@ -34,8 +34,8 @@ impl RegionRequester {
     pub fn new(client: Client) -> Self {
         // TODO(LFC): Pass in trace_id and span_id from some context when we have it.
         Self {
-            trace_id: None,
-            span_id: None,
+            trace_id: 0,
+            span_id: 0,
             client,
         }
     }

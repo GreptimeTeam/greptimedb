@@ -1,4 +1,4 @@
-CREATE TABLE test (a BIGINT time index, b INTEGER);
+CREATE TABLE test (a TIMESTAMP TIME INDEX, b INTEGER);
 
 Affected Rows: 0
 
@@ -8,11 +8,11 @@ Affected Rows: 3
 
 SELECT a FROM test LIMIT 1;
 
-+----+
-| a  |
-+----+
-| 11 |
-+----+
++-------------------------+
+| a                       |
++-------------------------+
+| 1970-01-01T00:00:00.011 |
++-------------------------+
 
 SELECT a FROM test LIMIT 1.25;
 
@@ -38,7 +38,7 @@ SELECT a FROM test LIMIT row_number() OVER ();
 
 Error: 3000(PlanQuery), Error during planning: LIMIT must not be negative
 
-CREATE TABLE test2 (a STRING, ts BIGINT TIME INDEX);
+CREATE TABLE test2 (a STRING, ts TIMESTAMP TIME INDEX);
 
 Affected Rows: 0
 
@@ -48,17 +48,17 @@ Affected Rows: 1
 
 SELECT * FROM test2 LIMIT 3;
 
-+-------------+----+
-| a           | ts |
-+-------------+----+
-| Hello World | 1  |
-+-------------+----+
++-------------+-------------------------+
+| a           | ts                      |
++-------------+-------------------------+
+| Hello World | 1970-01-01T00:00:00.001 |
++-------------+-------------------------+
 
 select 1 limit date '1992-01-01';
 
 Error: 3000(PlanQuery), Error during planning: LIMIT must not be negative
 
-CREATE TABLE integers(i BIGINT TIME INDEX);
+CREATE TABLE integers(i TIMESTAMP TIME INDEX);
 
 Affected Rows: 0
 
@@ -68,24 +68,24 @@ Affected Rows: 5
 
 SELECT * FROM integers LIMIT 3;
 
-+---+
-| i |
-+---+
-| 1 |
-| 2 |
-| 3 |
-+---+
++-------------------------+
+| i                       |
++-------------------------+
+| 1970-01-01T00:00:00.001 |
+| 1970-01-01T00:00:00.002 |
+| 1970-01-01T00:00:00.003 |
++-------------------------+
 
 SELECT * FROM integers LIMIT 4;
 
-+---+
-| i |
-+---+
-| 1 |
-| 2 |
-| 3 |
-| 4 |
-+---+
++-------------------------+
+| i                       |
++-------------------------+
+| 1970-01-01T00:00:00.001 |
+| 1970-01-01T00:00:00.002 |
+| 1970-01-01T00:00:00.003 |
+| 1970-01-01T00:00:00.004 |
++-------------------------+
 
 SELECT * FROM integers as int LIMIT (SELECT MIN(integers.i) FROM integers);
 

@@ -23,7 +23,7 @@ mod test {
     use api::v1::{
         alter_expr, AddColumn, AddColumns, AlterExpr, Column, ColumnDataType, ColumnDef,
         CreateDatabaseExpr, CreateTableExpr, DdlRequest, DeleteRequest, DeleteRequests,
-        DropTableExpr, FlushTableExpr, InsertRequest, InsertRequests, QueryRequest, SemanticType,
+        DropTableExpr, InsertRequest, InsertRequests, QueryRequest, SemanticType,
     };
     use common_catalog::consts::MITO_ENGINE;
     use common_meta::rpc::router::region_distribution;
@@ -33,8 +33,6 @@ mod test {
     use query::parser::QueryLanguageParser;
     use servers::query_handler::grpc::GrpcQueryHandler;
     use session::context::QueryContext;
-    use store_api::storage::RegionNumber;
-    use tests::{has_parquet_file, test_region_dir};
 
     use crate::tests;
     use crate::tests::MockDistributedInstance;
@@ -69,6 +67,7 @@ mod test {
             expr: Some(DdlExpr::CreateDatabase(CreateDatabaseExpr {
                 database_name: "database_created_through_grpc".to_string(),
                 create_if_not_exists: true,
+                options: Default::default(),
             })),
         });
         let output = query(instance, request).await;
@@ -293,131 +292,10 @@ CREATE TABLE {table_name} (
         test_insert_delete_and_query_on_auto_created_table(instance).await
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_distributed_flush_table() {
-        common_telemetry::init_default_ut_logging();
-
-        let instance = tests::create_distributed_instance("test_distributed_flush_table").await;
-        let data_tmp_dirs = instance.data_tmp_dirs();
-        let frontend = instance.frontend();
-        let frontend = frontend.as_ref();
-
-        let table_name = "my_dist_table";
-        let sql = format!(
-            r"
-CREATE TABLE {table_name} (
-    a INT,
-    ts TIMESTAMP,
-    TIME INDEX (ts)
-) PARTITION BY RANGE COLUMNS(a) (
-    PARTITION r0 VALUES LESS THAN (10),
-    PARTITION r1 VALUES LESS THAN (20),
-    PARTITION r2 VALUES LESS THAN (50),
-    PARTITION r3 VALUES LESS THAN (MAXVALUE),
-)"
-        );
-        create_table(frontend, sql).await;
-
-        test_insert_delete_and_query_on_existing_table(frontend, table_name).await;
-
-        flush_table(frontend, "greptime", "public", table_name, None).await;
-        // Wait for previous task finished
-        flush_table(frontend, "greptime", "public", table_name, None).await;
-
-        let table = frontend
-            .catalog_manager()
-            .table("greptime", "public", table_name)
-            .await
-            .unwrap()
-            .unwrap();
-        let table_id = table.table_info().table_id();
-
-        let table_route_value = instance
-            .table_metadata_manager()
-            .table_route_manager()
-            .get(table_id)
-            .await
-            .unwrap()
-            .unwrap();
-
-        let region_to_dn_map = region_distribution(&table_route_value.region_routes)
-            .unwrap()
-            .iter()
-            .map(|(k, v)| (v[0], *k))
-            .collect::<HashMap<u32, u64>>();
-
-        for (region, dn) in region_to_dn_map.iter() {
-            // data_tmp_dirs -> dn: 1..4
-            let data_tmp_dir = data_tmp_dirs.get((*dn - 1) as usize).unwrap();
-            let region_dir = test_region_dir(
-                data_tmp_dir.path().to_str().unwrap(),
-                "greptime",
-                "public",
-                table_id,
-                *region,
-            );
-            assert!(has_parquet_file(&region_dir));
-        }
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_standalone_flush_table() {
-        common_telemetry::init_default_ut_logging();
-
-        let standalone = tests::create_standalone_instance("test_standalone_flush_table").await;
-        let instance = &standalone.instance;
-        let data_tmp_dir = standalone.data_tmp_dir();
-
-        let table_name = "my_table";
-        let sql = format!("CREATE TABLE {table_name} (a INT, b STRING, ts TIMESTAMP, TIME INDEX (ts), PRIMARY KEY (a, b))");
-
-        create_table(instance, sql).await;
-
-        test_insert_delete_and_query_on_existing_table(instance, table_name).await;
-
-        let table_id = 1024;
-        let region_id = 0;
-        let region_dir = test_region_dir(
-            data_tmp_dir.path().to_str().unwrap(),
-            "greptime",
-            "public",
-            table_id,
-            region_id,
-        );
-        assert!(!has_parquet_file(&region_dir));
-
-        flush_table(instance, "greptime", "public", "my_table", None).await;
-        // Wait for previous task finished
-        flush_table(instance, "greptime", "public", "my_table", None).await;
-
-        assert!(has_parquet_file(&region_dir));
-    }
-
     async fn create_table(frontend: &Instance, sql: String) {
         let request = Request::Query(QueryRequest {
             query: Some(Query::Sql(sql)),
         });
-        let output = query(frontend, request).await;
-        assert!(matches!(output, Output::AffectedRows(0)));
-    }
-
-    async fn flush_table(
-        frontend: &Instance,
-        catalog_name: &str,
-        schema_name: &str,
-        table_name: &str,
-        region_number: Option<RegionNumber>,
-    ) {
-        let request = Request::Ddl(DdlRequest {
-            expr: Some(DdlExpr::FlushTable(FlushTableExpr {
-                catalog_name: catalog_name.to_string(),
-                schema_name: schema_name.to_string(),
-                table_name: table_name.to_string(),
-                region_number,
-                ..Default::default()
-            })),
-        });
-
         let output = query(frontend, request).await;
         assert!(matches!(output, Output::AffectedRows(0)));
     }

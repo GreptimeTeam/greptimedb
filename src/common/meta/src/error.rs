@@ -54,6 +54,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to parse value {} into key {}", value, key))]
+    ParseOption {
+        key: String,
+        value: String,
+        location: Location,
+    },
+
     #[snafu(display("Corrupted table route data, err: {}", err_msg))]
     RouteInfoCorrupted { err_msg: String, location: Location },
 
@@ -140,6 +147,9 @@ pub enum Error {
 
     #[snafu(display("External error: {}", err_msg))]
     External { location: Location, err_msg: String },
+
+    #[snafu(display("Invalid heartbeat response, location: {}", location))]
+    InvalidHeartbeatResponse { location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -151,12 +161,14 @@ impl ErrorExt for Error {
             IllegalServerState { .. } | EtcdTxnOpResponse { .. } => StatusCode::Internal,
 
             SerdeJson { .. }
+            | ParseOption { .. }
             | RouteInfoCorrupted { .. }
             | InvalidProtoMsg { .. }
             | InvalidTableMetadata { .. }
             | MoveRegion { .. }
             | Unexpected { .. }
-            | External { .. } => StatusCode::Unexpected,
+            | External { .. }
+            | InvalidHeartbeatResponse { .. } => StatusCode::Unexpected,
 
             SendMessage { .. }
             | GetKvCache { .. }
