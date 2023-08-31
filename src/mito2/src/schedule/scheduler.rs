@@ -36,13 +36,15 @@ const STATE_AWAIT_TERMINATION: u8 = 2;
 
 /// [Scheduler] defines a set of API to schedule Jobs
 #[async_trait::async_trait]
-pub trait Scheduler {
+pub trait Scheduler: Send + Sync {
     /// Schedules a Job
     fn schedule(&self, job: Job) -> Result<()>;
 
     /// Stops scheduler. If `await_termination` is set to true, the scheduler will wait until all tasks are processed.
     async fn stop(&self, await_termination: bool) -> Result<()>;
 }
+
+pub type SchedulerRef = Arc<dyn Scheduler>;
 
 /// Request scheduler based on local state.
 pub struct LocalScheduler {
@@ -57,7 +59,8 @@ pub struct LocalScheduler {
 }
 
 impl LocalScheduler {
-    /// cap: flume bounded cap
+    /// Starts a new scheduler.
+    ///
     /// concurrency: the number of bounded receiver
     pub fn new(concurrency: usize) -> Self {
         let (tx, rx) = flume::unbounded();
@@ -153,7 +156,11 @@ impl Scheduler for LocalScheduler {
 impl Drop for LocalScheduler {
     fn drop(&mut self) {
         if self.state.load(Ordering::Relaxed) != STATE_STOP {
-            logging::error!("scheduler must be stopped before dropping, which means the state of scheduler must be STATE_STOP");
+            logging::warn!("scheduler should be stopped before dropping, which means the state of scheduler must be STATE_STOP");
+
+            // We didn't call `stop()` so we cancel all background workers here.
+            self.sender.write().unwrap().take();
+            self.cancel_token.cancel();
         }
     }
 }
