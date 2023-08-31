@@ -15,7 +15,7 @@
 //! Handling flush related requests.
 
 use common_query::Output;
-use common_telemetry::error;
+use common_telemetry::{error, info};
 use common_time::util::current_time_millis;
 use store_api::logstore::LogStore;
 use store_api::region_request::RegionFlushRequest;
@@ -47,16 +47,23 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             compaction_time_window: None,
             flushed_entry_id: Some(request.flushed_entry_id),
         };
-        let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit));
+        let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone()));
         if let Err(e) = region.manifest_manager.update(action_list).await {
             error!(e; "Failed to write manifest, region: {}", region_id);
             request.send_error(e);
             return;
         }
 
-        // TODO(yingwen): Apply edit to region's version.
+        // Apply edit to region's version.
+        region
+            .version_control
+            .apply_edit(edit, region.file_purger.clone());
 
         // Delete wal.
+        info!(
+            "Region {} flush finished, tries to bump wal to {}",
+            region_id, request.flushed_entry_id
+        );
         if let Err(e) = self.wal.obsolete(region_id, request.flushed_entry_id).await {
             error!(e; "Failed to write wal, region: {}", region_id);
             request.send_error(e);

@@ -28,8 +28,10 @@ use std::sync::{Arc, RwLock};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::SequenceNumber;
 
+use crate::manifest::action::RegionEdit;
 use crate::memtable::version::{MemtableVersion, MemtableVersionRef};
 use crate::memtable::{MemtableBuilderRef, MemtableRef};
+use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::version::{SstVersion, SstVersionRef};
 use crate::wal::EntryId;
 
@@ -79,6 +81,19 @@ impl VersionControl {
         let new_version = Arc::new(
             VersionBuilder::from_version(version)
                 .memtables(new_memtables)
+                .build(),
+        );
+
+        let mut version_data = self.data.write().unwrap();
+        version_data.version = new_version;
+    }
+
+    /// Apply edit to current version.
+    pub(crate) fn apply_edit(&self, edit: RegionEdit, purger: FilePurgerRef) {
+        let version = self.current().version;
+        let new_version = Arc::new(
+            VersionBuilder::from_version(version)
+                .apply_edit(edit, purger)
                 .build(),
         );
 
@@ -153,6 +168,25 @@ impl VersionBuilder {
     /// Sets memtables.
     pub(crate) fn memtables(mut self, memtables: MemtableVersion) -> VersionBuilder {
         self.memtables = Arc::new(memtables);
+        self
+    }
+
+    /// Apply edit to the builder.
+    pub(crate) fn apply_edit(
+        mut self,
+        edit: RegionEdit,
+        file_purger: FilePurgerRef,
+    ) -> VersionBuilder {
+        if let Some(flushed_entry_id) = edit.flushed_entry_id {
+            self.flushed_entry_id = self.flushed_entry_id.max(flushed_entry_id);
+        }
+        if !edit.files_to_add.is_empty() || !edit.files_to_remove.is_empty() {
+            let mut ssts = (*self.ssts).clone();
+            ssts.add_files(file_purger, edit.files_to_add.into_iter());
+            ssts.remove_files(edit.files_to_remove.into_iter());
+            self.ssts = Arc::new(ssts);
+        }
+
         self
     }
 

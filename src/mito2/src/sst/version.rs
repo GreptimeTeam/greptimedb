@@ -17,10 +17,11 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 
-use crate::sst::file::{FileHandle, FileId, Level, MAX_LEVEL};
+use crate::sst::file::{FileHandle, FileId, FileMeta, Level, MAX_LEVEL};
+use crate::sst::file_purger::FilePurgerRef;
 
 /// A version of all SSTs in a region.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct SstVersion {
     /// SST metadata organized by levels.
     levels: LevelMetaArray,
@@ -40,6 +41,37 @@ impl SstVersion {
     pub(crate) fn levels(&self) -> &[LevelMeta] {
         &self.levels
     }
+
+    /// Add files to the version.
+    ///
+    /// # Panics
+    /// Panics if level of [FileMeta] is greater than [MAX_LEVEL].
+    pub(crate) fn add_files(
+        &mut self,
+        file_purger: FilePurgerRef,
+        files_to_add: impl Iterator<Item = FileMeta>,
+    ) {
+        for file in files_to_add {
+            let level = file.level;
+            let handle = FileHandle::new(file, file_purger.clone());
+            self.levels[level as usize]
+                .files
+                .insert(handle.file_id(), handle);
+        }
+    }
+
+    /// Remove files from the version.
+    ///
+    /// # Panics
+    /// Panics if level of [FileMeta] is greater than [MAX_LEVEL].
+    pub(crate) fn remove_files(&mut self, files_to_remove: impl Iterator<Item = FileMeta>) {
+        for file in files_to_remove {
+            let level = file.level;
+            if let Some(handle) = self.levels[level as usize].files.remove(&file.file_id) {
+                handle.mark_deleted();
+            }
+        }
+    }
 }
 
 // We only has fixed number of level, so we use array to hold elements. This implementation
@@ -47,6 +79,7 @@ impl SstVersion {
 type LevelMetaArray = [LevelMeta; MAX_LEVEL as usize];
 
 /// Metadata of files in the same SST level.
+#[derive(Clone)]
 pub struct LevelMeta {
     /// Level number.
     pub level: Level,
