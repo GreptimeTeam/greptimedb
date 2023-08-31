@@ -21,7 +21,9 @@ use api::v1::value::ValueData;
 use api::v1::{Row, Rows};
 use common_recordbatch::RecordBatches;
 use store_api::metadata::ColumnMetadata;
-use store_api::region_request::{RegionCloseRequest, RegionOpenRequest, RegionPutRequest};
+use store_api::region_request::{
+    RegionCloseRequest, RegionFlushRequest, RegionOpenRequest, RegionPutRequest,
+};
 use store_api::storage::RegionId;
 
 use super::*;
@@ -408,6 +410,58 @@ async fn test_write_query_region() {
 
     let request = ScanRequest::default();
     let scanner = engine.handle_query(region_id, request).unwrap();
+    let stream = scanner.scan().await.unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    let expected = "\
++-------+---------+---------------------+
+| tag_0 | field_0 | ts                  |
++-------+---------+---------------------+
+| 0     | 0.0     | 1970-01-01T00:00:00 |
+| 1     | 1.0     | 1970-01-01T00:00:01 |
+| 2     | 2.0     | 1970-01-01T00:00:02 |
++-------+---------+---------------------+";
+    assert_eq!(expected, batches.pretty_print().unwrap());
+}
+
+#[tokio::test]
+async fn test_manual_flush() {
+    let mut env = TestEnv::new();
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+
+    let column_schemas = request
+        .column_metadatas
+        .iter()
+        .map(column_metadata_to_column_schema)
+        .collect::<Vec<_>>();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let rows = Rows {
+        schema: column_schemas,
+        rows: build_rows(0, 3),
+    };
+    engine
+        .handle_request(region_id, RegionRequest::Put(RegionPutRequest { rows }))
+        .await
+        .unwrap();
+
+    let Output::AffectedRows(rows) = engine
+        .handle_request(region_id, RegionRequest::Flush(RegionFlushRequest {}))
+        .await
+        .unwrap()
+    else {
+        unreachable!()
+    };
+    assert_eq!(0, rows);
+
+    let request = ScanRequest::default();
+    let scanner = engine.handle_query(region_id, request).unwrap();
+    assert_eq!(1, scanner.num_files());
     let stream = scanner.scan().await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     let expected = "\
