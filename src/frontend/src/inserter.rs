@@ -88,9 +88,9 @@ impl<'a> Inserter<'a> {
             match self.get_table(req, &ctx).await? {
                 Some(table) => {
                     validate_request_with_table(req, &table)?;
-                    self.alter_table_on_demand(req, table, ctx.clone()).await?
+                    self.alter_table_on_demand(req, table, &ctx).await?
                 }
-                None => self.create_table(req, ctx.clone()).await?,
+                None => self.create_table(req, &ctx).await?,
             }
         }
 
@@ -112,7 +112,7 @@ impl<'a> Inserter<'a> {
         &self,
         req: &RowInsertRequest,
         table: TableRef,
-        ctx: QueryContextRef,
+        ctx: &QueryContextRef,
     ) -> Result<()> {
         let catalog_name = ctx.current_catalog();
         let schema_name = ctx.current_schema();
@@ -134,7 +134,7 @@ impl<'a> Inserter<'a> {
         let alter_table_expr = AlterExpr {
             catalog_name: catalog_name.to_string(),
             schema_name: schema_name.to_string(),
-            table_name,
+            table_name: table_name.to_string(),
             kind: Some(Kind::AddColumns(add_columns)),
             ..Default::default()
         };
@@ -142,15 +142,25 @@ impl<'a> Inserter<'a> {
         let req = Request::Ddl(DdlRequest {
             expr: Some(DdlExpr::Alter(alter_table_expr)),
         });
-        self.grpc_query_handler.do_query(req, ctx).await?;
+        self.grpc_query_handler.do_query(req, ctx.clone()).await?;
+
+        info!(
+            "Successfully added new columns to table: {}.{}.{}",
+            catalog_name, schema_name, table_name
+        );
 
         Ok(())
     }
 
-    async fn create_table(&self, req: &RowInsertRequest, ctx: QueryContextRef) -> Result<()> {
+    async fn create_table(&self, req: &RowInsertRequest, ctx: &QueryContextRef) -> Result<()> {
         let table_ref =
             TableReference::full(ctx.current_catalog(), ctx.current_schema(), &req.table_name);
         let request_schema = req.rows.as_ref().unwrap().schema.as_slice();
+
+        info!(
+            "Table {}.{}.{} does not exist, try create table",
+            table_ref.catalog, table_ref.schema, table_ref.table,
+        );
 
         let create_table_expr = self
             .create_expr_factory
@@ -159,7 +169,12 @@ impl<'a> Inserter<'a> {
         let req = Request::Ddl(DdlRequest {
             expr: Some(DdlExpr::CreateTable(create_table_expr)),
         });
-        self.grpc_query_handler.do_query(req, ctx).await?;
+        self.grpc_query_handler.do_query(req, ctx.clone()).await?;
+
+        info!(
+            "Successfully created table on insertion: {}.{}.{}",
+            table_ref.catalog, table_ref.schema, table_ref.table,
+        );
 
         Ok(())
     }
