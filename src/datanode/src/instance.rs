@@ -123,15 +123,15 @@ impl Instance {
         Ok(match opts.mode {
             Mode::Standalone => None,
             Mode::Distributed => {
-                let node_id = opts.node_id.context(MissingNodeIdSnafu)?;
-                let meta_client = meta_client.context(IncorrectInternalStateSnafu {
+                let _node_id = opts.node_id.context(MissingNodeIdSnafu)?;
+                let _meta_client = meta_client.context(IncorrectInternalStateSnafu {
                     state: "meta client is not provided when building heartbeat task",
                 })?;
                 let region_alive_keepers =
                     region_alive_keepers.context(IncorrectInternalStateSnafu {
                         state: "region_alive_keepers is not provided when building heartbeat task",
                     })?;
-                let handlers_executor = HandlerGroupExecutor::new(vec![
+                let _handlers_executor = HandlerGroupExecutor::new(vec![
                     Arc::new(ParseMailboxMessageHandler),
                     Arc::new(OpenRegionHandler::new(
                         catalog_manager.clone(),
@@ -146,15 +146,7 @@ impl Instance {
                     region_alive_keepers.clone(),
                 ]);
 
-                Some(HeartbeatTask::new(
-                    node_id,
-                    opts,
-                    meta_client,
-                    catalog_manager,
-                    Arc::new(handlers_executor),
-                    opts.heartbeat.interval_millis,
-                    region_alive_keepers,
-                ))
+                todo!("remove this method")
             }
         })
     }
@@ -425,7 +417,10 @@ fn create_compaction_scheduler<S: LogStore>(opts: &DatanodeOptions) -> Compactio
 }
 
 /// Create metasrv client instance and spawn heartbeat loop.
-async fn new_metasrv_client(node_id: u64, meta_config: &MetaClientOptions) -> Result<MetaClient> {
+pub async fn new_metasrv_client(
+    node_id: u64,
+    meta_config: &MetaClientOptions,
+) -> Result<MetaClient> {
     let cluster_id = 0; // TODO(hl): read from config
     let member_id = node_id;
 

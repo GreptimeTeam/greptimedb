@@ -51,6 +51,17 @@ impl MemoryTableEngineManager {
         MemoryTableEngineManager::alias(engine.name().to_string(), engine)
     }
 
+    // TODO: remove `TableEngineManager`
+    pub fn new_empty() -> Self {
+        let engines = RwLock::new(HashMap::new());
+        let engine_procedures = RwLock::new(HashMap::new());
+
+        MemoryTableEngineManager {
+            engines,
+            engine_procedures,
+        }
+    }
+
     /// Create a new [MemoryTableEngineManager] with single table `engine` and
     /// an alias `name` instead of the engine's name.
     pub fn alias(name: String, engine: TableEngineRef) -> Self {
