@@ -59,6 +59,14 @@ impl<'a> Inserter<'a> {
         requests: RowInsertRequests,
         ctx: QueryContextRef,
     ) -> Result<Output> {
+        requests.inserts.iter().try_for_each(|req| {
+            let non_empty = req.rows.as_ref().map(|r| !r.rows.is_empty());
+            let non_empty = non_empty.unwrap_or_default();
+            non_empty.then_some(()).with_context(|| EmptyDataSnafu {
+                msg: format!("insert to table: {:?}", &req.table_name),
+            })
+        })?;
+
         self.create_or_alter_tables_on_demand(&requests, ctx.clone())
             .await?;
         let query = Request::RowInserts(requests);
@@ -77,13 +85,6 @@ impl<'a> Inserter<'a> {
     ) -> Result<()> {
         // TODO(jeremy): create and alter in batch?
         for req in &requests.inserts {
-            if req.rows.as_ref().map(|r| r.rows.is_empty()).unwrap_or(true) {
-                return EmptyDataSnafu {
-                    msg: format!("insert to table: {:?}", &req.table_name),
-                }
-                .fail();
-            }
-
             match self.get_table(req, &ctx).await? {
                 Some(table) => {
                     validate_request_with_table(req, &table)?;
