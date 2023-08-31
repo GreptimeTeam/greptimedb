@@ -28,25 +28,30 @@ pub type AccessLayerRef = Arc<AccessLayer>;
 
 /// A layer to access SST files under the same directory.
 pub struct AccessLayer {
-    sst_dir: String,
+    region_dir: String,
     object_store: ObjectStore,
 }
 
 impl std::fmt::Debug for AccessLayer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AccessLayer")
-            .field("sst_dir", &self.sst_dir)
+            .field("region_dir", &self.region_dir)
             .finish()
     }
 }
 
 impl AccessLayer {
-    /// Returns a new [AccessLayer] for specific `sst_dir`.
-    pub fn new(sst_dir: impl Into<String>, object_store: ObjectStore) -> AccessLayer {
+    /// Returns a new [AccessLayer] for specific `region_dir`.
+    pub fn new(region_dir: impl Into<String>, object_store: ObjectStore) -> AccessLayer {
         AccessLayer {
-            sst_dir: sst_dir.into(),
+            region_dir: region_dir.into(),
             object_store,
         }
+    }
+
+    /// Returns the directory of the region.
+    pub fn region_dir(&self) -> &str {
+        &self.region_dir
     }
 
     /// Deletes a SST file with given file id.
@@ -60,7 +65,7 @@ impl AccessLayer {
 
     /// Returns a reader builder for specific `file`.
     pub(crate) fn read_sst(&self, file: FileHandle) -> ParquetReaderBuilder {
-        ParquetReaderBuilder::new(self.sst_dir.clone(), file, self.object_store.clone())
+        ParquetReaderBuilder::new(self.region_dir.clone(), file, self.object_store.clone())
     }
 
     /// Returns a new parquet writer to write the SST for specific `file_id`.
@@ -76,6 +81,6 @@ impl AccessLayer {
 
     /// Returns the `file_path` for the `file_name` in the object store.
     fn sst_file_path(&self, file_name: &str) -> String {
-        util::join_path(&self.sst_dir, file_name)
+        util::join_path(&self.region_dir, file_name)
     }
 }
