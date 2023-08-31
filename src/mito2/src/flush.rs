@@ -14,7 +14,7 @@
 
 //! Flush related utilities and structs.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use store_api::storage::RegionId;
@@ -118,13 +118,8 @@ impl RegionFlushTask {
 
 /// Manages background flushes of a worker.
 pub(crate) struct FlushScheduler {
-    /// Pending flush tasks.
-    queue: VecDeque<RegionFlushTask>,
     /// Tracks regions need to flush.
     region_status: HashMap<RegionId, FlushStatus>,
-    // TODO(yingwen): Support global flush concurrency control. We can implement a global permits for this.
-    /// Has running flush job.
-    has_flush_running: bool,
     /// Background job scheduler.
     scheduler: SchedulerRef,
 }
@@ -133,9 +128,7 @@ impl FlushScheduler {
     /// Creates a new flush scheduler.
     pub(crate) fn new(scheduler: SchedulerRef) -> FlushScheduler {
         FlushScheduler {
-            queue: VecDeque::new(),
             region_status: HashMap::new(),
-            has_flush_running: false,
             scheduler,
         }
     }
@@ -170,20 +163,8 @@ impl FlushScheduler {
         if flush_status.flushing_task.is_some() {
             // There is already a flush job running.
             flush_status.stalling = true;
-            self.queue.push_back(task);
             return;
         }
-
-        // Checks flush job limit.
-        if !self.queue.is_empty() || self.has_flush_running {
-            debug_assert!(self.has_flush_running);
-            // We reach job limit.
-            self.queue.push_back(task);
-            return;
-        }
-
-        // TODO(yingwen): Submit the flush job to job scheduler.
-        self.has_flush_running = true;
 
         todo!()
     }
