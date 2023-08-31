@@ -395,6 +395,9 @@ pub enum Error {
         source: object_store::Error,
         location: Location,
     },
+
+    #[snafu(display("Failed to flush region, source: {}", source))]
+    FlushRegion { source: Arc<Error> },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -457,6 +460,7 @@ impl ErrorExt for Error {
             StopScheduler { .. } => StatusCode::Internal,
             BuildPredicate { source, .. } => source.status_code(),
             DeleteSst { .. } => StatusCode::StorageUnavailable,
+            FlushRegion { source, .. } => source.status_code(),
         }
     }
 

@@ -14,22 +14,22 @@
 
 //! Flush related utilities and structs.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use common_telemetry::{error, info};
+use snafu::ResultExt;
 use store_api::storage::{RegionId, ScanRequest};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::access_layer::AccessLayerRef;
-use crate::error::{Error, Result};
+use crate::error::{Error, FlushRegionSnafu, Result};
 use crate::memtable::MemtableBuilderRef;
 use crate::read::Source;
-use crate::region::version::{VersionRef, VersionControlData};
+use crate::region::version::{VersionControlData, VersionRef};
 use crate::region::MitoRegionRef;
 use crate::request::{
-    BackgroundNotify, FlushFailed, FlushFinished, SenderDdlRequest, SenderWriteRequest,
-    WorkerRequest,
+    BackgroundNotify, FlushFailed, FlushFinished, SenderDdlRequest, WorkerRequest,
 };
 use crate::schedule::scheduler::{Job, SchedulerRef};
 use crate::sst::file::{FileId, FileMeta};
@@ -97,8 +97,8 @@ pub(crate) struct RegionFlushTask {
     pub(crate) region_id: RegionId,
     /// Reason to flush.
     pub(crate) reason: FlushReason,
-    /// Flush result sender.
-    pub(crate) sender: Option<oneshot::Sender<Result<()>>>,
+    /// Flush result senders.
+    pub(crate) senders: Vec<oneshot::Sender<Result<()>>>,
     /// Request sender to notify the worker.
     pub(crate) request_sender: mpsc::Sender<WorkerRequest>,
 
@@ -109,7 +109,7 @@ pub(crate) struct RegionFlushTask {
 impl RegionFlushTask {
     /// Consumes the task and notify the sender the job is success.
     fn on_success(self) {
-        if let Some(sender) = self.sender {
+        for sender in self.senders {
             let _ = sender.send(Ok(()));
         }
     }
@@ -129,13 +129,19 @@ impl RegionFlushTask {
     async fn do_flush(mut self, version_data: VersionControlData) {
         let worker_request = match self.flush_memtables(&version_data.version).await {
             Ok(file_metas) => {
-                let memtables_to_remove = version_data.version.memtables.immutables().iter().map(|m| m.id()).collect();
+                let memtables_to_remove = version_data
+                    .version
+                    .memtables
+                    .immutables()
+                    .iter()
+                    .map(|m| m.id())
+                    .collect();
                 let flush_finished = FlushFinished {
                     file_metas,
                     // The last entry has been flushed.
                     flushed_entry_id: version_data.last_entry_id,
                     memtables_to_remove,
-                    sender: self.sender.take(),
+                    senders: std::mem::take(&mut self.senders),
                 };
                 WorkerRequest::Background {
                     region_id: self.region_id,
@@ -208,21 +214,27 @@ impl RegionFlushTask {
 
     /// Send flush error to waiter.
     fn send_error(&mut self, err: Error) {
-        if let Some(sender) = self.sender.take() {
+        let err = Arc::new(err);
+        for sender in self.senders.drain(..) {
             // Ignore send result.
-            let _ = sender.send(Err(err));
+            let _ = sender.send(Err(err.clone()).context(FlushRegionSnafu));
         }
+    }
+
+    /// Merge two flush tasks.
+    fn merge(&mut self, mut other: RegionFlushTask) {
+        assert_eq!(self.region_id, other.region_id);
+        // Now we only merge senders. They share the same flush reason.
+        self.senders.append(&mut other.senders);
     }
 }
 
 /// Manages background flushes of a worker.
 pub(crate) struct FlushScheduler {
-    /// Pending flush tasks.
-    queue: VecDeque<RegionFlushTask>,
     /// Tracks regions need to flush.
     region_status: HashMap<RegionId, FlushStatus>,
     // TODO(yingwen): Support global flush concurrency control. We can implement a global permits for this.
-    /// Has running flush job.
+    /// Has running flush job. Now each worker only allow one flush job at a time.
     has_flush_running: bool,
     /// Background job scheduler.
     scheduler: SchedulerRef,
@@ -232,19 +244,10 @@ impl FlushScheduler {
     /// Creates a new flush scheduler.
     pub(crate) fn new(scheduler: SchedulerRef) -> FlushScheduler {
         FlushScheduler {
-            queue: VecDeque::new(),
             region_status: HashMap::new(),
             has_flush_running: false,
             scheduler,
         }
-    }
-
-    /// Returns true if the region is stalling.
-    pub(crate) fn is_stalling(&self, region_id: RegionId) -> bool {
-        self.region_status
-            .get(&region_id)
-            .map(|status| status.stalling)
-            .unwrap_or(false)
     }
 
     /// Returns true if the region already requested flush.
@@ -275,110 +278,112 @@ impl FlushScheduler {
             .or_insert_with(|| FlushStatus::new(region.clone()));
         // Checks whether we can flush the region now.
         if flush_status.flushing {
-            // There is already a flush job running, mark as stalling.
-            flush_status.stalling = true;
-            self.queue.push_back(task);
-            flush_status.num_queueing += 1;
-            return Ok(());
-        }
-
-        // Checks flush job limit.
-        if !self.queue.is_empty() || self.has_flush_running {
             debug_assert!(self.has_flush_running);
-            // We reach job limit.
-            self.queue.push_back(task);
-            flush_status.num_queueing += 1;
-            if flush_status.num_queueing > 1 {
-                flush_status.stalling = true;
-            }
+            // There is already a flush job running.
+            flush_status.push_task(task);
             return Ok(());
         }
 
-        // Now we can flush the region.
+        // Checks pending tasks and flush job limit.
+        if flush_status.pending_task.is_some() || self.has_flush_running {
+            flush_status.push_task(task);
+            return Ok(());
+        }
+
+        // Now we can flush the region directly.
         region
             .version_control
             .freeze_mutable(&task.memtable_builder);
         // Submit a flush job.
         let job = task.into_flush_job(region);
-        self.scheduler.schedule(job).map_err(|e| {
+        if let Err(e) = self.scheduler.schedule(job) {
             error!(e; "Failed to schedule flush job for region {}", region.region_id);
-            e
-        })?;
+
+            // Remove from region status if we can't submit the task.
+            self.region_status.remove(&region.region_id);
+            return Err(e);
+        }
+        flush_status.flushing = true;
         self.has_flush_running = true;
 
         Ok(())
     }
 
-    pub(crate) fn on_flush_success(&mut self, region_id: RegionId) {
+    /// Notifies the scheduler that the flush job is finished.
+    ///
+    /// Returns all pending requests if the region doesn't need to flush again.
+    pub(crate) fn on_flush_success(
+        &mut self,
+        region_id: RegionId,
+    ) -> Option<Vec<SenderDdlRequest>> {
         let Some(flush_status) = self.region_status.get_mut(&region_id) else {
-            return;
+            return None;
         };
 
+        // Now no flush job is running.
         self.has_flush_running = false;
         flush_status.flushing = false;
-        if flush_status {
-            unimplemented!();
+
+        if flush_status.pending_task.is_none() {
+            // The region doesn't have any pending flush task.
+            // Safety: The flush status exists.
+            let flush_status = self.region_status.remove(&region_id).unwrap();
+            return Some(flush_status.pending_ddls);
         }
 
-        // if flush_status.num_queueing == 0 {
-        //     // No pending flush job.
-        //     //
-        // } else if flush_status.num_queueing == 1 {
-        //     // Only one flush job.
-        // }
-
-        unimplemented!()
-    }
-
-    /// Add write `request` to pending queue.
-    ///
-    /// Returns error if region is not stalling.
-    pub(crate) fn add_write_request_to_pending(
-        &mut self,
-        request: SenderWriteRequest,
-    ) -> Result<(), SenderWriteRequest> {
-        if let Some(status) = self.region_status.get_mut(&request.request.region_id) {
-            if status.stalling {
-                status.pending_writes.push(request);
-                return Ok(());
-            }
-        }
-
-        Err(request)
+        None
     }
 
     /// Add ddl request to pending queue.
     ///
-    /// Returns error if region is not stalling.
+    /// Returns error if region doesn't request flush.
     pub(crate) fn add_ddl_request_to_pending(
         &mut self,
         request: SenderDdlRequest,
     ) -> Result<(), SenderDdlRequest> {
         if let Some(status) = self.region_status.get_mut(&request.region_id) {
-            if status.stalling {
-                status.pending_ddls.push(request);
-                return Ok(());
-            }
+            status.pending_ddls.push(request);
+            return Ok(());
         }
 
         Err(request)
+    }
+
+    /// Schedules a new flush task when the scheduler can submit next task.
+    pub(crate) fn schedule_next_flush(&mut self) -> Result<()> {
+        debug_assert!(!self.has_flush_running);
+        debug_assert!(self
+            .region_status
+            .values()
+            .all(|status| !status.flushing && status.pending_task.is_some()));
+
+        // Get the first region from status map.
+        let Some(flush_status) = self
+            .region_status
+            .values_mut()
+            .filter(|status| status.pending_task.is_some())
+            .next()
+        else {
+            return Ok(());
+        };
+        debug_assert!(!flush_status.flushing);
+        let task = flush_status.pending_task.take().unwrap();
+        let region = flush_status.region.clone();
+
+        self.schedule_flush(&region, task)
     }
 }
 
 /// Flush status of a region scheduled by the [FlushScheduler].
 ///
-/// Tracks running and pending flusht tasks and all pending requests of a region.
+/// Tracks running and pending flush tasks and all pending requests of a region.
 struct FlushStatus {
     /// Current region.
     region: MitoRegionRef,
     /// There is a flush task running.
     flushing: bool,
-    /// The number of flush requests waiting in queue.
-    num_queueing: usize,
-    /// The region is stalling.
-    stalling: bool,
-    /// Pending write requests.
-    pending_writes: Vec<SenderWriteRequest>,
+    /// Task waiting for flush.
+    pending_task: Option<RegionFlushTask>,
     /// Pending ddl requests.
     pending_ddls: Vec<SenderDdlRequest>,
 }
@@ -388,10 +393,16 @@ impl FlushStatus {
         FlushStatus {
             region,
             flushing: false,
-            num_queueing: 0,
-            stalling: false,
-            pending_writes: Vec::new(),
+            pending_task: None,
             pending_ddls: Vec::new(),
+        }
+    }
+
+    fn push_task(&mut self, task: RegionFlushTask) {
+        if let Some(pending) = &mut self.pending_task {
+            pending.merge(task);
+        } else {
+            self.pending_task = Some(task);
         }
     }
 }

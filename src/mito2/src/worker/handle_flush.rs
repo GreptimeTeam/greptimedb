@@ -21,7 +21,7 @@ use store_api::logstore::LogStore;
 use store_api::region_request::RegionFlushRequest;
 use store_api::storage::RegionId;
 
-use crate::error::{Result, RegionNotFoundSnafu};
+use crate::error::{RegionNotFoundSnafu, Result};
 use crate::flush::{FlushReason, RegionFlushTask};
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::region::MitoRegionRef;
@@ -36,9 +36,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         mut request: FlushFinished,
     ) {
         let Some(region) = self.regions.get_region(region_id) else {
-            request.send_error(RegionNotFoundSnafu {
-                region_id,
-            }.build());
+            request.send_error(RegionNotFoundSnafu { region_id }.build());
             return;
         };
 
@@ -64,6 +62,16 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             error!(e; "Failed to write wal, region: {}", region_id);
             request.send_error(e);
             return;
+        }
+
+        // Handle pending requests of the region.
+        if let Some(ddl_requests) = self.flush_scheduler.on_flush_success(region_id) {
+            self.handle_ddl_requests(ddl_requests).await;
+        }
+
+        // Schedule next flush job.
+        if let Err(e) = self.flush_scheduler.schedule_next_flush() {
+            error!(e; "Failed to schedule next flush");
         }
 
         // TODO(yingwen):
@@ -158,10 +166,12 @@ impl<S> RegionWorkerLoop<S> {
     }
 
     fn new_flush_task(&self, region: &MitoRegionRef, reason: FlushReason) -> RegionFlushTask {
+        // TODO(yingwen): metrics for flush reqeusted.
+
         RegionFlushTask {
             region_id: region.region_id,
             reason,
-            sender: None,
+            senders: Vec::new(),
             request_sender: self.sender.clone(),
             access_layer: region.access_layer.clone(),
             memtable_builder: self.memtable_builder.clone(),

@@ -15,6 +15,7 @@
 //! Worker requests.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use api::helper::{
@@ -35,7 +36,9 @@ use store_api::storage::{CompactionStrategy, RegionId};
 use tokio::sync::oneshot::{self, Receiver, Sender};
 
 use crate::config::DEFAULT_WRITE_BUFFER_SIZE;
-use crate::error::{CreateDefaultSnafu, Error, FillDefaultSnafu, InvalidRequestSnafu, Result};
+use crate::error::{
+    CreateDefaultSnafu, Error, FillDefaultSnafu, FlushRegionSnafu, InvalidRequestSnafu, Result,
+};
 use crate::memtable::MemtableId;
 use crate::sst::file::FileMeta;
 use crate::wal::EntryId;
@@ -448,16 +451,17 @@ pub(crate) struct FlushFinished {
     pub(crate) flushed_entry_id: EntryId,
     /// Id of memtables to remove.
     pub(crate) memtables_to_remove: SmallVec<[MemtableId; 2]>,
-    /// Flush result sender.
-    pub(crate) sender: Option<oneshot::Sender<Result<()>>>,
+    /// Flush result senders.
+    pub(crate) senders: Vec<oneshot::Sender<Result<()>>>,
 }
 
 impl FlushFinished {
     pub(crate) fn send_error(self, err: Error) {
+        let err = Arc::new(err);
         // TODO(yingwen): We should remove these files.
-        if let Some(sender) = self.sender {
+        for sender in self.senders {
             // Ignore send result.
-            let _ = sender.send(Err(err));
+            let _ = sender.send(Err(err.clone()).context(FlushRegionSnafu));
         }
     }
 }
