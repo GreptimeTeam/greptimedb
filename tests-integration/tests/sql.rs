@@ -136,7 +136,10 @@ pub async fn test_mysql_crud(store_type: StorageType) {
     .await
     .is_ok());
     for i in 0..10 {
-        let dt = DateTime::<Utc>::from_utc(NaiveDateTime::from_timestamp_opt(60, i).unwrap(), Utc);
+        let dt: DateTime<Utc> = DateTime::from_naive_utc_and_offset(
+            NaiveDateTime::from_timestamp_opt(60, i).unwrap(),
+            Utc,
+        );
         let d = NaiveDate::from_yo_opt(2015, 100).unwrap();
         let hello = format!("hello{i}");
         let bytes = hello.as_bytes();
@@ -165,7 +168,7 @@ pub async fn test_mysql_crud(store_type: StorageType) {
         assert_eq!(ret, i as i64);
         let expected_d = NaiveDate::from_yo_opt(2015, 100).unwrap();
         assert_eq!(expected_d, d);
-        let expected_dt = DateTime::<Utc>::from_utc(
+        let expected_dt: DateTime<Utc> = DateTime::from_naive_utc_and_offset(
             NaiveDateTime::from_timestamp_opt(60, i as u32).unwrap(),
             Utc,
         );

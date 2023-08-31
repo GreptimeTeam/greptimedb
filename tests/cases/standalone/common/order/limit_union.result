@@ -1,4 +1,4 @@
-CREATE TABLE integers(i BIGINT TIME INDEX);
+CREATE TABLE integers(i TIMESTAMP TIME INDEX);
 
 Affected Rows: 0
 
@@ -8,17 +8,17 @@ Affected Rows: 5
 
 SELECT * FROM integers UNION ALL SELECT * FROM integers LIMIT 7;
 
-+---+
-| i |
-+---+
-| 0 |
-| 1 |
-| 2 |
-| 3 |
-| 4 |
-| 0 |
-| 1 |
-+---+
++-------------------------+
+| i                       |
++-------------------------+
+| 1970-01-01T00:00:00     |
+| 1970-01-01T00:00:00.001 |
+| 1970-01-01T00:00:00.002 |
+| 1970-01-01T00:00:00.003 |
+| 1970-01-01T00:00:00.004 |
+| 1970-01-01T00:00:00     |
+| 1970-01-01T00:00:00.001 |
++-------------------------+
 
 SELECT COUNT(*) FROM (SELECT * FROM integers UNION ALL SELECT * FROM integers LIMIT 7) tbl;
 

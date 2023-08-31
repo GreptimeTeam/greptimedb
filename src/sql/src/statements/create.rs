@@ -229,7 +229,7 @@ mod tests {
     fn test_display_create_table() {
         let sql = r"create table if not exists demo(
                              host string,
-                             ts bigint,
+                             ts timestamp,
                              cpu double default 0,
                              memory double,
                              TIME INDEX (ts),
@@ -253,7 +253,7 @@ mod tests {
                     r#"
 CREATE TABLE IF NOT EXISTS demo (
   host STRING,
-  ts BIGINT,
+  ts TIMESTAMP,
   cpu DOUBLE DEFAULT 0,
   memory DOUBLE,
   TIME INDEX (ts),
@@ -284,7 +284,7 @@ WITH(
     fn test_display_empty_partition_column() {
         let sql = r"create table if not exists demo(
             host string,
-            ts bigint,
+            ts timestamp,
             cpu double default 0,
             memory double,
             TIME INDEX (ts),
@@ -301,7 +301,7 @@ WITH(
                     r#"
 CREATE TABLE IF NOT EXISTS demo (
   host STRING,
-  ts BIGINT,
+  ts TIMESTAMP,
   cpu DOUBLE DEFAULT 0,
   memory DOUBLE,
   TIME INDEX (ts),

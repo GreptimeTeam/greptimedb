@@ -1,4 +1,4 @@
-create table t0 (c0 varchar, t BIGINT TIME INDEX);
+create table t0 (c0 varchar, t TIMESTAMP TIME INDEX);
 
 Affected Rows: 0
 
@@ -8,19 +8,19 @@ Affected Rows: 7
 
 SELECT * FROM t0 ORDER BY t0.c0 DESC;
 
-+----+---+
-| c0 | t |
-+----+---+
-|    | 7 |
-|    | 6 |
-|    | 5 |
-|    | 4 |
-|    | 3 |
-|    | 2 |
-| a  | 1 |
-+----+---+
++----+-------------------------+
+| c0 | t                       |
++----+-------------------------+
+|    | 1970-01-01T00:00:00.007 |
+|    | 1970-01-01T00:00:00.006 |
+|    | 1970-01-01T00:00:00.005 |
+|    | 1970-01-01T00:00:00.004 |
+|    | 1970-01-01T00:00:00.003 |
+|    | 1970-01-01T00:00:00.002 |
+| a  | 1970-01-01T00:00:00.001 |
++----+-------------------------+
 
-CREATE TABLE test0 (job VARCHAR, name VARCHAR, t BIGINT TIME INDEX);
+CREATE TABLE test0 (job VARCHAR, name VARCHAR, t TIMESTAMP TIME INDEX);
 
 Affected Rows: 0
 
@@ -30,31 +30,31 @@ Affected Rows: 6
 
 SELECT * FROM test0 ORDER BY job, name;
 
-+-----------------------------------+----------+---+
-| job                               | name     | t |
-+-----------------------------------+----------+---+
-| Production Supervisor - WC40      | Dsa      | 6 |
-| Production Supervisor - WC60      | Brown    | 4 |
-| Production Supervisor - WC60      | Campbell | 5 |
-| Shipping and Receiving Clerk      | Berndt   | 2 |
-| Shipping and Receiving Clerk      | Kuppa    | 3 |
-| Shipping and Receiving Supervisor | Ackerman | 1 |
-+-----------------------------------+----------+---+
++-----------------------------------+----------+-------------------------+
+| job                               | name     | t                       |
++-----------------------------------+----------+-------------------------+
+| Production Supervisor - WC40      | Dsa      | 1970-01-01T00:00:00.006 |
+| Production Supervisor - WC60      | Brown    | 1970-01-01T00:00:00.004 |
+| Production Supervisor - WC60      | Campbell | 1970-01-01T00:00:00.005 |
+| Shipping and Receiving Clerk      | Berndt   | 1970-01-01T00:00:00.002 |
+| Shipping and Receiving Clerk      | Kuppa    | 1970-01-01T00:00:00.003 |
+| Shipping and Receiving Supervisor | Ackerman | 1970-01-01T00:00:00.001 |
++-----------------------------------+----------+-------------------------+
 
 SELECT * FROM test0 ORDER BY job DESC, name DESC;
 
-+-----------------------------------+----------+---+
-| job                               | name     | t |
-+-----------------------------------+----------+---+
-| Shipping and Receiving Supervisor | Ackerman | 1 |
-| Shipping and Receiving Clerk      | Kuppa    | 3 |
-| Shipping and Receiving Clerk      | Berndt   | 2 |
-| Production Supervisor - WC60      | Campbell | 5 |
-| Production Supervisor - WC60      | Brown    | 4 |
-| Production Supervisor - WC40      | Dsa      | 6 |
-+-----------------------------------+----------+---+
++-----------------------------------+----------+-------------------------+
+| job                               | name     | t                       |
++-----------------------------------+----------+-------------------------+
+| Shipping and Receiving Supervisor | Ackerman | 1970-01-01T00:00:00.001 |
+| Shipping and Receiving Clerk      | Kuppa    | 1970-01-01T00:00:00.003 |
+| Shipping and Receiving Clerk      | Berndt   | 1970-01-01T00:00:00.002 |
+| Production Supervisor - WC60      | Campbell | 1970-01-01T00:00:00.005 |
+| Production Supervisor - WC60      | Brown    | 1970-01-01T00:00:00.004 |
+| Production Supervisor - WC40      | Dsa      | 1970-01-01T00:00:00.006 |
++-----------------------------------+----------+-------------------------+
 
-CREATE TABLE test1 (s VARCHAR, t BIGINT TIME INDEX);
+CREATE TABLE test1 (s VARCHAR, t TIMESTAMP TIME INDEX);
 
 Affected Rows: 0
 
@@ -64,20 +64,20 @@ Affected Rows: 8
 
 SELECT * FROM test1 ORDER BY s;
 
-+---------------+---+
-| s             | t |
-+---------------+---+
-| 1             | 4 |
-| 10            | 6 |
-| 2             | 1 |
-| 3555555555551 | 8 |
-| 3555555555552 | 3 |
-| 3555555555553 | 7 |
-| 355555555556  | 5 |
-|               | 2 |
-+---------------+---+
++---------------+-------------------------+
+| s             | t                       |
++---------------+-------------------------+
+| 1             | 1970-01-01T00:00:00.004 |
+| 10            | 1970-01-01T00:00:00.006 |
+| 2             | 1970-01-01T00:00:00.001 |
+| 3555555555551 | 1970-01-01T00:00:00.008 |
+| 3555555555552 | 1970-01-01T00:00:00.003 |
+| 3555555555553 | 1970-01-01T00:00:00.007 |
+| 355555555556  | 1970-01-01T00:00:00.005 |
+|               | 1970-01-01T00:00:00.002 |
++---------------+-------------------------+
 
-CREATE TABLE test4 (i INT, j INT, t BIGINT TIME INDEX);
+CREATE TABLE test4 (i INT, j INT, t TIMESTAMP TIME INDEX);
 
 Affected Rows: 0
 
@@ -87,38 +87,38 @@ Affected Rows: 4
 
 SELECT * FROM test4 ORDER BY cast(i AS VARCHAR), j;
 
-+---+---+---+
-| i | j | t |
-+---+---+---+
-| 2 | 2 | 3 |
-| 2 | 3 | 2 |
-| 3 | 2 | 4 |
-| 3 | 3 | 1 |
-+---+---+---+
++---+---+-------------------------+
+| i | j | t                       |
++---+---+-------------------------+
+| 2 | 2 | 1970-01-01T00:00:00.003 |
+| 2 | 3 | 1970-01-01T00:00:00.002 |
+| 3 | 2 | 1970-01-01T00:00:00.004 |
+| 3 | 3 | 1970-01-01T00:00:00.001 |
++---+---+-------------------------+
 
 SELECT * FROM test4 ORDER BY i, cast(j AS VARCHAR);
 
-+---+---+---+
-| i | j | t |
-+---+---+---+
-| 2 | 2 | 3 |
-| 2 | 3 | 2 |
-| 3 | 2 | 4 |
-| 3 | 3 | 1 |
-+---+---+---+
++---+---+-------------------------+
+| i | j | t                       |
++---+---+-------------------------+
+| 2 | 2 | 1970-01-01T00:00:00.003 |
+| 2 | 3 | 1970-01-01T00:00:00.002 |
+| 3 | 2 | 1970-01-01T00:00:00.004 |
+| 3 | 3 | 1970-01-01T00:00:00.001 |
++---+---+-------------------------+
 
 SELECT * FROM test4 ORDER BY cast(i AS VARCHAR), cast(j AS VARCHAR);
 
-+---+---+---+
-| i | j | t |
-+---+---+---+
-| 2 | 2 | 3 |
-| 2 | 3 | 2 |
-| 3 | 2 | 4 |
-| 3 | 3 | 1 |
-+---+---+---+
++---+---+-------------------------+
+| i | j | t                       |
++---+---+-------------------------+
+| 2 | 2 | 1970-01-01T00:00:00.003 |
+| 2 | 3 | 1970-01-01T00:00:00.002 |
+| 3 | 2 | 1970-01-01T00:00:00.004 |
+| 3 | 3 | 1970-01-01T00:00:00.001 |
++---+---+-------------------------+
 
-CREATE TABLE tpch_q1_agg (l_returnflag VARCHAR, l_linestatus VARCHAR, sum_qty INT, sum_base_price DOUBLE, sum_disc_price DOUBLE, sum_charge DOUBLE, avg_qty DOUBLE, avg_price DOUBLE, avg_disc DOUBLE, count_order BIGINT, t BIGINT TIME INDEX);
+CREATE TABLE tpch_q1_agg (l_returnflag VARCHAR, l_linestatus VARCHAR, sum_qty INT, sum_base_price DOUBLE, sum_disc_price DOUBLE, sum_charge DOUBLE, avg_qty DOUBLE, avg_price DOUBLE, avg_disc DOUBLE, count_order BIGINT, t TIMESTAMP TIME INDEX);
 
 Affected Rows: 0
 
@@ -128,20 +128,20 @@ Affected Rows: 4
 
 SELECT * FROM tpch_q1_agg ORDER BY l_returnflag, l_linestatus;
 
-+--------------+--------------+---------+------------------+-----------------+-----------------------+--------------------+--------------------+---------------------+-------------+---+
-| l_returnflag | l_linestatus | sum_qty | sum_base_price   | sum_disc_price  | sum_charge            | avg_qty            | avg_price          | avg_disc            | count_order | t |
-+--------------+--------------+---------+------------------+-----------------+-----------------------+--------------------+--------------------+---------------------+-------------+---+
-| A            | F            | 3774200 | 5320753880.69    | 5054096266.6828 | 5256751331.449234     | 25.537587116854997 | 36002.12382901414  | 0.05014459706340077 | 147790      | 3 |
-| N            | F            | 95257   | 133737795.84     | 127132372.6512  | 132286291.229445      | 25.30066401062417  | 35521.32691633466  | 0.04939442231075697 | 3765        | 4 |
-| N            | O            | 7459297 | 1.05122700089e10 | 9986238338.3847 | 1.0385578376585466e10 | 25.545537671232875 | 36000.9246880137   | 0.05009595890410959 | 292000      | 1 |
-| R            | F            | 3785523 | 5337950526.47    | 5071818532.942  | 5274405503.049367     | 25.5259438574251   | 35994.029214030925 | 0.04998927856184382 | 148301      | 2 |
-+--------------+--------------+---------+------------------+-----------------+-----------------------+--------------------+--------------------+---------------------+-------------+---+
++--------------+--------------+---------+------------------+-----------------+-----------------------+--------------------+--------------------+---------------------+-------------+-------------------------+
+| l_returnflag | l_linestatus | sum_qty | sum_base_price   | sum_disc_price  | sum_charge            | avg_qty            | avg_price          | avg_disc            | count_order | t                       |
++--------------+--------------+---------+------------------+-----------------+-----------------------+--------------------+--------------------+---------------------+-------------+-------------------------+
+| A            | F            | 3774200 | 5320753880.69    | 5054096266.6828 | 5256751331.449234     | 25.537587116854997 | 36002.12382901414  | 0.05014459706340077 | 147790      | 1970-01-01T00:00:00.003 |
+| N            | F            | 95257   | 133737795.84     | 127132372.6512  | 132286291.229445      | 25.30066401062417  | 35521.32691633466  | 0.04939442231075697 | 3765        | 1970-01-01T00:00:00.004 |
+| N            | O            | 7459297 | 1.05122700089e10 | 9986238338.3847 | 1.0385578376585466e10 | 25.545537671232875 | 36000.9246880137   | 0.05009595890410959 | 292000      | 1970-01-01T00:00:00.001 |
+| R            | F            | 3785523 | 5337950526.47    | 5071818532.942  | 5274405503.049367     | 25.5259438574251   | 35994.029214030925 | 0.04998927856184382 | 148301      | 1970-01-01T00:00:00.002 |
++--------------+--------------+---------+------------------+-----------------+-----------------------+--------------------+--------------------+---------------------+-------------+-------------------------+
 
-create table test5 (i int, s varchar, t BIGINT TIME INDEX);
+create table test5 (i int, s varchar, t TIMESTAMP TIME INDEX);
 
 Affected Rows: 0
 
-CREATE TABLE test6 (i1 INT, s1 VARCHAR, i2 int, s2 VARCHAR, t BIGINT TIME INDEX);
+CREATE TABLE test6 (i1 INT, s1 VARCHAR, i2 int, s2 VARCHAR, t TIMESTAMP TIME INDEX);
 
 Affected Rows: 0
 
@@ -303,7 +303,7 @@ SELECT s1, s2, i1, i2 FROM test6 ORDER BY i2 DESC, s1, s2, i1;
 | 0reallylongstring2 | 1reallylongstring8 | 6  | 3  |
 +--------------------+--------------------+----+----+
 
-create table test7 (p_brand VARCHAR, p_type VARCHAR, p_size INT, supplier_cnt BIGINT, t BIGINT TIME INDEX);
+create table test7 (p_brand VARCHAR, p_type VARCHAR, p_size INT, supplier_cnt BIGINT, t TIMESTAMP TIME INDEX);
 
 Affected Rows: 0
 
@@ -327,7 +327,7 @@ SELECT p_brand, p_type, p_size, supplier_cnt FROM test7 ORDER BY supplier_cnt DE
 | Brand#11 | ECONOMY BURNISHED NICKEL | 49     | 4            |
 +----------+--------------------------+--------+--------------+
 
-create table test8 (i int, s varchar, t BIGINT TIME INDEX);
+create table test8 (i int, s varchar, t TIMESTAMP TIME INDEX);
 
 Affected Rows: 0
 
@@ -353,7 +353,7 @@ CREATE TABLE DirectReports
     Title varchar NOT NULL,
     EmployeeLevel int NOT NULL,
     "Sort" varchar NOT NULL,
-    "Timestamp" BIGINT TIME INDEX,
+    "Timestamp" TIMESTAMP TIME INDEX,
 );
 
 Affected Rows: 0

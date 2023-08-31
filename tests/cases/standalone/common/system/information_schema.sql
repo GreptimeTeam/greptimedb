@@ -13,7 +13,7 @@ use my_db;
 
 create table foo
 (
-    ts bigint time index
+    ts TIMESTAMP TIME INDEX
 );
 
 select table_name
