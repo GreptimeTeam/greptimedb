@@ -494,13 +494,33 @@ macro_rules! impl_table_meta_value {
     }
 }
 
+#[macro_export]
+macro_rules! impl_optional_meta_value {
+    ($($val_ty: ty), *) => {
+        $(
+            impl $val_ty {
+                pub fn try_from_raw_value(raw_value: &[u8]) -> Result<Option<Self>> {
+                    serde_json::from_slice(raw_value).context(SerdeJsonSnafu)
+                }
+
+                pub fn try_as_raw_value(&self) -> Result<Vec<u8>> {
+                    serde_json::to_vec(self).context(SerdeJsonSnafu)
+                }
+            }
+        )*
+    }
+}
+
 impl_table_meta_value! {
-    CatalogNameValue,
-    SchemaNameValue,
     TableNameValue,
     TableInfoValue,
     DatanodeTableValue,
     TableRouteValue
+}
+
+impl_optional_meta_value! {
+    CatalogNameValue,
+    SchemaNameValue
 }
 
 #[cfg(test)]

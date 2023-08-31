@@ -67,9 +67,8 @@ use crate::catalog::FrontendCatalogManager;
 use crate::error::{
     self, AlterExprToRequestSnafu, CatalogSnafu, ColumnDataTypeSnafu, ColumnNotFoundSnafu,
     DeserializePartitionSnafu, InvokeDatanodeSnafu, NotSupportedSnafu, ParseSqlSnafu,
-    RequestDatanodeSnafu, RequestMetaSnafu, Result, SchemaExistsSnafu, SchemaNotFoundSnafu,
-    TableAlreadyExistSnafu, TableMetadataManagerSnafu, TableNotFoundSnafu, TableSnafu,
-    UnrecognizedTableOptionSnafu,
+    RequestDatanodeSnafu, RequestMetaSnafu, Result, SchemaExistsSnafu, TableAlreadyExistSnafu,
+    TableMetadataManagerSnafu, TableNotFoundSnafu, TableSnafu, UnrecognizedTableOptionSnafu,
 };
 use crate::expr_factory;
 use crate::instance::distributed::deleter::DistDeleter;
@@ -106,7 +105,7 @@ impl DistInstance {
     ) -> Result<TableRef> {
         let _timer = common_telemetry::timer!(crate::metrics::DIST_CREATE_TABLE);
         // 1. get schema info
-        let schema = self
+        let schema_value = self
             .catalog_manager
             .table_metadata_manager_ref()
             .schema_manager()
@@ -117,13 +116,6 @@ impl DistInstance {
             .await
             .context(TableMetadataManagerSnafu)?;
 
-        let Some(schema_opts) = schema else {
-            return SchemaNotFoundSnafu {
-                schema_info: &create_table.schema_name,
-            }
-            .fail();
-        };
-
         let table_name = TableName::new(
             &create_table.catalog_name,
             &create_table.schema_name,
@@ -132,7 +124,7 @@ impl DistInstance {
 
         let (partitions, partition_cols) = parse_partitions(create_table, partitions)?;
 
-        let mut table_info = create_table_info(create_table, partition_cols, schema_opts)?;
+        let mut table_info = create_table_info(create_table, partition_cols, schema_value)?;
 
         let resp = self
             .create_table_procedure(create_table, partitions, table_info.clone())
@@ -795,7 +787,7 @@ fn create_partitions_stmt(partitions: Vec<PartitionInfo>) -> Result<Option<Parti
 fn create_table_info(
     create_table: &CreateTableExpr,
     partition_columns: Vec<String>,
-    schema_opts: SchemaNameValue,
+    schema_opts: Option<SchemaNameValue>,
 ) -> Result<RawTableInfo> {
     let mut column_schemas = Vec::with_capacity(create_table.column_defs.len());
     let mut column_name_to_index_map = HashMap::new();
@@ -881,8 +873,11 @@ fn create_table_info(
     Ok(table_info)
 }
 
-fn merge_options(mut table_opts: TableOptions, schema_opts: SchemaNameValue) -> TableOptions {
-    table_opts.ttl = table_opts.ttl.or(schema_opts.ttl);
+fn merge_options(
+    mut table_opts: TableOptions,
+    schema_opts: Option<SchemaNameValue>,
+) -> TableOptions {
+    table_opts.ttl = table_opts.ttl.or(schema_opts.and_then(|s| s.ttl));
     table_opts
 }
 

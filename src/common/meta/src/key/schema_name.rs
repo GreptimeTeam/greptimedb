@@ -163,7 +163,7 @@ impl SchemaManager {
         let raw_key = schema.as_raw_key();
         let value = self.kv_backend.get(&raw_key).await?;
         value
-            .map(|v| SchemaNameValue::try_from_raw_value(v.value.as_ref()))
+            .and_then(|v| SchemaNameValue::try_from_raw_value(v.value.as_ref()).transpose())
             .transpose()
     }
 
@@ -206,7 +206,11 @@ mod tests {
         assert_eq!(value, from_value);
 
         let parsed = SchemaNameValue::try_from_raw_value("{\"ttl\":\"10s\"}".as_bytes()).unwrap();
-        assert_eq!(value, parsed);
+        assert_eq!(Some(value), parsed);
+        let none = SchemaNameValue::try_from_raw_value("null".as_bytes()).unwrap();
+        assert!(none.is_none());
+        let err_empty = SchemaNameValue::try_from_raw_value("".as_bytes());
+        assert!(err_empty.is_err());
     }
 
     #[tokio::test]
