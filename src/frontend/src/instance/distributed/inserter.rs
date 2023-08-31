@@ -205,7 +205,7 @@ mod tests {
             .await
             .unwrap();
         schema_manager
-            .create(SchemaNameKey::default())
+            .create(SchemaNameKey::default(), None)
             .await
             .unwrap();
 

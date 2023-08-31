@@ -39,7 +39,7 @@ datatypes = { workspace = true }
 file-table-engine = { workspace = true }
 futures = "0.3"
 futures-util.workspace = true
-humantime-serde = "1.1"
+humantime-serde.workspace = true
 itertools.workspace = true
 meta-client = { workspace = true }
 # Although it is not used, please do not delete it.

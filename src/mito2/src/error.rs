@@ -26,6 +26,7 @@ use snafu::{Location, Snafu};
 use store_api::manifest::ManifestVersion;
 use store_api::storage::RegionId;
 
+use crate::sst::file::FileId;
 use crate::worker::WorkerId;
 
 #[derive(Debug, Snafu)]
@@ -387,6 +388,13 @@ pub enum Error {
         source: table::error::Error,
         location: Location,
     },
+
+    #[snafu(display("Failed to delete SST file, file id: {}, source: {}", file_id, source))]
+    DeleteSst {
+        file_id: FileId,
+        source: object_store::Error,
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -448,6 +456,7 @@ impl ErrorExt for Error {
             InvalidSchedulerState { .. } => StatusCode::InvalidArguments,
             StopScheduler { .. } => StatusCode::Internal,
             BuildPredicate { source, .. } => source.status_code(),
+            DeleteSst { .. } => StatusCode::StorageUnavailable,
         }
     }
 

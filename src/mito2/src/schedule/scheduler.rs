@@ -38,7 +38,7 @@ const STATE_AWAIT_TERMINATION: u8 = 2;
 #[async_trait::async_trait]
 pub trait Scheduler {
     /// Schedules a Job
-    fn schedule(&self, req: Job) -> Result<()>;
+    fn schedule(&self, job: Job) -> Result<()>;
 
     /// Stops scheduler. If `await_termination` is set to true, the scheduler will wait until all tasks are processed.
     async fn stop(&self, await_termination: bool) -> Result<()>;
@@ -77,8 +77,8 @@ impl LocalScheduler {
                             break;
                         }
                         req_opt = receiver.recv_async() =>{
-                            if let Ok(req) = req_opt {
-                                req.await;
+                            if let Ok(job) = req_opt {
+                                job.await;
                             }
                         }
                     }
@@ -86,8 +86,8 @@ impl LocalScheduler {
                 // When task scheduler is cancelled, we will wait all task finished
                 if state_clone.load(Ordering::Relaxed) == STATE_AWAIT_TERMINATION {
                     // recv_async waits until all sender's been dropped.
-                    while let Ok(req) = receiver.recv_async().await {
-                        req.await;
+                    while let Ok(job) = receiver.recv_async().await {
+                        job.await;
                     }
                     state_clone.store(STATE_STOP, Ordering::Relaxed);
                 }
@@ -111,7 +111,7 @@ impl LocalScheduler {
 
 #[async_trait::async_trait]
 impl Scheduler for LocalScheduler {
-    fn schedule(&self, req: Job) -> Result<()> {
+    fn schedule(&self, job: Job) -> Result<()> {
         ensure!(
             self.state.load(Ordering::Relaxed) == STATE_RUNNING,
             InvalidSchedulerStateSnafu
@@ -121,7 +121,7 @@ impl Scheduler for LocalScheduler {
             .unwrap()
             .as_ref()
             .context(InvalidSchedulerStateSnafu)?
-            .send(req)
+            .send(job)
             .map_err(|_| InvalidFlumeSenderSnafu {}.build())
     }
 

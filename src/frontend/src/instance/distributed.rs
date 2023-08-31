@@ -34,7 +34,7 @@ use client::Database;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::format_full_table_name;
 use common_error::ext::BoxedError;
-use common_meta::key::schema_name::SchemaNameKey;
+use common_meta::key::schema_name::{SchemaNameKey, SchemaNameValue};
 use common_meta::peer::Peer;
 use common_meta::rpc::ddl::{DdlTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse};
 use common_meta::rpc::router::{Partition, Partition as MetaPartition, RouteRequest};
@@ -67,8 +67,9 @@ use crate::catalog::FrontendCatalogManager;
 use crate::error::{
     self, AlterExprToRequestSnafu, CatalogSnafu, ColumnDataTypeSnafu, ColumnNotFoundSnafu,
     DeserializePartitionSnafu, InvokeDatanodeSnafu, NotSupportedSnafu, ParseSqlSnafu,
-    RequestDatanodeSnafu, RequestMetaSnafu, Result, SchemaExistsSnafu, TableAlreadyExistSnafu,
-    TableNotFoundSnafu, TableSnafu, UnrecognizedTableOptionSnafu,
+    RequestDatanodeSnafu, RequestMetaSnafu, Result, SchemaExistsSnafu, SchemaNotFoundSnafu,
+    TableAlreadyExistSnafu, TableMetadataManagerSnafu, TableNotFoundSnafu, TableSnafu,
+    UnrecognizedTableOptionSnafu,
 };
 use crate::expr_factory;
 use crate::instance::distributed::deleter::DistDeleter;
@@ -104,6 +105,25 @@ impl DistInstance {
         partitions: Option<Partitions>,
     ) -> Result<TableRef> {
         let _timer = common_telemetry::timer!(crate::metrics::DIST_CREATE_TABLE);
+        // 1. get schema info
+        let schema = self
+            .catalog_manager
+            .table_metadata_manager_ref()
+            .schema_manager()
+            .get(SchemaNameKey::new(
+                &create_table.catalog_name,
+                &create_table.schema_name,
+            ))
+            .await
+            .context(TableMetadataManagerSnafu)?;
+
+        let Some(schema_opts) = schema else {
+            return SchemaNotFoundSnafu {
+                schema_info: &create_table.schema_name,
+            }
+            .fail();
+        };
+
         let table_name = TableName::new(
             &create_table.catalog_name,
             &create_table.schema_name,
@@ -112,7 +132,7 @@ impl DistInstance {
 
         let (partitions, partition_cols) = parse_partitions(create_table, partitions)?;
 
-        let mut table_info = create_table_info(create_table, partition_cols)?;
+        let mut table_info = create_table_info(create_table, partition_cols, schema_opts)?;
 
         let resp = self
             .create_table_procedure(create_table, partitions, table_info.clone())
@@ -340,6 +360,7 @@ impl DistInstance {
                 let expr = CreateDatabaseExpr {
                     database_name: stmt.name.to_string(),
                     create_if_not_exists: stmt.if_not_exists,
+                    options: Default::default(),
                 };
                 self.handle_create_database(expr, query_ctx).await
             }
@@ -477,10 +498,12 @@ impl DistInstance {
             }
         );
 
+        let schema_value =
+            SchemaNameValue::try_from(&expr.options).context(error::TableMetadataManagerSnafu)?;
         self.catalog_manager
             .table_metadata_manager_ref()
             .schema_manager()
-            .create(schema)
+            .create(schema, Some(schema_value))
             .await
             .context(error::TableMetadataManagerSnafu)?;
 
@@ -772,6 +795,7 @@ fn create_partitions_stmt(partitions: Vec<PartitionInfo>) -> Result<Option<Parti
 fn create_table_info(
     create_table: &CreateTableExpr,
     partition_columns: Vec<String>,
+    schema_opts: SchemaNameValue,
 ) -> Result<RawTableInfo> {
     let mut column_schemas = Vec::with_capacity(create_table.column_defs.len());
     let mut column_name_to_index_map = HashMap::new();
@@ -818,6 +842,10 @@ fn create_table_info(
         })
         .collect::<Result<Vec<_>>>()?;
 
+    let table_options = TableOptions::try_from(&create_table.table_options)
+        .context(UnrecognizedTableOptionSnafu)?;
+    let table_options = merge_options(table_options, schema_opts);
+
     let meta = RawTableMeta {
         schema: raw_schema,
         primary_key_indices,
@@ -826,8 +854,7 @@ fn create_table_info(
         next_column_id: column_schemas.len() as u32,
         region_numbers: vec![],
         engine_options: HashMap::new(),
-        options: TableOptions::try_from(&create_table.table_options)
-            .context(UnrecognizedTableOptionSnafu)?,
+        options: table_options,
         created_on: DateTime::default(),
         partition_key_indices,
     };
@@ -852,6 +879,11 @@ fn create_table_info(
         table_type: TableType::Base,
     };
     Ok(table_info)
+}
+
+fn merge_options(mut table_opts: TableOptions, schema_opts: SchemaNameValue) -> TableOptions {
+    table_opts.ttl = table_opts.ttl.or(schema_opts.ttl);
+    table_opts
 }
 
 fn parse_partitions(

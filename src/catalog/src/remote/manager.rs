@@ -226,7 +226,7 @@ async fn register_table(
             engine: table_info.meta.engine.clone(),
         };
         region_alive_keepers
-            .register_table(table_ident, table)
+            .register_table(table_ident, table, memory_catalog_manager.clone())
             .await?;
     }
 
