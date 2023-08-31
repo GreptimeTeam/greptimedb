@@ -381,8 +381,7 @@ impl FlushScheduler {
         let Some(flush_status) = self
             .region_status
             .values_mut()
-            .filter(|status| status.pending_task.is_some())
-            .next()
+            .find(|status| status.pending_task.is_some())
         else {
             return Ok(());
         };
