@@ -165,7 +165,7 @@ impl<S> RegionWorkerLoop<S> {
     }
 
     fn new_flush_task(&self, region: &MitoRegionRef, reason: FlushReason) -> RegionFlushTask {
-        // TODO(yingwen): metrics for flush reqeusted.
+        // TODO(yingwen): metrics for flush requested.
         RegionFlushTask {
             region_id: region.region_id,
             reason,
