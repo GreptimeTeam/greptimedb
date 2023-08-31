@@ -234,9 +234,6 @@ impl RegionFlushTask {
 pub(crate) struct FlushScheduler {
     /// Tracks regions need to flush.
     region_status: HashMap<RegionId, FlushStatus>,
-    // TODO(yingwen): Support global flush concurrency control. We can implement a global permits for this.
-    /// Has running flush job. Now each worker only allow one flush job at a time.
-    has_flush_running: bool,
     /// Background job scheduler.
     scheduler: SchedulerRef,
 }
@@ -246,7 +243,6 @@ impl FlushScheduler {
     pub(crate) fn new(scheduler: SchedulerRef) -> FlushScheduler {
         FlushScheduler {
             region_status: HashMap::new(),
-            has_flush_running: false,
             scheduler,
         }
     }
@@ -279,14 +275,13 @@ impl FlushScheduler {
             .or_insert_with(|| FlushStatus::new(region.clone()));
         // Checks whether we can flush the region now.
         if flush_status.flushing {
-            debug_assert!(self.has_flush_running);
             // There is already a flush job running.
             flush_status.push_task(task);
             return Ok(());
         }
 
-        // Checks pending tasks and flush job limit.
-        if flush_status.pending_task.is_some() || self.has_flush_running {
+        // If there are pending tasks, then we should push it to pending list.
+        if flush_status.pending_task.is_some() {
             flush_status.push_task(task);
             return Ok(());
         }
@@ -307,7 +302,6 @@ impl FlushScheduler {
             return Err(e);
         }
         flush_status.flushing = true;
-        self.has_flush_running = true;
 
         Ok(())
     }
@@ -323,8 +317,7 @@ impl FlushScheduler {
             return None;
         };
 
-        // Now no flush job is running.
-        self.has_flush_running = false;
+        // This region doesn't have running flush job.
         flush_status.flushing = false;
 
         let pending_ddls = if flush_status.pending_task.is_none() {
@@ -353,9 +346,6 @@ impl FlushScheduler {
             return;
         };
 
-        // Now no flush job is running.
-        self.has_flush_running = false;
-
         // Fast fail: cancels all pending tasks and sends error to their waiters.
         flush_status.on_failure(err);
 
@@ -382,7 +372,6 @@ impl FlushScheduler {
 
     /// Schedules a new flush task when the scheduler can submit next task.
     pub(crate) fn schedule_next_flush(&mut self) -> Result<()> {
-        debug_assert!(!self.has_flush_running);
         debug_assert!(self
             .region_status
             .values()
@@ -413,7 +402,7 @@ struct FlushStatus {
     region: MitoRegionRef,
     /// There is a flush task running.
     flushing: bool,
-    /// Task waiting for flush.
+    /// Task waiting for next flush.
     pending_task: Option<RegionFlushTask>,
     /// Pending ddl requests.
     pending_ddls: Vec<SenderDdlRequest>,
