@@ -239,41 +239,39 @@ fn push_column_to_rows(column: Column, rows: &mut [Row]) -> Result<()> {
     let column_values = column.values.unwrap_or_default();
 
     macro_rules! push_column_values_match_types {
-        ($( ($arm:tt, $value_data_variant:tt, $field_name:tt), )*) => {
-            match column_type {
-                $(
-                ColumnDataType::$arm => {
-                    let row_count = rows.len();
-                    let actual_row_count = null_mask.count_ones() + column_values.$field_name.len();
-                    ensure!(
-                        actual_row_count == row_count,
-                        InvalidInsertRequestSnafu {
-                            reason: format!(
-                                "Expecting {} rows of data for column '{}', but got {}.",
-                                row_count, column.column_name, actual_row_count
-                            ),
-                        }
-                    );
+        ($( ($arm:tt, $value_data_variant:tt, $field_name:tt), )*) => { match column_type { $(
 
-                    let mut null_mask_iter = null_mask.into_iter();
-                    let mut values_iter = column_values.$field_name.into_iter();
-
-                    for row in rows {
-                        let value_is_null = null_mask_iter.next();
-                        if value_is_null == Some(true) {
-                            row.values.push(Value { value_data: None });
-                        } else {
-                            // previous check ensures that there is a value for each row
-                            let value = values_iter.next().unwrap();
-                            row.values.push(Value {
-                                value_data: Some(ValueData::$value_data_variant(value)),
-                            });
-                        }
-                    }
+        ColumnDataType::$arm => {
+            let row_count = rows.len();
+            let actual_row_count = null_mask.count_ones() + column_values.$field_name.len();
+            ensure!(
+                actual_row_count == row_count,
+                InvalidInsertRequestSnafu {
+                    reason: format!(
+                        "Expecting {} rows of data for column '{}', but got {}.",
+                        row_count, column.column_name, actual_row_count
+                    ),
                 }
-                )*
+            );
+
+            let mut null_mask_iter = null_mask.into_iter();
+            let mut values_iter = column_values.$field_name.into_iter();
+
+            for row in rows {
+                let value_is_null = null_mask_iter.next();
+                if value_is_null == Some(true) {
+                    row.values.push(Value { value_data: None });
+                } else {
+                    // previous check ensures that there is a value for each row
+                    let value = values_iter.next().unwrap();
+                    row.values.push(Value {
+                        value_data: Some(ValueData::$value_data_variant(value)),
+                    });
+                }
             }
-        };
+        }
+
+        )* }}
     }
 
     push_column_values_match_types!(
