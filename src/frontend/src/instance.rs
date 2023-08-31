@@ -316,7 +316,7 @@ impl Instance {
             &self.create_expr_factory,
             &self.grpc_query_handler,
         );
-        inserter.handle_inserts(requests, ctx).await
+        inserter.handle_column_inserts(requests, ctx).await
     }
 
     pub fn set_plugins(&mut self, map: Arc<Plugins>) {
