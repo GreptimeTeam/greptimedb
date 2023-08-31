@@ -276,9 +276,9 @@ impl KvBackend for RaftEngineBackend {
             vec![]
         };
         let mut batch = LogBatch::with_capacity(keys.len());
-
+        let engine = self.engine.read().unwrap();
         for key in keys {
-            if prev_kv && let Some(prev) = engine_get(&self.engine.read().unwrap(), &key)? {
+            if prev_kv && let Some(prev) = engine_get(&engine, &key)? {
                 prev_kvs.push(prev);
             }
             batch.delete(SYSTEM_NAMESPACE, key);
