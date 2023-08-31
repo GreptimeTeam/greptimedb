@@ -468,7 +468,10 @@ impl FlushFinished {
 
 /// Notifies a flush job is failed.
 #[derive(Debug)]
-pub(crate) struct FlushFailed {}
+pub(crate) struct FlushFailed {
+    /// The error source of the failure.
+    pub(crate) err: Arc<Error>,
+}
 
 #[cfg(test)]
 mod tests {

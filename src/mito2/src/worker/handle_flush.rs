@@ -69,17 +69,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             self.handle_ddl_requests(ddl_requests).await;
         }
 
-        // Schedule next flush job.
-        if let Err(e) = self.flush_scheduler.schedule_next_flush() {
-            error!(e; "Failed to schedule next flush");
-        }
-
-        // TODO(yingwen):
-        // 1. check region existence
-        // 2. write manifest
-        // 3. update region metadata.
-        // 4. handle all pending requests.
-        // 5. schedule next flush.
         unimplemented!()
     }
 }
@@ -95,13 +84,8 @@ impl<S> RegionWorkerLoop<S> {
     }
 
     /// On region flush job failed.
-    pub(crate) async fn handle_flush_failed(
-        &mut self,
-        _region_id: RegionId,
-        _request: FlushFailed,
-    ) {
-        // TODO(yingwen): fail all pending requests.
-        unimplemented!()
+    pub(crate) async fn handle_flush_failed(&mut self, region_id: RegionId, request: FlushFailed) {
+        self.flush_scheduler.on_flush_failed(region_id, request.err);
     }
 
     /// Checks whether the engine reaches flush threshold. If so, finds regions in this

@@ -150,10 +150,11 @@ impl RegionFlushTask {
             }
             Err(e) => {
                 error!(e; "Failed to flush region {}", self.region_id);
-                self.send_error(e);
+                let err = Arc::new(e);
+                self.send_error(err.clone());
                 WorkerRequest::Background {
                     region_id: self.region_id,
-                    notify: BackgroundNotify::FlushFailed(FlushFailed {}),
+                    notify: BackgroundNotify::FlushFailed(FlushFailed { err }),
                 }
             }
         };
@@ -213,8 +214,7 @@ impl RegionFlushTask {
     }
 
     /// Send flush error to waiter.
-    fn send_error(&mut self, err: Error) {
-        let err = Arc::new(err);
+    fn send_error(&mut self, err: Arc<Error>) {
         for sender in self.senders.drain(..) {
             // Ignore send result.
             let _ = sender.send(Err(err.clone()).context(FlushRegionSnafu));
@@ -324,14 +324,42 @@ impl FlushScheduler {
         self.has_flush_running = false;
         flush_status.flushing = false;
 
-        if flush_status.pending_task.is_none() {
+        let pending_ddls = if flush_status.pending_task.is_none() {
             // The region doesn't have any pending flush task.
             // Safety: The flush status exists.
             let flush_status = self.region_status.remove(&region_id).unwrap();
-            return Some(flush_status.pending_ddls);
+            Some(flush_status.pending_ddls)
+        } else {
+            None
+        };
+
+        // Schedule next flush job.
+        if let Err(e) = self.schedule_next_flush() {
+            error!(e; "Flush of region {} is successful, but failed to schedule next flush", region_id);
         }
 
-        None
+        pending_ddls
+    }
+
+    /// Notifies the scheduler that the flush job is finished.
+    pub(crate) fn on_flush_failed(&mut self, region_id: RegionId, err: Arc<Error>) {
+        error!(err; "Region {} failed to flush, cancel all pending tasks", region_id);
+
+        // Remove this region.
+        let Some(flush_status) = self.region_status.remove(&region_id) else {
+            return;
+        };
+
+        // Now no flush job is running.
+        self.has_flush_running = false;
+
+        // Fast fail: cancels all pending tasks and sends error to their waiters.
+        flush_status.on_failure(err);
+
+        // Still tries to schedule a new flush.
+        if let Err(e) = self.schedule_next_flush() {
+            error!(e; "Failed to schedule next flush after region {} flush is failed", region_id);
+        }
     }
 
     /// Add ddl request to pending queue.
@@ -403,6 +431,17 @@ impl FlushStatus {
             pending.merge(task);
         } else {
             self.pending_task = Some(task);
+        }
+    }
+
+    fn on_failure(self, err: Arc<Error>) {
+        if let Some(mut task) = self.pending_task {
+            task.send_error(err.clone());
+        }
+        for ddl in self.pending_ddls {
+            if let Some(sender) = ddl.sender {
+                let _ = sender.send(Err(err.clone()).context(FlushRegionSnafu));
+            }
         }
     }
 }
