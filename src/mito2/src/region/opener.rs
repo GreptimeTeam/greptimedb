@@ -14,9 +14,11 @@
 
 //! Region opener.
 
+use std::sync::atomic::AtomicI64;
 use std::sync::Arc;
 
 use common_telemetry::info;
+use common_time::util::current_time_millis;
 use futures::StreamExt;
 use object_store::util::join_dir;
 use object_store::ObjectStore;
@@ -33,6 +35,8 @@ use crate::memtable::MemtableBuilderRef;
 use crate::region::version::{VersionBuilder, VersionControl, VersionControlRef};
 use crate::region::MitoRegion;
 use crate::region_write_ctx::RegionWriteCtx;
+use crate::schedule::scheduler::SchedulerRef;
+use crate::sst::file_purger::LocalFilePurger;
 use crate::wal::{EntryId, Wal};
 
 /// Builder to create a new [MitoRegion] or open an existing one.
@@ -42,6 +46,7 @@ pub(crate) struct RegionOpener {
     memtable_builder: MemtableBuilderRef,
     object_store: ObjectStore,
     region_dir: String,
+    scheduler: SchedulerRef,
 }
 
 impl RegionOpener {
@@ -50,6 +55,7 @@ impl RegionOpener {
         region_id: RegionId,
         memtable_builder: MemtableBuilderRef,
         object_store: ObjectStore,
+        scheduler: SchedulerRef,
     ) -> RegionOpener {
         RegionOpener {
             region_id,
@@ -57,6 +63,7 @@ impl RegionOpener {
             memtable_builder,
             object_store,
             region_dir: String::new(),
+            scheduler,
         }
     }
 
@@ -94,12 +101,15 @@ impl RegionOpener {
 
         let version = VersionBuilder::new(metadata, mutable).build();
         let version_control = Arc::new(VersionControl::new(version));
+        let access_layer = Arc::new(AccessLayer::new(self.region_dir, self.object_store.clone()));
 
         Ok(MitoRegion {
             region_id,
             version_control,
-            access_layer: Arc::new(AccessLayer::new(self.region_dir, self.object_store.clone())),
+            access_layer: access_layer.clone(),
             manifest_manager,
+            file_purger: Arc::new(LocalFilePurger::new(self.scheduler, access_layer)),
+            last_flush_millis: AtomicI64::new(current_time_millis()),
         })
     }
 
@@ -141,12 +151,15 @@ impl RegionOpener {
         let flushed_sequence = version.flushed_entry_id;
         let version_control = Arc::new(VersionControl::new(version));
         replay_memtable(wal, region_id, flushed_sequence, &version_control).await?;
+        let access_layer = Arc::new(AccessLayer::new(self.region_dir, self.object_store.clone()));
 
         let region = MitoRegion {
             region_id: self.region_id,
             version_control,
-            access_layer: Arc::new(AccessLayer::new(self.region_dir, self.object_store)),
+            access_layer: access_layer.clone(),
             manifest_manager,
+            file_purger: Arc::new(LocalFilePurger::new(self.scheduler, access_layer)),
+            last_flush_millis: AtomicI64::new(current_time_millis()),
         };
         Ok(region)
     }

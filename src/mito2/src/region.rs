@@ -18,6 +18,7 @@ pub(crate) mod opener;
 pub(crate) mod version;
 
 use std::collections::HashMap;
+use std::sync::atomic::AtomicI64;
 use std::sync::{Arc, RwLock};
 
 use common_telemetry::info;
@@ -28,6 +29,7 @@ use crate::access_layer::AccessLayerRef;
 use crate::error::Result;
 use crate::manifest::manager::RegionManifestManager;
 use crate::region::version::{VersionControlRef, VersionRef};
+use crate::sst::file_purger::FilePurgerRef;
 
 /// Type to store region version.
 pub type VersionNumber = u32;
@@ -50,7 +52,11 @@ pub(crate) struct MitoRegion {
     /// SSTs accessor for this region.
     pub(crate) access_layer: AccessLayerRef,
     /// Manager to maintain manifest for this region.
-    manifest_manager: RegionManifestManager,
+    pub(crate) manifest_manager: RegionManifestManager,
+    /// SST file purger.
+    pub(crate) file_purger: FilePurgerRef,
+    /// Last flush time in millis.
+    last_flush_millis: AtomicI64,
 }
 
 pub(crate) type MitoRegionRef = Arc<MitoRegion>;

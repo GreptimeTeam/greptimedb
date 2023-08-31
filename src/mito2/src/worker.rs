@@ -194,6 +194,7 @@ impl<S: LogStore> WorkerStarter<S> {
             object_store: self.object_store,
             running: running.clone(),
             memtable_builder: Arc::new(TimeSeriesMemtableBuilder::default()),
+            scheduler: self.scheduler.clone(),
             write_buffer_manager: self.write_buffer_manager,
             flush_scheduler: FlushScheduler::new(self.scheduler),
         };
@@ -311,7 +312,8 @@ struct RegionWorkerLoop<S> {
     running: Arc<AtomicBool>,
     /// Memtable builder for each region.
     memtable_builder: MemtableBuilderRef,
-
+    /// Background job scheduler.
+    scheduler: SchedulerRef,
     /// Engine write buffer manager.
     write_buffer_manager: WriteBufferManagerRef,
     /// Schedules background flush requests.
