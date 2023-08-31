@@ -21,27 +21,24 @@ use common_error::ext::BoxedError;
 use common_recordbatch::error::ExternalSnafu;
 use common_recordbatch::{RecordBatchStreamAdaptor, SendableRecordBatchStream};
 use common_time::range::TimestampRange;
-use object_store::ObjectStore;
 use snafu::ResultExt;
 use store_api::storage::ScanRequest;
 use table::predicate::Predicate;
 
+use crate::access_layer::AccessLayerRef;
 use crate::error::Result;
 use crate::memtable::MemtableRef;
 use crate::read::merge::MergeReaderBuilder;
 use crate::read::projection::ProjectionMapper;
 use crate::read::BatchReader;
 use crate::sst::file::FileHandle;
-use crate::sst::parquet::reader::ParquetReaderBuilder;
 
 /// Scans a region and returns rows in a sorted sequence.
 ///
 /// The output order is always `order by primary key, time index`.
 pub struct SeqScan {
-    /// Directory of SST files.
-    file_dir: String,
-    /// Object store that stores SST files.
-    object_store: ObjectStore,
+    /// Region SST access layer.
+    access_layer: AccessLayerRef,
     /// Maps projected Batches to RecordBatches.
     mapper: Arc<ProjectionMapper>,
     /// Original scan request to scan memtable.
@@ -62,14 +59,12 @@ impl SeqScan {
     /// Creates a new [SeqScan].
     #[must_use]
     pub(crate) fn new(
-        file_dir: String,
-        object_store: ObjectStore,
+        access_layer: AccessLayerRef,
         mapper: ProjectionMapper,
         request: ScanRequest,
     ) -> SeqScan {
         SeqScan {
-            file_dir,
-            object_store,
+            access_layer,
             mapper: Arc::new(mapper),
             time_range: None,
             predicate: None,
@@ -116,16 +111,14 @@ impl SeqScan {
             builder.push_batch_iter(iter);
         }
         for file in &self.files {
-            let reader = ParquetReaderBuilder::new(
-                self.file_dir.clone(),
-                file.clone(),
-                self.object_store.clone(),
-            )
-            .predicate(self.predicate.clone())
-            .time_range(self.time_range)
-            .projection(Some(self.mapper.column_ids().to_vec()))
-            .build()
-            .await?;
+            let reader = self
+                .access_layer
+                .read_sst(file.clone())
+                .predicate(self.predicate.clone())
+                .time_range(self.time_range)
+                .projection(Some(self.mapper.column_ids().to_vec()))
+                .build()
+                .await?;
             builder.push_batch_reader(Box::new(reader));
         }
         let mut reader = builder.build().await?;
