@@ -23,7 +23,8 @@ use common_telemetry::{debug, logging};
 use datatypes::schema::Schema;
 use object_store::ObjectStore;
 use snafu::ResultExt;
-use table::engine::{table_dir, EngineContext, TableEngine, TableEngineProcedure, TableReference};
+use store_api::path_utils::table_dir;
+use table::engine::{EngineContext, TableEngine, TableEngineProcedure, TableReference};
 use table::error::TableOperationSnafu;
 use table::metadata::{TableId, TableInfo, TableInfoBuilder, TableMetaBuilder, TableType};
 use table::requests::{
