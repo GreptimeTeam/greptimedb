@@ -405,7 +405,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 DdlRequest::Open(req) => self.handle_open_request(ddl.region_id, req).await,
                 DdlRequest::Close(_) => self.handle_close_request(ddl.region_id).await,
                 DdlRequest::Alter(_) => todo!(),
-                DdlRequest::Flush(req) => self.handle_flush_request(ddl.region_id, req).await,
+                DdlRequest::Flush(_) => {
+                    self.handle_flush_request(ddl.region_id, ddl.sender).await;
+                    continue;
+                }
                 DdlRequest::Compact(_) => todo!(),
             };
 

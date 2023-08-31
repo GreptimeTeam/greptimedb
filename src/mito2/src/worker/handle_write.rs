@@ -88,8 +88,6 @@ impl<S> RegionWorkerLoop<S> {
                     continue;
                 };
 
-                // A new region to write, checks whether we need to flush this region.
-                self.flush_region_if_full(&region);
                 let region_ctx = RegionWriteCtx::new(region.region_id, &region.version_control);
 
                 e.insert(region_ctx);

@@ -452,16 +452,23 @@ pub(crate) struct FlushFinished {
     /// Id of memtables to remove.
     pub(crate) memtables_to_remove: SmallVec<[MemtableId; 2]>,
     /// Flush result senders.
-    pub(crate) senders: Vec<oneshot::Sender<Result<()>>>,
+    pub(crate) senders: Vec<oneshot::Sender<Result<Output>>>,
 }
 
 impl FlushFinished {
-    pub(crate) fn send_error(self, err: Error) {
+    pub(crate) fn on_failure(self, err: Error) {
         let err = Arc::new(err);
         // TODO(yingwen): We should remove these files.
         for sender in self.senders {
             // Ignore send result.
             let _ = sender.send(Err(err.clone()).context(FlushRegionSnafu));
+        }
+    }
+
+    pub(crate) fn on_success(self) {
+        for sender in self.senders {
+            // Ignore send result.
+            let _ = sender.send(Ok(Output::AffectedRows(0)));
         }
     }
 }

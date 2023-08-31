@@ -17,6 +17,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use common_query::Output;
 use common_telemetry::{error, info};
 use snafu::ResultExt;
 use store_api::storage::{RegionId, ScanRequest};
@@ -84,10 +85,10 @@ impl WriteBufferManager for WriteBufferManagerImpl {
 pub enum FlushReason {
     /// Other reasons.
     Others,
-    /// Memtable is full.
-    MemtableFull,
     /// Engine reaches flush threshold.
     EngineFull,
+    /// Manual flush.
+    Manual,
     // TODO(yingwen): Alter, manually.
 }
 
@@ -98,7 +99,7 @@ pub(crate) struct RegionFlushTask {
     /// Reason to flush.
     pub(crate) reason: FlushReason,
     /// Flush result senders.
-    pub(crate) senders: Vec<oneshot::Sender<Result<()>>>,
+    pub(crate) senders: Vec<oneshot::Sender<Result<Output>>>,
     /// Request sender to notify the worker.
     pub(crate) request_sender: mpsc::Sender<WorkerRequest>,
 
@@ -110,7 +111,15 @@ impl RegionFlushTask {
     /// Consumes the task and notify the sender the job is success.
     fn on_success(self) {
         for sender in self.senders {
-            let _ = sender.send(Ok(()));
+            let _ = sender.send(Ok(Output::AffectedRows(0)));
+        }
+    }
+
+    /// Send flush error to waiter.
+    fn on_failure(&mut self, err: Arc<Error>) {
+        for sender in self.senders.drain(..) {
+            // Ignore send result.
+            let _ = sender.send(Err(err.clone()).context(FlushRegionSnafu));
         }
     }
 
@@ -151,7 +160,7 @@ impl RegionFlushTask {
             Err(e) => {
                 error!(e; "Failed to flush region {}", self.region_id);
                 let err = Arc::new(e);
-                self.send_error(err.clone());
+                self.on_failure(err.clone());
                 WorkerRequest::Background {
                     region_id: self.region_id,
                     notify: BackgroundNotify::FlushFailed(FlushFailed { err }),
@@ -210,14 +219,6 @@ impl RegionFlushTask {
                 "Failed to notify flush job status for region {}, request: {:?}",
                 self.region_id, e.0
             );
-        }
-    }
-
-    /// Send flush error to waiter.
-    fn send_error(&mut self, err: Arc<Error>) {
-        for sender in self.senders.drain(..) {
-            // Ignore send result.
-            let _ = sender.send(Err(err.clone()).context(FlushRegionSnafu));
         }
     }
 
@@ -297,6 +298,8 @@ impl FlushScheduler {
         // Submit a flush job.
         let job = task.into_flush_job(region);
         if let Err(e) = self.scheduler.schedule(job) {
+            // If scheduler returns error, senders in the job will be dropped and waiters
+            // can get recv errors.
             error!(e; "Failed to schedule flush job for region {}", region.region_id);
 
             // Remove from region status if we can't submit the task.
@@ -436,7 +439,7 @@ impl FlushStatus {
 
     fn on_failure(self, err: Arc<Error>) {
         if let Some(mut task) = self.pending_task {
-            task.send_error(err.clone());
+            task.on_failure(err.clone());
         }
         for ddl in self.pending_ddls {
             if let Some(sender) = ddl.sender {

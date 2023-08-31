@@ -18,8 +18,8 @@ use common_query::Output;
 use common_telemetry::{error, info};
 use common_time::util::current_time_millis;
 use store_api::logstore::LogStore;
-use store_api::region_request::RegionFlushRequest;
 use store_api::storage::RegionId;
+use tokio::sync::oneshot;
 
 use crate::error::{RegionNotFoundSnafu, Result};
 use crate::flush::{FlushReason, RegionFlushTask};
@@ -36,7 +36,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         mut request: FlushFinished,
     ) {
         let Some(region) = self.regions.get_region(region_id) else {
-            request.send_error(RegionNotFoundSnafu { region_id }.build());
+            request.on_failure(RegionNotFoundSnafu { region_id }.build());
             return;
         };
 
@@ -50,7 +50,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone()));
         if let Err(e) = region.manifest_manager.update(action_list).await {
             error!(e; "Failed to write manifest, region: {}", region_id);
-            request.send_error(e);
+            request.on_failure(e);
             return;
         }
 
@@ -66,7 +66,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         );
         if let Err(e) = self.wal.obsolete(region_id, request.flushed_entry_id).await {
             error!(e; "Failed to write wal, region: {}", region_id);
-            request.send_error(e);
+            request.on_failure(e);
             return;
         }
 
@@ -75,7 +75,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             self.handle_ddl_requests(ddl_requests).await;
         }
 
-        unimplemented!()
+        // Notifies waiters.
+        request.on_success();
     }
 }
 
@@ -83,10 +84,23 @@ impl<S> RegionWorkerLoop<S> {
     /// Handles manual flush request.
     pub(crate) async fn handle_flush_request(
         &mut self,
-        _region_id: RegionId,
-        _request: RegionFlushRequest,
-    ) -> Result<Output> {
-        unimplemented!()
+        region_id: RegionId,
+        sender: Option<oneshot::Sender<Result<Output>>>,
+    ) {
+        let Some(region) = self.regions.get_region(region_id) else {
+            if let Some(sender) = sender {
+                let _ = sender.send(RegionNotFoundSnafu { region_id }.fail());
+            }
+            return;
+        };
+
+        let mut task = self.new_flush_task(&region, FlushReason::Manual);
+        if let Some(sender) = sender {
+            task.senders.push(sender);
+        }
+        if let Err(e) = self.flush_scheduler.schedule_flush(&region, task) {
+            error!(e; "Failed to schedule flush task for region {}", region.region_id);
+        }
     }
 
     /// On region flush job failed.
@@ -107,11 +121,6 @@ impl<S> RegionWorkerLoop<S> {
         if let Err(e) = self.flush_regions_on_engine_full() {
             error!(e; "Failed to flush worker");
         }
-    }
-
-    /// Flush a region if it meets flush requirements.
-    pub(crate) fn flush_region_if_full(&mut self, _region: &MitoRegionRef) {
-        // Now we does nothing.
     }
 
     /// Find some regions to flush to reduce write buffer usage.
@@ -157,7 +166,6 @@ impl<S> RegionWorkerLoop<S> {
 
     fn new_flush_task(&self, region: &MitoRegionRef, reason: FlushReason) -> RegionFlushTask {
         // TODO(yingwen): metrics for flush reqeusted.
-
         RegionFlushTask {
             region_id: region.region_id,
             reason,
