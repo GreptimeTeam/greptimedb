@@ -20,3 +20,4 @@ pub(crate) const METRIC_META_HEARTBEAT_CONNECTION_NUM: &str = "meta.heartbeat_co
 pub(crate) const METRIC_META_HANDLER_EXECUTE: &str = "meta.handler_execute";
 
 pub(crate) const METRIC_META_PROCEDURE_CREATE_TABLE: &str = "meta.procedure.create_table";
+pub(crate) const METRIC_META_PROCEDURE_DROP_TABLE: &str = "meta.procedure.drop_table";
