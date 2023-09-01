@@ -47,7 +47,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 .await
                 .context(OpenDalSnafu)?
         {
-            let _ = remove_region_dir_once(&request.region_dir, &self.object_store).await;
+            let result = remove_region_dir_once(&request.region_dir, &self.object_store).await;
+            info!("Region {} is dropped, result: {:?}", region_id, result);
             return RegionNotFoundSnafu { region_id }.fail();
         }
 

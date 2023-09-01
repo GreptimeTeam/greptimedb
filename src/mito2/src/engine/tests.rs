@@ -22,8 +22,7 @@ use api::v1::{ColumnSchema, Row, Rows, SemanticType};
 use common_recordbatch::RecordBatches;
 use store_api::metadata::ColumnMetadata;
 use store_api::region_request::{
-    RegionCloseRequest, RegionCreateRequest, RegionDeleteRequest, RegionOpenRequest,
-    RegionPutRequest,
+    RegionCreateRequest, RegionDeleteRequest, RegionOpenRequest, RegionPutRequest,
 };
 use store_api::storage::RegionId;
 

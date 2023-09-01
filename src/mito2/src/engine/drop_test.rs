@@ -39,7 +39,7 @@ async fn test_engine_drop_region() {
         .unwrap();
 
     let region = engine.get_region(region_id).unwrap();
-    let region_dir = region.region_dir.clone();
+    let region_dir = region.access_layer.region_dir().to_owned();
     // no dropping marker file
     assert!(!env
         .get_object_store()

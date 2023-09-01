@@ -21,7 +21,7 @@ use common_telemetry::info;
 use common_telemetry::tracing::warn;
 use futures::StreamExt;
 use object_store::util::join_path;
-use object_store::ObjectStore;
+use object_store::{EntryMode, Metakey, ObjectStore};
 use snafu::ResultExt;
 use store_api::storage::RegionId;
 use tokio::time::sleep;
@@ -43,7 +43,7 @@ impl<S> RegionWorkerLoop<S> {
         region.stop().await?;
 
         // write dropping marker
-        let marker_path = join_path(&region.region_dir, DROPPING_MARKER_FILE);
+        let marker_path = join_path(region.access_layer.region_dir(), DROPPING_MARKER_FILE);
         self.object_store
             .write(&marker_path, vec![])
             .await
@@ -61,7 +61,7 @@ impl<S> RegionWorkerLoop<S> {
         );
 
         // detach a background task to delete the region dir
-        let region_dir = region.region_dir.clone();
+        let region_dir = region.access_layer.region_dir().to_owned();
         let object_store = self.object_store.clone();
         let dropping_regions = self.dropping_regions.clone();
         common_runtime::spawn_bg(async move {
@@ -87,10 +87,10 @@ async fn later_drop_task(
     for _ in 0..MAX_RETRY_TIMES {
         sleep(Duration::from_secs(GC_TASK_INTERVAL_SEC)).await;
         let result = remove_region_dir_once(&region_path, &object_store).await;
-        if result.is_err() {
+        if let Err(err) = result {
             warn!(
-                "Error occurs during trying to GC region dir {}: {:?}",
-                region_path, result
+                "Error occurs during trying to GC region dir {}: {}",
+                region_path, err
             );
         } else {
             dropping_regions.remove_region(region_id);
@@ -104,6 +104,7 @@ async fn later_drop_task(
     );
 }
 
+// TODO(ruihang): place the marker in a separate dir
 pub(crate) async fn remove_region_dir_once(
     region_path: &str,
     object_store: &ObjectStore,
@@ -112,14 +113,20 @@ pub(crate) async fn remove_region_dir_once(
     let mut has_parquet_file = false;
     // record all paths that neither ends with .parquet nor the marker file
     let mut files_to_remove_first = vec![];
-    let mut files = object_store.list(region_path).await.context(OpenDalSnafu)?;
+    let mut files = object_store.scan(region_path).await.context(OpenDalSnafu)?;
     while let Some(file) = files.next().await {
         let file = file.context(OpenDalSnafu)?;
         if file.path().ends_with(".parquet") {
             has_parquet_file = true;
             break;
         } else if !file.path().ends_with(DROPPING_MARKER_FILE) {
-            files_to_remove_first.push(file.path().to_string());
+            let meta = object_store
+                .metadata(&file, Metakey::Mode)
+                .await
+                .context(OpenDalSnafu)?;
+            if meta.mode() == EntryMode::FILE {
+                files_to_remove_first.push(file.path().to_string());
+            }
         }
     }
 
