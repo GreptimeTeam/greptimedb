@@ -227,11 +227,11 @@ impl MetaSrvBuilder {
                 group.add_handler(OnLeaderStartHandler).await;
                 group.add_handler(CollectStatsHandler).await;
                 group.add_handler(MailboxHandler).await;
+                group.add_handler(RegionLeaseHandler).await;
+                group.add_handler(FilterInactiveRegionStatsHandler).await;
                 if let Some(region_failover_handler) = region_failover_handler {
                     group.add_handler(region_failover_handler).await;
                 }
-                group.add_handler(RegionLeaseHandler).await;
-                group.add_handler(FilterInactiveRegionStatsHandler).await;
                 group.add_handler(PersistStatsHandler::default()).await;
                 if let Some((publish, _)) = pubsub.as_ref() {
                     group
