@@ -15,30 +15,27 @@
 use std::vec;
 
 use async_trait::async_trait;
-use client::Database;
-use common_meta::cache_invalidator::Context;
-use common_meta::ident::TableIdent;
-use common_meta::key::table_info::TableInfoValue;
-use common_meta::key::table_name::TableNameKey;
-use common_meta::key::table_route::TableRouteValue;
-use common_meta::rpc::ddl::AlterTableTask;
-use common_meta::rpc::router::{find_leaders, RegionRoute};
-use common_meta::table_name::TableName;
 use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu};
 use common_procedure::{
     Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure, Status,
 };
 use common_telemetry::{debug, info};
-use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
 use table::engine::TableReference;
 use table::metadata::{RawTableInfo, TableId, TableInfo};
 use table::requests::{AlterKind, AlterTableRequest};
 
+use crate::cache_invalidator::Context;
 use crate::ddl::DdlContext;
-use crate::error::{self, Result, TableMetadataManagerSnafu};
-use crate::procedure::utils::handle_request_datanode_error;
+use crate::error::{self, Result};
+use crate::ident::TableIdent;
+use crate::key::table_info::TableInfoValue;
+use crate::key::table_name::TableNameKey;
+use crate::key::table_route::TableRouteValue;
+use crate::rpc::ddl::AlterTableTask;
+use crate::rpc::router::RegionRoute;
+use crate::table_name::TableName;
 
 // TODO(weny): removes in following PRs.
 #[allow(dead_code)]
@@ -50,9 +47,9 @@ pub struct AlterTableProcedure {
 // TODO(weny): removes in following PRs.
 #[allow(dead_code)]
 impl AlterTableProcedure {
-    pub(crate) const TYPE_NAME: &'static str = "metasrv-procedure::AlterTable";
+    pub const TYPE_NAME: &'static str = "metasrv-procedure::AlterTable";
 
-    pub(crate) fn new(
+    pub fn new(
         cluster_id: u64,
         task: AlterTableTask,
         alter_table_request: AlterTableRequest,
@@ -65,7 +62,7 @@ impl AlterTableProcedure {
         }
     }
 
-    pub(crate) fn from_json(json: &str, context: DdlContext) -> ProcedureResult<Self> {
+    pub fn from_json(json: &str, context: DdlContext) -> ProcedureResult<Self> {
         let data = serde_json::from_str(json).context(FromJsonSnafu)?;
 
         Ok(AlterTableProcedure { context, data })
@@ -85,8 +82,7 @@ impl AlterTableProcedure {
                     &request.schema_name,
                     new_table_name,
                 ))
-                .await
-                .context(TableMetadataManagerSnafu)?;
+                .await?;
 
             ensure!(
                 !exist,
@@ -107,57 +103,18 @@ impl AlterTableProcedure {
                 &request.schema_name,
                 &request.table_name,
             ))
-            .await
-            .context(TableMetadataManagerSnafu)?;
+            .await?;
 
         ensure!(
             exist,
             error::TableNotFoundSnafu {
-                name: request.table_ref().to_string()
+                table_name: request.table_ref().to_string()
             }
         );
 
         self.data.state = AlterTableState::UpdateMetadata;
 
         Ok(Status::executing(true))
-    }
-
-    /// Alters table on datanode.
-    async fn on_datanode_alter_table(&mut self) -> Result<Status> {
-        let region_routes = self
-            .data
-            .region_routes
-            .as_ref()
-            .context(error::UnexpectedSnafu {
-                violated: "expected table_route",
-            })?;
-
-        let table_ref = self.data.table_ref();
-
-        let clients = self.context.datanode_clients.clone();
-        let leaders = find_leaders(region_routes);
-        let mut joins = Vec::with_capacity(leaders.len());
-
-        for datanode in leaders {
-            let client = clients.get_client(&datanode).await;
-            let client = Database::new(table_ref.catalog, table_ref.schema, client);
-            let expr = self.data.task.alter_table.clone();
-            joins.push(common_runtime::spawn_bg(async move {
-                debug!("Sending {:?} to {:?}", expr, client);
-                client
-                    .alter(expr)
-                    .await
-                    .map_err(handle_request_datanode_error(datanode))
-            }));
-        }
-
-        let _ = join_all(joins)
-            .await
-            .into_iter()
-            .map(|e| e.context(error::JoinSnafu).flatten())
-            .collect::<Result<Vec<_>>>()?;
-
-        Ok(Status::Done)
     }
 
     /// Update table metadata for rename table operation.
@@ -168,8 +125,7 @@ impl AlterTableProcedure {
 
         table_metadata_manager
             .rename_table(current_table_info_value, new_table_name)
-            .await
-            .context(error::TableMetadataManagerSnafu)?;
+            .await?;
 
         Ok(())
     }
@@ -180,8 +136,7 @@ impl AlterTableProcedure {
 
         table_metadata_manager
             .update_table_info(current_table_info_value, new_table_info)
-            .await
-            .context(error::TableMetadataManagerSnafu)?;
+            .await?;
 
         Ok(())
     }
@@ -241,8 +196,7 @@ impl AlterTableProcedure {
         let TableRouteValue { region_routes, .. } = table_metadata_manager
             .table_route_manager()
             .get(table_id)
-            .await
-            .context(error::TableMetadataManagerSnafu)?
+            .await?
             .with_context(|| error::TableRouteNotFoundSnafu {
                 table_name: table_ref.to_string(),
             })?;
@@ -272,8 +226,7 @@ impl AlterTableProcedure {
                 },
                 table_ident,
             )
-            .await
-            .context(error::InvalidateTableCacheSnafu)?;
+            .await?;
 
         self.data.state = AlterTableState::DatanodeAlterTable;
         Ok(Status::executing(true))
@@ -320,7 +273,7 @@ impl Procedure for AlterTableProcedure {
             AlterTableState::Prepare => self.on_prepare().await,
             AlterTableState::UpdateMetadata => self.on_update_metadata().await,
             AlterTableState::InvalidateTableCache => self.on_broadcast().await,
-            AlterTableState::DatanodeAlterTable => self.on_datanode_alter_table().await,
+            AlterTableState::DatanodeAlterTable => todo!(),
         }
         .map_err(error_handler)
     }

@@ -10,9 +10,11 @@ async-stream.workspace = true
 async-trait.workspace = true
 common-catalog = { workspace = true }
 common-error = { workspace = true }
+common-procedure = { workspace = true }
 common-runtime = { workspace = true }
 common-telemetry = { workspace = true }
 common-time = { workspace = true }
+datatypes = { workspace = true }
 etcd-client.workspace = true
 futures.workspace = true
 humantime-serde.workspace = true
@@ -23,6 +25,7 @@ serde.workspace = true
 serde_json.workspace = true
 snafu.workspace = true
 store-api = { workspace = true }
+strum.workspace = true
 table = { workspace = true }
 tokio.workspace = true
 
