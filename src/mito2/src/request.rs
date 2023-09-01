@@ -34,7 +34,8 @@ use store_api::storage::{CompactionStrategy, RegionId};
 use tokio::sync::oneshot::{self, Receiver, Sender};
 
 use crate::config::DEFAULT_WRITE_BUFFER_SIZE;
-use crate::error::{CreateDefaultSnafu, FillDefaultSnafu, InvalidRequestSnafu, Result};
+use crate::error::{CreateDefaultSnafu, Error, FillDefaultSnafu, InvalidRequestSnafu, Result};
+use crate::sst::file::FileMeta;
 
 /// Options that affect the entire region.
 ///
@@ -312,6 +313,7 @@ pub(crate) fn validate_proto_value(
 }
 
 /// Sender and write request.
+#[derive(Debug)]
 pub(crate) struct SenderWriteRequest {
     /// Result sender.
     pub(crate) sender: Option<Sender<Result<Output>>>,
@@ -320,51 +322,90 @@ pub(crate) struct SenderWriteRequest {
 
 /// Request sent to a worker
 pub(crate) enum WorkerRequest {
-    /// Region request.
-    Region(RegionTask),
+    /// Write to a region.
+    Write(SenderWriteRequest),
+
+    /// Ddl request to a region.
+    Ddl(SenderDdlRequest),
+
+    /// Notifications from internal background jobs.
+    Background {
+        /// Id of the region to send.
+        region_id: RegionId,
+        /// Internal notification.
+        notify: BackgroundNotify,
+    },
 
     /// Notify a worker to stop.
     Stop,
 }
 
-/// Request to modify a region.
-#[derive(Debug)]
-pub(crate) struct RegionTask {
-    /// Sender to send result.
-    ///
-    /// Now the result is a `Result<()>`, but we could replace the empty tuple
-    /// with an enum if we need to carry more information.
-    pub(crate) sender: Option<Sender<Result<Output>>>,
-    /// Request body.
-    pub(crate) body: RequestBody,
-    /// Region identifier.
-    pub(crate) region_id: RegionId,
-}
-
-impl RegionTask {
-    /// Creates a [RegionTask] and a receiver from request body.
-    pub(crate) fn from_request(
+impl WorkerRequest {
+    /// Converts request from a [RegionRequest].
+    pub(crate) fn try_from_region_request(
         region_id: RegionId,
-        body: RequestBody,
-    ) -> (RegionTask, Receiver<Result<Output>>) {
+        value: RegionRequest,
+    ) -> Result<(WorkerRequest, Receiver<Result<Output>>)> {
         let (sender, receiver) = oneshot::channel();
-        (
-            RegionTask {
-                sender: Some(sender),
-                body,
+        let worker_request = match value {
+            RegionRequest::Put(v) => {
+                let write_request = WriteRequest::new(region_id, OpType::Put, v.rows)?;
+                WorkerRequest::Write(SenderWriteRequest {
+                    sender: Some(sender),
+                    request: write_request,
+                })
+            }
+            RegionRequest::Delete(v) => {
+                let write_request = WriteRequest::new(region_id, OpType::Delete, v.rows)?;
+                WorkerRequest::Write(SenderWriteRequest {
+                    sender: Some(sender),
+                    request: write_request,
+                })
+            }
+            RegionRequest::Create(v) => WorkerRequest::Ddl(SenderDdlRequest {
                 region_id,
-            },
-            receiver,
-        )
+                sender: Some(sender),
+                request: DdlRequest::Create(v),
+            }),
+            RegionRequest::Drop(v) => WorkerRequest::Ddl(SenderDdlRequest {
+                region_id,
+                sender: Some(sender),
+                request: DdlRequest::Drop(v),
+            }),
+            RegionRequest::Open(v) => WorkerRequest::Ddl(SenderDdlRequest {
+                region_id,
+                sender: Some(sender),
+                request: DdlRequest::Open(v),
+            }),
+            RegionRequest::Close(v) => WorkerRequest::Ddl(SenderDdlRequest {
+                region_id,
+                sender: Some(sender),
+                request: DdlRequest::Close(v),
+            }),
+            RegionRequest::Alter(v) => WorkerRequest::Ddl(SenderDdlRequest {
+                region_id,
+                sender: Some(sender),
+                request: DdlRequest::Alter(v),
+            }),
+            RegionRequest::Flush(v) => WorkerRequest::Ddl(SenderDdlRequest {
+                region_id,
+                sender: Some(sender),
+                request: DdlRequest::Flush(v),
+            }),
+            RegionRequest::Compact(v) => WorkerRequest::Ddl(SenderDdlRequest {
+                region_id,
+                sender: Some(sender),
+                request: DdlRequest::Compact(v),
+            }),
+        };
+
+        Ok((worker_request, receiver))
     }
 }
 
-/// Request body of a region task.
-///
-/// It validates requests outside of workers.
+/// DDL request to a region.
 #[derive(Debug)]
-pub(crate) enum RequestBody {
-    Write(WriteRequest),
+pub(crate) enum DdlRequest {
     Create(RegionCreateRequest),
     Drop(RegionDropRequest),
     Open(RegionOpenRequest),
@@ -374,32 +415,38 @@ pub(crate) enum RequestBody {
     Compact(RegionCompactRequest),
 }
 
-impl RequestBody {
-    /// Convert request body from [RegionRequest].
-    pub(crate) fn try_from_region_request(
-        region_id: RegionId,
-        value: RegionRequest,
-    ) -> Result<RequestBody> {
-        let body = match value {
-            RegionRequest::Put(v) => {
-                let write_request = WriteRequest::new(region_id, OpType::Put, v.rows)?;
-                RequestBody::Write(write_request)
-            }
-            RegionRequest::Delete(v) => {
-                let write_request = WriteRequest::new(region_id, OpType::Delete, v.rows)?;
-                RequestBody::Write(write_request)
-            }
-            RegionRequest::Create(v) => RequestBody::Create(v),
-            RegionRequest::Drop(v) => RequestBody::Drop(v),
-            RegionRequest::Open(v) => RequestBody::Open(v),
-            RegionRequest::Close(v) => RequestBody::Close(v),
-            RegionRequest::Alter(v) => RequestBody::Alter(v),
-            RegionRequest::Flush(v) => RequestBody::Flush(v),
-            RegionRequest::Compact(v) => RequestBody::Compact(v),
-        };
+/// Sender and Ddl request.
+#[derive(Debug)]
+pub(crate) struct SenderDdlRequest {
+    /// Region id of the request.
+    pub(crate) region_id: RegionId,
+    /// Result sender.
+    pub(crate) sender: Option<Sender<Result<Output>>>,
+    /// Ddl request.
+    pub(crate) request: DdlRequest,
+}
 
-        Ok(body)
-    }
+/// Notification from a background job.
+#[derive(Debug)]
+pub(crate) enum BackgroundNotify {
+    /// Flush is finished.
+    FlushFinished(FlushFinished),
+    /// Flush is failed.
+    FlushFailed(FlushFailed),
+}
+
+/// Notifies a flush job is finished.
+#[derive(Debug)]
+pub(crate) struct FlushFinished {
+    /// Meta of the flushed SST.
+    pub(crate) file_meta: FileMeta,
+}
+
+/// Notifies a flush job is failed.
+#[derive(Debug)]
+pub(crate) struct FlushFailed {
+    /// The reason of a failed flush job.
+    pub(crate) error: Error,
 }
 
 #[cfg(test)]

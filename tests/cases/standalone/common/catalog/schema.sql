@@ -10,11 +10,11 @@ SHOW DATABASES WHERE Schemas='test_public_schema';
 
 USE test_public_schema;
 
-CREATE TABLE hello(i BIGINT TIME INDEX);
+CREATE TABLE hello(i TIMESTAMP TIME INDEX);
 
 DROP TABLE hello;
 
-CREATE TABLE hello(i BIGINT TIME INDEX);
+CREATE TABLE hello(i TIMESTAMP TIME INDEX);
 
 SHOW TABLES FROM test_public_schema;
 

@@ -31,14 +31,14 @@ use key_lock::KeyLock;
 use object_store::ObjectStore;
 use snafu::{ensure, OptionExt, ResultExt};
 use storage::manifest::manifest_compress_type;
+use store_api::path_utils::{region_name, table_dir};
 use store_api::storage::{
     CloseOptions, ColumnDescriptorBuilder, ColumnFamilyDescriptor, ColumnFamilyDescriptorBuilder,
     ColumnId, CompactionStrategy, EngineContext as StorageEngineContext, OpenOptions, RegionNumber,
     RowKeyDescriptor, RowKeyDescriptorBuilder, StorageEngine,
 };
 use table::engine::{
-    region_name, table_dir, CloseTableResult, EngineContext, TableEngine, TableEngineProcedure,
-    TableReference,
+    CloseTableResult, EngineContext, TableEngine, TableEngineProcedure, TableReference,
 };
 use table::metadata::{TableId, TableInfo, TableVersion};
 use table::requests::{

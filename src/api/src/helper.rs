@@ -37,7 +37,6 @@ use greptime_proto::v1;
 use greptime_proto::v1::ddl_request::Expr;
 use greptime_proto::v1::greptime_request::Request;
 use greptime_proto::v1::query_request::Query;
-use greptime_proto::v1::region::region_request;
 use greptime_proto::v1::value::ValueData;
 use greptime_proto::v1::{DdlRequest, IntervalMonthDayNano, QueryRequest, SemanticType};
 use snafu::prelude::*;
@@ -333,21 +332,6 @@ fn query_request_type(request: &QueryRequest) -> &'static str {
     }
 }
 
-/// Returns the type name of the [RegionRequest].
-pub fn region_request_type(request: &region_request::Body) -> &'static str {
-    match request {
-        region_request::Body::Inserts(_) => "region.inserts",
-        region_request::Body::Deletes(_) => "region.deletes",
-        region_request::Body::Create(_) => "region.create",
-        region_request::Body::Drop(_) => "region.drop",
-        region_request::Body::Open(_) => "region.open",
-        region_request::Body::Close(_) => "region.close",
-        region_request::Body::Alter(_) => "region.alter",
-        region_request::Body::Flush(_) => "region.flush",
-        region_request::Body::Compact(_) => "region.compact",
-    }
-}
-
 /// Returns the type name of the [DdlRequest].
 fn ddl_request_type(request: &DdlRequest) -> &'static str {
     match request.expr {
@@ -355,8 +339,6 @@ fn ddl_request_type(request: &DdlRequest) -> &'static str {
         Some(Expr::CreateTable(_)) => "ddl.create_table",
         Some(Expr::Alter(_)) => "ddl.alter",
         Some(Expr::DropTable(_)) => "ddl.drop_table",
-        Some(Expr::FlushTable(_)) => "ddl.flush_table",
-        Some(Expr::CompactTable(_)) => "ddl.compact_table",
         Some(Expr::TruncateTable(_)) => "ddl.truncate_table",
         None => "ddl.empty",
     }

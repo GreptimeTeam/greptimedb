@@ -52,6 +52,10 @@ impl Drop for Dropper {
 }
 
 impl Runtime {
+    pub fn builder() -> Builder {
+        Builder::default()
+    }
+
     /// Spawn a future and execute it in this thread pool
     ///
     /// Similar to tokio::runtime::Runtime::spawn()

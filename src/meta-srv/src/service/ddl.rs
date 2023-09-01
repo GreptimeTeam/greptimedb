@@ -178,8 +178,8 @@ async fn handle_create_region_routes(
     // If the peers are not enough, some peers will be used for multiple partitions.
     peers.truncate(partitions.len());
 
-    let id = table_id_sequence.next().await?;
-    table_info.ident.table_id = id as u32;
+    let table_id = table_id_sequence.next().await? as u32;
+    table_info.ident.table_id = table_id;
 
     ensure!(
         partitions.len() <= MAX_REGION_SEQ as usize,
@@ -191,7 +191,7 @@ async fn handle_create_region_routes(
         .enumerate()
         .map(|(i, partition)| {
             let region = Region {
-                id: RegionId::from_u64(i as u64),
+                id: RegionId::new(table_id, i as u32),
                 partition: Some(partition.into()),
                 ..Default::default()
             };

@@ -13,6 +13,7 @@ anymap = "1.0.0-beta.2"
 api.workspace = true
 aquamarine = "0.3"
 arc-swap = "1.0"
+async-channel = "1.9"
 async-compat = "0.2"
 async-stream.workspace = true
 async-trait = "0.1"
@@ -33,7 +34,6 @@ dashmap = "5.4"
 datafusion-common.workspace = true
 datafusion.workspace = true
 datatypes = { workspace = true }
-flume = "0.10"
 futures.workspace = true
 lazy_static = "1.4"
 log-store = { workspace = true }
@@ -49,7 +49,7 @@ serde_json = "1.0"
 snafu.workspace = true
 storage = { workspace = true }
 store-api = { workspace = true }
-strum = "0.21"
+strum.workspace = true
 table = { workspace = true }
 tokio-util.workspace = true
 tokio.workspace = true

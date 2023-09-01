@@ -15,7 +15,6 @@
 use std::fmt::{self, Display};
 use std::sync::Arc;
 
-use common_base::paths::DATA_DIR;
 use common_procedure::BoxedProcedure;
 use datafusion_common::TableReference as DfTableReference;
 use store_api::storage::RegionNumber;
@@ -186,17 +185,6 @@ pub trait TableEngineProcedure: Send + Sync {
 }
 
 pub type TableEngineProcedureRef = Arc<dyn TableEngineProcedure>;
-
-/// Generate region name in the form of "{TABLE_ID}_{REGION_NUMBER}"
-#[inline]
-pub fn region_name(table_id: TableId, region_number: RegionNumber) -> String {
-    format!("{table_id}_{region_number:010}")
-}
-
-#[inline]
-pub fn table_dir(catalog_name: &str, schema_name: &str, table_id: TableId) -> String {
-    format!("{DATA_DIR}{catalog_name}/{schema_name}/{table_id}/")
-}
 
 #[cfg(test)]
 mod tests {

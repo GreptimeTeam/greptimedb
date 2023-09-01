@@ -17,11 +17,11 @@
 use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::debug;
 use common_time::range::TimestampRange;
-use object_store::ObjectStore;
 use snafu::ResultExt;
 use store_api::storage::ScanRequest;
 use table::predicate::{Predicate, TimeRangePredicateBuilder};
 
+use crate::access_layer::AccessLayerRef;
 use crate::error::{BuildPredicateSnafu, Result};
 use crate::read::projection::ProjectionMapper;
 use crate::read::seq_scan::SeqScan;
@@ -85,10 +85,8 @@ impl Scanner {
 pub(crate) struct ScanRegion {
     /// Version of the region at scan.
     version: VersionRef,
-    /// Directory of SST files.
-    file_dir: String,
-    /// Object store that stores SST files.
-    object_store: ObjectStore,
+    /// Access layer of the region.
+    access_layer: AccessLayerRef,
     /// Scan request.
     request: ScanRequest,
 }
@@ -97,14 +95,12 @@ impl ScanRegion {
     /// Creates a [ScanRegion].
     pub(crate) fn new(
         version: VersionRef,
-        file_dir: String,
-        object_store: ObjectStore,
+        access_layer: AccessLayerRef,
         request: ScanRequest,
     ) -> ScanRegion {
         ScanRegion {
             version,
-            file_dir,
-            object_store,
+            access_layer,
             request,
         }
     }
@@ -152,7 +148,7 @@ impl ScanRegion {
             None => ProjectionMapper::all(&self.version.metadata)?,
         };
 
-        let seq_scan = SeqScan::new(self.file_dir, self.object_store, mapper, self.request)
+        let seq_scan = SeqScan::new(self.access_layer.clone(), mapper, self.request)
             .with_time_range(Some(time_range))
             .with_predicate(Some(predicate))
             .with_memtables(memtables)

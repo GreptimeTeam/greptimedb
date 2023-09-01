@@ -37,6 +37,8 @@ use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant};
 
 use crate::error::{Result, TableEngineNotFoundSnafu};
+use crate::local::MemoryCatalogManager;
+use crate::DeregisterTableRequest;
 
 /// [RegionAliveKeepers] manages all [RegionAliveKeeper] in a scope of tables.
 pub struct RegionAliveKeepers {
@@ -70,7 +72,12 @@ impl RegionAliveKeepers {
         self.keepers.lock().await.get(&table_id).cloned()
     }
 
-    pub async fn register_table(&self, table_ident: TableIdent, table: TableRef) -> Result<()> {
+    pub async fn register_table(
+        &self,
+        table_ident: TableIdent,
+        table: TableRef,
+        catalog_manager: Arc<MemoryCatalogManager>,
+    ) -> Result<()> {
         let table_id = table_ident.table_id;
         let keeper = self.find_keeper(table_id).await;
         if keeper.is_some() {
@@ -86,6 +93,7 @@ impl RegionAliveKeepers {
 
         let keeper = Arc::new(RegionAliveKeeper::new(
             table_engine,
+            catalog_manager,
             table_ident.clone(),
             self.heartbeat_interval_millis,
         ));
@@ -203,6 +211,7 @@ impl HeartbeatResponseHandler for RegionAliveKeepers {
 /// Datanode, it will "extend" the region's "lease", with a deadline for [RegionAliveKeeper] to
 /// countdown.
 pub struct RegionAliveKeeper {
+    catalog_manager: Arc<MemoryCatalogManager>,
     table_engine: TableEngineRef,
     table_ident: TableIdent,
     countdown_task_handles: Arc<Mutex<HashMap<RegionNumber, Arc<CountdownTaskHandle>>>>,
@@ -213,10 +222,12 @@ pub struct RegionAliveKeeper {
 impl RegionAliveKeeper {
     fn new(
         table_engine: TableEngineRef,
+        catalog_manager: Arc<MemoryCatalogManager>,
         table_ident: TableIdent,
         heartbeat_interval_millis: u64,
     ) -> Self {
         Self {
+            catalog_manager,
             table_engine,
             table_ident,
             countdown_task_handles: Arc::new(Mutex::new(HashMap::new())),
@@ -244,11 +255,29 @@ impl RegionAliveKeeper {
                 let _ = x.lock().await.remove(&region);
             } // Else the countdown task handles map could be dropped because the keeper is dropped.
         };
+        let catalog_manager = self.catalog_manager.clone();
+        let ident = self.table_ident.clone();
         let handle = Arc::new(CountdownTaskHandle::new(
             self.table_engine.clone(),
             self.table_ident.clone(),
             region,
-            || on_task_finished,
+            move |result: Option<CloseTableResult>| {
+                if matches!(result, Some(CloseTableResult::Released(_))) {
+                    let result = catalog_manager.deregister_table_sync(DeregisterTableRequest {
+                        catalog: ident.catalog.to_string(),
+                        schema: ident.schema.to_string(),
+                        table_name: ident.table.to_string(),
+                    });
+
+                    info!(
+                        "Deregister table: {} after countdown task finished, result: {result:?}",
+                        ident.table_id
+                    );
+                } else {
+                    debug!("Countdown task returns: {result:?}");
+                }
+                on_task_finished
+            },
         ));
 
         let mut handles = self.countdown_task_handles.lock().await;
@@ -347,7 +376,7 @@ impl CountdownTaskHandle {
         table_engine: TableEngineRef,
         table_ident: TableIdent,
         region: RegionNumber,
-        on_task_finished: impl FnOnce() -> Fut + Send + 'static,
+        on_task_finished: impl FnOnce(Option<CloseTableResult>) -> Fut + Send + 'static,
     ) -> Self
     where
         Fut: Future<Output = ()> + Send,
@@ -361,8 +390,8 @@ impl CountdownTaskHandle {
             rx,
         };
         let handler = common_runtime::spawn_bg(async move {
-            countdown_task.run().await;
-            on_task_finished().await;
+            let result = countdown_task.run().await;
+            on_task_finished(result).await;
         });
 
         Self {
@@ -414,7 +443,8 @@ struct CountdownTask {
 }
 
 impl CountdownTask {
-    async fn run(&mut self) {
+    // returns true if
+    async fn run(&mut self) -> Option<CloseTableResult> {
         // 30 years. See `Instant::far_future`.
         let far_future = Instant::now() + Duration::from_secs(86400 * 365 * 30);
 
@@ -468,10 +498,11 @@ impl CountdownTask {
                         "Region {region} of table {table_ident} is closed, result: {result:?}. \
                         RegionAliveKeeper out.",
                     );
-                    break;
+                    return Some(result);
                 }
             }
         }
+        None
     }
 
     async fn close_region(&self) -> CloseTableResult {
@@ -547,8 +578,9 @@ mod test {
             table_options: TableOptions::default(),
             engine: "MockTableEngine".to_string(),
         });
+        let catalog_manager = MemoryCatalogManager::new_with_table(table.clone());
         keepers
-            .register_table(table_ident.clone(), table)
+            .register_table(table_ident.clone(), table, catalog_manager)
             .await
             .unwrap();
         assert!(keepers
@@ -684,7 +716,8 @@ mod test {
             table_id: 1024,
             engine: "mito".to_string(),
         };
-        let keeper = RegionAliveKeeper::new(table_engine, table_ident, 1000);
+        let catalog_manager = MemoryCatalogManager::with_default_setup();
+        let keeper = RegionAliveKeeper::new(table_engine, catalog_manager, table_ident, 1000);
 
         let region = 1;
         assert!(keeper.find_handle(&region).await.is_none());
@@ -727,7 +760,7 @@ mod test {
             table_engine.clone(),
             table_ident.clone(),
             1,
-            || async move { finished_clone.store(true, Ordering::Relaxed) },
+            |_| async move { finished_clone.store(true, Ordering::Relaxed) },
         );
         let tx = handle.tx.clone();
 
@@ -749,7 +782,7 @@ mod test {
 
         let finished = Arc::new(AtomicBool::new(false));
         let finished_clone = finished.clone();
-        let handle = CountdownTaskHandle::new(table_engine, table_ident, 1, || async move {
+        let handle = CountdownTaskHandle::new(table_engine, table_ident, 1, |_| async move {
             finished_clone.store(true, Ordering::Relaxed)
         });
         handle.tx.send(CountdownCommand::Start(100)).await.unwrap();

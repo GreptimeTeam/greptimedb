@@ -35,6 +35,12 @@ pub const INFORMATION_SCHEMA_TABLES_TABLE_ID: u32 = 3;
 pub const INFORMATION_SCHEMA_COLUMNS_TABLE_ID: u32 = 4;
 
 pub const MITO_ENGINE: &str = "mito";
+pub const MITO2_ENGINE: &str = "mito2";
+
+pub fn default_engine() -> &'static str {
+    MITO_ENGINE
+}
+
 pub const IMMUTABLE_FILE_ENGINE: &str = "file";
 
 pub const SEMANTIC_TYPE_PRIMARY_KEY: &str = "TAG";

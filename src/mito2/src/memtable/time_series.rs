@@ -123,6 +123,14 @@ impl Memtable for TimeSeriesMemtable {
 
         Box::new(self.series_set.iter_series(projection))
     }
+
+    fn is_empty(&self) -> bool {
+        self.series_set.series.read().unwrap().is_empty()
+    }
+
+    fn mark_immutable(&self) {
+        // TODO(yingwen): AllocTracker.done_allocating()
+    }
 }
 
 type SeriesRwLockMap = RwLock<BTreeMap<Vec<u8>, Arc<RwLock<Series>>>>;

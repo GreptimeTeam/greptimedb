@@ -25,31 +25,24 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use api::v1::alter_expr::Kind;
-use api::v1::ddl_request::Expr as DdlExpr;
-use api::v1::greptime_request::Request;
 use api::v1::meta::Role;
-use api::v1::{
-    AddColumns, AlterExpr, Column, DdlRequest, InsertRequest, InsertRequests, RowInsertRequests,
-};
+use api::v1::{InsertRequests, RowInsertRequests};
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use catalog::remote::CachedMetaKvBackend;
 use catalog::CatalogManagerRef;
 use client::client_manager::DatanodeClients;
 use common_base::Plugins;
-use common_catalog::consts::MITO_ENGINE;
 use common_error::ext::BoxedError;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
 use common_meta::heartbeat::handler::HandlerGroupExecutor;
 use common_meta::key::TableMetadataManager;
 use common_query::Output;
-use common_telemetry::logging::{debug, info};
+use common_telemetry::logging::info;
 use common_telemetry::{error, timer};
 use datanode::instance::sql::table_idents_to_full_name;
 use datanode::instance::InstanceRef as DnInstanceRef;
-use datatypes::schema::Schema;
 use distributed::DistInstance;
 use meta_client::client::{MetaClient, MetaClientBuilder};
 use partition::manager::PartitionRuleManager;
@@ -78,21 +71,19 @@ use sql::parser::ParserContext;
 use sql::statements::copy::CopyTable;
 use sql::statements::statement::Statement;
 use sqlparser::ast::ObjectName;
-use table::engine::TableReference;
 
 use crate::catalog::FrontendCatalogManager;
 use crate::error::{
-    self, Error, ExecLogicalPlanSnafu, ExecutePromqlSnafu, ExternalSnafu,
-    InvalidInsertRequestSnafu, MissingMetasrvOptsSnafu, ParseSqlSnafu, PermissionSnafu,
-    PlanStatementSnafu, Result, SqlExecInterceptedSnafu,
+    self, Error, ExecLogicalPlanSnafu, ExecutePromqlSnafu, ExternalSnafu, MissingMetasrvOptsSnafu,
+    ParseSqlSnafu, PermissionSnafu, PlanStatementSnafu, Result, SqlExecInterceptedSnafu,
 };
 use crate::expr_factory::CreateExprFactory;
 use crate::frontend::FrontendOptions;
 use crate::heartbeat::handler::invalidate_table_cache::InvalidateTableCacheHandler;
 use crate::heartbeat::HeartbeatTask;
+use crate::inserter::Inserter;
 use crate::instance::standalone::StandaloneGrpcQueryHandler;
 use crate::metrics;
-use crate::row_inserter::RowInserter;
 use crate::script::ScriptExecutor;
 use crate::server::{start_server, ServerHandlers, Services};
 use crate::statement::StatementExecutor;
@@ -130,7 +121,6 @@ pub struct Instance {
     plugins: Arc<Plugins>,
     servers: Arc<ServerHandlers>,
     heartbeat_task: Option<HeartbeatTask>,
-    row_inserter: Arc<RowInserter>,
 }
 
 impl Instance {
@@ -164,11 +154,8 @@ impl Instance {
             table_metadata_manager.clone(),
         );
 
-        let dist_instance = DistInstance::new(
-            meta_client.clone(),
-            Arc::new(catalog_manager.clone()),
-            datanode_clients.clone(),
-        );
+        let dist_instance =
+            DistInstance::new(meta_client.clone(), Arc::new(catalog_manager.clone()));
         let dist_instance = Arc::new(dist_instance);
 
         catalog_manager.set_dist_instance(dist_instance.clone());
@@ -212,13 +199,6 @@ impl Instance {
 
         let create_expr_factory = CreateExprFactory;
 
-        let row_inserter = Arc::new(RowInserter::new(
-            MITO_ENGINE.to_string(),
-            catalog_manager.clone(),
-            create_expr_factory,
-            dist_instance.clone(),
-        ));
-
         Ok(Instance {
             catalog_manager,
             script_executor,
@@ -229,7 +209,6 @@ impl Instance {
             plugins: plugins.clone(),
             servers: Arc::new(HashMap::new()),
             heartbeat_task,
-            row_inserter,
         })
     }
 
@@ -285,13 +264,6 @@ impl Instance {
         let create_expr_factory = CreateExprFactory;
         let grpc_query_handler = StandaloneGrpcQueryHandler::arc(dn_instance.clone());
 
-        let row_inserter = Arc::new(RowInserter::new(
-            MITO_ENGINE.to_string(),
-            catalog_manager.clone(),
-            create_expr_factory,
-            grpc_query_handler.clone(),
-        ));
-
         Ok(Instance {
             catalog_manager: catalog_manager.clone(),
             script_executor,
@@ -302,7 +274,6 @@ impl Instance {
             plugins: Default::default(),
             servers: Arc::new(HashMap::new()),
             heartbeat_task: None,
-            row_inserter,
         })
     }
 
@@ -323,7 +294,12 @@ impl Instance {
         requests: RowInsertRequests,
         ctx: QueryContextRef,
     ) -> Result<Output> {
-        self.row_inserter.handle_inserts(requests, ctx).await
+        let inserter = Inserter::new(
+            &self.catalog_manager,
+            &self.create_expr_factory,
+            &self.grpc_query_handler,
+        );
+        inserter.handle_row_inserts(requests, ctx).await
     }
 
     /// Handle batch inserts
@@ -332,130 +308,12 @@ impl Instance {
         requests: InsertRequests,
         ctx: QueryContextRef,
     ) -> Result<Output> {
-        for req in requests.inserts.iter() {
-            self.create_or_alter_table_on_demand(ctx.clone(), req)
-                .await?;
-        }
-
-        let query = Request::Inserts(requests);
-        GrpcQueryHandler::do_query(&*self.grpc_query_handler, query, ctx).await
-    }
-
-    // check if table already exist:
-    // - if table does not exist, create table by inferred CreateExpr
-    // - if table exist, check if schema matches. If any new column found, alter table by inferred `AlterExpr`
-    async fn create_or_alter_table_on_demand(
-        &self,
-        ctx: QueryContextRef,
-        request: &InsertRequest,
-    ) -> Result<()> {
-        let catalog_name = &ctx.current_catalog().to_owned();
-        let schema_name = &ctx.current_schema().to_owned();
-        let table_name = &request.table_name;
-        let columns = &request.columns;
-
-        let table = self
-            .catalog_manager
-            .table(catalog_name, schema_name, table_name)
-            .await
-            .context(error::CatalogSnafu)?;
-        match table {
-            None => {
-                info!(
-                    "Table {}.{}.{} does not exist, try create table",
-                    catalog_name, schema_name, table_name,
-                );
-                let _ = self
-                    .create_table_by_columns(ctx, table_name, columns, MITO_ENGINE)
-                    .await?;
-                info!(
-                    "Successfully created table on insertion: {}.{}.{}",
-                    catalog_name, schema_name, table_name
-                );
-            }
-            Some(table) => {
-                let schema = table.schema();
-
-                validate_insert_request(schema.as_ref(), request)?;
-
-                if let Some(add_columns) = common_grpc_expr::find_new_columns(&schema, columns)
-                    .context(error::FindNewColumnsOnInsertionSnafu)?
-                {
-                    info!(
-                        "Find new columns {:?} on insertion, try to alter table: {}.{}.{}",
-                        add_columns, catalog_name, schema_name, table_name
-                    );
-                    let _ = self
-                        .add_new_columns_to_table(ctx, table_name, add_columns)
-                        .await?;
-                    info!(
-                        "Successfully altered table on insertion: {}.{}.{}",
-                        catalog_name, schema_name, table_name
-                    );
-                }
-            }
-        };
-        Ok(())
-    }
-
-    /// Infer create table expr from inserting data
-    async fn create_table_by_columns(
-        &self,
-        ctx: QueryContextRef,
-        table_name: &str,
-        columns: &[Column],
-        engine: &str,
-    ) -> Result<Output> {
-        let catalog_name = ctx.current_catalog();
-        let schema_name = ctx.current_schema();
-
-        // Create table automatically, build schema from data.
-        let table_name = TableReference::full(catalog_name, schema_name, table_name);
-        let create_expr =
-            self.create_expr_factory
-                .create_table_expr_by_columns(&table_name, columns, engine)?;
-
-        info!(
-            "Try to create table: {} automatically with request: {:?}",
-            table_name, create_expr,
+        let inserter = Inserter::new(
+            &self.catalog_manager,
+            &self.create_expr_factory,
+            &self.grpc_query_handler,
         );
-
-        self.grpc_query_handler
-            .do_query(
-                Request::Ddl(DdlRequest {
-                    expr: Some(DdlExpr::CreateTable(create_expr)),
-                }),
-                ctx,
-            )
-            .await
-    }
-
-    async fn add_new_columns_to_table(
-        &self,
-        ctx: QueryContextRef,
-        table_name: &str,
-        add_columns: AddColumns,
-    ) -> Result<Output> {
-        debug!(
-            "Adding new columns: {:?} to table: {}",
-            add_columns, table_name
-        );
-        let expr = AlterExpr {
-            catalog_name: ctx.current_catalog().to_owned(),
-            schema_name: ctx.current_schema().to_owned(),
-            table_name: table_name.to_string(),
-            kind: Some(Kind::AddColumns(add_columns)),
-            ..Default::default()
-        };
-
-        self.grpc_query_handler
-            .do_query(
-                Request::Ddl(DdlRequest {
-                    expr: Some(DdlExpr::Alter(expr)),
-                }),
-                ctx,
-            )
-            .await
+        inserter.handle_column_inserts(requests, ctx).await
     }
 
     pub fn set_plugins(&mut self, map: Arc<Plugins>) {
@@ -742,107 +600,16 @@ fn validate_param(name: &ObjectName, query_ctx: &QueryContextRef) -> Result<()> 
         .context(SqlExecInterceptedSnafu)
 }
 
-fn validate_insert_request(schema: &Schema, request: &InsertRequest) -> Result<()> {
-    for column_schema in schema.column_schemas() {
-        if column_schema.is_nullable() || column_schema.default_constraint().is_some() {
-            continue;
-        }
-        let not_null = request
-            .columns
-            .iter()
-            .find(|x| x.column_name == column_schema.name)
-            .map(|column| column.null_mask.is_empty() || column.null_mask.iter().all(|x| *x == 0));
-        ensure!(
-            not_null == Some(true),
-            InvalidInsertRequestSnafu {
-                reason: format!(
-                    "Expecting insert data to be presented on a not null or no default value column '{}'.",
-                    &column_schema.name
-                )
-            }
-        );
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
 
-    use api::v1::column::Values;
-    use datatypes::prelude::{ConcreteDataType, Value};
-    use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema};
     use query::query_engine::options::QueryOptions;
     use session::context::QueryContext;
     use sql::dialect::GreptimeDbDialect;
     use strfmt::Format;
 
     use super::*;
-
-    #[test]
-    fn test_validate_insert_request() {
-        let schema = Schema::new(vec![
-            ColumnSchema::new("a", ConcreteDataType::int32_datatype(), true)
-                .with_default_constraint(None)
-                .unwrap(),
-            ColumnSchema::new("b", ConcreteDataType::int32_datatype(), true)
-                .with_default_constraint(Some(ColumnDefaultConstraint::Value(Value::Int32(100))))
-                .unwrap(),
-        ]);
-        let request = InsertRequest {
-            columns: vec![Column {
-                column_name: "c".to_string(),
-                values: Some(Values {
-                    i32_values: vec![1],
-                    ..Default::default()
-                }),
-                null_mask: vec![0],
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-        // If nullable is true, it doesn't matter whether the insert request has the column.
-        validate_insert_request(&schema, &request).unwrap();
-
-        let schema = Schema::new(vec![
-            ColumnSchema::new("a", ConcreteDataType::int32_datatype(), false)
-                .with_default_constraint(None)
-                .unwrap(),
-            ColumnSchema::new("b", ConcreteDataType::int32_datatype(), false)
-                .with_default_constraint(Some(ColumnDefaultConstraint::Value(Value::Int32(-100))))
-                .unwrap(),
-        ]);
-        let request = InsertRequest {
-            columns: vec![Column {
-                column_name: "a".to_string(),
-                values: Some(Values {
-                    i32_values: vec![1],
-                    ..Default::default()
-                }),
-                null_mask: vec![0],
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-        // If nullable is false, but the column is defined with default value,
-        // it also doesn't matter whether the insert request has the column.
-        validate_insert_request(&schema, &request).unwrap();
-
-        let request = InsertRequest {
-            columns: vec![Column {
-                column_name: "b".to_string(),
-                values: Some(Values {
-                    i32_values: vec![1],
-                    ..Default::default()
-                }),
-                null_mask: vec![0],
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-        // Neither of the above cases.
-        assert!(validate_insert_request(&schema, &request).is_err());
-    }
 
     #[test]
     fn test_exec_validation() {

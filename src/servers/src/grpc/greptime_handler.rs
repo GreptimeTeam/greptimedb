@@ -71,7 +71,7 @@ impl GreptimeRequestHandler {
         query_ctx.set_current_user(user_info);
 
         let handler = self.handler.clone();
-        let request_type = request_type(&query);
+        let request_type = request_type(&query).to_string();
         let db = query_ctx.get_db_string();
         let timer = RequestTimer::new(db.clone(), request_type);
 
@@ -170,7 +170,7 @@ pub(crate) fn create_query_context(header: Option<&RequestHeader>) -> QueryConte
     QueryContextBuilder::default()
         .current_catalog(catalog.to_string())
         .current_schema(schema.to_string())
-        .try_trace_id(header.and_then(|h: &RequestHeader| h.trace_id))
+        .try_trace_id(header.map(|h| h.trace_id))
         .build()
 }
 
@@ -180,13 +180,13 @@ pub(crate) fn create_query_context(header: Option<&RequestHeader>) -> QueryConte
 pub(crate) struct RequestTimer {
     start: Instant,
     db: String,
-    request_type: &'static str,
+    request_type: String,
     status_code: StatusCode,
 }
 
 impl RequestTimer {
     /// Returns a new timer.
-    pub fn new(db: String, request_type: &'static str) -> RequestTimer {
+    pub fn new(db: String, request_type: String) -> RequestTimer {
         RequestTimer {
             start: Instant::now(),
             db,
@@ -208,7 +208,7 @@ impl Drop for RequestTimer {
             self.start.elapsed(),
             &[
                 (METRIC_DB_LABEL, std::mem::take(&mut self.db)),
-                (METRIC_TYPE_LABEL, self.request_type.to_string()),
+                (METRIC_TYPE_LABEL, std::mem::take(&mut self.request_type)),
                 (METRIC_CODE_LABEL, self.status_code.to_string())
             ]
         );

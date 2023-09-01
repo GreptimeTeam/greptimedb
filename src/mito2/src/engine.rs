@@ -34,7 +34,7 @@ use store_api::storage::{RegionId, ScanRequest};
 use crate::config::MitoConfig;
 use crate::error::{RecvSnafu, RegionNotFoundSnafu, Result};
 use crate::read::scan_region::{ScanRegion, Scanner};
-use crate::request::{RegionTask, RequestBody};
+use crate::request::WorkerRequest;
 use crate::worker::WorkerGroup;
 
 /// Region engine implementation for timeseries data.
@@ -116,6 +116,9 @@ impl EngineInner {
         self.workers.stop().await
     }
 
+    /// Get metadata of a region.
+    ///
+    /// Returns error if the region doesn't exist.
     fn get_metadata(&self, region_id: RegionId) -> Result<RegionMetadataRef> {
         // Reading a region doesn't need to go through the region worker thread.
         let region = self
@@ -125,12 +128,10 @@ impl EngineInner {
         Ok(region.metadata())
     }
 
-    /// Handles [RequestBody] and return its executed result.
+    /// Handles [RegionRequest] and return its executed result.
     async fn handle_request(&self, region_id: RegionId, request: RegionRequest) -> Result<Output> {
-        // We validate and then convert the `request` into an inner `RequestBody` for ease of handling.
-        let body = RequestBody::try_from_region_request(region_id, request)?;
-        let (request, receiver) = RegionTask::from_request(region_id, body);
-        self.workers.submit_to_worker(request).await?;
+        let (request, receiver) = WorkerRequest::try_from_region_request(region_id, request)?;
+        self.workers.submit_to_worker(region_id, request).await?;
 
         receiver.await.context(RecvSnafu)?
     }
@@ -143,12 +144,7 @@ impl EngineInner {
             .get_region(region_id)
             .context(RegionNotFoundSnafu { region_id })?;
         let version = region.version();
-        let scan_region = ScanRegion::new(
-            version,
-            region.region_dir.clone(),
-            self.object_store.clone(),
-            request,
-        );
+        let scan_region = ScanRegion::new(version, region.access_layer.clone(), request);
 
         scan_region.scanner()
     }

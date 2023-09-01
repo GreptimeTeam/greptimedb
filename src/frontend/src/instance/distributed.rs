@@ -23,24 +23,21 @@ use api::helper::ColumnDataTypeWrapper;
 use api::v1::ddl_request::Expr as DdlExpr;
 use api::v1::greptime_request::Request;
 use api::v1::{
-    column_def, AlterExpr, CompactTableExpr, CreateDatabaseExpr, CreateTableExpr, DeleteRequests,
-    FlushTableExpr, InsertRequests, RowInsertRequests, TruncateTableExpr,
+    column_def, AlterExpr, CreateDatabaseExpr, CreateTableExpr, DeleteRequests, InsertRequests,
+    RowInsertRequests, TruncateTableExpr,
 };
 use async_trait::async_trait;
 use catalog::{CatalogManager, DeregisterTableRequest, RegisterTableRequest};
 use chrono::DateTime;
-use client::client_manager::DatanodeClients;
-use client::Database;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::format_full_table_name;
 use common_error::ext::BoxedError;
-use common_meta::key::schema_name::SchemaNameKey;
-use common_meta::peer::Peer;
+use common_meta::key::schema_name::{SchemaNameKey, SchemaNameValue};
 use common_meta::rpc::ddl::{DdlTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse};
-use common_meta::rpc::router::{Partition, Partition as MetaPartition, RouteRequest};
+use common_meta::rpc::router::{Partition, Partition as MetaPartition};
 use common_meta::table_name::TableName;
 use common_query::Output;
-use common_telemetry::{debug, info};
+use common_telemetry::info;
 use datanode::instance::sql::table_idents_to_full_name;
 use datanode::sql::SqlHandler;
 use datatypes::prelude::ConcreteDataType;
@@ -57,7 +54,6 @@ use sql::ast::{Ident, Value as SqlValue};
 use sql::statements::create::{PartitionEntry, Partitions};
 use sql::statements::statement::Statement;
 use sql::statements::{self, sql_value_to_value};
-use store_api::storage::RegionNumber;
 use table::error::TableOperationSnafu;
 use table::metadata::{RawTableInfo, RawTableMeta, TableId, TableIdent, TableInfo, TableType};
 use table::requests::{AlterTableRequest, TableOptions};
@@ -66,8 +62,8 @@ use table::TableRef;
 use crate::catalog::FrontendCatalogManager;
 use crate::error::{
     self, AlterExprToRequestSnafu, CatalogSnafu, ColumnDataTypeSnafu, ColumnNotFoundSnafu,
-    DeserializePartitionSnafu, InvokeDatanodeSnafu, NotSupportedSnafu, ParseSqlSnafu,
-    RequestDatanodeSnafu, RequestMetaSnafu, Result, SchemaExistsSnafu, TableAlreadyExistSnafu,
+    DeserializePartitionSnafu, InvokeDatanodeSnafu, NotSupportedSnafu, ParseSqlSnafu, Result,
+    SchemaExistsSnafu, SchemaNotFoundSnafu, TableAlreadyExistSnafu, TableMetadataManagerSnafu,
     TableNotFoundSnafu, TableSnafu, UnrecognizedTableOptionSnafu,
 };
 use crate::expr_factory;
@@ -82,19 +78,13 @@ const MAX_VALUE: &str = "MAXVALUE";
 pub struct DistInstance {
     meta_client: Arc<MetaClient>,
     pub(crate) catalog_manager: Arc<FrontendCatalogManager>,
-    datanode_clients: Arc<DatanodeClients>,
 }
 
 impl DistInstance {
-    pub fn new(
-        meta_client: Arc<MetaClient>,
-        catalog_manager: Arc<FrontendCatalogManager>,
-        datanode_clients: Arc<DatanodeClients>,
-    ) -> Self {
+    pub fn new(meta_client: Arc<MetaClient>, catalog_manager: Arc<FrontendCatalogManager>) -> Self {
         Self {
             meta_client,
             catalog_manager,
-            datanode_clients,
         }
     }
 
@@ -104,6 +94,25 @@ impl DistInstance {
         partitions: Option<Partitions>,
     ) -> Result<TableRef> {
         let _timer = common_telemetry::timer!(crate::metrics::DIST_CREATE_TABLE);
+        // 1. get schema info
+        let schema = self
+            .catalog_manager
+            .table_metadata_manager_ref()
+            .schema_manager()
+            .get(SchemaNameKey::new(
+                &create_table.catalog_name,
+                &create_table.schema_name,
+            ))
+            .await
+            .context(TableMetadataManagerSnafu)?;
+
+        let Some(schema_opts) = schema else {
+            return SchemaNotFoundSnafu {
+                schema_info: &create_table.schema_name,
+            }
+            .fail();
+        };
+
         let table_name = TableName::new(
             &create_table.catalog_name,
             &create_table.schema_name,
@@ -112,7 +121,7 @@ impl DistInstance {
 
         let (partitions, partition_cols) = parse_partitions(create_table, partitions)?;
 
-        let mut table_info = create_table_info(create_table, partition_cols)?;
+        let mut table_info = create_table_info(create_table, partition_cols, schema_opts)?;
 
         let resp = self
             .create_table_procedure(create_table, partitions, table_info.clone())
@@ -201,109 +210,6 @@ impl DistInstance {
         Ok(Output::AffectedRows(1))
     }
 
-    async fn flush_table(
-        &self,
-        table_name: TableName,
-        region_number: Option<RegionNumber>,
-    ) -> Result<Output> {
-        let candidates = self
-            .find_flush_or_compaction_candidates(&table_name, region_number)
-            .await?;
-
-        let expr = FlushTableExpr {
-            catalog_name: table_name.catalog_name.clone(),
-            schema_name: table_name.schema_name.clone(),
-            table_name: table_name.table_name.clone(),
-            region_number,
-            ..Default::default()
-        };
-
-        for candidate in candidates {
-            debug!("Flushing table {table_name} on Datanode {candidate:?}");
-
-            let client = self.datanode_clients.get_client(&candidate).await;
-            let client = Database::new(&expr.catalog_name, &expr.schema_name, client);
-            client
-                .flush_table(expr.clone())
-                .await
-                .context(RequestDatanodeSnafu)?;
-        }
-
-        Ok(Output::AffectedRows(0))
-    }
-
-    async fn compact_table(
-        &self,
-        table_name: TableName,
-        region_number: Option<RegionNumber>,
-    ) -> Result<Output> {
-        let candidates = self
-            .find_flush_or_compaction_candidates(&table_name, region_number)
-            .await?;
-
-        let expr = CompactTableExpr {
-            catalog_name: table_name.catalog_name.clone(),
-            schema_name: table_name.schema_name.clone(),
-            table_name: table_name.table_name.clone(),
-            region_number,
-        };
-
-        for candidate in candidates {
-            debug!("Compacting table {table_name} on Datanode {candidate:?}");
-
-            let client = self.datanode_clients.get_client(&candidate).await;
-            let client = Database::new(&expr.catalog_name, &expr.schema_name, client);
-            client
-                .compact_table(expr.clone())
-                .await
-                .context(RequestDatanodeSnafu)?;
-        }
-        Ok(Output::AffectedRows(0))
-    }
-
-    async fn find_flush_or_compaction_candidates(
-        &self,
-        table_name: &TableName,
-        region_number: Option<RegionNumber>,
-    ) -> Result<Vec<Peer>> {
-        let table = self
-            .catalog_manager
-            .table(
-                &table_name.catalog_name,
-                &table_name.schema_name,
-                &table_name.table_name,
-            )
-            .await
-            .context(CatalogSnafu)?
-            .with_context(|| TableNotFoundSnafu {
-                table_name: table_name.to_string(),
-            })?;
-        let table_id = table.table_info().table_id();
-
-        let route_response = self
-            .meta_client
-            .route(RouteRequest {
-                table_ids: vec![table_id],
-            })
-            .await
-            .context(RequestMetaSnafu)?;
-
-        let res = route_response
-            .table_routes
-            .iter()
-            .filter(|route| {
-                route.region_routes.iter().any(|r| {
-                    let Some(n) = region_number else {
-                        return true;
-                    };
-                    n == r.region.id.region_number()
-                })
-            })
-            .flat_map(|route| route.find_leaders().into_iter())
-            .collect::<Vec<_>>();
-        Ok(res)
-    }
-
     async fn truncate_table(&self, table_name: TableName) -> Result<Output> {
         let table = self
             .catalog_manager
@@ -340,6 +246,7 @@ impl DistInstance {
                 let expr = CreateDatabaseExpr {
                     database_name: stmt.name.to_string(),
                     create_if_not_exists: stmt.if_not_exists,
+                    options: Default::default(),
                 };
                 self.handle_create_database(expr, query_ctx).await
             }
@@ -410,7 +317,7 @@ impl DistInstance {
                 let table_name = TableName::new(catalog, schema, table);
                 self.truncate_table(table_name).await
             }
-            _ => error::NotSupportedSnafu {
+            _ => NotSupportedSnafu {
                 feat: format!("{stmt:?}"),
             }
             .fail(),
@@ -477,10 +384,12 @@ impl DistInstance {
             }
         );
 
+        let schema_value =
+            SchemaNameValue::try_from(&expr.options).context(error::TableMetadataManagerSnafu)?;
         self.catalog_manager
             .table_metadata_manager_ref()
             .schema_manager()
-            .create(schema)
+            .create(schema, Some(schema_value))
             .await
             .context(error::TableMetadataManagerSnafu)?;
 
@@ -708,16 +617,6 @@ impl GrpcQueryHandler for DistInstance {
                             TableName::new(&expr.catalog_name, &expr.schema_name, &expr.table_name);
                         self.drop_table(table_name).await
                     }
-                    DdlExpr::FlushTable(expr) => {
-                        let table_name =
-                            TableName::new(&expr.catalog_name, &expr.schema_name, &expr.table_name);
-                        self.flush_table(table_name, expr.region_number).await
-                    }
-                    DdlExpr::CompactTable(expr) => {
-                        let table_name =
-                            TableName::new(&expr.catalog_name, &expr.schema_name, &expr.table_name);
-                        self.compact_table(table_name, expr.region_number).await
-                    }
                     DdlExpr::TruncateTable(expr) => {
                         let table_name =
                             TableName::new(&expr.catalog_name, &expr.schema_name, &expr.table_name);
@@ -745,7 +644,7 @@ fn create_partitions_stmt(partitions: Vec<PartitionInfo>) -> Result<Option<Parti
         .into_iter()
         .map(|info| {
             // Generated the partition name from id
-            let name = &format!("r{}", info.id.as_u64());
+            let name = &format!("r{}", info.id.region_number());
             let bounds = info.partition.partition_bounds();
             let value_list = bounds
                 .iter()
@@ -772,6 +671,7 @@ fn create_partitions_stmt(partitions: Vec<PartitionInfo>) -> Result<Option<Parti
 fn create_table_info(
     create_table: &CreateTableExpr,
     partition_columns: Vec<String>,
+    schema_opts: SchemaNameValue,
 ) -> Result<RawTableInfo> {
     let mut column_schemas = Vec::with_capacity(create_table.column_defs.len());
     let mut column_name_to_index_map = HashMap::new();
@@ -818,6 +718,10 @@ fn create_table_info(
         })
         .collect::<Result<Vec<_>>>()?;
 
+    let table_options = TableOptions::try_from(&create_table.table_options)
+        .context(UnrecognizedTableOptionSnafu)?;
+    let table_options = merge_options(table_options, schema_opts);
+
     let meta = RawTableMeta {
         schema: raw_schema,
         primary_key_indices,
@@ -826,8 +730,7 @@ fn create_table_info(
         next_column_id: column_schemas.len() as u32,
         region_numbers: vec![],
         engine_options: HashMap::new(),
-        options: TableOptions::try_from(&create_table.table_options)
-            .context(UnrecognizedTableOptionSnafu)?,
+        options: table_options,
         created_on: DateTime::default(),
         partition_key_indices,
     };
@@ -852,6 +755,11 @@ fn create_table_info(
         table_type: TableType::Base,
     };
     Ok(table_info)
+}
+
+fn merge_options(mut table_opts: TableOptions, schema_opts: SchemaNameValue) -> TableOptions {
+    table_opts.ttl = table_opts.ttl.or(schema_opts.ttl);
+    table_opts
 }
 
 fn parse_partitions(

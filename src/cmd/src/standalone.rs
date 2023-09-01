@@ -154,10 +154,7 @@ pub struct Instance {
 impl Instance {
     pub async fn start(&mut self) -> Result<()> {
         // Start datanode instance before starting services, to avoid requests come in before internal components are started.
-        self.datanode
-            .start_instance()
-            .await
-            .context(StartDatanodeSnafu)?;
+        self.datanode.start().await.context(StartDatanodeSnafu)?;
         info!("Datanode instance started");
 
         self.frontend.start().await.context(StartFrontendSnafu)?;
@@ -171,7 +168,7 @@ impl Instance {
             .context(ShutdownFrontendSnafu)?;
 
         self.datanode
-            .shutdown_instance()
+            .shutdown()
             .await
             .context(ShutdownDatanodeSnafu)?;
         info!("Datanode instance stopped.");
@@ -293,6 +290,9 @@ impl StartCommand {
         })))
     }
 
+    #[allow(unreachable_code)]
+    #[allow(unused_variables)]
+    #[allow(clippy::diverging_sub_expression)]
     async fn build(self, fe_opts: FrontendOptions, dn_opts: DatanodeOptions) -> Result<Instance> {
         let plugins = Arc::new(load_frontend_plugins(&self.user_provider)?);
 
@@ -306,7 +306,8 @@ impl StartCommand {
             .await
             .context(StartDatanodeSnafu)?;
 
-        let mut frontend = build_frontend(plugins.clone(), datanode.get_instance()).await?;
+        // TODO: build frontend instance like in distributed mode
+        let mut frontend = build_frontend(plugins.clone(), todo!()).await?;
 
         frontend
             .build_servers(&fe_opts)
