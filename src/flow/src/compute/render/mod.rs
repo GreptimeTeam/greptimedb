@@ -98,7 +98,6 @@ where
     pub fn render_plan(&mut self, plan: Plan) -> CollectionBundle<S, Row> {
         match plan {
             Plan::Constant { rows } => {
-                dbg!(&rows);
                 let (rows, errs) = match rows {
                     Ok(rows) => (rows, Vec::new()),
                     Err(err) => (Vec::new(), vec![err]),
@@ -108,7 +107,6 @@ where
                 let ok_collection = rows
                     .into_iter()
                     .filter_map(move |(row, mut time, diff)| {
-                        dbg!(&row);
                         time.advance_by(since_frontier.borrow());
                         if !until.less_equal(&time) {
                             Some((
@@ -226,12 +224,120 @@ where
 
 #[cfg(test)]
 mod test {
-    use differential_dataflow::input::InputSession;
+    use std::any::Any;
+    use std::rc::Rc;
+
+    use datatypes::prelude::ConcreteDataType;
+    use datatypes::value::Value;
+    use differential_dataflow::input::{Input, InputSession};
+    use differential_dataflow::Collection;
     use timely::dataflow::scopes::Child;
+    use timely::dataflow::Stream;
+    use timely::Config;
 
     use super::*;
     use crate::expr::{GlobalId, LocalId};
     use crate::repr::Diff;
+    type OkStream<G> = Stream<G, (Row, repr::Timestamp, Diff)>;
+    type ErrStream<G> = Stream<G, (DataflowError, repr::Timestamp, Diff)>;
+    type OkCollection<G> = Collection<G, Row, Diff>;
+    type ErrCollection<G> = Collection<G, DataflowError, Diff>;
+    /// used as a token to prevent certain resources from being dropped
+    type AnyToken = Rc<dyn Any>;
+    struct MockSourceToken {
+        handle: InputSession<repr::Timestamp, Row, Diff>,
+        err_handle: InputSession<repr::Timestamp, DataflowError, Diff>,
+    }
+
+    fn mock_input_session(input: &mut InputSession<repr::Timestamp, Row, Diff>) {
+        // TODO: mock a cpu usage monotonic input with timestamp
+        // cpu, mem, ts
+        // f32, f32, DateTime
+        let schema = [
+            ConcreteDataType::float32_datatype(),
+            ConcreteDataType::float32_datatype(),
+            ConcreteDataType::datetime_datatype(),
+        ];
+        let cnt = 50;
+        let arrs = (0..cnt).map(|i| (i as f32 / cnt as f32, i as f32 / cnt as f32, i));
+        // need more mechanism to make timestamp also timestamp here
+        for (cpu, mem, ts) in arrs {
+            input.update(
+                Row::pack(vec![cpu.into(), mem.into(), Value::DateTime(ts.into())]),
+                1,
+            );
+            input.advance_to(ts as u64)
+        }
+        input.flush();
+    }
+
+    #[test]
+    fn test_simple_poc_with_input_built() {
+        // 1. build dataflow with input collection connected
+        // 2. give input
+        // type annotation is needed to prevent rust-analyzer to give up type deduction
+
+        // simple give dataflow information
+        // will be build by given dataflow information from other nodes later
+        let dataflow = {
+            let reduce_group_by_window = vec![BuildDesc {
+                id: GlobalId::User(1),
+                plan: Plan::Constant {
+                    rows: Ok(vec![(Row::default(), 0, 1)]),
+                },
+            }];
+            let mut dataflow = DataflowDescription::<Plan, ()>::new("test".to_string());
+            dataflow.objects_to_build = reduce_group_by_window;
+            dataflow
+        };
+
+        timely::execute(Config::thread(), move |worker| {
+            println!("worker: {:?}", worker.index());
+            let mut input = InputSession::<repr::Timestamp, Row, Diff>::new();
+            worker.dataflow_named(
+                "ProofOfConcept",
+                |scope: &mut Child<'_, _, repr::Timestamp>| {
+                    let mut test_ctx =
+                        Context::<_, Row, _>::for_dataflow_in(&dataflow, scope.clone());
+
+                    let ok_collection = input.to_collection(scope);
+                    let (err_handle, err_collection) = scope.new_collection();
+                    let input_collection =
+                        CollectionBundle::<_, _, repr::Timestamp>::from_collections(
+                            ok_collection,
+                            err_collection,
+                        );
+
+                    // TODO: generate `import_sources` from `dataflow.source_imports`
+                    let import_sources = vec![(Id::Global(GlobalId::User(0)), input_collection)];
+
+                    // import sources
+                    for (id, collection) in import_sources {
+                        test_ctx.insert_id(id, collection);
+                    }
+
+                    for build_desc in &dataflow.objects_to_build {
+                        test_ctx.build_object(build_desc.clone());
+                    }
+
+                    dbg!(test_ctx.bindings.keys());
+
+                    // TODO: export sinks
+                    let sink_ids = [GlobalId::User(0)];
+
+                    for sink in sink_ids {
+                        let inspect = test_ctx
+                            .lookup_id(Id::Global(sink))
+                            .unwrap()
+                            .as_specific_collection(None);
+                        inspect.0.inspect(|x| println!("{:?}", x));
+                    }
+                },
+            );
+            mock_input_session(&mut input);
+        })
+        .expect("Computation terminated abnormally");
+    }
     #[test]
     #[allow(clippy::print_stdout)]
     fn test_constant_plan_render() {
