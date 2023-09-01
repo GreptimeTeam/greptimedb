@@ -186,8 +186,7 @@ impl ErrorExt for Error {
             | CatalogAlreadyExists { .. }
             | SchemaAlreadyExists { .. }
             | TableNotExist { .. }
-            | RenameTable { .. }
-            | RetryLater { .. } => StatusCode::Internal,
+            | RenameTable { .. } => StatusCode::Internal,
 
             EncodeJson { .. }
             | DecodeJson { .. }
@@ -195,6 +194,7 @@ impl ErrorExt for Error {
             | ConvertRawKey { .. }
             | DecodeProto { .. } => StatusCode::Unexpected,
 
+            RetryLater { source, .. } => source.status_code(),
             OperateRegion { source, .. } => source.status_code(),
             MetaSrv { source, .. } => source.status_code(),
             InvalidCatalogValue { source, .. } => source.status_code(),
