@@ -26,6 +26,19 @@ use crate::pubsub::Message;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
+    #[snafu(display("Failed to invalidate table cache: {}", source))]
+    InvalidateTableCache {
+        location: Location,
+        source: common_meta::error::Error,
+    },
+
+    #[snafu(display("Failed to operate region on peer:{}, source: {}", peer, source))]
+    OperateRegion {
+        location: Location,
+        peer: Peer,
+        source: BoxedError,
+    },
+
     #[snafu(display("Failed to list catalogs: {}", source))]
     ListCatalogs {
         location: Location,
@@ -595,6 +608,7 @@ impl ErrorExt for Error {
             | Error::ConvertRawTableInfo { .. }
             | Error::BuildTableMeta { .. } => StatusCode::Unexpected,
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
+            Error::InvalidateTableCache { source, .. } => source.status_code(),
             Error::Table { source, .. } => source.status_code(),
             Error::RequestDatanode { source, .. } => source.status_code(),
             Error::InvalidCatalogValue { source, .. } => source.status_code(),
@@ -612,6 +626,7 @@ impl ErrorExt for Error {
             Error::RegionFailoverCandidatesNotFound { .. } => StatusCode::RuntimeResourcesExhausted,
 
             Error::RegisterProcedureLoader { source, .. } => source.status_code(),
+            Error::OperateRegion { source, .. } => source.status_code(),
 
             Error::TableRouteConversion { source, .. }
             | Error::ConvertProtoData { source, .. }

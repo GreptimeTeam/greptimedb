@@ -12,27 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(btree_extract_if)]
+use std::sync::Arc;
 
-pub mod cache_invalidator;
-pub mod datanode_manager;
-pub mod error;
-pub mod heartbeat;
-// TODO(weny): Removes it
-#[allow(deprecated)]
-pub mod helper;
-pub mod ident;
-pub mod instruction;
-pub mod key;
-pub mod kv_backend;
-pub mod metrics;
-pub mod peer;
-pub mod range_stream;
-pub mod rpc;
-pub mod table_name;
-pub mod util;
+use crate::error::Result;
+use crate::ident::TableIdent;
 
-pub type ClusterId = u64;
-pub type DatanodeId = u64;
+/// Places context of invalidating cache. e.g., span id, trace id etc.
+pub struct Context {
+    pub subject: Option<String>,
+}
 
-pub use instruction::RegionIdent;
+#[async_trait::async_trait]
+pub trait CacheInvalidator: Send + Sync {
+    // Invalidates table cache
+    async fn invalidate_table(&self, ctx: &Context, table_ident: TableIdent) -> Result<()>;
+}
+
+pub type CacheInvalidatorRef = Arc<dyn CacheInvalidator>;

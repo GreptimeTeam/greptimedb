@@ -97,6 +97,10 @@ impl MetaSrvOptions {
     }
 }
 
+pub struct MetasrvInfo {
+    pub server_addr: String,
+}
+
 // Options for datanode.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct DatanodeOptions {

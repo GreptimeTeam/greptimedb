@@ -15,6 +15,8 @@
 use std::sync::Arc;
 
 use client::client_manager::DatanodeClients;
+use common_meta::cache_invalidator::CacheInvalidatorRef;
+use common_meta::datanode_manager::DatanodeManagerRef;
 use common_meta::key::table_info::TableInfoValue;
 use common_meta::key::table_route::TableRouteValue;
 use common_meta::key::TableMetadataManagerRef;
@@ -32,23 +34,24 @@ use crate::error::{
 use crate::procedure::alter_table::AlterTableProcedure;
 use crate::procedure::create_table::CreateTableProcedure;
 use crate::procedure::drop_table::DropTableProcedure;
-use crate::service::mailbox::MailboxRef;
 
 pub type DdlManagerRef = Arc<DdlManager>;
 
 pub struct DdlManager {
     procedure_manager: ProcedureManagerRef,
     datanode_clients: Arc<DatanodeClients>,
-    pub(crate) mailbox: MailboxRef,
-    pub(crate) server_addr: String,
+
+    pub(crate) cache_invalidator: CacheInvalidatorRef,
     pub(crate) table_metadata_manager: TableMetadataManagerRef,
 }
 
 #[derive(Clone)]
 pub(crate) struct DdlContext {
+    // TODO(weny): removes it
     pub(crate) datanode_clients: Arc<DatanodeClients>,
-    pub(crate) mailbox: MailboxRef,
-    pub(crate) server_addr: String,
+
+    pub(crate) datanode_manager: DatanodeManagerRef,
+    pub(crate) cache_invalidator: CacheInvalidatorRef,
     pub(crate) table_metadata_manager: TableMetadataManagerRef,
 }
 
@@ -56,24 +59,23 @@ impl DdlManager {
     pub(crate) fn new(
         procedure_manager: ProcedureManagerRef,
         datanode_clients: Arc<DatanodeClients>,
-        mailbox: MailboxRef,
-        server_addr: String,
+        cache_invalidator: CacheInvalidatorRef,
         table_metadata_manager: TableMetadataManagerRef,
     ) -> Self {
         Self {
             procedure_manager,
             datanode_clients,
-            mailbox,
-            server_addr,
+            cache_invalidator,
             table_metadata_manager,
         }
     }
 
     pub(crate) fn create_context(&self) -> DdlContext {
         DdlContext {
+            datanode_manager: self.datanode_clients.clone(),
             datanode_clients: self.datanode_clients.clone(),
-            mailbox: self.mailbox.clone(),
-            server_addr: self.server_addr.clone(),
+            cache_invalidator: self.cache_invalidator.clone(),
+
             table_metadata_manager: self.table_metadata_manager.clone(),
         }
     }
