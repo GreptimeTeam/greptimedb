@@ -377,7 +377,7 @@ mod test {
             .meta(table_meta)
             .build()
             .unwrap();
-        let table = Arc::new(EmptyTable::from_table_info(&table_info));
+        let table = EmptyTable::from_table_info(&table_info);
         let catalog_list = MemoryCatalogManager::with_default_setup();
         assert!(catalog_list
             .register_table(RegisterTableRequest {

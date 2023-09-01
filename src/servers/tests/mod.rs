@@ -34,7 +34,7 @@ use servers::query_handler::{ScriptHandler, ScriptHandlerRef};
 use session::context::QueryContextRef;
 use snafu::ensure;
 use sql::statements::statement::Statement;
-use table::test_util::MemTable;
+use table::TableRef;
 
 mod grpc;
 mod http;
@@ -202,21 +202,20 @@ impl GrpcQueryHandler for DummyInstance {
     }
 }
 
-fn create_testing_instance(table: MemTable) -> DummyInstance {
-    let table = Arc::new(table);
+fn create_testing_instance(table: TableRef) -> DummyInstance {
     let catalog_manager = MemoryCatalogManager::new_with_table(table);
     let query_engine = QueryEngineFactory::new(catalog_manager, false).query_engine();
     DummyInstance::new(query_engine)
 }
 
-fn create_testing_script_handler(table: MemTable) -> ScriptHandlerRef {
+fn create_testing_script_handler(table: TableRef) -> ScriptHandlerRef {
     Arc::new(create_testing_instance(table)) as _
 }
 
-fn create_testing_sql_query_handler(table: MemTable) -> ServerSqlQueryHandlerRef {
+fn create_testing_sql_query_handler(table: TableRef) -> ServerSqlQueryHandlerRef {
     Arc::new(create_testing_instance(table)) as _
 }
 
-fn create_testing_grpc_query_handler(table: MemTable) -> ServerGrpcQueryHandlerRef {
+fn create_testing_grpc_query_handler(table: TableRef) -> ServerGrpcQueryHandlerRef {
     Arc::new(create_testing_instance(table)) as _
 }

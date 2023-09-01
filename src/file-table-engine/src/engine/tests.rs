@@ -17,15 +17,14 @@ use std::sync::Arc;
 
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, IMMUTABLE_FILE_ENGINE};
 use table::engine::{EngineContext, TableEngine, TableEngineProcedure};
+use table::error as table_error;
 use table::requests::{
     AlterKind, AlterTableRequest, DropTableRequest, OpenTableRequest, TruncateTableRequest,
 };
-use table::{error as table_error, Table};
 
 use crate::config::EngineConfig;
 use crate::engine::immutable::ImmutableFileTableEngine;
 use crate::manifest::immutable::manifest_path;
-use crate::table::immutable::ImmutableFileTable;
 use crate::test_util::{self, TestEngineComponents, TEST_TABLE_NAME};
 
 #[tokio::test]
@@ -76,11 +75,6 @@ async fn test_open_table() {
         .open_table(&ctx, open_req.clone())
         .await
         .unwrap()
-        .unwrap();
-
-    let reopened = reopened
-        .as_any()
-        .downcast_ref::<ImmutableFileTable>()
         .unwrap();
 
     let left = table.table_info();

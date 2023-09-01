@@ -92,6 +92,6 @@ fn create_correctness_engine() -> Arc<dyn QueryEngine> {
     columns.push(column);
 
     let schema = Arc::new(Schema::new(column_schemas));
-    let number_table = MemTable::new("corr_numbers", RecordBatch::new(schema, columns).unwrap());
+    let number_table = MemTable::table("corr_numbers", RecordBatch::new(schema, columns).unwrap());
     new_query_engine_with_table(number_table)
 }

@@ -582,7 +582,7 @@ mod tests {
         .unwrap();
 
         let ctx = SessionContext::new();
-        let table = Arc::new(MemTable::new("test", recordbatch));
+        let table = MemTable::table("test", recordbatch);
         let table_provider = Arc::new(DfTableProviderAdapter::new(table));
 
         let dataframe = ctx.read_table(table_provider.clone()).unwrap();
