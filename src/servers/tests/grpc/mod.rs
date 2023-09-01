@@ -30,6 +30,7 @@ use servers::query_handler::grpc::ServerGrpcQueryHandlerRef;
 use servers::server::Server;
 use snafu::ResultExt;
 use table::test_util::MemTable;
+use table::TableRef;
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
 
@@ -99,7 +100,7 @@ impl Server for MockGrpcServer {
     }
 }
 
-fn create_grpc_server(table: MemTable) -> Result<Arc<dyn Server>> {
+fn create_grpc_server(table: TableRef) -> Result<Arc<dyn Server>> {
     let query_handler = create_testing_grpc_query_handler(table);
     let io_runtime = Arc::new(
         RuntimeBuilder::default()

@@ -51,6 +51,10 @@ impl ThinTableAdapter {
     pub fn new(table: ThinTable, data_source: DataSourceRef) -> Self {
         Self { table, data_source }
     }
+
+    pub fn data_source(&self) -> DataSourceRef {
+        self.data_source.clone()
+    }
 }
 
 #[async_trait]
