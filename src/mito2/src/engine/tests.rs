@@ -603,10 +603,7 @@ async fn test_manual_flush() {
         schema: column_schemas,
         rows: build_rows(0, 3),
     };
-    engine
-        .handle_request(region_id, RegionRequest::Put(RegionPutRequest { rows }))
-        .await
-        .unwrap();
+    put_rows(&engine, region_id, rows).await;
 
     let Output::AffectedRows(rows) = engine
         .handle_request(region_id, RegionRequest::Flush(RegionFlushRequest {}))
