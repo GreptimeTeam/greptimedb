@@ -16,14 +16,9 @@ use api::v1::region::region_request::Body as PbRegionRequest;
 use api::v1::region::{ColumnDef, CreateRequest as PbCreateRegionRequest};
 use api::v1::SemanticType;
 use async_trait::async_trait;
-use client::Database;
-use common_catalog::consts::MITO2_ENGINE;
-use common_error::ext::ErrorExt;
-use common_error::status_code::StatusCode;
 use common_meta::key::table_name::TableNameKey;
 use common_meta::rpc::ddl::CreateTableTask;
 use common_meta::rpc::router::{find_leader_regions, find_leaders, RegionRoute};
-use common_meta::table_name::TableName;
 use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu};
 use common_procedure::{Context as ProcedureContext, LockKey, Procedure, Status};
 use common_telemetry::info;
@@ -35,12 +30,10 @@ use strum::AsRefStr;
 use table::engine::TableReference;
 use table::metadata::{RawTableInfo, TableId};
 
-use super::utils::{
-    handle_operate_region_error, handle_request_datanode_error, handle_retry_error,
-};
 use crate::ddl::DdlContext;
 use crate::error::{self, PrimaryKeyNotFoundSnafu, Result, TableMetadataManagerSnafu};
 use crate::metrics;
+use crate::procedure::utils::{handle_operate_region_error, handle_retry_error};
 
 pub struct CreateTableProcedure {
     context: DdlContext,
@@ -68,10 +61,6 @@ impl CreateTableProcedure {
             context,
             creator: TableCreator { data },
         })
-    }
-
-    fn table_name(&self) -> TableName {
-        self.creator.data.task.table_name()
     }
 
     pub fn table_info(&self) -> &RawTableInfo {
@@ -112,11 +101,7 @@ impl CreateTableProcedure {
             return Ok(Status::Done);
         }
 
-        self.creator.data.state = if expr.engine == MITO2_ENGINE {
-            CreateTableState::DatanodeCreateRegions
-        } else {
-            CreateTableState::DatanodeCreateTable
-        };
+        self.creator.data.state = CreateTableState::DatanodeCreateRegions;
 
         Ok(Status::executing(true))
     }
@@ -244,44 +229,6 @@ impl CreateTableProcedure {
 
         Ok(Status::Done)
     }
-
-    async fn on_datanode_create_table(&mut self) -> Result<Status> {
-        let region_routes = &self.creator.data.region_routes;
-        let table_name = self.table_name();
-        let clients = self.context.datanode_clients.clone();
-        let leaders = find_leaders(region_routes);
-        let mut joins = Vec::with_capacity(leaders.len());
-        let table_id = self.table_id();
-
-        for datanode in leaders {
-            let client = clients.get_client(&datanode).await;
-            let client = Database::new(&table_name.catalog_name, &table_name.schema_name, client);
-
-            let regions = find_leader_regions(region_routes, &datanode);
-            let mut create_expr_for_region = self.creator.data.task.create_table.clone();
-            create_expr_for_region.region_numbers = regions;
-            create_expr_for_region.table_id = Some(api::v1::TableId { id: table_id });
-
-            joins.push(common_runtime::spawn_bg(async move {
-                if let Err(err) = client.create(create_expr_for_region).await {
-                    if err.status_code() != StatusCode::TableAlreadyExists {
-                        return Err(handle_request_datanode_error(datanode)(err));
-                    }
-                }
-                Ok(())
-            }));
-        }
-
-        let _r = join_all(joins)
-            .await
-            .into_iter()
-            .map(|e| e.context(error::JoinSnafu).flatten())
-            .collect::<Result<Vec<_>>>()?;
-
-        self.creator.data.state = CreateTableState::CreateMetadata;
-
-        Ok(Status::executing(true))
-    }
 }
 
 #[async_trait]
@@ -300,7 +247,6 @@ impl Procedure for CreateTableProcedure {
 
         match state {
             CreateTableState::Prepare => self.on_prepare().await,
-            CreateTableState::DatanodeCreateTable => self.on_datanode_create_table().await,
             CreateTableState::DatanodeCreateRegions => self.on_datanode_create_regions().await,
             CreateTableState::CreateMetadata => self.on_create_metadata().await,
         }
@@ -344,9 +290,7 @@ impl TableCreator {
 enum CreateTableState {
     /// Prepares to create the table
     Prepare,
-    /// Datanode creates the table
-    DatanodeCreateTable,
-    /// Create regions on the Datanode
+    /// Creates regions on the Datanode
     DatanodeCreateRegions,
     /// Creates metadata
     CreateMetadata,
@@ -372,6 +316,7 @@ mod test {
     use std::sync::{Arc, Mutex};
 
     use api::v1::{ColumnDataType, ColumnDef as PbColumnDef, CreateTableExpr};
+    use common_catalog::consts::MITO2_ENGINE;
 
     use super::*;
     use crate::procedure::utils::mock::EchoRegionServer;
