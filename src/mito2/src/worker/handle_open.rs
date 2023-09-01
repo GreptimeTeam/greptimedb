@@ -26,6 +26,7 @@ use store_api::storage::RegionId;
 
 use crate::error::{OpenDalSnafu, RegionNotFoundSnafu, Result};
 use crate::region::opener::RegionOpener;
+use crate::worker::handle_drop::remove_region_dir_once;
 use crate::worker::{RegionWorkerLoop, DROPPING_MARKER_FILE};
 
 impl<S: LogStore> RegionWorkerLoop<S> {
@@ -46,7 +47,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 .await
                 .context(OpenDalSnafu)?
         {
-            let _ = self.object_store.delete(&request.region_dir).await;
+            let _ = remove_region_dir_once(&request.region_dir, &self.object_store).await;
             return RegionNotFoundSnafu { region_id }.fail();
         }
 

@@ -19,7 +19,6 @@ use std::time::Duration;
 use common_query::Output;
 use common_telemetry::info;
 use common_telemetry::tracing::warn;
-use futures::future::try_join_all;
 use futures::StreamExt;
 use object_store::util::join_path;
 use object_store::ObjectStore;
@@ -31,7 +30,8 @@ use crate::error::{OpenDalSnafu, RegionNotFoundSnafu, Result};
 use crate::region::RegionMapRef;
 use crate::worker::{RegionWorkerLoop, DROPPING_MARKER_FILE};
 
-const GC_TASK_INTERVAL_SEC: u64 = 5 * 60;
+const GC_TASK_INTERVAL_SEC: u64 = 5 * 60; // 5 minutes
+const MAX_RETRY_TIMES: u64 = 288; // 24 hours (5m * 288)
 
 impl<S> RegionWorkerLoop<S> {
     pub(crate) async fn handle_drop_request(&mut self, region_id: RegionId) -> Result<Output> {
@@ -84,53 +84,57 @@ async fn later_drop_task(
     object_store: ObjectStore,
     dropping_regions: RegionMapRef,
 ) {
-    loop {
-        let result: Result<()> = try {
-            sleep(Duration::from_secs(GC_TASK_INTERVAL_SEC)).await;
-
-            // list all files under the given region path to check if there are un-deleted parquet files
-            let mut has_parquet_file = false;
-            // record all paths that neither ends with .parquet nor the marker file
-            let mut files_to_remove_first = vec![];
-            let mut files = object_store
-                .list(&region_path)
-                .await
-                .context(OpenDalSnafu)?;
-            while let Some(file) = files.next().await {
-                let file = file.context(OpenDalSnafu)?;
-                if file.path().ends_with(".parquet") {
-                    has_parquet_file = true;
-                    break;
-                } else if !file.path().ends_with(DROPPING_MARKER_FILE) {
-                    files_to_remove_first.push(file.path().to_string());
-                }
-            }
-
-            if !has_parquet_file {
-                // no parquet file found, delete the region path
-                // first delete all files other than the marker
-                try_join_all(
-                    files_to_remove_first
-                        .iter()
-                        .map(|path| object_store.delete(path)),
-                )
-                .await
-                .context(OpenDalSnafu)?;
-                // then remove the marker with this dir
-                object_store
-                    .delete(&region_path)
-                    .await
-                    .context(OpenDalSnafu)?;
-
-                dropping_regions.remove_region(region_id);
-                info!("Region {} is dropped", region_path);
-            }
-        };
+    for _ in 0..MAX_RETRY_TIMES {
+        sleep(Duration::from_secs(GC_TASK_INTERVAL_SEC)).await;
+        let result = remove_region_dir_once(&region_path, &object_store).await;
         if result.is_err() {
             warn!(
                 "Error occurs during trying to GC region dir {}: {:?}",
                 region_path, result
             );
+        } else {
+            dropping_regions.remove_region(region_id);
+            info!("Region {} is dropped", region_path);
         }
     }
+
+    warn!(
+        "Failed to GC region dir {} after {} retries, giving up",
+        region_path, MAX_RETRY_TIMES
+    );
+}
+
+pub(crate) async fn remove_region_dir_once(
+    region_path: &str,
+    object_store: &ObjectStore,
+) -> Result<()> {
+    // list all files under the given region path to check if there are un-deleted parquet files
+    let mut has_parquet_file = false;
+    // record all paths that neither ends with .parquet nor the marker file
+    let mut files_to_remove_first = vec![];
+    let mut files = object_store.list(region_path).await.context(OpenDalSnafu)?;
+    while let Some(file) = files.next().await {
+        let file = file.context(OpenDalSnafu)?;
+        if file.path().ends_with(".parquet") {
+            has_parquet_file = true;
+            break;
+        } else if !file.path().ends_with(DROPPING_MARKER_FILE) {
+            files_to_remove_first.push(file.path().to_string());
+        }
+    }
+
+    if !has_parquet_file {
+        // no parquet file found, delete the region path
+        // first delete all files other than the marker
+        object_store
+            .remove(files_to_remove_first)
+            .await
+            .context(OpenDalSnafu)?;
+        // then remove the marker with this dir
+        object_store
+            .remove_all(region_path)
+            .await
+            .context(OpenDalSnafu)?;
+    }
+    Ok(())
 }
