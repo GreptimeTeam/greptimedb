@@ -12,72 +12,58 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::any::Any;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use catalog::local::new_memory_catalog_manager;
 use catalog::RegisterTableRequest;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_error::ext::BoxedError;
 use common_query::prelude::Expr;
 use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
 use common_time::range::TimestampRange;
 use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
 use datatypes::data_type::ConcreteDataType;
-use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
+use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::vectors::{Int64Vector, TimestampMillisecondVector};
+use store_api::data_source::{DataSource, DataSourceRef};
 use store_api::storage::ScanRequest;
-use table::metadata::{FilterPushDownType, TableInfoRef, TableType};
+use table::metadata::FilterPushDownType;
 use table::predicate::TimeRangePredicateBuilder;
 use table::test_util::MemTable;
-use table::Table;
-use tokio::sync::RwLock;
+use table::thin_table::{ThinTable, ThinTableAdapter};
+use table::TableRef;
 
 use crate::tests::exec_selection;
 use crate::{QueryEngineFactory, QueryEngineRef};
 
-struct MemTableWrapper {
-    inner: MemTable,
-    filter: RwLock<Vec<Expr>>,
-}
+struct MemTableWrapper;
 
 impl MemTableWrapper {
-    pub async fn get_filters(&self) -> Vec<Expr> {
-        self.filter.write().await.drain(..).collect()
+    pub fn table(table: TableRef, filter: Arc<RwLock<Vec<Expr>>>) -> TableRef {
+        let table_info = table.table_info();
+        let thin_table_adapter = table.as_any().downcast_ref::<ThinTableAdapter>().unwrap();
+        let data_source = thin_table_adapter.data_source();
+
+        let thin_table = ThinTable::new(table_info, FilterPushDownType::Exact);
+        let data_source = Arc::new(DataSourceWrapper {
+            inner: data_source,
+            filter,
+        });
+
+        Arc::new(ThinTableAdapter::new(thin_table, data_source))
     }
 }
 
-#[async_trait::async_trait]
-impl Table for MemTableWrapper {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
+struct DataSourceWrapper {
+    inner: DataSourceRef,
+    filter: Arc<RwLock<Vec<Expr>>>,
+}
 
-    fn schema(&self) -> SchemaRef {
-        self.inner.schema()
-    }
-
-    fn table_info(&self) -> TableInfoRef {
-        self.inner.table_info()
-    }
-
-    fn table_type(&self) -> TableType {
-        self.inner.table_type()
-    }
-
-    async fn scan_to_stream(
-        &self,
-        request: ScanRequest,
-    ) -> table::Result<SendableRecordBatchStream> {
-        *self.filter.write().await = request.filters.clone();
-        self.inner.scan_to_stream(request).await
-    }
-
-    fn supports_filters_pushdown(
-        &self,
-        filters: &[&Expr],
-    ) -> table::Result<Vec<FilterPushDownType>> {
-        Ok(vec![FilterPushDownType::Exact; filters.len()])
+impl DataSource for DataSourceWrapper {
+    fn get_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream, BoxedError> {
+        *self.filter.write().unwrap() = request.filters.clone();
+        self.inner.get_stream(request)
     }
 }
 
@@ -92,8 +78,9 @@ fn create_test_engine() -> TimeRangeTester {
     ])
     .unwrap();
 
-    let table = Arc::new(MemTableWrapper {
-        inner: MemTable::new(
+    let filter = Arc::new(RwLock::new(vec![]));
+    let table = MemTableWrapper::table(
+        MemTable::table(
             "m",
             RecordBatch::new(
                 Arc::new(schema),
@@ -106,8 +93,8 @@ fn create_test_engine() -> TimeRangeTester {
             )
             .unwrap(),
         ),
-        filter: Default::default(),
-    });
+        filter.clone(),
+    );
 
     let catalog_manager = new_memory_catalog_manager().unwrap();
     let req = RegisterTableRequest {
@@ -120,21 +107,25 @@ fn create_test_engine() -> TimeRangeTester {
     let _ = catalog_manager.register_table_sync(req).unwrap();
 
     let engine = QueryEngineFactory::new(catalog_manager, false).query_engine();
-    TimeRangeTester { engine, table }
+    TimeRangeTester { engine, filter }
 }
 
 struct TimeRangeTester {
     engine: QueryEngineRef,
-    table: Arc<MemTableWrapper>,
+    filter: Arc<RwLock<Vec<Expr>>>,
 }
 
 impl TimeRangeTester {
     async fn check(&self, sql: &str, expect: TimestampRange) {
         let _ = exec_selection(self.engine.clone(), sql).await;
-        let filters = self.table.get_filters().await;
+        let filters = self.get_filters();
 
         let range = TimeRangePredicateBuilder::new("ts", TimeUnit::Millisecond, &filters).build();
         assert_eq!(expect, range);
+    }
+
+    fn get_filters(&self) -> Vec<Expr> {
+        self.filter.write().unwrap().drain(..).collect()
     }
 }
 

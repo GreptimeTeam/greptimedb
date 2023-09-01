@@ -30,12 +30,13 @@ use servers::postgres::PostgresServer;
 use servers::server::Server;
 use servers::tls::TlsOption;
 use table::test_util::MemTable;
+use table::TableRef;
 use tokio_postgres::{Client, Error as PgError, NoTls, SimpleQueryMessage};
 
 use crate::create_testing_instance;
 
 fn create_postgres_server(
-    table: MemTable,
+    table: TableRef,
     check_pwd: bool,
     tls: TlsOption,
     auth_info: Option<DatabaseAuthInfo>,

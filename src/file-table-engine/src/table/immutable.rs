@@ -12,10 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::any::Any;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use common_datasource::file_format::Format;
 use common_datasource::object_store::build_backend;
 use common_error::ext::BoxedError;
@@ -24,10 +22,12 @@ use datatypes::schema::SchemaRef;
 use object_store::ObjectStore;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
+use store_api::data_source::DataSource;
 use store_api::storage::{RegionNumber, ScanRequest};
 use table::error::{self as table_error, Result as TableResult};
-use table::metadata::{RawTableInfo, TableInfo, TableInfoRef, TableType};
-use table::{requests, Table};
+use table::metadata::{FilterPushDownType, RawTableInfo, TableInfo};
+use table::thin_table::{ThinTable, ThinTableAdapter};
+use table::{requests, TableRef};
 
 use super::format::create_stream;
 use crate::error::{self, ConvertRawSnafu, Result};
@@ -45,68 +45,12 @@ pub struct ImmutableFileTableOptions {
 
 pub struct ImmutableFileTable {
     metadata: ImmutableMetadata,
-    // currently, it's immutable
-    table_info: Arc<TableInfo>,
-    object_store: ObjectStore,
-    files: Vec<String>,
-    format: Format,
+    table_ref: TableRef,
 }
 
 pub type ImmutableFileTableRef = Arc<ImmutableFileTable>;
 
-#[async_trait]
-impl Table for ImmutableFileTable {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    /// The [`SchemaRef`] before the projection.
-    /// It contains all the columns that may appear in the files (All missing columns should be filled NULLs).
-    fn schema(&self) -> SchemaRef {
-        self.table_info().meta.schema.clone()
-    }
-
-    fn table_info(&self) -> TableInfoRef {
-        self.table_info.clone()
-    }
-
-    fn table_type(&self) -> TableType {
-        self.table_info().table_type
-    }
-
-    async fn scan_to_stream(&self, request: ScanRequest) -> TableResult<SendableRecordBatchStream> {
-        create_stream(
-            &self.format,
-            &CreateScanPlanContext::default(),
-            &ScanPlanConfig {
-                file_schema: self.schema(),
-                files: &self.files,
-                projection: request.projection.as_ref(),
-                filters: &request.filters,
-                limit: request.limit,
-                store: self.object_store.clone(),
-            },
-        )
-        .map_err(BoxedError::new)
-        .context(table_error::TableOperationSnafu)
-    }
-
-    async fn flush(
-        &self,
-        _region_number: Option<RegionNumber>,
-        _wait: Option<bool>,
-    ) -> TableResult<()> {
-        // nothing to flush
-        Ok(())
-    }
-}
-
 impl ImmutableFileTable {
-    #[inline]
-    pub fn metadata(&self) -> &ImmutableMetadata {
-        &self.metadata
-    }
-
     pub(crate) fn new(table_info: TableInfo, metadata: ImmutableMetadata) -> Result<Self> {
         let table_info = Arc::new(table_info);
         let options = &table_info.meta.options.extra_options;
@@ -129,12 +73,19 @@ impl ImmutableFileTable {
 
         let object_store = build_backend(url, options).context(error::BuildBackendSnafu)?;
 
+        let schema = table_info.meta.schema.clone();
+        let thin_table = ThinTable::new(table_info, FilterPushDownType::Unsupported);
+        let data_source = Arc::new(ImmutableFileDataSource::new(
+            schema,
+            object_store,
+            meta.files,
+            format,
+        ));
+        let table_ref = Arc::new(ThinTableAdapter::new(thin_table, data_source));
+
         Ok(Self {
             metadata,
-            table_info,
-            object_store,
-            files: meta.files,
-            format,
+            table_ref,
         })
     }
 
@@ -170,5 +121,64 @@ impl ImmutableFileTable {
             TableInfo::try_from(metadata.table_info.clone()).context(ConvertRawSnafu)?;
 
         Ok((metadata, table_info))
+    }
+
+    #[inline]
+    pub fn metadata(&self) -> &ImmutableMetadata {
+        &self.metadata
+    }
+
+    pub fn as_table_ref(&self) -> TableRef {
+        self.table_ref.clone()
+    }
+
+    pub async fn close(&self, regions: &[RegionNumber]) -> TableResult<()> {
+        self.table_ref.close(regions).await
+    }
+}
+
+struct ImmutableFileDataSource {
+    schema: SchemaRef,
+    object_store: ObjectStore,
+    files: Vec<String>,
+    format: Format,
+}
+
+impl ImmutableFileDataSource {
+    fn new(
+        schema: SchemaRef,
+        object_store: ObjectStore,
+        files: Vec<String>,
+        format: Format,
+    ) -> Self {
+        Self {
+            schema,
+            object_store,
+            files,
+            format,
+        }
+    }
+}
+
+impl DataSource for ImmutableFileDataSource {
+    fn get_stream(
+        &self,
+        request: ScanRequest,
+    ) -> std::result::Result<SendableRecordBatchStream, BoxedError> {
+        create_stream(
+            &self.format,
+            &CreateScanPlanContext::default(),
+            &ScanPlanConfig {
+                file_schema: self.schema.clone(),
+                files: &self.files,
+                projection: request.projection.as_ref(),
+                filters: &request.filters,
+                limit: request.limit,
+                store: self.object_store.clone(),
+            },
+        )
+        .map_err(BoxedError::new)
+        .context(table_error::TableOperationSnafu)
+        .map_err(BoxedError::new)
     }
 }

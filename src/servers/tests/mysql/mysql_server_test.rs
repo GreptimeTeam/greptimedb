@@ -32,6 +32,7 @@ use servers::mysql::server::{MysqlServer, MysqlSpawnConfig, MysqlSpawnRef};
 use servers::server::Server;
 use servers::tls::TlsOption;
 use table::test_util::MemTable;
+use table::TableRef;
 
 use crate::create_testing_sql_query_handler;
 use crate::mysql::{all_datatype_testing_data, MysqlTextRow, TestingData};
@@ -43,7 +44,7 @@ struct MysqlOpts<'a> {
     reject_no_database: bool,
 }
 
-fn create_mysql_server(table: MemTable, opts: MysqlOpts<'_>) -> Result<Box<dyn Server>> {
+fn create_mysql_server(table: TableRef, opts: MysqlOpts<'_>) -> Result<Box<dyn Server>> {
     let query_handler = create_testing_sql_query_handler(table);
     let io_runtime = Arc::new(
         RuntimeBuilder::default()
@@ -262,7 +263,7 @@ async fn test_server_required_secure_client_plain() -> Result<()> {
     } = all_datatype_testing_data();
     let schema = Arc::new(Schema::new(column_schemas.clone()));
     let recordbatch = RecordBatch::new(schema, columns).unwrap();
-    let table = MemTable::new("all_datatypes", recordbatch);
+    let table = MemTable::table("all_datatypes", recordbatch);
 
     let mysql_server = create_mysql_server(
         table,
@@ -299,7 +300,7 @@ async fn test_server_required_secure_client_plain_with_pkcs8_priv_key() -> Resul
     } = all_datatype_testing_data();
     let schema = Arc::new(Schema::new(column_schemas.clone()));
     let recordbatch = RecordBatch::new(schema, columns).unwrap();
-    let table = MemTable::new("all_datatypes", recordbatch);
+    let table = MemTable::table("all_datatypes", recordbatch);
 
     let mysql_server = create_mysql_server(
         table,
@@ -331,7 +332,7 @@ async fn test_db_name() -> Result<()> {
     } = all_datatype_testing_data();
     let schema = Arc::new(Schema::new(column_schemas.clone()));
     let recordbatch = RecordBatch::new(schema, columns).unwrap();
-    let table = MemTable::new("all_datatypes", recordbatch);
+    let table = MemTable::table("all_datatypes", recordbatch);
 
     let mysql_server = create_mysql_server(
         table,
@@ -363,7 +364,7 @@ async fn do_test_query_all_datatypes(server_tls: TlsOption, client_tls: bool) ->
     } = all_datatype_testing_data();
     let schema = Arc::new(Schema::new(column_schemas.clone()));
     let recordbatch = RecordBatch::new(schema, columns).unwrap();
-    let table = MemTable::new("all_datatypes", recordbatch);
+    let table = MemTable::table("all_datatypes", recordbatch);
 
     let mysql_server = create_mysql_server(
         table,
@@ -462,7 +463,7 @@ async fn test_query_prepared() -> Result<()> {
     } = all_datatype_testing_data();
     let schema = Arc::new(Schema::new(column_schemas.clone()));
     let recordbatch = RecordBatch::new(schema, columns.clone()).unwrap();
-    let table = MemTable::new("all_datatypes", recordbatch);
+    let table = MemTable::table("all_datatypes", recordbatch);
 
     let mysql_server = create_mysql_server(
         table,
