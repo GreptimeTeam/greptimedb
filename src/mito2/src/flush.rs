@@ -121,7 +121,9 @@ impl RegionFlushTask {
     fn on_failure(&mut self, err: Arc<Error>) {
         for sender in self.senders.drain(..) {
             // Ignore send result.
-            let _ = sender.send(Err(err.clone()).context(FlushRegionSnafu));
+            let _ = sender.send(Err(err.clone()).context(FlushRegionSnafu {
+                region_id: self.region_id,
+            }));
         }
     }
 
@@ -148,6 +150,7 @@ impl RegionFlushTask {
                     .map(|m| m.id())
                     .collect();
                 let flush_finished = FlushFinished {
+                    region_id: self.region_id,
                     file_metas,
                     // The last entry has been flushed.
                     flushed_entry_id: version_data.last_entry_id,
@@ -434,7 +437,9 @@ impl FlushStatus {
         }
         for ddl in self.pending_ddls {
             if let Some(sender) = ddl.sender {
-                let _ = sender.send(Err(err.clone()).context(FlushRegionSnafu));
+                let _ = sender.send(Err(err.clone()).context(FlushRegionSnafu {
+                    region_id: self.region.region_id,
+                }));
             }
         }
     }

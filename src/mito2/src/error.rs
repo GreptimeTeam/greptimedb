@@ -396,8 +396,17 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to flush region, source: {}", source))]
-    FlushRegion { source: Arc<Error> },
+    #[snafu(display(
+        "Failed to flush region {}, location: {}, source: {}",
+        region_id,
+        location,
+        source
+    ))]
+    FlushRegion {
+        region_id: RegionId,
+        source: Arc<Error>,
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;

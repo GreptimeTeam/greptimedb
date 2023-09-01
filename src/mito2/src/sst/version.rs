@@ -54,9 +54,9 @@ impl SstVersion {
         for file in files_to_add {
             let level = file.level;
             let handle = FileHandle::new(file, file_purger.clone());
-            self.levels[level as usize]
-                .files
-                .insert(handle.file_id(), handle);
+            let file_id = handle.file_id();
+            let old = self.levels[level as usize].files.insert(file_id, handle);
+            assert!(old.is_none(), "Adds an existing file: {file_id}");
         }
     }
 

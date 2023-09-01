@@ -499,6 +499,8 @@ pub(crate) enum BackgroundNotify {
 /// Notifies a flush job is finished.
 #[derive(Debug)]
 pub(crate) struct FlushFinished {
+    /// Region id.
+    pub(crate) region_id: RegionId,
     /// Meta of the flushed SSTs.
     pub(crate) file_metas: Vec<FileMeta>,
     /// Entry id of flushed data.
@@ -516,7 +518,9 @@ impl FlushFinished {
         let err = Arc::new(err);
         for sender in self.senders {
             // Ignore send result.
-            let _ = sender.send(Err(err.clone()).context(FlushRegionSnafu));
+            let _ = sender.send(Err(err.clone()).context(FlushRegionSnafu {
+                region_id: self.region_id,
+            }));
         }
         // Clean flushed files.
         for file in self.file_metas {
