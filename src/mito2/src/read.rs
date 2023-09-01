@@ -41,10 +41,10 @@ use crate::error::{
 };
 use crate::memtable::BoxedBatchIterator;
 
-/// Storage internal representation of a batch of rows
-/// for a primary key (time series).
+/// Storage internal representation of a batch of rows for a primary key (time series).
 ///
-/// Rows are sorted by primary key, timestamp, sequence desc, op_type desc.
+/// Rows are sorted by primary key, timestamp, sequence desc, op_type desc. Fields
+/// always keep the same relative order as fields in [RegionMetadata](store_api::metadata::RegionMetadata).
 #[derive(Debug, PartialEq, Clone)]
 pub struct Batch {
     /// Primary key encoded in a comparable form.
@@ -202,6 +202,7 @@ impl Batch {
                 reason: "batches have different primary key",
             }
         );
+        // TODO(yingwen): Debug checks field schemas.
         ensure!(
             batches
                 .iter()

@@ -120,6 +120,8 @@ impl ProjectionMapper {
     ///
     /// The batch must match the `projection` using to build the mapper.
     pub(crate) fn convert(&self, batch: &Batch) -> common_recordbatch::error::Result<RecordBatch> {
+        // TODO(yingwen): validate batch schema.
+
         let pk_values = self
             .codec
             .decode(batch.primary_key())
@@ -179,3 +181,5 @@ fn new_repeated_vector(
     let base_vector = mutable_vector.to_vector();
     Ok(base_vector.replicate(&[num_rows]))
 }
+
+// TODO(yingwen): Add tests for mapper.
