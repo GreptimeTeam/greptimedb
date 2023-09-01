@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use api::v1::meta::{HeartbeatRequest, NodeStat, Peer, RegionStat, TableIdent};
+use api::v1::meta::{HeartbeatRequest, Peer, RegionStat};
 use catalog::remote::region_alive_keeper::RegionAliveKeepers;
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
 use common_meta::heartbeat::handler::{
@@ -216,15 +216,12 @@ impl HeartbeatTask {
                         }
                     }
                     _ = &mut sleep => {
-                        let (region_num,region_stats) = Self::load_stats(&region_server_clone).await;
+                        // TODO(jeremy): refactor load_status
+                        let (_,region_stats) = Self::load_stats(&region_server_clone).await;
                         let req = HeartbeatRequest {
                             peer: Some(Peer {
                                 id: node_id,
                                 addr: addr.clone(),
-                            }),
-                            node_stat: Some(NodeStat {
-                                region_num: region_num as _,
-                                ..Default::default()
                             }),
                             region_stats,
                             duration_since_epoch: (Instant::now() - epoch).as_millis() as u64,
@@ -268,14 +265,9 @@ impl HeartbeatTask {
         let region_stats = region_ids
             .into_iter()
             .map(|region_id| RegionStat {
-                // TODO: scratch more info
+                // TODO(ruihang): scratch more info
                 region_id: region_id.as_u64(),
-                table_ident: Some(TableIdent {
-                    table_id: region_id.table_id(),
-                    table_name: None,
-                    engine: "MitoEngine".to_string(),
-                }),
-
+                engine: "MitoEngine".to_string(),
                 ..Default::default()
             })
             .collect::<Vec<_>>();
