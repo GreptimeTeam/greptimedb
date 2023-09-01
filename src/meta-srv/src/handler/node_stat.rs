@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashSet;
+
 use api::v1::meta::HeartbeatRequest;
 use common_time::util as time_util;
 use serde::{Deserialize, Serialize};
@@ -59,6 +61,14 @@ impl Stat {
 
     pub fn region_ids(&self) -> Vec<u64> {
         self.region_stats.iter().map(|s| s.id).collect()
+    }
+
+    pub fn retain_active_region_stats(&mut self, inactive_region_ids: &HashSet<u64>) {
+        self.region_stats
+            .retain(|r| !inactive_region_ids.contains(&r.id));
+        self.rcus = self.region_stats.iter().map(|s| s.rcus).sum();
+        self.wcus = self.region_stats.iter().map(|s| s.wcus).sum();
+        self.region_num = self.region_stats.len() as u64;
     }
 }
 

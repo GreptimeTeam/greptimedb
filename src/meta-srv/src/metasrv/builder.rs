@@ -27,14 +27,18 @@ use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
 use crate::ddl::{DdlManager, DdlManagerRef};
 use crate::error::Result;
 use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
+use crate::handler::check_leader_handler::CheckLeaderHandler;
+use crate::handler::collect_stats_handler::CollectStatsHandler;
+use crate::handler::failure_handler::RegionFailureHandler;
+use crate::handler::filter_inactive_region_stats::FilterInactiveRegionStatsHandler;
+use crate::handler::keep_lease_handler::KeepLeaseHandler;
 use crate::handler::mailbox_handler::MailboxHandler;
+use crate::handler::on_leader_start_handler::OnLeaderStartHandler;
+use crate::handler::persist_stats_handler::PersistStatsHandler;
 use crate::handler::publish_heartbeat_handler::PublishHeartbeatHandler;
 use crate::handler::region_lease_handler::RegionLeaseHandler;
-use crate::handler::{
-    CheckLeaderHandler, CollectStatsHandler, HeartbeatHandlerGroup, HeartbeatMailbox,
-    KeepLeaseHandler, OnLeaderStartHandler, PersistStatsHandler, Pushers, RegionFailureHandler,
-    ResponseHeaderHandler,
-};
+use crate::handler::response_header_handler::ResponseHeaderHandler;
+use crate::handler::{HeartbeatHandlerGroup, HeartbeatMailbox, Pushers};
 use crate::lock::memory::MemLock;
 use crate::lock::DistLockRef;
 use crate::metadata_service::{DefaultMetadataService, MetadataServiceRef};
@@ -227,6 +231,7 @@ impl MetaSrvBuilder {
                     group.add_handler(region_failover_handler).await;
                 }
                 group.add_handler(RegionLeaseHandler).await;
+                group.add_handler(FilterInactiveRegionStatsHandler).await;
                 group.add_handler(PersistStatsHandler::default()).await;
                 if let Some((publish, _)) = pubsub.as_ref() {
                     group

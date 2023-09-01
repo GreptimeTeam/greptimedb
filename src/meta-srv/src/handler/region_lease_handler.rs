@@ -12,11 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
-
 use api::v1::meta::{HeartbeatRequest, RegionLease, Role};
 use async_trait::async_trait;
-use store_api::storage::RegionId;
 
 use crate::error::Result;
 use crate::handler::{HeartbeatAccumulator, HeartbeatHandler};
@@ -28,8 +25,7 @@ use crate::metasrv::Context;
 // TODO(LFC): Make region lease seconds calculated from Datanode heartbeat configuration.
 pub(crate) const REGION_LEASE_SECONDS: u64 = 20;
 
-#[derive(Default)]
-pub(crate) struct RegionLeaseHandler;
+pub struct RegionLeaseHandler;
 
 #[async_trait]
 impl HeartbeatHandler for RegionLeaseHandler {
@@ -47,19 +43,10 @@ impl HeartbeatHandler for RegionLeaseHandler {
             return Ok(());
         };
 
-        let mut table_region_leases = HashMap::new();
-        stat.region_stats.iter().for_each(|region_stat| {
-            let region_id = RegionId::from(region_stat.id);
-            table_region_leases
-                .entry(region_id.table_id())
-                .or_insert_with(Vec::new)
-                .push(region_id.region_number());
-        });
-
         let mut region_ids = stat.region_ids();
 
         let inactive_node_manager = InactiveNodeManager::new(&ctx.in_memory);
-        inactive_node_manager
+        acc.inactive_region_ids = inactive_node_manager
             .retain_active_regions(stat.cluster_id, stat.id, &mut region_ids)
             .await?;
 
@@ -80,7 +67,7 @@ mod test {
     use common_meta::ident::TableIdent;
     use common_meta::key::TableMetadataManager;
     use common_meta::RegionIdent;
-    use store_api::storage::RegionNumber;
+    use store_api::storage::{RegionId, RegionNumber};
 
     use super::*;
     use crate::handler::node_stat::{RegionStat, Stat};

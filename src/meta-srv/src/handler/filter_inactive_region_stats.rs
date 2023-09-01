@@ -4,7 +4,7 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,17 +13,17 @@
 // limitations under the License.
 
 use api::v1::meta::{HeartbeatRequest, Role};
+use async_trait::async_trait;
 use common_telemetry::warn;
 
-use super::node_stat::Stat;
 use crate::error::Result;
 use crate::handler::{HeartbeatAccumulator, HeartbeatHandler};
 use crate::metasrv::Context;
 
-pub struct CollectStatsHandler;
+pub struct FilterInactiveRegionStatsHandler;
 
-#[async_trait::async_trait]
-impl HeartbeatHandler for CollectStatsHandler {
+#[async_trait]
+impl HeartbeatHandler for FilterInactiveRegionStatsHandler {
     fn is_acceptable(&self, role: Role) -> bool {
         role == Role::Datanode
     }
@@ -34,20 +34,20 @@ impl HeartbeatHandler for CollectStatsHandler {
         _ctx: &mut Context,
         acc: &mut HeartbeatAccumulator,
     ) -> Result<()> {
-        if req.mailbox_message.is_some() {
-            // If the heartbeat is a mailbox message, it may have no other valid information,
-            // so we don't need to collect stats.
+        if acc.inactive_region_ids.is_empty() {
             return Ok(());
         }
 
-        match Stat::try_from(req.clone()) {
-            Ok(stat) => {
-                let _ = acc.stat.insert(stat);
-            }
-            Err(err) => {
-                warn!("Incomplete heartbeat data: {:?}, err: {:?}", req, err);
-            }
+        warn!(
+            "The heartbeat of this node {:?} contains some inactive regions: {:?}",
+            req.peer, acc.inactive_region_ids
+        );
+
+        let Some(stat) = acc.stat.as_mut() else {
+            return Ok(());
         };
+
+        stat.retain_active_region_stats(&acc.inactive_region_ids);
 
         Ok(())
     }
