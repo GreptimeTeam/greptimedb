@@ -41,6 +41,7 @@ use crate::error::{
 };
 use crate::memtable::MemtableId;
 use crate::sst::file::FileMeta;
+use crate::sst::file_purger::{FilePurgerRef, PurgeRequest};
 use crate::wal::EntryId;
 
 /// Options that affect the entire region.
@@ -453,15 +454,23 @@ pub(crate) struct FlushFinished {
     pub(crate) memtables_to_remove: SmallVec<[MemtableId; 2]>,
     /// Flush result senders.
     pub(crate) senders: Vec<oneshot::Sender<Result<Output>>>,
+    /// File purger for cleaning files on failure.
+    pub(crate) file_purger: FilePurgerRef,
 }
 
 impl FlushFinished {
     pub(crate) fn on_failure(self, err: Error) {
         let err = Arc::new(err);
-        // TODO(yingwen): We should remove these files.
         for sender in self.senders {
             // Ignore send result.
             let _ = sender.send(Err(err.clone()).context(FlushRegionSnafu));
+        }
+        // Clean flushed files.
+        for file in self.file_metas {
+            self.file_purger.send_request(PurgeRequest {
+                region_id: file.region_id,
+                file_id: file.file_id,
+            });
         }
     }
 

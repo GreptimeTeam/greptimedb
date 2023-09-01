@@ -34,6 +34,7 @@ use crate::request::{
 };
 use crate::schedule::scheduler::{Job, SchedulerRef};
 use crate::sst::file::{FileId, FileMeta};
+use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::parquet::WriteOptions;
 
 /// Global write buffer (memtable) manager.
@@ -105,6 +106,7 @@ pub(crate) struct RegionFlushTask {
 
     pub(crate) access_layer: AccessLayerRef,
     pub(crate) memtable_builder: MemtableBuilderRef,
+    pub(crate) file_purger: FilePurgerRef,
 }
 
 impl RegionFlushTask {
@@ -124,7 +126,7 @@ impl RegionFlushTask {
     }
 
     /// Converts the flush task into a background job.
-    fn into_flush_job(self, region: &MitoRegionRef) -> Job {
+    fn into_flush_job(mut self, region: &MitoRegionRef) -> Job {
         // Get a version of this region before creating a job so we
         // always have a consistent memtable list.
         let version_data = region.version_control.current();
@@ -135,7 +137,7 @@ impl RegionFlushTask {
     }
 
     /// Runs the flush task.
-    async fn do_flush(mut self, version_data: VersionControlData) {
+    async fn do_flush(&mut self, version_data: VersionControlData) {
         let worker_request = match self.flush_memtables(&version_data.version).await {
             Ok(file_metas) => {
                 let memtables_to_remove = version_data
@@ -151,6 +153,7 @@ impl RegionFlushTask {
                     flushed_entry_id: version_data.last_entry_id,
                     memtables_to_remove,
                     senders: std::mem::take(&mut self.senders),
+                    file_purger: self.file_purger.clone(),
                 };
                 WorkerRequest::Background {
                     region_id: self.region_id,

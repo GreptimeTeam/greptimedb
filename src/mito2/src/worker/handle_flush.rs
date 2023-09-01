@@ -173,6 +173,7 @@ impl<S> RegionWorkerLoop<S> {
             request_sender: self.sender.clone(),
             access_layer: region.access_layer.clone(),
             memtable_builder: self.memtable_builder.clone(),
+            file_purger: region.file_purger.clone(),
         }
     }
 }
