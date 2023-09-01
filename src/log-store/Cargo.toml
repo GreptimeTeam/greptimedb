@@ -17,6 +17,7 @@ byteorder = "1.4"
 bytes = "1.1"
 common-base = { workspace = true }
 common-error = { workspace = true }
+common-meta = { workspace = true }
 common-runtime = { workspace = true }
 common-telemetry = { workspace = true }
 futures-util.workspace = true
