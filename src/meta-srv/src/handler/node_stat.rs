@@ -56,6 +56,10 @@ impl Stat {
             node_id: self.id,
         }
     }
+
+    pub fn region_ids(&self) -> Vec<u64> {
+        self.region_stats.iter().map(|s| s.id).collect()
+    }
 }
 
 impl TryFrom<HeartbeatRequest> for Stat {

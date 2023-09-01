@@ -56,23 +56,12 @@ impl HeartbeatHandler for RegionLeaseHandler {
                 .push(region_id.region_number());
         });
 
-        let inactive_node_manager = InactiveNodeManager::new(&ctx.in_memory);
-        for (table_id, region_numbers) in table_region_leases.iter_mut() {
-            // TODO(jeremy): refactor this, use region_id
-            inactive_node_manager
-                .retain_active_regions(stat.cluster_id, stat.id, *table_id, region_numbers)
-                .await?;
-        }
+        let mut region_ids = stat.region_ids();
 
-        let region_ids = table_region_leases
-            .into_iter()
-            .filter(|(_, region_nums)| !region_nums.is_empty())
-            .flat_map(|(table_id, region_nums)| {
-                region_nums
-                    .into_iter()
-                    .map(move |region_num| RegionId::new(table_id, region_num).as_u64())
-            })
-            .collect();
+        let inactive_node_manager = InactiveNodeManager::new(&ctx.in_memory);
+        inactive_node_manager
+            .retain_active_regions(stat.cluster_id, stat.id, &mut region_ids)
+            .await?;
 
         acc.region_lease = Some(RegionLease {
             region_ids,
