@@ -157,6 +157,12 @@ pub enum Error {
         source: BoxedError,
     },
 
+    #[snafu(display("{}", source))]
+    ExecuteDdl {
+        location: Location,
+        source: BoxedError,
+    },
+
     #[snafu(display("Retry later, source: {}", source))]
     RetryLater { source: BoxedError },
 }
@@ -196,6 +202,7 @@ impl ErrorExt for Error {
 
             RetryLater { source, .. } => source.status_code(),
             OperateRegion { source, .. } => source.status_code(),
+            ExecuteDdl { source, .. } => source.status_code(),
             MetaSrv { source, .. } => source.status_code(),
             InvalidCatalogValue { source, .. } => source.status_code(),
         }
