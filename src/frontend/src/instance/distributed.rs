@@ -32,6 +32,7 @@ use chrono::DateTime;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::format_full_table_name;
 use common_error::ext::BoxedError;
+use common_meta::ddl_manager::{Context, DdlExecutorRef};
 use common_meta::key::schema_name::{SchemaNameKey, SchemaNameValue};
 use common_meta::rpc::ddl::{DdlTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse};
 use common_meta::rpc::router::{Partition, Partition as MetaPartition};
@@ -42,7 +43,6 @@ use datanode::instance::sql::table_idents_to_full_name;
 use datanode::sql::SqlHandler;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::RawSchema;
-use meta_client::client::MetaClient;
 use partition::manager::PartitionInfo;
 use partition::partition::{PartitionBound, PartitionDef};
 use query::error::QueryExecutionSnafu;
@@ -76,14 +76,14 @@ const MAX_VALUE: &str = "MAXVALUE";
 
 #[derive(Clone)]
 pub struct DistInstance {
-    meta_client: Arc<MetaClient>,
+    ddl_executor: DdlExecutorRef,
     pub(crate) catalog_manager: Arc<FrontendCatalogManager>,
 }
 
 impl DistInstance {
-    pub fn new(meta_client: Arc<MetaClient>, catalog_manager: Arc<FrontendCatalogManager>) -> Self {
+    pub fn new(ddl_executor: DdlExecutorRef, catalog_manager: Arc<FrontendCatalogManager>) -> Self {
         Self {
-            meta_client,
+            ddl_executor,
             catalog_manager,
         }
     }
@@ -452,10 +452,10 @@ impl DistInstance {
             task: DdlTask::new_alter_table(expr.clone()),
         };
 
-        self.meta_client
-            .submit_ddl_task(req)
+        self.ddl_executor
+            .submit_ddl_task(&Context, req)
             .await
-            .context(error::RequestMetaSnafu)?;
+            .context(error::ExecuteDdlSnafu)?;
 
         // Invalidates local cache ASAP.
         self.catalog_manager()
@@ -477,10 +477,10 @@ impl DistInstance {
             task: DdlTask::new_create_table(create_table.clone(), partitions, table_info),
         };
 
-        self.meta_client
-            .submit_ddl_task(request)
+        self.ddl_executor
+            .submit_ddl_task(&Context, request)
             .await
-            .context(error::RequestMetaSnafu)
+            .context(error::ExecuteDdlSnafu)
     }
 
     async fn drop_table_procedure(
@@ -497,10 +497,10 @@ impl DistInstance {
             ),
         };
 
-        self.meta_client
-            .submit_ddl_task(request)
+        self.ddl_executor
+            .submit_ddl_task(&Context, request)
             .await
-            .context(error::RequestMetaSnafu)
+            .context(error::ExecuteDdlSnafu)
     }
 
     async fn truncate_table_procedure(
@@ -511,10 +511,10 @@ impl DistInstance {
             task: DdlTask::new_truncate_table(truncate_table.clone()),
         };
 
-        self.meta_client
-            .submit_ddl_task(request)
+        self.ddl_executor
+            .submit_ddl_task(&Context, request)
             .await
-            .context(error::RequestMetaSnafu)
+            .context(error::ExecuteDdlSnafu)
     }
 
     async fn handle_dist_insert(

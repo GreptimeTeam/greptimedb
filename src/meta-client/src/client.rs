@@ -21,7 +21,10 @@ mod router;
 mod store;
 
 use api::v1::meta::Role;
+use common_error::ext::BoxedError;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
+use common_meta::ddl_manager::{Context, DdlExecutor};
+use common_meta::error::{self as meta_error, Result as MetaResult};
 use common_meta::rpc::ddl::{SubmitDdlTaskRequest, SubmitDdlTaskResponse};
 use common_meta::rpc::lock::{LockRequest, LockResponse, UnlockRequest};
 use common_meta::rpc::router::{RouteRequest, RouteResponse};
@@ -172,6 +175,20 @@ pub struct MetaClient {
     store: Option<StoreClient>,
     lock: Option<LockClient>,
     ddl: Option<DdlClient>,
+}
+
+#[async_trait::async_trait]
+impl DdlExecutor for MetaClient {
+    async fn submit_ddl_task(
+        &self,
+        _ctx: &Context,
+        request: SubmitDdlTaskRequest,
+    ) -> MetaResult<SubmitDdlTaskResponse> {
+        self.submit_ddl_task(request)
+            .await
+            .map_err(BoxedError::new)
+            .context(meta_error::ExecuteDdlSnafu)
+    }
 }
 
 impl MetaClient {
