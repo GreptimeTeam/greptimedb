@@ -26,7 +26,7 @@ use common_meta::ident::TableIdent;
 use common_meta::RegionIdent;
 use common_telemetry::{debug, error, info, warn};
 use snafu::{OptionExt, ResultExt};
-use store_api::storage::RegionNumber;
+use store_api::storage::{RegionId, RegionNumber};
 use table::engine::manager::TableEngineManagerRef;
 use table::engine::{CloseTableResult, EngineContext, TableEngineRef};
 use table::metadata::TableId;
@@ -166,39 +166,35 @@ impl RegionAliveKeepers {
 #[async_trait]
 impl HeartbeatResponseHandler for RegionAliveKeepers {
     fn is_acceptable(&self, ctx: &HeartbeatResponseHandlerContext) -> bool {
-        !ctx.response.region_leases.is_empty()
+        ctx.response.region_lease.is_some()
     }
 
     async fn handle(
         &self,
         ctx: &mut HeartbeatResponseHandlerContext,
     ) -> common_meta::error::Result<HandleControl> {
-        let leases = ctx.response.region_leases.drain(..).collect::<Vec<_>>();
-        for lease in leases {
-            let table_ident: TableIdent = match lease
-                .table_ident
-                .context(InvalidProtoMsgSnafu {
-                    err_msg: "'table_ident' is missing in RegionLease",
-                })
-                .and_then(|x| x.try_into())
-            {
-                Ok(x) => x,
-                Err(e) => {
-                    error!(e; "");
-                    continue;
-                }
-            };
-
-            let table_id = table_ident.table_id;
+        let region_lease = ctx
+            .response
+            .region_lease
+            .as_ref()
+            .context(InvalidProtoMsgSnafu {
+                err_msg: "'region_lease' is missing in heartbeat response",
+            })?;
+        let start_instant = self.epoch + Duration::from_millis(region_lease.duration_since_epoch);
+        let deadline = start_instant + Duration::from_secs(region_lease.lease_seconds);
+        for raw_region_id in &region_lease.region_ids {
+            let region_id = RegionId::from_u64(*raw_region_id);
+            let table_id = region_id.table_id();
             let Some(keeper) = self.keepers.lock().await.get(&table_id).cloned() else {
                 // Alive keeper could be affected by lagging msg, just warn and ignore.
-                warn!("Alive keeper for table {table_ident} is not found!");
+                warn!("Alive keeper for table {table_id} is not found!");
                 continue;
             };
 
-            let start_instant = self.epoch + Duration::from_millis(lease.duration_since_epoch);
-            let deadline = start_instant + Duration::from_secs(lease.lease_seconds);
-            keeper.keep_lived(lease.regions, deadline).await;
+            // TODO(jeremy): refactor this, use region_id
+            keeper
+                .keep_lived(vec![region_id.region_number()], deadline)
+                .await;
         }
         Ok(HandleControl::Continue)
     }
@@ -602,12 +598,14 @@ mod test {
         let duration_since_epoch = (Instant::now() - keepers.epoch).as_millis() as _;
         let lease_seconds = 100;
         let response = HeartbeatResponse {
-            region_leases: vec![RegionLease {
-                table_ident: Some(table_ident.clone().into()),
-                regions: vec![1, 3], // Not extending region 2's lease time.
+            region_lease: Some(RegionLease {
+                region_ids: vec![
+                    RegionId::new(table_ident.table_id, 1).as_u64(),
+                    RegionId::new(table_ident.table_id, 3).as_u64(),
+                ], // Not extending region 2's lease time.
                 duration_since_epoch,
                 lease_seconds,
-            }],
+            }),
             ..Default::default()
         };
         let keep_alive_until = keepers.epoch
