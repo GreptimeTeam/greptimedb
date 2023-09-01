@@ -102,6 +102,7 @@ impl RegionWriteCtx {
             version,
             committed_sequence,
             last_entry_id,
+            ..
         } = version_control.current();
 
         RegionWriteCtx {
