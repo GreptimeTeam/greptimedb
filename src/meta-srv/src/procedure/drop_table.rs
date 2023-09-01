@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::meta::MailboxMessage;
 use api::v1::region::{region_request, DropRequest as PbDropRegionRequest};
 use api::v1::DropTableExpr;
 use async_trait::async_trait;
@@ -21,8 +20,8 @@ use client::Database;
 use common_catalog::consts::MITO2_ENGINE;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
+use common_meta::cache_invalidator::Context;
 use common_meta::ident::TableIdent;
-use common_meta::instruction::Instruction;
 use common_meta::key::table_info::TableInfoValue;
 use common_meta::key::table_name::TableNameKey;
 use common_meta::key::table_route::TableRouteValue;
@@ -47,7 +46,7 @@ use crate::ddl::DdlContext;
 use crate::error::{self, Result, TableMetadataManagerSnafu};
 use crate::metrics;
 use crate::procedure::utils::handle_request_datanode_error;
-use crate::service::mailbox::BroadcastChannel;
+
 pub struct DropTableProcedure {
     context: DdlContext,
     data: DropTableData,
@@ -132,23 +131,17 @@ impl DropTableProcedure {
             table_id: self.data.task.table_id,
             engine: engine.to_string(),
         };
-        let instruction = Instruction::InvalidateTableCache(table_ident);
-
-        let msg = &MailboxMessage::json_message(
-            "Invalidate Table Cache by dropping table procedure",
-            &format!("Metasrv@{}", self.context.server_addr),
-            "Frontend broadcast",
-            common_time::util::current_time_millis(),
-            &instruction,
-        )
-        .with_context(|_| error::SerializeToJsonSnafu {
-            input: instruction.to_string(),
-        })?;
 
         self.context
-            .mailbox
-            .broadcast(&BroadcastChannel::Frontend, msg)
-            .await?;
+            .cache_invalidator
+            .invalidate_table(
+                &Context {
+                    subject: Some("Invalidate Table Cache by dropping table procedure".to_string()),
+                },
+                table_ident,
+            )
+            .await
+            .context(error::InvalidateTableCacheSnafu)?;
 
         self.data.state = if engine == MITO2_ENGINE {
             DropTableState::DatanodeDropRegions

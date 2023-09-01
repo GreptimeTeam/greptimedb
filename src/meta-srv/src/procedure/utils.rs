@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_error::ext::BoxedError;
 use common_meta::peer::Peer;
 use common_procedure::error::Error as ProcedureError;
 use snafu::{location, Location};
@@ -30,6 +31,25 @@ pub fn handle_request_datanode_error(datanode: Peer) -> impl FnOnce(client::erro
                 location: location!(),
                 peer: datanode,
                 source: err,
+            }
+        }
+    }
+}
+
+pub fn handle_operate_region_error(
+    datanode: Peer,
+) -> impl FnOnce(common_meta::error::Error) -> Error {
+    move |err| {
+        if matches!(err, common_meta::error::Error::RetryLater { .. }) {
+            error::RetryLaterSnafu {
+                reason: format!("Failed to execute operation on datanode, source: {}", err),
+            }
+            .build()
+        } else {
+            error::Error::OperateRegion {
+                location: location!(),
+                peer: datanode,
+                source: BoxedError::new(err),
             }
         }
     }
@@ -145,6 +165,7 @@ pub mod test_data {
     use table::metadata::{RawTableInfo, RawTableMeta, TableIdent, TableType};
     use table::requests::TableOptions;
 
+    use crate::cache_invalidator::MetasrvCacheInvalidator;
     use crate::ddl::DdlContext;
     use crate::handler::{HeartbeatMailbox, Pushers};
     use crate::sequence::Sequence;
@@ -220,10 +241,14 @@ pub mod test_data {
         let mailbox = HeartbeatMailbox::create(Pushers::default(), mailbox_sequence);
 
         let kv_backend = KvBackendAdapter::wrap(kv_store);
+        let clients = Arc::new(DatanodeClients::default());
         DdlContext {
-            datanode_clients: Arc::new(DatanodeClients::default()),
-            mailbox,
-            server_addr: "127.0.0.1:4321".to_string(),
+            datanode_clients: clients.clone(),
+            datanode_manager: clients,
+            cache_invalidator: Arc::new(MetasrvCacheInvalidator::new(
+                mailbox,
+                "127.0.0.1:4321".to_string(),
+            )),
             table_metadata_manager: Arc::new(TableMetadataManager::new(kv_backend)),
         }
     }

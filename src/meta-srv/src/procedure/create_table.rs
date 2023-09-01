@@ -16,7 +16,6 @@ use api::v1::region::region_request::Body as PbRegionRequest;
 use api::v1::region::{ColumnDef, CreateRequest as PbCreateRegionRequest};
 use api::v1::SemanticType;
 use async_trait::async_trait;
-use client::region::RegionRequester;
 use client::Database;
 use common_catalog::consts::MITO2_ENGINE;
 use common_error::ext::ErrorExt;
@@ -36,7 +35,9 @@ use strum::AsRefStr;
 use table::engine::TableReference;
 use table::metadata::{RawTableInfo, TableId};
 
-use super::utils::{handle_request_datanode_error, handle_retry_error};
+use super::utils::{
+    handle_operate_region_error, handle_request_datanode_error, handle_retry_error,
+};
 use crate::ddl::DdlContext;
 use crate::error::{self, PrimaryKeyNotFoundSnafu, Result, TableMetadataManagerSnafu};
 use crate::metrics;
@@ -190,7 +191,7 @@ impl CreateTableProcedure {
         let mut create_region_tasks = Vec::with_capacity(leaders.len());
 
         for datanode in leaders {
-            let clients = self.context.datanode_clients.clone();
+            let manager = self.context.datanode_manager.clone();
 
             let regions = find_leader_regions(region_routes, &datanode);
             let requests = regions
@@ -209,11 +210,10 @@ impl CreateTableProcedure {
 
             create_region_tasks.push(async move {
                 for request in requests {
-                    let client = clients.get_client(&datanode).await;
-                    let requester = RegionRequester::new(client);
+                    let requester = manager.datanode(&datanode).await;
 
                     if let Err(err) = requester.handle(request).await {
-                        return Err(handle_request_datanode_error(datanode)(err));
+                        return Err(handle_operate_region_error(datanode)(err));
                     }
                 }
                 Ok(())

@@ -1517,6 +1517,7 @@ dependencies = [
  "api",
  "arrow-flight",
  "async-stream",
+ "async-trait",
  "common-base",
  "common-catalog",
  "common-error",

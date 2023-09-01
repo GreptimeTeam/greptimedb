@@ -22,6 +22,7 @@ use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::ProcedureManagerRef;
 
+use crate::cache_invalidator::MetasrvCacheInvalidator;
 use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
 use crate::ddl::{DdlManager, DdlManagerRef};
 use crate::error::Result;
@@ -329,12 +330,15 @@ fn build_ddl_manager(
             .tcp_nodelay(options.datanode.client_options.tcp_nodelay);
         Arc::new(DatanodeClients::new(datanode_client_channel_config))
     });
+    let cache_invalidator = Arc::new(MetasrvCacheInvalidator::new(
+        mailbox.clone(),
+        options.server_addr.clone(),
+    ));
     // TODO(weny): considers to modify the default config of procedure manager
     Arc::new(DdlManager::new(
         procedure_manager.clone(),
         datanode_clients,
-        mailbox.clone(),
-        options.server_addr.clone(),
+        cache_invalidator,
         table_metadata_manager.clone(),
     ))
 }

@@ -150,6 +150,15 @@ pub enum Error {
 
     #[snafu(display("Invalid heartbeat response, location: {}", location))]
     InvalidHeartbeatResponse { location: Location },
+
+    #[snafu(display("{}", source))]
+    OperateRegion {
+        location: Location,
+        source: BoxedError,
+    },
+
+    #[snafu(display("Retry later, source: {}", source))]
+    RetryLater { source: BoxedError },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -177,7 +186,8 @@ impl ErrorExt for Error {
             | CatalogAlreadyExists { .. }
             | SchemaAlreadyExists { .. }
             | TableNotExist { .. }
-            | RenameTable { .. } => StatusCode::Internal,
+            | RenameTable { .. }
+            | RetryLater { .. } => StatusCode::Internal,
 
             EncodeJson { .. }
             | DecodeJson { .. }
@@ -185,13 +195,27 @@ impl ErrorExt for Error {
             | ConvertRawKey { .. }
             | DecodeProto { .. } => StatusCode::Unexpected,
 
+            OperateRegion { source, .. } => source.status_code(),
             MetaSrv { source, .. } => source.status_code(),
-
             InvalidCatalogValue { source, .. } => source.status_code(),
         }
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+}
+
+impl Error {
+    /// Creates a new [Error::RetryLater] error from source `err`.
+    pub fn retry_later<E: ErrorExt + Send + Sync + 'static>(err: E) -> Error {
+        Error::RetryLater {
+            source: BoxedError::new(err),
+        }
+    }
+
+    /// Determine whether it is a retry later type through [StatusCode]
+    pub fn is_retry_later(&self) -> bool {
+        matches!(self, Error::RetryLater { .. })
     }
 }
