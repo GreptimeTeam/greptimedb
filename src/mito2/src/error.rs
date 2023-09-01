@@ -367,8 +367,8 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Invalid flume sender, location: {}", location,))]
-    InvalidFlumeSender { location: Location },
+    #[snafu(display("Invalid sender, location: {}", location,))]
+    InvalidSender { location: Location },
 
     #[snafu(display("Invalid scheduler state, location: {}", location))]
     InvalidSchedulerState { location: Location },
@@ -452,7 +452,7 @@ impl ErrorExt for Error {
             ComputeArrow { .. } => StatusCode::Internal,
             ComputeVector { .. } => StatusCode::Internal,
             PrimaryKeyLengthMismatch { .. } => StatusCode::InvalidArguments,
-            InvalidFlumeSender { .. } => StatusCode::InvalidArguments,
+            InvalidSender { .. } => StatusCode::InvalidArguments,
             InvalidSchedulerState { .. } => StatusCode::InvalidArguments,
             StopScheduler { .. } => StatusCode::Internal,
             BuildPredicate { source, .. } => source.status_code(),
