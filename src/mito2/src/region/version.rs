@@ -51,6 +51,7 @@ impl VersionControl {
                 version: Arc::new(version),
                 committed_sequence: 0,
                 last_entry_id: 0,
+                is_dropped: false,
             }),
         }
     }
@@ -90,6 +91,13 @@ impl VersionControl {
         version_data.version = new_version;
         Some(mutable_id)
     }
+
+    /// Mark all opened files as deleted and set the delete marker in [VersionControlData]
+    pub(crate) fn mark_dropped(&self) {
+        let mut data = self.data.write().unwrap();
+        data.is_dropped = true;
+        data.version.ssts.mark_all_deleted();
+    }
 }
 
 pub(crate) type VersionControlRef = Arc<VersionControl>;
@@ -103,6 +111,8 @@ pub(crate) struct VersionControlData {
     pub(crate) committed_sequence: SequenceNumber,
     /// Last WAL entry Id.
     pub(crate) last_entry_id: EntryId,
+    /// Marker of whether this region is dropped/dropping
+    pub(crate) is_dropped: bool,
 }
 
 /// Static metadata of a region.
