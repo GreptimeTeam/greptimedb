@@ -29,6 +29,7 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ScanRequest;
 
 use crate::error::Result;
+use crate::flush::WriteBufferManagerRef;
 pub use crate::memtable::key_values::KeyValues;
 use crate::metrics::WRITE_BUFFER_BYTES;
 use crate::read::Batch;
@@ -41,11 +42,9 @@ pub type MemtableId = u32;
 #[derive(Debug, Default)]
 pub struct MemtableStats {
     /// The  estimated bytes allocated by this memtable from heap.
-    pub estimated_bytes: usize,
-    /// The max timestamp that this memtable contains.
-    pub max_timestamp: Timestamp,
-    /// The min timestamp that this memtable contains.
-    pub min_timestamp: Timestamp,
+    estimated_bytes: usize,
+    /// The time range that this memtable contains.
+    time_range: Option<(Timestamp, Timestamp)>,
 }
 
 impl MemtableStats {
@@ -129,7 +128,7 @@ impl Memtable for EmptyMemtable {
 /// Memtable memory allocation tracker.
 #[derive(Default)]
 pub struct AllocTracker {
-    // TODO(hl): add FlushStrategy so that we can reserve memory on allocation.
+    write_buffer_manager: Option<WriteBufferManagerRef>,
     /// Bytes allocated by the tracker.
     bytes_allocated: AtomicUsize,
     /// Whether allocating is done.
@@ -147,8 +146,9 @@ impl fmt::Debug for AllocTracker {
 
 impl AllocTracker {
     /// Returns a new [AllocTracker].
-    pub fn new() -> AllocTracker {
+    pub fn new(write_buffer_manager: Option<WriteBufferManagerRef>) -> AllocTracker {
         AllocTracker {
+            write_buffer_manager,
             bytes_allocated: AtomicUsize::new(0),
             is_done_allocating: AtomicBool::new(false),
         }
@@ -158,9 +158,9 @@ impl AllocTracker {
     pub(crate) fn on_allocation(&self, bytes: usize) {
         let _ = self.bytes_allocated.fetch_add(bytes, Ordering::Relaxed);
         increment_gauge!(WRITE_BUFFER_BYTES, bytes as f64);
-        // if let Some(flush_strategy) = &self.flush_strategy {
-        //     flush_strategy.reserve_mem(bytes);
-        // }
+        if let Some(write_buffer_manager) = &self.write_buffer_manager {
+            write_buffer_manager.reserve_mem(bytes);
+        }
     }
 
     /// Marks we have finished allocating memory so we can free it from
@@ -168,15 +168,16 @@ impl AllocTracker {
     ///
     /// The region MUST ensure that it calls this method inside the region writer's write lock.
     pub(crate) fn done_allocating(&self) {
-        // if let Some(flush_strategy) = &self.flush_strategy {
-        //     if self
-        //         .is_done_allocating
-        //         .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
-        //         .is_ok()
-        //     {
-        //         flush_strategy.schedule_free_mem(self.bytes_allocated.load(Ordering::Relaxed));
-        //     }
-        // }
+        if let Some(write_buffer_manager) = &self.write_buffer_manager {
+            if self
+                .is_done_allocating
+                .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                write_buffer_manager
+                    .schedule_free_mem(self.bytes_allocated.load(Ordering::Relaxed));
+            }
+        }
     }
 
     /// Returns bytes allocated.
@@ -195,9 +196,9 @@ impl Drop for AllocTracker {
         decrement_gauge!(WRITE_BUFFER_BYTES, bytes_allocated as f64);
 
         // Memory tracked by this tracker is freed.
-        // if let Some(flush_strategy) = &self.flush_strategy {
-        //     flush_strategy.free_mem(bytes_allocated);
-        // }
+        if let Some(write_buffer_manager) = &self.write_buffer_manager {
+            write_buffer_manager.free_mem(bytes_allocated);
+        }
     }
 }
 

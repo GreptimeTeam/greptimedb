@@ -199,12 +199,19 @@ impl Memtable for TimeSeriesMemtable {
     }
 
     fn mark_immutable(&self) {
-        // TODO(yingwen): AllocTracker.done_allocating()
+        self.alloc_tracker.done_allocating();
     }
 
     fn stats(&self) -> MemtableStats {
         let estimated_bytes = self.alloc_tracker.bytes_allocated();
 
+        if estimated_bytes == 0 {
+            // no rows ever written
+            return MemtableStats {
+                estimated_bytes,
+                time_range: None,
+            };
+        }
         let ts_type = self
             .region_metadata
             .time_index_column()
@@ -215,11 +222,9 @@ impl Memtable for TimeSeriesMemtable {
             .expect("Timestamp column must have timestamp type");
         let max_timestamp = ts_type.create_timestamp(self.max_timestamp.load(Ordering::Relaxed));
         let min_timestamp = ts_type.create_timestamp(self.min_timestamp.load(Ordering::Relaxed));
-
         MemtableStats {
             estimated_bytes,
-            max_timestamp,
-            min_timestamp,
+            time_range: Some((max_timestamp, min_timestamp)),
         }
     }
 }
@@ -268,6 +273,11 @@ impl SeriesSet {
             projection,
             last_key: None,
         }
+    }
+
+    /// Returns if series set is empty.
+    fn is_empty(&self) -> bool {
+        self.series.read().unwrap().is_empty()
     }
 }
 
