@@ -25,7 +25,7 @@ use datatypes::schema::{Schema, SchemaRef};
 use datatypes::value::ValueRef;
 use datatypes::vectors::VectorRef;
 use snafu::{OptionExt, ResultExt};
-use store_api::metadata::RegionMetadata;
+use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ColumnId;
 
 use crate::error::{InvalidRequestSnafu, Result};
@@ -33,7 +33,9 @@ use crate::read::Batch;
 use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
 
 /// Handles projection and converts a projected [Batch] to a projected [RecordBatch].
-pub(crate) struct ProjectionMapper {
+pub struct ProjectionMapper {
+    /// Metadata of the region.
+    metadata: RegionMetadataRef,
     /// Maps column in [RecordBatch] to index in [Batch].
     batch_indices: Vec<BatchIndex>,
     /// Decoder for primary key.
@@ -46,8 +48,8 @@ pub(crate) struct ProjectionMapper {
 
 impl ProjectionMapper {
     /// Returns a new mapper with projection.
-    pub(crate) fn new(
-        metadata: &RegionMetadata,
+    pub fn new(
+        metadata: &RegionMetadataRef,
         projection: impl Iterator<Item = usize>,
     ) -> Result<ProjectionMapper> {
         let projection_len = projection.size_hint().0;
@@ -94,6 +96,7 @@ impl ProjectionMapper {
         let output_schema = Arc::new(Schema::new(column_schemas));
 
         Ok(ProjectionMapper {
+            metadata: metadata.clone(),
             batch_indices,
             codec,
             output_schema,
@@ -102,8 +105,13 @@ impl ProjectionMapper {
     }
 
     /// Returns a new mapper without projection.
-    pub(crate) fn all(metadata: &RegionMetadata) -> Result<ProjectionMapper> {
+    pub fn all(metadata: &RegionMetadataRef) -> Result<ProjectionMapper> {
         ProjectionMapper::new(metadata, 0..metadata.column_metadatas.len())
+    }
+
+    /// Returns the metadata that created the mapper.
+    pub(crate) fn metadata(&self) -> &RegionMetadataRef {
+        &self.metadata
     }
 
     /// Returns ids of projected columns.

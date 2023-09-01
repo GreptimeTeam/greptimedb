@@ -27,7 +27,7 @@ use parquet::arrow::{ParquetRecordBatchStreamBuilder, ProjectionMask};
 use parquet::errors::ParquetError;
 use parquet::format::KeyValue;
 use snafu::{ensure, OptionExt, ResultExt};
-use store_api::metadata::RegionMetadata;
+use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::storage::ColumnId;
 use table::predicate::Predicate;
 use tokio::io::BufReader;
@@ -248,5 +248,12 @@ impl BatchReader for ParquetReader {
         self.batches.reverse();
 
         Ok(self.batches.pop())
+    }
+}
+
+impl ParquetReader {
+    /// Returns the metadata of the SST.
+    pub fn metadata(&self) -> &RegionMetadataRef {
+        self.read_format.metadata()
     }
 }
