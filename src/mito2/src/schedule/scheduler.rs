@@ -23,9 +23,7 @@ use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::error::{
-    InvalidFlumeSenderSnafu, InvalidSchedulerStateSnafu, Result, StopSchedulerSnafu,
-};
+use crate::error::{InvalidSchedulerStateSnafu, InvalidSenderSnafu, Result, StopSchedulerSnafu};
 
 pub type Job = Pin<Box<dyn Future<Output = ()> + Send>>;
 
@@ -49,7 +47,7 @@ pub type SchedulerRef = Arc<dyn Scheduler>;
 /// Request scheduler based on local state.
 pub struct LocalScheduler {
     /// Sends jobs to flume bounded channel
-    sender: RwLock<Option<flume::Sender<Job>>>,
+    sender: RwLock<Option<async_channel::Sender<Job>>>,
     /// Task handles
     handles: Mutex<Vec<JoinHandle<()>>>,
     /// Token used to halt the scheduler
@@ -63,7 +61,7 @@ impl LocalScheduler {
     ///
     /// concurrency: the number of bounded receiver
     pub fn new(concurrency: usize) -> Self {
-        let (tx, rx) = flume::unbounded();
+        let (tx, rx) = async_channel::unbounded();
         let token = CancellationToken::new();
         let state = Arc::new(AtomicU8::new(STATE_RUNNING));
 
@@ -79,7 +77,7 @@ impl LocalScheduler {
                         _ = child.cancelled() => {
                             break;
                         }
-                        req_opt = receiver.recv_async() =>{
+                        req_opt = receiver.recv() =>{
                             if let Ok(job) = req_opt {
                                 job.await;
                             }
@@ -89,7 +87,7 @@ impl LocalScheduler {
                 // When task scheduler is cancelled, we will wait all task finished
                 if state_clone.load(Ordering::Relaxed) == STATE_AWAIT_TERMINATION {
                     // recv_async waits until all sender's been dropped.
-                    while let Ok(job) = receiver.recv_async().await {
+                    while let Ok(job) = receiver.recv().await {
                         job.await;
                     }
                     state_clone.store(STATE_STOP, Ordering::Relaxed);
@@ -119,13 +117,14 @@ impl Scheduler for LocalScheduler {
             self.state.load(Ordering::Relaxed) == STATE_RUNNING,
             InvalidSchedulerStateSnafu
         );
+
         self.sender
             .read()
             .unwrap()
             .as_ref()
             .context(InvalidSchedulerStateSnafu)?
-            .send(job)
-            .map_err(|_| InvalidFlumeSenderSnafu {}.build())
+            .try_send(job)
+            .map_err(|_| InvalidSenderSnafu {}.build())
     }
 
     /// if await_termination is true, scheduler will wait all tasks finished before stopping
