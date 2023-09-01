@@ -13,10 +13,8 @@
 // limitations under the License.
 
 use api::v1::meta::HeartbeatRequest;
-use common_meta::ident::TableIdent;
 use common_time::util as time_util;
 use serde::{Deserialize, Serialize};
-use snafu::OptionExt;
 
 use crate::error::{Error, InvalidHeartbeatRequestSnafu};
 use crate::keys::StatKey;
@@ -31,10 +29,8 @@ pub struct Stat {
     pub rcus: i64,
     /// The write capacity units during this period
     pub wcus: i64,
-    /// How many tables on this node
-    pub table_num: i64,
     /// How many regions on this node
-    pub region_num: Option<u64>,
+    pub region_num: u64,
     pub region_stats: Vec<RegionStat>,
     // The node epoch is used to check whether the node has restarted or redeployed.
     pub node_epoch: u64,
@@ -43,7 +39,6 @@ pub struct Stat {
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct RegionStat {
     pub id: u64,
-    pub table_ident: TableIdent,
     /// The read capacity units during this period
     pub rcus: i64,
     /// The write capacity units during this period
@@ -61,6 +56,10 @@ impl Stat {
             node_id: self.id,
         }
     }
+
+    pub fn region_ids(&self) -> Vec<u64> {
+        self.region_stats.iter().map(|s| s.id).collect()
+    }
 }
 
 impl TryFrom<HeartbeatRequest> for Stat {
@@ -70,19 +69,13 @@ impl TryFrom<HeartbeatRequest> for Stat {
         let HeartbeatRequest {
             header,
             peer,
-            node_stat,
             region_stats,
             node_epoch,
             ..
         } = value;
 
-        match (header, peer, node_stat) {
-            (Some(header), Some(peer), Some(node_stat)) => {
-                let region_num = if node_stat.region_num >= 0 {
-                    Some(node_stat.region_num as u64)
-                } else {
-                    None
-                };
+        match (header, peer) {
+            (Some(header), Some(peer)) => {
                 let region_stats = region_stats
                     .into_iter()
                     .map(RegionStat::try_from)
@@ -93,10 +86,9 @@ impl TryFrom<HeartbeatRequest> for Stat {
                     cluster_id: header.cluster_id,
                     id: peer.id,
                     addr: peer.addr,
-                    rcus: node_stat.rcus,
-                    wcus: node_stat.wcus,
-                    table_num: node_stat.table_num,
-                    region_num,
+                    rcus: region_stats.iter().map(|s| s.rcus).sum(),
+                    wcus: region_stats.iter().map(|s| s.wcus).sum(),
+                    region_num: region_stats.len() as u64,
                     region_stats,
                     node_epoch,
                 })
@@ -113,20 +105,8 @@ impl TryFrom<api::v1::meta::RegionStat> for RegionStat {
     type Error = Error;
 
     fn try_from(value: api::v1::meta::RegionStat) -> Result<Self, Self::Error> {
-        let table_ident = value.table_ident.context(InvalidHeartbeatRequestSnafu {
-            err_msg: "missing table_ident",
-        })?;
-        let table_ident_result = TableIdent::try_from(table_ident);
-        let Ok(table_ident) = table_ident_result else {
-            return InvalidHeartbeatRequestSnafu {
-                err_msg: format!("invalid table_ident: {:?}", table_ident_result.err()),
-            }
-            .fail();
-        };
-
         Ok(Self {
             id: value.region_id,
-            table_ident,
             rcus: value.rcus,
             wcus: value.wcus,
             approximate_bytes: value.approximate_bytes,
@@ -144,7 +124,7 @@ mod tests {
         let stat = Stat {
             cluster_id: 3,
             id: 101,
-            region_num: Some(10),
+            region_num: 10,
             ..Default::default()
         };
 

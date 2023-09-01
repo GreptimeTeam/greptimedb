@@ -23,13 +23,14 @@ use common_telemetry::{debug, logging};
 use datatypes::schema::Schema;
 use object_store::ObjectStore;
 use snafu::ResultExt;
-use table::engine::{table_dir, EngineContext, TableEngine, TableEngineProcedure, TableReference};
+use store_api::path_utils::table_dir;
+use table::engine::{EngineContext, TableEngine, TableEngineProcedure, TableReference};
 use table::error::TableOperationSnafu;
 use table::metadata::{TableId, TableInfo, TableInfoBuilder, TableMetaBuilder, TableType};
 use table::requests::{
     AlterTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest, TruncateTableRequest,
 };
-use table::{error as table_error, Result as TableResult, Table, TableRef};
+use table::{error as table_error, Result as TableResult, TableRef};
 use tokio::sync::Mutex;
 
 use crate::config::EngineConfig;
@@ -301,7 +302,7 @@ impl EngineInner {
 
         let _ = self.tables.write().unwrap().insert(table_id, table.clone());
 
-        Ok(table)
+        Ok(table.as_table_ref())
     }
 
     fn get_table(&self, table_id: TableId) -> Option<TableRef> {
@@ -310,7 +311,7 @@ impl EngineInner {
             .unwrap()
             .get(&table_id)
             .cloned()
-            .map(|table| table as _)
+            .map(|table| table.as_table_ref())
     }
 
     async fn open_table(
@@ -364,7 +365,7 @@ impl EngineInner {
             );
 
             let _ = self.tables.write().unwrap().insert(table_id, table.clone());
-            Some(table as _)
+            Some(table.as_table_ref())
         };
 
         logging::info!(

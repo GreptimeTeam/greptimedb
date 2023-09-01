@@ -147,6 +147,18 @@ pub enum Error {
 
     #[snafu(display("External error: {}", err_msg))]
     External { location: Location, err_msg: String },
+
+    #[snafu(display("Invalid heartbeat response, location: {}", location))]
+    InvalidHeartbeatResponse { location: Location },
+
+    #[snafu(display("{}", source))]
+    OperateRegion {
+        location: Location,
+        source: BoxedError,
+    },
+
+    #[snafu(display("Retry later, source: {}", source))]
+    RetryLater { source: BoxedError },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -164,7 +176,8 @@ impl ErrorExt for Error {
             | InvalidTableMetadata { .. }
             | MoveRegion { .. }
             | Unexpected { .. }
-            | External { .. } => StatusCode::Unexpected,
+            | External { .. }
+            | InvalidHeartbeatResponse { .. } => StatusCode::Unexpected,
 
             SendMessage { .. }
             | GetKvCache { .. }
@@ -181,13 +194,28 @@ impl ErrorExt for Error {
             | ConvertRawKey { .. }
             | DecodeProto { .. } => StatusCode::Unexpected,
 
+            RetryLater { source, .. } => source.status_code(),
+            OperateRegion { source, .. } => source.status_code(),
             MetaSrv { source, .. } => source.status_code(),
-
             InvalidCatalogValue { source, .. } => source.status_code(),
         }
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+}
+
+impl Error {
+    /// Creates a new [Error::RetryLater] error from source `err`.
+    pub fn retry_later<E: ErrorExt + Send + Sync + 'static>(err: E) -> Error {
+        Error::RetryLater {
+            source: BoxedError::new(err),
+        }
+    }
+
+    /// Determine whether it is a retry later type through [StatusCode]
+    pub fn is_retry_later(&self) -> bool {
+        matches!(self, Error::RetryLater { .. })
     }
 }

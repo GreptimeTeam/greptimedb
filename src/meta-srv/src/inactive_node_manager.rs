@@ -16,7 +16,7 @@ use std::collections::HashSet;
 
 use common_meta::rpc::store::{BatchGetRequest, PutRequest};
 use common_meta::RegionIdent;
-use store_api::storage::RegionNumber;
+use store_api::storage::RegionId;
 
 use crate::error::Result;
 use crate::keys::InactiveNodeKey;
@@ -32,11 +32,15 @@ impl<'a> InactiveNodeManager<'a> {
     }
 
     pub async fn register_inactive_region(&self, region_ident: &RegionIdent) -> Result<()> {
+        let region_id = RegionId::new(
+            region_ident.table_ident.table_id,
+            region_ident.region_number,
+        )
+        .as_u64();
         let key = InactiveNodeKey {
             cluster_id: region_ident.cluster_id,
             node_id: region_ident.datanode_id,
-            table_id: region_ident.table_ident.table_id,
-            region_number: region_ident.region_number,
+            region_id,
         };
         let req = PutRequest {
             key: key.into(),
@@ -48,46 +52,45 @@ impl<'a> InactiveNodeManager<'a> {
     }
 
     pub async fn deregister_inactive_region(&self, region_ident: &RegionIdent) -> Result<()> {
+        let region_id = RegionId::new(
+            region_ident.table_ident.table_id,
+            region_ident.region_number,
+        )
+        .as_u64();
         let key: Vec<u8> = InactiveNodeKey {
             cluster_id: region_ident.cluster_id,
             node_id: region_ident.datanode_id,
-            table_id: region_ident.table_ident.table_id,
-            region_number: region_ident.region_number,
+            region_id,
         }
         .into();
         self.store.delete(&key, false).await?;
         Ok(())
     }
 
-    /// The input is a list of regions from a table on a specific node. If one or more
-    /// regions have been set to inactive state by metasrv, the corresponding regions
-    /// will be removed, then return the remaining regions.
+    /// The input is a list of regions on a specific node. If one or more regions have been
+    /// set to inactive state by metasrv, the corresponding regions will be removed, then
+    /// return the remaining regions.
     pub async fn retain_active_regions(
         &self,
         cluster_id: u64,
         node_id: u64,
-        table_id: u32,
-        region_numbers: &mut Vec<RegionNumber>,
+        region_ids: &mut Vec<u64>,
     ) -> Result<()> {
-        let key_region_numbers: Vec<(Vec<u8>, RegionNumber)> = region_numbers
+        let key_region_ids = region_ids
             .iter()
-            .map(|region_number| {
+            .map(|region_id| {
                 (
                     InactiveNodeKey {
                         cluster_id,
                         node_id,
-                        table_id,
-                        region_number: *region_number,
+                        region_id: *region_id,
                     }
                     .into(),
-                    *region_number,
+                    *region_id,
                 )
             })
-            .collect();
-        let keys = key_region_numbers
-            .iter()
-            .map(|(key, _)| key.clone())
-            .collect();
+            .collect::<Vec<(Vec<u8>, _)>>();
+        let keys = key_region_ids.iter().map(|(key, _)| key.clone()).collect();
         let resp = self.store.batch_get(BatchGetRequest { keys }).await?;
         let kvs = resp.kvs;
         if kvs.is_empty() {
@@ -95,12 +98,12 @@ impl<'a> InactiveNodeManager<'a> {
         }
 
         let inactive_keys = kvs.into_iter().map(|kv| kv.key).collect::<HashSet<_>>();
-        let active_region_numbers = key_region_numbers
+        let active_region_ids = key_region_ids
             .into_iter()
             .filter(|(key, _)| !inactive_keys.contains(key))
-            .map(|(_, region_number)| region_number)
+            .map(|(_, region_id)| region_id)
             .collect::<Vec<_>>();
-        *region_numbers = active_region_numbers;
+        *region_ids = active_region_ids;
 
         Ok(())
     }

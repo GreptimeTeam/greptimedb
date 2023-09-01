@@ -50,7 +50,7 @@ Affected Rows: 0
 
 create table foo
 (
-    ts bigint time index
+    ts TIMESTAMP TIME INDEX
 );
 
 Affected Rows: 0
@@ -86,11 +86,11 @@ where table_catalog = 'greptime'
   and table_schema != 'information_schema'
 order by table_schema, table_name;
 
-+---------------+--------------+------------+-------------+-----------+---------------+
-| table_catalog | table_schema | table_name | column_name | data_type | semantic_type |
-+---------------+--------------+------------+-------------+-----------+---------------+
-| greptime      | my_db        | foo        | ts          | Int64     | TIMESTAMP     |
-+---------------+--------------+------------+-------------+-----------+---------------+
++---------------+--------------+------------+-------------+----------------------+---------------+
+| table_catalog | table_schema | table_name | column_name | data_type            | semantic_type |
++---------------+--------------+------------+-------------+----------------------+---------------+
+| greptime      | my_db        | foo        | ts          | TimestampMillisecond | TIMESTAMP     |
++---------------+--------------+------------+-------------+----------------------+---------------+
 
 use public;
 

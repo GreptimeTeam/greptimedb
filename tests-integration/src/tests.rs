@@ -21,10 +21,8 @@ use std::sync::Arc;
 
 use catalog::RegisterSchemaRequest;
 use common_meta::key::TableMetadataManagerRef;
-use common_test_util::temp_dir::TempDir;
 use datanode::instance::Instance as DatanodeInstance;
 use frontend::instance::Instance;
-use table::engine::{region_name, table_dir};
 
 use crate::cluster::{GreptimeDbCluster, GreptimeDbClusterBuilder};
 use crate::test_util::{create_tmp_dir_and_datanode_opts, StorageType, TestGuard};
@@ -32,14 +30,6 @@ use crate::test_util::{create_tmp_dir_and_datanode_opts, StorageType, TestGuard}
 pub struct MockDistributedInstance(GreptimeDbCluster);
 
 impl MockDistributedInstance {
-    pub fn data_tmp_dirs(&self) -> Vec<&TempDir> {
-        self.0
-            ._dir_guards
-            .iter()
-            .filter_map(|d| if !d.is_wal { Some(&d.temp_dir) } else { None })
-            .collect()
-    }
-
     pub fn frontend(&self) -> Arc<Instance> {
         self.0.frontend.clone()
     }
@@ -56,12 +46,6 @@ impl MockDistributedInstance {
 pub struct MockStandaloneInstance {
     pub instance: Arc<Instance>,
     _guard: TestGuard,
-}
-
-impl MockStandaloneInstance {
-    pub fn data_tmp_dir(&self) -> &TempDir {
-        &self._guard.home_guard.temp_dir
-    }
 }
 
 pub(crate) async fn create_standalone_instance(test_name: &str) -> MockStandaloneInstance {
@@ -104,30 +88,4 @@ pub(crate) async fn create_standalone_instance(test_name: &str) -> MockStandalon
 pub async fn create_distributed_instance(test_name: &str) -> MockDistributedInstance {
     let cluster = GreptimeDbClusterBuilder::new(test_name).build().await;
     MockDistributedInstance(cluster)
-}
-
-pub fn test_region_dir(
-    dir: &str,
-    catalog_name: &str,
-    schema_name: &str,
-    table_id: u32,
-    region_id: u32,
-) -> String {
-    let table_dir = table_dir(catalog_name, schema_name, table_id);
-    let region_name = region_name(table_id, region_id);
-
-    format!("{}/{}/{}", dir, table_dir, region_name)
-}
-
-pub fn has_parquet_file(sst_dir: &str) -> bool {
-    for entry in std::fs::read_dir(sst_dir).unwrap() {
-        let entry = entry.unwrap();
-        let path = entry.path();
-        if !path.is_dir() {
-            assert_eq!("parquet", path.extension().unwrap());
-            return true;
-        }
-    }
-
-    false
 }

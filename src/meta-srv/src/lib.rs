@@ -16,6 +16,7 @@
 #![feature(result_flattening)]
 
 pub mod bootstrap;
+mod cache_invalidator;
 pub mod cluster;
 pub mod ddl;
 pub mod election;

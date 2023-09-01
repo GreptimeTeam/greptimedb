@@ -16,15 +16,9 @@ use api::v1::region::region_request::Body as PbRegionRequest;
 use api::v1::region::{ColumnDef, CreateRequest as PbCreateRegionRequest};
 use api::v1::SemanticType;
 use async_trait::async_trait;
-use client::region::RegionRequester;
-use client::Database;
-use common_catalog::consts::MITO2_ENGINE;
-use common_error::ext::ErrorExt;
-use common_error::status_code::StatusCode;
 use common_meta::key::table_name::TableNameKey;
 use common_meta::rpc::ddl::CreateTableTask;
 use common_meta::rpc::router::{find_leader_regions, find_leaders, RegionRoute};
-use common_meta::table_name::TableName;
 use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu};
 use common_procedure::{Context as ProcedureContext, LockKey, Procedure, Status};
 use common_telemetry::info;
@@ -33,13 +27,13 @@ use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::RegionId;
 use strum::AsRefStr;
-use table::engine::{region_dir, TableReference};
+use table::engine::TableReference;
 use table::metadata::{RawTableInfo, TableId};
 
-use super::utils::{handle_request_datanode_error, handle_retry_error};
 use crate::ddl::DdlContext;
 use crate::error::{self, PrimaryKeyNotFoundSnafu, Result, TableMetadataManagerSnafu};
 use crate::metrics;
+use crate::procedure::utils::{handle_operate_region_error, handle_retry_error};
 
 pub struct CreateTableProcedure {
     context: DdlContext,
@@ -67,10 +61,6 @@ impl CreateTableProcedure {
             context,
             creator: TableCreator { data },
         })
-    }
-
-    fn table_name(&self) -> TableName {
-        self.creator.data.task.table_name()
     }
 
     pub fn table_info(&self) -> &RawTableInfo {
@@ -111,11 +101,7 @@ impl CreateTableProcedure {
             return Ok(Status::Done);
         }
 
-        self.creator.data.state = if expr.engine == MITO2_ENGINE {
-            CreateTableState::DatanodeCreateRegions
-        } else {
-            CreateTableState::DatanodeCreateTable
-        };
+        self.creator.data.state = CreateTableState::DatanodeCreateRegions;
 
         Ok(Status::executing(true))
     }
@@ -170,7 +156,8 @@ impl CreateTableProcedure {
             column_defs,
             primary_key,
             create_if_not_exists: true,
-            region_dir: "".to_string(),
+            catalog: String::new(),
+            schema: String::new(),
             options: create_table_expr.table_options.clone(),
         })
     }
@@ -186,10 +173,10 @@ impl CreateTableProcedure {
         let request_template = self.create_region_request_template()?;
 
         let leaders = find_leaders(region_routes);
-        let mut create_table_tasks = Vec::with_capacity(leaders.len());
+        let mut create_region_tasks = Vec::with_capacity(leaders.len());
 
         for datanode in leaders {
-            let clients = self.context.datanode_clients.clone();
+            let manager = self.context.datanode_manager.clone();
 
             let regions = find_leader_regions(region_routes, &datanode);
             let requests = regions
@@ -197,31 +184,30 @@ impl CreateTableProcedure {
                 .map(|region_number| {
                     let region_id = RegionId::new(self.table_id(), *region_number);
 
-                    let mut create_table_request = request_template.clone();
-                    create_table_request.region_id = region_id.as_u64();
-                    create_table_request.region_dir = region_dir(catalog, schema, region_id);
+                    let mut create_region_request = request_template.clone();
+                    create_region_request.region_id = region_id.as_u64();
+                    create_region_request.catalog = catalog.to_string();
+                    create_region_request.schema = schema.to_string();
 
-                    PbRegionRequest::Create(create_table_request)
+                    PbRegionRequest::Create(create_region_request)
                 })
                 .collect::<Vec<_>>();
 
-            create_table_tasks.push(common_runtime::spawn_bg(async move {
+            create_region_tasks.push(async move {
                 for request in requests {
-                    let client = clients.get_client(&datanode).await;
-                    let requester = RegionRequester::new(client);
+                    let requester = manager.datanode(&datanode).await;
 
                     if let Err(err) = requester.handle(request).await {
-                        return Err(handle_request_datanode_error(datanode)(err));
+                        return Err(handle_operate_region_error(datanode)(err));
                     }
                 }
                 Ok(())
-            }));
+            });
         }
 
-        join_all(create_table_tasks)
+        join_all(create_region_tasks)
             .await
             .into_iter()
-            .map(|e| e.context(error::JoinSnafu).flatten())
             .collect::<Result<Vec<_>>>()?;
 
         self.creator.data.state = CreateTableState::CreateMetadata;
@@ -243,44 +229,6 @@ impl CreateTableProcedure {
 
         Ok(Status::Done)
     }
-
-    async fn on_datanode_create_table(&mut self) -> Result<Status> {
-        let region_routes = &self.creator.data.region_routes;
-        let table_name = self.table_name();
-        let clients = self.context.datanode_clients.clone();
-        let leaders = find_leaders(region_routes);
-        let mut joins = Vec::with_capacity(leaders.len());
-        let table_id = self.table_id();
-
-        for datanode in leaders {
-            let client = clients.get_client(&datanode).await;
-            let client = Database::new(&table_name.catalog_name, &table_name.schema_name, client);
-
-            let regions = find_leader_regions(region_routes, &datanode);
-            let mut create_expr_for_region = self.creator.data.task.create_table.clone();
-            create_expr_for_region.region_numbers = regions;
-            create_expr_for_region.table_id = Some(api::v1::TableId { id: table_id });
-
-            joins.push(common_runtime::spawn_bg(async move {
-                if let Err(err) = client.create(create_expr_for_region).await {
-                    if err.status_code() != StatusCode::TableAlreadyExists {
-                        return Err(handle_request_datanode_error(datanode)(err));
-                    }
-                }
-                Ok(())
-            }));
-        }
-
-        let _r = join_all(joins)
-            .await
-            .into_iter()
-            .map(|e| e.context(error::JoinSnafu).flatten())
-            .collect::<Result<Vec<_>>>()?;
-
-        self.creator.data.state = CreateTableState::CreateMetadata;
-
-        Ok(Status::executing(true))
-    }
 }
 
 #[async_trait]
@@ -299,7 +247,6 @@ impl Procedure for CreateTableProcedure {
 
         match state {
             CreateTableState::Prepare => self.on_prepare().await,
-            CreateTableState::DatanodeCreateTable => self.on_datanode_create_table().await,
             CreateTableState::DatanodeCreateRegions => self.on_datanode_create_regions().await,
             CreateTableState::CreateMetadata => self.on_create_metadata().await,
         }
@@ -343,9 +290,7 @@ impl TableCreator {
 enum CreateTableState {
     /// Prepares to create the table
     Prepare,
-    /// Datanode creates the table
-    DatanodeCreateTable,
-    /// Create regions on the Datanode
+    /// Creates regions on the Datanode
     DatanodeCreateRegions,
     /// Creates metadata
     CreateMetadata,
@@ -370,34 +315,12 @@ mod test {
     use std::collections::{HashMap, HashSet};
     use std::sync::{Arc, Mutex};
 
-    use api::v1::region::region_server::RegionServer;
-    use api::v1::region::RegionResponse;
-    use api::v1::{
-        ColumnDataType, ColumnDef as PbColumnDef, CreateTableExpr, ResponseHeader,
-        Status as PbStatus,
-    };
-    use chrono::DateTime;
-    use client::client_manager::DatanodeClients;
-    use client::Client;
-    use common_grpc::channel_manager::ChannelManager;
-    use common_meta::key::TableMetadataManager;
-    use common_meta::peer::Peer;
-    use common_runtime::{Builder as RuntimeBuilder, Runtime};
-    use datatypes::prelude::ConcreteDataType;
-    use datatypes::schema::{ColumnSchema, RawSchema};
-    use servers::grpc::region_server::{RegionServerHandler, RegionServerRequestHandler};
-    use table::metadata::{RawTableMeta, TableIdent, TableType};
-    use table::requests::TableOptions;
-    use tokio::sync::mpsc;
-    use tonic::transport::Server;
-    use tower::service_fn;
+    use api::v1::{ColumnDataType, ColumnDef as PbColumnDef, CreateTableExpr};
+    use common_catalog::consts::MITO2_ENGINE;
 
     use super::*;
-    use crate::handler::{HeartbeatMailbox, Pushers};
-    use crate::sequence::Sequence;
-    use crate::service::store::kv::KvBackendAdapter;
-    use crate::service::store::memory::MemStore;
-    use crate::test_util::new_region_route;
+    use crate::procedure::utils::mock::EchoRegionServer;
+    use crate::procedure::utils::test_data;
 
     fn create_table_procedure() -> CreateTableProcedure {
         let create_table_expr = CreateTableExpr {
@@ -440,80 +363,11 @@ mod test {
             engine: MITO2_ENGINE.to_string(),
         };
 
-        let raw_table_info = RawTableInfo {
-            ident: TableIdent::new(42),
-            name: "my_table".to_string(),
-            desc: Some("blabla".to_string()),
-            catalog_name: "my_catalog".to_string(),
-            schema_name: "my_schema".to_string(),
-            meta: RawTableMeta {
-                schema: RawSchema {
-                    column_schemas: vec![
-                        ColumnSchema::new(
-                            "ts".to_string(),
-                            ConcreteDataType::timestamp_millisecond_datatype(),
-                            false,
-                        ),
-                        ColumnSchema::new(
-                            "my_tag1".to_string(),
-                            ConcreteDataType::string_datatype(),
-                            true,
-                        ),
-                        ColumnSchema::new(
-                            "my_tag2".to_string(),
-                            ConcreteDataType::string_datatype(),
-                            true,
-                        ),
-                        ColumnSchema::new(
-                            "my_field_column".to_string(),
-                            ConcreteDataType::int32_datatype(),
-                            true,
-                        ),
-                    ],
-                    timestamp_index: Some(0),
-                    version: 0,
-                },
-                primary_key_indices: vec![1, 2],
-                value_indices: vec![2],
-                engine: MITO2_ENGINE.to_string(),
-                next_column_id: 3,
-                region_numbers: vec![1, 2, 3],
-                engine_options: HashMap::new(),
-                options: TableOptions::default(),
-                created_on: DateTime::default(),
-                partition_key_indices: vec![],
-            },
-            table_type: TableType::Base,
-        };
-
-        let peers = vec![
-            Peer::new(1, "127.0.0.1:4001"),
-            Peer::new(2, "127.0.0.1:4002"),
-            Peer::new(3, "127.0.0.1:4003"),
-        ];
-        let region_routes = vec![
-            new_region_route(1, &peers, 3),
-            new_region_route(2, &peers, 2),
-            new_region_route(3, &peers, 1),
-        ];
-
-        let kv_store = Arc::new(MemStore::new());
-
-        let mailbox_sequence = Sequence::new("test_heartbeat_mailbox", 0, 100, kv_store.clone());
-        let mailbox = HeartbeatMailbox::create(Pushers::default(), mailbox_sequence);
-
         CreateTableProcedure::new(
             1,
-            CreateTableTask::new(create_table_expr, vec![], raw_table_info),
-            region_routes,
-            DdlContext {
-                datanode_clients: Arc::new(DatanodeClients::default()),
-                mailbox,
-                server_addr: "127.0.0.1:4321".to_string(),
-                table_metadata_manager: Arc::new(TableMetadataManager::new(
-                    KvBackendAdapter::wrap(kv_store),
-                )),
-            },
+            CreateTableTask::new(create_table_expr, vec![], test_data::new_table_info()),
+            test_data::new_region_routes(),
+            test_data::new_ddl_context(),
         )
     }
 
@@ -562,85 +416,18 @@ mod test {
             ],
             primary_key: vec![2, 1],
             create_if_not_exists: true,
-            region_dir: "".to_string(),
+            catalog: String::new(),
+            schema: String::new(),
             options: HashMap::new(),
         };
         assert_eq!(template, expected);
-    }
-
-    #[derive(Clone)]
-    struct TestingRegionServerHandler {
-        runtime: Arc<Runtime>,
-        create_region_notifier: mpsc::Sender<RegionId>,
-    }
-
-    impl TestingRegionServerHandler {
-        fn new(create_region_notifier: mpsc::Sender<RegionId>) -> Self {
-            Self {
-                runtime: Arc::new(RuntimeBuilder::default().worker_threads(2).build().unwrap()),
-                create_region_notifier,
-            }
-        }
-
-        fn new_client(&self, datanode: &Peer) -> Client {
-            let (client, server) = tokio::io::duplex(1024);
-
-            let handler =
-                RegionServerRequestHandler::new(Arc::new(self.clone()), self.runtime.clone());
-
-            tokio::spawn(async move {
-                Server::builder()
-                    .add_service(RegionServer::new(handler))
-                    .serve_with_incoming(futures::stream::iter(vec![Ok::<_, std::io::Error>(
-                        server,
-                    )]))
-                    .await
-            });
-
-            let channel_manager = ChannelManager::new();
-            let mut client = Some(client);
-            channel_manager
-                .reset_with_connector(
-                    datanode.addr.clone(),
-                    service_fn(move |_| {
-                        let client = client.take().unwrap();
-                        async move { Ok::<_, std::io::Error>(client) }
-                    }),
-                )
-                .unwrap();
-            Client::with_manager_and_urls(channel_manager, vec![datanode.addr.clone()])
-        }
-    }
-
-    #[async_trait]
-    impl RegionServerHandler for TestingRegionServerHandler {
-        async fn handle(&self, request: PbRegionRequest) -> servers::error::Result<RegionResponse> {
-            let PbRegionRequest::Create(request) = request else {
-                unreachable!()
-            };
-            let region_id = request.region_id.into();
-
-            self.create_region_notifier.send(region_id).await.unwrap();
-
-            Ok(RegionResponse {
-                header: Some(ResponseHeader {
-                    status: Some(PbStatus {
-                        status_code: 0,
-                        err_msg: "".to_string(),
-                    }),
-                }),
-                affected_rows: 0,
-            })
-        }
     }
 
     #[tokio::test]
     async fn test_on_datanode_create_regions() {
         let mut procedure = create_table_procedure();
 
-        let (tx, mut rx) = mpsc::channel(10);
-
-        let region_server = TestingRegionServerHandler::new(tx);
+        let (region_server, mut rx) = EchoRegionServer::new();
 
         let datanodes = find_leaders(&procedure.creator.data.region_routes);
         for peer in datanodes {
@@ -661,7 +448,9 @@ mod test {
             let expected_created_regions = expected_created_regions.clone();
             let mut max_recv = expected_created_regions.lock().unwrap().len();
             async move {
-                while let Some(region_id) = rx.recv().await {
+                while let Some(PbRegionRequest::Create(request)) = rx.recv().await {
+                    let region_id = RegionId::from_u64(request.region_id);
+
                     expected_created_regions.lock().unwrap().remove(&region_id);
 
                     max_recv -= 1;

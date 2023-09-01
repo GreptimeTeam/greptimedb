@@ -38,11 +38,12 @@ use tokio::sync::{mpsc, Mutex};
 
 use crate::config::MitoConfig;
 use crate::error::{JoinSnafu, Result, WorkerStoppedSnafu};
-use crate::flush::{FlushScheduler, WriteBufferManagerRef};
+use crate::flush::{FlushScheduler, WriteBufferManagerImpl, WriteBufferManagerRef};
 use crate::memtable::time_series::TimeSeriesMemtableBuilder;
 use crate::memtable::MemtableBuilderRef;
 use crate::region::{MitoRegionRef, RegionMap, RegionMapRef};
 use crate::request::{BackgroundNotify, DdlRequest, SenderDdlRequest, WorkerRequest};
+use crate::schedule::scheduler::{LocalScheduler, SchedulerRef};
 use crate::wal::Wal;
 
 /// Identifier for a worker.
@@ -87,9 +88,9 @@ pub(crate) const DROPPING_MARKER_FILE: &str = ".dropping";
 /// Chan0 --> Buffer0
 /// Chan1 --> WorkerThread1
 /// ```
-#[derive(Debug)]
 pub(crate) struct WorkerGroup {
     workers: Vec<RegionWorker>,
+    scheduler: SchedulerRef,
 }
 
 impl WorkerGroup {
@@ -100,24 +101,27 @@ impl WorkerGroup {
         config: MitoConfig,
         log_store: Arc<S>,
         object_store: ObjectStore,
-        write_buffer_manager: WriteBufferManagerRef,
     ) -> WorkerGroup {
         assert!(config.num_workers.is_power_of_two());
         let config = Arc::new(config);
+        let write_buffer_manager = Arc::new(WriteBufferManagerImpl {});
+        let scheduler = Arc::new(LocalScheduler::new(config.max_background_jobs));
 
         let workers = (0..config.num_workers)
             .map(|id| {
-                RegionWorker::start(
-                    id as WorkerId,
-                    config.clone(),
-                    log_store.clone(),
-                    object_store.clone(),
-                    write_buffer_manager.clone(),
-                )
+                WorkerStarter {
+                    id: id as WorkerId,
+                    config: config.clone(),
+                    log_store: log_store.clone(),
+                    object_store: object_store.clone(),
+                    write_buffer_manager: write_buffer_manager.clone(),
+                    scheduler: scheduler.clone(),
+                }
+                .start()
             })
             .collect();
 
-        WorkerGroup { workers }
+        WorkerGroup { workers, scheduler }
     }
 
     /// Stop the worker group.
@@ -125,6 +129,8 @@ impl WorkerGroup {
         info!("Stop region worker group");
 
         try_join_all(self.workers.iter().map(|worker| worker.stop())).await?;
+
+        self.scheduler.stop(true).await?;
 
         Ok(())
     }
@@ -165,8 +171,52 @@ fn value_to_index(value: usize, num_workers: usize) -> usize {
     value & (num_workers - 1)
 }
 
+/// Worker start config.
+struct WorkerStarter<S> {
+    id: WorkerId,
+    config: Arc<MitoConfig>,
+    log_store: Arc<S>,
+    object_store: ObjectStore,
+    write_buffer_manager: WriteBufferManagerRef,
+    scheduler: SchedulerRef,
+}
+
+impl<S: LogStore> WorkerStarter<S> {
+    /// Start a region worker and its background thread.
+    fn start(self) -> RegionWorker {
+        let regions = Arc::new(RegionMap::default());
+        let (sender, receiver) = mpsc::channel(self.config.worker_channel_size);
+
+        let running = Arc::new(AtomicBool::new(true));
+        let mut worker_thread = RegionWorkerLoop {
+            id: self.id,
+            config: self.config,
+            regions: regions.clone(),
+            dropping_regions: Arc::new(RegionMap::default()),
+            receiver,
+            wal: Wal::new(self.log_store),
+            object_store: self.object_store,
+            running: running.clone(),
+            memtable_builder: Arc::new(TimeSeriesMemtableBuilder::default()),
+            scheduler: self.scheduler.clone(),
+            write_buffer_manager: self.write_buffer_manager,
+            flush_scheduler: FlushScheduler::new(self.scheduler),
+        };
+        let handle = common_runtime::spawn_write(async move {
+            worker_thread.run().await;
+        });
+
+        RegionWorker {
+            id: self.id,
+            regions,
+            sender,
+            handle: Mutex::new(Some(handle)),
+            running,
+        }
+    }
+}
+
 /// Worker to write and alter regions bound to it.
-#[derive(Debug)]
 pub(crate) struct RegionWorker {
     /// Id of the worker.
     id: WorkerId,
@@ -181,45 +231,6 @@ pub(crate) struct RegionWorker {
 }
 
 impl RegionWorker {
-    /// Start a region worker and its background thread.
-    fn start<S: LogStore>(
-        id: WorkerId,
-        config: Arc<MitoConfig>,
-        log_store: Arc<S>,
-        object_store: ObjectStore,
-        write_buffer_manager: WriteBufferManagerRef,
-    ) -> RegionWorker {
-        let regions = Arc::new(RegionMap::default());
-        let dropping_regions = Arc::new(RegionMap::default());
-        let (sender, receiver) = mpsc::channel(config.worker_channel_size);
-
-        let running = Arc::new(AtomicBool::new(true));
-        let mut worker_thread = RegionWorkerLoop {
-            id,
-            config,
-            regions: regions.clone(),
-            dropping_regions,
-            receiver,
-            wal: Wal::new(log_store),
-            object_store,
-            running: running.clone(),
-            memtable_builder: Arc::new(TimeSeriesMemtableBuilder::default()),
-            write_buffer_manager,
-            flush_scheduler: FlushScheduler::default(),
-        };
-        let handle = common_runtime::spawn_write(async move {
-            worker_thread.run().await;
-        });
-
-        RegionWorker {
-            id,
-            regions,
-            sender,
-            handle: Mutex::new(Some(handle)),
-            running,
-        }
-    }
-
     /// Submit request to background worker thread.
     async fn submit_request(&self, request: WorkerRequest) -> Result<()> {
         ensure!(self.is_running(), WorkerStoppedSnafu { id: self.id });
@@ -307,7 +318,8 @@ struct RegionWorkerLoop<S> {
     running: Arc<AtomicBool>,
     /// Memtable builder for each region.
     memtable_builder: MemtableBuilderRef,
-
+    /// Background job scheduler.
+    scheduler: SchedulerRef,
     /// Engine write buffer manager.
     write_buffer_manager: WriteBufferManagerRef,
     /// Schedules background flush requests.

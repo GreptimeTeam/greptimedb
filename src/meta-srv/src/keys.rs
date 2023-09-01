@@ -19,7 +19,6 @@ use lazy_static::lazy_static;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
-use store_api::storage::RegionNumber;
 
 use crate::error;
 use crate::error::Result;
@@ -204,13 +203,7 @@ pub struct StatValue {
 impl StatValue {
     /// Get the latest number of regions.
     pub fn region_num(&self) -> Option<u64> {
-        for stat in self.stats.iter().rev() {
-            match stat.region_num {
-                Some(region_num) => return Some(region_num),
-                None => continue,
-            }
-        }
-        None
+        self.stats.last().map(|x| x.region_num)
     }
 }
 
@@ -248,19 +241,14 @@ impl TryFrom<Vec<u8>> for StatValue {
 pub struct InactiveNodeKey {
     pub cluster_id: u64,
     pub node_id: u64,
-    pub table_id: u32,
-    pub region_number: RegionNumber,
+    pub region_id: u64,
 }
 
 impl From<InactiveNodeKey> for Vec<u8> {
     fn from(value: InactiveNodeKey) -> Self {
         format!(
-            "{}-{}-{}-{}-{}",
-            INACTIVE_NODE_PREFIX,
-            value.cluster_id,
-            value.node_id,
-            value.table_id,
-            value.region_number
+            "{}-{}-{}-{}",
+            INACTIVE_NODE_PREFIX, value.cluster_id, value.node_id, value.region_id
         )
         .into_bytes()
     }
@@ -297,7 +285,7 @@ mod tests {
         let stat = Stat {
             cluster_id: 0,
             id: 101,
-            region_num: Some(100),
+            region_num: 100,
             ..Default::default()
         };
 
@@ -312,7 +300,7 @@ mod tests {
         let stat = stats.get(0).unwrap();
         assert_eq!(0, stat.cluster_id);
         assert_eq!(101, stat.id);
-        assert_eq!(Some(100), stat.region_num);
+        assert_eq!(100, stat.region_num);
     }
 
     #[test]
@@ -349,25 +337,25 @@ mod tests {
 
         let wrong = StatValue {
             stats: vec![Stat {
-                region_num: None,
+                region_num: 0,
                 ..Default::default()
             }],
         };
         let right = wrong.region_num();
-        assert!(right.is_none());
+        assert_eq!(Some(0), right);
 
         let stat_val = StatValue {
             stats: vec![
                 Stat {
-                    region_num: Some(1),
+                    region_num: 1,
                     ..Default::default()
                 },
                 Stat {
-                    region_num: None,
+                    region_num: 0,
                     ..Default::default()
                 },
                 Stat {
-                    region_num: Some(2),
+                    region_num: 2,
                     ..Default::default()
                 },
             ],

@@ -1,4 +1,4 @@
-CREATE TABLE integers(i INTEGER, j BIGINT TIME INDEX);
+CREATE TABLE integers(i INTEGER, j TIMESTAMP TIME INDEX);
 
 Affected Rows: 0
 
@@ -130,32 +130,32 @@ SELECT i1.i,i2.i FROM integers i1 LEFT OUTER JOIN integers i2 ON 1=1 WHERE i1.i=
 
 SELECT * FROM integers WHERE i IN ((SELECT i FROM integers)) ORDER BY i;
 
-+---+---+
-| i | j |
-+---+---+
-| 1 | 1 |
-| 2 | 2 |
-| 3 | 3 |
-+---+---+
++---+-------------------------+
+| i | j                       |
++---+-------------------------+
+| 1 | 1970-01-01T00:00:00.001 |
+| 2 | 1970-01-01T00:00:00.002 |
+| 3 | 1970-01-01T00:00:00.003 |
++---+-------------------------+
 
 SELECT * FROM integers WHERE i NOT IN ((SELECT i FROM integers WHERE i=1)) ORDER BY i;
 
-+---+---+
-| i | j |
-+---+---+
-| 2 | 2 |
-| 3 | 3 |
-|   | 4 |
-+---+---+
++---+-------------------------+
+| i | j                       |
++---+-------------------------+
+| 2 | 1970-01-01T00:00:00.002 |
+| 3 | 1970-01-01T00:00:00.003 |
+|   | 1970-01-01T00:00:00.004 |
++---+-------------------------+
 
 SELECT * FROM integers WHERE i IN ((SELECT i FROM integers)) AND i<3 ORDER BY i;
 
-+---+---+
-| i | j |
-+---+---+
-| 1 | 1 |
-| 2 | 2 |
-+---+---+
++---+-------------------------+
+| i | j                       |
++---+-------------------------+
+| 1 | 1970-01-01T00:00:00.001 |
+| 2 | 1970-01-01T00:00:00.002 |
++---+-------------------------+
 
 SELECT i1.i,i2.i FROM integers i1, integers i2 WHERE i IN ((SELECT i FROM integers)) AND i1.i=i2.i ORDER BY 1;
 
@@ -169,21 +169,21 @@ SELECT i1.i,i2.i FROM integers i1, integers i2 WHERE i IN ((SELECT i FROM intege
 
 SELECT * FROM integers i1 WHERE EXISTS(SELECT i FROM integers WHERE i=i1.i) ORDER BY i1.i;
 
-+---+---+
-| i | j |
-+---+---+
-| 1 | 1 |
-| 2 | 2 |
-| 3 | 3 |
-+---+---+
++---+-------------------------+
+| i | j                       |
++---+-------------------------+
+| 1 | 1970-01-01T00:00:00.001 |
+| 2 | 1970-01-01T00:00:00.002 |
+| 3 | 1970-01-01T00:00:00.003 |
++---+-------------------------+
 
 SELECT * FROM integers i1 WHERE NOT EXISTS(SELECT i FROM integers WHERE i=i1.i) ORDER BY i1.i;
 
-+---+---+
-| i | j |
-+---+---+
-|   | 4 |
-+---+---+
++---+-------------------------+
+| i | j                       |
++---+-------------------------+
+|   | 1970-01-01T00:00:00.004 |
++---+-------------------------+
 
 SELECT i1.i,i2.i FROM integers i1, integers i2 WHERE i1.i=(SELECT i FROM integers WHERE i1.i=i) AND i1.i=i2.i ORDER BY i1.i;
 

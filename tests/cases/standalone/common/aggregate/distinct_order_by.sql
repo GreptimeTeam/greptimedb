@@ -1,6 +1,6 @@
-CREATE TABLE integers(i BIGINT TIME INDEX);
+CREATE TABLE integers(i bigint, ts TIMESTAMP TIME INDEX);
 
-INSERT INTO integers VALUES (1), (2), (3);
+INSERT INTO integers VALUES (1, 1), (2, 2), (3, 3);
 
 SELECT DISTINCT i%2 FROM integers ORDER BY 1;
 

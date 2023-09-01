@@ -59,11 +59,11 @@ impl From<&AddColumnLocation> for Location {
         match value {
             AddColumnLocation::First => Location {
                 location_type: LocationType::First.into(),
-                after_cloumn_name: "".to_string(),
+                after_column_name: "".to_string(),
             },
             AddColumnLocation::After { column_name } => Location {
                 location_type: LocationType::After.into(),
-                after_cloumn_name: column_name.to_string(),
+                after_column_name: column_name.to_string(),
             },
         }
     }

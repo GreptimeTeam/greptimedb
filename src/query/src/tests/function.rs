@@ -48,7 +48,7 @@ pub fn create_query_engine() -> QueryEngineRef {
 
     let schema = Arc::new(Schema::new(column_schemas.clone()));
     let recordbatch = RecordBatch::new(schema, columns).unwrap();
-    let number_table = MemTable::new("numbers", recordbatch);
+    let number_table = MemTable::table("numbers", recordbatch);
     new_query_engine_with_table(number_table)
 }
 

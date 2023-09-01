@@ -23,11 +23,11 @@ use common_telemetry::metric::Timer;
 use datatypes::schema::{Schema, SchemaRef};
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
+use store_api::path_utils::table_dir;
 use store_api::storage::{
     ColumnId, CompactionStrategy, CreateOptions, EngineContext, OpenOptions,
     RegionDescriptorBuilder, RegionId, RegionNumber, StorageEngine,
 };
-use table::engine::table_dir;
 use table::metadata::{TableInfoBuilder, TableMetaBuilder, TableType};
 use table::requests::CreateTableRequest;
 use table::TableRef;

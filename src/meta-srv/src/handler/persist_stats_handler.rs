@@ -198,7 +198,7 @@ mod tests {
         let val: StatValue = kv.value.try_into().unwrap();
         // first new stat must be set in kv store immediately
         assert_eq!(1, val.stats.len());
-        assert_eq!(Some(1), val.stats[0].region_num);
+        assert_eq!(1, val.stats[0].region_num);
 
         handle_request_many_times(ctx.clone(), &handler, 10).await;
 
@@ -221,7 +221,7 @@ mod tests {
                 stat: Some(Stat {
                     cluster_id: 3,
                     id: 101,
-                    region_num: Some(i as _),
+                    region_num: i as _,
                     ..Default::default()
                 }),
                 ..Default::default()

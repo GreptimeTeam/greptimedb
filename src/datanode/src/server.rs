@@ -12,25 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::default::Default;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use common_runtime::Builder as RuntimeBuilder;
 use futures::future;
 use servers::grpc::GrpcServer;
 use servers::http::{HttpServer, HttpServerBuilder};
 use servers::metrics_handler::MetricsHandler;
-use servers::query_handler::grpc::ServerGrpcQueryHandlerAdaptor;
 use servers::server::Server;
 use snafu::ResultExt;
 
 use crate::datanode::DatanodeOptions;
 use crate::error::{
-    ParseAddrSnafu, Result, RuntimeResourceSnafu, ShutdownServerSnafu, StartServerSnafu,
-    WaitForGrpcServingSnafu,
+    ParseAddrSnafu, Result, ShutdownServerSnafu, StartServerSnafu, WaitForGrpcServingSnafu,
 };
-use crate::instance::InstanceRef;
 use crate::region_server::RegionServer;
 
 pub mod grpc;
@@ -42,38 +37,19 @@ pub struct Services {
 }
 
 impl Services {
-    pub async fn try_new(instance: InstanceRef, opts: &DatanodeOptions) -> Result<Self> {
-        // TODO(ruihang): remove database service once region server is ready.
-        let enable_region_server = option_env!("ENABLE_REGION_SERVER").is_some();
-
-        let grpc_runtime = Arc::new(
-            RuntimeBuilder::default()
-                .worker_threads(opts.rpc_runtime_size)
-                .thread_name("grpc-io-handlers")
-                .build()
-                .context(RuntimeResourceSnafu)?,
-        );
-
-        let region_server = RegionServer::new(instance.query_engine(), grpc_runtime.clone());
-        let flight_handler = if enable_region_server {
-            Some(Arc::new(region_server.clone()) as _)
-        } else {
-            None
-        };
-        let region_server_handler = if enable_region_server {
-            Some(Arc::new(region_server.clone()) as _)
-        } else {
-            None
-        };
+    pub async fn try_new(region_server: RegionServer, opts: &DatanodeOptions) -> Result<Self> {
+        let flight_handler = Some(Arc::new(region_server.clone()) as _);
+        let region_server_handler = Some(Arc::new(region_server.clone()) as _);
+        let runtime = region_server.runtime();
 
         Ok(Self {
             grpc_server: GrpcServer::new(
-                ServerGrpcQueryHandlerAdaptor::arc(instance),
+                None,
                 None,
                 flight_handler,
                 region_server_handler,
                 None,
-                grpc_runtime,
+                runtime,
             ),
             http_server: HttpServerBuilder::new(opts.http_opts.clone())
                 .with_metrics_handler(MetricsHandler)
