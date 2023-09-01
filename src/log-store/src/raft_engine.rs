@@ -20,6 +20,7 @@ use store_api::logstore::namespace::Namespace;
 use crate::error::Error;
 use crate::raft_engine::protos::logstore::{EntryImpl, NamespaceImpl};
 
+mod backend;
 pub mod log_store;
 
 pub mod protos {

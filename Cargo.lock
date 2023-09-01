@@ -4900,6 +4900,7 @@ dependencies = [
  "bytes",
  "common-base",
  "common-error",
+ "common-meta",
  "common-runtime",
  "common-telemetry",
  "common-test-util",
