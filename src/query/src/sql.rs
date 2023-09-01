@@ -475,6 +475,6 @@ mod test {
         data: Vec<VectorRef>,
     ) -> TableRef {
         let record_batch = RecordBatch::new(table_schema, data).unwrap();
-        Arc::new(MemTable::new(table_name, record_batch))
+        MemTable::table(table_name, record_batch)
     }
 }

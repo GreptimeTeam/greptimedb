@@ -55,14 +55,14 @@ impl TableEngine for MockTableEngine {
 
         let data = vec![Arc::new(StringVector::from(vec!["a", "b", "c"])) as _];
         let record_batch = RecordBatch::new(schema, data).unwrap();
-        let table: TableRef = Arc::new(MemTable::new_with_catalog(
+        let table = MemTable::new_with_catalog(
             &request.table_name,
             record_batch,
             table_id,
             request.catalog_name,
             request.schema_name,
             vec![0],
-        )) as Arc<_>;
+        );
 
         let mut tables = self.tables.write().unwrap();
         let _ = tables.insert(table_id, table.clone() as TableRef);

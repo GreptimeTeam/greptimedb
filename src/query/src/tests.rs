@@ -12,13 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
-
 use catalog::local::MemoryCatalogManager;
 use common_query::Output;
 use common_recordbatch::{util, RecordBatch};
 use session::context::QueryContext;
-use table::test_util::MemTable;
+use table::TableRef;
 
 use crate::parser::QueryLanguageParser;
 use crate::{QueryEngineFactory, QueryEngineRef};
@@ -50,8 +48,7 @@ async fn exec_selection(engine: QueryEngineRef, sql: &str) -> Vec<RecordBatch> {
     util::collect(stream).await.unwrap()
 }
 
-pub fn new_query_engine_with_table(table: MemTable) -> QueryEngineRef {
-    let table = Arc::new(table);
+pub fn new_query_engine_with_table(table: TableRef) -> QueryEngineRef {
     let catalog_manager = MemoryCatalogManager::new_with_table(table);
 
     QueryEngineFactory::new(catalog_manager, false).query_engine()
