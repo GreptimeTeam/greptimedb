@@ -14,11 +14,10 @@
 
 use std::vec;
 
-use api::v1::meta::MailboxMessage;
 use async_trait::async_trait;
 use client::Database;
+use common_meta::cache_invalidator::Context;
 use common_meta::ident::TableIdent;
-use common_meta::instruction::Instruction;
 use common_meta::key::table_info::TableInfoValue;
 use common_meta::key::table_name::TableNameKey;
 use common_meta::key::table_route::TableRouteValue;
@@ -40,7 +39,6 @@ use table::requests::{AlterKind, AlterTableRequest};
 use crate::ddl::DdlContext;
 use crate::error::{self, Result, TableMetadataManagerSnafu};
 use crate::procedure::utils::handle_request_datanode_error;
-use crate::service::mailbox::BroadcastChannel;
 
 // TODO(weny): removes in following PRs.
 #[allow(dead_code)]
@@ -265,23 +263,18 @@ impl AlterTableProcedure {
             table_id: self.data.table_id(),
             engine: self.data.table_info().meta.engine.to_string(),
         };
-        let instruction = Instruction::InvalidateTableCache(table_ident);
-
-        let msg = &MailboxMessage::json_message(
-            "Invalidate table cache by alter table procedure",
-            &format!("Metasrv@{}", self.context.server_addr),
-            "Frontend broadcast",
-            common_time::util::current_time_millis(),
-            &instruction,
-        )
-        .with_context(|_| error::SerializeToJsonSnafu {
-            input: instruction.to_string(),
-        })?;
 
         self.context
-            .mailbox
-            .broadcast(&BroadcastChannel::Frontend, msg)
-            .await?;
+            .cache_invalidator
+            .invalidate_table(
+                &Context {
+                    subject: Some("Invalidate table cache by alter table procedure".to_string()),
+                },
+                table_ident,
+            )
+            .await
+            .context(error::InvalidateTableCacheSnafu)?;
+
         self.data.state = AlterTableState::DatanodeAlterTable;
         Ok(Status::executing(true))
     }
