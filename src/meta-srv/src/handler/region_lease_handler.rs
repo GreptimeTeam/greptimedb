@@ -49,35 +49,36 @@ impl HeartbeatHandler for RegionLeaseHandler {
 
         let mut table_region_leases = HashMap::new();
         stat.region_stats.iter().for_each(|region_stat| {
-            let table_ident = region_stat.table_ident.clone();
+            let region_id = RegionId::from(region_stat.id);
             table_region_leases
-                .entry(table_ident)
+                .entry(region_id.table_id())
                 .or_insert_with(Vec::new)
-                .push(RegionId::from(region_stat.id).region_number());
+                .push(region_id.region_number());
         });
 
         let inactive_node_manager = InactiveNodeManager::new(&ctx.in_memory);
-        for (table_ident, region_numbers) in table_region_leases.iter_mut() {
+        for (table_id, region_numbers) in table_region_leases.iter_mut() {
+            // TODO(jeremy): refactor this, use region_id
             inactive_node_manager
-                .retain_active_regions(
-                    stat.cluster_id,
-                    stat.id,
-                    table_ident.table_id,
-                    region_numbers,
-                )
+                .retain_active_regions(stat.cluster_id, stat.id, *table_id, region_numbers)
                 .await?;
         }
 
-        acc.region_leases = table_region_leases
+        let region_ids = table_region_leases
             .into_iter()
-            .filter(|(_, regions)| !regions.is_empty()) // filter out empty region_numbers
-            .map(|(table_ident, regions)| RegionLease {
-                table_ident: Some(table_ident.into()),
-                regions,
-                duration_since_epoch: req.duration_since_epoch,
-                lease_seconds: REGION_LEASE_SECONDS,
+            .filter(|(_, region_nums)| !region_nums.is_empty())
+            .flat_map(|(table_id, region_nums)| {
+                region_nums
+                    .into_iter()
+                    .map(move |region_num| RegionId::new(table_id, region_num).as_u64())
             })
             .collect();
+
+        acc.region_lease = Some(RegionLease {
+            region_ids,
+            duration_since_epoch: req.duration_since_epoch,
+            lease_seconds: REGION_LEASE_SECONDS,
+        });
 
         Ok(())
     }
@@ -87,7 +88,6 @@ impl HeartbeatHandler for RegionLeaseHandler {
 mod test {
     use std::sync::Arc;
 
-    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_meta::ident::TableIdent;
     use common_meta::key::TableMetadataManager;
     use common_meta::RegionIdent;
@@ -119,14 +119,6 @@ mod test {
         )
         .await;
 
-        let table_ident = TableIdent {
-            catalog: DEFAULT_CATALOG_NAME.to_string(),
-            schema: DEFAULT_SCHEMA_NAME.to_string(),
-            table: table_name.to_string(),
-            table_id,
-            engine: "mito".to_string(),
-        };
-
         let req = HeartbeatRequest {
             duration_since_epoch: 1234,
             ..Default::default()
@@ -141,13 +133,6 @@ mod test {
             let region_id = RegionId::new(table_id, region_number);
             RegionStat {
                 id: region_id.as_u64(),
-                table_ident: TableIdent {
-                    catalog: DEFAULT_CATALOG_NAME.to_string(),
-                    schema: DEFAULT_SCHEMA_NAME.to_string(),
-                    table: table_name.to_string(),
-                    table_id: 1,
-                    engine: "mito".to_string(),
-                },
                 ..Default::default()
             }
         };
@@ -186,10 +171,9 @@ mod test {
 
         RegionLeaseHandler.handle(&req, ctx, acc).await.unwrap();
 
-        assert_eq!(acc.region_leases.len(), 1);
-        let lease = acc.region_leases.remove(0);
-        assert_eq!(lease.table_ident.unwrap(), table_ident.into());
-        assert_eq!(lease.regions, vec![2]);
+        assert!(acc.region_lease.is_some());
+        let lease = acc.region_lease.as_ref().unwrap();
+        assert_eq!(lease.region_ids, vec![RegionId::new(table_id, 2).as_u64()]);
         assert_eq!(lease.duration_since_epoch, 1234);
         assert_eq!(lease.lease_seconds, REGION_LEASE_SECONDS);
     }
