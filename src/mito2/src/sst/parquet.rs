@@ -24,6 +24,8 @@ use crate::sst::file::FileTimeRange;
 
 /// Key of metadata in parquet SST.
 pub const PARQUET_METADATA_KEY: &str = "greptime:metadata";
+const DEFAULT_WRITE_BUFFER_SIZE: ReadableSize = ReadableSize::mb(8);
+const DEFAULT_ROW_GROUP_SIZE: usize = 100000;
 
 /// Parquet write options.
 #[derive(Debug)]
@@ -32,6 +34,15 @@ pub struct WriteOptions {
     pub write_buffer_size: ReadableSize,
     /// Row group size.
     pub row_group_size: usize,
+}
+
+impl Default for WriteOptions {
+    fn default() -> Self {
+        WriteOptions {
+            write_buffer_size: DEFAULT_WRITE_BUFFER_SIZE,
+            row_group_size: DEFAULT_ROW_GROUP_SIZE,
+        }
+    }
 }
 
 /// Parquet SST info returned by the writer.
