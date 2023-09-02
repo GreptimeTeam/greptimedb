@@ -98,20 +98,20 @@ impl<'a> InactiveNodeManager<'a> {
         }
 
         let inactive_keys = kvs.into_iter().map(|kv| kv.key).collect::<HashSet<_>>();
-        let mut inactive_region_ids = HashSet::new();
-        let active_region_ids = key_region_ids
-            .into_iter()
-            .filter(|(key, region_id)| {
-                let is_active = !inactive_keys.contains(key);
-                if !is_active {
-                    inactive_region_ids.insert(*region_id);
-                }
-                is_active
-            })
-            .map(|(_, region_id)| region_id)
-            .collect::<Vec<_>>();
-        *region_ids = active_region_ids;
+        let (active_region_ids, inactive_region_ids): (Vec<Option<u64>>, Vec<Option<u64>>) =
+            key_region_ids
+                .into_iter()
+                .map(|(key, region_id)| {
+                    let is_active = !inactive_keys.contains(&key);
+                    if is_active {
+                        (Some(region_id), None)
+                    } else {
+                        (None, Some(region_id))
+                    }
+                })
+                .unzip();
+        *region_ids = active_region_ids.into_iter().flatten().collect();
 
-        Ok(inactive_region_ids)
+        Ok(inactive_region_ids.into_iter().flatten().collect())
     }
 }
