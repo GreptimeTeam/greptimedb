@@ -20,9 +20,9 @@ use std::{fs, path};
 use api::v1::meta::Role;
 use catalog::remote::region_alive_keeper::RegionAliveKeepers;
 use catalog::remote::{CachedMetaKvBackend, RemoteCatalogManager};
-use catalog::{CatalogManager, CatalogManagerRef, RegisterTableRequest};
+use catalog::CatalogManagerRef;
 use common_base::Plugins;
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID};
+use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_error::ext::BoxedError;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
@@ -54,7 +54,6 @@ use store_api::path_utils::{CLUSTER_DIR, WAL_DIR};
 use table::engine::manager::{MemoryTableEngineManager, TableEngineManagerRef};
 use table::engine::{TableEngine, TableEngineProcedureRef};
 use table::requests::FlushTableRequest;
-use table::table::numbers::NumbersTable;
 use table::table::TableIdProviderRef;
 
 use crate::datanode::{DatanodeOptions, ObjectStoreConfig, ProcedureConfig, WalConfig};
@@ -203,39 +202,17 @@ impl Instance {
         // create remote catalog manager
         let (catalog_manager, table_id_provider, region_alive_keepers) = match opts.mode {
             Mode::Standalone => {
-                if opts.enable_memory_catalog {
-                    let catalog = catalog::local::MemoryCatalogManager::with_default_setup();
-                    let table = NumbersTable::table(MIN_USER_TABLE_ID);
-
-                    let _ = catalog
-                        .register_table(RegisterTableRequest {
-                            table_id: MIN_USER_TABLE_ID,
-                            table_name: table.table_info().name.to_string(),
-                            table,
-                            catalog: DEFAULT_CATALOG_NAME.to_string(),
-                            schema: DEFAULT_SCHEMA_NAME.to_string(),
-                        })
+                let catalog = Arc::new(
+                    catalog::local::LocalCatalogManager::try_new(engine_manager.clone())
                         .await
-                        .expect("Failed to register numbers");
+                        .context(CatalogSnafu)?,
+                );
 
-                    (
-                        catalog.clone() as CatalogManagerRef,
-                        Some(catalog as TableIdProviderRef),
-                        None,
-                    )
-                } else {
-                    let catalog = Arc::new(
-                        catalog::local::LocalCatalogManager::try_new(engine_manager.clone())
-                            .await
-                            .context(CatalogSnafu)?,
-                    );
-
-                    (
-                        catalog.clone() as CatalogManagerRef,
-                        Some(catalog as TableIdProviderRef),
-                        None,
-                    )
-                }
+                (
+                    catalog.clone() as CatalogManagerRef,
+                    Some(catalog as TableIdProviderRef),
+                    None,
+                )
             }
 
             Mode::Distributed => {
@@ -273,9 +250,12 @@ impl Instance {
             plugins,
         );
         let query_engine = factory.query_engine();
-        let procedure_manager =
-            create_procedure_manager(opts.node_id.unwrap_or(0), &opts.procedure, object_store)
-                .await?;
+        let procedure_manager = create_procedure_manager(
+            opts.node_id.unwrap_or(0),
+            &ProcedureConfig::default(),
+            object_store,
+        )
+        .await?;
         let sql_handler = SqlHandler::new(
             engine_manager.clone(),
             catalog_manager.clone(),

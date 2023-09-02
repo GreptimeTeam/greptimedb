@@ -25,9 +25,7 @@ use table::engine::{EngineContext, TableEngineRef};
 use table::requests::{CreateTableRequest, TableOptions};
 use table::TableRef;
 
-use crate::datanode::{
-    DatanodeOptions, FileConfig, ObjectStoreConfig, ProcedureConfig, StorageConfig, WalConfig,
-};
+use crate::datanode::{DatanodeOptions, FileConfig, ObjectStoreConfig, StorageConfig, WalConfig};
 use crate::error::{CreateTableSnafu, Result};
 use crate::heartbeat::HeartbeatTask;
 use crate::instance::{Instance, InstanceRef};
@@ -79,7 +77,6 @@ fn create_tmp_dir_and_datanode_opts(name: &str) -> (DatanodeOptions, TestGuard) 
             ..Default::default()
         },
         mode: Mode::Standalone,
-        procedure: ProcedureConfig::default(),
         ..Default::default()
     };
     (

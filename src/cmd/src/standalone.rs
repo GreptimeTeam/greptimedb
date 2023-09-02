@@ -81,7 +81,6 @@ impl SubCommand {
 #[serde(default)]
 pub struct StandaloneOptions {
     pub mode: Mode,
-    pub enable_memory_catalog: bool,
     pub enable_telemetry: bool,
     pub http_options: Option<HttpOptions>,
     pub grpc_options: Option<GrpcOptions>,
@@ -100,7 +99,6 @@ impl Default for StandaloneOptions {
     fn default() -> Self {
         Self {
             mode: Mode::Standalone,
-            enable_memory_catalog: false,
             enable_telemetry: true,
             http_options: Some(HttpOptions::default()),
             grpc_options: Some(GrpcOptions::default()),
@@ -136,11 +134,9 @@ impl StandaloneOptions {
 
     fn datanode_options(self) -> DatanodeOptions {
         DatanodeOptions {
-            enable_memory_catalog: self.enable_memory_catalog,
             enable_telemetry: self.enable_telemetry,
             wal: self.wal,
             storage: self.storage,
-            procedure: self.procedure,
             ..Default::default()
         }
     }
@@ -193,8 +189,6 @@ struct StartCommand {
     influxdb_enable: bool,
     #[clap(short, long)]
     config_file: Option<String>,
-    #[clap(short = 'm', long = "memory-catalog")]
-    enable_memory_catalog: bool,
     #[clap(long)]
     tls_mode: Option<TlsMode>,
     #[clap(long)]
@@ -214,8 +208,6 @@ impl StartCommand {
             self.env_prefix.as_ref(),
             None,
         )?;
-
-        opts.enable_memory_catalog = self.enable_memory_catalog;
 
         opts.mode = Mode::Standalone;
 

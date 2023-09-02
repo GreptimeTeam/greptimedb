@@ -1,7 +1,5 @@
 # Node running mode, see `standalone.example.toml`.
 mode = "distributed"
-# Whether to use in-memory catalog, see `standalone.example.toml`.
-enable_memory_catalog = false
 # The datanode identifier, should be unique.
 node_id = 42
 # gRPC server address, "127.0.0.1:3001" by default.

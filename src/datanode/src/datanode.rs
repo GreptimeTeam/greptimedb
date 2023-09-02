@@ -360,7 +360,6 @@ impl From<&DatanodeOptions> for StorageEngineConfig {
 #[serde(default)]
 pub struct DatanodeOptions {
     pub mode: Mode,
-    pub enable_memory_catalog: bool,
     pub node_id: Option<u64>,
     pub rpc_addr: String,
     pub rpc_hostname: Option<String>,
@@ -370,7 +369,6 @@ pub struct DatanodeOptions {
     pub meta_client_options: Option<MetaClientOptions>,
     pub wal: WalConfig,
     pub storage: StorageConfig,
-    pub procedure: ProcedureConfig,
     pub logging: LoggingOptions,
     pub enable_telemetry: bool,
 }
@@ -379,7 +377,6 @@ impl Default for DatanodeOptions {
     fn default() -> Self {
         Self {
             mode: Mode::Standalone,
-            enable_memory_catalog: false,
             node_id: None,
             rpc_addr: "127.0.0.1:3001".to_string(),
             rpc_hostname: None,
@@ -388,7 +385,6 @@ impl Default for DatanodeOptions {
             meta_client_options: None,
             wal: WalConfig::default(),
             storage: StorageConfig::default(),
-            procedure: ProcedureConfig::default(),
             logging: LoggingOptions::default(),
             heartbeat: HeartbeatOptions::default(),
             enable_telemetry: true,
