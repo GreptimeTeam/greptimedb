@@ -21,9 +21,43 @@ use snafu::{Location, Snafu};
 use store_api::storage::RegionNumber;
 use table::metadata::TableId;
 
+use crate::peer::Peer;
+
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
+    #[snafu(display("Failed to convert RawTableInfo into TableInfo: {}", source))]
+    ConvertRawTableInfo {
+        location: Location,
+        source: datatypes::Error,
+    },
+
+    #[snafu(display("Primary key '{key}' not found when creating region request, at {location}"))]
+    PrimaryKeyNotFound { key: String, location: Location },
+
+    #[snafu(display(
+        "Failed to build table meta for table: {}, source: {}",
+        table_name,
+        source
+    ))]
+    BuildTableMeta {
+        table_name: String,
+        source: table::metadata::TableMetaBuilderError,
+        location: Location,
+    },
+
+    #[snafu(display("Table occurs error, source: {}", source))]
+    Table {
+        location: Location,
+        source: table::error::Error,
+    },
+
+    #[snafu(display("Table route not found: {}", table_name))]
+    TableRouteNotFound {
+        table_name: String,
+        location: Location,
+    },
+
     #[snafu(display("Failed to decode protobuf, source: {}", source))]
     DecodeProto {
         location: Location,
@@ -77,9 +111,9 @@ pub enum Error {
     #[snafu(display("Unexpected: {err_msg}"))]
     Unexpected { err_msg: String, location: Location },
 
-    #[snafu(display("Table already exists, table_id: {}", table_id))]
+    #[snafu(display("Table already exists, table: {}", table_name))]
     TableAlreadyExists {
-        table_id: TableId,
+        table_name: String,
         location: Location,
     },
 
@@ -99,8 +133,8 @@ pub enum Error {
         source: Utf8Error,
     },
 
-    #[snafu(display("Table does not exist, table_name: {}", table_name))]
-    TableNotExist {
+    #[snafu(display("Table nod found, table: {}", table_name))]
+    TableNotFound {
         table_name: String,
         location: Location,
     },
@@ -163,6 +197,13 @@ pub enum Error {
         source: BoxedError,
     },
 
+    #[snafu(display("Failed to operate on datanode: {}, source: {}", peer, source))]
+    OperateDatanode {
+        location: Location,
+        peer: Peer,
+        source: BoxedError,
+    },
+
     #[snafu(display("Retry later, source: {}", source))]
     RetryLater { source: BoxedError },
 }
@@ -188,18 +229,26 @@ impl ErrorExt for Error {
             SendMessage { .. }
             | GetKvCache { .. }
             | CacheNotGet { .. }
-            | TableAlreadyExists { .. }
             | CatalogAlreadyExists { .. }
             | SchemaAlreadyExists { .. }
-            | TableNotExist { .. }
             | RenameTable { .. } => StatusCode::Internal,
+
+            PrimaryKeyNotFound { .. } => StatusCode::InvalidArguments,
+
+            TableNotFound { .. } => StatusCode::TableNotFound,
+            TableAlreadyExists { .. } => StatusCode::TableAlreadyExists,
 
             EncodeJson { .. }
             | DecodeJson { .. }
             | PayloadNotExist { .. }
             | ConvertRawKey { .. }
-            | DecodeProto { .. } => StatusCode::Unexpected,
+            | DecodeProto { .. }
+            | BuildTableMeta { .. }
+            | TableRouteNotFound { .. }
+            | ConvertRawTableInfo { .. } => StatusCode::Unexpected,
 
+            OperateDatanode { source, .. } => source.status_code(),
+            Table { source, .. } => source.status_code(),
             RetryLater { source, .. } => source.status_code(),
             OperateRegion { source, .. } => source.status_code(),
             ExecuteDdl { source, .. } => source.status_code(),

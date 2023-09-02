@@ -12,57 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_error::ext::BoxedError;
-use common_meta::peer::Peer;
-use common_procedure::error::Error as ProcedureError;
-use snafu::{location, Location};
-
-use crate::error::{self, Error};
-
-pub fn handle_request_datanode_error(datanode: Peer) -> impl FnOnce(client::error::Error) -> Error {
-    move |err| {
-        if matches!(err, client::error::Error::FlightGet { .. }) {
-            error::RetryLaterSnafu {
-                reason: format!("Failed to execute operation on datanode, source: {}", err),
-            }
-            .build()
-        } else {
-            error::Error::RequestDatanode {
-                location: location!(),
-                peer: datanode,
-                source: err,
-            }
-        }
-    }
-}
-
-pub fn handle_operate_region_error(
-    datanode: Peer,
-) -> impl FnOnce(common_meta::error::Error) -> Error {
-    move |err| {
-        if matches!(err, common_meta::error::Error::RetryLater { .. }) {
-            error::RetryLaterSnafu {
-                reason: format!("Failed to execute operation on datanode, source: {}", err),
-            }
-            .build()
-        } else {
-            error::Error::OperateRegion {
-                location: location!(),
-                peer: datanode,
-                source: BoxedError::new(err),
-            }
-        }
-    }
-}
-
-pub fn handle_retry_error(e: Error) -> ProcedureError {
-    if matches!(e, error::Error::RetryLater { .. }) {
-        ProcedureError::retry_later(e)
-    } else {
-        ProcedureError::external(e)
-    }
-}
-
 #[cfg(test)]
 pub mod mock {
     use std::io::Error;
@@ -157,6 +106,7 @@ pub mod test_data {
     use chrono::DateTime;
     use client::client_manager::DatanodeClients;
     use common_catalog::consts::MITO2_ENGINE;
+    use common_meta::ddl::DdlContext;
     use common_meta::key::TableMetadataManager;
     use common_meta::peer::Peer;
     use common_meta::rpc::router::RegionRoute;
@@ -166,7 +116,6 @@ pub mod test_data {
     use table::requests::TableOptions;
 
     use crate::cache_invalidator::MetasrvCacheInvalidator;
-    use crate::ddl::DdlContext;
     use crate::handler::{HeartbeatMailbox, Pushers};
     use crate::metasrv::MetasrvInfo;
     use crate::sequence::Sequence;
@@ -244,7 +193,6 @@ pub mod test_data {
         let kv_backend = KvBackendAdapter::wrap(kv_store);
         let clients = Arc::new(DatanodeClients::default());
         DdlContext {
-            datanode_clients: clients.clone(),
             datanode_manager: clients,
             cache_invalidator: Arc::new(MetasrvCacheInvalidator::new(
                 mailbox,

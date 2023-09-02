@@ -64,29 +64,6 @@ pub enum Error {
         source: common_grpc_expr::error::Error,
     },
 
-    #[snafu(display(
-        "Failed to build table meta for table: {}, source: {}",
-        table_name,
-        source
-    ))]
-    BuildTableMeta {
-        table_name: String,
-        source: table::metadata::TableMetaBuilderError,
-        location: Location,
-    },
-
-    #[snafu(display("Table occurs error, source: {}", source))]
-    Table {
-        location: Location,
-        source: table::error::Error,
-    },
-
-    #[snafu(display("Failed to convert RawTableInfo into TableInfo: {}", source))]
-    ConvertRawTableInfo {
-        location: Location,
-        source: datatypes::Error,
-    },
-
     #[snafu(display("Failed to execute transaction: {}", msg))]
     Txn { location: Location, msg: String },
 
@@ -529,9 +506,6 @@ pub enum Error {
         operation: String,
         location: Location,
     },
-
-    #[snafu(display("Primary key '{key}' not found when creating region request, at {location}"))]
-    PrimaryKeyNotFound { key: String, location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -586,7 +560,6 @@ impl ErrorExt for Error {
             | Error::UnsupportedSelectorType { .. }
             | Error::InvalidArguments { .. }
             | Error::InvalidHeartbeatRequest { .. }
-            | Error::PrimaryKeyNotFound { .. }
             | Error::TooManyPartitions { .. } => StatusCode::InvalidArguments,
             Error::LeaseKeyFromUtf8 { .. }
             | Error::LeaseValueFromUtf8 { .. }
@@ -604,12 +577,9 @@ impl ErrorExt for Error {
             | Error::UnexpectedInstructionReply { .. }
             | Error::Unexpected { .. }
             | Error::Txn { .. }
-            | Error::TableIdChanged { .. }
-            | Error::ConvertRawTableInfo { .. }
-            | Error::BuildTableMeta { .. } => StatusCode::Unexpected,
+            | Error::TableIdChanged { .. } => StatusCode::Unexpected,
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
             Error::InvalidateTableCache { source, .. } => source.status_code(),
-            Error::Table { source, .. } => source.status_code(),
             Error::RequestDatanode { source, .. } => source.status_code(),
             Error::InvalidCatalogValue { source, .. } => source.status_code(),
             Error::RecoverProcedure { source, .. }
