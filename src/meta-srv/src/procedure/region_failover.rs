@@ -49,7 +49,6 @@ use crate::service::mailbox::MailboxRef;
 use crate::service::store::kv::ResettableKvStoreRef;
 
 const OPEN_REGION_MESSAGE_TIMEOUT: Duration = Duration::from_secs(30);
-const CLOSE_REGION_MESSAGE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// A key for the preventing running multiple failover procedures for the same region.
 #[derive(PartialEq, Eq, Hash, Clone)]
@@ -770,7 +769,7 @@ mod tests {
         let result = procedure.execute(&ctx).await;
         assert!(matches!(result, Ok(Status::Executing { persist: true })));
         assert_eq!(
-            r#"{"region_failover_state":"DeactivateRegion","candidate":{"id":42,"addr":""},"region_lease_expiry_seconds":40}"#,
+            r#"{"region_failover_state":"DeactivateRegion","candidate":{"id":42,"addr":""},"region_lease_expiry_seconds":20}"#,
             serde_json::to_string(&procedure.node.state).unwrap()
         );
     }

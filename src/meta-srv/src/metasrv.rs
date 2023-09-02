@@ -45,7 +45,12 @@ use crate::sequence::SequenceRef;
 use crate::service::mailbox::MailboxRef;
 use crate::service::store::kv::{KvStoreRef, ResettableKvStoreRef};
 pub const TABLE_ID_SEQ: &str = "table_id";
-const METASRV_HOME: &str = "/tmp/metasrv";
+pub const METASRV_HOME: &str = "/tmp/metasrv";
+
+/// The lease seconds of a region. It's set by two default heartbeat intervals (5 second × 2) plus
+/// two roundtrip time (2 second × 2 × 2), plus some extra buffer (2 second).
+// TODO(LFC): Make region lease seconds calculated from Datanode heartbeat configuration.
+pub const REGION_LEASE_SECONDS: u64 = 20;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]

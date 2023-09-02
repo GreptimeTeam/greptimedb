@@ -18,12 +18,7 @@ use async_trait::async_trait;
 use crate::error::Result;
 use crate::handler::{HeartbeatAccumulator, HeartbeatHandler};
 use crate::inactive_node_manager::InactiveNodeManager;
-use crate::metasrv::Context;
-
-/// The lease seconds of a region. It's set by two default heartbeat intervals (5 second × 2) plus
-/// two roundtrip time (2 second × 2 × 2), plus some extra buffer (2 second).
-// TODO(LFC): Make region lease seconds calculated from Datanode heartbeat configuration.
-pub(crate) const REGION_LEASE_SECONDS: u64 = 20;
+use crate::metasrv::{Context, REGION_LEASE_SECONDS};
 
 pub struct RegionLeaseHandler {
     region_lease_seconds: u64,
