@@ -19,7 +19,6 @@ use lazy_static::lazy_static;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
-use store_api::storage::RegionNumber;
 
 use crate::error;
 use crate::error::Result;
@@ -242,19 +241,14 @@ impl TryFrom<Vec<u8>> for StatValue {
 pub struct InactiveNodeKey {
     pub cluster_id: u64,
     pub node_id: u64,
-    pub table_id: u32,
-    pub region_number: RegionNumber,
+    pub region_id: u64,
 }
 
 impl From<InactiveNodeKey> for Vec<u8> {
     fn from(value: InactiveNodeKey) -> Self {
         format!(
-            "{}-{}-{}-{}-{}",
-            INACTIVE_NODE_PREFIX,
-            value.cluster_id,
-            value.node_id,
-            value.table_id,
-            value.region_number
+            "{}-{}-{}-{}",
+            INACTIVE_NODE_PREFIX, value.cluster_id, value.node_id, value.region_id
         )
         .into_bytes()
     }

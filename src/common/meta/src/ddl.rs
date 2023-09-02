@@ -12,7 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub const METRIC_META_TXN_REQUEST: &str = "meta.txn_request";
+use crate::cache_invalidator::CacheInvalidatorRef;
+use crate::datanode_manager::DatanodeManagerRef;
+use crate::key::TableMetadataManagerRef;
 
-pub(crate) const METRIC_META_PROCEDURE_CREATE_TABLE: &str = "meta.procedure.create_table";
-pub(crate) const METRIC_META_PROCEDURE_DROP_TABLE: &str = "meta.procedure.drop_table";
+pub mod alter_table;
+pub mod create_table;
+pub mod drop_table;
+pub mod utils;
+
+#[derive(Clone)]
+pub struct DdlContext {
+    pub datanode_manager: DatanodeManagerRef,
+    pub cache_invalidator: CacheInvalidatorRef,
+    pub table_metadata_manager: TableMetadataManagerRef,
+}

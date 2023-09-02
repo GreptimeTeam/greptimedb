@@ -16,6 +16,7 @@
 
 mod handle_close;
 mod handle_create;
+mod handle_drop;
 mod handle_flush;
 mod handle_open;
 mod handle_write;
@@ -47,6 +48,8 @@ use crate::wal::Wal;
 
 /// Identifier for a worker.
 pub(crate) type WorkerId = u32;
+
+pub(crate) const DROPPING_MARKER_FILE: &str = ".dropping";
 
 #[cfg_attr(doc, aquamarine::aquamarine)]
 /// A fixed size group of [RegionWorkers](RegionWorker).
@@ -189,6 +192,7 @@ impl<S: LogStore> WorkerStarter<S> {
             id: self.id,
             config: self.config,
             regions: regions.clone(),
+            dropping_regions: Arc::new(RegionMap::default()),
             sender: sender.clone(),
             receiver,
             wal: Wal::new(self.log_store),
@@ -303,6 +307,8 @@ struct RegionWorkerLoop<S> {
     config: Arc<MitoConfig>,
     /// Regions bound to the worker.
     regions: RegionMapRef,
+    /// Regions that are not yet fully dropped.
+    dropping_regions: RegionMapRef,
     /// Request sender.
     sender: Sender<WorkerRequest>,
     /// Request receiver.
@@ -401,7 +407,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         for ddl in ddl_requests {
             let res = match ddl.request {
                 DdlRequest::Create(req) => self.handle_create_request(ddl.region_id, req).await,
-                DdlRequest::Drop(_) => todo!(),
+                DdlRequest::Drop(_) => self.handle_drop_request(ddl.region_id).await,
                 DdlRequest::Open(req) => self.handle_open_request(ddl.region_id, req).await,
                 DdlRequest::Close(_) => self.handle_close_request(ddl.region_id).await,
                 DdlRequest::Alter(_) => todo!(),

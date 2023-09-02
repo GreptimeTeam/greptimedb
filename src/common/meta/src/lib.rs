@@ -14,6 +14,10 @@
 
 #![feature(btree_extract_if)]
 
+pub mod cache_invalidator;
+pub mod datanode_manager;
+pub mod ddl;
+pub mod ddl_manager;
 pub mod error;
 pub mod heartbeat;
 // TODO(weny): Removes it

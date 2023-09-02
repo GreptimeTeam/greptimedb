@@ -72,6 +72,15 @@ impl SstVersion {
             }
         }
     }
+
+    /// Mark all SSTs in this version as deleted.
+    pub(crate) fn mark_all_deleted(&self) {
+        for level_meta in self.levels.iter() {
+            for file_handle in level_meta.files.values() {
+                file_handle.mark_deleted();
+            }
+        }
+    }
 }
 
 // We only has fixed number of level, so we use array to hold elements. This implementation

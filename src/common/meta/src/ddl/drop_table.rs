@@ -12,23 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::meta::MailboxMessage;
 use api::v1::region::{region_request, DropRequest as PbDropRegionRequest};
-use api::v1::DropTableExpr;
 use async_trait::async_trait;
-use client::region::RegionRequester;
-use client::Database;
-use common_catalog::consts::MITO2_ENGINE;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
-use common_meta::ident::TableIdent;
-use common_meta::instruction::Instruction;
-use common_meta::key::table_info::TableInfoValue;
-use common_meta::key::table_name::TableNameKey;
-use common_meta::key::table_route::TableRouteValue;
-use common_meta::rpc::ddl::DropTableTask;
-use common_meta::rpc::router::{find_leader_regions, find_leaders, RegionRoute};
-use common_meta::table_name::TableName;
 use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{
     Context as ProcedureContext, LockKey, Procedure, Result as ProcedureResult, Status,
@@ -43,20 +30,29 @@ use table::engine::TableReference;
 use table::metadata::{RawTableInfo, TableId};
 
 use super::utils::handle_retry_error;
+use crate::cache_invalidator::Context;
+use crate::ddl::utils::handle_operate_region_error;
 use crate::ddl::DdlContext;
-use crate::error::{self, Result, TableMetadataManagerSnafu};
+use crate::error::{self, Result};
+use crate::ident::TableIdent;
+use crate::key::table_info::TableInfoValue;
+use crate::key::table_name::TableNameKey;
+use crate::key::table_route::TableRouteValue;
 use crate::metrics;
-use crate::procedure::utils::handle_request_datanode_error;
-use crate::service::mailbox::BroadcastChannel;
+use crate::rpc::ddl::DropTableTask;
+use crate::rpc::router::{find_leader_regions, find_leaders, RegionRoute};
+use crate::table_name::TableName;
+
 pub struct DropTableProcedure {
-    context: DdlContext,
-    data: DropTableData,
+    pub context: DdlContext,
+    pub data: DropTableData,
 }
 
+#[allow(dead_code)]
 impl DropTableProcedure {
-    pub(crate) const TYPE_NAME: &'static str = "metasrv-procedure::DropTable";
+    pub const TYPE_NAME: &'static str = "metasrv-procedure::DropTable";
 
-    pub(crate) fn new(
+    pub fn new(
         cluster_id: u64,
         task: DropTableTask,
         table_route_value: TableRouteValue,
@@ -69,7 +65,7 @@ impl DropTableProcedure {
         }
     }
 
-    pub(crate) fn from_json(json: &str, context: DdlContext) -> ProcedureResult<Self> {
+    pub fn from_json(json: &str, context: DdlContext) -> ProcedureResult<Self> {
         let data = serde_json::from_str(json).context(FromJsonSnafu)?;
         Ok(Self { context, data })
     }
@@ -86,13 +82,12 @@ impl DropTableProcedure {
                 table_ref.schema,
                 table_ref.table,
             ))
-            .await
-            .context(TableMetadataManagerSnafu)?;
+            .await?;
 
         ensure!(
             exist,
             error::TableNotFoundSnafu {
-                name: table_ref.to_string()
+                table_name: table_ref.to_string()
             }
         );
 
@@ -110,8 +105,7 @@ impl DropTableProcedure {
 
         table_metadata_manager
             .delete_table_metadata(table_info_value, table_route_value)
-            .await
-            .context(error::TableMetadataManagerSnafu)?;
+            .await?;
 
         info!("Deleted table metadata for table {table_id}");
 
@@ -132,34 +126,23 @@ impl DropTableProcedure {
             table_id: self.data.task.table_id,
             engine: engine.to_string(),
         };
-        let instruction = Instruction::InvalidateTableCache(table_ident);
-
-        let msg = &MailboxMessage::json_message(
-            "Invalidate Table Cache by dropping table procedure",
-            &format!("Metasrv@{}", self.context.server_addr),
-            "Frontend broadcast",
-            common_time::util::current_time_millis(),
-            &instruction,
-        )
-        .with_context(|_| error::SerializeToJsonSnafu {
-            input: instruction.to_string(),
-        })?;
 
         self.context
-            .mailbox
-            .broadcast(&BroadcastChannel::Frontend, msg)
+            .cache_invalidator
+            .invalidate_table(
+                &Context {
+                    subject: Some("Invalidate Table Cache by dropping table procedure".to_string()),
+                },
+                table_ident,
+            )
             .await?;
 
-        self.data.state = if engine == MITO2_ENGINE {
-            DropTableState::DatanodeDropRegions
-        } else {
-            DropTableState::DatanodeDropTable
-        };
+        self.data.state = DropTableState::DatanodeDropRegions;
 
         Ok(Status::executing(true))
     }
 
-    async fn on_datanode_drop_regions(&self) -> Result<Status> {
+    pub async fn on_datanode_drop_regions(&self) -> Result<Status> {
         let table_id = self.data.table_id();
 
         let region_routes = &self.data.region_routes();
@@ -167,7 +150,7 @@ impl DropTableProcedure {
         let mut drop_region_tasks = Vec::with_capacity(leaders.len());
 
         for datanode in leaders {
-            let clients = self.context.datanode_clients.clone();
+            let clients = self.context.datanode_manager.clone();
 
             let regions = find_leader_regions(region_routes, &datanode);
             let region_ids = regions
@@ -183,12 +166,11 @@ impl DropTableProcedure {
                         region_id: region_id.as_u64(),
                     });
 
-                    let client = clients.get_client(&datanode).await;
-                    let requester = RegionRequester::new(client);
+                    let requester = clients.datanode(&datanode).await;
 
                     if let Err(err) = requester.handle(request).await {
                         if err.status_code() != StatusCode::RegionNotFound {
-                            return Err(handle_request_datanode_error(datanode)(err));
+                            return Err(handle_operate_region_error(datanode)(err));
                         }
                     }
                 }
@@ -199,50 +181,6 @@ impl DropTableProcedure {
         join_all(drop_region_tasks)
             .await
             .into_iter()
-            .collect::<Result<Vec<_>>>()?;
-
-        Ok(Status::Done)
-    }
-
-    /// Executes drop table instruction on datanode.
-    async fn on_datanode_drop_table(&mut self) -> Result<Status> {
-        let region_routes = &self.data.region_routes();
-
-        let table_ref = self.data.table_ref();
-        let table_id = self.data.task.table_id;
-
-        let clients = self.context.datanode_clients.clone();
-        let leaders = find_leaders(region_routes);
-        let mut joins = Vec::with_capacity(leaders.len());
-
-        let expr = DropTableExpr {
-            catalog_name: table_ref.catalog.to_string(),
-            schema_name: table_ref.schema.to_string(),
-            table_name: table_ref.table.to_string(),
-            table_id: Some(api::v1::TableId { id: table_id }),
-        };
-
-        for datanode in leaders {
-            debug!("Dropping table {table_ref} on Datanode {datanode:?}");
-
-            let client = clients.get_client(&datanode).await;
-            let client = Database::new(table_ref.catalog, table_ref.schema, client);
-            let expr = expr.clone();
-            joins.push(common_runtime::spawn_bg(async move {
-                if let Err(err) = client.drop_table(expr).await {
-                    // TODO(weny): add tests for `TableNotFound`
-                    if err.status_code() != StatusCode::TableNotFound {
-                        return Err(handle_request_datanode_error(datanode)(err));
-                    }
-                }
-                Ok(())
-            }));
-        }
-
-        let _r = join_all(joins)
-            .await
-            .into_iter()
-            .map(|e| e.context(error::JoinSnafu).flatten())
             .collect::<Result<Vec<_>>>()?;
 
         Ok(Status::Done)
@@ -267,7 +205,6 @@ impl Procedure for DropTableProcedure {
             DropTableState::Prepare => self.on_prepare().await,
             DropTableState::RemoveMetadata => self.on_remove_metadata().await,
             DropTableState::InvalidateTableCache => self.on_broadcast().await,
-            DropTableState::DatanodeDropTable => self.on_datanode_drop_table().await,
             DropTableState::DatanodeDropRegions => self.on_datanode_drop_regions().await,
         }
         .map_err(handle_retry_error)
@@ -291,11 +228,11 @@ impl Procedure for DropTableProcedure {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DropTableData {
-    state: DropTableState,
-    cluster_id: u64,
-    task: DropTableTask,
-    table_route_value: TableRouteValue,
-    table_info_value: TableInfoValue,
+    pub state: DropTableState,
+    pub cluster_id: u64,
+    pub task: DropTableTask,
+    pub table_route_value: TableRouteValue,
+    pub table_info_value: TableInfoValue,
 }
 
 impl DropTableData {
@@ -336,83 +273,13 @@ impl DropTableData {
 }
 
 #[derive(Debug, Serialize, Deserialize, AsRefStr)]
-enum DropTableState {
+pub enum DropTableState {
     /// Prepares to drop the table
     Prepare,
     /// Removes metadata
     RemoveMetadata,
     /// Invalidates Table Cache
     InvalidateTableCache,
-    /// Datanode drops the table
-    DatanodeDropTable,
-    /// Drop regions on Datanode
+    /// Drops regions on Datanode
     DatanodeDropRegions,
-}
-
-#[cfg(test)]
-mod test {
-    use std::collections::HashSet;
-    use std::sync::{Arc, Mutex};
-
-    use super::*;
-    use crate::procedure::utils::mock::EchoRegionServer;
-    use crate::procedure::utils::test_data;
-
-    #[tokio::test]
-    async fn test_on_datanode_drop_regions() {
-        let drop_table_task = DropTableTask {
-            catalog: "my_catalog".to_string(),
-            schema: "my_schema".to_string(),
-            table: "my_table".to_string(),
-            table_id: 42,
-        };
-        let procedure = DropTableProcedure::new(
-            1,
-            drop_table_task,
-            TableRouteValue::new(test_data::new_region_routes()),
-            TableInfoValue::new(test_data::new_table_info()),
-            test_data::new_ddl_context(),
-        );
-
-        let (region_server, mut rx) = EchoRegionServer::new();
-
-        let datanodes = find_leaders(&procedure.data.table_route_value.region_routes);
-        for peer in datanodes {
-            let client = region_server.new_client(&peer);
-            procedure
-                .context
-                .datanode_clients
-                .insert_client(peer, client)
-                .await;
-        }
-
-        let expected_dropped_regions = Arc::new(Mutex::new(HashSet::from([
-            RegionId::new(42, 1),
-            RegionId::new(42, 2),
-            RegionId::new(42, 3),
-        ])));
-        let handle = tokio::spawn({
-            let expected_dropped_regions = expected_dropped_regions.clone();
-            let mut max_recv = expected_dropped_regions.lock().unwrap().len();
-            async move {
-                while let Some(region_request::Body::Drop(request)) = rx.recv().await {
-                    let region_id = RegionId::from_u64(request.region_id);
-
-                    expected_dropped_regions.lock().unwrap().remove(&region_id);
-
-                    max_recv -= 1;
-                    if max_recv == 0 {
-                        break;
-                    }
-                }
-            }
-        });
-
-        let status = procedure.on_datanode_drop_regions().await.unwrap();
-        assert!(matches!(status, Status::Done));
-
-        handle.await.unwrap();
-
-        assert!(expected_dropped_regions.lock().unwrap().is_empty());
-    }
 }

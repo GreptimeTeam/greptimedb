@@ -4,7 +4,7 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -12,7 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub const METRIC_META_TXN_REQUEST: &str = "meta.txn_request";
+use std::sync::Arc;
 
-pub(crate) const METRIC_META_PROCEDURE_CREATE_TABLE: &str = "meta.procedure.create_table";
-pub(crate) const METRIC_META_PROCEDURE_DROP_TABLE: &str = "meta.procedure.drop_table";
+use crate::error::Result;
+use crate::ident::TableIdent;
+
+/// Places context of invalidating cache. e.g., span id, trace id etc.
+pub struct Context {
+    pub subject: Option<String>,
+}
+
+#[async_trait::async_trait]
+pub trait CacheInvalidator: Send + Sync {
+    // Invalidates table cache
+    async fn invalidate_table(&self, ctx: &Context, table_ident: TableIdent) -> Result<()>;
+}
+
+pub type CacheInvalidatorRef = Arc<dyn CacheInvalidator>;

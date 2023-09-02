@@ -12,37 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_meta::peer::Peer;
-use common_procedure::error::Error as ProcedureError;
-use snafu::{location, Location};
-
-use crate::error::{self, Error};
-
-pub fn handle_request_datanode_error(datanode: Peer) -> impl FnOnce(client::error::Error) -> Error {
-    move |err| {
-        if matches!(err, client::error::Error::FlightGet { .. }) {
-            error::RetryLaterSnafu {
-                reason: format!("Failed to execute operation on datanode, source: {}", err),
-            }
-            .build()
-        } else {
-            error::Error::RequestDatanode {
-                location: location!(),
-                peer: datanode,
-                source: err,
-            }
-        }
-    }
-}
-
-pub fn handle_retry_error(e: Error) -> ProcedureError {
-    if matches!(e, error::Error::RetryLater { .. }) {
-        ProcedureError::retry_later(e)
-    } else {
-        ProcedureError::external(e)
-    }
-}
-
 #[cfg(test)]
 pub mod mock {
     use std::io::Error;
@@ -137,6 +106,7 @@ pub mod test_data {
     use chrono::DateTime;
     use client::client_manager::DatanodeClients;
     use common_catalog::consts::MITO2_ENGINE;
+    use common_meta::ddl::DdlContext;
     use common_meta::key::TableMetadataManager;
     use common_meta::peer::Peer;
     use common_meta::rpc::router::RegionRoute;
@@ -145,8 +115,9 @@ pub mod test_data {
     use table::metadata::{RawTableInfo, RawTableMeta, TableIdent, TableType};
     use table::requests::TableOptions;
 
-    use crate::ddl::DdlContext;
+    use crate::cache_invalidator::MetasrvCacheInvalidator;
     use crate::handler::{HeartbeatMailbox, Pushers};
+    use crate::metasrv::MetasrvInfo;
     use crate::sequence::Sequence;
     use crate::service::store::kv::KvBackendAdapter;
     use crate::service::store::memory::MemStore;
@@ -220,10 +191,15 @@ pub mod test_data {
         let mailbox = HeartbeatMailbox::create(Pushers::default(), mailbox_sequence);
 
         let kv_backend = KvBackendAdapter::wrap(kv_store);
+        let clients = Arc::new(DatanodeClients::default());
         DdlContext {
-            datanode_clients: Arc::new(DatanodeClients::default()),
-            mailbox,
-            server_addr: "127.0.0.1:4321".to_string(),
+            datanode_manager: clients,
+            cache_invalidator: Arc::new(MetasrvCacheInvalidator::new(
+                mailbox,
+                MetasrvInfo {
+                    server_addr: "127.0.0.1:4321".to_string(),
+                },
+            )),
             table_metadata_manager: Arc::new(TableMetadataManager::new(kv_backend)),
         }
     }

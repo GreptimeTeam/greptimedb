@@ -14,20 +14,41 @@
 
 use api::v1::region::{region_request, RegionRequest, RegionRequestHeader, RegionResponse};
 use api::v1::ResponseHeader;
+use async_trait::async_trait;
+use common_error::ext::BoxedError;
 use common_error::status_code::StatusCode;
+use common_meta::datanode_manager::{AffectedRows, Datanode};
+use common_meta::error::{self as meta_error, Result as MetaResult};
 use common_telemetry::timer;
-use snafu::OptionExt;
+use snafu::{location, Location, OptionExt};
 
+use crate::error::Error::FlightGet;
 use crate::error::{IllegalDatabaseResponseSnafu, Result, ServerSnafu};
 use crate::{metrics, Client};
-
-type AffectedRows = u64;
 
 #[derive(Debug)]
 pub struct RegionRequester {
     trace_id: u64,
     span_id: u64,
     client: Client,
+}
+
+#[async_trait]
+impl Datanode for RegionRequester {
+    async fn handle(&self, request: region_request::Body) -> MetaResult<AffectedRows> {
+        self.handle_inner(request).await.map_err(|err| {
+            if matches!(err, FlightGet { .. }) {
+                meta_error::Error::RetryLater {
+                    source: BoxedError::new(err),
+                }
+            } else {
+                meta_error::Error::OperateRegion {
+                    source: BoxedError::new(err),
+                    location: location!(),
+                }
+            }
+        })
+    }
 }
 
 impl RegionRequester {
@@ -40,7 +61,7 @@ impl RegionRequester {
         }
     }
 
-    pub async fn handle(self, request: region_request::Body) -> Result<AffectedRows> {
+    async fn handle_inner(&self, request: region_request::Body) -> Result<AffectedRows> {
         let request_type = request.as_ref().to_string();
 
         let request = RegionRequest {
@@ -66,6 +87,10 @@ impl RegionRequester {
         check_response_header(header)?;
 
         Ok(affected_rows)
+    }
+
+    pub async fn handle(&self, request: region_request::Body) -> Result<AffectedRows> {
+        self.handle_inner(request).await
     }
 }
 

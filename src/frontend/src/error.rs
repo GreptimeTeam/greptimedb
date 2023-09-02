@@ -27,6 +27,12 @@ use store_api::storage::RegionNumber;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
+    #[snafu(display("Failed to execute ddl, source: {}", source))]
+    ExecuteDdl {
+        location: Location,
+        source: common_meta::error::Error,
+    },
+
     #[snafu(display("Unexpected, violated: {}", violated))]
     Unexpected {
         violated: String,
@@ -742,6 +748,7 @@ impl ErrorExt for Error {
             | Error::BuildBackend { source } => source.status_code(),
 
             Error::WriteParquet { source, .. } => source.status_code(),
+            Error::ExecuteDdl { source, .. } => source.status_code(),
             Error::InvalidCopyParameter { .. } => StatusCode::InvalidArguments,
 
             Error::ReadRecordBatch { source, .. } | Error::BuildColumnVectors { source, .. } => {

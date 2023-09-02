@@ -26,6 +26,19 @@ use crate::pubsub::Message;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
+    #[snafu(display("Failed to invalidate table cache: {}", source))]
+    InvalidateTableCache {
+        location: Location,
+        source: common_meta::error::Error,
+    },
+
+    #[snafu(display("Failed to operate region on peer:{}, source: {}", peer, source))]
+    OperateRegion {
+        location: Location,
+        peer: Peer,
+        source: BoxedError,
+    },
+
     #[snafu(display("Failed to list catalogs: {}", source))]
     ListCatalogs {
         location: Location,
@@ -49,29 +62,6 @@ pub enum Error {
     ConvertGrpcExpr {
         location: Location,
         source: common_grpc_expr::error::Error,
-    },
-
-    #[snafu(display(
-        "Failed to build table meta for table: {}, source: {}",
-        table_name,
-        source
-    ))]
-    BuildTableMeta {
-        table_name: String,
-        source: table::metadata::TableMetaBuilderError,
-        location: Location,
-    },
-
-    #[snafu(display("Table occurs error, source: {}", source))]
-    Table {
-        location: Location,
-        source: table::error::Error,
-    },
-
-    #[snafu(display("Failed to convert RawTableInfo into TableInfo: {}", source))]
-    ConvertRawTableInfo {
-        location: Location,
-        source: datatypes::Error,
     },
 
     #[snafu(display("Failed to execute transaction: {}", msg))]
@@ -516,9 +506,6 @@ pub enum Error {
         operation: String,
         location: Location,
     },
-
-    #[snafu(display("Primary key '{key}' not found when creating region request, at {location}"))]
-    PrimaryKeyNotFound { key: String, location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -573,7 +560,6 @@ impl ErrorExt for Error {
             | Error::UnsupportedSelectorType { .. }
             | Error::InvalidArguments { .. }
             | Error::InvalidHeartbeatRequest { .. }
-            | Error::PrimaryKeyNotFound { .. }
             | Error::TooManyPartitions { .. } => StatusCode::InvalidArguments,
             Error::LeaseKeyFromUtf8 { .. }
             | Error::LeaseValueFromUtf8 { .. }
@@ -591,11 +577,9 @@ impl ErrorExt for Error {
             | Error::UnexpectedInstructionReply { .. }
             | Error::Unexpected { .. }
             | Error::Txn { .. }
-            | Error::TableIdChanged { .. }
-            | Error::ConvertRawTableInfo { .. }
-            | Error::BuildTableMeta { .. } => StatusCode::Unexpected,
+            | Error::TableIdChanged { .. } => StatusCode::Unexpected,
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
-            Error::Table { source, .. } => source.status_code(),
+            Error::InvalidateTableCache { source, .. } => source.status_code(),
             Error::RequestDatanode { source, .. } => source.status_code(),
             Error::InvalidCatalogValue { source, .. } => source.status_code(),
             Error::RecoverProcedure { source, .. }
@@ -612,6 +596,7 @@ impl ErrorExt for Error {
             Error::RegionFailoverCandidatesNotFound { .. } => StatusCode::RuntimeResourcesExhausted,
 
             Error::RegisterProcedureLoader { source, .. } => source.status_code(),
+            Error::OperateRegion { source, .. } => source.status_code(),
 
             Error::TableRouteConversion { source, .. }
             | Error::ConvertProtoData { source, .. }
