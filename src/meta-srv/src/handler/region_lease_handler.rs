@@ -25,7 +25,25 @@ use crate::metasrv::Context;
 // TODO(LFC): Make region lease seconds calculated from Datanode heartbeat configuration.
 pub(crate) const REGION_LEASE_SECONDS: u64 = 20;
 
-pub struct RegionLeaseHandler;
+pub struct RegionLeaseHandler {
+    region_lease_seconds: u64,
+}
+
+impl RegionLeaseHandler {
+    pub fn new(region_lease_seconds: u64) -> Self {
+        Self {
+            region_lease_seconds,
+        }
+    }
+}
+
+impl Default for RegionLeaseHandler {
+    fn default() -> Self {
+        Self {
+            region_lease_seconds: REGION_LEASE_SECONDS,
+        }
+    }
+}
 
 #[async_trait]
 impl HeartbeatHandler for RegionLeaseHandler {
@@ -53,7 +71,7 @@ impl HeartbeatHandler for RegionLeaseHandler {
         acc.region_lease = Some(RegionLease {
             region_ids,
             duration_since_epoch: req.duration_since_epoch,
-            lease_seconds: REGION_LEASE_SECONDS,
+            lease_seconds: self.region_lease_seconds,
         });
 
         Ok(())
@@ -145,7 +163,10 @@ mod test {
             .await
             .unwrap();
 
-        RegionLeaseHandler.handle(&req, ctx, acc).await.unwrap();
+        RegionLeaseHandler::default()
+            .handle(&req, ctx, acc)
+            .await
+            .unwrap();
 
         assert!(acc.region_lease.is_some());
         let lease = acc.region_lease.as_ref().unwrap();

@@ -56,7 +56,7 @@ pub struct MetaSrvOptions {
     pub datanode_lease_secs: i64,
     pub selector: SelectorType,
     pub use_memory_store: bool,
-    pub disable_region_failover: bool,
+    pub enable_region_failover: bool,
     pub http_opts: HttpOptions,
     pub logging: LoggingOptions,
     pub procedure: ProcedureConfig,
@@ -74,7 +74,7 @@ impl Default for MetaSrvOptions {
             datanode_lease_secs: 15,
             selector: SelectorType::default(),
             use_memory_store: false,
-            disable_region_failover: false,
+            enable_region_failover: true,
             http_opts: HttpOptions::default(),
             logging: LoggingOptions {
                 dir: format!("{METASRV_HOME}/logs"),

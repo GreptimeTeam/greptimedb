@@ -190,9 +190,7 @@ impl MetaSrvBuilder {
         let handler_group = match handler_group {
             Some(handler_group) => handler_group,
             None => {
-                let region_failover_handler = if options.disable_region_failover {
-                    None
-                } else {
+                let region_failover_handler = if options.enable_region_failover {
                     let select_ctx = SelectorContext {
                         server_addr: options.server_addr.clone(),
                         datanode_lease_secs: options.datanode_lease_secs,
@@ -215,6 +213,14 @@ impl MetaSrvBuilder {
                         RegionFailureHandler::try_new(election.clone(), region_failover_manager)
                             .await?,
                     )
+                } else {
+                    None
+                };
+
+                let publish_heartbeat_handler = if let Some((publish, _)) = pubsub.as_ref() {
+                    Some(PublishHeartbeatHandler::new(publish.clone()))
+                } else {
+                    None
                 };
 
                 let group = HeartbeatHandlerGroup::new(pushers);
@@ -227,17 +233,15 @@ impl MetaSrvBuilder {
                 group.add_handler(OnLeaderStartHandler).await;
                 group.add_handler(CollectStatsHandler).await;
                 group.add_handler(MailboxHandler).await;
-                group.add_handler(RegionLeaseHandler).await;
+                group.add_handler(RegionLeaseHandler::default()).await;
                 group.add_handler(FilterInactiveRegionStatsHandler).await;
                 if let Some(region_failover_handler) = region_failover_handler {
                     group.add_handler(region_failover_handler).await;
                 }
-                group.add_handler(PersistStatsHandler::default()).await;
-                if let Some((publish, _)) = pubsub.as_ref() {
-                    group
-                        .add_handler(PublishHeartbeatHandler::new(publish.clone()))
-                        .await;
+                if let Some(publish_heartbeat_handler) = publish_heartbeat_handler {
+                    group.add_handler(publish_heartbeat_handler).await;
                 }
+                group.add_handler(PersistStatsHandler::default()).await;
                 group
             }
         };
