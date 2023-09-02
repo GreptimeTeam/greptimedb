@@ -63,11 +63,14 @@ pub(crate) struct MitoRegion {
 pub(crate) type MitoRegionRef = Arc<MitoRegion>;
 
 impl MitoRegion {
-    /// Stop background tasks for this region.
+    /// Stop background managers for this region.
     pub(crate) async fn stop(&self) -> Result<()> {
         self.manifest_manager.stop().await?;
 
-        info!("Stopped region, region_id: {}", self.region_id);
+        info!(
+            "Stopped region manifest manager, region_id: {}",
+            self.region_id
+        );
 
         Ok(())
     }

@@ -407,6 +407,12 @@ pub enum Error {
         source: Arc<Error>,
         location: Location,
     },
+
+    #[snafu(display("Region {} is dropped, location: {}", region_id, location))]
+    RegionDropped {
+        region_id: RegionId,
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -470,6 +476,7 @@ impl ErrorExt for Error {
             BuildPredicate { source, .. } => source.status_code(),
             DeleteSst { .. } => StatusCode::StorageUnavailable,
             FlushRegion { source, .. } => source.status_code(),
+            RegionDropped { .. } => StatusCode::RegionNotFound,
         }
     }
 

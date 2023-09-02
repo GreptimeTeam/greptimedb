@@ -36,6 +36,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         mut request: FlushFinished,
     ) {
         let Some(region) = self.regions.get_region(region_id) else {
+            // We may dropped the region.
             request.on_failure(RegionNotFoundSnafu { region_id }.build());
             return;
         };
