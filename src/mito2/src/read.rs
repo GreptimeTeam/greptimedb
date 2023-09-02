@@ -151,6 +151,11 @@ impl Batch {
         Some(self.get_sequence(self.sequences.len() - 1))
     }
 
+    /// Replaces the primary key of the batch.
+    pub fn set_primary_key(&mut self, primary_key: Vec<u8>) {
+        self.primary_key = primary_key;
+    }
+
     /// Slice the batch, returning a new batch.
     ///
     /// # Panics

@@ -42,7 +42,8 @@ pub struct ProjectionMapper {
     codec: McmpRowCodec,
     /// Schema for converted [RecordBatch].
     output_schema: SchemaRef,
-    /// Id of columns to project.
+    /// Id of columns to project. It keeps ids in the same order as the `projection`
+    /// indices to build the mapper.
     column_ids: Vec<ColumnId>,
 }
 
@@ -128,7 +129,7 @@ impl ProjectionMapper {
     ///
     /// The batch must match the `projection` using to build the mapper.
     pub(crate) fn convert(&self, batch: &Batch) -> common_recordbatch::error::Result<RecordBatch> {
-        // TODO(yingwen): validate batch schema.
+        // TODO(yingwen): validate batch schema has the same schema as expected.
 
         let pk_values = self
             .codec

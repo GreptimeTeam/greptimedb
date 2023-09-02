@@ -22,12 +22,17 @@ use crate::read::{Batch, BatchReader};
 
 /// Reader to adapt schema of underlying reader to expected schema.
 pub struct CompatReader<R> {
+    /// Underlying reader.
     reader: R,
+    /// Optional primary key adapter.
+    compat_pk: Option<CompatPrimaryKey>,
+    /// Optional fields adapter.
+    compat_fields: Option<CompatFields>,
 }
 
 impl<R> CompatReader<R> {
     /// Creates a new compat reader.
-    /// - `mapper` is the [ProjectionMapper] for scan.
+    /// - `mapper` is built from the metadata users expect to see.
     /// - `reader_meta` is the metadata of the input reader.
     /// - `reader` is the input reader.
     pub fn new(
@@ -35,13 +40,28 @@ impl<R> CompatReader<R> {
         reader_meta: RegionMetadataRef,
         reader: R,
     ) -> Result<CompatReader<R>> {
-        unimplemented!()
+        let compat_pk = may_compat_primary_key(mapper.metadata(), &reader_meta)?;
+        let compat_fields = may_compat_fields(mapper, &reader_meta)?;
+
+        Ok(CompatReader {
+            reader,
+            compat_pk,
+            compat_fields,
+        })
     }
 }
 
 #[async_trait::async_trait]
 impl<R: BatchReader> BatchReader for CompatReader<R> {
     async fn next_batch(&mut self) -> Result<Option<Batch>> {
+        let Some(batch) = self.reader.next_batch().await? else {
+            return Ok(None);
+        };
+
+        // if let Some(compat_pk) = &self.compat_pk {
+        //     compat_pk
+        // }
+
         todo!()
     }
 }
@@ -66,4 +86,28 @@ pub(crate) fn has_same_columns(left: &RegionMetadata, right: &RegionMetadata) ->
     }
 
     true
+}
+
+fn may_compat_primary_key(
+    expect: &RegionMetadata,
+    actual: &RegionMetadata,
+) -> Result<Option<CompatPrimaryKey>> {
+    unimplemented!()
+}
+
+fn may_compat_fields(
+    mapper: &ProjectionMapper,
+    actual: &RegionMetadata,
+) -> Result<Option<CompatFields>> {
+    unimplemented!()
+}
+
+/// Helper to make primary key compatible.
+struct CompatPrimaryKey {
+    //
+}
+
+/// Helper to make fields compatible.
+struct CompatFields {
+    //
 }

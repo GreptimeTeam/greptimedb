@@ -36,6 +36,13 @@ pub trait RowCodec {
     where
         I: Iterator<Item = ValueRef<'a>>;
 
+    /// Encodes rows to specific vec.
+    /// # Note
+    /// Ensure the length of row iterator matches the length of fields.
+    fn encode_to_vec<'a, I>(&self, row: I, buffer: &mut Vec<u8>) -> Result<()>
+    where
+        I: Iterator<Item = ValueRef<'a>>;
+
     /// Decode row values from bytes.
     fn decode(&self, bytes: &[u8]) -> Result<Vec<Value>>;
 }
@@ -223,12 +230,21 @@ impl RowCodec for McmpRowCodec {
     where
         I: Iterator<Item = ValueRef<'a>>,
     {
-        let mut bytes = Vec::with_capacity(self.estimated_size());
-        let mut serializer = Serializer::new(&mut bytes);
+        let mut buffer = Vec::new();
+        self.encode_to_vec(row, &mut buffer)?;
+        Ok(buffer)
+    }
+
+    fn encode_to_vec<'a, I>(&self, row: I, buffer: &mut Vec<u8>) -> Result<()>
+    where
+        I: Iterator<Item = ValueRef<'a>>,
+    {
+        buffer.reserve(self.estimated_size());
+        let mut serializer = Serializer::new(buffer);
         for (value, field) in row.zip(self.fields.iter()) {
             field.serialize(&mut serializer, &value)?;
         }
-        Ok(bytes)
+        Ok(())
     }
 
     fn decode(&self, bytes: &[u8]) -> Result<Vec<Value>> {

@@ -123,6 +123,8 @@ impl SeqScan {
             if compat::has_same_columns(self.mapper.metadata(), reader.metadata()) {
                 builder.push_batch_reader(Box::new(reader));
             } else {
+                // They have different schema. We need to adapt the batch first so the
+                // mapper can convert the it.
                 let compat_reader =
                     CompatReader::new(&self.mapper, reader.metadata().clone(), reader)?;
                 builder.push_batch_reader(Box::new(compat_reader));
