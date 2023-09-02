@@ -90,7 +90,7 @@ pub enum FlushReason {
     EngineFull,
     /// Manual flush.
     Manual,
-    // TODO(yingwen): Alter, manually.
+    // TODO(yingwen): Alter.
 }
 
 /// Task to flush a region.

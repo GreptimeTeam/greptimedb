@@ -116,7 +116,7 @@ impl ParquetWriter {
 
         let (_file_meta, file_size) = buffered_writer.close().await?;
         // Safety: num rows > 0 so we must have min/max.
-        let time_range = (stats.min_timestamp.unwrap(), stats.max_timestamp.unwrap());
+        let time_range = stats.time_range.unwrap();
 
         // object_store.write will make sure all bytes are written or an error is raised.
         Ok(Some(SstInfo {
@@ -131,10 +131,8 @@ impl ParquetWriter {
 struct SourceStats {
     /// Number of rows fetched.
     num_rows: usize,
-    /// Min timestamp from fetched batches.
-    min_timestamp: Option<Timestamp>,
-    /// Max timestamp from fetched batches.
-    max_timestamp: Option<Timestamp>,
+    /// Time range of fetched batches.
+    time_range: Option<(Timestamp, Timestamp)>,
 }
 
 impl SourceStats {
@@ -149,8 +147,12 @@ impl SourceStats {
             batch.first_timestamp().unwrap(),
             batch.last_timestamp().unwrap(),
         );
-        self.min_timestamp = Some(self.min_timestamp.unwrap_or(min_in_batch).min(min_in_batch));
-        self.max_timestamp = Some(self.max_timestamp.unwrap_or(max_in_batch).max(max_in_batch));
+        if let Some(time_range) = &mut self.time_range {
+            time_range.0 = time_range.0.min(min_in_batch);
+            time_range.1 = time_range.1.max(max_in_batch);
+        } else {
+            self.time_range = Some((min_in_batch, max_in_batch));
+        }
     }
 }
 
