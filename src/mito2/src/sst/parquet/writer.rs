@@ -15,6 +15,7 @@
 //! Parquet writer.
 
 use common_telemetry::debug;
+use common_time::Timestamp;
 use object_store::ObjectStore;
 use parquet::basic::{Compression, Encoding, ZstdLevel};
 use parquet::file::metadata::KeyValue;
@@ -25,7 +26,7 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::storage::consts::SEQUENCE_COLUMN_NAME;
 
 use crate::error::{InvalidMetadataSnafu, Result};
-use crate::read::Source;
+use crate::read::{Batch, Source};
 use crate::sst::parquet::format::WriteFormat;
 use crate::sst::parquet::{SstInfo, WriteOptions, PARQUET_METADATA_KEY};
 use crate::sst::stream_writer::BufferedWriter;
@@ -95,13 +96,13 @@ impl ParquetWriter {
         )
         .await?;
 
+        let mut stats = SourceStats::default();
         while let Some(batch) = self.source.next_batch().await? {
+            stats.update(&batch);
             let arrow_batch = write_format.convert_batch(&batch)?;
 
             buffered_writer.write(&arrow_batch).await?;
         }
-        // Get stats from the source.
-        let stats = self.source.stats();
 
         if stats.num_rows == 0 {
             debug!(
@@ -114,7 +115,8 @@ impl ParquetWriter {
         }
 
         let (_file_meta, file_size) = buffered_writer.close().await?;
-        let time_range = (stats.min_timestamp, stats.max_timestamp);
+        // Safety: num rows > 0 so we must have min/max.
+        let time_range = stats.time_range.unwrap();
 
         // object_store.write will make sure all bytes are written or an error is raised.
         Ok(Some(SstInfo {
@@ -122,6 +124,35 @@ impl ParquetWriter {
             file_size,
             num_rows: stats.num_rows,
         }))
+    }
+}
+
+#[derive(Default)]
+struct SourceStats {
+    /// Number of rows fetched.
+    num_rows: usize,
+    /// Time range of fetched batches.
+    time_range: Option<(Timestamp, Timestamp)>,
+}
+
+impl SourceStats {
+    fn update(&mut self, batch: &Batch) {
+        if batch.is_empty() {
+            return;
+        }
+
+        self.num_rows += batch.num_rows();
+        // Safety: batch is not empty.
+        let (min_in_batch, max_in_batch) = (
+            batch.first_timestamp().unwrap(),
+            batch.last_timestamp().unwrap(),
+        );
+        if let Some(time_range) = &mut self.time_range {
+            time_range.0 = time_range.0.min(min_in_batch);
+            time_range.1 = time_range.1.max(max_in_batch);
+        } else {
+            self.time_range = Some((min_in_batch, max_in_batch));
+        }
     }
 }
 

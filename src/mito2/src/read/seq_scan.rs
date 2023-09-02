@@ -137,3 +137,11 @@ impl SeqScan {
         Ok(stream)
     }
 }
+
+#[cfg(test)]
+impl SeqScan {
+    /// Returns number of SST files to scan.
+    pub(crate) fn num_files(&self) -> usize {
+        self.files.len()
+    }
+}

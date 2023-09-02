@@ -44,6 +44,16 @@ impl Scanner {
     }
 }
 
+#[cfg(test)]
+impl Scanner {
+    /// Returns number of files to scan.
+    pub(crate) fn num_files(&self) -> usize {
+        match self {
+            Scanner::Seq(seq_scan) => seq_scan.num_files(),
+        }
+    }
+}
+
 #[cfg_attr(doc, aquamarine::aquamarine)]
 /// Helper to scans a region by [ScanRequest].
 ///
