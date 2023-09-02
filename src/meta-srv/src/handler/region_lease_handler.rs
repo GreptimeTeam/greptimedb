@@ -51,10 +51,11 @@ impl HeartbeatHandler for RegionLeaseHandler {
         let mut region_ids = stat.region_ids();
 
         let inactive_node_manager = InactiveNodeManager::new(&ctx.in_memory);
-        acc.inactive_region_ids = inactive_node_manager
+        let inactive_region_ids = inactive_node_manager
             .retain_active_regions(stat.cluster_id, stat.id, &mut region_ids)
             .await?;
 
+        acc.inactive_region_ids = inactive_region_ids;
         acc.region_lease = Some(RegionLease {
             region_ids,
             duration_since_epoch: req.duration_since_epoch,

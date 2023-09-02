@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use common_meta::instruction::{Instruction, InstructionReply, SimpleReply};
 use common_meta::peer::Peer;
 use common_meta::RegionIdent;
-use common_telemetry::{debug, warn};
+use common_telemetry::{debug, info, warn};
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 
@@ -135,6 +135,7 @@ impl State for DeactivateRegion {
         ctx: &RegionFailoverContext,
         failed_region: &RegionIdent,
     ) -> Result<Box<dyn State>> {
+        info!("Deactivating region: {failed_region:?}");
         let result = self.send_close_region_message(ctx, failed_region).await;
         let mailbox_receiver = match result {
             Ok(mailbox_receiver) => mailbox_receiver,

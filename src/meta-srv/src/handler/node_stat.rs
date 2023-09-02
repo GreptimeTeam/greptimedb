@@ -64,6 +64,10 @@ impl Stat {
     }
 
     pub fn retain_active_region_stats(&mut self, inactive_region_ids: &HashSet<u64>) {
+        if inactive_region_ids.is_empty() {
+            return;
+        }
+
         self.region_stats
             .retain(|r| !inactive_region_ids.contains(&r.id));
         self.rcus = self.region_stats.iter().map(|s| s.rcus).sum();
