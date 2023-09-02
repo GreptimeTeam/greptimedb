@@ -24,7 +24,7 @@ use store_api::storage::{RegionId, ScanRequest};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::access_layer::AccessLayerRef;
-use crate::error::{Error, FlushRegionSnafu, RegionDroppedSnafu, Result};
+use crate::error::{Error, FlushRegionSnafu, RegionClosedSnafu, RegionDroppedSnafu, Result};
 use crate::memtable::MemtableBuilderRef;
 use crate::read::Source;
 use crate::region::version::{VersionControlData, VersionRef};
@@ -370,6 +370,17 @@ impl FlushScheduler {
 
         // Notifies all pending tasks.
         flush_status.on_failure(Arc::new(RegionDroppedSnafu { region_id }.build()));
+    }
+
+    /// Notifies the scheduler that the region is closed.
+    pub(crate) fn on_region_closed(&mut self, region_id: RegionId) {
+        // Remove this region.
+        let Some(flush_status) = self.region_status.remove(&region_id) else {
+            return;
+        };
+
+        // Notifies all pending tasks.
+        flush_status.on_failure(Arc::new(RegionClosedSnafu { region_id }.build()));
     }
 
     /// Add ddl request to pending queue.

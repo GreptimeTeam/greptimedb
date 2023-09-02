@@ -413,6 +413,12 @@ pub enum Error {
         region_id: RegionId,
         location: Location,
     },
+
+    #[snafu(display("Region {} is closed, location: {}", region_id, location))]
+    RegionClosed {
+        region_id: RegionId,
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -476,7 +482,8 @@ impl ErrorExt for Error {
             BuildPredicate { source, .. } => source.status_code(),
             DeleteSst { .. } => StatusCode::StorageUnavailable,
             FlushRegion { source, .. } => source.status_code(),
-            RegionDropped { .. } => StatusCode::RegionNotFound,
+            RegionDropped { .. } => StatusCode::Cancelled,
+            RegionClosed { .. } => StatusCode::Cancelled,
         }
     }
 
