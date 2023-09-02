@@ -30,21 +30,16 @@ use crate::error::{
 };
 use crate::handler::HeartbeatMailbox;
 use crate::inactive_node_manager::InactiveNodeManager;
-use crate::metasrv::REGION_LEASE_SECONDS;
 use crate::service::mailbox::{Channel, MailboxReceiver};
 
 #[derive(Serialize, Deserialize, Debug)]
 pub(super) struct DeactivateRegion {
     candidate: Peer,
-    region_lease_expiry_seconds: u64,
 }
 
 impl DeactivateRegion {
     pub(super) fn new(candidate: Peer) -> Self {
-        Self {
-            candidate,
-            region_lease_expiry_seconds: REGION_LEASE_SECONDS,
-        }
+        Self { candidate }
     }
 
     async fn send_close_region_message(
@@ -75,7 +70,7 @@ impl DeactivateRegion {
         // will be automatically closed.
         // If the deadline is exceeded, we can proceed to the next step with confidence,
         // as the expiration means that the region has been closed.
-        let timeout = Duration::from_secs(self.region_lease_expiry_seconds);
+        let timeout = Duration::from_secs(ctx.region_lease_secs);
         ctx.mailbox.send(&ch, msg, timeout).await
     }
 
@@ -127,8 +122,8 @@ impl DeactivateRegion {
     /// Sleep for `region_lease_expiry_seconds`, to make sure the region is closed (by its
     /// region alive keeper). This is critical for region not being opened in multiple Datanodes
     /// simultaneously.
-    async fn wait_for_region_lease_expiry(&self) {
-        tokio::time::sleep(Duration::from_secs(self.region_lease_expiry_seconds)).await;
+    async fn wait_for_region_lease_expiry(&self, ctx: &RegionFailoverContext) {
+        tokio::time::sleep(Duration::from_secs(ctx.region_lease_secs)).await;
     }
 }
 
@@ -149,7 +144,7 @@ impl State for DeactivateRegion {
                     failed_region.datanode_id, failed_region
                 );
                 // See the mailbox received timeout situation comments above.
-                self.wait_for_region_lease_expiry().await;
+                self.wait_for_region_lease_expiry(ctx).await;
                 return Ok(Box::new(ActivateRegion::new(self.candidate.clone())));
             }
             Err(e) => return Err(e),
@@ -241,10 +236,7 @@ mod tests {
         let mut env = TestingEnvBuilder::new().build().await;
         let failed_region = env.failed_region(1).await;
 
-        let state = DeactivateRegion {
-            candidate: Peer::new(2, ""),
-            region_lease_expiry_seconds: 2,
-        };
+        let state = DeactivateRegion::new(Peer::new(2, ""));
         let mailbox_receiver = state
             .send_close_region_message(&env.context, &failed_region)
             .await

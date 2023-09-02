@@ -191,7 +191,7 @@ impl MetaSrvBuilder {
             Some(handler_group) => handler_group,
             None => {
                 let region_failover_handler = if options.enable_region_failover {
-                    let select_ctx = SelectorContext {
+                    let selector_ctx = SelectorContext {
                         server_addr: options.server_addr.clone(),
                         datanode_lease_secs: options.datanode_lease_secs,
                         kv_store: kv_store.clone(),
@@ -201,11 +201,11 @@ impl MetaSrvBuilder {
                         table: None,
                     };
                     let region_failover_manager = Arc::new(RegionFailoverManager::new(
+                        options.region_lease_secs,
                         in_memory.clone(),
                         mailbox.clone(),
                         procedure_manager.clone(),
-                        selector.clone(),
-                        select_ctx,
+                        (selector.clone(), selector_ctx),
                         lock.clone(),
                         table_metadata_manager.clone(),
                     ));
@@ -223,6 +223,8 @@ impl MetaSrvBuilder {
                     None
                 };
 
+                let region_lease_handler = RegionLeaseHandler::new(options.region_lease_secs);
+
                 let group = HeartbeatHandlerGroup::new(pushers);
                 group.add_handler(ResponseHeaderHandler).await;
                 // `KeepLeaseHandler` should preferably be in front of `CheckLeaderHandler`,
@@ -233,7 +235,7 @@ impl MetaSrvBuilder {
                 group.add_handler(OnLeaderStartHandler).await;
                 group.add_handler(CollectStatsHandler).await;
                 group.add_handler(MailboxHandler).await;
-                group.add_handler(RegionLeaseHandler::default()).await;
+                group.add_handler(region_lease_handler).await;
                 group.add_handler(FilterInactiveRegionStatsHandler).await;
                 if let Some(region_failover_handler) = region_failover_handler {
                     group.add_handler(region_failover_handler).await;

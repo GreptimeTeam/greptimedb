@@ -69,6 +69,7 @@ impl From<RegionIdent> for RegionFailoverKey {
 }
 
 pub(crate) struct RegionFailoverManager {
+    region_lease_secs: u64,
     in_memory: ResettableKvStoreRef,
     mailbox: MailboxRef,
     procedure_manager: ProcedureManagerRef,
@@ -92,15 +93,16 @@ impl Drop for FailoverProcedureGuard {
 
 impl RegionFailoverManager {
     pub(crate) fn new(
+        region_lease_secs: u64,
         in_memory: ResettableKvStoreRef,
         mailbox: MailboxRef,
         procedure_manager: ProcedureManagerRef,
-        selector: SelectorRef,
-        selector_ctx: SelectorContext,
+        (selector, selector_ctx): (SelectorRef, SelectorContext),
         dist_lock: DistLockRef,
         table_metadata_manager: TableMetadataManagerRef,
     ) -> Self {
         Self {
+            region_lease_secs,
             in_memory,
             mailbox,
             procedure_manager,
@@ -114,6 +116,7 @@ impl RegionFailoverManager {
 
     pub(crate) fn create_context(&self) -> RegionFailoverContext {
         RegionFailoverContext {
+            region_lease_secs: self.region_lease_secs,
             in_memory: self.in_memory.clone(),
             mailbox: self.mailbox.clone(),
             selector: self.selector.clone(),
@@ -246,6 +249,7 @@ struct Node {
 /// The "Context" of region failover procedure state machine.
 #[derive(Clone)]
 pub struct RegionFailoverContext {
+    pub region_lease_secs: u64,
     pub in_memory: ResettableKvStoreRef,
     pub mailbox: MailboxRef,
     pub selector: SelectorRef,
@@ -542,6 +546,7 @@ mod tests {
 
             TestingEnv {
                 context: RegionFailoverContext {
+                    region_lease_secs: 10,
                     in_memory,
                     mailbox,
                     selector,
@@ -769,7 +774,7 @@ mod tests {
         let result = procedure.execute(&ctx).await;
         assert!(matches!(result, Ok(Status::Executing { persist: true })));
         assert_eq!(
-            r#"{"region_failover_state":"DeactivateRegion","candidate":{"id":42,"addr":""},"region_lease_expiry_seconds":20}"#,
+            r#"{"region_failover_state":"DeactivateRegion","candidate":{"id":42,"addr":""}}"#,
             serde_json::to_string(&procedure.node.state).unwrap()
         );
     }
