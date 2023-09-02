@@ -5467,6 +5467,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "smallvec",
  "snafu",
  "storage",
  "store-api",
