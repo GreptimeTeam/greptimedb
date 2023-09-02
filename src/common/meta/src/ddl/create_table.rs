@@ -16,9 +16,6 @@ use api::v1::region::region_request::Body as PbRegionRequest;
 use api::v1::region::{ColumnDef, CreateRequest as PbCreateRegionRequest};
 use api::v1::SemanticType;
 use async_trait::async_trait;
-use common_meta::key::table_name::TableNameKey;
-use common_meta::rpc::ddl::CreateTableTask;
-use common_meta::rpc::router::{find_leader_regions, find_leaders, RegionRoute};
 use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu};
 use common_procedure::{Context as ProcedureContext, LockKey, Procedure, Status};
 use common_telemetry::info;
@@ -30,20 +27,24 @@ use strum::AsRefStr;
 use table::engine::TableReference;
 use table::metadata::{RawTableInfo, TableId};
 
+use crate::ddl::utils::{handle_operate_region_error, handle_retry_error};
 use crate::ddl::DdlContext;
-use crate::error::{self, PrimaryKeyNotFoundSnafu, Result, TableMetadataManagerSnafu};
+use crate::error::{self, Result};
+use crate::key::table_name::TableNameKey;
 use crate::metrics;
-use crate::procedure::utils::{handle_operate_region_error, handle_retry_error};
+use crate::rpc::ddl::CreateTableTask;
+use crate::rpc::router::{find_leader_regions, find_leaders, RegionRoute};
 
 pub struct CreateTableProcedure {
-    context: DdlContext,
-    creator: TableCreator,
+    pub context: DdlContext,
+    pub creator: TableCreator,
 }
 
+#[allow(dead_code)]
 impl CreateTableProcedure {
-    pub(crate) const TYPE_NAME: &'static str = "metasrv-procedure::CreateTable";
+    pub const TYPE_NAME: &'static str = "metasrv-procedure::CreateTable";
 
-    pub(crate) fn new(
+    pub fn new(
         cluster_id: u64,
         task: CreateTableTask,
         region_routes: Vec<RegionRoute>,
@@ -55,7 +56,7 @@ impl CreateTableProcedure {
         }
     }
 
-    pub(crate) fn from_json(json: &str, context: DdlContext) -> ProcedureResult<Self> {
+    pub fn from_json(json: &str, context: DdlContext) -> ProcedureResult<Self> {
         let data = serde_json::from_str(json).context(FromJsonSnafu)?;
         Ok(CreateTableProcedure {
             context,
@@ -87,8 +88,7 @@ impl CreateTableProcedure {
                 &expr.schema_name,
                 &expr.table_name,
             ))
-            .await
-            .context(TableMetadataManagerSnafu)?;
+            .await?;
 
         if exist {
             ensure!(
@@ -106,7 +106,7 @@ impl CreateTableProcedure {
         Ok(Status::executing(true))
     }
 
-    fn create_region_request_template(&self) -> Result<PbCreateRegionRequest> {
+    pub fn create_region_request_template(&self) -> Result<PbCreateRegionRequest> {
         let create_table_expr = &self.creator.data.task.create_table;
 
         let column_defs = create_table_expr
@@ -146,7 +146,7 @@ impl CreateTableProcedure {
                             None
                         }
                     })
-                    .context(PrimaryKeyNotFoundSnafu { key })
+                    .context(error::PrimaryKeyNotFoundSnafu { key })
             })
             .collect::<Result<_>>()?;
 
@@ -162,7 +162,7 @@ impl CreateTableProcedure {
         })
     }
 
-    async fn on_datanode_create_regions(&mut self) -> Result<Status> {
+    pub async fn on_datanode_create_regions(&mut self) -> Result<Status> {
         let create_table_data = &self.creator.data;
         let region_routes = &create_table_data.region_routes;
 
@@ -223,8 +223,7 @@ impl CreateTableProcedure {
         let region_routes = self.region_routes().clone();
         manager
             .create_table_metadata(raw_table_info, region_routes)
-            .await
-            .context(TableMetadataManagerSnafu)?;
+            .await?;
         info!("Created table metadata for table {table_id}");
 
         Ok(Status::Done)
@@ -270,7 +269,7 @@ impl Procedure for CreateTableProcedure {
 }
 
 pub struct TableCreator {
-    data: CreateTableData,
+    pub data: CreateTableData,
 }
 
 impl TableCreator {
@@ -287,7 +286,7 @@ impl TableCreator {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, AsRefStr)]
-enum CreateTableState {
+pub enum CreateTableState {
     /// Prepares to create the table
     Prepare,
     /// Creates regions on the Datanode
@@ -298,178 +297,14 @@ enum CreateTableState {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CreateTableData {
-    state: CreateTableState,
-    task: CreateTableTask,
-    region_routes: Vec<RegionRoute>,
-    cluster_id: u64,
+    pub state: CreateTableState,
+    pub task: CreateTableTask,
+    pub region_routes: Vec<RegionRoute>,
+    pub cluster_id: u64,
 }
 
 impl CreateTableData {
     fn table_ref(&self) -> TableReference<'_> {
         self.task.table_ref()
-    }
-}
-
-#[cfg(test)]
-mod test {
-    use std::collections::{HashMap, HashSet};
-    use std::sync::{Arc, Mutex};
-
-    use api::v1::{ColumnDataType, ColumnDef as PbColumnDef, CreateTableExpr};
-    use common_catalog::consts::MITO2_ENGINE;
-
-    use super::*;
-    use crate::procedure::utils::mock::EchoRegionServer;
-    use crate::procedure::utils::test_data;
-
-    fn create_table_procedure() -> CreateTableProcedure {
-        let create_table_expr = CreateTableExpr {
-            catalog_name: "my_catalog".to_string(),
-            schema_name: "my_schema".to_string(),
-            table_name: "my_table".to_string(),
-            desc: "blabla".to_string(),
-            column_defs: vec![
-                PbColumnDef {
-                    name: "ts".to_string(),
-                    datatype: ColumnDataType::TimestampMillisecond as i32,
-                    is_nullable: false,
-                    default_constraint: vec![],
-                },
-                PbColumnDef {
-                    name: "my_tag1".to_string(),
-                    datatype: ColumnDataType::String as i32,
-                    is_nullable: true,
-                    default_constraint: vec![],
-                },
-                PbColumnDef {
-                    name: "my_tag2".to_string(),
-                    datatype: ColumnDataType::String as i32,
-                    is_nullable: true,
-                    default_constraint: vec![],
-                },
-                PbColumnDef {
-                    name: "my_field_column".to_string(),
-                    datatype: ColumnDataType::Int32 as i32,
-                    is_nullable: true,
-                    default_constraint: vec![],
-                },
-            ],
-            time_index: "ts".to_string(),
-            primary_keys: vec!["my_tag2".to_string(), "my_tag1".to_string()],
-            create_if_not_exists: false,
-            table_options: HashMap::new(),
-            table_id: None,
-            region_numbers: vec![1, 2, 3],
-            engine: MITO2_ENGINE.to_string(),
-        };
-
-        CreateTableProcedure::new(
-            1,
-            CreateTableTask::new(create_table_expr, vec![], test_data::new_table_info()),
-            test_data::new_region_routes(),
-            test_data::new_ddl_context(),
-        )
-    }
-
-    #[test]
-    fn test_create_region_request_template() {
-        let procedure = create_table_procedure();
-
-        let template = procedure.create_region_request_template().unwrap();
-
-        let expected = PbCreateRegionRequest {
-            region_id: 0,
-            engine: MITO2_ENGINE.to_string(),
-            column_defs: vec![
-                ColumnDef {
-                    name: "ts".to_string(),
-                    column_id: 0,
-                    datatype: ColumnDataType::TimestampMillisecond as i32,
-                    is_nullable: false,
-                    default_constraint: vec![],
-                    semantic_type: SemanticType::Timestamp as i32,
-                },
-                ColumnDef {
-                    name: "my_tag1".to_string(),
-                    column_id: 1,
-                    datatype: ColumnDataType::String as i32,
-                    is_nullable: true,
-                    default_constraint: vec![],
-                    semantic_type: SemanticType::Tag as i32,
-                },
-                ColumnDef {
-                    name: "my_tag2".to_string(),
-                    column_id: 2,
-                    datatype: ColumnDataType::String as i32,
-                    is_nullable: true,
-                    default_constraint: vec![],
-                    semantic_type: SemanticType::Tag as i32,
-                },
-                ColumnDef {
-                    name: "my_field_column".to_string(),
-                    column_id: 3,
-                    datatype: ColumnDataType::Int32 as i32,
-                    is_nullable: true,
-                    default_constraint: vec![],
-                    semantic_type: SemanticType::Field as i32,
-                },
-            ],
-            primary_key: vec![2, 1],
-            create_if_not_exists: true,
-            catalog: String::new(),
-            schema: String::new(),
-            options: HashMap::new(),
-        };
-        assert_eq!(template, expected);
-    }
-
-    #[tokio::test]
-    async fn test_on_datanode_create_regions() {
-        let mut procedure = create_table_procedure();
-
-        let (region_server, mut rx) = EchoRegionServer::new();
-
-        let datanodes = find_leaders(&procedure.creator.data.region_routes);
-        for peer in datanodes {
-            let client = region_server.new_client(&peer);
-            procedure
-                .context
-                .datanode_clients
-                .insert_client(peer, client)
-                .await;
-        }
-
-        let expected_created_regions = Arc::new(Mutex::new(HashSet::from([
-            RegionId::new(42, 1),
-            RegionId::new(42, 2),
-            RegionId::new(42, 3),
-        ])));
-        let handle = tokio::spawn({
-            let expected_created_regions = expected_created_regions.clone();
-            let mut max_recv = expected_created_regions.lock().unwrap().len();
-            async move {
-                while let Some(PbRegionRequest::Create(request)) = rx.recv().await {
-                    let region_id = RegionId::from_u64(request.region_id);
-
-                    expected_created_regions.lock().unwrap().remove(&region_id);
-
-                    max_recv -= 1;
-                    if max_recv == 0 {
-                        break;
-                    }
-                }
-            }
-        });
-
-        let status = procedure.on_datanode_create_regions().await.unwrap();
-        assert!(matches!(status, Status::Executing { persist: true }));
-        assert!(matches!(
-            procedure.creator.data.state,
-            CreateTableState::CreateMetadata
-        ));
-
-        handle.await.unwrap();
-
-        assert!(expected_created_regions.lock().unwrap().is_empty());
     }
 }
