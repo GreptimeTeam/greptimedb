@@ -26,6 +26,12 @@ use crate::pubsub::Message;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
+    #[snafu(display("Failed to submit ddl task: {}", source))]
+    SubmitDdlTask {
+        location: Location,
+        source: common_meta::error::Error,
+    },
+
     #[snafu(display("Failed to invalidate table cache: {}", source))]
     InvalidateTableCache {
         location: Location,
@@ -56,12 +62,6 @@ pub enum Error {
     Join {
         location: Location,
         source: JoinError,
-    },
-
-    #[snafu(display("Failed to convert grpc expr, source: {}", source))]
-    ConvertGrpcExpr {
-        location: Location,
-        source: common_grpc_expr::error::Error,
     },
 
     #[snafu(display("Failed to execute transaction: {}", msg))]
@@ -545,7 +545,6 @@ impl ErrorExt for Error {
             | Error::StartGrpc { .. }
             | Error::UpdateTableMetadata { .. }
             | Error::NoEnoughAvailableDatanode { .. }
-            | Error::ConvertGrpcExpr { .. }
             | Error::PublishMessage { .. }
             | Error::Join { .. }
             | Error::Unsupported { .. } => StatusCode::Internal,
@@ -597,7 +596,7 @@ impl ErrorExt for Error {
 
             Error::RegisterProcedureLoader { source, .. } => source.status_code(),
             Error::OperateRegion { source, .. } => source.status_code(),
-
+            Error::SubmitDdlTask { source, .. } => source.status_code(),
             Error::TableRouteConversion { source, .. }
             | Error::ConvertProtoData { source, .. }
             | Error::TableMetadataManager { source, .. }

@@ -1833,6 +1833,7 @@ dependencies = [
  "chrono",
  "common-catalog",
  "common-error",
+ "common-grpc-expr",
  "common-procedure",
  "common-runtime",
  "common-telemetry",

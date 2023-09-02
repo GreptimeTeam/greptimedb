@@ -20,7 +20,7 @@ use common_meta::ident::TableIdent;
 use common_meta::instruction::Instruction;
 use snafu::ResultExt;
 
-use crate::metasrv::MetasrvInfo;
+use crate::metasrv::MetaSrvInfo;
 use crate::service::mailbox::{BroadcastChannel, MailboxRef};
 
 const DEFAULT_SUBJECT: &str = "Invalidate table";
@@ -28,11 +28,11 @@ const DEFAULT_SUBJECT: &str = "Invalidate table";
 pub struct MetasrvCacheInvalidator {
     mailbox: MailboxRef,
     // Metasrv infos
-    info: MetasrvInfo,
+    info: MetaSrvInfo,
 }
 
 impl MetasrvCacheInvalidator {
-    pub fn new(mailbox: MailboxRef, info: MetasrvInfo) -> Self {
+    pub fn new(mailbox: MailboxRef, info: MetaSrvInfo) -> Self {
         Self { mailbox, info }
     }
 }

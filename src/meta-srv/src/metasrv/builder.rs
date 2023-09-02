@@ -18,13 +18,13 @@ use std::time::Duration;
 
 use client::client_manager::DatanodeClients;
 use common_grpc::channel_manager::ChannelConfig;
+use common_meta::ddl_manager::{DdlManager, DdlManagerRef};
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::ProcedureManagerRef;
 
 use crate::cache_invalidator::MetasrvCacheInvalidator;
 use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
-use crate::ddl::{DdlManager, DdlManagerRef};
 use crate::error::Result;
 use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
 use crate::handler::mailbox_handler::MailboxHandler;
@@ -39,17 +39,18 @@ use crate::lock::memory::MemLock;
 use crate::lock::DistLockRef;
 use crate::metadata_service::{DefaultMetadataService, MetadataServiceRef};
 use crate::metasrv::{
-    ElectionRef, MetaSrv, MetaSrvOptions, MetasrvInfo, SelectorContext, SelectorRef, TABLE_ID_SEQ,
+    ElectionRef, MetaSrv, MetaSrvInfo, MetaSrvOptions, SelectorContext, SelectorRef, TABLE_ID_SEQ,
 };
 use crate::procedure::region_failover::RegionFailoverManager;
 use crate::procedure::state_store::MetaStateStore;
 use crate::pubsub::{PublishRef, SubscribeManagerRef};
 use crate::selector::lease_based::LeaseBasedSelector;
-use crate::sequence::Sequence;
+use crate::sequence::{Sequence, SequenceRef};
 use crate::service::mailbox::MailboxRef;
 use crate::service::store::cached_kv::{CheckLeader, LeaderCachedKvStore};
 use crate::service::store::kv::{KvBackendAdapter, KvStoreRef, ResettableKvStoreRef};
 use crate::service::store::memory::MemStore;
+use crate::table_creator::MetaSrvTableCreator;
 
 // TODO(fys): try use derive_builder macro
 pub struct MetaSrvBuilder {
@@ -174,12 +175,23 @@ impl MetaSrvBuilder {
             .unwrap_or_else(|| Arc::new(DefaultMetadataService::new(table_metadata_manager)));
         let lock = lock.unwrap_or_else(|| Arc::new(MemLock::default()));
         let table_metadata_manager = build_table_metadata_manager(&kv_store);
+        let ctx = SelectorContext {
+            datanode_lease_secs: options.datanode_lease_secs,
+            server_addr: options.server_addr.clone(),
+            kv_store: kv_store.clone(),
+            meta_peer_client: meta_peer_client.clone(),
+            catalog: None,
+            schema: None,
+            table: None,
+        };
         let ddl_manager = build_ddl_manager(
             &options,
             datanode_clients,
             &procedure_manager,
             &mailbox,
             &table_metadata_manager,
+            (&selector, &ctx),
+            &table_id_sequence,
         );
         let _ = ddl_manager.try_start();
 
@@ -255,7 +267,7 @@ impl MetaSrvBuilder {
             procedure_manager,
             metadata_service,
             mailbox,
-            ddl_manager,
+            ddl_executor: ddl_manager,
             table_metadata_manager,
             greptimedb_telemetry_task: get_greptimedb_telemetry_task(
                 Some(metasrv_home),
@@ -318,6 +330,8 @@ fn build_ddl_manager(
     procedure_manager: &ProcedureManagerRef,
     mailbox: &MailboxRef,
     table_metadata_manager: &TableMetadataManagerRef,
+    (selector, selector_ctx): (&SelectorRef, &SelectorContext),
+    table_id_sequence: &SequenceRef,
 ) -> DdlManagerRef {
     let datanode_clients = datanode_clients.unwrap_or_else(|| {
         let datanode_client_channel_config = ChannelConfig::new()
@@ -332,16 +346,23 @@ fn build_ddl_manager(
     });
     let cache_invalidator = Arc::new(MetasrvCacheInvalidator::new(
         mailbox.clone(),
-        MetasrvInfo {
+        MetaSrvInfo {
             server_addr: options.server_addr.clone(),
         },
     ));
-    // TODO(weny): considers to modify the default config of procedure manager
+
+    let table_creator = Arc::new(MetaSrvTableCreator::new(
+        selector_ctx.clone(),
+        selector.clone(),
+        table_id_sequence.clone(),
+    ));
+
     Arc::new(DdlManager::new(
         procedure_manager.clone(),
         datanode_clients,
         cache_invalidator,
         table_metadata_manager.clone(),
+        table_creator,
     ))
 }
 
