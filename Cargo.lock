@@ -1833,6 +1833,7 @@ dependencies = [
  "chrono",
  "common-catalog",
  "common-error",
+ "common-procedure",
  "common-runtime",
  "common-telemetry",
  "common-time",
@@ -1848,6 +1849,7 @@ dependencies = [
  "serde_json",
  "snafu",
  "store-api",
+ "strum 0.25.0",
  "table",
  "tokio",
 ]

@@ -16,7 +16,10 @@ use std::sync::Arc;
 
 use client::client_manager::DatanodeClients;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
-use common_meta::datanode_manager::DatanodeManagerRef;
+use common_meta::ddl::alter_table::AlterTableProcedure;
+use common_meta::ddl::create_table::CreateTableProcedure;
+use common_meta::ddl::drop_table::DropTableProcedure;
+use common_meta::ddl::DdlContext;
 use common_meta::key::table_info::TableInfoValue;
 use common_meta::key::table_route::TableRouteValue;
 use common_meta::key::TableMetadataManagerRef;
@@ -31,9 +34,6 @@ use crate::error::{
     RegisterProcedureLoaderSnafu, Result, SubmitProcedureSnafu, UnsupportedSnafu,
     WaitProcedureSnafu,
 };
-use crate::procedure::alter_table::AlterTableProcedure;
-use crate::procedure::create_table::CreateTableProcedure;
-use crate::procedure::drop_table::DropTableProcedure;
 
 pub type DdlManagerRef = Arc<DdlManager>;
 
@@ -41,16 +41,6 @@ pub struct DdlManager {
     procedure_manager: ProcedureManagerRef,
     datanode_clients: Arc<DatanodeClients>,
 
-    pub(crate) cache_invalidator: CacheInvalidatorRef,
-    pub(crate) table_metadata_manager: TableMetadataManagerRef,
-}
-
-#[derive(Clone)]
-pub(crate) struct DdlContext {
-    // TODO(weny): removes it
-    pub(crate) datanode_clients: Arc<DatanodeClients>,
-
-    pub(crate) datanode_manager: DatanodeManagerRef,
     pub(crate) cache_invalidator: CacheInvalidatorRef,
     pub(crate) table_metadata_manager: TableMetadataManagerRef,
 }
@@ -73,9 +63,7 @@ impl DdlManager {
     pub(crate) fn create_context(&self) -> DdlContext {
         DdlContext {
             datanode_manager: self.datanode_clients.clone(),
-            datanode_clients: self.datanode_clients.clone(),
             cache_invalidator: self.cache_invalidator.clone(),
-
             table_metadata_manager: self.table_metadata_manager.clone(),
         }
     }
