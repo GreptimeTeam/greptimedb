@@ -33,6 +33,7 @@ mod flush;
 pub mod manifest;
 #[allow(dead_code)]
 pub mod memtable;
+mod metrics;
 #[allow(dead_code)]
 pub mod read;
 #[allow(dead_code)]
