@@ -20,6 +20,7 @@ use snafu::prelude::*;
 
 use crate::datanode::GcsConfig;
 use crate::error::{self, Result};
+use crate::store::build_http_client;
 
 pub(crate) async fn new_gcs_object_store(gcs_config: &GcsConfig) -> Result<ObjectStore> {
     let root = util::normalize_dir(&gcs_config.root);
@@ -35,6 +36,8 @@ pub(crate) async fn new_gcs_object_store(gcs_config: &GcsConfig) -> Result<Objec
         .scope(&gcs_config.scope)
         .credential_path(gcs_config.credential_path.expose_secret())
         .endpoint(&gcs_config.endpoint);
+
+    builder.http_client(build_http_client()?);
 
     Ok(ObjectStore::new(builder)
         .context(error::InitBackendSnafu)?

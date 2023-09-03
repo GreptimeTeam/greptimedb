@@ -20,6 +20,7 @@ use snafu::prelude::*;
 
 use crate::datanode::S3Config;
 use crate::error::{self, Result};
+use crate::store::build_http_client;
 
 pub(crate) async fn new_s3_object_store(s3_config: &S3Config) -> Result<ObjectStore> {
     let root = util::normalize_dir(&s3_config.root);
@@ -42,6 +43,8 @@ pub(crate) async fn new_s3_object_store(s3_config: &S3Config) -> Result<ObjectSt
     if s3_config.region.is_some() {
         let _ = builder.region(s3_config.region.as_ref().unwrap());
     }
+
+    builder.http_client(build_http_client()?);
 
     Ok(ObjectStore::new(builder)
         .context(error::InitBackendSnafu)?

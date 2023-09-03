@@ -20,6 +20,7 @@ use snafu::prelude::*;
 
 use crate::datanode::AzblobConfig;
 use crate::error::{self, Result};
+use crate::store::build_http_client;
 
 pub(crate) async fn new_azblob_object_store(azblob_config: &AzblobConfig) -> Result<ObjectStore> {
     let root = util::normalize_dir(&azblob_config.root);
@@ -40,6 +41,8 @@ pub(crate) async fn new_azblob_object_store(azblob_config: &AzblobConfig) -> Res
     if let Some(token) = &azblob_config.sas_token {
         let _ = builder.sas_token(token);
     }
+
+    builder.http_client(build_http_client()?);
 
     Ok(ObjectStore::new(builder)
         .context(error::InitBackendSnafu)?

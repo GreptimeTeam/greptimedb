@@ -20,6 +20,7 @@ use snafu::prelude::*;
 
 use crate::datanode::OssConfig;
 use crate::error::{self, Result};
+use crate::store::build_http_client;
 
 pub(crate) async fn new_oss_object_store(oss_config: &OssConfig) -> Result<ObjectStore> {
     let root = util::normalize_dir(&oss_config.root);
@@ -35,6 +36,8 @@ pub(crate) async fn new_oss_object_store(oss_config: &OssConfig) -> Result<Objec
         .endpoint(&oss_config.endpoint)
         .access_key_id(oss_config.access_key_id.expose_secret())
         .access_key_secret(oss_config.access_key_secret.expose_secret());
+
+    builder.http_client(build_http_client()?);
 
     Ok(ObjectStore::new(builder)
         .context(error::InitBackendSnafu)?
