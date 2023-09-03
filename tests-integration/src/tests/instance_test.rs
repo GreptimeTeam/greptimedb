@@ -154,6 +154,94 @@ PARTITION BY RANGE COLUMNS (ts) (
 }
 
 #[apply(both_instances_cases)]
+async fn test_validate_external_table_options(instance: Arc<dyn MockInstance>) {
+    let frontend = instance.frontend();
+    let format = "json";
+    let location = find_testing_resource("/tests/data/json/various_type.json");
+    let table_name = "various_type_json_with_schema";
+    let sql = &format!(
+        r#"CREATE EXTERNAL TABLE {table_name} (
+            a BIGINT NULL,
+            b DOUBLE NULL,
+            c BOOLEAN NULL,
+            d STRING NULL,
+            e TIMESTAMP(0) NULL,
+            f DOUBLE NULL,
+            g TIMESTAMP(0) NULL,
+          ) WITH (foo='bar', location='{location}', format='{format}');"#,
+    );
+
+    let result = try_execute_sql(&frontend, sql).await;
+    assert!(matches!(result, Err(Error::ParseSql { .. })));
+}
+
+#[apply(both_instances_cases)]
+async fn test_show_create_external_table(instance: Arc<dyn MockInstance>) {
+    let fe_instance = instance.frontend();
+    let format = "csv";
+    let location = find_testing_resource("/tests/data/csv/various_type.csv");
+    let table_name = "various_type_csv";
+
+    let output = execute_sql(
+        &fe_instance,
+        &format!(
+            r#"create external table {table_name} with (location='{location}', format='{format}');"#,
+        ),
+    )
+    .await;
+    assert!(matches!(output, Output::AffectedRows(0)));
+
+    let output = execute_sql(&fe_instance, &format!("show create table {table_name};")).await;
+
+    let Output::RecordBatches(record_batches) = output else {
+        unreachable!()
+    };
+
+    // We can't directly test `show create table` by check_output_stream because the location name length depends on the current filesystem.
+    let record_batches = record_batches.iter().collect::<Vec<_>>();
+    let column = record_batches[0].column_by_name("Create Table").unwrap();
+    let actual = column.get(0);
+    let expect = if instance.is_distributed_mode() {
+        format!(
+            r#"CREATE EXTERNAL TABLE IF NOT EXISTS "various_type_csv" (
+  "c_int" BIGINT NULL,
+  "c_float" DOUBLE NULL,
+  "c_string" DOUBLE NULL,
+  "c_bool" BOOLEAN NULL,
+  "c_date" DATE NULL,
+  "c_datetime" TIMESTAMP(0) NULL,
+
+)
+
+ENGINE=file
+WITH(
+  format = 'csv',
+  location = '{location}',
+  regions = 1
+)"#
+        )
+    } else {
+        format!(
+            r#"CREATE EXTERNAL TABLE IF NOT EXISTS "various_type_csv" (
+  "c_int" BIGINT NULL,
+  "c_float" DOUBLE NULL,
+  "c_string" DOUBLE NULL,
+  "c_bool" BOOLEAN NULL,
+  "c_date" DATE NULL,
+  "c_datetime" TIMESTAMP(0) NULL,
+
+)
+ENGINE=file
+WITH(
+  format = 'csv',
+  location = '{location}'
+)"#
+        )
+    };
+    assert_eq!(actual.to_string(), expect);
+}
+
+#[apply(both_instances_cases)]
 async fn test_issue477_same_table_name_in_different_databases(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
 
