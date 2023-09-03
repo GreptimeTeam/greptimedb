@@ -35,7 +35,8 @@ pub(crate) async fn new_s3_object_store(s3_config: &S3Config) -> Result<ObjectSt
         .root(&root)
         .bucket(&s3_config.bucket)
         .access_key_id(s3_config.access_key_id.expose_secret())
-        .secret_access_key(s3_config.secret_access_key.expose_secret());
+        .secret_access_key(s3_config.secret_access_key.expose_secret())
+        .http_client(build_http_client()?);
 
     if s3_config.endpoint.is_some() {
         let _ = builder.endpoint(s3_config.endpoint.as_ref().unwrap());
@@ -43,8 +44,6 @@ pub(crate) async fn new_s3_object_store(s3_config: &S3Config) -> Result<ObjectSt
     if s3_config.region.is_some() {
         let _ = builder.region(s3_config.region.as_ref().unwrap());
     }
-
-    builder.http_client(build_http_client()?);
 
     Ok(ObjectStore::new(builder)
         .context(error::InitBackendSnafu)?
