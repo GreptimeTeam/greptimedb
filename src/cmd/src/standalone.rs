@@ -16,9 +16,10 @@ use std::sync::Arc;
 
 use clap::Parser;
 use common_base::Plugins;
+use common_config::WalConfig;
 use common_telemetry::info;
 use common_telemetry::logging::LoggingOptions;
-use datanode::datanode::{Datanode, DatanodeOptions, ProcedureConfig, StorageConfig, WalConfig};
+use datanode::datanode::{Datanode, DatanodeOptions, ProcedureConfig, StorageConfig};
 use datanode::instance::InstanceRef;
 use frontend::frontend::FrontendOptions;
 use frontend::instance::{FrontendInstance, Instance as FeInstance};

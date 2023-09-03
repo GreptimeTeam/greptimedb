@@ -16,6 +16,7 @@ use catalog::RegisterTableRequest;
 use common_catalog::consts::{
     DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID, MITO_ENGINE,
 };
+use common_config::WalConfig;
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, RawSchema};
@@ -25,7 +26,7 @@ use table::engine::{EngineContext, TableEngineRef};
 use table::requests::{CreateTableRequest, TableOptions};
 use table::TableRef;
 
-use crate::datanode::{DatanodeOptions, FileConfig, ObjectStoreConfig, StorageConfig, WalConfig};
+use crate::datanode::{DatanodeOptions, FileConfig, ObjectStoreConfig, StorageConfig};
 use crate::error::{CreateTableSnafu, Result};
 use crate::heartbeat::HeartbeatTask;
 use crate::instance::{Instance, InstanceRef};

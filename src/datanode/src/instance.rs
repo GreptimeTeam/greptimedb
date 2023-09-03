@@ -23,6 +23,7 @@ use catalog::remote::{CachedMetaKvBackend, RemoteCatalogManager};
 use catalog::CatalogManagerRef;
 use common_base::Plugins;
 use common_catalog::consts::DEFAULT_CATALOG_NAME;
+use common_config::WalConfig;
 use common_error::ext::BoxedError;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
@@ -35,7 +36,6 @@ use common_procedure::ProcedureManagerRef;
 use common_telemetry::logging::{debug, info};
 use file_table_engine::engine::immutable::ImmutableFileTableEngine;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
-use log_store::LogConfig;
 use meta_client::client::{MetaClient, MetaClientBuilder};
 use meta_client::MetaClientOptions;
 use mito::config::EngineConfig as TableEngineConfig;
@@ -56,7 +56,7 @@ use table::engine::{TableEngine, TableEngineProcedureRef};
 use table::requests::FlushTableRequest;
 use table::table::TableIdProviderRef;
 
-use crate::datanode::{DatanodeOptions, ObjectStoreConfig, ProcedureConfig, WalConfig};
+use crate::datanode::{DatanodeOptions, ObjectStoreConfig, ProcedureConfig};
 use crate::error::{
     self, CatalogSnafu, IncorrectInternalStateSnafu, MetaClientInitSnafu, MissingMetasrvOptsSnafu,
     MissingNodeIdSnafu, NewCatalogSnafu, OpenLogStoreSnafu, RecoverProcedureSnafu, Result,
@@ -158,9 +158,9 @@ impl Instance {
     ) -> Result<(InstanceRef, Option<HeartbeatTask>)> {
         let data_home = util::normalize_dir(&opts.storage.data_home);
         info!("The working home directory is: {}", data_home);
-        let object_store = store::new_object_store(&data_home, &opts.storage.store).await?;
+        let object_store = store::new_object_store(&opts).await?;
         let log_store =
-            Arc::new(create_log_store(&data_home, &opts.storage.store, &opts.wal).await?);
+            Arc::new(create_log_store(&data_home, &opts.storage.store, opts.wal.clone()).await?);
 
         let mito_engine = Arc::new(DefaultEngine::new(
             TableEngineConfig {
@@ -432,7 +432,7 @@ pub async fn new_metasrv_client(
 pub(crate) async fn create_log_store(
     data_home: &str,
     store_config: &ObjectStoreConfig,
-    wal_config: &WalConfig,
+    wal_config: WalConfig,
 ) -> Result<RaftEngineLogStore> {
     let wal_dir = match (&wal_config.dir, store_config) {
         (Some(dir), _) => dir.to_string(),
@@ -449,16 +449,7 @@ pub(crate) async fn create_log_store(
         "Creating logstore with config: {:?} and storage path: {}",
         wal_config, &wal_dir
     );
-    let log_config = LogConfig {
-        file_size: wal_config.file_size.0,
-        log_file_dir: wal_dir,
-        purge_interval: wal_config.purge_interval,
-        purge_threshold: wal_config.purge_threshold.0,
-        read_batch_size: wal_config.read_batch_size,
-        sync_write: wal_config.sync_write,
-    };
-
-    let logstore = RaftEngineLogStore::try_new(log_config)
+    let logstore = RaftEngineLogStore::try_new(wal_dir, wal_config)
         .await
         .map_err(Box::new)
         .context(OpenLogStoreSnafu)?;

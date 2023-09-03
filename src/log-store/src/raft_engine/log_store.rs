@@ -16,6 +16,7 @@ use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
 use async_stream::stream;
+use common_config::WalConfig;
 use common_runtime::{RepeatedTask, TaskFunction};
 use common_telemetry::{error, info};
 use raft_engine::{Config, Engine, LogBatch, MessageExt, ReadableSize, RecoveryMode};
@@ -25,7 +26,6 @@ use store_api::logstore::entry_stream::SendableEntryStream;
 use store_api::logstore::namespace::Namespace as NamespaceTrait;
 use store_api::logstore::{AppendResponse, LogStore};
 
-use crate::config::LogConfig;
 use crate::error;
 use crate::error::{
     AddEntryLogBatchSnafu, Error, FetchEntrySnafu, IllegalNamespaceSnafu, IllegalStateSnafu,
@@ -37,7 +37,7 @@ use crate::raft_engine::protos::logstore::{EntryImpl, NamespaceImpl as Namespace
 const NAMESPACE_PREFIX: &str = "$sys/";
 
 pub struct RaftEngineLogStore {
-    config: LogConfig,
+    config: WalConfig,
     engine: Arc<Engine>,
     gc_task: RepeatedTask<Error>,
 }
@@ -72,13 +72,13 @@ impl TaskFunction<Error> for PurgeExpiredFilesFunction {
 }
 
 impl RaftEngineLogStore {
-    pub async fn try_new(config: LogConfig) -> Result<Self> {
+    pub async fn try_new(dir: String, config: WalConfig) -> Result<Self> {
         let raft_engine_config = Config {
-            dir: config.log_file_dir.clone(),
-            purge_threshold: ReadableSize(config.purge_threshold),
+            dir,
+            purge_threshold: ReadableSize(config.purge_threshold.0),
             recovery_mode: RecoveryMode::TolerateTailCorruption,
             batch_compression_threshold: ReadableSize::kb(8),
-            target_file_size: ReadableSize(config.file_size),
+            target_file_size: ReadableSize(config.file_size.0),
             ..Default::default()
         };
         let engine = Arc::new(Engine::open(raft_engine_config).context(RaftEngineSnafu)?);
@@ -368,15 +368,15 @@ mod tests {
     use std::collections::HashSet;
     use std::time::Duration;
 
+    use common_base::readable_size::ReadableSize;
     use common_telemetry::debug;
     use common_test_util::temp_dir::create_temp_dir;
     use futures_util::StreamExt;
-    use raft_engine::ReadableSize;
     use store_api::logstore::entry_stream::SendableEntryStream;
     use store_api::logstore::namespace::Namespace as NamespaceTrait;
     use store_api::logstore::LogStore;
 
-    use crate::config::LogConfig;
+    use super::*;
     use crate::error::Error;
     use crate::raft_engine::log_store::RaftEngineLogStore;
     use crate::raft_engine::protos::logstore::{EntryImpl as Entry, NamespaceImpl as Namespace};
@@ -384,10 +384,10 @@ mod tests {
     #[tokio::test]
     async fn test_open_logstore() {
         let dir = create_temp_dir("raft-engine-logstore-test");
-        let logstore = RaftEngineLogStore::try_new(LogConfig {
-            log_file_dir: dir.path().to_str().unwrap().to_string(),
-            ..Default::default()
-        })
+        let logstore = RaftEngineLogStore::try_new(
+            dir.path().to_str().unwrap().to_string(),
+            WalConfig::default(),
+        )
         .await
         .unwrap();
         let namespaces = logstore.list_namespaces().await.unwrap();
@@ -397,10 +397,10 @@ mod tests {
     #[tokio::test]
     async fn test_manage_namespace() {
         let dir = create_temp_dir("raft-engine-logstore-test");
-        let logstore = RaftEngineLogStore::try_new(LogConfig {
-            log_file_dir: dir.path().to_str().unwrap().to_string(),
-            ..Default::default()
-        })
+        let logstore = RaftEngineLogStore::try_new(
+            dir.path().to_str().unwrap().to_string(),
+            WalConfig::default(),
+        )
         .await
         .unwrap();
         assert!(logstore.list_namespaces().await.unwrap().is_empty());
@@ -423,10 +423,10 @@ mod tests {
     #[tokio::test]
     async fn test_append_and_read() {
         let dir = create_temp_dir("raft-engine-logstore-test");
-        let logstore = RaftEngineLogStore::try_new(LogConfig {
-            log_file_dir: dir.path().to_str().unwrap().to_string(),
-            ..Default::default()
-        })
+        let logstore = RaftEngineLogStore::try_new(
+            dir.path().to_str().unwrap().to_string(),
+            WalConfig::default(),
+        )
         .await
         .unwrap();
 
@@ -464,10 +464,10 @@ mod tests {
     async fn test_reopen() {
         let dir = create_temp_dir("raft-engine-logstore-reopen-test");
         {
-            let logstore = RaftEngineLogStore::try_new(LogConfig {
-                log_file_dir: dir.path().to_str().unwrap().to_string(),
-                ..Default::default()
-            })
+            let logstore = RaftEngineLogStore::try_new(
+                dir.path().to_str().unwrap().to_string(),
+                WalConfig::default(),
+            )
             .await
             .unwrap();
             assert!(logstore
@@ -484,10 +484,10 @@ mod tests {
             logstore.stop().await.unwrap();
         }
 
-        let logstore = RaftEngineLogStore::try_new(LogConfig {
-            log_file_dir: dir.path().to_str().unwrap().to_string(),
-            ..Default::default()
-        })
+        let logstore = RaftEngineLogStore::try_new(
+            dir.path().to_str().unwrap().to_string(),
+            WalConfig::default(),
+        )
         .await
         .unwrap();
 
@@ -519,16 +519,16 @@ mod tests {
     async fn test_compaction() {
         common_telemetry::init_default_ut_logging();
         let dir = create_temp_dir("raft-engine-logstore-test");
+        let path = dir.path().to_str().unwrap().to_string();
 
-        let config = LogConfig {
-            log_file_dir: dir.path().to_str().unwrap().to_string(),
-            file_size: ReadableSize::mb(2).0,
-            purge_threshold: ReadableSize::mb(4).0,
+        let config = WalConfig {
+            file_size: ReadableSize::mb(2),
+            purge_threshold: ReadableSize::mb(4),
             purge_interval: Duration::from_secs(5),
             ..Default::default()
         };
 
-        let logstore = RaftEngineLogStore::try_new(config).await.unwrap();
+        let logstore = RaftEngineLogStore::try_new(path, config).await.unwrap();
         let namespace = Namespace::with_id(42);
         for id in 0..4096 {
             let entry = Entry::create(id, namespace.id(), [b'x'; 4096].to_vec());
@@ -551,16 +551,16 @@ mod tests {
     async fn test_obsolete() {
         common_telemetry::init_default_ut_logging();
         let dir = create_temp_dir("raft-engine-logstore-test");
+        let path = dir.path().to_str().unwrap().to_string();
 
-        let config = LogConfig {
-            log_file_dir: dir.path().to_str().unwrap().to_string(),
-            file_size: ReadableSize::mb(2).0,
-            purge_threshold: ReadableSize::mb(4).0,
+        let config = WalConfig {
+            file_size: ReadableSize::mb(2),
+            purge_threshold: ReadableSize::mb(4),
             purge_interval: Duration::from_secs(5),
             ..Default::default()
         };
 
-        let logstore = RaftEngineLogStore::try_new(config).await.unwrap();
+        let logstore = RaftEngineLogStore::try_new(path, config).await.unwrap();
         let namespace = Namespace::with_id(42);
         for id in 0..1024 {
             let entry = Entry::create(id, namespace.id(), [b'x'; 4096].to_vec());
@@ -580,16 +580,16 @@ mod tests {
     async fn test_append_batch() {
         common_telemetry::init_default_ut_logging();
         let dir = create_temp_dir("logstore-append-batch-test");
+        let path = dir.path().to_str().unwrap().to_string();
 
-        let config = LogConfig {
-            log_file_dir: dir.path().to_str().unwrap().to_string(),
-            file_size: ReadableSize::mb(2).0,
-            purge_threshold: ReadableSize::mb(4).0,
+        let config = WalConfig {
+            file_size: ReadableSize::mb(2),
+            purge_threshold: ReadableSize::mb(4),
             purge_interval: Duration::from_secs(5),
             ..Default::default()
         };
 
-        let logstore = RaftEngineLogStore::try_new(config).await.unwrap();
+        let logstore = RaftEngineLogStore::try_new(path, config).await.unwrap();
 
         let entries = (0..8)
             .flat_map(|ns_id| {
@@ -612,15 +612,15 @@ mod tests {
         common_telemetry::init_default_ut_logging();
         let dir = create_temp_dir("logstore-append-batch-test");
 
-        let config = LogConfig {
-            log_file_dir: dir.path().to_str().unwrap().to_string(),
-            file_size: ReadableSize::mb(2).0,
-            purge_threshold: ReadableSize::mb(4).0,
+        let path = dir.path().to_str().unwrap().to_string();
+        let config = WalConfig {
+            file_size: ReadableSize::mb(2),
+            purge_threshold: ReadableSize::mb(4),
             purge_interval: Duration::from_secs(5),
             ..Default::default()
         };
 
-        let logstore = RaftEngineLogStore::try_new(config).await.unwrap();
+        let logstore = RaftEngineLogStore::try_new(path, config).await.unwrap();
 
         let entries = vec![
             Entry::create(0, 0, [b'0'; 4096].to_vec()),

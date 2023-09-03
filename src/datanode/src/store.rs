@@ -27,19 +27,18 @@ use common_base::readable_size::ReadableSize;
 use common_telemetry::logging::info;
 use object_store::layers::{LoggingLayer, LruCacheLayer, MetricsLayer, RetryLayer, TracingLayer};
 use object_store::services::Fs as FsBuilder;
+use object_store::util::normalize_dir;
 use object_store::{util, ObjectStore, ObjectStoreBuilder};
 use snafu::prelude::*;
 
-use crate::datanode::{ObjectStoreConfig, DEFAULT_OBJECT_STORE_CACHE_SIZE};
+use crate::datanode::{DatanodeOptions, ObjectStoreConfig, DEFAULT_OBJECT_STORE_CACHE_SIZE};
 use crate::error::{self, Result};
 
-pub(crate) async fn new_object_store(
-    data_home: &str,
-    store_config: &ObjectStoreConfig,
-) -> Result<ObjectStore> {
-    let object_store = match store_config {
+pub(crate) async fn new_object_store(opts: &DatanodeOptions) -> Result<ObjectStore> {
+    let data_home = normalize_dir(&opts.storage.data_home);
+    let object_store = match &opts.storage.store {
         ObjectStoreConfig::File(file_config) => {
-            fs::new_fs_object_store(data_home, file_config).await
+            fs::new_fs_object_store(&data_home, file_config).await
         }
         ObjectStoreConfig::S3(s3_config) => s3::new_s3_object_store(s3_config).await,
         ObjectStoreConfig::Oss(oss_config) => oss::new_oss_object_store(oss_config).await,
@@ -50,8 +49,9 @@ pub(crate) async fn new_object_store(
     }?;
 
     // Enable retry layer and cache layer for non-fs object storages
-    let object_store = if !matches!(store_config, ObjectStoreConfig::File(..)) {
-        let object_store = create_object_store_with_cache(object_store, store_config).await?;
+    let object_store = if !matches!(opts.storage.store, ObjectStoreConfig::File(..)) {
+        let object_store =
+            create_object_store_with_cache(object_store, &opts.storage.store).await?;
         object_store.layer(RetryLayer::new().with_jitter())
     } else {
         object_store

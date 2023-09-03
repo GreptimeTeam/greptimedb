@@ -1587,6 +1587,7 @@ dependencies = [
  "clap 3.2.25",
  "client",
  "common-base",
+ "common-config",
  "common-error",
  "common-meta",
  "common-query",
@@ -1670,6 +1671,15 @@ dependencies = [
  "serde_json",
  "snafu",
  "tokio",
+]
+
+[[package]]
+name = "common-config"
+version = "0.4.0-nightly"
+dependencies = [
+ "common-base",
+ "humantime-serde",
+ "serde",
 ]
 
 [[package]]
@@ -2612,6 +2622,7 @@ dependencies = [
  "client",
  "common-base",
  "common-catalog",
+ "common-config",
  "common-datasource",
  "common-error",
  "common-function",
@@ -4904,6 +4915,7 @@ dependencies = [
  "byteorder",
  "bytes",
  "common-base",
+ "common-config",
  "common-error",
  "common-meta",
  "common-runtime",
@@ -8364,6 +8376,7 @@ dependencies = [
  "async-trait",
  "catalog",
  "common-catalog",
+ "common-config",
  "common-error",
  "common-function",
  "common-query",
@@ -9119,6 +9132,7 @@ dependencies = [
  "atomic_float",
  "bytes",
  "common-base",
+ "common-config",
  "common-datasource",
  "common-error",
  "common-query",
