@@ -66,7 +66,7 @@ pub type WriteBufferManagerRef = Arc<dyn WriteBufferManager>;
 /// Default [WriteBufferManager] implementation.
 ///
 /// Inspired by RocksDB's WriteBufferManager.
-/// <https://github.com/facebook/rocksdb/blob/main/include/rocksdb/write_buffer_manager.h#L94>
+/// <https://github.com/facebook/rocksdb/blob/main/include/rocksdb/write_buffer_manager.h>
 #[derive(Debug)]
 pub struct WriteBufferManagerImpl {
     /// Write buffer size for the engine.
