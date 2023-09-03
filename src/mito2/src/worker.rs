@@ -104,7 +104,9 @@ impl WorkerGroup {
     ) -> WorkerGroup {
         assert!(config.num_workers.is_power_of_two());
         let config = Arc::new(config);
-        let write_buffer_manager = Arc::new(WriteBufferManagerImpl {});
+        let write_buffer_manager = Arc::new(WriteBufferManagerImpl::new(
+            config.global_write_buffer_size.as_bytes() as usize,
+        ));
         let scheduler = Arc::new(LocalScheduler::new(config.max_background_jobs));
 
         let workers = (0..config.num_workers)

@@ -15,6 +15,7 @@
 //! Flush related utilities and structs.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use common_query::Output;
@@ -62,23 +63,91 @@ pub trait WriteBufferManager: Send + Sync + std::fmt::Debug {
 
 pub type WriteBufferManagerRef = Arc<dyn WriteBufferManager>;
 
-// TODO(yingwen): Implements the manager.
+/// Default [WriteBufferManager] implementation.
+///
+/// Inspired by RocksDB's WriteBufferManager.
+/// <https://github.com/facebook/rocksdb/blob/main/include/rocksdb/write_buffer_manager.h#L94>
 #[derive(Debug)]
-pub struct WriteBufferManagerImpl {}
+pub struct WriteBufferManagerImpl {
+    /// Write buffer size for the engine.
+    global_write_buffer_size: usize,
+    /// Mutable memtable memory size limitation.
+    mutable_limitation: usize,
+    /// Memory in used (e.g. used by mutable and immutable memtables).
+    memory_used: AtomicUsize,
+    /// Memory that hasn't been scheduled to free (e.g. used by mutable memtables).
+    memory_active: AtomicUsize,
+}
+
+impl WriteBufferManagerImpl {
+    /// Returns a new manager with specific `global_write_buffer_size`.
+    pub fn new(global_write_buffer_size: usize) -> Self {
+        Self {
+            global_write_buffer_size,
+            mutable_limitation: Self::get_mutable_limitation(global_write_buffer_size),
+            memory_used: AtomicUsize::new(0),
+            memory_active: AtomicUsize::new(0),
+        }
+    }
+
+    /// Returns memory usage of mutable memtables.
+    pub(crate) fn mutable_usage(&self) -> usize {
+        self.memory_active.load(Ordering::Relaxed)
+    }
+
+    /// Returns the size limit for mutable memtables.
+    fn get_mutable_limitation(global_write_buffer_size: usize) -> usize {
+        global_write_buffer_size * 7 / 8
+    }
+}
 
 impl WriteBufferManager for WriteBufferManagerImpl {
     fn should_flush_engine(&self) -> bool {
+        let mutable_memtable_memory_usage = self.memory_active.load(Ordering::Relaxed);
+        if mutable_memtable_memory_usage > self.mutable_limitation {
+            info!(
+                "Engine should flush (over mutable limit), mutable_usage: {}, mutable_limitation: {}.",
+                mutable_memtable_memory_usage,
+                self.mutable_limitation,
+            );
+            return true;
+        }
+
+        let memory_usage = self.memory_used.load(Ordering::Relaxed);
+        // If the memory exceeds the buffer size, we trigger more aggressive
+        // flush. But if already more than half memory is being flushed,
+        // triggering more flush may not help. We will hold it instead.
+        if memory_usage >= self.global_write_buffer_size
+            && mutable_memtable_memory_usage >= self.global_write_buffer_size / 2
+        {
+            info!(
+                "Engine should flush (over total limit), memory_usage: {}, global_write_buffer_size: {}, \
+                 mutable_usage: {}.",
+                memory_usage,
+                self.global_write_buffer_size,
+                mutable_memtable_memory_usage,
+            );
+            return true;
+        }
+
         false
     }
 
-    fn reserve_mem(&self, _mem: usize) {}
+    fn reserve_mem(&self, mem: usize) {
+        self.memory_used.fetch_add(mem, Ordering::Relaxed);
+        self.memory_active.fetch_add(mem, Ordering::Relaxed);
+    }
 
-    fn schedule_free_mem(&self, _mem: usize) {}
+    fn schedule_free_mem(&self, mem: usize) {
+        self.memory_active.fetch_sub(mem, Ordering::Relaxed);
+    }
 
-    fn free_mem(&self, _mem: usize) {}
+    fn free_mem(&self, mem: usize) {
+        self.memory_used.fetch_sub(mem, Ordering::Relaxed);
+    }
 
     fn memory_usage(&self) -> usize {
-        0
+        self.memory_used.load(Ordering::Relaxed)
     }
 }
 
@@ -464,5 +533,61 @@ impl FlushStatus {
                 }));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_get_mutable_limitation() {
+        assert_eq!(7, WriteBufferManagerImpl::get_mutable_limitation(8));
+        assert_eq!(8, WriteBufferManagerImpl::get_mutable_limitation(10));
+        assert_eq!(56, WriteBufferManagerImpl::get_mutable_limitation(64));
+        assert_eq!(0, WriteBufferManagerImpl::get_mutable_limitation(0));
+    }
+
+    #[test]
+    fn test_over_mutable_limit() {
+        // Mutable limit is 800.
+        let manager = WriteBufferManagerImpl::new(1000);
+        manager.reserve_mem(500);
+        assert!(!manager.should_flush_engine());
+
+        // More than mutable limit.
+        manager.reserve_mem(400);
+        assert!(manager.should_flush_engine());
+
+        // Freezes mutable.
+        manager.schedule_free_mem(500);
+        assert!(!manager.should_flush_engine());
+        assert_eq!(900, manager.memory_used.load(Ordering::Relaxed));
+        assert_eq!(400, manager.memory_active.load(Ordering::Relaxed));
+
+        // Releases immutable.
+        manager.free_mem(500);
+        assert_eq!(400, manager.memory_used.load(Ordering::Relaxed));
+        assert_eq!(400, manager.memory_active.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn test_over_global() {
+        // Mutable limit is 800.
+        let manager = WriteBufferManagerImpl::new(1000);
+        manager.reserve_mem(1100);
+        // Global usage is still 1100.
+        manager.schedule_free_mem(200);
+        assert!(manager.should_flush_engine());
+
+        // More than global limit, but mutable (1100-200-450=450) is not enough (< 500).
+        manager.schedule_free_mem(450);
+        assert!(!manager.should_flush_engine());
+
+        // Now mutable is enough.
+        manager.reserve_mem(50);
+        assert!(manager.should_flush_engine());
+        manager.reserve_mem(100);
+        assert!(manager.should_flush_engine());
     }
 }
