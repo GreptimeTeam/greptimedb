@@ -23,10 +23,11 @@ use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use common_query::logical_plan::Expr;
 use common_time::Timestamp;
 use metrics::{decrement_gauge, increment_gauge};
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::ScanRequest;
+use store_api::storage::ColumnId;
 
 use crate::error::Result;
 use crate::flush::WriteBufferManagerRef;
@@ -63,8 +64,10 @@ pub trait Memtable: Send + Sync + fmt::Debug {
     /// Write key values into the memtable.
     fn write(&self, kvs: &KeyValues) -> Result<()>;
 
-    /// Scans the memtable for `req`.
-    fn iter(&self, req: ScanRequest) -> BoxedBatchIterator;
+    /// Scans the memtable.
+    /// `projection` selects columns to read, `None` means reading all columns.
+    /// `filters` are the predicates to be pushed down to memtable.
+    fn iter(&self, projection: Option<&[ColumnId]>, filters: &[Expr]) -> BoxedBatchIterator;
 
     /// Returns true if the memtable is empty.
     fn is_empty(&self) -> bool;
@@ -110,7 +113,7 @@ impl Memtable for EmptyMemtable {
         Ok(())
     }
 
-    fn iter(&self, _req: ScanRequest) -> BoxedBatchIterator {
+    fn iter(&self, _projection: Option<&[ColumnId]>, _filters: &[Expr]) -> BoxedBatchIterator {
         Box::new(std::iter::empty())
     }
 

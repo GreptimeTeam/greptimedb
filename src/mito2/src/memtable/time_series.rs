@@ -19,6 +19,7 @@ use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 
 use api::v1::OpType;
+use common_query::logical_plan::Expr;
 use datatypes::arrow;
 use datatypes::arrow::array::ArrayRef;
 use datatypes::data_type::DataType;
@@ -29,7 +30,7 @@ use datatypes::vectors::{
 };
 use snafu::{ensure, ResultExt};
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::{ColumnId, ScanRequest};
+use store_api::storage::ColumnId;
 
 use crate::error::{ComputeArrowSnafu, ConvertVectorSnafu, PrimaryKeyLengthMismatchSnafu, Result};
 use crate::memtable::{
@@ -178,12 +179,9 @@ impl Memtable for TimeSeriesMemtable {
         Ok(())
     }
 
-    fn iter(&self, req: ScanRequest) -> BoxedBatchIterator {
-        let projection = if let Some(projection) = &req.projection {
-            projection
-                .iter()
-                .map(|idx| self.region_metadata.column_metadatas[*idx].column_id)
-                .collect()
+    fn iter(&self, projection: Option<&[ColumnId]>, _filters: &[Expr]) -> BoxedBatchIterator {
+        let projection = if let Some(projection) = projection {
+            projection.iter().copied().collect()
         } else {
             self.region_metadata
                 .field_columns()
@@ -883,7 +881,7 @@ mod tests {
             .map(|kv| kv.timestamp().as_timestamp().unwrap().unwrap().value())
             .collect::<HashSet<_>>();
 
-        let iter = memtable.iter(ScanRequest::default());
+        let iter = memtable.iter(None, &[]);
         let read = iter
             .flat_map(|batch| {
                 batch
@@ -909,10 +907,7 @@ mod tests {
         let memtable = TimeSeriesMemtable::new(schema, 42);
         memtable.write(&kvs).unwrap();
 
-        let iter = memtable.iter(ScanRequest {
-            projection: Some(vec![3]), // k0, k1, ts, v0, v1, only take v0
-            ..Default::default()
-        });
+        let iter = memtable.iter(Some(&[3]), &[]);
 
         let mut v0_all = vec![];
 
