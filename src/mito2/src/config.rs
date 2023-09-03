@@ -52,7 +52,7 @@ pub struct MitoConfig {
     // Flush configs:
     /// Interval to auto flush a region if it has not flushed yet (default 30 min).
     pub auto_flush_interval: Duration,
-    /// Global write buffer size threshold to trigger flush (default 512M).
+    /// Global write buffer size threshold to trigger flush (default 1G).
     pub global_write_buffer_size: ReadableSize,
     /// Global write buffer size threshold to reject write requests (default 2G).
     pub global_write_buffer_reject_size: ReadableSize,
@@ -68,7 +68,7 @@ impl Default for MitoConfig {
             manifest_compress_type: CompressionType::Uncompressed,
             max_background_jobs: DEFAULT_MAX_BG_JOB,
             auto_flush_interval: Duration::from_secs(30 * 60),
-            global_write_buffer_size: ReadableSize::mb(512),
+            global_write_buffer_size: ReadableSize::gb(1),
             global_write_buffer_reject_size: ReadableSize::gb(2),
         }
     }
@@ -99,6 +99,14 @@ impl MitoConfig {
         if self.max_background_jobs == 0 {
             warn!("Sanitize max background jobs 0 to {}", DEFAULT_MAX_BG_JOB);
             self.max_background_jobs = DEFAULT_MAX_BG_JOB;
+        }
+
+        if self.global_write_buffer_reject_size <= self.global_write_buffer_size {
+            self.global_write_buffer_reject_size = self.global_write_buffer_size * 2;
+            warn!(
+                "Sanitize global write buffer reject size to {}",
+                self.global_write_buffer_reject_size
+            );
         }
     }
 }
