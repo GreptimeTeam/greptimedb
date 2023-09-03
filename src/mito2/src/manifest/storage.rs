@@ -163,15 +163,20 @@ impl ManifestObjectStore {
 
     /// Return all `R`s in the root directory that meet the `filter` conditions (that is, the `filter` closure returns `Some(R)`),
     /// and discard `R` that does not meet the conditions (that is, the `filter` closure returns `None`)
+    /// Return an empty vector when directory is not found.
     pub async fn get_paths<F, R>(&self, filter: F) -> Result<Vec<R>>
     where
         F: Fn(Entry) -> Option<R>,
     {
-        let streamer = self
-            .object_store
-            .list(&self.path)
-            .await
-            .context(OpenDalSnafu)?;
+        let streamer = match self.object_store.list(&self.path).await {
+            Ok(streamer) => streamer,
+            Err(e) if e.kind() == ErrorKind::NotFound => {
+                debug!("Manifest directory is not exists: {}", self.path);
+                return Ok(vec![]);
+            }
+            Err(e) => Err(e).context(OpenDalSnafu)?,
+        };
+
         streamer
             .try_filter_map(|e| async { Ok(filter(e)) })
             .try_collect::<Vec<_>>()
