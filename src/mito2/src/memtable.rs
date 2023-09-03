@@ -64,7 +64,7 @@ pub trait Memtable: Send + Sync + fmt::Debug {
     /// Write key values into the memtable.
     fn write(&self, kvs: &KeyValues) -> Result<()>;
 
-    /// Scans the memtable for `req`.
+    /// Scans the memtable.
     /// `projection` selects columns to read, `None` means reading all columns.
     /// `filters` are the predicates to be pushed down to memtable.
     fn iter(&self, projection: Option<&[ColumnId]>, filters: &[Expr]) -> BoxedBatchIterator;
