@@ -19,7 +19,6 @@ use std::time::Duration;
 use common_base::readable_size::ReadableSize;
 use common_datasource::compression::CompressionType;
 use common_telemetry::warn;
-use humantime_serde::humantime_serde;
 use serde::{Deserialize, Serialize};
 
 /// Default region worker num.
