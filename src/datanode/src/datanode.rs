@@ -26,6 +26,7 @@ use common_runtime::Runtime;
 use common_telemetry::info;
 use common_telemetry::logging::LoggingOptions;
 use meta_client::MetaClientOptions;
+use mito2::config::MitoConfig;
 use query::QueryEngineFactory;
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
@@ -369,6 +370,8 @@ pub struct DatanodeOptions {
     pub meta_client_options: Option<MetaClientOptions>,
     pub wal: WalConfig,
     pub storage: StorageConfig,
+    /// Options for different store engines.
+    pub store_engine: Vec<StoreEngineOptions>,
     pub logging: LoggingOptions,
     pub enable_telemetry: bool,
 }
@@ -385,6 +388,7 @@ impl Default for DatanodeOptions {
             meta_client_options: None,
             wal: WalConfig::default(),
             storage: StorageConfig::default(),
+            store_engine: vec![],
             logging: LoggingOptions::default(),
             heartbeat: HeartbeatOptions::default(),
             enable_telemetry: true,
@@ -400,6 +404,11 @@ impl DatanodeOptions {
     pub fn to_toml_string(&self) -> String {
         toml::to_string(&self).unwrap()
     }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub enum StoreEngineOptions {
+    Mito(MitoConfig),
 }
 
 /// Datanode service.
