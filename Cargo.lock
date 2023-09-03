@@ -5470,6 +5470,7 @@ dependencies = [
  "datafusion-common",
  "datatypes",
  "futures",
+ "humantime-serde",
  "lazy_static",
  "log-store",
  "memcomparable",
