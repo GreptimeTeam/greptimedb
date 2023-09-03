@@ -24,10 +24,10 @@ use crate::keys::{LeaseKey, LeaseValue, DN_LEASE_PREFIX};
 pub async fn alive_datanodes(
     cluster_id: u64,
     meta_peer_client: &MetaPeerClientRef,
-    lease_secs: i64,
+    lease_secs: u64,
 ) -> Result<HashMap<LeaseKey, LeaseValue>> {
     let lease_filter = |_: &LeaseKey, v: &LeaseValue| {
-        time_util::current_time_millis() - v.timestamp_millis < lease_secs * 1000
+        ((time_util::current_time_millis() - v.timestamp_millis) as u64) < lease_secs * 1000
     };
 
     filter_datanodes(cluster_id, meta_peer_client, lease_filter).await

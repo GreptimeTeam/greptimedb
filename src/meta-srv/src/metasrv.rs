@@ -45,7 +45,12 @@ use crate::sequence::SequenceRef;
 use crate::service::mailbox::MailboxRef;
 use crate::service::store::kv::{KvStoreRef, ResettableKvStoreRef};
 pub const TABLE_ID_SEQ: &str = "table_id";
-const METASRV_HOME: &str = "/tmp/metasrv";
+pub const METASRV_HOME: &str = "/tmp/metasrv";
+
+pub const DEFAULT_DATANODE_LEASE_SECS: u64 = 20;
+/// The lease seconds of a region. It's set by two default heartbeat intervals (5 second × 2) plus
+/// two roundtrip time (2 second × 2 × 2), plus some extra buffer (2 second).
+pub const DEFAULT_REGION_LEASE_SECS: u64 = 20;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -53,10 +58,11 @@ pub struct MetaSrvOptions {
     pub bind_addr: String,
     pub server_addr: String,
     pub store_addr: String,
-    pub datanode_lease_secs: i64,
+    pub datanode_lease_secs: u64,
+    pub region_lease_secs: u64,
     pub selector: SelectorType,
     pub use_memory_store: bool,
-    pub disable_region_failover: bool,
+    pub enable_region_failover: bool,
     pub http_opts: HttpOptions,
     pub logging: LoggingOptions,
     pub procedure: ProcedureConfig,
@@ -71,10 +77,11 @@ impl Default for MetaSrvOptions {
             bind_addr: "127.0.0.1:3002".to_string(),
             server_addr: "127.0.0.1:3002".to_string(),
             store_addr: "127.0.0.1:2379".to_string(),
-            datanode_lease_secs: 15,
+            datanode_lease_secs: DEFAULT_DATANODE_LEASE_SECS,
+            region_lease_secs: DEFAULT_REGION_LEASE_SECS,
             selector: SelectorType::default(),
             use_memory_store: false,
-            disable_region_failover: false,
+            enable_region_failover: true,
             http_opts: HttpOptions::default(),
             logging: LoggingOptions {
                 dir: format!("{METASRV_HOME}/logs"),
@@ -161,8 +168,8 @@ pub struct LeaderValue(pub String);
 
 #[derive(Clone)]
 pub struct SelectorContext {
-    pub datanode_lease_secs: i64,
     pub server_addr: String,
+    pub datanode_lease_secs: u64,
     pub kv_store: KvStoreRef,
     pub meta_peer_client: MetaPeerClientRef,
     pub catalog: Option<String>,
@@ -372,6 +379,7 @@ impl MetaSrv {
         let mailbox = self.mailbox.clone();
         let election = self.election.clone();
         let skip_all = Arc::new(AtomicBool::new(false));
+        let table_metadata_manager = self.table_metadata_manager.clone();
 
         Context {
             server_addr,
@@ -383,7 +391,7 @@ impl MetaSrv {
             election,
             skip_all,
             is_infancy: false,
-            table_metadata_manager: self.table_metadata_manager.clone(),
+            table_metadata_manager,
         }
     }
 }
