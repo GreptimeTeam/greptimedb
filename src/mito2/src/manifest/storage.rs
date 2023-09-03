@@ -171,7 +171,7 @@ impl ManifestObjectStore {
         let streamer = match self.object_store.list(&self.path).await {
             Ok(streamer) => streamer,
             Err(e) if e.kind() == ErrorKind::NotFound => {
-                debug!("Manifest directory is not exists: {}", self.path);
+                debug!("Manifest directory does not exists: {}", self.path);
                 return Ok(vec![]);
             }
             Err(e) => Err(e).context(OpenDalSnafu)?,
