@@ -40,7 +40,7 @@ pub mod table_routes;
 
 pub use crate::error::Result;
 
-mod inactive_node_manager;
+mod inactive_region_manager;
 
 mod greptimedb_telemetry;
 
