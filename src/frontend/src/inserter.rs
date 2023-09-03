@@ -184,7 +184,6 @@ impl<'a> Inserter<'a> {
             schema_name: schema_name.to_string(),
             table_name: table_name.to_string(),
             kind: Some(Kind::AddColumns(add_columns)),
-            ..Default::default()
         };
 
         let req = Request::Ddl(DdlRequest {

@@ -29,8 +29,8 @@ pub mod truncate;
 use std::str::FromStr;
 
 use api::helper::ColumnDataTypeWrapper;
-use api::v1::add_column::location::LocationType;
-use api::v1::add_column::Location;
+use api::v1::add_column_location::LocationType;
+use api::v1::{AddColumnLocation as Location, SemanticType};
 use common_base::bytes::Bytes;
 use common_query::AddColumnLocation;
 use common_time::Timestamp;
@@ -338,9 +338,11 @@ pub fn sql_column_def_to_grpc_column_def(col: &ColumnDef) -> Result<api::v1::Col
         .datatype() as i32;
     Ok(api::v1::ColumnDef {
         name,
-        datatype: data_type,
+        data_type,
         is_nullable,
         default_constraint: default_constraint.unwrap_or_default(),
+        // TODO(#1308): support adding new primary key columns
+        semantic_type: SemanticType::Field as _,
     })
 }
 
@@ -422,7 +424,7 @@ pub fn concrete_data_type_to_sql_data_type(data_type: &ConcreteDataType) -> Resu
 
 pub fn sql_location_to_grpc_add_column_location(
     location: &Option<AddColumnLocation>,
-) -> Option<api::v1::add_column::Location> {
+) -> Option<Location> {
     match location {
         Some(AddColumnLocation::First) => Some(Location {
             location_type: LocationType::First.into(),
@@ -741,7 +743,7 @@ mod tests {
 
         assert_eq!("col", grpc_column_def.name);
         assert!(grpc_column_def.is_nullable); // nullable when options are empty
-        assert_eq!(ColumnDataType::Float64 as i32, grpc_column_def.datatype);
+        assert_eq!(ColumnDataType::Float64 as i32, grpc_column_def.data_type);
         assert!(grpc_column_def.default_constraint.is_empty());
 
         // test not null

@@ -16,14 +16,26 @@ use api::v1::meta::{
     ddl_task_server, SubmitDdlTaskRequest as PbSubmitDdlTaskRequest,
     SubmitDdlTaskResponse as PbSubmitDdlTaskResponse,
 };
+use common_meta::key::table_name::TableNameKey;
 use common_meta::ddl::ExecutorContext;
-use common_meta::rpc::ddl::{DdlTask, SubmitDdlTaskRequest};
-use snafu::{OptionExt, ResultExt};
+use common_meta::rpc::ddl::{
+    AlterTableTask, CreateTableTask, DdlTask, DropTableTask, TruncateTableTask, SubmitDdlTaskRequest
+};
+use common_meta::rpc::router::{Region, RegionRoute};
+use common_meta::table_name::TableName;
+use common_telemetry::{info, warn};
+use snafu::{ensure, OptionExt, ResultExt};
+use store_api::storage::{RegionId, MAX_REGION_SEQ};
+use table::metadata::RawTableInfo;
 use tonic::{Request, Response};
 
 use super::GrpcResult;
-use crate::error::{self};
-use crate::metasrv::MetaSrv;
+use crate::ddl::DdlManagerRef;
+use crate::error::{
+    self, Result, TableMetadataManagerSnafu, TableNotFoundSnafu, TooManyPartitionsSnafu,
+};
+use crate::metasrv::{MetaSrv, SelectorContext, SelectorRef};
+use crate::sequence::SequenceRef;
 
 #[async_trait::async_trait]
 impl ddl_task_server::DdlTask for MetaSrv {

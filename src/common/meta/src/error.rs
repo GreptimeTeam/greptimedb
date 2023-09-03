@@ -146,7 +146,13 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Invalid protobuf message, err: {}", err_msg))]
+    #[snafu(display("Failed to convert alter table request, source: {source}, at {location}"))]
+    ConvertAlterTableRequest {
+        source: common_grpc_expr::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Invalid protobuf message: {err_msg}, at {location}"))]
     InvalidProtoMsg { err_msg: String, location: Location },
 
     #[snafu(display("Unexpected: {err_msg}"))]
@@ -300,6 +306,7 @@ impl ErrorExt for Error {
             ExecuteDdl { source, .. } => source.status_code(),
             MetaSrv { source, .. } => source.status_code(),
             InvalidCatalogValue { source, .. } => source.status_code(),
+            ConvertAlterTableRequest { source, .. } => source.status_code(),
         }
     }
 

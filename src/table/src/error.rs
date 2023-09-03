@@ -58,7 +58,7 @@ pub enum Error {
         source: BoxedError,
     },
 
-    #[snafu(display("Column {} already exists in table {}", column_name, table_name))]
+    #[snafu(display("Column {column_name} already exists in table {table_name}, at {location}"))]
     ColumnExists {
         column_name: String,
         table_name: String,

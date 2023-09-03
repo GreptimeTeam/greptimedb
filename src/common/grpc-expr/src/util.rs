@@ -116,9 +116,10 @@ pub fn build_create_table_expr(
 
         let column_def = ColumnDef {
             name: column_name.to_string(),
-            datatype,
+            data_type: datatype,
             is_nullable,
             default_constraint: vec![],
+            semantic_type,
         };
         column_defs.push(column_def);
     }
@@ -154,16 +155,15 @@ pub fn extract_new_columns(
         .into_iter()
         .filter(|expr| schema.column_schema_by_name(expr.column_name).is_none())
         .map(|expr| {
-            let is_key = expr.semantic_type == SemanticType::Tag as i32;
             let column_def = Some(ColumnDef {
                 name: expr.column_name.to_string(),
-                datatype: expr.datatype,
+                data_type: expr.datatype,
                 is_nullable: true,
                 default_constraint: vec![],
+                semantic_type: expr.semantic_type,
             });
             AddColumn {
                 column_def,
-                is_key,
                 location: None,
             }
         })

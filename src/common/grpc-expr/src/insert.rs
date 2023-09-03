@@ -219,7 +219,7 @@ mod tests {
                         .iter()
                         .find(|c| c.name == "host")
                         .unwrap()
-                        .datatype
+                        .data_type
                 )
                 .unwrap()
             )
@@ -233,7 +233,7 @@ mod tests {
                         .iter()
                         .find(|c| c.name == "cpu")
                         .unwrap()
-                        .datatype
+                        .data_type
                 )
                 .unwrap()
             )
@@ -247,7 +247,7 @@ mod tests {
                         .iter()
                         .find(|c| c.name == "memory")
                         .unwrap()
-                        .datatype
+                        .data_type
                 )
                 .unwrap()
             )
@@ -261,7 +261,7 @@ mod tests {
                         .iter()
                         .find(|c| c.name == "time")
                         .unwrap()
-                        .datatype
+                        .data_type
                 )
                 .unwrap()
             )
@@ -275,7 +275,7 @@ mod tests {
                         .iter()
                         .find(|c| c.name == "interval")
                         .unwrap()
-                        .datatype
+                        .data_type
                 )
                 .unwrap()
             )
@@ -289,7 +289,7 @@ mod tests {
                         .iter()
                         .find(|c| c.name == "ts")
                         .unwrap()
-                        .datatype
+                        .data_type
                 )
                 .unwrap()
             )
@@ -316,46 +316,40 @@ mod tests {
 
         assert_eq!(4, add_columns.add_columns.len());
         let host_column = &add_columns.add_columns[0];
-        assert!(host_column.is_key);
-
         assert_eq!(
             ConcreteDataType::string_datatype(),
             ConcreteDataType::from(
-                ColumnDataTypeWrapper::try_new(host_column.column_def.as_ref().unwrap().datatype)
+                ColumnDataTypeWrapper::try_new(host_column.column_def.as_ref().unwrap().data_type)
                     .unwrap()
             )
         );
 
         let memory_column = &add_columns.add_columns[1];
-        assert!(!memory_column.is_key);
-
         assert_eq!(
             ConcreteDataType::float64_datatype(),
             ConcreteDataType::from(
-                ColumnDataTypeWrapper::try_new(memory_column.column_def.as_ref().unwrap().datatype)
-                    .unwrap()
+                ColumnDataTypeWrapper::try_new(
+                    memory_column.column_def.as_ref().unwrap().data_type
+                )
+                .unwrap()
             )
         );
 
         let time_column = &add_columns.add_columns[2];
-        assert!(!time_column.is_key);
-
         assert_eq!(
             ConcreteDataType::time_datatype(TimeUnit::Millisecond),
             ConcreteDataType::from(
-                ColumnDataTypeWrapper::try_new(time_column.column_def.as_ref().unwrap().datatype)
+                ColumnDataTypeWrapper::try_new(time_column.column_def.as_ref().unwrap().data_type)
                     .unwrap()
             )
         );
 
         let interval_column = &add_columns.add_columns[3];
-        assert!(!interval_column.is_key);
-
         assert_eq!(
             ConcreteDataType::interval_datatype(IntervalUnit::MonthDayNano),
             ConcreteDataType::from(
                 ColumnDataTypeWrapper::try_new(
-                    interval_column.column_def.as_ref().unwrap().datatype
+                    interval_column.column_def.as_ref().unwrap().data_type
                 )
                 .unwrap()
             )

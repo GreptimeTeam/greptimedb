@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::{ColumnDataType, ColumnDef, CreateTableExpr, TableId};
+use api::v1::{ColumnDataType, ColumnDef, CreateTableExpr, SemanticType, TableId};
 use client::{Client, Database};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO_ENGINE};
 use prost::Message;
@@ -41,21 +41,24 @@ async fn run() {
         column_defs: vec![
             ColumnDef {
                 name: "timestamp".to_string(),
-                datatype: ColumnDataType::TimestampMillisecond as i32,
+                data_type: ColumnDataType::TimestampMillisecond as i32,
                 is_nullable: false,
                 default_constraint: vec![],
+                semantic_type: SemanticType::Timestamp as i32,
             },
             ColumnDef {
                 name: "key".to_string(),
-                datatype: ColumnDataType::Uint64 as i32,
+                data_type: ColumnDataType::Uint64 as i32,
                 is_nullable: false,
                 default_constraint: vec![],
+                semantic_type: SemanticType::Tag as i32,
             },
             ColumnDef {
                 name: "value".to_string(),
-                datatype: ColumnDataType::Uint64 as i32,
+                data_type: ColumnDataType::Uint64 as i32,
                 is_nullable: false,
                 default_constraint: vec![],
+                semantic_type: SemanticType::Field as i32,
             },
         ],
         time_index: "timestamp".to_string(),

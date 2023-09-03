@@ -13,10 +13,8 @@
 // limitations under the License.
 
 use api::v1::region::region_request::Body as PbRegionRequest;
-use api::v1::region::{
-    ColumnDef, CreateRequest as PbCreateRegionRequest, RegionRequest, RegionRequestHeader,
-};
-use api::v1::SemanticType;
+use api::v1::region::{CreateRequest as PbCreateRegionRequest, RegionColumnDef, RegionRequest, RegionRequestHeader};
+use api::v1::{ColumnDef, SemanticType};
 use async_trait::async_trait;
 use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu};
 use common_procedure::{Context as ProcedureContext, LockKey, Procedure, Status};
@@ -124,13 +122,15 @@ impl CreateTableProcedure {
                     SemanticType::Field
                 };
 
-                ColumnDef {
-                    name: c.name.clone(),
+                RegionColumnDef {
+                    column_def: Some(ColumnDef {
+                        name: c.name.clone(),
+                        data_type: c.data_type,
+                        is_nullable: c.is_nullable,
+                        default_constraint: c.default_constraint.clone(),
+                        semantic_type: semantic_type as i32,
+                    }),
                     column_id: i as u32,
-                    datatype: c.datatype,
-                    is_nullable: c.is_nullable,
-                    default_constraint: c.default_constraint.clone(),
-                    semantic_type: semantic_type as i32,
                 }
             })
             .collect::<Vec<_>>();
@@ -142,11 +142,13 @@ impl CreateTableProcedure {
                 column_defs
                     .iter()
                     .find_map(|c| {
-                        if &c.name == key {
-                            Some(c.column_id)
-                        } else {
-                            None
-                        }
+                        c.column_def.as_ref().and_then(|x| {
+                            if &x.name == key {
+                                Some(c.column_id)
+                            } else {
+                                None
+                            }
+                        })
                     })
                     .context(error::PrimaryKeyNotFoundSnafu { key })
             })
