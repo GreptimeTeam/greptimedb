@@ -22,7 +22,6 @@ use crate::handler::{HeartbeatAccumulator, HeartbeatHandler};
 use crate::keys::{LeaseKey, LeaseValue};
 use crate::metasrv::Context;
 
-#[derive(Default)]
 pub struct KeepLeaseHandler;
 
 #[async_trait::async_trait]

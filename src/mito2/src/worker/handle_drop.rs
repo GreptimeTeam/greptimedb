@@ -40,7 +40,6 @@ impl<S> RegionWorkerLoop<S> {
         };
 
         info!("Try to drop region: {}", region_id);
-        region.stop().await?;
 
         // write dropping marker
         let marker_path = join_path(region.access_layer.region_dir(), DROPPING_MARKER_FILE);
@@ -49,9 +48,12 @@ impl<S> RegionWorkerLoop<S> {
             .await
             .context(OpenDalSnafu)?;
 
+        region.stop().await?;
         // remove this region from region map to prevent other requests from accessing this region
         self.regions.remove_region(region_id);
         self.dropping_regions.insert_region(region.clone());
+        // Notifies flush scheduler.
+        self.flush_scheduler.on_region_dropped(region_id);
 
         // mark region version as dropped
         region.version_control.mark_dropped();

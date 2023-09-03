@@ -15,6 +15,7 @@
 //! Worker requests.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use api::helper::{
@@ -25,6 +26,7 @@ use api::v1::{ColumnDataType, ColumnSchema, OpType, Rows, SemanticType, Value};
 use common_base::readable_size::ReadableSize;
 use common_query::Output;
 use datatypes::prelude::DataType;
+use smallvec::SmallVec;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::metadata::{ColumnMetadata, RegionMetadata};
 use store_api::region_request::{
@@ -35,8 +37,13 @@ use store_api::storage::{CompactionStrategy, RegionId};
 use tokio::sync::oneshot::{self, Receiver, Sender};
 
 use crate::config::DEFAULT_WRITE_BUFFER_SIZE;
-use crate::error::{CreateDefaultSnafu, Error, FillDefaultSnafu, InvalidRequestSnafu, Result};
+use crate::error::{
+    CreateDefaultSnafu, Error, FillDefaultSnafu, FlushRegionSnafu, InvalidRequestSnafu, Result,
+};
+use crate::memtable::MemtableId;
 use crate::sst::file::FileMeta;
+use crate::sst::file_purger::{FilePurgerRef, PurgeRequest};
+use crate::wal::EntryId;
 
 /// Options that affect the entire region.
 ///
@@ -374,6 +381,7 @@ pub(crate) struct SenderWriteRequest {
 }
 
 /// Request sent to a worker
+#[derive(Debug)]
 pub(crate) enum WorkerRequest {
     /// Write to a region.
     Write(SenderWriteRequest),
@@ -491,15 +499,51 @@ pub(crate) enum BackgroundNotify {
 /// Notifies a flush job is finished.
 #[derive(Debug)]
 pub(crate) struct FlushFinished {
-    /// Meta of the flushed SST.
-    pub(crate) file_meta: FileMeta,
+    /// Region id.
+    pub(crate) region_id: RegionId,
+    /// Meta of the flushed SSTs.
+    pub(crate) file_metas: Vec<FileMeta>,
+    /// Entry id of flushed data.
+    pub(crate) flushed_entry_id: EntryId,
+    /// Id of memtables to remove.
+    pub(crate) memtables_to_remove: SmallVec<[MemtableId; 2]>,
+    /// Flush result senders.
+    pub(crate) senders: Vec<oneshot::Sender<Result<Output>>>,
+    /// File purger for cleaning files on failure.
+    pub(crate) file_purger: FilePurgerRef,
+}
+
+impl FlushFinished {
+    pub(crate) fn on_failure(self, err: Error) {
+        let err = Arc::new(err);
+        for sender in self.senders {
+            // Ignore send result.
+            let _ = sender.send(Err(err.clone()).context(FlushRegionSnafu {
+                region_id: self.region_id,
+            }));
+        }
+        // Clean flushed files.
+        for file in self.file_metas {
+            self.file_purger.send_request(PurgeRequest {
+                region_id: file.region_id,
+                file_id: file.file_id,
+            });
+        }
+    }
+
+    pub(crate) fn on_success(self) {
+        for sender in self.senders {
+            // Ignore send result.
+            let _ = sender.send(Ok(Output::AffectedRows(0)));
+        }
+    }
 }
 
 /// Notifies a flush job is failed.
 #[derive(Debug)]
 pub(crate) struct FlushFailed {
-    /// The reason of a failed flush job.
-    pub(crate) error: Error,
+    /// The error source of the failure.
+    pub(crate) err: Arc<Error>,
 }
 
 #[cfg(test)]

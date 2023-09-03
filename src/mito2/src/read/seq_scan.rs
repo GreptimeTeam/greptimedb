@@ -107,7 +107,7 @@ impl SeqScan {
         // Scans all memtables and SSTs. Builds a merge reader to merge results.
         let mut builder = MergeReaderBuilder::new();
         for mem in &self.memtables {
-            let iter = mem.iter(self.request.clone());
+            let iter = mem.iter(Some(self.mapper.column_ids()), &self.request.filters);
             builder.push_batch_iter(iter);
         }
         for file in &self.files {
@@ -135,5 +135,13 @@ impl SeqScan {
         ));
 
         Ok(stream)
+    }
+}
+
+#[cfg(test)]
+impl SeqScan {
+    /// Returns number of SST files to scan.
+    pub(crate) fn num_files(&self) -> usize {
+        self.files.len()
     }
 }

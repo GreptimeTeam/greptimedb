@@ -19,7 +19,7 @@ use common_meta::RegionIdent;
 use store_api::storage::RegionId;
 
 use crate::error::Result;
-use crate::keys::InactiveNodeKey;
+use crate::keys::InactiveRegionKey;
 use crate::service::store::kv::ResettableKvStoreRef;
 
 pub struct InactiveNodeManager<'a> {
@@ -37,7 +37,7 @@ impl<'a> InactiveNodeManager<'a> {
             region_ident.region_number,
         )
         .as_u64();
-        let key = InactiveNodeKey {
+        let key = InactiveRegionKey {
             cluster_id: region_ident.cluster_id,
             node_id: region_ident.datanode_id,
             region_id,
@@ -57,7 +57,7 @@ impl<'a> InactiveNodeManager<'a> {
             region_ident.region_number,
         )
         .as_u64();
-        let key: Vec<u8> = InactiveNodeKey {
+        let key: Vec<u8> = InactiveRegionKey {
             cluster_id: region_ident.cluster_id,
             node_id: region_ident.datanode_id,
             region_id,
@@ -68,19 +68,19 @@ impl<'a> InactiveNodeManager<'a> {
     }
 
     /// The input is a list of regions on a specific node. If one or more regions have been
-    /// set to inactive state by metasrv, the corresponding regions will be removed, then
-    /// return the remaining regions.
+    /// set to inactive state by metasrv, the corresponding regions will be removed(update the
+    /// `region_ids`), then returns the removed regions.
     pub async fn retain_active_regions(
         &self,
         cluster_id: u64,
         node_id: u64,
         region_ids: &mut Vec<u64>,
-    ) -> Result<()> {
+    ) -> Result<HashSet<u64>> {
         let key_region_ids = region_ids
             .iter()
             .map(|region_id| {
                 (
-                    InactiveNodeKey {
+                    InactiveRegionKey {
                         cluster_id,
                         node_id,
                         region_id: *region_id,
@@ -94,17 +94,24 @@ impl<'a> InactiveNodeManager<'a> {
         let resp = self.store.batch_get(BatchGetRequest { keys }).await?;
         let kvs = resp.kvs;
         if kvs.is_empty() {
-            return Ok(());
+            return Ok(HashSet::new());
         }
 
         let inactive_keys = kvs.into_iter().map(|kv| kv.key).collect::<HashSet<_>>();
-        let active_region_ids = key_region_ids
-            .into_iter()
-            .filter(|(key, _)| !inactive_keys.contains(key))
-            .map(|(_, region_id)| region_id)
-            .collect::<Vec<_>>();
-        *region_ids = active_region_ids;
+        let (active_region_ids, inactive_region_ids): (Vec<Option<u64>>, Vec<Option<u64>>) =
+            key_region_ids
+                .into_iter()
+                .map(|(key, region_id)| {
+                    let is_active = !inactive_keys.contains(&key);
+                    if is_active {
+                        (Some(region_id), None)
+                    } else {
+                        (None, Some(region_id))
+                    }
+                })
+                .unzip();
+        *region_ids = active_region_ids.into_iter().flatten().collect();
 
-        Ok(())
+        Ok(inactive_region_ids.into_iter().flatten().collect())
     }
 }

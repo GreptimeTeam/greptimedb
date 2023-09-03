@@ -14,6 +14,8 @@
 
 //! Configurations.
 
+use std::time::Duration;
+
 use common_base::readable_size::ReadableSize;
 use common_datasource::compression::CompressionType;
 use common_telemetry::warn;
@@ -45,8 +47,16 @@ pub struct MitoConfig {
     pub manifest_compress_type: CompressionType,
 
     // Background job configs:
-    /// Max number of running background jobs (default 4)
+    /// Max number of running background jobs (default 4).
     pub max_background_jobs: usize,
+
+    // Flush configs:
+    /// Interval to auto flush a region if it has not flushed yet (default 30 min).
+    pub auto_flush_interval: Duration,
+    /// Global write buffer size threshold to trigger flush (default 512M).
+    pub global_write_buffer_size: ReadableSize,
+    /// Global write buffer size threshold to reject write requests (default 2G).
+    pub global_write_buffer_reject_size: ReadableSize,
 }
 
 impl Default for MitoConfig {
@@ -58,6 +68,9 @@ impl Default for MitoConfig {
             manifest_checkpoint_distance: 10,
             manifest_compress_type: CompressionType::Uncompressed,
             max_background_jobs: DEFAULT_MAX_BG_JOB,
+            auto_flush_interval: Duration::from_secs(30 * 60),
+            global_write_buffer_size: ReadableSize::mb(512),
+            global_write_buffer_reject_size: ReadableSize::gb(2),
         }
     }
 }

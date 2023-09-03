@@ -93,7 +93,7 @@ struct StartCommand {
     #[clap(long)]
     use_memory_store: Option<bool>,
     #[clap(long)]
-    disable_region_failover: Option<bool>,
+    enable_region_failover: Option<bool>,
     #[clap(long)]
     http_addr: Option<String>,
     #[clap(long)]
@@ -140,8 +140,8 @@ impl StartCommand {
             opts.use_memory_store = use_memory_store;
         }
 
-        if let Some(disable_region_failover) = self.disable_region_failover {
-            opts.disable_region_failover = disable_region_failover;
+        if let Some(enable_region_failover) = self.enable_region_failover {
+            opts.enable_region_failover = enable_region_failover;
         }
 
         if let Some(http_addr) = &self.http_addr {
