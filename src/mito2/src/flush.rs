@@ -20,7 +20,7 @@ use std::sync::Arc;
 use common_query::Output;
 use common_telemetry::{error, info};
 use snafu::ResultExt;
-use store_api::storage::{RegionId, ScanRequest};
+use store_api::storage::RegionId;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::access_layer::AccessLayerRef;
@@ -190,7 +190,7 @@ impl RegionFlushTask {
             }
 
             let file_id = FileId::random();
-            let iter = mem.iter(ScanRequest::default());
+            let iter = mem.iter(None, &[]);
             let source = Source::Iter(iter);
             let mut writer = self
                 .access_layer
