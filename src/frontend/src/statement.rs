@@ -120,10 +120,9 @@ impl StatementExecutor {
                 self.copy_database(to_copy_database_request(arg, &query_ctx)?)
                     .await
             }
-
-            Statement::CreateDatabase(_)
-            | Statement::CreateTable(_)
+            Statement::CreateTable(_)
             | Statement::CreateExternalTable(_)
+            | Statement::CreateDatabase(_)
             | Statement::Alter(_)
             | Statement::DropTable(_)
             | Statement::TruncateTable(_)
