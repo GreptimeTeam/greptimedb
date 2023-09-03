@@ -159,7 +159,7 @@ impl AllocTracker {
 
     /// Tracks `bytes` memory is allocated.
     pub(crate) fn on_allocation(&self, bytes: usize) {
-        let _ = self.bytes_allocated.fetch_add(bytes, Ordering::Relaxed);
+        self.bytes_allocated.fetch_add(bytes, Ordering::Relaxed);
         increment_gauge!(WRITE_BUFFER_BYTES, bytes as f64);
         if let Some(write_buffer_manager) = &self.write_buffer_manager {
             write_buffer_manager.reserve_mem(bytes);
@@ -217,5 +217,63 @@ impl MemtableBuilder for DefaultMemtableBuilder {
         Arc::new(EmptyMemtable::new(
             self.next_id.fetch_add(1, Ordering::Relaxed),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::flush::{WriteBufferManager, WriteBufferManagerImpl};
+
+    #[test]
+    fn test_alloc_tracker_without_manager() {
+        let tracker = AllocTracker::new(None);
+        assert_eq!(0, tracker.bytes_allocated());
+        tracker.on_allocation(100);
+        assert_eq!(100, tracker.bytes_allocated());
+        tracker.on_allocation(200);
+        assert_eq!(300, tracker.bytes_allocated());
+
+        tracker.done_allocating();
+        assert_eq!(300, tracker.bytes_allocated());
+    }
+
+    #[test]
+    fn test_alloc_tracker_with_manager() {
+        let manager = Arc::new(WriteBufferManagerImpl::new(1000));
+        {
+            let tracker = AllocTracker::new(Some(manager.clone() as WriteBufferManagerRef));
+
+            tracker.on_allocation(100);
+            assert_eq!(100, tracker.bytes_allocated());
+            assert_eq!(100, manager.memory_usage());
+            assert_eq!(100, manager.mutable_usage());
+
+            for _ in 0..2 {
+                // Done allocating won't free the same memory multiple times.
+                tracker.done_allocating();
+                assert_eq!(100, manager.memory_usage());
+                assert_eq!(0, manager.mutable_usage());
+            }
+        }
+
+        assert_eq!(0, manager.memory_usage());
+        assert_eq!(0, manager.mutable_usage());
+    }
+
+    #[test]
+    fn test_alloc_tracker_without_done_allocating() {
+        let manager = Arc::new(WriteBufferManagerImpl::new(1000));
+        {
+            let tracker = AllocTracker::new(Some(manager.clone() as WriteBufferManagerRef));
+
+            tracker.on_allocation(100);
+            assert_eq!(100, tracker.bytes_allocated());
+            assert_eq!(100, manager.memory_usage());
+            assert_eq!(100, manager.mutable_usage());
+        }
+
+        assert_eq!(0, manager.memory_usage());
+        assert_eq!(0, manager.mutable_usage());
     }
 }

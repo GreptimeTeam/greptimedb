@@ -140,7 +140,7 @@ impl<S> RegionWorkerLoop<S> {
             }
 
             let version = region.version();
-            let region_mutable_size = version.memtables.mutable_bytes_usage();
+            let region_mutable_size = version.memtables.mutable_usage();
             // Tracks region with max mutable memtable size.
             if region_mutable_size > max_mutable_size {
                 max_mem_region = Some(region);
