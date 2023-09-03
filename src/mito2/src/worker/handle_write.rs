@@ -23,7 +23,7 @@ use store_api::metadata::RegionMetadata;
 use store_api::storage::RegionId;
 use tokio::sync::oneshot::Sender;
 
-use crate::error::{RegionNotFoundSnafu, Result};
+use crate::error::{RegionNotFoundSnafu, RejectWriteSnafu, Result};
 use crate::region_write_ctx::RegionWriteCtx;
 use crate::request::{SenderWriteRequest, WriteRequest};
 use crate::worker::RegionWorkerLoop;
@@ -119,14 +119,23 @@ impl<S> RegionWorkerLoop<S> {
     /// Returns true if the engine needs to reject some write requests.
     fn should_reject_write(&self) -> bool {
         // If memory usage reaches high threshold (we should also consider pending flush requests) returns true.
-        // TODO(yingwen): Implement this.
-        false
+        self.write_buffer_manager.memory_usage()
+            >= self.config.global_write_buffer_reject_size.as_bytes() as usize
     }
 }
 
 /// Send rejected error to all `write_requests`.
-fn reject_write_requests(_write_requests: Vec<SenderWriteRequest>) {
-    unimplemented!()
+fn reject_write_requests(write_requests: Vec<SenderWriteRequest>) {
+    for req in write_requests {
+        if let Some(sender) = req.sender {
+            let _ = sender.send(
+                RejectWriteSnafu {
+                    region_id: req.request.region_id,
+                }
+                .fail(),
+            );
+        }
+    }
 }
 
 /// Checks the schema and fill missing columns.

@@ -419,6 +419,16 @@ pub enum Error {
         region_id: RegionId,
         location: Location,
     },
+
+    #[snafu(display(
+        "Engine write buffer is full, rejecting write requests of region {}, location: {}",
+        region_id,
+        location
+    ))]
+    RejectWrite {
+        region_id: RegionId,
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -484,6 +494,7 @@ impl ErrorExt for Error {
             FlushRegion { source, .. } => source.status_code(),
             RegionDropped { .. } => StatusCode::Cancelled,
             RegionClosed { .. } => StatusCode::Cancelled,
+            RejectWrite { .. } => StatusCode::StorageUnavailable,
         }
     }
 
