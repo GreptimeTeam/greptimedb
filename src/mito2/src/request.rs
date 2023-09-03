@@ -503,10 +503,14 @@ pub(crate) struct SenderDdlRequest {
 /// Notification from a background job.
 #[derive(Debug)]
 pub(crate) enum BackgroundNotify {
-    /// Flush is finished.
+    /// Flush has finished.
     FlushFinished(FlushFinished),
-    /// Flush is failed.
+    /// Flush has failed.
     FlushFailed(FlushFailed),
+    /// Compaction has finished.
+    CompactionFinished(CompactionFinished),
+    /// Compaction has failed.
+    CompactionFailed(CompactionFailed),
 }
 
 /// Notifies a flush job is finished.
@@ -555,6 +559,35 @@ impl FlushFinished {
 /// Notifies a flush job is failed.
 #[derive(Debug)]
 pub(crate) struct FlushFailed {
+    /// The error source of the failure.
+    pub(crate) err: Arc<Error>,
+}
+
+/// Notifies a compaction job has finished.
+#[derive(Debug)]
+pub(crate) struct CompactionFinished {
+    /// Region id.
+    pub(crate) region_id: RegionId,
+    /// Compaction output files that are to be added to region version.
+    pub(crate) compaction_outputs: Vec<FileMeta>,
+    /// Compacted files that are to be removed from region version.
+    pub(crate) compacted_files: Vec<FileMeta>,
+    /// Compaction result senders.
+    pub(crate) senders: Vec<oneshot::Sender<Result<Output>>>,
+    /// File purger for cleaning files on failure.
+    pub(crate) file_purger: FilePurgerRef,
+}
+
+impl CompactionFinished {
+    pub fn on_failure(self, _err: Error) {
+        // cleaning compaction output files.
+        todo!()
+    }
+}
+
+/// A failing compaction result.
+#[derive(Debug)]
+pub(crate) struct CompactionFailed {
     /// The error source of the failure.
     pub(crate) err: Arc<Error>,
 }

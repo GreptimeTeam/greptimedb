@@ -15,6 +15,7 @@
 //! Structs and utilities for writing regions.
 
 mod handle_close;
+mod handle_compaction;
 mod handle_create;
 mod handle_drop;
 mod handle_flush;
@@ -506,6 +507,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 self.handle_flush_finished(region_id, req).await
             }
             BackgroundNotify::FlushFailed(req) => self.handle_flush_failed(region_id, req).await,
+            BackgroundNotify::CompactionFinished(req) => {
+                self.handle_compaction_finished(region_id, req).await
+            }
+            BackgroundNotify::CompactionFailed(req) => self.handle_compaction_failure(req).await,
         }
     }
 }

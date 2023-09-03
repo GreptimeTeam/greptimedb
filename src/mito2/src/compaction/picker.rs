@@ -14,16 +14,11 @@
 
 use std::fmt::Debug;
 use std::sync::Arc;
-use std::time::Duration;
-
-use common_time::Timestamp;
-use snafu::ResultExt;
-use store_api::logstore::LogStore;
 
 use crate::compaction::CompactionRequest;
-use crate::error::{CalculateExpiredTimeSnafu, Result};
-use crate::sst::file::FileHandle;
-use crate::sst::version::LevelMeta;
+use crate::error::Result;
+
+pub type CompactionPickerRef = Arc<dyn Picker + Send + Sync>;
 
 #[async_trait::async_trait]
 pub trait CompactionTask: Debug + Send + Sync + 'static {
@@ -32,28 +27,8 @@ pub trait CompactionTask: Debug + Send + Sync + 'static {
 
 /// Picker picks input SST files and builds the compaction task.
 /// Different compaction strategy may implement different pickers.
-pub trait Picker<S>: Debug + Send + 'static {
-    fn pick(&self, req: &CompactionRequest<S>) -> Result<Option<Arc<dyn CompactionTask>>>
-    where
-        S: LogStore;
-}
-
-/// Finds all expired SSTs across levels.
-pub(crate) fn get_expired_ssts(
-    levels: &[LevelMeta],
-    ttl: Option<Duration>,
-    now: Timestamp,
-) -> Result<Vec<FileHandle>> {
-    let Some(ttl) = ttl else {
-        return Ok(vec![]);
-    };
-
-    let expire_time = now.sub_duration(ttl).context(CalculateExpiredTimeSnafu)?;
-    let expired_ssts = levels
-        .iter()
-        .flat_map(|l| l.get_expired_files(&expire_time).into_iter())
-        .collect();
-    Ok(expired_ssts)
+pub trait Picker: Debug + Send + 'static {
+    fn pick(&self, req: CompactionRequest) -> Result<Option<Arc<dyn CompactionTask>>>;
 }
 
 pub struct PickerContext {

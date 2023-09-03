@@ -147,6 +147,10 @@ impl FileHandle {
     pub fn mark_compacting(&self, compacting: bool) {
         self.inner.compacting.store(compacting, Ordering::Relaxed);
     }
+
+    pub fn meta(&self) -> FileMeta {
+        self.inner.meta.clone()
+    }
 }
 
 /// Inner data of [FileHandle].

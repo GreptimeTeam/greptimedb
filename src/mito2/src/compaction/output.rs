@@ -47,7 +47,7 @@ pub(crate) struct CompactionOutput {
 }
 
 impl CompactionOutput {
-    async fn build(
+    pub(crate) async fn build(
         &self,
         region_id: RegionId,
         schema: RegionMetadataRef,

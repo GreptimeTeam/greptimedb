@@ -14,35 +14,43 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::{Debug, Formatter};
-use std::marker::PhantomData;
 use std::sync::Arc;
+use std::time::Duration;
 
 use common_base::readable_size::ReadableSize;
-use common_telemetry::{debug, info};
+use common_query::Output;
+use common_telemetry::{debug, error, info};
 use common_time::timestamp::TimeUnit;
 use common_time::timestamp_millis::BucketAligned;
 use common_time::Timestamp;
-use store_api::logstore::LogStore;
+use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
+use store_api::storage::RegionId;
+use tokio::sync::mpsc;
+use tokio::sync::oneshot::Sender;
 
 use crate::access_layer::AccessLayerRef;
 use crate::compaction::output::CompactionOutput;
-use crate::compaction::picker::{get_expired_ssts, CompactionTask, Picker};
+use crate::compaction::picker::{CompactionTask, Picker};
 use crate::compaction::CompactionRequest;
 use crate::error;
-use crate::sst::file::{FileHandle, FileId};
+use crate::error::{CalculateExpiredTimeSnafu, CompactRegionSnafu};
+use crate::request::{BackgroundNotify, CompactionFailed, CompactionFinished, WorkerRequest};
+use crate::sst::file::{FileHandle, FileId, FileMeta};
+use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::version::LevelMeta;
+
+const MAX_PARALLEL_COMPACTION: usize = 8;
 
 /// `TwcsPicker` picks files of which the max timestamp are in the same time window as compaction
 /// candidates.
-pub struct TwcsPicker<S> {
+pub struct TwcsPicker {
     max_active_window_files: usize,
     max_inactive_window_files: usize,
     time_window_seconds: Option<i64>,
-    _phantom_data: PhantomData<S>,
 }
 
-impl<S> Debug for TwcsPicker<S> {
+impl Debug for TwcsPicker {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TwcsPicker")
             .field("max_active_window_files", &self.max_active_window_files)
@@ -51,7 +59,7 @@ impl<S> Debug for TwcsPicker<S> {
     }
 }
 
-impl<S> TwcsPicker<S> {
+impl TwcsPicker {
     pub fn new(
         max_active_window_files: usize,
         max_inactive_window_files: usize,
@@ -60,7 +68,6 @@ impl<S> TwcsPicker<S> {
         Self {
             max_inactive_window_files,
             max_active_window_files,
-            _phantom_data: Default::default(),
             time_window_seconds,
         }
     }
@@ -111,49 +118,59 @@ impl<S> TwcsPicker<S> {
     }
 }
 
-impl<S: LogStore> Picker<S> for TwcsPicker<S> {
-    fn pick(&self, req: &CompactionRequest<S>) -> error::Result<Option<Arc<dyn CompactionTask>>> {
-        let levels = req.ssts().levels();
-        let expired_ssts = get_expired_ssts(levels, req.ttl, Timestamp::current_millis())?;
+impl Picker for TwcsPicker {
+    fn pick(&self, req: CompactionRequest) -> error::Result<Option<Arc<dyn CompactionTask>>> {
+        let CompactionRequest {
+            region_id,
+            region_metadata,
+            current_version,
+            access_layer,
+            ttl,
+            compaction_time_window,
+            request_sender,
+            waiters,
+            file_purger,
+        } = req;
+
+        let levels = current_version.ssts.levels();
+        let expired_ssts = get_expired_ssts(levels, ttl, Timestamp::current_millis())?;
         if !expired_ssts.is_empty() {
-            info!(
-                "Expired SSTs in region {}: {:?}",
-                req.region_id, expired_ssts
-            );
+            info!("Expired SSTs in region {}: {:?}", region_id, expired_ssts);
             // here we mark expired SSTs as compacting to avoid them being picked.
             expired_ssts.iter().for_each(|f| f.mark_compacting(true));
         }
 
-        let time_window_size = req
-            .compaction_time_window
+        let time_window_size = compaction_time_window
             .or(self.time_window_seconds)
             .unwrap_or_else(|| {
                 let inferred = infer_time_bucket(levels[0].files());
                 info!(
                     "Compaction window for region {} is not present, inferring from files: {:?}",
-                    req.region_id, inferred
+                    region_id, inferred
                 );
                 inferred
             });
 
         // Find active window from files in level 0.
         let active_window = find_latest_window_in_seconds(levels[0].files(), time_window_size);
-
+        // Assign files to windows
         let windows = assign_to_windows(levels.iter().flat_map(LevelMeta::files), time_window_size);
-
         let outputs = self.build_output(&windows, active_window, time_window_size);
 
         if outputs.is_empty() && expired_ssts.is_empty() {
             return Ok(None);
         }
         let task = TwcsCompactionTask {
-            schema: req.region_metadata.clone(),
-            sst_layer: req.access_layer.clone(),
+            region_id,
+            schema: region_metadata,
+            sst_layer: access_layer,
             outputs,
             expired_ssts,
-            sst_write_buffer_size: ReadableSize(100000000000),
+            sst_write_buffer_size: ReadableSize::mb(4),
             compaction_time_window: None,
-            reschedule_on_finish: false,
+            request_sender,
+            senders: waiters,
+            file_purger,
         };
         Ok(Some(Arc::new(task)))
     }
@@ -200,17 +217,19 @@ fn find_latest_window_in_seconds<'a>(
 }
 
 pub(crate) struct TwcsCompactionTask {
+    pub region_id: RegionId,
     pub schema: RegionMetadataRef,
     pub sst_layer: AccessLayerRef,
     pub outputs: Vec<CompactionOutput>,
-    // pub writer: RegionWriterRef<S>,
-    // pub shared_data: SharedDataRef,
-    // pub wal: Wal<S>,
-    // pub manifest: RegionManifest,
     pub expired_ssts: Vec<FileHandle>,
     pub sst_write_buffer_size: ReadableSize,
     pub compaction_time_window: Option<i64>,
-    pub reschedule_on_finish: bool,
+    pub file_purger: FilePurgerRef,
+    /// Request sender to notify the worker.
+    pub(crate) request_sender: mpsc::Sender<WorkerRequest>,
+
+    /// Senders that are used to notify waiters waiting for pending compaction tasks.
+    pub senders: Vec<Sender<error::Result<Output>>>,
 }
 
 impl Debug for TwcsCompactionTask {
@@ -219,9 +238,145 @@ impl Debug for TwcsCompactionTask {
     }
 }
 
+impl Drop for TwcsCompactionTask {
+    fn drop(&mut self) {
+        self.mark_files_compacting(false)
+    }
+}
+
+impl TwcsCompactionTask {
+    fn mark_files_compacting(&self, compacting: bool) {
+        self.outputs
+            .iter()
+            .flat_map(|o| o.inputs.iter())
+            .for_each(|f| f.mark_compacting(compacting))
+    }
+
+    /// Merges all SST files.
+    /// Returns `(output files, input files)`.
+    async fn merge_ssts(&mut self) -> error::Result<(Vec<FileMeta>, Vec<FileMeta>)> {
+        let mut futs = Vec::with_capacity(self.outputs.len());
+        let mut compacted_inputs = vec![];
+        let region_id = self.region_id;
+        for output in self.outputs.drain(..) {
+            let schema = self.schema.clone();
+            let sst_layer = self.sst_layer.clone();
+            let sst_write_buffer_size = self.sst_write_buffer_size;
+            compacted_inputs.extend(output.inputs.iter().map(FileHandle::meta));
+
+            info!(
+                "Compaction output [{}]-> {}",
+                output
+                    .inputs
+                    .iter()
+                    .map(|f| f.file_id().to_string())
+                    .collect::<Vec<_>>()
+                    .join(","),
+                output.output_file_id
+            );
+
+            // TODO(hl): Maybe spawn to runtime to exploit in-job parallelism.
+            futs.push(async move {
+                output
+                    .build(region_id, schema, sst_layer, sst_write_buffer_size)
+                    .await
+            });
+        }
+
+        let mut outputs = Vec::with_capacity(futs.len());
+        while !futs.is_empty() {
+            let mut task_chunk = Vec::with_capacity(MAX_PARALLEL_COMPACTION);
+            for _ in 0..MAX_PARALLEL_COMPACTION {
+                if let Some(task) = futs.pop() {
+                    task_chunk.push(common_runtime::spawn_bg(task));
+                }
+            }
+            let metas = futures::future::try_join_all(task_chunk)
+                .await
+                .context(error::JoinSnafu)?
+                .into_iter()
+                .collect::<error::Result<Vec<_>>>()?;
+            outputs.extend(metas.into_iter().flatten());
+        }
+
+        let inputs = compacted_inputs.into_iter().collect();
+        Ok((outputs, inputs))
+    }
+
+    async fn handle_compaction(&mut self) -> error::Result<(Vec<FileMeta>, Vec<FileMeta>)> {
+        self.mark_files_compacting(true);
+        let (output, mut compacted) = self.merge_ssts().await.map_err(|e| {
+            error!(e; "Failed to compact region: {}", self.region_id);
+            e
+        })?;
+        compacted.extend(self.expired_ssts.iter().map(FileHandle::meta));
+        Ok((output, compacted))
+    }
+
+    /// Handles compaction success.
+    fn on_success(&mut self) {
+        for sender in self.senders.drain(..) {
+            let _ = sender.send(Ok(Output::AffectedRows(0)).context(CompactRegionSnafu {
+                region_id: self.region_id,
+            }));
+        }
+    }
+
+    /// Handles compaction failure, notifies all waiters.
+    fn on_failure(&mut self, err: Arc<error::Error>) {
+        for sender in self.senders.drain(..) {
+            let _ = sender.send(Err(err.clone()).context(CompactRegionSnafu {
+                region_id: self.region_id,
+            }));
+        }
+    }
+
+    /// Notifies region worker to handle post-compaction tasks.
+    async fn send_to_worker(&self, request: WorkerRequest) {
+        if let Err(e) = self.request_sender.send(request).await {
+            error!(
+                "Failed to notify compaction job status for region {}, request: {:?}",
+                self.region_id, e.0
+            );
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl CompactionTask for TwcsCompactionTask {
-    async fn run(self) -> error::Result<()> {
+    async fn run(mut self) -> error::Result<()> {
+        let notify = match self.handle_compaction().await {
+            Ok((added, deleted)) => {
+                info!(
+                    "Compacted SST files, input: {:?}, output: {:?}, window: {:?}",
+                    added, deleted, self.compaction_time_window
+                );
+                self.on_success();
+
+                BackgroundNotify::CompactionFinished(CompactionFinished {
+                    region_id: self.region_id,
+                    compaction_outputs: added,
+                    compacted_files: deleted,
+                    senders: vec![],
+                    file_purger: self.file_purger.clone(),
+                })
+            }
+            Err(e) => {
+                error!(e; "Failed to compact region, region id: {}", self.region_id);
+                let err = Arc::new(e);
+                // notify compaction waiters
+                self.on_failure(err.clone());
+                BackgroundNotify::CompactionFailed(CompactionFailed { err })
+            }
+        };
+
+        self.send_to_worker(WorkerRequest::Background {
+            region_id: self.region_id,
+            notify,
+        })
+        .await;
+
+        // TODO(hl): handle reschedule
         Ok(())
     }
 }
@@ -337,11 +492,27 @@ pub(crate) const TIME_BUCKETS: TimeBuckets = TimeBuckets([
     10 * 365 * 24 * 60 * 60, // ten years
 ]);
 
+/// Finds all expired SSTs across levels.
+fn get_expired_ssts(
+    levels: &[LevelMeta],
+    ttl: Option<Duration>,
+    now: Timestamp,
+) -> error::Result<Vec<FileHandle>> {
+    let Some(ttl) = ttl else {
+        return Ok(vec![]);
+    };
+
+    let expire_time = now.sub_duration(ttl).context(CalculateExpiredTimeSnafu)?;
+    let expired_ssts = levels
+        .iter()
+        .flat_map(|l| l.get_expired_files(&expire_time).into_iter())
+        .collect();
+    Ok(expired_ssts)
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
-
-    use log_store::NoopLogStore;
 
     use super::*;
     use crate::compaction::test_util::new_file_handle;
@@ -423,11 +594,8 @@ mod tests {
             let windows = assign_to_windows(self.input_files.iter(), self.window_size);
             let active_window =
                 find_latest_window_in_seconds(self.input_files.iter(), self.window_size);
-            let output = TwcsPicker::<NoopLogStore>::new(4, 1, None).build_output(
-                &windows,
-                active_window,
-                self.window_size,
-            );
+            let output =
+                TwcsPicker::new(4, 1, None).build_output(&windows, active_window, self.window_size);
 
             let output = output
                 .iter()

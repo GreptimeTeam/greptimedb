@@ -15,16 +15,17 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use store_api::logstore::LogStore;
+use common_query::Output;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{CompactionStrategy, RegionId};
+use tokio::sync::{mpsc, oneshot};
 
 use crate::access_layer::AccessLayerRef;
-use crate::compaction::picker::Picker;
 use crate::compaction::twcs::TwcsPicker;
+use crate::error;
 use crate::region::version::VersionRef;
-use crate::sst::version::SstVersion;
-use crate::wal::Wal;
+use crate::request::WorkerRequest;
+use crate::sst::file_purger::FilePurgerRef;
 
 mod picker;
 mod twcs;
@@ -33,29 +34,23 @@ mod output;
 #[cfg(test)]
 mod test_util;
 
+pub use picker::CompactionPickerRef;
+
 /// Region compaction request.
-pub struct CompactionRequest<S: LogStore> {
+pub struct CompactionRequest {
     pub(crate) region_id: RegionId,
     pub(crate) region_metadata: RegionMetadataRef,
-    pub(crate) version: VersionRef,
+    pub(crate) current_version: VersionRef,
     pub(crate) access_layer: AccessLayerRef,
-    pub(crate) wal: Wal<S>,
     pub(crate) ttl: Option<Duration>,
     pub(crate) compaction_time_window: Option<i64>,
+    pub(crate) request_sender: mpsc::Sender<WorkerRequest>,
+    pub(crate) waiters: Vec<oneshot::Sender<error::Result<Output>>>,
+    pub(crate) file_purger: FilePurgerRef,
 }
-
-impl<S: LogStore> CompactionRequest<S> {
-    pub(crate) fn ssts(&self) -> &SstVersion {
-        &self.version.ssts
-    }
-}
-
-pub type CompactionPickerRef<S> = Arc<dyn Picker<S> + Send + Sync>;
 
 /// Builds compaction picker according to [CompactionStrategy].
-pub fn compaction_strategy_to_picker<S: LogStore>(
-    strategy: &CompactionStrategy,
-) -> CompactionPickerRef<S> {
+pub fn compaction_strategy_to_picker(strategy: &CompactionStrategy) -> CompactionPickerRef {
     match strategy {
         CompactionStrategy::Twcs(twcs_opts) => Arc::new(TwcsPicker::new(
             twcs_opts.max_active_window_files,
