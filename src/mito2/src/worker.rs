@@ -198,7 +198,9 @@ impl<S: LogStore> WorkerStarter<S> {
             wal: Wal::new(self.log_store),
             object_store: self.object_store,
             running: running.clone(),
-            memtable_builder: Arc::new(TimeSeriesMemtableBuilder::default()),
+            memtable_builder: Arc::new(TimeSeriesMemtableBuilder::new(Some(
+                self.write_buffer_manager.clone(),
+            ))),
             scheduler: self.scheduler.clone(),
             write_buffer_manager: self.write_buffer_manager,
             flush_scheduler: FlushScheduler::new(self.scheduler),
