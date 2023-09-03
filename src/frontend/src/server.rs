@@ -37,7 +37,6 @@ use crate::error::Error::StartServer;
 use crate::error::{self, Result};
 use crate::frontend::FrontendOptions;
 use crate::instance::FrontendInstance;
-use crate::service_config::{InfluxdbOptions, OtlpOptions, PromStoreOptions};
 
 pub(crate) struct Services;
 
@@ -57,7 +56,9 @@ impl Services {
         let mut result = Vec::<ServerHandler>::with_capacity(plugins.len());
         let user_provider = plugins.get::<UserProviderRef>();
 
-        if let Some(opts) = &opts.grpc_options {
+        {
+            // Always init GRPC server
+            let opts = &opts.grpc_options;
             let grpc_addr = parse_addr(&opts.addr)?;
 
             let grpc_runtime = Arc::new(
@@ -78,9 +79,51 @@ impl Services {
             );
 
             result.push((Box::new(grpc_server), grpc_addr));
-        };
+        }
 
-        if let Some(opts) = &opts.mysql_options {
+        {
+            // Always init HTTP server
+            let http_options = &opts.http_options;
+            let http_addr = parse_addr(&http_options.addr)?;
+
+            let mut http_server_builder = HttpServerBuilder::new(http_options.clone());
+            let _ = http_server_builder
+                .with_sql_handler(ServerSqlQueryHandlerAdaptor::arc(instance.clone()))
+                .with_grpc_handler(ServerGrpcQueryHandlerAdaptor::arc(instance.clone()));
+
+            if let Some(user_provider) = user_provider.clone() {
+                let _ = http_server_builder.with_user_provider(user_provider);
+            }
+
+            if opts.opentsdb_options.enable {
+                let _ = http_server_builder.with_opentsdb_handler(instance.clone());
+            }
+            if opts.influxdb_options.enable {
+                let _ = http_server_builder.with_influxdb_handler(instance.clone());
+            }
+
+            if opts.prom_store_options.enable {
+                let _ = http_server_builder
+                    .with_prom_handler(instance.clone())
+                    .with_prometheus_handler(instance.clone());
+            }
+
+            if opts.otlp_options.enable {
+                let _ = http_server_builder.with_otlp_handler(instance.clone());
+            }
+
+            let http_server = http_server_builder
+                .with_metrics_handler(MetricsHandler)
+                .with_script_handler(instance.clone())
+                .with_configurator(plugins.get::<ConfiguratorRef>())
+                .with_greptime_config_options(opts.to_toml_string())
+                .build();
+            result.push((Box::new(http_server), http_addr));
+        }
+
+        if opts.mysql_options.enable {
+            // Init MySQL server
+            let opts = &opts.mysql_options;
             let mysql_addr = parse_addr(&opts.addr)?;
 
             let mysql_io_runtime = Arc::new(
@@ -110,7 +153,9 @@ impl Services {
             result.push((mysql_server, mysql_addr));
         }
 
-        if let Some(opts) = &opts.postgres_options {
+        if opts.postgres_options.enable {
+            // Init PosgresSQL Server
+            let opts = &opts.postgres_options;
             let pg_addr = parse_addr(&opts.addr)?;
 
             let pg_io_runtime = Arc::new(
@@ -131,9 +176,9 @@ impl Services {
             result.push((pg_server, pg_addr));
         }
 
-        let mut set_opentsdb_handler = false;
-
-        if let Some(opts) = &opts.opentsdb_options {
+        if opts.opentsdb_options.enable {
+            // Init OpenTSDB server
+            let opts = &opts.opentsdb_options;
             let addr = parse_addr(&opts.addr)?;
 
             let io_runtime = Arc::new(
@@ -147,51 +192,6 @@ impl Services {
             let server = OpentsdbServer::create_server(instance.clone(), io_runtime);
 
             result.push((server, addr));
-            set_opentsdb_handler = true;
-        }
-
-        if let Some(http_options) = &opts.http_options {
-            let http_addr = parse_addr(&http_options.addr)?;
-
-            let mut http_server_builder = HttpServerBuilder::new(http_options.clone());
-            let _ = http_server_builder
-                .with_sql_handler(ServerSqlQueryHandlerAdaptor::arc(instance.clone()))
-                .with_grpc_handler(ServerGrpcQueryHandlerAdaptor::arc(instance.clone()));
-
-            if let Some(user_provider) = user_provider.clone() {
-                let _ = http_server_builder.with_user_provider(user_provider);
-            }
-
-            if set_opentsdb_handler {
-                let _ = http_server_builder.with_opentsdb_handler(instance.clone());
-            }
-            if matches!(
-                opts.influxdb_options,
-                Some(InfluxdbOptions { enable: true })
-            ) {
-                let _ = http_server_builder.with_influxdb_handler(instance.clone());
-            }
-
-            if matches!(
-                opts.prom_store_options,
-                Some(PromStoreOptions { enable: true })
-            ) {
-                let _ = http_server_builder
-                    .with_prom_handler(instance.clone())
-                    .with_prometheus_handler(instance.clone());
-            }
-
-            if matches!(opts.otlp_options, Some(OtlpOptions { enable: true })) {
-                let _ = http_server_builder.with_otlp_handler(instance.clone());
-            }
-
-            let http_server = http_server_builder
-                .with_metrics_handler(MetricsHandler)
-                .with_script_handler(instance)
-                .with_configurator(plugins.get::<ConfiguratorRef>())
-                .with_greptime_config_options(opts.to_toml_string())
-                .build();
-            result.push((Box::new(http_server), http_addr));
         }
 
         Ok(result
