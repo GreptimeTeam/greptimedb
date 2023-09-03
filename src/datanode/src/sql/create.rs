@@ -21,9 +21,9 @@ use common_telemetry::tracing::info;
 use datatypes::schema::RawSchema;
 use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
-use sql::ast::{ColumnOption, TableConstraint};
-use sql::statements::column_def_to_schema;
+use sql::ast::TableConstraint;
 use sql::statements::create::{CreateTable, TIME_INDEX};
+use sql::statements::{column_def_to_schema, has_primary_key_option};
 use sql::util::to_lowercase_options_map;
 use table::engine::TableReference;
 use table::metadata::TableId;
@@ -131,12 +131,7 @@ impl SqlHandler {
         let pk_map = stmt
             .columns
             .iter()
-            .filter(|col| {
-                col.options.iter().any(|options| match options.option {
-                    ColumnOption::Unique { is_primary } => is_primary,
-                    _ => false,
-                })
-            })
+            .filter(|c| has_primary_key_option(c))
             .map(|col| col.name.value.clone())
             .collect::<Vec<_>>();
 

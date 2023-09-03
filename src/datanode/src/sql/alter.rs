@@ -17,7 +17,7 @@ use common_query::Output;
 use common_telemetry::logging::info;
 use snafu::prelude::*;
 use sql::statements::alter::{AlterTable, AlterTableOperation};
-use sql::statements::column_def_to_schema;
+use sql::statements::{column_def_to_schema, has_primary_key_option};
 use table::engine::TableReference;
 use table::metadata::TableId;
 use table::requests::{AddColumnRequest, AlterKind, AlterTableRequest};
@@ -106,8 +106,7 @@ impl SqlHandler {
                 columns: vec![AddColumnRequest {
                     column_schema: column_def_to_schema(column_def, false)
                         .context(error::ParseSqlSnafu)?,
-                    // FIXME(dennis): supports adding key column
-                    is_key: false,
+                    is_key: has_primary_key_option(column_def),
                     location: location.clone(),
                 }],
             },
@@ -172,11 +171,42 @@ mod tests {
         assert_matches!(alter_kind, AlterKind::AddColumns { .. });
         match alter_kind {
             AlterKind::AddColumns { columns } => {
-                let new_column = &columns[0].column_schema;
+                let request = &columns[0];
+                let new_column = &request.column_schema;
 
                 assert_eq!(new_column.name, "tagk_i");
                 assert!(new_column.is_nullable());
                 assert_eq!(new_column.data_type, ConcreteDataType::string_datatype());
+                assert!(!request.is_key);
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_alter_to_request_with_adding_key_column() {
+        let alter_table = parse_sql("ALTER TABLE my_metric_1 ADD tagk_i STRING PRIMARY KEY;");
+        let req = SqlHandler::alter_to_request(
+            alter_table,
+            TableReference::full("greptime", "public", "my_metric_1"),
+            1,
+        )
+        .unwrap();
+        assert_eq!(req.catalog_name, "greptime");
+        assert_eq!(req.schema_name, "public");
+        assert_eq!(req.table_name, "my_metric_1");
+
+        let alter_kind = req.alter_kind;
+        assert_matches!(alter_kind, AlterKind::AddColumns { .. });
+        match alter_kind {
+            AlterKind::AddColumns { columns } => {
+                let request = &columns[0];
+                let new_column = &request.column_schema;
+
+                assert_eq!(new_column.name, "tagk_i");
+                assert!(new_column.is_nullable());
+                assert_eq!(new_column.data_type, ConcreteDataType::string_datatype());
+                assert!(request.is_key);
             }
             _ => unreachable!(),
         }
