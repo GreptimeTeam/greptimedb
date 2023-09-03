@@ -71,8 +71,8 @@ pub type WriteBufferManagerRef = Arc<dyn WriteBufferManager>;
 pub struct WriteBufferManagerImpl {
     /// Write buffer size for the engine.
     global_write_buffer_size: usize,
-    /// Mutable memtable memory size limitation.
-    mutable_limitation: usize,
+    /// Mutable memtable memory size limit.
+    mutable_limit: usize,
     /// Memory in used (e.g. used by mutable and immutable memtables).
     memory_used: AtomicUsize,
     /// Memory that hasn't been scheduled to free (e.g. used by mutable memtables).
@@ -84,7 +84,7 @@ impl WriteBufferManagerImpl {
     pub fn new(global_write_buffer_size: usize) -> Self {
         Self {
             global_write_buffer_size,
-            mutable_limitation: Self::get_mutable_limitation(global_write_buffer_size),
+            mutable_limit: Self::get_mutable_limit(global_write_buffer_size),
             memory_used: AtomicUsize::new(0),
             memory_active: AtomicUsize::new(0),
         }
@@ -96,7 +96,7 @@ impl WriteBufferManagerImpl {
     }
 
     /// Returns the size limit for mutable memtables.
-    fn get_mutable_limitation(global_write_buffer_size: usize) -> usize {
+    fn get_mutable_limit(global_write_buffer_size: usize) -> usize {
         global_write_buffer_size * 7 / 8
     }
 }
@@ -104,11 +104,10 @@ impl WriteBufferManagerImpl {
 impl WriteBufferManager for WriteBufferManagerImpl {
     fn should_flush_engine(&self) -> bool {
         let mutable_memtable_memory_usage = self.memory_active.load(Ordering::Relaxed);
-        if mutable_memtable_memory_usage > self.mutable_limitation {
+        if mutable_memtable_memory_usage > self.mutable_limit {
             info!(
-                "Engine should flush (over mutable limit), mutable_usage: {}, mutable_limitation: {}.",
-                mutable_memtable_memory_usage,
-                self.mutable_limitation,
+                "Engine should flush (over mutable limit), mutable_usage: {}, mutable_limit: {}.",
+                mutable_memtable_memory_usage, self.mutable_limit,
             );
             return true;
         }
@@ -541,11 +540,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_get_mutable_limitation() {
-        assert_eq!(7, WriteBufferManagerImpl::get_mutable_limitation(8));
-        assert_eq!(8, WriteBufferManagerImpl::get_mutable_limitation(10));
-        assert_eq!(56, WriteBufferManagerImpl::get_mutable_limitation(64));
-        assert_eq!(0, WriteBufferManagerImpl::get_mutable_limitation(0));
+    fn test_get_mutable_limit() {
+        assert_eq!(7, WriteBufferManagerImpl::get_mutable_limit(8));
+        assert_eq!(8, WriteBufferManagerImpl::get_mutable_limit(10));
+        assert_eq!(56, WriteBufferManagerImpl::get_mutable_limit(64));
+        assert_eq!(0, WriteBufferManagerImpl::get_mutable_limit(0));
     }
 
     #[test]
