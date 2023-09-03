@@ -26,7 +26,7 @@ use crate::handler::node_stat::Stat;
 
 pub(crate) const DN_LEASE_PREFIX: &str = "__meta_dnlease";
 pub(crate) const SEQ_PREFIX: &str = "__meta_seq";
-pub(crate) const INACTIVE_NODE_PREFIX: &str = "__meta_inactive_node";
+pub(crate) const INACTIVE_REGION_PREFIX: &str = "__meta_inactive_region";
 
 pub const DN_STAT_PREFIX: &str = "__meta_dnstat";
 
@@ -238,17 +238,17 @@ impl TryFrom<Vec<u8>> for StatValue {
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
-pub struct InactiveNodeKey {
+pub struct InactiveRegionKey {
     pub cluster_id: u64,
     pub node_id: u64,
     pub region_id: u64,
 }
 
-impl From<InactiveNodeKey> for Vec<u8> {
-    fn from(value: InactiveNodeKey) -> Self {
+impl From<InactiveRegionKey> for Vec<u8> {
+    fn from(value: InactiveRegionKey) -> Self {
         format!(
             "{}-{}-{}-{}",
-            INACTIVE_NODE_PREFIX, value.cluster_id, value.node_id, value.region_id
+            INACTIVE_REGION_PREFIX, value.cluster_id, value.node_id, value.region_id
         )
         .into_bytes()
     }

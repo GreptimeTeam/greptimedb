@@ -27,14 +27,18 @@ use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
 use crate::ddl::{DdlManager, DdlManagerRef};
 use crate::error::Result;
 use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
+use crate::handler::check_leader_handler::CheckLeaderHandler;
+use crate::handler::collect_stats_handler::CollectStatsHandler;
+use crate::handler::failure_handler::RegionFailureHandler;
+use crate::handler::filter_inactive_region_stats::FilterInactiveRegionStatsHandler;
+use crate::handler::keep_lease_handler::KeepLeaseHandler;
 use crate::handler::mailbox_handler::MailboxHandler;
+use crate::handler::on_leader_start_handler::OnLeaderStartHandler;
+use crate::handler::persist_stats_handler::PersistStatsHandler;
 use crate::handler::publish_heartbeat_handler::PublishHeartbeatHandler;
 use crate::handler::region_lease_handler::RegionLeaseHandler;
-use crate::handler::{
-    CheckLeaderHandler, CollectStatsHandler, HeartbeatHandlerGroup, HeartbeatMailbox,
-    KeepLeaseHandler, OnLeaderStartHandler, PersistStatsHandler, Pushers, RegionFailureHandler,
-    ResponseHeaderHandler,
-};
+use crate::handler::response_header_handler::ResponseHeaderHandler;
+use crate::handler::{HeartbeatHandlerGroup, HeartbeatMailbox, Pushers};
 use crate::lock::memory::MemLock;
 use crate::lock::DistLockRef;
 use crate::metadata_service::{DefaultMetadataService, MetadataServiceRef};
@@ -186,10 +190,8 @@ impl MetaSrvBuilder {
         let handler_group = match handler_group {
             Some(handler_group) => handler_group,
             None => {
-                let region_failover_handler = if options.disable_region_failover {
-                    None
-                } else {
-                    let select_ctx = SelectorContext {
+                let region_failover_handler = if options.enable_region_failover {
+                    let selector_ctx = SelectorContext {
                         server_addr: options.server_addr.clone(),
                         datanode_lease_secs: options.datanode_lease_secs,
                         kv_store: kv_store.clone(),
@@ -199,11 +201,11 @@ impl MetaSrvBuilder {
                         table: None,
                     };
                     let region_failover_manager = Arc::new(RegionFailoverManager::new(
+                        options.region_lease_secs,
                         in_memory.clone(),
                         mailbox.clone(),
                         procedure_manager.clone(),
-                        selector.clone(),
-                        select_ctx,
+                        (selector.clone(), selector_ctx),
                         lock.clone(),
                         table_metadata_manager.clone(),
                     ));
@@ -211,7 +213,17 @@ impl MetaSrvBuilder {
                         RegionFailureHandler::try_new(election.clone(), region_failover_manager)
                             .await?,
                     )
+                } else {
+                    None
                 };
+
+                let publish_heartbeat_handler = if let Some((publish, _)) = pubsub.as_ref() {
+                    Some(PublishHeartbeatHandler::new(publish.clone()))
+                } else {
+                    None
+                };
+
+                let region_lease_handler = RegionLeaseHandler::new(options.region_lease_secs);
 
                 let group = HeartbeatHandlerGroup::new(pushers);
                 group.add_handler(ResponseHeaderHandler).await;
@@ -223,16 +235,15 @@ impl MetaSrvBuilder {
                 group.add_handler(OnLeaderStartHandler).await;
                 group.add_handler(CollectStatsHandler).await;
                 group.add_handler(MailboxHandler).await;
+                group.add_handler(region_lease_handler).await;
+                group.add_handler(FilterInactiveRegionStatsHandler).await;
                 if let Some(region_failover_handler) = region_failover_handler {
                     group.add_handler(region_failover_handler).await;
                 }
-                group.add_handler(RegionLeaseHandler).await;
-                group.add_handler(PersistStatsHandler::default()).await;
-                if let Some((publish, _)) = pubsub.as_ref() {
-                    group
-                        .add_handler(PublishHeartbeatHandler::new(publish.clone()))
-                        .await;
+                if let Some(publish_heartbeat_handler) = publish_heartbeat_handler {
+                    group.add_handler(publish_heartbeat_handler).await;
                 }
+                group.add_handler(PersistStatsHandler::default()).await;
                 group
             }
         };

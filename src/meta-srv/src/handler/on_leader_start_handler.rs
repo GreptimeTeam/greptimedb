@@ -18,7 +18,6 @@ use crate::error::Result;
 use crate::handler::{HeartbeatAccumulator, HeartbeatHandler};
 use crate::metasrv::Context;
 
-#[derive(Default)]
 pub struct OnLeaderStartHandler;
 
 #[async_trait::async_trait]
