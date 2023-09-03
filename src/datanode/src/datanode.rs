@@ -389,6 +389,7 @@ impl DatanodeOptions {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum RegionEngineConfig {
+    #[serde(rename = "mito")]
     Mito(MitoConfig),
 }
 
