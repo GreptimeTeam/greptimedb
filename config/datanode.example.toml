@@ -70,8 +70,8 @@ auto_flush_interval = "1h"
 global_write_buffer_size = "1GB"
 
 # Mito engine options
-[[store_engine]]
-[store_engine.mito]
+[[region_engine]]
+[region_engine.mito]
 # Number of region workers
 num_workers = 8
 # Request channel size of each worker

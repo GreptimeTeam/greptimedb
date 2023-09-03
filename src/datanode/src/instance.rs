@@ -56,7 +56,7 @@ use table::engine::{TableEngine, TableEngineProcedureRef};
 use table::requests::FlushTableRequest;
 use table::table::TableIdProviderRef;
 
-use crate::datanode::{DatanodeOptions, ObjectStoreConfig, ProcedureConfig};
+use crate::datanode::{DatanodeOptions, ProcedureConfig};
 use crate::error::{
     self, CatalogSnafu, IncorrectInternalStateSnafu, MetaClientInitSnafu, MissingMetasrvOptsSnafu,
     MissingNodeIdSnafu, NewCatalogSnafu, OpenLogStoreSnafu, RecoverProcedureSnafu, Result,
@@ -158,9 +158,8 @@ impl Instance {
     ) -> Result<(InstanceRef, Option<HeartbeatTask>)> {
         let data_home = util::normalize_dir(&opts.storage.data_home);
         info!("The working home directory is: {}", data_home);
-        let object_store = store::new_object_store(&opts).await?;
-        let log_store =
-            Arc::new(create_log_store(&data_home, &opts.storage.store, opts.wal.clone()).await?);
+        let object_store = store::new_object_store(opts).await?;
+        let log_store = Arc::new(create_log_store(&data_home, opts.wal.clone()).await?);
 
         let mito_engine = Arc::new(DefaultEngine::new(
             TableEngineConfig {
@@ -431,16 +430,9 @@ pub async fn new_metasrv_client(
 
 pub(crate) async fn create_log_store(
     data_home: &str,
-    store_config: &ObjectStoreConfig,
     wal_config: WalConfig,
 ) -> Result<RaftEngineLogStore> {
-    let wal_dir = match (&wal_config.dir, store_config) {
-        (Some(dir), _) => dir.to_string(),
-        (None, ObjectStoreConfig::File(_file_config)) => {
-            format!("{}{WAL_DIR}", data_home)
-        }
-        _ => return error::MissingWalDirConfigSnafu {}.fail(),
-    };
+    let wal_dir = format!("{}{WAL_DIR}", data_home);
 
     // create WAL directory
     fs::create_dir_all(path::Path::new(&wal_dir))

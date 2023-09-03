@@ -68,10 +68,7 @@ fn create_tmp_dir_and_datanode_opts(name: &str) -> (DatanodeOptions, TestGuard) 
     let wal_tmp_dir = create_temp_dir(&format!("gt_wal_{name}"));
     let data_tmp_dir = create_temp_dir(&format!("gt_data_{name}"));
     let opts = DatanodeOptions {
-        wal: WalConfig {
-            dir: Some(wal_tmp_dir.path().to_str().unwrap().to_string()),
-            ..Default::default()
-        },
+        wal: WalConfig::default(),
         storage: StorageConfig {
             data_home: data_tmp_dir.path().to_str().unwrap().to_string(),
             store: ObjectStoreConfig::File(FileConfig {}),

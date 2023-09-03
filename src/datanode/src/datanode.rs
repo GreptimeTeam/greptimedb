@@ -50,8 +50,7 @@ use store_api::region_engine::RegionEngineRef;
 use tokio::fs;
 
 use crate::error::{
-    CreateDirSnafu, MissingWalDirConfigSnafu, OpenLogStoreSnafu, Result, RuntimeResourceSnafu,
-    ShutdownInstanceSnafu,
+    CreateDirSnafu, OpenLogStoreSnafu, Result, RuntimeResourceSnafu, ShutdownInstanceSnafu,
 };
 use crate::heartbeat::HeartbeatTask;
 use crate::region_server::RegionServer;
@@ -353,7 +352,7 @@ pub struct DatanodeOptions {
     pub wal: WalConfig,
     pub storage: StorageConfig,
     /// Options for different store engines.
-    pub store_engine: Vec<StoreEngineOptions>,
+    pub region_engine: Vec<RegionEngineConfig>,
     pub logging: LoggingOptions,
     pub enable_telemetry: bool,
 }
@@ -370,7 +369,7 @@ impl Default for DatanodeOptions {
             meta_client_options: None,
             wal: WalConfig::default(),
             storage: StorageConfig::default(),
-            store_engine: vec![],
+            region_engine: vec![],
             logging: LoggingOptions::default(),
             heartbeat: HeartbeatOptions::default(),
             enable_telemetry: true,
@@ -389,7 +388,7 @@ impl DatanodeOptions {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub enum StoreEngineOptions {
+pub enum RegionEngineConfig {
     Mito(MitoConfig),
 }
 
@@ -488,14 +487,8 @@ impl Datanode {
     /// Build [RaftEngineLogStore]
     async fn build_log_store(opts: &DatanodeOptions) -> Result<Arc<RaftEngineLogStore>> {
         let data_home = normalize_dir(&opts.storage.data_home);
+        let wal_dir = format!("{}{WAL_DIR}", data_home);
         let wal_config = opts.wal.clone();
-        let wal_dir = match (&wal_config.dir, opts.storage.store.clone()) {
-            (Some(dir), _) => dir.to_string(),
-            (None, ObjectStoreConfig::File(_file_config)) => {
-                format!("{}{WAL_DIR}", data_home)
-            }
-            _ => return MissingWalDirConfigSnafu {}.fail(),
-        };
 
         // create WAL directory
         fs::create_dir_all(Path::new(&wal_dir))
@@ -522,9 +515,9 @@ impl Datanode {
         S: LogStore,
     {
         let mut engines = vec![];
-        for engine in &opts.store_engine {
+        for engine in &opts.region_engine {
             match engine {
-                StoreEngineOptions::Mito(config) => {
+                RegionEngineConfig::Mito(config) => {
                     let engine: MitoEngine =
                         MitoEngine::new(config.clone(), log_store.clone(), object_store.clone());
                     engines.push(Arc::new(engine) as _);
