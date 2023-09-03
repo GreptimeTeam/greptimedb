@@ -434,6 +434,26 @@ pub enum Error {
         region_id: RegionId,
         location: Location,
     },
+
+    #[snafu(display(
+        "Failed to calculate SST expired time, location: {}, source: {}",
+        location,
+        source
+    ))]
+    CalculateExpiredTime {
+        source: common_time::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Failed to build time range predicate for compaction, location: {}, source: {}",
+        location,
+        source
+    ))]
+    BuildCompactionPredicate {
+        source: table::error::Error,
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -499,6 +519,8 @@ impl ErrorExt for Error {
             FlushRegion { source, .. } => source.status_code(),
             RegionDropped { .. } => StatusCode::Cancelled,
             RegionClosed { .. } => StatusCode::Cancelled,
+            CalculateExpiredTime { .. } => StatusCode::InvalidArguments,
+            BuildCompactionPredicate { .. } => StatusCode::Internal,
             RejectWrite { .. } => StatusCode::StorageUnavailable,
         }
     }

@@ -1,3 +1,4 @@
+#![feature(let_chains)]
 // Copyright 2023 Greptime Team
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -21,6 +22,7 @@ pub mod test_util;
 
 // TODO(yingwen): Remove all `allow(dead_code)` after finish refactoring mito.
 mod access_layer;
+mod compaction;
 pub mod config;
 pub mod engine;
 pub mod error;

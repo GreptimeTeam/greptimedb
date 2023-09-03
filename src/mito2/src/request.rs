@@ -64,7 +64,7 @@ impl Default for RegionOptions {
         RegionOptions {
             write_buffer_size: Some(DEFAULT_WRITE_BUFFER_SIZE),
             ttl: None,
-            compaction_strategy: CompactionStrategy::LeveledTimeWindow,
+            compaction_strategy: CompactionStrategy::default(),
         }
     }
 }

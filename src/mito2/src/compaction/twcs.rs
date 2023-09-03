@@ -1,0 +1,668 @@
+// Copyright 2023 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use std::collections::{BTreeMap, HashMap};
+use std::fmt::{Debug, Formatter};
+use std::marker::PhantomData;
+use std::sync::Arc;
+
+use common_base::readable_size::ReadableSize;
+use common_telemetry::{debug, info};
+use common_time::timestamp::TimeUnit;
+use common_time::timestamp_millis::BucketAligned;
+use common_time::Timestamp;
+use store_api::logstore::LogStore;
+use store_api::metadata::RegionMetadataRef;
+
+use crate::access_layer::AccessLayerRef;
+use crate::compaction::output::CompactionOutput;
+use crate::compaction::picker::{get_expired_ssts, CompactionTask, Picker};
+use crate::compaction::CompactionRequest;
+use crate::error;
+use crate::sst::file::{FileHandle, FileId};
+use crate::sst::version::LevelMeta;
+
+/// `TwcsPicker` picks files of which the max timestamp are in the same time window as compaction
+/// candidates.
+pub struct TwcsPicker<S> {
+    max_active_window_files: usize,
+    max_inactive_window_files: usize,
+    time_window_seconds: Option<i64>,
+    _phantom_data: PhantomData<S>,
+}
+
+impl<S> Debug for TwcsPicker<S> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TwcsPicker")
+            .field("max_active_window_files", &self.max_active_window_files)
+            .field("max_inactive_window_files", &self.max_inactive_window_files)
+            .finish()
+    }
+}
+
+impl<S> TwcsPicker<S> {
+    pub fn new(
+        max_active_window_files: usize,
+        max_inactive_window_files: usize,
+        time_window_seconds: Option<i64>,
+    ) -> Self {
+        Self {
+            max_inactive_window_files,
+            max_active_window_files,
+            _phantom_data: Default::default(),
+            time_window_seconds,
+        }
+    }
+
+    /// Builds compaction output from files.
+    /// For active writing window, we allow for at most `max_active_window_files` files to alleviate
+    /// fragmentation. For other windows, we allow at most 1 file at each window.
+    fn build_output(
+        &self,
+        time_windows: &BTreeMap<i64, Vec<FileHandle>>,
+        active_window: Option<i64>,
+        window_size: i64,
+    ) -> Vec<CompactionOutput> {
+        let mut output = vec![];
+        for (window, files) in time_windows {
+            if let Some(active_window) = active_window && *window == active_window {
+                if files.len() > self.max_active_window_files {
+                    output.push(CompactionOutput {
+                        output_file_id: FileId::random(),
+                        output_level: 1, // we only have two levels and always compact to l1 
+                        time_window_bound: *window,
+                        time_window_sec: window_size,
+                        inputs: files.clone(),
+                        // Strict window is not needed since we always compact many files to one 
+                        // single file in TWCS.
+                        strict_window: false,
+                    });
+                } else {
+                    debug!("Active window not present or no enough files in active window {:?}, window: {}", active_window, *window);
+                }
+            } else {
+                // not active writing window
+                if files.len() > self.max_inactive_window_files {
+                    output.push(CompactionOutput {
+                        output_file_id: FileId::random(),
+                        output_level: 1,
+                        time_window_bound: *window,
+                        time_window_sec: window_size,
+                        inputs: files.clone(),
+                        strict_window: false,
+                    });
+                } else {
+                    debug!("No enough files, current: {}, max_inactive_window_files: {}", files.len(), self.max_inactive_window_files)
+                }
+            }
+        }
+        output
+    }
+}
+
+impl<S: LogStore> Picker<S> for TwcsPicker<S> {
+    fn pick(&self, req: &CompactionRequest<S>) -> error::Result<Option<Arc<dyn CompactionTask>>> {
+        let levels = req.ssts().levels();
+        let expired_ssts = get_expired_ssts(levels, req.ttl, Timestamp::current_millis())?;
+        if !expired_ssts.is_empty() {
+            info!(
+                "Expired SSTs in region {}: {:?}",
+                req.region_id, expired_ssts
+            );
+            // here we mark expired SSTs as compacting to avoid them being picked.
+            expired_ssts.iter().for_each(|f| f.mark_compacting(true));
+        }
+
+        let time_window_size = req
+            .compaction_time_window
+            .or(self.time_window_seconds)
+            .unwrap_or_else(|| {
+                let inferred = infer_time_bucket(levels[0].files());
+                info!(
+                    "Compaction window for region {} is not present, inferring from files: {:?}",
+                    req.region_id, inferred
+                );
+                inferred
+            });
+
+        // Find active window from files in level 0.
+        let active_window = find_latest_window_in_seconds(levels[0].files(), time_window_size);
+
+        let windows = assign_to_windows(levels.iter().flat_map(LevelMeta::files), time_window_size);
+
+        let outputs = self.build_output(&windows, active_window, time_window_size);
+
+        if outputs.is_empty() && expired_ssts.is_empty() {
+            return Ok(None);
+        }
+        let task = TwcsCompactionTask {
+            schema: req.region_metadata.clone(),
+            sst_layer: req.access_layer.clone(),
+            outputs,
+            expired_ssts,
+            sst_write_buffer_size: ReadableSize(100000000000),
+            compaction_time_window: None,
+            reschedule_on_finish: false,
+        };
+        Ok(Some(Arc::new(task)))
+    }
+}
+
+/// Assigns files to windows with predefined window size (in seconds) by their max timestamps.
+fn assign_to_windows<'a>(
+    files: impl Iterator<Item = &'a FileHandle>,
+    time_window_size: i64,
+) -> BTreeMap<i64, Vec<FileHandle>> {
+    let mut windows: BTreeMap<i64, Vec<FileHandle>> = BTreeMap::new();
+    // Iterates all files and assign to time windows according to max timestamp
+    for file in files {
+        let (_, end) = file.time_range();
+        let time_window = end
+            .convert_to(TimeUnit::Second)
+            .unwrap()
+            .value()
+            .align_to_ceil_by_bucket(time_window_size)
+            .unwrap_or(i64::MIN);
+        windows.entry(time_window).or_default().push(file.clone());
+    }
+    windows
+}
+
+/// Finds the latest active writing window among all files.
+/// Returns `None` when there are no files or all files are corrupted.
+fn find_latest_window_in_seconds<'a>(
+    files: impl Iterator<Item = &'a FileHandle>,
+    time_window_size: i64,
+) -> Option<i64> {
+    let mut latest_timestamp = None;
+    for f in files {
+        let (_, end) = f.time_range();
+        if let Some(latest) = latest_timestamp && end > latest {
+            latest_timestamp = Some(end);
+        } else {
+            latest_timestamp = Some(end);
+        }
+    }
+    latest_timestamp
+        .and_then(|ts| ts.convert_to_ceil(TimeUnit::Second))
+        .and_then(|ts| ts.value().align_to_ceil_by_bucket(time_window_size))
+}
+
+pub(crate) struct TwcsCompactionTask {
+    pub schema: RegionMetadataRef,
+    pub sst_layer: AccessLayerRef,
+    pub outputs: Vec<CompactionOutput>,
+    // pub writer: RegionWriterRef<S>,
+    // pub shared_data: SharedDataRef,
+    // pub wal: Wal<S>,
+    // pub manifest: RegionManifest,
+    pub expired_ssts: Vec<FileHandle>,
+    pub sst_write_buffer_size: ReadableSize,
+    pub compaction_time_window: Option<i64>,
+    pub reschedule_on_finish: bool,
+}
+
+impl Debug for TwcsCompactionTask {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TwcsCompactionTask").finish()
+    }
+}
+
+#[async_trait::async_trait]
+impl CompactionTask for TwcsCompactionTask {
+    async fn run(self) -> error::Result<()> {
+        Ok(())
+    }
+}
+
+/// Infers the suitable time bucket duration.
+/// Now it simply find the max and min timestamp across all SSTs in level and fit the time span
+/// into time bucket.
+pub(crate) fn infer_time_bucket<'a>(files: impl Iterator<Item = &'a FileHandle>) -> i64 {
+    let mut max_ts = Timestamp::new(i64::MIN, TimeUnit::Second);
+    let mut min_ts = Timestamp::new(i64::MAX, TimeUnit::Second);
+
+    for f in files {
+        let (start, end) = f.time_range();
+        min_ts = min_ts.min(start);
+        max_ts = max_ts.max(end);
+    }
+
+    // safety: Convert whatever timestamp into seconds will not cause overflow.
+    let min_sec = min_ts.convert_to(TimeUnit::Second).unwrap().value();
+    let max_sec = max_ts.convert_to(TimeUnit::Second).unwrap().value();
+
+    max_sec
+        .checked_sub(min_sec)
+        .map(|span| TIME_BUCKETS.fit_time_bucket(span)) // return the max bucket on subtraction overflow.
+        .unwrap_or_else(|| TIME_BUCKETS.max()) // safety: TIME_BUCKETS cannot be empty.
+}
+
+/// Finds files that can be compacted in given level.
+/// Currently they're files that is not currently under compaction.
+#[inline]
+fn find_compactable_files(level: &LevelMeta) -> Vec<FileHandle> {
+    level.files().filter(|f| !f.compacting()).cloned().collect()
+}
+
+/// Calculates timestamp span between start and end timestamp.
+fn file_time_bucket_span(start_sec: i64, end_sec: i64, bucket_sec: i64) -> Vec<i64> {
+    assert!(start_sec <= end_sec);
+
+    // if timestamp is between `[i64::MIN, i64::MIN.align_by_bucket(bucket)]`, which cannot
+    // be aligned to a valid i64 bound, simply return `i64::MIN` rather than just underflow.
+    let mut start_aligned = start_sec.align_by_bucket(bucket_sec).unwrap_or(i64::MIN);
+    let end_aligned = end_sec.align_by_bucket(bucket_sec).unwrap_or(i64::MIN);
+
+    let mut res = Vec::with_capacity(((end_aligned - start_aligned) / bucket_sec + 1) as usize);
+    while start_aligned < end_aligned {
+        res.push(start_aligned);
+        start_aligned += bucket_sec;
+    }
+    res.push(end_aligned);
+    res
+}
+
+/// Calculates buckets for files. If file does not contain a time range in metadata, it will be
+/// assigned to a special bucket `i64::MAX` (normally no timestamp can be aligned to this bucket)
+/// so that all files without timestamp can be compacted together.
+fn calculate_time_buckets(bucket_sec: i64, files: &[FileHandle]) -> HashMap<i64, Vec<FileHandle>> {
+    let mut buckets = HashMap::new();
+
+    for file in files {
+        let (start, end) = file.time_range();
+        let bounds = file_time_bucket_span(
+            start.convert_to(TimeUnit::Second).unwrap().value(),
+            end.convert_to(TimeUnit::Second).unwrap().value(),
+            bucket_sec,
+        );
+        for bound in bounds {
+            buckets
+                .entry(bound)
+                .or_insert_with(Vec::new)
+                .push(file.clone());
+        }
+    }
+    buckets
+}
+
+pub(crate) struct TimeBuckets([i64; 7]);
+
+impl TimeBuckets {
+    /// Fits a given time span into time bucket by find the minimum bucket that can cover the span.
+    /// Returns the max bucket if no such bucket can be found.
+    fn fit_time_bucket(&self, span_sec: i64) -> i64 {
+        assert!(span_sec >= 0);
+        match self.0.binary_search(&span_sec) {
+            Ok(idx) => self.0[idx],
+            Err(idx) => {
+                if idx < self.0.len() {
+                    self.0[idx]
+                } else {
+                    self.0.last().copied().unwrap()
+                }
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn get(&self, idx: usize) -> i64 {
+        self.0[idx]
+    }
+
+    fn max(&self) -> i64 {
+        self.0.last().copied().unwrap()
+    }
+}
+
+/// A set of predefined time buckets.
+pub(crate) const TIME_BUCKETS: TimeBuckets = TimeBuckets([
+    60 * 60,                 // one hour
+    2 * 60 * 60,             // two hours
+    12 * 60 * 60,            // twelve hours
+    24 * 60 * 60,            // one day
+    7 * 24 * 60 * 60,        // one week
+    365 * 24 * 60 * 60,      // one year
+    10 * 365 * 24 * 60 * 60, // ten years
+]);
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use log_store::NoopLogStore;
+
+    use super::*;
+    use crate::compaction::test_util::new_file_handle;
+    use crate::sst::file::Level;
+
+    #[test]
+    fn test_get_latest_window_in_seconds() {
+        assert_eq!(
+            Some(1),
+            find_latest_window_in_seconds([new_file_handle(FileId::random(), 0, 999, 0)].iter(), 1)
+        );
+        assert_eq!(
+            Some(1),
+            find_latest_window_in_seconds(
+                [new_file_handle(FileId::random(), 0, 1000, 0)].iter(),
+                1
+            )
+        );
+
+        assert_eq!(
+            Some(-9223372036854000),
+            find_latest_window_in_seconds(
+                [new_file_handle(FileId::random(), i64::MIN, i64::MIN + 1, 0)].iter(),
+                3600,
+            )
+        );
+
+        assert_eq!(
+            (i64::MAX / 10000000 + 1) * 10000,
+            find_latest_window_in_seconds(
+                [new_file_handle(FileId::random(), i64::MIN, i64::MAX, 0)].iter(),
+                10000,
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn test_assign_to_windows() {
+        let windows = assign_to_windows(
+            [
+                new_file_handle(FileId::random(), 0, 999, 0),
+                new_file_handle(FileId::random(), 0, 999, 0),
+                new_file_handle(FileId::random(), 0, 999, 0),
+                new_file_handle(FileId::random(), 0, 999, 0),
+                new_file_handle(FileId::random(), 0, 999, 0),
+            ]
+            .iter(),
+            3,
+        );
+        assert_eq!(5, windows.get(&0).unwrap().len());
+
+        let files = [FileId::random(); 3];
+        let windows = assign_to_windows(
+            [
+                new_file_handle(files[0], -2000, -3, 0),
+                new_file_handle(files[1], 0, 2999, 0),
+                new_file_handle(files[2], 50, 10001, 0),
+            ]
+            .iter(),
+            3,
+        );
+        assert_eq!(files[0], windows.get(&0).unwrap().get(0).unwrap().file_id());
+        assert_eq!(files[1], windows.get(&3).unwrap().get(0).unwrap().file_id());
+        assert_eq!(
+            files[2],
+            windows.get(&12).unwrap().get(0).unwrap().file_id()
+        );
+    }
+
+    struct CompactionPickerTestCase {
+        window_size: i64,
+        input_files: Vec<FileHandle>,
+        expected_outputs: Vec<ExpectedOutput>,
+    }
+
+    impl CompactionPickerTestCase {
+        fn check(&self) {
+            let windows = assign_to_windows(self.input_files.iter(), self.window_size);
+            let active_window =
+                find_latest_window_in_seconds(self.input_files.iter(), self.window_size);
+            let output = TwcsPicker::<NoopLogStore>::new(4, 1, None).build_output(
+                &windows,
+                active_window,
+                self.window_size,
+            );
+
+            let output = output
+                .iter()
+                .map(|o| {
+                    let input_file_ids =
+                        o.inputs.iter().map(|f| f.file_id()).collect::<HashSet<_>>();
+                    (
+                        input_file_ids,
+                        o.output_level,
+                        o.time_window_sec,
+                        o.time_window_bound,
+                        o.strict_window,
+                    )
+                })
+                .collect::<Vec<_>>();
+
+            let expected = self
+                .expected_outputs
+                .iter()
+                .map(|o| {
+                    let input_file_ids = o
+                        .input_files
+                        .iter()
+                        .map(|idx| self.input_files[*idx].file_id())
+                        .collect::<HashSet<_>>();
+                    (
+                        input_file_ids,
+                        o.output_level,
+                        o.time_window_sec,
+                        o.time_window_bound,
+                        o.strict_window,
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(expected, output);
+        }
+    }
+
+    struct ExpectedOutput {
+        input_files: Vec<usize>,
+        output_level: Level,
+        time_window_sec: i64,
+        time_window_bound: i64,
+        strict_window: bool,
+    }
+
+    #[test]
+    fn test_build_twcs_output() {
+        let file_ids = (0..4).map(|_| FileId::random()).collect::<Vec<_>>();
+
+        CompactionPickerTestCase {
+            window_size: 3,
+            input_files: [
+                new_file_handle(file_ids[0], -2000, -3, 0),
+                new_file_handle(file_ids[1], -3000, -100, 0),
+                new_file_handle(file_ids[2], 0, 2999, 0), //active windows
+                new_file_handle(file_ids[3], 50, 2998, 0), //active windows
+            ]
+            .to_vec(),
+            expected_outputs: vec![ExpectedOutput {
+                input_files: vec![0, 1],
+                output_level: 1,
+                time_window_sec: 3,
+                time_window_bound: 0,
+                strict_window: false,
+            }],
+        }
+        .check();
+
+        let file_ids = (0..6).map(|_| FileId::random()).collect::<Vec<_>>();
+        CompactionPickerTestCase {
+            window_size: 3,
+            input_files: [
+                new_file_handle(file_ids[0], -2000, -3, 0),
+                new_file_handle(file_ids[1], -3000, -100, 0),
+                new_file_handle(file_ids[2], 0, 2999, 0),
+                new_file_handle(file_ids[3], 50, 2998, 0),
+                new_file_handle(file_ids[4], 11, 2990, 0),
+                new_file_handle(file_ids[5], 50, 4998, 0),
+            ]
+            .to_vec(),
+            expected_outputs: vec![
+                ExpectedOutput {
+                    input_files: vec![0, 1],
+                    output_level: 1,
+                    time_window_sec: 3,
+                    time_window_bound: 0,
+                    strict_window: false,
+                },
+                ExpectedOutput {
+                    input_files: vec![2, 3, 4],
+                    output_level: 1,
+                    time_window_sec: 3,
+                    time_window_bound: 3,
+                    strict_window: false,
+                },
+            ],
+        }
+        .check();
+    }
+
+    #[test]
+    fn test_time_bucket() {
+        assert_eq!(TIME_BUCKETS.get(0), TIME_BUCKETS.fit_time_bucket(1));
+        assert_eq!(TIME_BUCKETS.get(0), TIME_BUCKETS.fit_time_bucket(60 * 60));
+        assert_eq!(
+            TIME_BUCKETS.get(1),
+            TIME_BUCKETS.fit_time_bucket(60 * 60 + 1)
+        );
+
+        assert_eq!(
+            TIME_BUCKETS.get(2),
+            TIME_BUCKETS.fit_time_bucket(TIME_BUCKETS.get(2) - 1)
+        );
+        assert_eq!(
+            TIME_BUCKETS.get(2),
+            TIME_BUCKETS.fit_time_bucket(TIME_BUCKETS.get(2))
+        );
+        assert_eq!(
+            TIME_BUCKETS.get(3),
+            TIME_BUCKETS.fit_time_bucket(TIME_BUCKETS.get(3) - 1)
+        );
+        assert_eq!(TIME_BUCKETS.get(6), TIME_BUCKETS.fit_time_bucket(i64::MAX));
+    }
+
+    #[test]
+    fn test_infer_time_buckets() {
+        assert_eq!(
+            TIME_BUCKETS.get(0),
+            infer_time_bucket(
+                [
+                    new_file_handle(FileId::random(), 0, TIME_BUCKETS.get(0) * 1000 - 1, 0),
+                    new_file_handle(FileId::random(), 1, 10_000, 0)
+                ]
+                .iter()
+            )
+        );
+    }
+
+    fn check_bucket_calculation(
+        bucket_sec: i64,
+        files: Vec<FileHandle>,
+        expected: &[(i64, &[FileId])],
+    ) {
+        let res = calculate_time_buckets(bucket_sec, &files);
+
+        let expected = expected
+            .iter()
+            .map(|(bucket, file_ids)| (*bucket, file_ids.iter().copied().collect::<HashSet<_>>()))
+            .collect::<HashMap<_, _>>();
+
+        for (bucket, file_ids) in expected {
+            let actual = res
+                .get(&bucket)
+                .unwrap()
+                .iter()
+                .map(|f| f.file_id())
+                .collect();
+            assert_eq!(
+                file_ids, actual,
+                "bucket: {bucket}, expected: {file_ids:?}, actual: {actual:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn test_calculate_time_buckets() {
+        let file_id_a = FileId::random();
+        let file_id_b = FileId::random();
+        // simple case, files with disjoint
+        check_bucket_calculation(
+            10,
+            new_file_handles(&[(file_id_a, 0, 9000), (file_id_b, 10000, 19000)]),
+            &[(0, &[file_id_a]), (10, &[file_id_b])],
+        );
+
+        // files across buckets
+        check_bucket_calculation(
+            10,
+            new_file_handles(&[(file_id_a, 0, 10001), (file_id_b, 10000, 19000)]),
+            &[(0, &[file_id_a]), (10, &[file_id_a, file_id_b])],
+        );
+        check_bucket_calculation(
+            10,
+            new_file_handles(&[(file_id_a, 0, 10000)]),
+            &[(0, &[file_id_a]), (10, &[file_id_a])],
+        );
+
+        // file with an large time range
+        let file_id_array = &[file_id_a];
+        let expected = (0..(TIME_BUCKETS.get(4) / TIME_BUCKETS.get(0)))
+            .map(|b| (b * TIME_BUCKETS.get(0), file_id_array as _))
+            .collect::<Vec<_>>();
+        check_bucket_calculation(
+            TIME_BUCKETS.get(0),
+            new_file_handles(&[(file_id_a, 0, TIME_BUCKETS.get(4) * 1000)]),
+            &expected,
+        );
+    }
+
+    #[test]
+    fn test_time_bucket_span() {
+        assert_eq!(vec![0], file_time_bucket_span(1, 9, 10));
+        assert_eq!(vec![0, 10], file_time_bucket_span(1, 10, 10));
+        assert_eq!(vec![-10], file_time_bucket_span(-10, -1, 10));
+        assert_eq!(vec![-10, 0], file_time_bucket_span(-10, 0, 10));
+    }
+
+    #[test]
+    fn test_time_bucket_span_large() {
+        assert_eq!(
+            vec![
+                (i64::MAX - 10).align_by_bucket(10).unwrap(),
+                i64::MAX.align_by_bucket(10).unwrap(),
+            ],
+            file_time_bucket_span(i64::MAX - 10, i64::MAX, 10)
+        );
+
+        for bucket in 1..100 {
+            assert_eq!(
+                vec![
+                    i64::MIN,
+                    (i64::MIN + bucket).align_by_bucket(bucket).unwrap()
+                ],
+                file_time_bucket_span(i64::MIN, i64::MIN + bucket, bucket)
+            );
+        }
+    }
+
+    fn new_file_handles(input: &[(FileId, i64, i64)]) -> Vec<FileHandle> {
+        input
+            .iter()
+            .map(|(file_id, start, end)| new_file_handle(*file_id, *start, *end, 0))
+            .collect()
+    }
+
+    // TODO(hl): TTL tester that checks if get_expired_ssts function works as expected.
+}

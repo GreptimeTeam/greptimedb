@@ -85,6 +85,17 @@ impl FilePurger for LocalFilePurger {
     }
 }
 
+#[derive(Debug)]
+pub(crate) struct NoopFilePurger;
+
+impl FilePurger for NoopFilePurger {
+    fn send_request(&self, _request: PurgeRequest) {}
+}
+
+pub(crate) fn new_noop_file_purger() -> FilePurgerRef {
+    Arc::new(NoopFilePurger {})
+}
+
 #[cfg(test)]
 mod tests {
     use common_test_util::temp_dir::create_temp_dir;

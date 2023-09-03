@@ -137,6 +137,16 @@ impl FileHandle {
     pub fn mark_deleted(&self) {
         self.inner.deleted.store(true, Ordering::Relaxed);
     }
+
+    #[inline]
+    pub fn compacting(&self) -> bool {
+        self.inner.compacting.load(Ordering::Relaxed)
+    }
+
+    #[inline]
+    pub fn mark_compacting(&self, compacting: bool) {
+        self.inner.compacting.store(compacting, Ordering::Relaxed);
+    }
 }
 
 /// Inner data of [FileHandle].
