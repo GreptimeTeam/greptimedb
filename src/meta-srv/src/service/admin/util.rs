@@ -12,10 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub(crate) const METRIC_META_CREATE_CATALOG: &str = "meta.create_catalog";
-pub(crate) const METRIC_META_CREATE_SCHEMA: &str = "meta.create_schema";
-pub(crate) const METRIC_META_KV_REQUEST: &str = "meta.kv_request";
-pub(crate) const METRIC_META_ROUTE_REQUEST: &str = "meta.route_request";
-pub(crate) const METRIC_META_HEARTBEAT_CONNECTION_NUM: &str = "meta.heartbeat_connection_num";
-pub(crate) const METRIC_META_HANDLER_EXECUTE: &str = "meta.handler_execute";
-pub const METRIC_META_INACTIVE_REGIONS: &str = "meta.inactive_regions";
+use std::collections::HashMap;
+
+use snafu::{OptionExt, ResultExt};
+
+use crate::error::{self, Result};
+
+pub fn extract_cluster_id(params: &HashMap<String, String>) -> Result<u64> {
+    params
+        .get("cluster_id")
+        .map(|id| id.parse::<u64>())
+        .context(error::MissingRequiredParameterSnafu {
+            param: "cluster_id",
+        })?
+        .context(error::ParseNumSnafu {
+            err_msg: "`cluster_id` is not a valid number",
+        })
+}

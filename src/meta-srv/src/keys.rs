@@ -35,6 +35,10 @@ lazy_static! {
         Regex::new(&format!("^{DN_LEASE_PREFIX}-([0-9]+)-([0-9]+)$")).unwrap();
     static ref DATANODE_STAT_KEY_PATTERN: Regex =
         Regex::new(&format!("^{DN_STAT_PREFIX}-([0-9]+)-([0-9]+)$")).unwrap();
+    static ref INACTIVE_REGION_KEY_PATTERN: Regex = Regex::new(&format!(
+        "^{INACTIVE_REGION_PREFIX}-([0-9]+)-([0-9]+)-([0-9]+)$"
+    ))
+    .unwrap();
 }
 
 #[derive(Debug, Clone, Eq, Hash, PartialEq, Serialize, Deserialize)]
@@ -164,7 +168,7 @@ impl FromStr for StatKey {
     fn from_str(key: &str) -> Result<Self> {
         let caps = DATANODE_STAT_KEY_PATTERN
             .captures(key)
-            .context(error::InvalidLeaseKeySnafu { key })?;
+            .context(error::InvalidStatKeySnafu { key })?;
 
         ensure!(caps.len() == 3, error::InvalidStatKeySnafu { key });
 
@@ -237,11 +241,17 @@ impl TryFrom<Vec<u8>> for StatValue {
     }
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct InactiveRegionKey {
     pub cluster_id: u64,
     pub node_id: u64,
     pub region_id: u64,
+}
+
+impl InactiveRegionKey {
+    pub fn get_prefix_by_cluster(cluster_id: u64) -> Vec<u8> {
+        format!("{}-{}-", INACTIVE_REGION_PREFIX, cluster_id).into_bytes()
+    }
 }
 
 impl From<InactiveRegionKey> for Vec<u8> {
@@ -251,6 +261,51 @@ impl From<InactiveRegionKey> for Vec<u8> {
             INACTIVE_REGION_PREFIX, value.cluster_id, value.node_id, value.region_id
         )
         .into_bytes()
+    }
+}
+
+impl FromStr for InactiveRegionKey {
+    type Err = error::Error;
+
+    fn from_str(key: &str) -> Result<Self> {
+        let caps = INACTIVE_REGION_KEY_PATTERN
+            .captures(key)
+            .context(error::InvalidInactiveRegionKeySnafu { key })?;
+
+        ensure!(
+            caps.len() == 4,
+            error::InvalidInactiveRegionKeySnafu { key }
+        );
+
+        let cluster_id = caps[1].to_string();
+        let node_id = caps[2].to_string();
+        let region_id = caps[3].to_string();
+
+        let cluster_id: u64 = cluster_id.parse().context(error::ParseNumSnafu {
+            err_msg: format!("invalid cluster_id: {cluster_id}"),
+        })?;
+        let node_id: u64 = node_id.parse().context(error::ParseNumSnafu {
+            err_msg: format!("invalid node_id: {node_id}"),
+        })?;
+        let region_id: u64 = region_id.parse().context(error::ParseNumSnafu {
+            err_msg: format!("invalid region_id: {region_id}"),
+        })?;
+
+        Ok(Self {
+            cluster_id,
+            node_id,
+            region_id,
+        })
+    }
+}
+
+impl TryFrom<Vec<u8>> for InactiveRegionKey {
+    type Error = error::Error;
+
+    fn try_from(bytes: Vec<u8>) -> Result<Self> {
+        String::from_utf8(bytes)
+            .context(error::InvalidRegionKeyFromUtf8Snafu {})
+            .map(|x| x.parse())?
     }
 }
 
@@ -375,5 +430,19 @@ mod tests {
 
         assert_eq!(1, stat_key.cluster_id);
         assert_eq!(101, stat_key.node_id);
+    }
+
+    #[test]
+    fn test_inactive_region_key_round_trip() {
+        let key = InactiveRegionKey {
+            cluster_id: 0,
+            node_id: 1,
+            region_id: 2,
+        };
+
+        let key_bytes: Vec<u8> = key.try_into().unwrap();
+        let new_key: InactiveRegionKey = key_bytes.try_into().unwrap();
+
+        assert_eq!(new_key, key);
     }
 }

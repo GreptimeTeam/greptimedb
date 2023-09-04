@@ -15,14 +15,14 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
-use snafu::{OptionExt, ResultExt};
+use snafu::ResultExt;
 use tonic::codegen::http;
 
 use crate::cluster::MetaPeerClientRef;
 use crate::error::{self, Result};
 use crate::keys::{LeaseKey, LeaseValue};
 use crate::lease;
-use crate::service::admin::HttpHandler;
+use crate::service::admin::{util, HttpHandler};
 
 pub struct NodeLeaseHandler {
     pub meta_peer_client: MetaPeerClientRef,
@@ -35,15 +35,7 @@ impl HttpHandler for NodeLeaseHandler {
         _: &str,
         params: &HashMap<String, String>,
     ) -> Result<http::Response<String>> {
-        let cluster_id = params
-            .get("cluster_id")
-            .map(|id| id.parse::<u64>())
-            .context(error::MissingRequiredParameterSnafu {
-                param: "cluster_id",
-            })?
-            .context(error::ParseNumSnafu {
-                err_msg: "`cluster_id` is not a valid number",
-            })?;
+        let cluster_id = util::extract_cluster_id(params)?;
 
         let leases =
             lease::filter_datanodes(cluster_id, &self.meta_peer_client, |_, _| true).await?;
