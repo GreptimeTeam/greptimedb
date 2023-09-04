@@ -98,6 +98,7 @@ impl Services {
             if opts.opentsdb_options.enable {
                 let _ = http_server_builder.with_opentsdb_handler(instance.clone());
             }
+
             if opts.influxdb_options.enable {
                 let _ = http_server_builder.with_influxdb_handler(instance.clone());
             }
