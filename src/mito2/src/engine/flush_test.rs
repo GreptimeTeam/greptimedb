@@ -188,3 +188,32 @@ async fn test_write_stall() {
 +-------+---------+---------------------+";
     assert_eq!(expected, batches.pretty_print().unwrap());
 }
+
+#[tokio::test]
+async fn test_flush_empty() {
+    let mut env = TestEnv::new();
+    let write_buffer_manager = Arc::new(MockWriteBufferManager::default());
+    let engine = env
+        .create_engine_with(MitoConfig::default(), write_buffer_manager.clone(), None)
+        .await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    flush_region(&engine, region_id).await;
+
+    let request = ScanRequest::default();
+    let scanner = engine.scan(region_id, request).unwrap();
+    assert_eq!(0, scanner.num_files());
+    let stream = scanner.scan().await.unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    let expected = "\
+++
+++";
+    assert_eq!(expected, batches.pretty_print().unwrap());
+}
