@@ -49,7 +49,7 @@ impl FlushListener {
 
     /// Returns the last flushed region.
     pub fn last_flushed_region(&self) -> Option<RegionId> {
-        self.last_flushed_region.lock().unwrap().clone()
+        *self.last_flushed_region.lock().unwrap()
     }
 }
 

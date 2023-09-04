@@ -526,18 +526,10 @@ impl<S> RegionWorkerLoop<S> {
 }
 
 /// Wrapper that only calls event listener in tests.
+#[derive(Default)]
 pub(crate) struct WorkerListener {
     #[cfg(test)]
     listener: Option<crate::engine::listener::EventListenerRef>,
-}
-
-impl Default for WorkerListener {
-    fn default() -> Self {
-        WorkerListener {
-            #[cfg(test)]
-            listener: None,
-        }
-    }
 }
 
 impl WorkerListener {
