@@ -35,6 +35,7 @@ datafusion-common.workspace = true
 datafusion.workspace = true
 datatypes = { workspace = true }
 futures.workspace = true
+humantime-serde = { workspace = true }
 lazy_static = "1.4"
 log-store = { workspace = true }
 memcomparable = "0.2"

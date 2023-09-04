@@ -12,27 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use serde::{Deserialize, Serialize};
-use servers::tls::TlsOption;
+use std::collections::HashMap;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct MysqlOptions {
-    pub enable: bool,
-    pub addr: String,
-    pub runtime_size: usize,
-    #[serde(default = "Default::default")]
-    pub tls: TlsOption,
-    pub reject_no_database: Option<bool>,
-}
+use snafu::{OptionExt, ResultExt};
 
-impl Default for MysqlOptions {
-    fn default() -> Self {
-        Self {
-            enable: true,
-            addr: "127.0.0.1:4002".to_string(),
-            runtime_size: 2,
-            tls: TlsOption::default(),
-            reject_no_database: None,
-        }
-    }
+use crate::error::{self, Result};
+
+pub fn extract_cluster_id(params: &HashMap<String, String>) -> Result<u64> {
+    params
+        .get("cluster_id")
+        .map(|id| id.parse::<u64>())
+        .context(error::MissingRequiredParameterSnafu {
+            param: "cluster_id",
+        })?
+        .context(error::ParseNumSnafu {
+            err_msg: "`cluster_id` is not a valid number",
+        })
 }

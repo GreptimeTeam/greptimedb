@@ -33,6 +33,7 @@ use log_store::test_util::log_store_util;
 use object_store::services::Fs;
 use object_store::ObjectStore;
 use store_api::metadata::{ColumnMetadata, RegionMetadataRef};
+use store_api::region_engine::RegionEngine;
 use store_api::region_request::{
     RegionCreateRequest, RegionDeleteRequest, RegionPutRequest, RegionRequest,
 };

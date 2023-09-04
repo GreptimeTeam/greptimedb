@@ -1,7 +1,5 @@
 # Node running mode, "standalone" or "distributed".
 mode = "standalone"
-# Whether to use in-memory catalog, `false` by default.
-enable_memory_catalog = false
 # Whether to enable greptimedb telemetry, true by default.
 enable_telemetry = true
 
@@ -24,6 +22,8 @@ runtime_size = 8
 
 # MySQL server options.
 [mysql_options]
+# Whether to enable
+enable = true
 # Server address, "127.0.0.1:4002" by default.
 addr = "127.0.0.1:4002"
 # The number of server worker threads, 2 by default.
@@ -45,6 +45,8 @@ key_path = ""
 
 # PostgresSQL server options.
 [postgres_options]
+# Whether to enable
+enable = true
 # Server address, "127.0.0.1:4003" by default.
 addr = "127.0.0.1:4003"
 # The number of server worker threads, 2 by default.
@@ -61,6 +63,8 @@ key_path = ""
 
 # OpenTSDB protocol options.
 [opentsdb_options]
+# Whether to enable
+enable = true
 # OpenTSDB telnet API server address, "127.0.0.1:4242" by default.
 addr = "127.0.0.1:4242"
 # The number of server worker threads, 2 by default.
@@ -129,13 +133,6 @@ picker_schedule_interval = "5m"
 auto_flush_interval = "1h"
 # Global write buffer size for all regions.
 global_write_buffer_size = "1GB"
-
-# Procedure storage options.
-[procedure]
-# Procedure max retry time.
-max_retry_times = 3
-# Initial retry delay of procedures, increases exponentially
-retry_delay = "500ms"
 
 # Log options
 # [logging]

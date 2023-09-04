@@ -14,11 +14,9 @@
 
 #![feature(let_chains)]
 
-mod config;
 pub mod error;
 mod noop;
 pub mod raft_engine;
 pub mod test_util;
 
-pub use config::LogConfig;
 pub use noop::NoopLogStore;

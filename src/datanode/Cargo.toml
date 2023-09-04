@@ -19,6 +19,7 @@ bytes = "1.1"
 catalog = { workspace = true }
 common-base = { workspace = true }
 common-catalog = { workspace = true }
+common-config = { workspace = true }
 common-datasource = { workspace = true }
 common-error = { workspace = true }
 common-function = { workspace = true }
@@ -48,10 +49,12 @@ meta-client = { workspace = true }
 meta-srv = { workspace = true }
 metrics.workspace = true
 mito = { workspace = true }
+mito2 = { workspace = true }
 object-store = { workspace = true }
 pin-project = "1.0"
 prost.workspace = true
 query = { workspace = true }
+reqwest = { workspace = true }
 secrecy = { version = "0.8", features = ["serde", "alloc"] }
 serde.workspace = true
 serde_json = "1.0"

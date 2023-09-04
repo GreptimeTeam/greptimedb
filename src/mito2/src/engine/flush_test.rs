@@ -19,6 +19,7 @@ use std::sync::Arc;
 use api::v1::Rows;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
+use store_api::region_engine::RegionEngine;
 use store_api::region_request::{RegionFlushRequest, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest};
 
@@ -59,7 +60,7 @@ async fn test_manual_flush() {
     assert_eq!(0, rows);
 
     let request = ScanRequest::default();
-    let scanner = engine.handle_query(region_id, request).unwrap();
+    let scanner = engine.scan(region_id, request).unwrap();
     assert_eq!(1, scanner.num_files());
     let stream = scanner.scan().await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
@@ -116,7 +117,7 @@ async fn test_flush_engine() {
     listener.wait().await;
 
     let request = ScanRequest::default();
-    let scanner = engine.handle_query(region_id, request).unwrap();
+    let scanner = engine.scan(region_id, request).unwrap();
     assert_eq!(1, scanner.num_files());
     let stream = scanner.scan().await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();

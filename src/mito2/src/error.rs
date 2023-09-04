@@ -455,12 +455,12 @@ impl ErrorExt for Error {
             | DecompressObject { .. }
             | SerdeJson { .. }
             | Utf8 { .. }
-            | RegionExists { .. }
             | NewRecordBatch { .. }
-            | RegionNotFound { .. }
             | RegionCorrupted { .. }
             | CreateDefault { .. }
             | InvalidParquet { .. } => StatusCode::Unexpected,
+            RegionNotFound { .. } => StatusCode::RegionNotFound,
+            RegionExists { .. } => StatusCode::RegionAlreadyExists,
             InvalidScanIndex { .. }
             | InvalidMeta { .. }
             | InvalidSchema { .. }

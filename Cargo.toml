@@ -8,6 +8,7 @@ members = [
     "src/cmd",
     "src/common/base",
     "src/common/catalog",
+    "src/common/config",
     "src/common/datasource",
     "src/common/error",
     "src/common/function",
@@ -89,6 +90,11 @@ paste = "1.0"
 prost = "0.11"
 rand = "0.8"
 regex = "1.8"
+reqwest = { version = "0.11", default-features = false, features = [
+    "json",
+    "rustls-tls-native-roots",
+    "stream",
+] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 smallvec = "1"
@@ -113,6 +119,7 @@ client = { path = "src/client" }
 cmd = { path = "src/cmd" }
 common-base = { path = "src/common/base" }
 common-catalog = { path = "src/common/catalog" }
+common-config = { path = "src/common/config" }
 common-datasource = { path = "src/common/datasource" }
 common-error = { path = "src/common/error" }
 common-function = { path = "src/common/function" }

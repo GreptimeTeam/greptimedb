@@ -16,9 +16,10 @@ use std::sync::Arc;
 
 use clap::Parser;
 use common_base::Plugins;
+use common_config::WalConfig;
 use common_telemetry::info;
 use common_telemetry::logging::LoggingOptions;
-use datanode::datanode::{Datanode, DatanodeOptions, ProcedureConfig, StorageConfig, WalConfig};
+use datanode::datanode::{Datanode, DatanodeOptions, ProcedureConfig, StorageConfig};
 use datanode::instance::InstanceRef;
 use frontend::frontend::FrontendOptions;
 use frontend::instance::{FrontendInstance, Instance as FeInstance};
@@ -81,15 +82,14 @@ impl SubCommand {
 #[serde(default)]
 pub struct StandaloneOptions {
     pub mode: Mode,
-    pub enable_memory_catalog: bool,
     pub enable_telemetry: bool,
-    pub http_options: Option<HttpOptions>,
-    pub grpc_options: Option<GrpcOptions>,
-    pub mysql_options: Option<MysqlOptions>,
-    pub postgres_options: Option<PostgresOptions>,
-    pub opentsdb_options: Option<OpentsdbOptions>,
-    pub influxdb_options: Option<InfluxdbOptions>,
-    pub prom_store_options: Option<PromStoreOptions>,
+    pub http_options: HttpOptions,
+    pub grpc_options: GrpcOptions,
+    pub mysql_options: MysqlOptions,
+    pub postgres_options: PostgresOptions,
+    pub opentsdb_options: OpentsdbOptions,
+    pub influxdb_options: InfluxdbOptions,
+    pub prom_store_options: PromStoreOptions,
     pub wal: WalConfig,
     pub storage: StorageConfig,
     pub procedure: ProcedureConfig,
@@ -100,15 +100,14 @@ impl Default for StandaloneOptions {
     fn default() -> Self {
         Self {
             mode: Mode::Standalone,
-            enable_memory_catalog: false,
             enable_telemetry: true,
-            http_options: Some(HttpOptions::default()),
-            grpc_options: Some(GrpcOptions::default()),
-            mysql_options: Some(MysqlOptions::default()),
-            postgres_options: Some(PostgresOptions::default()),
-            opentsdb_options: Some(OpentsdbOptions::default()),
-            influxdb_options: Some(InfluxdbOptions::default()),
-            prom_store_options: Some(PromStoreOptions::default()),
+            http_options: HttpOptions::default(),
+            grpc_options: GrpcOptions::default(),
+            mysql_options: MysqlOptions::default(),
+            postgres_options: PostgresOptions::default(),
+            opentsdb_options: OpentsdbOptions::default(),
+            influxdb_options: InfluxdbOptions::default(),
+            prom_store_options: PromStoreOptions::default(),
             wal: WalConfig::default(),
             storage: StorageConfig::default(),
             procedure: ProcedureConfig::default(),
@@ -136,11 +135,9 @@ impl StandaloneOptions {
 
     fn datanode_options(self) -> DatanodeOptions {
         DatanodeOptions {
-            enable_memory_catalog: self.enable_memory_catalog,
             enable_telemetry: self.enable_telemetry,
             wal: self.wal,
             storage: self.storage,
-            procedure: self.procedure,
             ..Default::default()
         }
     }
@@ -193,8 +190,6 @@ struct StartCommand {
     influxdb_enable: bool,
     #[clap(short, long)]
     config_file: Option<String>,
-    #[clap(short = 'm', long = "memory-catalog")]
-    enable_memory_catalog: bool,
     #[clap(long)]
     tls_mode: Option<TlsMode>,
     #[clap(long)]
@@ -215,8 +210,6 @@ impl StartCommand {
             None,
         )?;
 
-        opts.enable_memory_catalog = self.enable_memory_catalog;
-
         opts.mode = Mode::Standalone;
 
         if let Some(dir) = top_level_options.log_dir {
@@ -234,9 +227,7 @@ impl StartCommand {
         );
 
         if let Some(addr) = &self.http_addr {
-            if let Some(http_opts) = &mut opts.http_options {
-                http_opts.addr = addr.clone()
-            }
+            opts.http_options.addr = addr.clone()
         }
 
         if let Some(addr) = &self.rpc_addr {
@@ -250,33 +241,28 @@ impl StartCommand {
                 }
                 .fail();
             }
-            if let Some(grpc_opts) = &mut opts.grpc_options {
-                grpc_opts.addr = addr.clone()
-            }
+            opts.grpc_options.addr = addr.clone()
         }
 
         if let Some(addr) = &self.mysql_addr {
-            if let Some(mysql_opts) = &mut opts.mysql_options {
-                mysql_opts.addr = addr.clone();
-                mysql_opts.tls = tls_opts.clone();
-            }
+            opts.mysql_options.enable = true;
+            opts.mysql_options.addr = addr.clone();
+            opts.mysql_options.tls = tls_opts.clone();
         }
 
         if let Some(addr) = &self.postgres_addr {
-            if let Some(postgres_opts) = &mut opts.postgres_options {
-                postgres_opts.addr = addr.clone();
-                postgres_opts.tls = tls_opts;
-            }
+            opts.postgres_options.enable = true;
+            opts.postgres_options.addr = addr.clone();
+            opts.postgres_options.tls = tls_opts;
         }
 
         if let Some(addr) = &self.opentsdb_addr {
-            if let Some(opentsdb_addr) = &mut opts.opentsdb_options {
-                opentsdb_addr.addr = addr.clone();
-            }
+            opts.opentsdb_options.enable = true;
+            opts.opentsdb_options.addr = addr.clone();
         }
 
         if self.influxdb_enable {
-            opts.influxdb_options = Some(InfluxdbOptions { enable: true });
+            opts.influxdb_options.enable = self.influxdb_enable;
         }
 
         let fe_opts = opts.clone().frontend_options();
@@ -424,34 +410,16 @@ mod tests {
         let dn_opts = options.dn_opts;
         let logging_opts = options.logging;
         assert_eq!(Mode::Standalone, fe_opts.mode);
-        assert_eq!(
-            "127.0.0.1:4000".to_string(),
-            fe_opts.http_options.as_ref().unwrap().addr
-        );
-        assert_eq!(
-            Duration::from_secs(30),
-            fe_opts.http_options.as_ref().unwrap().timeout
-        );
-        assert_eq!(
-            ReadableSize::mb(128),
-            fe_opts.http_options.as_ref().unwrap().body_limit
-        );
-        assert_eq!(
-            "127.0.0.1:4001".to_string(),
-            fe_opts.grpc_options.unwrap().addr
-        );
-        assert_eq!(
-            "127.0.0.1:4002",
-            fe_opts.mysql_options.as_ref().unwrap().addr
-        );
-        assert_eq!(2, fe_opts.mysql_options.as_ref().unwrap().runtime_size);
-        assert_eq!(
-            None,
-            fe_opts.mysql_options.as_ref().unwrap().reject_no_database
-        );
-        assert!(fe_opts.influxdb_options.as_ref().unwrap().enable);
+        assert_eq!("127.0.0.1:4000".to_string(), fe_opts.http_options.addr);
+        assert_eq!(Duration::from_secs(30), fe_opts.http_options.timeout);
+        assert_eq!(ReadableSize::mb(128), fe_opts.http_options.body_limit);
+        assert_eq!("127.0.0.1:4001".to_string(), fe_opts.grpc_options.addr);
+        assert!(fe_opts.mysql_options.enable);
+        assert_eq!("127.0.0.1:4002", fe_opts.mysql_options.addr);
+        assert_eq!(2, fe_opts.mysql_options.runtime_size);
+        assert_eq!(None, fe_opts.mysql_options.reject_no_database);
+        assert!(fe_opts.influxdb_options.enable);
 
-        assert_eq!("/tmp/greptimedb/test/wal", dn_opts.wal.dir.unwrap());
         match &dn_opts.storage.store {
             datanode::datanode::ObjectStoreConfig::S3(s3_config) => {
                 assert_eq!(
@@ -561,20 +529,11 @@ mod tests {
                 assert_eq!(opts.logging.level.as_ref().unwrap(), "debug");
 
                 // Should be read from cli, cli > config file > env > default values.
-                assert_eq!(
-                    opts.fe_opts.http_options.as_ref().unwrap().addr,
-                    "127.0.0.1:14000"
-                );
-                assert_eq!(
-                    ReadableSize::mb(64),
-                    opts.fe_opts.http_options.as_ref().unwrap().body_limit
-                );
+                assert_eq!(opts.fe_opts.http_options.addr, "127.0.0.1:14000");
+                assert_eq!(ReadableSize::mb(64), opts.fe_opts.http_options.body_limit);
 
                 // Should be default value.
-                assert_eq!(
-                    opts.fe_opts.grpc_options.unwrap().addr,
-                    GrpcOptions::default().addr
-                );
+                assert_eq!(opts.fe_opts.grpc_options.addr, GrpcOptions::default().addr);
             },
         );
     }

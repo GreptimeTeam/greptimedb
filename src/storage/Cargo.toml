@@ -14,6 +14,7 @@ async-stream.workspace = true
 async-trait = "0.1"
 bytes = "1.1"
 common-base = { workspace = true }
+common-config = { workspace = true }
 common-datasource = { workspace = true }
 common-error = { workspace = true }
 common-query = { workspace = true }
