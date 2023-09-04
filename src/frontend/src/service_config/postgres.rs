@@ -17,6 +17,7 @@ use servers::tls::TlsOption;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PostgresOptions {
+    pub enable: bool,
     pub addr: String,
     pub runtime_size: usize,
     #[serde(default = "Default::default")]
@@ -26,6 +27,7 @@ pub struct PostgresOptions {
 impl Default for PostgresOptions {
     fn default() -> Self {
         Self {
+            enable: true,
             addr: "127.0.0.1:4003".to_string(),
             runtime_size: 2,
             tls: Default::default(),

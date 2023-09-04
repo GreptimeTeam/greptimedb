@@ -24,6 +24,8 @@ runtime_size = 8
 
 # MySQL server options.
 [mysql_options]
+# Whether to enable
+enable = true
 # Server address, "127.0.0.1:4002" by default.
 addr = "127.0.0.1:4002"
 # The number of server worker threads, 2 by default.
@@ -45,6 +47,8 @@ key_path = ""
 
 # PostgresSQL server options.
 [postgres_options]
+# Whether to enable
+enable = true
 # Server address, "127.0.0.1:4003" by default.
 addr = "127.0.0.1:4003"
 # The number of server worker threads, 2 by default.
@@ -61,6 +65,8 @@ key_path = ""
 
 # OpenTSDB protocol options.
 [opentsdb_options]
+# Whether to enable
+enable = true
 # OpenTSDB telnet API server address, "127.0.0.1:4242" by default.
 addr = "127.0.0.1:4242"
 # The number of server worker threads, 2 by default.
