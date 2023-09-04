@@ -53,7 +53,6 @@ use sql::ast::{Ident, Value as SqlValue};
 use sql::statements::create::{PartitionEntry, Partitions};
 use sql::statements::statement::Statement;
 use sql::statements::{self, sql_value_to_value};
-use table::error::TableOperationSnafu;
 use table::metadata::{RawTableInfo, RawTableMeta, TableId, TableIdent, TableInfo, TableType};
 use table::requests::{AlterTableRequest, TableOptions};
 use table::TableRef;
@@ -64,7 +63,7 @@ use crate::error::{
     self, AlterExprToRequestSnafu, CatalogSnafu, ColumnDataTypeSnafu, ColumnNotFoundSnafu,
     DeserializePartitionSnafu, InvokeDatanodeSnafu, NotSupportedSnafu, ParseSqlSnafu, Result,
     SchemaExistsSnafu, SchemaNotFoundSnafu, TableAlreadyExistSnafu, TableMetadataManagerSnafu,
-    TableNotFoundSnafu, TableSnafu, UnrecognizedTableOptionSnafu,
+    TableNotFoundSnafu, UnrecognizedTableOptionSnafu,
 };
 use crate::expr_factory;
 use crate::instance::distributed::deleter::DistDeleter;
@@ -278,12 +277,7 @@ impl DistInstance {
                         .context(InvokeDatanodeSnafu)?;
 
                 let inserter = DistInserter::new(&self.catalog_manager);
-                let affected_rows = inserter
-                    .insert_table_request(insert_request)
-                    .await
-                    .map_err(BoxedError::new)
-                    .context(TableOperationSnafu)
-                    .context(TableSnafu)?;
+                let affected_rows = inserter.insert_table_request(insert_request).await?;
                 Ok(Output::AffectedRows(affected_rows as usize))
             }
             Statement::ShowCreateTable(show) => {

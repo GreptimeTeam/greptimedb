@@ -29,7 +29,7 @@ use crate::error::{
     CatalogSnafu, FindDatanodeSnafu, FindTableRouteSnafu, JoinTaskSnafu, RequestInsertsSnafu,
     Result, SplitInsertSnafu, TableNotFoundSnafu,
 };
-use crate::table::insert::insert_request_table_to_region;
+use crate::inserter::Inserter;
 
 /// A distributed inserter. It ingests GRPC [InsertRequests].
 ///
@@ -82,11 +82,8 @@ impl<'a> DistInserter<'a> {
             })?;
 
         let table_info = table.table_info();
-        let region_request = insert_request_table_to_region(&table_info, request)?;
-        let requests = InsertRequests {
-            requests: vec![region_request],
-        };
-        self.insert_region_requests(requests).await
+        let request = Inserter::convert_table_to_region(&table_info, request)?;
+        self.insert_region_requests(request).await
     }
 
     /// Splits GRPC [InsertRequests] into multiple GRPC [InsertRequests]s, each of which

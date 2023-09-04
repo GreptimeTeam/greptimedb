@@ -24,7 +24,7 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use api::v1::region::{region_request, InsertRequests};
+use api::v1::region::region_request;
 use catalog::CatalogManagerRef;
 use common_error::ext::BoxedError;
 use common_query::Output;
@@ -51,10 +51,10 @@ use crate::error::{
     self, CatalogSnafu, ExecLogicalPlanSnafu, ExecuteStatementSnafu, ExternalSnafu, InsertSnafu,
     PlanStatementSnafu, Result, TableNotFoundSnafu,
 };
+use crate::inserter::Inserter;
 use crate::instance::distributed::deleter::DistDeleter;
 use crate::instance::region_handler::RegionRequestHandlerRef;
 use crate::statement::backup::{COPY_DATABASE_TIME_END_KEY, COPY_DATABASE_TIME_START_KEY};
-use crate::table::insert::insert_request_table_to_region;
 
 #[derive(Clone)]
 pub struct StatementExecutor {
@@ -185,11 +185,11 @@ impl StatementExecutor {
         let table = self.get_table(&table_ref).await?;
         let table_info = table.table_info();
 
-        let region_request = insert_request_table_to_region(&table_info, request)?;
-        let body = region_request::Body::Inserts(InsertRequests {
-            requests: vec![region_request],
-        });
-        let region_response = self.region_request_handler.handle(body, query_ctx).await?;
+        let request = Inserter::convert_table_to_region(&table_info, request)?;
+        let region_response = self
+            .region_request_handler
+            .handle(region_request::Body::Inserts(request), query_ctx)
+            .await?;
 
         Ok(region_response.affected_rows as _)
     }

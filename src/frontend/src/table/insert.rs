@@ -14,20 +14,14 @@
 
 use std::collections::HashMap;
 
-use api::helper::{push_vals, vectors_to_rows, ColumnDataTypeWrapper};
+use api::helper::{push_vals, ColumnDataTypeWrapper};
 use api::v1::column::Values;
-use api::v1::region::InsertRequest as RegionInsertRequest;
-use api::v1::{Column, ColumnSchema, Rows, SemanticType};
+use api::v1::{Column, SemanticType};
 use datatypes::prelude::*;
 use snafu::{ensure, OptionExt, ResultExt};
-use store_api::storage::RegionId;
-use table::metadata::{TableInfoRef, TableMeta};
-use table::requests::InsertRequest;
+use table::metadata::TableMeta;
 
-use crate::error::{
-    self, ColumnDataTypeSnafu, ColumnNotFoundSnafu, InvalidInsertRequestSnafu,
-    MissingTimeIndexColumnSnafu, NotSupportedSnafu, Result, VectorToGrpcColumnSnafu,
-};
+use crate::error::{self, ColumnDataTypeSnafu, NotSupportedSnafu, Result, VectorToGrpcColumnSnafu};
 
 pub(crate) fn to_grpc_columns(
     table_meta: &TableMeta,
@@ -101,98 +95,14 @@ fn vector_to_grpc_column(
     Ok(column)
 }
 
-pub(crate) fn insert_request_table_to_region(
-    table_info: &TableInfoRef,
-    insert: InsertRequest,
-) -> Result<RegionInsertRequest> {
-    let region_id = RegionId::new(table_info.table_id(), insert.region_number).into();
-    let row_count = row_count(&insert.columns_values)?;
-    let schema = column_schema(table_info, &insert.columns_values)?;
-    let rows = vectors_to_rows(insert.columns_values.values(), row_count);
-    Ok(RegionInsertRequest {
-        region_id,
-        rows: Some(Rows { schema, rows }),
-    })
-}
-
-pub(crate) fn row_count(columns: &HashMap<String, VectorRef>) -> Result<usize> {
-    let mut columns_iter = columns.values();
-
-    let len = columns_iter
-        .next()
-        .map(|column| column.len())
-        .unwrap_or_default();
-    ensure!(
-        columns_iter.all(|column| column.len() == len),
-        InvalidInsertRequestSnafu {
-            reason: "The row count of columns is not the same."
-        }
-    );
-
-    Ok(len)
-}
-
-pub(crate) fn column_schema(
-    table_info: &TableInfoRef,
-    columns: &HashMap<String, VectorRef>,
-) -> Result<Vec<ColumnSchema>> {
-    let table_meta = &table_info.meta;
-    let mut schema = vec![];
-
-    for (column_name, vector) in columns {
-        let time_index_column = &table_meta
-            .schema
-            .timestamp_column()
-            .with_context(|| table::error::MissingTimeIndexColumnSnafu {
-                table_name: table_info.name.to_string(),
-            })
-            .context(MissingTimeIndexColumnSnafu)?
-            .name;
-        let semantic_type = if column_name == time_index_column {
-            SemanticType::Timestamp
-        } else {
-            let column_index = table_meta
-                .schema
-                .column_index_by_name(column_name)
-                .context(ColumnNotFoundSnafu {
-                    msg: format!("unable to find column {column_name} in table schema"),
-                })?;
-            if table_meta.primary_key_indices.contains(&column_index) {
-                SemanticType::Tag
-            } else {
-                SemanticType::Field
-            }
-        };
-
-        let datatype: ColumnDataTypeWrapper =
-            vector.data_type().try_into().context(ColumnDataTypeSnafu)?;
-
-        schema.push(ColumnSchema {
-            column_name: column_name.clone(),
-            datatype: datatype.datatype().into(),
-            semantic_type: semantic_type.into(),
-        });
-    }
-
-    Ok(schema)
-}
-
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
     use std::sync::Arc;
 
-    use api::v1::value::ValueData;
     use api::v1::ColumnDataType;
-    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-    use datatypes::prelude::ScalarVectorBuilder;
     use datatypes::schema::{ColumnSchema, Schema};
-    use datatypes::vectors::{
-        Int16VectorBuilder, Int32Vector, Int64Vector, MutableVector, StringVector,
-        StringVectorBuilder,
-    };
-    use table::metadata::{TableInfoBuilder, TableMetaBuilder};
-    use table::requests::InsertRequest;
+    use datatypes::vectors::{Int32Vector, Int64Vector, StringVector};
+    use table::metadata::TableMetaBuilder;
 
     use super::*;
 
@@ -254,103 +164,5 @@ mod tests {
         );
         assert_eq!(column.null_mask, vec![2]);
         assert_eq!(column.datatype, ColumnDataType::String as i32);
-    }
-
-    #[test]
-    fn test_insert_request_table_to_region() {
-        let schema = Schema::new(vec![
-            ColumnSchema::new("ts", ConcreteDataType::int64_datatype(), false)
-                .with_time_index(true),
-            ColumnSchema::new("id", ConcreteDataType::int16_datatype(), false),
-            ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
-        ]);
-
-        let table_meta = TableMetaBuilder::default()
-            .schema(Arc::new(schema))
-            .primary_key_indices(vec![2])
-            .next_column_id(3)
-            .build()
-            .unwrap();
-
-        let table_info = Arc::new(
-            TableInfoBuilder::default()
-                .name("demo")
-                .meta(table_meta)
-                .table_id(1)
-                .build()
-                .unwrap(),
-        );
-
-        let insert_request = mock_insert_request();
-        let request = insert_request_table_to_region(&table_info, insert_request).unwrap();
-
-        verify_region_insert_request(request);
-    }
-
-    fn mock_insert_request() -> InsertRequest {
-        let mut builder = StringVectorBuilder::with_capacity(3);
-        builder.push(Some("host1"));
-        builder.push(None);
-        builder.push(Some("host3"));
-        let host = builder.to_vector();
-
-        let mut builder = Int16VectorBuilder::with_capacity(3);
-        builder.push(Some(1_i16));
-        builder.push(Some(2_i16));
-        builder.push(Some(3_i16));
-        let id = builder.to_vector();
-
-        let columns_values = HashMap::from([("host".to_string(), host), ("id".to_string(), id)]);
-
-        InsertRequest {
-            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
-            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
-            table_name: "demo".to_string(),
-            columns_values,
-            region_number: 0,
-        }
-    }
-
-    fn verify_region_insert_request(request: RegionInsertRequest) {
-        assert_eq!(request.region_id, RegionId::new(1, 0).as_u64());
-
-        let rows = request.rows.unwrap();
-        for (i, column) in rows.schema.iter().enumerate() {
-            let name = &column.column_name;
-            if name == "id" {
-                assert_eq!(ColumnDataType::Int16 as i32, column.datatype);
-                assert_eq!(SemanticType::Field as i32, column.semantic_type);
-                let values = rows
-                    .rows
-                    .iter()
-                    .map(|row| row.values[i].value_data.clone())
-                    .collect::<Vec<_>>();
-                assert_eq!(
-                    vec![
-                        Some(ValueData::I16Value(1)),
-                        Some(ValueData::I16Value(2)),
-                        Some(ValueData::I16Value(3))
-                    ],
-                    values
-                );
-            }
-            if name == "host" {
-                assert_eq!(ColumnDataType::String as i32, column.datatype);
-                assert_eq!(SemanticType::Tag as i32, column.semantic_type);
-                let values = rows
-                    .rows
-                    .iter()
-                    .map(|row| row.values[i].value_data.clone())
-                    .collect::<Vec<_>>();
-                assert_eq!(
-                    vec![
-                        Some(ValueData::StringValue("host1".to_string())),
-                        None,
-                        Some(ValueData::StringValue("host3".to_string()))
-                    ],
-                    values
-                );
-            }
-        }
     }
 }
