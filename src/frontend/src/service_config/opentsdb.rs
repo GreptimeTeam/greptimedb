@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct OpentsdbOptions {
+    pub enable: bool,
     pub addr: String,
     pub runtime_size: usize,
 }
@@ -23,6 +24,7 @@ pub struct OpentsdbOptions {
 impl Default for OpentsdbOptions {
     fn default() -> Self {
         Self {
+            enable: true,
             addr: "127.0.0.1:4242".to_string(),
             runtime_size: 2,
         }
