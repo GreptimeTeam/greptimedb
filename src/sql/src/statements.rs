@@ -270,6 +270,17 @@ fn parse_column_default_constraint(
     }
 }
 
+/// Return true when the `ColumnDef` options contain primary key
+pub fn has_primary_key_option(column_def: &ColumnDef) -> bool {
+    column_def
+        .options
+        .iter()
+        .any(|options| match options.option {
+            ColumnOption::Unique { is_primary } => is_primary,
+            _ => false,
+        })
+}
+
 // TODO(yingwen): Make column nullable by default, and checks invalid case like
 // a column is not nullable but has a default value null.
 /// Create a `ColumnSchema` from `ColumnDef`.
@@ -746,6 +757,28 @@ mod tests {
 
         let grpc_column_def = sql_column_def_to_grpc_column_def(&column_def).unwrap();
         assert!(!grpc_column_def.is_nullable);
+    }
+
+    #[test]
+    pub fn test_has_primary_key_option() {
+        let column_def = ColumnDef {
+            name: "col".into(),
+            data_type: SqlDataType::Double,
+            collation: None,
+            options: vec![],
+        };
+        assert!(!has_primary_key_option(&column_def));
+
+        let column_def = ColumnDef {
+            name: "col".into(),
+            data_type: SqlDataType::Double,
+            collation: None,
+            options: vec![ColumnOptionDef {
+                name: None,
+                option: ColumnOption::Unique { is_primary: true },
+            }],
+        };
+        assert!(has_primary_key_option(&column_def));
     }
 
     #[test]
