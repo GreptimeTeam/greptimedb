@@ -14,7 +14,6 @@
 
 pub mod deleter;
 pub(crate) mod inserter;
-pub(crate) mod row_inserter;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -22,9 +21,9 @@ use std::sync::Arc;
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::ddl_request::Expr as DdlExpr;
 use api::v1::greptime_request::Request;
+use api::v1::region::{region_request, RegionResponse};
 use api::v1::{
-    column_def, AlterExpr, CreateDatabaseExpr, CreateTableExpr, DeleteRequests, InsertRequests,
-    RowInsertRequests, TruncateTableExpr,
+    column_def, AlterExpr, CreateDatabaseExpr, CreateTableExpr, DeleteRequests, TruncateTableExpr,
 };
 use async_trait::async_trait;
 use catalog::{CatalogManager, DeregisterTableRequest, RegisterTableRequest};
@@ -59,6 +58,7 @@ use table::metadata::{RawTableInfo, RawTableMeta, TableId, TableIdent, TableInfo
 use table::requests::{AlterTableRequest, TableOptions};
 use table::TableRef;
 
+use super::region_handler::RegionRequestHandler;
 use crate::catalog::FrontendCatalogManager;
 use crate::error::{
     self, AlterExprToRequestSnafu, CatalogSnafu, ColumnDataTypeSnafu, ColumnNotFoundSnafu,
@@ -69,7 +69,6 @@ use crate::error::{
 use crate::expr_factory;
 use crate::instance::distributed::deleter::DistDeleter;
 use crate::instance::distributed::inserter::DistInserter;
-use crate::instance::distributed::row_inserter::RowDistInserter;
 use crate::table::DistTable;
 
 const MAX_VALUE: &str = "MAXVALUE";
@@ -273,19 +272,14 @@ impl DistInstance {
                 self.drop_table(table_name).await
             }
             Statement::Insert(insert) => {
-                let (catalog, schema, _) =
-                    table_idents_to_full_name(insert.table_name(), query_ctx.clone())
-                        .map_err(BoxedError::new)
-                        .context(error::ExternalSnafu)?;
-
                 let insert_request =
                     SqlHandler::insert_to_request(self.catalog_manager.clone(), &insert, query_ctx)
                         .await
                         .context(InvokeDatanodeSnafu)?;
 
-                let inserter = DistInserter::new(catalog, schema, self.catalog_manager.clone());
+                let inserter = DistInserter::new(&self.catalog_manager);
                 let affected_rows = inserter
-                    .insert(vec![insert_request])
+                    .insert_table_request(insert_request)
                     .await
                     .map_err(BoxedError::new)
                     .context(TableOperationSnafu)
@@ -524,34 +518,6 @@ impl DistInstance {
             .context(error::ExecuteDdlSnafu)
     }
 
-    async fn handle_dist_insert(
-        &self,
-        requests: InsertRequests,
-        ctx: QueryContextRef,
-    ) -> Result<Output> {
-        let inserter = DistInserter::new(
-            ctx.current_catalog().to_owned(),
-            ctx.current_schema().to_owned(),
-            self.catalog_manager.clone(),
-        );
-        let affected_rows = inserter.grpc_insert(requests).await?;
-        Ok(Output::AffectedRows(affected_rows as usize))
-    }
-
-    async fn handle_row_dist_insert(
-        &self,
-        requests: RowInsertRequests,
-        ctx: QueryContextRef,
-    ) -> Result<Output> {
-        let inserter = RowDistInserter::new(
-            ctx.current_catalog().to_owned(),
-            ctx.current_schema().to_owned(),
-            self.catalog_manager.clone(),
-        );
-        let affected_rows = inserter.insert(requests).await?;
-        Ok(Output::AffectedRows(affected_rows as usize))
-    }
-
     async fn handle_dist_delete(
         &self,
         request: DeleteRequests,
@@ -591,8 +557,11 @@ impl GrpcQueryHandler for DistInstance {
 
     async fn do_query(&self, request: Request, ctx: QueryContextRef) -> Result<Output> {
         match request {
-            Request::Inserts(requests) => self.handle_dist_insert(requests, ctx).await,
-            Request::RowInserts(requests) => self.handle_row_dist_insert(requests, ctx).await,
+            Request::Inserts(_) => NotSupportedSnafu { feat: "inserts" }.fail(),
+            Request::RowInserts(_) => NotSupportedSnafu {
+                feat: "row inserts",
+            }
+            .fail(),
             Request::RowDeletes(_) => NotSupportedSnafu {
                 feat: "row deletes",
             }
@@ -624,6 +593,44 @@ impl GrpcQueryHandler for DistInstance {
                     }
                 }
             }
+        }
+    }
+}
+
+pub(crate) struct DistRegionRequestHandler {
+    catalog_manager: Arc<FrontendCatalogManager>,
+}
+
+impl DistRegionRequestHandler {
+    pub fn arc(catalog_manager: Arc<FrontendCatalogManager>) -> Arc<Self> {
+        Arc::new(Self { catalog_manager })
+    }
+}
+
+#[async_trait]
+impl RegionRequestHandler for DistRegionRequestHandler {
+    async fn handle(
+        &self,
+        request: region_request::Body,
+        _ctx: QueryContextRef,
+    ) -> Result<RegionResponse> {
+        match request {
+            region_request::Body::Inserts(inserts) => {
+                let inserter = DistInserter::new(&self.catalog_manager);
+                let affected_rows = inserter.insert_region_requests(inserts).await? as _;
+                Ok(RegionResponse {
+                    header: Some(Default::default()),
+                    affected_rows,
+                })
+            }
+            region_request::Body::Deletes(_)
+            | region_request::Body::Create(_)
+            | region_request::Body::Drop(_)
+            | region_request::Body::Open(_)
+            | region_request::Body::Close(_)
+            | region_request::Body::Alter(_)
+            | region_request::Body::Flush(_)
+            | region_request::Body::Compact(_) => todo!(),
         }
     }
 }

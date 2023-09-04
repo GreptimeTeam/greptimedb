@@ -16,6 +16,9 @@ use api::helper::ColumnDataTypeWrapper;
 use api::v1::alter_expr::Kind;
 use api::v1::ddl_request::Expr as DdlExpr;
 use api::v1::greptime_request::Request;
+use api::v1::region::{
+    region_request, InsertRequest as RegionInsertRequest, InsertRequests as RegionInsertRequests,
+};
 use api::v1::value::ValueData;
 use api::v1::{
     AlterExpr, Column, ColumnDataType, ColumnSchema, DdlRequest, InsertRequest, InsertRequests,
@@ -31,19 +34,22 @@ use datatypes::schema::Schema;
 use servers::query_handler::grpc::GrpcQueryHandlerRef;
 use session::context::QueryContextRef;
 use snafu::prelude::*;
+use store_api::storage::RegionId;
 use table::engine::TableReference;
 use table::TableRef;
 
 use crate::error::{
     CatalogSnafu, ColumnDataTypeSnafu, EmptyDataSnafu, Error, FindNewColumnsOnInsertionSnafu,
-    InvalidInsertRequestSnafu, Result,
+    InvalidInsertRequestSnafu, Result, TableNotFoundSnafu,
 };
 use crate::expr_factory::CreateExprFactory;
+use crate::instance::region_handler::RegionRequestHandlerRef;
 
 pub(crate) struct Inserter<'a> {
     catalog_manager: &'a CatalogManagerRef,
     create_expr_factory: &'a CreateExprFactory,
     grpc_query_handler: &'a GrpcQueryHandlerRef<Error>,
+    region_request_handler: &'a RegionRequestHandlerRef,
 }
 
 impl<'a> Inserter<'a> {
@@ -51,11 +57,13 @@ impl<'a> Inserter<'a> {
         catalog_manager: &'a CatalogManagerRef,
         create_expr_factory: &'a CreateExprFactory,
         grpc_query_handler: &'a GrpcQueryHandlerRef<Error>,
+        region_request_handler: &'a RegionRequestHandlerRef,
     ) -> Self {
         Self {
             catalog_manager,
             create_expr_factory,
             grpc_query_handler,
+            region_request_handler,
         }
     }
 
@@ -81,10 +89,14 @@ impl<'a> Inserter<'a> {
             })
         })?;
 
-        self.create_or_alter_tables_on_demand(&requests, ctx.clone())
+        self.create_or_alter_tables_on_demand(&requests, &ctx)
             .await?;
-        let query = Request::RowInserts(requests);
-        self.grpc_query_handler.do_query(query, ctx).await
+        let region_request = self.build_region_request(requests, &ctx).await?;
+        let response = self
+            .region_request_handler
+            .handle(region_request, ctx)
+            .await?;
+        Ok(Output::AffectedRows(response.affected_rows as _))
     }
 }
 
@@ -95,16 +107,16 @@ impl<'a> Inserter<'a> {
     async fn create_or_alter_tables_on_demand(
         &self,
         requests: &RowInsertRequests,
-        ctx: QueryContextRef,
+        ctx: &QueryContextRef,
     ) -> Result<()> {
         // TODO(jeremy): create and alter in batch?
         for req in &requests.inserts {
-            match self.get_table(req, &ctx).await? {
+            match self.get_table(req, ctx).await? {
                 Some(table) => {
                     validate_request_with_table(req, &table)?;
-                    self.alter_table_on_demand(req, table, &ctx).await?
+                    self.alter_table_on_demand(req, table, ctx).await?
                 }
-                None => self.create_table(req, &ctx).await?,
+                None => self.create_table(req, ctx).await?,
             }
         }
 
@@ -191,6 +203,31 @@ impl<'a> Inserter<'a> {
         );
 
         Ok(())
+    }
+
+    async fn build_region_request(
+        &self,
+        requests: RowInsertRequests,
+        ctx: &QueryContextRef,
+    ) -> Result<region_request::Body> {
+        let mut region_request = Vec::with_capacity(requests.inserts.len());
+        for request in requests.inserts {
+            let table = self.get_table(&request, ctx).await?;
+            let table = table.with_context(|| TableNotFoundSnafu {
+                table_name: request.table_name.clone(),
+            })?;
+
+            let region_id = RegionId::new(table.table_info().table_id(), request.region_number);
+            let insert_request = RegionInsertRequest {
+                region_id: region_id.into(),
+                rows: request.rows,
+            };
+            region_request.push(insert_request);
+        }
+
+        Ok(region_request::Body::Inserts(RegionInsertRequests {
+            requests: region_request,
+        }))
     }
 }
 
