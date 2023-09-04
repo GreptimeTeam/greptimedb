@@ -97,7 +97,7 @@ impl<'a> Inserter<'a> {
 
         self.create_or_alter_tables_on_demand(&requests, &ctx)
             .await?;
-        let region_request = self.build_region_request(requests, &ctx).await?;
+        let region_request = self.convert_req_row_to_region(requests, &ctx).await?;
         let response = self
             .region_request_handler
             .handle(region_request, ctx)
@@ -105,7 +105,7 @@ impl<'a> Inserter<'a> {
         Ok(Output::AffectedRows(response.affected_rows as _))
     }
 
-    pub fn convert_table_to_region(
+    pub fn convert_req_table_to_region(
         table_info: &TableInfoRef,
         insert: TableInsertRequest,
     ) -> Result<RegionInsertRequests> {
@@ -227,7 +227,7 @@ impl<'a> Inserter<'a> {
         Ok(())
     }
 
-    async fn build_region_request(
+    async fn convert_req_row_to_region(
         &self,
         requests: RowInsertRequests,
         ctx: &QueryContextRef,
@@ -705,7 +705,8 @@ mod tests {
         );
 
         let insert_request = mock_insert_request();
-        let mut request = Inserter::convert_table_to_region(&table_info, insert_request).unwrap();
+        let mut request =
+            Inserter::convert_req_table_to_region(&table_info, insert_request).unwrap();
 
         assert_eq!(request.requests.len(), 1);
         verify_region_insert_request(request.requests.pop().unwrap());

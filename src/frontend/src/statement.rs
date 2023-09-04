@@ -184,7 +184,7 @@ impl StatementExecutor {
         let table = self.get_table(&table_ref).await?;
         let table_info = table.table_info();
 
-        let request = Inserter::convert_table_to_region(&table_info, request)?;
+        let request = Inserter::convert_req_table_to_region(&table_info, request)?;
         let region_response = self
             .region_request_handler
             .handle(region_request::Body::Inserts(request), query_ctx)
