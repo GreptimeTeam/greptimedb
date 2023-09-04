@@ -29,7 +29,7 @@ use crate::error::{
     Error, Result, RetryLaterSnafu, SerializeToJsonSnafu, UnexpectedInstructionReplySnafu,
 };
 use crate::handler::HeartbeatMailbox;
-use crate::inactive_node_manager::InactiveNodeManager;
+use crate::inactive_region_manager::InactiveRegionManager;
 use crate::service::mailbox::{Channel, MailboxReceiver};
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -62,7 +62,7 @@ impl DeactivateRegion {
 
         let ch = Channel::Datanode(failed_region.datanode_id);
         // Mark the region as inactive
-        InactiveNodeManager::new(&ctx.in_memory)
+        InactiveRegionManager::new(&ctx.in_memory)
             .register_inactive_region(failed_region)
             .await?;
         // We first marked the region as inactive, which means that the failed region cannot
@@ -93,7 +93,7 @@ impl DeactivateRegion {
                     .fail();
                 };
                 if result {
-                    InactiveNodeManager::new(&ctx.in_memory)
+                    InactiveRegionManager::new(&ctx.in_memory)
                         .deregister_inactive_region(failed_region)
                         .await?;
 

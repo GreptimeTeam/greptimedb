@@ -17,7 +17,7 @@ use async_trait::async_trait;
 
 use crate::error::Result;
 use crate::handler::{HeartbeatAccumulator, HeartbeatHandler};
-use crate::inactive_node_manager::InactiveNodeManager;
+use crate::inactive_region_manager::InactiveRegionManager;
 use crate::metasrv::Context;
 
 pub struct RegionLeaseHandler {
@@ -50,8 +50,8 @@ impl HeartbeatHandler for RegionLeaseHandler {
 
         let mut region_ids = stat.region_ids();
 
-        let inactive_node_manager = InactiveNodeManager::new(&ctx.in_memory);
-        let inactive_region_ids = inactive_node_manager
+        let inactive_region_manager = InactiveRegionManager::new(&ctx.in_memory);
+        let inactive_region_ids = inactive_region_manager
             .retain_active_regions(stat.cluster_id, stat.id, &mut region_ids)
             .await?;
 
@@ -126,8 +126,8 @@ mod test {
             ..Default::default()
         });
 
-        let inactive_node_manager = InactiveNodeManager::new(&ctx.in_memory);
-        inactive_node_manager
+        let inactive_region_manager = InactiveRegionManager::new(&ctx.in_memory);
+        inactive_region_manager
             .register_inactive_region(&RegionIdent {
                 cluster_id: 1,
                 datanode_id: 1,
@@ -139,7 +139,7 @@ mod test {
             })
             .await
             .unwrap();
-        inactive_node_manager
+        inactive_region_manager
             .register_inactive_region(&RegionIdent {
                 cluster_id: 1,
                 datanode_id: 1,

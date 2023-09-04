@@ -29,7 +29,7 @@ use crate::error::{
     Error, Result, RetryLaterSnafu, SerializeToJsonSnafu, UnexpectedInstructionReplySnafu,
 };
 use crate::handler::HeartbeatMailbox;
-use crate::inactive_node_manager::InactiveNodeManager;
+use crate::inactive_region_manager::InactiveRegionManager;
 use crate::procedure::region_failover::OPEN_REGION_MESSAGE_TIMEOUT;
 use crate::service::mailbox::{Channel, MailboxReceiver};
 
@@ -76,7 +76,7 @@ impl ActivateRegion {
             datanode_id: self.candidate.id,
             ..failed_region.clone()
         };
-        InactiveNodeManager::new(&ctx.in_memory)
+        InactiveRegionManager::new(&ctx.in_memory)
             .deregister_inactive_region(&candidate)
             .await?;
 
