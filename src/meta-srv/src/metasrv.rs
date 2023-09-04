@@ -97,7 +97,7 @@ impl MetaSrvOptions {
     }
 }
 
-pub struct MetaSrvInfo {
+pub struct MetasrvInfo {
     pub server_addr: String,
 }
 

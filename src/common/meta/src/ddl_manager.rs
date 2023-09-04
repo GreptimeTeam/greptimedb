@@ -189,7 +189,7 @@ impl DdlManager {
         truncate_table_task: TruncateTableTask,
         region_routes: Vec<RegionRoute>,
     ) -> Result<ProcedureId> {
-        error!("truncate table procedure is not supported, cluster_id = {}, truncate_table_task = {:?}, region_routes = {:?}",
+        error!("Truncate table procedure is not supported, cluster_id = {}, truncate_table_task = {:?}, region_routes = {:?}",
             cluster_id, truncate_table_task, region_routes);
 
         UnsupportedSnafu {
@@ -377,6 +377,7 @@ impl DdlExecutor for DdlManager {
         let cluster_id = ctx.cluster_id.context(error::UnexpectedSnafu {
             err_msg: "cluster_id not found",
         })?;
+        info!("Submitting Ddl task: {:?}", request.task);
         match request.task {
             CreateTable(create_table_task) => {
                 handle_create_table_task(self, cluster_id, create_table_task).await

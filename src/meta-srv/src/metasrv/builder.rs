@@ -39,7 +39,7 @@ use crate::lock::memory::MemLock;
 use crate::lock::DistLockRef;
 use crate::metadata_service::{DefaultMetadataService, MetadataServiceRef};
 use crate::metasrv::{
-    ElectionRef, MetaSrv, MetaSrvInfo, MetaSrvOptions, SelectorContext, SelectorRef, TABLE_ID_SEQ,
+    ElectionRef, MetaSrv, MetaSrvOptions, MetasrvInfo, SelectorContext, SelectorRef, TABLE_ID_SEQ,
 };
 use crate::procedure::region_failover::RegionFailoverManager;
 use crate::procedure::state_store::MetaStateStore;
@@ -346,7 +346,7 @@ fn build_ddl_manager(
     });
     let cache_invalidator = Arc::new(MetasrvCacheInvalidator::new(
         mailbox.clone(),
-        MetaSrvInfo {
+        MetasrvInfo {
             server_addr: options.server_addr.clone(),
         },
     ));

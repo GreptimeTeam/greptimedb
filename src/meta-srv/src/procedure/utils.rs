@@ -117,7 +117,7 @@ pub mod test_data {
 
     use crate::cache_invalidator::MetasrvCacheInvalidator;
     use crate::handler::{HeartbeatMailbox, Pushers};
-    use crate::metasrv::MetaSrvInfo;
+    use crate::metasrv::MetasrvInfo;
     use crate::sequence::Sequence;
     use crate::service::store::kv::KvBackendAdapter;
     use crate::service::store::memory::MemStore;
@@ -196,7 +196,7 @@ pub mod test_data {
             datanode_manager: clients,
             cache_invalidator: Arc::new(MetasrvCacheInvalidator::new(
                 mailbox,
-                MetaSrvInfo {
+                MetasrvInfo {
                     server_addr: "127.0.0.1:4321".to_string(),
                 },
             )),
