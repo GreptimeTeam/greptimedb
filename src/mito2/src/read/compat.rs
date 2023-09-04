@@ -14,6 +14,8 @@
 
 //! Utilities to adapt readers with different schema.
 
+use std::collections::HashMap;
+
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 
 use crate::error::Result;
@@ -99,6 +101,15 @@ fn may_compat_fields(
     mapper: &ProjectionMapper,
     actual: &RegionMetadata,
 ) -> Result<Option<CompatFields>> {
+    let expect_fields = mapper.batch_fields();
+    let actual_fields = Batch::projected_fields(actual, mapper.column_ids());
+    let source_field_index: HashMap<_, _> = actual_fields.iter().enumerate().map(|(idx, column_id)| (*column_id, idx)).collect();
+
+    for column_id in expect_fields {
+        //
+        unimplemented!();
+    }
+
     unimplemented!()
 }
 

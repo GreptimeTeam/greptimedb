@@ -20,6 +20,7 @@ pub mod projection;
 pub(crate) mod scan_region;
 pub(crate) mod seq_scan;
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use api::v1::OpType;
@@ -35,6 +36,7 @@ use datatypes::vectors::{
     BooleanVector, Helper, UInt32Vector, UInt64Vector, UInt8Vector, Vector, VectorRef,
 };
 use snafu::{ensure, OptionExt, ResultExt};
+use store_api::metadata::RegionMetadata;
 use store_api::storage::{ColumnId, SequenceNumber};
 
 use crate::error::{
@@ -316,6 +318,24 @@ impl Batch {
 
         let indices = UInt32Vector::from_iter_values(to_sort.iter().map(|v| v.0 as u32));
         self.take_in_place(&indices)
+    }
+
+    /// Returns ids of fields in the [Batch] after applying the `projection`.
+    pub(crate) fn projected_fields(
+        metadata: &RegionMetadata,
+        projection: &[ColumnId],
+    ) -> Vec<ColumnId> {
+        let projected_ids: HashSet<_> = projection.iter().copied().collect();
+        metadata
+            .field_columns()
+            .filter_map(|column| {
+                if projected_ids.contains(&column.column_id) {
+                    Some(column.column_id)
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     /// Takes the batch in place.

@@ -42,9 +42,11 @@ pub struct ProjectionMapper {
     codec: McmpRowCodec,
     /// Schema for converted [RecordBatch].
     output_schema: SchemaRef,
-    /// Id of columns to project. It keeps ids in the same order as the `projection`
+    /// Ids of columns to project. It keeps ids in the same order as the `projection`
     /// indices to build the mapper.
     column_ids: Vec<ColumnId>,
+    /// Ids of field columns in the [Batch].
+    batch_fields: Vec<ColumnId>,
 }
 
 impl ProjectionMapper {
@@ -95,6 +97,7 @@ impl ProjectionMapper {
         );
         // Safety: Columns come from existing schema.
         let output_schema = Arc::new(Schema::new(column_schemas));
+        let batch_fields = Batch::projected_fields(metadata, &column_ids);
 
         Ok(ProjectionMapper {
             metadata: metadata.clone(),
@@ -102,6 +105,7 @@ impl ProjectionMapper {
             codec,
             output_schema,
             column_ids,
+            batch_fields,
         })
     }
 
@@ -120,6 +124,11 @@ impl ProjectionMapper {
         &self.column_ids
     }
 
+    /// Returns ids of fields in [Batch]es the mapper expects to convert.
+    pub(crate) fn batch_fields(&self) -> &[ColumnId] {
+        &self.batch_fields
+    }
+
     /// Returns the schema of converted [RecordBatch].
     pub(crate) fn output_schema(&self) -> SchemaRef {
         self.output_schema.clone()
@@ -129,7 +138,12 @@ impl ProjectionMapper {
     ///
     /// The batch must match the `projection` using to build the mapper.
     pub(crate) fn convert(&self, batch: &Batch) -> common_recordbatch::error::Result<RecordBatch> {
-        // TODO(yingwen): validate batch schema has the same schema as expected.
+        debug_assert_eq!(self.batch_fields.len(), batch.fields().len());
+        debug_assert!(self
+            .batch_fields
+            .iter()
+            .zip(batch.fields())
+            .all(|(id, batch_col)| *id == batch_col.column_id));
 
         let pk_values = self
             .codec
