@@ -1587,6 +1587,7 @@ dependencies = [
  "clap 3.2.25",
  "client",
  "common-base",
+ "common-config",
  "common-error",
  "common-meta",
  "common-query",
@@ -1673,6 +1674,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-config"
+version = "0.4.0-nightly"
+dependencies = [
+ "common-base",
+ "humantime-serde",
+ "serde",
+]
+
+[[package]]
 name = "common-datasource"
 version = "0.4.0-nightly"
 dependencies = [
@@ -1691,6 +1701,7 @@ dependencies = [
  "orc-rust",
  "paste",
  "regex",
+ "serde",
  "snafu",
  "strum 0.25.0",
  "tokio",
@@ -2611,6 +2622,7 @@ dependencies = [
  "client",
  "common-base",
  "common-catalog",
+ "common-config",
  "common-datasource",
  "common-error",
  "common-function",
@@ -2641,6 +2653,7 @@ dependencies = [
  "meta-srv",
  "metrics",
  "mito",
+ "mito2",
  "object-store",
  "pin-project",
  "prost",
@@ -4903,6 +4916,7 @@ dependencies = [
  "byteorder",
  "bytes",
  "common-base",
+ "common-config",
  "common-error",
  "common-meta",
  "common-runtime",
@@ -5457,6 +5471,7 @@ dependencies = [
  "datafusion-common",
  "datatypes",
  "futures",
+ "humantime-serde",
  "lazy_static",
  "log-store",
  "memcomparable",
@@ -8363,6 +8378,7 @@ dependencies = [
  "async-trait",
  "catalog",
  "common-catalog",
+ "common-config",
  "common-error",
  "common-function",
  "common-query",
@@ -9119,6 +9135,7 @@ dependencies = [
  "atomic_float",
  "bytes",
  "common-base",
+ "common-config",
  "common-datasource",
  "common-error",
  "common-query",

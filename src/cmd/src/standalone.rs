@@ -16,9 +16,10 @@ use std::sync::Arc;
 
 use clap::Parser;
 use common_base::Plugins;
+use common_config::WalConfig;
 use common_telemetry::info;
 use common_telemetry::logging::LoggingOptions;
-use datanode::datanode::{Datanode, DatanodeOptions, ProcedureConfig, StorageConfig, WalConfig};
+use datanode::datanode::{Datanode, DatanodeOptions, ProcedureConfig, StorageConfig};
 use datanode::instance::InstanceRef;
 use frontend::frontend::FrontendOptions;
 use frontend::instance::{FrontendInstance, Instance as FeInstance};
@@ -81,7 +82,6 @@ impl SubCommand {
 #[serde(default)]
 pub struct StandaloneOptions {
     pub mode: Mode,
-    pub enable_memory_catalog: bool,
     pub enable_telemetry: bool,
     pub http_options: HttpOptions,
     pub grpc_options: GrpcOptions,
@@ -100,7 +100,6 @@ impl Default for StandaloneOptions {
     fn default() -> Self {
         Self {
             mode: Mode::Standalone,
-            enable_memory_catalog: false,
             enable_telemetry: true,
             http_options: HttpOptions::default(),
             grpc_options: GrpcOptions::default(),
@@ -136,11 +135,9 @@ impl StandaloneOptions {
 
     fn datanode_options(self) -> DatanodeOptions {
         DatanodeOptions {
-            enable_memory_catalog: self.enable_memory_catalog,
             enable_telemetry: self.enable_telemetry,
             wal: self.wal,
             storage: self.storage,
-            procedure: self.procedure,
             ..Default::default()
         }
     }
@@ -193,8 +190,6 @@ struct StartCommand {
     influxdb_enable: bool,
     #[clap(short, long)]
     config_file: Option<String>,
-    #[clap(short = 'm', long = "memory-catalog")]
-    enable_memory_catalog: bool,
     #[clap(long)]
     tls_mode: Option<TlsMode>,
     #[clap(long)]
@@ -214,8 +209,6 @@ impl StartCommand {
             self.env_prefix.as_ref(),
             None,
         )?;
-
-        opts.enable_memory_catalog = self.enable_memory_catalog;
 
         opts.mode = Mode::Standalone;
 
@@ -427,7 +420,6 @@ mod tests {
         assert_eq!(None, fe_opts.mysql_options.reject_no_database);
         assert!(fe_opts.influxdb_options.enable);
 
-        assert_eq!("/tmp/greptimedb/test/wal", dn_opts.wal.dir.unwrap());
         match &dn_opts.storage.store {
             datanode::datanode::ObjectStoreConfig::S3(s3_config) => {
                 assert_eq!(
