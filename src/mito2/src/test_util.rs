@@ -16,7 +16,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use api::greptime_proto::v1;
 use api::v1::value::ValueData;
@@ -32,9 +32,11 @@ use object_store::services::Fs;
 use object_store::ObjectStore;
 use store_api::metadata::{ColumnMetadata, RegionMetadataRef};
 use store_api::region_request::RegionCreateRequest;
+use store_api::storage::RegionId;
+use tokio::sync::Notify;
 
 use crate::config::MitoConfig;
-use crate::engine::listener::EventListenerRef;
+use crate::engine::listener::{EventListener, EventListenerRef};
 use crate::engine::MitoEngine;
 use crate::error::Result;
 use crate::flush::{WriteBufferManager, WriteBufferManagerRef};
@@ -428,5 +430,42 @@ impl WriteBufferManager for MockWriteBufferManager {
 
     fn memory_usage(&self) -> usize {
         self.memory_used.load(Ordering::Relaxed)
+    }
+}
+
+/// Listener to watch flush events.
+pub struct FlushListener {
+    notify: Notify,
+    last_flushed_region: Mutex<Option<RegionId>>,
+}
+
+impl FlushListener {
+    /// Creates a new listener.
+    pub fn new() -> FlushListener {
+        FlushListener {
+            notify: Notify::new(),
+            last_flushed_region: Mutex::new(None),
+        }
+    }
+
+    /// Wait until one flush job is done.
+    pub async fn wait(&self) {
+        self.notify.notified().await;
+    }
+
+    /// Returns the last flushed region.
+    pub fn last_flushed_region(&self) -> Option<RegionId> {
+        self.last_flushed_region.lock().unwrap().clone()
+    }
+}
+
+impl EventListener for FlushListener {
+    fn on_flush_success(&self, region_id: RegionId) {
+        {
+            let mut last_flushed_region = self.last_flushed_region.lock().unwrap();
+            *last_flushed_region = Some(region_id);
+        }
+
+        self.notify.notify_one()
     }
 }
