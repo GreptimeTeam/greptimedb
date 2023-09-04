@@ -20,15 +20,16 @@ mod gcs;
 mod oss;
 mod s3;
 
-use std::path;
 use std::sync::Arc;
+use std::time::Duration;
+use std::{env, path};
 
 use common_base::readable_size::ReadableSize;
 use common_telemetry::logging::info;
 use object_store::layers::{LoggingLayer, LruCacheLayer, MetricsLayer, RetryLayer, TracingLayer};
 use object_store::services::Fs as FsBuilder;
 use object_store::util::normalize_dir;
-use object_store::{util, ObjectStore, ObjectStoreBuilder};
+use object_store::{util, HttpClient, ObjectStore, ObjectStoreBuilder};
 use snafu::prelude::*;
 
 use crate::datanode::{DatanodeOptions, ObjectStoreConfig, DEFAULT_OBJECT_STORE_CACHE_SIZE};
@@ -132,4 +133,37 @@ pub(crate) fn clean_temp_dir(dir: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+pub(crate) fn build_http_client() -> Result<HttpClient> {
+    let http_builder = {
+        let mut builder = reqwest::ClientBuilder::new();
+
+        // Pool max idle per host controls connection pool size.
+        // Default to no limit, set to `0` for disable it.
+        let pool_max_idle_per_host = env::var("_GREPTIMEDB_HTTP_POOL_MAX_IDLE_PER_HOST")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(usize::MAX);
+        builder = builder.pool_max_idle_per_host(pool_max_idle_per_host);
+
+        // Connect timeout default to 30s.
+        let connect_timeout = env::var("_GREPTIMEDB_HTTP_CONNECT_TIMEOUT")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(30);
+        builder = builder.connect_timeout(Duration::from_secs(connect_timeout));
+
+        // Pool connection idle timeout default to 90s.
+        let idle_timeout = env::var("_GREPTIMEDB_HTTP_POOL_IDLE_TIMEOUT")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(90);
+
+        builder = builder.pool_idle_timeout(Duration::from_secs(idle_timeout));
+
+        builder
+    };
+
+    HttpClient::build(http_builder).context(error::InitBackendSnafu)
 }

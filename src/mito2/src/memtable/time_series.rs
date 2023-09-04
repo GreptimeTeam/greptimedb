@@ -33,6 +33,7 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ColumnId;
 
 use crate::error::{ComputeArrowSnafu, ConvertVectorSnafu, PrimaryKeyLengthMismatchSnafu, Result};
+use crate::flush::WriteBufferManagerRef;
 use crate::memtable::{
     AllocTracker, BoxedBatchIterator, KeyValues, Memtable, MemtableBuilder, MemtableId,
     MemtableRef, MemtableStats,
@@ -43,15 +44,31 @@ use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
 /// Initial vector builder capacity.
 const INITIAL_BUILDER_CAPACITY: usize = 32;
 
+/// Builder to build [TimeSeriesMemtable].
 #[derive(Debug, Default)]
 pub struct TimeSeriesMemtableBuilder {
     id: AtomicU32,
+    write_buffer_manager: Option<WriteBufferManagerRef>,
+}
+
+impl TimeSeriesMemtableBuilder {
+    /// Creates a new builder with specific `write_buffer_manager`.
+    pub fn new(write_buffer_manager: Option<WriteBufferManagerRef>) -> Self {
+        Self {
+            id: AtomicU32::new(0),
+            write_buffer_manager,
+        }
+    }
 }
 
 impl MemtableBuilder for TimeSeriesMemtableBuilder {
     fn build(&self, metadata: &RegionMetadataRef) -> MemtableRef {
         let id = self.id.fetch_add(1, Ordering::Relaxed);
-        Arc::new(TimeSeriesMemtable::new(metadata.clone(), id))
+        Arc::new(TimeSeriesMemtable::new(
+            metadata.clone(),
+            id,
+            self.write_buffer_manager.clone(),
+        ))
     }
 }
 
@@ -67,7 +84,11 @@ pub struct TimeSeriesMemtable {
 }
 
 impl TimeSeriesMemtable {
-    pub fn new(region_metadata: RegionMetadataRef, id: MemtableId) -> Self {
+    pub fn new(
+        region_metadata: RegionMetadataRef,
+        id: MemtableId,
+        write_buffer_manager: Option<WriteBufferManagerRef>,
+    ) -> Self {
         let row_codec = McmpRowCodec::new(
             region_metadata
                 .primary_key_columns()
@@ -80,7 +101,7 @@ impl TimeSeriesMemtable {
             region_metadata,
             series_set,
             row_codec,
-            alloc_tracker: AllocTracker::default(),
+            alloc_tracker: AllocTracker::new(write_buffer_manager),
             max_timestamp: AtomicI64::new(i64::MIN),
             min_timestamp: AtomicI64::new(i64::MAX),
         }
@@ -873,7 +894,7 @@ mod tests {
         common_telemetry::init_default_ut_logging();
         let schema = schema_for_test();
         let kvs = build_key_values(&schema, "hello".to_string(), 42, 100);
-        let memtable = TimeSeriesMemtable::new(schema, 42);
+        let memtable = TimeSeriesMemtable::new(schema, 42, None);
         memtable.write(&kvs).unwrap();
 
         let expected_ts = kvs
@@ -904,7 +925,7 @@ mod tests {
         common_telemetry::init_default_ut_logging();
         let schema = schema_for_test();
         let kvs = build_key_values(&schema, "hello".to_string(), 42, 100);
-        let memtable = TimeSeriesMemtable::new(schema, 42);
+        let memtable = TimeSeriesMemtable::new(schema, 42, None);
         memtable.write(&kvs).unwrap();
 
         let iter = memtable.iter(Some(&[3]), &[]);
