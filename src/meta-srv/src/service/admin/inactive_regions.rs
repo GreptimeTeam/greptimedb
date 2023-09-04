@@ -11,6 +11,7 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
@@ -63,9 +64,9 @@ impl HttpHandler for ClearInactiveRegionsHandler {
         let cluster_id = util::extract_cluster_id(params)?;
 
         let inactive_region_manager = InactiveRegionManager::new(&self.store);
-        let _ = inactive_region_manager
+        inactive_region_manager
             .clear_all_inactive_regions(cluster_id)
-            .await;
+            .await?;
 
         Ok(http::Response::builder()
             .status(http::StatusCode::OK)
