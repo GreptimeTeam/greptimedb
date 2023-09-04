@@ -75,7 +75,7 @@ Affected Rows: 0
 DESCRIBE TABLE intervals;
 
 +----------------+----------------------+-----+------+---------+---------------+
-| Field          | Type                 | Key | Null | Default | Semantic Type |
+| Column         | Type                 | Key | Null | Default | Semantic Type |
 +----------------+----------------------+-----+------+---------+---------------+
 | ts             | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
 | interval_value | IntervalMonthDayNano |     | YES  |         | FIELD         |
