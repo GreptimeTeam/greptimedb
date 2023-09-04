@@ -30,7 +30,6 @@ use store_api::region_request::{
 use store_api::storage::RegionId;
 
 use super::*;
-use crate::error::Error;
 use crate::region::version::VersionControlData;
 use crate::test_util::{CreateRequestBuilder, TestEnv};
 
@@ -224,8 +223,7 @@ async fn test_write_query_region() {
     put_rows(&engine, region_id, rows).await;
 
     let request = ScanRequest::default();
-    let scanner = engine.scan(region_id, request).unwrap();
-    let stream = scanner.scan().await.unwrap();
+    let stream = engine.handle_query(region_id, request).await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     let expected = "\
 +-------+---------+---------------------+
