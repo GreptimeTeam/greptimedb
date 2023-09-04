@@ -42,7 +42,9 @@ use crate::flush::{FlushScheduler, WriteBufferManagerImpl, WriteBufferManagerRef
 use crate::memtable::time_series::TimeSeriesMemtableBuilder;
 use crate::memtable::MemtableBuilderRef;
 use crate::region::{MitoRegionRef, RegionMap, RegionMapRef};
-use crate::request::{BackgroundNotify, DdlRequest, SenderDdlRequest, WorkerRequest};
+use crate::request::{
+    BackgroundNotify, DdlRequest, SenderDdlRequest, SenderWriteRequest, WorkerRequest,
+};
 use crate::schedule::scheduler::{LocalScheduler, SchedulerRef};
 use crate::wal::Wal;
 
@@ -206,6 +208,7 @@ impl<S: LogStore> WorkerStarter<S> {
             scheduler: self.scheduler.clone(),
             write_buffer_manager: self.write_buffer_manager,
             flush_scheduler: FlushScheduler::new(self.scheduler),
+            stalled_requests: StalledRequests::default(),
         };
         let handle = common_runtime::spawn_write(async move {
             worker_thread.run().await;
@@ -303,6 +306,29 @@ impl Drop for RegionWorker {
 
 type RequestBuffer = Vec<WorkerRequest>;
 
+/// Buffer for stalled write requests.
+///
+/// Maintains stalled write requests and their estimated size.
+#[derive(Default)]
+pub(crate) struct StalledRequests {
+    /// Stalled requests.
+    pub(crate) requests: Vec<SenderWriteRequest>,
+    /// Estimated size of all stalled requests.
+    pub(crate) estimated_size: usize,
+}
+
+impl StalledRequests {
+    /// Appends stalled requests.
+    pub(crate) fn append(&mut self, requests: &mut Vec<SenderWriteRequest>) {
+        let size: usize = requests
+            .iter()
+            .map(|req| req.request.estimated_size())
+            .sum();
+        self.requests.append(requests);
+        self.estimated_size += size;
+    }
+}
+
 /// Background worker loop to handle requests.
 struct RegionWorkerLoop<S> {
     // Id of the worker.
@@ -331,6 +357,8 @@ struct RegionWorkerLoop<S> {
     write_buffer_manager: WriteBufferManagerRef,
     /// Schedules background flush requests.
     flush_scheduler: FlushScheduler,
+    /// Stalled write requests.
+    stalled_requests: StalledRequests,
 }
 
 impl<S: LogStore> RegionWorkerLoop<S> {
@@ -397,7 +425,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         // Handles all write requests first. So we can alter regions without
         // considering existing write requests.
-        self.handle_write_requests(write_requests).await;
+        self.handle_write_requests(write_requests, true).await;
 
         self.handle_ddl_requests(ddl_requests).await;
     }

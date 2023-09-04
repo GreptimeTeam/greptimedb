@@ -30,7 +30,11 @@ use crate::worker::RegionWorkerLoop;
 
 impl<S: LogStore> RegionWorkerLoop<S> {
     /// Takes and handles all write requests.
-    pub(crate) async fn handle_write_requests(&mut self, write_requests: Vec<SenderWriteRequest>) {
+    pub(crate) async fn handle_write_requests(
+        &mut self,
+        mut write_requests: Vec<SenderWriteRequest>,
+        allow_stall: bool,
+    ) {
         if write_requests.is_empty() {
             return;
         }
@@ -41,6 +45,15 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         if self.should_reject_write() {
             // The memory pressure is still too high, reject write requests.
             reject_write_requests(write_requests);
+            // Also reject all stalled requests.
+            let stalled = std::mem::take(&mut self.stalled_requests);
+            reject_write_requests(stalled.requests);
+            return;
+        }
+
+        if self.write_buffer_manager.should_stall() && allow_stall {
+            // TODO(yingwen): stalled metrics.
+            self.stalled_requests.append(&mut write_requests);
             return;
         }
 
@@ -118,8 +131,8 @@ impl<S> RegionWorkerLoop<S> {
 
     /// Returns true if the engine needs to reject some write requests.
     fn should_reject_write(&self) -> bool {
-        // If memory usage reaches high threshold (we should also consider pending flush requests) returns true.
-        self.write_buffer_manager.memory_usage()
+        // If memory usage reaches high threshold (we should also consider stalled requests) returns true.
+        self.write_buffer_manager.memory_usage() + self.stalled_requests.estimated_size
             >= self.config.global_write_buffer_reject_size.as_bytes() as usize
     }
 }
