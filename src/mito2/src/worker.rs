@@ -96,7 +96,7 @@ pub(crate) struct WorkerGroup {
 }
 
 impl WorkerGroup {
-    /// Start a worker group.
+    /// Starts a worker group.
     ///
     /// The number of workers should be power of two.
     pub(crate) fn start<S: LogStore>(
@@ -120,6 +120,7 @@ impl WorkerGroup {
                     object_store: object_store.clone(),
                     write_buffer_manager: write_buffer_manager.clone(),
                     scheduler: scheduler.clone(),
+                    listener: WorkerListener::default(),
                 }
                 .start()
             })
@@ -128,18 +129,19 @@ impl WorkerGroup {
         WorkerGroup { workers, scheduler }
     }
 
-    /// Stop the worker group.
+    /// Stops the worker group.
     pub(crate) async fn stop(&self) -> Result<()> {
         info!("Stop region worker group");
 
-        try_join_all(self.workers.iter().map(|worker| worker.stop())).await?;
-
+        // Stops the scheduler gracefully.
         self.scheduler.stop(true).await?;
+
+        try_join_all(self.workers.iter().map(|worker| worker.stop())).await?;
 
         Ok(())
     }
 
-    /// Submit a request to a worker in the group.
+    /// Submits a request to a worker in the group.
     pub(crate) async fn submit_to_worker(
         &self,
         region_id: RegionId,
@@ -174,14 +176,15 @@ impl WorkerGroup {
 // Tests methods.
 #[cfg(test)]
 impl WorkerGroup {
-    /// Start a worker group with `write_buffer_manager` for tests.
+    /// Starts a worker group with `write_buffer_manager` and `listener` for tests.
     ///
     /// The number of workers should be power of two.
-    pub(crate) fn start_with_manager<S: LogStore>(
+    pub(crate) fn start_for_test<S: LogStore>(
         config: MitoConfig,
         log_store: Arc<S>,
         object_store: ObjectStore,
         write_buffer_manager: WriteBufferManagerRef,
+        listener: Option<crate::engine::listener::EventListenerRef>,
     ) -> WorkerGroup {
         assert!(config.num_workers.is_power_of_two());
         let config = Arc::new(config);
@@ -196,6 +199,7 @@ impl WorkerGroup {
                     object_store: object_store.clone(),
                     write_buffer_manager: write_buffer_manager.clone(),
                     scheduler: scheduler.clone(),
+                    listener: WorkerListener::new(listener.clone()),
                 }
                 .start()
             })
@@ -217,10 +221,11 @@ struct WorkerStarter<S> {
     object_store: ObjectStore,
     write_buffer_manager: WriteBufferManagerRef,
     scheduler: SchedulerRef,
+    listener: WorkerListener,
 }
 
 impl<S: LogStore> WorkerStarter<S> {
-    /// Start a region worker and its background thread.
+    /// Starts a region worker and its background thread.
     fn start(self) -> RegionWorker {
         let regions = Arc::new(RegionMap::default());
         let (sender, receiver) = mpsc::channel(self.config.worker_channel_size);
@@ -243,6 +248,7 @@ impl<S: LogStore> WorkerStarter<S> {
             write_buffer_manager: self.write_buffer_manager,
             flush_scheduler: FlushScheduler::new(self.scheduler),
             stalled_requests: StalledRequests::default(),
+            listener: self.listener,
         };
         let handle = common_runtime::spawn_write(async move {
             worker_thread.run().await;
@@ -273,7 +279,7 @@ pub(crate) struct RegionWorker {
 }
 
 impl RegionWorker {
-    /// Submit request to background worker thread.
+    /// Submits request to background worker thread.
     async fn submit_request(&self, request: WorkerRequest) -> Result<()> {
         ensure!(self.is_running(), WorkerStoppedSnafu { id: self.id });
         if self.sender.send(request).await.is_err() {
@@ -393,6 +399,8 @@ struct RegionWorkerLoop<S> {
     flush_scheduler: FlushScheduler,
     /// Stalled write requests.
     stalled_requests: StalledRequests,
+    /// Event listener for tests.
+    listener: WorkerListener,
 }
 
 impl<S: LogStore> RegionWorkerLoop<S> {
@@ -514,6 +522,40 @@ impl<S> RegionWorkerLoop<S> {
         }
 
         self.regions.clear();
+    }
+}
+
+/// Wrapper that only calls event listener in tests.
+pub(crate) struct WorkerListener {
+    #[cfg(test)]
+    listener: Option<crate::engine::listener::EventListenerRef>,
+}
+
+impl Default for WorkerListener {
+    fn default() -> Self {
+        WorkerListener {
+            #[cfg(test)]
+            listener: None,
+        }
+    }
+}
+
+impl WorkerListener {
+    #[cfg(test)]
+    pub(crate) fn new(
+        listener: Option<crate::engine::listener::EventListenerRef>,
+    ) -> WorkerListener {
+        WorkerListener { listener }
+    }
+
+    /// Flush is finished successfully.
+    pub(crate) fn on_flush_success(&self, region_id: RegionId) {
+        #[cfg(test)]
+        if let Some(listener) = &self.listener {
+            listener.on_flush_success(region_id);
+        }
+        // Avoid compiler warning.
+        let _ = region_id;
     }
 }
 

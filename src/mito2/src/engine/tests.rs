@@ -156,13 +156,7 @@ async fn test_region_replay() {
     };
     put_rows(&engine, region_id, rows).await;
 
-    engine.stop().await.unwrap();
-
-    let engine = MitoEngine::new(
-        MitoConfig::default(),
-        env.get_logstore().unwrap(),
-        env.get_object_store().unwrap(),
-    );
+    let engine = env.reopen_engine(engine, MitoConfig::default()).await;
 
     let open_region = engine
         .handle_request(
@@ -418,11 +412,7 @@ async fn test_manual_flush() {
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new().build();
 
-    let column_schemas = request
-        .column_metadatas
-        .iter()
-        .map(column_metadata_to_column_schema)
-        .collect::<Vec<_>>();
+    let column_schemas = rows_schema(&request);
     engine
         .handle_request(region_id, RegionRequest::Create(request))
         .await

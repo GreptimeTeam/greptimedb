@@ -83,6 +83,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let stalled = std::mem::take(&mut self.stalled_requests);
         // We already stalled these requests, don't stall them again.
         self.handle_write_requests(stalled.requests, false).await;
+
+        self.listener.on_flush_success(region_id);
     }
 }
 
