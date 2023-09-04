@@ -465,9 +465,7 @@ pub fn status_to_tonic_code(status_code: StatusCode) -> Code {
         | StatusCode::EngineExecuteQuery => Code::Internal,
         StatusCode::InvalidArguments | StatusCode::InvalidSyntax => Code::InvalidArgument,
         StatusCode::Cancelled => Code::Cancelled,
-        StatusCode::TableAlreadyExists
-        | StatusCode::TableColumnExists
-        | StatusCode::RegionAlreadyExists => Code::AlreadyExists,
+        StatusCode::TableAlreadyExists | StatusCode::TableColumnExists => Code::AlreadyExists,
         StatusCode::TableNotFound
         | StatusCode::RegionNotFound
         | StatusCode::TableColumnNotFound
