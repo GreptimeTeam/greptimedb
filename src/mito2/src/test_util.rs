@@ -15,6 +15,7 @@
 //! Utilities for testing.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use api::greptime_proto::v1;
@@ -35,6 +36,7 @@ use store_api::region_request::RegionCreateRequest;
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
 use crate::error::Result;
+use crate::flush::WriteBufferManager;
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::read::{Batch, BatchBuilder, BatchReader};
 use crate::worker::WorkerGroup;
@@ -328,4 +330,57 @@ pub fn new_batch(
     new_batch_builder(primary_key, timestamps, sequences, op_types, field)
         .build()
         .unwrap()
+}
+
+/// A mock [WriteBufferManager] that supports controlling whether to flush/stall.
+#[derive(Debug, Default)]
+pub struct MockWriteBufferManager {
+    should_flush: AtomicBool,
+    should_stall: AtomicBool,
+    memory_used: AtomicUsize,
+    memory_active: AtomicUsize,
+}
+
+impl MockWriteBufferManager {
+    /// Set whether to flush the engine.
+    pub fn set_should_flush(&self, value: bool) {
+        self.should_flush.store(value, Ordering::Relaxed);
+    }
+
+    /// Set whether to stall the engine.
+    pub fn set_should_stall(&self, value: bool) {
+        self.should_stall.store(value, Ordering::Relaxed);
+    }
+
+    /// Returns memory usage of mutable memtables.
+    pub fn mutable_usage(&self) -> usize {
+        self.memory_active.load(Ordering::Relaxed)
+    }
+}
+
+impl WriteBufferManager for MockWriteBufferManager {
+    fn should_flush_engine(&self) -> bool {
+        self.should_flush.load(Ordering::Relaxed)
+    }
+
+    fn should_stall(&self) -> bool {
+        self.should_stall.load(Ordering::Relaxed)
+    }
+
+    fn reserve_mem(&self, mem: usize) {
+        self.memory_used.fetch_add(mem, Ordering::Relaxed);
+        self.memory_active.fetch_add(mem, Ordering::Relaxed);
+    }
+
+    fn schedule_free_mem(&self, mem: usize) {
+        self.memory_active.fetch_sub(mem, Ordering::Relaxed);
+    }
+
+    fn free_mem(&self, mem: usize) {
+        self.memory_used.fetch_sub(mem, Ordering::Relaxed);
+    }
+
+    fn memory_usage(&self) -> usize {
+        self.memory_used.load(Ordering::Relaxed)
+    }
 }
