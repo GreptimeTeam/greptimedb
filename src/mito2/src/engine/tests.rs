@@ -19,6 +19,8 @@ use std::collections::HashMap;
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::value::ValueData;
 use api::v1::{ColumnSchema, Row, Rows, SemanticType};
+use common_error::ext::ErrorExt;
+use common_error::status_code::StatusCode;
 use common_recordbatch::RecordBatches;
 use store_api::metadata::ColumnMetadata;
 use store_api::region_request::{
@@ -28,7 +30,6 @@ use store_api::region_request::{
 use store_api::storage::RegionId;
 
 use super::*;
-use crate::error::Error;
 use crate::region::version::VersionControlData;
 use crate::test_util::{CreateRequestBuilder, TestEnv};
 
@@ -54,7 +55,7 @@ async fn test_engine_new_stop() {
         .await
         .unwrap_err();
     assert!(
-        matches!(err, Error::WorkerStopped { .. }),
+        matches!(err.status_code(), StatusCode::Internal),
         "unexpected err: {err}"
     );
 }
@@ -181,7 +182,7 @@ async fn test_region_replay() {
     assert_eq!(0, rows);
 
     let request = ScanRequest::default();
-    let scanner = engine.handle_query(region_id, request).unwrap();
+    let scanner = engine.scan(region_id, request).unwrap();
     let stream = scanner.scan().await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     assert_eq!(42, batches.iter().map(|b| b.num_rows()).sum::<usize>());
@@ -222,8 +223,7 @@ async fn test_write_query_region() {
     put_rows(&engine, region_id, rows).await;
 
     let request = ScanRequest::default();
-    let scanner = engine.handle_query(region_id, request).unwrap();
-    let stream = scanner.scan().await.unwrap();
+    let stream = engine.handle_query(region_id, request).await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     let expected = "\
 +-------+---------+---------------------+
@@ -335,7 +335,7 @@ async fn test_put_delete() {
     delete_rows(&engine, region_id, rows).await;
 
     let request = ScanRequest::default();
-    let scanner = engine.handle_query(region_id, request).unwrap();
+    let scanner = engine.scan(region_id, request).unwrap();
     let stream = scanner.scan().await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     let expected = "\
@@ -393,7 +393,7 @@ async fn test_put_overwrite() {
     put_rows(&engine, region_id, rows).await;
 
     let request = ScanRequest::default();
-    let scanner = engine.handle_query(region_id, request).unwrap();
+    let scanner = engine.scan(region_id, request).unwrap();
     let stream = scanner.scan().await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     let expected = "\
@@ -444,7 +444,7 @@ async fn test_manual_flush() {
     assert_eq!(0, rows);
 
     let request = ScanRequest::default();
-    let scanner = engine.handle_query(region_id, request).unwrap();
+    let scanner = engine.scan(region_id, request).unwrap();
     assert_eq!(1, scanner.num_files());
     let stream = scanner.scan().await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
