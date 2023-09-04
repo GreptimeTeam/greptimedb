@@ -14,9 +14,10 @@
 
 //! Engine event listener for tests.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use store_api::storage::RegionId;
+use tokio::sync::Notify;
 
 /// Mito engine background event listener.
 pub trait EventListener: Send + Sync {
@@ -25,3 +26,40 @@ pub trait EventListener: Send + Sync {
 }
 
 pub type EventListenerRef = Arc<dyn EventListener>;
+
+/// Listener to watch flush events.
+pub struct FlushListener {
+    notify: Notify,
+    last_flushed_region: Mutex<Option<RegionId>>,
+}
+
+impl FlushListener {
+    /// Creates a new listener.
+    pub fn new() -> FlushListener {
+        FlushListener {
+            notify: Notify::new(),
+            last_flushed_region: Mutex::new(None),
+        }
+    }
+
+    /// Wait until one flush job is done.
+    pub async fn wait(&self) {
+        self.notify.notified().await;
+    }
+
+    /// Returns the last flushed region.
+    pub fn last_flushed_region(&self) -> Option<RegionId> {
+        self.last_flushed_region.lock().unwrap().clone()
+    }
+}
+
+impl EventListener for FlushListener {
+    fn on_flush_success(&self, region_id: RegionId) {
+        {
+            let mut last_flushed_region = self.last_flushed_region.lock().unwrap();
+            *last_flushed_region = Some(region_id);
+        }
+
+        self.notify.notify_one()
+    }
+}

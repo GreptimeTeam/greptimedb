@@ -16,12 +16,14 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use api::greptime_proto::v1;
+use api::helper::ColumnDataTypeWrapper;
 use api::v1::value::ValueData;
-use api::v1::{OpType, SemanticType};
+use api::v1::{OpType, Row, Rows, SemanticType};
 use common_datasource::compression::CompressionType;
+use common_query::Output;
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
 use datatypes::arrow::array::{TimestampMillisecondArray, UInt64Array, UInt8Array};
 use datatypes::prelude::ConcreteDataType;
@@ -31,12 +33,13 @@ use log_store::test_util::log_store_util;
 use object_store::services::Fs;
 use object_store::ObjectStore;
 use store_api::metadata::{ColumnMetadata, RegionMetadataRef};
-use store_api::region_request::RegionCreateRequest;
+use store_api::region_request::{
+    RegionCreateRequest, RegionDeleteRequest, RegionPutRequest, RegionRequest,
+};
 use store_api::storage::RegionId;
-use tokio::sync::Notify;
 
 use crate::config::MitoConfig;
-use crate::engine::listener::{EventListener, EventListenerRef};
+use crate::engine::listener::EventListenerRef;
 use crate::engine::MitoEngine;
 use crate::error::Result;
 use crate::flush::{WriteBufferManager, WriteBufferManagerRef};
@@ -433,39 +436,115 @@ impl WriteBufferManager for MockWriteBufferManager {
     }
 }
 
-/// Listener to watch flush events.
-pub struct FlushListener {
-    notify: Notify,
-    last_flushed_region: Mutex<Option<RegionId>>,
-}
-
-impl FlushListener {
-    /// Creates a new listener.
-    pub fn new() -> FlushListener {
-        FlushListener {
-            notify: Notify::new(),
-            last_flushed_region: Mutex::new(None),
-        }
-    }
-
-    /// Wait until one flush job is done.
-    pub async fn wait(&self) {
-        self.notify.notified().await;
-    }
-
-    /// Returns the last flushed region.
-    pub fn last_flushed_region(&self) -> Option<RegionId> {
-        self.last_flushed_region.lock().unwrap().clone()
+fn column_metadata_to_column_schema(metadata: &ColumnMetadata) -> api::v1::ColumnSchema {
+    api::v1::ColumnSchema {
+        column_name: metadata.column_schema.name.clone(),
+        datatype: ColumnDataTypeWrapper::try_from(metadata.column_schema.data_type.clone())
+            .unwrap()
+            .datatype() as i32,
+        semantic_type: metadata.semantic_type as i32,
     }
 }
 
-impl EventListener for FlushListener {
-    fn on_flush_success(&self, region_id: RegionId) {
-        {
-            let mut last_flushed_region = self.last_flushed_region.lock().unwrap();
-            *last_flushed_region = Some(region_id);
-        }
+/// Build rows with schema (string, f64, ts_millis).
+pub fn build_rows(start: usize, end: usize) -> Vec<Row> {
+    (start..end)
+        .map(|i| api::v1::Row {
+            values: vec![
+                api::v1::Value {
+                    value_data: Some(ValueData::StringValue(i.to_string())),
+                },
+                api::v1::Value {
+                    value_data: Some(ValueData::F64Value(i as f64)),
+                },
+                api::v1::Value {
+                    value_data: Some(ValueData::TsMillisecondValue(i as i64 * 1000)),
+                },
+            ],
+        })
+        .collect()
+}
 
-        self.notify.notify_one()
-    }
+/// Get column schemas for rows.
+pub fn rows_schema(request: &RegionCreateRequest) -> Vec<api::v1::ColumnSchema> {
+    request
+        .column_metadatas
+        .iter()
+        .map(column_metadata_to_column_schema)
+        .collect::<Vec<_>>()
+}
+
+/// Get column schemas for delete requests.
+pub fn delete_rows_schema(request: &RegionCreateRequest) -> Vec<api::v1::ColumnSchema> {
+    request
+        .column_metadatas
+        .iter()
+        .filter(|col| col.semantic_type != SemanticType::Field)
+        .map(column_metadata_to_column_schema)
+        .collect::<Vec<_>>()
+}
+
+/// Put rows into the engine.
+pub async fn put_rows(engine: &MitoEngine, region_id: RegionId, rows: Rows) {
+    let num_rows = rows.rows.len();
+    let output = engine
+        .handle_request(region_id, RegionRequest::Put(RegionPutRequest { rows }))
+        .await
+        .unwrap();
+    let Output::AffectedRows(rows_inserted) = output else {
+        unreachable!()
+    };
+    assert_eq!(num_rows, rows_inserted);
+}
+
+/// Build rows to put for specific `key`.
+pub fn build_rows_for_key(key: &str, start: usize, end: usize, value_start: usize) -> Vec<Row> {
+    (start..end)
+        .enumerate()
+        .map(|(idx, ts)| api::v1::Row {
+            values: vec![
+                api::v1::Value {
+                    value_data: Some(ValueData::StringValue(key.to_string())),
+                },
+                api::v1::Value {
+                    value_data: Some(ValueData::F64Value((value_start + idx) as f64)),
+                },
+                api::v1::Value {
+                    value_data: Some(ValueData::TsMillisecondValue(ts as i64 * 1000)),
+                },
+            ],
+        })
+        .collect()
+}
+
+/// Build rows to delete for specific `key`.
+pub fn build_delete_rows_for_key(key: &str, start: usize, end: usize) -> Vec<Row> {
+    (start..end)
+        .map(|ts| api::v1::Row {
+            values: vec![
+                api::v1::Value {
+                    value_data: Some(ValueData::StringValue(key.to_string())),
+                },
+                api::v1::Value {
+                    value_data: Some(ValueData::TsMillisecondValue(ts as i64 * 1000)),
+                },
+            ],
+        })
+        .collect()
+}
+
+/// Delete rows from the engine.
+pub async fn delete_rows(engine: &MitoEngine, region_id: RegionId, rows: Rows) {
+    let num_rows = rows.rows.len();
+    let output = engine
+        .handle_request(
+            region_id,
+            RegionRequest::Delete(RegionDeleteRequest { rows }),
+        )
+        .await
+        .unwrap();
+    let Output::AffectedRows(rows_inserted) = output else {
+        unreachable!()
+    };
+    assert_eq!(num_rows, rows_inserted);
 }

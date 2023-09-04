@@ -21,6 +21,8 @@ mod create_test;
 #[cfg(test)]
 mod drop_test;
 #[cfg(test)]
+mod flush_test;
+#[cfg(test)]
 pub(crate) mod listener;
 #[cfg(test)]
 mod open_test;
