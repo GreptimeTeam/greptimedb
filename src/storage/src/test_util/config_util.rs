@@ -14,9 +14,9 @@
 
 use std::sync::Arc;
 
+use common_config::WalConfig;
 use common_datasource::compression::CompressionType;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
-use log_store::LogConfig;
 use object_store::services::Fs;
 use object_store::ObjectStore;
 use store_api::manifest::Manifest;
@@ -91,11 +91,11 @@ pub async fn new_store_config_with_object_store(
         None,
     );
     manifest.start().await.unwrap();
-    let log_config = LogConfig {
-        log_file_dir: log_store_dir(store_dir),
-        ..Default::default()
-    };
-    let log_store = Arc::new(RaftEngineLogStore::try_new(log_config).await.unwrap());
+    let log_store = Arc::new(
+        RaftEngineLogStore::try_new(log_store_dir(store_dir), WalConfig::default())
+            .await
+            .unwrap(),
+    );
 
     let compaction_scheduler = Arc::new(LocalScheduler::new(
         SchedulerConfig::default(),
