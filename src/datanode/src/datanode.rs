@@ -14,18 +14,24 @@
 
 //! Datanode configurations
 
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use catalog::local::MemoryCatalogManager;
 use common_base::readable_size::ReadableSize;
 use common_base::Plugins;
+use common_config::WalConfig;
 use common_error::ext::BoxedError;
 pub use common_procedure::options::ProcedureConfig;
 use common_runtime::Runtime;
 use common_telemetry::info;
 use common_telemetry::logging::LoggingOptions;
+use log_store::raft_engine::log_store::RaftEngineLogStore;
 use meta_client::MetaClientOptions;
+use mito2::config::MitoConfig;
+use mito2::engine::MitoEngine;
+use object_store::util::normalize_dir;
 use query::QueryEngineFactory;
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
@@ -38,11 +44,18 @@ use storage::config::{
     DEFAULT_PICKER_SCHEDULE_INTERVAL, DEFAULT_REGION_WRITE_BUFFER_SIZE,
 };
 use storage::scheduler::SchedulerConfig;
+use store_api::logstore::LogStore;
+use store_api::path_utils::WAL_DIR;
+use store_api::region_engine::RegionEngineRef;
+use tokio::fs;
 
-use crate::error::{Result, RuntimeResourceSnafu, ShutdownInstanceSnafu};
+use crate::error::{
+    CreateDirSnafu, OpenLogStoreSnafu, Result, RuntimeResourceSnafu, ShutdownInstanceSnafu,
+};
 use crate::heartbeat::HeartbeatTask;
 use crate::region_server::RegionServer;
 use crate::server::Services;
+use crate::store;
 
 pub const DEFAULT_OBJECT_STORE_CACHE_SIZE: ReadableSize = ReadableSize(1024);
 
@@ -218,37 +231,6 @@ impl Default for ObjectStoreConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct WalConfig {
-    // wal directory
-    pub dir: Option<String>,
-    // wal file size in bytes
-    pub file_size: ReadableSize,
-    // wal purge threshold in bytes
-    pub purge_threshold: ReadableSize,
-    // purge interval in seconds
-    #[serde(with = "humantime_serde")]
-    pub purge_interval: Duration,
-    // read batch size
-    pub read_batch_size: usize,
-    // whether to sync log file after every write
-    pub sync_write: bool,
-}
-
-impl Default for WalConfig {
-    fn default() -> Self {
-        Self {
-            dir: None,
-            file_size: ReadableSize::mb(256), // log file size 256MB
-            purge_threshold: ReadableSize::gb(4), // purge threshold 4GB
-            purge_interval: Duration::from_secs(600),
-            read_batch_size: 128,
-            sync_write: false,
-        }
-    }
-}
-
 /// Options for region manifest
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(default)]
@@ -360,7 +342,6 @@ impl From<&DatanodeOptions> for StorageEngineConfig {
 #[serde(default)]
 pub struct DatanodeOptions {
     pub mode: Mode,
-    pub enable_memory_catalog: bool,
     pub node_id: Option<u64>,
     pub rpc_addr: String,
     pub rpc_hostname: Option<String>,
@@ -370,7 +351,8 @@ pub struct DatanodeOptions {
     pub meta_client_options: Option<MetaClientOptions>,
     pub wal: WalConfig,
     pub storage: StorageConfig,
-    pub procedure: ProcedureConfig,
+    /// Options for different store engines.
+    pub region_engine: Vec<RegionEngineConfig>,
     pub logging: LoggingOptions,
     pub enable_telemetry: bool,
 }
@@ -379,7 +361,6 @@ impl Default for DatanodeOptions {
     fn default() -> Self {
         Self {
             mode: Mode::Standalone,
-            enable_memory_catalog: false,
             node_id: None,
             rpc_addr: "127.0.0.1:3001".to_string(),
             rpc_hostname: None,
@@ -388,7 +369,7 @@ impl Default for DatanodeOptions {
             meta_client_options: None,
             wal: WalConfig::default(),
             storage: StorageConfig::default(),
-            procedure: ProcedureConfig::default(),
+            region_engine: vec![],
             logging: LoggingOptions::default(),
             heartbeat: HeartbeatOptions::default(),
             enable_telemetry: true,
@@ -404,6 +385,12 @@ impl DatanodeOptions {
     pub fn to_toml_string(&self) -> String {
         toml::to_string(&self).unwrap()
     }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub enum RegionEngineConfig {
+    #[serde(rename = "mito")]
+    Mito(MitoConfig),
 }
 
 /// Datanode service.
@@ -434,7 +421,13 @@ impl Datanode {
                 .context(RuntimeResourceSnafu)?,
         );
 
-        let region_server = RegionServer::new(query_engine, runtime);
+        let mut region_server = RegionServer::new(query_engine, runtime);
+        let log_store = Self::build_log_store(&opts).await?;
+        let object_store = store::new_object_store(&opts).await?;
+        let engines = Self::build_store_engines(&opts, log_store, object_store).await?;
+        for engine in engines {
+            region_server.register_engine(engine);
+        }
 
         // build optional things with different modes
         let services = match opts.mode {
@@ -496,6 +489,51 @@ impl Datanode {
 
     pub fn region_server(&self) -> RegionServer {
         self.region_server.clone()
+    }
+
+    // internal utils
+
+    /// Build [RaftEngineLogStore]
+    async fn build_log_store(opts: &DatanodeOptions) -> Result<Arc<RaftEngineLogStore>> {
+        let data_home = normalize_dir(&opts.storage.data_home);
+        let wal_dir = format!("{}{WAL_DIR}", data_home);
+        let wal_config = opts.wal.clone();
+
+        // create WAL directory
+        fs::create_dir_all(Path::new(&wal_dir))
+            .await
+            .context(CreateDirSnafu { dir: &wal_dir })?;
+        info!(
+            "Creating logstore with config: {:?} and storage path: {}",
+            wal_config, &wal_dir
+        );
+        let logstore = RaftEngineLogStore::try_new(wal_dir, wal_config)
+            .await
+            .map_err(Box::new)
+            .context(OpenLogStoreSnafu)?;
+        Ok(Arc::new(logstore))
+    }
+
+    /// Build [RegionEngineRef] from `store_engine` section in `opts`
+    async fn build_store_engines<S>(
+        opts: &DatanodeOptions,
+        log_store: Arc<S>,
+        object_store: object_store::ObjectStore,
+    ) -> Result<Vec<RegionEngineRef>>
+    where
+        S: LogStore,
+    {
+        let mut engines = vec![];
+        for engine in &opts.region_engine {
+            match engine {
+                RegionEngineConfig::Mito(config) => {
+                    let engine: MitoEngine =
+                        MitoEngine::new(config.clone(), log_store.clone(), object_store.clone());
+                    engines.push(Arc::new(engine) as _);
+                }
+            }
+        }
+        Ok(engines)
     }
 }
 

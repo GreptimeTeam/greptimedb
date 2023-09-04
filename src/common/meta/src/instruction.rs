@@ -15,6 +15,7 @@
 use std::fmt::{Display, Formatter};
 
 use serde::{Deserialize, Serialize};
+use store_api::storage::RegionId;
 
 use crate::ident::TableIdent;
 use crate::{ClusterId, DatanodeId};
@@ -25,6 +26,12 @@ pub struct RegionIdent {
     pub datanode_id: DatanodeId,
     pub table_ident: TableIdent,
     pub region_number: u32,
+}
+
+impl RegionIdent {
+    pub fn get_region_id(&self) -> RegionId {
+        RegionId::new(self.table_ident.table_id, self.region_number)
+    }
 }
 
 impl Display for RegionIdent {

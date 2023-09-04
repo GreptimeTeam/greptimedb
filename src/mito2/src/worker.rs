@@ -104,7 +104,9 @@ impl WorkerGroup {
     ) -> WorkerGroup {
         assert!(config.num_workers.is_power_of_two());
         let config = Arc::new(config);
-        let write_buffer_manager = Arc::new(WriteBufferManagerImpl {});
+        let write_buffer_manager = Arc::new(WriteBufferManagerImpl::new(
+            config.global_write_buffer_size.as_bytes() as usize,
+        ));
         let scheduler = Arc::new(LocalScheduler::new(config.max_background_jobs));
 
         let workers = (0..config.num_workers)
@@ -193,11 +195,14 @@ impl<S: LogStore> WorkerStarter<S> {
             config: self.config,
             regions: regions.clone(),
             dropping_regions: Arc::new(RegionMap::default()),
+            sender: sender.clone(),
             receiver,
             wal: Wal::new(self.log_store),
             object_store: self.object_store,
             running: running.clone(),
-            memtable_builder: Arc::new(TimeSeriesMemtableBuilder::default()),
+            memtable_builder: Arc::new(TimeSeriesMemtableBuilder::new(Some(
+                self.write_buffer_manager.clone(),
+            ))),
             scheduler: self.scheduler.clone(),
             write_buffer_manager: self.write_buffer_manager,
             flush_scheduler: FlushScheduler::new(self.scheduler),
@@ -308,6 +313,8 @@ struct RegionWorkerLoop<S> {
     regions: RegionMapRef,
     /// Regions that are not yet fully dropped.
     dropping_regions: RegionMapRef,
+    /// Request sender.
+    sender: Sender<WorkerRequest>,
     /// Request receiver.
     receiver: Receiver<WorkerRequest>,
     /// WAL of the engine.
@@ -404,10 +411,15 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         for ddl in ddl_requests {
             let res = match ddl.request {
                 DdlRequest::Create(req) => self.handle_create_request(ddl.region_id, req).await,
+                DdlRequest::Drop(_) => self.handle_drop_request(ddl.region_id).await,
                 DdlRequest::Open(req) => self.handle_open_request(ddl.region_id, req).await,
                 DdlRequest::Close(_) => self.handle_close_request(ddl.region_id).await,
-                DdlRequest::Drop(_) => self.handle_drop_request(ddl.region_id).await,
-                DdlRequest::Alter(_) | DdlRequest::Flush(_) | DdlRequest::Compact(_) => todo!(),
+                DdlRequest::Alter(_) => todo!(),
+                DdlRequest::Flush(_) => {
+                    self.handle_flush_request(ddl.region_id, ddl.sender).await;
+                    continue;
+                }
+                DdlRequest::Compact(_) => todo!(),
             };
 
             if let Some(sender) = ddl.sender {
@@ -416,9 +428,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
         }
     }
-}
 
-impl<S> RegionWorkerLoop<S> {
     /// Handles region background request
     async fn handle_background_notify(&mut self, region_id: RegionId, notify: BackgroundNotify) {
         match notify {
@@ -428,7 +438,9 @@ impl<S> RegionWorkerLoop<S> {
             BackgroundNotify::FlushFailed(req) => self.handle_flush_failed(region_id, req).await,
         }
     }
+}
 
+impl<S> RegionWorkerLoop<S> {
     // Clean up the worker.
     async fn clean(&self) {
         // Closes remaining regions.

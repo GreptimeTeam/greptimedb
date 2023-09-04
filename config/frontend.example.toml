@@ -20,6 +20,7 @@ runtime_size = 8
 
 # MySQL server options, see `standalone.example.toml`.
 [mysql_options]
+enable = true
 addr = "127.0.0.1:4002"
 runtime_size = 2
 
@@ -31,6 +32,7 @@ key_path = ""
 
 # PostgresSQL server options, see `standalone.example.toml`.
 [postgres_options]
+enable = true
 addr = "127.0.0.1:4003"
 runtime_size = 2
 
@@ -42,6 +44,7 @@ key_path = ""
 
 # OpenTSDB protocol options, see `standalone.example.toml`.
 [opentsdb_options]
+enable = true
 addr = "127.0.0.1:4242"
 runtime_size = 2
 

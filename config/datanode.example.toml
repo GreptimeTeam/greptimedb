@@ -1,7 +1,5 @@
 # Node running mode, see `standalone.example.toml`.
 mode = "distributed"
-# Whether to use in-memory catalog, see `standalone.example.toml`.
-enable_memory_catalog = false
 # The datanode identifier, should be unique.
 node_id = 42
 # gRPC server address, "127.0.0.1:3001" by default.
@@ -71,10 +69,27 @@ auto_flush_interval = "1h"
 # Global write buffer size for all regions.
 global_write_buffer_size = "1GB"
 
-# Procedure storage options, see `standalone.example.toml`.
-[procedure]
-max_retry_times = 3
-retry_delay = "500ms"
+# Mito engine options
+[[region_engine]]
+[region_engine.mito]
+# Number of region workers
+num_workers = 8
+# Request channel size of each worker
+worker_channel_size = 128
+# Max batch size for a worker to handle requests
+worker_request_batch_size = 64
+# Number of meta action updated to trigger a new checkpoint for the manifest
+manifest_checkpoint_distance = 10
+# Manifest compression type
+manifest_compress_type = "Uncompressed"
+# Max number of running background jobs
+max_background_jobs = 4
+# Interval to auto flush a region if it has not flushed yet.
+auto_flush_interval = "1h"
+# Global write buffer size for all regions.
+global_write_buffer_size = "1GB"
+# Global write buffer size threshold to reject write requests (default 2G).
+global_write_buffer_reject_size = "2GB"
 
 # Log options
 # [logging]

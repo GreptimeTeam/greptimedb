@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use common_meta::instruction::{Instruction, InstructionReply, SimpleReply};
 use common_meta::peer::Peer;
 use common_meta::RegionIdent;
-use common_telemetry::debug;
+use common_telemetry::{debug, info};
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 
@@ -29,7 +29,7 @@ use crate::error::{
     Error, Result, RetryLaterSnafu, SerializeToJsonSnafu, UnexpectedInstructionReplySnafu,
 };
 use crate::handler::HeartbeatMailbox;
-use crate::inactive_node_manager::InactiveNodeManager;
+use crate::inactive_region_manager::InactiveRegionManager;
 use crate::procedure::region_failover::OPEN_REGION_MESSAGE_TIMEOUT;
 use crate::service::mailbox::{Channel, MailboxReceiver};
 
@@ -76,7 +76,7 @@ impl ActivateRegion {
             datanode_id: self.candidate.id,
             ..failed_region.clone()
         };
-        InactiveNodeManager::new(&ctx.in_memory)
+        InactiveRegionManager::new(&ctx.in_memory)
             .deregister_inactive_region(&candidate)
             .await?;
 
@@ -135,6 +135,7 @@ impl State for ActivateRegion {
         ctx: &RegionFailoverContext,
         failed_region: &RegionIdent,
     ) -> Result<Box<dyn State>> {
+        info!("Activating region: {failed_region:?}");
         let mailbox_receiver = self
             .send_open_region_message(ctx, failed_region, OPEN_REGION_MESSAGE_TIMEOUT)
             .await?;

@@ -20,7 +20,6 @@ use crate::error::Result;
 use crate::handler::{HeartbeatAccumulator, HeartbeatHandler};
 use crate::metasrv::Context;
 
-#[derive(Default)]
 pub struct CollectStatsHandler;
 
 #[async_trait::async_trait]

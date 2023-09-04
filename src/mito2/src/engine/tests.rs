@@ -19,15 +19,17 @@ use std::collections::HashMap;
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::value::ValueData;
 use api::v1::{ColumnSchema, Row, Rows, SemanticType};
+use common_error::ext::ErrorExt;
+use common_error::status_code::StatusCode;
 use common_recordbatch::RecordBatches;
 use store_api::metadata::ColumnMetadata;
 use store_api::region_request::{
-    RegionCreateRequest, RegionDeleteRequest, RegionOpenRequest, RegionPutRequest,
+    RegionCreateRequest, RegionDeleteRequest, RegionFlushRequest, RegionOpenRequest,
+    RegionPutRequest,
 };
 use store_api::storage::RegionId;
 
 use super::*;
-use crate::error::Error;
 use crate::region::version::VersionControlData;
 use crate::test_util::{CreateRequestBuilder, TestEnv};
 
@@ -53,7 +55,7 @@ async fn test_engine_new_stop() {
         .await
         .unwrap_err();
     assert!(
-        matches!(err, Error::WorkerStopped { .. }),
+        matches!(err.status_code(), StatusCode::Internal),
         "unexpected err: {err}"
     );
 }
@@ -180,7 +182,7 @@ async fn test_region_replay() {
     assert_eq!(0, rows);
 
     let request = ScanRequest::default();
-    let scanner = engine.handle_query(region_id, request).unwrap();
+    let scanner = engine.scan(region_id, request).unwrap();
     let stream = scanner.scan().await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     assert_eq!(42, batches.iter().map(|b| b.num_rows()).sum::<usize>());
@@ -221,8 +223,7 @@ async fn test_write_query_region() {
     put_rows(&engine, region_id, rows).await;
 
     let request = ScanRequest::default();
-    let scanner = engine.handle_query(region_id, request).unwrap();
-    let stream = scanner.scan().await.unwrap();
+    let stream = engine.handle_query(region_id, request).await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     let expected = "\
 +-------+---------+---------------------+
@@ -334,7 +335,7 @@ async fn test_put_delete() {
     delete_rows(&engine, region_id, rows).await;
 
     let request = ScanRequest::default();
-    let scanner = engine.handle_query(region_id, request).unwrap();
+    let scanner = engine.scan(region_id, request).unwrap();
     let stream = scanner.scan().await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     let expected = "\
@@ -392,7 +393,7 @@ async fn test_put_overwrite() {
     put_rows(&engine, region_id, rows).await;
 
     let request = ScanRequest::default();
-    let scanner = engine.handle_query(region_id, request).unwrap();
+    let scanner = engine.scan(region_id, request).unwrap();
     let stream = scanner.scan().await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     let expected = "\
@@ -405,6 +406,55 @@ async fn test_put_overwrite() {
 | b     | 3.0     | 1970-01-01T00:00:00 |
 | b     | 1.0     | 1970-01-01T00:00:01 |
 | b     | 4.0     | 1970-01-01T00:00:02 |
++-------+---------+---------------------+";
+    assert_eq!(expected, batches.pretty_print().unwrap());
+}
+
+#[tokio::test]
+async fn test_manual_flush() {
+    let mut env = TestEnv::new();
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+
+    let column_schemas = request
+        .column_metadatas
+        .iter()
+        .map(column_metadata_to_column_schema)
+        .collect::<Vec<_>>();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let rows = Rows {
+        schema: column_schemas,
+        rows: build_rows(0, 3),
+    };
+    put_rows(&engine, region_id, rows).await;
+
+    let Output::AffectedRows(rows) = engine
+        .handle_request(region_id, RegionRequest::Flush(RegionFlushRequest {}))
+        .await
+        .unwrap()
+    else {
+        unreachable!()
+    };
+    assert_eq!(0, rows);
+
+    let request = ScanRequest::default();
+    let scanner = engine.scan(region_id, request).unwrap();
+    assert_eq!(1, scanner.num_files());
+    let stream = scanner.scan().await.unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    let expected = "\
++-------+---------+---------------------+
+| tag_0 | field_0 | ts                  |
++-------+---------+---------------------+
+| 0     | 0.0     | 1970-01-01T00:00:00 |
+| 1     | 1.0     | 1970-01-01T00:00:01 |
+| 2     | 2.0     | 1970-01-01T00:00:02 |
 +-------+---------+---------------------+";
     assert_eq!(expected, batches.pretty_print().unwrap());
 }

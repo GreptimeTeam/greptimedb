@@ -28,9 +28,10 @@ use std::sync::{Arc, RwLock};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::SequenceNumber;
 
-use crate::flush::RegionMemtableStats;
+use crate::manifest::action::RegionEdit;
 use crate::memtable::version::{MemtableVersion, MemtableVersionRef};
-use crate::memtable::{MemtableBuilderRef, MemtableId, MemtableRef};
+use crate::memtable::{MemtableBuilderRef, MemtableRef};
+use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::version::{SstVersion, SstVersionRef};
 use crate::wal::EntryId;
 
@@ -68,16 +69,13 @@ impl VersionControl {
         data.last_entry_id = entry_id;
     }
 
-    /// Freezes the mutable memtable and returns the id of the frozen memtable.
-    ///
-    /// If the mutable memtable is empty or there is already an immutable memtable, returns `None`.
-    pub(crate) fn freeze_mutable(&self, builder: &MemtableBuilderRef) -> Option<MemtableId> {
+    /// Freezes the mutable memtable if it is not empty.
+    pub(crate) fn freeze_mutable(&self, builder: &MemtableBuilderRef) {
         let version = self.current().version;
-        if version.memtables.mutable.is_empty() || version.memtables.immutable.is_some() {
-            return None;
+        if version.memtables.mutable.is_empty() {
+            return;
         }
         let new_mutable = builder.build(&version.metadata);
-        let mutable_id = version.memtables.mutable.id();
         // Safety: Immutable memtable is None.
         let new_memtables = version.memtables.freeze_mutable(new_mutable).unwrap();
         // Create a new version with memtable switched.
@@ -89,7 +87,19 @@ impl VersionControl {
 
         let mut version_data = self.data.write().unwrap();
         version_data.version = new_version;
-        Some(mutable_id)
+    }
+
+    /// Apply edit to current version.
+    pub(crate) fn apply_edit(&self, edit: RegionEdit, purger: FilePurgerRef) {
+        let version = self.current().version;
+        let new_version = Arc::new(
+            VersionBuilder::from_version(version)
+                .apply_edit(edit, purger)
+                .build(),
+        );
+
+        let mut version_data = self.data.write().unwrap();
+        version_data.version = new_version;
     }
 
     /// Mark all opened files as deleted and set the delete marker in [VersionControlData]
@@ -136,17 +146,6 @@ pub(crate) struct Version {
 
 pub(crate) type VersionRef = Arc<Version>;
 
-impl Version {
-    /// Returns statistics of the mutable memtable.
-    pub(crate) fn mutable_stats(&self) -> RegionMemtableStats {
-        // TODO(yingwen): Get from memtable.
-        RegionMemtableStats {
-            bytes_mutable: 0,
-            write_buffer_size: 0,
-        }
-    }
-}
-
 /// Version builder.
 pub(crate) struct VersionBuilder {
     metadata: RegionMetadataRef,
@@ -179,6 +178,25 @@ impl VersionBuilder {
     /// Sets memtables.
     pub(crate) fn memtables(mut self, memtables: MemtableVersion) -> VersionBuilder {
         self.memtables = Arc::new(memtables);
+        self
+    }
+
+    /// Apply edit to the builder.
+    pub(crate) fn apply_edit(
+        mut self,
+        edit: RegionEdit,
+        file_purger: FilePurgerRef,
+    ) -> VersionBuilder {
+        if let Some(flushed_entry_id) = edit.flushed_entry_id {
+            self.flushed_entry_id = self.flushed_entry_id.max(flushed_entry_id);
+        }
+        if !edit.files_to_add.is_empty() || !edit.files_to_remove.is_empty() {
+            let mut ssts = (*self.ssts).clone();
+            ssts.add_files(file_purger, edit.files_to_add.into_iter());
+            ssts.remove_files(edit.files_to_remove.into_iter());
+            self.ssts = Arc::new(ssts);
+        }
+
         self
     }
 

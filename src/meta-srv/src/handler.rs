@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::ops::Range;
 use std::sync::Arc;
 use std::time::Duration;
@@ -22,17 +22,10 @@ use api::v1::meta::{
     HeartbeatRequest, HeartbeatResponse, MailboxMessage, RegionLease, RequestHeader,
     ResponseHeader, Role, PROTOCOL_VERSION,
 };
-pub use check_leader_handler::CheckLeaderHandler;
-pub use collect_stats_handler::CollectStatsHandler;
 use common_meta::instruction::{Instruction, InstructionReply};
 use common_telemetry::{debug, info, timer, warn};
 use dashmap::DashMap;
-pub use failure_handler::RegionFailureHandler;
-pub use keep_lease_handler::KeepLeaseHandler;
 use metrics::{decrement_gauge, increment_gauge};
-pub use on_leader_start_handler::OnLeaderStartHandler;
-pub use persist_stats_handler::PersistStatsHandler;
-pub use response_header_handler::ResponseHeaderHandler;
 use snafu::{OptionExt, ResultExt};
 use tokio::sync::mpsc::Sender;
 use tokio::sync::{oneshot, Notify, RwLock};
@@ -46,17 +39,18 @@ use crate::service::mailbox::{
     BroadcastChannel, Channel, Mailbox, MailboxReceiver, MailboxRef, MessageId,
 };
 
-mod check_leader_handler;
-mod collect_stats_handler;
-pub(crate) mod failure_handler;
-mod keep_lease_handler;
+pub mod check_leader_handler;
+pub mod collect_stats_handler;
+pub mod failure_handler;
+pub mod filter_inactive_region_stats;
+pub mod keep_lease_handler;
 pub mod mailbox_handler;
 pub mod node_stat;
-mod on_leader_start_handler;
-mod persist_stats_handler;
+pub mod on_leader_start_handler;
+pub mod persist_stats_handler;
 pub mod publish_heartbeat_handler;
-pub(crate) mod region_lease_handler;
-mod response_header_handler;
+pub mod region_lease_handler;
+pub mod response_header_handler;
 
 #[async_trait::async_trait]
 pub trait HeartbeatHandler: Send + Sync {
@@ -81,6 +75,7 @@ pub struct HeartbeatAccumulator {
     pub header: Option<ResponseHeader>,
     pub instructions: Vec<Instruction>,
     pub stat: Option<Stat>,
+    pub inactive_region_ids: HashSet<u64>,
     pub region_lease: Option<RegionLease>,
 }
 
@@ -404,11 +399,13 @@ mod tests {
     use api::v1::meta::{MailboxMessage, RequestHeader, Role, PROTOCOL_VERSION};
     use tokio::sync::mpsc;
 
+    use crate::handler::check_leader_handler::CheckLeaderHandler;
+    use crate::handler::collect_stats_handler::CollectStatsHandler;
     use crate::handler::mailbox_handler::MailboxHandler;
-    use crate::handler::{
-        CheckLeaderHandler, CollectStatsHandler, HeartbeatHandlerGroup, HeartbeatMailbox,
-        OnLeaderStartHandler, PersistStatsHandler, Pusher, ResponseHeaderHandler,
-    };
+    use crate::handler::on_leader_start_handler::OnLeaderStartHandler;
+    use crate::handler::persist_stats_handler::PersistStatsHandler;
+    use crate::handler::response_header_handler::ResponseHeaderHandler;
+    use crate::handler::{HeartbeatHandlerGroup, HeartbeatMailbox, Pusher};
     use crate::sequence::Sequence;
     use crate::service::mailbox::{Channel, MailboxReceiver, MailboxRef};
     use crate::service::store::memory::MemStore;

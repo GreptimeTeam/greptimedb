@@ -21,9 +21,9 @@ use common_telemetry::tracing::info;
 use datatypes::schema::RawSchema;
 use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
-use sql::ast::{ColumnOption, TableConstraint};
-use sql::statements::column_def_to_schema;
+use sql::ast::TableConstraint;
 use sql::statements::create::{CreateTable, TIME_INDEX};
+use sql::statements::{column_def_to_schema, has_primary_key_option};
 use sql::util::to_lowercase_options_map;
 use table::engine::TableReference;
 use table::metadata::TableId;
@@ -131,12 +131,7 @@ impl SqlHandler {
         let pk_map = stmt
             .columns
             .iter()
-            .filter(|col| {
-                col.options.iter().any(|options| match options.option {
-                    ColumnOption::Unique { is_primary } => is_primary,
-                    _ => false,
-                })
-            })
+            .filter(|c| has_primary_key_option(c))
             .map(|col| col.name.value.clone())
             .collect::<Vec<_>>();
 
@@ -279,7 +274,7 @@ mod tests {
                 "timestamp" timestamp TIME INDEX,
                 "value" DOUBLE,
                 host STRING PRIMARY KEY
-            ) engine=mito with(regions=1, ttl='7days',write_buffer_size='32MB',some='other');"#;
+            ) engine=mito with(regions=1, ttl='7days',write_buffer_size='32MB');"#;
         let parsed_stmt = sql_to_statement(sql);
         let c = SqlHandler::create_to_request(42, parsed_stmt, &TableReference::bare("demo_table"))
             .unwrap();
@@ -289,7 +284,6 @@ mod tests {
             Some(ReadableSize::mb(32)),
             c.table_options.write_buffer_size
         );
-        assert_eq!("other", c.table_options.extra_options.get("some").unwrap());
     }
 
     #[tokio::test]

@@ -19,6 +19,7 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use common_base::readable_size::ReadableSize;
+use common_datasource::object_store::s3::is_supported_in_s3;
 use common_query::AddColumnLocation;
 use common_time::range::TimestampRange;
 use datatypes::prelude::VectorRef;
@@ -332,6 +333,18 @@ macro_rules! meter_insert_request {
     };
 }
 
+pub fn valid_table_option(key: &str) -> bool {
+    matches!(
+        key,
+        IMMUTABLE_TABLE_LOCATION_KEY
+            | IMMUTABLE_TABLE_FORMAT_KEY
+            | IMMUTABLE_TABLE_PATTERN_KEY
+            | WRITE_BUFFER_SIZE_KEY
+            | TTL_KEY
+            | REGIONS_KEY
+    ) | is_supported_in_s3(key)
+}
+
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct CopyDatabaseRequest {
     pub catalog_name: String,
@@ -345,6 +358,17 @@ pub struct CopyDatabaseRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_validate_table_option() {
+        assert!(valid_table_option(IMMUTABLE_TABLE_LOCATION_KEY));
+        assert!(valid_table_option(IMMUTABLE_TABLE_FORMAT_KEY));
+        assert!(valid_table_option(IMMUTABLE_TABLE_PATTERN_KEY));
+        assert!(valid_table_option(TTL_KEY));
+        assert!(valid_table_option(REGIONS_KEY));
+        assert!(valid_table_option(WRITE_BUFFER_SIZE_KEY));
+        assert!(!valid_table_option("foo"));
+    }
 
     #[test]
     fn test_serialize_table_options() {
