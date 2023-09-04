@@ -12,11 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_error::ext::ErrorExt;
+use common_error::status_code::StatusCode;
+use store_api::region_engine::RegionEngine;
 use store_api::region_request::RegionRequest;
 use store_api::storage::RegionId;
 
 use crate::config::MitoConfig;
-use crate::error::Error;
 use crate::test_util::{CreateRequestBuilder, TestEnv};
 
 #[tokio::test]
@@ -71,7 +73,7 @@ async fn test_engine_create_existing_region() {
         .await
         .unwrap_err();
     assert!(
-        matches!(err, Error::RegionExists { .. }),
+        matches!(err.status_code(), StatusCode::RegionAlreadyExists),
         "unexpected err: {err}"
     );
 }

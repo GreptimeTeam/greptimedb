@@ -73,22 +73,12 @@ impl MitoEngine {
         self.inner.stop().await
     }
 
-    /// Handle requests that modify a region.
-    pub async fn handle_request(
-        &self,
-        region_id: RegionId,
-        request: RegionRequest,
-    ) -> Result<Output> {
-        self.inner.handle_request(region_id, request).await
-    }
-
     /// Returns true if the specific region exists.
     pub fn is_region_exists(&self, region_id: RegionId) -> bool {
         self.inner.workers.is_region_exists(region_id)
     }
 
-    /// Handles the scan `request` and returns a [Scanner] for the `request`.
-    fn handle_query(&self, region_id: RegionId, request: ScanRequest) -> Result<Scanner> {
+    fn scan(&self, region_id: RegionId, request: ScanRequest) -> Result<Scanner> {
         self.inner.handle_query(region_id, request)
     }
 
@@ -178,10 +168,14 @@ impl RegionEngine for MitoEngine {
     /// Handle substrait query and return a stream of record batches
     async fn handle_query(
         &self,
-        _region_id: RegionId,
-        _request: ScanRequest,
+        region_id: RegionId,
+        request: ScanRequest,
     ) -> std::result::Result<SendableRecordBatchStream, BoxedError> {
-        todo!()
+        self.scan(region_id, request)
+            .map_err(BoxedError::new)?
+            .scan()
+            .await
+            .map_err(BoxedError::new)
     }
 
     /// Retrieve region's metadata.
