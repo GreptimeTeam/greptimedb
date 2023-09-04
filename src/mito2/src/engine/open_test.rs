@@ -14,11 +14,13 @@
 
 use std::collections::HashMap;
 
+use common_error::ext::ErrorExt;
+use common_error::status_code::StatusCode;
+use store_api::region_engine::RegionEngine;
 use store_api::region_request::{RegionCloseRequest, RegionOpenRequest, RegionRequest};
 use store_api::storage::RegionId;
 
 use crate::config::MitoConfig;
-use crate::error::Error;
 use crate::test_util::{CreateRequestBuilder, TestEnv};
 
 #[tokio::test]
@@ -38,7 +40,7 @@ async fn test_engine_open_empty() {
         .await
         .unwrap_err();
     assert!(
-        matches!(err, Error::RegionNotFound { .. }),
+        matches!(err.status_code(), StatusCode::RegionNotFound),
         "unexpected err: {err}"
     );
 }
