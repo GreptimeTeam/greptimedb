@@ -58,9 +58,12 @@ impl Procedure for TruncateTableProcedure {
     }
 
     fn lock_key(&self) -> LockKey {
-        // We lock the whole table.
-        let table_name = self.data.table_ref().to_string();
-        LockKey::single(table_name)
+        // We lock the whole table, the catalog and the schema.
+        LockKey::new([
+            self.data.table_ref().catalog.to_string(),
+            self.data.table_ref().schema.to_string(),
+            self.data.table_ref().table.to_string(),
+        ])
     }
 }
 
@@ -241,7 +244,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_truncate_table_procedure() {
-        let env = TestEnv::new("truncate");
+        let mut env = TestEnv::new("truncate");
         let table_name = "test_truncate";
         let table_id = env.create_table(table_name).await;
 
@@ -256,6 +259,7 @@ mod tests {
             table_engine,
             procedure_manager,
             catalog_manager,
+            ..
         } = env;
         let procedure =
             TruncateTableProcedure::new(request, catalog_manager.clone(), table_engine.clone());
@@ -281,6 +285,7 @@ mod tests {
             table_engine,
             procedure_manager: _,
             catalog_manager,
+            ..
         } = TestEnv::new("truncate");
         let table_name = "test_truncate";
 

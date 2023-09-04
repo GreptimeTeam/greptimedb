@@ -60,7 +60,7 @@ impl Procedure for AlterTableProcedure {
     }
 
     fn lock_key(&self) -> LockKey {
-        // We lock the whole table.
+        // We lock the whole table, the catalog and the schema.
         let table_name = self.data.table_ref().to_string();
         // If alter kind is rename, we also need to lock the renamed table.
         if let AlterKind::RenameTable { new_table_name } = &self.data.request.alter_kind {
@@ -70,9 +70,18 @@ impl Procedure for AlterTableProcedure {
                 table: new_table_name,
             }
             .to_string();
-            LockKey::new([table_name, new_table_name])
+            LockKey::new([
+                self.data.request.catalog_name.clone(),
+                self.data.request.schema_name.clone(),
+                table_name,
+                new_table_name,
+            ])
         } else {
-            LockKey::single(table_name)
+            LockKey::new([
+                self.data.request.catalog_name.clone(),
+                self.data.request.schema_name.clone(),
+                table_name,
+            ])
         }
     }
 }

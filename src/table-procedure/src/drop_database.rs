@@ -58,12 +58,17 @@ impl Procedure for DropDatabaseProcedure {
     }
 
     fn lock_key(&self) -> LockKey {
+        // Lock the catalog, the schema and the tables which belong to them.
         LockKey::new(
             self.data
                 .request
                 .table_names
                 .iter()
                 .map(|(name, _)| name.clone())
+                .chain(vec![
+                    self.data.request.catalog_name.clone(),
+                    self.data.request.schema_name.clone(),
+                ])
                 .collect::<Vec<_>>(),
         )
     }
@@ -188,8 +193,10 @@ impl DropDatabaseProcedure {
             let engine_ctx = EngineContext::default();
             let request = DropTableRequest {
                 catalog_name: self.data.request.catalog_name.to_string(),
-                schema_name:  self.data.request.schema_name.to_string(),
-                table_name: self.data.request.table_names[self.data.now_subprocedure_id].0.clone(),
+                schema_name: self.data.request.schema_name.to_string(),
+                table_name: self.data.request.table_names[self.data.now_subprocedure_id]
+                    .0
+                    .clone(),
                 table_id: self.data.request.table_names[self.data.now_subprocedure_id].1,
             };
             let procedure = self
@@ -297,6 +304,7 @@ mod tests {
             schema: schema_name.clone(),
         };
         catalog_manager
+            .clone()
             .register_catalog(catalog_name.clone())
             .await
             .unwrap();

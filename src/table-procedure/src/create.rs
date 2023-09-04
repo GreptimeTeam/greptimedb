@@ -59,9 +59,12 @@ impl Procedure for CreateTableProcedure {
     }
 
     fn lock_key(&self) -> LockKey {
-        // We lock the whole table.
-        let table_name = self.data.table_ref().to_string();
-        LockKey::single(table_name)
+        // We lock the whole table, the catalog and the schema.
+        LockKey::new([
+            self.data.table_ref().catalog.to_string(),
+            self.data.table_ref().schema.to_string(),
+            self.data.table_ref().table.to_string(),
+        ])
     }
 }
 
