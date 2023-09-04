@@ -20,9 +20,10 @@ use std::{fs, path};
 use api::v1::meta::Role;
 use catalog::remote::region_alive_keeper::RegionAliveKeepers;
 use catalog::remote::{CachedMetaKvBackend, RemoteCatalogManager};
-use catalog::{CatalogManager, CatalogManagerRef, RegisterTableRequest};
+use catalog::CatalogManagerRef;
 use common_base::Plugins;
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID};
+use common_catalog::consts::DEFAULT_CATALOG_NAME;
+use common_config::WalConfig;
 use common_error::ext::BoxedError;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
@@ -35,7 +36,6 @@ use common_procedure::ProcedureManagerRef;
 use common_telemetry::logging::{debug, info};
 use file_table_engine::engine::immutable::ImmutableFileTableEngine;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
-use log_store::LogConfig;
 use meta_client::client::{MetaClient, MetaClientBuilder};
 use meta_client::MetaClientOptions;
 use mito::config::EngineConfig as TableEngineConfig;
@@ -54,10 +54,9 @@ use store_api::path_utils::{CLUSTER_DIR, WAL_DIR};
 use table::engine::manager::{MemoryTableEngineManager, TableEngineManagerRef};
 use table::engine::{TableEngine, TableEngineProcedureRef};
 use table::requests::FlushTableRequest;
-use table::table::numbers::NumbersTable;
 use table::table::TableIdProviderRef;
 
-use crate::datanode::{DatanodeOptions, ObjectStoreConfig, ProcedureConfig, WalConfig};
+use crate::datanode::{DatanodeOptions, ProcedureConfig};
 use crate::error::{
     self, CatalogSnafu, IncorrectInternalStateSnafu, MetaClientInitSnafu, MissingMetasrvOptsSnafu,
     MissingNodeIdSnafu, NewCatalogSnafu, OpenLogStoreSnafu, RecoverProcedureSnafu, Result,
@@ -159,9 +158,8 @@ impl Instance {
     ) -> Result<(InstanceRef, Option<HeartbeatTask>)> {
         let data_home = util::normalize_dir(&opts.storage.data_home);
         info!("The working home directory is: {}", data_home);
-        let object_store = store::new_object_store(&data_home, &opts.storage.store).await?;
-        let log_store =
-            Arc::new(create_log_store(&data_home, &opts.storage.store, &opts.wal).await?);
+        let object_store = store::new_object_store(opts).await?;
+        let log_store = Arc::new(create_log_store(&data_home, opts.wal.clone()).await?);
 
         let mito_engine = Arc::new(DefaultEngine::new(
             TableEngineConfig {
@@ -203,39 +201,17 @@ impl Instance {
         // create remote catalog manager
         let (catalog_manager, table_id_provider, region_alive_keepers) = match opts.mode {
             Mode::Standalone => {
-                if opts.enable_memory_catalog {
-                    let catalog = catalog::local::MemoryCatalogManager::with_default_setup();
-                    let table = NumbersTable::table(MIN_USER_TABLE_ID);
-
-                    let _ = catalog
-                        .register_table(RegisterTableRequest {
-                            table_id: MIN_USER_TABLE_ID,
-                            table_name: table.table_info().name.to_string(),
-                            table,
-                            catalog: DEFAULT_CATALOG_NAME.to_string(),
-                            schema: DEFAULT_SCHEMA_NAME.to_string(),
-                        })
+                let catalog = Arc::new(
+                    catalog::local::LocalCatalogManager::try_new(engine_manager.clone())
                         .await
-                        .expect("Failed to register numbers");
+                        .context(CatalogSnafu)?,
+                );
 
-                    (
-                        catalog.clone() as CatalogManagerRef,
-                        Some(catalog as TableIdProviderRef),
-                        None,
-                    )
-                } else {
-                    let catalog = Arc::new(
-                        catalog::local::LocalCatalogManager::try_new(engine_manager.clone())
-                            .await
-                            .context(CatalogSnafu)?,
-                    );
-
-                    (
-                        catalog.clone() as CatalogManagerRef,
-                        Some(catalog as TableIdProviderRef),
-                        None,
-                    )
-                }
+                (
+                    catalog.clone() as CatalogManagerRef,
+                    Some(catalog as TableIdProviderRef),
+                    None,
+                )
             }
 
             Mode::Distributed => {
@@ -273,9 +249,12 @@ impl Instance {
             plugins,
         );
         let query_engine = factory.query_engine();
-        let procedure_manager =
-            create_procedure_manager(opts.node_id.unwrap_or(0), &opts.procedure, object_store)
-                .await?;
+        let procedure_manager = create_procedure_manager(
+            opts.node_id.unwrap_or(0),
+            &ProcedureConfig::default(),
+            object_store,
+        )
+        .await?;
         let sql_handler = SqlHandler::new(
             engine_manager.clone(),
             catalog_manager.clone(),
@@ -451,16 +430,9 @@ pub async fn new_metasrv_client(
 
 pub(crate) async fn create_log_store(
     data_home: &str,
-    store_config: &ObjectStoreConfig,
-    wal_config: &WalConfig,
+    wal_config: WalConfig,
 ) -> Result<RaftEngineLogStore> {
-    let wal_dir = match (&wal_config.dir, store_config) {
-        (Some(dir), _) => dir.to_string(),
-        (None, ObjectStoreConfig::File(_file_config)) => {
-            format!("{}{WAL_DIR}", data_home)
-        }
-        _ => return error::MissingWalDirConfigSnafu {}.fail(),
-    };
+    let wal_dir = format!("{}{WAL_DIR}", data_home);
 
     // create WAL directory
     fs::create_dir_all(path::Path::new(&wal_dir))
@@ -469,16 +441,7 @@ pub(crate) async fn create_log_store(
         "Creating logstore with config: {:?} and storage path: {}",
         wal_config, &wal_dir
     );
-    let log_config = LogConfig {
-        file_size: wal_config.file_size.0,
-        log_file_dir: wal_dir,
-        purge_interval: wal_config.purge_interval,
-        purge_threshold: wal_config.purge_threshold.0,
-        read_batch_size: wal_config.read_batch_size,
-        sync_write: wal_config.sync_write,
-    };
-
-    let logstore = RaftEngineLogStore::try_new(log_config)
+    let logstore = RaftEngineLogStore::try_new(wal_dir, wal_config)
         .await
         .map_err(Box::new)
         .context(OpenLogStoreSnafu)?;

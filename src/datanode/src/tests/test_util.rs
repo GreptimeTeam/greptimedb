@@ -16,6 +16,7 @@ use catalog::RegisterTableRequest;
 use common_catalog::consts::{
     DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID, MITO_ENGINE,
 };
+use common_config::WalConfig;
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, RawSchema};
@@ -25,9 +26,7 @@ use table::engine::{EngineContext, TableEngineRef};
 use table::requests::{CreateTableRequest, TableOptions};
 use table::TableRef;
 
-use crate::datanode::{
-    DatanodeOptions, FileConfig, ObjectStoreConfig, ProcedureConfig, StorageConfig, WalConfig,
-};
+use crate::datanode::{DatanodeOptions, FileConfig, ObjectStoreConfig, StorageConfig};
 use crate::error::{CreateTableSnafu, Result};
 use crate::heartbeat::HeartbeatTask;
 use crate::instance::{Instance, InstanceRef};
@@ -69,17 +68,13 @@ fn create_tmp_dir_and_datanode_opts(name: &str) -> (DatanodeOptions, TestGuard) 
     let wal_tmp_dir = create_temp_dir(&format!("gt_wal_{name}"));
     let data_tmp_dir = create_temp_dir(&format!("gt_data_{name}"));
     let opts = DatanodeOptions {
-        wal: WalConfig {
-            dir: Some(wal_tmp_dir.path().to_str().unwrap().to_string()),
-            ..Default::default()
-        },
+        wal: WalConfig::default(),
         storage: StorageConfig {
             data_home: data_tmp_dir.path().to_str().unwrap().to_string(),
             store: ObjectStoreConfig::File(FileConfig {}),
             ..Default::default()
         },
         mode: Mode::Standalone,
-        procedure: ProcedureConfig::default(),
         ..Default::default()
     };
     (

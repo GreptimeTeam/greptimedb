@@ -19,6 +19,7 @@ use std::time::Duration;
 use common_base::readable_size::ReadableSize;
 use common_datasource::compression::CompressionType;
 use common_telemetry::warn;
+use serde::{Deserialize, Serialize};
 
 /// Default region worker num.
 const DEFAULT_NUM_WORKERS: usize = 1;
@@ -28,7 +29,7 @@ const DEFAULT_MAX_BG_JOB: usize = 4;
 pub(crate) const DEFAULT_WRITE_BUFFER_SIZE: ReadableSize = ReadableSize::mb(32);
 
 /// Configuration for [MitoEngine](crate::engine::MitoEngine).
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct MitoConfig {
     // Worker configs:
     /// Number of region workers (default 1).
@@ -51,6 +52,7 @@ pub struct MitoConfig {
 
     // Flush configs:
     /// Interval to auto flush a region if it has not flushed yet (default 30 min).
+    #[serde(with = "humantime_serde")]
     pub auto_flush_interval: Duration,
     /// Global write buffer size threshold to trigger flush (default 512M).
     pub global_write_buffer_size: ReadableSize,

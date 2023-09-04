@@ -26,6 +26,7 @@ object-store = { workspace = true }
 orc-rust = "0.2"
 paste = "1.0"
 regex = "1.7"
+serde.workspace = true
 snafu.workspace = true
 strum.workspace = true
 tokio-util.workspace = true
