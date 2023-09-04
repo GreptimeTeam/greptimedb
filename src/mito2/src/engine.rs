@@ -102,8 +102,6 @@ impl MitoEngine {
 struct EngineInner {
     /// Region workers group.
     workers: WorkerGroup,
-    /// Shared object store of all regions.
-    object_store: ObjectStore,
 }
 
 impl EngineInner {
@@ -114,8 +112,7 @@ impl EngineInner {
         object_store: ObjectStore,
     ) -> EngineInner {
         EngineInner {
-            workers: WorkerGroup::start(config, log_store, object_store.clone()),
-            object_store,
+            workers: WorkerGroup::start(config, log_store, object_store),
         }
     }
 
@@ -190,5 +187,30 @@ impl RegionEngine for MitoEngine {
         region_id: RegionId,
     ) -> std::result::Result<RegionMetadataRef, BoxedError> {
         self.inner.get_metadata(region_id).map_err(BoxedError::new)
+    }
+}
+
+// Tests methods.
+#[cfg(test)]
+impl MitoEngine {
+    /// Returns a new [MitoEngine] with specific `config`, `log_store`, `object_store` and `write_buffer_manager`.
+    pub fn new_with_manager<S: LogStore>(
+        mut config: MitoConfig,
+        log_store: Arc<S>,
+        object_store: ObjectStore,
+        write_buffer_manager: crate::flush::WriteBufferManagerRef,
+    ) -> MitoEngine {
+        config.sanitize();
+
+        MitoEngine {
+            inner: Arc::new(EngineInner {
+                workers: WorkerGroup::start_with_manager(
+                    config,
+                    log_store,
+                    object_store,
+                    write_buffer_manager,
+                ),
+            }),
+        }
     }
 }

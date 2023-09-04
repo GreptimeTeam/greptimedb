@@ -171,6 +171,40 @@ impl WorkerGroup {
     }
 }
 
+// Tests methods.
+#[cfg(test)]
+impl WorkerGroup {
+    /// Start a worker group with `write_buffer_manager` for tests.
+    ///
+    /// The number of workers should be power of two.
+    pub(crate) fn start_with_manager<S: LogStore>(
+        config: MitoConfig,
+        log_store: Arc<S>,
+        object_store: ObjectStore,
+        write_buffer_manager: WriteBufferManagerRef,
+    ) -> WorkerGroup {
+        assert!(config.num_workers.is_power_of_two());
+        let config = Arc::new(config);
+        let scheduler = Arc::new(LocalScheduler::new(config.max_background_jobs));
+
+        let workers = (0..config.num_workers)
+            .map(|id| {
+                WorkerStarter {
+                    id: id as WorkerId,
+                    config: config.clone(),
+                    log_store: log_store.clone(),
+                    object_store: object_store.clone(),
+                    write_buffer_manager: write_buffer_manager.clone(),
+                    scheduler: scheduler.clone(),
+                }
+                .start()
+            })
+            .collect();
+
+        WorkerGroup { workers, scheduler }
+    }
+}
+
 fn value_to_index(value: usize, num_workers: usize) -> usize {
     value & (num_workers - 1)
 }
