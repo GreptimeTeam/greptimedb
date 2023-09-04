@@ -54,6 +54,18 @@ impl Timestamp {
         }
     }
 
+    /// Creates current timestamp in specific time `unit`.
+    pub fn current_time(unit: TimeUnit) -> Timestamp {
+        let now = chrono::Utc::now();
+        let value = match unit {
+            TimeUnit::Second => now.timestamp(),
+            TimeUnit::Millisecond => now.timestamp_millis(),
+            TimeUnit::Microsecond => now.timestamp_micros(),
+            TimeUnit::Nanosecond => now.timestamp_nanos(),
+        };
+        Timestamp { value, unit }
+    }
+
     /// Subtracts a duration from timestamp.
     /// # Note
     /// The result time unit remains unchanged even if `duration` has a different unit with `self`.

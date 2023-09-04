@@ -14,7 +14,7 @@
 
 use std::fmt::{Display, Formatter};
 
-use common_time::util;
+use common_time::{util, Timestamp};
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
 
@@ -150,12 +150,46 @@ impl ColumnDefaultConstraint {
         }
     }
 
+    /// Create a default value for given `data_type`.
+    ///
+    /// If `is_nullable` is `true`, then this method would returns error if the created
+    /// default value is null.
+    pub fn create_default(&self, data_type: &ConcreteDataType, is_nullable: bool) -> Result<Value> {
+        match self {
+            ColumnDefaultConstraint::Function(expr) => {
+                // Functions should also ensure its return value is not null when
+                // is_nullable is true.
+                match &expr[..] {
+                    CURRENT_TIMESTAMP => create_current_timestamp(data_type),
+                    _ => error::UnsupportedDefaultExprSnafu { expr }.fail(),
+                }
+            }
+            ColumnDefaultConstraint::Value(v) => {
+                ensure!(is_nullable || !v.is_null(), error::NullDefaultSnafu);
+
+                Ok(v.clone())
+            }
+        }
+    }
+
     /// Returns true if this constraint might creates NULL.
     fn maybe_null(&self) -> bool {
         // Once we support more functions, we may return true if given function
         // could return null.
         matches!(self, ColumnDefaultConstraint::Value(Value::Null))
     }
+}
+
+fn create_current_timestamp(data_type: &ConcreteDataType) -> Result<Value> {
+    let Some(timestamp_type) = data_type.as_timestamp() else {
+        return error::DefaultValueTypeSnafu {
+            reason: format!("Not support to assign current timestamp to {data_type:?} type"),
+        }
+        .fail();
+    };
+
+    let unit = timestamp_type.unit();
+    Ok(Value::Timestamp(Timestamp::current_time(unit)))
 }
 
 fn create_current_timestamp_vector(
@@ -246,7 +280,7 @@ mod tests {
     }
 
     #[test]
-    fn test_create_default_vector_by_value() {
+    fn test_create_default_by_value() {
         let constraint = ColumnDefaultConstraint::Value(Value::Int32(10));
         let data_type = ConcreteDataType::int32_datatype();
         let v = constraint
@@ -254,55 +288,65 @@ mod tests {
             .unwrap();
         let expect: VectorRef = Arc::new(Int32Vector::from_values(vec![10; 4]));
         assert_eq!(expect, v);
+        let v = constraint.create_default(&data_type, false).unwrap();
+        assert_eq!(Value::Int32(10), v);
     }
 
     #[test]
     fn test_create_default_vector_by_func() {
         let constraint = ColumnDefaultConstraint::Function(CURRENT_TIMESTAMP.to_string());
+        let check_value = |v| {
+            assert!(
+                matches!(v, Value::Timestamp(_)),
+                "v {:?} is not timestamp",
+                v
+            );
+        };
+        let check_vector = |v: VectorRef| {
+            assert_eq!(4, v.len());
+            assert!(
+                matches!(v.get(0), Value::Timestamp(_)),
+                "v {:?} is not timestamp",
+                v.get(0)
+            );
+        };
+
         // Timestamp type.
         let data_type = ConcreteDataType::timestamp_millisecond_datatype();
         let v = constraint
             .create_default_vector(&data_type, false, 4)
             .unwrap();
-        assert_eq!(4, v.len());
-        assert!(
-            matches!(v.get(0), Value::Timestamp(_)),
-            "v {:?} is not timestamp",
-            v.get(0)
-        );
+        check_vector(v);
+
+        let v = constraint.create_default(&data_type, false).unwrap();
+        check_value(v);
 
         let data_type = ConcreteDataType::timestamp_second_datatype();
         let v = constraint
             .create_default_vector(&data_type, false, 4)
             .unwrap();
-        assert_eq!(4, v.len());
-        assert!(
-            matches!(v.get(0), Value::Timestamp(_)),
-            "v {:?} is not timestamp",
-            v.get(0)
-        );
+        check_vector(v);
+
+        let v = constraint.create_default(&data_type, false).unwrap();
+        check_value(v);
 
         let data_type = ConcreteDataType::timestamp_microsecond_datatype();
         let v = constraint
             .create_default_vector(&data_type, false, 4)
             .unwrap();
-        assert_eq!(4, v.len());
-        assert!(
-            matches!(v.get(0), Value::Timestamp(_)),
-            "v {:?} is not timestamp",
-            v.get(0)
-        );
+        check_vector(v);
+
+        let v = constraint.create_default(&data_type, false).unwrap();
+        check_value(v);
 
         let data_type = ConcreteDataType::timestamp_nanosecond_datatype();
         let v = constraint
             .create_default_vector(&data_type, false, 4)
             .unwrap();
-        assert_eq!(4, v.len());
-        assert!(
-            matches!(v.get(0), Value::Timestamp(_)),
-            "v {:?} is not timestamp",
-            v.get(0)
-        );
+        check_vector(v);
+
+        let v = constraint.create_default(&data_type, false).unwrap();
+        check_value(v);
 
         // Int64 type.
         let data_type = ConcreteDataType::int64_datatype();
@@ -321,6 +365,7 @@ mod tests {
         assert!(constraint
             .create_default_vector(&data_type, false, 4)
             .is_err());
+        assert!(constraint.create_default(&data_type, false).is_err());
     }
 
     #[test]
