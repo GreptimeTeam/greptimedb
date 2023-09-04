@@ -549,6 +549,14 @@ impl WorkerListener {
         // Avoid compiler warning.
         let _ = region_id;
     }
+
+    /// Engine is stalled.
+    pub(crate) fn on_write_stall(&self) {
+        #[cfg(test)]
+        if let Some(listener) = &self.listener {
+            listener.on_write_stall();
+        }
+    }
 }
 
 #[cfg(test)]

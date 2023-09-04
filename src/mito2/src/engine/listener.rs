@@ -14,8 +14,9 @@
 
 //! Engine event listener for tests.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
+use common_telemetry::info;
 use store_api::storage::RegionId;
 use tokio::sync::Notify;
 
@@ -23,6 +24,9 @@ use tokio::sync::Notify;
 pub trait EventListener: Send + Sync {
     /// Notifies the listener that a region is flushed successfully.
     fn on_flush_success(&self, region_id: RegionId);
+
+    /// Notifies the listener that the engine is stalled.
+    fn on_write_stall(&self);
 }
 
 pub type EventListenerRef = Arc<dyn EventListener>;
@@ -30,7 +34,6 @@ pub type EventListenerRef = Arc<dyn EventListener>;
 /// Listener to watch flush events.
 pub struct FlushListener {
     notify: Notify,
-    last_flushed_region: Mutex<Option<RegionId>>,
 }
 
 impl FlushListener {
@@ -38,7 +41,6 @@ impl FlushListener {
     pub fn new() -> FlushListener {
         FlushListener {
             notify: Notify::new(),
-            last_flushed_region: Mutex::new(None),
         }
     }
 
@@ -46,20 +48,43 @@ impl FlushListener {
     pub async fn wait(&self) {
         self.notify.notified().await;
     }
-
-    /// Returns the last flushed region.
-    pub fn last_flushed_region(&self) -> Option<RegionId> {
-        *self.last_flushed_region.lock().unwrap()
-    }
 }
 
 impl EventListener for FlushListener {
     fn on_flush_success(&self, region_id: RegionId) {
-        {
-            let mut last_flushed_region = self.last_flushed_region.lock().unwrap();
-            *last_flushed_region = Some(region_id);
-        }
+        info!("Region {} flush successfully", region_id);
 
         self.notify.notify_one()
+    }
+
+    fn on_write_stall(&self) {}
+}
+
+/// Listener to watch stall events.
+pub struct StallListener {
+    notify: Notify,
+}
+
+impl StallListener {
+    /// Creates a new listener.
+    pub fn new() -> StallListener {
+        StallListener {
+            notify: Notify::new(),
+        }
+    }
+
+    /// Wait for a stall event.
+    pub async fn wait(&self) {
+        self.notify.notified().await;
+    }
+}
+
+impl EventListener for StallListener {
+    fn on_flush_success(&self, _region_id: RegionId) {}
+
+    fn on_write_stall(&self) {
+        info!("Engine is stalled");
+
+        self.notify.notify_one();
     }
 }

@@ -54,6 +54,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         if self.write_buffer_manager.should_stall() && allow_stall {
             // TODO(yingwen): stalled metrics.
             self.stalled_requests.append(&mut write_requests);
+            self.listener.on_write_stall();
             return;
         }
 

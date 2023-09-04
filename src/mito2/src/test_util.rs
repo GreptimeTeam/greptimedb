@@ -35,7 +35,7 @@ use object_store::ObjectStore;
 use store_api::metadata::{ColumnMetadata, RegionMetadataRef};
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{
-    RegionCreateRequest, RegionDeleteRequest, RegionPutRequest, RegionRequest,
+    RegionCreateRequest, RegionDeleteRequest, RegionFlushRequest, RegionPutRequest, RegionRequest,
 };
 use store_api::storage::RegionId;
 
@@ -548,4 +548,16 @@ pub async fn delete_rows(engine: &MitoEngine, region_id: RegionId, rows: Rows) {
         unreachable!()
     };
     assert_eq!(num_rows, rows_inserted);
+}
+
+/// Flush a region manually.
+pub async fn flush_region(engine: &MitoEngine, region_id: RegionId) {
+    let Output::AffectedRows(rows) = engine
+        .handle_request(region_id, RegionRequest::Flush(RegionFlushRequest {}))
+        .await
+        .unwrap()
+    else {
+        unreachable!()
+    };
+    assert_eq!(0, rows);
 }
