@@ -14,29 +14,26 @@
 
 use std::collections::HashSet;
 
-use common_meta::rpc::store::{BatchGetRequest, PutRequest};
+use common_meta::rpc::store::{BatchGetRequest, DeleteRangeRequest, PutRequest, RangeRequest};
 use common_meta::RegionIdent;
-use store_api::storage::RegionId;
+use metrics::{decrement_gauge, increment_gauge};
 
 use crate::error::Result;
 use crate::keys::InactiveRegionKey;
+use crate::metrics::METRIC_META_INACTIVE_REGIONS;
 use crate::service::store::kv::ResettableKvStoreRef;
 
-pub struct InactiveNodeManager<'a> {
+pub struct InactiveRegionManager<'a> {
     store: &'a ResettableKvStoreRef,
 }
 
-impl<'a> InactiveNodeManager<'a> {
+impl<'a> InactiveRegionManager<'a> {
     pub fn new(store: &'a ResettableKvStoreRef) -> Self {
         Self { store }
     }
 
     pub async fn register_inactive_region(&self, region_ident: &RegionIdent) -> Result<()> {
-        let region_id = RegionId::new(
-            region_ident.table_ident.table_id,
-            region_ident.region_number,
-        )
-        .as_u64();
+        let region_id = region_ident.get_region_id().as_u64();
         let key = InactiveRegionKey {
             cluster_id: region_ident.cluster_id,
             node_id: region_ident.datanode_id,
@@ -48,15 +45,14 @@ impl<'a> InactiveNodeManager<'a> {
             prev_kv: false,
         };
         self.store.put(req).await?;
+
+        increment_gauge!(METRIC_META_INACTIVE_REGIONS, 1.0);
+
         Ok(())
     }
 
     pub async fn deregister_inactive_region(&self, region_ident: &RegionIdent) -> Result<()> {
-        let region_id = RegionId::new(
-            region_ident.table_ident.table_id,
-            region_ident.region_number,
-        )
-        .as_u64();
+        let region_id = region_ident.get_region_id().as_u64();
         let key: Vec<u8> = InactiveRegionKey {
             cluster_id: region_ident.cluster_id,
             node_id: region_ident.datanode_id,
@@ -64,6 +60,9 @@ impl<'a> InactiveNodeManager<'a> {
         }
         .into();
         self.store.delete(&key, false).await?;
+
+        decrement_gauge!(METRIC_META_INACTIVE_REGIONS, 1.0);
+
         Ok(())
     }
 
@@ -113,5 +112,30 @@ impl<'a> InactiveNodeManager<'a> {
         *region_ids = active_region_ids.into_iter().flatten().collect();
 
         Ok(inactive_region_ids.into_iter().flatten().collect())
+    }
+
+    /// Scan all inactive regions in the cluster.
+    ///
+    /// When will these data appear?
+    /// Generally, it is because the corresponding Datanode is disconnected and
+    /// did not respond to the `Failover` scheduling instructions of metasrv.
+    pub async fn scan_all_inactive_regions(
+        &self,
+        cluster_id: u64,
+    ) -> Result<Vec<InactiveRegionKey>> {
+        let prefix = InactiveRegionKey::get_prefix_by_cluster(cluster_id);
+        let request = RangeRequest::new().with_prefix(prefix);
+        let resp = self.store.range(request).await?;
+        let kvs = resp.kvs;
+        kvs.into_iter()
+            .map(|kv| InactiveRegionKey::try_from(kv.key))
+            .collect::<Result<Vec<_>>>()
+    }
+
+    pub async fn clear_all_inactive_regions(&self, cluster_id: u64) -> Result<()> {
+        let prefix = InactiveRegionKey::get_prefix_by_cluster(cluster_id);
+        let request = DeleteRangeRequest::new().with_prefix(prefix);
+        let _ = self.store.delete_range(request).await?;
+        Ok(())
     }
 }

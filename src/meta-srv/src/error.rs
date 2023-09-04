@@ -156,6 +156,9 @@ pub enum Error {
     #[snafu(display("Invalid datanode stat key: {}", key))]
     InvalidStatKey { key: String, location: Location },
 
+    #[snafu(display("Invalid inactive region key: {}", key))]
+    InvalidInactiveRegionKey { key: String, location: Location },
+
     #[snafu(display("Failed to parse datanode lease key from utf8: {}", source))]
     LeaseKeyFromUtf8 {
         source: std::string::FromUtf8Error,
@@ -176,6 +179,12 @@ pub enum Error {
 
     #[snafu(display("Failed to parse datanode stat value from utf8: {}", source))]
     StatValueFromUtf8 {
+        source: std::string::FromUtf8Error,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to parse invalid region key from utf8: {}", source))]
+    InvalidRegionKeyFromUtf8 {
         source: std::string::FromUtf8Error,
         location: Location,
     },
@@ -556,6 +565,7 @@ impl ErrorExt for Error {
             | Error::EmptyTableName { .. }
             | Error::InvalidLeaseKey { .. }
             | Error::InvalidStatKey { .. }
+            | Error::InvalidInactiveRegionKey { .. }
             | Error::ParseNum { .. }
             | Error::UnsupportedSelectorType { .. }
             | Error::InvalidArguments { .. }
@@ -565,6 +575,7 @@ impl ErrorExt for Error {
             | Error::LeaseValueFromUtf8 { .. }
             | Error::StatKeyFromUtf8 { .. }
             | Error::StatValueFromUtf8 { .. }
+            | Error::InvalidRegionKeyFromUtf8 { .. }
             | Error::UnexpectedSequenceValue { .. }
             | Error::TableRouteNotFound { .. }
             | Error::TableInfoNotFound { .. }
