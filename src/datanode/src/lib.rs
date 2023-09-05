@@ -15,6 +15,7 @@
 #![feature(assert_matches)]
 #![feature(trait_upcasting)]
 
+pub mod alive_keeper;
 pub mod datanode;
 pub mod error;
 mod greptimedb_telemetry;
