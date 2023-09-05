@@ -16,11 +16,16 @@
 
 use std::collections::HashMap;
 
+use datatypes::value::Value;
+use datatypes::vectors::VectorRef;
+use snafu::{ensure, OptionExt, ResultExt};
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
+use store_api::storage::ColumnId;
 
-use crate::error::Result;
+use crate::error::{CompatReaderSnafu, CreateDefaultSnafu, Result};
 use crate::read::projection::ProjectionMapper;
 use crate::read::{Batch, BatchReader};
+use crate::row_converter::{McmpRowCodec, SortField};
 
 /// Reader to adapt schema of underlying reader to expected schema.
 pub struct CompatReader<R> {
@@ -60,10 +65,6 @@ impl<R: BatchReader> BatchReader for CompatReader<R> {
             return Ok(None);
         };
 
-        // if let Some(compat_pk) = &self.compat_pk {
-        //     compat_pk
-        // }
-
         todo!()
     }
 }
@@ -90,35 +91,145 @@ pub(crate) fn has_same_columns(left: &RegionMetadata, right: &RegionMetadata) ->
     true
 }
 
+/// Helper to make primary key compatible.
+struct CompatPrimaryKey {
+    /// Row converter to append values to primary keys.
+    converter: McmpRowCodec,
+    /// Default values to append.
+    values: Vec<Value>,
+}
+
+/// Helper to make fields compatible.
+struct CompatFields {
+    /// Column Ids the reader actually returns.
+    actual_fields: Vec<ColumnId>,
+    /// Indices to convert actual fields to expect fields.
+    index_or_defaults: Vec<IndexOrDefault>,
+}
+
+/// Creates a [CompatPrimaryKey] if needed.
 fn may_compat_primary_key(
     expect: &RegionMetadata,
     actual: &RegionMetadata,
 ) -> Result<Option<CompatPrimaryKey>> {
-    unimplemented!()
+    ensure!(
+        actual.primary_key.len() <= expect.primary_key.len(),
+        CompatReaderSnafu {
+            region_id: expect.region_id,
+            reason: format!(
+                "primary key has more columns {} than exepct {}",
+                actual.primary_key.len(),
+                expect.primary_key.len()
+            ),
+        }
+    );
+    ensure!(
+        actual.primary_key == expect.primary_key[..actual.primary_key.len()],
+        CompatReaderSnafu {
+            region_id: expect.region_id,
+            reason: format!(
+                "primary key has different prefix, expect: {:?}, actual: {:?}",
+                expect.primary_key, actual.primary_key
+            ),
+        }
+    );
+    if actual.primary_key.len() == expect.primary_key.len() {
+        return Ok(None);
+    }
+
+    // We need to append default values to the primary key.
+    let to_add = &expect.primary_key[actual.primary_key.len()..];
+    let mut fields = Vec::with_capacity(to_add.len());
+    let mut values = Vec::with_capacity(to_add.len());
+    for column_id in to_add {
+        // Safety: The id comes from expect region metadata.
+        let column = expect.column_by_id(*column_id).unwrap();
+        fields.push(SortField::new(column.column_schema.data_type.clone()));
+        let default_value = column
+            .column_schema
+            .create_default()
+            .context(CreateDefaultSnafu {
+                region_id: expect.region_id,
+                column: &column.column_schema.name,
+            })?
+            .with_context(|| CompatReaderSnafu {
+                region_id: expect.region_id,
+                reason: format!(
+                    "key column {} does not have a default value to read",
+                    column.column_schema.name
+                ),
+            })?;
+        values.push(default_value);
+    }
+    let converter = McmpRowCodec::new(fields);
+
+    Ok(Some(CompatPrimaryKey { converter, values }))
 }
 
+/// Creates a [CompatFields] if needed.
 fn may_compat_fields(
     mapper: &ProjectionMapper,
     actual: &RegionMetadata,
 ) -> Result<Option<CompatFields>> {
     let expect_fields = mapper.batch_fields();
     let actual_fields = Batch::projected_fields(actual, mapper.column_ids());
-    let source_field_index: HashMap<_, _> = actual_fields.iter().enumerate().map(|(idx, column_id)| (*column_id, idx)).collect();
-
-    for column_id in expect_fields {
-        //
-        unimplemented!();
+    if expect_fields == actual_fields {
+        return Ok(None);
     }
 
-    unimplemented!()
+    let source_field_index: HashMap<_, _> = actual_fields
+        .iter()
+        .enumerate()
+        .map(|(idx, column_id)| (*column_id, idx))
+        .collect();
+
+    let index_or_defaults = expect_fields
+        .iter()
+        .map(|column_id| {
+            if let Some(index) = source_field_index.get(column_id) {
+                // Source has this field.
+                Ok(IndexOrDefault::Index(*index))
+            } else {
+                // Safety: mapper must have this column.
+                let column = mapper.metadata().column_by_id(*column_id).unwrap();
+                // Create a default vector with 1 element for that column.
+                let default_vector = column
+                    .column_schema
+                    .create_default_vector(1)
+                    .context(CreateDefaultSnafu {
+                        region_id: mapper.metadata().region_id,
+                        column: &column.column_schema.name,
+                    })?
+                    .with_context(|| CompatReaderSnafu {
+                        region_id: mapper.metadata().region_id,
+                        reason: format!(
+                            "column {} does not have a default value to read",
+                            column.column_schema.name
+                        ),
+                    })?;
+                Ok(IndexOrDefault::DefaultValue {
+                    column_id: column.column_id,
+                    default_vector,
+                })
+            }
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(Some(CompatFields {
+        actual_fields,
+        index_or_defaults,
+    }))
 }
 
-/// Helper to make primary key compatible.
-struct CompatPrimaryKey {
-    //
-}
-
-/// Helper to make fields compatible.
-struct CompatFields {
-    //
+/// Index in source batch or a default value to fill a column.
+enum IndexOrDefault {
+    /// Index of the column in source batch.
+    Index(usize),
+    /// Default value for the column.
+    DefaultValue {
+        /// Id of the column.
+        column_id: ColumnId,
+        /// Default value. The vector has only 1 element.
+        default_vector: VectorRef,
+    },
 }

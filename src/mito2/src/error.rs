@@ -419,6 +419,18 @@ pub enum Error {
         region_id: RegionId,
         location: Location,
     },
+
+    #[snafu(display(
+        "Failed to compat readers for region {}, reason: {}, location: {}",
+        region_id,
+        reason,
+        location
+    ))]
+    CompatReader {
+        region_id: RegionId,
+        reason: String,
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -484,6 +496,7 @@ impl ErrorExt for Error {
             FlushRegion { source, .. } => source.status_code(),
             RegionDropped { .. } => StatusCode::Cancelled,
             RegionClosed { .. } => StatusCode::Cancelled,
+            CompatReader { .. } => StatusCode::Unexpected,
         }
     }
 
