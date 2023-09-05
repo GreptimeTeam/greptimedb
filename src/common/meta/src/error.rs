@@ -26,6 +26,47 @@ use crate::peer::Peer;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
+    #[snafu(display("Failed to convert grpc expr, source: {}", source))]
+    ConvertGrpcExpr {
+        location: Location,
+        source: common_grpc_expr::error::Error,
+    },
+
+    #[snafu(display("Table info not found: {}", table_name))]
+    TableInfoNotFound {
+        table_name: String,
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Failed to register procedure loader, type name: {}, source: {}",
+        type_name,
+        source
+    ))]
+    RegisterProcedureLoader {
+        type_name: String,
+        location: Location,
+        source: common_procedure::error::Error,
+    },
+
+    #[snafu(display("Failed to submit procedure, source: {source}"))]
+    SubmitProcedure {
+        location: Location,
+        source: common_procedure::Error,
+    },
+
+    #[snafu(display("Unsupported operation {}, location: {}", operation, location))]
+    Unsupported {
+        operation: String,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to wait procedure done, source: {source}"))]
+    WaitProcedure {
+        location: Location,
+        source: common_procedure::Error,
+    },
+
     #[snafu(display("Failed to convert RawTableInfo into TableInfo: {}", source))]
     ConvertRawTableInfo {
         location: Location,
@@ -224,6 +265,8 @@ impl ErrorExt for Error {
             | MoveRegion { .. }
             | Unexpected { .. }
             | External { .. }
+            | ConvertGrpcExpr { .. }
+            | TableInfoNotFound { .. }
             | InvalidHeartbeatResponse { .. } => StatusCode::Unexpected,
 
             SendMessage { .. }
@@ -231,7 +274,8 @@ impl ErrorExt for Error {
             | CacheNotGet { .. }
             | CatalogAlreadyExists { .. }
             | SchemaAlreadyExists { .. }
-            | RenameTable { .. } => StatusCode::Internal,
+            | RenameTable { .. }
+            | Unsupported { .. } => StatusCode::Internal,
 
             PrimaryKeyNotFound { .. } => StatusCode::InvalidArguments,
 
@@ -247,6 +291,8 @@ impl ErrorExt for Error {
             | TableRouteNotFound { .. }
             | ConvertRawTableInfo { .. } => StatusCode::Unexpected,
 
+            SubmitProcedure { source, .. } | WaitProcedure { source, .. } => source.status_code(),
+            RegisterProcedureLoader { source, .. } => source.status_code(),
             OperateDatanode { source, .. } => source.status_code(),
             Table { source, .. } => source.status_code(),
             RetryLater { source, .. } => source.status_code(),

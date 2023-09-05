@@ -123,6 +123,7 @@ impl TryFrom<SubmitDdlTaskRequest> for PbSubmitDdlTaskRequest {
     }
 }
 
+#[derive(Debug, Default)]
 pub struct SubmitDdlTaskResponse {
     pub key: Vec<u8>,
     pub table_id: Option<TableId>,
@@ -137,6 +138,18 @@ impl TryFrom<PbSubmitDdlTaskResponse> for SubmitDdlTaskResponse {
             key: resp.key,
             table_id,
         })
+    }
+}
+
+impl From<SubmitDdlTaskResponse> for PbSubmitDdlTaskResponse {
+    fn from(val: SubmitDdlTaskResponse) -> Self {
+        Self {
+            key: val.key,
+            table_id: val
+                .table_id
+                .map(|table_id| api::v1::meta::TableId { id: table_id }),
+            ..Default::default()
+        }
     }
 }
 

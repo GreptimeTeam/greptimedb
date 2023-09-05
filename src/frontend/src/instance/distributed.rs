@@ -31,7 +31,7 @@ use chrono::DateTime;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::format_full_table_name;
 use common_error::ext::BoxedError;
-use common_meta::ddl_manager::{Context, DdlExecutorRef};
+use common_meta::ddl::{DdlExecutorRef, ExecutorContext};
 use common_meta::key::schema_name::{SchemaNameKey, SchemaNameValue};
 use common_meta::rpc::ddl::{DdlTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse};
 use common_meta::rpc::router::{Partition, Partition as MetaPartition};
@@ -448,7 +448,7 @@ impl DistInstance {
         };
 
         self.ddl_executor
-            .submit_ddl_task(&Context, req)
+            .submit_ddl_task(&ExecutorContext::default(), req)
             .await
             .context(error::ExecuteDdlSnafu)?;
 
@@ -473,7 +473,7 @@ impl DistInstance {
         };
 
         self.ddl_executor
-            .submit_ddl_task(&Context, request)
+            .submit_ddl_task(&ExecutorContext::default(), request)
             .await
             .context(error::ExecuteDdlSnafu)
     }
@@ -493,7 +493,7 @@ impl DistInstance {
         };
 
         self.ddl_executor
-            .submit_ddl_task(&Context, request)
+            .submit_ddl_task(&ExecutorContext::default(), request)
             .await
             .context(error::ExecuteDdlSnafu)
     }
@@ -507,7 +507,7 @@ impl DistInstance {
         };
 
         self.ddl_executor
-            .submit_ddl_task(&Context, request)
+            .submit_ddl_task(&ExecutorContext::default(), request)
             .await
             .context(error::ExecuteDdlSnafu)
     }

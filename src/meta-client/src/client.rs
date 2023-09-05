@@ -23,7 +23,7 @@ mod store;
 use api::v1::meta::Role;
 use common_error::ext::BoxedError;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
-use common_meta::ddl_manager::{Context, DdlExecutor};
+use common_meta::ddl::{DdlExecutor, ExecutorContext};
 use common_meta::error::{self as meta_error, Result as MetaResult};
 use common_meta::rpc::ddl::{SubmitDdlTaskRequest, SubmitDdlTaskResponse};
 use common_meta::rpc::lock::{LockRequest, LockResponse, UnlockRequest};
@@ -181,7 +181,7 @@ pub struct MetaClient {
 impl DdlExecutor for MetaClient {
     async fn submit_ddl_task(
         &self,
-        _ctx: &Context,
+        _ctx: &ExecutorContext,
         request: SubmitDdlTaskRequest,
     ) -> MetaResult<SubmitDdlTaskResponse> {
         self.submit_ddl_task(request)
