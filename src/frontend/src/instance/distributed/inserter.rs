@@ -45,6 +45,7 @@ impl<'a> DistInserter<'a> {
         Self {
             catalog_manager,
             trace_id: None,
+            span_id: None,
         }
     }
 
@@ -53,6 +54,7 @@ impl<'a> DistInserter<'a> {
         self
     }
 
+    #[allow(dead_code)]
     pub fn with_span_id(mut self, span_id: u64) -> Self {
         self.span_id = Some(span_id);
         self
