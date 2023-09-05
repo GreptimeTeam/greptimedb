@@ -14,6 +14,8 @@
 
 use std::collections::HashMap;
 
+use api::v1::region::region_request;
+use client::region::check_response_header;
 use common_query::Output;
 use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
 use datafusion_expr::{DmlStatement, LogicalPlan as DfLogicalPlan, WriteOp};
@@ -33,18 +35,24 @@ use table::TableRef;
 
 use super::StatementExecutor;
 use crate::error::{
-    BuildColumnVectorsSnafu, ExecLogicalPlanSnafu, ExecuteStatementSnafu,
-    MissingTimeIndexColumnSnafu, ReadRecordBatchSnafu, Result, UnexpectedSnafu,
+    BuildColumnVectorsSnafu, ExecLogicalPlanSnafu, MissingTimeIndexColumnSnafu,
+    ReadRecordBatchSnafu, RequestDatanodeSnafu, Result, UnexpectedSnafu,
 };
+use crate::req_convert::insert::StatementToRegion;
 
 impl StatementExecutor {
     pub async fn insert(&self, insert: Box<Insert>, query_ctx: QueryContextRef) -> Result<Output> {
         if insert.can_extract_values() {
             // Fast path: plain insert ("insert with literal values") is executed directly
-            self.sql_stmt_executor
-                .execute_sql(Statement::Insert(insert), query_ctx)
-                .await
-                .context(ExecuteStatementSnafu)
+            let request = StatementToRegion::new(self.catalog_manager.as_ref(), &query_ctx)
+                .convert(&insert)
+                .await?;
+            let response = self
+                .region_request_handler
+                .handle(region_request::Body::Inserts(request), query_ctx)
+                .await?;
+            check_response_header(response.header).context(RequestDatanodeSnafu)?;
+            Ok(Output::AffectedRows(response.affected_rows as usize))
         } else {
             // Slow path: insert with subquery. Execute the subquery first, via query engine. Then
             // insert the results by sending insert requests.
@@ -108,7 +116,9 @@ impl StatementExecutor {
         while let Some(batch) = stream.next().await {
             let record_batch = batch.context(ReadRecordBatchSnafu)?;
             let delete_request = build_delete_request(record_batch, table.schema(), &table_info)?;
-            affected_rows += self.send_delete_request(delete_request).await?;
+            affected_rows += self
+                .handle_table_delete_request(delete_request, query_ctx.clone())
+                .await?;
         }
 
         Ok(Output::AffectedRows(affected_rows))

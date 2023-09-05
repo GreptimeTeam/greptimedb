@@ -63,6 +63,12 @@ pub enum Error {
         source: common_meta::error::Error,
     },
 
+    #[snafu(display("Failed to delete data, source: {}", source))]
+    RequestDeletes {
+        #[snafu(backtrace)]
+        source: common_meta::error::Error,
+    },
+
     #[snafu(display("Runtime resource error, source: {}", source))]
     RuntimeResource {
         #[snafu(backtrace)]
@@ -711,6 +717,7 @@ impl ErrorExt for Error {
 
             Error::RequestDatanode { source } => source.status_code(),
             Error::RequestInserts { source } => source.status_code(),
+            Error::RequestDeletes { source } => source.status_code(),
 
             Error::ColumnDataType { source } | Error::InvalidColumnDef { source, .. } => {
                 source.status_code()

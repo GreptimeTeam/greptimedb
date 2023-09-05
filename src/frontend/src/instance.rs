@@ -27,7 +27,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::meta::Role;
-use api::v1::{InsertRequests, RowInsertRequests};
+use api::v1::{DeleteRequests, InsertRequests, RowDeleteRequests, RowInsertRequests};
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use catalog::remote::CachedMetaKvBackend;
@@ -78,6 +78,7 @@ use self::distributed::DistRegionRequestHandler;
 use self::region_handler::RegionRequestHandlerRef;
 use self::standalone::StandaloneRegionRequestHandler;
 use crate::catalog::FrontendCatalogManager;
+use crate::delete::Deleter;
 use crate::error::{
     self, Error, ExecLogicalPlanSnafu, ExecutePromqlSnafu, ExternalSnafu, MissingMetasrvOptsSnafu,
     ParseSqlSnafu, PermissionSnafu, PlanStatementSnafu, Result, SqlExecInterceptedSnafu,
@@ -86,7 +87,7 @@ use crate::expr_factory::CreateExprFactory;
 use crate::frontend::FrontendOptions;
 use crate::heartbeat::handler::invalidate_table_cache::InvalidateTableCacheHandler;
 use crate::heartbeat::HeartbeatTask;
-use crate::inserter::Inserter;
+use crate::insert::Inserter;
 use crate::instance::standalone::StandaloneGrpcQueryHandler;
 use crate::metrics;
 use crate::script::ScriptExecutor;
@@ -311,10 +312,10 @@ impl Instance {
         ctx: QueryContextRef,
     ) -> Result<Output> {
         let inserter = Inserter::new(
-            &self.catalog_manager,
+            self.catalog_manager.as_ref(),
             &self.create_expr_factory,
             &self.grpc_query_handler,
-            &self.region_request_handler,
+            self.region_request_handler.as_ref(),
         );
         inserter.handle_row_inserts(requests, ctx).await
     }
@@ -326,12 +327,38 @@ impl Instance {
         ctx: QueryContextRef,
     ) -> Result<Output> {
         let inserter = Inserter::new(
-            &self.catalog_manager,
+            self.catalog_manager.as_ref(),
             &self.create_expr_factory,
             &self.grpc_query_handler,
-            &self.region_request_handler,
+            self.region_request_handler.as_ref(),
         );
         inserter.handle_column_inserts(requests, ctx).await
+    }
+
+    /// Handle batch deletes with row-format
+    pub async fn handle_row_deletes(
+        &self,
+        requests: RowDeleteRequests,
+        ctx: QueryContextRef,
+    ) -> Result<Output> {
+        let deleter = Deleter::new(
+            self.catalog_manager.as_ref(),
+            self.region_request_handler.as_ref(),
+        );
+        deleter.handle_row_deletes(requests, ctx).await
+    }
+
+    /// Handle batch deletes
+    pub async fn handle_deletes(
+        &self,
+        requests: DeleteRequests,
+        ctx: QueryContextRef,
+    ) -> Result<Output> {
+        let deleter = Deleter::new(
+            self.catalog_manager.as_ref(),
+            self.region_request_handler.as_ref(),
+        );
+        deleter.handle_column_deletes(requests, ctx).await
     }
 
     pub fn set_plugins(&mut self, map: Arc<Plugins>) {
