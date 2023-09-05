@@ -329,3 +329,13 @@ pub fn new_batch(
         .build()
         .unwrap()
 }
+
+/// Ensure the reader returns batch as `expect`.
+pub async fn check_reader_result<R: BatchReader>(reader: &mut R, expect: &[Batch]) {
+    let mut result = Vec::new();
+    while let Some(batch) = reader.next_batch().await.unwrap() {
+        result.push(batch);
+    }
+
+    assert_eq!(expect, result);
+}

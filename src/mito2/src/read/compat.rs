@@ -292,3 +292,147 @@ enum IndexOrDefault {
         default_vector: VectorRef,
     },
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use api::v1::{OpType, SemanticType};
+    use datatypes::prelude::ConcreteDataType;
+    use datatypes::schema::ColumnSchema;
+    use datatypes::value::ValueRef;
+    use datatypes::vectors::{Int64Vector, TimestampMillisecondVector, UInt64Vector, UInt8Vector};
+    use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
+    use store_api::storage::RegionId;
+
+    use super::*;
+    use crate::test_util::{check_reader_result, VecBatchReader};
+
+    /// Creates a new [RegionMetadata].
+    fn new_metadata(
+        semantic_types: &[(ColumnId, SemanticType)],
+        primary_key: &[ColumnId],
+    ) -> RegionMetadata {
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 1));
+        for (id, semantic_type) in semantic_types {
+            let column_schema = match semantic_type {
+                SemanticType::Tag => ColumnSchema::new(
+                    format!("tag_{id}"),
+                    ConcreteDataType::string_datatype(),
+                    true,
+                ),
+                SemanticType::Field => ColumnSchema::new(
+                    format!("field_{id}"),
+                    ConcreteDataType::int64_datatype(),
+                    true,
+                ),
+                SemanticType::Timestamp => ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+            };
+
+            builder.push_column_metadata(ColumnMetadata {
+                column_schema,
+                semantic_type: *semantic_type,
+                column_id: *id,
+            });
+        }
+        builder.primary_key(primary_key.to_vec());
+        builder.build().unwrap()
+    }
+
+    /// Encode primary key.
+    fn encode_key(keys: &[Option<&str>]) -> Vec<u8> {
+        let fields = (0..keys.len())
+            .map(|_| SortField::new(ConcreteDataType::string_datatype()))
+            .collect();
+        let converter = McmpRowCodec::new(fields);
+        let row = keys.iter().map(|str_opt| match str_opt {
+            Some(v) => ValueRef::String(v),
+            None => ValueRef::Null,
+        });
+
+        converter.encode(row).unwrap()
+    }
+
+    /// Creates a batch for specific primary `key`.
+    ///
+    /// `fields`: [(column_id of the field, is null)]
+    fn new_batch(
+        primary_key: &[u8],
+        fields: &[(ColumnId, bool)],
+        start_ts: i64,
+        num_rows: usize,
+    ) -> Batch {
+        let timestamps = Arc::new(TimestampMillisecondVector::from_values(
+            start_ts..start_ts + num_rows as i64,
+        ));
+        let sequences = Arc::new(UInt64Vector::from_values(0..num_rows as u64));
+        let op_types = Arc::new(UInt8Vector::from_vec(vec![OpType::Put as u8; num_rows]));
+        let field_columns = fields
+            .iter()
+            .map(|(id, is_null)| {
+                let data = if *is_null {
+                    Arc::new(Int64Vector::from(vec![None; num_rows]))
+                } else {
+                    Arc::new(Int64Vector::from_vec(vec![*id as i64; num_rows]))
+                };
+                BatchColumn {
+                    column_id: *id,
+                    data,
+                }
+            })
+            .collect();
+        Batch::new(
+            primary_key.to_vec(),
+            timestamps,
+            sequences,
+            op_types,
+            field_columns,
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_compat_reader() {
+        let reader_meta = Arc::new(new_metadata(
+            &[
+                (0, SemanticType::Timestamp),
+                (1, SemanticType::Tag),
+                (2, SemanticType::Field),
+            ],
+            &[1],
+        ));
+        let expect_meta = Arc::new(new_metadata(
+            &[
+                (0, SemanticType::Timestamp),
+                (1, SemanticType::Tag),
+                (2, SemanticType::Field),
+                (3, SemanticType::Tag),
+                (4, SemanticType::Field),
+            ],
+            &[1, 3],
+        ));
+        let mapper = ProjectionMapper::all(&expect_meta).unwrap();
+        let k1 = encode_key(&[Some("a")]);
+        let k2 = encode_key(&[Some("b")]);
+        let source_reader = VecBatchReader::new(&[
+            new_batch(&k1, &[(2, false)], 1000, 3),
+            new_batch(&k2, &[(2, false)], 1000, 3),
+        ]);
+
+        let mut compat_reader = CompatReader::new(&mapper, reader_meta, source_reader).unwrap();
+        let k1 = encode_key(&[Some("a"), None]);
+        let k2 = encode_key(&[Some("b"), None]);
+        check_reader_result(
+            &mut compat_reader,
+            &[
+                new_batch(&k1, &[(2, false), (4, true)], 1000, 3),
+                new_batch(&k2, &[(2, false), (4, true)], 1000, 3),
+            ],
+        )
+        .await;
+    }
+}
