@@ -18,7 +18,6 @@
 pub mod bootstrap;
 mod cache_invalidator;
 pub mod cluster;
-pub mod ddl;
 pub mod election;
 pub mod error;
 mod failure_detector;
@@ -36,6 +35,7 @@ pub mod pubsub;
 pub mod selector;
 mod sequence;
 pub mod service;
+pub mod table_creator;
 pub mod table_routes;
 
 pub use crate::error::Result;
