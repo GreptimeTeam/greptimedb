@@ -109,9 +109,9 @@ impl RegionAliveKeeper {
     }
 
     pub async fn deregister_region(&self, region_id: RegionId) {
-        self.tasks.lock().await.remove(&region_id).map(|_| {
-            info!("Deregister alive countdown for region {region_id}");
-        });
+        if self.tasks.lock().await.remove(&region_id).is_some() {
+            info!("Deregister alive countdown for region {region_id}")
+        }
     }
 
     async fn keep_lived(&self, designated_regions: Vec<RegionId>, deadline: Instant) {
@@ -352,341 +352,38 @@ impl CountdownTask {
     }
 }
 
-#[cfg(feature = "testeeeed")]
+#[cfg(test)]
 mod test {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Arc;
-
-    use api::v1::meta::{HeartbeatResponse, RegionLease};
-    use common_meta::heartbeat::mailbox::HeartbeatMailbox;
-    use datatypes::schema::RawSchema;
-    use table::engine::manager::MemoryTableEngineManager;
-    use table::engine::TableEngine;
-    use table::requests::{CreateTableRequest, TableOptions};
-    use table::test_util::EmptyTable;
-
     use super::*;
-    use crate::remote::mock::MockTableEngine;
-
-    async fn prepare_keepers() -> (TableIdent, RegionAliveKeeper) {
-        let table_engine = Arc::new(MockTableEngine::default());
-        let table_engine_manager = Arc::new(MemoryTableEngineManager::new(table_engine));
-        let keepers = RegionAliveKeeper::new(table_engine_manager, 5000);
-
-        let catalog = "my_catalog";
-        let schema = "my_schema";
-        let table = "my_table";
-        let table_ident = TableIdent {
-            catalog: catalog.to_string(),
-            schema: schema.to_string(),
-            table: table.to_string(),
-            table_id: 1,
-            engine: "MockTableEngine".to_string(),
-        };
-        let table = EmptyTable::table(CreateTableRequest {
-            id: 1,
-            catalog_name: catalog.to_string(),
-            schema_name: schema.to_string(),
-            table_name: table.to_string(),
-            desc: None,
-            schema: RawSchema {
-                column_schemas: vec![],
-                timestamp_index: None,
-                version: 0,
-            },
-            region_numbers: vec![1, 2, 3],
-            primary_key_indices: vec![],
-            create_if_not_exists: false,
-            table_options: TableOptions::default(),
-            engine: "MockTableEngine".to_string(),
-        });
-        let catalog_manager = MemoryCatalogManager::new_with_table(table.clone());
-        keepers
-            .register_table(table_ident.clone(), table, catalog_manager)
-            .await
-            .unwrap();
-        assert!(keepers
-            .keepers
-            .lock()
-            .await
-            .contains_key(&table_ident.table_id));
-
-        (table_ident, keepers)
-    }
+    use crate::tests::mock_region_server;
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_handle_heartbeat_response() {
-        let (table_ident, keepers) = prepare_keepers().await;
+    async fn region_alive_keeper() {
+        let region_server = mock_region_server();
+        let alive_keeper = RegionAliveKeeper::new(region_server, 300);
+        let region_id = RegionId::new(1, 2);
 
-        keepers.start().await;
-        let startup_protection_until = Instant::now() + Duration::from_secs(21);
+        // register a region before starting
+        alive_keeper.register_region(region_id).await;
+        assert!(alive_keeper.find_handle(region_id).await.is_some());
 
-        let duration_since_epoch = (Instant::now() - keepers.epoch).as_millis() as _;
-        let lease_seconds = 100;
-        let response = HeartbeatResponse {
-            region_lease: Some(RegionLease {
-                region_ids: vec![
-                    RegionId::new(table_ident.table_id, 1).as_u64(),
-                    RegionId::new(table_ident.table_id, 3).as_u64(),
-                ], // Not extending region 2's lease time.
-                duration_since_epoch,
-                lease_seconds,
-            }),
-            ..Default::default()
-        };
-        let keep_alive_until = keepers.epoch
-            + Duration::from_millis(duration_since_epoch)
-            + Duration::from_secs(lease_seconds);
+        alive_keeper.start().await;
 
-        let (tx, _) = mpsc::channel(8);
-        let mailbox = Arc::new(HeartbeatMailbox::new(tx));
-        let mut ctx = HeartbeatResponseHandlerContext::new(mailbox, response);
+        // started alive keeper should assign deadline to this region
+        let deadline = alive_keeper.deadline(region_id).await.unwrap();
+        assert!(deadline >= Instant::now());
 
-        assert!(keepers.handle(&mut ctx).await.unwrap() == HandleControl::Continue);
-
-        // sleep to wait for background task spawned in `handle`
-        tokio::time::sleep(Duration::from_secs(1)).await;
-
-        async fn test(
-            keeper: &Arc<RegionAliveKeeperDeprecated>,
-            region_number: RegionNumber,
-            startup_protection_until: Instant,
-            keep_alive_until: Instant,
-            is_kept_live: bool,
-        ) {
-            let deadline = keeper.deadline(region_number).await.unwrap();
-            if is_kept_live {
-                assert!(deadline > startup_protection_until && deadline == keep_alive_until);
-            } else {
-                assert!(deadline <= startup_protection_until);
-            }
-        }
-
-        let keeper = &keepers
-            .keepers
-            .lock()
-            .await
-            .get(&table_ident.table_id)
-            .cloned()
-            .unwrap();
-
-        // Test region 1 and 3 is kept lived. Their deadlines are updated to desired instant.
-        test(keeper, 1, startup_protection_until, keep_alive_until, true).await;
-        test(keeper, 3, startup_protection_until, keep_alive_until, true).await;
-
-        // Test region 2 is not kept lived. It's deadline is not updated: still during startup protection period.
-        test(keeper, 2, startup_protection_until, keep_alive_until, false).await;
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_region_alive_keepers() {
-        let (table_ident, keepers) = prepare_keepers().await;
-
-        keepers
-            .register_region(&RegionIdent {
-                cluster_id: 1,
-                datanode_id: 1,
-                table_ident: table_ident.clone(),
-                region_number: 4,
-            })
+        // extend lease then sleep
+        alive_keeper
+            .keep_lived(vec![region_id], Instant::now() + Duration::from_millis(500))
             .await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(alive_keeper.find_handle(region_id).await.is_some());
+        let deadline = alive_keeper.deadline(region_id).await.unwrap();
+        assert!(deadline >= Instant::now());
 
-        keepers.start().await;
-        for keeper in keepers.keepers.lock().await.values() {
-            let regions = {
-                let handles = keeper.countdown_task_handles.lock().await;
-                handles.keys().copied().collect::<Vec<_>>()
-            };
-            for region in regions {
-                // assert countdown tasks are started
-                let deadline = keeper.deadline(region).await.unwrap();
-                assert!(deadline <= Instant::now() + Duration::from_secs(20));
-            }
-        }
-
-        keepers
-            .deregister_region(&RegionIdent {
-                cluster_id: 1,
-                datanode_id: 1,
-                table_ident: table_ident.clone(),
-                region_number: 1,
-            })
-            .await;
-        let mut regions = keepers
-            .find_keeper(table_ident.table_id)
-            .await
-            .unwrap()
-            .countdown_task_handles
-            .lock()
-            .await
-            .keys()
-            .copied()
-            .collect::<Vec<_>>();
-        regions.sort();
-        assert_eq!(regions, vec![2, 3, 4]);
-
-        let keeper = keepers.deregister_table(&table_ident).await.unwrap();
-        assert!(Arc::try_unwrap(keeper).is_ok(), "keeper is not dropped");
-        assert!(keepers.keepers.lock().await.is_empty());
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_region_alive_keeper() {
-        let table_engine = Arc::new(MockTableEngine::default());
-        let table_ident = TableIdent {
-            catalog: "my_catalog".to_string(),
-            schema: "my_schema".to_string(),
-            table: "my_table".to_string(),
-            table_id: 1024,
-            engine: "mito".to_string(),
-        };
-        let catalog_manager = MemoryCatalogManager::with_default_setup();
-        let keeper =
-            RegionAliveKeeperDeprecated::new(table_engine, catalog_manager, table_ident, 1000);
-
-        let region = 1;
-        assert!(keeper.find_handle(&region).await.is_none());
-        keeper.register_region(region).await;
-        let _ = keeper.find_handle(&region).await.unwrap();
-
-        let ten_seconds_later = || Instant::now() + Duration::from_secs(10);
-
-        keeper.keep_lived(vec![1, 2, 3], ten_seconds_later()).await;
-        assert!(keeper.find_handle(&2).await.is_none());
-        assert!(keeper.find_handle(&3).await.is_none());
-
-        let far_future = Instant::now() + Duration::from_secs(86400 * 365 * 29);
-        // assert if keeper is not started, keep_lived is of no use
-        assert!(keeper.deadline(region).await.unwrap() > far_future);
-
-        keeper.start().await;
-        keeper.keep_lived(vec![1, 2, 3], ten_seconds_later()).await;
-        // assert keep_lived works if keeper is started
-        assert!(keeper.deadline(region).await.unwrap() <= ten_seconds_later());
-
-        let handle = keeper.deregister_region(region).await.unwrap();
-        assert!(Arc::try_unwrap(handle).is_ok(), "handle is not dropped");
-        assert!(keeper.find_handle(&region).await.is_none());
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_countdown_task_handle() {
-        let table_engine = Arc::new(MockTableEngine::default());
-        let table_ident = TableIdent {
-            catalog: "my_catalog".to_string(),
-            schema: "my_schema".to_string(),
-            table: "my_table".to_string(),
-            table_id: 1024,
-            engine: "mito".to_string(),
-        };
-        let finished = Arc::new(AtomicBool::new(false));
-        let finished_clone = finished.clone();
-        let handle = CountdownTaskHandle::new(
-            table_engine.clone(),
-            table_ident.clone(),
-            1,
-            |_| async move { finished_clone.store(true, Ordering::Relaxed) },
-        );
-        let tx = handle.tx.clone();
-
-        // assert countdown task is running
-        tx.send(CountdownCommand::Start(5000)).await.unwrap();
-        assert!(!finished.load(Ordering::Relaxed));
-
-        drop(handle);
-        tokio::time::sleep(Duration::from_secs(1)).await;
-
-        // assert countdown task is stopped
-        assert!(tx
-            .try_send(CountdownCommand::Reset(
-                Instant::now() + Duration::from_secs(10)
-            ))
-            .is_err());
-        // assert `on_task_finished` is not called (because the task is aborted by the handle's drop)
-        assert!(!finished.load(Ordering::Relaxed));
-
-        let finished = Arc::new(AtomicBool::new(false));
-        let finished_clone = finished.clone();
-        let handle = CountdownTaskHandle::new(table_engine, table_ident, 1, |_| async move {
-            finished_clone.store(true, Ordering::Relaxed)
-        });
-        handle.tx.send(CountdownCommand::Start(100)).await.unwrap();
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        // assert `on_task_finished` is called when task is finished normally
-        assert!(finished.load(Ordering::Relaxed));
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_countdown_task_run() {
-        let ctx = &EngineContext::default();
-        let catalog = "my_catalog";
-        let schema = "my_schema";
-        let table = "my_table";
-        let table_id = 1;
-        let request = CreateTableRequest {
-            id: table_id,
-            catalog_name: catalog.to_string(),
-            schema_name: schema.to_string(),
-            table_name: table.to_string(),
-            desc: None,
-            schema: RawSchema {
-                column_schemas: vec![],
-                timestamp_index: None,
-                version: 0,
-            },
-            region_numbers: vec![],
-            primary_key_indices: vec![],
-            create_if_not_exists: false,
-            table_options: TableOptions::default(),
-            engine: "mito".to_string(),
-        };
-
-        let table_engine = Arc::new(MockTableEngine::default());
-        let _ = table_engine.create_table(ctx, request).await.unwrap();
-
-        let table_ident = TableIdent {
-            catalog: catalog.to_string(),
-            schema: schema.to_string(),
-            table: table.to_string(),
-            table_id,
-            engine: "mito".to_string(),
-        };
-        let (tx, rx) = mpsc::channel(10);
-        let mut task = CountdownTask {
-            table_engine: table_engine.clone(),
-            table_ident,
-            region: 1,
-            rx,
-        };
-        let _handle = common_runtime::spawn_bg(async move {
-            task.run().await;
-        });
-
-        async fn deadline(tx: &mpsc::Sender<CountdownCommand>) -> Instant {
-            let (s, r) = oneshot::channel();
-            tx.send(CountdownCommand::Deadline(s)).await.unwrap();
-            r.await.unwrap()
-        }
-
-        // if countdown task is not started, its deadline is set to far future
-        assert!(deadline(&tx).await > Instant::now() + Duration::from_secs(86400 * 365 * 29));
-
-        // start countdown in 250ms * 4 = 1s
-        tx.send(CountdownCommand::Start(250)).await.unwrap();
-        // assert deadline is correctly set
-        assert!(deadline(&tx).await <= Instant::now() + Duration::from_secs(1));
-
-        // reset countdown in 1.5s
-        tx.send(CountdownCommand::Reset(
-            Instant::now() + Duration::from_millis(1500),
-        ))
-        .await
-        .unwrap();
-
-        // assert the table is closed after deadline is reached
-        assert!(table_engine.table_exists(ctx, table_id));
-        // spare 500ms for the task to close the table
-        tokio::time::sleep(Duration::from_millis(2000)).await;
-        assert!(!table_engine.table_exists(ctx, table_id));
+        // sleep to wait lease expired
+        tokio::time::sleep(Duration::from_millis(1000)).await;
+        assert!(alive_keeper.find_handle(region_id).await.is_none());
     }
 }

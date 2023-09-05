@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::any::Any;
 use std::assert_matches::assert_matches;
 use std::sync::Arc;
 use std::time::Duration;
@@ -20,19 +21,29 @@ use api::v1::greptime_request::Request as GrpcRequest;
 use api::v1::meta::HeartbeatResponse;
 use api::v1::query_request::Query;
 use api::v1::QueryRequest;
+use async_trait::async_trait;
 use catalog::local::MemoryCatalogManager;
 use catalog::remote::region_alive_keeper::RegionAliveKeepers;
 use catalog::CatalogManagerRef;
+use common_function::scalars::aggregate::AggregateFunctionMetaRef;
+use common_function::scalars::FunctionRef;
 use common_meta::heartbeat::handler::{
     HandlerGroupExecutor, HeartbeatResponseHandlerContext, HeartbeatResponseHandlerExecutor,
 };
 use common_meta::heartbeat::mailbox::{HeartbeatMailbox, MessageMeta};
 use common_meta::ident::TableIdent;
 use common_meta::instruction::{Instruction, InstructionReply, RegionIdent, SimpleReply};
+use common_query::prelude::ScalarUdf;
 use common_query::Output;
+use common_runtime::Runtime;
 use datatypes::prelude::ConcreteDataType;
+use query::dataframe::DataFrame;
+use query::plan::LogicalPlan;
+use query::planner::LogicalPlanner;
+use query::query_engine::DescribeResult;
+use query::QueryEngine;
 use servers::query_handler::grpc::GrpcQueryHandler;
-use session::context::QueryContext;
+use session::context::{QueryContext, QueryContextRef};
 use table::engine::manager::TableEngineManagerRef;
 use table::TableRef;
 use test_util::MockInstance;
@@ -42,6 +53,7 @@ use tokio::time::Instant;
 use crate::heartbeat::handler::close_region::CloseRegionHandler;
 use crate::heartbeat::handler::open_region::OpenRegionHandler;
 use crate::instance::Instance;
+use crate::region_server::RegionServer;
 
 pub(crate) mod test_util;
 
@@ -345,4 +357,51 @@ async fn assert_test_table_found(instance: &Instance) {
     let output = instance.do_query(query, QueryContext::arc()).await.unwrap();
 
     assert!(matches!(output, Output::AffectedRows(2)));
+}
+
+pub struct MockQueryEngine;
+
+#[async_trait]
+impl QueryEngine for MockQueryEngine {
+    fn as_any(&self) -> &dyn Any {
+        self as _
+    }
+
+    fn planner(&self) -> Arc<dyn LogicalPlanner> {
+        unimplemented!()
+    }
+
+    fn name(&self) -> &str {
+        "MockQueryEngine"
+    }
+
+    async fn describe(&self, _plan: LogicalPlan) -> query::error::Result<DescribeResult> {
+        unimplemented!()
+    }
+
+    async fn execute(
+        &self,
+        _plan: LogicalPlan,
+        _query_ctx: QueryContextRef,
+    ) -> query::error::Result<Output> {
+        unimplemented!()
+    }
+
+    fn register_udf(&self, _udf: ScalarUdf) {}
+
+    fn register_aggregate_function(&self, _func: AggregateFunctionMetaRef) {}
+
+    fn register_function(&self, _func: FunctionRef) {}
+
+    fn read_table(&self, _table: TableRef) -> query::error::Result<DataFrame> {
+        unimplemented!()
+    }
+}
+
+/// Create a region server without any engine
+pub fn mock_region_server() -> RegionServer {
+    RegionServer::new(
+        Arc::new(MockQueryEngine),
+        Arc::new(Runtime::builder().build().unwrap()),
+    )
 }
