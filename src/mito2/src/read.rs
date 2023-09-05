@@ -221,16 +221,22 @@ impl Batch {
                 reason: "batches have different primary key",
             }
         );
-        // TODO(yingwen): Debug checks field schemas.
-        ensure!(
-            batches
-                .iter()
-                .skip(1)
-                .all(|b| b.fields().len() == first.fields().len()),
-            InvalidBatchSnafu {
-                reason: "batches have different field num",
+        for b in batches.iter().skip(1) {
+            ensure!(
+                b.fields.len() == first.fields.len(),
+                InvalidBatchSnafu {
+                    reason: "batches have different field num",
+                }
+            );
+            for (l, r) in b.fields.iter().zip(&first.fields) {
+                ensure!(
+                    l.column_id == r.column_id,
+                    InvalidBatchSnafu {
+                        reason: "batches have different fields",
+                    }
+                );
             }
-        );
+        }
 
         // We take the primary key from the first batch.
         let mut builder = BatchBuilder::new(primary_key);
@@ -758,6 +764,37 @@ mod tests {
         let batch1 = new_batch(&[1], &[1], &[OpType::Put], &[1]);
         let mut batch2 = new_batch(&[2], &[2], &[OpType::Put], &[2]);
         batch2.primary_key = b"hello".to_vec();
+        let err = Batch::concat(vec![batch1, batch2]).unwrap_err();
+        assert!(
+            matches!(err, Error::InvalidBatch { .. }),
+            "unexpected err: {err}"
+        );
+    }
+
+    #[test]
+    fn test_concat_different_fields() {
+        let batch1 = new_batch(&[1], &[1], &[OpType::Put], &[1]);
+        let fields = vec![
+            batch1.fields()[0].clone(),
+            BatchColumn {
+                column_id: 2,
+                data: Arc::new(UInt64Vector::from_slice(&[2])),
+            },
+        ];
+        // Batch 2 has more fields.
+        let batch2 = batch1.clone().with_fields(fields).unwrap();
+        let err = Batch::concat(vec![batch1.clone(), batch2]).unwrap_err();
+        assert!(
+            matches!(err, Error::InvalidBatch { .. }),
+            "unexpected err: {err}"
+        );
+
+        // Batch 2 has different field.
+        let fields = vec![BatchColumn {
+            column_id: 2,
+            data: Arc::new(UInt64Vector::from_slice(&[2])),
+        }];
+        let batch2 = batch1.clone().with_fields(fields).unwrap();
         let err = Batch::concat(vec![batch1, batch2]).unwrap_err();
         assert!(
             matches!(err, Error::InvalidBatch { .. }),
