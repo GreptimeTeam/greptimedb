@@ -20,7 +20,7 @@ use api::v1::{ColumnSchema as GrpcColumnSchema, Row, Rows, Value as GrpcValue};
 use catalog::CatalogManager;
 use datatypes::schema::{ColumnSchema, SchemaRef};
 use session::context::QueryContext;
-use snafu::{OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use sql::statements;
 use sql::statements::insert::Insert;
 use sqlparser::ast::{ObjectName, Value as SqlValue};
@@ -57,8 +57,15 @@ impl<'a> StatementToRegion<'a> {
         let column_names = column_names(stmt, &table_schema);
         let column_count = column_names.len();
 
-        let sql_values = stmt.values_body().context(MissingInsertBodySnafu)?;
-        let row_count = sql_values.len();
+        let sql_rows = stmt.values_body().context(MissingInsertBodySnafu)?;
+        let row_count = sql_rows.len();
+
+        ensure!(
+            sql_rows.iter().all(|row| row.len() == column_count),
+            InvalidSqlSnafu {
+                err_msg: format!("The column count of the row is not the same as columns.")
+            }
+        );
 
         let mut schema = Vec::with_capacity(column_count);
         let mut rows = vec![
@@ -85,9 +92,9 @@ impl<'a> StatementToRegion<'a> {
             };
             schema.push(grpc_column_schema);
 
-            for sql_value in sql_values.iter().map(|row| &row[i]) {
-                let value = sql_value_to_grpc_value(column_schema, sql_value)?;
-                rows[i].values.push(value);
+            for (sql_row, grpc_row) in sql_rows.iter().zip(rows.iter_mut()) {
+                let value = sql_value_to_grpc_value(column_schema, &sql_row[i])?;
+                grpc_row.values.push(value);
             }
         }
 
