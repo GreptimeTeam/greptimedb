@@ -161,8 +161,21 @@ impl ColumnSchema {
     ///
     /// If the column is `NOT NULL` but doesn't has `DEFAULT` value supplied, returns `Ok(None)`.
     pub fn create_default(&self) -> Result<Option<Value>> {
-        self.create_default_vector(1)
-            .map(|vec_ref_option| vec_ref_option.map(|vec_ref| vec_ref.get(0)))
+        match &self.default_constraint {
+            Some(c) => c
+                .create_default(&self.data_type, self.is_nullable)
+                .map(Some),
+            None => {
+                if self.is_nullable {
+                    // No default constraint, use null as default value.
+                    ColumnDefaultConstraint::null_value()
+                        .create_default(&self.data_type, self.is_nullable)
+                        .map(Some)
+                } else {
+                    Ok(None)
+                }
+            }
+        }
     }
 }
 
