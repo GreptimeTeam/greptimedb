@@ -36,10 +36,17 @@ use crate::region_server::RegionServer;
 
 const MAX_CLOSE_RETRY_TIMES: usize = 10;
 
-/// [RegionAliveKeepers] manages all [RegionAliveKeeper] in a scope of tables.
-pub struct RegionAliveKeepers {
+/// [RegionAliveKeeper] manages all [CountdownTaskHandle]s.
+///
+/// [RegionAliveKeeper] starts a [CountdownTask] for each region. When deadline is reached,
+/// the region will be closed.
+/// The deadline is controlled by Metasrv. It works like "lease" for regions: a Datanode submits its
+/// opened regions to Metasrv, in heartbeats. If Metasrv decides some region could be resided in this
+/// Datanode, it will "extend" the region's "lease", with a deadline for [RegionAliveKeeper] to
+/// countdown.
+pub struct RegionAliveKeeper {
     region_server: RegionServer,
-    keepers: Arc<Mutex<HashMap<RegionId, Arc<RegionAliveKeeper>>>>,
+    tasks: Arc<Mutex<HashMap<RegionId, Arc<CountdownTaskHandle>>>>,
     heartbeat_interval_millis: u64,
     started: AtomicBool,
 
@@ -50,133 +57,29 @@ pub struct RegionAliveKeepers {
     epoch: Instant,
 }
 
-impl RegionAliveKeepers {
+impl RegionAliveKeeper {
     pub fn new(region_server: RegionServer, heartbeat_interval_millis: u64) -> Self {
         Self {
             region_server,
-            keepers: Arc::new(Mutex::new(HashMap::new())),
+            tasks: Arc::new(Mutex::new(HashMap::new())),
             heartbeat_interval_millis,
             started: AtomicBool::new(false),
             epoch: Instant::now(),
         }
     }
 
-    pub async fn find_keeper(&self, region_id: RegionId) -> Option<Arc<RegionAliveKeeper>> {
-        self.keepers.lock().await.get(&region_id).cloned()
+    async fn find_handle(&self, region_id: RegionId) -> Option<Arc<CountdownTaskHandle>> {
+        self.tasks.lock().await.get(&region_id).cloned()
     }
 
     pub async fn register_region(&self, region_id: RegionId) {
-        match self.find_keeper(region_id).await {
-            Some(keeper) => keeper.register_region(region_id).await,
-            None => {
-                let keeper = RegionAliveKeeper::new(
-                    self.region_server.clone(),
-                    self.heartbeat_interval_millis,
-                );
-                keeper.start().await;
-            }
-        }
-    }
-
-    pub async fn deregister_region(&self, region_id: RegionId) {
-        let Some(keeper) = self.find_keeper(region_id).await else {
-            // Alive keeper could be affected by lagging msg, just warn and ignore.
-            warn!("Alive keeper for region {region_id} is not found!");
-            return;
-        };
-        let _ = keeper.deregister_region(region_id).await;
-    }
-
-    pub async fn start(&self) {
-        let keepers = self.keepers.lock().await;
-        for keeper in keepers.values() {
-            keeper.start().await;
-        }
-        self.started.store(true, Ordering::Relaxed);
-
-        info!(
-            "RegionAliveKeepers for tables {:?} are started!",
-            keepers.keys().map(|x| x.to_string()).collect::<Vec<_>>(),
-        );
-    }
-
-    pub fn epoch(&self) -> Instant {
-        self.epoch
-    }
-}
-
-#[async_trait]
-impl HeartbeatResponseHandler for RegionAliveKeepers {
-    fn is_acceptable(&self, ctx: &HeartbeatResponseHandlerContext) -> bool {
-        ctx.response.region_lease.is_some()
-    }
-
-    async fn handle(
-        &self,
-        ctx: &mut HeartbeatResponseHandlerContext,
-    ) -> common_meta::error::Result<HandleControl> {
-        let region_lease = ctx
-            .response
-            .region_lease
-            .as_ref()
-            .context(InvalidProtoMsgSnafu {
-                err_msg: "'region_lease' is missing in heartbeat response",
-            })?;
-        let start_instant = self.epoch + Duration::from_millis(region_lease.duration_since_epoch);
-        let deadline = start_instant + Duration::from_secs(region_lease.lease_seconds);
-        for raw_region_id in &region_lease.region_ids {
-            let region_id = RegionId::from_u64(*raw_region_id);
-            let Some(keeper) = self.keepers.lock().await.get(&region_id).cloned() else {
-                // Alive keeper could be affected by lagging msg, just warn and ignore.
-                warn!("Alive keeper for region {region_id} is not found!");
-                continue;
-            };
-
-            keeper.keep_lived(vec![region_id], deadline).await;
-        }
-        Ok(HandleControl::Continue)
-    }
-}
-
-/// [RegionAliveKeeper] starts a countdown for each region in a table. When deadline is reached,
-/// the region will be closed.
-/// The deadline is controlled by Metasrv. It works like "lease" for regions: a Datanode submits its
-/// opened regions to Metasrv, in heartbeats. If Metasrv decides some region could be resided in this
-/// Datanode, it will "extend" the region's "lease", with a deadline for [RegionAliveKeeper] to
-/// countdown.
-pub struct RegionAliveKeeper {
-    region_server: RegionServer,
-    countdown_task_handles: Arc<Mutex<HashMap<RegionId, Arc<CountdownTaskHandle>>>>,
-    heartbeat_interval_millis: u64,
-    started: AtomicBool,
-}
-
-impl RegionAliveKeeper {
-    fn new(region_server: RegionServer, heartbeat_interval_millis: u64) -> Self {
-        Self {
-            region_server,
-            countdown_task_handles: Arc::new(Mutex::new(HashMap::new())),
-            heartbeat_interval_millis,
-            started: AtomicBool::new(false),
-        }
-    }
-
-    async fn find_handle(&self, region_id: RegionId) -> Option<Arc<CountdownTaskHandle>> {
-        self.countdown_task_handles
-            .lock()
-            .await
-            .get(&region_id)
-            .cloned()
-    }
-
-    async fn register_region(&self, region_id: RegionId) {
         if self.find_handle(region_id).await.is_some() {
             return;
         }
 
-        let countdown_task_handles = Arc::downgrade(&self.countdown_task_handles);
+        let tasks = Arc::downgrade(&self.tasks);
         let on_task_finished = async move {
-            if let Some(x) = countdown_task_handles.upgrade() {
+            if let Some(x) = tasks.upgrade() {
                 let _ = x.lock().await.remove(&region_id);
             } // Else the countdown task handles map could be dropped because the keeper is dropped.
         };
@@ -191,7 +94,7 @@ impl RegionAliveKeeper {
             },
         ));
 
-        let mut handles = self.countdown_task_handles.lock().await;
+        let mut handles = self.tasks.lock().await;
         let _ = handles.insert(region_id, handle.clone());
 
         if self.started.load(Ordering::Relaxed) {
@@ -205,28 +108,10 @@ impl RegionAliveKeeper {
         }
     }
 
-    async fn deregister_region(&self, region_id: RegionId) -> Option<Arc<CountdownTaskHandle>> {
-        self.countdown_task_handles
-            .lock()
-            .await
-            .remove(&region_id)
-            .map(|x| {
-                info!("Deregister alive countdown for region {region_id}",);
-                x
-            })
-    }
-
-    async fn start(&self) {
-        let handles = self.countdown_task_handles.lock().await;
-        for handle in handles.values() {
-            handle.start(self.heartbeat_interval_millis).await;
-        }
-
-        self.started.store(true, Ordering::Relaxed);
-        info!(
-            "Region alive countdowns for regions {:?} are started!",
-            handles.keys().copied().collect::<Vec<_>>(),
-        );
+    pub async fn deregister_region(&self, region_id: RegionId) {
+        self.tasks.lock().await.remove(&region_id).map(|_| {
+            info!("Deregister alive countdown for region {region_id}");
+        });
     }
 
     async fn keep_lived(&self, designated_regions: Vec<RegionId>, deadline: Instant) {
@@ -247,6 +132,52 @@ impl RegionAliveKeeper {
             }
         }
         deadline
+    }
+
+    pub async fn start(&self) {
+        let tasks = self.tasks.lock().await;
+        for task in tasks.values() {
+            task.start(self.heartbeat_interval_millis).await;
+        }
+        self.started.store(true, Ordering::Relaxed);
+
+        info!(
+            "RegionAliveKeeper is started with region {:?}",
+            tasks.keys().map(|x| x.to_string()).collect::<Vec<_>>(),
+        );
+    }
+
+    pub fn epoch(&self) -> Instant {
+        self.epoch
+    }
+}
+
+#[async_trait]
+impl HeartbeatResponseHandler for RegionAliveKeeper {
+    fn is_acceptable(&self, ctx: &HeartbeatResponseHandlerContext) -> bool {
+        ctx.response.region_lease.is_some()
+    }
+
+    async fn handle(
+        &self,
+        ctx: &mut HeartbeatResponseHandlerContext,
+    ) -> common_meta::error::Result<HandleControl> {
+        let region_lease = ctx
+            .response
+            .region_lease
+            .as_ref()
+            .context(InvalidProtoMsgSnafu {
+                err_msg: "'region_lease' is missing in heartbeat response",
+            })?;
+        let start_instant = self.epoch + Duration::from_millis(region_lease.duration_since_epoch);
+        let deadline = start_instant + Duration::from_secs(region_lease.lease_seconds);
+        let region_ids = region_lease
+            .region_ids
+            .iter()
+            .map(|id| RegionId::from_u64(*id))
+            .collect();
+        self.keep_lived(region_ids, deadline).await;
+        Ok(HandleControl::Continue)
     }
 }
 
@@ -437,10 +368,10 @@ mod test {
     use super::*;
     use crate::remote::mock::MockTableEngine;
 
-    async fn prepare_keepers() -> (TableIdent, RegionAliveKeepers) {
+    async fn prepare_keepers() -> (TableIdent, RegionAliveKeeper) {
         let table_engine = Arc::new(MockTableEngine::default());
         let table_engine_manager = Arc::new(MemoryTableEngineManager::new(table_engine));
-        let keepers = RegionAliveKeepers::new(table_engine_manager, 5000);
+        let keepers = RegionAliveKeeper::new(table_engine_manager, 5000);
 
         let catalog = "my_catalog";
         let schema = "my_schema";
@@ -517,7 +448,7 @@ mod test {
         tokio::time::sleep(Duration::from_secs(1)).await;
 
         async fn test(
-            keeper: &Arc<RegionAliveKeeper>,
+            keeper: &Arc<RegionAliveKeeperDeprecated>,
             region_number: RegionNumber,
             startup_protection_until: Instant,
             keep_alive_until: Instant,
@@ -610,7 +541,8 @@ mod test {
             engine: "mito".to_string(),
         };
         let catalog_manager = MemoryCatalogManager::with_default_setup();
-        let keeper = RegionAliveKeeper::new(table_engine, catalog_manager, table_ident, 1000);
+        let keeper =
+            RegionAliveKeeperDeprecated::new(table_engine, catalog_manager, table_ident, 1000);
 
         let region = 1;
         assert!(keeper.find_handle(&region).await.is_none());
