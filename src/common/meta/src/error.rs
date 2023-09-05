@@ -26,12 +26,6 @@ use crate::peer::Peer;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
-    #[snafu(display("Failed to convert grpc expr, source: {}", source))]
-    ConvertGrpcExpr {
-        location: Location,
-        source: common_grpc_expr::error::Error,
-    },
-
     #[snafu(display("Table info not found: {}", table_name))]
     TableInfoNotFound {
         table_name: String,
@@ -271,7 +265,6 @@ impl ErrorExt for Error {
             | MoveRegion { .. }
             | Unexpected { .. }
             | External { .. }
-            | ConvertGrpcExpr { .. }
             | TableInfoNotFound { .. }
             | InvalidHeartbeatResponse { .. } => StatusCode::Unexpected,
 

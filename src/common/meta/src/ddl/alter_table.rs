@@ -17,7 +17,7 @@ use std::vec;
 use api::v1::alter_expr::Kind;
 use api::v1::region::{
     alter_request, region_request, AddColumn, AddColumns, AlterRequest, DropColumn, DropColumns,
-    RegionColumnDef,
+    RegionColumnDef, RegionRequest,
 };
 use api::v1::{AlterExpr, RenameTable};
 use async_trait::async_trait;
@@ -212,10 +212,14 @@ impl AlterTableProcedure {
                 for region in regions {
                     let region_id = RegionId::new(table_id, region);
                     let request = self.create_alter_region_request(region_id)?;
+                    let request = RegionRequest {
+                        header: None,
+                        body: Some(region_request::Body::Alter(request)),
+                    };
                     debug!("Submitting {request:?} to {datanode}");
 
                     let requester = datanode_manager.datanode(&datanode).await;
-                    if let Err(e) = requester.handle(region_request::Body::Alter(request)).await {
+                    if let Err(e) = requester.handle(request).await {
                         return Err(handle_operate_region_error(datanode)(e));
                     }
                 }

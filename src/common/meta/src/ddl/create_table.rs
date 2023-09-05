@@ -13,7 +13,9 @@
 // limitations under the License.
 
 use api::v1::region::region_request::Body as PbRegionRequest;
-use api::v1::region::{CreateRequest as PbCreateRegionRequest, RegionColumnDef, RegionRequest, RegionRequestHeader};
+use api::v1::region::{
+    CreateRequest as PbCreateRegionRequest, RegionColumnDef, RegionRequest, RegionRequestHeader,
+};
 use api::v1::{ColumnDef, SemanticType};
 use async_trait::async_trait;
 use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu};
@@ -40,7 +42,6 @@ pub struct CreateTableProcedure {
     pub creator: TableCreator,
 }
 
-#[allow(dead_code)]
 impl CreateTableProcedure {
     pub const TYPE_NAME: &'static str = "metasrv-procedure::CreateTable";
 
