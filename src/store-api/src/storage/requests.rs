@@ -14,12 +14,19 @@
 
 use std::collections::{HashMap, HashSet};
 
+use api::helper::ColumnDataTypeWrapper;
+use api::v1::region::{alter_request, AddColumn as PbAddColumn};
+use api::v1::SemanticType;
 use common_error::ext::ErrorExt;
 use common_query::logical_plan::Expr;
 use common_recordbatch::OrderOption;
 use datatypes::vectors::VectorRef;
+use snafu::{OptionExt, ResultExt};
 
-use crate::storage::{ColumnDescriptor, RegionDescriptor, SequenceNumber};
+use crate::error::{
+    BuildColumnDescriptorSnafu, Error, InvalidDefaultConstraintSnafu, InvalidRawRegionRequestSnafu,
+};
+use crate::storage::{ColumnDescriptor, ColumnDescriptorBuilder, RegionDescriptor, SequenceNumber};
 
 /// Write request holds a collection of updates to apply to a region.
 ///
@@ -129,6 +136,83 @@ impl AlterOperation {
     }
 }
 
+impl TryFrom<PbAddColumn> for AddColumn {
+    type Error = Error;
+
+    fn try_from(add_column: PbAddColumn) -> Result<Self, Self::Error> {
+        let column_def = add_column
+            .column_def
+            .context(InvalidRawRegionRequestSnafu {
+                err: "'column_def' is absent",
+            })?;
+        let column_id = column_def.column_id;
+
+        let column_def = column_def
+            .column_def
+            .context(InvalidRawRegionRequestSnafu {
+                err: "'column_def' is absent",
+            })?;
+
+        let data_type = column_def.data_type;
+        let data_type = ColumnDataTypeWrapper::try_new(data_type)
+            .map_err(|_| {
+                InvalidRawRegionRequestSnafu {
+                    err: format!("unknown raw column datatype: {data_type}"),
+                }
+                .build()
+            })?
+            .into();
+
+        let constraint = column_def.default_constraint.as_slice();
+        let constraint = if constraint.is_empty() {
+            None
+        } else {
+            Some(
+                constraint
+                    .try_into()
+                    .context(InvalidDefaultConstraintSnafu {
+                        constraint: String::from_utf8_lossy(constraint),
+                    })?,
+            )
+        };
+
+        let desc = ColumnDescriptorBuilder::new(column_id, column_def.name.clone(), data_type)
+            .is_nullable(column_def.is_nullable)
+            .is_time_index(column_def.semantic_type() == SemanticType::Timestamp)
+            .default_constraint(constraint)
+            .build()
+            .context(BuildColumnDescriptorSnafu)?;
+
+        Ok(AddColumn {
+            desc,
+            is_key: column_def.semantic_type() == SemanticType::Tag,
+            // TODO(ruihang & yingwen): support alter column's "location"
+        })
+    }
+}
+
+impl TryFrom<alter_request::Kind> for AlterOperation {
+    type Error = Error;
+
+    fn try_from(kind: alter_request::Kind) -> Result<Self, Self::Error> {
+        let operation = match kind {
+            alter_request::Kind::AddColumns(x) => {
+                let columns = x
+                    .add_columns
+                    .into_iter()
+                    .map(|x| x.try_into())
+                    .collect::<Result<Vec<_>, Self::Error>>()?;
+                AlterOperation::AddColumns { columns }
+            }
+            alter_request::Kind::DropColumns(x) => {
+                let names = x.drop_columns.into_iter().map(|x| x.name).collect();
+                AlterOperation::DropColumns { names }
+            }
+        };
+        Ok(operation)
+    }
+}
+
 /// Alter region request.
 #[derive(Debug)]
 pub struct AlterRequest {
@@ -140,7 +224,12 @@ pub struct AlterRequest {
 
 #[cfg(test)]
 mod tests {
+    use api::v1::region::{
+        AddColumn as PbAddColumn, AddColumns, DropColumn, DropColumns, RegionColumnDef,
+    };
+    use api::v1::{ColumnDataType, ColumnDef};
     use datatypes::prelude::*;
+    use datatypes::schema::ColumnDefaultConstraint;
 
     use super::*;
     use crate::storage::{
@@ -213,5 +302,83 @@ mod tests {
         op.apply(&mut desc);
         assert_eq!(1, desc.row_key.columns.len());
         assert_eq!(1, desc.default_cf.columns.len());
+    }
+
+    #[test]
+    fn test_try_from_raw_alter_kind() {
+        let kind = alter_request::Kind::AddColumns(AddColumns {
+            add_columns: vec![
+                PbAddColumn {
+                    column_def: Some(RegionColumnDef {
+                        column_def: Some(ColumnDef {
+                            name: "my_tag".to_string(),
+                            data_type: ColumnDataType::Int32 as _,
+                            is_nullable: false,
+                            default_constraint: vec![],
+                            semantic_type: SemanticType::Tag as _,
+                        }),
+                        column_id: 1,
+                    }),
+                    location: None,
+                },
+                PbAddColumn {
+                    column_def: Some(RegionColumnDef {
+                        column_def: Some(ColumnDef {
+                            name: "my_field".to_string(),
+                            data_type: ColumnDataType::String as _,
+                            is_nullable: true,
+                            default_constraint: ColumnDefaultConstraint::Value("hello".into())
+                                .try_into()
+                                .unwrap(),
+                            semantic_type: SemanticType::Field as _,
+                        }),
+                        column_id: 2,
+                    }),
+                    location: None,
+                },
+            ],
+        });
+
+        let AlterOperation::AddColumns { columns } = AlterOperation::try_from(kind).unwrap() else {
+            unreachable!()
+        };
+        assert_eq!(2, columns.len());
+
+        let desc = &columns[0].desc;
+        assert_eq!(desc.id, 1);
+        assert_eq!(&desc.name, "my_tag");
+        assert_eq!(desc.data_type, ConcreteDataType::int32_datatype());
+        assert!(!desc.is_nullable());
+        assert!(!desc.is_time_index());
+        assert_eq!(desc.default_constraint(), None);
+        assert!(columns[0].is_key);
+
+        let desc = &columns[1].desc;
+        assert_eq!(desc.id, 2);
+        assert_eq!(&desc.name, "my_field");
+        assert_eq!(desc.data_type, ConcreteDataType::string_datatype());
+        assert!(desc.is_nullable());
+        assert!(!desc.is_time_index());
+        assert_eq!(
+            desc.default_constraint(),
+            Some(&ColumnDefaultConstraint::Value("hello".into()))
+        );
+        assert!(!columns[1].is_key);
+
+        let kind = alter_request::Kind::DropColumns(DropColumns {
+            drop_columns: vec![
+                DropColumn {
+                    name: "c1".to_string(),
+                },
+                DropColumn {
+                    name: "c2".to_string(),
+                },
+            ],
+        });
+
+        let AlterOperation::DropColumns { names } = AlterOperation::try_from(kind).unwrap() else {
+            unreachable!()
+        };
+        assert_eq!(names, vec!["c1", "c2"]);
     }
 }

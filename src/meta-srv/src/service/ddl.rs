@@ -22,7 +22,7 @@ use snafu::{OptionExt, ResultExt};
 use tonic::{Request, Response};
 
 use super::GrpcResult;
-use crate::error::{self};
+use crate::error;
 use crate::metasrv::MetaSrv;
 
 #[async_trait::async_trait]

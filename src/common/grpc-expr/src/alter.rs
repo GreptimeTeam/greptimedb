@@ -12,10 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::add_column::location::LocationType;
-use api::v1::add_column::Location;
+use api::v1::add_column_location::LocationType;
 use api::v1::alter_expr::Kind;
-use api::v1::{column_def, AlterExpr, CreateTableExpr, DropColumns, RenameTable};
+use api::v1::{
+    column_def, AddColumnLocation as Location, AlterExpr, CreateTableExpr, DropColumns,
+    RenameTable, SemanticType,
+};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::AddColumnLocation;
 use datatypes::schema::{ColumnSchema, RawSchema};
@@ -55,7 +57,7 @@ pub fn alter_expr_to_request(table_id: TableId, expr: AlterExpr) -> Result<Alter
                     )?;
                     Ok(AddColumnRequest {
                         column_schema: schema,
-                        is_key: ac.is_key,
+                        is_key: column_def.semantic_type == SemanticType::Tag as i32,
                         location: parse_location(ac.location)?,
                     })
                 })
@@ -79,7 +81,7 @@ pub fn alter_expr_to_request(table_id: TableId, expr: AlterExpr) -> Result<Alter
         table_name: expr.table_name,
         table_id,
         alter_kind,
-        table_version: Some(expr.table_version),
+        table_version: None,
     };
     Ok(request)
 }
@@ -197,8 +199,7 @@ fn parse_location(location: Option<Location>) -> Result<Option<AddColumnLocation
 
 #[cfg(test)]
 mod tests {
-    use api::v1::add_column::location::LocationType;
-    use api::v1::{AddColumn, AddColumns, ColumnDataType, ColumnDef, DropColumn};
+    use api::v1::{AddColumn, AddColumns, ColumnDataType, ColumnDef, DropColumn, SemanticType};
     use datatypes::prelude::ConcreteDataType;
 
     use super::*;
@@ -214,15 +215,14 @@ mod tests {
                 add_columns: vec![AddColumn {
                     column_def: Some(ColumnDef {
                         name: "mem_usage".to_string(),
-                        datatype: ColumnDataType::Float64 as i32,
+                        data_type: ColumnDataType::Float64 as i32,
                         is_nullable: false,
                         default_constraint: vec![],
+                        semantic_type: SemanticType::Field as i32,
                     }),
-                    is_key: false,
                     location: None,
                 }],
             })),
-            ..Default::default()
         };
 
         let alter_request = alter_expr_to_request(1, expr).unwrap();
@@ -255,11 +255,11 @@ mod tests {
                     AddColumn {
                         column_def: Some(ColumnDef {
                             name: "mem_usage".to_string(),
-                            datatype: ColumnDataType::Float64 as i32,
+                            data_type: ColumnDataType::Float64 as i32,
                             is_nullable: false,
                             default_constraint: vec![],
+                            semantic_type: SemanticType::Field as i32,
                         }),
-                        is_key: false,
                         location: Some(Location {
                             location_type: LocationType::First.into(),
                             after_column_name: "".to_string(),
@@ -268,11 +268,11 @@ mod tests {
                     AddColumn {
                         column_def: Some(ColumnDef {
                             name: "cpu_usage".to_string(),
-                            datatype: ColumnDataType::Float64 as i32,
+                            data_type: ColumnDataType::Float64 as i32,
                             is_nullable: false,
                             default_constraint: vec![],
+                            semantic_type: SemanticType::Field as i32,
                         }),
-                        is_key: false,
                         location: Some(Location {
                             location_type: LocationType::After.into(),
                             after_column_name: "ts".to_string(),
@@ -280,7 +280,6 @@ mod tests {
                     },
                 ],
             })),
-            ..Default::default()
         };
 
         let alter_request = alter_expr_to_request(1, expr).unwrap();
@@ -329,7 +328,6 @@ mod tests {
                     name: "mem_usage".to_string(),
                 }],
             })),
-            ..Default::default()
         };
 
         let alter_request = alter_expr_to_request(1, expr).unwrap();
