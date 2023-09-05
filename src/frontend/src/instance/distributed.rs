@@ -606,25 +606,50 @@ impl RegionRequestHandler for DistRegionRequestHandler {
     async fn handle(
         &self,
         request: region_request::Body,
-        _ctx: QueryContextRef,
+        ctx: QueryContextRef,
     ) -> Result<RegionResponse> {
         match request {
             region_request::Body::Inserts(inserts) => {
-                let inserter = DistInserter::new(&self.catalog_manager);
+                let inserter =
+                    DistInserter::new(&self.catalog_manager).with_trace_id(ctx.trace_id());
                 let affected_rows = inserter.insert_region_requests(inserts).await? as _;
                 Ok(RegionResponse {
                     header: Some(Default::default()),
                     affected_rows,
                 })
             }
-            region_request::Body::Deletes(_)
-            | region_request::Body::Create(_)
-            | region_request::Body::Drop(_)
-            | region_request::Body::Open(_)
-            | region_request::Body::Close(_)
-            | region_request::Body::Alter(_)
-            | region_request::Body::Flush(_)
-            | region_request::Body::Compact(_) => todo!(),
+            region_request::Body::Deletes(_) => NotSupportedSnafu {
+                feat: "region deletes",
+            }
+            .fail(),
+            region_request::Body::Create(_) => NotSupportedSnafu {
+                feat: "region create",
+            }
+            .fail(),
+            region_request::Body::Drop(_) => NotSupportedSnafu {
+                feat: "region drop",
+            }
+            .fail(),
+            region_request::Body::Open(_) => NotSupportedSnafu {
+                feat: "region open",
+            }
+            .fail(),
+            region_request::Body::Close(_) => NotSupportedSnafu {
+                feat: "region close",
+            }
+            .fail(),
+            region_request::Body::Alter(_) => NotSupportedSnafu {
+                feat: "region alter",
+            }
+            .fail(),
+            region_request::Body::Flush(_) => NotSupportedSnafu {
+                feat: "region flush",
+            }
+            .fail(),
+            region_request::Body::Compact(_) => NotSupportedSnafu {
+                feat: "region compact",
+            }
+            .fail(),
         }
     }
 }

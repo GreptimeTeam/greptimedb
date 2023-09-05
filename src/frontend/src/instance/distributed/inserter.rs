@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 
-use api::v1::region::{region_request, InsertRequests};
+use api::v1::region::{region_request, InsertRequests, RegionRequest, RegionRequestHeader};
 use catalog::CatalogManager;
 use common_meta::datanode_manager::DatanodeManager;
 use common_meta::peer::Peer;
@@ -31,27 +31,44 @@ use crate::error::{
 };
 use crate::inserter::Inserter;
 
-/// A distributed inserter. It ingests GRPC [InsertRequests].
+/// A distributed inserter. It ingests gRPC [InsertRequests].
 ///
 /// Table data partitioning and Datanode requests batching are handled inside.
 pub struct DistInserter<'a> {
     catalog_manager: &'a FrontendCatalogManager,
+    trace_id: Option<u64>,
 }
 
 impl<'a> DistInserter<'a> {
     pub fn new(catalog_manager: &'a FrontendCatalogManager) -> Self {
-        Self { catalog_manager }
+        Self {
+            catalog_manager,
+            trace_id: None,
+        }
+    }
+
+    pub fn with_trace_id(mut self, trace_id: u64) -> Self {
+        self.trace_id = Some(trace_id);
+        self
     }
 
     pub(crate) async fn insert_region_requests(&self, requests: InsertRequests) -> Result<u64> {
         let requests = self.split(requests).await?;
+        let trace_id = self.trace_id.unwrap_or_default();
         let results = future::try_join_all(requests.into_iter().map(|(peer, inserts)| {
             let datanode_clients = self.catalog_manager.datanode_clients();
             common_runtime::spawn_write(async move {
+                let request = RegionRequest {
+                    header: Some(RegionRequestHeader {
+                        trace_id,
+                        span_id: 0,
+                    }),
+                    body: Some(region_request::Body::Inserts(inserts)),
+                };
                 datanode_clients
                     .datanode(&peer)
                     .await
-                    .handle(region_request::Body::Inserts(inserts))
+                    .handle(request)
                     .await
                     .context(RequestInsertsSnafu)
             })
@@ -86,7 +103,7 @@ impl<'a> DistInserter<'a> {
         self.insert_region_requests(request).await
     }
 
-    /// Splits GRPC [InsertRequests] into multiple GRPC [InsertRequests]s, each of which
+    /// Splits gRPC [InsertRequests] into multiple gRPC [InsertRequests]s, each of which
     /// is grouped by the peer of Datanode, so we can batch them together when invoking gRPC write
     /// method in Datanode.
     async fn split(&self, requests: InsertRequests) -> Result<HashMap<Peer, InsertRequests>> {

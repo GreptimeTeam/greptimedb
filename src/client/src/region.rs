@@ -23,19 +23,17 @@ use common_telemetry::timer;
 use snafu::{location, Location, OptionExt};
 
 use crate::error::Error::FlightGet;
-use crate::error::{IllegalDatabaseResponseSnafu, Result, ServerSnafu};
+use crate::error::{IllegalDatabaseResponseSnafu, MissingFieldSnafu, Result, ServerSnafu};
 use crate::{metrics, Client};
 
 #[derive(Debug)]
 pub struct RegionRequester {
-    trace_id: u64,
-    span_id: u64,
     client: Client,
 }
 
 #[async_trait]
 impl Datanode for RegionRequester {
-    async fn handle(&self, request: region_request::Body) -> MetaResult<AffectedRows> {
+    async fn handle(&self, request: RegionRequest) -> MetaResult<AffectedRows> {
         self.handle_inner(request).await.map_err(|err| {
             if matches!(err, FlightGet { .. }) {
                 meta_error::Error::RetryLater {
@@ -53,24 +51,16 @@ impl Datanode for RegionRequester {
 
 impl RegionRequester {
     pub fn new(client: Client) -> Self {
-        // TODO(LFC): Pass in trace_id and span_id from some context when we have it.
-        Self {
-            trace_id: 0,
-            span_id: 0,
-            client,
-        }
+        Self { client }
     }
 
-    async fn handle_inner(&self, request: region_request::Body) -> Result<AffectedRows> {
-        let request_type = request.as_ref().to_string();
-
-        let request = RegionRequest {
-            header: Some(RegionRequestHeader {
-                trace_id: self.trace_id,
-                span_id: self.span_id,
-            }),
-            body: Some(request),
-        };
+    async fn handle_inner(&self, request: RegionRequest) -> Result<AffectedRows> {
+        let request_type = request
+            .body
+            .as_ref()
+            .with_context(|| MissingFieldSnafu { field: "body" })?
+            .as_ref()
+            .to_string();
 
         let _timer = timer!(
             metrics::METRIC_REGION_REQUEST_GRPC,
@@ -90,6 +80,13 @@ impl RegionRequester {
     }
 
     pub async fn handle(&self, request: region_request::Body) -> Result<AffectedRows> {
+        let request = RegionRequest {
+            header: Some(RegionRequestHeader {
+                trace_id: 0,
+                span_id: 0,
+            }),
+            body: Some(request),
+        };
         self.handle_inner(request).await
     }
 }

@@ -333,7 +333,7 @@ impl StatementExecutor {
                         schema_name: req.schema_name.to_string(),
                         table_name: req.table_name.to_string(),
                         columns_values,
-                        //TODO: support multi-regions
+                        // TODO: support multi-regions
                         region_number: 0,
                     },
                     query_ctx.clone(),
