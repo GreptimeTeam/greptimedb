@@ -21,7 +21,6 @@ mod dml;
 mod show;
 mod tql;
 
-use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -44,6 +43,7 @@ use snafu::{OptionExt, ResultExt};
 use sql::statements::copy::{CopyDatabaseArgument, CopyTable, CopyTableArgument};
 use sql::statements::statement::Statement;
 use sqlparser::ast::ObjectName;
+use sql::statements::OptionMap;
 use table::engine::TableReference;
 use table::requests::{CopyDatabaseRequest, CopyDirection, CopyTableRequest};
 use table::TableRef;
@@ -259,8 +259,8 @@ fn to_copy_table_request(stmt: CopyTable, query_ctx: QueryContextRef) -> Result<
         schema_name,
         table_name,
         location,
-        with,
-        connection,
+        with: with.map,
+        connection: connection.map,
         pattern,
         direction,
         // we copy the whole table by default.
@@ -292,14 +292,14 @@ fn to_copy_database_request(
         catalog_name,
         schema_name: database_name,
         location: arg.location,
-        with: arg.with,
-        connection: arg.connection,
+        with: arg.with.map,
+        connection: arg.connection.map,
         time_range,
     })
 }
 
 /// Extracts timestamp from a [HashMap<String, String>] with given key.
-fn extract_timestamp(map: &HashMap<String, String>, key: &str) -> Result<Option<Timestamp>> {
+fn extract_timestamp(map: &OptionMap, key: &str) -> Result<Option<Timestamp>> {
     map.get(key)
         .map(|v| {
             Timestamp::from_str(v)

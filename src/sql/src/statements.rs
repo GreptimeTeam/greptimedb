@@ -20,10 +20,12 @@ pub mod describe;
 pub mod drop;
 pub mod explain;
 pub mod insert;
+mod option_map;
 pub mod query;
 pub mod show;
 pub mod statement;
 pub mod tql;
+mod transform;
 pub mod truncate;
 
 use std::str::FromStr;
@@ -38,7 +40,9 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, COMMENT_KEY};
 use datatypes::types::TimestampType;
 use datatypes::value::{OrderedF32, OrderedF64, Value};
+pub use option_map::OptionMap;
 use snafu::{ensure, OptionExt, ResultExt};
+pub use transform::transform_statements;
 
 use crate::ast::{
     ColumnDef, ColumnOption, ColumnOptionDef, DataType as SqlDataType, Expr, TimezoneInfo,

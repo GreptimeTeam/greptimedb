@@ -881,7 +881,7 @@ mod tests {
             match &stmts[0] {
                 Statement::CreateExternalTable(c) => {
                     assert_eq!(c.name.to_string(), test.expected_table_name.to_string());
-                    assert_eq!(c.options, test.expected_options);
+                    assert_eq!(c.options, test.expected_options.into());
                     assert_eq!(c.if_not_exists, test.expected_if_not_exist);
                     assert_eq!(c.engine, test.expected_engine);
                 }
@@ -911,7 +911,7 @@ mod tests {
         match &stmts[0] {
             Statement::CreateExternalTable(c) => {
                 assert_eq!(c.name.to_string(), "city");
-                assert_eq!(c.options, options);
+                assert_eq!(c.options, options.into());
 
                 let columns = &c.columns;
                 assert_column_def(&columns[0], "host", "STRING");
