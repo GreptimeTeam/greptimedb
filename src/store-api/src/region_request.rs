@@ -16,8 +16,9 @@ use std::collections::HashMap;
 
 use api::v1::region::region_request;
 use api::v1::Rows;
+use snafu::OptionExt;
 
-use crate::metadata::{ColumnMetadata, MetadataError};
+use crate::metadata::{ColumnMetadata, InvalidRawRegionRequestSnafu, MetadataError};
 use crate::path_utils::region_dir;
 use crate::storage::{AlterRequest, ColumnId, RegionId, ScanRequest};
 
@@ -102,12 +103,25 @@ impl RegionRequest {
                 close.region_id.into(),
                 Self::Close(RegionCloseRequest {}),
             )]),
-            region_request::Body::Alter(alter) => Ok(vec![(
-                alter.region_id.into(),
-                Self::Alter(RegionAlterRequest {
-                    request: unimplemented!(),
-                }),
-            )]),
+            region_request::Body::Alter(alter) => {
+                let kind = alter.kind.context(InvalidRawRegionRequestSnafu {
+                    err: "'kind' is absent",
+                })?;
+                Ok(vec![(
+                    alter.region_id.into(),
+                    Self::Alter(RegionAlterRequest {
+                        request: AlterRequest {
+                            operation: kind.try_into().map_err(|e| {
+                                InvalidRawRegionRequestSnafu {
+                                    err: format!("{e}"),
+                                }
+                                .build()
+                            })?,
+                            version: alter.schema_version as _,
+                        },
+                    }),
+                )])
+            }
             region_request::Body::Flush(flush) => Ok(vec![(
                 flush.region_id.into(),
                 Self::Flush(RegionFlushRequest {}),

@@ -229,15 +229,16 @@ impl CatalogManager for FrontendCatalogManager {
                         None
                     }
                 })
-                .collect();
+                .collect::<Vec<_>>();
 
-            let column_defs = expr_factory::column_schemas_to_defs(request.schema.column_schemas)
-                .map_err(|e| {
-                InvalidSystemTableDefSnafu {
-                    err_msg: e.to_string(),
-                }
-                .build()
-            })?;
+            let column_defs =
+                expr_factory::column_schemas_to_defs(request.schema.column_schemas, &primary_keys)
+                    .map_err(|e| {
+                        InvalidSystemTableDefSnafu {
+                            err_msg: e.to_string(),
+                        }
+                        .build()
+                    })?;
 
             let mut create_table = CreateTableExpr {
                 catalog_name: request.catalog_name,

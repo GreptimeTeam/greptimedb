@@ -26,12 +26,6 @@ use crate::peer::Peer;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
-    #[snafu(display("Failed to convert grpc expr, source: {}", source))]
-    ConvertGrpcExpr {
-        location: Location,
-        source: common_grpc_expr::error::Error,
-    },
-
     #[snafu(display("Table info not found: {}", table_name))]
     TableInfoNotFound {
         table_name: String,
@@ -146,7 +140,13 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Invalid protobuf message, err: {}", err_msg))]
+    #[snafu(display("Failed to convert alter table request, source: {source}, at {location}"))]
+    ConvertAlterTableRequest {
+        source: common_grpc_expr::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Invalid protobuf message: {err_msg}, at {location}"))]
     InvalidProtoMsg { err_msg: String, location: Location },
 
     #[snafu(display("Unexpected: {err_msg}"))]
@@ -265,7 +265,6 @@ impl ErrorExt for Error {
             | MoveRegion { .. }
             | Unexpected { .. }
             | External { .. }
-            | ConvertGrpcExpr { .. }
             | TableInfoNotFound { .. }
             | InvalidHeartbeatResponse { .. } => StatusCode::Unexpected,
 
@@ -300,6 +299,7 @@ impl ErrorExt for Error {
             ExecuteDdl { source, .. } => source.status_code(),
             MetaSrv { source, .. } => source.status_code(),
             InvalidCatalogValue { source, .. } => source.status_code(),
+            ConvertAlterTableRequest { source, .. } => source.status_code(),
         }
     }
 

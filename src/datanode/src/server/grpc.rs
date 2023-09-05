@@ -78,25 +78,20 @@ impl Instance {
         expr: AlterExpr,
         ctx: QueryContextRef,
     ) -> Result<Output> {
-        let table_id = match expr.table_id.as_ref() {
-            None => {
-                self.catalog_manager
-                    .table(&expr.catalog_name, &expr.schema_name, &expr.table_name)
-                    .await
-                    .context(CatalogSnafu)?
-                    .with_context(|| TableNotFoundSnafu {
-                        table_name: format_full_table_name(
-                            &expr.catalog_name,
-                            &expr.schema_name,
-                            &expr.table_name,
-                        ),
-                    })?
-                    .table_info()
-                    .ident
-                    .table_id
-            }
-            Some(table_id) => table_id.id, // For requests from Metasrv.
-        };
+        let table_id = self
+            .catalog_manager
+            .table(&expr.catalog_name, &expr.schema_name, &expr.table_name)
+            .await
+            .context(CatalogSnafu)?
+            .with_context(|| TableNotFoundSnafu {
+                table_name: format_full_table_name(
+                    &expr.catalog_name,
+                    &expr.schema_name,
+                    &expr.table_name,
+                ),
+            })?
+            .table_info()
+            .table_id();
 
         let request = alter_expr_to_request(table_id, expr).context(AlterExprToRequestSnafu)?;
         self.sql_handler()
@@ -165,7 +160,7 @@ impl Instance {
 
 #[cfg(test)]
 mod tests {
-    use api::v1::{column_def, ColumnDataType, ColumnDef, TableId};
+    use api::v1::{column_def, ColumnDataType, ColumnDef, SemanticType, TableId};
     use common_catalog::consts::{MIN_USER_TABLE_ID, MITO_ENGINE};
     use common_grpc_expr::create_table_schema;
     use datatypes::prelude::ConcreteDataType;
@@ -218,9 +213,10 @@ mod tests {
     fn test_create_column_schema() {
         let column_def = ColumnDef {
             name: "a".to_string(),
-            datatype: 1024,
+            data_type: 1024,
             is_nullable: true,
             default_constraint: vec![],
+            semantic_type: SemanticType::Tag as i32,
         };
         let result = column_def::try_as_column_schema(&column_def);
         assert!(matches!(
@@ -230,9 +226,10 @@ mod tests {
 
         let column_def = ColumnDef {
             name: "a".to_string(),
-            datatype: ColumnDataType::String as i32,
+            data_type: ColumnDataType::String as i32,
             is_nullable: true,
             default_constraint: vec![],
+            semantic_type: SemanticType::Tag as i32,
         };
         let column_schema = column_def::try_as_column_schema(&column_def).unwrap();
         assert_eq!(column_schema.name, "a");
@@ -242,9 +239,10 @@ mod tests {
         let default_constraint = ColumnDefaultConstraint::Value(Value::from("default value"));
         let column_def = ColumnDef {
             name: "a".to_string(),
-            datatype: ColumnDataType::String as i32,
+            data_type: ColumnDataType::String as i32,
             is_nullable: true,
             default_constraint: default_constraint.clone().try_into().unwrap(),
+            semantic_type: SemanticType::Tag as i32,
         };
         let column_schema = column_def::try_as_column_schema(&column_def).unwrap();
         assert_eq!(column_schema.name, "a");
@@ -260,27 +258,31 @@ mod tests {
         let column_defs = vec![
             ColumnDef {
                 name: "host".to_string(),
-                datatype: ColumnDataType::String as i32,
+                data_type: ColumnDataType::String as i32,
                 is_nullable: false,
                 default_constraint: vec![],
+                semantic_type: SemanticType::Tag as i32,
             },
             ColumnDef {
                 name: "ts".to_string(),
-                datatype: ColumnDataType::TimestampMillisecond as i32,
+                data_type: ColumnDataType::TimestampMillisecond as i32,
                 is_nullable: false,
                 default_constraint: vec![],
+                semantic_type: SemanticType::Timestamp as i32,
             },
             ColumnDef {
                 name: "cpu".to_string(),
-                datatype: ColumnDataType::Float32 as i32,
+                data_type: ColumnDataType::Float32 as i32,
                 is_nullable: true,
                 default_constraint: vec![],
+                semantic_type: SemanticType::Field as i32,
             },
             ColumnDef {
                 name: "memory".to_string(),
-                datatype: ColumnDataType::Float64 as i32,
+                data_type: ColumnDataType::Float64 as i32,
                 is_nullable: true,
                 default_constraint: vec![],
+                semantic_type: SemanticType::Field as i32,
             },
         ];
         CreateTableExpr {
