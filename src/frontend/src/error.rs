@@ -630,6 +630,29 @@ pub enum Error {
         source: common_recordbatch::error::Error,
         location: Location,
     },
+
+    #[snafu(display("Missing insert body, source: {source}"))]
+    MissingInsertBody {
+        source: sql::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Failed to build default value, column: {}, source: {}",
+        column,
+        source
+    ))]
+    ColumnDefaultValue {
+        column: String,
+        location: Location,
+        source: datatypes::error::Error,
+    },
+
+    #[snafu(display(
+        "No valid default value can be built automatically, column: {}",
+        column,
+    ))]
+    ColumnNoneDefaultValue { column: String, location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -652,7 +675,8 @@ impl ErrorExt for Error {
             | Error::BuildCsvConfig { .. }
             | Error::ProjectSchema { .. }
             | Error::UnsupportedFormat { .. }
-            | Error::EmptyData { .. } => StatusCode::InvalidArguments,
+            | Error::EmptyData { .. }
+            | Error::ColumnNoneDefaultValue { .. } => StatusCode::InvalidArguments,
 
             Error::NotSupported { .. } => StatusCode::Unsupported,
 
@@ -699,7 +723,8 @@ impl ErrorExt for Error {
             | Error::FindRegionRoute { .. }
             | Error::BuildDfLogicalPlan { .. }
             | Error::BuildTableMeta { .. }
-            | Error::VectorToGrpcColumn { .. } => StatusCode::Internal,
+            | Error::VectorToGrpcColumn { .. }
+            | Error::MissingInsertBody { .. } => StatusCode::Internal,
 
             Error::IncompleteGrpcResult { .. }
             | Error::ContextValueNotFound { .. }
@@ -768,6 +793,8 @@ impl ErrorExt for Error {
             Error::ReadRecordBatch { source, .. } | Error::BuildColumnVectors { source, .. } => {
                 source.status_code()
             }
+
+            Error::ColumnDefaultValue { source, .. } => source.status_code(),
         }
     }
 
