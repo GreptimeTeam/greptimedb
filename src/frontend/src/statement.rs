@@ -51,7 +51,7 @@ use crate::error::{
     self, CatalogSnafu, ExecLogicalPlanSnafu, ExecuteStatementSnafu, ExternalSnafu, InsertSnafu,
     PlanStatementSnafu, Result, TableNotFoundSnafu,
 };
-use crate::inserter::req_convert::table_to_region::TableToRegion;
+use crate::inserter::req_convert::TableToRegion;
 use crate::instance::distributed::deleter::DistDeleter;
 use crate::instance::region_handler::RegionRequestHandlerRef;
 use crate::statement::backup::{COPY_DATABASE_TIME_END_KEY, COPY_DATABASE_TIME_START_KEY};

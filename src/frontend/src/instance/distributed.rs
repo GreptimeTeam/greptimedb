@@ -65,7 +65,7 @@ use crate::error::{
     UnrecognizedTableOptionSnafu,
 };
 use crate::expr_factory;
-use crate::inserter::req_convert::stmt_to_region::StatementToRegion;
+use crate::inserter::req_convert::StatementToRegion;
 use crate::instance::distributed::deleter::DistDeleter;
 use crate::instance::distributed::inserter::DistInserter;
 use crate::table::DistTable;

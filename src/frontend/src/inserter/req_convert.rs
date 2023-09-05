@@ -12,16 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod column_to_row;
-pub mod row_to_region;
-pub mod stmt_to_region;
-pub mod table_to_region;
+mod column_to_row;
+mod row_to_region;
+mod stmt_to_region;
+mod table_to_region;
 
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::{ColumnDataType, SemanticType};
+pub use column_to_row::ColumnToRow;
 use datatypes::prelude::ConcreteDataType;
+pub use row_to_region::RowToRegion;
 use snafu::{OptionExt, ResultExt};
+pub use stmt_to_region::StatementToRegion;
 use table::metadata::TableInfo;
+pub use table_to_region::TableToRegion;
 
 use crate::error::{ColumnDataTypeSnafu, ColumnNotFoundSnafu, MissingTimeIndexColumnSnafu, Result};
 

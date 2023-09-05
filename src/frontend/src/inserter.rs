@@ -33,8 +33,7 @@ use snafu::prelude::*;
 use table::engine::TableReference;
 use table::TableRef;
 
-use self::req_convert::column_to_row::ColumnToRow;
-use self::req_convert::row_to_region::RowToRegion;
+use self::req_convert::{ColumnToRow, RowToRegion};
 use crate::error::{
     CatalogSnafu, EmptyDataSnafu, Error, FindNewColumnsOnInsertionSnafu, InvalidInsertRequestSnafu,
     Result,
