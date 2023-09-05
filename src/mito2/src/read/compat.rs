@@ -99,6 +99,7 @@ pub(crate) fn has_same_columns(left: &RegionMetadata, right: &RegionMetadata) ->
 }
 
 /// Helper to make primary key compatible.
+#[derive(Debug)]
 struct CompatPrimaryKey {
     /// Row converter to append values to primary keys.
     converter: McmpRowCodec,
@@ -124,6 +125,7 @@ impl CompatPrimaryKey {
 }
 
 /// Helper to make fields compatible.
+#[derive(Debug)]
 struct CompatFields {
     /// Column Ids the reader actually returns.
     actual_fields: Vec<ColumnId>,
@@ -281,6 +283,7 @@ fn may_compat_fields(
 }
 
 /// Index in source batch or a default value to fill a column.
+#[derive(Debug)]
 enum IndexOrDefault {
     /// Index of the column in source batch.
     Index(usize),
@@ -393,6 +396,81 @@ mod tests {
             field_columns,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn test_invalid_pk_len() {
+        let reader_meta = new_metadata(
+            &[
+                (0, SemanticType::Timestamp),
+                (1, SemanticType::Tag),
+                (2, SemanticType::Tag),
+                (3, SemanticType::Field),
+            ],
+            &[1, 2],
+        );
+        let expect_meta = new_metadata(
+            &[
+                (0, SemanticType::Timestamp),
+                (1, SemanticType::Tag),
+                (2, SemanticType::Field),
+            ],
+            &[1],
+        );
+        may_compat_primary_key(&expect_meta, &reader_meta).unwrap_err();
+    }
+
+    #[test]
+    fn test_different_pk() {
+        let reader_meta = new_metadata(
+            &[
+                (0, SemanticType::Timestamp),
+                (1, SemanticType::Tag),
+                (2, SemanticType::Tag),
+                (3, SemanticType::Field),
+            ],
+            &[2, 1],
+        );
+        let expect_meta = new_metadata(
+            &[
+                (0, SemanticType::Timestamp),
+                (1, SemanticType::Tag),
+                (2, SemanticType::Tag),
+                (3, SemanticType::Field),
+                (4, SemanticType::Tag),
+            ],
+            &[1, 2, 4],
+        );
+        may_compat_primary_key(&expect_meta, &reader_meta).unwrap_err();
+    }
+
+    #[test]
+    fn test_same_pk() {
+        let reader_meta = new_metadata(
+            &[
+                (0, SemanticType::Timestamp),
+                (1, SemanticType::Tag),
+                (2, SemanticType::Field),
+            ],
+            &[1],
+        );
+        assert!(may_compat_primary_key(&reader_meta, &reader_meta)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn test_same_fields() {
+        let reader_meta = Arc::new(new_metadata(
+            &[
+                (0, SemanticType::Timestamp),
+                (1, SemanticType::Tag),
+                (2, SemanticType::Field),
+            ],
+            &[1],
+        ));
+        let mapper = ProjectionMapper::all(&reader_meta).unwrap();
+        assert!(may_compat_fields(&mapper, &reader_meta).unwrap().is_none())
     }
 
     #[tokio::test]
