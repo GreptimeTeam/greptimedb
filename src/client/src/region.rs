@@ -80,10 +80,9 @@ impl RegionRequester {
                     source: BoxedError::new(ServerSnafu { code, msg }.build()),
                 };
                 error!(
-                    "Failed to do Flight get, addr: {}, code: {}, source: {}",
+                    e; "Failed to do Flight get, addr: {}, code: {}",
                     flight_client.addr(),
-                    tonic_code,
-                    error
+                    tonic_code
                 );
                 error
             })?;
@@ -116,10 +115,12 @@ impl RegionRequester {
                     .map_err(BoxedError::new)
                     .context(ExternalSnafu)?;
                 let FlightMessage::Recordbatch(record_batch) = flight_message else {
-                    yield IllegalFlightMessagesSnafu {reason: "A Schema message must be succeeded exclusively by a set of RecordBatch messages"}
-                                        .fail()
-                                        .map_err(BoxedError::new)
-                                        .context(ExternalSnafu);
+                    yield IllegalFlightMessagesSnafu {
+                            reason: "A Schema message must be succeeded exclusively by a set of RecordBatch messages"
+                        }
+                        .fail()
+                        .map_err(BoxedError::new)
+                        .context(ExternalSnafu);
                     break;
                 };
                 yield Ok(record_batch);
