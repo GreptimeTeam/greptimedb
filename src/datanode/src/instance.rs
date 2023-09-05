@@ -18,7 +18,7 @@ use std::time::Duration;
 use std::{fs, path};
 
 use api::v1::meta::Role;
-use catalog::remote::{CachedMetaKvBackend, RemoteCatalogManager};
+use catalog::local::MemoryCatalogManager;
 use catalog::CatalogManagerRef;
 use common_base::Plugins;
 use common_catalog::consts::DEFAULT_CATALOG_NAME;
@@ -28,7 +28,6 @@ use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
 use common_meta::heartbeat::handler::HandlerGroupExecutor;
-use common_meta::key::TableMetadataManager;
 use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::store::state_store::ObjectStateStore;
 use common_procedure::ProcedureManagerRef;
@@ -191,21 +190,10 @@ impl Instance {
                 )
             }
 
-            Mode::Distributed => {
-                let meta_client = meta_client.clone().context(IncorrectInternalStateSnafu {
-                    state: "meta client is not provided when creating distributed Datanode",
-                })?;
-
-                let kv_backend = Arc::new(CachedMetaKvBackend::new(meta_client));
-
-                let catalog_manager = Arc::new(RemoteCatalogManager::new(
-                    engine_manager.clone(),
-                    opts.node_id.context(MissingNodeIdSnafu)?,
-                    Arc::new(TableMetadataManager::new(kv_backend)),
-                ));
-
-                (catalog_manager as CatalogManagerRef, None)
-            }
+            Mode::Distributed => (
+                MemoryCatalogManager::with_default_setup() as CatalogManagerRef,
+                None,
+            ),
         };
 
         let factory = QueryEngineFactory::new_with_plugins(

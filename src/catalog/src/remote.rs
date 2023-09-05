@@ -15,10 +15,8 @@
 use std::sync::Arc;
 
 pub use client::{CachedMetaKvBackend, MetaKvBackend};
-pub use manager::RemoteCatalogManager;
 
 mod client;
-mod manager;
 
 #[cfg(feature = "testing")]
 pub mod mock;
