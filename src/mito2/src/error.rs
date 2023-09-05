@@ -186,7 +186,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Invalid request to region {}, reason: {}", region_id, reason))]
+    #[snafu(display("Invalid request to region {}, location: {}, reason: {}", region_id, location, reason))]
     InvalidRequest {
         region_id: RegionId,
         reason: String,
