@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Handling flush related requests.
+//! Handling truncate related requests.
 
 use common_query::Output;
 use common_telemetry::info;
@@ -41,8 +41,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         // Maek all data obsolete.
         let version_data = region.version_control.current();
-        let commited_sequence = version_data.committed_sequence;
-        self.wal.obsolete(region_id, commited_sequence).await?;
+        let committed_sequence = version_data.committed_sequence;
+        self.wal.obsolete(region_id, committed_sequence).await?;
 
         // Reset region's version and mark all SSTs deleted.
         region.version_control.reset(0, &self.memtable_builder);
