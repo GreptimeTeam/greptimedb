@@ -59,6 +59,6 @@ impl CacheInvalidator for MetasrvCacheInvalidator {
             .broadcast(&BroadcastChannel::Frontend, msg)
             .await
             .map_err(BoxedError::new)
-            .context(meta_error::MetaSrvSnafu)
+            .context(meta_error::ExternalSnafu)
     }
 }
