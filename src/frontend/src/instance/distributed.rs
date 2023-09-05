@@ -44,7 +44,6 @@ use common_query::Output;
 use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::info;
 use datanode::instance::sql::table_idents_to_full_name;
-use datanode::sql::SqlHandler;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::RawSchema;
 use partition::manager::PartitionInfo;
@@ -67,12 +66,13 @@ use table::TableRef;
 use crate::catalog::FrontendCatalogManager;
 use crate::error::{
     self, AlterExprToRequestSnafu, CatalogSnafu, ColumnDataTypeSnafu, ColumnNotFoundSnafu,
-    DeserializePartitionSnafu, FindDatanodeSnafu, FindTableRouteSnafu, InvokeDatanodeSnafu,
-    NotSupportedSnafu, ParseSqlSnafu, RequestDatanodeSnafu, Result, SchemaExistsSnafu,
-    SchemaNotFoundSnafu, TableAlreadyExistSnafu, TableMetadataManagerSnafu, TableNotFoundSnafu,
+    DeserializePartitionSnafu, FindDatanodeSnafu, FindTableRouteSnafu, NotSupportedSnafu,
+    ParseSqlSnafu, RequestDatanodeSnafu, Result, SchemaExistsSnafu, SchemaNotFoundSnafu,
+    TableAlreadyExistSnafu, TableMetadataManagerSnafu, TableNotFoundSnafu,
     UnrecognizedTableOptionSnafu,
 };
 use crate::expr_factory;
+use crate::inserter::req_convert::StatementToRegion;
 use crate::instance::distributed::deleter::DistDeleter;
 use crate::instance::distributed::inserter::DistInserter;
 use crate::table::DistTable;
@@ -278,13 +278,11 @@ impl DistInstance {
                 self.drop_table(table_name).await
             }
             Statement::Insert(insert) => {
-                let insert_request =
-                    SqlHandler::insert_to_request(self.catalog_manager.clone(), &insert, query_ctx)
-                        .await
-                        .context(InvokeDatanodeSnafu)?;
-
+                let request = StatementToRegion::new(self.catalog_manager.as_ref(), &query_ctx)
+                    .convert(&insert)
+                    .await?;
                 let inserter = DistInserter::new(&self.catalog_manager);
-                let affected_rows = inserter.insert_table_request(insert_request).await?;
+                let affected_rows = inserter.insert(request).await?;
                 Ok(Output::AffectedRows(affected_rows as usize))
             }
             Statement::ShowCreateTable(show) => {
@@ -637,7 +635,7 @@ impl DistRegionRequestHandler {
             region_request::Body::Inserts(inserts) => {
                 let inserter =
                     DistInserter::new(&self.catalog_manager).with_trace_id(ctx.trace_id());
-                let affected_rows = inserter.insert_region_requests(inserts).await? as _;
+                let affected_rows = inserter.insert(inserts).await? as _;
                 Ok(RegionResponse {
                     header: Some(Default::default()),
                     affected_rows,

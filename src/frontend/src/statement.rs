@@ -52,7 +52,7 @@ use crate::error::{
     self, CatalogSnafu, ExecLogicalPlanSnafu, ExecuteStatementSnafu, ExternalSnafu, InsertSnafu,
     PlanStatementSnafu, RequestDatanodeSnafu, Result, TableNotFoundSnafu,
 };
-use crate::inserter::Inserter;
+use crate::inserter::req_convert::TableToRegion;
 use crate::instance::distributed::deleter::DistDeleter;
 use crate::statement::backup::{COPY_DATABASE_TIME_END_KEY, COPY_DATABASE_TIME_START_KEY};
 
@@ -184,7 +184,7 @@ impl StatementExecutor {
         let table = self.get_table(&table_ref).await?;
         let table_info = table.table_info();
 
-        let request = Inserter::convert_req_table_to_region(&table_info, request)?;
+        let request = TableToRegion::new(&table_info).convert(request)?;
         let region_response = self
             .region_request_handler
             .handle(region_request::Body::Inserts(request), query_ctx)
