@@ -15,14 +15,15 @@
 use std::collections::HashMap;
 
 use api::helper;
-use api::v1::{ColumnSchema, Row, RowInsertRequest, Rows};
+use api::v1::region::InsertRequest;
+use api::v1::{ColumnSchema, Row, Rows};
 use datatypes::value::Value;
-use store_api::storage::RegionNumber;
+use store_api::storage::{RegionId, RegionNumber, TableId};
 
 use crate::error::Result;
 use crate::PartitionRuleRef;
 
-pub type RowInsertRequestSplits = HashMap<RegionNumber, RowInsertRequest>;
+pub type InsertRequestSplits = HashMap<RegionNumber, InsertRequest>;
 
 pub struct RowSplitter {
     partition_rule: PartitionRuleRef,
@@ -33,7 +34,7 @@ impl RowSplitter {
         Self { partition_rule }
     }
 
-    pub fn split(&self, req: RowInsertRequest) -> Result<RowInsertRequestSplits> {
+    pub fn split(&self, req: InsertRequest) -> Result<InsertRequestSplits> {
         // No partition
         let partition_columns = self.partition_rule.partition_columns();
         if partition_columns.is_empty() {
@@ -45,12 +46,13 @@ impl RowSplitter {
             return Ok(HashMap::new());
         };
 
-        SplitReadRowHelper::new(req.table_name, rows, &self.partition_rule).split_to_requests()
+        let table_id = RegionId::from_u64(req.region_id).table_id();
+        SplitReadRowHelper::new(table_id, rows, &self.partition_rule).split_to_requests()
     }
 }
 
 struct SplitReadRowHelper<'a> {
-    table_name: String,
+    table_id: TableId,
     schema: Vec<ColumnSchema>,
     rows: Vec<Row>,
     partition_rule: &'a PartitionRuleRef,
@@ -59,7 +61,7 @@ struct SplitReadRowHelper<'a> {
 }
 
 impl<'a> SplitReadRowHelper<'a> {
-    fn new(table_name: String, rows: Rows, partition_rule: &'a PartitionRuleRef) -> Self {
+    fn new(table_id: TableId, rows: Rows, partition_rule: &'a PartitionRuleRef) -> Self {
         let col_name_to_idx = rows
             .schema
             .iter()
@@ -73,7 +75,7 @@ impl<'a> SplitReadRowHelper<'a> {
             .collect::<Vec<_>>();
 
         Self {
-            table_name,
+            table_id,
             schema: rows.schema,
             rows: rows.rows,
             partition_rule,
@@ -81,7 +83,7 @@ impl<'a> SplitReadRowHelper<'a> {
         }
     }
 
-    fn split_to_requests(mut self) -> Result<RowInsertRequestSplits> {
+    fn split_to_requests(mut self) -> Result<InsertRequestSplits> {
         let request_splits = self
             .split_to_regions()?
             .into_iter()
@@ -90,13 +92,12 @@ impl<'a> SplitReadRowHelper<'a> {
                     .into_iter()
                     .map(|row_idx| std::mem::take(&mut self.rows[row_idx]))
                     .collect();
-                let req = RowInsertRequest {
-                    table_name: self.table_name.clone(),
+                let req = InsertRequest {
                     rows: Some(Rows {
                         schema: self.schema.clone(),
                         rows,
                     }),
-                    region_number,
+                    region_id: RegionId::new(self.table_id, region_number).into(),
                 };
                 (region_number, req)
             })
@@ -145,7 +146,7 @@ mod tests {
     use crate::partition::PartitionExpr;
     use crate::PartitionRule;
 
-    fn mock_insert_request() -> RowInsertRequest {
+    fn mock_insert_request() -> InsertRequest {
         let schema = vec![
             ColumnSchema {
                 column_name: "id".to_string(),
@@ -186,10 +187,9 @@ mod tests {
                 ],
             },
         ];
-        RowInsertRequest {
-            table_name: "t".to_string(),
+        InsertRequest {
             rows: Some(Rows { schema, rows }),
-            region_number: 0,
+            region_id: 0,
         }
     }
 
@@ -279,8 +279,8 @@ mod tests {
 
         let req0 = &splits[&0];
         let req1 = &splits[&1];
-        assert_eq!(req0.region_number, 0);
-        assert_eq!(req1.region_number, 1);
+        assert_eq!(req0.region_id, 0);
+        assert_eq!(req1.region_id, 1);
 
         let rows0 = req0.rows.as_ref().unwrap();
         let rows1 = req1.rows.as_ref().unwrap();
@@ -298,7 +298,7 @@ mod tests {
         assert_eq!(splits.len(), 1);
 
         let req = &splits[&1];
-        assert_eq!(req.region_number, 1);
+        assert_eq!(req.region_id, 1);
 
         let rows = req.rows.as_ref().unwrap();
         assert_eq!(rows.rows.len(), 3);
@@ -314,7 +314,7 @@ mod tests {
         assert_eq!(splits.len(), 1);
 
         let req = &splits[&0];
-        assert_eq!(req.region_number, 0);
+        assert_eq!(req.region_id, 0);
 
         let rows = req.rows.as_ref().unwrap();
         assert_eq!(rows.rows.len(), 3);

@@ -16,12 +16,10 @@ use std::collections::HashMap;
 
 use api::helper::{push_vals, ColumnDataTypeWrapper};
 use api::v1::column::Values;
-use api::v1::{Column, InsertRequest as GrpcInsertRequest, SemanticType};
+use api::v1::{Column, SemanticType};
 use datatypes::prelude::*;
 use snafu::{ensure, OptionExt, ResultExt};
-use store_api::storage::RegionNumber;
 use table::metadata::TableMeta;
-use table::requests::InsertRequest;
 
 use crate::error::{self, ColumnDataTypeSnafu, NotSupportedSnafu, Result, VectorToGrpcColumnSnafu};
 
@@ -53,21 +51,6 @@ pub(crate) fn to_grpc_columns(
     let row_count = row_count.unwrap_or(0) as u32;
 
     Ok((columns, row_count))
-}
-
-pub(crate) fn to_grpc_insert_request(
-    table_meta: &TableMeta,
-    region_number: RegionNumber,
-    insert: InsertRequest,
-) -> Result<GrpcInsertRequest> {
-    let table_name = insert.table_name.clone();
-    let (columns, row_count) = to_grpc_columns(table_meta, &insert.columns_values)?;
-    Ok(GrpcInsertRequest {
-        table_name,
-        region_number,
-        columns,
-        row_count,
-    })
 }
 
 fn vector_to_grpc_column(
@@ -114,19 +97,12 @@ fn vector_to_grpc_column(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
     use std::sync::Arc;
 
     use api::v1::ColumnDataType;
-    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-    use datatypes::prelude::ScalarVectorBuilder;
     use datatypes::schema::{ColumnSchema, Schema};
-    use datatypes::vectors::{
-        Int16VectorBuilder, Int32Vector, Int64Vector, MutableVector, StringVector,
-        StringVectorBuilder,
-    };
+    use datatypes::vectors::{Int32Vector, Int64Vector, StringVector};
     use table::metadata::TableMetaBuilder;
-    use table::requests::InsertRequest;
 
     use super::*;
 
@@ -188,76 +164,5 @@ mod tests {
         );
         assert_eq!(column.null_mask, vec![2]);
         assert_eq!(column.datatype, ColumnDataType::String as i32);
-    }
-
-    #[test]
-    fn test_to_grpc_insert_request() {
-        let schema = Schema::new(vec![
-            ColumnSchema::new("ts", ConcreteDataType::int64_datatype(), false)
-                .with_time_index(true),
-            ColumnSchema::new("id", ConcreteDataType::int16_datatype(), false),
-            ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
-        ]);
-
-        let table_meta = TableMetaBuilder::default()
-            .schema(Arc::new(schema))
-            .primary_key_indices(vec![])
-            .next_column_id(3)
-            .build()
-            .unwrap();
-
-        let insert_request = mock_insert_request();
-        let request = to_grpc_insert_request(&table_meta, 12, insert_request).unwrap();
-
-        verify_grpc_insert_request(request);
-    }
-
-    fn mock_insert_request() -> InsertRequest {
-        let mut builder = StringVectorBuilder::with_capacity(3);
-        builder.push(Some("host1"));
-        builder.push(None);
-        builder.push(Some("host3"));
-        let host = builder.to_vector();
-
-        let mut builder = Int16VectorBuilder::with_capacity(3);
-        builder.push(Some(1_i16));
-        builder.push(Some(2_i16));
-        builder.push(Some(3_i16));
-        let id = builder.to_vector();
-
-        let columns_values = HashMap::from([("host".to_string(), host), ("id".to_string(), id)]);
-
-        InsertRequest {
-            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
-            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
-            table_name: "demo".to_string(),
-            columns_values,
-            region_number: 0,
-        }
-    }
-
-    fn verify_grpc_insert_request(request: GrpcInsertRequest) {
-        let table_name = request.table_name;
-        assert_eq!("demo", table_name);
-
-        for column in request.columns {
-            let name = column.column_name;
-            if name == "id" {
-                assert_eq!(0, column.null_mask[0]);
-                assert_eq!(ColumnDataType::Int16 as i32, column.datatype);
-                assert_eq!(vec![1, 2, 3], column.values.as_ref().unwrap().i16_values);
-            }
-            if name == "host" {
-                assert_eq!(2, column.null_mask[0]);
-                assert_eq!(ColumnDataType::String as i32, column.datatype);
-                assert_eq!(
-                    vec!["host1", "host3"],
-                    column.values.as_ref().unwrap().string_values
-                );
-            }
-        }
-
-        let region_number = request.region_number;
-        assert_eq!(12, region_number);
     }
 }

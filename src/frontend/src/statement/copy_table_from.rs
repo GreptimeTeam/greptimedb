@@ -40,6 +40,7 @@ use datatypes::vectors::Helper;
 use futures_util::StreamExt;
 use object_store::{Entry, EntryMode, Metakey, ObjectStore};
 use regex::Regex;
+use session::context::QueryContextRef;
 use snafu::ResultExt;
 use table::engine::TableReference;
 use table::requests::{CopyTableRequest, InsertRequest};
@@ -235,7 +236,11 @@ impl StatementExecutor {
         }
     }
 
-    pub async fn copy_table_from(&self, req: CopyTableRequest) -> Result<usize> {
+    pub async fn copy_table_from(
+        &self,
+        req: CopyTableRequest,
+        query_ctx: QueryContextRef,
+    ) -> Result<usize> {
         let table_ref = TableReference {
             catalog: &req.catalog_name,
             schema: &req.schema_name,
@@ -322,14 +327,17 @@ impl StatementExecutor {
                     .zip(vectors)
                     .collect::<HashMap<_, _>>();
 
-                pending.push(self.send_insert_request(InsertRequest {
-                    catalog_name: req.catalog_name.to_string(),
-                    schema_name: req.schema_name.to_string(),
-                    table_name: req.table_name.to_string(),
-                    columns_values,
-                    //TODO: support multi-regions
-                    region_number: 0,
-                }));
+                pending.push(self.handle_table_insert_request(
+                    InsertRequest {
+                        catalog_name: req.catalog_name.to_string(),
+                        schema_name: req.schema_name.to_string(),
+                        table_name: req.table_name.to_string(),
+                        columns_values,
+                        // TODO: support multi-regions
+                        region_number: 0,
+                    },
+                    query_ctx.clone(),
+                ));
 
                 if pending_mem_size as u64 >= pending_mem_threshold {
                     rows_inserted += batch_insert(&mut pending, &mut pending_mem_size).await?;

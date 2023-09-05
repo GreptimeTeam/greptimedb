@@ -12,7 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::region::{region_request, DropRequest as PbDropRegionRequest};
+use api::v1::region::{
+    region_request, DropRequest as PbDropRegionRequest, RegionRequest, RegionRequestHeader,
+};
 use async_trait::async_trait;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
@@ -162,13 +164,17 @@ impl DropTableProcedure {
                 for region_id in region_ids {
                     debug!("Dropping region {region_id} on Datanode {datanode:?}");
 
-                    let request = region_request::Body::Drop(PbDropRegionRequest {
-                        region_id: region_id.as_u64(),
-                    });
+                    let request = RegionRequest {
+                        header: Some(RegionRequestHeader {
+                            trace_id: 0,
+                            span_id: 0,
+                        }),
+                        body: Some(region_request::Body::Drop(PbDropRegionRequest {
+                            region_id: region_id.as_u64(),
+                        })),
+                    };
 
-                    let requester = clients.datanode(&datanode).await;
-
-                    if let Err(err) = requester.handle(request).await {
+                    if let Err(err) = clients.datanode(&datanode).await.handle(request).await {
                         if err.status_code() != StatusCode::RegionNotFound {
                             return Err(handle_operate_region_error(datanode)(err));
                         }

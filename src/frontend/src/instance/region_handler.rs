@@ -4,7 +4,7 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -14,25 +14,19 @@
 
 use std::sync::Arc;
 
-use api::v1::region::RegionRequest;
+use api::v1::region::{region_request, RegionResponse};
+use async_trait::async_trait;
+use session::context::QueryContextRef;
 
 use crate::error::Result;
-use crate::peer::Peer;
 
-pub type AffectedRows = u64;
-
-#[async_trait::async_trait]
-pub trait Datanode: Send + Sync {
-    /// Handles DML, and DDL requests.
-    async fn handle(&self, request: RegionRequest) -> Result<AffectedRows>;
+#[async_trait]
+pub trait RegionRequestHandler: Send + Sync {
+    async fn handle(
+        &self,
+        request: region_request::Body,
+        ctx: QueryContextRef,
+    ) -> Result<RegionResponse>;
 }
 
-pub type DatanodeRef = Arc<dyn Datanode>;
-
-#[async_trait::async_trait]
-pub trait DatanodeManager: Send + Sync {
-    /// Retrieves a target `datanode`.
-    async fn datanode(&self, datanode: &Peer) -> DatanodeRef;
-}
-
-pub type DatanodeManagerRef = Arc<dyn DatanodeManager>;
+pub type RegionRequestHandlerRef = Arc<dyn RegionRequestHandler>;
