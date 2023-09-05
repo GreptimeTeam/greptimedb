@@ -15,21 +15,18 @@
 use std::collections::HashMap;
 
 use api::v1::region::{region_request, InsertRequests, RegionRequest, RegionRequestHeader};
-use catalog::CatalogManager;
 use common_meta::datanode_manager::DatanodeManager;
 use common_meta::peer::Peer;
 use futures_util::future;
 use metrics::counter;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
-use table::requests::InsertRequest as TableInsertRequest;
 
 use crate::catalog::FrontendCatalogManager;
 use crate::error::{
-    CatalogSnafu, FindDatanodeSnafu, FindTableRouteSnafu, JoinTaskSnafu, RequestInsertsSnafu,
-    Result, SplitInsertSnafu, TableNotFoundSnafu,
+    FindDatanodeSnafu, FindTableRouteSnafu, JoinTaskSnafu, RequestInsertsSnafu, Result,
+    SplitInsertSnafu,
 };
-use crate::inserter::Inserter;
 
 /// A distributed inserter. It ingests gRPC [InsertRequests].
 ///
@@ -60,7 +57,7 @@ impl<'a> DistInserter<'a> {
         self
     }
 
-    pub(crate) async fn insert_region_requests(&self, requests: InsertRequests) -> Result<u64> {
+    pub(crate) async fn insert(&self, requests: InsertRequests) -> Result<u64> {
         let requests = self.split(requests).await?;
         let trace_id = self.trace_id.unwrap_or_default();
         let span_id = self.span_id.unwrap_or_default();
@@ -85,28 +82,6 @@ impl<'a> DistInserter<'a> {
         let affected_rows = results.into_iter().sum::<Result<u64>>()?;
         counter!(crate::metrics::DIST_INGEST_ROW_COUNT, affected_rows);
         Ok(affected_rows)
-    }
-
-    pub(crate) async fn insert_table_request(&self, request: TableInsertRequest) -> Result<u64> {
-        let table = self
-            .catalog_manager
-            .table(
-                &request.catalog_name,
-                &request.schema_name,
-                &request.table_name,
-            )
-            .await
-            .context(CatalogSnafu)?
-            .with_context(|| TableNotFoundSnafu {
-                table_name: format!(
-                    "{}.{}.{}",
-                    request.catalog_name, request.schema_name, request.table_name
-                ),
-            })?;
-
-        let table_info = table.table_info();
-        let request = Inserter::convert_req_table_to_region(&table_info, request)?;
-        self.insert_region_requests(request).await
     }
 
     /// Splits gRPC [InsertRequests] into multiple gRPC [InsertRequests]s, each of which
