@@ -406,9 +406,8 @@ impl Datanode {
         let query_engine_factory = QueryEngineFactory::new_with_plugins(
             // query engine in datanode only executes plan with resolved table source.
             MemoryCatalogManager::with_default_setup(),
+            None,
             false,
-            None,
-            None,
             plugins,
         );
         let query_engine = query_engine_factory.query_engine();

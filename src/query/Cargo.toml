@@ -48,6 +48,7 @@ serde_json = "1.0"
 session.workspace = true
 snafu = { version = "0.7", features = ["backtraces"] }
 sql.workspace = true
+store-api.workspace = true
 substrait.workspace = true
 table.workspace = true
 tokio.workspace = true

@@ -837,10 +837,10 @@ pub fn value_to_grpc_value(value: Value) -> GrpcValue {
             Value::Date(v) => Some(ValueData::DateValue(v.val())),
             Value::DateTime(v) => Some(ValueData::DatetimeValue(v.val())),
             Value::Timestamp(v) => Some(match v.unit() {
-                TimeUnit::Second => ValueData::TimeSecondValue(v.value()),
-                TimeUnit::Millisecond => ValueData::TimeMillisecondValue(v.value()),
-                TimeUnit::Microsecond => ValueData::TimeMicrosecondValue(v.value()),
-                TimeUnit::Nanosecond => ValueData::TimeNanosecondValue(v.value()),
+                TimeUnit::Second => ValueData::TsSecondValue(v.value()),
+                TimeUnit::Millisecond => ValueData::TsMillisecondValue(v.value()),
+                TimeUnit::Microsecond => ValueData::TsMicrosecondValue(v.value()),
+                TimeUnit::Nanosecond => ValueData::TsNanosecondValue(v.value()),
             }),
             Value::Time(v) => Some(match v.unit() {
                 TimeUnit::Second => ValueData::TimeSecondValue(v.value()),
