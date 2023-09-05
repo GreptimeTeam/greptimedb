@@ -13,172 +13,149 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
-use api::v1::InsertRequests;
+use api::v1::region::{region_request, InsertRequests, RegionRequest, RegionRequestHeader};
 use catalog::CatalogManager;
-use client::Database;
-use common_grpc_expr::insert::to_table_insert_request;
+use common_meta::datanode_manager::DatanodeManager;
 use common_meta::peer::Peer;
-use common_meta::table_name::TableName;
-use futures::future;
+use futures_util::future;
 use metrics::counter;
 use snafu::{OptionExt, ResultExt};
-use table::metadata::TableInfoRef;
-use table::meter_insert_request;
-use table::requests::InsertRequest;
+use store_api::storage::RegionId;
+use table::requests::InsertRequest as TableInsertRequest;
 
 use crate::catalog::FrontendCatalogManager;
 use crate::error::{
-    CatalogSnafu, FindDatanodeSnafu, FindTableRouteSnafu, JoinTaskSnafu, RequestDatanodeSnafu,
-    Result, SplitInsertSnafu, TableNotFoundSnafu, ToTableInsertRequestSnafu,
+    CatalogSnafu, FindDatanodeSnafu, FindTableRouteSnafu, JoinTaskSnafu, RequestInsertsSnafu,
+    Result, SplitInsertSnafu, TableNotFoundSnafu,
 };
-use crate::table::insert::to_grpc_insert_request;
+use crate::inserter::Inserter;
 
-/// A distributed inserter. It ingests GRPC [InsertRequests] or table [InsertRequest] (so it can be
-/// used in protocol handlers or table insertion API).
+/// A distributed inserter. It ingests gRPC [InsertRequests].
 ///
 /// Table data partitioning and Datanode requests batching are handled inside.
-///
-/// Note that the inserter is confined to a single catalog and schema. I.e., it cannot handle
-/// multiple insert requests with different catalog or schema (will throw "NotSupported" error).
-/// This is because we currently do not have this kind of requirements. Let's keep it simple for now.
-pub(crate) struct DistInserter {
-    catalog: String,
-    schema: String,
-    catalog_manager: Arc<FrontendCatalogManager>,
+pub struct DistInserter<'a> {
+    catalog_manager: &'a FrontendCatalogManager,
+    trace_id: Option<u64>,
+    span_id: Option<u64>,
 }
 
-impl DistInserter {
-    pub(crate) fn new(
-        catalog: String,
-        schema: String,
-        catalog_manager: Arc<FrontendCatalogManager>,
-    ) -> Self {
+impl<'a> DistInserter<'a> {
+    pub fn new(catalog_manager: &'a FrontendCatalogManager) -> Self {
         Self {
-            catalog,
-            schema,
             catalog_manager,
+            trace_id: None,
+            span_id: None,
         }
     }
 
-    pub(crate) async fn grpc_insert(&self, requests: InsertRequests) -> Result<u32> {
-        let inserts = requests
-            .inserts
-            .into_iter()
-            .map(|x| {
-                to_table_insert_request(&self.catalog, &self.schema, x)
-                    .context(ToTableInsertRequestSnafu)
-            })
-            .collect::<Result<Vec<_>>>()?;
-
-        self.insert(inserts).await
+    pub fn with_trace_id(mut self, trace_id: u64) -> Self {
+        self.trace_id = Some(trace_id);
+        self
     }
 
-    pub(crate) async fn insert(&self, requests: Vec<InsertRequest>) -> Result<u32> {
-        debug_assert!(requests
-            .iter()
-            .all(|x| x.catalog_name == self.catalog && x.schema_name == self.schema));
-
-        let inserts = self.split_inserts(requests).await?;
-
-        self.request_datanodes(inserts).await
+    #[allow(dead_code)]
+    pub fn with_span_id(mut self, span_id: u64) -> Self {
+        self.span_id = Some(span_id);
+        self
     }
 
-    /// Splits multiple table [InsertRequest]s into multiple GRPC [InsertRequests]s, each of which
-    /// is grouped by the peer of Datanode, so we can batch them together when invoking gRPC write
-    /// method in Datanode.
-    async fn split_inserts(
-        &self,
-        requests: Vec<InsertRequest>,
-    ) -> Result<HashMap<Peer, InsertRequests>> {
-        let partition_manager = self.catalog_manager.partition_manager();
-
-        let mut inserts = HashMap::new();
-
-        for request in requests {
-            meter_insert_request!(request);
-
-            let table_name = TableName::new(&self.catalog, &self.schema, &request.table_name);
-            let table_info = self.find_table_info(&request.table_name).await?;
-            let table_meta = &table_info.meta;
-
-            let table_id = table_info.table_id();
-            let split = partition_manager
-                .split_insert_request(table_id, request, table_meta.schema.as_ref())
-                .await
-                .context(SplitInsertSnafu)?;
-
-            let table_route = partition_manager
-                .find_table_route(table_id)
-                .await
-                .with_context(|_| FindTableRouteSnafu {
-                    table_name: table_name.to_string(),
-                })?;
-
-            for (region_number, insert) in split {
-                let datanode =
-                    table_route
-                        .find_region_leader(region_number)
-                        .context(FindDatanodeSnafu {
-                            region: region_number,
-                        })?;
-
-                let insert = to_grpc_insert_request(table_meta, region_number, insert)?;
-
-                inserts
-                    .entry(datanode.clone())
-                    .or_insert_with(|| InsertRequests { inserts: vec![] })
-                    .inserts
-                    .push(insert);
-            }
-        }
-        Ok(inserts)
-    }
-
-    async fn find_table_info(&self, table_name: &str) -> Result<TableInfoRef> {
-        let table = self
-            .catalog_manager
-            .table(&self.catalog, &self.schema, table_name)
-            .await
-            .context(CatalogSnafu)?
-            .with_context(|| TableNotFoundSnafu {
-                table_name: common_catalog::format_full_table_name(
-                    &self.catalog,
-                    &self.schema,
-                    table_name,
-                ),
-            })?;
-        Ok(table.table_info())
-    }
-
-    async fn request_datanodes(&self, inserts: HashMap<Peer, InsertRequests>) -> Result<u32> {
-        let results = future::try_join_all(inserts.into_iter().map(|(peer, inserts)| {
+    pub(crate) async fn insert_region_requests(&self, requests: InsertRequests) -> Result<u64> {
+        let requests = self.split(requests).await?;
+        let trace_id = self.trace_id.unwrap_or_default();
+        let span_id = self.span_id.unwrap_or_default();
+        let results = future::try_join_all(requests.into_iter().map(|(peer, inserts)| {
             let datanode_clients = self.catalog_manager.datanode_clients();
-            let catalog = self.catalog.clone();
-            let schema = self.schema.clone();
-
             common_runtime::spawn_write(async move {
-                let client = datanode_clients.get_client(&peer).await;
-                let database = Database::new(&catalog, &schema, client);
-                database.insert(inserts).await.context(RequestDatanodeSnafu)
+                let request = RegionRequest {
+                    header: Some(RegionRequestHeader { trace_id, span_id }),
+                    body: Some(region_request::Body::Inserts(inserts)),
+                };
+                datanode_clients
+                    .datanode(&peer)
+                    .await
+                    .handle(request)
+                    .await
+                    .context(RequestInsertsSnafu)
             })
         }))
         .await
         .context(JoinTaskSnafu)?;
 
-        let affected_rows = results.into_iter().sum::<Result<u32>>()?;
-        counter!(crate::metrics::DIST_INGEST_ROW_COUNT, affected_rows as u64);
+        let affected_rows = results.into_iter().sum::<Result<u64>>()?;
+        counter!(crate::metrics::DIST_INGEST_ROW_COUNT, affected_rows);
         Ok(affected_rows)
+    }
+
+    pub(crate) async fn insert_table_request(&self, request: TableInsertRequest) -> Result<u64> {
+        let table = self
+            .catalog_manager
+            .table(
+                &request.catalog_name,
+                &request.schema_name,
+                &request.table_name,
+            )
+            .await
+            .context(CatalogSnafu)?
+            .with_context(|| TableNotFoundSnafu {
+                table_name: format!(
+                    "{}.{}.{}",
+                    request.catalog_name, request.schema_name, request.table_name
+                ),
+            })?;
+
+        let table_info = table.table_info();
+        let request = Inserter::convert_req_table_to_region(&table_info, request)?;
+        self.insert_region_requests(request).await
+    }
+
+    /// Splits gRPC [InsertRequests] into multiple gRPC [InsertRequests]s, each of which
+    /// is grouped by the peer of Datanode, so we can batch them together when invoking gRPC write
+    /// method in Datanode.
+    async fn split(&self, requests: InsertRequests) -> Result<HashMap<Peer, InsertRequests>> {
+        let partition_manager = self.catalog_manager.partition_manager();
+        let mut inserts: HashMap<Peer, InsertRequests> = HashMap::new();
+
+        for req in requests.requests {
+            let table_id = RegionId::from_u64(req.region_id).table_id();
+
+            let req_splits = partition_manager
+                .split_insert_request(table_id, req)
+                .await
+                .context(SplitInsertSnafu)?;
+            let table_route = partition_manager
+                .find_table_route(table_id)
+                .await
+                .context(FindTableRouteSnafu { table_id })?;
+
+            for (region_number, insert) in req_splits {
+                let peer =
+                    table_route
+                        .find_region_leader(region_number)
+                        .context(FindDatanodeSnafu {
+                            region: region_number,
+                        })?;
+                inserts
+                    .entry(peer.clone())
+                    .or_default()
+                    .requests
+                    .push(insert);
+            }
+        }
+
+        Ok(inserts)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use api::v1::column::Values;
-    use api::v1::{Column, ColumnDataType, InsertRequest as GrpcInsertRequest, SemanticType};
+    use std::sync::Arc;
+
+    use api::helper::vectors_to_rows;
+    use api::v1::region::InsertRequest;
+    use api::v1::value::ValueData;
+    use api::v1::{ColumnDataType, ColumnSchema, Row, Rows, SemanticType, Value};
     use client::client_manager::DatanodeClients;
-    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_meta::key::catalog_name::{CatalogManager, CatalogNameKey};
     use common_meta::key::schema_name::{SchemaManager, SchemaNameKey};
     use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
@@ -186,7 +163,7 @@ mod tests {
     use common_meta::kv_backend::KvBackendRef;
     use common_meta::rpc::router::{Region, RegionRoute};
     use datatypes::prelude::{ConcreteDataType, VectorRef};
-    use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, Schema};
+    use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema as DtColumnSchema, Schema};
     use datatypes::vectors::Int32Vector;
     use table::metadata::{RawTableInfo, TableInfoBuilder, TableMetaBuilder};
 
@@ -217,13 +194,13 @@ mod tests {
         table_metadata_manager: &TableMetadataManagerRef,
     ) {
         let schema = Arc::new(Schema::new(vec![
-            ColumnSchema::new("ts", ConcreteDataType::int64_datatype(), false)
+            DtColumnSchema::new("ts", ConcreteDataType::int64_datatype(), false)
                 .with_time_index(true)
                 .with_default_constraint(Some(ColumnDefaultConstraint::Function(
                     "current_timestamp()".to_string(),
                 )))
                 .unwrap(),
-            ColumnSchema::new("a", ConcreteDataType::int32_datatype(), true),
+            DtColumnSchema::new("a", ConcreteDataType::int32_datatype(), true),
         ]));
 
         let table_meta = TableMetaBuilder::default()
@@ -279,61 +256,65 @@ mod tests {
             table_metadata_manager,
         ));
 
-        let inserter = DistInserter::new(
-            DEFAULT_CATALOG_NAME.to_string(),
-            DEFAULT_SCHEMA_NAME.to_string(),
-            catalog_manager,
-        );
+        let inserter = DistInserter::new(&catalog_manager);
 
         let new_insert_request = |vector: VectorRef| -> InsertRequest {
+            let row_count = vector.len();
             InsertRequest {
-                catalog_name: DEFAULT_CATALOG_NAME.to_string(),
-                schema_name: DEFAULT_SCHEMA_NAME.to_string(),
-                table_name: table_name.to_string(),
-                columns_values: HashMap::from([("a".to_string(), vector)]),
-                region_number: 0,
+                region_id: RegionId::new(1, 0).into(),
+                rows: Some(Rows {
+                    schema: vec![ColumnSchema {
+                        column_name: "a".to_string(),
+                        datatype: ColumnDataType::Int32 as i32,
+                        semantic_type: SemanticType::Field as i32,
+                    }],
+                    rows: vectors_to_rows([vector].iter(), row_count),
+                }),
             }
         };
-        let requests = vec![
-            new_insert_request(Arc::new(Int32Vector::from(vec![
-                Some(1),
-                None,
-                Some(11),
-                Some(101),
-            ]))),
-            new_insert_request(Arc::new(Int32Vector::from(vec![
-                Some(2),
-                Some(12),
-                None,
-                Some(102),
-            ]))),
-        ];
 
-        let mut inserts = inserter.split_inserts(requests).await.unwrap();
+        let requests = InsertRequests {
+            requests: vec![
+                new_insert_request(Arc::new(Int32Vector::from(vec![
+                    Some(1),
+                    None,
+                    Some(11),
+                    Some(101),
+                ]))),
+                new_insert_request(Arc::new(Int32Vector::from(vec![
+                    Some(2),
+                    Some(12),
+                    None,
+                    Some(102),
+                ]))),
+            ],
+        };
+
+        let mut inserts = inserter.split(requests).await.unwrap();
 
         assert_eq!(inserts.len(), 3);
 
-        let new_grpc_insert_request = |column_values: Vec<i32>,
-                                       null_mask: Vec<u8>,
-                                       row_count: u32,
-                                       region_number: u32|
-         -> GrpcInsertRequest {
-            GrpcInsertRequest {
-                table_name: table_name.to_string(),
-                columns: vec![Column {
-                    column_name: "a".to_string(),
-                    semantic_type: SemanticType::Field as i32,
-                    values: Some(Values {
-                        i32_values: column_values,
-                        ..Default::default()
+        let new_split_insert_request =
+            |rows: Vec<Option<i32>>, region_id: RegionId| -> InsertRequest {
+                InsertRequest {
+                    region_id: region_id.into(),
+                    rows: Some(Rows {
+                        schema: vec![ColumnSchema {
+                            column_name: "a".to_string(),
+                            datatype: ColumnDataType::Int32 as i32,
+                            semantic_type: SemanticType::Field as i32,
+                        }],
+                        rows: rows
+                            .into_iter()
+                            .map(|v| Row {
+                                values: vec![Value {
+                                    value_data: v.map(ValueData::I32Value),
+                                }],
+                            })
+                            .collect(),
                     }),
-                    null_mask,
-                    datatype: ColumnDataType::Int32 as i32,
-                }],
-                row_count,
-                region_number,
-            }
-        };
+                }
+            };
 
         // region to datanode placement:
         // 1 -> 1
@@ -345,37 +326,37 @@ mod tests {
         // 2 -> [10, 50)
         // 3 -> (min, 10)
 
-        let datanode_inserts = inserts.remove(&Peer::new(1, "")).unwrap().inserts;
+        let datanode_inserts = inserts.remove(&Peer::new(1, "")).unwrap().requests;
         assert_eq!(datanode_inserts.len(), 2);
         assert_eq!(
             datanode_inserts[0],
-            new_grpc_insert_request(vec![101], vec![0], 1, 1)
+            new_split_insert_request(vec![Some(101)], RegionId::new(1, 1))
         );
         assert_eq!(
             datanode_inserts[1],
-            new_grpc_insert_request(vec![102], vec![0], 1, 1)
+            new_split_insert_request(vec![Some(102)], RegionId::new(1, 1))
         );
 
-        let datanode_inserts = inserts.remove(&Peer::new(2, "")).unwrap().inserts;
+        let datanode_inserts = inserts.remove(&Peer::new(2, "")).unwrap().requests;
         assert_eq!(datanode_inserts.len(), 2);
         assert_eq!(
             datanode_inserts[0],
-            new_grpc_insert_request(vec![11], vec![0], 1, 2)
+            new_split_insert_request(vec![Some(11)], RegionId::new(1, 2))
         );
         assert_eq!(
             datanode_inserts[1],
-            new_grpc_insert_request(vec![12], vec![0], 1, 2)
+            new_split_insert_request(vec![Some(12)], RegionId::new(1, 2))
         );
 
-        let datanode_inserts = inserts.remove(&Peer::new(3, "")).unwrap().inserts;
+        let datanode_inserts = inserts.remove(&Peer::new(3, "")).unwrap().requests;
         assert_eq!(datanode_inserts.len(), 2);
         assert_eq!(
             datanode_inserts[0],
-            new_grpc_insert_request(vec![1], vec![2], 2, 3)
+            new_split_insert_request(vec![Some(1), None], RegionId::new(1, 3))
         );
         assert_eq!(
             datanode_inserts[1],
-            new_grpc_insert_request(vec![2], vec![2], 2, 3)
+            new_split_insert_request(vec![Some(2), None], RegionId::new(1, 3))
         );
     }
 }

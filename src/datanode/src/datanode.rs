@@ -398,6 +398,7 @@ pub struct Datanode {
     opts: DatanodeOptions,
     services: Option<Services>,
     heartbeat_task: Option<HeartbeatTask>,
+    region_server: RegionServer,
 }
 
 impl Datanode {
@@ -434,7 +435,9 @@ impl Datanode {
             Mode::Standalone => None,
         };
         let heartbeat_task = match opts.mode {
-            Mode::Distributed => Some(HeartbeatTask::try_new(&opts, Some(region_server)).await?),
+            Mode::Distributed => {
+                Some(HeartbeatTask::try_new(&opts, Some(region_server.clone())).await?)
+            }
             Mode::Standalone => None,
         };
 
@@ -442,6 +445,7 @@ impl Datanode {
             opts,
             services,
             heartbeat_task,
+            region_server,
         })
     }
 
@@ -481,6 +485,10 @@ impl Datanode {
                 .context(ShutdownInstanceSnafu)?;
         }
         Ok(())
+    }
+
+    pub fn region_server(&self) -> RegionServer {
+        self.region_server.clone()
     }
 
     // internal utils
