@@ -15,6 +15,7 @@
 //! Utilities for testing.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -194,6 +195,10 @@ impl TestEnv {
         } else {
             RegionManifestManager::open(manifest_opts).await
         }
+    }
+
+    pub fn get_data_path(&self) -> PathBuf {
+        self.data_home.path().join("data")
     }
 }
 

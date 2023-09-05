@@ -21,6 +21,7 @@ mod handle_create;
 mod handle_drop;
 mod handle_flush;
 mod handle_open;
+mod handle_truncate;
 mod handle_write;
 
 use std::collections::hash_map::DefaultHasher;
@@ -503,6 +504,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     self.handle_compaction_request(ddl.region_id, ddl.sender);
                     continue;
                 }
+                DdlRequest::Truncate(_) => self.handle_truncate_request(ddl.region_id).await,
             };
 
             ddl.sender.send(res);

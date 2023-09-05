@@ -35,6 +35,8 @@ pub enum RegionMetaAction {
     Edit(RegionEdit),
     /// Remove the region.
     Remove(RegionRemove),
+    /// Truncate the region.
+    Truncate(RegionTruncate),
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -54,6 +56,11 @@ pub struct RegionEdit {
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct RegionRemove {
+    pub region_id: RegionId,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct RegionTruncate {
     pub region_id: RegionId,
 }
 
@@ -116,6 +123,11 @@ impl RegionManifestBuilder {
         if let Some(flushed_sequence) = edit.flushed_sequence {
             self.flushed_sequence = self.flushed_sequence.max(flushed_sequence);
         }
+    }
+
+    pub fn apply_truncate(&mut self, manifest_version: ManifestVersion, _truncate: RegionTruncate) {
+        self.manifest_version = manifest_version;
+        self.files.clear();
     }
 
     /// Check if the builder keeps a [RegionMetadata](crate::metadata::RegionMetadata).
