@@ -29,7 +29,9 @@ use arrow_flight::Ticket;
 use async_trait::async_trait;
 use catalog::{CatalogManager, DeregisterTableRequest, RegisterTableRequest};
 use chrono::DateTime;
+use client::error::{HandleRequestSnafu, Result as ClientResult};
 use client::region::RegionRequester;
+use client::region_handler::RegionRequestHandler;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::format_full_table_name;
 use common_error::ext::BoxedError;
@@ -62,7 +64,6 @@ use table::metadata::{RawTableInfo, RawTableMeta, TableId, TableIdent, TableInfo
 use table::requests::{AlterTableRequest, TableOptions};
 use table::TableRef;
 
-use super::region_handler::RegionRequestHandler;
 use crate::catalog::FrontendCatalogManager;
 use crate::error::{
     self, AlterExprToRequestSnafu, CatalogSnafu, ColumnDataTypeSnafu, ColumnNotFoundSnafu,
@@ -611,6 +612,26 @@ impl RegionRequestHandler for DistRegionRequestHandler {
         &self,
         request: region_request::Body,
         ctx: QueryContextRef,
+    ) -> ClientResult<RegionResponse> {
+        self.handle_inner(request, ctx)
+            .await
+            .map_err(BoxedError::new)
+            .context(HandleRequestSnafu)
+    }
+
+    async fn do_get(&self, request: QueryRequest) -> ClientResult<SendableRecordBatchStream> {
+        self.do_get_inner(request)
+            .await
+            .map_err(BoxedError::new)
+            .context(HandleRequestSnafu)
+    }
+}
+
+impl DistRegionRequestHandler {
+    async fn handle_inner(
+        &self,
+        request: region_request::Body,
+        ctx: QueryContextRef,
     ) -> Result<RegionResponse> {
         match request {
             region_request::Body::Inserts(inserts) => {
@@ -657,7 +678,7 @@ impl RegionRequestHandler for DistRegionRequestHandler {
         }
     }
 
-    async fn do_get(&self, request: QueryRequest) -> Result<SendableRecordBatchStream> {
+    async fn do_get_inner(&self, request: QueryRequest) -> Result<SendableRecordBatchStream> {
         let region_id = RegionId::from_u64(request.region_id);
 
         let table_route = self

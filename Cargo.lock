@@ -1539,6 +1539,7 @@ dependencies = [
  "parking_lot",
  "prost",
  "rand",
+ "session",
  "snafu",
  "substrait 0.4.0-nightly",
  "substrait 0.7.5",
