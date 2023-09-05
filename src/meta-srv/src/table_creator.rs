@@ -54,7 +54,7 @@ impl TableCreator for MetaSrvTableCreator {
         ctx: &TableCreatorContext,
         raw_table_info: &mut RawTableInfo,
         partitions: &[Partition],
-    ) -> MetaResult<(TableId, Vec<RegionRoute>)> {
+    ) -> MetaResult<(Option<TableId>, Vec<RegionRoute>)> {
         handle_create_region_routes(
             ctx.cluster_id,
             raw_table_info,
@@ -77,7 +77,7 @@ async fn handle_create_region_routes(
     ctx: &SelectorContext,
     selector: &SelectorRef,
     table_id_sequence: &SequenceRef,
-) -> Result<(TableId, Vec<RegionRoute>)> {
+) -> Result<(Option<TableId>, Vec<RegionRoute>)> {
     let mut peers = selector.select(cluster_id, ctx).await?;
 
     if peers.len() < partitions.len() {
@@ -122,5 +122,5 @@ async fn handle_create_region_routes(
         })
         .collect::<Vec<_>>();
 
-    Ok((table_id, region_routes))
+    Ok((Some(table_id), region_routes))
 }

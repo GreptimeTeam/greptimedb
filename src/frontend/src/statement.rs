@@ -15,6 +15,7 @@
 mod backup;
 mod copy_table_from;
 mod copy_table_to;
+mod ddl;
 mod describe;
 mod dml;
 mod show;
@@ -24,9 +25,15 @@ use std::collections::HashMap;
 use std::str::FromStr;
 
 use api::v1::region::region_request;
-use catalog::CatalogManagerRef;
+use api::v1::CreateTableExpr;
+use catalog::error::InternalSnafu;
+use catalog::{CatalogManagerRef, RegisterSystemTableRequest};
 use client::region_handler::RegionRequestHandlerRef;
 use common_error::ext::BoxedError;
+use common_meta::cache_invalidator::CacheInvalidatorRef;
+use common_meta::ddl::DdlTaskExecutorRef;
+use common_meta::key::TableMetadataManagerRef;
+use common_meta::table_name::TableName;
 use common_query::Output;
 use common_time::range::TimestampRange;
 use common_time::Timestamp;
@@ -49,6 +56,7 @@ use crate::error::{
     self, CatalogSnafu, ExecLogicalPlanSnafu, ExecuteStatementSnafu, ExternalSnafu,
     PlanStatementSnafu, RequestDatanodeSnafu, Result, TableNotFoundSnafu,
 };
+use crate::expr_factory;
 use crate::req_convert::{delete, insert};
 use crate::statement::backup::{COPY_DATABASE_TIME_END_KEY, COPY_DATABASE_TIME_START_KEY};
 
@@ -58,6 +66,9 @@ pub struct StatementExecutor {
     query_engine: QueryEngineRef,
     sql_stmt_executor: SqlStatementExecutorRef,
     region_request_handler: RegionRequestHandlerRef,
+    ddl_executor: DdlTaskExecutorRef,
+    table_metadata_manager: TableMetadataManagerRef,
+    cache_invalidator: CacheInvalidatorRef,
 }
 
 impl StatementExecutor {
@@ -66,12 +77,18 @@ impl StatementExecutor {
         query_engine: QueryEngineRef,
         sql_stmt_executor: SqlStatementExecutorRef,
         region_request_handler: RegionRequestHandlerRef,
+        ddl_task_executor: DdlTaskExecutorRef,
+        table_metadata_manager: TableMetadataManagerRef,
+        cache_invalidator: CacheInvalidatorRef,
     ) -> Self {
         Self {
             catalog_manager,
             query_engine,
             sql_stmt_executor,
             region_request_handler,
+            ddl_executor: ddl_task_executor,
+            table_metadata_manager,
+            cache_invalidator,
         }
     }
 
@@ -122,13 +139,39 @@ impl StatementExecutor {
                 self.copy_database(to_copy_database_request(arg, &query_ctx)?)
                     .await
             }
-            Statement::CreateTable(_)
-            | Statement::CreateExternalTable(_)
-            | Statement::CreateDatabase(_)
-            | Statement::Alter(_)
-            | Statement::DropTable(_)
-            | Statement::TruncateTable(_)
-            | Statement::ShowCreateTable(_) => self
+
+            Statement::CreateTable(stmt) => {
+                let create_expr = &mut expr_factory::create_to_expr(&stmt, query_ctx)?;
+                let _ = self.create_table(create_expr, stmt.partitions).await?;
+                Ok(Output::AffectedRows(0))
+            }
+            Statement::CreateExternalTable(stmt) => {
+                let create_expr = &mut expr_factory::create_external_expr(stmt, query_ctx).await?;
+                let _ = self.create_table(create_expr, None).await?;
+                Ok(Output::AffectedRows(0))
+            }
+            Statement::Alter(alter_table) => {
+                let expr = expr_factory::to_alter_expr(alter_table, query_ctx)?;
+                self.handle_alter_table(expr).await
+            }
+            Statement::DropTable(stmt) => {
+                let (catalog, schema, table) =
+                    table_idents_to_full_name(stmt.table_name(), query_ctx)
+                        .map_err(BoxedError::new)
+                        .context(error::ExternalSnafu)?;
+                let table_name = TableName::new(catalog, schema, table);
+                self.drop_table(table_name).await
+            }
+            Statement::TruncateTable(stmt) => {
+                let (catalog, schema, table) =
+                    table_idents_to_full_name(stmt.table_name(), query_ctx)
+                        .map_err(BoxedError::new)
+                        .context(error::ExternalSnafu)?;
+                let table_name = TableName::new(catalog, schema, table);
+                self.truncate_table(table_name).await
+            }
+
+            Statement::CreateDatabase(_) | Statement::ShowCreateTable(_) => self
                 .sql_stmt_executor
                 .execute_sql(stmt, query_ctx)
                 .await
@@ -209,6 +252,93 @@ impl StatementExecutor {
             .await
             .context(RequestDatanodeSnafu)?;
         Ok(affected_rows as _)
+    }
+
+    pub async fn register_system_table(
+        &self,
+        request: RegisterSystemTableRequest,
+    ) -> catalog::error::Result<()> {
+        let open_hook = request.open_hook;
+        let request = request.create_table_request;
+
+        if let Some(table) = self
+            .catalog_manager
+            .table(
+                &request.catalog_name,
+                &request.schema_name,
+                &request.table_name,
+            )
+            .await?
+        {
+            if let Some(hook) = open_hook {
+                (hook)(table).await?;
+            }
+            return Ok(());
+        }
+
+        let time_index = request
+            .schema
+            .column_schemas
+            .iter()
+            .find_map(|x| {
+                if x.is_time_index() {
+                    Some(x.name.clone())
+                } else {
+                    None
+                }
+            })
+            .context(InvalidSystemTableDefSnafu {
+                err_msg: "Time index is not defined.",
+            })?;
+
+        let primary_keys = request
+            .schema
+            .column_schemas
+            .iter()
+            .enumerate()
+            .filter_map(|(i, x)| {
+                if request.primary_key_indices.contains(&i) {
+                    Some(x.name.clone())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let column_defs =
+            expr_factory::column_schemas_to_defs(request.schema.column_schemas, &primary_keys)
+                .map_err(|e| {
+                    InvalidSystemTableDefSnafu {
+                        err_msg: e.to_string(),
+                    }
+                    .build()
+                })?;
+
+        let mut create_table = CreateTableExpr {
+            catalog_name: request.catalog_name,
+            schema_name: request.schema_name,
+            table_name: request.table_name,
+            desc: request.desc.unwrap_or("".to_string()),
+            column_defs,
+            time_index,
+            primary_keys,
+            create_if_not_exists: request.create_if_not_exists,
+            table_options: (&request.table_options).into(),
+            table_id: None, // Should and will be assigned by Meta.
+            region_numbers: vec![0],
+            engine: request.engine,
+        };
+
+        let table = self
+            .create_table(&mut create_table, None)
+            .await
+            .map_err(BoxedError::new)
+            .context(InternalSnafu)?;
+
+        if let Some(hook) = open_hook {
+            (hook)(table).await?;
+        }
+        Ok(())
     }
 }
 

@@ -99,12 +99,6 @@ sync_write = false
 file_size = "256MB"
 # Kv purge threshold.
 purge_threshold = "4GB"
-# Kv purge interval in seconds.
-purge_interval = "10m"
-# Kv read batch size.
-read_batch_size = 128
-# Whether to sync log file after every write.
-sync_write = false
 
 # Procedure storage options.
 [procedure]

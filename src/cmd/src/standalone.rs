@@ -16,7 +16,9 @@ use std::sync::Arc;
 
 use clap::Parser;
 use common_base::Plugins;
-use common_config::{KvStoreConfig, WalConfig};
+use common_config::{kv_store_dir, KvStoreConfig, WalConfig};
+use common_meta::kv_backend::KvBackendRef;
+use common_procedure::ProcedureManagerRef;
 use common_telemetry::info;
 use common_telemetry::logging::LoggingOptions;
 use datanode::datanode::{Datanode, DatanodeOptions, ProcedureConfig, StorageConfig};
@@ -297,9 +299,22 @@ impl StartCommand {
             .await
             .context(StartDatanodeSnafu)?;
 
+        let kv_dir = kv_store_dir(&opts.data_home);
+
+        let (kv_store, procedure_manager) =
+            FeInstance::try_build_standalone_components(kv_dir, opts.kv_store, opts.procedure)
+                .await
+                .context(StartFrontendSnafu)?;
+
         // TODO: build frontend instance like in distributed mode
-        let mut frontend =
-            build_frontend(plugins.clone(), todo!(), datanode.region_server()).await?;
+        let mut frontend = build_frontend(
+            plugins.clone(),
+            kv_store,
+            procedure_manager,
+            todo!(),
+            datanode.region_server(),
+        )
+        .await?;
 
         frontend
             .build_servers(&fe_opts)
@@ -313,12 +328,19 @@ impl StartCommand {
 /// Build frontend instance in standalone mode
 async fn build_frontend(
     plugins: Arc<Plugins>,
+    kv_store: KvBackendRef,
+    procedure_manager: ProcedureManagerRef,
     datanode_instance: InstanceRef,
     region_server: RegionServer,
 ) -> Result<FeInstance> {
-    let mut frontend_instance = FeInstance::try_new_standalone(datanode_instance, region_server)
-        .await
-        .context(StartFrontendSnafu)?;
+    let mut frontend_instance = FeInstance::try_new_standalone(
+        kv_store,
+        procedure_manager,
+        datanode_instance,
+        region_server,
+    )
+    .await
+    .context(StartFrontendSnafu)?;
     frontend_instance.set_plugins(plugins.clone());
     Ok(frontend_instance)
 }

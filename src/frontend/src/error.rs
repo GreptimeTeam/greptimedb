@@ -27,6 +27,18 @@ use store_api::storage::RegionNumber;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
+    #[snafu(display("Failed to invalidate table cache, source: {}", source))]
+    InvalidateTableCache {
+        location: Location,
+        source: common_meta::error::Error,
+    },
+
+    #[snafu(display("Failed to open raft engine backend, source: {}", source))]
+    OpenRaftEngineBackend {
+        location: Location,
+        source: BoxedError,
+    },
+
     #[snafu(display("Failed to execute ddl, source: {}", source))]
     ExecuteDdl {
         location: Location,
@@ -710,6 +722,8 @@ impl ErrorExt for Error {
                 source.status_code()
             }
 
+            Error::InvalidateTableCache { source, .. } => source.status_code(),
+
             Error::ParseFileFormat { source, .. } | Error::InferSchema { source, .. } => {
                 source.status_code()
             }
@@ -721,6 +735,8 @@ impl ErrorExt for Error {
             Error::ConvertColumnDefaultConstraint { source, .. }
             | Error::CreateTableInfo { source }
             | Error::IntoVectors { source } => source.status_code(),
+
+            Error::OpenRaftEngineBackend { .. } => StatusCode::StorageUnavailable,
 
             Error::RequestDatanode { source } => source.status_code(),
             Error::RequestInserts { source } => source.status_code(),

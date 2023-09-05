@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use common_error::ext::BoxedError;
 use common_procedure::{watcher, ProcedureId, ProcedureManagerRef, ProcedureWithId};
 use common_telemetry::{error, info};
 use snafu::{OptionExt, ResultExt};
@@ -23,7 +24,9 @@ use crate::datanode_manager::DatanodeManagerRef;
 use crate::ddl::alter_table::AlterTableProcedure;
 use crate::ddl::create_table::CreateTableProcedure;
 use crate::ddl::drop_table::DropTableProcedure;
-use crate::ddl::{DdlContext, DdlExecutor, ExecutorContext, TableCreatorContext, TableCreatorRef};
+use crate::ddl::{
+    DdlContext, DdlTaskExecutor, ExecutorContext, TableCreatorContext, TableCreatorRef,
+};
 use crate::error::{
     self, RegisterProcedureLoaderSnafu, Result, SubmitProcedureSnafu, TableNotFoundSnafu,
     UnsupportedSnafu, WaitProcedureSnafu,
@@ -89,6 +92,7 @@ impl DdlManager {
                     CreateTableProcedure::from_json(json, context).map(|p| Box::new(p) as _)
                 }),
             )
+            .map_err(BoxedError::new)
             .context(RegisterProcedureLoaderSnafu {
                 type_name: CreateTableProcedure::TYPE_NAME,
             })?;
@@ -103,6 +107,7 @@ impl DdlManager {
                     DropTableProcedure::from_json(json, context).map(|p| Box::new(p) as _)
                 }),
             )
+            .map_err(BoxedError::new)
             .context(RegisterProcedureLoaderSnafu {
                 type_name: DropTableProcedure::TYPE_NAME,
             })?;
@@ -117,6 +122,7 @@ impl DdlManager {
                     AlterTableProcedure::from_json(json, context).map(|p| Box::new(p) as _)
                 }),
             )
+            .map_err(BoxedError::new)
             .context(RegisterProcedureLoaderSnafu {
                 type_name: AlterTableProcedure::TYPE_NAME,
             })
@@ -198,10 +204,12 @@ impl DdlManager {
             .procedure_manager
             .submit(procedure_with_id)
             .await
+            .map_err(BoxedError::new)
             .context(SubmitProcedureSnafu)?;
 
         watcher::wait(&mut watcher)
             .await
+            .map_err(BoxedError::new)
             .context(WaitProcedureSnafu)?;
 
         Ok(procedure_id)
@@ -342,16 +350,16 @@ async fn handle_create_table_task(
         .submit_create_table_task(cluster_id, create_table_task, region_routes)
         .await?;
 
-    info!("Table: {table_id} is created via procedure_id {id:?}");
+    info!("Table: {table_id:?} is created via procedure_id {id:?}");
 
     Ok(SubmitDdlTaskResponse {
         key: id.to_string().into(),
-        table_id: Some(table_id),
+        table_id,
     })
 }
 
 #[async_trait::async_trait]
-impl DdlExecutor for DdlManager {
+impl DdlTaskExecutor for DdlManager {
     async fn submit_ddl_task(
         &self,
         ctx: &ExecutorContext,

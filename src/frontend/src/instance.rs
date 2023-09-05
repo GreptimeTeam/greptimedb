@@ -34,11 +34,19 @@ use catalog::CatalogManagerRef;
 use client::client_manager::DatanodeClients;
 use client::region_handler::RegionRequestHandlerRef;
 use common_base::Plugins;
+use common_config::KvStoreConfig;
 use common_error::ext::BoxedError;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
+use common_meta::cache_invalidator::DummyCacheInvalidator;
+use common_meta::ddl_manager::DdlManager;
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
 use common_meta::heartbeat::handler::HandlerGroupExecutor;
 use common_meta::key::TableMetadataManager;
+use common_meta::kv_backend::KvBackendRef;
+use common_meta::state_store::KvStateStore;
+use common_procedure::local::{LocalManager, ManagerConfig};
+use common_procedure::options::ProcedureConfig;
+use common_procedure::ProcedureManagerRef;
 use common_query::Output;
 use common_telemetry::logging::info;
 use common_telemetry::{error, timer};
@@ -46,6 +54,7 @@ use datanode::instance::sql::table_idents_to_full_name;
 use datanode::instance::InstanceRef as DnInstanceRef;
 use datanode::region_server::RegionServer;
 use distributed::DistInstance;
+use log_store::raft_engine::RaftEngineBackend;
 use meta_client::client::{MetaClient, MetaClientBuilder};
 use partition::manager::PartitionRuleManager;
 use partition::route::TableRoutes;
@@ -54,6 +63,7 @@ use query::plan::LogicalPlan;
 use query::query_engine::options::{validate_catalog_and_schema, QueryOptions};
 use query::query_engine::DescribeResult;
 use query::{QueryEngineFactory, QueryEngineRef};
+use raft_engine::{Config, ReadableSize, RecoveryMode};
 use servers::error as server_error;
 use servers::error::{AuthSnafu, ExecuteQuerySnafu, ParsePromQLSnafu};
 use servers::interceptor::{
@@ -75,7 +85,9 @@ use sql::statements::statement::Statement;
 use sqlparser::ast::ObjectName;
 
 use self::distributed::DistRegionRequestHandler;
-use self::standalone::StandaloneRegionRequestHandler;
+use self::standalone::{
+    StandaloneDatanodeManager, StandaloneRegionRequestHandler, StandaloneTableCreator,
+};
 use crate::catalog::FrontendCatalogManager;
 use crate::delete::Deleter;
 use crate::error::{
@@ -160,12 +172,9 @@ impl Instance {
             table_metadata_manager.clone(),
         ));
 
-        let dist_instance = Arc::new(DistInstance::new(
-            meta_client.clone(),
-            catalog_manager.clone(),
-        ));
-
         let dist_request_handler = DistRegionRequestHandler::arc(catalog_manager.clone());
+
+        let dist_instance = Arc::new(DistInstance::new(catalog_manager.clone()));
 
         let query_engine = QueryEngineFactory::new_with_plugins(
             catalog_manager.clone(),
@@ -175,9 +184,6 @@ impl Instance {
         )
         .query_engine();
 
-        let script_executor =
-            Arc::new(ScriptExecutor::new(catalog_manager.clone(), query_engine.clone()).await?);
-
         let region_request_handler = DistRegionRequestHandler::arc(catalog_manager.clone());
 
         let statement_executor = Arc::new(StatementExecutor::new(
@@ -185,9 +191,15 @@ impl Instance {
             query_engine.clone(),
             dist_instance.clone(),
             region_request_handler.clone(),
+            meta_client.clone(),
+            table_metadata_manager,
+            catalog_manager.clone(),
         ));
 
         plugins.insert::<StatementExecutorRef>(statement_executor.clone());
+
+        let script_executor =
+            Arc::new(ScriptExecutor::new(catalog_manager.clone(), query_engine.clone()).await?);
 
         let handlers_executor = HandlerGroupExecutor::new(vec![
             Arc::new(ParseMailboxMessageHandler),
@@ -258,7 +270,39 @@ impl Instance {
         Ok(Arc::new(meta_client))
     }
 
+    pub async fn try_build_standalone_components(
+        dir: String,
+        config: KvStoreConfig,
+        procedure_config: ProcedureConfig,
+    ) -> Result<(KvBackendRef, ProcedureManagerRef)> {
+        let kv_store = Arc::new(
+            RaftEngineBackend::try_open_with_cfg(Config {
+                dir,
+                purge_threshold: ReadableSize(config.purge_threshold.0),
+                recovery_mode: RecoveryMode::TolerateTailCorruption,
+                batch_compression_threshold: ReadableSize::kb(8),
+                target_file_size: ReadableSize(config.file_size.0),
+                ..Default::default()
+            })
+            .map_err(BoxedError::new)
+            .context(error::OpenRaftEngineBackendSnafu)?,
+        );
+
+        let state_store = Arc::new(KvStateStore::new(kv_store.clone()));
+
+        let manager_config = ManagerConfig {
+            max_retry_times: procedure_config.max_retry_times,
+            retry_delay: procedure_config.retry_delay,
+            ..Default::default()
+        };
+        let procedure_manager = Arc::new(LocalManager::new(manager_config, state_store));
+
+        Ok((kv_store, procedure_manager))
+    }
+
     pub async fn try_new_standalone(
+        kv_backend: KvBackendRef,
+        procedure_manager: ProcedureManagerRef,
         dn_instance: DnInstanceRef,
         region_server: RegionServer,
     ) -> Result<Self> {
@@ -267,12 +311,27 @@ impl Instance {
         let script_executor =
             Arc::new(ScriptExecutor::new(catalog_manager.clone(), query_engine.clone()).await?);
 
-        let region_request_handler = StandaloneRegionRequestHandler::arc(region_server);
+        let region_request_handler = StandaloneRegionRequestHandler::arc(region_server.clone());
+
+        let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
+
+        let cache_invalidator = Arc::new(DummyCacheInvalidator);
+        let ddl_executor = Arc::new(DdlManager::new(
+            procedure_manager,
+            Arc::new(StandaloneDatanodeManager(region_server)),
+            cache_invalidator.clone(),
+            table_metadata_manager.clone(),
+            Arc::new(StandaloneTableCreator),
+        ));
+
         let statement_executor = Arc::new(StatementExecutor::new(
             catalog_manager.clone(),
             query_engine.clone(),
             dn_instance.clone(),
             region_request_handler.clone(),
+            ddl_executor,
+            table_metadata_manager.clone(),
+            cache_invalidator,
         ));
 
         let create_expr_factory = CreateExprFactory;

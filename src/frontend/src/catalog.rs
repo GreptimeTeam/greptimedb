@@ -23,14 +23,17 @@ use catalog::error::{
 use catalog::information_schema::{InformationSchemaProvider, COLUMNS, TABLES};
 use catalog::remote::KvCacheInvalidatorRef;
 use catalog::{
-    CatalogManager, DeregisterSchemaRequest, DeregisterTableRequest, RegisterSchemaRequest,
-    RegisterTableRequest, RenameTableRequest,
+    CatalogManager, DeregisterSchemaRequest, DeregisterTableRequest, RegisterTableRequest,
+    RenameTableRequest, RegisterSchemaRequest,
 };
 use client::client_manager::DatanodeClients;
 use common_catalog::consts::{
     DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME, NUMBERS_TABLE_ID,
 };
 use common_error::ext::BoxedError;
+use common_meta::cache_invalidator::{CacheInvalidator, Context};
+use common_meta::error::Result as MetaResult;
+use common_meta::ident::TableIdent;
 use common_meta::key::catalog_name::CatalogNameKey;
 use common_meta::key::schema_name::SchemaNameKey;
 use common_meta::key::table_info::TableInfoKey;
@@ -41,7 +44,6 @@ use common_telemetry::debug;
 use futures_util::TryStreamExt;
 use partition::manager::PartitionRuleManagerRef;
 use snafu::prelude::*;
-use table::metadata::TableId;
 use table::table::numbers::{NumbersTable, NUMBERS_TABLE_NAME};
 use table::TableRef;
 
@@ -54,6 +56,41 @@ pub struct FrontendCatalogManager {
     partition_manager: PartitionRuleManagerRef,
     datanode_clients: Arc<DatanodeClients>,
     table_metadata_manager: TableMetadataManagerRef,
+}
+
+#[async_trait::async_trait]
+impl CacheInvalidator for FrontendCatalogManager {
+    async fn invalidate_table(&self, _ctx: &Context, table_ident: TableIdent) -> MetaResult<()> {
+        let table_id = table_ident.table_id;
+        let key = TableNameKey::new(
+            &table_ident.catalog,
+            &table_ident.schema,
+            &table_ident.table,
+        );
+        self.backend_cache_invalidator
+            .invalidate_key(&key.as_raw_key())
+            .await;
+        debug!(
+            "invalidated cache key: {}",
+            String::from_utf8_lossy(&key.as_raw_key())
+        );
+
+        let key = TableInfoKey::new(table_id);
+        self.backend_cache_invalidator
+            .invalidate_key(&key.as_raw_key())
+            .await;
+        debug!(
+            "invalidated cache key: {}",
+            String::from_utf8_lossy(&key.as_raw_key())
+        );
+
+        self.partition_manager
+            .table_routes()
+            .invalidate_table_route(table_id)
+            .await;
+
+        Ok(())
+    }
 }
 
 impl FrontendCatalogManager {
@@ -93,37 +130,6 @@ impl FrontendCatalogManager {
         let key = SchemaNameKey::new(catalog, schema).as_raw_key();
 
         self.backend_cache_invalidator.invalidate_key(&key).await;
-    }
-
-    pub async fn invalidate_table(
-        &self,
-        catalog: &str,
-        schema: &str,
-        table: &str,
-        table_id: TableId,
-    ) {
-        let key = TableNameKey::new(catalog, schema, table);
-        self.backend_cache_invalidator
-            .invalidate_key(&key.as_raw_key())
-            .await;
-        debug!(
-            "invalidated cache key: {}",
-            String::from_utf8_lossy(&key.as_raw_key())
-        );
-
-        let key = TableInfoKey::new(table_id);
-        self.backend_cache_invalidator
-            .invalidate_key(&key.as_raw_key())
-            .await;
-        debug!(
-            "invalidated cache key: {}",
-            String::from_utf8_lossy(&key.as_raw_key())
-        );
-
-        self.partition_manager
-            .table_routes()
-            .invalidate_table_route(table_id)
-            .await;
     }
 }
 
