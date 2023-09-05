@@ -30,4 +30,5 @@ pub mod server;
 pub mod sql;
 mod store;
 #[cfg(test)]
+#[allow(dead_code)]
 mod tests;

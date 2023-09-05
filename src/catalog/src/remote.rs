@@ -22,7 +22,6 @@ mod manager;
 
 #[cfg(feature = "testing")]
 pub mod mock;
-pub mod region_alive_keeper;
 
 #[async_trait::async_trait]
 pub trait KvCacheInvalidator: Send + Sync {

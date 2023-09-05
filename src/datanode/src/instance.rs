@@ -18,7 +18,6 @@ use std::time::Duration;
 use std::{fs, path};
 
 use api::v1::meta::Role;
-use catalog::remote::region_alive_keeper::RegionAliveKeepers;
 use catalog::remote::{CachedMetaKvBackend, RemoteCatalogManager};
 use catalog::CatalogManagerRef;
 use common_base::Plugins;
@@ -113,7 +112,6 @@ impl Instance {
     fn build_heartbeat_task(
         opts: &DatanodeOptions,
         meta_client: Option<Arc<MetaClient>>,
-        region_alive_keepers: Option<Arc<RegionAliveKeepers>>,
     ) -> Result<Option<HeartbeatTask>> {
         Ok(match opts.mode {
             Mode::Standalone => None,
@@ -122,14 +120,8 @@ impl Instance {
                 let _meta_client = meta_client.context(IncorrectInternalStateSnafu {
                     state: "meta client is not provided when building heartbeat task",
                 })?;
-                let region_alive_keepers =
-                    region_alive_keepers.context(IncorrectInternalStateSnafu {
-                        state: "region_alive_keepers is not provided when building heartbeat task",
-                    })?;
-                let _handlers_executor = HandlerGroupExecutor::new(vec![
-                    Arc::new(ParseMailboxMessageHandler),
-                    region_alive_keepers.clone(),
-                ]);
+                let _handlers_executor =
+                    HandlerGroupExecutor::new(vec![Arc::new(ParseMailboxMessageHandler)]);
 
                 todo!("remove this method")
             }
@@ -185,7 +177,7 @@ impl Instance {
         );
 
         // create remote catalog manager
-        let (catalog_manager, table_id_provider, region_alive_keepers) = match opts.mode {
+        let (catalog_manager, table_id_provider) = match opts.mode {
             Mode::Standalone => {
                 let catalog = Arc::new(
                     catalog::local::LocalCatalogManager::try_new(engine_manager.clone())
@@ -196,7 +188,6 @@ impl Instance {
                 (
                     catalog.clone() as CatalogManagerRef,
                     Some(catalog as TableIdProviderRef),
-                    None,
                 )
             }
 
@@ -207,23 +198,13 @@ impl Instance {
 
                 let kv_backend = Arc::new(CachedMetaKvBackend::new(meta_client));
 
-                let region_alive_keepers = Arc::new(RegionAliveKeepers::new(
-                    engine_manager.clone(),
-                    opts.heartbeat.interval_millis,
-                ));
-
                 let catalog_manager = Arc::new(RemoteCatalogManager::new(
                     engine_manager.clone(),
                     opts.node_id.context(MissingNodeIdSnafu)?,
-                    region_alive_keepers.clone(),
                     Arc::new(TableMetadataManager::new(kv_backend)),
                 ));
 
-                (
-                    catalog_manager as CatalogManagerRef,
-                    None,
-                    Some(region_alive_keepers),
-                )
+                (catalog_manager as CatalogManagerRef, None)
             }
         };
 
@@ -276,8 +257,7 @@ impl Instance {
             greptimedb_telemetry_task,
         });
 
-        let heartbeat_task =
-            Instance::build_heartbeat_task(opts, meta_client, region_alive_keepers)?;
+        let heartbeat_task = Instance::build_heartbeat_task(opts, meta_client)?;
 
         Ok((instance, heartbeat_task))
     }
