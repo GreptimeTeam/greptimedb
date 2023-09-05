@@ -24,8 +24,8 @@ use store_api::storage::ColumnId;
 
 use crate::error::{CompatReaderSnafu, CreateDefaultSnafu, Result};
 use crate::read::projection::ProjectionMapper;
-use crate::read::{Batch, BatchReader};
-use crate::row_converter::{McmpRowCodec, SortField};
+use crate::read::{Batch, BatchColumn, BatchReader};
+use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
 
 /// Reader to adapt schema of underlying reader to expected schema.
 pub struct CompatReader<R> {
@@ -61,11 +61,18 @@ impl<R> CompatReader<R> {
 #[async_trait::async_trait]
 impl<R: BatchReader> BatchReader for CompatReader<R> {
     async fn next_batch(&mut self) -> Result<Option<Batch>> {
-        let Some(batch) = self.reader.next_batch().await? else {
+        let Some(mut batch) = self.reader.next_batch().await? else {
             return Ok(None);
         };
 
-        todo!()
+        if let Some(compat_pk) = &self.compat_pk {
+            batch = compat_pk.compat(batch)?;
+        }
+        if let Some(compat_fields) = &self.compat_fields {
+            batch = compat_fields.compat(batch);
+        }
+
+        Ok(Some(batch))
     }
 }
 
@@ -99,12 +106,64 @@ struct CompatPrimaryKey {
     values: Vec<Value>,
 }
 
+impl CompatPrimaryKey {
+    /// Make primary key of the `batch` compatible.
+    #[must_use]
+    fn compat(&self, mut batch: Batch) -> Result<Batch> {
+        let mut buffer =
+            Vec::with_capacity(batch.primary_key().len() + self.converter.estimated_size());
+        buffer.extend_from_slice(batch.primary_key());
+        self.converter.encode_to_vec(
+            self.values.iter().map(|value| value.as_value_ref()),
+            &mut buffer,
+        )?;
+
+        batch.set_primary_key(buffer);
+        Ok(batch)
+    }
+}
+
 /// Helper to make fields compatible.
 struct CompatFields {
     /// Column Ids the reader actually returns.
     actual_fields: Vec<ColumnId>,
     /// Indices to convert actual fields to expect fields.
     index_or_defaults: Vec<IndexOrDefault>,
+}
+
+impl CompatFields {
+    /// Make fields of the `batch` compatible.
+    #[must_use]
+    fn compat(&self, batch: Batch) -> Batch {
+        debug_assert_eq!(self.actual_fields.len(), batch.fields().len());
+        debug_assert!(self
+            .actual_fields
+            .iter()
+            .zip(batch.fields())
+            .all(|(id, batch_column)| *id == batch_column.column_id));
+
+        let len = batch.num_rows();
+        let fields = self
+            .index_or_defaults
+            .iter()
+            .map(|index_or_default| match index_or_default {
+                IndexOrDefault::Index(index) => batch.fields()[*index].clone(),
+                IndexOrDefault::DefaultValue {
+                    column_id,
+                    default_vector,
+                } => {
+                    let data = default_vector.replicate(&[len]);
+                    BatchColumn {
+                        column_id: *column_id,
+                        data,
+                    }
+                }
+            })
+            .collect();
+
+        // Safety: We ensure all columns have the same length and the new batch should be valid.
+        batch.with_fields(fields).unwrap()
+    }
 }
 
 /// Creates a [CompatPrimaryKey] if needed.

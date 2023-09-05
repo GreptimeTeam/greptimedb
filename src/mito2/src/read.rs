@@ -80,6 +80,17 @@ impl Batch {
             .build()
     }
 
+    /// Tries to set fields for the batch.
+    pub fn with_fields(self, fields: Vec<BatchColumn>) -> Result<Batch> {
+        Batch::new(
+            self.primary_key,
+            self.timestamps,
+            self.sequences,
+            self.op_types,
+            fields,
+        )
+    }
+
     /// Returns primary key of the batch.
     pub fn primary_key(&self) -> &[u8] {
         &self.primary_key
@@ -593,8 +604,6 @@ impl Source {
 /// The reader must guarantee [Batch]es returned by it have the same schema.
 #[async_trait]
 pub trait BatchReader: Send {
-    // TODO(yingwen): fields of the batch returned.
-
     /// Fetch next [Batch].
     ///
     /// Returns `Ok(None)` when the reader has reached its end and calling `next_batch()`
