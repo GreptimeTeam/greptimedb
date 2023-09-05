@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use clap::Parser;
 use common_base::Plugins;
-use common_config::WalConfig;
+use common_config::{KvStoreConfig, WalConfig};
 use common_telemetry::info;
 use common_telemetry::logging::LoggingOptions;
 use datanode::datanode::{Datanode, DatanodeOptions, ProcedureConfig, StorageConfig};
@@ -47,12 +47,8 @@ pub struct Command {
 }
 
 impl Command {
-    pub async fn build(
-        self,
-        fe_opts: FrontendOptions,
-        dn_opts: DatanodeOptions,
-    ) -> Result<Instance> {
-        self.subcmd.build(fe_opts, dn_opts).await
+    pub async fn build(self, opts: MixOptions) -> Result<Instance> {
+        self.subcmd.build(opts).await
     }
 
     pub fn load_options(&self, top_level_options: TopLevelOptions) -> Result<Options> {
@@ -66,9 +62,9 @@ enum SubCommand {
 }
 
 impl SubCommand {
-    async fn build(self, fe_opts: FrontendOptions, dn_opts: DatanodeOptions) -> Result<Instance> {
+    async fn build(self, opts: MixOptions) -> Result<Instance> {
         match self {
-            SubCommand::Start(cmd) => cmd.build(fe_opts, dn_opts).await,
+            SubCommand::Start(cmd) => cmd.build(opts).await,
         }
     }
 
@@ -93,6 +89,7 @@ pub struct StandaloneOptions {
     pub prom_store_options: PromStoreOptions,
     pub wal: WalConfig,
     pub storage: StorageConfig,
+    pub kv_store: KvStoreConfig,
     pub procedure: ProcedureConfig,
     pub logging: LoggingOptions,
 }
@@ -111,6 +108,7 @@ impl Default for StandaloneOptions {
             prom_store_options: PromStoreOptions::default(),
             wal: WalConfig::default(),
             storage: StorageConfig::default(),
+            kv_store: KvStoreConfig::default(),
             procedure: ProcedureConfig::default(),
             logging: LoggingOptions::default(),
         }
@@ -265,12 +263,16 @@ impl StartCommand {
         if self.influxdb_enable {
             opts.influxdb_options.enable = self.influxdb_enable;
         }
-
+        let kv_store = opts.kv_store.clone();
+        let procedure = opts.procedure.clone();
         let fe_opts = opts.clone().frontend_options();
         let logging = opts.logging.clone();
         let dn_opts = opts.datanode_options();
 
         Ok(Options::Standalone(Box::new(MixOptions {
+            procedure,
+            kv_store,
+            data_home: dn_opts.storage.data_home.to_string(),
             fe_opts,
             dn_opts,
             logging,
@@ -280,8 +282,10 @@ impl StartCommand {
     #[allow(unreachable_code)]
     #[allow(unused_variables)]
     #[allow(clippy::diverging_sub_expression)]
-    async fn build(self, fe_opts: FrontendOptions, dn_opts: DatanodeOptions) -> Result<Instance> {
+    async fn build(self, opts: MixOptions) -> Result<Instance> {
         let plugins = Arc::new(load_frontend_plugins(&self.user_provider)?);
+        let fe_opts = opts.fe_opts;
+        let dn_opts = opts.dn_opts;
 
         info!("Standalone start command: {:#?}", self);
         info!(

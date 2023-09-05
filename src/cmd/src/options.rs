@@ -12,9 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_config::KvStoreConfig;
 use common_telemetry::logging::LoggingOptions;
 use config::{Config, Environment, File, FileFormat};
-use datanode::datanode::DatanodeOptions;
+use datanode::datanode::{DatanodeOptions, ProcedureConfig};
 use frontend::frontend::FrontendOptions;
 use meta_srv::metasrv::MetaSrvOptions;
 use serde::{Deserialize, Serialize};
@@ -26,6 +27,9 @@ pub const ENV_VAR_SEP: &str = "__";
 pub const ENV_LIST_SEP: &str = ",";
 
 pub struct MixOptions {
+    pub data_home: String,
+    pub procedure: ProcedureConfig,
+    pub kv_store: KvStoreConfig,
     pub fe_opts: FrontendOptions,
     pub dn_opts: DatanodeOptions,
     pub logging: LoggingOptions,

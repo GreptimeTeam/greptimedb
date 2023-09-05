@@ -44,3 +44,31 @@ impl Default for WalConfig {
         }
     }
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct KvStoreConfig {
+    // Kv file size in bytes
+    pub file_size: ReadableSize,
+    // Kv purge threshold in bytes
+    pub purge_threshold: ReadableSize,
+    // purge interval in seconds
+    #[serde(with = "humantime_serde")]
+    pub purge_interval: Duration,
+    // read batch size
+    pub read_batch_size: usize,
+    // whether to sync log file after every write
+    pub sync_write: bool,
+}
+
+impl Default for KvStoreConfig {
+    fn default() -> Self {
+        Self {
+            file_size: ReadableSize::mb(256),     // log file size 256MB
+            purge_threshold: ReadableSize::gb(4), // purge threshold 4GB
+            purge_interval: Duration::from_secs(600),
+            read_batch_size: 128,
+            sync_write: false,
+        }
+    }
+}

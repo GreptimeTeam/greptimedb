@@ -82,8 +82,6 @@ enable = true
 
 # WAL options.
 [wal]
-# WAL data directory
-# dir = "/tmp/greptimedb/wal"
 # WAL file size in bytes.
 file_size = "256MB"
 # WAL purge threshold.
@@ -94,6 +92,26 @@ purge_interval = "10m"
 read_batch_size = 128
 # Whether to sync log file after every write.
 sync_write = false
+
+# Kv options.
+[kv_store]
+# Kv file size in bytes.
+file_size = "256MB"
+# Kv purge threshold.
+purge_threshold = "4GB"
+# Kv purge interval in seconds.
+purge_interval = "10m"
+# Kv read batch size.
+read_batch_size = 128
+# Whether to sync log file after every write.
+sync_write = false
+
+# Procedure storage options.
+[procedure]
+# Procedure max retry time.
+max_retry_times = 3
+# Initial retry delay of procedures, increases exponentially
+retry_delay = "500ms"
 
 # Storage options.
 [storage]
