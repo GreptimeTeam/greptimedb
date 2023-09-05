@@ -139,6 +139,7 @@ mod tests {
 
     type DefaultEngine = MitoEngine<EngineImpl<RaftEngineLogStore>>;
 
+    #[ignore = "script engine is temporary disabled"]
     #[tokio::test]
     async fn test_insert_find_compile_script() {
         let wal_dir = create_temp_dir("test_insert_find_compile_script_wal");
