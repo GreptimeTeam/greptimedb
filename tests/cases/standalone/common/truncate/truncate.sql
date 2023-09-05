@@ -16,6 +16,8 @@ SELECT ts, host, cpu, memory FROM monitor ORDER BY ts;
 
 TRUNCATE monitor;
 
+SELECT ts, host, cpu, memory FROM monitor ORDER BY ts;
+
 INSERT INTO monitor(ts, host, cpu, memory) VALUES 
 (1691746335000, 'host1', 99.9, 8192),
 (1691746335000, 'host2', 99.9, 8192),
