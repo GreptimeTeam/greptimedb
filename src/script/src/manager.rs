@@ -41,7 +41,7 @@ impl ScriptManager {
         Ok(Self {
             compiled: RwLock::new(HashMap::default()),
             py_engine: PyEngine::new(query_engine.clone()),
-            table: ScriptsTable::new(catalog_manager, query_engine).await?,
+            table: ScriptsTable::new_empty(catalog_manager, query_engine)?,
         })
     }
 
@@ -168,7 +168,7 @@ mod tests {
                 .unwrap(),
         );
 
-        let factory = QueryEngineFactory::new(catalog_manager.clone(), false);
+        let factory = QueryEngineFactory::new(catalog_manager.clone(), None, false);
         let query_engine = factory.query_engine();
         let mgr = ScriptManager::new(catalog_manager.clone(), query_engine)
             .await

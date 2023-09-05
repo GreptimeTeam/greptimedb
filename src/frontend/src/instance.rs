@@ -165,12 +165,12 @@ impl Instance {
 
         catalog_manager.set_dist_instance(dist_instance.clone());
         let catalog_manager = Arc::new(catalog_manager);
+        let dist_request_handler = DistRegionRequestHandler::arc(catalog_manager.clone());
 
         let query_engine = QueryEngineFactory::new_with_plugins(
             catalog_manager.clone(),
+            Some(dist_request_handler),
             true,
-            Some(partition_manager.clone()),
-            Some(datanode_clients.clone()),
             plugins.clone(),
         )
         .query_engine();
