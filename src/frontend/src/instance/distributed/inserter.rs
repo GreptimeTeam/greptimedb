@@ -37,6 +37,7 @@ use crate::inserter::Inserter;
 pub struct DistInserter<'a> {
     catalog_manager: &'a FrontendCatalogManager,
     trace_id: Option<u64>,
+    span_id: Option<u64>,
 }
 
 impl<'a> DistInserter<'a> {
@@ -52,17 +53,20 @@ impl<'a> DistInserter<'a> {
         self
     }
 
+    pub fn with_span_id(mut self, span_id: u64) -> Self {
+        self.span_id = Some(span_id);
+        self
+    }
+
     pub(crate) async fn insert_region_requests(&self, requests: InsertRequests) -> Result<u64> {
         let requests = self.split(requests).await?;
         let trace_id = self.trace_id.unwrap_or_default();
+        let span_id = self.span_id.unwrap_or_default();
         let results = future::try_join_all(requests.into_iter().map(|(peer, inserts)| {
             let datanode_clients = self.catalog_manager.datanode_clients();
             common_runtime::spawn_write(async move {
                 let request = RegionRequest {
-                    header: Some(RegionRequestHeader {
-                        trace_id,
-                        span_id: 0,
-                    }),
+                    header: Some(RegionRequestHeader { trace_id, span_id }),
                     body: Some(region_request::Body::Inserts(inserts)),
                 };
                 datanode_clients
