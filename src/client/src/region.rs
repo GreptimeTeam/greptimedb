@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::region::{region_request, RegionRequest, RegionRequestHeader, RegionResponse};
+use api::v1::region::{RegionRequest, RegionResponse};
 use api::v1::ResponseHeader;
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
@@ -79,14 +79,7 @@ impl RegionRequester {
         Ok(affected_rows)
     }
 
-    pub async fn handle(&self, request: region_request::Body) -> Result<AffectedRows> {
-        let request = RegionRequest {
-            header: Some(RegionRequestHeader {
-                trace_id: 0,
-                span_id: 0,
-            }),
-            body: Some(request),
-        };
+    pub async fn handle(&self, request: RegionRequest) -> Result<AffectedRows> {
         self.handle_inner(request).await
     }
 }
