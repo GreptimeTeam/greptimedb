@@ -15,25 +15,24 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use api::v1::RowInsertRequest;
+use api::v1::region::InsertRequest;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::TableRoute;
 use common_query::prelude::Expr;
 use datafusion_expr::{BinaryExpr, Expr as DfExpr, Operator};
 use datatypes::prelude::Value;
-use datatypes::schema::Schema;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::TableId;
-use table::requests::{DeleteRequest, InsertRequest};
+use table::requests::DeleteRequest;
 
 use crate::columns::RangeColumnsPartitionRule;
 use crate::error::{FindLeaderSnafu, Result};
 use crate::partition::{PartitionBound, PartitionDef, PartitionExpr};
 use crate::range::RangePartitionRule;
 use crate::route::TableRoutes;
-use crate::row_splitter::{RowInsertRequestSplits, RowSplitter};
-use crate::splitter::{DeleteRequestSplit, InsertRequestSplit, WriteSplitter};
+use crate::row_splitter::{InsertRequestSplits, RowSplitter};
+use crate::splitter::{DeleteRequestSplit, WriteSplitter};
 use crate::{error, PartitionRuleRef};
 
 #[async_trait::async_trait]
@@ -236,26 +235,13 @@ impl PartitionRuleManager {
         Ok(regions)
     }
 
-    /// Split [InsertRequest] into [InsertRequestSplit] according to the partition rule
+    /// Split [InsertRequest] into [InsertRequestSplits] according to the partition rule
     /// of given table.
     pub async fn split_insert_request(
         &self,
         table: TableId,
         req: InsertRequest,
-        schema: &Schema,
-    ) -> Result<InsertRequestSplit> {
-        let partition_rule = self.find_table_partition_rule(table).await?;
-        let splitter = WriteSplitter::with_partition_rule(partition_rule);
-        splitter.split_insert(req, schema)
-    }
-
-    /// Split [RowInsertRequest] into [RowInsertRequestSplits] according to the partition rule
-    /// of given table.
-    pub async fn split_row_insert_request(
-        &self,
-        table: TableId,
-        req: RowInsertRequest,
-    ) -> Result<RowInsertRequestSplits> {
+    ) -> Result<InsertRequestSplits> {
         let partition_rule = self.find_table_partition_rule(table).await?;
         RowSplitter::new(partition_rule).split(req)
     }

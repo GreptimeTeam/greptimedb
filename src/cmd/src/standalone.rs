@@ -21,6 +21,7 @@ use common_telemetry::info;
 use common_telemetry::logging::LoggingOptions;
 use datanode::datanode::{Datanode, DatanodeOptions, ProcedureConfig, StorageConfig};
 use datanode::instance::InstanceRef;
+use datanode::region_server::RegionServer;
 use frontend::frontend::FrontendOptions;
 use frontend::instance::{FrontendInstance, Instance as FeInstance};
 use frontend::service_config::{
@@ -293,7 +294,8 @@ impl StartCommand {
             .context(StartDatanodeSnafu)?;
 
         // TODO: build frontend instance like in distributed mode
-        let mut frontend = build_frontend(plugins.clone(), todo!()).await?;
+        let mut frontend =
+            build_frontend(plugins.clone(), todo!(), datanode.region_server()).await?;
 
         frontend
             .build_servers(&fe_opts)
@@ -308,8 +310,9 @@ impl StartCommand {
 async fn build_frontend(
     plugins: Arc<Plugins>,
     datanode_instance: InstanceRef,
+    region_server: RegionServer,
 ) -> Result<FeInstance> {
-    let mut frontend_instance = FeInstance::try_new_standalone(datanode_instance.clone())
+    let mut frontend_instance = FeInstance::try_new_standalone(datanode_instance, region_server)
         .await
         .context(StartFrontendSnafu)?;
     frontend_instance.set_plugins(plugins.clone());

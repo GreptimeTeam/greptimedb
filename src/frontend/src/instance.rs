@@ -18,6 +18,7 @@ mod influxdb;
 mod opentsdb;
 mod otlp;
 mod prom_store;
+pub mod region_handler;
 mod script;
 mod standalone;
 
@@ -43,6 +44,7 @@ use common_telemetry::logging::info;
 use common_telemetry::{error, timer};
 use datanode::instance::sql::table_idents_to_full_name;
 use datanode::instance::InstanceRef as DnInstanceRef;
+use datanode::region_server::RegionServer;
 use distributed::DistInstance;
 use meta_client::client::{MetaClient, MetaClientBuilder};
 use partition::manager::PartitionRuleManager;
@@ -72,6 +74,9 @@ use sql::statements::copy::CopyTable;
 use sql::statements::statement::Statement;
 use sqlparser::ast::ObjectName;
 
+use self::distributed::DistRegionRequestHandler;
+use self::region_handler::RegionRequestHandlerRef;
+use self::standalone::StandaloneRegionRequestHandler;
 use crate::catalog::FrontendCatalogManager;
 use crate::error::{
     self, Error, ExecLogicalPlanSnafu, ExecutePromqlSnafu, ExternalSnafu, MissingMetasrvOptsSnafu,
@@ -115,6 +120,7 @@ pub struct Instance {
     statement_executor: Arc<StatementExecutor>,
     query_engine: QueryEngineRef,
     grpc_query_handler: GrpcQueryHandlerRef<Error>,
+    region_request_handler: RegionRequestHandlerRef,
     create_expr_factory: CreateExprFactory,
     /// plugins: this map holds extensions to customize query or auth
     /// behaviours.
@@ -165,7 +171,7 @@ impl Instance {
             catalog_manager.clone(),
             true,
             Some(partition_manager.clone()),
-            Some(datanode_clients),
+            Some(datanode_clients.clone()),
             plugins.clone(),
         )
         .query_engine();
@@ -173,10 +179,13 @@ impl Instance {
         let script_executor =
             Arc::new(ScriptExecutor::new(catalog_manager.clone(), query_engine.clone()).await?);
 
+        let region_request_handler = DistRegionRequestHandler::arc(catalog_manager.clone());
+
         let statement_executor = Arc::new(StatementExecutor::new(
             catalog_manager.clone(),
             query_engine.clone(),
             dist_instance.clone(),
+            region_request_handler.clone(),
         ));
 
         plugins.insert::<StatementExecutorRef>(statement_executor.clone());
@@ -205,6 +214,7 @@ impl Instance {
             create_expr_factory,
             statement_executor,
             query_engine,
+            region_request_handler,
             grpc_query_handler: dist_instance,
             plugins: plugins.clone(),
             servers: Arc::new(HashMap::new()),
@@ -249,16 +259,21 @@ impl Instance {
         Ok(Arc::new(meta_client))
     }
 
-    pub async fn try_new_standalone(dn_instance: DnInstanceRef) -> Result<Self> {
+    pub async fn try_new_standalone(
+        dn_instance: DnInstanceRef,
+        region_server: RegionServer,
+    ) -> Result<Self> {
         let catalog_manager = dn_instance.catalog_manager();
         let query_engine = dn_instance.query_engine();
         let script_executor =
             Arc::new(ScriptExecutor::new(catalog_manager.clone(), query_engine.clone()).await?);
 
+        let region_request_handler = StandaloneRegionRequestHandler::arc(region_server);
         let statement_executor = Arc::new(StatementExecutor::new(
             catalog_manager.clone(),
             query_engine.clone(),
             dn_instance.clone(),
+            region_request_handler.clone(),
         ));
 
         let create_expr_factory = CreateExprFactory;
@@ -271,6 +286,7 @@ impl Instance {
             statement_executor,
             query_engine,
             grpc_query_handler,
+            region_request_handler,
             plugins: Default::default(),
             servers: Arc::new(HashMap::new()),
             heartbeat_task: None,
@@ -298,6 +314,7 @@ impl Instance {
             &self.catalog_manager,
             &self.create_expr_factory,
             &self.grpc_query_handler,
+            &self.region_request_handler,
         );
         inserter.handle_row_inserts(requests, ctx).await
     }
@@ -312,6 +329,7 @@ impl Instance {
             &self.catalog_manager,
             &self.create_expr_factory,
             &self.grpc_query_handler,
+            &self.region_request_handler,
         );
         inserter.handle_column_inserts(requests, ctx).await
     }

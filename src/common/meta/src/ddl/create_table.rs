@@ -13,7 +13,9 @@
 // limitations under the License.
 
 use api::v1::region::region_request::Body as PbRegionRequest;
-use api::v1::region::{ColumnDef, CreateRequest as PbCreateRegionRequest};
+use api::v1::region::{
+    ColumnDef, CreateRequest as PbCreateRegionRequest, RegionRequest, RegionRequestHeader,
+};
 use api::v1::SemanticType;
 use async_trait::async_trait;
 use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu};
@@ -197,6 +199,13 @@ impl CreateTableProcedure {
                 for request in requests {
                     let requester = manager.datanode(&datanode).await;
 
+                    let request = RegionRequest {
+                        header: Some(RegionRequestHeader {
+                            trace_id: 0,
+                            span_id: 0,
+                        }),
+                        body: Some(request),
+                    };
                     if let Err(err) = requester.handle(request).await {
                         return Err(handle_operate_region_error(datanode)(err));
                     }

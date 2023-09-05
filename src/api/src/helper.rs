@@ -33,17 +33,16 @@ use datatypes::vectors::{
     TimestampMillisecondVector, TimestampNanosecondVector, TimestampSecondVector, UInt32Vector,
     UInt64Vector, VectorRef,
 };
-use greptime_proto::v1;
 use greptime_proto::v1::ddl_request::Expr;
 use greptime_proto::v1::greptime_request::Request;
 use greptime_proto::v1::query_request::Query;
 use greptime_proto::v1::value::ValueData;
-use greptime_proto::v1::{DdlRequest, IntervalMonthDayNano, QueryRequest, SemanticType};
+use greptime_proto::v1::{self, DdlRequest, IntervalMonthDayNano, QueryRequest, Row, SemanticType};
 use snafu::prelude::*;
 
 use crate::error::{self, Result};
 use crate::v1::column::Values;
-use crate::v1::{Column, ColumnDataType};
+use crate::v1::{Column, ColumnDataType, Value as GrpcValue};
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct ColumnDataTypeWrapper(ColumnDataType);
@@ -804,6 +803,59 @@ pub fn to_column_data_type(data_type: &ConcreteDataType) -> Option<ColumnDataTyp
     Some(column_data_type)
 }
 
+pub fn vectors_to_rows<'a>(
+    columns: impl Iterator<Item = &'a VectorRef>,
+    row_count: usize,
+) -> Vec<Row> {
+    let mut rows = vec![Row { values: vec![] }; row_count];
+    for column in columns {
+        for (row_index, row) in rows.iter_mut().enumerate() {
+            row.values.push(GrpcValue {
+                value_data: match column.get(row_index) {
+                    Value::Null => None,
+                    Value::Boolean(v) => Some(ValueData::BoolValue(v)),
+                    Value::UInt8(v) => Some(ValueData::U8Value(v as _)),
+                    Value::UInt16(v) => Some(ValueData::U16Value(v as _)),
+                    Value::UInt32(v) => Some(ValueData::U32Value(v)),
+                    Value::UInt64(v) => Some(ValueData::U64Value(v)),
+                    Value::Int8(v) => Some(ValueData::I8Value(v as _)),
+                    Value::Int16(v) => Some(ValueData::I16Value(v as _)),
+                    Value::Int32(v) => Some(ValueData::I32Value(v)),
+                    Value::Int64(v) => Some(ValueData::I64Value(v)),
+                    Value::Float32(v) => Some(ValueData::F32Value(*v)),
+                    Value::Float64(v) => Some(ValueData::F64Value(*v)),
+                    Value::String(v) => Some(ValueData::StringValue(v.as_utf8().to_string())),
+                    Value::Binary(v) => Some(ValueData::BinaryValue(v.to_vec())),
+                    Value::Date(v) => Some(ValueData::DateValue(v.val())),
+                    Value::DateTime(v) => Some(ValueData::DatetimeValue(v.val())),
+                    Value::Timestamp(v) => Some(match v.unit() {
+                        TimeUnit::Second => ValueData::TimeSecondValue(v.value()),
+                        TimeUnit::Millisecond => ValueData::TimeMillisecondValue(v.value()),
+                        TimeUnit::Microsecond => ValueData::TimeMicrosecondValue(v.value()),
+                        TimeUnit::Nanosecond => ValueData::TimeNanosecondValue(v.value()),
+                    }),
+                    Value::Time(v) => Some(match v.unit() {
+                        TimeUnit::Second => ValueData::TimeSecondValue(v.value()),
+                        TimeUnit::Millisecond => ValueData::TimeMillisecondValue(v.value()),
+                        TimeUnit::Microsecond => ValueData::TimeMicrosecondValue(v.value()),
+                        TimeUnit::Nanosecond => ValueData::TimeNanosecondValue(v.value()),
+                    }),
+                    Value::Interval(v) => Some(match v.unit() {
+                        IntervalUnit::YearMonth => ValueData::IntervalYearMonthValues(v.to_i32()),
+                        IntervalUnit::DayTime => ValueData::IntervalDayTimeValues(v.to_i64()),
+                        IntervalUnit::MonthDayNano => ValueData::IntervalMonthDayNanoValues(
+                            convert_i128_to_interval(v.to_i128()),
+                        ),
+                    }),
+                    Value::List(_) => unreachable!(),
+                },
+            })
+        }
+    }
+
+    rows
+}
+
 /// Returns true if the column type is equal to expected type.
 fn is_column_type_eq(column_type: ColumnDataType, expect_type: &ConcreteDataType) -> bool {
     if let Some(expect) = to_column_data_type(expect_type) {
@@ -818,8 +870,9 @@ mod tests {
     use std::sync::Arc;
 
     use datatypes::types::{
-        IntervalDayTimeType, IntervalMonthDayNanoType, IntervalYearMonthType, TimeMillisecondType,
-        TimeSecondType, TimestampMillisecondType, TimestampSecondType,
+        Int32Type, IntervalDayTimeType, IntervalMonthDayNanoType, IntervalYearMonthType,
+        TimeMillisecondType, TimeSecondType, TimestampMillisecondType, TimestampSecondType,
+        UInt32Type,
     };
     use datatypes::vectors::{
         BooleanVector, IntervalDayTimeVector, IntervalMonthDayNanoVector, IntervalYearMonthVector,
@@ -1522,4 +1575,76 @@ mod tests {
             Value::DateTime(3.into())
         ]
     );
+
+    #[test]
+    fn test_vectors_to_rows_for_different_types() {
+        let boolean_vec = BooleanVector::from_vec(vec![true, false, true]);
+        let int8_vec = PrimitiveVector::<Int8Type>::from_iter_values(vec![1, 2, 3]);
+        let int32_vec = PrimitiveVector::<Int32Type>::from_iter_values(vec![100, 200, 300]);
+        let uint8_vec = PrimitiveVector::<UInt8Type>::from_iter_values(vec![10, 20, 30]);
+        let uint32_vec = PrimitiveVector::<UInt32Type>::from_iter_values(vec![1000, 2000, 3000]);
+        let float32_vec = Float32Vector::from_vec(vec![1.1, 2.2, 3.3]);
+        let date_vec = DateVector::from_vec(vec![10, 20, 30]);
+        let string_vec = StringVector::from_vec(vec!["a", "b", "c"]);
+
+        let vector_refs: Vec<VectorRef> = vec![
+            Arc::new(boolean_vec),
+            Arc::new(int8_vec),
+            Arc::new(int32_vec),
+            Arc::new(uint8_vec),
+            Arc::new(uint32_vec),
+            Arc::new(float32_vec),
+            Arc::new(date_vec),
+            Arc::new(string_vec),
+        ];
+
+        let result = vectors_to_rows(vector_refs.iter(), 3);
+
+        assert_eq!(result.len(), 3);
+
+        assert_eq!(result[0].values.len(), 8);
+        let values = result[0]
+            .values
+            .iter()
+            .map(|v| v.value_data.clone().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(values[0], ValueData::BoolValue(true));
+        assert_eq!(values[1], ValueData::I8Value(1));
+        assert_eq!(values[2], ValueData::I32Value(100));
+        assert_eq!(values[3], ValueData::U8Value(10));
+        assert_eq!(values[4], ValueData::U32Value(1000));
+        assert_eq!(values[5], ValueData::F32Value(1.1));
+        assert_eq!(values[6], ValueData::DateValue(10));
+        assert_eq!(values[7], ValueData::StringValue("a".to_string()));
+
+        assert_eq!(result[1].values.len(), 8);
+        let values = result[1]
+            .values
+            .iter()
+            .map(|v| v.value_data.clone().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(values[0], ValueData::BoolValue(false));
+        assert_eq!(values[1], ValueData::I8Value(2));
+        assert_eq!(values[2], ValueData::I32Value(200));
+        assert_eq!(values[3], ValueData::U8Value(20));
+        assert_eq!(values[4], ValueData::U32Value(2000));
+        assert_eq!(values[5], ValueData::F32Value(2.2));
+        assert_eq!(values[6], ValueData::DateValue(20));
+        assert_eq!(values[7], ValueData::StringValue("b".to_string()));
+
+        assert_eq!(result[2].values.len(), 8);
+        let values = result[2]
+            .values
+            .iter()
+            .map(|v| v.value_data.clone().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(values[0], ValueData::BoolValue(true));
+        assert_eq!(values[1], ValueData::I8Value(3));
+        assert_eq!(values[2], ValueData::I32Value(300));
+        assert_eq!(values[3], ValueData::U8Value(30));
+        assert_eq!(values[4], ValueData::U32Value(3000));
+        assert_eq!(values[5], ValueData::F32Value(3.3));
+        assert_eq!(values[6], ValueData::DateValue(30));
+        assert_eq!(values[7], ValueData::StringValue("c".to_string()));
+    }
 }

@@ -12,14 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::alter_expr::Kind;
 use api::v1::ddl_request::Expr as DdlExpr;
 use api::v1::greptime_request::Request;
+use api::v1::region::{
+    region_request, InsertRequest as RegionInsertRequest, InsertRequests as RegionInsertRequests,
+};
 use api::v1::value::ValueData;
 use api::v1::{
     AlterExpr, Column, ColumnDataType, ColumnSchema, DdlRequest, InsertRequest, InsertRequests,
-    Row, RowInsertRequest, RowInsertRequests, Rows, Value,
+    Row, RowInsertRequest, RowInsertRequests, Rows, SemanticType, Value,
 };
 use catalog::CatalogManagerRef;
 use common_base::BitVec;
@@ -28,22 +33,29 @@ use common_grpc_expr::util::{extract_new_columns, ColumnExpr};
 use common_query::Output;
 use common_telemetry::info;
 use datatypes::schema::Schema;
+use datatypes::vectors::VectorRef;
 use servers::query_handler::grpc::GrpcQueryHandlerRef;
 use session::context::QueryContextRef;
 use snafu::prelude::*;
+use store_api::storage::RegionId;
 use table::engine::TableReference;
+use table::metadata::TableInfoRef;
+use table::requests::InsertRequest as TableInsertRequest;
 use table::TableRef;
 
 use crate::error::{
-    CatalogSnafu, ColumnDataTypeSnafu, EmptyDataSnafu, Error, FindNewColumnsOnInsertionSnafu,
-    InvalidInsertRequestSnafu, Result,
+    CatalogSnafu, ColumnDataTypeSnafu, ColumnNotFoundSnafu, EmptyDataSnafu, Error,
+    FindNewColumnsOnInsertionSnafu, InvalidInsertRequestSnafu, MissingTimeIndexColumnSnafu, Result,
+    TableNotFoundSnafu,
 };
 use crate::expr_factory::CreateExprFactory;
+use crate::instance::region_handler::RegionRequestHandlerRef;
 
 pub(crate) struct Inserter<'a> {
     catalog_manager: &'a CatalogManagerRef,
     create_expr_factory: &'a CreateExprFactory,
     grpc_query_handler: &'a GrpcQueryHandlerRef<Error>,
+    region_request_handler: &'a RegionRequestHandlerRef,
 }
 
 impl<'a> Inserter<'a> {
@@ -51,11 +63,13 @@ impl<'a> Inserter<'a> {
         catalog_manager: &'a CatalogManagerRef,
         create_expr_factory: &'a CreateExprFactory,
         grpc_query_handler: &'a GrpcQueryHandlerRef<Error>,
+        region_request_handler: &'a RegionRequestHandlerRef,
     ) -> Self {
         Self {
             catalog_manager,
             create_expr_factory,
             grpc_query_handler,
+            region_request_handler,
         }
     }
 
@@ -81,10 +95,30 @@ impl<'a> Inserter<'a> {
             })
         })?;
 
-        self.create_or_alter_tables_on_demand(&requests, ctx.clone())
+        self.create_or_alter_tables_on_demand(&requests, &ctx)
             .await?;
-        let query = Request::RowInserts(requests);
-        self.grpc_query_handler.do_query(query, ctx).await
+        let region_request = self.convert_req_row_to_region(requests, &ctx).await?;
+        let response = self
+            .region_request_handler
+            .handle(region_request, ctx)
+            .await?;
+        Ok(Output::AffectedRows(response.affected_rows as _))
+    }
+
+    pub fn convert_req_table_to_region(
+        table_info: &TableInfoRef,
+        insert: TableInsertRequest,
+    ) -> Result<RegionInsertRequests> {
+        let region_id = RegionId::new(table_info.table_id(), insert.region_number).into();
+        let row_count = row_count(&insert.columns_values)?;
+        let schema = column_schema(table_info, &insert.columns_values)?;
+        let rows = api::helper::vectors_to_rows(insert.columns_values.values(), row_count);
+        Ok(RegionInsertRequests {
+            requests: vec![RegionInsertRequest {
+                region_id,
+                rows: Some(Rows { schema, rows }),
+            }],
+        })
     }
 }
 
@@ -95,16 +129,16 @@ impl<'a> Inserter<'a> {
     async fn create_or_alter_tables_on_demand(
         &self,
         requests: &RowInsertRequests,
-        ctx: QueryContextRef,
+        ctx: &QueryContextRef,
     ) -> Result<()> {
         // TODO(jeremy): create and alter in batch?
         for req in &requests.inserts {
-            match self.get_table(req, &ctx).await? {
+            match self.get_table(req, ctx).await? {
                 Some(table) => {
                     validate_request_with_table(req, &table)?;
-                    self.alter_table_on_demand(req, table, &ctx).await?
+                    self.alter_table_on_demand(req, table, ctx).await?
                 }
-                None => self.create_table(req, &ctx).await?,
+                None => self.create_table(req, ctx).await?,
             }
         }
 
@@ -191,6 +225,31 @@ impl<'a> Inserter<'a> {
         );
 
         Ok(())
+    }
+
+    async fn convert_req_row_to_region(
+        &self,
+        requests: RowInsertRequests,
+        ctx: &QueryContextRef,
+    ) -> Result<region_request::Body> {
+        let mut region_request = Vec::with_capacity(requests.inserts.len());
+        for request in requests.inserts {
+            let table = self.get_table(&request, ctx).await?;
+            let table = table.with_context(|| TableNotFoundSnafu {
+                table_name: request.table_name.clone(),
+            })?;
+
+            let region_id = RegionId::new(table.table_info().table_id(), request.region_number);
+            let insert_request = RegionInsertRequest {
+                region_id: region_id.into(),
+                rows: request.rows,
+            };
+            region_request.push(insert_request);
+        }
+
+        Ok(region_request::Body::Inserts(RegionInsertRequests {
+            requests: region_request,
+        }))
     }
 }
 
@@ -363,13 +422,81 @@ fn validate_required_columns(request_schema: &[ColumnSchema], table_schema: &Sch
     Ok(())
 }
 
+fn row_count(columns: &HashMap<String, VectorRef>) -> Result<usize> {
+    let mut columns_iter = columns.values();
+
+    let len = columns_iter
+        .next()
+        .map(|column| column.len())
+        .unwrap_or_default();
+    ensure!(
+        columns_iter.all(|column| column.len() == len),
+        InvalidInsertRequestSnafu {
+            reason: "The row count of columns is not the same."
+        }
+    );
+
+    Ok(len)
+}
+
+fn column_schema(
+    table_info: &TableInfoRef,
+    columns: &HashMap<String, VectorRef>,
+) -> Result<Vec<ColumnSchema>> {
+    let table_meta = &table_info.meta;
+    let mut schema = vec![];
+
+    for (column_name, vector) in columns {
+        let time_index_column = &table_meta
+            .schema
+            .timestamp_column()
+            .with_context(|| table::error::MissingTimeIndexColumnSnafu {
+                table_name: table_info.name.to_string(),
+            })
+            .context(MissingTimeIndexColumnSnafu)?
+            .name;
+        let semantic_type = if column_name == time_index_column {
+            SemanticType::Timestamp
+        } else {
+            let column_index = table_meta
+                .schema
+                .column_index_by_name(column_name)
+                .context(ColumnNotFoundSnafu {
+                    msg: format!("unable to find column {column_name} in table schema"),
+                })?;
+            if table_meta.primary_key_indices.contains(&column_index) {
+                SemanticType::Tag
+            } else {
+                SemanticType::Field
+            }
+        };
+
+        let datatype: ColumnDataTypeWrapper =
+            vector.data_type().try_into().context(ColumnDataTypeSnafu)?;
+
+        schema.push(ColumnSchema {
+            column_name: column_name.clone(),
+            datatype: datatype.datatype().into(),
+            semantic_type: semantic_type.into(),
+        });
+    }
+
+    Ok(schema)
+}
+
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use api::v1::column::Values;
     use api::v1::SemanticType;
     use common_base::bit_vec::prelude::*;
+    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use datatypes::prelude::{ConcreteDataType, Value as DtValue};
+    use datatypes::scalars::ScalarVectorBuilder;
     use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema as DtColumnSchema};
+    use datatypes::vectors::{Int16VectorBuilder, MutableVector, StringVectorBuilder};
+    use table::metadata::{TableInfoBuilder, TableMetaBuilder};
 
     use super::*;
 
@@ -550,5 +677,105 @@ mod tests {
             }],
         };
         assert!(request_column_to_row(invalid_request_with_wrong_row_count).is_err());
+    }
+
+    #[test]
+    fn test_insert_request_table_to_region() {
+        let schema = Schema::new(vec![
+            DtColumnSchema::new("ts", ConcreteDataType::int64_datatype(), false)
+                .with_time_index(true),
+            DtColumnSchema::new("id", ConcreteDataType::int16_datatype(), false),
+            DtColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
+        ]);
+
+        let table_meta = TableMetaBuilder::default()
+            .schema(Arc::new(schema))
+            .primary_key_indices(vec![2])
+            .next_column_id(3)
+            .build()
+            .unwrap();
+
+        let table_info = Arc::new(
+            TableInfoBuilder::default()
+                .name("demo")
+                .meta(table_meta)
+                .table_id(1)
+                .build()
+                .unwrap(),
+        );
+
+        let insert_request = mock_insert_request();
+        let mut request =
+            Inserter::convert_req_table_to_region(&table_info, insert_request).unwrap();
+
+        assert_eq!(request.requests.len(), 1);
+        verify_region_insert_request(request.requests.pop().unwrap());
+    }
+
+    fn mock_insert_request() -> TableInsertRequest {
+        let mut builder = StringVectorBuilder::with_capacity(3);
+        builder.push(Some("host1"));
+        builder.push(None);
+        builder.push(Some("host3"));
+        let host = builder.to_vector();
+
+        let mut builder = Int16VectorBuilder::with_capacity(3);
+        builder.push(Some(1_i16));
+        builder.push(Some(2_i16));
+        builder.push(Some(3_i16));
+        let id = builder.to_vector();
+
+        let columns_values = HashMap::from([("host".to_string(), host), ("id".to_string(), id)]);
+
+        TableInsertRequest {
+            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+            table_name: "demo".to_string(),
+            columns_values,
+            region_number: 0,
+        }
+    }
+
+    fn verify_region_insert_request(request: RegionInsertRequest) {
+        assert_eq!(request.region_id, RegionId::new(1, 0).as_u64());
+
+        let rows = request.rows.unwrap();
+        for (i, column) in rows.schema.iter().enumerate() {
+            let name = &column.column_name;
+            if name == "id" {
+                assert_eq!(ColumnDataType::Int16 as i32, column.datatype);
+                assert_eq!(SemanticType::Field as i32, column.semantic_type);
+                let values = rows
+                    .rows
+                    .iter()
+                    .map(|row| row.values[i].value_data.clone())
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    vec![
+                        Some(ValueData::I16Value(1)),
+                        Some(ValueData::I16Value(2)),
+                        Some(ValueData::I16Value(3))
+                    ],
+                    values
+                );
+            }
+            if name == "host" {
+                assert_eq!(ColumnDataType::String as i32, column.datatype);
+                assert_eq!(SemanticType::Tag as i32, column.semantic_type);
+                let values = rows
+                    .rows
+                    .iter()
+                    .map(|row| row.values[i].value_data.clone())
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    vec![
+                        Some(ValueData::StringValue("host1".to_string())),
+                        None,
+                        Some(ValueData::StringValue("host3".to_string()))
+                    ],
+                    values
+                );
+            }
+        }
     }
 }

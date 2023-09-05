@@ -15,14 +15,18 @@
 use std::sync::Arc;
 
 use api::v1::greptime_request::Request;
+use api::v1::region::{region_request, RegionResponse};
 use async_trait::async_trait;
 use common_query::Output;
 use datanode::error::Error as DatanodeError;
+use datanode::region_server::RegionServer;
+use servers::grpc::region_server::RegionServerHandler;
 use servers::query_handler::grpc::{GrpcQueryHandler, GrpcQueryHandlerRef};
 use session::context::QueryContextRef;
 use snafu::ResultExt;
 
-use crate::error::{self, Result};
+use super::region_handler::RegionRequestHandler;
+use crate::error::{Error, InvokeDatanodeSnafu, InvokeRegionServerSnafu, Result};
 
 pub(crate) struct StandaloneGrpcQueryHandler(GrpcQueryHandlerRef<DatanodeError>);
 
@@ -34,12 +38,36 @@ impl StandaloneGrpcQueryHandler {
 
 #[async_trait]
 impl GrpcQueryHandler for StandaloneGrpcQueryHandler {
-    type Error = error::Error;
+    type Error = Error;
 
     async fn do_query(&self, query: Request, ctx: QueryContextRef) -> Result<Output> {
         self.0
             .do_query(query, ctx)
             .await
-            .context(error::InvokeDatanodeSnafu)
+            .context(InvokeDatanodeSnafu)
+    }
+}
+
+pub(crate) struct StandaloneRegionRequestHandler {
+    region_server: RegionServer,
+}
+
+impl StandaloneRegionRequestHandler {
+    pub fn arc(region_server: RegionServer) -> Arc<Self> {
+        Arc::new(Self { region_server })
+    }
+}
+
+#[async_trait]
+impl RegionRequestHandler for StandaloneRegionRequestHandler {
+    async fn handle(
+        &self,
+        request: region_request::Body,
+        _ctx: QueryContextRef,
+    ) -> Result<RegionResponse> {
+        self.region_server
+            .handle(request)
+            .await
+            .context(InvokeRegionServerSnafu)
     }
 }
