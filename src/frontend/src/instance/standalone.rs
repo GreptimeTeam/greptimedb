@@ -15,11 +15,14 @@
 use std::sync::Arc;
 
 use api::v1::greptime_request::Request;
-use api::v1::region::{region_request, RegionResponse};
+use api::v1::region::{region_request, QueryRequest, RegionResponse};
 use async_trait::async_trait;
+use common_error::ext::BoxedError;
 use common_query::Output;
+use common_recordbatch::SendableRecordBatchStream;
 use datanode::error::Error as DatanodeError;
 use datanode::region_server::RegionServer;
+use servers::error::ExecutePlanSnafu;
 use servers::grpc::region_server::RegionServerHandler;
 use servers::query_handler::grpc::{GrpcQueryHandler, GrpcQueryHandlerRef};
 use session::context::QueryContextRef;
@@ -68,6 +71,15 @@ impl RegionRequestHandler for StandaloneRegionRequestHandler {
         self.region_server
             .handle(request)
             .await
+            .context(InvokeRegionServerSnafu)
+    }
+
+    async fn do_get(&self, request: QueryRequest) -> Result<SendableRecordBatchStream> {
+        self.region_server
+            .handle_read(request)
+            .await
+            .map_err(BoxedError::new)
+            .context(ExecutePlanSnafu)
             .context(InvokeRegionServerSnafu)
     }
 }
