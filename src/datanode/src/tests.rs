@@ -24,7 +24,6 @@ use api::v1::QueryRequest;
 use async_trait::async_trait;
 use catalog::local::MemoryCatalogManager;
 use catalog::remote::region_alive_keeper::RegionAliveKeepers;
-use catalog::CatalogManagerRef;
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_function::scalars::FunctionRef;
 use common_meta::heartbeat::handler::{
@@ -50,8 +49,6 @@ use test_util::MockInstance;
 use tokio::sync::mpsc::{self, Receiver};
 use tokio::time::Instant;
 
-use crate::heartbeat::handler::close_region::CloseRegionHandler;
-use crate::heartbeat::handler::open_region::OpenRegionHandler;
 use crate::instance::Instance;
 use crate::region_server::RegionServer;
 
@@ -62,7 +59,6 @@ struct HandlerTestGuard {
     mailbox: Arc<HeartbeatMailbox>,
     rx: Receiver<(MessageMeta, InstructionReply)>,
     engine_manager_ref: TableEngineManagerRef,
-    catalog_manager_ref: CatalogManagerRef,
 }
 
 #[tokio::test]
@@ -71,18 +67,10 @@ async fn test_close_region_handler() {
         instance,
         mailbox,
         mut rx,
-        engine_manager_ref,
-        catalog_manager_ref,
         ..
     } = prepare_handler_test("test_close_region_handler").await;
 
-    let executor = Arc::new(HandlerGroupExecutor::new(vec![Arc::new(
-        CloseRegionHandler::new(
-            catalog_manager_ref.clone(),
-            engine_manager_ref.clone(),
-            Arc::new(RegionAliveKeepers::new(engine_manager_ref.clone(), 5000)),
-        ),
-    )]));
+    let executor = Arc::new(HandlerGroupExecutor::new(vec![]));
 
     let _ = prepare_table(instance.inner()).await;
 
@@ -146,25 +134,13 @@ async fn test_open_region_handler() {
         mailbox,
         mut rx,
         engine_manager_ref,
-        catalog_manager_ref,
         ..
     } = prepare_handler_test("test_open_region_handler").await;
 
     let region_alive_keepers = Arc::new(RegionAliveKeepers::new(engine_manager_ref.clone(), 5000));
     region_alive_keepers.start().await;
 
-    let executor = Arc::new(HandlerGroupExecutor::new(vec![
-        Arc::new(OpenRegionHandler::new(
-            catalog_manager_ref.clone(),
-            engine_manager_ref.clone(),
-            region_alive_keepers.clone(),
-        )),
-        Arc::new(CloseRegionHandler::new(
-            catalog_manager_ref.clone(),
-            engine_manager_ref.clone(),
-            region_alive_keepers.clone(),
-        )),
-    ]));
+    let executor = Arc::new(HandlerGroupExecutor::new(vec![]));
 
     let instruction = open_region_instruction();
     let Instruction::OpenRegion(region_ident) = instruction.clone() else {
@@ -258,7 +234,6 @@ async fn prepare_handler_test(name: &str) -> HandlerTestGuard {
     let mock_instance = MockInstance::new(name).await;
     let instance = mock_instance.inner();
     let engine_manager = instance.sql_handler().table_engine_manager().clone();
-    let catalog_manager = instance.sql_handler().catalog_manager().clone();
     let (tx, rx) = mpsc::channel(8);
     let mailbox = Arc::new(HeartbeatMailbox::new(tx));
 
@@ -267,7 +242,6 @@ async fn prepare_handler_test(name: &str) -> HandlerTestGuard {
         mailbox,
         rx,
         engine_manager_ref: engine_manager,
-        catalog_manager_ref: catalog_manager,
     }
 }
 

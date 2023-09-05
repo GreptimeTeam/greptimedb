@@ -51,7 +51,7 @@ use storage::scheduler::{LocalScheduler, SchedulerConfig};
 use storage::EngineImpl;
 use store_api::logstore::LogStore;
 use store_api::path_utils::{CLUSTER_DIR, WAL_DIR};
-use table::engine::manager::{MemoryTableEngineManager, TableEngineManagerRef};
+use table::engine::manager::MemoryTableEngineManager;
 use table::engine::{TableEngine, TableEngineProcedureRef};
 use table::requests::FlushTableRequest;
 use table::table::TableIdProviderRef;
@@ -63,8 +63,6 @@ use crate::error::{
     ShutdownInstanceSnafu, StartProcedureManagerSnafu, StopProcedureManagerSnafu,
 };
 use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
-use crate::heartbeat::handler::close_region::CloseRegionHandler;
-use crate::heartbeat::handler::open_region::OpenRegionHandler;
 use crate::heartbeat::HeartbeatTask;
 use crate::row_inserter::RowInserter;
 use crate::sql::{SqlHandler, SqlRequest};
@@ -115,8 +113,6 @@ impl Instance {
     fn build_heartbeat_task(
         opts: &DatanodeOptions,
         meta_client: Option<Arc<MetaClient>>,
-        catalog_manager: CatalogManagerRef,
-        engine_manager: TableEngineManagerRef,
         region_alive_keepers: Option<Arc<RegionAliveKeepers>>,
     ) -> Result<Option<HeartbeatTask>> {
         Ok(match opts.mode {
@@ -132,16 +128,6 @@ impl Instance {
                     })?;
                 let _handlers_executor = HandlerGroupExecutor::new(vec![
                     Arc::new(ParseMailboxMessageHandler),
-                    Arc::new(OpenRegionHandler::new(
-                        catalog_manager.clone(),
-                        engine_manager.clone(),
-                        region_alive_keepers.clone(),
-                    )),
-                    Arc::new(CloseRegionHandler::new(
-                        catalog_manager.clone(),
-                        engine_manager,
-                        region_alive_keepers.clone(),
-                    )),
                     region_alive_keepers.clone(),
                 ]);
 
@@ -290,13 +276,8 @@ impl Instance {
             greptimedb_telemetry_task,
         });
 
-        let heartbeat_task = Instance::build_heartbeat_task(
-            opts,
-            meta_client,
-            catalog_manager,
-            engine_manager,
-            region_alive_keepers,
-        )?;
+        let heartbeat_task =
+            Instance::build_heartbeat_task(opts, meta_client, region_alive_keepers)?;
 
         Ok((instance, heartbeat_task))
     }
