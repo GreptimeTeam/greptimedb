@@ -14,11 +14,9 @@
 
 use std::sync::Arc;
 
-use common_grpc_expr::alter_expr_to_request;
 use common_procedure::{watcher, ProcedureId, ProcedureManagerRef, ProcedureWithId};
 use common_telemetry::{error, info};
 use snafu::{OptionExt, ResultExt};
-use table::requests::AlterTableRequest;
 
 use crate::cache_invalidator::CacheInvalidatorRef;
 use crate::datanode_manager::DatanodeManagerRef;
@@ -27,10 +25,11 @@ use crate::ddl::create_table::CreateTableProcedure;
 use crate::ddl::drop_table::DropTableProcedure;
 use crate::ddl::{DdlContext, DdlExecutor, ExecutorContext, TableCreatorContext, TableCreatorRef};
 use crate::error::{
-    self, RegisterProcedureLoaderSnafu, Result, SubmitProcedureSnafu, UnsupportedSnafu,
-    WaitProcedureSnafu,
+    self, RegisterProcedureLoaderSnafu, Result, SubmitProcedureSnafu, TableNotFoundSnafu,
+    UnsupportedSnafu, WaitProcedureSnafu,
 };
 use crate::key::table_info::TableInfoValue;
+use crate::key::table_name::TableNameKey;
 use crate::key::table_route::TableRouteValue;
 use crate::key::TableMetadataManagerRef;
 use crate::rpc::ddl::DdlTask::{AlterTable, CreateTable, DropTable, TruncateTable};
@@ -127,18 +126,12 @@ impl DdlManager {
         &self,
         cluster_id: u64,
         alter_table_task: AlterTableTask,
-        alter_table_request: AlterTableRequest,
         table_info_value: TableInfoValue,
     ) -> Result<ProcedureId> {
         let context = self.create_context();
 
-        let procedure = AlterTableProcedure::new(
-            cluster_id,
-            alter_table_task,
-            alter_table_request,
-            table_info_value,
-            context,
-        );
+        let procedure =
+            AlterTableProcedure::new(cluster_id, alter_table_task, table_info_value, context);
 
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
@@ -255,22 +248,23 @@ async fn handle_truncate_table_task(
 async fn handle_alter_table_task(
     ddl_manager: &DdlManager,
     cluster_id: u64,
-    mut alter_table_task: AlterTableTask,
+    alter_table_task: AlterTableTask,
 ) -> Result<SubmitDdlTaskResponse> {
-    let table_id = alter_table_task
-        .alter_table
-        .table_id
-        .as_ref()
-        .context(error::UnexpectedSnafu {
-            err_msg: "expected table id ",
-        })?
-        .id;
-
-    let mut alter_table_request =
-        alter_expr_to_request(table_id, alter_table_task.alter_table.clone())
-            .context(error::ConvertGrpcExprSnafu)?;
-
     let table_ref = alter_table_task.table_ref();
+
+    let table_id = ddl_manager
+        .table_metadata_manager
+        .table_name_manager()
+        .get(TableNameKey::new(
+            table_ref.catalog,
+            table_ref.schema,
+            table_ref.table,
+        ))
+        .await?
+        .with_context(|| TableNotFoundSnafu {
+            table_name: table_ref.to_string(),
+        })?
+        .table_id();
 
     let table_info_value = ddl_manager
         .table_metadata_manager()
@@ -281,19 +275,8 @@ async fn handle_alter_table_task(
             table_name: table_ref.to_string(),
         })?;
 
-    let table_info = &table_info_value.table_info;
-
-    // Sets alter_table's table_version
-    alter_table_task.alter_table.table_version = table_info.ident.version;
-    alter_table_request.table_version = Some(table_info.ident.version);
-
     let id = ddl_manager
-        .submit_alter_table_task(
-            cluster_id,
-            alter_table_task,
-            alter_table_request,
-            table_info_value,
-        )
+        .submit_alter_table_task(cluster_id, alter_table_task, table_info_value)
         .await?;
 
     info!("Table: {table_id} is altered via procedure_id {id:?}");

@@ -323,13 +323,13 @@ async fn new_dummy_catalog_list(
 
 #[cfg(test)]
 mod test {
-    use api::v1::add_column::location::LocationType;
-    use api::v1::add_column::Location;
+    use api::v1::add_column_location::LocationType;
     use api::v1::column::Values;
     use api::v1::{
-        alter_expr, AddColumn, AddColumns, AlterExpr, Column, ColumnDataType, ColumnDef,
-        CreateDatabaseExpr, CreateTableExpr, DeleteRequest, DropTableExpr, InsertRequest,
-        InsertRequests, QueryRequest, RenameTable, SemanticType, TableId, TruncateTableExpr,
+        alter_expr, AddColumn, AddColumnLocation as Location, AddColumns, AlterExpr, Column,
+        ColumnDataType, ColumnDef, CreateDatabaseExpr, CreateTableExpr, DeleteRequest,
+        DropTableExpr, InsertRequest, InsertRequests, QueryRequest, RenameTable, SemanticType,
+        TableId, TruncateTableExpr,
     };
     use common_catalog::consts::MITO_ENGINE;
     use common_error::ext::ErrorExt;
@@ -378,15 +378,17 @@ mod test {
                 column_defs: vec![
                     ColumnDef {
                         name: "a".to_string(),
-                        datatype: ColumnDataType::String as i32,
+                        data_type: ColumnDataType::String as i32,
                         is_nullable: true,
                         default_constraint: vec![],
+                        semantic_type: SemanticType::Tag as i32,
                     },
                     ColumnDef {
                         name: "ts".to_string(),
-                        datatype: ColumnDataType::TimestampMillisecond as i32,
+                        data_type: ColumnDataType::TimestampMillisecond as i32,
                         is_nullable: false,
                         default_constraint: vec![],
+                        semantic_type: SemanticType::Timestamp as i32,
                     },
                 ],
                 time_index: "ts".to_string(),
@@ -432,15 +434,17 @@ mod test {
                 column_defs: vec![
                     ColumnDef {
                         name: "a".to_string(),
-                        datatype: ColumnDataType::String as i32,
+                        data_type: ColumnDataType::String as i32,
                         is_nullable: true,
                         default_constraint: vec![],
+                        semantic_type: SemanticType::Tag as i32,
                     },
                     ColumnDef {
                         name: "ts".to_string(),
-                        datatype: ColumnDataType::TimestampMillisecond as i32,
+                        data_type: ColumnDataType::TimestampMillisecond as i32,
                         is_nullable: false,
                         default_constraint: vec![],
+                        semantic_type: SemanticType::Timestamp as i32,
                     },
                 ],
                 time_index: "ts".to_string(),
@@ -500,15 +504,17 @@ mod test {
                 column_defs: vec![
                     ColumnDef {
                         name: "a".to_string(),
-                        datatype: ColumnDataType::String as i32,
+                        data_type: ColumnDataType::String as i32,
                         is_nullable: true,
                         default_constraint: vec![],
+                        semantic_type: SemanticType::Field as i32,
                     },
                     ColumnDef {
                         name: "ts".to_string(),
-                        datatype: ColumnDataType::TimestampMillisecond as i32,
+                        data_type: ColumnDataType::TimestampMillisecond as i32,
                         is_nullable: false,
                         default_constraint: vec![],
+                        semantic_type: SemanticType::Timestamp as i32,
                     },
                 ],
                 time_index: "ts".to_string(),
@@ -531,22 +537,16 @@ mod test {
                     add_columns: vec![AddColumn {
                         column_def: Some(ColumnDef {
                             name: "b".to_string(),
-                            datatype: ColumnDataType::Int32 as i32,
+                            data_type: ColumnDataType::Int32 as i32,
                             is_nullable: true,
                             default_constraint: vec![],
+                            semantic_type: SemanticType::Tag as i32,
                         }),
-                        is_key: true,
                         location: None,
                     }],
                 })),
-                ..Default::default()
             })),
         });
-        let output = instance
-            .do_query(query.clone(), QueryContext::arc())
-            .await
-            .unwrap();
-        assert!(matches!(output, Output::AffectedRows(0)));
 
         let output = instance.do_query(query, QueryContext::arc()).await.unwrap();
         assert!(matches!(output, Output::AffectedRows(0)));
@@ -561,16 +561,14 @@ mod test {
                     add_columns: vec![AddColumn {
                         column_def: Some(ColumnDef {
                             name: "b".to_string(),
-                            datatype: ColumnDataType::Int32 as i32,
+                            data_type: ColumnDataType::Int32 as i32,
                             is_nullable: true,
                             default_constraint: vec![],
+                            semantic_type: SemanticType::Tag as i32,
                         }),
-                        is_key: true,
                         location: None,
                     }],
                 })),
-                table_version: 1,
-                ..Default::default()
             })),
         });
         let err = instance
@@ -582,7 +580,6 @@ mod test {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_rename_table_twice() {
-        common_telemetry::init_default_ut_logging();
         let instance = MockInstance::new("test_alter_table_twice").await;
         let instance = instance.inner();
 
@@ -605,15 +602,17 @@ mod test {
                 column_defs: vec![
                     ColumnDef {
                         name: "a".to_string(),
-                        datatype: ColumnDataType::String as i32,
+                        data_type: ColumnDataType::String as i32,
                         is_nullable: true,
                         default_constraint: vec![],
+                        semantic_type: SemanticType::Field as i32,
                     },
                     ColumnDef {
                         name: "ts".to_string(),
-                        datatype: ColumnDataType::TimestampMillisecond as i32,
+                        data_type: ColumnDataType::TimestampMillisecond as i32,
                         is_nullable: false,
                         default_constraint: vec![],
+                        semantic_type: SemanticType::Timestamp as i32,
                     },
                 ],
                 time_index: "ts".to_string(),
@@ -636,8 +635,6 @@ mod test {
                 kind: Some(alter_expr::Kind::RenameTable(RenameTable {
                     new_table_name: "new_my_table".to_string(),
                 })),
-                table_id: Some(TableId { id: 1025 }),
-                ..Default::default()
             })),
         });
         let output = instance
@@ -647,11 +644,8 @@ mod test {
         assert!(matches!(output, Output::AffectedRows(0)));
 
         // renames it again.
-        let output = instance
-            .do_query(query.clone(), QueryContext::arc())
-            .await
-            .unwrap();
-        assert!(matches!(output, Output::AffectedRows(0)));
+        let result = instance.do_query(query, QueryContext::arc()).await;
+        assert!(matches!(result, Err(error::Error::TableNotFound { .. })));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -678,15 +672,17 @@ mod test {
                 column_defs: vec![
                     ColumnDef {
                         name: "a".to_string(),
-                        datatype: ColumnDataType::String as i32,
+                        data_type: ColumnDataType::String as i32,
                         is_nullable: true,
                         default_constraint: vec![],
+                        semantic_type: SemanticType::Tag as i32,
                     },
                     ColumnDef {
                         name: "ts".to_string(),
-                        datatype: ColumnDataType::TimestampMillisecond as i32,
+                        data_type: ColumnDataType::TimestampMillisecond as i32,
                         is_nullable: false,
                         default_constraint: vec![],
+                        semantic_type: SemanticType::Timestamp as i32,
                     },
                 ],
                 time_index: "ts".to_string(),
@@ -707,21 +703,21 @@ mod test {
                         AddColumn {
                             column_def: Some(ColumnDef {
                                 name: "b".to_string(),
-                                datatype: ColumnDataType::Int32 as i32,
+                                data_type: ColumnDataType::Int32 as i32,
                                 is_nullable: true,
                                 default_constraint: vec![],
+                                semantic_type: SemanticType::Tag as i32,
                             }),
-                            is_key: true,
                             location: None,
                         },
                         AddColumn {
                             column_def: Some(ColumnDef {
                                 name: "c".to_string(),
-                                datatype: ColumnDataType::Int32 as i32,
+                                data_type: ColumnDataType::Int32 as i32,
                                 is_nullable: true,
                                 default_constraint: vec![],
+                                semantic_type: SemanticType::Tag as i32,
                             }),
-                            is_key: true,
                             location: Some(Location {
                                 location_type: LocationType::First.into(),
                                 after_column_name: "".to_string(),
@@ -730,11 +726,11 @@ mod test {
                         AddColumn {
                             column_def: Some(ColumnDef {
                                 name: "d".to_string(),
-                                datatype: ColumnDataType::Int32 as i32,
+                                data_type: ColumnDataType::Int32 as i32,
                                 is_nullable: true,
                                 default_constraint: vec![],
+                                semantic_type: SemanticType::Tag as i32,
                             }),
-                            is_key: true,
                             location: Some(Location {
                                 location_type: LocationType::After.into(),
                                 after_column_name: "a".to_string(),
@@ -742,7 +738,6 @@ mod test {
                         },
                     ],
                 })),
-                ..Default::default()
             })),
         });
         let output = instance.do_query(query, QueryContext::arc()).await.unwrap();

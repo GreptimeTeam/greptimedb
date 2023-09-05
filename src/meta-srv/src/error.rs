@@ -279,7 +279,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Unexpected, violated: {}", violated))]
+    #[snafu(display("Unexpected, violated: {violated}, at {location}"))]
     Unexpected {
         violated: String,
         location: Location,

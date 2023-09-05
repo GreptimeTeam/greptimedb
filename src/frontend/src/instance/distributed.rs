@@ -407,7 +407,7 @@ impl DistInstance {
         Ok(())
     }
 
-    async fn handle_alter_table(&self, mut expr: AlterExpr) -> Result<Output> {
+    async fn handle_alter_table(&self, expr: AlterExpr) -> Result<Output> {
         let catalog_name = if expr.catalog_name.is_empty() {
             DEFAULT_CATALOG_NAME
         } else {
@@ -432,8 +432,6 @@ impl DistInstance {
             })?;
 
         let table_id = table.table_info().ident.table_id;
-        expr.table_id = Some(api::v1::TableId { id: table_id });
-
         self.verify_alter(table_id, table.table_info(), expr.clone())?;
 
         let req = SubmitDdlTaskRequest {
@@ -824,7 +822,7 @@ fn find_partition_entries(
         for column in column_defs {
             let column_name = &column.name;
             let data_type = ConcreteDataType::from(
-                ColumnDataTypeWrapper::try_new(column.datatype).context(ColumnDataTypeSnafu)?,
+                ColumnDataTypeWrapper::try_new(column.data_type).context(ColumnDataTypeSnafu)?,
             );
             column_name_and_type.push((column_name, data_type));
         }

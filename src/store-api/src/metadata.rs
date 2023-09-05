@@ -21,7 +21,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
-use api::v1::region::ColumnDef;
+use api::v1::region::RegionColumnDef;
 use api::v1::SemanticType;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
@@ -49,9 +49,16 @@ pub struct ColumnMetadata {
 
 impl ColumnMetadata {
     /// Construct `Self` from protobuf struct [ColumnDef]
-    pub fn try_from_column_def(column_def: ColumnDef) -> Result<Self> {
-        let semantic_type = column_def.semantic_type();
+    pub fn try_from_column_def(column_def: RegionColumnDef) -> Result<Self> {
         let column_id = column_def.column_id;
+
+        let column_def = column_def
+            .column_def
+            .context(InvalidRawRegionRequestSnafu {
+                err: "column_def is absent",
+            })?;
+
+        let semantic_type = column_def.semantic_type();
 
         let default_constrain = if column_def.default_constraint.is_empty() {
             None
@@ -61,7 +68,7 @@ impl ColumnMetadata {
                     .context(ConvertDatatypesSnafu)?,
             )
         };
-        let data_type = ColumnDataTypeWrapper::new(column_def.datatype()).into();
+        let data_type = ColumnDataTypeWrapper::new(column_def.data_type()).into();
         let column_schema = ColumnSchema::new(column_def.name, data_type, column_def.is_nullable)
             .with_default_constraint(default_constrain)
             .context(ConvertDatatypesSnafu)?;
@@ -498,6 +505,9 @@ pub enum MetadataError {
         location: Location,
         source: datatypes::error::Error,
     },
+
+    #[snafu(display("Invalid raw region request: {err}, at {location}"))]
+    InvalidRawRegionRequest { err: String, location: Location },
 }
 
 impl ErrorExt for MetadataError {
