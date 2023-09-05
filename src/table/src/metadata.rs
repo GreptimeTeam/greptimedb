@@ -24,7 +24,7 @@ use datatypes::schema::{ColumnSchema, RawSchema, Schema, SchemaBuilder, SchemaRe
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
-use store_api::storage::{ColumnDescriptor, ColumnDescriptorBuilder, ColumnId};
+use store_api::storage::{ColumnDescriptor, ColumnDescriptorBuilder, ColumnId, RegionId};
 
 use crate::error::{self, Result};
 use crate::requests::{AddColumnRequest, AlterKind, TableOptions};
@@ -468,6 +468,14 @@ pub type TableInfoRef = Arc<TableInfo>;
 impl TableInfo {
     pub fn table_id(&self) -> TableId {
         self.ident.table_id
+    }
+
+    pub fn region_ids(&self) -> Vec<RegionId> {
+        self.meta
+            .region_numbers
+            .iter()
+            .map(|id| RegionId::new(self.table_id(), *id))
+            .collect()
     }
 }
 

@@ -241,13 +241,8 @@ impl Instance {
             }
         };
 
-        let factory = QueryEngineFactory::new_with_plugins(
-            catalog_manager.clone(),
-            false,
-            None,
-            None,
-            plugins,
-        );
+        let factory =
+            QueryEngineFactory::new_with_plugins(catalog_manager.clone(), None, false, plugins);
         let query_engine = factory.query_engine();
         let procedure_manager = create_procedure_manager(
             opts.node_id.unwrap_or(0),

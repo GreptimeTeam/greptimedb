@@ -389,7 +389,7 @@ mod test {
             })
             .await
             .is_ok());
-        QueryEngineFactory::new(catalog_list, false).query_engine()
+        QueryEngineFactory::new(catalog_list, None, false).query_engine()
     }
 
     async fn query_plan_compare(sql: &str, expected: String) {
