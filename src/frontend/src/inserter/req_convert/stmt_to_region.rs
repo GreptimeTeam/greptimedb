@@ -63,7 +63,7 @@ impl<'a> StatementToRegion<'a> {
         ensure!(
             sql_rows.iter().all(|row| row.len() == column_count),
             InvalidSqlSnafu {
-                err_msg: format!("The column count of the row is not the same as columns.")
+                err_msg: "The column count of the row is not the same as columns."
             }
         );
 
