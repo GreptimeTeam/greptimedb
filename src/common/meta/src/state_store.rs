@@ -12,19 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use async_stream::try_stream;
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
-use common_meta::rpc::store::{BatchDeleteRequest, PutRequest, RangeRequest};
-use common_meta::util;
-use common_procedure::error::{
-    CorruptedDataSnafu, DeleteStatesSnafu, ListStateSnafu, PutStateSnafu,
-};
+use common_procedure::error::{DeleteStatesSnafu, ListStateSnafu, PutStateSnafu};
 use common_procedure::store::state_store::{KeyValueStream, StateStore};
-use common_procedure::Result;
+use common_procedure::Result as ProcedureResult;
+use futures::StreamExt;
 use snafu::ResultExt;
 
-use crate::service::store::kv::KvStoreRef;
+use crate::error::Result;
+use crate::kv_backend::KvBackendRef;
+use crate::range_stream::PaginationStream;
+use crate::rpc::store::{BatchDeleteRequest, PutRequest, RangeRequest};
+use crate::rpc::KeyValue;
+use crate::util;
 
 const PROCEDURE_PREFIX: &str = "/__procedure__/";
 
@@ -36,25 +39,35 @@ fn strip_prefix(key: &str) -> String {
     key.trim_start_matches(PROCEDURE_PREFIX).to_string()
 }
 
-pub(crate) struct MetaStateStore {
-    kv_store: KvStoreRef,
-    max_size_per_range: i64,
+pub struct KvStateStore {
+    kv_backend: KvBackendRef,
+    // limit is set to 0, it is treated as no limit.
+    max_size_per_range: usize,
 }
 
-impl MetaStateStore {
-    pub(crate) fn new(kv_store: KvStoreRef) -> Self {
+impl KvStateStore {
+    // `max_size_per_range` is set to 0, it is treated as no limit.
+    pub fn new(kv_backend: KvBackendRef, max_size_per_range: usize) -> Self {
         Self {
-            kv_store,
-            max_size_per_range: -1,
+            kv_backend,
+            max_size_per_range,
         }
     }
 }
 
+fn decode_kv(kv: KeyValue) -> Result<(String, Vec<u8>)> {
+    let key = String::from_utf8_lossy(&kv.key);
+    let key = strip_prefix(&key);
+    let value = kv.value;
+
+    Ok((key, value))
+}
+
 #[async_trait]
-impl StateStore for MetaStateStore {
-    async fn put(&self, key: &str, value: Vec<u8>) -> Result<()> {
+impl StateStore for KvStateStore {
+    async fn put(&self, key: &str, value: Vec<u8>) -> ProcedureResult<()> {
         let _ = self
-            .kv_store
+            .kv_backend
             .put(PutRequest {
                 key: with_prefix(key).into_bytes(),
                 value,
@@ -66,52 +79,38 @@ impl StateStore for MetaStateStore {
         Ok(())
     }
 
-    async fn walk_top_down(&self, path: &str) -> Result<KeyValueStream> {
+    async fn walk_top_down(&self, path: &str) -> ProcedureResult<KeyValueStream> {
         // extend their lifetimes to be used in the stream
         let path = path.to_string();
-        let kv_store = self.kv_store.clone();
-        let limit = self.max_size_per_range;
 
-        let stream = try_stream! {
-            let mut key = with_prefix(path.trim_start_matches('/')).into_bytes();
-            let range_end = util::get_prefix_end_key(&key);
-            loop {
-                let req = RangeRequest {
-                    key: key.clone(),
-                    range_end: range_end.clone(),
-                    limit,
-                    ..Default::default()
-                };
-                let resp = kv_store.range(req).await.map_err(BoxedError::new).with_context(|_|
-                    ListStateSnafu { path: path.clone() }
-                )?;
+        let key = with_prefix(path.trim_start_matches('/')).into_bytes();
+        let range_end = util::get_prefix_end_key(&key);
 
-                let mut no_more_data = true;
-                if resp.more {
-                    if let Some(last) = resp.kvs.last() {
-                        key = util::get_prefix_end_key(&last.key);
-                        no_more_data = false;
-                    }
-                }
-
-                for kv in resp.kvs {
-                    let key = String::from_utf8(kv.key).context(CorruptedDataSnafu)?;
-                    let key = strip_prefix(&key);
-                    let value = kv.value;
-                    yield (key, value)
-                }
-
-                if no_more_data {
-                    break;
-                }
-            }
+        let req = RangeRequest {
+            key: key.clone(),
+            range_end,
+            ..Default::default()
         };
+
+        let stream = PaginationStream::new(
+            self.kv_backend.clone(),
+            req,
+            self.max_size_per_range,
+            Arc::new(decode_kv),
+        );
+
+        let stream = stream.map(move |r| {
+            let path = path.clone();
+            r.map_err(BoxedError::new)
+                .with_context(|_| ListStateSnafu { path })
+        });
+
         Ok(Box::pin(stream))
     }
 
-    async fn batch_delete(&self, keys: &[String]) -> Result<()> {
+    async fn batch_delete(&self, keys: &[String]) -> ProcedureResult<()> {
         let _ = self
-            .kv_store
+            .kv_backend
             .batch_delete(BatchDeleteRequest {
                 keys: keys
                     .iter()
@@ -127,7 +126,7 @@ impl StateStore for MetaStateStore {
         Ok(())
     }
 
-    async fn delete(&self, key: &str) -> Result<()> {
+    async fn delete(&self, key: &str) -> ProcedureResult<()> {
         self.batch_delete(&[key.to_string()]).await
     }
 }
@@ -140,12 +139,12 @@ mod tests {
     use futures::TryStreamExt;
 
     use super::*;
-    use crate::service::store::memory::MemStore;
+    use crate::kv_backend::memory::MemoryKvBackend;
 
     #[tokio::test]
     async fn test_meta_state_store() {
-        let store = &MetaStateStore {
-            kv_store: Arc::new(MemStore::new()),
+        let store = &KvStateStore {
+            kv_backend: Arc::new(MemoryKvBackend::new()),
             max_size_per_range: 1, // for testing "more" in range
         };
 
