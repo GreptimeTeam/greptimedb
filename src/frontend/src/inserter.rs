@@ -22,6 +22,7 @@ use api::v1::{
     AlterExpr, ColumnSchema, DdlRequest, InsertRequests, RowInsertRequest, RowInsertRequests,
 };
 use catalog::CatalogManagerRef;
+use client::region_handler::RegionRequestHandlerRef;
 use common_catalog::consts::default_engine;
 use common_grpc_expr::util::{extract_new_columns, ColumnExpr};
 use common_query::Output;
@@ -36,10 +37,9 @@ use table::TableRef;
 use self::req_convert::{ColumnToRow, RowToRegion};
 use crate::error::{
     CatalogSnafu, EmptyDataSnafu, Error, FindNewColumnsOnInsertionSnafu, InvalidInsertRequestSnafu,
-    Result,
+    RequestDatanodeSnafu, Result,
 };
 use crate::expr_factory::CreateExprFactory;
-use crate::instance::region_handler::RegionRequestHandlerRef;
 
 pub(crate) struct Inserter<'a> {
     catalog_manager: &'a CatalogManagerRef,
@@ -94,7 +94,8 @@ impl<'a> Inserter<'a> {
         let response = self
             .region_request_handler
             .handle(region_request, ctx)
-            .await?;
+            .await
+            .context(RequestDatanodeSnafu)?;
         Ok(Output::AffectedRows(response.affected_rows as _))
     }
 }
