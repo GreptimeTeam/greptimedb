@@ -166,7 +166,7 @@ impl Picker for TwcsPicker {
             sst_write_buffer_size: ReadableSize::mb(4),
             compaction_time_window: None,
             request_sender,
-            senders: waiters,
+            sender: waiters,
             file_purger,
         };
         Ok(Some(Arc::new(task)))
@@ -224,9 +224,8 @@ pub(crate) struct TwcsCompactionTask {
     pub file_purger: FilePurgerRef,
     /// Request sender to notify the worker.
     pub(crate) request_sender: mpsc::Sender<WorkerRequest>,
-
-    /// Senders that are used to notify waiters waiting for pending compaction tasks.
-    pub senders: Vec<Sender<error::Result<Output>>>,
+    /// Sender that are used to notify waiters waiting for pending compaction tasks.
+    pub sender: Option<Sender<error::Result<Output>>>,
 }
 
 impl Debug for TwcsCompactionTask {
@@ -312,7 +311,7 @@ impl TwcsCompactionTask {
 
     /// Handles compaction success.
     fn on_success(&mut self) {
-        for sender in self.senders.drain(..) {
+        if let Some(sender) = self.sender.take() {
             let _ = sender.send(Ok(Output::AffectedRows(0)).context(CompactRegionSnafu {
                 region_id: self.region_id,
             }));
@@ -321,7 +320,7 @@ impl TwcsCompactionTask {
 
     /// Handles compaction failure, notifies all waiters.
     fn on_failure(&mut self, err: Arc<error::Error>) {
-        for sender in self.senders.drain(..) {
+        if let Some(sender) = self.sender.take() {
             let _ = sender.send(Err(err.clone()).context(CompactRegionSnafu {
                 region_id: self.region_id,
             }));

@@ -65,7 +65,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     fn new_compaction_request(
         &self,
         region: &MitoRegionRef,
-        waiters: Vec<oneshot::Sender<Result<Output>>>,
+        waiters: Option<oneshot::Sender<Result<Output>>>,
     ) -> CompactionRequest {
         let current_version = region.version_control.current().version;
         let access_layer = region.access_layer.clone();

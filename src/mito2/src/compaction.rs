@@ -40,7 +40,7 @@ pub struct CompactionRequest {
     pub(crate) ttl: Option<Duration>,
     pub(crate) compaction_time_window: Option<i64>,
     pub(crate) request_sender: mpsc::Sender<WorkerRequest>,
-    pub(crate) waiters: Vec<oneshot::Sender<error::Result<Output>>>,
+    pub(crate) waiters: Option<oneshot::Sender<error::Result<Output>>>,
     pub(crate) file_purger: FilePurgerRef,
 }
 
