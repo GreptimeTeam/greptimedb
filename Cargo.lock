@@ -1841,6 +1841,7 @@ name = "common-meta"
 version = "0.4.0-nightly"
 dependencies = [
  "api",
+ "arrow-flight",
  "async-stream",
  "async-trait",
  "chrono",
@@ -1848,6 +1849,7 @@ dependencies = [
  "common-error",
  "common-grpc-expr",
  "common-procedure",
+ "common-recordbatch",
  "common-runtime",
  "common-telemetry",
  "common-time",

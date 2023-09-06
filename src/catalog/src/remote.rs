@@ -27,3 +27,10 @@ pub trait KvCacheInvalidator: Send + Sync {
 }
 
 pub type KvCacheInvalidatorRef = Arc<dyn KvCacheInvalidator>;
+
+pub struct DummyKvCacheInvalidator;
+
+#[async_trait::async_trait]
+impl KvCacheInvalidator for DummyKvCacheInvalidator {
+    async fn invalidate_key(&self, _key: &[u8]) {}
+}

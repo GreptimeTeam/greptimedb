@@ -14,6 +14,8 @@
 
 use std::sync::Arc;
 
+use catalog::remote::DummyKvCacheInvalidator;
+use catalog::CatalogManagerRef;
 use clap::Parser;
 use common_base::Plugins;
 use common_config::{kv_store_dir, KvStoreConfig, WalConfig};
@@ -22,13 +24,14 @@ use common_procedure::ProcedureManagerRef;
 use common_telemetry::info;
 use common_telemetry::logging::LoggingOptions;
 use datanode::datanode::{Datanode, DatanodeOptions, ProcedureConfig, StorageConfig};
-use datanode::instance::InstanceRef;
 use datanode::region_server::RegionServer;
+use frontend::catalog::FrontendCatalogManager;
 use frontend::frontend::FrontendOptions;
-use frontend::instance::{FrontendInstance, Instance as FeInstance};
+use frontend::instance::{FrontendInstance, Instance as FeInstance, StandaloneDatanodeManager};
 use frontend::service_config::{
     GrpcOptions, InfluxdbOptions, MysqlOptions, OpentsdbOptions, PostgresOptions, PromStoreOptions,
 };
+use query::QueryEngineRef;
 use serde::{Deserialize, Serialize};
 use servers::http::HttpOptions;
 use servers::tls::{TlsMode, TlsOption};
@@ -295,10 +298,6 @@ impl StartCommand {
             fe_opts, dn_opts
         );
 
-        let datanode = Datanode::new(dn_opts.clone(), Default::default())
-            .await
-            .context(StartDatanodeSnafu)?;
-
         let kv_dir = kv_store_dir(&opts.data_home);
 
         let (kv_store, procedure_manager) = FeInstance::try_build_standalone_components(
@@ -309,13 +308,25 @@ impl StartCommand {
         .await
         .context(StartFrontendSnafu)?;
 
+        let datanode = Datanode::new(dn_opts.clone(), plugins.clone())
+            .await
+            .context(StartDatanodeSnafu)?;
+        let region_server = datanode.region_server();
+
+        let catalog_manager = Arc::new(FrontendCatalogManager::new(
+            kv_store.clone(),
+            Arc::new(DummyKvCacheInvalidator),
+            Arc::new(StandaloneDatanodeManager(region_server.clone())),
+        ));
+
         // TODO: build frontend instance like in distributed mode
         let mut frontend = build_frontend(
-            plugins.clone(),
+            plugins,
             kv_store,
             procedure_manager,
-            todo!(),
-            datanode.region_server(),
+            catalog_manager,
+            datanode.query_engine(),
+            region_server,
         )
         .await?;
 
@@ -333,13 +344,15 @@ async fn build_frontend(
     plugins: Arc<Plugins>,
     kv_store: KvBackendRef,
     procedure_manager: ProcedureManagerRef,
-    datanode_instance: InstanceRef,
+    catalog_manager: CatalogManagerRef,
+    query_engine: QueryEngineRef,
     region_server: RegionServer,
 ) -> Result<FeInstance> {
     let mut frontend_instance = FeInstance::try_new_standalone(
         kv_store,
         procedure_manager,
-        datanode_instance,
+        catalog_manager,
+        query_engine,
         region_server,
     )
     .await

@@ -95,9 +95,17 @@ impl Datanode for StandaloneDatanode {
 
         Ok(resp.affected_rows)
     }
+
+    async fn handle_query(&self, request: QueryRequest) -> MetaResult<SendableRecordBatchStream> {
+        self.0
+            .handle_read(request)
+            .await
+            .map_err(BoxedError::new)
+            .context(meta_error::ExternalSnafu)
+    }
 }
 
-pub(crate) struct StandaloneDatanodeManager(pub(crate) RegionServer);
+pub struct StandaloneDatanodeManager(pub RegionServer);
 
 #[async_trait]
 impl DatanodeManager for StandaloneDatanodeManager {

@@ -32,7 +32,7 @@ use meta_client::MetaClientOptions;
 use mito2::config::MitoConfig;
 use mito2::engine::MitoEngine;
 use object_store::util::normalize_dir;
-use query::QueryEngineFactory;
+use query::{QueryEngineFactory, QueryEngineRef};
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use servers::heartbeat_options::HeartbeatOptions;
@@ -399,6 +399,7 @@ pub struct Datanode {
     services: Option<Services>,
     heartbeat_task: Option<HeartbeatTask>,
     region_server: RegionServer,
+    query_engine: QueryEngineRef,
 }
 
 impl Datanode {
@@ -420,7 +421,7 @@ impl Datanode {
                 .context(RuntimeResourceSnafu)?,
         );
 
-        let mut region_server = RegionServer::new(query_engine, runtime);
+        let mut region_server = RegionServer::new(query_engine.clone(), runtime);
         let log_store = Self::build_log_store(&opts).await?;
         let object_store = store::new_object_store(&opts).await?;
         let engines = Self::build_store_engines(&opts, log_store, object_store).await?;
@@ -445,6 +446,7 @@ impl Datanode {
             services,
             heartbeat_task,
             region_server,
+            query_engine,
         })
     }
 
@@ -488,6 +490,10 @@ impl Datanode {
 
     pub fn region_server(&self) -> RegionServer {
         self.region_server.clone()
+    }
+
+    pub fn query_engine(&self) -> QueryEngineRef {
+        self.query_engine.clone()
     }
 
     // internal utils

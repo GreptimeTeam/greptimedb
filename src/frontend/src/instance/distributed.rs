@@ -18,22 +18,19 @@ pub(crate) mod inserter;
 use std::sync::Arc;
 
 use api::v1::region::{region_request, QueryRequest};
-use arrow_flight::Ticket;
 use async_trait::async_trait;
 use client::error::{HandleRequestSnafu, Result as ClientResult};
-use client::region::RegionRequester;
 use client::region_handler::RegionRequestHandler;
 use common_error::ext::BoxedError;
 use common_meta::datanode_manager::AffectedRows;
 use common_recordbatch::SendableRecordBatchStream;
-use prost::Message;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
 
 use crate::catalog::FrontendCatalogManager;
 use crate::error::{
-    FindDatanodeSnafu, FindTableRouteSnafu, NotSupportedSnafu, RequestDatanodeSnafu, Result,
+    FindDatanodeSnafu, FindTableRouteSnafu, NotSupportedSnafu, RequestQuerySnafu, Result,
 };
 use crate::instance::distributed::deleter::DistDeleter;
 use crate::instance::distributed::inserter::DistInserter;
@@ -133,19 +130,11 @@ impl DistRegionRequestHandler {
                 region: region_id.region_number(),
             })?;
 
-        let client = self
-            .catalog_manager
-            .datanode_clients()
-            .get_client(peer)
-            .await;
+        let client = self.catalog_manager.datanode_manager().datanode(peer).await;
 
-        let ticket = Ticket {
-            ticket: request.encode_to_vec().into(),
-        };
-        let region_requester = RegionRequester::new(client);
-        region_requester
-            .do_get(ticket)
+        client
+            .handle_query(request)
             .await
-            .context(RequestDatanodeSnafu)
+            .context(RequestQuerySnafu)
     }
 }

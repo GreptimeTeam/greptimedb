@@ -20,7 +20,6 @@ mod otlp;
 mod prom_store;
 mod script;
 mod standalone;
-
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -51,11 +50,9 @@ use common_query::Output;
 use common_telemetry::logging::info;
 use common_telemetry::{error, timer};
 use datanode::instance::sql::table_idents_to_full_name;
-use datanode::instance::InstanceRef as DnInstanceRef;
 use datanode::region_server::RegionServer;
 use log_store::raft_engine::RaftEngineBackend;
 use meta_client::client::{MetaClient, MetaClientBuilder};
-use partition::manager::PartitionRuleManager;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
 use query::plan::LogicalPlan;
 use query::query_engine::options::{validate_catalog_and_schema, QueryOptions};
@@ -81,11 +78,10 @@ use sql::parser::ParserContext;
 use sql::statements::copy::CopyTable;
 use sql::statements::statement::Statement;
 use sqlparser::ast::ObjectName;
+pub use standalone::StandaloneDatanodeManager;
 
 use self::distributed::DistRegionRequestHandler;
-use self::standalone::{
-    StandaloneDatanodeManager, StandaloneRegionRequestHandler, StandaloneTableCreator,
-};
+use self::standalone::{StandaloneRegionRequestHandler, StandaloneTableCreator};
 use crate::catalog::FrontendCatalogManager;
 use crate::delete::Deleter;
 use crate::error::{
@@ -157,15 +153,10 @@ impl Instance {
     ) -> Result<Self> {
         let meta_backend = Arc::new(CachedMetaKvBackend::new(meta_client.clone()));
 
-        let partition_manager = Arc::new(PartitionRuleManager::new(meta_backend.clone()));
-
-        let table_metadata_manager = Arc::new(TableMetadataManager::new(meta_backend.clone()));
         let catalog_manager = Arc::new(FrontendCatalogManager::new(
             meta_backend.clone(),
             meta_backend.clone(),
-            partition_manager,
             datanode_clients.clone(),
-            table_metadata_manager.clone(),
         ));
 
         let dist_request_handler = DistRegionRequestHandler::arc(catalog_manager.clone());
@@ -292,11 +283,10 @@ impl Instance {
     pub async fn try_new_standalone(
         kv_backend: KvBackendRef,
         procedure_manager: ProcedureManagerRef,
-        dn_instance: DnInstanceRef,
+        catalog_manager: CatalogManagerRef,
+        query_engine: QueryEngineRef,
         region_server: RegionServer,
     ) -> Result<Self> {
-        let catalog_manager = dn_instance.catalog_manager();
-        let query_engine = dn_instance.query_engine();
         let script_executor =
             Arc::new(ScriptExecutor::new(catalog_manager.clone(), query_engine.clone()).await?);
 

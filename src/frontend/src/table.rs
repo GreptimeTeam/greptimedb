@@ -55,6 +55,7 @@ pub(crate) mod test {
     use catalog::remote::MetaKvBackend;
     use common_meta::key::TableMetadataManager;
     use common_meta::kv_backend::memory::MemoryKvBackend;
+    use common_meta::kv_backend::KvBackendRef;
     use common_meta::peer::Peer;
     use common_meta::rpc::router::{Region, RegionRoute};
     use common_query::prelude::Expr;
@@ -133,8 +134,9 @@ pub(crate) mod test {
     ///   PARTITION r2 VALUES LESS THAN (50, 'sh'),
     ///   PARTITION r3 VALUES LESS THAN (MAXVALUE, MAXVALUE),
     /// )
-    pub(crate) async fn create_partition_rule_manager() -> PartitionRuleManagerRef {
-        let kv_backend = Arc::new(MemoryKvBackend::default());
+    pub(crate) async fn create_partition_rule_manager(
+        kv_backend: KvBackendRef,
+    ) -> PartitionRuleManagerRef {
         let table_metadata_manager = TableMetadataManager::new(kv_backend.clone());
         let partition_manager = Arc::new(PartitionRuleManager::new(kv_backend));
 
@@ -269,7 +271,8 @@ pub(crate) mod test {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_find_partition_rule() {
-        let partition_manager = create_partition_rule_manager().await;
+        let partition_manager =
+            create_partition_rule_manager(Arc::new(MemoryKvBackend::default())).await;
 
         // "one_column_partitioning_table" has id 1
         let partition_rule = partition_manager

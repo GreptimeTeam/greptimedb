@@ -69,6 +69,12 @@ pub enum Error {
         source: client::Error,
     },
 
+    #[snafu(display("Failed to query, source: {}", source))]
+    RequestQuery {
+        #[snafu(backtrace)]
+        source: common_meta::error::Error,
+    },
+
     #[snafu(display("Failed to insert data, source: {}", source))]
     RequestInserts {
         #[snafu(backtrace)]
@@ -739,6 +745,7 @@ impl ErrorExt for Error {
             Error::OpenRaftEngineBackend { .. } => StatusCode::StorageUnavailable,
 
             Error::RequestDatanode { source } => source.status_code(),
+            Error::RequestQuery { source } => source.status_code(),
             Error::RequestInserts { source } => source.status_code(),
             Error::RequestDeletes { source } => source.status_code(),
 
