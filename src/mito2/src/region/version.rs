@@ -144,12 +144,11 @@ impl VersionControl {
         let version = self.current().version;
 
         let new_mutable = memtable_builder.build(&version.metadata);
-        let new_memtables = MemtableVersion::new(new_mutable);
-
-        let mut version_builder = VersionBuilder::from_version(version).memtables(new_memtables);
-        version_builder.flushed_entry_id = flushed_entry_id;
-        version_builder.ssts = Arc::new(SstVersion::new());
-        let new_version = Arc::new(version_builder.build());
+        let new_version = Arc::new(
+            VersionBuilder::new(version.metadata.clone(), new_mutable)
+                .flushed_entry_id(flushed_entry_id)
+                .build(),
+        );
 
         let mut version_data = self.data.write().unwrap();
         version_data.version.ssts.mark_all_deleted();

@@ -62,6 +62,7 @@ pub struct RegionRemove {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct RegionTruncate {
     pub region_id: RegionId,
+    pub flushed_entry_id: EntryId,
 }
 
 /// The region manifest data.
@@ -125,8 +126,9 @@ impl RegionManifestBuilder {
         }
     }
 
-    pub fn apply_truncate(&mut self, manifest_version: ManifestVersion, _truncate: RegionTruncate) {
+    pub fn apply_truncate(&mut self, manifest_version: ManifestVersion, truncate: RegionTruncate) {
         self.manifest_version = manifest_version;
+        self.flushed_entry_id = truncate.flushed_entry_id;
         self.files.clear();
     }
 

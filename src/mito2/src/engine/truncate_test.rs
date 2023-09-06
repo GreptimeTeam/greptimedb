@@ -28,19 +28,6 @@ use super::ScanRequest;
 use crate::config::MitoConfig;
 use crate::test_util::{build_rows, put_rows, rows_schema, CreateRequestBuilder, TestEnv};
 
-fn has_parquet_file(sst_dir: &str) -> bool {
-    for entry in std::fs::read_dir(sst_dir).unwrap() {
-        let entry = entry.unwrap();
-        let path = entry.path();
-        if !path.is_dir() {
-            assert_eq!("parquet", path.extension().unwrap());
-            return true;
-        }
-    }
-
-    false
-}
-
 #[tokio::test]
 async fn test_engine_truncate_region_basic() {
     let mut env = TestEnv::with_prefix("truncate-basic");
@@ -158,58 +145,54 @@ async fn test_engine_put_data_after_truncate() {
 async fn test_engine_truncate_after_flush() {
     init_default_ut_logging();
     let mut env = TestEnv::with_prefix("truncate-flush");
-    let region_dir;
-    {
-        let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env.create_engine(MitoConfig::default()).await;
 
-        // Create the region.
-        let region_id = RegionId::new(1, 1);
-        let request = CreateRequestBuilder::new().build();
-        let column_schemas = rows_schema(&request);
-        engine
-            .handle_request(region_id, RegionRequest::Create(request))
-            .await
-            .unwrap();
+    // Create the region.
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
 
-        // Put data to the region.
-        let rows = Rows {
-            schema: column_schemas.clone(),
-            rows: build_rows(0, 3),
-        };
-        put_rows(&engine, region_id, rows).await;
+    // Put data to the region.
+    let rows = Rows {
+        schema: column_schemas.clone(),
+        rows: build_rows(0, 3),
+    };
+    put_rows(&engine, region_id, rows).await;
 
-        // Flush the region.
-        engine
-            .handle_request(region_id, RegionRequest::Flush(RegionFlushRequest {}))
-            .await
-            .unwrap();
+    // Flush the region.
+    engine
+        .handle_request(region_id, RegionRequest::Flush(RegionFlushRequest {}))
+        .await
+        .unwrap();
 
-        let region = engine.get_region(region_id).unwrap();
-        region_dir = env
-            .get_data_path()
-            .join(region.access_layer.region_dir())
-            .display()
-            .to_string();
-        assert!(has_parquet_file(&region_dir));
+    let request = ScanRequest::default();
+    let scanner = engine.scan(region_id, request.clone()).unwrap();
+    assert_eq!(1, scanner.num_files());
 
-        // Truncate the region.
-        engine
-            .handle_request(region_id, RegionRequest::Truncate(RegionTruncateRequest {}))
-            .await
-            .unwrap();
+    // Truncate the region.
+    engine
+        .handle_request(region_id, RegionRequest::Truncate(RegionTruncateRequest {}))
+        .await
+        .unwrap();
 
-        // Put data to the region.
-        let rows = Rows {
-            schema: column_schemas,
-            rows: build_rows(5, 8),
-        };
-        put_rows(&engine, region_id, rows).await;
+    // Put data to the region.
+    let rows = Rows {
+        schema: column_schemas,
+        rows: build_rows(5, 8),
+    };
+    put_rows(&engine, region_id, rows).await;
 
-        // Scan the region.
-        let request = ScanRequest::default();
-        let stream = engine.handle_query(region_id, request).await.unwrap();
-        let batches = RecordBatches::try_collect(stream).await.unwrap();
-        let expected = "\
+    // Scan the region.
+    let stream = engine
+        .handle_query(region_id, request.clone())
+        .await
+        .unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    let expected = "\
 +-------+---------+---------------------+
 | tag_0 | field_0 | ts                  |
 +-------+---------+---------------------+
@@ -217,10 +200,12 @@ async fn test_engine_truncate_after_flush() {
 | 6     | 6.0     | 1970-01-01T00:00:06 |
 | 7     | 7.0     | 1970-01-01T00:00:07 |
 +-------+---------+---------------------+";
-        assert_eq!(expected, batches.pretty_print().unwrap());
-    }
+    assert_eq!(expected, batches.pretty_print().unwrap());
+
     tokio::time::sleep(Duration::from_millis(100)).await;
-    assert!(!has_parquet_file(&region_dir));
+
+    let scanner = engine.scan(region_id, request).unwrap();
+    assert_eq!(0, scanner.num_files());
 }
 
 #[tokio::test]

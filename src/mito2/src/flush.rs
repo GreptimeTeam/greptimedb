@@ -452,35 +452,33 @@ impl FlushScheduler {
 
     /// Notifies the scheduler that the region is dropped.
     pub(crate) fn on_region_dropped(&mut self, region_id: RegionId) {
-        // Remove this region.
-        let Some(flush_status) = self.region_status.remove(&region_id) else {
-            return;
-        };
-
-        // Notifies all pending tasks.
-        flush_status.on_failure(Arc::new(RegionDroppedSnafu { region_id }.build()));
+        self.remove_region_on_failure(
+            region_id,
+            Arc::new(RegionDroppedSnafu { region_id }.build()),
+        );
     }
 
     /// Notifies the scheduler that the region is closed.
     pub(crate) fn on_region_closed(&mut self, region_id: RegionId) {
-        // Remove this region.
-        let Some(flush_status) = self.region_status.remove(&region_id) else {
-            return;
-        };
-
-        // Notifies all pending tasks.
-        flush_status.on_failure(Arc::new(RegionClosedSnafu { region_id }.build()));
+        self.remove_region_on_failure(region_id, Arc::new(RegionClosedSnafu { region_id }.build()));
     }
 
     /// Notifies the scheduler that the region is truncating.
     pub(crate) fn on_region_truncating(&mut self, region_id: RegionId) {
+        self.remove_region_on_failure(
+            region_id,
+            Arc::new(RegionTruncatingSnafu { region_id }.build()),
+        );
+    }
+
+    pub(crate) fn remove_region_on_failure(&mut self, region_id: RegionId, err: Arc<Error>) {
         // Remove this region.
         let Some(flush_status) = self.region_status.remove(&region_id) else {
             return;
         };
 
         // Notifies all pending tasks.
-        flush_status.on_failure(Arc::new(RegionTruncatingSnafu { region_id }.build()));
+        flush_status.on_failure(err);
     }
 
     /// Add ddl request to pending queue.
