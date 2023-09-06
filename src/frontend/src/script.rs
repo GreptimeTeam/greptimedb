@@ -183,7 +183,7 @@ mod python {
                 catalog_name: request.catalog_name,
                 schema_name: request.schema_name,
                 table_name: request.table_name,
-                desc: request.desc.unwrap_or("".to_string()),
+                desc: request.desc.unwrap_or_default(),
                 column_defs,
                 time_index,
                 primary_keys,
