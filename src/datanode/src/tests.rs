@@ -40,15 +40,13 @@ use tokio::sync::mpsc::{self, Receiver};
 use crate::region_server::RegionServer;
 use crate::Instance;
 
-// pub(crate) mod test_util;
-
 struct HandlerTestGuard {
     instance: Instance,
     mailbox: Arc<HeartbeatMailbox>,
     rx: Receiver<(MessageMeta, InstructionReply)>,
 }
 
-async fn prepare_handler_test(name: &str) -> HandlerTestGuard {
+async fn prepare_handler_test(_name: &str) -> HandlerTestGuard {
     let instance = Instance;
     let (tx, rx) = mpsc::channel(8);
     let mailbox = Arc::new(HeartbeatMailbox::new(tx));
