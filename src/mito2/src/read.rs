@@ -778,7 +778,7 @@ mod tests {
             batch1.fields()[0].clone(),
             BatchColumn {
                 column_id: 2,
-                data: Arc::new(UInt64Vector::from_slice(&[2])),
+                data: Arc::new(UInt64Vector::from_slice([2])),
             },
         ];
         // Batch 2 has more fields.
@@ -792,7 +792,7 @@ mod tests {
         // Batch 2 has different field.
         let fields = vec![BatchColumn {
             column_id: 2,
-            data: Arc::new(UInt64Vector::from_slice(&[2])),
+            data: Arc::new(UInt64Vector::from_slice([2])),
         }];
         let batch2 = batch1.clone().with_fields(fields).unwrap();
         let err = Batch::concat(vec![batch1, batch2]).unwrap_err();

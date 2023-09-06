@@ -109,7 +109,6 @@ struct CompatPrimaryKey {
 
 impl CompatPrimaryKey {
     /// Make primary key of the `batch` compatible.
-    #[must_use]
     fn compat(&self, mut batch: Batch) -> Result<Batch> {
         let mut buffer =
             Vec::with_capacity(batch.primary_key().len() + self.converter.estimated_size());
