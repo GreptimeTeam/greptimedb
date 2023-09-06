@@ -15,7 +15,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::ops::Range;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use api::v1::meta::mailbox_message::Payload;
 use api::v1::meta::{
@@ -262,7 +262,7 @@ pub struct HeartbeatMailbox {
     pushers: Pushers,
     sequence: Sequence,
     senders: DashMap<MessageId, oneshot::Sender<Result<MailboxMessage>>>,
-    timeouts: DashMap<MessageId, Duration>,
+    timeouts: DashMap<MessageId, Instant>,
     timeout_notify: Notify,
 }
 
@@ -309,7 +309,7 @@ impl HeartbeatMailbox {
                 self.timeout_notify.notified().await;
             }
 
-            let now = Duration::from_millis(common_time::util::current_time_millis() as u64);
+            let now = Instant::now();
             let timeout_ids = self
                 .timeouts
                 .iter()
@@ -364,8 +364,7 @@ impl Mailbox for HeartbeatMailbox {
 
         let (tx, rx) = oneshot::channel();
         let _ = self.senders.insert(message_id, tx);
-        let deadline =
-            Duration::from_millis(common_time::util::current_time_millis() as u64) + timeout;
+        let deadline = Instant::now() + timeout;
         let _ = self.timeouts.insert(message_id, deadline);
         self.timeout_notify.notify_one();
 
