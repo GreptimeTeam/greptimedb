@@ -34,6 +34,10 @@ mod dummy {
             Ok(Self {})
         }
 
+        pub async fn start(&self) -> Result<()> {
+            Ok(())
+        }
+
         pub async fn insert_script(
             &self,
             _schema: &str,
@@ -56,12 +60,23 @@ mod dummy {
 
 #[cfg(feature = "python")]
 mod python {
+    use api::v1::ddl_request::Expr;
+    use api::v1::greptime_request::Request;
+    use api::v1::{CreateTableExpr, DdlRequest};
+    use catalog::RegisterSystemTableRequest;
     use common_error::ext::BoxedError;
+    use common_meta::table_name::TableName;
     use common_telemetry::logging::error;
     use script::manager::ScriptManager;
-    use snafu::ResultExt;
+    use servers::query_handler::grpc::GrpcQueryHandler;
+    use session::context::QueryContext;
+    use snafu::{OptionExt, ResultExt};
+    use table::requests::CreateTableRequest;
 
     use super::*;
+    use crate::error::{CatalogSnafu, InvalidSystemTableDefSnafu, TableNotFoundSnafu};
+    use crate::expr_factory;
+    use crate::instance::Instance;
 
     pub struct ScriptExecutor {
         script_manager: ScriptManager,
@@ -76,6 +91,107 @@ mod python {
                 script_manager: ScriptManager::new(catalog_manager, query_engine)
                     .await
                     .context(crate::error::StartScriptManagerSnafu)?,
+            })
+        }
+
+        pub async fn start(&self, instance: &Instance) -> Result<()> {
+            let RegisterSystemTableRequest {
+                create_table_request: request,
+                open_hook,
+            } = self.script_manager.create_table_request();
+
+            if let Some(table) = instance
+                .catalog_manager()
+                .table(
+                    &request.catalog_name,
+                    &request.schema_name,
+                    &request.table_name,
+                )
+                .await
+                .context(CatalogSnafu)?
+            {
+                if let Some(open_hook) = open_hook {
+                    (open_hook)(table).await.context(CatalogSnafu)?;
+                }
+
+                return Ok(());
+            }
+
+            let table_name = TableName::new(
+                &request.catalog_name,
+                &request.schema_name,
+                &request.table_name,
+            );
+
+            let expr = Self::create_table_expr(request)?;
+
+            let _ = instance
+                .do_query(
+                    Request::Ddl(DdlRequest {
+                        expr: Some(Expr::CreateTable(expr)),
+                    }),
+                    QueryContext::arc(),
+                )
+                .await?;
+
+            let table = instance
+                .catalog_manager()
+                .table(
+                    &table_name.catalog_name,
+                    &table_name.schema_name,
+                    &table_name.table_name,
+                )
+                .await
+                .context(CatalogSnafu)?
+                .with_context(|| TableNotFoundSnafu {
+                    table_name: table_name.to_string(),
+                })?;
+
+            if let Some(open_hook) = open_hook {
+                (open_hook)(table).await.context(CatalogSnafu)?;
+            }
+
+            Ok(())
+        }
+
+        fn create_table_expr(request: CreateTableRequest) -> Result<CreateTableExpr> {
+            let column_schemas = request.schema.column_schemas;
+
+            let time_index = column_schemas
+                .iter()
+                .find_map(|x| {
+                    if x.is_time_index() {
+                        Some(x.name.clone())
+                    } else {
+                        None
+                    }
+                })
+                .context(InvalidSystemTableDefSnafu {
+                    err_msg: "Time index is not defined.",
+                })?;
+
+            let primary_keys = request
+                .primary_key_indices
+                .iter()
+                // Indexing has to be safe because the create script table request is pre-defined.
+                .map(|i| column_schemas[*i].name.clone())
+                .collect::<Vec<_>>();
+
+            let column_defs = expr_factory::column_schemas_to_defs(column_schemas, &primary_keys)?;
+
+            Ok(CreateTableExpr {
+                catalog_name: request.catalog_name,
+                schema_name: request.schema_name,
+                table_name: request.table_name,
+                desc: request.desc.unwrap_or_default(),
+                column_defs,
+                time_index,
+                primary_keys,
+                create_if_not_exists: request.create_if_not_exists,
+                table_options: (&request.table_options).into(),
+                table_id: None, // Should and will be assigned by Meta.
+                region_numbers: vec![0],
+                engine: request.engine,
             })
         }
 

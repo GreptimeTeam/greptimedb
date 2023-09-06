@@ -155,7 +155,10 @@ pub enum Error {
     #[snafu(display("Invalid DeleteRequest, reason: {}", reason))]
     InvalidDeleteRequest { reason: String, location: Location },
 
-    #[snafu(display("Table not found: {}", table_name))]
+    #[snafu(display("Invalid system table definition: {err_msg}, at {location}"))]
+    InvalidSystemTableDef { err_msg: String, location: Location },
+
+    #[snafu(display("Table not found: '{}', at {location}", table_name))]
     TableNotFound {
         table_name: String,
         location: Location,
@@ -739,6 +742,7 @@ impl ErrorExt for Error {
 
             Error::IncompleteGrpcResult { .. }
             | Error::ContextValueNotFound { .. }
+            | Error::InvalidSystemTableDef { .. }
             | Error::EncodeJson { .. } => StatusCode::Unexpected,
 
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
