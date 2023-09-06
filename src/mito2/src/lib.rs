@@ -23,7 +23,6 @@ pub mod test_util;
 #[allow(dead_code)]
 mod access_layer;
 pub mod config;
-#[allow(dead_code)]
 pub mod engine;
 pub mod error;
 #[allow(dead_code)]
