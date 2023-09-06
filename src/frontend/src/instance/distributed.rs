@@ -21,10 +21,8 @@ use std::sync::Arc;
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::ddl_request::Expr as DdlExpr;
 use api::v1::greptime_request::Request;
-use api::v1::region::{region_request, QueryRequest, RegionResponse};
-use api::v1::{
-    column_def, AlterExpr, CreateDatabaseExpr, CreateTableExpr, DeleteRequests, TruncateTableExpr,
-};
+use api::v1::region::{region_request, QueryRequest};
+use api::v1::{column_def, AlterExpr, CreateDatabaseExpr, CreateTableExpr, TruncateTableExpr};
 use arrow_flight::Ticket;
 use async_trait::async_trait;
 use catalog::{CatalogManager, DeregisterTableRequest, RegisterTableRequest};
@@ -35,6 +33,7 @@ use client::region_handler::RegionRequestHandler;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::format_full_table_name;
 use common_error::ext::BoxedError;
+use common_meta::datanode_manager::AffectedRows;
 use common_meta::ddl::{DdlExecutorRef, ExecutorContext};
 use common_meta::key::schema_name::{SchemaNameKey, SchemaNameValue};
 use common_meta::rpc::ddl::{DdlTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse};
@@ -72,7 +71,6 @@ use crate::error::{
     UnrecognizedTableOptionSnafu,
 };
 use crate::expr_factory;
-use crate::inserter::req_convert::StatementToRegion;
 use crate::instance::distributed::deleter::DistDeleter;
 use crate::instance::distributed::inserter::DistInserter;
 use crate::table::DistTable;
@@ -276,14 +274,6 @@ impl DistInstance {
                         .context(error::ExternalSnafu)?;
                 let table_name = TableName::new(catalog, schema, table);
                 self.drop_table(table_name).await
-            }
-            Statement::Insert(insert) => {
-                let request = StatementToRegion::new(self.catalog_manager.as_ref(), &query_ctx)
-                    .convert(&insert)
-                    .await?;
-                let inserter = DistInserter::new(&self.catalog_manager);
-                let affected_rows = inserter.insert(request).await?;
-                Ok(Output::AffectedRows(affected_rows as usize))
             }
             Statement::ShowCreateTable(show) => {
                 let (catalog, schema, table) =
@@ -515,20 +505,6 @@ impl DistInstance {
             .context(error::ExecuteDdlSnafu)
     }
 
-    async fn handle_dist_delete(
-        &self,
-        request: DeleteRequests,
-        ctx: QueryContextRef,
-    ) -> Result<Output> {
-        let deleter = DistDeleter::new(
-            ctx.current_catalog().to_string(),
-            ctx.current_schema().to_string(),
-            self.catalog_manager(),
-        );
-        let affected_rows = deleter.grpc_delete(request).await?;
-        Ok(Output::AffectedRows(affected_rows))
-    }
-
     pub fn catalog_manager(&self) -> Arc<FrontendCatalogManager> {
         self.catalog_manager.clone()
     }
@@ -555,6 +531,7 @@ impl GrpcQueryHandler for DistInstance {
     async fn do_query(&self, request: Request, ctx: QueryContextRef) -> Result<Output> {
         match request {
             Request::Inserts(_) => NotSupportedSnafu { feat: "inserts" }.fail(),
+            Request::Deletes(_) => NotSupportedSnafu { feat: "deletes" }.fail(),
             Request::RowInserts(_) => NotSupportedSnafu {
                 feat: "row inserts",
             }
@@ -563,7 +540,6 @@ impl GrpcQueryHandler for DistInstance {
                 feat: "row deletes",
             }
             .fail(),
-            Request::Deletes(requests) => self.handle_dist_delete(requests, ctx).await,
             Request::Query(_) => {
                 unreachable!("Query should have been handled directly in Frontend Instance!")
             }
@@ -610,7 +586,7 @@ impl RegionRequestHandler for DistRegionRequestHandler {
         &self,
         request: region_request::Body,
         ctx: QueryContextRef,
-    ) -> ClientResult<RegionResponse> {
+    ) -> ClientResult<AffectedRows> {
         self.handle_inner(request, ctx)
             .await
             .map_err(BoxedError::new)
@@ -630,21 +606,17 @@ impl DistRegionRequestHandler {
         &self,
         request: region_request::Body,
         ctx: QueryContextRef,
-    ) -> Result<RegionResponse> {
+    ) -> Result<AffectedRows> {
         match request {
             region_request::Body::Inserts(inserts) => {
                 let inserter =
                     DistInserter::new(&self.catalog_manager).with_trace_id(ctx.trace_id());
-                let affected_rows = inserter.insert(inserts).await? as _;
-                Ok(RegionResponse {
-                    header: Some(Default::default()),
-                    affected_rows,
-                })
+                inserter.insert(inserts).await
             }
-            region_request::Body::Deletes(_) => NotSupportedSnafu {
-                feat: "region deletes",
+            region_request::Body::Deletes(deletes) => {
+                let deleter = DistDeleter::new(&self.catalog_manager).with_trace_id(ctx.trace_id());
+                deleter.delete(deletes).await
             }
-            .fail(),
             region_request::Body::Create(_) => NotSupportedSnafu {
                 feat: "region create",
             }
