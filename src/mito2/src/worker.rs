@@ -27,6 +27,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use common_query::Output;
 use common_runtime::JoinHandle;
 use common_telemetry::{error, info, warn};
 use futures::future::try_join_all;
@@ -35,7 +36,7 @@ use snafu::{ensure, ResultExt};
 use store_api::logstore::LogStore;
 use store_api::storage::RegionId;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, oneshot, Mutex};
 
 use crate::config::MitoConfig;
 use crate::error::{JoinSnafu, Result, WorkerStoppedSnafu};
@@ -171,6 +172,14 @@ impl WorkerGroup {
         let index = value_to_index(value, self.workers.len());
 
         &self.workers[index]
+    }
+}
+
+/// Send result to the sender.
+pub(crate) fn send_result(sender: Option<oneshot::Sender<Result<Output>>>, res: Result<Output>) {
+    if let Some(sender) = sender {
+        // Ignore send result.
+        let _ = sender.send(res);
     }
 }
 

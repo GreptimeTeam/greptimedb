@@ -17,16 +17,14 @@
 use std::collections::{hash_map, HashMap};
 use std::sync::Arc;
 
-use common_query::Output;
 use store_api::logstore::LogStore;
 use store_api::metadata::RegionMetadata;
 use store_api::storage::RegionId;
-use tokio::sync::oneshot::Sender;
 
 use crate::error::{RegionNotFoundSnafu, RejectWriteSnafu, Result};
 use crate::region_write_ctx::RegionWriteCtx;
 use crate::request::{SenderWriteRequest, WriteRequest};
-use crate::worker::RegionWorkerLoop;
+use crate::worker::{send_result, RegionWorkerLoop};
 
 impl<S: LogStore> RegionWorkerLoop<S> {
     /// Takes and handles all write requests.
@@ -166,12 +164,4 @@ fn maybe_fill_missing_columns(request: &mut WriteRequest, metadata: &RegionMetad
     }
 
     Ok(())
-}
-
-/// Send result to the request.
-fn send_result(sender: Option<Sender<Result<Output>>>, res: Result<Output>) {
-    if let Some(sender) = sender {
-        // Ignore send result.
-        let _ = sender.send(res);
-    }
 }
