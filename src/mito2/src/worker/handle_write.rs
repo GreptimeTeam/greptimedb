@@ -91,6 +91,8 @@ impl<S> RegionWorkerLoop<S> {
         for mut sender_req in write_requests {
             let region_id = sender_req.request.region_id;
 
+            // TODO(yingwen): If region is waiter for alter, add requests to pending writes.
+
             // Checks whether the region exists and is it stalling.
             if let hash_map::Entry::Vacant(e) = region_ctxs.entry(region_id) {
                 let Some(region) = self.regions.get_region(region_id) else {

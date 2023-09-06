@@ -108,6 +108,14 @@ impl VersionControl {
         data.is_dropped = true;
         data.version.ssts.mark_all_deleted();
     }
+
+    /// Alter schema of the region.
+    ///
+    /// It will replace existing mutable memtable with a memtable that uses the
+    /// new schema.
+    pub(crate) fn alter_schema(&self, metadata: RegionMetadataRef, builder: &MemtableBuilderRef) {
+        unimplemented!()
+    }
 }
 
 pub(crate) type VersionControlRef = Arc<VersionControl>;

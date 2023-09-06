@@ -165,7 +165,8 @@ pub enum FlushReason {
     EngineFull,
     /// Manual flush.
     Manual,
-    // TODO(yingwen): Alter.
+    /// Flush to alter table.
+    Alter,
 }
 
 /// Task to flush a region.
