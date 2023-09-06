@@ -29,7 +29,6 @@ use table::TableRef;
 use crate::datanode::{DatanodeOptions, FileConfig, ObjectStoreConfig, StorageConfig};
 use crate::error::{CreateTableSnafu, Result};
 use crate::heartbeat::HeartbeatTask;
-use crate::instance::{Instance, InstanceRef};
 
 pub(crate) struct MockInstance {
     instance: InstanceRef,
@@ -84,52 +83,4 @@ fn create_tmp_dir_and_datanode_opts(name: &str) -> (DatanodeOptions, TestGuard) 
             _data_tmp_dir: data_tmp_dir,
         },
     )
-}
-
-pub(crate) async fn create_test_table(
-    instance: &Instance,
-    ts_type: ConcreteDataType,
-) -> Result<TableRef> {
-    let column_schemas = vec![
-        ColumnSchema::new("host", ConcreteDataType::string_datatype(), true),
-        ColumnSchema::new("cpu", ConcreteDataType::float64_datatype(), true),
-        ColumnSchema::new("memory", ConcreteDataType::float64_datatype(), true),
-        ColumnSchema::new("ts", ts_type, true).with_time_index(true),
-    ];
-
-    let table_name = "demo";
-    let table_engine: TableEngineRef = instance
-        .sql_handler()
-        .table_engine_manager()
-        .engine(MITO_ENGINE)
-        .unwrap();
-    let table = table_engine
-        .create_table(
-            &EngineContext::default(),
-            CreateTableRequest {
-                id: MIN_USER_TABLE_ID,
-                catalog_name: "greptime".to_string(),
-                schema_name: "public".to_string(),
-                table_name: table_name.to_string(),
-                desc: Some(" a test table".to_string()),
-                schema: RawSchema::new(column_schemas),
-                create_if_not_exists: true,
-                primary_key_indices: vec![0], // "host" is in primary keys
-                table_options: TableOptions::default(),
-                region_numbers: vec![0],
-                engine: MITO_ENGINE.to_string(),
-            },
-        )
-        .await
-        .context(CreateTableSnafu { table_name })?;
-
-    let req = RegisterTableRequest {
-        catalog: DEFAULT_CATALOG_NAME.to_string(),
-        schema: DEFAULT_SCHEMA_NAME.to_string(),
-        table_name: table_name.to_string(),
-        table_id: table.table_info().ident.table_id,
-        table: table.clone(),
-    };
-    let _ = instance.catalog_manager.register_table(req).await.unwrap();
-    Ok(table)
 }

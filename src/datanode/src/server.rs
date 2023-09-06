@@ -28,7 +28,7 @@ use crate::error::{
 };
 use crate::region_server::RegionServer;
 
-pub mod grpc;
+// pub mod grpc;
 
 /// All rpc services.
 pub struct Services {
