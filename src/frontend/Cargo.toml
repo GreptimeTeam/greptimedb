@@ -11,6 +11,7 @@ testing = []
 
 [dependencies]
 api = { workspace = true }
+arrow-flight.workspace = true
 async-compat = "0.2"
 async-stream.workspace = true
 async-trait = "0.1"

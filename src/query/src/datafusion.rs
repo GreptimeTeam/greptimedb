@@ -517,7 +517,7 @@ mod tests {
         };
         let _ = catalog_manager.register_table(req).await.unwrap();
 
-        QueryEngineFactory::new(catalog_manager, false).query_engine()
+        QueryEngineFactory::new(catalog_manager, None, false).query_engine()
     }
 
     #[tokio::test]

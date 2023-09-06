@@ -131,6 +131,22 @@ impl ScriptsTable {
         }
         Ok(())
     }
+
+    pub fn new_empty(
+        catalog_manager: CatalogManagerRef,
+        query_engine: QueryEngineRef,
+    ) -> Result<Self> {
+        Ok(Self {
+            catalog_manager,
+            query_engine,
+            name: format_full_table_name(
+                DEFAULT_CATALOG_NAME,
+                DEFAULT_SCHEMA_NAME,
+                SCRIPTS_TABLE_NAME,
+            ),
+        })
+    }
+
     pub async fn new(
         catalog_manager: CatalogManagerRef,
         query_engine: QueryEngineRef,

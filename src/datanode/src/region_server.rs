@@ -179,6 +179,7 @@ impl RegionServerInner {
 
     pub fn register_engine(&self, engine: RegionEngineRef) {
         let engine_name = engine.name();
+        info!("Region Engine {engine_name} is registered");
         self.engines
             .write()
             .unwrap()

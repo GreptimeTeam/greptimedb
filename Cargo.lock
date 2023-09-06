@@ -1539,6 +1539,7 @@ dependencies = [
  "parking_lot",
  "prost",
  "rand",
+ "session",
  "snafu",
  "substrait 0.4.0-nightly",
  "substrait 0.7.5",
@@ -3231,6 +3232,7 @@ name = "frontend"
 version = "0.4.0-nightly"
 dependencies = [
  "api",
+ "arrow-flight",
  "async-compat",
  "async-stream",
  "async-trait",

@@ -16,12 +16,12 @@ use api::v1::region::region_request;
 use api::v1::{DeleteRequests, RowDeleteRequests};
 use catalog::CatalogManager;
 use client::region::check_response_header;
+use client::region_handler::RegionRequestHandler;
 use common_query::Output;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
 
 use crate::error::{RequestDatanodeSnafu, Result};
-use crate::instance::region_handler::RegionRequestHandler;
 use crate::req_convert::delete::{ColumnToRow, RowToRegion};
 
 pub(crate) struct Deleter<'a> {
@@ -69,7 +69,8 @@ impl<'a> Deleter<'a> {
         let response = self
             .region_request_handler
             .handle(region_request, ctx)
-            .await?;
+            .await
+            .context(RequestDatanodeSnafu)?;
         check_response_header(response.header).context(RequestDatanodeSnafu)?;
         Ok(Output::AffectedRows(response.affected_rows as _))
     }

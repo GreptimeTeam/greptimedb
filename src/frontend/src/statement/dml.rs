@@ -50,7 +50,8 @@ impl StatementExecutor {
             let response = self
                 .region_request_handler
                 .handle(region_request::Body::Inserts(request), query_ctx)
-                .await?;
+                .await
+                .context(RequestDatanodeSnafu)?;
             check_response_header(response.header).context(RequestDatanodeSnafu)?;
             Ok(Output::AffectedRows(response.affected_rows as usize))
         } else {

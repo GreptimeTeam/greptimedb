@@ -21,6 +21,7 @@ use api::v1::{
 };
 use catalog::CatalogManager;
 use client::region::check_response_header;
+use client::region_handler::RegionRequestHandler;
 use common_catalog::consts::default_engine;
 use common_grpc_expr::util::{extract_new_columns, ColumnExpr};
 use common_query::Output;
@@ -37,7 +38,6 @@ use crate::error::{
     RequestDatanodeSnafu, Result,
 };
 use crate::expr_factory::CreateExprFactory;
-use crate::instance::region_handler::RegionRequestHandler;
 use crate::req_convert::insert::{ColumnToRow, RowToRegion};
 
 pub(crate) struct Inserter<'a> {
@@ -93,8 +93,10 @@ impl<'a> Inserter<'a> {
         let response = self
             .region_request_handler
             .handle(region_request, ctx)
-            .await?;
+            .await
+            .context(RequestDatanodeSnafu)?;
         check_response_header(response.header).context(RequestDatanodeSnafu)?;
+
         Ok(Output::AffectedRows(response.affected_rows as _))
     }
 }
