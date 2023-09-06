@@ -377,7 +377,7 @@ impl<'a> ParserContext<'a> {
                 }
             );
 
-            // The timestamp type may be an alias type, we have to retrieve the acutal type.
+            // The timestamp type may be an alias type, we have to retrieve the actual type.
             let data_type = get_real_timestamp_type(&column.data_type);
             ensure!(
                 matches!(column.data_type, DataType::Timestamp(_, _)),

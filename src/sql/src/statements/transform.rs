@@ -67,7 +67,7 @@ fn transform_expr_type_alias(expr: &mut Expr) -> ControlFlow<()> {
             }
         }
 
-        // Timestamp(precison) in cast, datafusion doesn't support Timestamp(9) etc.
+        // Timestamp(precision) in cast, datafusion doesn't support Timestamp(9) etc.
         // We have to transform it into arrow_cast(expr, type).
         Expr::Cast {
             data_type: DataType::Timestamp(precision, zone),
@@ -178,8 +178,8 @@ mod tests {
         }
     }
 
-    fn test_timestamp_precision_type(precison: i32, expected: &str) {
-        test_timestamp_alias(&format!("Timestamp({precison})"), expected);
+    fn test_timestamp_precision_type(precision: i32, expected: &str) {
+        test_timestamp_alias(&format!("Timestamp({precision})"), expected);
     }
 
     #[test]
