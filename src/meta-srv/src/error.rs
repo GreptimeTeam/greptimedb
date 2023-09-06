@@ -26,6 +26,12 @@ use crate::pubsub::Message;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
+    #[snafu(display("Failed to allocate next sequence number: {}", source))]
+    NextSequence {
+        location: Location,
+        source: common_meta::error::Error,
+    },
+
     #[snafu(display("Failed to submit ddl task: {}", source))]
     SubmitDdlTask {
         location: Location,
@@ -222,9 +228,6 @@ pub enum Error {
         source: common_catalog::error::Error,
     },
 
-    #[snafu(display("Unexpected sequence value: {}", err_msg))]
-    UnexpectedSequenceValue { err_msg: String, location: Location },
-
     #[snafu(display("Failed to decode table route, source: {}", source))]
     DecodeTableRoute {
         source: prost::DecodeError,
@@ -247,17 +250,6 @@ pub enum Error {
     CorruptedTableRoute {
         key: String,
         reason: String,
-        location: Location,
-    },
-
-    #[snafu(display("Failed to get sequence: {}", err_msg))]
-    NextSequence { err_msg: String, location: Location },
-
-    #[snafu(display("Sequence out of range: {}, start={}, step={}", name, start, step))]
-    SequenceOutOfRange {
-        name: String,
-        start: u64,
-        step: u64,
         location: Location,
     },
 
@@ -575,12 +567,9 @@ impl ErrorExt for Error {
             | Error::StatKeyFromUtf8 { .. }
             | Error::StatValueFromUtf8 { .. }
             | Error::InvalidRegionKeyFromUtf8 { .. }
-            | Error::UnexpectedSequenceValue { .. }
             | Error::TableRouteNotFound { .. }
             | Error::TableInfoNotFound { .. }
             | Error::CorruptedTableRoute { .. }
-            | Error::NextSequence { .. }
-            | Error::SequenceOutOfRange { .. }
             | Error::MoveValue { .. }
             | Error::InvalidTxnResult { .. }
             | Error::InvalidUtf8Value { .. }
@@ -604,6 +593,7 @@ impl ErrorExt for Error {
             }
 
             Error::RegionFailoverCandidatesNotFound { .. } => StatusCode::RuntimeResourcesExhausted,
+            Error::NextSequence { source, .. } => source.status_code(),
 
             Error::RegisterProcedureLoader { source, .. } => source.status_code(),
             Error::OperateRegion { source, .. } => source.status_code(),

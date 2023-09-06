@@ -393,6 +393,7 @@ mod tests {
     use common_meta::ident::TableIdent;
     use common_meta::instruction::{Instruction, InstructionReply, SimpleReply};
     use common_meta::key::TableMetadataManager;
+    use common_meta::sequence::Sequence;
     use common_meta::DatanodeId;
     use common_procedure::{BoxedProcedure, ProcedureId};
     use common_procedure_test::MockContextProvider;
@@ -404,7 +405,6 @@ mod tests {
     use crate::handler::{HeartbeatMailbox, Pusher, Pushers};
     use crate::lock::memory::MemLock;
     use crate::selector::{Namespace, Selector};
-    use crate::sequence::Sequence;
     use crate::service::mailbox::Channel;
     use crate::service::store::kv::{KvBackendAdapter, KvStoreRef};
     use crate::service::store::memory::MemStore;
@@ -521,8 +521,12 @@ mod tests {
                 let _ = heartbeat_receivers.insert(datanode_id, rx);
             }
 
-            let mailbox_sequence =
-                Sequence::new("test_heartbeat_mailbox", 0, 100, kv_store.clone());
+            let mailbox_sequence = Sequence::new(
+                "test_heartbeat_mailbox",
+                0,
+                100,
+                KvBackendAdapter::wrap(kv_store.clone()),
+            );
             let mailbox = HeartbeatMailbox::create(pushers.clone(), mailbox_sequence);
 
             let selector = self.selector.unwrap_or_else(|| {

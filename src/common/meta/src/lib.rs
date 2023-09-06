@@ -31,6 +31,7 @@ pub mod metrics;
 pub mod peer;
 pub mod range_stream;
 pub mod rpc;
+pub mod sequence;
 pub mod table_name;
 pub mod util;
 

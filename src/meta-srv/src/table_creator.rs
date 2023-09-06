@@ -18,6 +18,7 @@ use common_error::ext::BoxedError;
 use common_meta::ddl::{TableCreator, TableCreatorContext};
 use common_meta::error::{self as meta_error, Result as MetaResult};
 use common_meta::rpc::router::{Region, RegionRoute};
+use common_meta::sequence::SequenceRef;
 use common_telemetry::warn;
 use snafu::{ensure, ResultExt};
 use store_api::storage::{RegionId, TableId, MAX_REGION_SEQ};
@@ -25,7 +26,6 @@ use table::metadata::RawTableInfo;
 
 use crate::error::{self, Result, TooManyPartitionsSnafu};
 use crate::metasrv::{SelectorContext, SelectorRef};
-use crate::sequence::SequenceRef;
 
 pub struct MetaSrvTableCreator {
     ctx: SelectorContext,
@@ -93,7 +93,10 @@ async fn handle_create_region_routes(
     // If the peers are not enough, some peers will be used for multiple partitions.
     peers.truncate(partitions.len());
 
-    let table_id = table_id_sequence.next().await? as u32;
+    let table_id = table_id_sequence
+        .next()
+        .await
+        .context(error::NextSequenceSnafu)? as u32;
     table_info.ident.table_id = table_id;
 
     ensure!(
