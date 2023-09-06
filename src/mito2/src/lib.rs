@@ -41,7 +41,6 @@ pub(crate) mod schedule;
 #[allow(dead_code)]
 pub mod sst;
 pub mod wal;
-#[allow(dead_code)]
 mod worker;
 
 #[cfg_attr(doc, aquamarine::aquamarine)]
