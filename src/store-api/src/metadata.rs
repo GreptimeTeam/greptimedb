@@ -127,6 +127,7 @@ pub struct RegionMetadata {
 
     /// Immutable and unique id of a region.
     pub region_id: RegionId,
+    // TODO(yingwen): Add schema version.
 }
 
 pub type RegionMetadataRef = Arc<RegionMetadata>;

@@ -14,6 +14,7 @@
 
 //! Structs and utilities for writing regions.
 
+mod handle_alter;
 mod handle_close;
 mod handle_create;
 mod handle_drop;
@@ -484,7 +485,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 DdlRequest::Drop(_) => self.handle_drop_request(ddl.region_id).await,
                 DdlRequest::Open(req) => self.handle_open_request(ddl.region_id, req).await,
                 DdlRequest::Close(_) => self.handle_close_request(ddl.region_id).await,
-                DdlRequest::Alter(_) => todo!(),
+                DdlRequest::Alter(req) => {
+                    self.handle_alter_request(ddl.region_id, req, ddl.sender)
+                        .await;
+                    continue;
+                }
                 DdlRequest::Flush(_) => {
                     self.handle_flush_request(ddl.region_id, ddl.sender).await;
                     continue;

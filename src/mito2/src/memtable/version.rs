@@ -85,6 +85,8 @@ impl MemtableVersion {
         })
     }
 
+    // TODO(yingwen): Remove memtables on flush done.
+
     /// Returns the memory usage of the mutable memtable.
     pub(crate) fn mutable_usage(&self) -> usize {
         self.mutable.stats().estimated_bytes
