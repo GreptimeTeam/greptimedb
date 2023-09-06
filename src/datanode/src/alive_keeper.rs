@@ -24,11 +24,13 @@ use common_meta::error::InvalidProtoMsgSnafu;
 use common_meta::heartbeat::handler::{
     HandleControl, HeartbeatResponseHandler, HeartbeatResponseHandlerContext,
 };
-use common_telemetry::{debug, error, info, warn};
+use common_telemetry::{debug, error, info, trace, warn};
 use snafu::OptionExt;
 use store_api::region_request::{RegionCloseRequest, RegionRequest};
 use store_api::storage::RegionId;
-use tokio::sync::{mpsc, oneshot, Mutex};
+#[cfg(test)]
+use tokio::sync::oneshot;
+use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant};
 
@@ -123,7 +125,8 @@ impl RegionAliveKeeper {
         }
     }
 
-    pub async fn deadline(&self, region_id: RegionId) -> Option<Instant> {
+    #[cfg(test)]
+    async fn deadline(&self, region_id: RegionId) -> Option<Instant> {
         let mut deadline = None;
         if let Some(handle) = self.find_handle(region_id).await {
             let (s, r) = oneshot::channel();
@@ -183,8 +186,13 @@ impl HeartbeatResponseHandler for RegionAliveKeeper {
 
 #[derive(Debug)]
 enum CountdownCommand {
+    /// Start this countdown task. The first deadline will be set to
+    /// 4 * `heartbeat_interval_millis`
     Start(u64),
+    /// Reset countdown deadline to the given instance.
     Reset(Instant),
+    /// Returns the current deadline of the countdown task.
+    #[cfg(test)]
     Deadline(oneshot::Sender<Instant>),
 }
 
@@ -241,6 +249,15 @@ impl CountdownTaskHandle {
         }
     }
 
+    #[cfg(test)]
+    async fn deadline(&self) -> Option<Instant> {
+        let (tx, rx) = oneshot::channel();
+        if self.tx.send(CountdownCommand::Deadline(tx)).await.is_ok() {
+            return rx.await.ok();
+        }
+        None
+    }
+
     async fn reset_deadline(&self, deadline: Instant) {
         if let Err(e) = self.tx.send(CountdownCommand::Reset(deadline)).await {
             warn!(
@@ -292,7 +309,7 @@ impl CountdownTask {
                         },
                         Some(CountdownCommand::Reset(deadline)) => {
                             if countdown.deadline() < deadline {
-                                debug!(
+                                trace!(
                                     "Reset deadline of region {region_id} to approximately {} seconds later",
                                     (deadline - Instant::now()).as_secs_f32(),
                                 );
@@ -311,6 +328,7 @@ impl CountdownTask {
                             );
                             break;
                         },
+                        #[cfg(test)]
                         Some(CountdownCommand::Deadline(tx)) => {
                             let _ = tx.send(countdown.deadline());
                         }
@@ -385,5 +403,65 @@ mod test {
         // sleep to wait lease expired
         tokio::time::sleep(Duration::from_millis(1000)).await;
         assert!(alive_keeper.find_handle(region_id).await.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn countdown_task() {
+        let region_server = mock_region_server();
+
+        let (tx, rx) = oneshot::channel();
+
+        let countdown_handle = CountdownTaskHandle::new(
+            region_server,
+            RegionId::new(9999, 2),
+            |result: Option<bool>| async move {
+                tx.send((Instant::now(), result)).unwrap();
+            },
+        );
+
+        // if countdown task is not started, its deadline is set to far future
+        assert!(
+            countdown_handle.deadline().await.unwrap()
+                > Instant::now() + Duration::from_secs(86400 * 365 * 29)
+        );
+
+        // the first deadline should be set to 4 * heartbeat_interval_millis
+        // we assert it to be greater than 3 * heartbeat_interval_millis to avoid flaky test
+        let heartbeat_interval_millis = 100;
+        countdown_handle.start(heartbeat_interval_millis).await;
+        assert!(
+            countdown_handle.deadline().await.unwrap()
+                > Instant::now() + Duration::from_millis(heartbeat_interval_millis * 3)
+        );
+
+        // reset deadline
+        // a nearer deadline will be ignored
+        countdown_handle
+            .reset_deadline(Instant::now() + Duration::from_millis(heartbeat_interval_millis))
+            .await;
+        assert!(
+            countdown_handle.deadline().await.unwrap()
+                > Instant::now() + Duration::from_millis(heartbeat_interval_millis * 3)
+        );
+
+        // only a farther deadline will be accepted
+        countdown_handle
+            .reset_deadline(Instant::now() + Duration::from_millis(heartbeat_interval_millis * 5))
+            .await;
+        assert!(
+            countdown_handle.deadline().await.unwrap()
+                > Instant::now() + Duration::from_millis(heartbeat_interval_millis * 4)
+        );
+
+        // wait for countdown task to finish
+        let before_await = Instant::now();
+        let (finish_instant, result) = rx.await.unwrap();
+        // the mock region server cannot close the region
+        assert_eq!(result, Some(false));
+        // this task should be finished after 5 * heartbeat_interval_millis
+        // we assert 4 times here
+        assert!(
+            finish_instant > before_await + Duration::from_millis(heartbeat_interval_millis * 4)
+        );
     }
 }
