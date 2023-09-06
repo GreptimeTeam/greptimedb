@@ -321,7 +321,7 @@ impl Instance {
             Arc::new(StandaloneDatanodeManager(region_server)),
             cache_invalidator.clone(),
             table_metadata_manager.clone(),
-            Arc::new(StandaloneTableCreator),
+            Arc::new(StandaloneTableCreator::new(kv_backend.clone())),
         ));
 
         let statement_executor = Arc::new(StatementExecutor::new(

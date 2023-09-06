@@ -25,8 +25,10 @@ use common_error::ext::BoxedError;
 use common_meta::datanode_manager::{AffectedRows, Datanode, DatanodeManager, DatanodeRef};
 use common_meta::ddl::{TableCreator, TableCreatorContext};
 use common_meta::error::{self as meta_error, Result as MetaResult};
+use common_meta::kv_backend::KvBackendRef;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::{Region, RegionRoute};
+use common_meta::sequence::{Sequence, SequenceRef};
 use common_query::Output;
 use common_recordbatch::SendableRecordBatchStream;
 use datanode::error::Error as DatanodeError;
@@ -39,6 +41,8 @@ use store_api::storage::{RegionId, TableId};
 use table::metadata::RawTableInfo;
 
 use crate::error::{Error, InvokeDatanodeSnafu, InvokeRegionServerSnafu, Result};
+
+const TABLE_ID_SEQ: &str = "table_id";
 
 pub(crate) struct StandaloneGrpcQueryHandler(GrpcQueryHandlerRef<DatanodeError>);
 impl StandaloneGrpcQueryHandler {
@@ -125,7 +129,17 @@ impl DatanodeManager for StandaloneDatanodeManager {
     }
 }
 
-pub(crate) struct StandaloneTableCreator;
+pub(crate) struct StandaloneTableCreator {
+    table_id_sequence: SequenceRef,
+}
+
+impl StandaloneTableCreator {
+    pub fn new(kv_backend: KvBackendRef) -> Self {
+        Self {
+            table_id_sequence: Arc::new(Sequence::new(TABLE_ID_SEQ, 1024, 10, kv_backend)),
+        }
+    }
+}
 
 #[async_trait]
 impl TableCreator for StandaloneTableCreator {
@@ -134,14 +148,14 @@ impl TableCreator for StandaloneTableCreator {
         _ctx: &TableCreatorContext,
         _raw_table_info: &mut RawTableInfo,
         partitions: &[Partition],
-    ) -> MetaResult<(Option<TableId>, Vec<RegionRoute>)> {
+    ) -> MetaResult<(TableId, Vec<RegionRoute>)> {
+        let table_id = self.table_id_sequence.next().await? as u32;
         let region_routes = partitions
             .iter()
             .enumerate()
             .map(|(i, partition)| {
                 let region = Region {
-                    // TODO(weny): Adds the real table id.
-                    id: RegionId::new(0, i as u32),
+                    id: RegionId::new(table_id, i as u32),
                     partition: Some(partition.clone().into()),
                     ..Default::default()
                 };
@@ -155,6 +169,6 @@ impl TableCreator for StandaloneTableCreator {
             })
             .collect::<Vec<_>>();
 
-        Ok((None, region_routes))
+        Ok((table_id, region_routes))
     }
 }

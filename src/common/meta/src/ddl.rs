@@ -57,7 +57,7 @@ pub trait TableCreator: Send + Sync {
         ctx: &TableCreatorContext,
         table_info: &mut RawTableInfo,
         partitions: &[Partition],
-    ) -> Result<(Option<TableId>, Vec<RegionRoute>)>;
+    ) -> Result<(TableId, Vec<RegionRoute>)>;
 }
 
 pub type TableCreatorRef = Arc<dyn TableCreator>;
