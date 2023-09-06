@@ -111,7 +111,7 @@ async fn alter_region_schema(
 }
 
 /// Checks whether all memtables are empty.
-fn can_alter_directly(version: &Version) -> bool {
+fn can_alter_directly(_version: &Version) -> bool {
     unimplemented!()
 }
 
@@ -119,8 +119,8 @@ fn can_alter_directly(version: &Version) -> bool {
 ///
 /// Returns an error if the `request` is invalid.
 fn metadata_after_alteration(
-    metadata: &RegionMetadata,
-    request: RegionAlterRequest,
+    _metadata: &RegionMetadata,
+    _request: RegionAlterRequest,
 ) -> Result<RegionMetadataRef> {
     unimplemented!()
 }

@@ -113,7 +113,7 @@ impl VersionControl {
     ///
     /// It will replace existing mutable memtable with a memtable that uses the
     /// new schema.
-    pub(crate) fn alter_schema(&self, metadata: RegionMetadataRef, builder: &MemtableBuilderRef) {
+    pub(crate) fn alter_schema(&self, _metadata: RegionMetadataRef, _builder: &MemtableBuilderRef) {
         unimplemented!()
     }
 }
