@@ -65,7 +65,7 @@ impl TableCreator for MetaSrvTableCreator {
         )
         .await
         .map_err(BoxedError::new)
-        .context(meta_error::MetaSrvSnafu)
+        .context(meta_error::ExternalSnafu)
     }
 }
 

@@ -49,7 +49,7 @@ impl Datanode for RegionRequester {
                     source: BoxedError::new(err),
                 }
             } else {
-                meta_error::Error::OperateRegion {
+                meta_error::Error::External {
                     source: BoxedError::new(err),
                     location: location!(),
                 }
