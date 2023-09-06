@@ -2,12 +2,16 @@
 
 use std::ops::ControlFlow;
 
-use sqlparser::ast::{visit_expressions_mut, ColumnDef, DataType, Expr};
+use datatypes::data_type::DataType as GreptimeDataType;
+use sqlparser::ast::{
+    visit_expressions_mut, ColumnDef, DataType, Expr, Function, FunctionArg, FunctionArgExpr,
+    Ident, ObjectName, Value,
+};
 
 use crate::error::Result;
 use crate::statements::create::{CreateExternalTable, CreateTable};
 use crate::statements::statement::Statement;
-use crate::statements::TimezoneInfo;
+use crate::statements::{sql_data_type_to_concrete_data_type, TimezoneInfo};
 
 /// Transform statements by rules
 pub fn transform_statements(stmts: &mut Vec<Statement>) -> Result<()> {
@@ -15,21 +19,7 @@ pub fn transform_statements(stmts: &mut Vec<Statement>) -> Result<()> {
         transform_stmt(stmt)?;
     }
 
-    visit_expressions_mut(stmts, |expr| {
-        match expr {
-            Expr::Cast { data_type, .. } => {
-                replace_type_alias(data_type);
-            }
-            Expr::TryCast { data_type, .. } => {
-                replace_type_alias(data_type);
-            }
-            Expr::SafeCast { data_type, .. } => {
-                replace_type_alias(data_type);
-            }
-            _ => {}
-        }
-        ControlFlow::<()>::Continue(())
-    });
+    transform_expr(stmts)?;
 
     Ok(())
 }
@@ -38,6 +28,75 @@ fn transform_stmt(stmt: &mut Statement) -> Result<()> {
     transform_stmt_type_alias(stmt)?;
 
     Ok(())
+}
+
+fn transform_expr(stmts: &mut Vec<Statement>) -> Result<()> {
+    visit_expressions_mut(stmts, |expr| {
+        transform_expr_type_alias(expr)?;
+
+        ControlFlow::<()>::Continue(())
+    });
+
+    Ok(())
+}
+
+fn transform_expr_type_alias(expr: &mut Expr) -> ControlFlow<()> {
+    match expr {
+        // Type alias
+        Expr::Cast {
+            data_type: DataType::Custom(name, tokens),
+            expr: cast_expr,
+        } if name.0.len() == 1 && tokens.is_empty() => {
+            if let Some(new_type) = get_data_type_by_alias_name(name.0[0].value.as_str()) {
+                if let Ok(concrete_type) = sql_data_type_to_concrete_data_type(&new_type) {
+                    let new_type = concrete_type.as_arrow_type();
+                    *expr = Expr::Function(Function {
+                        name: ObjectName(vec![Ident::new("arrow_cast")]),
+                        args: vec![
+                            FunctionArg::Unnamed(FunctionArgExpr::Expr((**cast_expr).clone())),
+                            FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(
+                                Value::SingleQuotedString(new_type.to_string()),
+                            ))),
+                        ],
+                        over: None,
+                        distinct: false,
+                        special: false,
+                        order_by: vec![],
+                    });
+                }
+            }
+        }
+
+        // Timestamp(precison) in cast, datafusion doesn't support Timestamp(9) etc.
+        // We have to transform it into arrow_cast(expr, type).
+        Expr::Cast {
+            data_type: DataType::Timestamp(precision, zone),
+            expr: cast_expr,
+        } => {
+            if let Ok(concrete_type) =
+                sql_data_type_to_concrete_data_type(&DataType::Timestamp(*precision, *zone))
+            {
+                let new_type = concrete_type.as_arrow_type();
+                *expr = Expr::Function(Function {
+                    name: ObjectName(vec![Ident::new("arrow_cast")]),
+                    args: vec![
+                        FunctionArg::Unnamed(FunctionArgExpr::Expr((**cast_expr).clone())),
+                        FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(
+                            Value::SingleQuotedString(new_type.to_string()),
+                        ))),
+                    ],
+                    over: None,
+                    distinct: false,
+                    special: false,
+                    order_by: vec![],
+                });
+            }
+        }
+
+        // TODO(dennis): supports try_cast
+        _ => {}
+    }
+    ControlFlow::<()>::Continue(())
 }
 
 fn transform_stmt_type_alias(stmt: &mut Statement) -> Result<()> {
@@ -64,55 +123,40 @@ fn replace_type_alias(data_type: &mut DataType) {
         // Which means 8 bytes in postgres (not 8 bits). If we upgrade the sqlparser, need to process it.
         // See https://docs.rs/sqlparser/latest/sqlparser/ast/enum.DataType.html#variant.Int8
         DataType::Custom(name, tokens) if name.0.len() == 1 && tokens.is_empty() => {
-            match name.0[0].value.as_str() {
-                // Timestamp type alias
-                "TIMESTAMP_S" | "TIMESTAMPSECOND" => {
-                    *data_type = DataType::Timestamp(Some(0), TimezoneInfo::None);
-                }
-                "TIMESTAMP_MS" | "TIMESTAMPMILLISECOND" => {
-                    *data_type = DataType::Timestamp(Some(3), TimezoneInfo::None);
-                }
-                "TIMESTAMP_MICROS" | "TIMESTAMPMICROSECOND" => {
-                    *data_type = DataType::Timestamp(Some(6), TimezoneInfo::None);
-                }
-                "TIMESTAMP_NS" | "TIMESTAMPNANOSECOND" => {
-                    *data_type = DataType::Timestamp(Some(9), TimezoneInfo::None);
-                }
-                // Number type alias
-                "INT8" => {
-                    *data_type = DataType::TinyInt(None);
-                }
-                "INT16" => {
-                    *data_type = DataType::SmallInt(None);
-                }
-                "INT32" => {
-                    *data_type = DataType::Int(None);
-                }
-                "INT64" => {
-                    *data_type = DataType::BigInt(None);
-                }
-                "UINT8" => {
-                    *data_type = DataType::UnsignedTinyInt(None);
-                }
-                "UINT16" => {
-                    *data_type = DataType::UnsignedSmallInt(None);
-                }
-                "UINT32" => {
-                    *data_type = DataType::UnsignedInt(None);
-                }
-                "UINT64" => {
-                    *data_type = DataType::UnsignedBigInt(None);
-                }
-                "Float32" => {
-                    *data_type = DataType::Float(None);
-                }
-                "Float64" => {
-                    *data_type = DataType::Double;
-                }
-                _ => {}
+            if let Some(new_type) = get_data_type_by_alias_name(name.0[0].value.as_str()) {
+                *data_type = new_type;
             }
         }
         _ => {}
+    }
+}
+
+pub fn get_data_type_by_alias_name(name: &str) -> Option<DataType> {
+    match name.to_uppercase().as_ref() {
+        // Timestamp type alias
+        "TIMESTAMP_S" | "TIMESTAMPSECOND" => Some(DataType::Timestamp(Some(0), TimezoneInfo::None)),
+
+        "TIMESTAMP_MS" | "TIMESTAMPMILLISECOND" => {
+            Some(DataType::Timestamp(Some(3), TimezoneInfo::None))
+        }
+        "TIMESTAMP_MICROS" | "TIMESTAMPMICROSECOND" => {
+            Some(DataType::Timestamp(Some(6), TimezoneInfo::None))
+        }
+        "TIMESTAMP_NS" | "TIMESTAMPNANOSECOND" => {
+            Some(DataType::Timestamp(Some(9), TimezoneInfo::None))
+        }
+        // Number type alias
+        "INT8" => Some(DataType::TinyInt(None)),
+        "INT16" => Some(DataType::SmallInt(None)),
+        "INT32" => Some(DataType::Int(None)),
+        "INT64" => Some(DataType::BigInt(None)),
+        "UINT8" => Some(DataType::UnsignedTinyInt(None)),
+        "UINT16" => Some(DataType::UnsignedSmallInt(None)),
+        "UINT32" => Some(DataType::UnsignedInt(None)),
+        "UINT64" => Some(DataType::UnsignedBigInt(None)),
+        "FLOAT32" => Some(DataType::Float(None)),
+        "FLOAT64" => Some(DataType::Double),
+        _ => None,
     }
 }
 
@@ -123,14 +167,92 @@ mod tests {
     use super::*;
     use crate::parser::ParserContext;
 
+    fn test_timestamp_alias(alias: &str, expected: &str) {
+        let sql = format!("SELECT TIMESTAMP '2020-01-01 01:23:45.12345678'::{alias}");
+        let mut stmts = ParserContext::create_with_dialect(&sql, &GenericDialect {}).unwrap();
+        transform_statements(&mut stmts).unwrap();
+
+        match &stmts[0] {
+            Statement::Query(q) => assert_eq!(format!("SELECT arrow_cast(TIMESTAMP '2020-01-01 01:23:45.12345678', 'Timestamp({expected}, None)')"), q.to_string()),
+            _ => unreachable!(),
+        }
+    }
+
+    fn test_timestamp_precision_type(precison: i32, expected: &str) {
+        test_timestamp_alias(&format!("Timestamp({precison})"), expected);
+    }
+
     #[test]
-    fn test_transform_type_alias() {
-        let sql = "SELECT TIMESTAMP '2020-01-01 01:23:45.12345678'::TIMESTAMP(9)";
+    fn test_transform_timestamp_alias() {
+        // Timestamp[Second | Millisecond | Microsecond | Nanosecond]
+        test_timestamp_alias("TimestampSecond", "Second");
+        test_timestamp_alias("Timestamp_s", "Second");
+        test_timestamp_alias("TimestampMillisecond", "Millisecond");
+        test_timestamp_alias("Timestamp_ms", "Millisecond");
+        test_timestamp_alias("TimestampMicrosecond", "Microsecond");
+        test_timestamp_alias("Timestamp_micros", "Microsecond");
+        test_timestamp_alias("TimestampNanosecond", "Nanosecond");
+        test_timestamp_alias("Timestamp_ns", "Nanosecond");
+        // Timestamp(precision)
+        test_timestamp_precision_type(0, "Second");
+        test_timestamp_precision_type(3, "Millisecond");
+        test_timestamp_precision_type(6, "Microsecond");
+        test_timestamp_precision_type(9, "Nanosecond");
+    }
+
+    #[test]
+    fn test_create_sql_with_type_alias() {
+        let sql = r#"
+CREATE TABLE data_types (
+  s string,
+  tint int8,
+  sint int16,
+  i int32,
+  bint int64,
+  v varchar,
+  f float32,
+  d float64,
+  b boolean,
+  vb varbinary,
+  dt date,
+  dtt datetime,
+  ts0 TimestampSecond,
+  ts3 TimestampMillisecond,
+  ts6 TimestampMicrosecond,
+  ts9 TimestampNanosecond DEFAULT CURRENT_TIMESTAMP TIME INDEX,
+  PRIMARY KEY(s));"#;
+
         let mut stmts = ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap();
-        transform(&mut stmts).unwrap();
+        transform_statements(&mut stmts).unwrap();
 
-        println!("{:?}", stmts);
+        match &stmts[0] {
+            Statement::CreateTable(c) => {
+                let expected = r#"CREATE TABLE  data_types (
+  s STRING,
+  tint TINYINT,
+  sint SMALLINT,
+  i INT,
+  bint BIGINT,
+  v VARCHAR,
+  f FLOAT,
+  d DOUBLE,
+  b BOOLEAN,
+  vb VARBINARY,
+  dt DATE,
+  dtt DATETIME,
+  ts0 TIMESTAMP(0),
+  ts3 TIMESTAMP(3),
+  ts6 TIMESTAMP(6),
+  ts9 TIMESTAMP(9) DEFAULT CURRENT_TIMESTAMP() NOT NULL,
+  TIME INDEX (ts9),
+  PRIMARY KEY (s)
+)
+ENGINE=mito
+"#;
 
-        panic!();
+                assert_eq!(expected, c.to_string());
+            }
+            _ => unreachable!(),
+        }
     }
 }

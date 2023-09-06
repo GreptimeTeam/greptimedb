@@ -13,7 +13,7 @@ INSERT INTO monitor(ts, host, cpu, memory) VALUES
 
 SELECT ts, host, cpu, memory FROM monitor ORDER BY ts;
 
-DELETE FROM monitor WHERE host = 'host1' AND ts = 1655276557000000000::timestamp;
+DELETE FROM monitor WHERE host = 'host1' AND ts = 1655276557000::timestamp;
 
 DELETE FROM monitor WHERE host = 'host2';
 

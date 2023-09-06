@@ -37,7 +37,9 @@ use crate::statements::create::{
     CreateDatabase, CreateExternalTable, CreateTable, PartitionEntry, Partitions, TIME_INDEX,
 };
 use crate::statements::statement::Statement;
-use crate::statements::{sql_data_type_to_concrete_data_type, sql_value_to_value};
+use crate::statements::{
+    get_data_type_by_alias_name, sql_data_type_to_concrete_data_type, sql_value_to_value,
+};
 use crate::util::parse_option_string;
 
 pub const ENGINE: &str = "ENGINE";
@@ -374,6 +376,9 @@ impl<'a> ParserContext<'a> {
                     msg: "time index column can't be null",
                 }
             );
+
+            // The timestamp type may be an alias type, we have to retrieve the acutal type.
+            let data_type = get_real_timestamp_type(&column.data_type);
             ensure!(
                 matches!(column.data_type, DataType::Timestamp(_, _)),
                 InvalidColumnOptionSnafu {
@@ -664,6 +669,19 @@ fn validate_time_index(create_table: &CreateTable) -> Result<()> {
     Ok(())
 }
 
+fn get_real_timestamp_type(data_type: &DataType) -> DataType {
+    match data_type {
+        DataType::Custom(name, tokens) if name.0.len() == 1 && tokens.is_empty() => {
+            if let Some(real_type) = get_data_type_by_alias_name(name.0[0].value.as_str()) {
+                real_type
+            } else {
+                data_type.clone()
+            }
+        }
+        _ => data_type.clone(),
+    }
+}
+
 fn validate_partitions(columns: &[ColumnDef], partitions: &Partitions) -> Result<()> {
     let partition_columns = ensure_partition_columns_defined(columns, partitions)?;
 
@@ -895,7 +913,7 @@ mod tests {
         let sql = "CREATE EXTERNAL TABLE city (
             host string,
             ts int64,
-            cpu float64 default 0,
+            cpu float32 default 0,
             memory float64,
             TIME INDEX (ts),
             PRIMARY KEY(ts, host)
@@ -915,9 +933,9 @@ mod tests {
 
                 let columns = &c.columns;
                 assert_column_def(&columns[0], "host", "STRING");
-                assert_column_def(&columns[1], "ts", "int64");
-                assert_column_def(&columns[2], "cpu", "float64");
-                assert_column_def(&columns[3], "memory", "float64");
+                assert_column_def(&columns[1], "ts", "BIGINT");
+                assert_column_def(&columns[2], "cpu", "FLOAT");
+                assert_column_def(&columns[3], "memory", "DOUBLE");
 
                 let constraints = &c.constraints;
                 assert_matches!(
@@ -1423,7 +1441,7 @@ ENGINE=mito";
         let sql = r"create table demo(
                              host string,
                              ts timestamp,
-                             cpu float64 default 0,
+                             cpu float32 default 0,
                              memory float64,
                              TIME INDEX (ts),
                              PRIMARY KEY(ts, host)) engine=mito
@@ -1440,8 +1458,9 @@ ENGINE=mito";
                 let columns = &c.columns;
                 assert_column_def(&columns[0], "host", "STRING");
                 assert_column_def(&columns[1], "ts", "TIMESTAMP");
-                assert_column_def(&columns[2], "cpu", "float64");
-                assert_column_def(&columns[3], "memory", "float64");
+                assert_column_def(&columns[2], "cpu", "FLOAT");
+                assert_column_def(&columns[3], "memory", "DOUBLE");
+
                 let constraints = &c.constraints;
                 assert_matches!(
                     &constraints[0],
