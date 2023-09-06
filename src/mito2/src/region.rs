@@ -32,9 +32,6 @@ use crate::manifest::manager::RegionManifestManager;
 use crate::region::version::{VersionControlRef, VersionRef};
 use crate::sst::file_purger::FilePurgerRef;
 
-/// Type to store region version.
-pub type VersionNumber = u32;
-
 /// Metadata and runtime status of a region.
 ///
 /// Writing and reading a region follow a single-writer-multi-reader rule:

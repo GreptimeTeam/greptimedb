@@ -33,7 +33,6 @@ pub mod memtable;
 mod metrics;
 #[allow(dead_code)]
 pub mod read;
-#[allow(dead_code)]
 mod region;
 mod region_write_ctx;
 #[allow(dead_code)]
