@@ -187,7 +187,7 @@ impl DdlExecutor for MetaClient {
         self.submit_ddl_task(request)
             .await
             .map_err(BoxedError::new)
-            .context(meta_error::ExecuteDdlSnafu)
+            .context(meta_error::ExternalSnafu)
     }
 }
 
