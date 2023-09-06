@@ -15,11 +15,13 @@
 use std::sync::Arc;
 
 use api::v1::greptime_request::Request;
-use api::v1::region::{region_request, QueryRequest, RegionResponse};
+use api::v1::region::{region_request, QueryRequest};
 use async_trait::async_trait;
 use client::error::{HandleRequestSnafu, Result as ClientResult};
+use client::region::check_response_header;
 use client::region_handler::RegionRequestHandler;
 use common_error::ext::BoxedError;
+use common_meta::datanode_manager::AffectedRows;
 use common_query::Output;
 use common_recordbatch::SendableRecordBatchStream;
 use datanode::error::Error as DatanodeError;
@@ -67,13 +69,17 @@ impl RegionRequestHandler for StandaloneRegionRequestHandler {
         &self,
         request: region_request::Body,
         _ctx: QueryContextRef,
-    ) -> ClientResult<RegionResponse> {
-        self.region_server
+    ) -> ClientResult<AffectedRows> {
+        let response = self
+            .region_server
             .handle(request)
             .await
             .context(InvokeRegionServerSnafu)
             .map_err(BoxedError::new)
-            .context(HandleRequestSnafu)
+            .context(HandleRequestSnafu)?;
+
+        check_response_header(response.header)?;
+        Ok(response.affected_rows)
     }
 
     async fn do_get(&self, request: QueryRequest) -> ClientResult<SendableRecordBatchStream> {

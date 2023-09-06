@@ -15,7 +15,6 @@
 use std::collections::HashMap;
 
 use api::v1::region::region_request;
-use client::region::check_response_header;
 use common_query::Output;
 use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
 use datafusion_expr::{DmlStatement, LogicalPlan as DfLogicalPlan, WriteOp};
@@ -47,13 +46,12 @@ impl StatementExecutor {
             let request = StatementToRegion::new(self.catalog_manager.as_ref(), &query_ctx)
                 .convert(&insert)
                 .await?;
-            let response = self
+            let affected_rows = self
                 .region_request_handler
                 .handle(region_request::Body::Inserts(request), query_ctx)
                 .await
                 .context(RequestDatanodeSnafu)?;
-            check_response_header(response.header).context(RequestDatanodeSnafu)?;
-            Ok(Output::AffectedRows(response.affected_rows as usize))
+            Ok(Output::AffectedRows(affected_rows as _))
         } else {
             // Slow path: insert with subquery. Execute the subquery first, via query engine. Then
             // insert the results by sending insert requests.

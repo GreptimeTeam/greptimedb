@@ -21,7 +21,7 @@ use std::sync::Arc;
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::ddl_request::Expr as DdlExpr;
 use api::v1::greptime_request::Request;
-use api::v1::region::{region_request, QueryRequest, RegionResponse};
+use api::v1::region::{region_request, QueryRequest};
 use api::v1::{column_def, AlterExpr, CreateDatabaseExpr, CreateTableExpr, TruncateTableExpr};
 use arrow_flight::Ticket;
 use async_trait::async_trait;
@@ -33,6 +33,7 @@ use client::region_handler::RegionRequestHandler;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::format_full_table_name;
 use common_error::ext::BoxedError;
+use common_meta::datanode_manager::AffectedRows;
 use common_meta::ddl::{DdlExecutorRef, ExecutorContext};
 use common_meta::key::schema_name::{SchemaNameKey, SchemaNameValue};
 use common_meta::rpc::ddl::{DdlTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse};
@@ -585,7 +586,7 @@ impl RegionRequestHandler for DistRegionRequestHandler {
         &self,
         request: region_request::Body,
         ctx: QueryContextRef,
-    ) -> ClientResult<RegionResponse> {
+    ) -> ClientResult<AffectedRows> {
         self.handle_inner(request, ctx)
             .await
             .map_err(BoxedError::new)
@@ -605,24 +606,16 @@ impl DistRegionRequestHandler {
         &self,
         request: region_request::Body,
         ctx: QueryContextRef,
-    ) -> Result<RegionResponse> {
+    ) -> Result<AffectedRows> {
         match request {
             region_request::Body::Inserts(inserts) => {
                 let inserter =
                     DistInserter::new(&self.catalog_manager).with_trace_id(ctx.trace_id());
-                let affected_rows = inserter.insert(inserts).await? as _;
-                Ok(RegionResponse {
-                    header: Some(Default::default()),
-                    affected_rows,
-                })
+                inserter.insert(inserts).await
             }
             region_request::Body::Deletes(deletes) => {
                 let deleter = DistDeleter::new(&self.catalog_manager).with_trace_id(ctx.trace_id());
-                let affected_rows = deleter.delete(deletes).await? as _;
-                Ok(RegionResponse {
-                    header: Some(Default::default()),
-                    affected_rows,
-                })
+                deleter.delete(deletes).await
             }
             region_request::Body::Create(_) => NotSupportedSnafu {
                 feat: "region create",

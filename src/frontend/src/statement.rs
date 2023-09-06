@@ -25,7 +25,6 @@ use std::str::FromStr;
 
 use api::v1::region::region_request;
 use catalog::CatalogManagerRef;
-use client::region::check_response_header;
 use client::region_handler::RegionRequestHandlerRef;
 use common_error::ext::BoxedError;
 use common_query::Output;
@@ -182,13 +181,12 @@ impl StatementExecutor {
         let table_info = table.table_info();
 
         let request = insert::TableToRegion::new(&table_info).convert(request)?;
-        let region_response = self
+        let affected_rows = self
             .region_request_handler
             .handle(region_request::Body::Inserts(request), query_ctx)
             .await
             .context(RequestDatanodeSnafu)?;
-        check_response_header(region_response.header).context(RequestDatanodeSnafu)?;
-        Ok(region_response.affected_rows as _)
+        Ok(affected_rows as _)
     }
 
     async fn handle_table_delete_request(
@@ -205,13 +203,12 @@ impl StatementExecutor {
         let table_info = table.table_info();
 
         let request = delete::TableToRegion::new(&table_info).convert(request)?;
-        let region_response = self
+        let affected_rows = self
             .region_request_handler
             .handle(region_request::Body::Deletes(request), query_ctx)
             .await
             .context(RequestDatanodeSnafu)?;
-        check_response_header(region_response.header).context(RequestDatanodeSnafu)?;
-        Ok(region_response.affected_rows as _)
+        Ok(affected_rows as _)
     }
 }
 

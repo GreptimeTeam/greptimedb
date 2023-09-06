@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 
 use api::v1::region::{region_request, DeleteRequests, RegionRequest, RegionRequestHeader};
-use common_meta::datanode_manager::DatanodeManager;
+use common_meta::datanode_manager::{AffectedRows, DatanodeManager};
 use common_meta::peer::Peer;
 use futures::future;
 use metrics::counter;
@@ -57,7 +57,7 @@ impl<'a> DistDeleter<'a> {
         self
     }
 
-    pub(crate) async fn delete(&self, requests: DeleteRequests) -> Result<u64> {
+    pub(crate) async fn delete(&self, requests: DeleteRequests) -> Result<AffectedRows> {
         let requests = self.split(requests).await?;
         let trace_id = self.trace_id.unwrap_or_default();
         let span_id = self.span_id.unwrap_or_default();

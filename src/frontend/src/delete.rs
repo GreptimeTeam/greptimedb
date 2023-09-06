@@ -18,7 +18,6 @@ use std::{iter, mem};
 use api::v1::region::region_request;
 use api::v1::{DeleteRequests, RowDeleteRequest, RowDeleteRequests};
 use catalog::CatalogManager;
-use client::region::check_response_header;
 use client::region_handler::RegionRequestHandler;
 use common_query::Output;
 use session::context::QueryContextRef;
@@ -76,13 +75,12 @@ impl<'a> Deleter<'a> {
             .await?;
         let region_request = region_request::Body::Deletes(region_request);
 
-        let response = self
+        let affected_rows = self
             .region_request_handler
             .handle(region_request, ctx)
             .await
             .context(RequestDatanodeSnafu)?;
-        check_response_header(response.header).context(RequestDatanodeSnafu)?;
-        Ok(Output::AffectedRows(response.affected_rows as _))
+        Ok(Output::AffectedRows(affected_rows as _))
     }
 }
 
