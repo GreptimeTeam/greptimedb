@@ -22,6 +22,7 @@ use std::sync::Arc;
 
 use api::v1::meta::RegionStat;
 use common_telemetry::{info, warn};
+use futures::future::BoxFuture;
 use snafu::ResultExt;
 use table::engine::{EngineContext, TableEngineRef};
 use table::metadata::{TableId, TableType};
@@ -74,10 +75,6 @@ pub trait CatalogManager: Send + Sync {
     /// Rename a table to [RenameTableRequest::new_table_name], returns whether the table is renamed.
     async fn rename_table(&self, request: RenameTableRequest) -> Result<bool>;
 
-    /// Register a system table, should be called before starting the manager.
-    async fn register_system_table(&self, request: RegisterSystemTableRequest)
-        -> error::Result<()>;
-
     async fn catalog_names(&self) -> Result<Vec<String>>;
 
     async fn schema_names(&self, catalog: &str) -> Result<Vec<String>>;
@@ -102,7 +99,8 @@ pub trait CatalogManager: Send + Sync {
 pub type CatalogManagerRef = Arc<dyn CatalogManager>;
 
 /// Hook called after system table opening.
-pub type OpenSystemTableHook = Arc<dyn Fn(TableRef) -> Result<()> + Send + Sync>;
+pub type OpenSystemTableHook =
+    Box<dyn Fn(TableRef) -> BoxFuture<'static, Result<()>> + Send + Sync>;
 
 /// Register system table request:
 /// - When system table is already created and registered, the hook will be called
@@ -200,7 +198,7 @@ pub(crate) async fn handle_system_table_request<'a, M: CatalogManager>(
             table
         };
         if let Some(hook) = req.open_hook {
-            (hook)(table)?;
+            (hook)(table).await?;
         }
     }
     Ok(())
