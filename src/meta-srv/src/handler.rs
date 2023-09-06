@@ -23,6 +23,7 @@ use api::v1::meta::{
     ResponseHeader, Role, PROTOCOL_VERSION,
 };
 use common_meta::instruction::{Instruction, InstructionReply};
+use common_meta::sequence::Sequence;
 use common_telemetry::{debug, info, timer, warn};
 use dashmap::DashMap;
 use metrics::{decrement_gauge, increment_gauge};
@@ -34,7 +35,6 @@ use self::node_stat::Stat;
 use crate::error::{self, DeserializeFromJsonSnafu, Result, UnexpectedInstructionReplySnafu};
 use crate::metasrv::Context;
 use crate::metrics::{METRIC_META_HANDLER_EXECUTE, METRIC_META_HEARTBEAT_CONNECTION_NUM};
-use crate::sequence::Sequence;
 use crate::service::mailbox::{
     BroadcastChannel, Channel, Mailbox, MailboxReceiver, MailboxRef, MessageId,
 };
@@ -336,7 +336,11 @@ impl HeartbeatMailbox {
         // In this implementation, we pre-occupy the message_id of 0,
         // and we use `message_id = 0` to mark a Message as a one-way call.
         loop {
-            let next = self.sequence.next().await?;
+            let next = self
+                .sequence
+                .next()
+                .await
+                .context(error::NextSequenceSnafu)?;
             if next > 0 {
                 return Ok(next);
             }
@@ -397,6 +401,7 @@ mod tests {
     use std::time::Duration;
 
     use api::v1::meta::{MailboxMessage, RequestHeader, Role, PROTOCOL_VERSION};
+    use common_meta::sequence::Sequence;
     use tokio::sync::mpsc;
 
     use crate::handler::check_leader_handler::CheckLeaderHandler;
@@ -406,8 +411,8 @@ mod tests {
     use crate::handler::persist_stats_handler::PersistStatsHandler;
     use crate::handler::response_header_handler::ResponseHeaderHandler;
     use crate::handler::{HeartbeatHandlerGroup, HeartbeatMailbox, Pusher};
-    use crate::sequence::Sequence;
     use crate::service::mailbox::{Channel, MailboxReceiver, MailboxRef};
+    use crate::service::store::kv::KvBackendAdapter;
     use crate::service::store::memory::MemStore;
 
     #[tokio::test]
@@ -451,7 +456,7 @@ mod tests {
             .await;
 
         let kv_store = Arc::new(MemStore::new());
-        let seq = Sequence::new("test_seq", 0, 10, kv_store);
+        let seq = Sequence::new("test_seq", 0, 10, KvBackendAdapter::wrap(kv_store));
         let mailbox = HeartbeatMailbox::create(handler_group.pushers(), seq);
 
         let msg = MailboxMessage {
