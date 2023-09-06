@@ -22,7 +22,9 @@ use api::v1::meta::Peer;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
 use common_grpc::channel_manager;
+use common_meta::ddl::DdlExecutorRef;
 use common_meta::key::TableMetadataManagerRef;
+use common_meta::sequence::SequenceRef;
 use common_procedure::options::ProcedureConfig;
 use common_procedure::ProcedureManagerRef;
 use common_telemetry::logging::LoggingOptions;
@@ -33,7 +35,6 @@ use snafu::ResultExt;
 use tokio::sync::broadcast::error::RecvError;
 
 use crate::cluster::MetaPeerClientRef;
-use crate::ddl::DdlManagerRef;
 use crate::election::{Election, LeaderChangeMessage};
 use crate::error::{RecoverProcedureSnafu, Result};
 use crate::handler::HeartbeatHandlerGroup;
@@ -41,7 +42,6 @@ use crate::lock::DistLockRef;
 use crate::metadata_service::MetadataServiceRef;
 use crate::pubsub::{PublishRef, SubscribeManagerRef};
 use crate::selector::{Selector, SelectorType};
-use crate::sequence::SequenceRef;
 use crate::service::mailbox::MailboxRef;
 use crate::service::store::kv::{KvStoreRef, ResettableKvStoreRef};
 pub const TABLE_ID_SEQ: &str = "table_id";
@@ -198,7 +198,7 @@ pub struct MetaSrv {
     procedure_manager: ProcedureManagerRef,
     metadata_service: MetadataServiceRef,
     mailbox: MailboxRef,
-    ddl_manager: DdlManagerRef,
+    ddl_executor: DdlExecutorRef,
     table_metadata_manager: TableMetadataManagerRef,
     greptimedb_telemetry_task: Arc<GreptimeDBTelemetryTask>,
     pubsub: Option<(PublishRef, SubscribeManagerRef)>,
@@ -349,8 +349,8 @@ impl MetaSrv {
         &self.mailbox
     }
 
-    pub fn ddl_manager(&self) -> &DdlManagerRef {
-        &self.ddl_manager
+    pub fn ddl_executor(&self) -> &DdlExecutorRef {
+        &self.ddl_executor
     }
 
     pub fn procedure_manager(&self) -> &ProcedureManagerRef {

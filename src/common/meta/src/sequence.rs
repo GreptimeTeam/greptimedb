@@ -15,23 +15,24 @@
 use std::ops::Range;
 use std::sync::Arc;
 
-use common_meta::rpc::store::CompareAndPutRequest;
 use snafu::{ensure, OptionExt};
 use tokio::sync::Mutex;
 
 use crate::error::{self, Result};
-use crate::keys;
-use crate::service::store::kv::KvStoreRef;
+use crate::kv_backend::KvBackendRef;
+use crate::rpc::store::CompareAndPutRequest;
 
 pub type SequenceRef = Arc<Sequence>;
+
+pub(crate) const SEQ_PREFIX: &str = "__meta_seq";
 
 pub struct Sequence {
     inner: Mutex<Inner>,
 }
 
 impl Sequence {
-    pub fn new(name: impl AsRef<str>, initial: u64, step: u64, generator: KvStoreRef) -> Self {
-        let name = format!("{}-{}", keys::SEQ_PREFIX, name.as_ref());
+    pub fn new(name: impl AsRef<str>, initial: u64, step: u64, generator: KvBackendRef) -> Self {
+        let name = format!("{}-{}", SEQ_PREFIX, name.as_ref());
         let step = step.max(1);
         Self {
             inner: Mutex::new(Inner {
@@ -54,7 +55,7 @@ impl Sequence {
 
 struct Inner {
     name: String,
-    generator: KvStoreRef,
+    generator: KvBackendRef,
     // The initial(minimal) value of the sequence.
     initial: u64,
     // The next available sequences(if it is in the range,
@@ -158,21 +159,20 @@ mod tests {
     use std::any::Any;
     use std::sync::Arc;
 
-    use common_meta::kv_backend::{KvBackend, TxnService};
-    use common_meta::rpc::store::{
+    use super::*;
+    use crate::error::Error;
+    use crate::kv_backend::memory::MemoryKvBackend;
+    use crate::kv_backend::{KvBackend, TxnService};
+    use crate::rpc::store::{
         BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse,
         BatchPutRequest, BatchPutResponse, CompareAndPutResponse, DeleteRangeRequest,
         DeleteRangeResponse, MoveValueRequest, MoveValueResponse, PutRequest, PutResponse,
         RangeRequest, RangeResponse,
     };
 
-    use super::*;
-    use crate::error::Error;
-    use crate::service::store::memory::MemStore;
-
     #[tokio::test]
     async fn test_sequence() {
-        let kv_store = Arc::new(MemStore::new());
+        let kv_store = Arc::new(MemoryKvBackend::default());
         let initial = 1024;
         let seq = Sequence::new("test_seq", initial, 10, kv_store);
 
@@ -183,7 +183,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sequence_out_of_rage() {
-        let kv_store = Arc::new(MemStore::new());
+        let kv_store = Arc::new(MemoryKvBackend::default());
         let initial = u64::MAX - 10;
         let seq = Sequence::new("test_seq", initial, 10, kv_store);
 

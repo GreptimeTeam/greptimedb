@@ -74,7 +74,9 @@ impl StatementExecutor {
                 let record_batch = batch.context(ReadRecordBatchSnafu)?;
                 let insert_request =
                     build_insert_request(record_batch, table.schema(), &table_info)?;
-                affected_rows += self.send_insert_request(insert_request).await?;
+                affected_rows += self
+                    .handle_table_insert_request(insert_request, query_ctx.clone())
+                    .await?;
             }
 
             Ok(Output::AffectedRows(affected_rows))

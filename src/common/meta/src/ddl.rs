@@ -12,14 +12,55 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
+use api::v1::meta::Partition;
+use store_api::storage::TableId;
+use table::metadata::RawTableInfo;
+
 use crate::cache_invalidator::CacheInvalidatorRef;
 use crate::datanode_manager::DatanodeManagerRef;
+use crate::error::Result;
 use crate::key::TableMetadataManagerRef;
+use crate::rpc::ddl::{SubmitDdlTaskRequest, SubmitDdlTaskResponse};
+use crate::rpc::router::RegionRoute;
 
 pub mod alter_table;
 pub mod create_table;
 pub mod drop_table;
 pub mod utils;
+
+#[derive(Debug, Default)]
+pub struct ExecutorContext {
+    pub cluster_id: Option<u64>,
+}
+
+#[async_trait::async_trait]
+pub trait DdlExecutor: Send + Sync {
+    async fn submit_ddl_task(
+        &self,
+        ctx: &ExecutorContext,
+        request: SubmitDdlTaskRequest,
+    ) -> Result<SubmitDdlTaskResponse>;
+}
+
+pub type DdlExecutorRef = Arc<dyn DdlExecutor>;
+
+pub struct TableCreatorContext {
+    pub cluster_id: u64,
+}
+
+#[async_trait::async_trait]
+pub trait TableCreator: Send + Sync {
+    async fn create(
+        &self,
+        ctx: &TableCreatorContext,
+        table_info: &mut RawTableInfo,
+        partitions: &[Partition],
+    ) -> Result<(TableId, Vec<RegionRoute>)>;
+}
+
+pub type TableCreatorRef = Arc<dyn TableCreator>;
 
 #[derive(Clone)]
 pub struct DdlContext {

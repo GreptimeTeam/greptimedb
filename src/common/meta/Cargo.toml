@@ -10,6 +10,7 @@ async-stream.workspace = true
 async-trait.workspace = true
 common-catalog = { workspace = true }
 common-error = { workspace = true }
+common-grpc-expr.workspace = true
 common-procedure = { workspace = true }
 common-runtime = { workspace = true }
 common-telemetry = { workspace = true }

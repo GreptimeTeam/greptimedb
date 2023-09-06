@@ -57,6 +57,12 @@ pub enum Error {
         source: client::Error,
     },
 
+    #[snafu(display("Failed to insert data, source: {}", source))]
+    RequestInserts {
+        #[snafu(backtrace)]
+        source: common_meta::error::Error,
+    },
+
     #[snafu(display("Runtime resource error, source: {}", source))]
     RuntimeResource {
         #[snafu(backtrace)]
@@ -189,12 +195,12 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Failed to find table route for table {}, source: {}",
-        table_name,
+        "Failed to find table route for table id {}, source: {}",
+        table_id,
         source
     ))]
     FindTableRoute {
-        table_name: String,
+        table_id: u32,
         #[snafu(backtrace)]
         source: partition::error::Error,
     },
@@ -323,6 +329,12 @@ pub enum Error {
     InvokeDatanode {
         #[snafu(backtrace)]
         source: datanode::error::Error,
+    },
+
+    #[snafu(display("{source}"))]
+    InvokeRegionServer {
+        #[snafu(backtrace)]
+        source: servers::error::Error,
     },
 
     #[snafu(display("Missing meta_client_options section in config"))]
@@ -618,6 +630,29 @@ pub enum Error {
         source: common_recordbatch::error::Error,
         location: Location,
     },
+
+    #[snafu(display("Missing insert body, source: {source}"))]
+    MissingInsertBody {
+        source: sql::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Failed to build default value, column: {}, source: {}",
+        column,
+        source
+    ))]
+    ColumnDefaultValue {
+        column: String,
+        location: Location,
+        source: datatypes::error::Error,
+    },
+
+    #[snafu(display(
+        "No valid default value can be built automatically, column: {}",
+        column,
+    ))]
+    ColumnNoneDefaultValue { column: String, location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -640,7 +675,8 @@ impl ErrorExt for Error {
             | Error::BuildCsvConfig { .. }
             | Error::ProjectSchema { .. }
             | Error::UnsupportedFormat { .. }
-            | Error::EmptyData { .. } => StatusCode::InvalidArguments,
+            | Error::EmptyData { .. }
+            | Error::ColumnNoneDefaultValue { .. } => StatusCode::InvalidArguments,
 
             Error::NotSupported { .. } => StatusCode::Unsupported,
 
@@ -674,6 +710,7 @@ impl ErrorExt for Error {
             | Error::IntoVectors { source } => source.status_code(),
 
             Error::RequestDatanode { source } => source.status_code(),
+            Error::RequestInserts { source } => source.status_code(),
 
             Error::ColumnDataType { source } | Error::InvalidColumnDef { source, .. } => {
                 source.status_code()
@@ -686,7 +723,8 @@ impl ErrorExt for Error {
             | Error::FindRegionRoute { .. }
             | Error::BuildDfLogicalPlan { .. }
             | Error::BuildTableMeta { .. }
-            | Error::VectorToGrpcColumn { .. } => StatusCode::Internal,
+            | Error::VectorToGrpcColumn { .. }
+            | Error::MissingInsertBody { .. } => StatusCode::Internal,
 
             Error::IncompleteGrpcResult { .. }
             | Error::ContextValueNotFound { .. }
@@ -725,6 +763,7 @@ impl ErrorExt for Error {
             Error::TableAlreadyExist { .. } => StatusCode::TableAlreadyExists,
             Error::EncodeSubstraitLogicalPlan { source } => source.status_code(),
             Error::InvokeDatanode { source } => source.status_code(),
+            Error::InvokeRegionServer { source } => source.status_code(),
 
             Error::External { source } => source.status_code(),
             Error::DeserializePartition { source, .. }
@@ -754,6 +793,8 @@ impl ErrorExt for Error {
             Error::ReadRecordBatch { source, .. } | Error::BuildColumnVectors { source, .. } => {
                 source.status_code()
             }
+
+            Error::ColumnDefaultValue { source, .. } => source.status_code(),
         }
     }
 

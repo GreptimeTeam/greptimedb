@@ -59,6 +59,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         region
             .version_control
             .apply_edit(edit, region.file_purger.clone());
+        region.update_flush_millis();
 
         // Delete wal.
         info!(

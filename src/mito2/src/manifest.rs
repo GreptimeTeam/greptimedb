@@ -15,7 +15,6 @@
 //! manifest storage
 
 pub mod action;
-#[allow(unused_variables)]
 pub mod manager;
 pub mod storage;
 #[cfg(test)]

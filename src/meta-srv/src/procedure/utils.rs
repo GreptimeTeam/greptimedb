@@ -104,12 +104,13 @@ pub mod test_data {
     use std::sync::Arc;
 
     use chrono::DateTime;
-    use client::client_manager::DatanodeClients;
     use common_catalog::consts::MITO2_ENGINE;
+    use common_meta::datanode_manager::DatanodeManagerRef;
     use common_meta::ddl::DdlContext;
     use common_meta::key::TableMetadataManager;
     use common_meta::peer::Peer;
     use common_meta::rpc::router::RegionRoute;
+    use common_meta::sequence::Sequence;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, RawSchema};
     use table::metadata::{RawTableInfo, RawTableMeta, TableIdent, TableType};
@@ -118,7 +119,6 @@ pub mod test_data {
     use crate::cache_invalidator::MetasrvCacheInvalidator;
     use crate::handler::{HeartbeatMailbox, Pushers};
     use crate::metasrv::MetasrvInfo;
-    use crate::sequence::Sequence;
     use crate::service::store::kv::KvBackendAdapter;
     use crate::service::store::memory::MemStore;
     use crate::test_util::new_region_route;
@@ -138,7 +138,10 @@ pub mod test_data {
 
     pub fn new_table_info() -> RawTableInfo {
         RawTableInfo {
-            ident: TableIdent::new(42),
+            ident: TableIdent {
+                table_id: 42,
+                version: 1,
+            },
             name: "my_table".to_string(),
             desc: Some("blabla".to_string()),
             catalog_name: "my_catalog".to_string(),
@@ -184,16 +187,20 @@ pub mod test_data {
         }
     }
 
-    pub(crate) fn new_ddl_context() -> DdlContext {
+    pub(crate) fn new_ddl_context(datanode_manager: DatanodeManagerRef) -> DdlContext {
         let kv_store = Arc::new(MemStore::new());
 
-        let mailbox_sequence = Sequence::new("test_heartbeat_mailbox", 0, 100, kv_store.clone());
+        let mailbox_sequence = Sequence::new(
+            "test_heartbeat_mailbox",
+            0,
+            100,
+            KvBackendAdapter::wrap(kv_store.clone()),
+        );
         let mailbox = HeartbeatMailbox::create(Pushers::default(), mailbox_sequence);
 
         let kv_backend = KvBackendAdapter::wrap(kv_store);
-        let clients = Arc::new(DatanodeClients::default());
         DdlContext {
-            datanode_manager: clients,
+            datanode_manager,
             cache_invalidator: Arc::new(MetasrvCacheInvalidator::new(
                 mailbox,
                 MetasrvInfo {

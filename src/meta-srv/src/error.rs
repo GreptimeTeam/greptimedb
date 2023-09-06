@@ -26,6 +26,18 @@ use crate::pubsub::Message;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
+    #[snafu(display("Failed to allocate next sequence number: {}", source))]
+    NextSequence {
+        location: Location,
+        source: common_meta::error::Error,
+    },
+
+    #[snafu(display("Failed to submit ddl task: {}", source))]
+    SubmitDdlTask {
+        location: Location,
+        source: common_meta::error::Error,
+    },
+
     #[snafu(display("Failed to invalidate table cache: {}", source))]
     InvalidateTableCache {
         location: Location,
@@ -56,12 +68,6 @@ pub enum Error {
     Join {
         location: Location,
         source: JoinError,
-    },
-
-    #[snafu(display("Failed to convert grpc expr, source: {}", source))]
-    ConvertGrpcExpr {
-        location: Location,
-        source: common_grpc_expr::error::Error,
     },
 
     #[snafu(display("Failed to execute transaction: {}", msg))]
@@ -222,9 +228,6 @@ pub enum Error {
         source: common_catalog::error::Error,
     },
 
-    #[snafu(display("Unexpected sequence value: {}", err_msg))]
-    UnexpectedSequenceValue { err_msg: String, location: Location },
-
     #[snafu(display("Failed to decode table route, source: {}", source))]
     DecodeTableRoute {
         source: prost::DecodeError,
@@ -250,17 +253,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to get sequence: {}", err_msg))]
-    NextSequence { err_msg: String, location: Location },
-
-    #[snafu(display("Sequence out of range: {}, start={}, step={}", name, start, step))]
-    SequenceOutOfRange {
-        name: String,
-        start: u64,
-        step: u64,
-        location: Location,
-    },
-
     #[snafu(display("MetaSrv has no leader at this moment"))]
     NoLeader { location: Location },
 
@@ -279,7 +271,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Unexpected, violated: {}", violated))]
+    #[snafu(display("Unexpected, violated: {violated}, at {location}"))]
     Unexpected {
         violated: String,
         location: Location,
@@ -554,7 +546,6 @@ impl ErrorExt for Error {
             | Error::StartGrpc { .. }
             | Error::UpdateTableMetadata { .. }
             | Error::NoEnoughAvailableDatanode { .. }
-            | Error::ConvertGrpcExpr { .. }
             | Error::PublishMessage { .. }
             | Error::Join { .. }
             | Error::Unsupported { .. } => StatusCode::Internal,
@@ -576,12 +567,9 @@ impl ErrorExt for Error {
             | Error::StatKeyFromUtf8 { .. }
             | Error::StatValueFromUtf8 { .. }
             | Error::InvalidRegionKeyFromUtf8 { .. }
-            | Error::UnexpectedSequenceValue { .. }
             | Error::TableRouteNotFound { .. }
             | Error::TableInfoNotFound { .. }
             | Error::CorruptedTableRoute { .. }
-            | Error::NextSequence { .. }
-            | Error::SequenceOutOfRange { .. }
             | Error::MoveValue { .. }
             | Error::InvalidTxnResult { .. }
             | Error::InvalidUtf8Value { .. }
@@ -605,10 +593,11 @@ impl ErrorExt for Error {
             }
 
             Error::RegionFailoverCandidatesNotFound { .. } => StatusCode::RuntimeResourcesExhausted,
+            Error::NextSequence { source, .. } => source.status_code(),
 
             Error::RegisterProcedureLoader { source, .. } => source.status_code(),
             Error::OperateRegion { source, .. } => source.status_code(),
-
+            Error::SubmitDdlTask { source, .. } => source.status_code(),
             Error::TableRouteConversion { source, .. }
             | Error::ConvertProtoData { source, .. }
             | Error::TableMetadataManager { source, .. }

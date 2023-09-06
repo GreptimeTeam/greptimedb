@@ -17,6 +17,8 @@
 use std::any::Any;
 use std::sync::RwLock;
 
+use common_error::ext::BoxedError;
+use common_meta::error as meta_error;
 use common_meta::kv_backend::txn::{Txn, TxnOp, TxnOpResponse, TxnRequest, TxnResponse};
 use common_meta::kv_backend::{KvBackend, TxnService};
 use common_meta::rpc::store::{
@@ -29,7 +31,6 @@ use common_meta::rpc::KeyValue;
 use raft_engine::{Engine, LogBatch};
 use snafu::ResultExt;
 
-use crate::error;
 use crate::error::RaftEngineSnafu;
 
 pub(crate) const SYSTEM_NAMESPACE: u64 = 0;
@@ -41,9 +42,9 @@ pub struct RaftEngineBackend {
 
 #[async_trait::async_trait]
 impl TxnService for RaftEngineBackend {
-    type Error = error::Error;
+    type Error = meta_error::Error;
 
-    async fn txn(&self, txn: Txn) -> Result<TxnResponse, Self::Error> {
+    async fn txn(&self, txn: Txn) -> meta_error::Result<TxnResponse> {
         let TxnRequest {
             compare,
             success,
@@ -65,7 +66,9 @@ impl TxnService for RaftEngineBackend {
             TxnOp::Put(key, value) => {
                 batch
                     .put(SYSTEM_NAMESPACE, key.clone(), value)
-                    .context(RaftEngineSnafu)?;
+                    .context(RaftEngineSnafu)
+                    .map_err(BoxedError::new)
+                    .context(meta_error::ExternalSnafu)?;
                 Ok(TxnOpResponse::ResponsePut(PutResponse { prev_kv: None }))
             }
 
@@ -98,9 +101,13 @@ impl TxnService for RaftEngineBackend {
         let responses = if succeeded { success } else { failure }
             .into_iter()
             .map(do_txn)
-            .collect::<error::Result<_>>()?;
+            .collect::<meta_error::Result<_>>()?;
 
-        engine.write(&mut batch, false).context(RaftEngineSnafu)?;
+        engine
+            .write(&mut batch, false)
+            .context(RaftEngineSnafu)
+            .map_err(BoxedError::new)
+            .context(meta_error::ExternalSnafu)?;
 
         Ok(TxnResponse {
             succeeded,
@@ -137,7 +144,9 @@ impl KvBackend for RaftEngineBackend {
                     true
                 },
             )
-            .context(RaftEngineSnafu)?;
+            .context(RaftEngineSnafu)
+            .map_err(BoxedError::new)
+            .context(meta_error::ExternalSnafu)?;
         Ok(RangeResponse {
             kvs: res,
             more: false,
@@ -179,10 +188,16 @@ impl KvBackend for RaftEngineBackend {
             }
             batch
                 .put(SYSTEM_NAMESPACE, kv.key, kv.value)
-                .context(RaftEngineSnafu)?;
+                .context(RaftEngineSnafu)
+                .map_err(BoxedError::new)
+                .context(meta_error::ExternalSnafu)?;
         }
 
-        engine.write(&mut batch, false).context(RaftEngineSnafu)?;
+        engine
+            .write(&mut batch, false)
+            .context(RaftEngineSnafu)
+            .map_err(BoxedError::new)
+            .context(meta_error::ExternalSnafu)?;
 
         Ok(BatchPutResponse { prev_kvs })
     }
@@ -222,8 +237,14 @@ impl KvBackend for RaftEngineBackend {
         if eq {
             batch
                 .put(SYSTEM_NAMESPACE, key, value)
-                .context(RaftEngineSnafu)?;
-            engine.write(&mut batch, false).context(RaftEngineSnafu)?;
+                .context(RaftEngineSnafu)
+                .map_err(BoxedError::new)
+                .context(meta_error::ExternalSnafu)?;
+            engine
+                .write(&mut batch, false)
+                .context(RaftEngineSnafu)
+                .map_err(BoxedError::new)
+                .context(meta_error::ExternalSnafu)?;
         }
         Ok(CompareAndPutResponse {
             success: eq,
@@ -284,7 +305,11 @@ impl KvBackend for RaftEngineBackend {
             batch.delete(SYSTEM_NAMESPACE, key);
         }
         let engine = self.engine.read().unwrap();
-        engine.write(&mut batch, false).context(RaftEngineSnafu)?;
+        engine
+            .write(&mut batch, false)
+            .context(RaftEngineSnafu)
+            .map_err(BoxedError::new)
+            .context(meta_error::ExternalSnafu)?;
         Ok(BatchDeleteResponse { prev_kvs })
     }
 
@@ -312,7 +337,7 @@ impl KvBackend for RaftEngineBackend {
     }
 }
 
-fn engine_get(engine: &Engine, key: &[u8]) -> error::Result<Option<KeyValue>> {
+fn engine_get(engine: &Engine, key: &[u8]) -> meta_error::Result<Option<KeyValue>> {
     let res = engine.get(SYSTEM_NAMESPACE, key);
     Ok(res.map(|value| KeyValue {
         key: key.to_vec(),
@@ -320,19 +345,29 @@ fn engine_get(engine: &Engine, key: &[u8]) -> error::Result<Option<KeyValue>> {
     }))
 }
 
-fn engine_put(engine: &Engine, key: Vec<u8>, value: Vec<u8>) -> error::Result<()> {
+fn engine_put(engine: &Engine, key: Vec<u8>, value: Vec<u8>) -> meta_error::Result<()> {
     let mut batch = LogBatch::with_capacity(1);
     batch
         .put(SYSTEM_NAMESPACE, key, value)
-        .context(RaftEngineSnafu)?;
-    engine.write(&mut batch, false).context(RaftEngineSnafu)?;
+        .context(RaftEngineSnafu)
+        .map_err(BoxedError::new)
+        .context(meta_error::ExternalSnafu)?;
+    engine
+        .write(&mut batch, false)
+        .context(RaftEngineSnafu)
+        .map_err(BoxedError::new)
+        .context(meta_error::ExternalSnafu)?;
     Ok(())
 }
 
-fn engine_delete(engine: &Engine, key: &[u8]) -> error::Result<()> {
+fn engine_delete(engine: &Engine, key: &[u8]) -> meta_error::Result<()> {
     let mut batch = LogBatch::with_capacity(1);
     batch.delete(SYSTEM_NAMESPACE, key.to_vec());
-    engine.write(&mut batch, false).context(RaftEngineSnafu)?;
+    engine
+        .write(&mut batch, false)
+        .context(RaftEngineSnafu)
+        .map_err(BoxedError::new)
+        .context(meta_error::ExternalSnafu)?;
     Ok(())
 }
 

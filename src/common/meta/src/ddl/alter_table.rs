@@ -14,51 +14,60 @@
 
 use std::vec;
 
+use api::v1::alter_expr::Kind;
+use api::v1::region::{
+    alter_request, region_request, AddColumn, AddColumns, AlterRequest, DropColumn, DropColumns,
+    RegionColumnDef, RegionRequest,
+};
+use api::v1::{AlterExpr, RenameTable};
 use async_trait::async_trait;
+use common_grpc_expr::alter_expr_to_request;
 use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu};
 use common_procedure::{
     Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure, Status,
 };
 use common_telemetry::{debug, info};
+use futures::future;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
+use store_api::storage::RegionId;
+use strum::AsRefStr;
 use table::engine::TableReference;
 use table::metadata::{RawTableInfo, TableId, TableInfo};
-use table::requests::{AlterKind, AlterTableRequest};
+use table::requests::AlterKind;
 
 use crate::cache_invalidator::Context;
+use crate::ddl::utils::handle_operate_region_error;
 use crate::ddl::DdlContext;
-use crate::error::{self, Result};
+use crate::error::{
+    self, ConvertAlterTableRequestSnafu, InvalidProtoMsgSnafu, Result, TableRouteNotFoundSnafu,
+};
 use crate::ident::TableIdent;
 use crate::key::table_info::TableInfoValue;
 use crate::key::table_name::TableNameKey;
 use crate::key::table_route::TableRouteValue;
+use crate::metrics;
 use crate::rpc::ddl::AlterTableTask;
-use crate::rpc::router::RegionRoute;
+use crate::rpc::router::{find_leader_regions, find_leaders};
 use crate::table_name::TableName;
 
-// TODO(weny): removes in following PRs.
-#[allow(dead_code)]
 pub struct AlterTableProcedure {
     context: DdlContext,
     data: AlterTableData,
 }
 
-// TODO(weny): removes in following PRs.
-#[allow(dead_code)]
 impl AlterTableProcedure {
     pub const TYPE_NAME: &'static str = "metasrv-procedure::AlterTable";
 
     pub fn new(
         cluster_id: u64,
         task: AlterTableTask,
-        alter_table_request: AlterTableRequest,
         table_info_value: TableInfoValue,
         context: DdlContext,
     ) -> Self {
         Self {
             context,
-            data: AlterTableData::new(task, alter_table_request, table_info_value, cluster_id),
+            data: AlterTableData::new(task, table_info_value, cluster_id),
         }
     }
 
@@ -70,51 +79,160 @@ impl AlterTableProcedure {
 
     // Checks whether the table exists.
     async fn on_prepare(&mut self) -> Result<Status> {
-        let request = &self.data.alter_table_request;
+        let alter_expr = &self.alter_expr();
+        let catalog = &alter_expr.catalog_name;
+        let schema = &alter_expr.schema_name;
 
         let manager = &self.context.table_metadata_manager;
 
-        if let AlterKind::RenameTable { new_table_name } = &request.alter_kind {
+        if let Kind::RenameTable(RenameTable { new_table_name }) = self.alter_kind()? {
+            let new_table_name_key = TableNameKey::new(catalog, schema, new_table_name);
+
             let exist = manager
                 .table_name_manager()
-                .exists(TableNameKey::new(
-                    &request.catalog_name,
-                    &request.schema_name,
-                    new_table_name,
-                ))
+                .exists(new_table_name_key)
                 .await?;
 
             ensure!(
                 !exist,
                 error::TableAlreadyExistsSnafu {
-                    table_name: common_catalog::format_full_table_name(
-                        &request.catalog_name,
-                        &request.schema_name,
-                        new_table_name,
-                    ),
+                    table_name: TableName::from(new_table_name_key).to_string(),
                 }
             )
         }
 
-        let exist = manager
-            .table_name_manager()
-            .exists(TableNameKey::new(
-                &request.catalog_name,
-                &request.schema_name,
-                &request.table_name,
-            ))
-            .await?;
+        let table_name_key = TableNameKey::new(catalog, schema, &alter_expr.table_name);
+
+        let exist = manager.table_name_manager().exists(table_name_key).await?;
 
         ensure!(
             exist,
             error::TableNotFoundSnafu {
-                table_name: request.table_ref().to_string()
+                table_name: TableName::from(table_name_key).to_string()
             }
         );
 
         self.data.state = AlterTableState::UpdateMetadata;
 
         Ok(Status::executing(true))
+    }
+
+    fn alter_expr(&self) -> &AlterExpr {
+        &self.data.task.alter_table
+    }
+
+    fn alter_kind(&self) -> Result<&Kind> {
+        self.alter_expr()
+            .kind
+            .as_ref()
+            .context(InvalidProtoMsgSnafu {
+                err_msg: "'kind' is absent",
+            })
+    }
+
+    pub fn create_alter_region_request(&self, region_id: RegionId) -> Result<AlterRequest> {
+        let table_info = self.data.table_info();
+
+        let kind =
+            match self.alter_kind()? {
+                Kind::AddColumns(x) => {
+                    let mut next_column_id = table_info.meta.next_column_id;
+
+                    let add_columns =
+                        x.add_columns
+                            .iter()
+                            .map(|add_column| {
+                                let column_def = add_column.column_def.as_ref().context(
+                                    InvalidProtoMsgSnafu {
+                                        err_msg: "'column_def' is absent",
+                                    },
+                                )?;
+
+                                let column_id = next_column_id;
+                                next_column_id += 1;
+
+                                let column_def = RegionColumnDef {
+                                    column_def: Some(column_def.clone()),
+                                    column_id,
+                                };
+
+                                Ok(AddColumn {
+                                    column_def: Some(column_def),
+                                    location: add_column.location.clone(),
+                                })
+                            })
+                            .collect::<Result<Vec<_>>>()?;
+
+                    alter_request::Kind::AddColumns(AddColumns { add_columns })
+                }
+                Kind::DropColumns(x) => {
+                    let drop_columns = x
+                        .drop_columns
+                        .iter()
+                        .map(|x| DropColumn {
+                            name: x.name.clone(),
+                        })
+                        .collect::<Vec<_>>();
+
+                    alter_request::Kind::DropColumns(DropColumns { drop_columns })
+                }
+                Kind::RenameTable(_) => unreachable!(),
+            };
+
+        Ok(AlterRequest {
+            region_id: region_id.as_u64(),
+            schema_version: table_info.ident.version,
+            kind: Some(kind),
+        })
+    }
+
+    pub async fn submit_alter_region_requests(&self) -> Result<Status> {
+        let table_id = self.data.table_id();
+        let table_ref = self.data.table_ref();
+
+        let TableRouteValue { region_routes, .. } = self
+            .context
+            .table_metadata_manager
+            .table_route_manager()
+            .get(table_id)
+            .await?
+            .with_context(|| TableRouteNotFoundSnafu {
+                table_name: table_ref.to_string(),
+            })?;
+
+        let leaders = find_leaders(&region_routes);
+        let mut alter_region_tasks = Vec::with_capacity(leaders.len());
+
+        for datanode in leaders {
+            let datanode_manager = self.context.datanode_manager.clone();
+
+            let regions = find_leader_regions(&region_routes, &datanode);
+
+            alter_region_tasks.push(async move {
+                for region in regions {
+                    let region_id = RegionId::new(table_id, region);
+                    let request = self.create_alter_region_request(region_id)?;
+                    let request = RegionRequest {
+                        header: None,
+                        body: Some(region_request::Body::Alter(request)),
+                    };
+                    debug!("Submitting {request:?} to {datanode}");
+
+                    let requester = datanode_manager.datanode(&datanode).await;
+                    if let Err(e) = requester.handle(request).await {
+                        return Err(handle_operate_region_error(datanode)(e));
+                    }
+                }
+                Ok(())
+            });
+        }
+
+        future::join_all(alter_region_tasks)
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok(Status::Done)
     }
 
     /// Update table metadata for rename table operation.
@@ -148,7 +266,8 @@ impl AlterTableProcedure {
 
         let table_ref = self.data.table_ref();
 
-        let request = &self.data.alter_table_request;
+        let request = alter_expr_to_request(self.data.table_id(), self.alter_expr().clone())
+            .context(ConvertAlterTableRequestSnafu)?;
 
         let new_meta = table_info
             .meta
@@ -172,11 +291,9 @@ impl AlterTableProcedure {
 
     /// Update table metadata.
     async fn on_update_metadata(&mut self) -> Result<Status> {
-        let request = &self.data.alter_table_request;
         let table_id = self.data.table_id();
         let table_ref = self.data.table_ref();
         let new_info = self.build_new_table_info()?;
-        let table_metadata_manager = &self.context.table_metadata_manager;
 
         debug!(
             "starting update table: {} metadata, new table info {:?}",
@@ -184,7 +301,7 @@ impl AlterTableProcedure {
             new_info
         );
 
-        if let AlterKind::RenameTable { new_table_name } = &request.alter_kind {
+        if let Kind::RenameTable(RenameTable { new_table_name }) = self.alter_kind()? {
             self.on_update_metadata_for_rename(new_table_name.to_string())
                 .await?;
         } else {
@@ -193,27 +310,18 @@ impl AlterTableProcedure {
 
         info!("Updated table metadata for table {table_id}");
 
-        let TableRouteValue { region_routes, .. } = table_metadata_manager
-            .table_route_manager()
-            .get(table_id)
-            .await?
-            .with_context(|| error::TableRouteNotFoundSnafu {
-                table_name: table_ref.to_string(),
-            })?;
-
-        self.data.region_routes = Some(region_routes);
         self.data.state = AlterTableState::InvalidateTableCache;
         Ok(Status::executing(true))
     }
 
     /// Broadcasts the invalidating table cache instructions.
     async fn on_broadcast(&mut self) -> Result<Status> {
-        let table_name = self.data.table_name();
+        let table_ref = self.data.table_ref();
 
         let table_ident = TableIdent {
-            catalog: table_name.catalog_name,
-            schema: table_name.schema_name,
-            table: table_name.table_name,
+            catalog: table_ref.catalog.to_string(),
+            schema: table_ref.schema.to_string(),
+            table: table_ref.table.to_string(),
             table_id: self.data.table_id(),
             engine: self.data.table_info().meta.engine.to_string(),
         };
@@ -228,8 +336,14 @@ impl AlterTableProcedure {
             )
             .await?;
 
-        self.data.state = AlterTableState::DatanodeAlterTable;
-        Ok(Status::executing(true))
+        let alter_kind = self.alter_kind()?;
+        if matches!(alter_kind, Kind::RenameTable { .. }) {
+            Ok(Status::Done)
+        } else {
+            self.data.state = AlterTableState::SubmitAlterRegionRequests;
+
+            Ok(Status::executing(true))
+        }
     }
 
     fn lock_key_inner(&self) -> Vec<String> {
@@ -241,8 +355,7 @@ impl AlterTableProcedure {
         );
         let mut lock_key = vec![table_key];
 
-        if let AlterKind::RenameTable { new_table_name } = &self.data.alter_table_request.alter_kind
-        {
+        if let Ok(Kind::RenameTable(RenameTable { new_table_name })) = self.alter_kind() {
             lock_key.push(common_catalog::format_full_table_name(
                 table_ref.catalog,
                 table_ref.schema,
@@ -269,11 +382,18 @@ impl Procedure for AlterTableProcedure {
             }
         };
 
-        match self.data.state {
+        let state = &self.data.state;
+
+        let _timer = common_telemetry::timer!(
+            metrics::METRIC_META_PROCEDURE_ALTER_TABLE,
+            &[("step", state.as_ref().to_string())]
+        );
+
+        match state {
             AlterTableState::Prepare => self.on_prepare().await,
             AlterTableState::UpdateMetadata => self.on_update_metadata().await,
             AlterTableState::InvalidateTableCache => self.on_broadcast().await,
-            AlterTableState::DatanodeAlterTable => todo!(),
+            AlterTableState::SubmitAlterRegionRequests => self.submit_alter_region_requests().await,
         }
         .map_err(error_handler)
     }
@@ -289,7 +409,7 @@ impl Procedure for AlterTableProcedure {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, AsRefStr)]
 enum AlterTableState {
     /// Prepares to alter the table
     Prepare,
@@ -297,32 +417,22 @@ enum AlterTableState {
     UpdateMetadata,
     /// Broadcasts the invalidating table cache instruction.
     InvalidateTableCache,
-    /// Datanode alters the table.
-    DatanodeAlterTable,
+    SubmitAlterRegionRequests,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AlterTableData {
     state: AlterTableState,
     task: AlterTableTask,
-    alter_table_request: AlterTableRequest,
-    region_routes: Option<Vec<RegionRoute>>,
     table_info_value: TableInfoValue,
     cluster_id: u64,
 }
 
 impl AlterTableData {
-    pub fn new(
-        task: AlterTableTask,
-        alter_table_request: AlterTableRequest,
-        table_info_value: TableInfoValue,
-        cluster_id: u64,
-    ) -> Self {
+    pub fn new(task: AlterTableTask, table_info_value: TableInfoValue, cluster_id: u64) -> Self {
         Self {
             state: AlterTableState::Prepare,
             task,
-            alter_table_request,
-            region_routes: None,
             table_info_value,
             cluster_id,
         }
@@ -330,10 +440,6 @@ impl AlterTableData {
 
     fn table_ref(&self) -> TableReference {
         self.task.table_ref()
-    }
-
-    fn table_name(&self) -> TableName {
-        self.task.table_name()
     }
 
     fn table_id(&self) -> TableId {

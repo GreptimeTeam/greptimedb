@@ -18,7 +18,7 @@ use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use catalog::CatalogManagerRef;
-use client::client_manager::DatanodeClients;
+use client::region_handler::RegionRequestHandlerRef;
 use common_base::Plugins;
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_query::physical_plan::SessionContext;
@@ -37,7 +37,6 @@ use datafusion::physical_planner::{DefaultPhysicalPlanner, ExtensionPlanner, Phy
 use datafusion_expr::LogicalPlan as DfLogicalPlan;
 use datafusion_optimizer::analyzer::Analyzer;
 use datafusion_optimizer::optimizer::Optimizer;
-use partition::manager::PartitionRuleManager;
 use promql::extension_plan::PromExtensionPlanner;
 use substrait::extension_serializer::ExtensionSerializer;
 use table::table::adapter::DfTableProviderAdapter;
@@ -73,9 +72,8 @@ impl fmt::Debug for QueryEngineState {
 impl QueryEngineState {
     pub fn new(
         catalog_list: CatalogManagerRef,
+        request_handler: Option<RegionRequestHandlerRef>,
         with_dist_planner: bool,
-        partition_manager: Option<Arc<PartitionRuleManager>>,
-        datanode_clients: Option<Arc<DatanodeClients>>,
         plugins: Arc<Plugins>,
     ) -> Self {
         let runtime_env = Arc::new(RuntimeEnv::default());
@@ -114,9 +112,8 @@ impl QueryEngineState {
         .with_serializer_registry(Arc::new(ExtensionSerializer))
         .with_analyzer_rules(analyzer.rules)
         .with_query_planner(Arc::new(DfQueryPlanner::new(
-            partition_manager,
-            datanode_clients,
             catalog_list.clone(),
+            request_handler,
         )))
         .with_optimizer_rules(optimizer.rules)
         .with_physical_optimizer_rules(physical_optimizers);
@@ -223,15 +220,16 @@ impl QueryPlanner for DfQueryPlanner {
 
 impl DfQueryPlanner {
     fn new(
-        partition_manager: Option<Arc<PartitionRuleManager>>,
-        datanode_clients: Option<Arc<DatanodeClients>>,
         catalog_manager: CatalogManagerRef,
+        request_handler: Option<RegionRequestHandlerRef>,
     ) -> Self {
         let mut planners: Vec<Arc<dyn ExtensionPlanner + Send + Sync>> =
             vec![Arc::new(PromExtensionPlanner), Arc::new(RangeSelectPlanner)];
-        if let Some(partition_manager) = partition_manager
-         && let Some(datanode_clients) = datanode_clients {
-            planners.push(Arc::new(DistExtensionPlanner::new(partition_manager, datanode_clients, catalog_manager)));
+        if let Some(request_handler) = request_handler {
+            planners.push(Arc::new(DistExtensionPlanner::new(
+                catalog_manager,
+                request_handler,
+            )));
         }
         Self {
             physical_planner: DefaultPhysicalPlanner::with_extension_planners(planners),

@@ -125,9 +125,7 @@ impl DistDeleter {
             let table_route = partition_manager
                 .find_table_route(table_id)
                 .await
-                .with_context(|_| FindTableRouteSnafu {
-                    table_name: table_name.to_string(),
-                })?;
+                .with_context(|_| FindTableRouteSnafu { table_id })?;
 
             for (region_number, delete) in split {
                 let datanode =

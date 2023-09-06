@@ -12,37 +12,44 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::region::{region_request, RegionRequest, RegionRequestHeader, RegionResponse};
+use api::v1::region::{RegionRequest, RegionResponse};
 use api::v1::ResponseHeader;
+use arrow_flight::Ticket;
+use async_stream::stream;
 use async_trait::async_trait;
-use common_error::ext::BoxedError;
+use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
+use common_grpc::flight::{FlightDecoder, FlightMessage};
 use common_meta::datanode_manager::{AffectedRows, Datanode};
 use common_meta::error::{self as meta_error, Result as MetaResult};
-use common_telemetry::timer;
-use snafu::{location, Location, OptionExt};
+use common_recordbatch::error::ExternalSnafu;
+use common_recordbatch::{RecordBatchStreamAdaptor, SendableRecordBatchStream};
+use common_telemetry::{error, timer};
+use snafu::{location, Location, OptionExt, ResultExt};
+use tokio_stream::StreamExt;
 
 use crate::error::Error::FlightGet;
-use crate::error::{IllegalDatabaseResponseSnafu, Result, ServerSnafu};
-use crate::{metrics, Client};
+use crate::error::{
+    self, ConvertFlightDataSnafu, IllegalDatabaseResponseSnafu, IllegalFlightMessagesSnafu,
+    MissingFieldSnafu, Result, ServerSnafu,
+};
+use crate::{metrics, Client, Error};
 
 #[derive(Debug)]
 pub struct RegionRequester {
-    trace_id: u64,
-    span_id: u64,
     client: Client,
 }
 
 #[async_trait]
 impl Datanode for RegionRequester {
-    async fn handle(&self, request: region_request::Body) -> MetaResult<AffectedRows> {
+    async fn handle(&self, request: RegionRequest) -> MetaResult<AffectedRows> {
         self.handle_inner(request).await.map_err(|err| {
             if matches!(err, FlightGet { .. }) {
                 meta_error::Error::RetryLater {
                     source: BoxedError::new(err),
                 }
             } else {
-                meta_error::Error::OperateRegion {
+                meta_error::Error::External {
                     source: BoxedError::new(err),
                     location: location!(),
                 }
@@ -53,24 +60,87 @@ impl Datanode for RegionRequester {
 
 impl RegionRequester {
     pub fn new(client: Client) -> Self {
-        // TODO(LFC): Pass in trace_id and span_id from some context when we have it.
-        Self {
-            trace_id: 0,
-            span_id: 0,
-            client,
-        }
+        Self { client }
     }
 
-    async fn handle_inner(&self, request: region_request::Body) -> Result<AffectedRows> {
-        let request_type = request.as_ref().to_string();
+    pub async fn do_get(&self, ticket: Ticket) -> Result<SendableRecordBatchStream> {
+        let mut flight_client = self.client.make_flight_client()?;
+        let response = flight_client
+            .mut_inner()
+            .do_get(ticket)
+            .await
+            .map_err(|e| {
+                let tonic_code = e.code();
+                let e: error::Error = e.into();
+                let code = e.status_code();
+                let msg = e.to_string();
+                let error = Error::FlightGet {
+                    tonic_code,
+                    addr: flight_client.addr().to_string(),
+                    source: BoxedError::new(ServerSnafu { code, msg }.build()),
+                };
+                error!(
+                    e; "Failed to do Flight get, addr: {}, code: {}",
+                    flight_client.addr(),
+                    tonic_code
+                );
+                error
+            })?;
 
-        let request = RegionRequest {
-            header: Some(RegionRequestHeader {
-                trace_id: self.trace_id,
-                span_id: self.span_id,
-            }),
-            body: Some(request),
+        let flight_data_stream = response.into_inner();
+        let mut decoder = FlightDecoder::default();
+
+        let mut flight_message_stream = flight_data_stream.map(move |flight_data| {
+            flight_data
+                .map_err(Error::from)
+                .and_then(|data| decoder.try_decode(data).context(ConvertFlightDataSnafu))
+        });
+
+        let Some(first_flight_message) = flight_message_stream.next().await else {
+            return IllegalFlightMessagesSnafu {
+                reason: "Expect the response not to be empty",
+            }
+            .fail();
         };
+        let FlightMessage::Schema(schema) = first_flight_message? else {
+            return IllegalFlightMessagesSnafu {
+                reason: "Expect schema to be the first flight message",
+            }
+            .fail();
+        };
+
+        let stream = Box::pin(stream!({
+            while let Some(flight_message) = flight_message_stream.next().await {
+                let flight_message = flight_message
+                    .map_err(BoxedError::new)
+                    .context(ExternalSnafu)?;
+                let FlightMessage::Recordbatch(record_batch) = flight_message else {
+                    yield IllegalFlightMessagesSnafu {
+                            reason: "A Schema message must be succeeded exclusively by a set of RecordBatch messages"
+                        }
+                        .fail()
+                        .map_err(BoxedError::new)
+                        .context(ExternalSnafu);
+                    break;
+                };
+                yield Ok(record_batch);
+            }
+        }));
+        let record_batch_stream = RecordBatchStreamAdaptor {
+            schema,
+            stream,
+            output_ordering: None,
+        };
+        Ok(Box::pin(record_batch_stream))
+    }
+
+    async fn handle_inner(&self, request: RegionRequest) -> Result<AffectedRows> {
+        let request_type = request
+            .body
+            .as_ref()
+            .with_context(|| MissingFieldSnafu { field: "body" })?
+            .as_ref()
+            .to_string();
 
         let _timer = timer!(
             metrics::METRIC_REGION_REQUEST_GRPC,
@@ -89,7 +159,7 @@ impl RegionRequester {
         Ok(affected_rows)
     }
 
-    pub async fn handle(&self, request: region_request::Body) -> Result<AffectedRows> {
+    pub async fn handle(&self, request: RegionRequest) -> Result<AffectedRows> {
         self.handle_inner(request).await
     }
 }

@@ -152,7 +152,7 @@ impl EngineInner {
 #[async_trait]
 impl RegionEngine for MitoEngine {
     fn name(&self) -> &str {
-        "MitoEngine"
+        "mito"
     }
 
     async fn handle_request(

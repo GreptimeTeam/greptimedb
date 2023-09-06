@@ -398,6 +398,7 @@ pub struct Datanode {
     opts: DatanodeOptions,
     services: Option<Services>,
     heartbeat_task: Option<HeartbeatTask>,
+    region_server: RegionServer,
 }
 
 impl Datanode {
@@ -405,9 +406,8 @@ impl Datanode {
         let query_engine_factory = QueryEngineFactory::new_with_plugins(
             // query engine in datanode only executes plan with resolved table source.
             MemoryCatalogManager::with_default_setup(),
+            None,
             false,
-            None,
-            None,
             plugins,
         );
         let query_engine = query_engine_factory.query_engine();
@@ -434,7 +434,9 @@ impl Datanode {
             Mode::Standalone => None,
         };
         let heartbeat_task = match opts.mode {
-            Mode::Distributed => Some(HeartbeatTask::try_new(&opts, Some(region_server)).await?),
+            Mode::Distributed => {
+                Some(HeartbeatTask::try_new(&opts, Some(region_server.clone())).await?)
+            }
             Mode::Standalone => None,
         };
 
@@ -442,6 +444,7 @@ impl Datanode {
             opts,
             services,
             heartbeat_task,
+            region_server,
         })
     }
 
@@ -481,6 +484,10 @@ impl Datanode {
                 .context(ShutdownInstanceSnafu)?;
         }
         Ok(())
+    }
+
+    pub fn region_server(&self) -> RegionServer {
+        self.region_server.clone()
     }
 
     // internal utils

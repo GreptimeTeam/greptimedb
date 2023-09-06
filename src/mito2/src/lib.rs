@@ -20,35 +20,27 @@
 pub mod test_util;
 
 // TODO(yingwen): Remove all `allow(dead_code)` after finish refactoring mito.
-#[allow(dead_code)]
 mod access_layer;
 pub mod config;
-#[allow(dead_code)]
 pub mod engine;
 pub mod error;
 #[allow(dead_code)]
 mod flush;
-#[allow(dead_code)]
-#[allow(unused_variables)]
 pub mod manifest;
 #[allow(dead_code)]
 pub mod memtable;
 mod metrics;
 #[allow(dead_code)]
 pub mod read;
-#[allow(dead_code)]
 mod region;
 mod region_write_ctx;
 #[allow(dead_code)]
 pub mod request;
-#[allow(dead_code)]
 mod row_converter;
-#[allow(dead_code)]
 pub(crate) mod schedule;
 #[allow(dead_code)]
 pub mod sst;
 pub mod wal;
-#[allow(dead_code)]
 mod worker;
 
 #[cfg_attr(doc, aquamarine::aquamarine)]

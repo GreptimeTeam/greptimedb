@@ -24,7 +24,9 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 
+use api::v1::region::region_request;
 use catalog::CatalogManagerRef;
+use client::region_handler::RegionRequestHandlerRef;
 use common_error::ext::BoxedError;
 use common_query::Output;
 use common_time::range::TimestampRange;
@@ -48,10 +50,10 @@ use table::TableRef;
 use crate::catalog::FrontendCatalogManager;
 use crate::error::{
     self, CatalogSnafu, ExecLogicalPlanSnafu, ExecuteStatementSnafu, ExternalSnafu, InsertSnafu,
-    PlanStatementSnafu, Result, TableNotFoundSnafu,
+    PlanStatementSnafu, RequestDatanodeSnafu, Result, TableNotFoundSnafu,
 };
+use crate::inserter::req_convert::TableToRegion;
 use crate::instance::distributed::deleter::DistDeleter;
-use crate::instance::distributed::inserter::DistInserter;
 use crate::statement::backup::{COPY_DATABASE_TIME_END_KEY, COPY_DATABASE_TIME_START_KEY};
 
 #[derive(Clone)]
@@ -59,6 +61,7 @@ pub struct StatementExecutor {
     catalog_manager: CatalogManagerRef,
     query_engine: QueryEngineRef,
     sql_stmt_executor: SqlStatementExecutorRef,
+    region_request_handler: RegionRequestHandlerRef,
 }
 
 impl StatementExecutor {
@@ -66,11 +69,13 @@ impl StatementExecutor {
         catalog_manager: CatalogManagerRef,
         query_engine: QueryEngineRef,
         sql_stmt_executor: SqlStatementExecutorRef,
+        region_request_handler: RegionRequestHandlerRef,
     ) -> Self {
         Self {
             catalog_manager,
             query_engine,
             sql_stmt_executor,
+            region_request_handler,
         }
     }
 
@@ -110,9 +115,10 @@ impl StatementExecutor {
                         .copy_table_to(req, query_ctx)
                         .await
                         .map(Output::AffectedRows),
-                    CopyDirection::Import => {
-                        self.copy_table_from(req).await.map(Output::AffectedRows)
-                    }
+                    CopyDirection::Import => self
+                        .copy_table_from(req, query_ctx)
+                        .await
+                        .map(Output::AffectedRows),
                 }
             }
 
@@ -165,45 +171,27 @@ impl StatementExecutor {
             })
     }
 
-    // TODO(zhongzc): A middle state that eliminates calls to table.insert,
-    // For DistTable, its insert is not invoked; for MitoTable, it is still called but eventually eliminated.
-    async fn send_insert_request(&self, request: InsertRequest) -> Result<usize> {
-        let frontend_catalog_manager = self
-            .catalog_manager
-            .as_any()
-            .downcast_ref::<FrontendCatalogManager>();
+    async fn handle_table_insert_request(
+        &self,
+        request: InsertRequest,
+        query_ctx: QueryContextRef,
+    ) -> Result<usize> {
+        let table_ref = TableReference::full(
+            &request.catalog_name,
+            &request.schema_name,
+            &request.table_name,
+        );
+        let table = self.get_table(&table_ref).await?;
+        let table_info = table.table_info();
 
-        let table_name = request.table_name.clone();
-        match frontend_catalog_manager {
-            Some(frontend_catalog_manager) => {
-                let inserter = DistInserter::new(
-                    request.catalog_name.clone(),
-                    request.schema_name.clone(),
-                    Arc::new(frontend_catalog_manager.clone()),
-                );
-                let affected_rows = inserter
-                    .insert(vec![request])
-                    .await
-                    .map_err(BoxedError::new)
-                    .context(TableOperationSnafu)
-                    .context(InsertSnafu { table_name })?;
-                Ok(affected_rows as usize)
-            }
-            None => {
-                let table_ref = TableReference::full(
-                    &request.catalog_name,
-                    &request.schema_name,
-                    &request.table_name,
-                );
-                let affected_rows = self
-                    .get_table(&table_ref)
-                    .await?
-                    .insert(request)
-                    .await
-                    .context(InsertSnafu { table_name })?;
-                Ok(affected_rows)
-            }
-        }
+        let request = TableToRegion::new(&table_info).convert(request)?;
+        let region_response = self
+            .region_request_handler
+            .handle(region_request::Body::Inserts(request), query_ctx)
+            .await
+            .context(RequestDatanodeSnafu)?;
+
+        Ok(region_response.affected_rows as _)
     }
 
     // TODO(zhongzc): A middle state that eliminates calls to table.delete,
