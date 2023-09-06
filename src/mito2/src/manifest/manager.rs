@@ -273,7 +273,7 @@ impl RegionManifestManagerInner {
                     RegionMetaAction::Edit(action) => {
                         manifest_builder.apply_edit(manifest_version, action);
                     }
-                    RegionMetaAction::Remove(_) | RegionMetaAction::Protocol(_) => {
+                    RegionMetaAction::Remove(_) => {
                         debug!(
                             "Unhandled action in {}, action: {:?}",
                             options.manifest_dir, action
@@ -323,7 +323,7 @@ impl RegionManifestManagerInner {
                 RegionMetaAction::Edit(action) => {
                     manifest_builder.apply_edit(version, action);
                 }
-                RegionMetaAction::Remove(_) | RegionMetaAction::Protocol(_) => {
+                RegionMetaAction::Remove(_) => {
                     debug!(
                         "Unhandled action for region {}, action: {:?}",
                         self.manifest.metadata.region_id, action
@@ -394,7 +394,7 @@ impl RegionManifestManagerInner {
                     RegionMetaAction::Edit(action) => {
                         manifest_builder.apply_edit(version, action);
                     }
-                    RegionMetaAction::Remove(_) | RegionMetaAction::Protocol(_) => {
+                    RegionMetaAction::Remove(_) => {
                         debug!(
                             "Unhandled action for region {}, action: {:?}",
                             self.manifest.metadata.region_id, action

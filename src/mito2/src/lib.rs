@@ -28,8 +28,6 @@ pub mod engine;
 pub mod error;
 #[allow(dead_code)]
 mod flush;
-#[allow(dead_code)]
-#[allow(unused_variables)]
 pub mod manifest;
 #[allow(dead_code)]
 pub mod memtable;

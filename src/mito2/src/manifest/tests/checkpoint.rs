@@ -66,7 +66,7 @@ async fn manager_without_checkpoint() {
     let (_env, manager) = build_manager(0, CompressionType::Uncompressed).await;
 
     // apply 10 actions
-    for i in 0..10 {
+    for _ in 0..10 {
         manager.update(nop_action()).await.unwrap();
     }
 
@@ -110,7 +110,7 @@ async fn manager_with_checkpoint_distance_1() {
     let (env, manager) = build_manager(1, CompressionType::Uncompressed).await;
 
     // apply 10 actions
-    for i in 0..10 {
+    for _ in 0..10 {
         manager.update(nop_action()).await.unwrap();
     }
 
@@ -194,7 +194,7 @@ async fn generate_checkpoint_with_compression_types(
     compress_type: CompressionType,
     actions: Vec<RegionMetaActionList>,
 ) -> RegionCheckpoint {
-    let (env, manager) = build_manager(1, CompressionType::Uncompressed).await;
+    let (_env, manager) = build_manager(1, compress_type).await;
 
     for action in actions {
         manager.update(action).await.unwrap();
