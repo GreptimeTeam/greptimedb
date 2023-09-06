@@ -92,8 +92,6 @@ impl MitoEngine {
 struct EngineInner {
     /// Region workers group.
     workers: WorkerGroup,
-    /// Shared object store of all regions.
-    object_store: ObjectStore,
 }
 
 impl EngineInner {
@@ -105,7 +103,6 @@ impl EngineInner {
     ) -> EngineInner {
         EngineInner {
             workers: WorkerGroup::start(config, log_store, object_store.clone()),
-            object_store,
         }
     }
 
