@@ -39,7 +39,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         // Notifies flush scheduler.
         self.flush_scheduler.on_region_truncating(region_id);
 
-        // Maek all data obsolete.
+        // Make all data obsolete.
         let version_data = region.version_control.current();
         let committed_sequence = version_data.committed_sequence;
         self.wal.obsolete(region_id, committed_sequence).await?;
