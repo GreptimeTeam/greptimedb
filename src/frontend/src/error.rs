@@ -152,6 +152,9 @@ pub enum Error {
     #[snafu(display("Invalid InsertRequest, reason: {}", reason))]
     InvalidInsertRequest { reason: String, location: Location },
 
+    #[snafu(display("Invalid DeleteRequest, reason: {}", reason))]
+    InvalidDeleteRequest { reason: String, location: Location },
+
     #[snafu(display("Table not found: {}", table_name))]
     TableNotFound {
         table_name: String,
@@ -669,6 +672,7 @@ impl ErrorExt for Error {
             Error::ParseAddr { .. }
             | Error::InvalidSql { .. }
             | Error::InvalidInsertRequest { .. }
+            | Error::InvalidDeleteRequest { .. }
             | Error::IllegalPrimaryKeysDef { .. }
             | Error::CatalogNotFound { .. }
             | Error::SchemaNotFound { .. }

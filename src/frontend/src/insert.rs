@@ -83,6 +83,7 @@ impl<'a> Inserter<'a> {
                 .map(|r| !r.rows.is_empty())
                 .unwrap_or_default()
         });
+        validate_row_count_match(&requests)?;
 
         self.create_or_alter_tables_on_demand(&requests, &ctx)
             .await?;
@@ -204,6 +205,20 @@ impl<'a> Inserter<'a> {
 
         Ok(())
     }
+}
+
+fn validate_row_count_match(requests: &RowInsertRequests) -> Result<()> {
+    for request in &requests.inserts {
+        let rows = request.rows.as_ref().unwrap();
+        let column_count = rows.schema.len();
+        ensure!(
+            rows.rows.iter().all(|r| r.values.len() == column_count),
+            InvalidInsertRequestSnafu {
+                reason: "row count mismatch"
+            }
+        )
+    }
+    Ok(())
 }
 
 fn validate_request_with_table(req: &RowInsertRequest, table: &TableRef) -> Result<()> {
