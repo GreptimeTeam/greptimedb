@@ -50,7 +50,7 @@ pub struct HeartbeatTask {
     region_server: RegionServer,
     interval: u64,
     resp_handler_executor: HeartbeatResponseHandlerExecutorRef,
-    region_alive_keepers: Arc<RegionAliveKeeper>,
+    region_alive_keeper: Arc<RegionAliveKeeper>,
 }
 
 impl Drop for HeartbeatTask {
@@ -76,14 +76,14 @@ impl HeartbeatTask {
 
         let region_server = region_server.unwrap();
 
-        let region_alive_keepers = Arc::new(RegionAliveKeeper::new(
+        let region_alive_keeper = Arc::new(RegionAliveKeeper::new(
             region_server.clone(),
             opts.heartbeat.interval_millis,
         ));
         let resp_handler_executor = Arc::new(HandlerGroupExecutor::new(vec![
             Arc::new(ParseMailboxMessageHandler),
             Arc::new(RegionHeartbeatResponseHandler::new(region_server.clone())),
-            region_alive_keepers.clone(),
+            region_alive_keeper.clone(),
         ]));
 
         Ok(Self {
@@ -97,7 +97,7 @@ impl HeartbeatTask {
             region_server,
             interval: opts.heartbeat.interval_millis,
             resp_handler_executor,
-            region_alive_keepers,
+            region_alive_keeper,
         })
     }
 
@@ -162,7 +162,7 @@ impl HeartbeatTask {
         let addr = resolve_addr(&self.server_addr, &self.server_hostname);
         info!("Starting heartbeat to Metasrv with interval {interval}. My node id is {node_id}, address is {addr}.");
 
-        self.region_alive_keepers.start().await;
+        self.region_alive_keeper.start().await;
 
         let meta_client = self.meta_client.clone();
         let region_server_clone = self.region_server.clone();
@@ -180,7 +180,7 @@ impl HeartbeatTask {
         )
         .await?;
 
-        let epoch = self.region_alive_keepers.epoch();
+        let epoch = self.region_alive_keeper.epoch();
         common_runtime::spawn_bg(async move {
             let sleep = tokio::time::sleep(Duration::from_millis(0));
             tokio::pin!(sleep);
