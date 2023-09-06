@@ -33,7 +33,6 @@ pub mod mocks;
 pub mod procedure;
 pub mod pubsub;
 pub mod selector;
-mod sequence;
 pub mod service;
 pub mod table_creator;
 pub mod table_routes;

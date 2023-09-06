@@ -26,6 +26,20 @@ use crate::peer::Peer;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
+    #[snafu(display("Failed to get sequence: {}", err_msg))]
+    NextSequence { err_msg: String, location: Location },
+
+    #[snafu(display("Sequence out of range: {}, start={}, step={}", name, start, step))]
+    SequenceOutOfRange {
+        name: String,
+        start: u64,
+        step: u64,
+        location: Location,
+    },
+
+    #[snafu(display("Unexpected sequence value: {}", err_msg))]
+    UnexpectedSequenceValue { err_msg: String, location: Location },
+
     #[snafu(display("Table info not found: {}", table_name))]
     TableInfoNotFound {
         table_name: String,
@@ -266,6 +280,9 @@ impl ErrorExt for Error {
             | Unexpected { .. }
             | External { .. }
             | TableInfoNotFound { .. }
+            | NextSequence { .. }
+            | SequenceOutOfRange { .. }
+            | UnexpectedSequenceValue { .. }
             | InvalidHeartbeatResponse { .. } => StatusCode::Unexpected,
 
             SendMessage { .. }
