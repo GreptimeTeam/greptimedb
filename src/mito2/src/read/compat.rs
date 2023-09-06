@@ -551,4 +551,50 @@ mod tests {
         )
         .await;
     }
+
+    #[tokio::test]
+    async fn test_compat_reader_projection() {
+        let reader_meta = Arc::new(new_metadata(
+            &[
+                (0, SemanticType::Timestamp),
+                (1, SemanticType::Tag),
+                (2, SemanticType::Field),
+            ],
+            &[1],
+        ));
+        let expect_meta = Arc::new(new_metadata(
+            &[
+                (0, SemanticType::Timestamp),
+                (1, SemanticType::Tag),
+                (3, SemanticType::Field),
+                (2, SemanticType::Field),
+                (4, SemanticType::Field),
+            ],
+            &[1],
+        ));
+        // tag_1, field_2, field_3
+        let mapper = ProjectionMapper::new(&expect_meta, [1, 3, 2].into_iter()).unwrap();
+        let k1 = encode_key(&[Some("a")]);
+        let source_reader = VecBatchReader::new(&[new_batch(&k1, &[(2, false)], 1000, 3)]);
+
+        let mut compat_reader =
+            CompatReader::new(&mapper, reader_meta.clone(), source_reader).unwrap();
+        check_reader_result(
+            &mut compat_reader,
+            &[new_batch(&k1, &[(3, true), (2, false)], 1000, 3)],
+        )
+        .await;
+
+        // tag_1, field_4, field_3
+        let mapper = ProjectionMapper::new(&expect_meta, [1, 4, 2].into_iter()).unwrap();
+        let k1 = encode_key(&[Some("a")]);
+        let source_reader = VecBatchReader::new(&[new_batch(&k1, &[], 1000, 3)]);
+
+        let mut compat_reader = CompatReader::new(&mapper, reader_meta, source_reader).unwrap();
+        check_reader_result(
+            &mut compat_reader,
+            &[new_batch(&k1, &[(3, true), (4, true)], 1000, 3)],
+        )
+        .await;
+    }
 }
