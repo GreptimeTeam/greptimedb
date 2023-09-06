@@ -75,9 +75,14 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         // Notifies waiters.
         request.on_success();
 
-        // Handle pending DDL requests for the region.
-        if let Some(ddl_requests) = self.flush_scheduler.on_flush_success(region_id) {
+        // Handle pending requests for the region.
+        if let Some((ddl_requests, write_requests)) =
+            self.flush_scheduler.on_flush_success(region_id)
+        {
+            // Perform DDLs first because they require empty memtables.
             self.handle_ddl_requests(ddl_requests).await;
+            // Handle pending write requests, we don't stall these requests.
+            self.handle_write_requests(write_requests, false).await;
         }
 
         // Handle stalled requests.

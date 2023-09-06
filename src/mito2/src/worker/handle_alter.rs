@@ -64,16 +64,12 @@ impl<S> RegionWorkerLoop<S> {
             }
 
             // TODO(yingwen): Maybe assert in add_ddl_request_to_pending instead returning result.
-            if let Err(e) = self
-                .flush_scheduler
+            self.flush_scheduler
                 .add_ddl_request_to_pending(SenderDdlRequest {
                     region_id,
                     sender,
                     request: DdlRequest::Alter(request),
-                })
-            {
-                todo!()
-            }
+                });
 
             todo!()
         }

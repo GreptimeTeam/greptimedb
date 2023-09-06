@@ -31,12 +31,14 @@ use crate::read::Source;
 use crate::region::version::{VersionControlData, VersionRef};
 use crate::region::MitoRegionRef;
 use crate::request::{
-    BackgroundNotify, FlushFailed, FlushFinished, SenderDdlRequest, WorkerRequest,
+    BackgroundNotify, FlushFailed, FlushFinished, SenderDdlRequest, SenderWriteRequest,
+    WorkerRequest,
 };
 use crate::schedule::scheduler::{Job, SchedulerRef};
 use crate::sst::file::{FileId, FileMeta};
 use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::parquet::WriteOptions;
+use crate::worker::send_result;
 
 /// Global write buffer (memtable) manager.
 ///
@@ -394,7 +396,7 @@ impl FlushScheduler {
     pub(crate) fn on_flush_success(
         &mut self,
         region_id: RegionId,
-    ) -> Option<Vec<SenderDdlRequest>> {
+    ) -> Option<(Vec<SenderDdlRequest>, Vec<SenderWriteRequest>)> {
         let Some(flush_status) = self.region_status.get_mut(&region_id) else {
             return None;
         };
@@ -406,7 +408,7 @@ impl FlushScheduler {
             // The region doesn't have any pending flush task.
             // Safety: The flush status exists.
             let flush_status = self.region_status.remove(&region_id).unwrap();
-            Some(flush_status.pending_ddls)
+            Some((flush_status.pending_ddls, flush_status.pending_writes))
         } else {
             None
         };
@@ -461,17 +463,24 @@ impl FlushScheduler {
 
     /// Add ddl request to pending queue.
     ///
-    /// Returns error if region doesn't request flush.
-    pub(crate) fn add_ddl_request_to_pending(
-        &mut self,
-        request: SenderDdlRequest,
-    ) -> Result<(), SenderDdlRequest> {
-        if let Some(status) = self.region_status.get_mut(&request.region_id) {
-            status.pending_ddls.push(request);
-            return Ok(());
-        }
+    /// # Panics
+    /// Panics if region didn't request flush.
+    pub(crate) fn add_ddl_request_to_pending(&mut self, request: SenderDdlRequest) {
+        let status = self.region_status.get_mut(&request.region_id).unwrap();
+        status.pending_ddls.push(request);
+    }
 
-        Err(request)
+    /// Add write request to pending queue.
+    ///
+    /// # Panics
+    /// Panics if region didn't request flush.
+    pub(crate) fn add_write_request_to_pending(&mut self, request: SenderWriteRequest) {
+        unimplemented!()
+    }
+
+    /// Returns true if the region has pending DDLs.
+    pub(crate) fn has_pending_ddls(&self, region_id: RegionId) -> bool {
+        unimplemented!()
     }
 
     /// Schedules a new flush task when the scheduler can submit next task.
@@ -509,6 +518,8 @@ struct FlushStatus {
     pending_task: Option<RegionFlushTask>,
     /// Pending ddl requests.
     pending_ddls: Vec<SenderDdlRequest>,
+    /// Pending write requests.
+    pending_writes: Vec<SenderWriteRequest>,
 }
 
 impl FlushStatus {
@@ -518,6 +529,7 @@ impl FlushStatus {
             flushing: false,
             pending_task: None,
             pending_ddls: Vec::new(),
+            pending_writes: Vec::new(),
         }
     }
 
@@ -534,11 +546,20 @@ impl FlushStatus {
             task.on_failure(err.clone());
         }
         for ddl in self.pending_ddls {
-            if let Some(sender) = ddl.sender {
-                let _ = sender.send(Err(err.clone()).context(FlushRegionSnafu {
+            send_result(
+                ddl.sender,
+                Err(err.clone()).context(FlushRegionSnafu {
                     region_id: self.region.region_id,
-                }));
-            }
+                }),
+            );
+        }
+        for write_req in self.pending_writes {
+            send_result(
+                write_req.sender,
+                Err(err.clone()).context(FlushRegionSnafu {
+                    region_id: self.region.region_id,
+                }),
+            );
         }
     }
 }
