@@ -164,7 +164,7 @@ impl RegionRequester {
     }
 }
 
-fn check_response_header(header: Option<ResponseHeader>) -> Result<()> {
+pub fn check_response_header(header: Option<ResponseHeader>) -> Result<()> {
     let status = header
         .and_then(|header| header.status)
         .context(IllegalDatabaseResponseSnafu {

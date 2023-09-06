@@ -15,7 +15,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use api::v1::region::InsertRequest;
+use api::v1::region::{DeleteRequest, InsertRequest};
 use common_meta::peer::Peer;
 use common_meta::rpc::router::TableRoute;
 use common_query::prelude::Expr;
@@ -24,15 +24,13 @@ use datatypes::prelude::Value;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::TableId;
-use table::requests::DeleteRequest;
 
 use crate::columns::RangeColumnsPartitionRule;
 use crate::error::{FindLeaderSnafu, Result};
 use crate::partition::{PartitionBound, PartitionDef, PartitionExpr};
 use crate::range::RangePartitionRule;
 use crate::route::TableRoutes;
-use crate::row_splitter::{InsertRequestSplits, RowSplitter};
-use crate::splitter::{DeleteRequestSplit, WriteSplitter};
+use crate::splitter::{DeleteRequestSplits, InsertRequestSplits, RowSplitter};
 use crate::{error, PartitionRuleRef};
 
 #[async_trait::async_trait]
@@ -243,18 +241,18 @@ impl PartitionRuleManager {
         req: InsertRequest,
     ) -> Result<InsertRequestSplits> {
         let partition_rule = self.find_table_partition_rule(table).await?;
-        RowSplitter::new(partition_rule).split(req)
+        RowSplitter::new(partition_rule).split_insert(req)
     }
 
+    /// Split [DeleteRequest] into [DeleteRequestSplits] according to the partition rule
+    /// of given table.
     pub async fn split_delete_request(
         &self,
         table: TableId,
         req: DeleteRequest,
-        primary_key_column_names: Vec<&String>,
-    ) -> Result<DeleteRequestSplit> {
+    ) -> Result<DeleteRequestSplits> {
         let partition_rule = self.find_table_partition_rule(table).await?;
-        let splitter = WriteSplitter::with_partition_rule(partition_rule);
-        splitter.split_delete(req, primary_key_column_names)
+        RowSplitter::new(partition_rule).split_delete(req)
     }
 }
 

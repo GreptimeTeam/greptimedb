@@ -12,34 +12,26 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::value::ValueData;
-use api::v1::{
-    Column, ColumnDataType, ColumnSchema, InsertRequest, InsertRequests, Row, RowInsertRequest,
-    RowInsertRequests, Rows, Value,
-};
+use api::v1::{Column, ColumnDataType, ColumnSchema, Row, Rows, SemanticType, Value};
 use common_base::BitVec;
+use datatypes::prelude::ConcreteDataType;
+use datatypes::vectors::VectorRef;
 use snafu::prelude::*;
 use snafu::ResultExt;
+use table::metadata::TableInfo;
 
-use crate::error::{ColumnDataTypeSnafu, InvalidInsertRequestSnafu, Result};
+use crate::error::{
+    ColumnDataTypeSnafu, ColumnNotFoundSnafu, InvalidInsertRequestSnafu,
+    MissingTimeIndexColumnSnafu, Result,
+};
 
-pub struct ColumnToRow;
-
-impl ColumnToRow {
-    pub fn convert(requests: InsertRequests) -> Result<RowInsertRequests> {
-        requests
-            .inserts
-            .into_iter()
-            .map(request_column_to_row)
-            .collect::<Result<Vec<_>>>()
-            .map(|inserts| RowInsertRequests { inserts })
-    }
-}
-
-fn request_column_to_row(request: InsertRequest) -> Result<RowInsertRequest> {
-    let row_count = request.row_count as usize;
-    let column_count = request.columns.len();
+pub fn columns_to_rows(columns: Vec<Column>, row_count: u32) -> Result<Rows> {
+    let row_count = row_count as usize;
+    let column_count = columns.len();
     let mut schema = Vec::with_capacity(column_count);
     let mut rows = vec![
         Row {
@@ -47,7 +39,7 @@ fn request_column_to_row(request: InsertRequest) -> Result<RowInsertRequest> {
         };
         row_count
     ];
-    for column in request.columns {
+    for column in columns {
         let column_schema = ColumnSchema {
             column_name: column.column_name.clone(),
             datatype: column.datatype,
@@ -58,11 +50,7 @@ fn request_column_to_row(request: InsertRequest) -> Result<RowInsertRequest> {
         push_column_to_rows(column, &mut rows)?;
     }
 
-    Ok(RowInsertRequest {
-        table_name: request.table_name,
-        rows: Some(Rows { schema, rows }),
-        region_number: request.region_number,
-    })
+    Ok(Rows { schema, rows })
 }
 
 fn push_column_to_rows(column: Column, rows: &mut [Row]) -> Result<()> {
@@ -168,6 +156,74 @@ fn push_column_to_rows(column: Column, rows: &mut [Row]) -> Result<()> {
     Ok(())
 }
 
+pub fn row_count(columns: &HashMap<String, VectorRef>) -> Result<usize> {
+    let mut columns_iter = columns.values();
+
+    let len = columns_iter
+        .next()
+        .map(|column| column.len())
+        .unwrap_or_default();
+    ensure!(
+        columns_iter.all(|column| column.len() == len),
+        InvalidInsertRequestSnafu {
+            reason: "The row count of columns is not the same."
+        }
+    );
+
+    Ok(len)
+}
+
+pub fn column_schema(
+    table_info: &TableInfo,
+    columns: &HashMap<String, VectorRef>,
+) -> Result<Vec<ColumnSchema>> {
+    columns
+        .iter()
+        .map(|(column_name, vector)| {
+            Ok(ColumnSchema {
+                column_name: column_name.clone(),
+                datatype: data_type(vector.data_type())?.into(),
+                semantic_type: semantic_type(table_info, column_name)?.into(),
+            })
+        })
+        .collect::<Result<Vec<_>>>()
+}
+
+fn semantic_type(table_info: &TableInfo, column: &str) -> Result<SemanticType> {
+    let table_meta = &table_info.meta;
+    let table_schema = &table_meta.schema;
+
+    let time_index_column = &table_schema
+        .timestamp_column()
+        .with_context(|| table::error::MissingTimeIndexColumnSnafu {
+            table_name: table_info.name.to_string(),
+        })
+        .context(MissingTimeIndexColumnSnafu)?
+        .name;
+
+    let semantic_type = if column == time_index_column {
+        SemanticType::Timestamp
+    } else {
+        let column_index = table_schema.column_index_by_name(column);
+        let column_index = column_index.context(ColumnNotFoundSnafu {
+            msg: format!("unable to find column {column} in table schema"),
+        })?;
+
+        if table_meta.primary_key_indices.contains(&column_index) {
+            SemanticType::Tag
+        } else {
+            SemanticType::Field
+        }
+    };
+
+    Ok(semantic_type)
+}
+
+fn data_type(data_type: ConcreteDataType) -> Result<ColumnDataType> {
+    let datatype: ColumnDataTypeWrapper = data_type.try_into().context(ColumnDataTypeSnafu)?;
+    Ok(datatype.datatype())
+}
+
 #[cfg(test)]
 mod tests {
     use api::v1::column::Values;
@@ -178,43 +234,36 @@ mod tests {
 
     #[test]
     fn test_request_column_to_row() {
-        let insert_request = InsertRequest {
-            table_name: String::from("test_table"),
-            row_count: 3,
-            region_number: 1,
-            columns: vec![
-                Column {
-                    column_name: String::from("col1"),
-                    datatype: ColumnDataType::Int32.into(),
-                    semantic_type: SemanticType::Field.into(),
-                    null_mask: bitvec![u8, Lsb0; 1, 0, 1].into_vec(),
-                    values: Some(Values {
-                        i32_values: vec![42],
-                        ..Default::default()
-                    }),
-                },
-                Column {
-                    column_name: String::from("col2"),
-                    datatype: ColumnDataType::String.into(),
-                    semantic_type: SemanticType::Tag.into(),
-                    null_mask: vec![],
-                    values: Some(Values {
-                        string_values: vec![
-                            String::from("value1"),
-                            String::from("value2"),
-                            String::from("value3"),
-                        ],
-                        ..Default::default()
-                    }),
-                },
-            ],
-        };
+        let columns = vec![
+            Column {
+                column_name: String::from("col1"),
+                datatype: ColumnDataType::Int32.into(),
+                semantic_type: SemanticType::Field.into(),
+                null_mask: bitvec![u8, Lsb0; 1, 0, 1].into_vec(),
+                values: Some(Values {
+                    i32_values: vec![42],
+                    ..Default::default()
+                }),
+            },
+            Column {
+                column_name: String::from("col2"),
+                datatype: ColumnDataType::String.into(),
+                semantic_type: SemanticType::Tag.into(),
+                null_mask: vec![],
+                values: Some(Values {
+                    string_values: vec![
+                        String::from("value1"),
+                        String::from("value2"),
+                        String::from("value3"),
+                    ],
+                    ..Default::default()
+                }),
+            },
+        ];
+        let row_count = 3;
 
-        let result = request_column_to_row(insert_request);
-        let row_insert_request = result.unwrap();
-        assert_eq!(row_insert_request.table_name, "test_table");
-        assert_eq!(row_insert_request.region_number, 1);
-        let rows = row_insert_request.rows.unwrap();
+        let result = columns_to_rows(columns, row_count);
+        let rows = result.unwrap();
 
         assert_eq!(rows.schema.len(), 2);
         assert_eq!(rows.schema[0].column_name, "col1");
@@ -250,55 +299,46 @@ mod tests {
             Some(ValueData::StringValue(String::from("value3")))
         );
 
-        let invalid_request_with_wrong_type = InsertRequest {
-            table_name: String::from("test_table"),
-            row_count: 3,
-            region_number: 1,
-            columns: vec![Column {
-                column_name: String::from("col1"),
-                datatype: ColumnDataType::Int32.into(),
-                semantic_type: SemanticType::Field.into(),
-                null_mask: bitvec![u8, Lsb0; 1, 0, 1].into_vec(),
-                values: Some(Values {
-                    i8_values: vec![42],
-                    ..Default::default()
-                }),
-            }],
-        };
-        assert!(request_column_to_row(invalid_request_with_wrong_type).is_err());
+        // wrong type
+        let columns = vec![Column {
+            column_name: String::from("col1"),
+            datatype: ColumnDataType::Int32.into(),
+            semantic_type: SemanticType::Field.into(),
+            null_mask: bitvec![u8, Lsb0; 1, 0, 1].into_vec(),
+            values: Some(Values {
+                i8_values: vec![42],
+                ..Default::default()
+            }),
+        }];
+        let row_count = 3;
+        assert!(columns_to_rows(columns, row_count).is_err());
 
-        let invalid_request_with_wrong_row_count = InsertRequest {
-            table_name: String::from("test_table"),
-            row_count: 3,
-            region_number: 1,
-            columns: vec![Column {
-                column_name: String::from("col1"),
-                datatype: ColumnDataType::Int32.into(),
-                semantic_type: SemanticType::Field.into(),
-                null_mask: bitvec![u8, Lsb0; 0, 0, 1].into_vec(),
-                values: Some(Values {
-                    i32_values: vec![42],
-                    ..Default::default()
-                }),
-            }],
-        };
-        assert!(request_column_to_row(invalid_request_with_wrong_row_count).is_err());
+        // wrong row count
+        let columns = vec![Column {
+            column_name: String::from("col1"),
+            datatype: ColumnDataType::Int32.into(),
+            semantic_type: SemanticType::Field.into(),
+            null_mask: bitvec![u8, Lsb0; 0, 0, 1].into_vec(),
+            values: Some(Values {
+                i32_values: vec![42],
+                ..Default::default()
+            }),
+        }];
+        let row_count = 3;
+        assert!(columns_to_rows(columns, row_count).is_err());
 
-        let invalid_request_with_wrong_row_count = InsertRequest {
-            table_name: String::from("test_table"),
-            row_count: 3,
-            region_number: 1,
-            columns: vec![Column {
-                column_name: String::from("col1"),
-                datatype: ColumnDataType::Int32.into(),
-                semantic_type: SemanticType::Field.into(),
-                null_mask: vec![],
-                values: Some(Values {
-                    i32_values: vec![42],
-                    ..Default::default()
-                }),
-            }],
-        };
-        assert!(request_column_to_row(invalid_request_with_wrong_row_count).is_err());
+        // wrong row count
+        let columns = vec![Column {
+            column_name: String::from("col1"),
+            datatype: ColumnDataType::Int32.into(),
+            semantic_type: SemanticType::Field.into(),
+            null_mask: vec![],
+            values: Some(Values {
+                i32_values: vec![42],
+                ..Default::default()
+            }),
+        }];
+        let row_count = 3;
+        assert!(columns_to_rows(columns, row_count).is_err());
     }
 }
