@@ -15,7 +15,7 @@
 use common_time::Timestamp;
 
 use crate::sst::file::{FileHandle, FileId, FileMeta, Level};
-use crate::sst::file_purger::new_noop_file_purger;
+use crate::test_util::new_noop_file_purger;
 
 /// Test util to create file handles.
 pub fn new_file_handle(

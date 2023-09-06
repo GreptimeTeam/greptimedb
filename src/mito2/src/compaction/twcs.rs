@@ -91,9 +91,6 @@ impl TwcsPicker {
                         time_window_bound: *window,
                         time_window_sec: window_size,
                         inputs: files.clone(),
-                        // Strict window is not needed since we always compact many files to one 
-                        // single file in TWCS.
-                        strict_window: false,
                     });
                 } else {
                     debug!("Active window not present or no enough files in active window {:?}, window: {}", active_window, *window);
@@ -107,7 +104,6 @@ impl TwcsPicker {
                         time_window_bound: *window,
                         time_window_sec: window_size,
                         inputs: files.clone(),
-                        strict_window: false,
                     });
                 } else {
                     debug!("No enough files, current: {}, max_inactive_window_files: {}", files.len(), self.max_inactive_window_files)
@@ -121,8 +117,6 @@ impl TwcsPicker {
 impl Picker for TwcsPicker {
     fn pick(&self, req: CompactionRequest) -> error::Result<Option<Arc<dyn CompactionTask>>> {
         let CompactionRequest {
-            region_id,
-            region_metadata,
             current_version,
             access_layer,
             ttl,
@@ -132,12 +126,15 @@ impl Picker for TwcsPicker {
             file_purger,
         } = req;
 
+        let region_metadata = current_version.metadata.clone();
+        let region_id = region_metadata.region_id;
+
         let levels = current_version.ssts.levels();
         let expired_ssts = get_expired_ssts(levels, ttl, Timestamp::current_millis())?;
         if !expired_ssts.is_empty() {
             info!("Expired SSTs in region {}: {:?}", region_id, expired_ssts);
             // here we mark expired SSTs as compacting to avoid them being picked.
-            expired_ssts.iter().for_each(|f| f.mark_compacting(true));
+            expired_ssts.iter().for_each(|f| f.set_compacting(true));
         }
 
         let time_window_size = compaction_time_window
@@ -249,7 +246,7 @@ impl TwcsCompactionTask {
         self.outputs
             .iter()
             .flat_map(|o| o.inputs.iter())
-            .for_each(|f| f.mark_compacting(compacting))
+            .for_each(|f| f.set_compacting(compacting))
     }
 
     /// Merges all SST files.
@@ -344,7 +341,7 @@ impl TwcsCompactionTask {
 
 #[async_trait::async_trait]
 impl CompactionTask for TwcsCompactionTask {
-    async fn run(mut self) -> error::Result<()> {
+    async fn run(mut self) {
         let notify = match self.handle_compaction().await {
             Ok((added, deleted)) => {
                 info!(
@@ -375,9 +372,7 @@ impl CompactionTask for TwcsCompactionTask {
             notify,
         })
         .await;
-
         // TODO(hl): handle reschedule
-        Ok(())
     }
 }
 
@@ -607,7 +602,6 @@ mod tests {
                         o.output_level,
                         o.time_window_sec,
                         o.time_window_bound,
-                        o.strict_window,
                     )
                 })
                 .collect::<Vec<_>>();
@@ -626,7 +620,6 @@ mod tests {
                         o.output_level,
                         o.time_window_sec,
                         o.time_window_bound,
-                        o.strict_window,
                     )
                 })
                 .collect::<Vec<_>>();

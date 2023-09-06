@@ -67,15 +67,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         region: &MitoRegionRef,
         waiters: Vec<oneshot::Sender<Result<Output>>>,
     ) -> CompactionRequest {
-        let region_id = region.region_id;
-        let region_metadata = region.metadata();
         let current_version = region.version_control.current().version;
         let access_layer = region.access_layer.clone();
         let file_purger = region.file_purger.clone();
 
         CompactionRequest {
-            region_id,
-            region_metadata,
             current_version,
             access_layer,
             ttl: None,                    // TODO(hl): get TTL info from region metadata

@@ -34,8 +34,6 @@ pub(crate) struct CompactionOutput {
     pub time_window_sec: i64,
     /// Compaction input files.
     pub inputs: Vec<FileHandle>,
-    /// If the compaction output is strictly windowed.
-    pub strict_window: bool,
 }
 
 impl CompactionOutput {

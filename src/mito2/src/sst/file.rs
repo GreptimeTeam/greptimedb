@@ -144,7 +144,7 @@ impl FileHandle {
     }
 
     #[inline]
-    pub fn mark_compacting(&self, compacting: bool) {
+    pub fn set_compacting(&self, compacting: bool) {
         self.inner.compacting.store(compacting, Ordering::Relaxed);
     }
 

@@ -12,12 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod output;
+mod picker;
+#[cfg(test)]
+mod test_util;
+mod twcs;
+
 use std::sync::Arc;
 use std::time::Duration;
 
 use common_query::Output;
-use store_api::metadata::RegionMetadataRef;
-use store_api::storage::{CompactionStrategy, RegionId};
+pub use picker::CompactionPickerRef;
+use store_api::storage::CompactionStrategy;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::access_layer::AccessLayerRef;
@@ -27,19 +33,8 @@ use crate::region::version::VersionRef;
 use crate::request::WorkerRequest;
 use crate::sst::file_purger::FilePurgerRef;
 
-mod picker;
-mod twcs;
-
-mod output;
-#[cfg(test)]
-mod test_util;
-
-pub use picker::CompactionPickerRef;
-
 /// Region compaction request.
 pub struct CompactionRequest {
-    pub(crate) region_id: RegionId,
-    pub(crate) region_metadata: RegionMetadataRef,
     pub(crate) current_version: VersionRef,
     pub(crate) access_layer: AccessLayerRef,
     pub(crate) ttl: Option<Duration>,

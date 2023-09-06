@@ -110,15 +110,12 @@ impl LevelMeta {
     /// Returns expired SSTs from current level.
     pub fn get_expired_files(&self, expire_time: &Timestamp) -> Vec<FileHandle> {
         self.files
-            .iter()
-            .filter_map(|(_, v)| {
+            .values()
+            .filter(|v| {
                 let (_, end) = v.time_range();
-                if &end < expire_time {
-                    Some(v.clone())
-                } else {
-                    None
-                }
+                &end < expire_time
             })
+            .cloned()
             .collect()
     }
 

@@ -46,7 +46,19 @@ use crate::error::Result;
 use crate::flush::{WriteBufferManager, WriteBufferManagerRef};
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::read::{Batch, BatchBuilder, BatchReader};
+use crate::sst::file_purger::{FilePurger, FilePurgerRef, PurgeRequest};
 use crate::worker::WorkerGroup;
+
+#[derive(Debug)]
+pub(crate) struct NoopFilePurger;
+
+impl FilePurger for NoopFilePurger {
+    fn send_request(&self, _request: PurgeRequest) {}
+}
+
+pub(crate) fn new_noop_file_purger() -> FilePurgerRef {
+    Arc::new(NoopFilePurger {})
+}
 
 /// Env to test mito engine.
 pub struct TestEnv {

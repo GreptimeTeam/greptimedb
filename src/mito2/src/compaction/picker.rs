@@ -22,7 +22,7 @@ pub type CompactionPickerRef = Arc<dyn Picker + Send + Sync>;
 
 #[async_trait::async_trait]
 pub trait CompactionTask: Debug + Send + Sync + 'static {
-    async fn run(self) -> Result<()>;
+    async fn run(self);
 }
 
 /// Picker picks input SST files and builds the compaction task.
