@@ -37,7 +37,6 @@ mod region_write_ctx;
 #[allow(dead_code)]
 pub mod request;
 mod row_converter;
-#[allow(dead_code)]
 pub(crate) mod schedule;
 #[allow(dead_code)]
 pub mod sst;
