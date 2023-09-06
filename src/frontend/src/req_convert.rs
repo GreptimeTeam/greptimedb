@@ -12,15 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(assert_matches)]
-
-pub mod columns;
-pub mod error;
-pub mod manager;
-pub mod metrics;
-pub mod partition;
-pub mod range;
-pub mod route;
-pub mod splitter;
-
-pub use crate::partition::{PartitionRule, PartitionRuleRef};
+mod common;
+pub mod delete;
+pub mod insert;

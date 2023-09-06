@@ -22,7 +22,6 @@ mod tql;
 
 use std::collections::HashMap;
 use std::str::FromStr;
-use std::sync::Arc;
 
 use api::v1::region::region_request;
 use catalog::CatalogManagerRef;
@@ -41,19 +40,16 @@ use snafu::{OptionExt, ResultExt};
 use sql::statements::copy::{CopyDatabaseArgument, CopyTable, CopyTableArgument};
 use sql::statements::statement::Statement;
 use table::engine::TableReference;
-use table::error::TableOperationSnafu;
 use table::requests::{
     CopyDatabaseRequest, CopyDirection, CopyTableRequest, DeleteRequest, InsertRequest,
 };
 use table::TableRef;
 
-use crate::catalog::FrontendCatalogManager;
 use crate::error::{
-    self, CatalogSnafu, ExecLogicalPlanSnafu, ExecuteStatementSnafu, ExternalSnafu, InsertSnafu,
+    self, CatalogSnafu, ExecLogicalPlanSnafu, ExecuteStatementSnafu, ExternalSnafu,
     PlanStatementSnafu, RequestDatanodeSnafu, Result, TableNotFoundSnafu,
 };
-use crate::inserter::req_convert::TableToRegion;
-use crate::instance::distributed::deleter::DistDeleter;
+use crate::req_convert::{delete, insert};
 use crate::statement::backup::{COPY_DATABASE_TIME_END_KEY, COPY_DATABASE_TIME_START_KEY};
 
 #[derive(Clone)]
@@ -184,55 +180,35 @@ impl StatementExecutor {
         let table = self.get_table(&table_ref).await?;
         let table_info = table.table_info();
 
-        let request = TableToRegion::new(&table_info).convert(request)?;
-        let region_response = self
+        let request = insert::TableToRegion::new(&table_info).convert(request)?;
+        let affected_rows = self
             .region_request_handler
             .handle(region_request::Body::Inserts(request), query_ctx)
             .await
             .context(RequestDatanodeSnafu)?;
-
-        Ok(region_response.affected_rows as _)
+        Ok(affected_rows as _)
     }
 
-    // TODO(zhongzc): A middle state that eliminates calls to table.delete,
-    // For DistTable, its delete is not invoked; for MitoTable, it is still called but eventually eliminated.
-    async fn send_delete_request(&self, request: DeleteRequest) -> Result<usize> {
-        let frontend_catalog_manager = self
-            .catalog_manager
-            .as_any()
-            .downcast_ref::<FrontendCatalogManager>();
+    async fn handle_table_delete_request(
+        &self,
+        request: DeleteRequest,
+        query_ctx: QueryContextRef,
+    ) -> Result<usize> {
+        let table_ref = TableReference::full(
+            &request.catalog_name,
+            &request.schema_name,
+            &request.table_name,
+        );
+        let table = self.get_table(&table_ref).await?;
+        let table_info = table.table_info();
 
-        let table_name = request.table_name.clone();
-        match frontend_catalog_manager {
-            Some(frontend_catalog_manager) => {
-                let inserter = DistDeleter::new(
-                    request.catalog_name.clone(),
-                    request.schema_name.clone(),
-                    Arc::new(frontend_catalog_manager.clone()),
-                );
-                let affected_rows = inserter
-                    .delete(vec![request])
-                    .await
-                    .map_err(BoxedError::new)
-                    .context(TableOperationSnafu)
-                    .context(InsertSnafu { table_name })?;
-                Ok(affected_rows)
-            }
-            None => {
-                let table_ref = TableReference::full(
-                    &request.catalog_name,
-                    &request.schema_name,
-                    &request.table_name,
-                );
-                let affected_rows = self
-                    .get_table(&table_ref)
-                    .await?
-                    .delete(request)
-                    .await
-                    .context(InsertSnafu { table_name })?;
-                Ok(affected_rows)
-            }
-        }
+        let request = delete::TableToRegion::new(&table_info).convert(request)?;
+        let affected_rows = self
+            .region_request_handler
+            .handle(region_request::Body::Deletes(request), query_ctx)
+            .await
+            .context(RequestDatanodeSnafu)?;
+        Ok(affected_rows as _)
     }
 }
 

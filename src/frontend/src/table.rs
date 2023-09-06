@@ -24,9 +24,6 @@ use table::TableRef;
 
 use crate::error::NotSupportedSnafu;
 
-pub mod delete;
-pub mod insert;
-
 #[derive(Clone)]
 pub struct DistTable;
 
