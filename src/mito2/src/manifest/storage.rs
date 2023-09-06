@@ -17,10 +17,10 @@ use std::iter::Iterator;
 use std::str::FromStr;
 
 use common_datasource::compression::CompressionType;
-use common_telemetry::{debug, info};
+use common_telemetry::debug;
 use futures::TryStreamExt;
 use lazy_static::lazy_static;
-use object_store::{raw_normalize_path, util, Entry, ErrorKind, ObjectStore};
+use object_store::{util, Entry, ErrorKind, ObjectStore};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
@@ -184,10 +184,6 @@ impl ManifestObjectStore {
             .context(OpenDalSnafu)
     }
 
-    pub(crate) fn path(&self) -> &str {
-        &self.path
-    }
-
     pub async fn scan(
         &self,
         start: ManifestVersion,
@@ -289,45 +285,6 @@ impl ManifestObjectStore {
         Ok(ret)
     }
 
-    async fn delete_all(&self, remove_action_manifest: ManifestVersion) -> Result<()> {
-        let entries: Vec<Entry> = self.get_paths(Some).await?;
-
-        // Filter out the latest delta file.
-        let paths: Vec<_> = entries
-            .iter()
-            .filter(|e| {
-                let name = e.name();
-                if is_delta_file(name) && file_version(name) == remove_action_manifest {
-                    return false;
-                }
-                true
-            })
-            .map(|e| e.path().to_string())
-            .collect();
-
-        info!(
-            "Deleting {} from manifest storage path {} paths: {:?}",
-            paths.len(),
-            self.path,
-            paths,
-        );
-
-        // Delete all files except the latest delta file.
-        self.object_store
-            .remove(paths)
-            .await
-            .context(OpenDalSnafu)?;
-
-        // Delete the latest delta file and the manifest directory.
-        self.object_store
-            .remove_all(&self.path)
-            .await
-            .context(OpenDalSnafu)?;
-        info!("Deleted manifest storage path {}", self.path);
-
-        Ok(())
-    }
-
     pub async fn save(&self, version: ManifestVersion, bytes: &[u8]) -> Result<()> {
         let path = self.delta_file_path(version);
         debug!("Save log to manifest storage, version: {}", version);
@@ -343,36 +300,6 @@ impl ManifestObjectStore {
             .write(&path, data)
             .await
             .context(OpenDalSnafu)
-    }
-
-    async fn delete(&self, start: ManifestVersion, end: ManifestVersion) -> Result<()> {
-        ensure!(start <= end, InvalidScanIndexSnafu { start, end });
-
-        // Due to backward compatibility, it is possible that the user's log between start and end has not been compressed,
-        // so we need to delete the uncompressed file corresponding to that version, even if the uncompressed file in that version do not exist.
-        let mut paths = Vec::with_capacity(((end - start) * 2) as usize);
-        for version in start..end {
-            paths.push(raw_normalize_path(&self.delta_file_path(version)));
-            if self.compress_type != FALL_BACK_COMPRESS_TYPE {
-                paths.push(raw_normalize_path(&gen_path(
-                    &self.path,
-                    &delta_file(version),
-                    FALL_BACK_COMPRESS_TYPE,
-                )));
-            }
-        }
-
-        debug!(
-            "Deleting logs from manifest storage, start: {}, end: {}",
-            start, end
-        );
-
-        self.object_store
-            .remove(paths.clone())
-            .await
-            .context(OpenDalSnafu)?;
-
-        Ok(())
     }
 
     pub async fn save_checkpoint(&self, version: ManifestVersion, bytes: &[u8]) -> Result<()> {
@@ -467,29 +394,6 @@ impl ManifestObjectStore {
                 }
             }?;
         Ok(checkpoint_data.map(|data| (version, data)))
-    }
-
-    async fn delete_checkpoint(&self, version: ManifestVersion) -> Result<()> {
-        // Due to backward compatibility, it is possible that the user's checkpoint file has not been compressed,
-        // so we need to delete the uncompressed checkpoint file corresponding to that version, even if the uncompressed checkpoint file in that version do not exist.
-        let paths = if self.compress_type != FALL_BACK_COMPRESS_TYPE {
-            vec![
-                raw_normalize_path(&self.checkpoint_file_path(version)),
-                raw_normalize_path(&gen_path(
-                    &self.path,
-                    &checkpoint_file(version),
-                    FALL_BACK_COMPRESS_TYPE,
-                )),
-            ]
-        } else {
-            vec![raw_normalize_path(&self.checkpoint_file_path(version))]
-        };
-
-        self.object_store
-            .remove(paths.clone())
-            .await
-            .context(OpenDalSnafu)?;
-        Ok(())
     }
 
     /// Load the latest checkpoint.
@@ -609,18 +513,6 @@ mod tests {
         }
         assert!(it.next_log().await.unwrap().is_none());
 
-        // Delete [0, 3)
-        log_store.delete(0, 3).await.unwrap();
-
-        // [3, 5) remains
-        let mut it = log_store.scan(0, 11).await.unwrap();
-        for v in 3..5 {
-            let (version, bytes) = it.next_log().await.unwrap().unwrap();
-            assert_eq!(v, version);
-            assert_eq!(format!("hello, {v}").as_bytes(), bytes);
-        }
-        assert!(it.next_log().await.unwrap().is_none());
-
         // test checkpoint
         assert!(log_store.load_last_checkpoint().await.unwrap().is_none());
         log_store
@@ -702,19 +594,9 @@ mod tests {
         assert_eq!(v, 10);
         assert_eq!(checkpoint, "checkpoint_compressed".as_bytes());
 
-        // Delete previously uncompressed checkpoint
-        log_store.delete_checkpoint(5).await.unwrap();
-        assert!(log_store.load_checkpoint(5).await.unwrap().is_none());
-
-        // Delete [3, 7), contain uncompressed/compressed data
-        log_store.delete(3, 7).await.unwrap();
-        // [3, 7) deleted
-        let mut it = log_store.scan(3, 7).await.unwrap();
-        assert!(it.next_log().await.unwrap().is_none());
-
         // Delete util 10, contain uncompressed/compressed data
         // log 0, 1, 2, 7, 8, 9 will be delete
-        assert_eq!(6, log_store.delete_until(10, false).await.unwrap());
+        assert_eq!(11, log_store.delete_until(10, false).await.unwrap());
         let mut it = log_store.scan(0, 10).await.unwrap();
         assert!(it.next_log().await.unwrap().is_none());
     }

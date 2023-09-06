@@ -105,7 +105,7 @@ impl LocalScheduler {
     }
 
     #[inline]
-    fn running(&self) -> bool {
+    fn is_running(&self) -> bool {
         self.state.load(Ordering::Relaxed) == STATE_RUNNING
     }
 }
@@ -113,10 +113,7 @@ impl LocalScheduler {
 #[async_trait::async_trait]
 impl Scheduler for LocalScheduler {
     fn schedule(&self, job: Job) -> Result<()> {
-        ensure!(
-            self.state.load(Ordering::Relaxed) == STATE_RUNNING,
-            InvalidSchedulerStateSnafu
-        );
+        ensure!(self.is_running(), InvalidSchedulerStateSnafu);
 
         self.sender
             .read()
@@ -129,10 +126,7 @@ impl Scheduler for LocalScheduler {
 
     /// if await_termination is true, scheduler will wait all tasks finished before stopping
     async fn stop(&self, await_termination: bool) -> Result<()> {
-        ensure!(
-            self.state.load(Ordering::Relaxed) == STATE_RUNNING,
-            InvalidSchedulerStateSnafu
-        );
+        ensure!(self.is_running(), InvalidSchedulerStateSnafu);
         let state = if await_termination {
             STATE_AWAIT_TERMINATION
         } else {
