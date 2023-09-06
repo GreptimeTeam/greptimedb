@@ -172,7 +172,7 @@ where
             // TODO(discord9): impl Distinct&Accumulate first
             _ => todo!(),
         };
-        todo!()
+        arrangement
     }
 
     /// Build the dataflow to compute the set of distinct keys.

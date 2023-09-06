@@ -14,7 +14,7 @@ pub use linear::{MapFilterProject, SafeMfpPlan};
 pub(crate) use relation::{AggregateExpr, AggregateFunc, TableFunc};
 use serde::{Deserialize, Serialize};
 
-use crate::expr::func::{BinaryFunc, UnaryFunc, VariadicFunc};
+pub(crate) use crate::expr::func::{BinaryFunc, UnaryFunc, VariadicFunc};
 use crate::storage::errors::EvalError;
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]

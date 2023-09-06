@@ -11,11 +11,38 @@ pub enum UnaryFunc {
     IsNull,
     IsTrue,
     IsFalse,
+    CastDatetimeToInt64,
+    CastInt64ToFloat32,
 }
 
 impl UnaryFunc {
     pub fn eval(&self, values: &[Value], expr: &ScalarExpr) -> Result<Value, EvalError> {
-        todo!()
+        let arg = expr.eval(values)?;
+        match self {
+            Self::CastDatetimeToInt64 => {
+                let datetime = if let Value::DateTime(datetime) = arg {
+                    Ok(datetime.val())
+                } else {
+                    Err(EvalError::TypeMismatch(format!(
+                        "cannot cast {:?} to datetime",
+                        arg
+                    )))
+                }?;
+                Ok(Value::from(datetime))
+            }
+            Self::CastInt64ToFloat32 => {
+                let int64 = if let Value::Int64(int64) = arg {
+                    Ok(int64)
+                } else {
+                    Err(EvalError::TypeMismatch(format!(
+                        "cannot cast {:?} to int64",
+                        arg
+                    )))
+                }?;
+                Ok(Value::from(int64 as f32))
+            }
+            _ => todo!(),
+        }
     }
 }
 
