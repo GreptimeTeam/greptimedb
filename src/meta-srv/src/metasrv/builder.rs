@@ -52,7 +52,6 @@ use crate::pubsub::{PublishRef, SubscribeManagerRef};
 use crate::selector::lease_based::LeaseBasedSelector;
 use crate::service::mailbox::MailboxRef;
 use crate::service::store::cached_kv::{CheckLeader, LeaderCachedKvStore};
-use crate::service::store::etcd::MAX_TXN_SIZE;
 use crate::service::store::kv::{KvBackendAdapter, KvStoreRef, ResettableKvStoreRef};
 use crate::service::store::memory::MemStore;
 use crate::table_creator::MetaSrvTableCreator;
@@ -330,10 +329,7 @@ fn build_procedure_manager(options: &MetaSrvOptions, kv_store: &KvStoreRef) -> P
         retry_delay: options.procedure.retry_delay,
         ..Default::default()
     };
-    let state_store = Arc::new(KvStateStore::new(
-        KvBackendAdapter::wrap(kv_store.clone()),
-        MAX_TXN_SIZE,
-    ));
+    let state_store = Arc::new(KvStateStore::new(KvBackendAdapter::wrap(kv_store.clone())));
     Arc::new(LocalManager::new(manager_config, state_store))
 }
 

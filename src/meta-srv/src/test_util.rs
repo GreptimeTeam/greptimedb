@@ -27,7 +27,6 @@ use crate::lock::memory::MemLock;
 use crate::metasrv::SelectorContext;
 use crate::procedure::region_failover::RegionFailoverManager;
 use crate::selector::lease_based::LeaseBasedSelector;
-use crate::service::store::etcd::MAX_TXN_SIZE;
 use crate::service::store::kv::KvBackendAdapter;
 use crate::service::store::memory::MemStore;
 
@@ -58,10 +57,7 @@ pub(crate) fn create_region_failover_manager() -> Arc<RegionFailoverManager> {
     );
     let mailbox = HeartbeatMailbox::create(pushers, mailbox_sequence);
 
-    let state_store = Arc::new(KvStateStore::new(
-        KvBackendAdapter::wrap(kv_store.clone()),
-        MAX_TXN_SIZE,
-    ));
+    let state_store = Arc::new(KvStateStore::new(KvBackendAdapter::wrap(kv_store.clone())));
     let procedure_manager = Arc::new(LocalManager::new(ManagerConfig::default(), state_store));
 
     let in_memory = Arc::new(MemStore::new());

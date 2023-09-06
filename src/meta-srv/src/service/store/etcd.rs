@@ -41,7 +41,7 @@ use crate::service::store::kv::KvStoreRef;
 // The etcd default configuration's `--max-txn-ops` is 128.
 //
 // For more detail, see: https://etcd.io/docs/v3.5/op-guide/configuration/
-pub const MAX_TXN_SIZE: usize = 128;
+const MAX_TXN_SIZE: usize = 128;
 
 pub struct EtcdStore {
     client: Client,

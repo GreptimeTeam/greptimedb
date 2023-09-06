@@ -27,7 +27,8 @@ use crate::kv_backend::KvBackendRef;
 use crate::range_stream::PaginationStream;
 use crate::rpc::store::{BatchDeleteRequest, PutRequest, RangeRequest};
 use crate::rpc::KeyValue;
-use crate::util;
+
+const DELIMITER: &str = "/";
 
 const PROCEDURE_PREFIX: &str = "/__procedure__/";
 
@@ -47,10 +48,10 @@ pub struct KvStateStore {
 
 impl KvStateStore {
     // `max_size_per_range` is set to 0, it is treated as no limit.
-    pub fn new(kv_backend: KvBackendRef, max_size_per_range: usize) -> Self {
+    pub fn new(kv_backend: KvBackendRef) -> Self {
         Self {
             kv_backend,
-            max_size_per_range,
+            max_size_per_range: 0,
         }
     }
 }
@@ -83,14 +84,8 @@ impl StateStore for KvStateStore {
         // extend their lifetimes to be used in the stream
         let path = path.to_string();
 
-        let key = with_prefix(path.trim_start_matches('/')).into_bytes();
-        let range_end = util::get_prefix_end_key(&key);
-
-        let req = RangeRequest {
-            key: key.clone(),
-            range_end,
-            ..Default::default()
-        };
+        let key = with_prefix(path.trim_start_matches(DELIMITER)).into_bytes();
+        let req = RangeRequest::new().with_prefix(key);
 
         let stream = PaginationStream::new(
             self.kv_backend.clone(),
