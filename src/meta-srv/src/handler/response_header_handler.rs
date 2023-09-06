@@ -51,11 +51,11 @@ mod tests {
 
     use api::v1::meta::{HeartbeatResponse, RequestHeader};
     use common_meta::key::TableMetadataManager;
+    use common_meta::sequence::Sequence;
 
     use super::*;
     use crate::cluster::MetaPeerClientBuilder;
     use crate::handler::{Context, HeartbeatMailbox, Pushers};
-    use crate::sequence::Sequence;
     use crate::service::store::cached_kv::LeaderCachedKvStore;
     use crate::service::store::kv::KvBackendAdapter;
     use crate::service::store::memory::MemStore;
@@ -66,7 +66,7 @@ mod tests {
         let kv_store = Arc::new(MemStore::new());
         let leader_cached_kv_store =
             Arc::new(LeaderCachedKvStore::with_always_leader(kv_store.clone()));
-        let seq = Sequence::new("test_seq", 0, 10, kv_store.clone());
+        let seq = Sequence::new("test_seq", 0, 10, KvBackendAdapter::wrap(kv_store.clone()));
         let mailbox = HeartbeatMailbox::create(Pushers::default(), seq);
         let meta_peer_client = MetaPeerClientBuilder::default()
             .election(None)
