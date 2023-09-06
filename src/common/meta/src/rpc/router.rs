@@ -77,16 +77,10 @@ impl TryFrom<PbRouteResponse> for RouteResponse {
 pub fn region_distribution(region_routes: &[RegionRoute]) -> Result<RegionDistribution> {
     let mut regions_id_map = RegionDistribution::new();
     for route in region_routes.iter() {
-        let node_id = route
-            .leader_peer
-            .as_ref()
-            .context(error::UnexpectedSnafu {
-                err_msg: "leader not found",
-            })?
-            .id;
-
-        let region_id = route.region.id.region_number();
-        regions_id_map.entry(node_id).or_default().push(region_id);
+        if let Some(peer) = route.leader_peer.as_ref() {
+            let region_id = route.region.id.region_number();
+            regions_id_map.entry(peer.id).or_default().push(region_id);
+        }
     }
     for (_, regions) in regions_id_map.iter_mut() {
         // id asc
