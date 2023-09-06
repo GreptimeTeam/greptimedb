@@ -21,6 +21,10 @@ mod create_test;
 #[cfg(test)]
 mod drop_test;
 #[cfg(test)]
+mod flush_test;
+#[cfg(test)]
+pub(crate) mod listener;
+#[cfg(test)]
 mod open_test;
 #[cfg(test)]
 mod tests;
@@ -102,7 +106,7 @@ impl EngineInner {
         object_store: ObjectStore,
     ) -> EngineInner {
         EngineInner {
-            workers: WorkerGroup::start(config, log_store, object_store.clone()),
+            workers: WorkerGroup::start(config, log_store, object_store),
         }
     }
 
@@ -181,5 +185,32 @@ impl RegionEngine for MitoEngine {
         region_id: RegionId,
     ) -> std::result::Result<RegionMetadataRef, BoxedError> {
         self.inner.get_metadata(region_id).map_err(BoxedError::new)
+    }
+}
+
+// Tests methods.
+#[cfg(test)]
+impl MitoEngine {
+    /// Returns a new [MitoEngine] for tests.
+    pub fn new_for_test<S: LogStore>(
+        mut config: MitoConfig,
+        log_store: Arc<S>,
+        object_store: ObjectStore,
+        write_buffer_manager: crate::flush::WriteBufferManagerRef,
+        listener: Option<crate::engine::listener::EventListenerRef>,
+    ) -> MitoEngine {
+        config.sanitize();
+
+        MitoEngine {
+            inner: Arc::new(EngineInner {
+                workers: WorkerGroup::start_for_test(
+                    config,
+                    log_store,
+                    object_store,
+                    write_buffer_manager,
+                    listener,
+                ),
+            }),
+        }
     }
 }
