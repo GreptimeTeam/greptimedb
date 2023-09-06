@@ -20,7 +20,6 @@
 pub mod test_util;
 
 // TODO(yingwen): Remove all `allow(dead_code)` after finish refactoring mito.
-#[allow(dead_code)]
 mod access_layer;
 pub mod config;
 pub mod engine;
