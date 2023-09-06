@@ -265,15 +265,15 @@ impl StartCommand {
         if self.influxdb_enable {
             opts.influxdb_options.enable = self.influxdb_enable;
         }
-        let kv_store_opts = opts.kv_store.clone();
-        let procedure_opts = opts.procedure.clone();
+        let kv_store_cfg = opts.kv_store.clone();
+        let procedure_cfg = opts.procedure.clone();
         let fe_opts = opts.clone().frontend_options();
         let logging_opts = opts.logging.clone();
         let dn_opts = opts.datanode_options();
 
         Ok(Options::Standalone(Box::new(MixOptions {
-            procedure_cfg: procedure_opts,
-            kv_store_cfg: kv_store_opts,
+            procedure_cfg,
+            kv_store_cfg,
             data_home: dn_opts.storage.data_home.to_string(),
             fe_opts,
             dn_opts,

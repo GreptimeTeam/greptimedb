@@ -160,7 +160,7 @@ impl TableCreator for StandaloneTableCreator {
                     ..Default::default()
                 };
                 // It's only a placeholder.
-                let peer = Peer::new(0, "localhost");
+                let peer = Peer::default();
                 RegionRoute {
                     region,
                     leader_peer: Some(peer),

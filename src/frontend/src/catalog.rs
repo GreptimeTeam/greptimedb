@@ -23,8 +23,8 @@ use catalog::error::{
 use catalog::information_schema::{InformationSchemaProvider, COLUMNS, TABLES};
 use catalog::remote::KvCacheInvalidatorRef;
 use catalog::{
-    CatalogManager, DeregisterSchemaRequest, DeregisterTableRequest, RegisterTableRequest,
-    RenameTableRequest, RegisterSchemaRequest,
+    CatalogManager, DeregisterSchemaRequest, DeregisterTableRequest, RegisterSchemaRequest,
+    RegisterTableRequest, RenameTableRequest,
 };
 use client::client_manager::DatanodeClients;
 use common_catalog::consts::{
@@ -153,7 +153,7 @@ impl CatalogManager for FrontendCatalogManager {
     async fn deregister_table(&self, _request: DeregisterTableRequest) -> CatalogResult<()> {
         Ok(())
     }
-    
+
     async fn register_schema(
         &self,
         _request: RegisterSchemaRequest,

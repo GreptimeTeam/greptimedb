@@ -17,7 +17,7 @@ use std::fmt::{Display, Formatter};
 use api::v1::meta::Peer as PbPeer;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Hash, Eq, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Default, Clone, Hash, Eq, PartialEq, Deserialize, Serialize)]
 pub struct Peer {
     /// Node identifier. Unique in a cluster.
     pub id: u64,

@@ -55,7 +55,6 @@ use crate::error::{
 };
 use crate::instance::distributed::deleter::DistDeleter;
 use crate::instance::distributed::inserter::DistInserter;
-use crate::req_convert::insert::StatementToRegion;
 use crate::MAX_VALUE;
 
 #[derive(Clone)]
@@ -81,15 +80,6 @@ impl DistInstance {
                     options: Default::default(),
                 };
                 self.handle_create_database(expr, query_ctx).await
-            }
-
-            Statement::Insert(insert) => {
-                let request = StatementToRegion::new(self.catalog_manager.as_ref(), &query_ctx)
-                    .convert(&insert)
-                    .await?;
-                let inserter = DistInserter::new(&self.catalog_manager);
-                let affected_rows = inserter.insert(request).await?;
-                Ok(Output::AffectedRows(affected_rows as usize))
             }
             Statement::ShowCreateTable(show) => {
                 let (catalog, schema, table) =
