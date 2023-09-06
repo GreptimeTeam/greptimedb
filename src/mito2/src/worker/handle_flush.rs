@@ -72,13 +72,20 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return;
         }
 
-        // Handle pending requests of the region.
+        // Notifies waiters.
+        request.on_success();
+
+        // Handle pending DDL requests for the region.
         if let Some(ddl_requests) = self.flush_scheduler.on_flush_success(region_id) {
             self.handle_ddl_requests(ddl_requests).await;
         }
 
-        // Notifies waiters.
-        request.on_success();
+        // Handle stalled requests.
+        let stalled = std::mem::take(&mut self.stalled_requests);
+        // We already stalled these requests, don't stall them again.
+        self.handle_write_requests(stalled.requests, false).await;
+
+        self.listener.on_flush_success(region_id);
     }
 }
 

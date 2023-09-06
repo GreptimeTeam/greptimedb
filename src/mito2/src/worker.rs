@@ -42,7 +42,9 @@ use crate::flush::{FlushScheduler, WriteBufferManagerImpl, WriteBufferManagerRef
 use crate::memtable::time_series::TimeSeriesMemtableBuilder;
 use crate::memtable::MemtableBuilderRef;
 use crate::region::{MitoRegionRef, RegionMap, RegionMapRef};
-use crate::request::{BackgroundNotify, DdlRequest, SenderDdlRequest, WorkerRequest};
+use crate::request::{
+    BackgroundNotify, DdlRequest, SenderDdlRequest, SenderWriteRequest, WorkerRequest,
+};
 use crate::schedule::scheduler::{LocalScheduler, SchedulerRef};
 use crate::wal::Wal;
 
@@ -94,7 +96,7 @@ pub(crate) struct WorkerGroup {
 }
 
 impl WorkerGroup {
-    /// Start a worker group.
+    /// Starts a worker group.
     ///
     /// The number of workers should be power of two.
     pub(crate) fn start<S: LogStore>(
@@ -118,6 +120,7 @@ impl WorkerGroup {
                     object_store: object_store.clone(),
                     write_buffer_manager: write_buffer_manager.clone(),
                     scheduler: scheduler.clone(),
+                    listener: WorkerListener::default(),
                 }
                 .start()
             })
@@ -126,18 +129,19 @@ impl WorkerGroup {
         WorkerGroup { workers, scheduler }
     }
 
-    /// Stop the worker group.
+    /// Stops the worker group.
     pub(crate) async fn stop(&self) -> Result<()> {
         info!("Stop region worker group");
 
-        try_join_all(self.workers.iter().map(|worker| worker.stop())).await?;
-
+        // Stops the scheduler gracefully.
         self.scheduler.stop(true).await?;
+
+        try_join_all(self.workers.iter().map(|worker| worker.stop())).await?;
 
         Ok(())
     }
 
-    /// Submit a request to a worker in the group.
+    /// Submits a request to a worker in the group.
     pub(crate) async fn submit_to_worker(
         &self,
         region_id: RegionId,
@@ -169,6 +173,42 @@ impl WorkerGroup {
     }
 }
 
+// Tests methods.
+#[cfg(test)]
+impl WorkerGroup {
+    /// Starts a worker group with `write_buffer_manager` and `listener` for tests.
+    ///
+    /// The number of workers should be power of two.
+    pub(crate) fn start_for_test<S: LogStore>(
+        config: MitoConfig,
+        log_store: Arc<S>,
+        object_store: ObjectStore,
+        write_buffer_manager: WriteBufferManagerRef,
+        listener: Option<crate::engine::listener::EventListenerRef>,
+    ) -> WorkerGroup {
+        assert!(config.num_workers.is_power_of_two());
+        let config = Arc::new(config);
+        let scheduler = Arc::new(LocalScheduler::new(config.max_background_jobs));
+
+        let workers = (0..config.num_workers)
+            .map(|id| {
+                WorkerStarter {
+                    id: id as WorkerId,
+                    config: config.clone(),
+                    log_store: log_store.clone(),
+                    object_store: object_store.clone(),
+                    write_buffer_manager: write_buffer_manager.clone(),
+                    scheduler: scheduler.clone(),
+                    listener: WorkerListener::new(listener.clone()),
+                }
+                .start()
+            })
+            .collect();
+
+        WorkerGroup { workers, scheduler }
+    }
+}
+
 fn value_to_index(value: usize, num_workers: usize) -> usize {
     value & (num_workers - 1)
 }
@@ -181,10 +221,11 @@ struct WorkerStarter<S> {
     object_store: ObjectStore,
     write_buffer_manager: WriteBufferManagerRef,
     scheduler: SchedulerRef,
+    listener: WorkerListener,
 }
 
 impl<S: LogStore> WorkerStarter<S> {
-    /// Start a region worker and its background thread.
+    /// Starts a region worker and its background thread.
     fn start(self) -> RegionWorker {
         let regions = Arc::new(RegionMap::default());
         let (sender, receiver) = mpsc::channel(self.config.worker_channel_size);
@@ -206,6 +247,8 @@ impl<S: LogStore> WorkerStarter<S> {
             scheduler: self.scheduler.clone(),
             write_buffer_manager: self.write_buffer_manager,
             flush_scheduler: FlushScheduler::new(self.scheduler),
+            stalled_requests: StalledRequests::default(),
+            listener: self.listener,
         };
         let handle = common_runtime::spawn_write(async move {
             worker_thread.run().await;
@@ -236,7 +279,7 @@ pub(crate) struct RegionWorker {
 }
 
 impl RegionWorker {
-    /// Submit request to background worker thread.
+    /// Submits request to background worker thread.
     async fn submit_request(&self, request: WorkerRequest) -> Result<()> {
         ensure!(self.is_running(), WorkerStoppedSnafu { id: self.id });
         if self.sender.send(request).await.is_err() {
@@ -303,6 +346,29 @@ impl Drop for RegionWorker {
 
 type RequestBuffer = Vec<WorkerRequest>;
 
+/// Buffer for stalled write requests.
+///
+/// Maintains stalled write requests and their estimated size.
+#[derive(Default)]
+pub(crate) struct StalledRequests {
+    /// Stalled requests.
+    pub(crate) requests: Vec<SenderWriteRequest>,
+    /// Estimated size of all stalled requests.
+    pub(crate) estimated_size: usize,
+}
+
+impl StalledRequests {
+    /// Appends stalled requests.
+    pub(crate) fn append(&mut self, requests: &mut Vec<SenderWriteRequest>) {
+        let size: usize = requests
+            .iter()
+            .map(|req| req.request.estimated_size())
+            .sum();
+        self.requests.append(requests);
+        self.estimated_size += size;
+    }
+}
+
 /// Background worker loop to handle requests.
 struct RegionWorkerLoop<S> {
     // Id of the worker.
@@ -331,6 +397,10 @@ struct RegionWorkerLoop<S> {
     write_buffer_manager: WriteBufferManagerRef,
     /// Schedules background flush requests.
     flush_scheduler: FlushScheduler,
+    /// Stalled write requests.
+    stalled_requests: StalledRequests,
+    /// Event listener for tests.
+    listener: WorkerListener,
 }
 
 impl<S: LogStore> RegionWorkerLoop<S> {
@@ -397,7 +467,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         // Handles all write requests first. So we can alter regions without
         // considering existing write requests.
-        self.handle_write_requests(write_requests).await;
+        self.handle_write_requests(write_requests, true).await;
 
         self.handle_ddl_requests(ddl_requests).await;
     }
@@ -452,6 +522,40 @@ impl<S> RegionWorkerLoop<S> {
         }
 
         self.regions.clear();
+    }
+}
+
+/// Wrapper that only calls event listener in tests.
+#[derive(Default)]
+pub(crate) struct WorkerListener {
+    #[cfg(test)]
+    listener: Option<crate::engine::listener::EventListenerRef>,
+}
+
+impl WorkerListener {
+    #[cfg(test)]
+    pub(crate) fn new(
+        listener: Option<crate::engine::listener::EventListenerRef>,
+    ) -> WorkerListener {
+        WorkerListener { listener }
+    }
+
+    /// Flush is finished successfully.
+    pub(crate) fn on_flush_success(&self, region_id: RegionId) {
+        #[cfg(test)]
+        if let Some(listener) = &self.listener {
+            listener.on_flush_success(region_id);
+        }
+        // Avoid compiler warning.
+        let _ = region_id;
+    }
+
+    /// Engine is stalled.
+    pub(crate) fn on_write_stall(&self) {
+        #[cfg(test)]
+        if let Some(listener) = &self.listener {
+            listener.on_write_stall();
+        }
     }
 }
 
