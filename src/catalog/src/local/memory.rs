@@ -33,7 +33,7 @@ use crate::error::{
 use crate::information_schema::InformationSchemaProvider;
 use crate::{
     CatalogManager, DeregisterSchemaRequest, DeregisterTableRequest, RegisterSchemaRequest,
-    RegisterSystemTableRequest, RegisterTableRequest, RenameTableRequest,
+    RegisterTableRequest, RenameTableRequest,
 };
 
 type SchemaEntries = HashMap<String, HashMap<String, TableRef>>;
@@ -130,11 +130,6 @@ impl CatalogManager for MemoryCatalogManager {
             &[crate::metrics::db_label(&request.catalog, &request.schema)],
         );
         Ok(true)
-    }
-
-    async fn register_system_table(&self, _request: RegisterSystemTableRequest) -> Result<()> {
-        // TODO(ruihang): support register system table request
-        Ok(())
     }
 
     async fn schema_exist(&self, catalog: &str, schema: &str) -> Result<bool> {

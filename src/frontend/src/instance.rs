@@ -152,20 +152,19 @@ impl Instance {
         let partition_manager = Arc::new(PartitionRuleManager::new(table_routes));
 
         let table_metadata_manager = Arc::new(TableMetadataManager::new(meta_backend.clone()));
-        let mut catalog_manager = FrontendCatalogManager::new(
+        let catalog_manager = Arc::new(FrontendCatalogManager::new(
             meta_backend.clone(),
             meta_backend.clone(),
             partition_manager.clone(),
             datanode_clients.clone(),
             table_metadata_manager.clone(),
-        );
+        ));
 
-        let dist_instance =
-            DistInstance::new(meta_client.clone(), Arc::new(catalog_manager.clone()));
-        let dist_instance = Arc::new(dist_instance);
+        let dist_instance = Arc::new(DistInstance::new(
+            meta_client.clone(),
+            catalog_manager.clone(),
+        ));
 
-        catalog_manager.set_dist_instance(dist_instance.clone());
-        let catalog_manager = Arc::new(catalog_manager);
         let dist_request_handler = DistRegionRequestHandler::arc(catalog_manager.clone());
 
         let query_engine = QueryEngineFactory::new_with_plugins(
@@ -383,11 +382,11 @@ impl Instance {
 #[async_trait]
 impl FrontendInstance for Instance {
     async fn start(&self) -> Result<()> {
-        // TODO(hl): Frontend init should move to here
-
         if let Some(heartbeat_task) = &self.heartbeat_task {
             heartbeat_task.start().await?;
         }
+
+        self.script_executor.start(self).await?;
 
         futures::future::try_join_all(self.servers.values().map(start_server))
             .await
