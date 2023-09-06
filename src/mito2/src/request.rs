@@ -25,6 +25,7 @@ use api::helper::{
 use api::v1::{ColumnDataType, ColumnSchema, OpType, Rows, SemanticType, Value};
 use common_base::readable_size::ReadableSize;
 use common_query::Output;
+use common_telemetry::info;
 use datatypes::prelude::DataType;
 use prost::Message;
 use smallvec::SmallVec;
@@ -579,15 +580,27 @@ pub(crate) struct CompactionFinished {
 }
 
 impl CompactionFinished {
+    /// Compaction succeeded but failed to update manifest or region's already been dropped,
+    /// clean compaction output files.
     pub fn on_failure(self, _err: Error) {
-        // cleaning compaction output files.
-        todo!()
+        for file in &self.compacted_files {
+            let file_id = file.file_id;
+            info!(
+                "Cleaning region {} compaction output file: {}",
+                self.region_id, file_id
+            );
+            self.file_purger.send_request(PurgeRequest {
+                region_id: self.region_id,
+                file_id,
+            });
+        }
     }
 }
 
 /// A failing compaction result.
 #[derive(Debug)]
 pub(crate) struct CompactionFailed {
+    pub(crate) region_id: RegionId,
     /// The error source of the failure.
     pub(crate) err: Arc<Error>,
 }

@@ -362,7 +362,10 @@ impl CompactionTask for TwcsCompactionTask {
                 let err = Arc::new(e);
                 // notify compaction waiters
                 self.on_failure(err.clone());
-                BackgroundNotify::CompactionFailed(CompactionFailed { err })
+                BackgroundNotify::CompactionFailed(CompactionFailed {
+                    region_id: self.region_id,
+                    err,
+                })
             }
         };
 

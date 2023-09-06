@@ -57,8 +57,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             .apply_edit(edit, region.file_purger.clone());
     }
 
-    pub(crate) async fn handle_compaction_failure(&mut self, _req: CompactionFailed) {
-        todo!()
+    /// When compaction fails, we simply log the error.
+    pub(crate) async fn handle_compaction_failure(&mut self, req: CompactionFailed) {
+        error!(req.err; "Failed to compact region: {}", req.region_id);
     }
 
     /// Creates a new compaction request.
