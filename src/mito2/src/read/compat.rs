@@ -512,4 +512,43 @@ mod tests {
         )
         .await;
     }
+
+    #[tokio::test]
+    async fn test_compat_reader_different_order() {
+        let reader_meta = Arc::new(new_metadata(
+            &[
+                (0, SemanticType::Timestamp),
+                (1, SemanticType::Tag),
+                (2, SemanticType::Field),
+            ],
+            &[1],
+        ));
+        let expect_meta = Arc::new(new_metadata(
+            &[
+                (0, SemanticType::Timestamp),
+                (1, SemanticType::Tag),
+                (3, SemanticType::Field),
+                (2, SemanticType::Field),
+                (4, SemanticType::Field),
+            ],
+            &[1],
+        ));
+        let mapper = ProjectionMapper::all(&expect_meta).unwrap();
+        let k1 = encode_key(&[Some("a")]);
+        let k2 = encode_key(&[Some("b")]);
+        let source_reader = VecBatchReader::new(&[
+            new_batch(&k1, &[(2, false)], 1000, 3),
+            new_batch(&k2, &[(2, false)], 1000, 3),
+        ]);
+
+        let mut compat_reader = CompatReader::new(&mapper, reader_meta, source_reader).unwrap();
+        check_reader_result(
+            &mut compat_reader,
+            &[
+                new_batch(&k1, &[(3, true), (2, false), (4, true)], 1000, 3),
+                new_batch(&k2, &[(3, true), (2, false), (4, true)], 1000, 3),
+            ],
+        )
+        .await;
+    }
 }
