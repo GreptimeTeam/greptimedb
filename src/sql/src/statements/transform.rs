@@ -147,12 +147,14 @@ fn replace_type_alias(data_type: &mut DataType) {
 pub fn get_data_type_by_alias_name(name: &str) -> Option<DataType> {
     match name.to_uppercase().as_ref() {
         // Timestamp type alias
-        "TIMESTAMP_S" | "TIMESTAMPSECOND" => Some(DataType::Timestamp(Some(0), TimezoneInfo::None)),
+        "TIMESTAMP_S" | "TIMESTAMP_SEC" | "TIMESTAMPSECOND" => {
+            Some(DataType::Timestamp(Some(0), TimezoneInfo::None))
+        }
 
         "TIMESTAMP_MS" | "TIMESTAMPMILLISECOND" => {
             Some(DataType::Timestamp(Some(3), TimezoneInfo::None))
         }
-        "TIMESTAMP_MICROS" | "TIMESTAMPMICROSECOND" => {
+        "TIMESTAMP_US" | "TIMESTAMPMICROSECOND" => {
             Some(DataType::Timestamp(Some(6), TimezoneInfo::None))
         }
         "TIMESTAMP_NS" | "TIMESTAMPNANOSECOND" => {
@@ -203,7 +205,7 @@ mod tests {
         test_timestamp_alias("TimestampMillisecond", "Millisecond");
         test_timestamp_alias("Timestamp_ms", "Millisecond");
         test_timestamp_alias("TimestampMicrosecond", "Microsecond");
-        test_timestamp_alias("Timestamp_micros", "Microsecond");
+        test_timestamp_alias("Timestamp_us", "Microsecond");
         test_timestamp_alias("TimestampNanosecond", "Nanosecond");
         test_timestamp_alias("Timestamp_ns", "Nanosecond");
         // Timestamp(precision)

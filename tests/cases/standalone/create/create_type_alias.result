@@ -13,7 +13,7 @@ CREATE TABLE data_types (
   dtt datetime,
   ts0 TimestampSecond,
   ts3 Timestamp_MS,
-  ts6 Timestamp_micros,
+  ts6 Timestamp_US,
   ts9 TimestampNanosecond DEFAULT CURRENT_TIMESTAMP TIME INDEX,
   PRIMARY KEY(s));
 
