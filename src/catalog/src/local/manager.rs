@@ -517,20 +517,6 @@ impl CatalogManager for LocalCatalogManager {
         .fail()
     }
 
-    async fn register_system_table(&self, request: RegisterSystemTableRequest) -> Result<()> {
-        let catalog_name = request.create_table_request.catalog_name.clone();
-        let schema_name = request.create_table_request.schema_name.clone();
-
-        let mut sys_table_requests = self.system_table_requests.lock().await;
-        sys_table_requests.push(request);
-        increment_gauge!(
-            crate::metrics::METRIC_CATALOG_MANAGER_TABLE_COUNT,
-            1.0,
-            &[crate::metrics::db_label(&catalog_name, &schema_name)],
-        );
-        Ok(())
-    }
-
     async fn schema_exist(&self, catalog: &str, schema: &str) -> Result<bool> {
         self.catalogs.schema_exist(catalog, schema).await
     }
