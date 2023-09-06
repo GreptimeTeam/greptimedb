@@ -14,13 +14,14 @@
 
 use std::collections::HashMap;
 
-use api::v1::region::region_request;
+use api::v1;
+use api::v1::region::{alter_request, region_request, AlterRequest};
 use api::v1::Rows;
 use snafu::OptionExt;
 
-use crate::metadata::{ColumnMetadata, InvalidRawRegionRequestSnafu, MetadataError};
+use crate::metadata::{ColumnMetadata, InvalidRawRegionRequestSnafu, MetadataError, Result};
 use crate::path_utils::region_dir;
-use crate::storage::{AlterRequest, ColumnId, RegionId, ScanRequest};
+use crate::storage::{ColumnId, RegionId, ScanRequest};
 
 #[derive(Debug)]
 pub enum RegionRequest {
@@ -39,11 +40,7 @@ pub enum RegionRequest {
 impl RegionRequest {
     /// Convert [Body](region_request::Body) to a group of [RegionRequest] with region id.
     /// Inserts/Deletes request might become multiple requests. Others are one-to-one.
-    // TODO: implement alter request
-    #[allow(unreachable_code)]
-    pub fn try_from_request_body(
-        body: region_request::Body,
-    ) -> Result<Vec<(RegionId, Self)>, MetadataError> {
+    pub fn try_from_request_body(body: region_request::Body) -> Result<Vec<(RegionId, Self)>> {
         match body {
             region_request::Body::Inserts(inserts) => Ok(inserts
                 .requests
@@ -68,7 +65,7 @@ impl RegionRequest {
                     .column_defs
                     .into_iter()
                     .map(ColumnMetadata::try_from_column_def)
-                    .collect::<Result<Vec<_>, _>>()?;
+                    .collect::<Result<Vec<_>>>()?;
                 let region_id = create.region_id.into();
                 let region_dir = region_dir(&create.catalog, &create.schema, region_id);
                 Ok(vec![(
@@ -103,25 +100,10 @@ impl RegionRequest {
                 close.region_id.into(),
                 Self::Close(RegionCloseRequest {}),
             )]),
-            region_request::Body::Alter(alter) => {
-                let kind = alter.kind.context(InvalidRawRegionRequestSnafu {
-                    err: "'kind' is absent",
-                })?;
-                Ok(vec![(
-                    alter.region_id.into(),
-                    Self::Alter(RegionAlterRequest {
-                        request: AlterRequest {
-                            operation: kind.try_into().map_err(|e| {
-                                InvalidRawRegionRequestSnafu {
-                                    err: format!("{e}"),
-                                }
-                                .build()
-                            })?,
-                            version: alter.schema_version as _,
-                        },
-                    }),
-                )])
-            }
+            region_request::Body::Alter(alter) => Ok(vec![(
+                alter.region_id.into(),
+                Self::Alter(RegionAlterRequest::try_from(alter)?),
+            )]),
             region_request::Body::Flush(flush) => Ok(vec![(
                 flush.region_id.into(),
                 Self::Flush(RegionFlushRequest {}),
@@ -189,9 +171,84 @@ pub struct RegionOpenRequest {
 #[derive(Debug)]
 pub struct RegionCloseRequest {}
 
+/// Alter metadata of a region.
 #[derive(Debug)]
 pub struct RegionAlterRequest {
-    pub request: AlterRequest,
+    /// The version of the schema before applying the alteration.
+    pub schema_version: u64,
+    /// Kind of alteration to do.
+    pub kind: AlterKind,
+}
+
+impl TryFrom<AlterRequest> for RegionAlterRequest {
+    type Error = MetadataError;
+
+    fn try_from(value: AlterRequest) -> Result<Self> {
+        let _kind = value.kind.context(InvalidRawRegionRequestSnafu {
+            err: "'kind' is absent",
+        })?;
+        todo!()
+    }
+}
+
+/// Kind of the alteration.
+#[derive(Debug)]
+pub enum AlterKind {
+    /// Add columns to the region.
+    AddColumns {
+        /// Columns to add.
+        columns: Vec<AddColumn>,
+    },
+    /// Drop columns from the region, only value columns are allowed to drop.
+    DropColumns {
+        /// Name of columns to drop.
+        names: Vec<String>,
+    },
+}
+
+impl TryFrom<alter_request::Kind> for AlterKind {
+    type Error = MetadataError;
+
+    fn try_from(_value: alter_request::Kind) -> Result<Self> {
+        todo!()
+    }
+}
+
+/// Add a column.
+#[derive(Debug)]
+pub struct AddColumn {
+    /// Metadata of the column to add.
+    pub column_metadata: ColumnMetadata,
+    /// Location to add the column.
+    pub location: AddColumnLocation,
+}
+
+impl TryFrom<v1::region::AddColumn> for AddColumn {
+    type Error = MetadataError;
+
+    fn try_from(_value: v1::region::AddColumn) -> Result<Self> {
+        todo!()
+    }
+}
+
+/// Location to add a column.
+#[derive(Debug)]
+pub enum AddColumnLocation {
+    /// Add the column to the first position of columns.
+    First,
+    /// Add the column after specific column.
+    After {
+        /// Add the column after this column.
+        column_name: String,
+    },
+}
+
+impl TryFrom<v1::AddColumnLocation> for AddColumnLocation {
+    type Error = MetadataError;
+
+    fn try_from(_value: v1::AddColumnLocation) -> Result<Self> {
+        todo!()
+    }
 }
 
 #[derive(Debug)]
