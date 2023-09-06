@@ -9045,6 +9045,7 @@ dependencies = [
  "datatypes",
  "hex",
  "itertools 0.10.5",
+ "lazy_static",
  "once_cell",
  "regex",
  "snafu",
