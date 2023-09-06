@@ -29,7 +29,6 @@ use either::Either;
 use frontend::catalog::FrontendCatalogManager;
 use meta_client::client::MetaClientBuilder;
 use partition::manager::PartitionRuleManager;
-use partition::route::TableRoutes;
 use query::datafusion::DatafusionQueryEngine;
 use query::logical_optimizer::LogicalOptimizer;
 use query::parser::QueryLanguageParser;
@@ -254,8 +253,7 @@ async fn create_query_engine(meta_addr: &str) -> Result<DatafusionQueryEngine> {
 
     let cached_meta_backend = Arc::new(CachedMetaKvBackend::new(meta_client.clone()));
 
-    let table_routes = Arc::new(TableRoutes::new(meta_client));
-    let partition_manager = Arc::new(PartitionRuleManager::new(table_routes));
+    let partition_manager = Arc::new(PartitionRuleManager::new(cached_meta_backend.clone()));
 
     let datanode_clients = Arc::new(DatanodeClients::default());
 

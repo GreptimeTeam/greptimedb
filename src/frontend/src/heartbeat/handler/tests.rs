@@ -64,13 +64,8 @@ async fn test_invalidate_table_cache_handler() {
         inner: Mutex::new(inner),
     });
 
-    let inner = HashMap::from([(table_id, 1)]);
-    let table_route = Arc::new(MockTableRouteCacheInvalidator {
-        inner: Mutex::new(inner),
-    });
-
     let executor = Arc::new(HandlerGroupExecutor::new(vec![Arc::new(
-        InvalidateTableCacheHandler::new(backend.clone(), table_route.clone()),
+        InvalidateTableCacheHandler::new(backend.clone()),
     )]));
 
     let (tx, mut rx) = mpsc::channel(8);
@@ -100,8 +95,6 @@ async fn test_invalidate_table_cache_handler() {
         .lock()
         .unwrap()
         .contains_key(&table_info_key.as_raw_key()));
-
-    assert!(!table_route.inner.lock().unwrap().contains_key(&table_id));
 
     // removes a invalid key
     handle_instruction(

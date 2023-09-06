@@ -14,7 +14,6 @@
 
 use std::sync::Arc;
 
-use api::v1::greptime_request::Request;
 use api::v1::meta::Partition;
 use api::v1::region::{region_request, QueryRequest, RegionRequest};
 use async_trait::async_trait;
@@ -29,39 +28,17 @@ use common_meta::kv_backend::KvBackendRef;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::{Region, RegionRoute};
 use common_meta::sequence::{Sequence, SequenceRef};
-use common_query::Output;
 use common_recordbatch::SendableRecordBatchStream;
-use datanode::error::Error as DatanodeError;
 use datanode::region_server::RegionServer;
 use servers::grpc::region_server::RegionServerHandler;
-use servers::query_handler::grpc::{GrpcQueryHandler, GrpcQueryHandlerRef};
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::{RegionId, TableId};
 use table::metadata::RawTableInfo;
 
-use crate::error::{Error, InvokeDatanodeSnafu, InvokeRegionServerSnafu, Result};
+use crate::error::InvokeRegionServerSnafu;
 
 const TABLE_ID_SEQ: &str = "table_id";
-
-pub(crate) struct StandaloneGrpcQueryHandler(GrpcQueryHandlerRef<DatanodeError>);
-impl StandaloneGrpcQueryHandler {
-    pub(crate) fn arc(handler: GrpcQueryHandlerRef<DatanodeError>) -> Arc<Self> {
-        Arc::new(Self(handler))
-    }
-}
-
-#[async_trait]
-impl GrpcQueryHandler for StandaloneGrpcQueryHandler {
-    type Error = Error;
-
-    async fn do_query(&self, query: Request, ctx: QueryContextRef) -> Result<Output> {
-        self.0
-            .do_query(query, ctx)
-            .await
-            .context(InvokeDatanodeSnafu)
-    }
-}
 
 pub(crate) struct StandaloneRegionRequestHandler {
     region_server: RegionServer,

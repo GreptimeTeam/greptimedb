@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
-use api::v1::{column_def, AlterExpr, CreateTableExpr, TruncateTableExpr};
+use api::v1::{column_def, AlterExpr, CreateDatabaseExpr, CreateTableExpr, TruncateTableExpr};
 use catalog::{CatalogManagerRef, DeregisterTableRequest, RegisterTableRequest};
 use chrono::DateTime;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
@@ -339,6 +339,38 @@ impl StatementExecutor {
             .submit_ddl_task(&ExecutorContext::default(), request)
             .await
             .context(error::ExecuteDdlSnafu)
+    }
+
+    pub async fn create_database(&self, catalog: &str, expr: CreateDatabaseExpr) -> Result<Output> {
+        // TODO(weny): considers executing it in the procedures.
+        let schema_key = SchemaNameKey::new(catalog, &expr.database_name);
+        let exists = self
+            .table_metadata_manager
+            .schema_manager()
+            .exist(schema_key)
+            .await
+            .context(error::TableMetadataManagerSnafu)?;
+
+        if exists {
+            return if expr.create_if_not_exists {
+                Ok(Output::AffectedRows(1))
+            } else {
+                error::SchemaExistsSnafu {
+                    name: &expr.database_name,
+                }
+                .fail()
+            };
+        }
+
+        let schema_value =
+            SchemaNameValue::try_from(&expr.options).context(error::TableMetadataManagerSnafu)?;
+        self.table_metadata_manager
+            .schema_manager()
+            .create(schema_key, Some(schema_value))
+            .await
+            .context(error::TableMetadataManagerSnafu)?;
+
+        Ok(Output::AffectedRows(1))
     }
 }
 

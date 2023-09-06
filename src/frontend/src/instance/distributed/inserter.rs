@@ -102,14 +102,12 @@ impl<'a> DistInserter<'a> {
                 .find_table_route(table_id)
                 .await
                 .context(FindTableRouteSnafu { table_id })?;
+            let region_map = table_route.region_map();
 
             for (region_number, insert) in req_splits {
-                let peer =
-                    table_route
-                        .find_region_leader(region_number)
-                        .context(FindDatanodeSnafu {
-                            region: region_number,
-                        })?;
+                let peer = *region_map.get(&region_number).context(FindDatanodeSnafu {
+                    region: region_number,
+                })?;
                 inserts
                     .entry(peer.clone())
                     .or_default()
