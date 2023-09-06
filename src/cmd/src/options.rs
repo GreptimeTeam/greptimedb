@@ -28,11 +28,11 @@ pub const ENV_LIST_SEP: &str = ",";
 
 pub struct MixOptions {
     pub data_home: String,
-    pub procedure: ProcedureConfig,
-    pub kv_store: KvStoreConfig,
+    pub procedure_cfg: ProcedureConfig,
+    pub kv_store_cfg: KvStoreConfig,
     pub fe_opts: FrontendOptions,
     pub dn_opts: DatanodeOptions,
-    pub logging: LoggingOptions,
+    pub logging_opts: LoggingOptions,
 }
 
 pub enum Options {
@@ -55,7 +55,7 @@ impl Options {
             Options::Datanode(opts) => &opts.logging,
             Options::Frontend(opts) => &opts.logging,
             Options::Metasrv(opts) => &opts.logging,
-            Options::Standalone(opts) => &opts.logging,
+            Options::Standalone(opts) => &opts.logging_opts,
             Options::Cli(opts) => opts,
         }
     }

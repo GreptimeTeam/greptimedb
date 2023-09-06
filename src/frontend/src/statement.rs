@@ -25,9 +25,7 @@ use std::collections::HashMap;
 use std::str::FromStr;
 
 use api::v1::region::region_request;
-use api::v1::CreateTableExpr;
-use catalog::error::InternalSnafu;
-use catalog::{CatalogManagerRef, RegisterSystemTableRequest};
+use catalog::CatalogManagerRef;
 use client::region_handler::RegionRequestHandlerRef;
 use common_error::ext::BoxedError;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
@@ -252,93 +250,6 @@ impl StatementExecutor {
             .await
             .context(RequestDatanodeSnafu)?;
         Ok(affected_rows as _)
-    }
-
-    pub async fn register_system_table(
-        &self,
-        request: RegisterSystemTableRequest,
-    ) -> catalog::error::Result<()> {
-        let open_hook = request.open_hook;
-        let request = request.create_table_request;
-
-        if let Some(table) = self
-            .catalog_manager
-            .table(
-                &request.catalog_name,
-                &request.schema_name,
-                &request.table_name,
-            )
-            .await?
-        {
-            if let Some(hook) = open_hook {
-                (hook)(table).await?;
-            }
-            return Ok(());
-        }
-
-        let time_index = request
-            .schema
-            .column_schemas
-            .iter()
-            .find_map(|x| {
-                if x.is_time_index() {
-                    Some(x.name.clone())
-                } else {
-                    None
-                }
-            })
-            .context(InvalidSystemTableDefSnafu {
-                err_msg: "Time index is not defined.",
-            })?;
-
-        let primary_keys = request
-            .schema
-            .column_schemas
-            .iter()
-            .enumerate()
-            .filter_map(|(i, x)| {
-                if request.primary_key_indices.contains(&i) {
-                    Some(x.name.clone())
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>();
-
-        let column_defs =
-            expr_factory::column_schemas_to_defs(request.schema.column_schemas, &primary_keys)
-                .map_err(|e| {
-                    InvalidSystemTableDefSnafu {
-                        err_msg: e.to_string(),
-                    }
-                    .build()
-                })?;
-
-        let mut create_table = CreateTableExpr {
-            catalog_name: request.catalog_name,
-            schema_name: request.schema_name,
-            table_name: request.table_name,
-            desc: request.desc.unwrap_or("".to_string()),
-            column_defs,
-            time_index,
-            primary_keys,
-            create_if_not_exists: request.create_if_not_exists,
-            table_options: (&request.table_options).into(),
-            table_id: None, // Should and will be assigned by Meta.
-            region_numbers: vec![0],
-            engine: request.engine,
-        };
-
-        let table = self
-            .create_table(&mut create_table, None)
-            .await
-            .map_err(BoxedError::new)
-            .context(InternalSnafu)?;
-
-        if let Some(hook) = open_hook {
-            (hook)(table).await?;
-        }
-        Ok(())
     }
 }
 

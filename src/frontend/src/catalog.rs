@@ -153,7 +153,7 @@ impl CatalogManager for FrontendCatalogManager {
     async fn deregister_table(&self, _request: DeregisterTableRequest) -> CatalogResult<()> {
         Ok(())
     }
-
+    
     async fn register_schema(
         &self,
         _request: RegisterSchemaRequest,

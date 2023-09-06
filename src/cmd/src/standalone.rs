@@ -265,19 +265,19 @@ impl StartCommand {
         if self.influxdb_enable {
             opts.influxdb_options.enable = self.influxdb_enable;
         }
-        let kv_store = opts.kv_store.clone();
-        let procedure = opts.procedure.clone();
+        let kv_store_opts = opts.kv_store.clone();
+        let procedure_opts = opts.procedure.clone();
         let fe_opts = opts.clone().frontend_options();
-        let logging = opts.logging.clone();
+        let logging_opts = opts.logging.clone();
         let dn_opts = opts.datanode_options();
 
         Ok(Options::Standalone(Box::new(MixOptions {
-            procedure,
-            kv_store,
+            procedure_cfg: procedure_opts,
+            kv_store_cfg: kv_store_opts,
             data_home: dn_opts.storage.data_home.to_string(),
             fe_opts,
             dn_opts,
-            logging,
+            logging_opts,
         })))
     }
 
@@ -301,10 +301,13 @@ impl StartCommand {
 
         let kv_dir = kv_store_dir(&opts.data_home);
 
-        let (kv_store, procedure_manager) =
-            FeInstance::try_build_standalone_components(kv_dir, opts.kv_store, opts.procedure)
-                .await
-                .context(StartFrontendSnafu)?;
+        let (kv_store, procedure_manager) = FeInstance::try_build_standalone_components(
+            kv_dir,
+            opts.kv_store_cfg,
+            opts.procedure_cfg,
+        )
+        .await
+        .context(StartFrontendSnafu)?;
 
         // TODO: build frontend instance like in distributed mode
         let mut frontend = build_frontend(
@@ -437,7 +440,7 @@ mod tests {
         };
         let fe_opts = options.fe_opts;
         let dn_opts = options.dn_opts;
-        let logging_opts = options.logging;
+        let logging_opts = options.logging_opts;
         assert_eq!(Mode::Standalone, fe_opts.mode);
         assert_eq!("127.0.0.1:4000".to_string(), fe_opts.http_options.addr);
         assert_eq!(Duration::from_secs(30), fe_opts.http_options.timeout);
@@ -482,8 +485,8 @@ mod tests {
             unreachable!()
         };
 
-        assert_eq!("/tmp/greptimedb/test/logs", opts.logging.dir);
-        assert_eq!("debug", opts.logging.level.unwrap());
+        assert_eq!("/tmp/greptimedb/test/logs", opts.logging_opts.dir);
+        assert_eq!("debug", opts.logging_opts.level.unwrap());
     }
 
     #[test]
@@ -552,10 +555,10 @@ mod tests {
                 };
 
                 // Should be read from env, env > default values.
-                assert_eq!(opts.logging.dir, "/other/log/dir");
+                assert_eq!(opts.logging_opts.dir, "/other/log/dir");
 
                 // Should be read from config file, config file > env > default values.
-                assert_eq!(opts.logging.level.as_ref().unwrap(), "debug");
+                assert_eq!(opts.logging_opts.level.as_ref().unwrap(), "debug");
 
                 // Should be read from cli, cli > config file > env > default values.
                 assert_eq!(opts.fe_opts.http_options.addr, "127.0.0.1:14000");
