@@ -115,7 +115,7 @@ impl TwcsPicker {
 }
 
 impl Picker for TwcsPicker {
-    fn pick(&self, req: CompactionRequest) -> error::Result<Option<Arc<dyn CompactionTask>>> {
+    fn pick(&self, req: CompactionRequest) -> error::Result<Option<Box<dyn CompactionTask>>> {
         let CompactionRequest {
             current_version,
             access_layer,
@@ -169,7 +169,7 @@ impl Picker for TwcsPicker {
             sender: waiters,
             file_purger,
         };
-        Ok(Some(Arc::new(task)))
+        Ok(Some(Box::new(task)))
     }
 }
 
@@ -310,7 +310,7 @@ impl TwcsCompactionTask {
     }
 
     /// Handles compaction success.
-    fn on_success(&mut self) {
+    fn early_success(&mut self) {
         if let Some(sender) = self.sender.take() {
             let _ = sender.send(Ok(Output::AffectedRows(0)).context(CompactRegionSnafu {
                 region_id: self.region_id,
@@ -340,20 +340,20 @@ impl TwcsCompactionTask {
 
 #[async_trait::async_trait]
 impl CompactionTask for TwcsCompactionTask {
-    async fn run(mut self) {
+    async fn run(&mut self) {
         let notify = match self.handle_compaction().await {
             Ok((added, deleted)) => {
                 info!(
                     "Compacted SST files, input: {:?}, output: {:?}, window: {:?}",
                     added, deleted, self.compaction_time_window
                 );
-                self.on_success();
+                self.early_success();
 
                 BackgroundNotify::CompactionFinished(CompactionFinished {
                     region_id: self.region_id,
                     compaction_outputs: added,
                     compacted_files: deleted,
-                    senders: vec![],
+                    sender: self.sender.take(),
                     file_purger: self.file_purger.clone(),
                 })
             }

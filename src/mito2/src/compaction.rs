@@ -22,15 +22,18 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common_query::Output;
+use common_telemetry::debug;
 pub use picker::CompactionPickerRef;
-use store_api::storage::CompactionStrategy;
+use store_api::storage::{CompactionStrategy, RegionId, TwcsOptions};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::access_layer::AccessLayerRef;
 use crate::compaction::twcs::TwcsPicker;
 use crate::error;
+use crate::error::Result;
 use crate::region::version::VersionRef;
 use crate::request::WorkerRequest;
+use crate::schedule::scheduler::SchedulerRef;
 use crate::sst::file_purger::FilePurgerRef;
 
 /// Region compaction request.
@@ -44,6 +47,12 @@ pub struct CompactionRequest {
     pub(crate) file_purger: FilePurgerRef,
 }
 
+impl CompactionRequest {
+    pub(crate) fn region_id(&self) -> RegionId {
+        self.current_version.metadata.region_id
+    }
+}
+
 /// Builds compaction picker according to [CompactionStrategy].
 pub fn compaction_strategy_to_picker(strategy: &CompactionStrategy) -> CompactionPickerRef {
     match strategy {
@@ -52,5 +61,34 @@ pub fn compaction_strategy_to_picker(strategy: &CompactionStrategy) -> Compactio
             twcs_opts.max_inactive_window_files,
             twcs_opts.time_window_seconds,
         )) as Arc<_>,
+    }
+}
+
+pub(crate) struct CompactionScheduler {
+    scheduler: SchedulerRef,
+    // TODO(hl): maybe tracks region compaction status in CompactionScheduler
+}
+
+impl CompactionScheduler {
+    pub(crate) fn new(scheduler: SchedulerRef) -> Self {
+        Self { scheduler }
+    }
+
+    /// Schedules a region compaction task.
+    pub(crate) fn schedule_compaction(&self, req: CompactionRequest) -> Result<()> {
+        self.scheduler.schedule(Box::pin(async {
+            // TODO(hl): build picker according to region options.
+            let strategy =
+                compaction_strategy_to_picker(&CompactionStrategy::Twcs(TwcsOptions::default()));
+            debug!(
+                "Pick compaction strategy {:?} for region: {}",
+                strategy,
+                req.region_id()
+            );
+            let Some(mut task) = strategy.pick(req).unwrap() else {
+                return;
+            };
+            task.run().await;
+        }))
     }
 }

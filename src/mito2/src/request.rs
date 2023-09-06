@@ -25,7 +25,9 @@ use api::helper::{
 use api::v1::{ColumnDataType, ColumnSchema, OpType, Rows, SemanticType, Value};
 use common_base::readable_size::ReadableSize;
 use common_query::Output;
-use common_telemetry::info;
+use common_query::Output::AffectedRows;
+use common_telemetry::tracing::log::info;
+use common_telemetry::warn;
 use datatypes::prelude::DataType;
 use prost::Message;
 use smallvec::SmallVec;
@@ -573,19 +575,26 @@ pub(crate) struct CompactionFinished {
     pub(crate) compaction_outputs: Vec<FileMeta>,
     /// Compacted files that are to be removed from region version.
     pub(crate) compacted_files: Vec<FileMeta>,
-    /// Compaction result senders.
-    pub(crate) senders: Vec<oneshot::Sender<Result<Output>>>,
+    /// Compaction result sender.
+    pub(crate) sender: Option<oneshot::Sender<Result<Output>>>,
     /// File purger for cleaning files on failure.
     pub(crate) file_purger: FilePurgerRef,
 }
 
 impl CompactionFinished {
+    pub fn on_success(self) {
+        if let Some(sender) = self.sender {
+            let _ = sender.send(Ok(AffectedRows(0)));
+        }
+        info!("Successfully compacted region: {}", self.region_id);
+    }
+
     /// Compaction succeeded but failed to update manifest or region's already been dropped,
     /// clean compaction output files.
     pub fn on_failure(self, _err: Error) {
         for file in &self.compacted_files {
             let file_id = file.file_id;
-            info!(
+            warn!(
                 "Cleaning region {} compaction output file: {}",
                 self.region_id, file_id
             );

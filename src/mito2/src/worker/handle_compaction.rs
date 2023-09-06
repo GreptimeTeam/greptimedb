@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use common_query::Output;
-use common_telemetry::error;
+use common_telemetry::{error, info};
 use store_api::logstore::LogStore;
 use store_api::storage::RegionId;
 use tokio::sync::oneshot;
@@ -26,6 +26,30 @@ use crate::request::{CompactionFailed, CompactionFinished};
 use crate::worker::RegionWorkerLoop;
 
 impl<S: LogStore> RegionWorkerLoop<S> {
+    /// Handles compaction request submitted to region worker.
+    pub(crate) fn handle_compaction_request(
+        &mut self,
+        region_id: RegionId,
+        sender: Option<oneshot::Sender<Result<Output>>>,
+    ) {
+        let Some(region) = self.regions.get_region(region_id) else {
+            if let Some(sender) = sender {
+                let _ = sender.send(RegionNotFoundSnafu { region_id }.fail());
+            }
+            return;
+        };
+
+        let request = self.new_compaction_request(&region, sender);
+        if let Err(e) = self.compaction_scheduler.schedule_compaction(request) {
+            error!(e; "Failed to schedule compaction task for region: {}", region_id);
+        } else {
+            info!(
+                "Successfully scheduled compaction task for region: {}",
+                region_id
+            );
+        }
+    }
+
     /// Handles compaction finished, update region version and manifest, deleted compacted files.
     pub(crate) async fn handle_compaction_finished(
         &mut self,
@@ -46,7 +70,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         };
         let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone()));
         if let Err(e) = region.manifest_manager.update(action_list).await {
-            error!(e; "Failed to write manifest, region: {}", region_id);
+            error!(e; "Failed to update manifest, region: {}", region_id);
             request.on_failure(e);
             return;
         }
@@ -55,6 +79,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         region
             .version_control
             .apply_edit(edit, region.file_purger.clone());
+        request.on_success();
     }
 
     /// When compaction fails, we simply log the error.
