@@ -360,10 +360,11 @@ pub(crate) fn validate_proto_value(
             InvalidRequestSnafu {
                 region_id,
                 reason: format!(
-                    "column {} has type {:?}, but schema has type {:?}",
-                    column_schema.column_name,
+                    "value has type {:?}, but column {} has type {:?}({})",
                     value_type,
-                    ColumnDataType::from_i32(column_schema.datatype)
+                    column_schema.column_name,
+                    ColumnDataType::from_i32(column_schema.datatype),
+                    column_schema.datatype,
                 ),
             }
         );
