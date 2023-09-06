@@ -479,8 +479,11 @@ impl FlushScheduler {
     }
 
     /// Returns true if the region has pending DDLs.
-    pub(crate) fn has_pending_ddls(&self, _region_id: RegionId) -> bool {
-        unimplemented!()
+    pub(crate) fn has_pending_ddls(&self, region_id: RegionId) -> bool {
+        self.region_status
+            .get(&region_id)
+            .map(|status| !status.pending_ddls.is_empty())
+            .unwrap_or(false)
     }
 
     /// Schedules a new flush task when the scheduler can submit next task.

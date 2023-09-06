@@ -94,6 +94,7 @@ impl<S> RegionWorkerLoop<S> {
             // If region is waiting for alteration, add requests to pending writes.
             if self.flush_scheduler.has_pending_ddls(region_id) {
                 // TODO(yingwen): consider adding some metrics for this.
+                // Safety: The region has pending ddls.
                 self.flush_scheduler
                     .add_write_request_to_pending(sender_req);
                 continue;

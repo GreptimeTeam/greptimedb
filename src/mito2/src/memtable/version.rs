@@ -18,10 +18,10 @@ use std::sync::Arc;
 
 use smallvec::SmallVec;
 
-use crate::memtable::MemtableRef;
+use crate::memtable::{MemtableId, MemtableRef};
 
 /// A version of current memtables in a region.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct MemtableVersion {
     /// Mutable memtable.
     pub(crate) mutable: MemtableRef,
@@ -85,7 +85,15 @@ impl MemtableVersion {
         })
     }
 
-    // TODO(yingwen): Remove memtables on flush done.
+    /// Removes memtables by ids from immutable memtables.
+    pub(crate) fn remove_memtables(&mut self, ids: &[MemtableId]) {
+        self.immutables = self
+            .immutables
+            .iter()
+            .filter(|mem| !ids.contains(&mem.id()))
+            .cloned()
+            .collect();
+    }
 
     /// Returns the memory usage of the mutable memtable.
     pub(crate) fn mutable_usage(&self) -> usize {

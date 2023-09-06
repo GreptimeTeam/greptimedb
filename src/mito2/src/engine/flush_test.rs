@@ -53,6 +53,7 @@ async fn test_manual_flush() {
 
     let request = ScanRequest::default();
     let scanner = engine.scan(region_id, request).unwrap();
+    assert_eq!(0, scanner.num_memtables());
     assert_eq!(1, scanner.num_files());
     let stream = scanner.scan().await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
@@ -98,7 +99,7 @@ async fn test_flush_engine() {
 
     write_buffer_manager.set_should_flush(true);
 
-    // Writes and triggers flush.
+    // Writes to the mutable memtable and triggers flush.
     let rows = Rows {
         schema: column_schemas.clone(),
         rows: build_rows_for_key("b", 0, 2, 0),
@@ -110,6 +111,7 @@ async fn test_flush_engine() {
 
     let request = ScanRequest::default();
     let scanner = engine.scan(region_id, request).unwrap();
+    assert_eq!(1, scanner.num_memtables());
     assert_eq!(1, scanner.num_files());
     let stream = scanner.scan().await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
@@ -174,6 +176,7 @@ async fn test_write_stall() {
 
     let request = ScanRequest::default();
     let scanner = engine.scan(region_id, request).unwrap();
+    assert_eq!(1, scanner.num_memtables());
     assert_eq!(1, scanner.num_files());
     let stream = scanner.scan().await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
@@ -209,6 +212,7 @@ async fn test_flush_empty() {
 
     let request = ScanRequest::default();
     let scanner = engine.scan(region_id, request).unwrap();
+    assert_eq!(0, scanner.num_memtables());
     assert_eq!(0, scanner.num_files());
     let stream = scanner.scan().await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();

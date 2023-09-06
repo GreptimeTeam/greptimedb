@@ -56,9 +56,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         }
 
         // Apply edit to region's version.
-        region
-            .version_control
-            .apply_edit(edit, region.file_purger.clone());
+        region.version_control.apply_edit(
+            edit,
+            &request.memtables_to_remove,
+            region.file_purger.clone(),
+        );
         region.update_flush_millis();
 
         // Delete wal.

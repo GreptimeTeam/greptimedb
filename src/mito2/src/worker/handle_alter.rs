@@ -63,7 +63,7 @@ impl<S> RegionWorkerLoop<S> {
                 return;
             }
 
-            // TODO(yingwen): Maybe assert in add_ddl_request_to_pending instead returning result.
+            // Safety: We have requested flush.
             self.flush_scheduler
                 .add_ddl_request_to_pending(SenderDdlRequest {
                     region_id,

@@ -30,7 +30,7 @@ use store_api::storage::SequenceNumber;
 
 use crate::manifest::action::RegionEdit;
 use crate::memtable::version::{MemtableVersion, MemtableVersionRef};
-use crate::memtable::{MemtableBuilderRef, MemtableRef};
+use crate::memtable::{MemtableBuilderRef, MemtableId, MemtableRef};
 use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::version::{SstVersion, SstVersionRef};
 use crate::wal::EntryId;
@@ -90,11 +90,17 @@ impl VersionControl {
     }
 
     /// Apply edit to current version.
-    pub(crate) fn apply_edit(&self, edit: RegionEdit, purger: FilePurgerRef) {
+    pub(crate) fn apply_edit(
+        &self,
+        edit: RegionEdit,
+        memtables_to_remove: &[MemtableId],
+        purger: FilePurgerRef,
+    ) {
         let version = self.current().version;
         let new_version = Arc::new(
             VersionBuilder::from_version(version)
                 .apply_edit(edit, purger)
+                .remove_memtables(memtables_to_remove)
                 .build(),
         );
 
@@ -205,6 +211,16 @@ impl VersionBuilder {
             self.ssts = Arc::new(ssts);
         }
 
+        self
+    }
+
+    /// Remove memtables from the builder.
+    pub(crate) fn remove_memtables(mut self, ids: &[MemtableId]) -> VersionBuilder {
+        if !ids.is_empty() {
+            let mut memtables = (*self.memtables).clone();
+            memtables.remove_memtables(ids);
+            self.memtables = Arc::new(memtables);
+        }
         self
     }
 
