@@ -27,9 +27,10 @@ use store_api::region_request::{
 use store_api::storage::{RegionId, ScanRequest};
 
 use crate::config::MitoConfig;
-use crate::engine::tests::{build_rows, column_metadata_to_column_schema, put_rows};
 use crate::engine::MitoEngine;
-use crate::test_util::{CreateRequestBuilder, TestEnv};
+use crate::test_util::{
+    build_rows, column_metadata_to_column_schema, put_rows, CreateRequestBuilder, TestEnv,
+};
 
 async fn put_and_flush(
     engine: &MitoEngine,
@@ -41,7 +42,7 @@ async fn put_and_flush(
         schema: column_schemas.to_vec(),
         rows: build_rows(rows.start, rows.end),
     };
-    put_rows(&engine, region_id, rows).await;
+    put_rows(engine, region_id, rows).await;
 
     let Output::AffectedRows(rows) = engine
         .handle_request(region_id, RegionRequest::Flush(RegionFlushRequest {}))
