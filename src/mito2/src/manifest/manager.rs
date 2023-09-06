@@ -436,7 +436,7 @@ impl RegionManifestManagerInner {
     ) -> Result<Option<RegionCheckpoint>> {
         let last_checkpoint = store.load_last_checkpoint().await?;
 
-        if let Some((version, bytes)) = last_checkpoint {
+        if let Some((_, bytes)) = last_checkpoint {
             let checkpoint = RegionCheckpoint::decode(&bytes)?;
             Ok(Some(checkpoint))
         } else {
