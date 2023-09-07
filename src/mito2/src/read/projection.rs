@@ -25,7 +25,7 @@ use datatypes::schema::{Schema, SchemaRef};
 use datatypes::value::ValueRef;
 use datatypes::vectors::VectorRef;
 use snafu::{OptionExt, ResultExt};
-use store_api::metadata::RegionMetadata;
+use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ColumnId;
 
 use crate::error::{InvalidRequestSnafu, Result};
@@ -33,21 +33,26 @@ use crate::read::Batch;
 use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
 
 /// Handles projection and converts a projected [Batch] to a projected [RecordBatch].
-pub(crate) struct ProjectionMapper {
+pub struct ProjectionMapper {
+    /// Metadata of the region.
+    metadata: RegionMetadataRef,
     /// Maps column in [RecordBatch] to index in [Batch].
     batch_indices: Vec<BatchIndex>,
     /// Decoder for primary key.
     codec: McmpRowCodec,
     /// Schema for converted [RecordBatch].
     output_schema: SchemaRef,
-    /// Id of columns to project.
+    /// Ids of columns to project. It keeps ids in the same order as the `projection`
+    /// indices to build the mapper.
     column_ids: Vec<ColumnId>,
+    /// Ids of field columns in the [Batch].
+    batch_fields: Vec<ColumnId>,
 }
 
 impl ProjectionMapper {
     /// Returns a new mapper with projection.
-    pub(crate) fn new(
-        metadata: &RegionMetadata,
+    pub fn new(
+        metadata: &RegionMetadataRef,
         projection: impl Iterator<Item = usize>,
     ) -> Result<ProjectionMapper> {
         let projection_len = projection.size_hint().0;
@@ -92,23 +97,36 @@ impl ProjectionMapper {
         );
         // Safety: Columns come from existing schema.
         let output_schema = Arc::new(Schema::new(column_schemas));
+        let batch_fields = Batch::projected_fields(metadata, &column_ids);
 
         Ok(ProjectionMapper {
+            metadata: metadata.clone(),
             batch_indices,
             codec,
             output_schema,
             column_ids,
+            batch_fields,
         })
     }
 
     /// Returns a new mapper without projection.
-    pub(crate) fn all(metadata: &RegionMetadata) -> Result<ProjectionMapper> {
+    pub fn all(metadata: &RegionMetadataRef) -> Result<ProjectionMapper> {
         ProjectionMapper::new(metadata, 0..metadata.column_metadatas.len())
+    }
+
+    /// Returns the metadata that created the mapper.
+    pub(crate) fn metadata(&self) -> &RegionMetadataRef {
+        &self.metadata
     }
 
     /// Returns ids of projected columns.
     pub(crate) fn column_ids(&self) -> &[ColumnId] {
         &self.column_ids
+    }
+
+    /// Returns ids of fields in [Batch]es the mapper expects to convert.
+    pub(crate) fn batch_fields(&self) -> &[ColumnId] {
+        &self.batch_fields
     }
 
     /// Returns the schema of converted [RecordBatch].
@@ -120,6 +138,13 @@ impl ProjectionMapper {
     ///
     /// The batch must match the `projection` using to build the mapper.
     pub(crate) fn convert(&self, batch: &Batch) -> common_recordbatch::error::Result<RecordBatch> {
+        debug_assert_eq!(self.batch_fields.len(), batch.fields().len());
+        debug_assert!(self
+            .batch_fields
+            .iter()
+            .zip(batch.fields())
+            .all(|(id, batch_col)| *id == batch_col.column_id));
+
         let pk_values = self
             .codec
             .decode(batch.primary_key())
@@ -179,3 +204,5 @@ fn new_repeated_vector(
     let base_vector = mutable_vector.to_vector();
     Ok(base_vector.replicate(&[num_rows]))
 }
+
+// TODO(yingwen): Add tests for mapper.

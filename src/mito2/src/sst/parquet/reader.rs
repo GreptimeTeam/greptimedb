@@ -27,7 +27,7 @@ use parquet::arrow::{ParquetRecordBatchStreamBuilder, ProjectionMask};
 use parquet::errors::ParquetError;
 use parquet::format::KeyValue;
 use snafu::{ensure, OptionExt, ResultExt};
-use store_api::metadata::RegionMetadata;
+use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::storage::ColumnId;
 use table::predicate::Predicate;
 use tokio::io::BufReader;
@@ -42,11 +42,18 @@ use crate::sst::parquet::PARQUET_METADATA_KEY;
 
 /// Parquet SST reader builder.
 pub struct ParquetReaderBuilder {
+    /// SST directory.
     file_dir: String,
     file_handle: FileHandle,
     object_store: ObjectStore,
+    /// Predicate to push down.
     predicate: Option<Predicate>,
+    /// Time range to filter.
     time_range: Option<TimestampRange>,
+    /// Metadata of columns to read.
+    ///
+    /// `None` reads all columns. Due to schema change, the projection
+    /// can contain columns not in the parquet file.
     projection: Option<Vec<ColumnId>>,
 }
 
@@ -97,10 +104,6 @@ impl ParquetReaderBuilder {
         Ok(ParquetReader {
             file_path,
             file_handle: self.file_handle,
-            object_store: self.object_store,
-            predicate: self.predicate,
-            time_range: self.time_range,
-            projection: self.projection,
             stream,
             read_format,
             batches: Vec::new(),
@@ -206,17 +209,6 @@ pub struct ParquetReader {
     ///
     /// Holds the file handle to avoid the file purge purge it.
     file_handle: FileHandle,
-    object_store: ObjectStore,
-    /// Predicate to push down.
-    predicate: Option<Predicate>,
-    /// Time range to filter.
-    time_range: Option<TimestampRange>,
-    /// Metadata of columns to read.
-    ///
-    /// `None` reads all columns. Due to schema change, the projection
-    /// can contain columns not in the parquet file.
-    projection: Option<Vec<ColumnId>>,
-
     /// Inner parquet record batch stream.
     stream: BoxedRecordBatchStream,
     /// Helper to read record batches.
@@ -248,5 +240,12 @@ impl BatchReader for ParquetReader {
         self.batches.reverse();
 
         Ok(self.batches.pop())
+    }
+}
+
+impl ParquetReader {
+    /// Returns the metadata of the SST.
+    pub fn metadata(&self) -> &RegionMetadataRef {
+        self.read_format.metadata()
     }
 }

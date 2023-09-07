@@ -138,6 +138,11 @@ impl ReadFormat {
         &self.arrow_schema
     }
 
+    /// Gets the metadata of the SST.
+    pub(crate) fn metadata(&self) -> &RegionMetadataRef {
+        &self.metadata
+    }
+
     /// Gets sorted projection indices to read `columns` from parquet files.
     ///
     /// This function ignores columns not in `metadata` to for compatibility between
