@@ -15,10 +15,7 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use api::v1::greptime_request::Request as GrpcRequest;
 use api::v1::meta::HeartbeatResponse;
-use api::v1::query_request::Query;
-use api::v1::QueryRequest;
 use async_trait::async_trait;
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_function::scalars::FunctionRef;
@@ -31,43 +28,33 @@ use common_meta::instruction::{Instruction, InstructionReply, RegionIdent};
 use common_query::prelude::ScalarUdf;
 use common_query::Output;
 use common_runtime::Runtime;
-use datatypes::prelude::ConcreteDataType;
 use query::dataframe::DataFrame;
 use query::plan::LogicalPlan;
 use query::planner::LogicalPlanner;
 use query::query_engine::DescribeResult;
 use query::QueryEngine;
-use servers::query_handler::grpc::GrpcQueryHandler;
-use session::context::{QueryContext, QueryContextRef};
-use table::engine::manager::TableEngineManagerRef;
+use session::context::QueryContextRef;
 use table::TableRef;
-use test_util::MockInstance;
 use tokio::sync::mpsc::{self, Receiver};
 
-use crate::instance::Instance;
 use crate::region_server::RegionServer;
-
-pub(crate) mod test_util;
+use crate::Instance;
 
 struct HandlerTestGuard {
-    instance: MockInstance,
+    instance: Instance,
     mailbox: Arc<HeartbeatMailbox>,
     rx: Receiver<(MessageMeta, InstructionReply)>,
-    engine_manager_ref: TableEngineManagerRef,
 }
 
-async fn prepare_handler_test(name: &str) -> HandlerTestGuard {
-    let mock_instance = MockInstance::new(name).await;
-    let instance = mock_instance.inner();
-    let engine_manager = instance.sql_handler().table_engine_manager().clone();
+async fn prepare_handler_test(_name: &str) -> HandlerTestGuard {
+    let instance = Instance;
     let (tx, rx) = mpsc::channel(8);
     let mailbox = Arc::new(HeartbeatMailbox::new(tx));
 
     HandlerTestGuard {
-        instance: mock_instance,
+        instance,
         mailbox,
         rx,
-        engine_manager_ref: engine_manager,
     }
 }
 
@@ -120,43 +107,6 @@ fn open_region_instruction() -> Instruction {
         cluster_id: 1,
         datanode_id: 2,
     })
-}
-
-async fn prepare_table(instance: &Instance) -> TableRef {
-    test_util::create_test_table(instance, ConcreteDataType::timestamp_millisecond_datatype())
-        .await
-        .unwrap()
-}
-
-async fn assert_test_table_not_found(instance: &Instance) {
-    let query = GrpcRequest::Query(QueryRequest {
-        query: Some(Query::Sql(
-            "INSERT INTO demo(host, cpu, memory, ts) VALUES \
-                        ('host1', 66.6, 1024, 1672201025000),\
-                        ('host2', 88.8, 333.3, 1672201026000)"
-                .to_string(),
-        )),
-    });
-    let output = instance
-        .do_query(query, QueryContext::arc())
-        .await
-        .unwrap_err();
-
-    assert_eq!(output.to_string(), "Failed to execute sql, source: Failure during query execution, source: Table not found: greptime.public.demo");
-}
-
-async fn assert_test_table_found(instance: &Instance) {
-    let query = GrpcRequest::Query(QueryRequest {
-        query: Some(Query::Sql(
-            "INSERT INTO demo(host, cpu, memory, ts) VALUES \
-                        ('host1', 66.6, 1024, 1672201025000),\
-                        ('host2', 88.8, 333.3, 1672201026000)"
-                .to_string(),
-        )),
-    });
-    let output = instance.do_query(query, QueryContext::arc()).await.unwrap();
-
-    assert!(matches!(output, Output::AffectedRows(2)));
 }
 
 pub struct MockQueryEngine;

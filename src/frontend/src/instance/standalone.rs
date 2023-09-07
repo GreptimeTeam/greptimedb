@@ -35,12 +35,6 @@ use crate::error::{Error, InvokeDatanodeSnafu, InvokeRegionServerSnafu, Result};
 
 pub(crate) struct StandaloneGrpcQueryHandler(GrpcQueryHandlerRef<DatanodeError>);
 
-impl StandaloneGrpcQueryHandler {
-    pub(crate) fn arc(handler: GrpcQueryHandlerRef<DatanodeError>) -> Arc<Self> {
-        Arc::new(Self(handler))
-    }
-}
-
 #[async_trait]
 impl GrpcQueryHandler for StandaloneGrpcQueryHandler {
     type Error = Error;
@@ -58,6 +52,7 @@ pub(crate) struct StandaloneRegionRequestHandler {
 }
 
 impl StandaloneRegionRequestHandler {
+    #[allow(dead_code)]
     pub fn arc(region_server: RegionServer) -> Arc<Self> {
         Arc::new(Self { region_server })
     }

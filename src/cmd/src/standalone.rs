@@ -20,8 +20,8 @@ use common_config::WalConfig;
 use common_telemetry::info;
 use common_telemetry::logging::LoggingOptions;
 use datanode::datanode::{Datanode, DatanodeOptions, ProcedureConfig, StorageConfig};
-use datanode::instance::InstanceRef;
 use datanode::region_server::RegionServer;
+use datanode::Instance as InstanceRef;
 use frontend::frontend::FrontendOptions;
 use frontend::instance::{FrontendInstance, Instance as FeInstance};
 use frontend::service_config::{
