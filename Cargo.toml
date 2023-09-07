@@ -153,7 +153,7 @@ object-store = { path = "src/object-store" }
 partition = { path = "src/partition" }
 promql = { path = "src/promql" }
 query = { path = "src/query" }
-raft-engine = { git = "https://github.com/tikv/raft-engine.git", rev = "2dcaf5beeea3d5de9ec9c7133a2451d00f508f52" }
+raft-engine = { version = "0.4" }
 script = { path = "src/script" }
 servers = { path = "src/servers" }
 session = { path = "src/session" }

@@ -14,7 +14,6 @@
 
 use std::sync::Arc;
 
-use common_error::ext::BoxedError;
 use common_procedure::{watcher, ProcedureId, ProcedureManagerRef, ProcedureWithId};
 use common_telemetry::{error, info};
 use snafu::{OptionExt, ResultExt};
@@ -92,7 +91,6 @@ impl DdlManager {
                     CreateTableProcedure::from_json(json, context).map(|p| Box::new(p) as _)
                 }),
             )
-            .map_err(BoxedError::new)
             .context(RegisterProcedureLoaderSnafu {
                 type_name: CreateTableProcedure::TYPE_NAME,
             })?;
@@ -107,7 +105,6 @@ impl DdlManager {
                     DropTableProcedure::from_json(json, context).map(|p| Box::new(p) as _)
                 }),
             )
-            .map_err(BoxedError::new)
             .context(RegisterProcedureLoaderSnafu {
                 type_name: DropTableProcedure::TYPE_NAME,
             })?;
@@ -122,7 +119,6 @@ impl DdlManager {
                     AlterTableProcedure::from_json(json, context).map(|p| Box::new(p) as _)
                 }),
             )
-            .map_err(BoxedError::new)
             .context(RegisterProcedureLoaderSnafu {
                 type_name: AlterTableProcedure::TYPE_NAME,
             })
@@ -204,12 +200,10 @@ impl DdlManager {
             .procedure_manager
             .submit(procedure_with_id)
             .await
-            .map_err(BoxedError::new)
             .context(SubmitProcedureSnafu)?;
 
         watcher::wait(&mut watcher)
             .await
-            .map_err(BoxedError::new)
             .context(WaitProcedureSnafu)?;
 
         Ok(procedure_id)
