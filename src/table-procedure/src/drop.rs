@@ -163,8 +163,7 @@ impl DropTableProcedure {
                 table_name: self.data.request.table_name.clone(),
             };
             self.catalog_manager
-                .deregister_table(deregister_table_req)
-                .await
+                .deregister_local_table(deregister_table_req)
                 .context(AccessCatalogSnafu)?;
         }
 

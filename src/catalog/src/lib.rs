@@ -44,36 +44,40 @@ pub mod tables;
 pub trait CatalogManager: Send + Sync {
     fn as_any(&self) -> &dyn Any;
 
-    /// Starts a catalog manager.
-    async fn start(&self) -> Result<()>;
+    /// Register a local catalog.
+    ///
+    /// # Returns
+    ///
+    /// Whether the catalog is registered.
+    fn register_local_catalog(&self, name: &str) -> Result<bool>;
 
-    /// Registers a catalog to catalog manager, returns whether the catalog exist before.
-    async fn register_catalog(self: Arc<Self>, name: String) -> Result<bool>;
-
-    /// Register a schema with catalog name and schema name. Retuens whether the
-    /// schema registered.
+    /// Register a local schema.
+    ///
+    /// # Returns
+    ///
+    /// Whether the schema is registered.
     ///
     /// # Errors
     ///
     /// This method will/should fail if catalog not exist
-    async fn register_schema(&self, request: RegisterSchemaRequest) -> Result<bool>;
+    fn register_local_schema(&self, request: RegisterSchemaRequest) -> Result<bool>;
 
     /// Deregisters a database within given catalog/schema to catalog manager
-    async fn deregister_schema(&self, request: DeregisterSchemaRequest) -> Result<bool>;
+    fn deregister_local_schema(&self, request: DeregisterSchemaRequest) -> Result<bool>;
 
-    /// Registers a table within given catalog/schema to catalog manager,
-    /// returns whether the table registered.
+    /// Registers a local table.
+    ///
+    /// # Returns
+    ///
+    /// Whether the table is registered.
     ///
     /// # Errors
     ///
     /// This method will/should fail if catalog or schema not exist
-    async fn register_table(&self, request: RegisterTableRequest) -> Result<bool>;
+    fn register_local_table(&self, request: RegisterTableRequest) -> Result<bool>;
 
     /// Deregisters a table within given catalog/schema to catalog manager
-    async fn deregister_table(&self, request: DeregisterTableRequest) -> Result<()>;
-
-    /// Rename a table to [RenameTableRequest::new_table_name], returns whether the table is renamed.
-    async fn rename_table(&self, request: RenameTableRequest) -> Result<bool>;
+    fn deregister_local_table(&self, request: DeregisterTableRequest) -> Result<()>;
 
     async fn catalog_names(&self) -> Result<Vec<String>>;
 
@@ -160,7 +164,7 @@ pub struct RegisterSchemaRequest {
     pub schema: String,
 }
 
-pub(crate) async fn handle_system_table_request<'a, M: CatalogManager>(
+pub(crate) async fn handle_system_table_request<'a, M: CatalogManager + ?Sized>(
     manager: &'a M,
     engine: TableEngineRef,
     sys_table_requests: &'a mut Vec<RegisterSystemTableRequest>,
@@ -185,15 +189,13 @@ pub(crate) async fn handle_system_table_request<'a, M: CatalogManager>(
                         table_name,
                     ),
                 })?;
-            let _ = manager
-                .register_table(RegisterTableRequest {
-                    catalog: catalog_name.clone(),
-                    schema: schema_name.clone(),
-                    table_name: table_name.clone(),
-                    table_id,
-                    table: table.clone(),
-                })
-                .await?;
+            manager.register_local_table(RegisterTableRequest {
+                catalog: catalog_name.clone(),
+                schema: schema_name.clone(),
+                table_name: table_name.clone(),
+                table_id,
+                table: table.clone(),
+            })?;
             info!("Created and registered system table: {table_name}");
             table
         };

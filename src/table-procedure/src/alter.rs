@@ -15,7 +15,7 @@
 //! Procedure to alter a table.
 
 use async_trait::async_trait;
-use catalog::{CatalogManagerRef, RenameTableRequest};
+use catalog::CatalogManagerRef;
 use common_procedure::error::SubprocedureFailedSnafu;
 use common_procedure::{
     Context, Error, LockKey, Procedure, ProcedureId, ProcedureManager, ProcedureState,
@@ -50,7 +50,9 @@ impl Procedure for AlterTableProcedure {
         match self.data.state {
             AlterTableState::Prepare => self.on_prepare().await,
             AlterTableState::EngineAlterTable => self.on_engine_alter_table(ctx).await,
-            AlterTableState::RenameInCatalog => self.on_rename_in_catalog().await,
+            // No more need to "rename table in catalog", because the table metadata is now stored
+            // in kv backend, and updated by the unified DDL procedure soon. For ordinary tables,
+            // catalog manager will be a readonly proxy.
         }
     }
 
@@ -214,15 +216,7 @@ impl AlterTableProcedure {
                     self.data.request.table_name,
                     sub_id
                 );
-                // The sub procedure is done, we can execute next step.
-                if self.data.request.is_rename_table() {
-                    // We also need to rename the table in the catalog.
-                    self.data.state = AlterTableState::RenameInCatalog;
-                    Ok(Status::executing(true))
-                } else {
-                    // If this isn't a rename operation, we are done.
-                    Ok(Status::Done)
-                }
+                Ok(Status::Done)
             }
             ProcedureState::Failed { error } => {
                 // Return error if the subprocedure is failed.
@@ -231,28 +225,6 @@ impl AlterTableProcedure {
                 })?
             }
         }
-    }
-
-    async fn on_rename_in_catalog(&mut self) -> Result<Status> {
-        // Safety: table id is available in this state.
-        let table_id = self.data.table_id.unwrap();
-        if let AlterKind::RenameTable { new_table_name } = &self.data.request.alter_kind {
-            let rename_req = RenameTableRequest {
-                catalog: self.data.request.catalog_name.clone(),
-                schema: self.data.request.schema_name.clone(),
-                table_name: self.data.request.table_name.clone(),
-                new_table_name: new_table_name.clone(),
-                table_id,
-            };
-
-            let _ = self
-                .catalog_manager
-                .rename_table(rename_req)
-                .await
-                .map_err(Error::from_error_ext)?;
-        }
-
-        Ok(Status::Done)
     }
 }
 
@@ -263,8 +235,6 @@ enum AlterTableState {
     Prepare,
     /// Alter table in the table engine.
     EngineAlterTable,
-    /// Rename the table in the catalog (optional).
-    RenameInCatalog,
 }
 
 /// Serializable data of [AlterTableProcedure].
@@ -292,58 +262,5 @@ impl AlterTableData {
             schema: &self.request.schema_name,
             table: &self.request.table_name,
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-
-    use super::*;
-    use crate::test_util::TestEnv;
-
-    #[tokio::test]
-    async fn test_alter_table_procedure_rename() {
-        let env = TestEnv::new("rename");
-        let table_name = "test_old";
-        let table_id = env.create_table(table_name).await;
-
-        let new_table_name = "test_new";
-        let request = AlterTableRequest {
-            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
-            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
-            table_name: table_name.to_string(),
-            table_id,
-            alter_kind: AlterKind::RenameTable {
-                new_table_name: new_table_name.to_string(),
-            },
-            table_version: None,
-        };
-
-        let TestEnv {
-            dir: _dir,
-            table_engine,
-            procedure_manager,
-            catalog_manager,
-        } = env;
-        let procedure =
-            AlterTableProcedure::new(request, catalog_manager.clone(), table_engine.clone());
-        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
-
-        let mut watcher = procedure_manager.submit(procedure_with_id).await.unwrap();
-        watcher.changed().await.unwrap();
-
-        let table = catalog_manager
-            .table(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, new_table_name)
-            .await
-            .unwrap()
-            .unwrap();
-        let table_info = table.table_info();
-        assert_eq!(new_table_name, table_info.name);
-
-        assert!(!catalog_manager
-            .table_exist(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, table_name)
-            .await
-            .unwrap());
     }
 }
