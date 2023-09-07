@@ -18,7 +18,6 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
-use store_api::manifest::action::{ProtocolAction, ProtocolVersion};
 use store_api::manifest::ManifestVersion;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::RegionId;
@@ -30,8 +29,6 @@ use crate::wal::EntryId;
 /// Actions that can be applied to region manifest.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum RegionMetaAction {
-    /// Set the min/max supported protocol version
-    Protocol(ProtocolAction),
     /// Change region's metadata for request like ALTER
     Change(RegionChange),
     /// Edit region's state for changing options or file list.
@@ -176,11 +173,6 @@ impl RegionMetaActionList {
 }
 
 impl RegionMetaActionList {
-    fn set_protocol(&mut self, action: ProtocolAction) {
-        // The protocol action should be the first action in action list by convention.
-        self.actions.insert(0, RegionMetaAction::Protocol(action));
-    }
-
     /// Encode self into json in the form of string lines.
     pub fn encode(&self) -> Result<Vec<u8>> {
         let json = serde_json::to_string(&self).context(SerdeJsonSnafu)?;
@@ -192,22 +184,6 @@ impl RegionMetaActionList {
         let data = std::str::from_utf8(bytes).context(Utf8Snafu)?;
 
         serde_json::from_str(data).context(SerdeJsonSnafu)
-    }
-}
-
-pub struct RegionMetaActionIter {
-    // log_iter: ObjectStoreLogIterator,
-    reader_version: ProtocolVersion,
-    last_protocol: Option<ProtocolAction>,
-}
-
-impl RegionMetaActionIter {
-    pub fn last_protocol(&self) -> Option<ProtocolAction> {
-        self.last_protocol.clone()
-    }
-
-    async fn next_action(&mut self) -> Result<Option<(ManifestVersion, RegionMetaActionList)>> {
-        todo!()
     }
 }
 
@@ -262,19 +238,6 @@ mod tests {
 
         let region_remove = r#"{"region_id":42}"#;
         let _ = serde_json::from_str::<RegionRemove>(region_remove).unwrap();
-
-        let protocol_action = r#"{"min_reader_version":1,"min_writer_version":2}"#;
-        let _ = serde_json::from_str::<ProtocolAction>(protocol_action).unwrap();
-    }
-
-    fn mock_file_meta() -> FileMeta {
-        FileMeta {
-            region_id: 0.into(),
-            file_id: FileId::random(),
-            time_range: (0.into(), 10000.into()),
-            level: 0,
-            file_size: 1024,
-        }
     }
 
     #[test]

@@ -26,6 +26,20 @@ use crate::peer::Peer;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
+    #[snafu(display("Failed to get sequence: {}", err_msg))]
+    NextSequence { err_msg: String, location: Location },
+
+    #[snafu(display("Sequence out of range: {}, start={}, step={}", name, start, step))]
+    SequenceOutOfRange {
+        name: String,
+        start: u64,
+        step: u64,
+        location: Location,
+    },
+
+    #[snafu(display("Unexpected sequence value: {}", err_msg))]
+    UnexpectedSequenceValue { err_msg: String, location: Location },
+
     #[snafu(display("Table info not found: {}", table_name))]
     TableInfoNotFound {
         table_name: String,
@@ -192,12 +206,6 @@ pub enum Error {
     #[snafu(display("Get null from cache, key: {}", key))]
     CacheNotGet { key: String, location: Location },
 
-    #[snafu(display("{source}"))]
-    MetaSrv {
-        source: BoxedError,
-        location: Location,
-    },
-
     #[snafu(display("Etcd txn error: {err_msg}"))]
     EtcdTxnOpResponse { err_msg: String, location: Location },
 
@@ -220,23 +228,14 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("External error: {}", err_msg))]
-    External { location: Location, err_msg: String },
+    #[snafu(display("{}", source))]
+    External {
+        location: Location,
+        source: BoxedError,
+    },
 
     #[snafu(display("Invalid heartbeat response, location: {}", location))]
     InvalidHeartbeatResponse { location: Location },
-
-    #[snafu(display("{}", source))]
-    OperateRegion {
-        location: Location,
-        source: BoxedError,
-    },
-
-    #[snafu(display("{}", source))]
-    ExecuteDdl {
-        location: Location,
-        source: BoxedError,
-    },
 
     #[snafu(display("Failed to operate on datanode: {}, source: {}", peer, source))]
     OperateDatanode {
@@ -264,8 +263,10 @@ impl ErrorExt for Error {
             | InvalidTableMetadata { .. }
             | MoveRegion { .. }
             | Unexpected { .. }
-            | External { .. }
             | TableInfoNotFound { .. }
+            | NextSequence { .. }
+            | SequenceOutOfRange { .. }
+            | UnexpectedSequenceValue { .. }
             | InvalidHeartbeatResponse { .. } => StatusCode::Unexpected,
 
             SendMessage { .. }
@@ -292,12 +293,10 @@ impl ErrorExt for Error {
 
             SubmitProcedure { source, .. } | WaitProcedure { source, .. } => source.status_code(),
             RegisterProcedureLoader { source, .. } => source.status_code(),
+            External { source, .. } => source.status_code(),
             OperateDatanode { source, .. } => source.status_code(),
             Table { source, .. } => source.status_code(),
             RetryLater { source, .. } => source.status_code(),
-            OperateRegion { source, .. } => source.status_code(),
-            ExecuteDdl { source, .. } => source.status_code(),
-            MetaSrv { source, .. } => source.status_code(),
             InvalidCatalogValue { source, .. } => source.status_code(),
             ConvertAlterTableRequest { source, .. } => source.status_code(),
         }

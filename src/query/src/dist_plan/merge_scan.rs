@@ -17,14 +17,11 @@ use std::sync::Arc;
 
 use arrow_schema::{Schema as ArrowSchema, SchemaRef as ArrowSchemaRef};
 use async_stream::stream;
-use client::client_manager::DatanodeClients;
-use client::Database;
+use client::region_handler::RegionRequestHandlerRef;
 use common_base::bytes::Bytes;
 use common_error::ext::BoxedError;
-use common_meta::peer::Peer;
 use common_meta::table_name::TableName;
 use common_query::physical_plan::TaskContext;
-use common_query::Output;
 use common_recordbatch::adapter::DfRecordBatchStreamAdapter;
 use common_recordbatch::error::ExternalSnafu;
 use common_recordbatch::{
@@ -39,9 +36,11 @@ use datafusion_expr::{Extension, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion_physical_expr::PhysicalSortExpr;
 use datatypes::schema::{Schema, SchemaRef};
 use futures_util::StreamExt;
+use greptime_proto::v1::region::QueryRequest;
 use snafu::ResultExt;
+use store_api::storage::RegionId;
 
-use crate::error::{ConvertSchemaSnafu, RemoteRequestSnafu, UnexpectedOutputKindSnafu};
+use crate::error::ConvertSchemaSnafu;
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone)]
 pub struct MergeScanLogicalPlan {
@@ -108,48 +107,52 @@ impl MergeScanLogicalPlan {
     }
 }
 
-#[derive(Debug)]
 pub struct MergeScanExec {
     table: TableName,
-    peers: Vec<Peer>,
+    regions: Vec<RegionId>,
     substrait_plan: Bytes,
     schema: SchemaRef,
     arrow_schema: ArrowSchemaRef,
-    clients: Arc<DatanodeClients>,
+    request_handler: RegionRequestHandlerRef,
     metric: ExecutionPlanMetricsSet,
+}
+
+impl std::fmt::Debug for MergeScanExec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MergeScanExec")
+            .field("table", &self.table)
+            .field("regions", &self.regions)
+            .field("schema", &self.schema)
+            .finish()
+    }
 }
 
 impl MergeScanExec {
     pub fn new(
         table: TableName,
-        peers: Vec<Peer>,
+        regions: Vec<RegionId>,
         substrait_plan: Bytes,
         arrow_schema: &ArrowSchema,
-        clients: Arc<DatanodeClients>,
+        request_handler: RegionRequestHandlerRef,
     ) -> Result<Self> {
         let arrow_schema_without_metadata = Self::arrow_schema_without_metadata(arrow_schema);
         let schema_without_metadata =
             Self::arrow_schema_to_schema(arrow_schema_without_metadata.clone())?;
         Ok(Self {
             table,
-            peers,
+            regions,
             substrait_plan,
             schema: schema_without_metadata,
             arrow_schema: arrow_schema_without_metadata,
-            clients,
+            request_handler,
             metric: ExecutionPlanMetricsSet::new(),
         })
     }
 
-    pub fn to_stream(&self, context: Arc<TaskContext>) -> Result<SendableRecordBatchStream> {
+    pub fn to_stream(&self, _context: Arc<TaskContext>) -> Result<SendableRecordBatchStream> {
         let substrait_plan = self.substrait_plan.to_vec();
-        let peers = self.peers.clone();
-        let clients = self.clients.clone();
-        let table = self.table.clone();
-        let trace_id = context
-            .task_id()
-            .and_then(|id| id.parse().ok())
-            .unwrap_or_default();
+        let regions = self.regions.clone();
+        let request_handler = self.request_handler.clone();
         let metric = MergeScanMetric::new(&self.metric);
 
         let stream = Box::pin(stream!({
@@ -157,26 +160,16 @@ impl MergeScanExec {
             let mut ready_timer = metric.ready_time().timer();
             let mut first_consume_timer = Some(metric.first_consume_time().timer());
 
-            for peer in peers {
-                let client = clients.get_client(&peer).await;
-                let database = Database::new(&table.catalog_name, &table.schema_name, client);
-                let output: Output = database
-                    .logical_plan(substrait_plan.clone(), trace_id)
+            for region_id in regions {
+                let request = QueryRequest {
+                    region_id: region_id.into(),
+                    plan: substrait_plan.clone(),
+                };
+                let mut stream = request_handler
+                    .do_get(request)
                     .await
-                    .context(RemoteRequestSnafu)
                     .map_err(BoxedError::new)
                     .context(ExternalSnafu)?;
-
-                let Output::Stream(mut stream) = output else {
-                    yield UnexpectedOutputKindSnafu {
-                        expected: "Stream",
-                        got: "RecordBatches or AffectedRows",
-                    }
-                    .fail()
-                    .map_err(BoxedError::new)
-                    .context(ExternalSnafu);
-                    return;
-                };
 
                 ready_timer.stop();
 
@@ -279,8 +272,8 @@ impl ExecutionPlan for MergeScanExec {
 impl DisplayAs for MergeScanExec {
     fn fmt_as(&self, _t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "MergeScanExec: peers=[")?;
-        for peer in self.peers.iter() {
-            write!(f, "{}, ", peer)?;
+        for region_id in self.regions.iter() {
+            write!(f, "{}, ", region_id)?;
         }
         write!(f, "]")
     }

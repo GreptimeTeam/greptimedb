@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub(crate) mod req_convert;
-
 use api::v1::alter_expr::Kind;
 use api::v1::ddl_request::Expr as DdlExpr;
 use api::v1::greptime_request::Request;
@@ -21,7 +19,8 @@ use api::v1::region::region_request;
 use api::v1::{
     AlterExpr, ColumnSchema, DdlRequest, InsertRequests, RowInsertRequest, RowInsertRequests,
 };
-use catalog::CatalogManagerRef;
+use catalog::CatalogManager;
+use client::region_handler::RegionRequestHandler;
 use common_catalog::consts::default_engine;
 use common_grpc_expr::util::{extract_new_columns, ColumnExpr};
 use common_query::Output;
@@ -33,27 +32,26 @@ use snafu::prelude::*;
 use table::engine::TableReference;
 use table::TableRef;
 
-use self::req_convert::{ColumnToRow, RowToRegion};
 use crate::error::{
-    CatalogSnafu, EmptyDataSnafu, Error, FindNewColumnsOnInsertionSnafu, InvalidInsertRequestSnafu,
-    Result,
+    CatalogSnafu, Error, FindNewColumnsOnInsertionSnafu, InvalidInsertRequestSnafu,
+    RequestDatanodeSnafu, Result,
 };
 use crate::expr_factory::CreateExprFactory;
-use crate::instance::region_handler::RegionRequestHandlerRef;
+use crate::req_convert::insert::{ColumnToRow, RowToRegion};
 
 pub(crate) struct Inserter<'a> {
-    catalog_manager: &'a CatalogManagerRef,
+    catalog_manager: &'a dyn CatalogManager,
     create_expr_factory: &'a CreateExprFactory,
     grpc_query_handler: &'a GrpcQueryHandlerRef<Error>,
-    region_request_handler: &'a RegionRequestHandlerRef,
+    region_request_handler: &'a dyn RegionRequestHandler,
 }
 
 impl<'a> Inserter<'a> {
     pub fn new(
-        catalog_manager: &'a CatalogManagerRef,
+        catalog_manager: &'a dyn CatalogManager,
         create_expr_factory: &'a CreateExprFactory,
         grpc_query_handler: &'a GrpcQueryHandlerRef<Error>,
-        region_request_handler: &'a RegionRequestHandlerRef,
+        region_request_handler: &'a dyn RegionRequestHandler,
     ) -> Self {
         Self {
             catalog_manager,
@@ -74,28 +72,31 @@ impl<'a> Inserter<'a> {
 
     pub async fn handle_row_inserts(
         &self,
-        requests: RowInsertRequests,
+        mut requests: RowInsertRequests,
         ctx: QueryContextRef,
     ) -> Result<Output> {
-        requests.inserts.iter().try_for_each(|req| {
-            let non_empty = req.rows.as_ref().map(|r| !r.rows.is_empty());
-            let non_empty = non_empty.unwrap_or_default();
-            non_empty.then_some(()).with_context(|| EmptyDataSnafu {
-                msg: format!("insert to table: {:?}", &req.table_name),
-            })
-        })?;
+        // remove empty requests
+        requests.inserts.retain(|req| {
+            req.rows
+                .as_ref()
+                .map(|r| !r.rows.is_empty())
+                .unwrap_or_default()
+        });
+        validate_row_count_match(&requests)?;
 
         self.create_or_alter_tables_on_demand(&requests, &ctx)
             .await?;
-        let region_request = RowToRegion::new(self.catalog_manager.as_ref(), &ctx)
+        let region_request = RowToRegion::new(self.catalog_manager, &ctx)
             .convert(requests)
             .await?;
         let region_request = region_request::Body::Inserts(region_request);
-        let response = self
+
+        let affected_rows = self
             .region_request_handler
             .handle(region_request, ctx)
-            .await?;
-        Ok(Output::AffectedRows(response.affected_rows as _))
+            .await
+            .context(RequestDatanodeSnafu)?;
+        Ok(Output::AffectedRows(affected_rows as _))
     }
 }
 
@@ -202,6 +203,20 @@ impl<'a> Inserter<'a> {
 
         Ok(())
     }
+}
+
+fn validate_row_count_match(requests: &RowInsertRequests) -> Result<()> {
+    for request in &requests.inserts {
+        let rows = request.rows.as_ref().unwrap();
+        let column_count = rows.schema.len();
+        ensure!(
+            rows.rows.iter().all(|r| r.values.len() == column_count),
+            InvalidInsertRequestSnafu {
+                reason: "row count mismatch"
+            }
+        )
+    }
+    Ok(())
 }
 
 fn validate_request_with_table(req: &RowInsertRequest, table: &TableRef) -> Result<()> {

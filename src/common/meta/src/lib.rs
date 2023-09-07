@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #![feature(btree_extract_if)]
+#![feature(async_closure)]
 
 pub mod cache_invalidator;
 pub mod datanode_manager;
@@ -31,6 +32,8 @@ pub mod metrics;
 pub mod peer;
 pub mod range_stream;
 pub mod rpc;
+pub mod sequence;
+pub mod state_store;
 pub mod table_name;
 pub mod util;
 

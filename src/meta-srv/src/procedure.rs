@@ -13,7 +13,6 @@
 // limitations under the License.
 
 pub mod region_failover;
-pub(crate) mod state_store;
 #[cfg(test)]
 mod tests;
 mod utils;

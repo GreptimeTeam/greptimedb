@@ -45,6 +45,9 @@ pub trait WriteBufferManager: Send + Sync + std::fmt::Debug {
     /// Returns whether to trigger the engine.
     fn should_flush_engine(&self) -> bool;
 
+    /// Returns whether to stall write requests.
+    fn should_stall(&self) -> bool;
+
     /// Reserves `mem` bytes.
     fn reserve_mem(&self, mem: usize);
 
@@ -130,6 +133,10 @@ impl WriteBufferManager for WriteBufferManagerImpl {
         }
 
         false
+    }
+
+    fn should_stall(&self) -> bool {
+        self.memory_usage() >= self.global_write_buffer_size
     }
 
     fn reserve_mem(&self, mem: usize) {
@@ -553,6 +560,7 @@ mod tests {
         let manager = WriteBufferManagerImpl::new(1000);
         manager.reserve_mem(500);
         assert!(!manager.should_flush_engine());
+        assert!(!manager.should_stall());
 
         // More than mutable limit.
         manager.reserve_mem(400);
@@ -575,6 +583,7 @@ mod tests {
         // Mutable limit is 800.
         let manager = WriteBufferManagerImpl::new(1000);
         manager.reserve_mem(1100);
+        assert!(manager.should_stall());
         // Global usage is still 1100.
         manager.schedule_free_mem(200);
         assert!(manager.should_flush_engine());

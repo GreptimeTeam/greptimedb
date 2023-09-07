@@ -238,9 +238,6 @@ pub enum Error {
     #[snafu(display("Illegal access to catalog: {} and schema: {}", catalog, schema))]
     QueryAccessDenied { catalog: String, schema: String },
 
-    #[snafu(display("Invalid system table definition: {err_msg}"))]
-    InvalidSystemTableDef { err_msg: String, location: Location },
-
     #[snafu(display("{}: {}", msg, source))]
     Datafusion {
         msg: String,
@@ -275,7 +272,6 @@ impl ErrorExt for Error {
             | Error::IllegalManagerState { .. }
             | Error::CatalogNotFound { .. }
             | Error::InvalidEntryType { .. }
-            | Error::InvalidSystemTableDef { .. }
             | Error::ParallelOpenTable { .. } => StatusCode::Unexpected,
 
             Error::SystemCatalog { .. }

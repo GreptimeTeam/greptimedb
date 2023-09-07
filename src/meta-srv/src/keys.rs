@@ -25,7 +25,6 @@ use crate::error::Result;
 use crate::handler::node_stat::Stat;
 
 pub(crate) const DN_LEASE_PREFIX: &str = "__meta_dnlease";
-pub(crate) const SEQ_PREFIX: &str = "__meta_seq";
 pub(crate) const INACTIVE_REGION_PREFIX: &str = "__meta_inactive_region";
 
 pub const DN_STAT_PREFIX: &str = "__meta_dnstat";

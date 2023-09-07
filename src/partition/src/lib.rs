@@ -21,7 +21,6 @@ pub mod metrics;
 pub mod partition;
 pub mod range;
 pub mod route;
-pub mod row_splitter;
 pub mod splitter;
 
 pub use crate::partition::{PartitionRule, PartitionRuleRef};

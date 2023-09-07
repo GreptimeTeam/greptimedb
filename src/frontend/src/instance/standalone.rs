@@ -15,9 +15,15 @@
 use std::sync::Arc;
 
 use api::v1::greptime_request::Request;
-use api::v1::region::{region_request, RegionResponse};
+use api::v1::region::{region_request, QueryRequest};
 use async_trait::async_trait;
+use client::error::{HandleRequestSnafu, Result as ClientResult};
+use client::region::check_response_header;
+use client::region_handler::RegionRequestHandler;
+use common_error::ext::BoxedError;
+use common_meta::datanode_manager::AffectedRows;
 use common_query::Output;
+use common_recordbatch::SendableRecordBatchStream;
 use datanode::error::Error as DatanodeError;
 use datanode::region_server::RegionServer;
 use servers::grpc::region_server::RegionServerHandler;
@@ -25,16 +31,9 @@ use servers::query_handler::grpc::{GrpcQueryHandler, GrpcQueryHandlerRef};
 use session::context::QueryContextRef;
 use snafu::ResultExt;
 
-use super::region_handler::RegionRequestHandler;
 use crate::error::{Error, InvokeDatanodeSnafu, InvokeRegionServerSnafu, Result};
 
 pub(crate) struct StandaloneGrpcQueryHandler(GrpcQueryHandlerRef<DatanodeError>);
-
-impl StandaloneGrpcQueryHandler {
-    pub(crate) fn arc(handler: GrpcQueryHandlerRef<DatanodeError>) -> Arc<Self> {
-        Arc::new(Self(handler))
-    }
-}
 
 #[async_trait]
 impl GrpcQueryHandler for StandaloneGrpcQueryHandler {
@@ -53,6 +52,7 @@ pub(crate) struct StandaloneRegionRequestHandler {
 }
 
 impl StandaloneRegionRequestHandler {
+    #[allow(dead_code)]
     pub fn arc(region_server: RegionServer) -> Arc<Self> {
         Arc::new(Self { region_server })
     }
@@ -64,10 +64,24 @@ impl RegionRequestHandler for StandaloneRegionRequestHandler {
         &self,
         request: region_request::Body,
         _ctx: QueryContextRef,
-    ) -> Result<RegionResponse> {
-        self.region_server
+    ) -> ClientResult<AffectedRows> {
+        let response = self
+            .region_server
             .handle(request)
             .await
             .context(InvokeRegionServerSnafu)
+            .map_err(BoxedError::new)
+            .context(HandleRequestSnafu)?;
+
+        check_response_header(response.header)?;
+        Ok(response.affected_rows)
+    }
+
+    async fn do_get(&self, request: QueryRequest) -> ClientResult<SendableRecordBatchStream> {
+        self.region_server
+            .handle_read(request)
+            .await
+            .map_err(BoxedError::new)
+            .context(HandleRequestSnafu)
     }
 }

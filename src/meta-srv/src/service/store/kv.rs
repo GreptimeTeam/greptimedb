@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
-use common_meta::error::MetaSrvSnafu;
+use common_meta::error::ExternalSnafu;
 use common_meta::kv_backend::txn::{Txn, TxnResponse};
 use common_meta::kv_backend::{KvBackend, KvBackendRef, TxnService};
 use common_meta::rpc::store::{
@@ -55,7 +55,7 @@ impl TxnService for KvBackendAdapter {
             .txn(txn)
             .await
             .map_err(BoxedError::new)
-            .context(MetaSrvSnafu)
+            .context(ExternalSnafu)
     }
 }
 
@@ -74,7 +74,7 @@ impl KvBackend for KvBackendAdapter {
             .range(req)
             .await
             .map_err(BoxedError::new)
-            .context(MetaSrvSnafu)
+            .context(ExternalSnafu)
     }
 
     async fn put(&self, req: PutRequest) -> Result<PutResponse, Self::Error> {
@@ -82,7 +82,7 @@ impl KvBackend for KvBackendAdapter {
             .put(req)
             .await
             .map_err(BoxedError::new)
-            .context(MetaSrvSnafu)
+            .context(ExternalSnafu)
     }
 
     async fn batch_put(&self, req: BatchPutRequest) -> Result<BatchPutResponse, Self::Error> {
@@ -90,7 +90,7 @@ impl KvBackend for KvBackendAdapter {
             .batch_put(req)
             .await
             .map_err(BoxedError::new)
-            .context(MetaSrvSnafu)
+            .context(ExternalSnafu)
     }
 
     async fn batch_get(&self, req: BatchGetRequest) -> Result<BatchGetResponse, Self::Error> {
@@ -98,7 +98,7 @@ impl KvBackend for KvBackendAdapter {
             .batch_get(req)
             .await
             .map_err(BoxedError::new)
-            .context(MetaSrvSnafu)
+            .context(ExternalSnafu)
     }
 
     async fn compare_and_put(
@@ -109,7 +109,7 @@ impl KvBackend for KvBackendAdapter {
             .compare_and_put(req)
             .await
             .map_err(BoxedError::new)
-            .context(MetaSrvSnafu)
+            .context(ExternalSnafu)
     }
 
     async fn delete_range(
@@ -120,7 +120,7 @@ impl KvBackend for KvBackendAdapter {
             .delete_range(req)
             .await
             .map_err(BoxedError::new)
-            .context(MetaSrvSnafu)
+            .context(ExternalSnafu)
     }
 
     async fn batch_delete(
@@ -131,7 +131,7 @@ impl KvBackend for KvBackendAdapter {
             .batch_delete(req)
             .await
             .map_err(BoxedError::new)
-            .context(MetaSrvSnafu)
+            .context(ExternalSnafu)
     }
 
     async fn move_value(&self, req: MoveValueRequest) -> Result<MoveValueResponse, Self::Error> {
@@ -139,6 +139,6 @@ impl KvBackend for KvBackendAdapter {
             .move_value(req)
             .await
             .map_err(BoxedError::new)
-            .context(MetaSrvSnafu)
+            .context(ExternalSnafu)
     }
 }

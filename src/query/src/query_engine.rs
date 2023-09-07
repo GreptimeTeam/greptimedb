@@ -21,14 +21,13 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use catalog::CatalogManagerRef;
-use client::client_manager::DatanodeClients;
+use client::region_handler::RegionRequestHandlerRef;
 use common_base::Plugins;
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_function::scalars::{FunctionRef, FUNCTION_REGISTRY};
 use common_query::prelude::ScalarUdf;
 use common_query::Output;
 use datatypes::schema::Schema;
-use partition::manager::PartitionRuleManager;
 use session::context::QueryContextRef;
 use sql::statements::statement::Statement;
 use table::TableRef;
@@ -86,28 +85,29 @@ pub struct QueryEngineFactory {
 }
 
 impl QueryEngineFactory {
-    pub fn new(catalog_manager: CatalogManagerRef, with_dist_planner: bool) -> Self {
+    pub fn new(
+        catalog_manager: CatalogManagerRef,
+        request_handler: Option<RegionRequestHandlerRef>,
+        with_dist_planner: bool,
+    ) -> Self {
         Self::new_with_plugins(
             catalog_manager,
+            request_handler,
             with_dist_planner,
-            None,
-            None,
             Default::default(),
         )
     }
 
     pub fn new_with_plugins(
         catalog_manager: CatalogManagerRef,
+        request_handler: Option<RegionRequestHandlerRef>,
         with_dist_planner: bool,
-        partition_manager: Option<Arc<PartitionRuleManager>>,
-        clients: Option<Arc<DatanodeClients>>,
         plugins: Arc<Plugins>,
     ) -> Self {
         let state = Arc::new(QueryEngineState::new(
             catalog_manager,
+            request_handler,
             with_dist_planner,
-            partition_manager,
-            clients,
             plugins.clone(),
         ));
         let query_engine = Arc::new(DatafusionQueryEngine::new(state, plugins));
@@ -139,7 +139,7 @@ mod tests {
     #[test]
     fn test_query_engine_factory() {
         let catalog_list = catalog::local::new_memory_catalog_manager().unwrap();
-        let factory = QueryEngineFactory::new(catalog_list, false);
+        let factory = QueryEngineFactory::new(catalog_list, None, false);
 
         let engine = factory.query_engine();
 

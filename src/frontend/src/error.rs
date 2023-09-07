@@ -63,6 +63,12 @@ pub enum Error {
         source: common_meta::error::Error,
     },
 
+    #[snafu(display("Failed to delete data, source: {}", source))]
+    RequestDeletes {
+        #[snafu(backtrace)]
+        source: common_meta::error::Error,
+    },
+
     #[snafu(display("Runtime resource error, source: {}", source))]
     RuntimeResource {
         #[snafu(backtrace)]
@@ -146,7 +152,13 @@ pub enum Error {
     #[snafu(display("Invalid InsertRequest, reason: {}", reason))]
     InvalidInsertRequest { reason: String, location: Location },
 
-    #[snafu(display("Table not found: {}", table_name))]
+    #[snafu(display("Invalid DeleteRequest, reason: {}", reason))]
+    InvalidDeleteRequest { reason: String, location: Location },
+
+    #[snafu(display("Invalid system table definition: {err_msg}, at {location}"))]
+    InvalidSystemTableDef { err_msg: String, location: Location },
+
+    #[snafu(display("Table not found: '{}', at {location}", table_name))]
     TableNotFound {
         table_name: String,
         location: Location,
@@ -663,6 +675,7 @@ impl ErrorExt for Error {
             Error::ParseAddr { .. }
             | Error::InvalidSql { .. }
             | Error::InvalidInsertRequest { .. }
+            | Error::InvalidDeleteRequest { .. }
             | Error::IllegalPrimaryKeysDef { .. }
             | Error::CatalogNotFound { .. }
             | Error::SchemaNotFound { .. }
@@ -711,6 +724,7 @@ impl ErrorExt for Error {
 
             Error::RequestDatanode { source } => source.status_code(),
             Error::RequestInserts { source } => source.status_code(),
+            Error::RequestDeletes { source } => source.status_code(),
 
             Error::ColumnDataType { source } | Error::InvalidColumnDef { source, .. } => {
                 source.status_code()
@@ -728,6 +742,7 @@ impl ErrorExt for Error {
 
             Error::IncompleteGrpcResult { .. }
             | Error::ContextValueNotFound { .. }
+            | Error::InvalidSystemTableDef { .. }
             | Error::EncodeJson { .. } => StatusCode::Unexpected,
 
             Error::TableNotFound { .. } => StatusCode::TableNotFound,

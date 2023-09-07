@@ -21,28 +21,32 @@ use std::sync::Arc;
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::ddl_request::Expr as DdlExpr;
 use api::v1::greptime_request::Request;
-use api::v1::region::{region_request, RegionResponse};
-use api::v1::{
-    column_def, AlterExpr, CreateDatabaseExpr, CreateTableExpr, DeleteRequests, TruncateTableExpr,
-};
+use api::v1::region::{region_request, QueryRequest};
+use api::v1::{column_def, AlterExpr, CreateDatabaseExpr, CreateTableExpr, TruncateTableExpr};
+use arrow_flight::Ticket;
 use async_trait::async_trait;
 use catalog::{CatalogManager, DeregisterTableRequest, RegisterTableRequest};
 use chrono::DateTime;
+use client::error::{HandleRequestSnafu, Result as ClientResult};
+use client::region::RegionRequester;
+use client::region_handler::RegionRequestHandler;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::format_full_table_name;
 use common_error::ext::BoxedError;
+use common_meta::datanode_manager::AffectedRows;
 use common_meta::ddl::{DdlExecutorRef, ExecutorContext};
 use common_meta::key::schema_name::{SchemaNameKey, SchemaNameValue};
 use common_meta::rpc::ddl::{DdlTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse};
 use common_meta::rpc::router::{Partition, Partition as MetaPartition};
 use common_meta::table_name::TableName;
 use common_query::Output;
+use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::info;
-use datanode::instance::sql::table_idents_to_full_name;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::RawSchema;
 use partition::manager::PartitionInfo;
 use partition::partition::{PartitionBound, PartitionDef};
+use prost::Message;
 use query::error::QueryExecutionSnafu;
 use query::query_engine::SqlStatementExecutor;
 use servers::query_handler::grpc::GrpcQueryHandler;
@@ -52,23 +56,23 @@ use sql::ast::{Ident, Value as SqlValue};
 use sql::statements::create::{PartitionEntry, Partitions};
 use sql::statements::statement::Statement;
 use sql::statements::{self, sql_value_to_value};
+use store_api::storage::RegionId;
 use table::metadata::{RawTableInfo, RawTableMeta, TableId, TableIdent, TableInfo, TableType};
 use table::requests::{AlterTableRequest, TableOptions};
 use table::TableRef;
 
-use super::region_handler::RegionRequestHandler;
 use crate::catalog::FrontendCatalogManager;
 use crate::error::{
     self, AlterExprToRequestSnafu, CatalogSnafu, ColumnDataTypeSnafu, ColumnNotFoundSnafu,
-    DeserializePartitionSnafu, NotSupportedSnafu, ParseSqlSnafu, Result, SchemaExistsSnafu,
-    SchemaNotFoundSnafu, TableAlreadyExistSnafu, TableMetadataManagerSnafu, TableNotFoundSnafu,
+    DeserializePartitionSnafu, FindDatanodeSnafu, FindTableRouteSnafu, NotSupportedSnafu,
+    ParseSqlSnafu, RequestDatanodeSnafu, Result, SchemaExistsSnafu, SchemaNotFoundSnafu,
+    TableAlreadyExistSnafu, TableMetadataManagerSnafu, TableNotFoundSnafu,
     UnrecognizedTableOptionSnafu,
 };
 use crate::expr_factory;
-use crate::inserter::req_convert::StatementToRegion;
 use crate::instance::distributed::deleter::DistDeleter;
 use crate::instance::distributed::inserter::DistInserter;
-use crate::table::DistTable;
+use crate::table::{table_idents_to_full_name, DistTable};
 
 const MAX_VALUE: &str = "MAXVALUE";
 
@@ -269,14 +273,6 @@ impl DistInstance {
                         .context(error::ExternalSnafu)?;
                 let table_name = TableName::new(catalog, schema, table);
                 self.drop_table(table_name).await
-            }
-            Statement::Insert(insert) => {
-                let request = StatementToRegion::new(self.catalog_manager.as_ref(), &query_ctx)
-                    .convert(&insert)
-                    .await?;
-                let inserter = DistInserter::new(&self.catalog_manager);
-                let affected_rows = inserter.insert(request).await?;
-                Ok(Output::AffectedRows(affected_rows as usize))
             }
             Statement::ShowCreateTable(show) => {
                 let (catalog, schema, table) =
@@ -508,20 +504,6 @@ impl DistInstance {
             .context(error::ExecuteDdlSnafu)
     }
 
-    async fn handle_dist_delete(
-        &self,
-        request: DeleteRequests,
-        ctx: QueryContextRef,
-    ) -> Result<Output> {
-        let deleter = DistDeleter::new(
-            ctx.current_catalog().to_string(),
-            ctx.current_schema().to_string(),
-            self.catalog_manager(),
-        );
-        let affected_rows = deleter.grpc_delete(request).await?;
-        Ok(Output::AffectedRows(affected_rows))
-    }
-
     pub fn catalog_manager(&self) -> Arc<FrontendCatalogManager> {
         self.catalog_manager.clone()
     }
@@ -548,6 +530,7 @@ impl GrpcQueryHandler for DistInstance {
     async fn do_query(&self, request: Request, ctx: QueryContextRef) -> Result<Output> {
         match request {
             Request::Inserts(_) => NotSupportedSnafu { feat: "inserts" }.fail(),
+            Request::Deletes(_) => NotSupportedSnafu { feat: "deletes" }.fail(),
             Request::RowInserts(_) => NotSupportedSnafu {
                 feat: "row inserts",
             }
@@ -556,7 +539,6 @@ impl GrpcQueryHandler for DistInstance {
                 feat: "row deletes",
             }
             .fail(),
-            Request::Deletes(requests) => self.handle_dist_delete(requests, ctx).await,
             Request::Query(_) => {
                 unreachable!("Query should have been handled directly in Frontend Instance!")
             }
@@ -603,21 +585,37 @@ impl RegionRequestHandler for DistRegionRequestHandler {
         &self,
         request: region_request::Body,
         ctx: QueryContextRef,
-    ) -> Result<RegionResponse> {
+    ) -> ClientResult<AffectedRows> {
+        self.handle_inner(request, ctx)
+            .await
+            .map_err(BoxedError::new)
+            .context(HandleRequestSnafu)
+    }
+
+    async fn do_get(&self, request: QueryRequest) -> ClientResult<SendableRecordBatchStream> {
+        self.do_get_inner(request)
+            .await
+            .map_err(BoxedError::new)
+            .context(HandleRequestSnafu)
+    }
+}
+
+impl DistRegionRequestHandler {
+    async fn handle_inner(
+        &self,
+        request: region_request::Body,
+        ctx: QueryContextRef,
+    ) -> Result<AffectedRows> {
         match request {
             region_request::Body::Inserts(inserts) => {
                 let inserter =
                     DistInserter::new(&self.catalog_manager).with_trace_id(ctx.trace_id());
-                let affected_rows = inserter.insert(inserts).await? as _;
-                Ok(RegionResponse {
-                    header: Some(Default::default()),
-                    affected_rows,
-                })
+                inserter.insert(inserts).await
             }
-            region_request::Body::Deletes(_) => NotSupportedSnafu {
-                feat: "region deletes",
+            region_request::Body::Deletes(deletes) => {
+                let deleter = DistDeleter::new(&self.catalog_manager).with_trace_id(ctx.trace_id());
+                deleter.delete(deletes).await
             }
-            .fail(),
             region_request::Body::Create(_) => NotSupportedSnafu {
                 feat: "region create",
             }
@@ -647,6 +645,38 @@ impl RegionRequestHandler for DistRegionRequestHandler {
             }
             .fail(),
         }
+    }
+
+    async fn do_get_inner(&self, request: QueryRequest) -> Result<SendableRecordBatchStream> {
+        let region_id = RegionId::from_u64(request.region_id);
+
+        let table_route = self
+            .catalog_manager
+            .partition_manager()
+            .find_table_route(region_id.table_id())
+            .await
+            .context(FindTableRouteSnafu {
+                table_id: region_id.table_id(),
+            })?;
+        let peer = table_route
+            .find_region_leader(region_id.region_number())
+            .context(FindDatanodeSnafu {
+                region: region_id.region_number(),
+            })?;
+        let client = self
+            .catalog_manager
+            .datanode_clients()
+            .get_client(peer)
+            .await;
+
+        let ticket = Ticket {
+            ticket: request.encode_to_vec().into(),
+        };
+        let region_requester = RegionRequester::new(client);
+        region_requester
+            .do_get(ticket)
+            .await
+            .context(RequestDatanodeSnafu)
     }
 }
 

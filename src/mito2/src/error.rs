@@ -186,7 +186,12 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Invalid request to region {}, reason: {}", region_id, reason))]
+    #[snafu(display(
+        "Invalid request to region {}, location: {}, reason: {}",
+        region_id,
+        location,
+        reason
+    ))]
     InvalidRequest {
         region_id: RegionId,
         reason: String,
@@ -421,6 +426,16 @@ pub enum Error {
     },
 
     #[snafu(display(
+        "Engine write buffer is full, rejecting write requests of region {}, location: {}",
+        region_id,
+        location
+    ))]
+    RejectWrite {
+        region_id: RegionId,
+        location: Location,
+    },
+
+    #[snafu(display(
         "Failed to compat readers for region {}, reason: {}, location: {}",
         region_id,
         reason,
@@ -496,6 +511,7 @@ impl ErrorExt for Error {
             FlushRegion { source, .. } => source.status_code(),
             RegionDropped { .. } => StatusCode::Cancelled,
             RegionClosed { .. } => StatusCode::Cancelled,
+            RejectWrite { .. } => StatusCode::StorageUnavailable,
             CompatReader { .. } => StatusCode::Unexpected,
         }
     }

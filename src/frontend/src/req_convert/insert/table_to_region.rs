@@ -12,20 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
-
 use api::v1::region::{
     InsertRequest as RegionInsertRequest, InsertRequests as RegionInsertRequests,
 };
-use api::v1::{ColumnSchema, Rows};
-use datatypes::vectors::VectorRef;
-use snafu::prelude::*;
+use api::v1::Rows;
 use store_api::storage::RegionId;
 use table::metadata::TableInfo;
 use table::requests::InsertRequest as TableInsertRequest;
 
-use super::{data_type, semantic_type};
-use crate::error::{InvalidInsertRequestSnafu, Result};
+use crate::error::Result;
+use crate::req_convert::common::{column_schema, row_count};
 
 pub struct TableToRegion<'a> {
     table_info: &'a TableInfo,
@@ -50,41 +46,9 @@ impl<'a> TableToRegion<'a> {
     }
 }
 
-fn row_count(columns: &HashMap<String, VectorRef>) -> Result<usize> {
-    let mut columns_iter = columns.values();
-
-    let len = columns_iter
-        .next()
-        .map(|column| column.len())
-        .unwrap_or_default();
-    ensure!(
-        columns_iter.all(|column| column.len() == len),
-        InvalidInsertRequestSnafu {
-            reason: "The row count of columns is not the same."
-        }
-    );
-
-    Ok(len)
-}
-
-fn column_schema(
-    table_info: &TableInfo,
-    columns: &HashMap<String, VectorRef>,
-) -> Result<Vec<ColumnSchema>> {
-    columns
-        .iter()
-        .map(|(column_name, vector)| {
-            Ok(ColumnSchema {
-                column_name: column_name.clone(),
-                datatype: data_type(vector.data_type())?.into(),
-                semantic_type: semantic_type(table_info, column_name)?.into(),
-            })
-        })
-        .collect::<Result<Vec<_>>>()
-}
-
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::sync::Arc;
 
     use api::v1::value::ValueData;

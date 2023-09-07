@@ -26,6 +26,7 @@ use api::v1::{ColumnDataType, ColumnSchema, OpType, Rows, SemanticType, Value};
 use common_base::readable_size::ReadableSize;
 use common_query::Output;
 use datatypes::prelude::DataType;
+use prost::Message;
 use smallvec::SmallVec;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::metadata::{ColumnMetadata, RegionMetadata};
@@ -131,6 +132,17 @@ impl WriteRequest {
             name_to_index,
             has_null,
         })
+    }
+
+    /// Returns estimated size of the request.
+    pub(crate) fn estimated_size(&self) -> usize {
+        let row_size = self
+            .rows
+            .rows
+            .get(0)
+            .map(|row| row.encoded_len())
+            .unwrap_or(0);
+        row_size * self.rows.rows.len()
     }
 
     /// Gets column index by name.
@@ -360,10 +372,11 @@ pub(crate) fn validate_proto_value(
             InvalidRequestSnafu {
                 region_id,
                 reason: format!(
-                    "column {} has type {:?}, but schema has type {:?}",
-                    column_schema.column_name,
+                    "value has type {:?}, but column {} has type {:?}({})",
                     value_type,
-                    ColumnDataType::from_i32(column_schema.datatype)
+                    column_schema.column_name,
+                    ColumnDataType::from_i32(column_schema.datatype),
+                    column_schema.datatype,
                 ),
             }
         );

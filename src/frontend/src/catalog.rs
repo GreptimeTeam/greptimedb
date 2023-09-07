@@ -16,16 +16,15 @@ use std::any::Any;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use api::v1::CreateTableExpr;
 use catalog::error::{
-    self as catalog_err, InternalSnafu, InvalidSystemTableDefSnafu, ListCatalogsSnafu,
-    ListSchemasSnafu, Result as CatalogResult, TableMetadataManagerSnafu, UnimplementedSnafu,
+    self as catalog_err, ListCatalogsSnafu, ListSchemasSnafu, Result as CatalogResult,
+    TableMetadataManagerSnafu,
 };
 use catalog::information_schema::{InformationSchemaProvider, COLUMNS, TABLES};
 use catalog::remote::KvCacheInvalidatorRef;
 use catalog::{
     CatalogManager, DeregisterSchemaRequest, DeregisterTableRequest, RegisterSchemaRequest,
-    RegisterSystemTableRequest, RegisterTableRequest, RenameTableRequest,
+    RegisterTableRequest, RenameTableRequest,
 };
 use client::client_manager::DatanodeClients;
 use common_catalog::consts::{
@@ -46,8 +45,6 @@ use table::metadata::TableId;
 use table::table::numbers::{NumbersTable, NUMBERS_TABLE_NAME};
 use table::TableRef;
 
-use crate::expr_factory;
-use crate::instance::distributed::DistInstance;
 use crate::table::DistTable;
 
 #[derive(Clone)]
@@ -57,12 +54,6 @@ pub struct FrontendCatalogManager {
     partition_manager: PartitionRuleManagerRef,
     datanode_clients: Arc<DatanodeClients>,
     table_metadata_manager: TableMetadataManagerRef,
-
-    // TODO(LFC): Remove this field.
-    // DistInstance in FrontendCatalogManager is only used for creating distributed script table now.
-    // Once we have some standalone distributed table creator (like create distributed table procedure),
-    // we should use that.
-    dist_instance: Option<Arc<DistInstance>>,
 }
 
 impl FrontendCatalogManager {
@@ -79,12 +70,7 @@ impl FrontendCatalogManager {
             partition_manager,
             datanode_clients,
             table_metadata_manager,
-            dist_instance: None,
         }
-    }
-
-    pub fn set_dist_instance(&mut self, dist_instance: Arc<DistInstance>) {
-        self.dist_instance = Some(dist_instance)
     }
 
     pub fn backend(&self) -> KvBackendRef {
@@ -178,99 +164,6 @@ impl CatalogManager for FrontendCatalogManager {
 
     async fn rename_table(&self, _request: RenameTableRequest) -> catalog_err::Result<bool> {
         unimplemented!()
-    }
-
-    async fn register_system_table(
-        &self,
-        request: RegisterSystemTableRequest,
-    ) -> catalog::error::Result<()> {
-        if let Some(dist_instance) = &self.dist_instance {
-            let open_hook = request.open_hook;
-            let request = request.create_table_request;
-
-            if let Some(table) = self
-                .table(
-                    &request.catalog_name,
-                    &request.schema_name,
-                    &request.table_name,
-                )
-                .await?
-            {
-                if let Some(hook) = open_hook {
-                    (hook)(table)?;
-                }
-                return Ok(());
-            }
-
-            let time_index = request
-                .schema
-                .column_schemas
-                .iter()
-                .find_map(|x| {
-                    if x.is_time_index() {
-                        Some(x.name.clone())
-                    } else {
-                        None
-                    }
-                })
-                .context(InvalidSystemTableDefSnafu {
-                    err_msg: "Time index is not defined.",
-                })?;
-
-            let primary_keys = request
-                .schema
-                .column_schemas
-                .iter()
-                .enumerate()
-                .filter_map(|(i, x)| {
-                    if request.primary_key_indices.contains(&i) {
-                        Some(x.name.clone())
-                    } else {
-                        None
-                    }
-                })
-                .collect::<Vec<_>>();
-
-            let column_defs =
-                expr_factory::column_schemas_to_defs(request.schema.column_schemas, &primary_keys)
-                    .map_err(|e| {
-                        InvalidSystemTableDefSnafu {
-                            err_msg: e.to_string(),
-                        }
-                        .build()
-                    })?;
-
-            let mut create_table = CreateTableExpr {
-                catalog_name: request.catalog_name,
-                schema_name: request.schema_name,
-                table_name: request.table_name,
-                desc: request.desc.unwrap_or("".to_string()),
-                column_defs,
-                time_index,
-                primary_keys,
-                create_if_not_exists: request.create_if_not_exists,
-                table_options: (&request.table_options).into(),
-                table_id: None, // Should and will be assigned by Meta.
-                region_numbers: vec![0],
-                engine: request.engine,
-            };
-
-            let table = dist_instance
-                .create_table(&mut create_table, None)
-                .await
-                .map_err(BoxedError::new)
-                .context(InternalSnafu)?;
-
-            if let Some(hook) = open_hook {
-                (hook)(table)?;
-            }
-            Ok(())
-        } else {
-            UnimplementedSnafu {
-                operation: "register system table",
-            }
-            .fail()
-        }
     }
 
     async fn catalog_names(&self) -> CatalogResult<Vec<String>> {
@@ -374,16 +267,7 @@ impl CatalogManager for FrontendCatalogManager {
         }
 
         if schema == INFORMATION_SCHEMA_NAME {
-            // hack: use existing cyclin reference to get Arc<Self>.
-            // This can be remove by refactoring the struct into something like Arc<Inner>
-            common_telemetry::info!("going to use dist instance");
-            let manager = if let Some(instance) = self.dist_instance.as_ref() {
-                common_telemetry::info!("dist instance exist");
-                instance.catalog_manager() as _
-            } else {
-                common_telemetry::info!("dist instance doesn't exist");
-                return Ok(None);
-            };
+            let manager = Arc::new(self.clone()) as _;
 
             let provider =
                 InformationSchemaProvider::new(catalog.to_string(), Arc::downgrade(&manager));

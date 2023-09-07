@@ -24,6 +24,7 @@ use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
 use common_grpc::channel_manager;
 use common_meta::ddl::DdlExecutorRef;
 use common_meta::key::TableMetadataManagerRef;
+use common_meta::sequence::SequenceRef;
 use common_procedure::options::ProcedureConfig;
 use common_procedure::ProcedureManagerRef;
 use common_telemetry::logging::LoggingOptions;
@@ -41,7 +42,6 @@ use crate::lock::DistLockRef;
 use crate::metadata_service::MetadataServiceRef;
 use crate::pubsub::{PublishRef, SubscribeManagerRef};
 use crate::selector::{Selector, SelectorType};
-use crate::sequence::SequenceRef;
 use crate::service::mailbox::MailboxRef;
 use crate::service::store::kv::{KvStoreRef, ResettableKvStoreRef};
 pub const TABLE_ID_SEQ: &str = "table_id";
@@ -239,9 +239,10 @@ impl MetaSrv {
                                     if let Err(e) = procedure_manager.recover().await {
                                         error!("Failed to recover procedures, error: {e}");
                                     }
-                                    let _ = task_handler.start(common_runtime::bg_runtime())
-                                    .map_err(|e| {
-                                        debug!("Failed to start greptimedb telemetry task, error: {e}");
+                                    let _ = task_handler.start().map_err(|e| {
+                                        debug!(
+                                            "Failed to start greptimedb telemetry task, error: {e}"
+                                        );
                                     });
                                 }
                                 LeaderChangeMessage::StepDown(leader) => {

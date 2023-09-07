@@ -18,7 +18,6 @@ mod influxdb;
 mod opentsdb;
 mod otlp;
 mod prom_store;
-pub mod region_handler;
 mod script;
 mod standalone;
 
@@ -27,12 +26,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::meta::Role;
-use api::v1::{InsertRequests, RowInsertRequests};
+use api::v1::{DeleteRequests, InsertRequests, RowDeleteRequests, RowInsertRequests};
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use catalog::remote::CachedMetaKvBackend;
 use catalog::CatalogManagerRef;
 use client::client_manager::DatanodeClients;
+use client::region_handler::RegionRequestHandlerRef;
 use common_base::Plugins;
 use common_error::ext::BoxedError;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
@@ -42,9 +42,8 @@ use common_meta::key::TableMetadataManager;
 use common_query::Output;
 use common_telemetry::logging::info;
 use common_telemetry::{error, timer};
-use datanode::instance::sql::table_idents_to_full_name;
-use datanode::instance::InstanceRef as DnInstanceRef;
 use datanode::region_server::RegionServer;
+use datanode::Instance as DnInstanceRef;
 use distributed::DistInstance;
 use meta_client::client::{MetaClient, MetaClientBuilder};
 use partition::manager::PartitionRuleManager;
@@ -75,9 +74,8 @@ use sql::statements::statement::Statement;
 use sqlparser::ast::ObjectName;
 
 use self::distributed::DistRegionRequestHandler;
-use self::region_handler::RegionRequestHandlerRef;
-use self::standalone::StandaloneRegionRequestHandler;
 use crate::catalog::FrontendCatalogManager;
+use crate::delete::Deleter;
 use crate::error::{
     self, Error, ExecLogicalPlanSnafu, ExecutePromqlSnafu, ExternalSnafu, MissingMetasrvOptsSnafu,
     ParseSqlSnafu, PermissionSnafu, PlanStatementSnafu, Result, SqlExecInterceptedSnafu,
@@ -86,12 +84,12 @@ use crate::expr_factory::CreateExprFactory;
 use crate::frontend::FrontendOptions;
 use crate::heartbeat::handler::invalidate_table_cache::InvalidateTableCacheHandler;
 use crate::heartbeat::HeartbeatTask;
-use crate::inserter::Inserter;
-use crate::instance::standalone::StandaloneGrpcQueryHandler;
+use crate::insert::Inserter;
 use crate::metrics;
 use crate::script::ScriptExecutor;
 use crate::server::{start_server, ServerHandlers, Services};
 use crate::statement::StatementExecutor;
+use crate::table::table_idents_to_full_name;
 
 #[async_trait]
 pub trait FrontendInstance:
@@ -152,26 +150,25 @@ impl Instance {
         let partition_manager = Arc::new(PartitionRuleManager::new(table_routes));
 
         let table_metadata_manager = Arc::new(TableMetadataManager::new(meta_backend.clone()));
-        let mut catalog_manager = FrontendCatalogManager::new(
+        let catalog_manager = Arc::new(FrontendCatalogManager::new(
             meta_backend.clone(),
             meta_backend.clone(),
             partition_manager.clone(),
             datanode_clients.clone(),
             table_metadata_manager.clone(),
-        );
+        ));
 
-        let dist_instance =
-            DistInstance::new(meta_client.clone(), Arc::new(catalog_manager.clone()));
-        let dist_instance = Arc::new(dist_instance);
+        let dist_instance = Arc::new(DistInstance::new(
+            meta_client.clone(),
+            catalog_manager.clone(),
+        ));
 
-        catalog_manager.set_dist_instance(dist_instance.clone());
-        let catalog_manager = Arc::new(catalog_manager);
+        let dist_request_handler = DistRegionRequestHandler::arc(catalog_manager.clone());
 
         let query_engine = QueryEngineFactory::new_with_plugins(
             catalog_manager.clone(),
+            Some(dist_request_handler),
             true,
-            Some(partition_manager.clone()),
-            Some(datanode_clients.clone()),
             plugins.clone(),
         )
         .query_engine();
@@ -260,37 +257,38 @@ impl Instance {
     }
 
     pub async fn try_new_standalone(
-        dn_instance: DnInstanceRef,
-        region_server: RegionServer,
+        _dn_instance: DnInstanceRef,
+        _region_server: RegionServer,
     ) -> Result<Self> {
-        let catalog_manager = dn_instance.catalog_manager();
-        let query_engine = dn_instance.query_engine();
-        let script_executor =
-            Arc::new(ScriptExecutor::new(catalog_manager.clone(), query_engine.clone()).await?);
+        todo!()
+        // let catalog_manager = dn_instance.catalog_manager();
+        // let query_engine = dn_instance.query_engine();
+        // let script_executor =
+        //     Arc::new(ScriptExecutor::new(catalog_manager.clone(), query_engine.clone()).await?);
 
-        let region_request_handler = StandaloneRegionRequestHandler::arc(region_server);
-        let statement_executor = Arc::new(StatementExecutor::new(
-            catalog_manager.clone(),
-            query_engine.clone(),
-            dn_instance.clone(),
-            region_request_handler.clone(),
-        ));
+        // let region_request_handler = StandaloneRegionRequestHandler::arc(region_server);
+        // let statement_executor = Arc::new(StatementExecutor::new(
+        //     catalog_manager.clone(),
+        //     query_engine.clone(),
+        //     dn_instance.clone(),
+        //     region_request_handler.clone(),
+        // ));
 
-        let create_expr_factory = CreateExprFactory;
-        let grpc_query_handler = StandaloneGrpcQueryHandler::arc(dn_instance.clone());
+        // let create_expr_factory = CreateExprFactory;
+        // let grpc_query_handler = StandaloneGrpcQueryHandler::arc(dn_instance.clone());
 
-        Ok(Instance {
-            catalog_manager: catalog_manager.clone(),
-            script_executor,
-            create_expr_factory,
-            statement_executor,
-            query_engine,
-            grpc_query_handler,
-            region_request_handler,
-            plugins: Default::default(),
-            servers: Arc::new(HashMap::new()),
-            heartbeat_task: None,
-        })
+        // Ok(Instance {
+        //     catalog_manager: catalog_manager.clone(),
+        //     script_executor,
+        //     create_expr_factory,
+        //     statement_executor,
+        //     query_engine,
+        //     grpc_query_handler,
+        //     region_request_handler,
+        //     plugins: Default::default(),
+        //     servers: Arc::new(HashMap::new()),
+        //     heartbeat_task: None,
+        // })
     }
 
     pub async fn build_servers(&mut self, opts: &FrontendOptions) -> Result<()> {
@@ -311,10 +309,10 @@ impl Instance {
         ctx: QueryContextRef,
     ) -> Result<Output> {
         let inserter = Inserter::new(
-            &self.catalog_manager,
+            self.catalog_manager.as_ref(),
             &self.create_expr_factory,
             &self.grpc_query_handler,
-            &self.region_request_handler,
+            self.region_request_handler.as_ref(),
         );
         inserter.handle_row_inserts(requests, ctx).await
     }
@@ -326,12 +324,38 @@ impl Instance {
         ctx: QueryContextRef,
     ) -> Result<Output> {
         let inserter = Inserter::new(
-            &self.catalog_manager,
+            self.catalog_manager.as_ref(),
             &self.create_expr_factory,
             &self.grpc_query_handler,
-            &self.region_request_handler,
+            self.region_request_handler.as_ref(),
         );
         inserter.handle_column_inserts(requests, ctx).await
+    }
+
+    /// Handle batch deletes with row-format
+    pub async fn handle_row_deletes(
+        &self,
+        requests: RowDeleteRequests,
+        ctx: QueryContextRef,
+    ) -> Result<Output> {
+        let deleter = Deleter::new(
+            self.catalog_manager.as_ref(),
+            self.region_request_handler.as_ref(),
+        );
+        deleter.handle_row_deletes(requests, ctx).await
+    }
+
+    /// Handle batch deletes
+    pub async fn handle_deletes(
+        &self,
+        requests: DeleteRequests,
+        ctx: QueryContextRef,
+    ) -> Result<Output> {
+        let deleter = Deleter::new(
+            self.catalog_manager.as_ref(),
+            self.region_request_handler.as_ref(),
+        );
+        deleter.handle_column_deletes(requests, ctx).await
     }
 
     pub fn set_plugins(&mut self, map: Arc<Plugins>) {
@@ -357,11 +381,11 @@ impl Instance {
 #[async_trait]
 impl FrontendInstance for Instance {
     async fn start(&self) -> Result<()> {
-        // TODO(hl): Frontend init should move to here
-
         if let Some(heartbeat_task) = &self.heartbeat_task {
             heartbeat_task.start().await?;
         }
+
+        self.script_executor.start(self).await?;
 
         futures::future::try_join_all(self.servers.values().map(start_server))
             .await
