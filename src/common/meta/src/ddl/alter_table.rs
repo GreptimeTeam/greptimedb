@@ -21,7 +21,6 @@ use api::v1::region::{
 };
 use api::v1::{AlterExpr, RenameTable};
 use async_trait::async_trait;
-use common_error::ext::BoxedError;
 use common_grpc_expr::alter_expr_to_request;
 use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu};
 use common_procedure::{
@@ -263,19 +262,16 @@ impl AlterTableProcedure {
     fn build_new_table_info(&self) -> Result<TableInfo> {
         // Builds new_meta
         let table_info = TableInfo::try_from(self.data.table_info().clone())
-            .map_err(BoxedError::new)
             .context(error::ConvertRawTableInfoSnafu)?;
 
         let table_ref = self.data.table_ref();
 
         let request = alter_expr_to_request(self.data.table_id(), self.alter_expr().clone())
-            .map_err(BoxedError::new)
             .context(ConvertAlterTableRequestSnafu)?;
 
         let new_meta = table_info
             .meta
             .builder_with_alter_kind(table_ref.table, &request.alter_kind)
-            .map_err(BoxedError::new)
             .context(error::TableSnafu)?
             .build()
             .with_context(|_| error::BuildTableMetaSnafu {

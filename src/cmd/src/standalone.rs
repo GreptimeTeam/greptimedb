@@ -299,7 +299,6 @@ impl StartCommand {
         );
 
         let kv_dir = kv_store_dir(&opts.data_home);
-
         let (kv_store, procedure_manager) = FeInstance::try_build_standalone_components(
             kv_dir,
             opts.kv_store_cfg,
