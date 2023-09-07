@@ -239,9 +239,10 @@ impl MetaSrv {
                                     if let Err(e) = procedure_manager.recover().await {
                                         error!("Failed to recover procedures, error: {e}");
                                     }
-                                    let _ = task_handler.start(common_runtime::bg_runtime())
-                                    .map_err(|e| {
-                                        debug!("Failed to start greptimedb telemetry task, error: {e}");
+                                    let _ = task_handler.start().map_err(|e| {
+                                        debug!(
+                                            "Failed to start greptimedb telemetry task, error: {e}"
+                                        );
                                     });
                                 }
                                 LeaderChangeMessage::StepDown(leader) => {
