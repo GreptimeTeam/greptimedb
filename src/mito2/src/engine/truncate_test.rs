@@ -17,15 +17,19 @@ use std::time::Duration;
 
 use api::v1::Rows;
 use common_recordbatch::RecordBatches;
-use common_telemetry::init_default_ut_logging;
+use object_store::util::join_path;
+use smallvec::SmallVec;
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{
     RegionCloseRequest, RegionFlushRequest, RegionOpenRequest, RegionRequest, RegionTruncateRequest,
 };
 use store_api::storage::RegionId;
+use tokio::sync::oneshot;
 
 use super::ScanRequest;
 use crate::config::MitoConfig;
+use crate::request::{BackgroundNotify, FlushFinished, WorkerRequest};
+use crate::sst::file::{FileId, FileMeta, FileTimeRange};
 use crate::test_util::{build_rows, put_rows, rows_schema, CreateRequestBuilder, TestEnv};
 
 #[tokio::test]
@@ -143,7 +147,6 @@ async fn test_engine_put_data_after_truncate() {
 
 #[tokio::test]
 async fn test_engine_truncate_after_flush() {
-    init_default_ut_logging();
     let mut env = TestEnv::with_prefix("truncate-flush");
     let engine = env.create_engine(MitoConfig::default()).await;
 
@@ -231,12 +234,6 @@ async fn test_engine_truncate_reopen() {
     };
     put_rows(&engine, region_id, rows).await;
 
-    // Flush the region.
-    engine
-        .handle_request(region_id, RegionRequest::Flush(RegionFlushRequest {}))
-        .await
-        .unwrap();
-
     // Truncate the region
     engine
         .handle_request(region_id, RegionRequest::Truncate(RegionTruncateRequest {}))
@@ -268,4 +265,83 @@ async fn test_engine_truncate_reopen() {
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     let expected = "++\n++";
     assert_eq!(expected, batches.pretty_print().unwrap());
+}
+
+#[tokio::test]
+async fn test_engine_truncate_during_flush() {
+    let mut env = TestEnv::with_prefix("truncate-reopen");
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    // Create the region.
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    let region_dir = request.region_dir.clone();
+
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    // Put data to the region.
+    let rows = Rows {
+        schema: column_schemas.clone(),
+        rows: build_rows(0, 3),
+    };
+    put_rows(&engine, region_id, rows).await;
+
+    let region = engine.get_region(region_id).unwrap();
+
+    // Create a parquet file.
+    // Simulate that the `do_flush()` function is currently being executed.
+    let file_id = FileId::random();
+    let file_name = format!("{}.parquet", file_id);
+    let file_meta = FileMeta {
+        region_id,
+        file_id,
+        time_range: FileTimeRange::default(),
+        level: 0,
+        file_size: 0,
+    };
+    env.get_object_store()
+        .unwrap()
+        .write(&join_path(&region_dir, &file_name), vec![])
+        .await
+        .unwrap();
+
+    let (sender, receiver) = oneshot::channel();
+
+    let flushed_entry_id = region.version_control.current().last_entry_id;
+
+    // Truncate the region.
+    engine
+        .handle_request(region_id, RegionRequest::Truncate(RegionTruncateRequest {}))
+        .await
+        .unwrap();
+
+    // The flush task is finished, and the `handle_flush_finished()` is executed.
+    let finished = FlushFinished {
+        region_id,
+        file_metas: vec![file_meta.clone()],
+        flushed_entry_id,
+        memtables_to_remove: SmallVec::new(),
+        file_purger: region.file_purger.clone(),
+        senders: vec![sender],
+    };
+
+    let worker_request = WorkerRequest::Background {
+        region_id,
+        notify: BackgroundNotify::FlushFinished(finished),
+    };
+
+    engine
+        .handle_worker_request(region_id, worker_request)
+        .await
+        .unwrap();
+
+    let _ = receiver.await.unwrap();
+
+    let request = ScanRequest::default();
+    let scanner = engine.scan(region_id, request.clone()).unwrap();
+    assert_eq!(0, scanner.num_files());
 }

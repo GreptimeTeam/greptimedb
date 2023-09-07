@@ -19,7 +19,7 @@ use common_time::util::current_time_millis;
 use store_api::logstore::LogStore;
 use store_api::storage::RegionId;
 
-use crate::error::Result;
+use crate::error::{RegionTruncatingSnafu, Result};
 use crate::flush::{FlushReason, RegionFlushTask};
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::region::MitoRegionRef;
@@ -135,6 +135,17 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let Some(region) = self.regions.writable_region_or(region_id, &mut request) else {
             return;
         };
+
+        // The flush task before truncating the region.
+        let version_data = region.version_control.current();
+        if version_data.version.flushed_entry_id >= request.flushed_entry_id {
+            info!(
+                "Truncate region {} to {}",
+                region_id, request.flushed_entry_id
+            );
+            request.on_failure(RegionTruncatingSnafu { region_id }.build());
+            return;
+        }
 
         // Write region edit to manifest.
         let edit = RegionEdit {

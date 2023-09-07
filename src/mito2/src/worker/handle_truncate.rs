@@ -31,27 +31,30 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         info!("Try to truncate region {}", region_id);
 
         let version_data = region.version_control.current();
+        let entry_id = version_data.last_entry_id;
+
+        // Notifies flush scheduler.
+        self.flush_scheduler.on_region_truncating(region_id);
+
+        // TODO(DevilExileSu): Consider compaction tasks during truncate.
 
         // Write region truncated to manifest.
         let truncate = RegionTruncate {
             region_id,
-            flushed_entry_id: version_data.last_entry_id,
+            flushed_entry_id: entry_id,
         };
         let action_list =
             RegionMetaActionList::with_action(RegionMetaAction::Truncate(truncate.clone()));
         region.manifest_manager.update(action_list).await?;
 
-        // Notifies flush scheduler.
-        self.flush_scheduler.on_region_truncating(region_id);
-
         // Reset region's version and mark all SSTs deleted.
-        let entry_id = version_data.last_entry_id;
         region
             .version_control
             .reset(entry_id, &self.memtable_builder);
 
         // Make all data obsolete.
         self.wal.obsolete(region_id, entry_id).await?;
+        info!("Done truncate");
 
         Ok(Output::AffectedRows(0))
     }
