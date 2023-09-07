@@ -22,7 +22,7 @@ use client::region::check_response_header;
 use client::region_handler::RegionRequestHandler;
 use common_error::ext::BoxedError;
 use common_meta::datanode_manager::{AffectedRows, Datanode, DatanodeManager, DatanodeRef};
-use common_meta::ddl::{TableCreatorContext, TableMetadataAllocator};
+use common_meta::ddl::{TableMetadataAllocator, TableMetadataAllocatorContext};
 use common_meta::error::{self as meta_error, Result as MetaResult};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::peer::Peer;
@@ -115,11 +115,11 @@ impl DatanodeManager for StandaloneDatanodeManager {
     }
 }
 
-pub(crate) struct StandaloneTableCreator {
+pub(crate) struct StandaloneTableMetadataCreator {
     table_id_sequence: SequenceRef,
 }
 
-impl StandaloneTableCreator {
+impl StandaloneTableMetadataCreator {
     pub fn new(kv_backend: KvBackendRef) -> Self {
         Self {
             table_id_sequence: Arc::new(Sequence::new(TABLE_ID_SEQ, 1024, 10, kv_backend)),
@@ -128,14 +128,15 @@ impl StandaloneTableCreator {
 }
 
 #[async_trait]
-impl TableMetadataAllocator for StandaloneTableCreator {
+impl TableMetadataAllocator for StandaloneTableMetadataCreator {
     async fn create(
         &self,
-        _ctx: &TableCreatorContext,
-        _raw_table_info: &mut RawTableInfo,
+        _ctx: &TableMetadataAllocatorContext,
+        raw_table_info: &mut RawTableInfo,
         partitions: &[Partition],
     ) -> MetaResult<(TableId, Vec<RegionRoute>)> {
         let table_id = self.table_id_sequence.next().await? as u32;
+        raw_table_info.ident.table_id = table_id;
         let region_routes = partitions
             .iter()
             .enumerate()

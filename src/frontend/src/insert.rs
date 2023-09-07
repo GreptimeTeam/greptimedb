@@ -161,7 +161,7 @@ impl<'a> Inserter<'a> {
         };
 
         self.statement_executor
-            .handle_alter_table(alter_table_expr)
+            .alter_table_inner(alter_table_expr)
             .await?;
 
         info!(
@@ -188,7 +188,7 @@ impl<'a> Inserter<'a> {
 
         // TODO(weny): multiple regions table.
         self.statement_executor
-            .create_table(&mut create_table_expr, None)
+            .create_table_inner(&mut create_table_expr, None)
             .await?;
 
         info!(

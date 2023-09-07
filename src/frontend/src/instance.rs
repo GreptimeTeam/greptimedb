@@ -80,7 +80,7 @@ use sqlparser::ast::ObjectName;
 pub use standalone::StandaloneDatanodeManager;
 
 use self::distributed::DistRegionRequestHandler;
-use self::standalone::{StandaloneRegionRequestHandler, StandaloneTableCreator};
+use self::standalone::{StandaloneRegionRequestHandler, StandaloneTableMetadataCreator};
 use crate::catalog::FrontendCatalogManager;
 use crate::delete::Deleter;
 use crate::error::{
@@ -300,7 +300,7 @@ impl Instance {
             Arc::new(StandaloneDatanodeManager(region_server)),
             cache_invalidator.clone(),
             table_metadata_manager.clone(),
-            Arc::new(StandaloneTableCreator::new(kv_backend.clone())),
+            Arc::new(StandaloneTableMetadataCreator::new(kv_backend.clone())),
         ));
 
         let statement_executor = Arc::new(StatementExecutor::new(

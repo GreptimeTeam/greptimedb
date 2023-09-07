@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
-use api::v1::{column_def, AlterExpr, CreateDatabaseExpr, CreateTableExpr, TruncateTableExpr};
+use api::v1::{column_def, AlterExpr, CreateTableExpr, TruncateTableExpr};
 use catalog::{CatalogManagerRef, DeregisterTableRequest, RegisterTableRequest};
 use chrono::DateTime;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
@@ -33,9 +33,11 @@ use common_telemetry::info;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::RawSchema;
 use partition::partition::{PartitionBound, PartitionDef};
+use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::ast::Value as SqlValue;
-use sql::statements::create::Partitions;
+use sql::statements::alter::AlterTable;
+use sql::statements::create::{CreateExternalTable, CreateTable, Partitions};
 use sql::statements::sql_value_to_value;
 use table::metadata::{self, RawTableInfo, RawTableMeta, TableId, TableInfo, TableType};
 use table::requests::{AlterTableRequest, TableOptions};
@@ -48,14 +50,28 @@ use crate::error::{
     TableMetadataManagerSnafu, TableNotFoundSnafu, UnrecognizedTableOptionSnafu,
 };
 use crate::table::DistTable;
-use crate::MAX_VALUE;
+use crate::{expr_factory, MAX_VALUE};
 
 impl StatementExecutor {
     pub fn catalog_manager(&self) -> CatalogManagerRef {
         self.catalog_manager.clone()
     }
 
-    pub async fn create_table(
+    pub async fn create_table(&self, stmt: CreateTable, ctx: QueryContextRef) -> Result<TableRef> {
+        let create_expr = &mut expr_factory::create_to_expr(&stmt, ctx)?;
+        self.create_table_inner(create_expr, stmt.partitions).await
+    }
+
+    pub async fn create_external_table(
+        &self,
+        create_expr: CreateExternalTable,
+        ctx: QueryContextRef,
+    ) -> Result<TableRef> {
+        let create_expr = &mut expr_factory::create_external_expr(create_expr, ctx).await?;
+        self.create_table_inner(create_expr, None).await
+    }
+
+    pub async fn create_table_inner(
         &self,
         create_table: &mut CreateTableExpr,
         partitions: Option<Partitions>,
@@ -233,7 +249,16 @@ impl StatementExecutor {
         Ok(())
     }
 
-    pub async fn handle_alter_table(&self, expr: AlterExpr) -> Result<Output> {
+    pub async fn alter_table(
+        &self,
+        alter_table: AlterTable,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
+        let expr = expr_factory::to_alter_expr(alter_table, query_ctx)?;
+        self.alter_table_inner(expr).await
+    }
+
+    pub async fn alter_table_inner(&self, expr: AlterExpr) -> Result<Output> {
         let catalog_name = if expr.catalog_name.is_empty() {
             DEFAULT_CATALOG_NAME
         } else {
@@ -340,9 +365,14 @@ impl StatementExecutor {
             .context(error::ExecuteDdlSnafu)
     }
 
-    pub async fn create_database(&self, catalog: &str, expr: CreateDatabaseExpr) -> Result<Output> {
+    pub async fn create_database(
+        &self,
+        catalog: &str,
+        database: &str,
+        create_if_not_exists: bool,
+    ) -> Result<Output> {
         // TODO(weny): considers executing it in the procedures.
-        let schema_key = SchemaNameKey::new(catalog, &expr.database_name);
+        let schema_key = SchemaNameKey::new(catalog, database);
         let exists = self
             .table_metadata_manager
             .schema_manager()
@@ -351,21 +381,16 @@ impl StatementExecutor {
             .context(error::TableMetadataManagerSnafu)?;
 
         if exists {
-            return if expr.create_if_not_exists {
+            return if create_if_not_exists {
                 Ok(Output::AffectedRows(1))
             } else {
-                error::SchemaExistsSnafu {
-                    name: &expr.database_name,
-                }
-                .fail()
+                error::SchemaExistsSnafu { name: database }.fail()
             };
         }
 
-        let schema_value =
-            SchemaNameValue::try_from(&expr.options).context(error::TableMetadataManagerSnafu)?;
         self.table_metadata_manager
             .schema_manager()
-            .create(schema_key, Some(schema_value))
+            .create(schema_key, None)
             .await
             .context(error::TableMetadataManagerSnafu)?;
 

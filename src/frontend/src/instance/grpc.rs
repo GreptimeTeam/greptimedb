@@ -101,16 +101,18 @@ impl GrpcQueryHandler for Instance {
                         // TODO(weny): supports to create multiple region table.
                         let _ = self
                             .statement_executor
-                            .create_table(&mut expr, None)
+                            .create_table_inner(&mut expr, None)
                             .await?;
                         Output::AffectedRows(0)
                     }
-                    DdlExpr::Alter(expr) => {
-                        self.statement_executor.handle_alter_table(expr).await?
-                    }
+                    DdlExpr::Alter(expr) => self.statement_executor.alter_table_inner(expr).await?,
                     DdlExpr::CreateDatabase(expr) => {
                         self.statement_executor
-                            .create_database(ctx.current_catalog(), expr)
+                            .create_database(
+                                ctx.current_catalog(),
+                                &expr.database_name,
+                                expr.create_if_not_exists,
+                            )
                             .await?
                     }
                     DdlExpr::DropTable(expr) => {

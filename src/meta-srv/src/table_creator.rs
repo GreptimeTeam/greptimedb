@@ -15,7 +15,7 @@
 use api::v1::meta::Partition;
 use common_catalog::format_full_table_name;
 use common_error::ext::BoxedError;
-use common_meta::ddl::{TableCreatorContext, TableMetadataAllocator};
+use common_meta::ddl::{TableMetadataAllocator, TableMetadataAllocatorContext};
 use common_meta::error::{self as meta_error, Result as MetaResult};
 use common_meta::rpc::router::{Region, RegionRoute};
 use common_meta::sequence::SequenceRef;
@@ -27,13 +27,13 @@ use table::metadata::RawTableInfo;
 use crate::error::{self, Result, TooManyPartitionsSnafu};
 use crate::metasrv::{SelectorContext, SelectorRef};
 
-pub struct MetaSrvTableCreator {
+pub struct MetaSrvTableMetadataAllocator {
     ctx: SelectorContext,
     selector: SelectorRef,
     table_id_sequence: SequenceRef,
 }
 
-impl MetaSrvTableCreator {
+impl MetaSrvTableMetadataAllocator {
     pub fn new(
         ctx: SelectorContext,
         selector: SelectorRef,
@@ -48,10 +48,10 @@ impl MetaSrvTableCreator {
 }
 
 #[async_trait::async_trait]
-impl TableMetadataAllocator for MetaSrvTableCreator {
+impl TableMetadataAllocator for MetaSrvTableMetadataAllocator {
     async fn create(
         &self,
-        ctx: &TableCreatorContext,
+        ctx: &TableMetadataAllocatorContext,
         raw_table_info: &mut RawTableInfo,
         partitions: &[Partition],
     ) -> MetaResult<(TableId, Vec<RegionRoute>)> {

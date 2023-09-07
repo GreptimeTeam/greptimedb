@@ -26,7 +26,6 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use api::v1::region::region_request;
-use api::v1::CreateDatabaseExpr;
 use catalog::CatalogManagerRef;
 use client::region_handler::RegionRequestHandlerRef;
 use common_error::ext::BoxedError;
@@ -57,7 +56,6 @@ use crate::error::{
     self, CatalogSnafu, ExecLogicalPlanSnafu, ExternalSnafu, InvalidSqlSnafu, PlanStatementSnafu,
     RequestDatanodeSnafu, Result, TableNotFoundSnafu,
 };
-use crate::expr_factory;
 use crate::req_convert::{delete, insert};
 use crate::statement::backup::{COPY_DATABASE_TIME_END_KEY, COPY_DATABASE_TIME_START_KEY};
 use crate::table::table_idents_to_full_name;
@@ -142,19 +140,14 @@ impl StatementExecutor {
             }
 
             Statement::CreateTable(stmt) => {
-                let create_expr = &mut expr_factory::create_to_expr(&stmt, query_ctx)?;
-                let _ = self.create_table(create_expr, stmt.partitions).await?;
+                let _ = self.create_table(stmt, query_ctx).await?;
                 Ok(Output::AffectedRows(0))
             }
             Statement::CreateExternalTable(stmt) => {
-                let create_expr = &mut expr_factory::create_external_expr(stmt, query_ctx).await?;
-                let _ = self.create_table(create_expr, None).await?;
+                let _ = self.create_external_table(stmt, query_ctx).await?;
                 Ok(Output::AffectedRows(0))
             }
-            Statement::Alter(alter_table) => {
-                let expr = expr_factory::to_alter_expr(alter_table, query_ctx)?;
-                self.handle_alter_table(expr).await
-            }
+            Statement::Alter(alter_table) => self.alter_table(alter_table, query_ctx).await,
             Statement::DropTable(stmt) => {
                 let (catalog, schema, table) =
                     table_idents_to_full_name(stmt.table_name(), query_ctx)
@@ -173,13 +166,12 @@ impl StatementExecutor {
             }
 
             Statement::CreateDatabase(stmt) => {
-                let expr = CreateDatabaseExpr {
-                    database_name: stmt.name.to_string(),
-                    create_if_not_exists: stmt.if_not_exists,
-                    options: Default::default(),
-                };
-                self.create_database(query_ctx.current_catalog(), expr)
-                    .await
+                self.create_database(
+                    query_ctx.current_catalog(),
+                    &stmt.name.to_string(),
+                    stmt.if_not_exists,
+                )
+                .await
             }
 
             Statement::ShowCreateTable(show) => {

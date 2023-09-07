@@ -24,7 +24,8 @@ use crate::ddl::alter_table::AlterTableProcedure;
 use crate::ddl::create_table::CreateTableProcedure;
 use crate::ddl::drop_table::DropTableProcedure;
 use crate::ddl::{
-    DdlContext, DdlTaskExecutor, ExecutorContext, TableCreatorContext, TableMetadataAllocatorRef,
+    DdlContext, DdlTaskExecutor, ExecutorContext, TableMetadataAllocatorContext,
+    TableMetadataAllocatorRef,
 };
 use crate::error::{
     self, RegisterProcedureLoaderSnafu, Result, SubmitProcedureSnafu, TableNotFoundSnafu,
@@ -334,7 +335,7 @@ async fn handle_create_table_task(
     let (table_id, region_routes) = ddl_manager
         .table_creator
         .create(
-            &TableCreatorContext { cluster_id },
+            &TableMetadataAllocatorContext { cluster_id },
             &mut create_table_task.table_info,
             &create_table_task.partitions,
         )

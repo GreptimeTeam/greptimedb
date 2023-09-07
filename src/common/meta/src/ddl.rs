@@ -46,7 +46,7 @@ pub trait DdlTaskExecutor: Send + Sync {
 
 pub type DdlTaskExecutorRef = Arc<dyn DdlTaskExecutor>;
 
-pub struct TableCreatorContext {
+pub struct TableMetadataAllocatorContext {
     pub cluster_id: u64,
 }
 
@@ -54,7 +54,7 @@ pub struct TableCreatorContext {
 pub trait TableMetadataAllocator: Send + Sync {
     async fn create(
         &self,
-        ctx: &TableCreatorContext,
+        ctx: &TableMetadataAllocatorContext,
         table_info: &mut RawTableInfo,
         partitions: &[Partition],
     ) -> Result<(TableId, Vec<RegionRoute>)>;
