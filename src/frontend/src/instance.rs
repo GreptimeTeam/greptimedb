@@ -49,7 +49,6 @@ use common_procedure::ProcedureManagerRef;
 use common_query::Output;
 use common_telemetry::logging::info;
 use common_telemetry::{error, timer};
-use datanode::instance::sql::table_idents_to_full_name;
 use datanode::region_server::RegionServer;
 use log_store::raft_engine::RaftEngineBackend;
 use meta_client::client::{MetaClient, MetaClientBuilder};
@@ -97,6 +96,7 @@ use crate::metrics;
 use crate::script::ScriptExecutor;
 use crate::server::{start_server, ServerHandlers, Services};
 use crate::statement::StatementExecutor;
+use crate::table::table_idents_to_full_name;
 
 #[async_trait]
 pub trait FrontendInstance:

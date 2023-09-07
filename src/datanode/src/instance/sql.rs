@@ -225,56 +225,6 @@ impl Instance {
     }
 }
 
-// TODO(LFC): Refactor consideration: move this function to some helper mod,
-// could be done together or after `TableReference`'s refactoring, when issue #559 is resolved.
-/// Converts maybe fully-qualified table name (`<catalog>.<schema>.<table>`) to tuple.
-pub fn table_idents_to_full_name(
-    obj_name: &ObjectName,
-    query_ctx: QueryContextRef,
-) -> Result<(String, String, String)> {
-    match &obj_name.0[..] {
-        [table] => Ok((
-            query_ctx.current_catalog().to_owned(),
-            query_ctx.current_schema().to_owned(),
-            table.value.clone(),
-        )),
-        [schema, table] => Ok((
-            query_ctx.current_catalog().to_owned(),
-            schema.value.clone(),
-            table.value.clone(),
-        )),
-        [catalog, schema, table] => Ok((
-            catalog.value.clone(),
-            schema.value.clone(),
-            table.value.clone(),
-        )),
-        _ => error::InvalidSqlSnafu {
-            msg: format!(
-                "expect table name to be <catalog>.<schema>.<table>, <schema>.<table> or <table>, actual: {obj_name}",
-            ),
-        }.fail(),
-    }
-}
-
-pub fn idents_to_full_database_name(
-    obj_name: &ObjectName,
-    query_ctx: &QueryContextRef,
-) -> Result<(String, String)> {
-    match &obj_name.0[..] {
-        [database] => Ok((
-            query_ctx.current_catalog().to_owned(),
-            database.value.clone(),
-        )),
-        [catalog, database] => Ok((catalog.value.clone(), database.value.clone())),
-        _ => error::InvalidSqlSnafu {
-            msg: format!(
-                "expect database name to be <catalog>.<database>, <database>, found: {obj_name}",
-            ),
-        }
-        .fail(),
-    }
-}
-
 #[async_trait]
 impl SqlStatementExecutor for Instance {
     async fn execute_sql(

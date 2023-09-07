@@ -38,7 +38,6 @@ use common_meta::table_name::TableName;
 use common_query::Output;
 use common_time::range::TimestampRange;
 use common_time::Timestamp;
-use datanode::instance::sql::{idents_to_full_database_name, table_idents_to_full_name};
 use partition::manager::{PartitionRuleManager, PartitionRuleManagerRef};
 use query::parser::QueryStatement;
 use query::plan::LogicalPlan;
@@ -47,6 +46,7 @@ use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
 use sql::statements::copy::{CopyDatabaseArgument, CopyTable, CopyTableArgument};
 use sql::statements::statement::Statement;
+use sqlparser::ast::ObjectName;
 use table::engine::TableReference;
 use table::requests::{
     CopyDatabaseRequest, CopyDirection, CopyTableRequest, DeleteRequest, InsertRequest,
@@ -54,12 +54,13 @@ use table::requests::{
 use table::TableRef;
 
 use crate::error::{
-    self, CatalogSnafu, ExecLogicalPlanSnafu, ExternalSnafu, PlanStatementSnafu,
+    self, CatalogSnafu, ExecLogicalPlanSnafu, ExternalSnafu, InvalidSqlSnafu, PlanStatementSnafu,
     RequestDatanodeSnafu, Result, TableNotFoundSnafu,
 };
 use crate::expr_factory;
 use crate::req_convert::{delete, insert};
 use crate::statement::backup::{COPY_DATABASE_TIME_END_KEY, COPY_DATABASE_TIME_START_KEY};
+use crate::table::table_idents_to_full_name;
 
 #[derive(Clone)]
 pub struct StatementExecutor {
@@ -353,4 +354,23 @@ fn extract_timestamp(map: &HashMap<String, String>, key: &str) -> Result<Option<
                 .map_err(|_| error::InvalidCopyParameterSnafu { key, value: v }.build())
         })
         .transpose()
+}
+
+fn idents_to_full_database_name(
+    obj_name: &ObjectName,
+    query_ctx: &QueryContextRef,
+) -> Result<(String, String)> {
+    match &obj_name.0[..] {
+        [database] => Ok((
+            query_ctx.current_catalog().to_owned(),
+            database.value.clone(),
+        )),
+        [catalog, database] => Ok((catalog.value.clone(), database.value.clone())),
+        _ => InvalidSqlSnafu {
+            err_msg: format!(
+                "expect database name to be <catalog>.<database>, <database>, found: {obj_name}",
+            ),
+        }
+        .fail(),
+    }
 }

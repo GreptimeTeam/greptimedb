@@ -16,13 +16,15 @@ use std::sync::Arc;
 
 use common_error::ext::BoxedError;
 use common_recordbatch::SendableRecordBatchStream;
+use session::context::QueryContextRef;
+use sqlparser::ast::ObjectName;
 use store_api::data_source::DataSource;
 use store_api::storage::ScanRequest;
 use table::metadata::{FilterPushDownType, TableInfoRef};
 use table::thin_table::{ThinTable, ThinTableAdapter};
 use table::TableRef;
 
-use crate::error::NotSupportedSnafu;
+use crate::error::{InvalidSqlSnafu, NotSupportedSnafu, Result};
 
 #[derive(Clone)]
 pub struct DistTable;
@@ -38,12 +40,46 @@ impl DistTable {
 pub struct DummyDataSource;
 
 impl DataSource for DummyDataSource {
-    fn get_stream(&self, _request: ScanRequest) -> Result<SendableRecordBatchStream, BoxedError> {
+    fn get_stream(
+        &self,
+        _request: ScanRequest,
+    ) -> std::result::Result<SendableRecordBatchStream, BoxedError> {
         NotSupportedSnafu {
             feat: "get stream from a distributed table",
         }
         .fail()
         .map_err(BoxedError::new)
+    }
+}
+
+// TODO(LFC): Refactor consideration: move this function to some helper mod,
+// could be done together or after `TableReference`'s refactoring, when issue #559 is resolved.
+/// Converts maybe fully-qualified table name (`<catalog>.<schema>.<table>`) to tuple.
+pub fn table_idents_to_full_name(
+    obj_name: &ObjectName,
+    query_ctx: QueryContextRef,
+) -> Result<(String, String, String)> {
+    match &obj_name.0[..] {
+        [table] => Ok((
+            query_ctx.current_catalog().to_owned(),
+            query_ctx.current_schema().to_owned(),
+            table.value.clone(),
+        )),
+        [schema, table] => Ok((
+            query_ctx.current_catalog().to_owned(),
+            schema.value.clone(),
+            table.value.clone(),
+        )),
+        [catalog, schema, table] => Ok((
+            catalog.value.clone(),
+            schema.value.clone(),
+            table.value.clone(),
+        )),
+        _ => InvalidSqlSnafu {
+            err_msg: format!(
+                "expect table name to be <catalog>.<schema>.<table>, <schema>.<table> or <table>, actual: {obj_name}",
+            ),
+        }.fail(),
     }
 }
 

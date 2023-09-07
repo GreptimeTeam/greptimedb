@@ -45,6 +45,7 @@ pub(crate) struct StandaloneRegionRequestHandler {
 }
 
 impl StandaloneRegionRequestHandler {
+    #[allow(dead_code)]
     pub fn arc(region_server: RegionServer) -> Arc<Self> {
         Arc::new(Self { region_server })
     }
