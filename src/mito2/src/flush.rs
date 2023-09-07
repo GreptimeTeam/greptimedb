@@ -474,8 +474,12 @@ impl FlushScheduler {
     ///
     /// # Panics
     /// Panics if region didn't request flush.
-    pub(crate) fn add_write_request_to_pending(&mut self, _request: SenderWriteRequest) {
-        unimplemented!()
+    pub(crate) fn add_write_request_to_pending(&mut self, request: SenderWriteRequest) {
+        let status = self
+            .region_status
+            .get_mut(&request.request.region_id)
+            .unwrap();
+        status.pending_writes.push(request);
     }
 
     /// Returns true if the region has pending DDLs.

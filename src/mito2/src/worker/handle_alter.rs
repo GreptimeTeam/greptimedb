@@ -46,7 +46,6 @@ impl<S> RegionWorkerLoop<S> {
 
         info!("Try to alter region: {}, request: {:?}", region_id, request);
 
-        // TODO(yingwen): We should remove immutable memtables on flush finished.
         let version = region.version();
         if !can_alter_directly(&version) {
             // We need to flush all memtables first.
