@@ -42,7 +42,6 @@ use common_meta::table_name::TableName;
 use common_query::Output;
 use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::info;
-use datanode::instance::sql::table_idents_to_full_name;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::RawSchema;
 use partition::manager::PartitionInfo;
@@ -72,7 +71,7 @@ use crate::error::{
 use crate::expr_factory;
 use crate::instance::distributed::deleter::DistDeleter;
 use crate::instance::distributed::inserter::DistInserter;
-use crate::table::DistTable;
+use crate::table::{table_idents_to_full_name, DistTable};
 
 const MAX_VALUE: &str = "MAXVALUE";
 
