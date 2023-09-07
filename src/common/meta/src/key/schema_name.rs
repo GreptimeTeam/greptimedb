@@ -192,9 +192,9 @@ mod tests {
     #[test]
     fn test_serialization() {
         let key = SchemaNameKey::new("my-catalog", "my-schema");
-        assert_eq!(key.to_string(), "__schema_name/my-catalog/my-schema");
+        assert_eq!(key.to_string(), "gt__schema_name/my-catalog/my-schema");
 
-        let parsed: SchemaNameKey<'_> = "__schema_name/my-catalog/my-schema".try_into().unwrap();
+        let parsed: SchemaNameKey<'_> = "gt__schema_name/my-catalog/my-schema".try_into().unwrap();
         assert_eq!(key, parsed);
 
         let value = SchemaNameValue {

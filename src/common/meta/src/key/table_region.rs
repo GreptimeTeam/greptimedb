@@ -78,7 +78,7 @@ mod tests {
     fn test_serde() {
         let key = TableRegionKey::new(1);
         let raw_key = key.as_raw_key();
-        assert_eq!(raw_key, b"__table_region/1");
+        assert_eq!(raw_key, b"gt__table_region/1");
 
         let value = TableRegionValue {
             region_distribution: RegionDistribution::from([(1, vec![1, 2, 3]), (2, vec![4, 5, 6])]),

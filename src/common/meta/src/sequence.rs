@@ -24,7 +24,7 @@ use crate::rpc::store::CompareAndPutRequest;
 
 pub type SequenceRef = Arc<Sequence>;
 
-pub(crate) const SEQ_PREFIX: &str = "__meta_seq";
+pub(crate) const SEQ_PREFIX: &str = "gt__meta_seq";
 
 pub struct Sequence {
     inner: Mutex<Inner>,

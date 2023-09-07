@@ -142,9 +142,9 @@ mod tests {
     fn test_serialization() {
         let key = CatalogNameKey::new("my-catalog");
 
-        assert_eq!(key.to_string(), "__catalog_name/my-catalog");
+        assert_eq!(key.to_string(), "gt__catalog_name/my-catalog");
 
-        let parsed: CatalogNameKey = "__catalog_name/my-catalog".try_into().unwrap();
+        let parsed: CatalogNameKey = "gt__catalog_name/my-catalog".try_into().unwrap();
 
         assert_eq!(key, parsed);
     }

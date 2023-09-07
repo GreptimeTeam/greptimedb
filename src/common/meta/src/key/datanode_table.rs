@@ -234,7 +234,7 @@ mod tests {
             table_id: 2,
         };
         let raw_key = key.as_raw_key();
-        assert_eq!(raw_key, b"__dn_table/1/2");
+        assert_eq!(raw_key, b"gt__dn_table/1/2");
 
         let value = DatanodeTableValue {
             table_id: 42,
@@ -260,13 +260,13 @@ mod tests {
         test_err(b"");
         test_err(vec![0u8, 159, 146, 150].as_slice()); // invalid UTF8 string
         test_err(b"invalid_prefix/1/2");
-        test_err(b"__dn_table/");
-        test_err(b"__dn_table/invalid_len_1");
-        test_err(b"__dn_table/invalid_len_3/1/2");
-        test_err(b"__dn_table/invalid_node_id/2");
-        test_err(b"__dn_table/1/invalid_table_id");
+        test_err(b"gt__dn_table/");
+        test_err(b"gt__dn_table/invalid_len_1");
+        test_err(b"gt__dn_table/invalid_len_3/1/2");
+        test_err(b"gt__dn_table/invalid_node_id/2");
+        test_err(b"gt__dn_table/1/invalid_table_id");
 
-        let table_id = DatanodeTableKey::strip_table_id(b"__dn_table/1/2").unwrap();
+        let table_id = DatanodeTableKey::strip_table_id(b"gt__dn_table/1/2").unwrap();
         assert_eq!(table_id, 2);
     }
 }

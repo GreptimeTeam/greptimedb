@@ -112,7 +112,7 @@ impl TableInfoManager {
         (txn, Self::build_decode_fn(raw_key))
     }
 
-    /// Builds a create table info transaction, it expected the `__table_info/{table_id}` wasn't occupied.
+    /// Builds a create table info transaction, it expected the `gt__table_info/{table_id}` wasn't occupied.
     pub(crate) fn build_create_txn(
         &self,
         table_id: TableId,
@@ -248,7 +248,7 @@ mod tests {
     fn test_key_serde() {
         let key = TableInfoKey::new(42);
         let raw_key = key.as_raw_key();
-        assert_eq!(raw_key, b"__table_info/42");
+        assert_eq!(raw_key, b"gt__table_info/42");
     }
 
     #[test]

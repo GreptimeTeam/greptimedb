@@ -248,19 +248,19 @@ mod tests {
         test_err(b"");
         test_err(vec![0u8, 159, 146, 150].as_slice()); // invalid UTF8 string
         test_err(b"invalid_prefix/my_catalog/my_schema/my_table");
-        test_err(b"__table_name/");
-        test_err(b"__table_name/invalid_len_1");
-        test_err(b"__table_name/invalid_len_2/x");
-        test_err(b"__table_name/invalid_len_4/x/y/z");
-        test_err(b"__table_name/000_invalid_catalog/y/z");
-        test_err(b"__table_name/x/000_invalid_schema/z");
-        test_err(b"__table_name/x/y/000_invalid_table");
+        test_err(b"gt__table_name/");
+        test_err(b"gt__table_name/invalid_len_1");
+        test_err(b"gt__table_name/invalid_len_2/x");
+        test_err(b"gt__table_name/invalid_len_4/x/y/z");
+        test_err(b"gt__table_name/000_invalid_catalog/y/z");
+        test_err(b"gt__table_name/x/000_invalid_schema/z");
+        test_err(b"gt__table_name/x/y/000_invalid_table");
 
         fn test_ok(table_name: &str) {
             assert_eq!(
                 table_name,
                 TableNameKey::strip_table_name(
-                    format!("__table_name/my_catalog/my_schema/{}", table_name).as_bytes()
+                    format!("gt__table_name/my_catalog/my_schema/{}", table_name).as_bytes()
                 )
                 .unwrap()
             );
@@ -275,7 +275,7 @@ mod tests {
         let key = TableNameKey::new("my_catalog", "my_schema", "my_table");
         let raw_key = key.as_raw_key();
         assert_eq!(
-            b"__table_name/my_catalog/my_schema/my_table",
+            b"gt__table_name/my_catalog/my_schema/my_table",
             raw_key.as_slice()
         );
 

@@ -26,7 +26,7 @@ use crate::rpc::router::{region_distribution, RegionRoute};
 
 pub const TABLE_ROUTE_PREFIX: &str = "__meta_table_route";
 
-pub const NEXT_TABLE_ROUTE_PREFIX: &str = "__table_route";
+pub const NEXT_TABLE_ROUTE_PREFIX: &str = "gt__table_route";
 
 // TODO(weny): Renames it to TableRouteKey.
 pub struct NextTableRouteKey {
@@ -96,7 +96,7 @@ impl TableRouteManager {
         (txn, Self::build_decode_fn(raw_key))
     }
 
-    /// Builds a create table route transaction. it expected the `__table_route/{table_id}` wasn't occupied.
+    /// Builds a create table route transaction. it expected the `gt__table_route/{table_id}` wasn't occupied.
     pub(crate) fn build_create_txn(
         &self,
         table_id: TableId,
@@ -281,7 +281,7 @@ mod tests {
 
         let removed = key.removed_key();
         assert_eq!(
-            "__removed-__meta_table_route-greptime-public-demo-123",
+            "gt__removed-__meta_table_route-greptime-public-demo-123",
             removed
         );
     }

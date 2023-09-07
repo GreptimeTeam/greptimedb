@@ -16,7 +16,7 @@ Now we have the following table metadata keys:
 
 **TableInfo** 
 ```rust
-// __table_info/{table_id}
+// gt__table_info/{table_id}
 pub struct TableInfoKey {
     table_id: TableId,
 }
@@ -29,7 +29,7 @@ pub struct TableInfoValue {
 
 **TableRoute** 
 ```rust
-// __table_route/{table_id}
+// gt__table_route/{table_id}
 pub struct NextTableRouteKey {
     table_id: TableId,
 }
@@ -40,7 +40,7 @@ pub struct TableRoute {
 ```
 **DatanodeTable**
 ```rust
-// __table_route/{datanode_id}/{table_id}
+// gt__table_route/{datanode_id}/{table_id}
 pub struct DatanodeTableKey {
     datanode_id: DatanodeId,
     table_id: TableId,
@@ -55,7 +55,7 @@ pub struct DatanodeTableValue {
 
 **TableNameKey**
 ```rust
-// __table_name/{CatalogName}/{SchemaName}/{TableName}
+// gt__table_name/{CatalogName}/{SchemaName}/{TableName}
 pub struct TableNameKey<'a> {
     pub catalog: &'a str,
     pub schema: &'a str,
@@ -80,7 +80,7 @@ Creates all of the above keys. `TableRoute`, `TableInfo`, should be empty.
 The **TableNameKey**'s lock will be held by the procedure framework.
 ## Drop Table DDL
 
-`TableInfoKey` and `NextTableRouteKey` will be added with  `__removed-` prefix, and the other above keys will be deleted.  The transaction will not compare any keys.
+`TableInfoKey` and `NextTableRouteKey` will be added with  `gt__removed-` prefix, and the other above keys will be deleted.  The transaction will not compare any keys.
 ## Alter Table DDL
 
 1. Rename table, updates `TableInfo` and `TableName`. Compares `TableInfo`, and the new `TableNameKey` should be empty, and TableInfo should equal the Snapshot when submitting DDL.

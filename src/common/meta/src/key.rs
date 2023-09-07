@@ -15,24 +15,24 @@
 //! This mod defines all the keys used in the metadata store (Metasrv).
 //! Specifically, there are these kinds of keys:
 //!
-//! 1. Datanode table key: `__dn_table/{datanode_id}/{table_id}`
+//! 1. Datanode table key: `gt__dn_table/{datanode_id}/{table_id}`
 //!     - The value is a [DatanodeTableValue] struct; it contains `table_id` and the regions that
 //!       belong to this Datanode.
 //!     - This key is primary used in the startup of Datanode, to let Datanode know which tables
 //!       and regions it should open.
 //!
-//! 2. Table info key: `__table_info/{table_id}`
+//! 2. Table info key: `gt__table_info/{table_id}`
 //!     - The value is a [TableInfoValue] struct; it contains the whole table info (like column
 //!       schemas).
 //!     - This key is mainly used in constructing the table in Datanode and Frontend.
 //!
-//! 3. Catalog name key: `__catalog_name/{catalog_name}`
+//! 3. Catalog name key: `gt__catalog_name/{catalog_name}`
 //!     - Indices all catalog names
 //!
-//! 4. Schema name key: `__schema_name/{catalog_name}/{schema_name}`
+//! 4. Schema name key: `gt__schema_name/{catalog_name}/{schema_name}`
 //!     - Indices all schema names belong to the {catalog_name}
 //!
-//! 5. Table name key: `__table_name/{catalog_name}/{schema_name}/{table_name}`
+//! 5. Table name key: `gt__table_name/{catalog_name}/{schema_name}/{table_name}`
 //!     - The value is a [TableNameValue] struct; it contains the table id.
 //!     - Used in the table name to table id lookup.
 //!
@@ -78,16 +78,16 @@ use crate::kv_backend::KvBackendRef;
 use crate::rpc::router::{region_distribution, RegionRoute};
 use crate::DatanodeId;
 
-pub const REMOVED_PREFIX: &str = "__removed";
+pub const REMOVED_PREFIX: &str = "gt__removed";
 
 const NAME_PATTERN: &str = "[a-zA-Z_:-][a-zA-Z0-9_:-]*";
 
-const DATANODE_TABLE_KEY_PREFIX: &str = "__dn_table";
-const TABLE_INFO_KEY_PREFIX: &str = "__table_info";
-const TABLE_NAME_KEY_PREFIX: &str = "__table_name";
-const TABLE_REGION_KEY_PREFIX: &str = "__table_region";
-const CATALOG_NAME_KEY_PREFIX: &str = "__catalog_name";
-const SCHEMA_NAME_KEY_PREFIX: &str = "__schema_name";
+const DATANODE_TABLE_KEY_PREFIX: &str = "gt__dn_table";
+const TABLE_INFO_KEY_PREFIX: &str = "gt__table_info";
+const TABLE_NAME_KEY_PREFIX: &str = "gt__table_name";
+const TABLE_REGION_KEY_PREFIX: &str = "gt__table_region";
+const CATALOG_NAME_KEY_PREFIX: &str = "gt__catalog_name";
+const SCHEMA_NAME_KEY_PREFIX: &str = "gt__schema_name";
 
 pub type RegionDistribution = BTreeMap<DatanodeId, Vec<RegionNumber>>;
 
@@ -525,7 +525,7 @@ mod tests {
     #[test]
     fn test_to_removed_key() {
         let key = "test_key";
-        let removed = "__removed-test_key";
+        let removed = "gt__removed-test_key";
         assert_eq!(removed, to_removed_key(key));
     }
 
