@@ -24,7 +24,7 @@ use crate::ddl::alter_table::AlterTableProcedure;
 use crate::ddl::create_table::CreateTableProcedure;
 use crate::ddl::drop_table::DropTableProcedure;
 use crate::ddl::{
-    DdlContext, DdlTaskExecutor, ExecutorContext, TableCreatorContext, TableCreatorRef,
+    DdlContext, DdlTaskExecutor, ExecutorContext, TableCreatorContext, TableMetadataAllocatorRef,
 };
 use crate::error::{
     self, RegisterProcedureLoaderSnafu, Result, SubmitProcedureSnafu, TableNotFoundSnafu,
@@ -48,7 +48,7 @@ pub struct DdlManager {
     datanode_manager: DatanodeManagerRef,
     cache_invalidator: CacheInvalidatorRef,
     table_metadata_manager: TableMetadataManagerRef,
-    table_creator: TableCreatorRef,
+    table_creator: TableMetadataAllocatorRef,
 }
 
 impl DdlManager {
@@ -57,7 +57,7 @@ impl DdlManager {
         datanode_clients: DatanodeManagerRef,
         cache_invalidator: CacheInvalidatorRef,
         table_metadata_manager: TableMetadataManagerRef,
-        table_creator: TableCreatorRef,
+        table_creator: TableMetadataAllocatorRef,
     ) -> Self {
         Self {
             procedure_manager,

@@ -61,7 +61,6 @@ impl StatementExecutor {
         partitions: Option<Partitions>,
     ) -> Result<TableRef> {
         let _timer = common_telemetry::timer!(crate::metrics::DIST_CREATE_TABLE);
-        // 1. get schema info
         let schema = self
             .table_metadata_manager
             .schema_manager()

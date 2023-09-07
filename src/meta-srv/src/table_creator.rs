@@ -15,7 +15,7 @@
 use api::v1::meta::Partition;
 use common_catalog::format_full_table_name;
 use common_error::ext::BoxedError;
-use common_meta::ddl::{TableCreator, TableCreatorContext};
+use common_meta::ddl::{TableCreatorContext, TableMetadataAllocator};
 use common_meta::error::{self as meta_error, Result as MetaResult};
 use common_meta::rpc::router::{Region, RegionRoute};
 use common_meta::sequence::SequenceRef;
@@ -48,7 +48,7 @@ impl MetaSrvTableCreator {
 }
 
 #[async_trait::async_trait]
-impl TableCreator for MetaSrvTableCreator {
+impl TableMetadataAllocator for MetaSrvTableCreator {
     async fn create(
         &self,
         ctx: &TableCreatorContext,

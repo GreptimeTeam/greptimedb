@@ -22,7 +22,7 @@ use client::region::check_response_header;
 use client::region_handler::RegionRequestHandler;
 use common_error::ext::BoxedError;
 use common_meta::datanode_manager::{AffectedRows, Datanode, DatanodeManager, DatanodeRef};
-use common_meta::ddl::{TableCreator, TableCreatorContext};
+use common_meta::ddl::{TableCreatorContext, TableMetadataAllocator};
 use common_meta::error::{self as meta_error, Result as MetaResult};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::peer::Peer;
@@ -128,7 +128,7 @@ impl StandaloneTableCreator {
 }
 
 #[async_trait]
-impl TableCreator for StandaloneTableCreator {
+impl TableMetadataAllocator for StandaloneTableCreator {
     async fn create(
         &self,
         _ctx: &TableCreatorContext,

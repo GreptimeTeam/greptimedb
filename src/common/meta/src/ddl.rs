@@ -51,7 +51,7 @@ pub struct TableCreatorContext {
 }
 
 #[async_trait::async_trait]
-pub trait TableCreator: Send + Sync {
+pub trait TableMetadataAllocator: Send + Sync {
     async fn create(
         &self,
         ctx: &TableCreatorContext,
@@ -60,7 +60,7 @@ pub trait TableCreator: Send + Sync {
     ) -> Result<(TableId, Vec<RegionRoute>)>;
 }
 
-pub type TableCreatorRef = Arc<dyn TableCreator>;
+pub type TableMetadataAllocatorRef = Arc<dyn TableMetadataAllocator>;
 
 #[derive(Clone)]
 pub struct DdlContext {

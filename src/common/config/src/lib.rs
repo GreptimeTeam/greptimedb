@@ -61,8 +61,10 @@ pub struct KvStoreConfig {
 impl Default for KvStoreConfig {
     fn default() -> Self {
         Self {
-            file_size: ReadableSize::mb(256),     // log file size 256MB
-            purge_threshold: ReadableSize::gb(4), // purge threshold 4GB
+            // log file size 256MB
+            file_size: ReadableSize::mb(256),
+            // purge threshold 4GB
+            purge_threshold: ReadableSize::gb(4),
         }
     }
 }

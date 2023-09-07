@@ -104,7 +104,7 @@ pub fn find_leaders(region_routes: &[RegionRoute]) -> HashSet<Peer> {
         .collect()
 }
 
-pub fn find_region_map(region_routes: &[RegionRoute]) -> HashMap<u32, &Peer> {
+pub fn convert_to_region_map(region_routes: &[RegionRoute]) -> HashMap<u32, &Peer> {
     region_routes
         .iter()
         .filter_map(|x| {
@@ -116,7 +116,10 @@ pub fn find_region_map(region_routes: &[RegionRoute]) -> HashMap<u32, &Peer> {
 }
 
 pub fn find_region_leader(region_routes: &[RegionRoute], region_number: u32) -> Option<&Peer> {
-    find_region_map(region_routes).get(&region_number).copied()
+    region_routes
+        .iter()
+        .find(|x| x.region.id.region_number() == region_number)
+        .and_then(|r| r.leader_peer.as_ref())
 }
 
 pub fn find_leader_regions(region_routes: &[RegionRoute], datanode: &Peer) -> Vec<RegionNumber> {
@@ -346,7 +349,7 @@ pub struct RegionRoutes(pub Vec<RegionRoute>);
 
 impl RegionRoutes {
     pub fn region_map(&self) -> HashMap<u32, &Peer> {
-        find_region_map(&self.0)
+        convert_to_region_map(&self.0)
     }
 
     pub fn find_region_leader(&self, region_number: u32) -> Option<&Peer> {
