@@ -43,7 +43,7 @@ impl HeartbeatHandler for CollectStatsHandler {
         match Stat::try_from(req.clone()) {
             Ok(stat) => {
                 // If stat is empty, it means the request is a mailbox response
-                if stat.is_empty() {
+                if !stat.is_empty() {
                     let _ = acc.stat.insert(stat);
                 }
             }
