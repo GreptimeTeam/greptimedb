@@ -14,12 +14,17 @@
 
 use std::collections::HashMap;
 
+use api::helper::ColumnDataTypeWrapper;
 use api::v1;
+use api::v1::add_column_location::LocationType;
 use api::v1::region::{alter_request, region_request, AlterRequest};
 use api::v1::Rows;
-use snafu::OptionExt;
+use datatypes::schema::ColumnSchema;
+use snafu::{OptionExt, ResultExt};
 
-use crate::metadata::{ColumnMetadata, InvalidRawRegionRequestSnafu, MetadataError, Result};
+use crate::metadata::{
+    ColumnMetadata, ConvertDatatypesSnafu, InvalidRawRegionRequestSnafu, MetadataError, Result,
+};
 use crate::path_utils::region_dir;
 use crate::storage::{ColumnId, RegionId, ScanRequest};
 
@@ -184,10 +189,15 @@ impl TryFrom<AlterRequest> for RegionAlterRequest {
     type Error = MetadataError;
 
     fn try_from(value: AlterRequest) -> Result<Self> {
-        let _kind = value.kind.context(InvalidRawRegionRequestSnafu {
-            err: "'kind' is absent",
+        let kind = value.kind.context(InvalidRawRegionRequestSnafu {
+            err: "missing kind in AlterRequest",
         })?;
-        todo!()
+
+        let kind = AlterKind::try_from(kind)?;
+        Ok(RegionAlterRequest {
+            schema_version: value.schema_version,
+            kind,
+        })
     }
 }
 
@@ -209,8 +219,23 @@ pub enum AlterKind {
 impl TryFrom<alter_request::Kind> for AlterKind {
     type Error = MetadataError;
 
-    fn try_from(_value: alter_request::Kind) -> Result<Self> {
-        todo!()
+    fn try_from(kind: alter_request::Kind) -> Result<Self> {
+        let alter_kind = match kind {
+            alter_request::Kind::AddColumns(x) => {
+                let columns = x
+                    .add_columns
+                    .into_iter()
+                    .map(|x| x.try_into())
+                    .collect::<Result<Vec<_>>>()?;
+                AlterKind::AddColumns { columns }
+            }
+            alter_request::Kind::DropColumns(x) => {
+                let names = x.drop_columns.into_iter().map(|x| x.name).collect();
+                AlterKind::DropColumns { names }
+            }
+        };
+
+        Ok(alter_kind)
     }
 }
 
@@ -226,8 +251,23 @@ pub struct AddColumn {
 impl TryFrom<v1::region::AddColumn> for AddColumn {
     type Error = MetadataError;
 
-    fn try_from(_value: v1::region::AddColumn) -> Result<Self> {
-        todo!()
+    fn try_from(add_column: v1::region::AddColumn) -> Result<Self> {
+        let column_def = add_column
+            .column_def
+            .context(InvalidRawRegionRequestSnafu {
+                err: "missing column_def in AddColumn",
+            })?;
+
+        let column_metadata = ColumnMetadata::try_from_column_def(column_def)?;
+        let location = add_column.location.context(InvalidRawRegionRequestSnafu {
+            err: "missing location in AddColumn",
+        })?;
+        let location = AddColumnLocation::try_from(location)?;
+
+        Ok(AddColumn {
+            column_metadata,
+            location,
+        })
     }
 }
 
@@ -246,8 +286,20 @@ pub enum AddColumnLocation {
 impl TryFrom<v1::AddColumnLocation> for AddColumnLocation {
     type Error = MetadataError;
 
-    fn try_from(_value: v1::AddColumnLocation) -> Result<Self> {
-        todo!()
+    fn try_from(location: v1::AddColumnLocation) -> Result<Self> {
+        let location_type = LocationType::from_i32(location.location_type).context(
+            InvalidRawRegionRequestSnafu {
+                err: format!("unknown location type {}", location.location_type),
+            },
+        )?;
+        let add_column_location = match location_type {
+            LocationType::First => AddColumnLocation::First,
+            LocationType::After => AddColumnLocation::After {
+                column_name: location.after_column_name,
+            },
+        };
+
+        Ok(add_column_location)
     }
 }
 

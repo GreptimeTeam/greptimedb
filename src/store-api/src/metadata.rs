@@ -513,7 +513,7 @@ pub enum MetadataError {
     },
 
     #[snafu(display(
-        "Failed to convert with struct from datatypes, location: {}, source: {}",
+        "Failed to convert struct from datatypes, location: {}, source: {}",
         location,
         source
     ))]
