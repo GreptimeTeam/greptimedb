@@ -77,7 +77,7 @@ impl<'a> Inserter<'a> {
                 .map(|r| !r.rows.is_empty())
                 .unwrap_or_default()
         });
-        validate_row_count_match(&requests)?;
+        validate_column_count_match(&requests)?;
 
         self.create_or_alter_tables_on_demand(&requests, &ctx)
             .await?;
@@ -225,7 +225,7 @@ impl<'a> Inserter<'a> {
     }
 }
 
-fn validate_row_count_match(requests: &RowInsertRequests) -> Result<()> {
+fn validate_column_count_match(requests: &RowInsertRequests) -> Result<()> {
     for request in &requests.inserts {
         let rows = request.rows.as_ref().unwrap();
         let column_count = rows.schema.len();

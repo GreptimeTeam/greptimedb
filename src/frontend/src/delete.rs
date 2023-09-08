@@ -67,7 +67,7 @@ impl<'a> Deleter<'a> {
                 .map(|r| !r.rows.is_empty())
                 .unwrap_or_default()
         });
-        validate_row_count_match(&requests)?;
+        validate_column_count_match(&requests)?;
 
         let requests = self.trim_columns(requests, &ctx).await?;
         let deletes = RowToRegion::new(self.catalog_manager, &ctx)
@@ -159,7 +159,7 @@ impl<'a> Deleter<'a> {
     }
 }
 
-fn validate_row_count_match(requests: &RowDeleteRequests) -> Result<()> {
+fn validate_column_count_match(requests: &RowDeleteRequests) -> Result<()> {
     for request in &requests.deletes {
         let rows = request.rows.as_ref().unwrap();
         let column_count = rows.schema.len();
