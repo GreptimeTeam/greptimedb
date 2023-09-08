@@ -18,6 +18,7 @@ use crate::error::Result;
 use crate::ident::TableIdent;
 
 /// Places context of invalidating cache. e.g., span id, trace id etc.
+#[derive(Debug, Default)]
 pub struct Context {
     pub subject: Option<String>,
 }
@@ -29,3 +30,12 @@ pub trait CacheInvalidator: Send + Sync {
 }
 
 pub type CacheInvalidatorRef = Arc<dyn CacheInvalidator>;
+
+pub struct DummyCacheInvalidator;
+
+#[async_trait::async_trait]
+impl CacheInvalidator for DummyCacheInvalidator {
+    async fn invalidate_table(&self, _ctx: &Context, _table_ident: TableIdent) -> Result<()> {
+        Ok(())
+    }
+}

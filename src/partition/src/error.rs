@@ -25,6 +25,12 @@ use table::metadata::TableId;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
+    #[snafu(display("Table route manager error: {}", source))]
+    TableRouteManager {
+        source: common_meta::error::Error,
+        location: Location,
+    },
+
     #[snafu(display("Failed to get meta info from cache, error: {}", err_msg))]
     GetCache { err_msg: String, location: Location },
 
@@ -156,6 +162,7 @@ impl ErrorExt for Error {
             Error::ConvertScalarValue { .. } => StatusCode::Internal,
             Error::FindDatanode { .. } => StatusCode::InvalidArguments,
             Error::CreateDefaultToRead { source, .. } => source.status_code(),
+            Error::TableRouteManager { source, .. } => source.status_code(),
             Error::MissingDefaultValue { .. } => StatusCode::Internal,
         }
     }

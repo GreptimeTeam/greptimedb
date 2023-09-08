@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 
 use api::v1::region::{region_request, DeleteRequests, RegionRequest, RegionRequestHeader};
-use common_meta::datanode_manager::{AffectedRows, DatanodeManager};
+use common_meta::datanode_manager::AffectedRows;
 use common_meta::peer::Peer;
 use futures::future;
 use metrics::counter;
@@ -62,7 +62,7 @@ impl<'a> DistDeleter<'a> {
         let trace_id = self.trace_id.unwrap_or_default();
         let span_id = self.span_id.unwrap_or_default();
         let results = future::try_join_all(requests.into_iter().map(|(peer, deletes)| {
-            let datanode_clients = self.catalog_manager.datanode_clients();
+            let datanode_clients = self.catalog_manager.datanode_manager();
             common_runtime::spawn_write(async move {
                 let request = RegionRequest {
                     header: Some(RegionRequestHeader { trace_id, span_id }),
@@ -135,15 +135,11 @@ mod tests {
     use common_meta::helper::{CatalogValue, SchemaValue};
     use common_meta::key::catalog_name::CatalogNameKey;
     use common_meta::key::schema_name::SchemaNameKey;
-    use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_meta::kv_backend::{KvBackend, KvBackendRef};
-    use common_meta::rpc::router::{Region, RegionRoute};
     use common_meta::rpc::store::PutRequest;
-    use datatypes::prelude::{ConcreteDataType, VectorRef};
-    use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema as DtColumnSchema, Schema};
+    use datatypes::prelude::VectorRef;
     use datatypes::vectors::Int32Vector;
-    use table::metadata::{RawTableInfo, TableInfoBuilder, TableMetaBuilder};
 
     use super::*;
     use crate::heartbeat::handler::tests::MockKvCacheInvalidator;
@@ -174,72 +170,15 @@ mod tests {
         backend
     }
 
-    async fn create_testing_table(
-        table_name: &str,
-        table_metadata_manager: &TableMetadataManagerRef,
-    ) {
-        let schema = Arc::new(Schema::new(vec![
-            DtColumnSchema::new("ts", ConcreteDataType::int64_datatype(), false)
-                .with_time_index(true)
-                .with_default_constraint(Some(ColumnDefaultConstraint::Function(
-                    "current_timestamp()".to_string(),
-                )))
-                .unwrap(),
-            DtColumnSchema::new("a", ConcreteDataType::int32_datatype(), true),
-            DtColumnSchema::new("value", ConcreteDataType::int32_datatype(), false),
-        ]));
-
-        let table_meta = TableMetaBuilder::default()
-            .schema(schema)
-            .primary_key_indices(vec![1])
-            .next_column_id(1)
-            .build()
-            .unwrap();
-
-        let table_id = 1;
-        let table_info: RawTableInfo = TableInfoBuilder::new(table_name, table_meta)
-            .table_id(table_id)
-            .build()
-            .unwrap()
-            .into();
-
-        let region_route_factory = |region_id: u64, peer: u64| RegionRoute {
-            region: Region {
-                id: region_id.into(),
-                ..Default::default()
-            },
-            leader_peer: Some(Peer {
-                id: peer,
-                addr: String::new(),
-            }),
-            follower_peers: vec![],
-        };
-
-        let region_routes = vec![
-            region_route_factory(1, 1),
-            region_route_factory(2, 2),
-            region_route_factory(3, 3),
-        ];
-        table_metadata_manager
-            .create_table_metadata(table_info, region_routes)
-            .await
-            .unwrap();
-    }
-
     #[tokio::test]
     async fn test_split_deletes() {
         let backend = prepare_mocked_backend().await;
-
-        let table_metadata_manager = Arc::new(TableMetadataManager::new(backend.clone()));
-        let table_name = "one_column_partitioning_table";
-        create_testing_table(table_name, &table_metadata_manager).await;
+        create_partition_rule_manager(backend.clone()).await;
 
         let catalog_manager = Arc::new(FrontendCatalogManager::new(
             backend,
             Arc::new(MockKvCacheInvalidator::default()),
-            create_partition_rule_manager().await,
             Arc::new(DatanodeClients::default()),
-            table_metadata_manager,
         ));
 
         let new_delete_request = |vector: VectorRef| -> DeleteRequest {
