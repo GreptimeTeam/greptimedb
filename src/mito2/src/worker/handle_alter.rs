@@ -14,15 +14,17 @@
 
 //! Handling alter related requests.
 
+use std::sync::Arc;
+
 use common_query::Output;
 use common_telemetry::{error, info};
-use snafu::ensure;
-use store_api::metadata::{RegionMetadata, RegionMetadataRef};
-use store_api::region_request::{AlterKind, RegionAlterRequest};
+use snafu::ResultExt;
+use store_api::metadata::{RegionMetadata, RegionMetadataBuilder, RegionMetadataRef};
+use store_api::region_request::RegionAlterRequest;
 use store_api::storage::RegionId;
 use tokio::sync::oneshot;
 
-use crate::error::{InvalidRequestSnafu, RegionNotFoundSnafu, Result};
+use crate::error::{InvalidMetadataSnafu, InvalidRegionRequestSnafu, RegionNotFoundSnafu, Result};
 use crate::flush::FlushReason;
 use crate::manifest::action::{RegionChange, RegionMetaAction, RegionMetaActionList};
 use crate::memtable::MemtableBuilderRef;
@@ -118,7 +120,18 @@ fn metadata_after_alteration(
     metadata: &RegionMetadata,
     request: RegionAlterRequest,
 ) -> Result<RegionMetadataRef> {
-    //
+    // Validates request.
+    request
+        .validate(metadata)
+        .context(InvalidRegionRequestSnafu)?;
 
-    unimplemented!()
+    let mut builder = RegionMetadataBuilder::from_existing(metadata.clone());
+    builder
+        .alter(request.kind)
+        .context(InvalidRegionRequestSnafu)?
+        .bump_version();
+    let new_meta = builder.build().context(InvalidMetadataSnafu)?;
+    assert_eq!(request.schema_version + 1, new_meta.schema_version);
+
+    Ok(Arc::new(new_meta))
 }

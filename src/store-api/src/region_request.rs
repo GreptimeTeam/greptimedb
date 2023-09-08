@@ -12,18 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use api::helper::ColumnDataTypeWrapper;
 use api::v1::add_column_location::LocationType;
 use api::v1::region::{alter_request, region_request, AlterRequest};
 use api::v1::{self, Rows, SemanticType};
-use datatypes::schema::ColumnSchema;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{ensure, OptionExt};
 
 use crate::metadata::{
-    ColumnMetadata, ConvertDatatypesSnafu, InvalidRawRegionRequestSnafu, InvalidRegionRequestSnafu,
-    MetadataError, RegionMetadata, Result,
+    ColumnMetadata, InvalidRawRegionRequestSnafu, InvalidRegionRequestSnafu, MetadataError,
+    RegionMetadata, Result,
 };
 use crate::path_utils::region_dir;
 use crate::storage::{ColumnId, RegionId, ScanRequest};
@@ -241,8 +239,20 @@ impl AlterKind {
     pub fn validate(&self, metadata: &RegionMetadata) -> Result<()> {
         match self {
             AlterKind::AddColumns { columns } => {
+                let mut names = HashSet::with_capacity(columns.len());
                 for col_to_add in columns {
+                    ensure!(
+                        !names.contains(&col_to_add.column_metadata.column_schema.name),
+                        InvalidRegionRequestSnafu {
+                            region_id: metadata.region_id,
+                            err: format!(
+                                "add column {} more than once",
+                                col_to_add.column_metadata.column_schema.name
+                            ),
+                        }
+                    );
                     col_to_add.validate(metadata)?;
+                    names.insert(&col_to_add.column_metadata.column_schema.name);
                 }
             }
             AlterKind::DropColumns { names } => {

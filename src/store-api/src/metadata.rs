@@ -32,6 +32,7 @@ use serde::de::Error;
 use serde::{Deserialize, Deserializer, Serialize};
 use snafu::{ensure, Location, OptionExt, ResultExt, Snafu};
 
+use crate::region_request::{AddColumn, AddColumnLocation, AlterKind};
 use crate::storage::{ColumnId, RegionId};
 
 pub type Result<T> = std::result::Result<T, MetadataError>;
@@ -426,6 +427,17 @@ impl RegionMetadataBuilder {
         self
     }
 
+    /// Applies the alter `kind` to the builder.
+    ///
+    /// The `kind` should be valid.
+    pub fn alter(&mut self, kind: AlterKind) -> Result<&mut Self> {
+        match kind {
+            AlterKind::AddColumns { columns } => self.add_columns(columns)?,
+            AlterKind::DropColumns { names } => self.drop_columns(&names),
+        }
+        Ok(self)
+    }
+
     /// Consumes the builder and build a [RegionMetadata].
     pub fn build(self) -> Result<RegionMetadata> {
         let skipped = SkippedFields::new(&self.column_metadatas)?;
@@ -443,6 +455,42 @@ impl RegionMetadataBuilder {
         meta.validate()?;
 
         Ok(meta)
+    }
+
+    /// Adds columns to the metadata.
+    fn add_columns(&mut self, columns: Vec<AddColumn>) -> Result<()> {
+        for add_column in columns {
+            match add_column.location {
+                AddColumnLocation::First => {
+                    self.column_metadatas.insert(0, add_column.column_metadata);
+                }
+                AddColumnLocation::After { column_name } => {
+                    let pos = self
+                        .column_metadatas
+                        .iter()
+                        .position(|col| col.column_schema.name == column_name)
+                        .context(InvalidRegionRequestSnafu {
+                            region_id: self.region_id,
+                            err: format!(
+                                "column {} not found, failed to add column {} after it",
+                                column_name, add_column.column_metadata.column_schema.name
+                            ),
+                        })?;
+                    // Insert after pos.
+                    self.column_metadatas
+                        .insert(pos + 1, add_column.column_metadata);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Drops columns from the metadata.
+    fn drop_columns(&mut self, names: &[String]) {
+        let name_set: HashSet<_> = names.iter().collect();
+        self.column_metadatas
+            .retain(|col| !name_set.contains(&col.column_schema.name));
     }
 }
 
