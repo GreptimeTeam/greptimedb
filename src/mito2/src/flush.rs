@@ -360,13 +360,13 @@ impl FlushScheduler {
         // Checks whether we can flush the region now.
         if flush_status.flushing {
             // There is already a flush job running.
-            flush_status.push_task(task);
+            flush_status.merge_task(task);
             return Ok(());
         }
 
         // If there are pending tasks, then we should push it to pending list.
         if flush_status.pending_task.is_some() {
-            flush_status.push_task(task);
+            flush_status.merge_task(task);
             return Ok(());
         }
 
@@ -540,7 +540,8 @@ impl FlushStatus {
         }
     }
 
-    fn push_task(&mut self, task: RegionFlushTask) {
+    /// Merges the task to pending task.
+    fn merge_task(&mut self, task: RegionFlushTask) {
         if let Some(pending) = &mut self.pending_task {
             pending.merge(task);
         } else {

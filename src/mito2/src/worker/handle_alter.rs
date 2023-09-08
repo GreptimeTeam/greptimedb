@@ -47,10 +47,9 @@ impl<S> RegionWorkerLoop<S> {
         info!("Try to alter region: {}, request: {:?}", region_id, request);
 
         let version = region.version();
-        // Checks whether memtables are empty.
+        // Checks whether we can alter the region directly.
         if !can_alter_directly(&version) {
             // We need to flush all memtables first.
-            // If no pending flush task, we must trigger a flush.
             info!("Flush region: {} before alteration", region_id);
 
             // Try to submit a flush task.
@@ -69,7 +68,7 @@ impl<S> RegionWorkerLoop<S> {
                     request: DdlRequest::Alter(request),
                 });
 
-            todo!()
+            return;
         }
 
         // Now we can alter the region directly.
@@ -109,8 +108,8 @@ async fn alter_region_schema(
 }
 
 /// Checks whether all memtables are empty.
-fn can_alter_directly(_version: &Version) -> bool {
-    unimplemented!()
+fn can_alter_directly(version: &Version) -> bool {
+    version.memtables.mutable.is_empty() && version.memtables.immutables().is_empty()
 }
 
 /// Creates a metadata after applying the alter `request` to the old `metadata`.

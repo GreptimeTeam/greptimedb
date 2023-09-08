@@ -118,9 +118,21 @@ impl VersionControl {
     /// Alter schema of the region.
     ///
     /// It replaces existing mutable memtable with a memtable that uses the
-    /// new schema.
-    pub(crate) fn alter_schema(&self, _metadata: RegionMetadataRef, _builder: &MemtableBuilderRef) {
-        unimplemented!()
+    /// new schema. Memtables of the version must be empty.
+    pub(crate) fn alter_schema(&self, metadata: RegionMetadataRef, builder: &MemtableBuilderRef) {
+        let new_mutable = builder.build(&metadata);
+        let version = self.current().version;
+        debug_assert!(version.memtables.mutable.is_empty());
+        debug_assert!(version.memtables.immutables().is_empty());
+        let new_version = Arc::new(
+            VersionBuilder::from_version(version)
+                .metadata(metadata)
+                .memtables(MemtableVersion::new(new_mutable))
+                .build(),
+        );
+
+        let mut version_data = self.data.write().unwrap();
+        version_data.version = new_version;
     }
 }
 
@@ -192,6 +204,12 @@ impl VersionBuilder {
     /// Sets memtables.
     pub(crate) fn memtables(mut self, memtables: MemtableVersion) -> VersionBuilder {
         self.memtables = Arc::new(memtables);
+        self
+    }
+
+    /// Sets metadata.
+    pub(crate) fn metadata(mut self, metadata: RegionMetadataRef) -> VersionBuilder {
+        self.metadata = metadata;
         self
     }
 
