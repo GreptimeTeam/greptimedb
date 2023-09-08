@@ -38,9 +38,7 @@ impl<S> RegionWorkerLoop<S> {
         sender: Option<oneshot::Sender<Result<Output>>>,
     ) {
         let Some(region) = self.regions.get_region(region_id) else {
-            if let Some(sender) = sender {
-                let _ = sender.send(RegionNotFoundSnafu { region_id }.fail());
-            }
+            send_result(sender, RegionNotFoundSnafu { region_id }.fail());
             return;
         };
 
