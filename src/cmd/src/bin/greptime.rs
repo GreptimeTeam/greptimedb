@@ -116,7 +116,7 @@ impl SubCommand {
                 Ok(Application::Metasrv(app))
             }
             (SubCommand::Standalone(cmd), Options::Standalone(opts)) => {
-                let app = cmd.build(opts.fe_opts, opts.dn_opts).await?;
+                let app = cmd.build(*opts).await?;
                 Ok(Application::Standalone(app))
             }
             (SubCommand::Cli(cmd), Options::Cli(_)) => {

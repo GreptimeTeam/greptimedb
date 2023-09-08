@@ -77,16 +77,10 @@ impl TryFrom<PbRouteResponse> for RouteResponse {
 pub fn region_distribution(region_routes: &[RegionRoute]) -> Result<RegionDistribution> {
     let mut regions_id_map = RegionDistribution::new();
     for route in region_routes.iter() {
-        let node_id = route
-            .leader_peer
-            .as_ref()
-            .context(error::UnexpectedSnafu {
-                err_msg: "leader not found",
-            })?
-            .id;
-
-        let region_id = route.region.id.region_number();
-        regions_id_map.entry(node_id).or_default().push(region_id);
+        if let Some(peer) = route.leader_peer.as_ref() {
+            let region_id = route.region.id.region_number();
+            regions_id_map.entry(peer.id).or_default().push(region_id);
+        }
     }
     for (_, regions) in regions_id_map.iter_mut() {
         // id asc
@@ -108,6 +102,24 @@ pub fn find_leaders(region_routes: &[RegionRoute]) -> HashSet<Peer> {
         .flat_map(|x| &x.leader_peer)
         .cloned()
         .collect()
+}
+
+pub fn convert_to_region_map(region_routes: &[RegionRoute]) -> HashMap<u32, &Peer> {
+    region_routes
+        .iter()
+        .filter_map(|x| {
+            x.leader_peer
+                .as_ref()
+                .map(|leader| (x.region.id.region_number(), leader))
+        })
+        .collect::<HashMap<_, _>>()
+}
+
+pub fn find_region_leader(region_routes: &[RegionRoute], region_number: u32) -> Option<&Peer> {
+    region_routes
+        .iter()
+        .find(|x| x.region.id.region_number() == region_number)
+        .and_then(|r| r.leader_peer.as_ref())
 }
 
 pub fn find_leader_regions(region_routes: &[RegionRoute], datanode: &Peer) -> Vec<RegionNumber> {
@@ -331,6 +343,18 @@ pub struct RegionRoute {
     pub region: Region,
     pub leader_peer: Option<Peer>,
     pub follower_peers: Vec<Peer>,
+}
+
+pub struct RegionRoutes(pub Vec<RegionRoute>);
+
+impl RegionRoutes {
+    pub fn region_map(&self) -> HashMap<u32, &Peer> {
+        convert_to_region_map(&self.0)
+    }
+
+    pub fn find_region_leader(&self, region_number: u32) -> Option<&Peer> {
+        self.region_map().get(&region_number).copied()
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]

@@ -26,22 +26,25 @@ use catalog::{
     CatalogManager, DeregisterSchemaRequest, DeregisterTableRequest, RegisterSchemaRequest,
     RegisterTableRequest, RenameTableRequest,
 };
-use client::client_manager::DatanodeClients;
 use common_catalog::consts::{
     DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME, NUMBERS_TABLE_ID,
 };
 use common_error::ext::BoxedError;
+use common_meta::cache_invalidator::{CacheInvalidator, Context};
+use common_meta::datanode_manager::DatanodeManagerRef;
+use common_meta::error::Result as MetaResult;
+use common_meta::ident::TableIdent;
 use common_meta::key::catalog_name::CatalogNameKey;
 use common_meta::key::schema_name::SchemaNameKey;
 use common_meta::key::table_info::TableInfoKey;
 use common_meta::key::table_name::TableNameKey;
-use common_meta::key::{TableMetaKey, TableMetadataManagerRef};
+use common_meta::key::table_route::NextTableRouteKey;
+use common_meta::key::{TableMetaKey, TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
 use common_telemetry::debug;
 use futures_util::TryStreamExt;
-use partition::manager::PartitionRuleManagerRef;
+use partition::manager::{PartitionRuleManager, PartitionRuleManagerRef};
 use snafu::prelude::*;
-use table::metadata::TableId;
 use table::table::numbers::{NumbersTable, NUMBERS_TABLE_NAME};
 use table::TableRef;
 
@@ -52,57 +55,19 @@ pub struct FrontendCatalogManager {
     backend: KvBackendRef,
     backend_cache_invalidator: KvCacheInvalidatorRef,
     partition_manager: PartitionRuleManagerRef,
-    datanode_clients: Arc<DatanodeClients>,
     table_metadata_manager: TableMetadataManagerRef,
+    datanode_manager: DatanodeManagerRef,
 }
 
-impl FrontendCatalogManager {
-    pub fn new(
-        backend: KvBackendRef,
-        backend_cache_invalidator: KvCacheInvalidatorRef,
-        partition_manager: PartitionRuleManagerRef,
-        datanode_clients: Arc<DatanodeClients>,
-        table_metadata_manager: TableMetadataManagerRef,
-    ) -> Self {
-        Self {
-            backend,
-            backend_cache_invalidator,
-            partition_manager,
-            datanode_clients,
-            table_metadata_manager,
-        }
-    }
-
-    pub fn backend(&self) -> KvBackendRef {
-        self.backend.clone()
-    }
-
-    pub fn partition_manager(&self) -> PartitionRuleManagerRef {
-        self.partition_manager.clone()
-    }
-
-    pub fn table_metadata_manager_ref(&self) -> &TableMetadataManagerRef {
-        &self.table_metadata_manager
-    }
-
-    pub fn datanode_clients(&self) -> Arc<DatanodeClients> {
-        self.datanode_clients.clone()
-    }
-
-    pub async fn invalidate_schema(&self, catalog: &str, schema: &str) {
-        let key = SchemaNameKey::new(catalog, schema).as_raw_key();
-
-        self.backend_cache_invalidator.invalidate_key(&key).await;
-    }
-
-    pub async fn invalidate_table(
-        &self,
-        catalog: &str,
-        schema: &str,
-        table: &str,
-        table_id: TableId,
-    ) {
-        let key = TableNameKey::new(catalog, schema, table);
+#[async_trait::async_trait]
+impl CacheInvalidator for FrontendCatalogManager {
+    async fn invalidate_table(&self, _ctx: &Context, table_ident: TableIdent) -> MetaResult<()> {
+        let table_id = table_ident.table_id;
+        let key = TableNameKey::new(
+            &table_ident.catalog,
+            &table_ident.schema,
+            &table_ident.table,
+        );
         self.backend_cache_invalidator
             .invalidate_key(&key.as_raw_key())
             .await;
@@ -120,10 +85,54 @@ impl FrontendCatalogManager {
             String::from_utf8_lossy(&key.as_raw_key())
         );
 
-        self.partition_manager
-            .table_routes()
-            .invalidate_table_route(table_id)
+        let key = &NextTableRouteKey { table_id };
+        self.backend_cache_invalidator
+            .invalidate_key(&key.as_raw_key())
             .await;
+        debug!(
+            "invalidated cache key: {}",
+            String::from_utf8_lossy(&key.as_raw_key())
+        );
+
+        Ok(())
+    }
+}
+
+impl FrontendCatalogManager {
+    pub fn new(
+        backend: KvBackendRef,
+        backend_cache_invalidator: KvCacheInvalidatorRef,
+        datanode_manager: DatanodeManagerRef,
+    ) -> Self {
+        Self {
+            backend: backend.clone(),
+            backend_cache_invalidator,
+            partition_manager: Arc::new(PartitionRuleManager::new(backend.clone())),
+            table_metadata_manager: Arc::new(TableMetadataManager::new(backend)),
+            datanode_manager,
+        }
+    }
+
+    pub fn backend(&self) -> KvBackendRef {
+        self.backend.clone()
+    }
+
+    pub fn partition_manager(&self) -> PartitionRuleManagerRef {
+        self.partition_manager.clone()
+    }
+
+    pub fn table_metadata_manager_ref(&self) -> &TableMetadataManagerRef {
+        &self.table_metadata_manager
+    }
+
+    pub fn datanode_manager(&self) -> DatanodeManagerRef {
+        self.datanode_manager.clone()
+    }
+
+    pub async fn invalidate_schema(&self, catalog: &str, schema: &str) {
+        let key = SchemaNameKey::new(catalog, schema).as_raw_key();
+
+        self.backend_cache_invalidator.invalidate_key(&key).await;
     }
 }
 

@@ -21,15 +21,12 @@ use client::client_manager::DatanodeClients;
 use client::{Client, Database, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_base::Plugins;
 use common_error::ext::ErrorExt;
-use common_meta::key::TableMetadataManager;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
 use common_telemetry::logging;
 use either::Either;
 use frontend::catalog::FrontendCatalogManager;
 use meta_client::client::MetaClientBuilder;
-use partition::manager::PartitionRuleManager;
-use partition::route::TableRoutes;
 use query::datafusion::DatafusionQueryEngine;
 use query::logical_optimizer::LogicalOptimizer;
 use query::parser::QueryLanguageParser;
@@ -254,17 +251,12 @@ async fn create_query_engine(meta_addr: &str) -> Result<DatafusionQueryEngine> {
 
     let cached_meta_backend = Arc::new(CachedMetaKvBackend::new(meta_client.clone()));
 
-    let table_routes = Arc::new(TableRoutes::new(meta_client));
-    let partition_manager = Arc::new(PartitionRuleManager::new(table_routes));
-
     let datanode_clients = Arc::new(DatanodeClients::default());
 
     let catalog_list = Arc::new(FrontendCatalogManager::new(
         cached_meta_backend.clone(),
         cached_meta_backend.clone(),
-        partition_manager,
         datanode_clients,
-        Arc::new(TableMetadataManager::new(cached_meta_backend)),
     ));
     let plugins: Arc<Plugins> = Default::default();
     let state = Arc::new(QueryEngineState::new(

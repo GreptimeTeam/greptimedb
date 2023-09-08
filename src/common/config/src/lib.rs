@@ -44,3 +44,27 @@ impl Default for WalConfig {
         }
     }
 }
+
+pub fn kv_store_dir(store_dir: &str) -> String {
+    format!("{store_dir}/kv")
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct KvStoreConfig {
+    // Kv file size in bytes
+    pub file_size: ReadableSize,
+    // Kv purge threshold in bytes
+    pub purge_threshold: ReadableSize,
+}
+
+impl Default for KvStoreConfig {
+    fn default() -> Self {
+        Self {
+            // log file size 256MB
+            file_size: ReadableSize::mb(256),
+            // purge threshold 4GB
+            purge_threshold: ReadableSize::gb(4),
+        }
+    }
+}

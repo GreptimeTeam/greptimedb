@@ -13,12 +13,8 @@
 // limitations under the License.
 
 use api::v1::alter_expr::Kind;
-use api::v1::ddl_request::Expr as DdlExpr;
-use api::v1::greptime_request::Request;
 use api::v1::region::region_request;
-use api::v1::{
-    AlterExpr, ColumnSchema, DdlRequest, InsertRequests, RowInsertRequest, RowInsertRequests,
-};
+use api::v1::{AlterExpr, ColumnSchema, InsertRequests, RowInsertRequest, RowInsertRequests};
 use catalog::CatalogManager;
 use client::region_handler::RegionRequestHandler;
 use common_catalog::consts::default_engine;
@@ -26,23 +22,23 @@ use common_grpc_expr::util::{extract_new_columns, ColumnExpr};
 use common_query::Output;
 use common_telemetry::info;
 use datatypes::schema::Schema;
-use servers::query_handler::grpc::GrpcQueryHandlerRef;
 use session::context::QueryContextRef;
 use snafu::prelude::*;
 use table::engine::TableReference;
 use table::TableRef;
 
 use crate::error::{
-    CatalogSnafu, Error, FindNewColumnsOnInsertionSnafu, InvalidInsertRequestSnafu,
-    RequestDatanodeSnafu, Result,
+    CatalogSnafu, FindNewColumnsOnInsertionSnafu, InvalidInsertRequestSnafu, RequestDatanodeSnafu,
+    Result,
 };
 use crate::expr_factory::CreateExprFactory;
 use crate::req_convert::insert::{ColumnToRow, RowToRegion};
+use crate::statement::StatementExecutor;
 
 pub(crate) struct Inserter<'a> {
     catalog_manager: &'a dyn CatalogManager,
     create_expr_factory: &'a CreateExprFactory,
-    grpc_query_handler: &'a GrpcQueryHandlerRef<Error>,
+    statement_executor: &'a StatementExecutor,
     region_request_handler: &'a dyn RegionRequestHandler,
 }
 
@@ -50,13 +46,13 @@ impl<'a> Inserter<'a> {
     pub fn new(
         catalog_manager: &'a dyn CatalogManager,
         create_expr_factory: &'a CreateExprFactory,
-        grpc_query_handler: &'a GrpcQueryHandlerRef<Error>,
+        statement_executor: &'a StatementExecutor,
         region_request_handler: &'a dyn RegionRequestHandler,
     ) -> Self {
         Self {
             catalog_manager,
             create_expr_factory,
-            grpc_query_handler,
+            statement_executor,
             region_request_handler,
         }
     }
@@ -164,10 +160,9 @@ impl<'a> Inserter<'a> {
             kind: Some(Kind::AddColumns(add_columns)),
         };
 
-        let req = Request::Ddl(DdlRequest {
-            expr: Some(DdlExpr::Alter(alter_table_expr)),
-        });
-        self.grpc_query_handler.do_query(req, ctx.clone()).await?;
+        self.statement_executor
+            .alter_table_inner(alter_table_expr)
+            .await?;
 
         info!(
             "Successfully added new columns to table: {}.{}.{}",
@@ -187,14 +182,14 @@ impl<'a> Inserter<'a> {
             table_ref.catalog, table_ref.schema, table_ref.table,
         );
 
-        let create_table_expr = self
+        let mut create_table_expr = self
             .create_expr_factory
             .create_table_expr_by_column_schemas(&table_ref, request_schema, default_engine())?;
 
-        let req = Request::Ddl(DdlRequest {
-            expr: Some(DdlExpr::CreateTable(create_table_expr)),
-        });
-        self.grpc_query_handler.do_query(req, ctx.clone()).await?;
+        // TODO(weny): multiple regions table.
+        self.statement_executor
+            .create_table_inner(&mut create_table_expr, None)
+            .await?;
 
         info!(
             "Successfully created table on insertion: {}.{}.{}",
