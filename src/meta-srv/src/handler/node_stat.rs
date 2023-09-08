@@ -52,6 +52,11 @@ pub struct RegionStat {
 }
 
 impl Stat {
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.region_stats.is_empty()
+    }
+
     pub fn stat_key(&self) -> StatKey {
         StatKey {
             cluster_id: self.cluster_id,
