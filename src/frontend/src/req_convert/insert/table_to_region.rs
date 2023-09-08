@@ -12,37 +12,39 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::region::{
-    InsertRequest as RegionInsertRequest, InsertRequests as RegionInsertRequests,
-};
+use api::v1::region::InsertRequests as RegionInsertRequests;
 use api::v1::Rows;
-use store_api::storage::RegionId;
+use partition::manager::PartitionRuleManager;
 use table::metadata::TableInfo;
 use table::requests::InsertRequest as TableInsertRequest;
 
 use crate::error::Result;
+use crate::req_convert::common::partitioner::Partitioner;
 use crate::req_convert::common::{column_schema, row_count};
 
 pub struct TableToRegion<'a> {
     table_info: &'a TableInfo,
+    partition_manager: &'a PartitionRuleManager,
 }
 
 impl<'a> TableToRegion<'a> {
-    pub fn new(table_info: &'a TableInfo) -> Self {
-        Self { table_info }
+    pub fn new(table_info: &'a TableInfo, partition_manager: &'a PartitionRuleManager) -> Self {
+        Self {
+            table_info,
+            partition_manager,
+        }
     }
 
-    pub fn convert(&self, request: TableInsertRequest) -> Result<RegionInsertRequests> {
-        let region_id = RegionId::new(self.table_info.table_id(), request.region_number).into();
+    pub async fn convert(&self, request: TableInsertRequest) -> Result<RegionInsertRequests> {
         let row_count = row_count(&request.columns_values)?;
         let schema = column_schema(self.table_info, &request.columns_values)?;
         let rows = api::helper::vectors_to_rows(request.columns_values.values(), row_count);
-        Ok(RegionInsertRequests {
-            requests: vec![RegionInsertRequest {
-                region_id,
-                rows: Some(Rows { schema, rows }),
-            }],
-        })
+        let rows = Rows { schema, rows };
+
+        let requests = Partitioner::new(self.partition_manager)
+            .partition_insert_requests(self.table_info.table_id(), rows)
+            .await?;
+        Ok(requests)
     }
 }
 
@@ -51,115 +53,120 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
+    use api::v1::region::InsertRequest as RegionInsertRequest;
     use api::v1::value::ValueData;
-    use api::v1::{ColumnDataType, SemanticType};
+    use api::v1::{ColumnDataType, ColumnSchema, Row, SemanticType, Value};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-    use datatypes::prelude::ConcreteDataType;
-    use datatypes::scalars::ScalarVectorBuilder;
-    use datatypes::schema::{ColumnSchema as DtColumnSchema, Schema};
-    use datatypes::vectors::{Int16VectorBuilder, MutableVector, StringVectorBuilder};
-    use table::metadata::{TableInfoBuilder, TableMetaBuilder};
+    use common_meta::key::catalog_name::{CatalogManager, CatalogNameKey};
+    use common_meta::key::schema_name::{SchemaManager, SchemaNameKey};
+    use common_meta::kv_backend::memory::MemoryKvBackend;
+    use common_meta::kv_backend::KvBackendRef;
+    use datatypes::vectors::{Int32Vector, VectorRef};
+    use store_api::storage::RegionId;
 
     use super::*;
+    use crate::table::test::{create_partition_rule_manager, new_test_table_info};
 
-    #[test]
-    fn test_insert_request_table_to_region() {
-        let schema = Schema::new(vec![
-            DtColumnSchema::new("ts", ConcreteDataType::int64_datatype(), false)
-                .with_time_index(true),
-            DtColumnSchema::new("id", ConcreteDataType::int16_datatype(), false),
-            DtColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
-        ]);
+    async fn prepare_mocked_backend() -> KvBackendRef {
+        let backend = Arc::new(MemoryKvBackend::default());
 
-        let table_meta = TableMetaBuilder::default()
-            .schema(Arc::new(schema))
-            .primary_key_indices(vec![2])
-            .next_column_id(3)
-            .build()
+        let catalog_manager = CatalogManager::new(backend.clone());
+        let schema_manager = SchemaManager::new(backend.clone());
+
+        catalog_manager
+            .create(CatalogNameKey::default())
+            .await
+            .unwrap();
+        schema_manager
+            .create(SchemaNameKey::default(), None)
+            .await
             .unwrap();
 
-        let table_info = Arc::new(
-            TableInfoBuilder::default()
-                .name("demo")
-                .meta(table_meta)
-                .table_id(1)
-                .build()
-                .unwrap(),
-        );
-
-        let insert_request = mock_insert_request();
-        let mut request = TableToRegion::new(&table_info)
-            .convert(insert_request)
-            .unwrap();
-
-        assert_eq!(request.requests.len(), 1);
-        verify_region_insert_request(request.requests.pop().unwrap());
+        backend
     }
 
-    fn mock_insert_request() -> TableInsertRequest {
-        let mut builder = StringVectorBuilder::with_capacity(3);
-        builder.push(Some("host1"));
-        builder.push(None);
-        builder.push(Some("host3"));
-        let host = builder.to_vector();
+    #[tokio::test]
+    async fn test_insert_request_table_to_region() {
+        // region to datanode placement:
+        // 1 -> 1
+        // 2 -> 2
+        // 3 -> 3
+        //
+        // region value ranges:
+        // 1 -> [50, max)
+        // 2 -> [10, 50)
+        // 3 -> (min, 10)
 
-        let mut builder = Int16VectorBuilder::with_capacity(3);
-        builder.push(Some(1_i16));
-        builder.push(Some(2_i16));
-        builder.push(Some(3_i16));
-        let id = builder.to_vector();
+        let backend = prepare_mocked_backend().await;
+        let partition_manager = create_partition_rule_manager(backend.clone()).await;
+        let table_info = new_test_table_info(1, "table_1", vec![0u32, 1, 2].into_iter());
 
-        let columns_values = HashMap::from([("host".to_string(), host), ("id".to_string(), id)]);
+        let converter = TableToRegion::new(&table_info, &partition_manager);
 
+        let table_request = build_table_request(Arc::new(Int32Vector::from(vec![
+            Some(1),
+            None,
+            Some(11),
+            Some(101),
+        ])));
+
+        let region_requests = converter.convert(table_request).await.unwrap();
+        let mut region_id_to_region_requests = region_requests
+            .requests
+            .into_iter()
+            .map(|r| (r.region_id, r))
+            .collect::<HashMap<_, _>>();
+
+        let region_id = RegionId::new(1, 1).as_u64();
+        let region_request = region_id_to_region_requests.remove(&region_id).unwrap();
+        assert_eq!(
+            region_request,
+            build_region_request(vec![Some(101)], region_id)
+        );
+
+        let region_id = RegionId::new(1, 2).as_u64();
+        let region_request = region_id_to_region_requests.remove(&region_id).unwrap();
+        assert_eq!(
+            region_request,
+            build_region_request(vec![Some(11)], region_id)
+        );
+
+        let region_id = RegionId::new(1, 3).as_u64();
+        let region_request = region_id_to_region_requests.remove(&region_id).unwrap();
+        assert_eq!(
+            region_request,
+            build_region_request(vec![Some(1), None], region_id)
+        );
+    }
+
+    fn build_table_request(vector: VectorRef) -> TableInsertRequest {
         TableInsertRequest {
             catalog_name: DEFAULT_CATALOG_NAME.to_string(),
             schema_name: DEFAULT_SCHEMA_NAME.to_string(),
-            table_name: "demo".to_string(),
-            columns_values,
+            table_name: "table_1".to_string(),
+            columns_values: HashMap::from([("a".to_string(), vector)]),
             region_number: 0,
         }
     }
 
-    fn verify_region_insert_request(request: RegionInsertRequest) {
-        assert_eq!(request.region_id, RegionId::new(1, 0).as_u64());
-
-        let rows = request.rows.unwrap();
-        for (i, column) in rows.schema.iter().enumerate() {
-            let name = &column.column_name;
-            if name == "id" {
-                assert_eq!(ColumnDataType::Int16 as i32, column.datatype);
-                assert_eq!(SemanticType::Field as i32, column.semantic_type);
-                let values = rows
-                    .rows
-                    .iter()
-                    .map(|row| row.values[i].value_data.clone())
-                    .collect::<Vec<_>>();
-                assert_eq!(
-                    vec![
-                        Some(ValueData::I16Value(1)),
-                        Some(ValueData::I16Value(2)),
-                        Some(ValueData::I16Value(3))
-                    ],
-                    values
-                );
-            }
-            if name == "host" {
-                assert_eq!(ColumnDataType::String as i32, column.datatype);
-                assert_eq!(SemanticType::Tag as i32, column.semantic_type);
-                let values = rows
-                    .rows
-                    .iter()
-                    .map(|row| row.values[i].value_data.clone())
-                    .collect::<Vec<_>>();
-                assert_eq!(
-                    vec![
-                        Some(ValueData::StringValue("host1".to_string())),
-                        None,
-                        Some(ValueData::StringValue("host3".to_string()))
-                    ],
-                    values
-                );
-            }
+    fn build_region_request(rows: Vec<Option<i32>>, region_id: u64) -> RegionInsertRequest {
+        RegionInsertRequest {
+            region_id,
+            rows: Some(Rows {
+                schema: vec![ColumnSchema {
+                    column_name: "a".to_string(),
+                    datatype: ColumnDataType::Int32 as i32,
+                    semantic_type: SemanticType::Tag as i32,
+                }],
+                rows: rows
+                    .into_iter()
+                    .map(|v| Row {
+                        values: vec![Value {
+                            value_data: v.map(ValueData::I32Value),
+                        }],
+                    })
+                    .collect(),
+            }),
         }
     }
 }

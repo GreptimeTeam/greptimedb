@@ -43,9 +43,13 @@ impl StatementExecutor {
     pub async fn insert(&self, insert: Box<Insert>, query_ctx: QueryContextRef) -> Result<Output> {
         if insert.can_extract_values() {
             // Fast path: plain insert ("insert with literal values") is executed directly
-            let inserts = StatementToRegion::new(self.catalog_manager.as_ref(), &query_ctx)
-                .convert(&insert)
-                .await?;
+            let inserts = StatementToRegion::new(
+                self.catalog_manager.as_ref(),
+                &self.partition_manager,
+                &query_ctx,
+            )
+            .convert(&insert)
+            .await?;
             let region_request = RegionRequest {
                 header: Some(RegionRequestHeader {
                     trace_id: query_ctx.trace_id(),

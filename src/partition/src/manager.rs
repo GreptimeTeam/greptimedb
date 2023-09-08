@@ -15,7 +15,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use api::v1::region::{DeleteRequest, InsertRequest};
+use api::v1::Rows;
 use common_meta::key::table_route::TableRouteManager;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::peer::Peer;
@@ -31,7 +31,7 @@ use crate::columns::RangeColumnsPartitionRule;
 use crate::error::{FindLeaderSnafu, Result};
 use crate::partition::{PartitionBound, PartitionDef, PartitionExpr};
 use crate::range::RangePartitionRule;
-use crate::splitter::{DeleteRequestSplits, InsertRequestSplits, RowSplitter};
+use crate::splitter::RowSplitter;
 use crate::{error, PartitionRuleRef};
 
 #[async_trait::async_trait]
@@ -247,26 +247,13 @@ impl PartitionRuleManager {
         Ok(regions)
     }
 
-    /// Split [InsertRequest] into [InsertRequestSplits] according to the partition rule
-    /// of given table.
-    pub async fn split_insert_request(
+    pub async fn split_rows(
         &self,
-        table: TableId,
-        req: InsertRequest,
-    ) -> Result<InsertRequestSplits> {
-        let partition_rule = self.find_table_partition_rule(table).await?;
-        RowSplitter::new(partition_rule).split_insert(req)
-    }
-
-    /// Split [DeleteRequest] into [DeleteRequestSplits] according to the partition rule
-    /// of given table.
-    pub async fn split_delete_request(
-        &self,
-        table: TableId,
-        req: DeleteRequest,
-    ) -> Result<DeleteRequestSplits> {
-        let partition_rule = self.find_table_partition_rule(table).await?;
-        RowSplitter::new(partition_rule).split_delete(req)
+        table_id: TableId,
+        rows: Rows,
+    ) -> Result<HashMap<RegionNumber, Rows>> {
+        let partition_rule = self.find_table_partition_rule(table_id).await?;
+        RowSplitter::new(partition_rule).split(rows)
     }
 }
 

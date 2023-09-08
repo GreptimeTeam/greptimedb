@@ -15,16 +15,12 @@
 use std::collections::HashMap;
 
 use api::helper;
-use api::v1::region::{DeleteRequest, InsertRequest};
 use api::v1::{ColumnSchema, Row, Rows};
 use datatypes::value::Value;
-use store_api::storage::{RegionId, RegionNumber};
+use store_api::storage::RegionNumber;
 
 use crate::error::Result;
 use crate::PartitionRuleRef;
-
-pub type InsertRequestSplits = HashMap<RegionNumber, InsertRequest>;
-pub type DeleteRequestSplits = HashMap<RegionNumber, DeleteRequest>;
 
 pub struct RowSplitter {
     partition_rule: PartitionRuleRef,
@@ -35,43 +31,8 @@ impl RowSplitter {
         Self { partition_rule }
     }
 
-    pub fn split_insert(&self, req: InsertRequest) -> Result<InsertRequestSplits> {
-        let table_id = RegionId::from_u64(req.region_id).table_id();
-        Ok(self
-            .split(req.rows)?
-            .into_iter()
-            .map(|(region_number, rows)| {
-                let region_id = RegionId::new(table_id, region_number);
-                let req = InsertRequest {
-                    rows: Some(rows),
-                    region_id: region_id.into(),
-                };
-                (region_number, req)
-            })
-            .collect())
-    }
-
-    pub fn split_delete(&self, req: DeleteRequest) -> Result<DeleteRequestSplits> {
-        let table_id = RegionId::from_u64(req.region_id).table_id();
-        Ok(self
-            .split(req.rows)?
-            .into_iter()
-            .map(|(region_number, rows)| {
-                let region_id = RegionId::new(table_id, region_number);
-                let req = DeleteRequest {
-                    rows: Some(rows),
-                    region_id: region_id.into(),
-                };
-                (region_number, req)
-            })
-            .collect())
-    }
-
-    fn split(&self, rows: Option<Rows>) -> Result<HashMap<RegionNumber, Rows>> {
+    pub fn split(&self, rows: Rows) -> Result<HashMap<RegionNumber, Rows>> {
         // No data
-        let Some(rows) = rows else {
-            return Ok(HashMap::new());
-        };
         if rows.rows.is_empty() {
             return Ok(HashMap::new());
         }
@@ -177,7 +138,7 @@ mod tests {
     use crate::partition::PartitionExpr;
     use crate::PartitionRule;
 
-    fn mock_insert_request() -> InsertRequest {
+    fn mock_rows() -> Rows {
         let schema = vec![
             ColumnSchema {
                 column_name: "id".to_string(),
@@ -218,10 +179,7 @@ mod tests {
                 ],
             },
         ];
-        InsertRequest {
-            rows: Some(Rows { schema, rows }),
-            region_id: 0,
-        }
+        Rows { schema, rows }
     }
 
     #[derive(Debug, Serialize, Deserialize)]
@@ -301,53 +259,42 @@ mod tests {
 
     #[test]
     fn test_writer_splitter() {
-        let insert_request = mock_insert_request();
+        let rows = mock_rows();
         let rule = Arc::new(MockPartitionRule) as PartitionRuleRef;
         let splitter = RowSplitter::new(rule);
-        let splits = splitter.split_insert(insert_request).unwrap();
 
+        let mut splits = splitter.split(rows).unwrap();
         assert_eq!(splits.len(), 2);
 
-        let req0 = &splits[&0];
-        let req1 = &splits[&1];
-        assert_eq!(req0.region_id, 0);
-        assert_eq!(req1.region_id, 1);
-
-        let rows0 = req0.rows.as_ref().unwrap();
-        let rows1 = req1.rows.as_ref().unwrap();
-        assert_eq!(rows0.rows.len(), 1);
-        assert_eq!(rows1.rows.len(), 2);
+        let rows0 = splits.remove(&0).unwrap().rows;
+        let rows1 = splits.remove(&1).unwrap().rows;
+        assert_eq!(rows0.len(), 1);
+        assert_eq!(rows1.len(), 2);
     }
 
     #[test]
     fn test_missed_col_writer_splitter() {
-        let insert_request = mock_insert_request();
+        let rows = mock_rows();
         let rule = Arc::new(MockMissedColPartitionRule) as PartitionRuleRef;
-        let splitter = RowSplitter::new(rule);
-        let splits = splitter.split_insert(insert_request).unwrap();
 
+        let splitter = RowSplitter::new(rule);
+        let mut splits = splitter.split(rows).unwrap();
         assert_eq!(splits.len(), 1);
 
-        let req = &splits[&1];
-        assert_eq!(req.region_id, 1);
-
-        let rows = req.rows.as_ref().unwrap();
-        assert_eq!(rows.rows.len(), 3);
+        let rows = splits.remove(&1).unwrap().rows;
+        assert_eq!(rows.len(), 3);
     }
 
     #[test]
     fn test_empty_partition_rule_writer_splitter() {
-        let insert_request = mock_insert_request();
+        let rows = mock_rows();
         let rule = Arc::new(EmptyPartitionRule) as PartitionRuleRef;
         let splitter = RowSplitter::new(rule);
-        let splits = splitter.split_insert(insert_request).unwrap();
 
+        let mut splits = splitter.split(rows).unwrap();
         assert_eq!(splits.len(), 1);
 
-        let req = &splits[&0];
-        assert_eq!(req.region_id, 0);
-
-        let rows = req.rows.as_ref().unwrap();
-        assert_eq!(rows.rows.len(), 3);
+        let rows = splits.remove(&0).unwrap().rows;
+        assert_eq!(rows.len(), 3);
     }
 }

@@ -25,7 +25,6 @@ use store_api::storage::RegionId;
 use crate::catalog::FrontendCatalogManager;
 use crate::error::{
     FindDatanodeSnafu, FindTableRouteSnafu, JoinTaskSnafu, RequestDeletesSnafu, Result,
-    SplitDeleteSnafu,
 };
 
 /// A distributed deleter. It ingests gRPC [DeleteRequests].
@@ -51,7 +50,7 @@ impl<'a> DistDeleter<'a> {
     }
 
     pub(crate) async fn delete(&self, requests: DeleteRequests) -> Result<AffectedRows> {
-        let requests = self.split(requests).await?;
+        let requests = self.group_by_peer(requests).await?;
         let trace_id = self.trace_id;
         let span_id = self.span_id;
         let results = future::try_join_all(requests.into_iter().map(|(peer, deletes)| {
@@ -77,201 +76,31 @@ impl<'a> DistDeleter<'a> {
         Ok(affected_rows)
     }
 
-    /// Splits gRPC [DeleteRequests] into multiple gRPC [DeleteRequests]s, each of which
-    /// is grouped by the peer of Datanode, so we can batch them together when invoking gRPC write
-    /// method in Datanode.
-    async fn split(&self, requests: DeleteRequests) -> Result<HashMap<Peer, DeleteRequests>> {
+    async fn group_by_peer(
+        &self,
+        requests: DeleteRequests,
+    ) -> Result<HashMap<Peer, DeleteRequests>> {
         let partition_manager = self.catalog_manager.partition_manager();
         let mut deletes: HashMap<Peer, DeleteRequests> = HashMap::new();
 
         for req in requests.requests {
-            let table_id = RegionId::from_u64(req.region_id).table_id();
-
-            let req_splits = partition_manager
-                .split_delete_request(table_id, req)
-                .await
-                .context(SplitDeleteSnafu)?;
+            let region_id = RegionId::from_u64(req.region_id);
+            let table_id = region_id.table_id();
+            let region_number = region_id.region_number();
             let table_route = partition_manager
                 .find_table_route(table_id)
                 .await
                 .context(FindTableRouteSnafu { table_id })?;
+            let peer =
+                table_route
+                    .find_region_leader(region_number)
+                    .context(FindDatanodeSnafu {
+                        region: region_number,
+                    })?;
 
-            for (region_number, delete) in req_splits {
-                let peer =
-                    table_route
-                        .find_region_leader(region_number)
-                        .context(FindDatanodeSnafu {
-                            region: region_number,
-                        })?;
-                deletes
-                    .entry(peer.clone())
-                    .or_default()
-                    .requests
-                    .push(delete);
-            }
+            deletes.entry(peer.clone()).or_default().requests.push(req);
         }
 
         Ok(deletes)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-
-    use api::helper::vectors_to_rows;
-    use api::v1::region::DeleteRequest;
-    use api::v1::value::ValueData;
-    use api::v1::{ColumnDataType, ColumnSchema, Row, Rows, SemanticType, Value};
-    use client::client_manager::DatanodeClients;
-    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-    use common_meta::helper::{CatalogValue, SchemaValue};
-    use common_meta::key::catalog_name::CatalogNameKey;
-    use common_meta::key::schema_name::SchemaNameKey;
-    use common_meta::kv_backend::memory::MemoryKvBackend;
-    use common_meta::kv_backend::{KvBackend, KvBackendRef};
-    use common_meta::rpc::store::PutRequest;
-    use datatypes::prelude::VectorRef;
-    use datatypes::vectors::Int32Vector;
-
-    use super::*;
-    use crate::heartbeat::handler::tests::MockKvCacheInvalidator;
-    use crate::table::test::create_partition_rule_manager;
-
-    async fn prepare_mocked_backend() -> KvBackendRef {
-        let backend = Arc::new(MemoryKvBackend::default());
-
-        let default_catalog = CatalogNameKey {
-            catalog: DEFAULT_CATALOG_NAME,
-        }
-        .to_string();
-        let req = PutRequest::new()
-            .with_key(default_catalog.as_bytes())
-            .with_value(CatalogValue.as_bytes().unwrap());
-        backend.put(req).await.unwrap();
-
-        let default_schema = SchemaNameKey {
-            catalog: DEFAULT_CATALOG_NAME,
-            schema: DEFAULT_SCHEMA_NAME,
-        }
-        .to_string();
-        let req = PutRequest::new()
-            .with_key(default_schema.as_bytes())
-            .with_value(SchemaValue.as_bytes().unwrap());
-        backend.put(req).await.unwrap();
-
-        backend
-    }
-
-    #[tokio::test]
-    async fn test_split_deletes() {
-        let backend = prepare_mocked_backend().await;
-        create_partition_rule_manager(backend.clone()).await;
-
-        let catalog_manager = Arc::new(FrontendCatalogManager::new(
-            backend,
-            Arc::new(MockKvCacheInvalidator::default()),
-            Arc::new(DatanodeClients::default()),
-        ));
-
-        let new_delete_request = |vector: VectorRef| -> DeleteRequest {
-            let row_count = vector.len();
-            DeleteRequest {
-                region_id: RegionId::new(1, 0).into(),
-                rows: Some(Rows {
-                    schema: vec![ColumnSchema {
-                        column_name: "a".to_string(),
-                        datatype: ColumnDataType::Int32 as i32,
-                        semantic_type: SemanticType::Tag as i32,
-                    }],
-                    rows: vectors_to_rows([vector].iter(), row_count),
-                }),
-            }
-        };
-        let requests = DeleteRequests {
-            requests: vec![
-                new_delete_request(Arc::new(Int32Vector::from(vec![
-                    Some(1),
-                    Some(11),
-                    Some(50),
-                ]))),
-                new_delete_request(Arc::new(Int32Vector::from(vec![
-                    Some(2),
-                    Some(12),
-                    Some(102),
-                ]))),
-            ],
-        };
-
-        let deleter = DistDeleter::new(&catalog_manager, 0, 0);
-        let mut deletes = deleter.split(requests).await.unwrap();
-
-        assert_eq!(deletes.len(), 3);
-
-        let new_split_delete_request =
-            |rows: Vec<Option<i32>>, region_id: RegionId| -> DeleteRequest {
-                DeleteRequest {
-                    region_id: region_id.into(),
-                    rows: Some(Rows {
-                        schema: vec![ColumnSchema {
-                            column_name: "a".to_string(),
-                            datatype: ColumnDataType::Int32 as i32,
-                            semantic_type: SemanticType::Tag as i32,
-                        }],
-                        rows: rows
-                            .into_iter()
-                            .map(|v| Row {
-                                values: vec![Value {
-                                    value_data: v.map(ValueData::I32Value),
-                                }],
-                            })
-                            .collect(),
-                    }),
-                }
-            };
-
-        // region to datanode placement:
-        // 1 -> 1
-        // 2 -> 2
-        // 3 -> 3
-        //
-        // region value ranges:
-        // 1 -> [50, max)
-        // 2 -> [10, 50)
-        // 3 -> (min, 10)
-
-        let datanode_deletes = deletes.remove(&Peer::new(1, "")).unwrap().requests;
-        assert_eq!(datanode_deletes.len(), 2);
-
-        assert_eq!(
-            datanode_deletes[0],
-            new_split_delete_request(vec![Some(50)], RegionId::new(1, 1))
-        );
-        assert_eq!(
-            datanode_deletes[1],
-            new_split_delete_request(vec![Some(102)], RegionId::new(1, 1))
-        );
-
-        let datanode_deletes = deletes.remove(&Peer::new(2, "")).unwrap().requests;
-        assert_eq!(datanode_deletes.len(), 2);
-        assert_eq!(
-            datanode_deletes[0],
-            new_split_delete_request(vec![Some(11)], RegionId::new(1, 2))
-        );
-        assert_eq!(
-            datanode_deletes[1],
-            new_split_delete_request(vec![Some(12)], RegionId::new(1, 2))
-        );
-
-        let datanode_deletes = deletes.remove(&Peer::new(3, "")).unwrap().requests;
-        assert_eq!(datanode_deletes.len(), 2);
-        assert_eq!(
-            datanode_deletes[0],
-            new_split_delete_request(vec![Some(1)], RegionId::new(1, 3))
-        );
-        assert_eq!(
-            datanode_deletes[1],
-            new_split_delete_request(vec![Some(2)], RegionId::new(1, 3))
-        );
     }
 }

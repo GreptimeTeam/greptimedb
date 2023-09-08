@@ -166,7 +166,7 @@ fn validate_row_count_match(requests: &RowDeleteRequests) -> Result<()> {
         ensure!(
             rows.rows.iter().all(|r| r.values.len() == column_count),
             InvalidDeleteRequestSnafu {
-                reason: "row count mismatch"
+                reason: "column count mismatch"
             }
         )
     }

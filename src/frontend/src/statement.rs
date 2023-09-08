@@ -238,7 +238,9 @@ impl StatementExecutor {
         let table = self.get_table(&table_ref).await?;
         let table_info = table.table_info();
 
-        let inserts = insert::TableToRegion::new(&table_info).convert(request)?;
+        let inserts = insert::TableToRegion::new(&table_info, &self.partition_manager)
+            .convert(request)
+            .await?;
         let region_request = RegionRequest {
             header: Some(RegionRequestHeader {
                 trace_id: query_ctx.trace_id(),
@@ -268,7 +270,9 @@ impl StatementExecutor {
         let table = self.get_table(&table_ref).await?;
         let table_info = table.table_info();
 
-        let deletes = delete::TableToRegion::new(&table_info).convert(request)?;
+        let deletes = delete::TableToRegion::new(&table_info, &self.partition_manager)
+            .convert(request)
+            .await?;
         let region_request = RegionRequest {
             header: Some(RegionRequestHeader {
                 trace_id: query_ctx.trace_id(),
