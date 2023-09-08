@@ -127,7 +127,10 @@ pub struct RegionMetadata {
 
     /// Immutable and unique id of a region.
     pub region_id: RegionId,
-    // TODO(yingwen): Add schema version.
+    /// Current version of the region schema.
+    ///
+    /// The version starts from 0. Altering the schema bumps the version.
+    pub schema_version: u64,
 }
 
 pub type RegionMetadataRef = Arc<RegionMetadata>;
@@ -143,6 +146,7 @@ impl<'de> Deserialize<'de> for RegionMetadata {
             column_metadatas: Vec<ColumnMetadata>,
             primary_key: Vec<ColumnId>,
             region_id: RegionId,
+            schema_version: u64,
         }
 
         let without_schema = RegionMetadataWithoutSchema::deserialize(deserializer)?;
@@ -156,6 +160,7 @@ impl<'de> Deserialize<'de> for RegionMetadata {
             column_metadatas: without_schema.column_metadatas,
             primary_key: without_schema.primary_key,
             region_id: without_schema.region_id,
+            schema_version: without_schema.schema_version,
         })
     }
 }
@@ -379,6 +384,7 @@ pub struct RegionMetadataBuilder {
     region_id: RegionId,
     column_metadatas: Vec<ColumnMetadata>,
     primary_key: Vec<ColumnId>,
+    schema_version: u64,
 }
 
 impl RegionMetadataBuilder {
@@ -388,31 +394,39 @@ impl RegionMetadataBuilder {
             region_id: id,
             column_metadatas: vec![],
             primary_key: vec![],
+            schema_version: 0,
         }
     }
 
-    /// Create a builder from existing [RegionMetadata].
+    /// Creates a builder from existing [RegionMetadata].
     pub fn from_existing(existing: RegionMetadata) -> Self {
         Self {
             column_metadatas: existing.column_metadatas,
             primary_key: existing.primary_key,
             region_id: existing.region_id,
+            schema_version: existing.schema_version,
         }
     }
 
-    /// Push a new column metadata to this region's metadata.
+    /// Pushes a new column metadata to this region's metadata.
     pub fn push_column_metadata(&mut self, column_metadata: ColumnMetadata) -> &mut Self {
         self.column_metadatas.push(column_metadata);
         self
     }
 
-    /// Set the primary key of the region.
+    /// Sets the primary key of the region.
     pub fn primary_key(&mut self, key: Vec<ColumnId>) -> &mut Self {
         self.primary_key = key;
         self
     }
 
-    /// Consume the builder and build a [RegionMetadata].
+    /// Increases the schema version by 1.
+    pub fn bump_version(&mut self) -> &mut Self {
+        self.schema_version += 1;
+        self
+    }
+
+    /// Consumes the builder and build a [RegionMetadata].
     pub fn build(self) -> Result<RegionMetadata> {
         let skipped = SkippedFields::new(&self.column_metadatas)?;
 
@@ -423,6 +437,7 @@ impl RegionMetadataBuilder {
             column_metadatas: self.column_metadatas,
             primary_key: self.primary_key,
             region_id: self.region_id,
+            schema_version: self.schema_version,
         };
 
         meta.validate()?;
@@ -812,5 +827,15 @@ mod test {
                 .contains("number of primary key columns 1 not equal to tag columns 2"),
             "unexpected err: {err}",
         );
+    }
+
+    #[test]
+    fn test_bump_version() {
+        let mut region_metadata = build_test_region_metadata();
+        let mut builder = RegionMetadataBuilder::from_existing(region_metadata.clone());
+        builder.bump_version();
+        let new_meta = builder.build().unwrap();
+        region_metadata.schema_version += 1;
+        assert_eq!(region_metadata, new_meta);
     }
 }

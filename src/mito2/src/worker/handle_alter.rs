@@ -47,12 +47,11 @@ impl<S> RegionWorkerLoop<S> {
         info!("Try to alter region: {}, request: {:?}", region_id, request);
 
         let version = region.version();
+        // Checks whether memtables are empty.
         if !can_alter_directly(&version) {
             // We need to flush all memtables first.
+            // If no pending flush task, we must trigger a flush.
             info!("Flush region: {} before alteration", region_id);
-
-            // TODO(yingwen): Optimization: We don't need to submit a flush task again if the
-            // mutable memtable is empty.
 
             // Try to submit a flush task.
             let task = self.new_flush_task(&region, FlushReason::Alter);
