@@ -19,14 +19,12 @@ use serde::{Deserialize, Serialize};
 use table::metadata::TableId;
 
 use crate::error::Result;
-use crate::key::{to_removed_key, RegionDistribution, TableMetaKey};
+use crate::key::{to_removed_key, RegionDistribution, TableMetaKey, NEXT_TABLE_ROUTE_PREFIX};
 use crate::kv_backend::txn::{Compare, CompareOp, Txn, TxnOp, TxnOpResponse};
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::router::{region_distribution, RegionRoute};
 
 pub const TABLE_ROUTE_PREFIX: &str = "__meta_table_route";
-
-pub const NEXT_TABLE_ROUTE_PREFIX: &str = "gt__table_route";
 
 // TODO(weny): Renames it to TableRouteKey.
 pub struct NextTableRouteKey {

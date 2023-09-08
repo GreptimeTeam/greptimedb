@@ -88,6 +88,7 @@ const TABLE_NAME_KEY_PREFIX: &str = "gt__table_name";
 const TABLE_REGION_KEY_PREFIX: &str = "gt__table_region";
 const CATALOG_NAME_KEY_PREFIX: &str = "gt__catalog_name";
 const SCHEMA_NAME_KEY_PREFIX: &str = "gt__schema_name";
+const NEXT_TABLE_ROUTE_PREFIX: &str = "gt__table_route";
 
 pub type RegionDistribution = BTreeMap<DatanodeId, Vec<RegionNumber>>;
 
