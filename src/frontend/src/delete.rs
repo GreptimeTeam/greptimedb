@@ -15,7 +15,7 @@
 use std::collections::HashSet;
 use std::{iter, mem};
 
-use api::v1::region::region_request;
+use api::v1::region::{region_request, RegionRequest, RegionRequestHeader};
 use api::v1::{DeleteRequests, RowDeleteRequest, RowDeleteRequests};
 use catalog::CatalogManager;
 use client::region_handler::RegionRequestHandler;
@@ -70,14 +70,20 @@ impl<'a> Deleter<'a> {
         validate_row_count_match(&requests)?;
 
         let requests = self.trim_columns(requests, &ctx).await?;
-        let region_request = RowToRegion::new(self.catalog_manager, &ctx)
+        let deletes = RowToRegion::new(self.catalog_manager, &ctx)
             .convert(requests)
             .await?;
-        let region_request = region_request::Body::Deletes(region_request);
+        let region_request = RegionRequest {
+            header: Some(RegionRequestHeader {
+                trace_id: ctx.trace_id(),
+                span_id: 0,
+            }),
+            body: Some(region_request::Body::Deletes(deletes)),
+        };
 
         let affected_rows = self
             .region_request_handler
-            .handle(region_request, ctx)
+            .handle(region_request)
             .await
             .context(RequestDatanodeSnafu)?;
         Ok(Output::AffectedRows(affected_rows as _))

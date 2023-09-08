@@ -14,21 +14,16 @@
 
 use std::sync::Arc;
 
-use api::v1::region::{region_request, QueryRequest};
+use api::v1::region::{QueryRequest, RegionRequest};
 use async_trait::async_trait;
 use common_meta::datanode_manager::AffectedRows;
 use common_recordbatch::SendableRecordBatchStream;
-use session::context::QueryContextRef;
 
 use crate::error::Result;
 
 #[async_trait]
 pub trait RegionRequestHandler: Send + Sync {
-    async fn handle(
-        &self,
-        request: region_request::Body,
-        ctx: QueryContextRef,
-    ) -> Result<AffectedRows>;
+    async fn handle(&self, request: RegionRequest) -> Result<AffectedRows>;
 
     // TODO(ruihang): add trace id and span id in the request.
     async fn do_get(&self, request: QueryRequest) -> Result<SendableRecordBatchStream>;

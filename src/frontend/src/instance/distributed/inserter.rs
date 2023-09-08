@@ -33,34 +33,23 @@ use crate::error::{
 /// Table data partitioning and Datanode requests batching are handled inside.
 pub struct DistInserter<'a> {
     catalog_manager: &'a FrontendCatalogManager,
-    trace_id: Option<u64>,
-    span_id: Option<u64>,
+    trace_id: u64,
+    span_id: u64,
 }
 
 impl<'a> DistInserter<'a> {
-    pub fn new(catalog_manager: &'a FrontendCatalogManager) -> Self {
+    pub fn new(catalog_manager: &'a FrontendCatalogManager, trace_id: u64, span_id: u64) -> Self {
         Self {
             catalog_manager,
-            trace_id: None,
-            span_id: None,
+            trace_id,
+            span_id,
         }
-    }
-
-    pub fn with_trace_id(mut self, trace_id: u64) -> Self {
-        self.trace_id = Some(trace_id);
-        self
-    }
-
-    #[allow(dead_code)]
-    pub fn with_span_id(mut self, span_id: u64) -> Self {
-        self.span_id = Some(span_id);
-        self
     }
 
     pub(crate) async fn insert(&self, requests: InsertRequests) -> Result<AffectedRows> {
         let requests = self.split(requests).await?;
-        let trace_id = self.trace_id.unwrap_or_default();
-        let span_id = self.span_id.unwrap_or_default();
+        let trace_id = self.trace_id;
+        let span_id = self.span_id;
         let results = future::try_join_all(requests.into_iter().map(|(peer, inserts)| {
             let datanode_clients = self.catalog_manager.datanode_manager();
             common_runtime::spawn_write(async move {
@@ -169,7 +158,7 @@ mod tests {
             Arc::new(DatanodeClients::default()),
         ));
 
-        let inserter = DistInserter::new(&catalog_manager);
+        let inserter = DistInserter::new(&catalog_manager, 0, 0);
 
         let new_insert_request = |vector: VectorRef| -> InsertRequest {
             let row_count = vector.len();

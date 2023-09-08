@@ -25,7 +25,7 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use api::v1::region::region_request;
+use api::v1::region::{region_request, RegionRequest, RegionRequestHeader};
 use catalog::CatalogManagerRef;
 use client::region_handler::RegionRequestHandlerRef;
 use common_error::ext::BoxedError;
@@ -238,10 +238,18 @@ impl StatementExecutor {
         let table = self.get_table(&table_ref).await?;
         let table_info = table.table_info();
 
-        let request = insert::TableToRegion::new(&table_info).convert(request)?;
+        let inserts = insert::TableToRegion::new(&table_info).convert(request)?;
+        let region_request = RegionRequest {
+            header: Some(RegionRequestHeader {
+                trace_id: query_ctx.trace_id(),
+                span_id: 0,
+            }),
+            body: Some(region_request::Body::Inserts(inserts)),
+        };
+
         let affected_rows = self
             .region_request_handler
-            .handle(region_request::Body::Inserts(request), query_ctx)
+            .handle(region_request)
             .await
             .context(RequestDatanodeSnafu)?;
         Ok(affected_rows as _)
@@ -260,10 +268,18 @@ impl StatementExecutor {
         let table = self.get_table(&table_ref).await?;
         let table_info = table.table_info();
 
-        let request = delete::TableToRegion::new(&table_info).convert(request)?;
+        let deletes = delete::TableToRegion::new(&table_info).convert(request)?;
+        let region_request = RegionRequest {
+            header: Some(RegionRequestHeader {
+                trace_id: query_ctx.trace_id(),
+                span_id: 0,
+            }),
+            body: Some(region_request::Body::Deletes(deletes)),
+        };
+
         let affected_rows = self
             .region_request_handler
-            .handle(region_request::Body::Deletes(request), query_ctx)
+            .handle(region_request)
             .await
             .context(RequestDatanodeSnafu)?;
         Ok(affected_rows as _)

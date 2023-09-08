@@ -25,7 +25,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::meta::Role;
-use api::v1::{DeleteRequests, InsertRequests, RowDeleteRequests, RowInsertRequests};
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use catalog::remote::CachedMetaKvBackend;
@@ -82,16 +81,13 @@ pub use standalone::StandaloneDatanodeManager;
 use self::distributed::DistRegionRequestHandler;
 use self::standalone::{StandaloneRegionRequestHandler, StandaloneTableMetadataCreator};
 use crate::catalog::FrontendCatalogManager;
-use crate::delete::Deleter;
 use crate::error::{
     self, Error, ExecLogicalPlanSnafu, ExecutePromqlSnafu, ExternalSnafu, MissingMetasrvOptsSnafu,
     ParseSqlSnafu, PermissionSnafu, PlanStatementSnafu, Result, SqlExecInterceptedSnafu,
 };
-use crate::expr_factory::CreateExprFactory;
 use crate::frontend::FrontendOptions;
 use crate::heartbeat::handler::invalidate_table_cache::InvalidateTableCacheHandler;
 use crate::heartbeat::HeartbeatTask;
-use crate::insert::Inserter;
 use crate::metrics;
 use crate::script::ScriptExecutor;
 use crate::server::{start_server, ServerHandlers, Services};
@@ -125,7 +121,6 @@ pub struct Instance {
     statement_executor: Arc<StatementExecutor>,
     query_engine: QueryEngineRef,
     region_request_handler: RegionRequestHandlerRef,
-    create_expr_factory: CreateExprFactory,
     /// plugins: this map holds extensions to customize query or auth
     /// behaviours.
     plugins: Arc<Plugins>,
@@ -198,12 +193,9 @@ impl Instance {
 
         common_telemetry::init_node_id(opts.node_id.clone());
 
-        let create_expr_factory = CreateExprFactory;
-
         Ok(Instance {
             catalog_manager,
             script_executor,
-            create_expr_factory,
             statement_executor,
             query_engine,
             region_request_handler,
@@ -312,12 +304,9 @@ impl Instance {
             cache_invalidator,
         ));
 
-        let create_expr_factory = CreateExprFactory;
-
         Ok(Instance {
             catalog_manager: catalog_manager.clone(),
             script_executor,
-            create_expr_factory,
             statement_executor,
             query_engine,
             region_request_handler,
@@ -336,62 +325,6 @@ impl Instance {
 
     pub fn catalog_manager(&self) -> &CatalogManagerRef {
         &self.catalog_manager
-    }
-
-    // Handle batch inserts with row-format
-    pub async fn handle_row_inserts(
-        &self,
-        requests: RowInsertRequests,
-        ctx: QueryContextRef,
-    ) -> Result<Output> {
-        let inserter = Inserter::new(
-            self.catalog_manager.as_ref(),
-            &self.create_expr_factory,
-            &self.statement_executor,
-            self.region_request_handler.as_ref(),
-        );
-        inserter.handle_row_inserts(requests, ctx).await
-    }
-
-    /// Handle batch inserts
-    pub async fn handle_inserts(
-        &self,
-        requests: InsertRequests,
-        ctx: QueryContextRef,
-    ) -> Result<Output> {
-        let inserter = Inserter::new(
-            self.catalog_manager.as_ref(),
-            &self.create_expr_factory,
-            &self.statement_executor,
-            self.region_request_handler.as_ref(),
-        );
-        inserter.handle_column_inserts(requests, ctx).await
-    }
-
-    /// Handle batch deletes with row-format
-    pub async fn handle_row_deletes(
-        &self,
-        requests: RowDeleteRequests,
-        ctx: QueryContextRef,
-    ) -> Result<Output> {
-        let deleter = Deleter::new(
-            self.catalog_manager.as_ref(),
-            self.region_request_handler.as_ref(),
-        );
-        deleter.handle_row_deletes(requests, ctx).await
-    }
-
-    /// Handle batch deletes
-    pub async fn handle_deletes(
-        &self,
-        requests: DeleteRequests,
-        ctx: QueryContextRef,
-    ) -> Result<Output> {
-        let deleter = Deleter::new(
-            self.catalog_manager.as_ref(),
-            self.region_request_handler.as_ref(),
-        );
-        deleter.handle_column_deletes(requests, ctx).await
     }
 
     pub fn set_plugins(&mut self, map: Arc<Plugins>) {
