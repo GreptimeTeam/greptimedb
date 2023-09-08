@@ -47,8 +47,6 @@ impl HttpHandler for RouteHandler {
 
         let key = TableNameKey::new(catalog, schema, table);
 
-        let mut result = HashMap::with_capacity(1);
-
         let table_id = self
             .table_metadata_manager
             .table_name_manager()
@@ -57,22 +55,16 @@ impl HttpHandler for RouteHandler {
             .context(error::TableMetadataManagerSnafu)?
             .map(|x| x.table_id());
 
-        if let Some(table_id) = table_id {
-            let table_route_value = self
-                .table_metadata_manager
-                .table_route_manager()
-                .get(table_id)
-                .await
-                .context(error::TableMetadataManagerSnafu)?
-                .map(|x| format!("{x:?}"))
-                .unwrap_or_else(|| "Not Found".to_string());
-            result.insert("table_route_value", table_route_value);
-        }
-
+        let table_route_value = self
+            .table_metadata_manager
+            .table_route_manager()
+            .get(table_id.context(error::TableNotFoundSnafu { name: table_name })?)
+            .await
+            .context(error::TableMetadataManagerSnafu)?
+            .context(error::TableRouteNotFoundSnafu { table_name })?;
         http::Response::builder()
             .status(http::StatusCode::OK)
-            // Safety: HashMap<String, String> is definitely "serde-json"-able.
-            .body(serde_json::to_string(&result).unwrap())
+            .body(serde_json::to_string(&table_route_value).unwrap())
             .context(error::InvalidHttpBodySnafu)
     }
 }
