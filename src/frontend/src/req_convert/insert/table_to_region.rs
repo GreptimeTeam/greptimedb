@@ -39,8 +39,8 @@ impl<'a> TableToRegion<'a> {
         let row_count = row_count(&request.columns_values)?;
         let schema = column_schema(self.table_info, &request.columns_values)?;
         let rows = api::helper::vectors_to_rows(request.columns_values.values(), row_count);
-        let rows = Rows { schema, rows };
 
+        let rows = Rows { schema, rows };
         let requests = Partitioner::new(self.partition_manager)
             .partition_insert_requests(self.table_info.table_id(), rows)
             .await?;
