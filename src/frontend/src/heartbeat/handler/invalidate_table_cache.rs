@@ -22,7 +22,7 @@ use common_meta::ident::TableIdent;
 use common_meta::instruction::{Instruction, InstructionReply, SimpleReply};
 use common_meta::key::table_info::TableInfoKey;
 use common_meta::key::table_name::TableNameKey;
-use common_meta::key::table_route::NextTableRouteKey;
+use common_meta::key::table_route::TableRouteKey;
 use common_meta::key::TableMetaKey;
 use common_telemetry::error;
 
@@ -96,7 +96,7 @@ impl InvalidateTableCacheHandler {
             .await;
 
         self.backend_cache_invalidator
-            .invalidate_key(&NextTableRouteKey { table_id }.as_raw_key())
+            .invalidate_key(&TableRouteKey { table_id }.as_raw_key())
             .await;
     }
 }

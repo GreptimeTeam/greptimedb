@@ -14,7 +14,6 @@
 
 use std::str::FromStr;
 
-use common_meta::key::TABLE_ROUTE_PREFIX;
 use lazy_static::lazy_static;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -129,15 +128,6 @@ impl TryFrom<LeaseValue> for Vec<u8> {
             })?
             .into_bytes())
     }
-}
-
-pub fn build_table_route_prefix(catalog: impl AsRef<str>, schema: impl AsRef<str>) -> String {
-    format!(
-        "{}-{}-{}-",
-        TABLE_ROUTE_PREFIX,
-        catalog.as_ref(),
-        schema.as_ref()
-    )
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
@@ -311,14 +301,6 @@ impl TryFrom<Vec<u8>> for InactiveRegionKey {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_build_prefix() {
-        assert_eq!(
-            "__meta_table_route-CATALOG-SCHEMA-",
-            build_table_route_prefix("CATALOG", "SCHEMA")
-        )
-    }
 
     #[test]
     fn test_stat_key_round_trip() {

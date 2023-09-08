@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use async_trait::async_trait;
-use common_meta::key::table_route::NextTableRouteKey;
+use common_meta::key::table_route::TableRouteKey;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::RegionRoute;
 use common_meta::RegionIdent;
@@ -79,7 +79,7 @@ impl UpdateRegionMetadata {
         }
 
         pretty_log_table_route_change(
-            NextTableRouteKey::new(table_id).to_string(),
+            TableRouteKey::new(table_id).to_string(),
             &new_region_routes,
             failed_region,
         );
