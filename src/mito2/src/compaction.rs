@@ -43,7 +43,7 @@ pub struct CompactionRequest {
     pub(crate) ttl: Option<Duration>,
     pub(crate) compaction_time_window: Option<i64>,
     pub(crate) request_sender: mpsc::Sender<WorkerRequest>,
-    pub(crate) waiters: Option<oneshot::Sender<error::Result<Output>>>,
+    pub(crate) waiter: Option<oneshot::Sender<error::Result<Output>>>,
     pub(crate) file_purger: FilePurgerRef,
 }
 
@@ -78,14 +78,14 @@ impl CompactionScheduler {
     pub(crate) fn schedule_compaction(&self, req: CompactionRequest) -> Result<()> {
         self.scheduler.schedule(Box::pin(async {
             // TODO(hl): build picker according to region options.
-            let strategy =
+            let picker =
                 compaction_strategy_to_picker(&CompactionStrategy::Twcs(TwcsOptions::default()));
             debug!(
                 "Pick compaction strategy {:?} for region: {}",
-                strategy,
+                picker,
                 req.region_id()
             );
-            let Some(mut task) = strategy.pick(req).unwrap() else {
+            let Some(mut task) = picker.pick(req) else {
                 return;
             };
             task.run().await;

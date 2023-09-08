@@ -103,7 +103,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             ttl: None,                    // TODO(hl): get TTL info from region metadata
             compaction_time_window: None, // TODO(hl): get persisted region compaction time window
             request_sender: self.sender.clone(),
-            waiters,
+            waiter: waiters,
             file_purger,
         }
     }

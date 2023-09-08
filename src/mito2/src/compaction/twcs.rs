@@ -34,7 +34,7 @@ use crate::compaction::output::CompactionOutput;
 use crate::compaction::picker::{CompactionTask, Picker};
 use crate::compaction::CompactionRequest;
 use crate::error;
-use crate::error::{CalculateExpiredTimeSnafu, CompactRegionSnafu};
+use crate::error::CompactRegionSnafu;
 use crate::request::{BackgroundNotify, CompactionFailed, CompactionFinished, WorkerRequest};
 use crate::sst::file::{FileHandle, FileId, FileMeta};
 use crate::sst::file_purger::FilePurgerRef;
@@ -115,14 +115,14 @@ impl TwcsPicker {
 }
 
 impl Picker for TwcsPicker {
-    fn pick(&self, req: CompactionRequest) -> error::Result<Option<Box<dyn CompactionTask>>> {
+    fn pick(&self, req: CompactionRequest) -> Option<Box<dyn CompactionTask>> {
         let CompactionRequest {
             current_version,
             access_layer,
             ttl,
             compaction_time_window,
             request_sender,
-            waiters,
+            waiter: waiters,
             file_purger,
         } = req;
 
@@ -130,7 +130,7 @@ impl Picker for TwcsPicker {
         let region_id = region_metadata.region_id;
 
         let levels = current_version.ssts.levels();
-        let expired_ssts = get_expired_ssts(levels, ttl, Timestamp::current_millis())?;
+        let expired_ssts = get_expired_ssts(levels, ttl, Timestamp::current_millis());
         if !expired_ssts.is_empty() {
             info!("Expired SSTs in region {}: {:?}", region_id, expired_ssts);
             // here we mark expired SSTs as compacting to avoid them being picked.
@@ -155,7 +155,7 @@ impl Picker for TwcsPicker {
         let outputs = self.build_output(&windows, active_window, time_window_size);
 
         if outputs.is_empty() && expired_ssts.is_empty() {
-            return Ok(None);
+            return None;
         }
         let task = TwcsCompactionTask {
             region_id,
@@ -169,7 +169,7 @@ impl Picker for TwcsPicker {
             sender: waiters,
             file_purger,
         };
-        Ok(Some(Box::new(task)))
+        Some(Box::new(task))
     }
 }
 
@@ -230,7 +230,12 @@ pub(crate) struct TwcsCompactionTask {
 
 impl Debug for TwcsCompactionTask {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TwcsCompactionTask").finish()
+        f.debug_struct("TwcsCompactionTask")
+            .field("region_id", &self.region_id)
+            .field("outputs", &self.outputs)
+            .field("expired_ssts", &self.expired_ssts)
+            .field("compaction_time_window", &self.compaction_time_window)
+            .finish()
     }
 }
 
@@ -252,7 +257,8 @@ impl TwcsCompactionTask {
     /// Returns `(output files, input files)`.
     async fn merge_ssts(&mut self) -> error::Result<(Vec<FileMeta>, Vec<FileMeta>)> {
         let mut futs = Vec::with_capacity(self.outputs.len());
-        let mut compacted_inputs = vec![];
+        let mut compacted_inputs =
+            Vec::with_capacity(self.outputs.iter().map(|o| o.inputs.len()).sum());
         let region_id = self.region_id;
         for output in self.outputs.drain(..) {
             let schema = self.schema.clone();
@@ -494,17 +500,23 @@ fn get_expired_ssts(
     levels: &[LevelMeta],
     ttl: Option<Duration>,
     now: Timestamp,
-) -> error::Result<Vec<FileHandle>> {
+) -> Vec<FileHandle> {
     let Some(ttl) = ttl else {
-        return Ok(vec![]);
+        return vec![];
     };
 
-    let expire_time = now.sub_duration(ttl).context(CalculateExpiredTimeSnafu)?;
-    let expired_ssts = levels
+    let expire_time = match now.sub_duration(ttl) {
+        Ok(expire_time) => expire_time,
+        Err(e) => {
+            error!(e; "Failed to calculate region TTL expire time");
+            return vec![];
+        }
+    };
+
+    levels
         .iter()
         .flat_map(|l| l.get_expired_files(&expire_time).into_iter())
-        .collect();
-    Ok(expired_ssts)
+        .collect()
 }
 
 #[cfg(test)]

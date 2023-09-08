@@ -16,7 +16,6 @@ use std::fmt::Debug;
 use std::sync::Arc;
 
 use crate::compaction::CompactionRequest;
-use crate::error::Result;
 
 pub type CompactionPickerRef = Arc<dyn Picker + Send + Sync>;
 
@@ -28,7 +27,7 @@ pub trait CompactionTask: Debug + Send + Sync + 'static {
 /// Picker picks input SST files and builds the compaction task.
 /// Different compaction strategy may implement different pickers.
 pub trait Picker: Debug + Send + 'static {
-    fn pick(&self, req: CompactionRequest) -> Result<Option<Box<dyn CompactionTask>>>;
+    fn pick(&self, req: CompactionRequest) -> Option<Box<dyn CompactionTask>>;
 }
 
 pub struct PickerContext {

@@ -436,16 +436,6 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Failed to calculate SST expired time, location: {}, source: {}",
-        location,
-        source
-    ))]
-    CalculateExpiredTime {
-        source: common_time::error::Error,
-        location: Location,
-    },
-
-    #[snafu(display(
         "Failed to build time range predicate for compaction, location: {}, source: {}",
         location,
         source
@@ -531,7 +521,6 @@ impl ErrorExt for Error {
             FlushRegion { source, .. } => source.status_code(),
             RegionDropped { .. } => StatusCode::Cancelled,
             RegionClosed { .. } => StatusCode::Cancelled,
-            CalculateExpiredTime { .. } => StatusCode::InvalidArguments,
             BuildCompactionPredicate { .. } => StatusCode::Internal,
             RejectWrite { .. } => StatusCode::StorageUnavailable,
             CompactRegion { source, .. } => source.status_code(),
