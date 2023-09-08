@@ -392,6 +392,8 @@ pub async fn check_reader_result<R: BatchReader>(reader: &mut R, expect: &[Batch
     }
 
     assert_eq!(expect, result);
+    // Next call to `next_batch()` still returns None.
+    assert!(reader.next_batch().await.unwrap().is_none());
 }
 
 /// A mock [WriteBufferManager] that supports controlling whether to flush/stall.
