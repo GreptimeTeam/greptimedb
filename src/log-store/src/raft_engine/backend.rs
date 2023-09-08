@@ -28,16 +28,25 @@ use common_meta::rpc::store::{
     RangeRequest, RangeResponse,
 };
 use common_meta::rpc::KeyValue;
-use raft_engine::{Engine, LogBatch};
+use raft_engine::{Config, Engine, LogBatch};
 use snafu::ResultExt;
 
-use crate::error::RaftEngineSnafu;
+use crate::error::{self, RaftEngineSnafu};
 
 pub(crate) const SYSTEM_NAMESPACE: u64 = 0;
 
 /// RaftEngine based [KvBackend] implementation.
 pub struct RaftEngineBackend {
     engine: RwLock<Engine>,
+}
+
+impl RaftEngineBackend {
+    pub fn try_open_with_cfg(config: Config) -> error::Result<Self> {
+        let engine = Engine::open(config).context(RaftEngineSnafu)?;
+        Ok(Self {
+            engine: RwLock::new(engine),
+        })
+    }
 }
 
 #[async_trait::async_trait]

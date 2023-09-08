@@ -23,7 +23,10 @@ use crate::datanode_manager::DatanodeManagerRef;
 use crate::ddl::alter_table::AlterTableProcedure;
 use crate::ddl::create_table::CreateTableProcedure;
 use crate::ddl::drop_table::DropTableProcedure;
-use crate::ddl::{DdlContext, DdlExecutor, ExecutorContext, TableCreatorContext, TableCreatorRef};
+use crate::ddl::{
+    DdlContext, DdlTaskExecutor, ExecutorContext, TableMetadataAllocatorContext,
+    TableMetadataAllocatorRef,
+};
 use crate::error::{
     self, RegisterProcedureLoaderSnafu, Result, SubmitProcedureSnafu, TableNotFoundSnafu,
     UnsupportedSnafu, WaitProcedureSnafu,
@@ -46,7 +49,7 @@ pub struct DdlManager {
     datanode_manager: DatanodeManagerRef,
     cache_invalidator: CacheInvalidatorRef,
     table_metadata_manager: TableMetadataManagerRef,
-    table_creator: TableCreatorRef,
+    table_creator: TableMetadataAllocatorRef,
 }
 
 impl DdlManager {
@@ -55,7 +58,7 @@ impl DdlManager {
         datanode_clients: DatanodeManagerRef,
         cache_invalidator: CacheInvalidatorRef,
         table_metadata_manager: TableMetadataManagerRef,
-        table_creator: TableCreatorRef,
+        table_creator: TableMetadataAllocatorRef,
     ) -> Self {
         Self {
             procedure_manager,
@@ -332,7 +335,7 @@ async fn handle_create_table_task(
     let (table_id, region_routes) = ddl_manager
         .table_creator
         .create(
-            &TableCreatorContext { cluster_id },
+            &TableMetadataAllocatorContext { cluster_id },
             &mut create_table_task.table_info,
             &create_table_task.partitions,
         )
@@ -342,7 +345,7 @@ async fn handle_create_table_task(
         .submit_create_table_task(cluster_id, create_table_task, region_routes)
         .await?;
 
-    info!("Table: {table_id} is created via procedure_id {id:?}");
+    info!("Table: {table_id:?} is created via procedure_id {id:?}");
 
     Ok(SubmitDdlTaskResponse {
         key: id.to_string().into(),
@@ -351,7 +354,7 @@ async fn handle_create_table_task(
 }
 
 #[async_trait::async_trait]
-impl DdlExecutor for DdlManager {
+impl DdlTaskExecutor for DdlManager {
     async fn submit_ddl_task(
         &self,
         ctx: &ExecutorContext,

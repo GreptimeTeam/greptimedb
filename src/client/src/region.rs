@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::region::{RegionRequest, RegionResponse};
+use api::v1::region::{QueryRequest, RegionRequest, RegionResponse};
 use api::v1::ResponseHeader;
 use arrow_flight::Ticket;
 use async_stream::stream;
@@ -25,6 +25,7 @@ use common_meta::error::{self as meta_error, Result as MetaResult};
 use common_recordbatch::error::ExternalSnafu;
 use common_recordbatch::{RecordBatchStreamAdaptor, SendableRecordBatchStream};
 use common_telemetry::{error, timer};
+use prost::Message;
 use snafu::{location, Location, OptionExt, ResultExt};
 use tokio_stream::StreamExt;
 
@@ -56,6 +57,16 @@ impl Datanode for RegionRequester {
             }
         })
     }
+
+    async fn handle_query(&self, request: QueryRequest) -> MetaResult<SendableRecordBatchStream> {
+        let ticket = Ticket {
+            ticket: request.encode_to_vec().into(),
+        };
+        self.do_get_inner(ticket)
+            .await
+            .map_err(BoxedError::new)
+            .context(meta_error::ExternalSnafu)
+    }
 }
 
 impl RegionRequester {
@@ -63,7 +74,7 @@ impl RegionRequester {
         Self { client }
     }
 
-    pub async fn do_get(&self, ticket: Ticket) -> Result<SendableRecordBatchStream> {
+    pub async fn do_get_inner(&self, ticket: Ticket) -> Result<SendableRecordBatchStream> {
         let mut flight_client = self.client.make_flight_client()?;
         let response = flight_client
             .mut_inner()

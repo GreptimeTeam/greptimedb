@@ -14,19 +14,24 @@
 
 use std::sync::Arc;
 
+use catalog::remote::DummyKvCacheInvalidator;
+use catalog::CatalogManagerRef;
 use clap::Parser;
 use common_base::Plugins;
-use common_config::WalConfig;
+use common_config::{kv_store_dir, KvStoreConfig, WalConfig};
+use common_meta::kv_backend::KvBackendRef;
+use common_procedure::ProcedureManagerRef;
 use common_telemetry::info;
 use common_telemetry::logging::LoggingOptions;
 use datanode::datanode::{Datanode, DatanodeOptions, ProcedureConfig, StorageConfig};
 use datanode::region_server::RegionServer;
-use datanode::Instance as InstanceRef;
+use frontend::catalog::FrontendCatalogManager;
 use frontend::frontend::FrontendOptions;
-use frontend::instance::{FrontendInstance, Instance as FeInstance};
+use frontend::instance::{FrontendInstance, Instance as FeInstance, StandaloneDatanodeManager};
 use frontend::service_config::{
     GrpcOptions, InfluxdbOptions, MysqlOptions, OpentsdbOptions, PostgresOptions, PromStoreOptions,
 };
+use query::QueryEngineRef;
 use serde::{Deserialize, Serialize};
 use servers::http::HttpOptions;
 use servers::tls::{TlsMode, TlsOption};
@@ -47,12 +52,8 @@ pub struct Command {
 }
 
 impl Command {
-    pub async fn build(
-        self,
-        fe_opts: FrontendOptions,
-        dn_opts: DatanodeOptions,
-    ) -> Result<Instance> {
-        self.subcmd.build(fe_opts, dn_opts).await
+    pub async fn build(self, opts: MixOptions) -> Result<Instance> {
+        self.subcmd.build(opts).await
     }
 
     pub fn load_options(&self, top_level_options: TopLevelOptions) -> Result<Options> {
@@ -66,9 +67,9 @@ enum SubCommand {
 }
 
 impl SubCommand {
-    async fn build(self, fe_opts: FrontendOptions, dn_opts: DatanodeOptions) -> Result<Instance> {
+    async fn build(self, opts: MixOptions) -> Result<Instance> {
         match self {
-            SubCommand::Start(cmd) => cmd.build(fe_opts, dn_opts).await,
+            SubCommand::Start(cmd) => cmd.build(opts).await,
         }
     }
 
@@ -93,6 +94,7 @@ pub struct StandaloneOptions {
     pub prom_store_options: PromStoreOptions,
     pub wal: WalConfig,
     pub storage: StorageConfig,
+    pub kv_store: KvStoreConfig,
     pub procedure: ProcedureConfig,
     pub logging: LoggingOptions,
 }
@@ -111,6 +113,7 @@ impl Default for StandaloneOptions {
             prom_store_options: PromStoreOptions::default(),
             wal: WalConfig::default(),
             storage: StorageConfig::default(),
+            kv_store: KvStoreConfig::default(),
             procedure: ProcedureConfig::default(),
             logging: LoggingOptions::default(),
         }
@@ -265,23 +268,29 @@ impl StartCommand {
         if self.influxdb_enable {
             opts.influxdb_options.enable = self.influxdb_enable;
         }
-
+        let kv_store_cfg = opts.kv_store.clone();
+        let procedure_cfg = opts.procedure.clone();
         let fe_opts = opts.clone().frontend_options();
-        let logging = opts.logging.clone();
+        let logging_opts = opts.logging.clone();
         let dn_opts = opts.datanode_options();
 
         Ok(Options::Standalone(Box::new(MixOptions {
+            procedure_cfg,
+            kv_store_cfg,
+            data_home: dn_opts.storage.data_home.to_string(),
             fe_opts,
             dn_opts,
-            logging,
+            logging_opts,
         })))
     }
 
     #[allow(unreachable_code)]
     #[allow(unused_variables)]
     #[allow(clippy::diverging_sub_expression)]
-    async fn build(self, fe_opts: FrontendOptions, dn_opts: DatanodeOptions) -> Result<Instance> {
+    async fn build(self, opts: MixOptions) -> Result<Instance> {
         let plugins = Arc::new(load_frontend_plugins(&self.user_provider)?);
+        let fe_opts = opts.fe_opts;
+        let dn_opts = opts.dn_opts;
 
         info!("Standalone start command: {:#?}", self);
         info!(
@@ -289,13 +298,36 @@ impl StartCommand {
             fe_opts, dn_opts
         );
 
-        let datanode = Datanode::new(dn_opts.clone(), Default::default())
+        let kv_dir = kv_store_dir(&opts.data_home);
+        let (kv_store, procedure_manager) = FeInstance::try_build_standalone_components(
+            kv_dir,
+            opts.kv_store_cfg,
+            opts.procedure_cfg,
+        )
+        .await
+        .context(StartFrontendSnafu)?;
+
+        let datanode = Datanode::new(dn_opts.clone(), plugins.clone())
             .await
             .context(StartDatanodeSnafu)?;
+        let region_server = datanode.region_server();
+
+        let catalog_manager = Arc::new(FrontendCatalogManager::new(
+            kv_store.clone(),
+            Arc::new(DummyKvCacheInvalidator),
+            Arc::new(StandaloneDatanodeManager(region_server.clone())),
+        ));
 
         // TODO: build frontend instance like in distributed mode
-        let mut frontend =
-            build_frontend(plugins.clone(), todo!(), datanode.region_server()).await?;
+        let mut frontend = build_frontend(
+            plugins,
+            kv_store,
+            procedure_manager,
+            catalog_manager,
+            datanode.query_engine(),
+            region_server,
+        )
+        .await?;
 
         frontend
             .build_servers(&fe_opts)
@@ -309,12 +341,21 @@ impl StartCommand {
 /// Build frontend instance in standalone mode
 async fn build_frontend(
     plugins: Arc<Plugins>,
-    datanode_instance: InstanceRef,
+    kv_store: KvBackendRef,
+    procedure_manager: ProcedureManagerRef,
+    catalog_manager: CatalogManagerRef,
+    query_engine: QueryEngineRef,
     region_server: RegionServer,
 ) -> Result<FeInstance> {
-    let mut frontend_instance = FeInstance::try_new_standalone(datanode_instance, region_server)
-        .await
-        .context(StartFrontendSnafu)?;
+    let mut frontend_instance = FeInstance::try_new_standalone(
+        kv_store,
+        procedure_manager,
+        catalog_manager,
+        query_engine,
+        region_server,
+    )
+    .await
+    .context(StartFrontendSnafu)?;
     frontend_instance.set_plugins(plugins.clone());
     Ok(frontend_instance)
 }
@@ -411,7 +452,7 @@ mod tests {
         };
         let fe_opts = options.fe_opts;
         let dn_opts = options.dn_opts;
-        let logging_opts = options.logging;
+        let logging_opts = options.logging_opts;
         assert_eq!(Mode::Standalone, fe_opts.mode);
         assert_eq!("127.0.0.1:4000".to_string(), fe_opts.http_options.addr);
         assert_eq!(Duration::from_secs(30), fe_opts.http_options.timeout);
@@ -456,8 +497,8 @@ mod tests {
             unreachable!()
         };
 
-        assert_eq!("/tmp/greptimedb/test/logs", opts.logging.dir);
-        assert_eq!("debug", opts.logging.level.unwrap());
+        assert_eq!("/tmp/greptimedb/test/logs", opts.logging_opts.dir);
+        assert_eq!("debug", opts.logging_opts.level.unwrap());
     }
 
     #[test]
@@ -526,10 +567,10 @@ mod tests {
                 };
 
                 // Should be read from env, env > default values.
-                assert_eq!(opts.logging.dir, "/other/log/dir");
+                assert_eq!(opts.logging_opts.dir, "/other/log/dir");
 
                 // Should be read from config file, config file > env > default values.
-                assert_eq!(opts.logging.level.as_ref().unwrap(), "debug");
+                assert_eq!(opts.logging_opts.level.as_ref().unwrap(), "debug");
 
                 // Should be read from cli, cli > config file > env > default values.
                 assert_eq!(opts.fe_opts.http_options.addr, "127.0.0.1:14000");

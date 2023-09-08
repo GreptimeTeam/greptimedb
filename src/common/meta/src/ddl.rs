@@ -36,7 +36,7 @@ pub struct ExecutorContext {
 }
 
 #[async_trait::async_trait]
-pub trait DdlExecutor: Send + Sync {
+pub trait DdlTaskExecutor: Send + Sync {
     async fn submit_ddl_task(
         &self,
         ctx: &ExecutorContext,
@@ -44,23 +44,23 @@ pub trait DdlExecutor: Send + Sync {
     ) -> Result<SubmitDdlTaskResponse>;
 }
 
-pub type DdlExecutorRef = Arc<dyn DdlExecutor>;
+pub type DdlTaskExecutorRef = Arc<dyn DdlTaskExecutor>;
 
-pub struct TableCreatorContext {
+pub struct TableMetadataAllocatorContext {
     pub cluster_id: u64,
 }
 
 #[async_trait::async_trait]
-pub trait TableCreator: Send + Sync {
+pub trait TableMetadataAllocator: Send + Sync {
     async fn create(
         &self,
-        ctx: &TableCreatorContext,
+        ctx: &TableMetadataAllocatorContext,
         table_info: &mut RawTableInfo,
         partitions: &[Partition],
     ) -> Result<(TableId, Vec<RegionRoute>)>;
 }
 
-pub type TableCreatorRef = Arc<dyn TableCreator>;
+pub type TableMetadataAllocatorRef = Arc<dyn TableMetadataAllocator>;
 
 #[derive(Clone)]
 pub struct DdlContext {

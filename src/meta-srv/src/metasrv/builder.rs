@@ -54,7 +54,7 @@ use crate::service::mailbox::MailboxRef;
 use crate::service::store::cached_kv::{CheckLeader, LeaderCachedKvStore};
 use crate::service::store::kv::{KvBackendAdapter, KvStoreRef, ResettableKvStoreRef};
 use crate::service::store::memory::MemStore;
-use crate::table_creator::MetaSrvTableCreator;
+use crate::table_creator::MetaSrvTableMetadataAllocator;
 
 // TODO(fys): try use derive_builder macro
 pub struct MetaSrvBuilder {
@@ -366,7 +366,7 @@ fn build_ddl_manager(
         },
     ));
 
-    let table_creator = Arc::new(MetaSrvTableCreator::new(
+    let table_creator = Arc::new(MetaSrvTableMetadataAllocator::new(
         selector_ctx.clone(),
         selector.clone(),
         table_id_sequence.clone(),

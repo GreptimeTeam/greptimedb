@@ -20,7 +20,6 @@ mod otlp;
 mod prom_store;
 mod script;
 mod standalone;
-
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -34,32 +33,38 @@ use catalog::CatalogManagerRef;
 use client::client_manager::DatanodeClients;
 use client::region_handler::RegionRequestHandlerRef;
 use common_base::Plugins;
+use common_config::KvStoreConfig;
 use common_error::ext::BoxedError;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
+use common_meta::cache_invalidator::DummyCacheInvalidator;
+use common_meta::ddl_manager::DdlManager;
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
 use common_meta::heartbeat::handler::HandlerGroupExecutor;
 use common_meta::key::TableMetadataManager;
+use common_meta::kv_backend::KvBackendRef;
+use common_meta::state_store::KvStateStore;
+use common_procedure::local::{LocalManager, ManagerConfig};
+use common_procedure::options::ProcedureConfig;
+use common_procedure::ProcedureManagerRef;
 use common_query::Output;
 use common_telemetry::logging::info;
 use common_telemetry::{error, timer};
 use datanode::region_server::RegionServer;
-use datanode::Instance as DnInstanceRef;
-use distributed::DistInstance;
+use log_store::raft_engine::RaftEngineBackend;
 use meta_client::client::{MetaClient, MetaClientBuilder};
-use partition::manager::PartitionRuleManager;
-use partition::route::TableRoutes;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
 use query::plan::LogicalPlan;
 use query::query_engine::options::{validate_catalog_and_schema, QueryOptions};
 use query::query_engine::DescribeResult;
 use query::{QueryEngineFactory, QueryEngineRef};
+use raft_engine::{Config, ReadableSize, RecoveryMode};
 use servers::error as server_error;
 use servers::error::{AuthSnafu, ExecuteQuerySnafu, ParsePromQLSnafu};
 use servers::interceptor::{
     PromQueryInterceptor, PromQueryInterceptorRef, SqlQueryInterceptor, SqlQueryInterceptorRef,
 };
 use servers::prometheus_handler::PrometheusHandler;
-use servers::query_handler::grpc::{GrpcQueryHandler, GrpcQueryHandlerRef};
+use servers::query_handler::grpc::GrpcQueryHandler;
 use servers::query_handler::sql::SqlQueryHandler;
 use servers::query_handler::{
     InfluxdbLineProtocolHandler, OpenTelemetryProtocolHandler, OpentsdbProtocolHandler,
@@ -72,8 +77,10 @@ use sql::parser::ParserContext;
 use sql::statements::copy::CopyTable;
 use sql::statements::statement::Statement;
 use sqlparser::ast::ObjectName;
+pub use standalone::StandaloneDatanodeManager;
 
 use self::distributed::DistRegionRequestHandler;
+use self::standalone::{StandaloneRegionRequestHandler, StandaloneTableMetadataCreator};
 use crate::catalog::FrontendCatalogManager;
 use crate::delete::Deleter;
 use crate::error::{
@@ -117,7 +124,6 @@ pub struct Instance {
     script_executor: Arc<ScriptExecutor>,
     statement_executor: Arc<StatementExecutor>,
     query_engine: QueryEngineRef,
-    grpc_query_handler: GrpcQueryHandlerRef<Error>,
     region_request_handler: RegionRequestHandlerRef,
     create_expr_factory: CreateExprFactory,
     /// plugins: this map holds extensions to customize query or auth
@@ -146,21 +152,11 @@ impl Instance {
         opts: &FrontendOptions,
     ) -> Result<Self> {
         let meta_backend = Arc::new(CachedMetaKvBackend::new(meta_client.clone()));
-        let table_routes = Arc::new(TableRoutes::new(meta_client.clone()));
-        let partition_manager = Arc::new(PartitionRuleManager::new(table_routes));
 
-        let table_metadata_manager = Arc::new(TableMetadataManager::new(meta_backend.clone()));
         let catalog_manager = Arc::new(FrontendCatalogManager::new(
             meta_backend.clone(),
             meta_backend.clone(),
-            partition_manager.clone(),
             datanode_clients.clone(),
-            table_metadata_manager.clone(),
-        ));
-
-        let dist_instance = Arc::new(DistInstance::new(
-            meta_client.clone(),
-            catalog_manager.clone(),
         ));
 
         let dist_request_handler = DistRegionRequestHandler::arc(catalog_manager.clone());
@@ -173,26 +169,25 @@ impl Instance {
         )
         .query_engine();
 
-        let script_executor =
-            Arc::new(ScriptExecutor::new(catalog_manager.clone(), query_engine.clone()).await?);
-
         let region_request_handler = DistRegionRequestHandler::arc(catalog_manager.clone());
 
         let statement_executor = Arc::new(StatementExecutor::new(
             catalog_manager.clone(),
             query_engine.clone(),
-            dist_instance.clone(),
             region_request_handler.clone(),
+            meta_client.clone(),
+            meta_backend.clone(),
+            catalog_manager.clone(),
         ));
 
         plugins.insert::<StatementExecutorRef>(statement_executor.clone());
 
+        let script_executor =
+            Arc::new(ScriptExecutor::new(catalog_manager.clone(), query_engine.clone()).await?);
+
         let handlers_executor = HandlerGroupExecutor::new(vec![
             Arc::new(ParseMailboxMessageHandler),
-            Arc::new(InvalidateTableCacheHandler::new(
-                meta_backend,
-                partition_manager,
-            )),
+            Arc::new(InvalidateTableCacheHandler::new(meta_backend)),
         ]);
 
         let heartbeat_task = Some(HeartbeatTask::new(
@@ -212,7 +207,6 @@ impl Instance {
             statement_executor,
             query_engine,
             region_request_handler,
-            grpc_query_handler: dist_instance,
             plugins: plugins.clone(),
             servers: Arc::new(HashMap::new()),
             heartbeat_task,
@@ -256,39 +250,81 @@ impl Instance {
         Ok(Arc::new(meta_client))
     }
 
+    pub async fn try_build_standalone_components(
+        dir: String,
+        kv_store_config: KvStoreConfig,
+        procedure_config: ProcedureConfig,
+    ) -> Result<(KvBackendRef, ProcedureManagerRef)> {
+        let kv_store = Arc::new(
+            RaftEngineBackend::try_open_with_cfg(Config {
+                dir,
+                purge_threshold: ReadableSize(kv_store_config.purge_threshold.0),
+                recovery_mode: RecoveryMode::TolerateTailCorruption,
+                batch_compression_threshold: ReadableSize::kb(8),
+                target_file_size: ReadableSize(kv_store_config.file_size.0),
+                ..Default::default()
+            })
+            .map_err(BoxedError::new)
+            .context(error::OpenRaftEngineBackendSnafu)?,
+        );
+
+        let state_store = Arc::new(KvStateStore::new(kv_store.clone()));
+
+        let manager_config = ManagerConfig {
+            max_retry_times: procedure_config.max_retry_times,
+            retry_delay: procedure_config.retry_delay,
+            ..Default::default()
+        };
+        let procedure_manager = Arc::new(LocalManager::new(manager_config, state_store));
+
+        Ok((kv_store, procedure_manager))
+    }
+
     pub async fn try_new_standalone(
-        _dn_instance: DnInstanceRef,
-        _region_server: RegionServer,
+        kv_backend: KvBackendRef,
+        procedure_manager: ProcedureManagerRef,
+        catalog_manager: CatalogManagerRef,
+        query_engine: QueryEngineRef,
+        region_server: RegionServer,
     ) -> Result<Self> {
-        todo!()
-        // let catalog_manager = dn_instance.catalog_manager();
-        // let query_engine = dn_instance.query_engine();
-        // let script_executor =
-        //     Arc::new(ScriptExecutor::new(catalog_manager.clone(), query_engine.clone()).await?);
+        let script_executor =
+            Arc::new(ScriptExecutor::new(catalog_manager.clone(), query_engine.clone()).await?);
 
-        // let region_request_handler = StandaloneRegionRequestHandler::arc(region_server);
-        // let statement_executor = Arc::new(StatementExecutor::new(
-        //     catalog_manager.clone(),
-        //     query_engine.clone(),
-        //     dn_instance.clone(),
-        //     region_request_handler.clone(),
-        // ));
+        let region_request_handler = StandaloneRegionRequestHandler::arc(region_server.clone());
 
-        // let create_expr_factory = CreateExprFactory;
-        // let grpc_query_handler = StandaloneGrpcQueryHandler::arc(dn_instance.clone());
+        let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
 
-        // Ok(Instance {
-        //     catalog_manager: catalog_manager.clone(),
-        //     script_executor,
-        //     create_expr_factory,
-        //     statement_executor,
-        //     query_engine,
-        //     grpc_query_handler,
-        //     region_request_handler,
-        //     plugins: Default::default(),
-        //     servers: Arc::new(HashMap::new()),
-        //     heartbeat_task: None,
-        // })
+        let cache_invalidator = Arc::new(DummyCacheInvalidator);
+        let ddl_executor = Arc::new(DdlManager::new(
+            procedure_manager,
+            Arc::new(StandaloneDatanodeManager(region_server)),
+            cache_invalidator.clone(),
+            table_metadata_manager.clone(),
+            Arc::new(StandaloneTableMetadataCreator::new(kv_backend.clone())),
+        ));
+
+        let statement_executor = Arc::new(StatementExecutor::new(
+            catalog_manager.clone(),
+            query_engine.clone(),
+            region_request_handler.clone(),
+            ddl_executor,
+            kv_backend.clone(),
+            cache_invalidator,
+        ));
+
+        let create_expr_factory = CreateExprFactory;
+
+        Ok(Instance {
+            catalog_manager: catalog_manager.clone(),
+            script_executor,
+            create_expr_factory,
+            statement_executor,
+            query_engine,
+            region_request_handler,
+            plugins: Default::default(),
+            servers: Arc::new(HashMap::new()),
+            heartbeat_task: None,
+        })
     }
 
     pub async fn build_servers(&mut self, opts: &FrontendOptions) -> Result<()> {
@@ -311,7 +347,7 @@ impl Instance {
         let inserter = Inserter::new(
             self.catalog_manager.as_ref(),
             &self.create_expr_factory,
-            &self.grpc_query_handler,
+            &self.statement_executor,
             self.region_request_handler.as_ref(),
         );
         inserter.handle_row_inserts(requests, ctx).await
@@ -326,7 +362,7 @@ impl Instance {
         let inserter = Inserter::new(
             self.catalog_manager.as_ref(),
             &self.create_expr_factory,
-            &self.grpc_query_handler,
+            &self.statement_executor,
             self.region_request_handler.as_ref(),
         );
         inserter.handle_column_inserts(requests, ctx).await

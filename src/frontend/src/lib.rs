@@ -30,3 +30,5 @@ mod server;
 pub mod service_config;
 pub mod statement;
 pub mod table;
+
+pub const MAX_VALUE: &str = "MAXVALUE";

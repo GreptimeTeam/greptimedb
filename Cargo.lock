@@ -1591,6 +1591,7 @@ dependencies = [
  "common-config",
  "common-error",
  "common-meta",
+ "common-procedure",
  "common-query",
  "common-recordbatch",
  "common-telemetry",
@@ -1840,6 +1841,7 @@ name = "common-meta"
 version = "0.4.0-nightly"
 dependencies = [
  "api",
+ "arrow-flight",
  "async-stream",
  "async-trait",
  "chrono",
@@ -1847,6 +1849,7 @@ dependencies = [
  "common-error",
  "common-grpc-expr",
  "common-procedure",
+ "common-recordbatch",
  "common-runtime",
  "common-telemetry",
  "common-time",
@@ -3242,12 +3245,14 @@ dependencies = [
  "client",
  "common-base",
  "common-catalog",
+ "common-config",
  "common-datasource",
  "common-error",
  "common-function",
  "common-grpc",
  "common-grpc-expr",
  "common-meta",
+ "common-procedure",
  "common-query",
  "common-recordbatch",
  "common-runtime",
@@ -3264,6 +3269,7 @@ dependencies = [
  "futures-util",
  "humantime-serde",
  "itertools 0.10.5",
+ "log-store",
  "meta-client",
  "meta-srv",
  "meter-core",
@@ -3277,6 +3283,7 @@ dependencies = [
  "partition",
  "prost",
  "query",
+ "raft-engine",
  "regex",
  "script",
  "serde",
@@ -7275,8 +7282,9 @@ dependencies = [
 
 [[package]]
 name = "raft-engine"
-version = "0.3.0"
-source = "git+https://github.com/tikv/raft-engine.git?rev=2dcaf5beeea3d5de9ec9c7133a2451d00f508f52#2dcaf5beeea3d5de9ec9c7133a2451d00f508f52"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e02bdc8cba47cb7062b433f56700a8edbc9fcd6d706389120d20aa1827e5ba7b"
 dependencies = [
  "byteorder",
  "crc32fast",
