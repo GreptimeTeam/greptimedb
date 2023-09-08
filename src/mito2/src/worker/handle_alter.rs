@@ -16,12 +16,13 @@
 
 use common_query::Output;
 use common_telemetry::{error, info};
+use snafu::ensure;
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
-use store_api::region_request::RegionAlterRequest;
+use store_api::region_request::{AlterKind, RegionAlterRequest};
 use store_api::storage::RegionId;
 use tokio::sync::oneshot;
 
-use crate::error::{RegionNotFoundSnafu, Result};
+use crate::error::{InvalidRequestSnafu, RegionNotFoundSnafu, Result};
 use crate::flush::FlushReason;
 use crate::manifest::action::{RegionChange, RegionMetaAction, RegionMetaActionList};
 use crate::memtable::MemtableBuilderRef;
@@ -114,8 +115,10 @@ fn can_alter_directly(version: &Version) -> bool {
 ///
 /// Returns an error if the `request` is invalid.
 fn metadata_after_alteration(
-    _metadata: &RegionMetadata,
-    _request: RegionAlterRequest,
+    metadata: &RegionMetadata,
+    request: RegionAlterRequest,
 ) -> Result<RegionMetadataRef> {
+    //
+
     unimplemented!()
 }

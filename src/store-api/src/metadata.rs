@@ -522,8 +522,20 @@ pub enum MetadataError {
         source: datatypes::error::Error,
     },
 
-    #[snafu(display("Invalid raw region request: {err}, at {location}"))]
+    #[snafu(display("Invalid raw region request, err: {}, location: {}", err, location))]
     InvalidRawRegionRequest { err: String, location: Location },
+
+    #[snafu(display(
+        "Invalid region request, region_id: {}, err: {}, location: {}",
+        region_id,
+        err,
+        location
+    ))]
+    InvalidRegionRequest {
+        region_id: RegionId,
+        err: String,
+        location: Location,
+    },
 }
 
 impl ErrorExt for MetadataError {

@@ -15,15 +15,15 @@
 use std::collections::HashMap;
 
 use api::helper::ColumnDataTypeWrapper;
-use api::v1;
 use api::v1::add_column_location::LocationType;
 use api::v1::region::{alter_request, region_request, AlterRequest};
-use api::v1::Rows;
+use api::v1::{self, Rows, SemanticType};
 use datatypes::schema::ColumnSchema;
-use snafu::{OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::metadata::{
-    ColumnMetadata, ConvertDatatypesSnafu, InvalidRawRegionRequestSnafu, MetadataError, Result,
+    ColumnMetadata, ConvertDatatypesSnafu, InvalidRawRegionRequestSnafu, InvalidRegionRequestSnafu,
+    MetadataError, RegionMetadata, Result,
 };
 use crate::path_utils::region_dir;
 use crate::storage::{ColumnId, RegionId, ScanRequest};
@@ -185,6 +185,26 @@ pub struct RegionAlterRequest {
     pub kind: AlterKind,
 }
 
+impl RegionAlterRequest {
+    /// Checks whether the request is valid, returns an error if it is invalid.
+    pub fn validate(&self, metadata: &RegionMetadata) -> Result<()> {
+        ensure!(
+            metadata.schema_version == self.schema_version,
+            InvalidRegionRequestSnafu {
+                region_id: metadata.region_id,
+                err: format!(
+                    "region schema version {} is not equal to request schema version {}",
+                    metadata.schema_version, self.schema_version
+                ),
+            }
+        );
+
+        self.kind.validate(metadata)?;
+
+        Ok(())
+    }
+}
+
 impl TryFrom<AlterRequest> for RegionAlterRequest {
     type Error = MetadataError;
 
@@ -214,6 +234,43 @@ pub enum AlterKind {
         /// Name of columns to drop.
         names: Vec<String>,
     },
+}
+
+impl AlterKind {
+    /// Returns an error if the the alter kind is invalid.
+    pub fn validate(&self, metadata: &RegionMetadata) -> Result<()> {
+        match self {
+            AlterKind::AddColumns { columns } => {
+                for col_to_add in columns {
+                    col_to_add.validate(metadata)?;
+                }
+            }
+            AlterKind::DropColumns { names } => {
+                for name in names {
+                    Self::validate_column_to_drop(name, metadata)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Returns an error if the column to drop is invalid.
+    fn validate_column_to_drop(name: &str, metadata: &RegionMetadata) -> Result<()> {
+        let column = metadata
+            .column_by_name(name)
+            .with_context(|| InvalidRegionRequestSnafu {
+                region_id: metadata.region_id,
+                err: format!("column {} does not exist", name),
+            })?;
+        ensure!(
+            column.semantic_type == SemanticType::Field,
+            InvalidRegionRequestSnafu {
+                region_id: metadata.region_id,
+                err: format!("column {} is not a field and could not be dropped", name),
+            }
+        );
+        Ok(())
+    }
 }
 
 impl TryFrom<alter_request::Kind> for AlterKind {
@@ -246,6 +303,41 @@ pub struct AddColumn {
     pub column_metadata: ColumnMetadata,
     /// Location to add the column.
     pub location: AddColumnLocation,
+}
+
+impl AddColumn {
+    /// Returns an error if the column to add is invalid.
+    pub fn validate(&self, metadata: &RegionMetadata) -> Result<()> {
+        ensure!(
+            self.column_metadata.column_schema.is_nullable()
+                || self
+                    .column_metadata
+                    .column_schema
+                    .default_constraint()
+                    .is_some(),
+            InvalidRegionRequestSnafu {
+                region_id: metadata.region_id,
+                err: format!(
+                    "no default value for column {}",
+                    self.column_metadata.column_schema.name
+                ),
+            }
+        );
+        ensure!(
+            metadata
+                .column_by_name(&self.column_metadata.column_schema.name)
+                .is_none(),
+            InvalidRegionRequestSnafu {
+                region_id: metadata.region_id,
+                err: format!(
+                    "column {} already exists",
+                    self.column_metadata.column_schema.name
+                ),
+            }
+        );
+
+        Ok(())
+    }
 }
 
 impl TryFrom<v1::region::AddColumn> for AddColumn {
