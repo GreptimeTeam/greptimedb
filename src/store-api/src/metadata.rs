@@ -461,10 +461,13 @@ impl RegionMetadataBuilder {
     fn add_columns(&mut self, columns: Vec<AddColumn>) -> Result<()> {
         for add_column in columns {
             match add_column.location {
-                AddColumnLocation::First => {
+                None => {
+                    self.column_metadatas.push(add_column.column_metadata);
+                },
+                Some(AddColumnLocation::First) => {
                     self.column_metadatas.insert(0, add_column.column_metadata);
-                }
-                AddColumnLocation::After { column_name } => {
+                },
+                Some(AddColumnLocation::After { column_name }) => {
                     let pos = self
                         .column_metadatas
                         .iter()
@@ -479,7 +482,7 @@ impl RegionMetadataBuilder {
                     // Insert after pos.
                     self.column_metadatas
                         .insert(pos + 1, add_column.column_metadata);
-                }
+                },
             }
         }
 

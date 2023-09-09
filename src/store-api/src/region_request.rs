@@ -306,13 +306,14 @@ impl TryFrom<alter_request::Kind> for AlterKind {
     }
 }
 
-/// Add a column.
+/// Adds a column.
 #[derive(Debug)]
 pub struct AddColumn {
     /// Metadata of the column to add.
     pub column_metadata: ColumnMetadata,
-    /// Location to add the column.
-    pub location: AddColumnLocation,
+    /// Location to add the column. If location is None, the region adds
+    /// the column to the last.
+    pub location: Option<AddColumnLocation>,
 }
 
 impl AddColumn {
@@ -361,10 +362,10 @@ impl TryFrom<v1::region::AddColumn> for AddColumn {
             })?;
 
         let column_metadata = ColumnMetadata::try_from_column_def(column_def)?;
-        let location = add_column.location.context(InvalidRawRegionRequestSnafu {
-            err: "missing location in AddColumn",
-        })?;
-        let location = AddColumnLocation::try_from(location)?;
+        let location = add_column
+            .location
+            .map(AddColumnLocation::try_from)
+            .transpose()?;
 
         Ok(AddColumn {
             column_metadata,
