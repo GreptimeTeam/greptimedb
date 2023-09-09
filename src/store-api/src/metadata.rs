@@ -460,13 +460,15 @@ impl RegionMetadataBuilder {
     /// Adds columns to the metadata.
     fn add_columns(&mut self, columns: Vec<AddColumn>) -> Result<()> {
         for add_column in columns {
+            let column_id = add_column.column_metadata.column_id;
+            let semantic_type = add_column.column_metadata.semantic_type;
             match add_column.location {
                 None => {
                     self.column_metadatas.push(add_column.column_metadata);
-                },
+                }
                 Some(AddColumnLocation::First) => {
                     self.column_metadatas.insert(0, add_column.column_metadata);
-                },
+                }
                 Some(AddColumnLocation::After { column_name }) => {
                     let pos = self
                         .column_metadatas
@@ -482,7 +484,11 @@ impl RegionMetadataBuilder {
                     // Insert after pos.
                     self.column_metadatas
                         .insert(pos + 1, add_column.column_metadata);
-                },
+                }
+            }
+            if semantic_type == SemanticType::Tag {
+                // For a new tag, we extend the primary key.
+                self.primary_key.push(column_id);
             }
         }
 
@@ -900,5 +906,93 @@ mod test {
         let new_meta = builder.build().unwrap();
         region_metadata.schema_version += 1;
         assert_eq!(region_metadata, new_meta);
+    }
+
+    fn new_column_metadata(name: &str, is_tag: bool, column_id: ColumnId) -> ColumnMetadata {
+        let semantic_type = if is_tag {
+            SemanticType::Tag
+        } else {
+            SemanticType::Field
+        };
+        ColumnMetadata {
+            column_schema: ColumnSchema::new(name, ConcreteDataType::string_datatype(), true),
+            semantic_type,
+            column_id,
+        }
+    }
+
+    fn check_columns(metadata: &RegionMetadata, names: &[&str]) {
+        let actual: Vec<_> = metadata
+            .column_metadatas
+            .iter()
+            .map(|col| &col.column_schema.name)
+            .collect();
+        assert_eq!(names, actual);
+    }
+
+    #[test]
+    fn test_alter() {
+        let metadata = build_test_region_metadata();
+        let mut builder = RegionMetadataBuilder::from_existing(metadata);
+        builder
+            .alter(AlterKind::AddColumns {
+                columns: vec![AddColumn {
+                    column_metadata: new_column_metadata("d", true, 4),
+                    location: None,
+                }],
+            })
+            .unwrap();
+        let metadata = builder.build().unwrap();
+        check_columns(&metadata, &["a", "b", "c", "d"]);
+        assert_eq!([2, 4], &metadata.primary_key[..]);
+
+        let mut builder = RegionMetadataBuilder::from_existing(metadata);
+        builder
+            .alter(AlterKind::AddColumns {
+                columns: vec![AddColumn {
+                    column_metadata: new_column_metadata("e", false, 5),
+                    location: Some(AddColumnLocation::First),
+                }],
+            })
+            .unwrap();
+        let metadata = builder.build().unwrap();
+        check_columns(&metadata, &["e", "a", "b", "c", "d"]);
+
+        let mut builder = RegionMetadataBuilder::from_existing(metadata);
+        builder
+            .alter(AlterKind::AddColumns {
+                columns: vec![AddColumn {
+                    column_metadata: new_column_metadata("f", false, 6),
+                    location: Some(AddColumnLocation::After {
+                        column_name: "b".to_string(),
+                    }),
+                }],
+            })
+            .unwrap();
+        let metadata = builder.build().unwrap();
+        check_columns(&metadata, &["e", "a", "b", "f", "c", "d"]);
+
+        let mut builder = RegionMetadataBuilder::from_existing(metadata);
+        builder
+            .alter(AlterKind::AddColumns {
+                columns: vec![AddColumn {
+                    column_metadata: new_column_metadata("g", false, 7),
+                    location: Some(AddColumnLocation::After {
+                        column_name: "d".to_string(),
+                    }),
+                }],
+            })
+            .unwrap();
+        let metadata = builder.build().unwrap();
+        check_columns(&metadata, &["e", "a", "b", "f", "c", "d", "g"]);
+
+        let mut builder = RegionMetadataBuilder::from_existing(metadata);
+        builder
+            .alter(AlterKind::DropColumns {
+                names: vec!["g".to_string(), "e".to_string()],
+            })
+            .unwrap();
+        let metadata = builder.build().unwrap();
+        check_columns(&metadata, &["a", "b", "f", "c", "d"]);
     }
 }
