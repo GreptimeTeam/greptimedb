@@ -19,7 +19,7 @@ use store_api::storage::RegionId;
 use tokio::sync::oneshot;
 
 use crate::compaction::CompactionRequest;
-use crate::error::{RegionNotFoundSnafu, Result};
+use crate::error::Result;
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::region::MitoRegionRef;
 use crate::request::{CompactionFailed, CompactionFinished};
@@ -32,9 +32,12 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         region_id: RegionId,
         sender: Option<oneshot::Sender<Result<Output>>>,
     ) {
-        let Some(region) = self.regions.get_region(region_id) else {
-            send_result(sender, RegionNotFoundSnafu { region_id }.fail());
-            return;
+        let region = match self.regions.get_writable_region(region_id) {
+            Ok(v) => v,
+            Err(e) => {
+                send_result(sender, Err(e));
+                return;
+            }
         };
 
         let request = self.new_compaction_request(&region, sender);
@@ -54,9 +57,12 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         region_id: RegionId,
         mut request: CompactionFinished,
     ) {
-        let Some(region) = self.regions.get_region(region_id) else {
-            request.on_failure(RegionNotFoundSnafu { region_id }.build());
-            return;
+        let region = match self.regions.get_writable_region(region_id) {
+            Ok(v) => v,
+            Err(e) => {
+                request.on_failure(e);
+                return;
+            }
         };
 
         // Write region edit to manifest.
