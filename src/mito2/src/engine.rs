@@ -144,6 +144,17 @@ impl EngineInner {
 
         scan_region.scanner()
     }
+
+    /// Set writable mode for a region.
+    fn set_writable(&self, region_id: RegionId, writable: bool) -> Result<()> {
+        let region = self
+            .workers
+            .get_region(region_id)
+            .context(RegionNotFoundSnafu { region_id })?;
+
+        region.set_writable(writable);
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -191,6 +202,12 @@ impl RegionEngine for MitoEngine {
     /// automatically shutdown.)
     async fn stop(&self) -> std::result::Result<(), BoxedError> {
         self.inner.stop().await.map_err(BoxedError::new)
+    }
+
+    async fn set_writable(&self, region_id: RegionId, writable: bool) -> Result<(), BoxedError> {
+        self.inner
+            .set_writable(region_id, writable)
+            .map_err(BoxedError::new)
     }
 }
 
