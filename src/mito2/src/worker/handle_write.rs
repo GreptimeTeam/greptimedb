@@ -21,7 +21,7 @@ use store_api::logstore::LogStore;
 use store_api::metadata::RegionMetadata;
 use store_api::storage::RegionId;
 
-use crate::error::{RegionNotFoundSnafu, RejectWriteSnafu, Result};
+use crate::error::{RejectWriteSnafu, Result};
 use crate::region_write_ctx::RegionWriteCtx;
 use crate::request::{SenderWriteRequest, WriteRequest};
 use crate::worker::{send_result, RegionWorkerLoop};
@@ -102,11 +102,13 @@ impl<S> RegionWorkerLoop<S> {
 
             // Checks whether the region exists and is it stalling.
             if let hash_map::Entry::Vacant(e) = region_ctxs.entry(region_id) {
-                let Some(region) = self.regions.get_region(region_id) else {
-                    // No such region.
-                    send_result(sender_req.sender, RegionNotFoundSnafu { region_id }.fail());
-
-                    continue;
+                let region = match self.regions.get_writable_region(region_id) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        // No such region or the region is read only.
+                        send_result(sender_req.sender, Err(e));
+                        continue;
+                    }
                 };
 
                 let region_ctx = RegionWriteCtx::new(region.region_id, &region.version_control);

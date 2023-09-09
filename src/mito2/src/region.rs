@@ -23,11 +23,12 @@ use std::sync::{Arc, RwLock};
 
 use common_telemetry::info;
 use common_time::util::current_time_millis;
+use snafu::{ensure, OptionExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::RegionId;
 
 use crate::access_layer::AccessLayerRef;
-use crate::error::Result;
+use crate::error::{RegionNotFoundSnafu, RegionReadonlySnafu, Result};
 use crate::manifest::manager::RegionManifestManager;
 use crate::region::version::{VersionControlRef, VersionRef};
 use crate::sst::file_purger::FilePurgerRef;
@@ -131,6 +132,17 @@ impl RegionMap {
     pub(crate) fn get_region(&self, region_id: RegionId) -> Option<MitoRegionRef> {
         let regions = self.regions.read().unwrap();
         regions.get(&region_id).cloned()
+    }
+
+    /// Get writable region by region id.
+    ///
+    /// Returns error if the region does not exist or is readonly.
+    pub(crate) fn get_writable_region(&self, region_id: RegionId) -> Result<MitoRegionRef> {
+        let region = self
+            .get_region(region_id)
+            .context(RegionNotFoundSnafu { region_id })?;
+        ensure!(region.is_writable(), RegionReadonlySnafu { region_id });
+        Ok(region)
     }
 
     /// Remove region by id.

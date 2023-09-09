@@ -21,7 +21,7 @@ use store_api::logstore::LogStore;
 use store_api::storage::RegionId;
 use tokio::sync::oneshot;
 
-use crate::error::{RegionNotFoundSnafu, Result};
+use crate::error::Result;
 use crate::flush::{FlushReason, RegionFlushTask};
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::region::MitoRegionRef;
@@ -35,10 +35,13 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         region_id: RegionId,
         mut request: FlushFinished,
     ) {
-        let Some(region) = self.regions.get_region(region_id) else {
-            // We may dropped or closed the region.
-            request.on_failure(RegionNotFoundSnafu { region_id }.build());
-            return;
+        let region = match self.regions.get_writable_region(region_id) {
+            Ok(v) => v,
+            Err(e) => {
+                // We may dropped or closed the region. The region may be readonly.
+                request.on_failure(e);
+                return;
+            }
         };
 
         // Write region edit to manifest.
@@ -104,9 +107,12 @@ impl<S> RegionWorkerLoop<S> {
         region_id: RegionId,
         sender: Option<oneshot::Sender<Result<Output>>>,
     ) {
-        let Some(region) = self.regions.get_region(region_id) else {
-            send_result(sender, RegionNotFoundSnafu { region_id }.fail());
-            return;
+        let region = match self.regions.get_writable_region(region_id) {
+            Ok(v) => v,
+            Err(e) => {
+                send_result(sender, Err(e));
+                return;
+            }
         };
 
         let mut task = self.new_flush_task(&region, FlushReason::Manual);
