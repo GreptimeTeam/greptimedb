@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+
 use api::v1::{Rows, SemanticType};
 use common_recordbatch::RecordBatches;
 use datatypes::prelude::ConcreteDataType;
@@ -19,15 +21,28 @@ use datatypes::schema::ColumnSchema;
 use store_api::metadata::ColumnMetadata;
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{
-    AddColumn, AddColumnLocation, AlterKind, RegionAlterRequest, RegionRequest,
+    AddColumn, AddColumnLocation, AlterKind, RegionAlterRequest, RegionOpenRequest, RegionRequest,
 };
 use store_api::storage::{RegionId, ScanRequest};
 
 use crate::config::MitoConfig;
+use crate::engine::MitoEngine;
 use crate::test_util::{build_rows, put_rows, rows_schema, CreateRequestBuilder, TestEnv};
 
+async fn scan_check_after_alter(engine: &MitoEngine, region_id: RegionId, expected: &str) {
+    let request = ScanRequest::default();
+    let scanner = engine.scan(region_id, request).unwrap();
+    assert_eq!(0, scanner.num_memtables());
+    assert_eq!(1, scanner.num_files());
+    let stream = scanner.scan().await.unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    assert_eq!(expected, batches.pretty_print().unwrap());
+}
+
 #[tokio::test]
-async fn test_alter_add_column() {
+async fn test_alter_region() {
+    common_telemetry::init_default_ut_logging();
+
     let mut env = TestEnv::new();
     let engine = env.create_engine(MitoConfig::default()).await;
 
@@ -35,6 +50,7 @@ async fn test_alter_add_column() {
     let request = CreateRequestBuilder::new().build();
 
     let column_schemas = rows_schema(&request);
+    let region_dir = request.region_dir.clone();
     engine
         .handle_request(region_id, RegionRequest::Create(request))
         .await
@@ -68,12 +84,6 @@ async fn test_alter_add_column() {
         .await
         .unwrap();
 
-    let request = ScanRequest::default();
-    let scanner = engine.scan(region_id, request).unwrap();
-    assert_eq!(0, scanner.num_memtables());
-    assert_eq!(1, scanner.num_files());
-    let stream = scanner.scan().await.unwrap();
-    let batches = RecordBatches::try_collect(stream).await.unwrap();
     let expected = "\
 +-------+-------+---------+---------------------+
 | tag_1 | tag_0 | field_0 | ts                  |
@@ -82,5 +92,20 @@ async fn test_alter_add_column() {
 |       | 1     | 1.0     | 1970-01-01T00:00:01 |
 |       | 2     | 2.0     | 1970-01-01T00:00:02 |
 +-------+-------+---------+---------------------+";
-    assert_eq!(expected, batches.pretty_print().unwrap());
+    scan_check_after_alter(&engine, region_id, expected).await;
+
+    // Reopen region.
+    let engine = env.reopen_engine(engine, MitoConfig::default()).await;
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Open(RegionOpenRequest {
+                engine: String::new(),
+                region_dir,
+                options: HashMap::default(),
+            }),
+        )
+        .await
+        .unwrap();
+    scan_check_after_alter(&engine, region_id, expected).await;
 }
