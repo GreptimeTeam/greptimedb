@@ -404,7 +404,7 @@ impl FlushScheduler {
         // This region doesn't have running flush job.
         flush_status.flushing = false;
 
-        let pending_ddls = if flush_status.pending_task.is_none() {
+        let pending_requests = if flush_status.pending_task.is_none() {
             // The region doesn't have any pending flush task.
             // Safety: The flush status exists.
             let flush_status = self.region_status.remove(&region_id).unwrap();
@@ -418,7 +418,7 @@ impl FlushScheduler {
             error!(e; "Flush of region {} is successful, but failed to schedule next flush", region_id);
         }
 
-        pending_ddls
+        pending_requests
     }
 
     /// Notifies the scheduler that the flush job is finished.
@@ -525,7 +525,7 @@ struct FlushStatus {
     pending_task: Option<RegionFlushTask>,
     /// Pending ddl requests.
     pending_ddls: Vec<SenderDdlRequest>,
-    /// Pending write requests.
+    /// Requests waiting to write after altering the region.
     pending_writes: Vec<SenderWriteRequest>,
 }
 
