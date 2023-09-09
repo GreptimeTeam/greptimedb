@@ -146,19 +146,23 @@ impl RegionOpener {
         );
 
         let region_id = metadata.region_id;
-        let mutable = self.memtable_builder.build(&metadata);
-        let version = VersionBuilder::new(metadata, mutable).build();
-        let flushed_sequence = version.flushed_entry_id;
-        let version_control = Arc::new(VersionControl::new(version));
-        replay_memtable(wal, region_id, flushed_sequence, &version_control).await?;
         let access_layer = Arc::new(AccessLayer::new(self.region_dir, self.object_store.clone()));
+        let file_purger = Arc::new(LocalFilePurger::new(self.scheduler, access_layer.clone()));
+        let mutable = self.memtable_builder.build(&metadata);
+        let version = VersionBuilder::new(metadata, mutable)
+            .add_files(file_purger.clone(), manifest.files.values().cloned())
+            .flushed_entry_id(manifest.flushed_entry_id)
+            .build();
+        let flushed_entry_id = version.flushed_entry_id;
+        let version_control = Arc::new(VersionControl::new(version));
+        replay_memtable(wal, region_id, flushed_entry_id, &version_control).await?;
 
         let region = MitoRegion {
             region_id: self.region_id,
             version_control,
-            access_layer: access_layer.clone(),
+            access_layer,
             manifest_manager,
-            file_purger: Arc::new(LocalFilePurger::new(self.scheduler, access_layer)),
+            file_purger,
             last_flush_millis: AtomicI64::new(current_time_millis()),
         };
         Ok(region)

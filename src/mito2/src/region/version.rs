@@ -31,6 +31,7 @@ use store_api::storage::SequenceNumber;
 use crate::manifest::action::RegionEdit;
 use crate::memtable::version::{MemtableVersion, MemtableVersionRef};
 use crate::memtable::{MemtableBuilderRef, MemtableId, MemtableRef};
+use crate::sst::file::FileMeta;
 use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::version::{SstVersion, SstVersionRef};
 use crate::wal::EntryId;
@@ -182,7 +183,7 @@ pub(crate) struct VersionBuilder {
 
 impl VersionBuilder {
     /// Returns a new builder.
-    pub(crate) fn new(metadata: RegionMetadataRef, mutable: MemtableRef) -> VersionBuilder {
+    pub(crate) fn new(metadata: RegionMetadataRef, mutable: MemtableRef) -> Self {
         VersionBuilder {
             metadata,
             memtables: Arc::new(MemtableVersion::new(mutable)),
@@ -192,7 +193,7 @@ impl VersionBuilder {
     }
 
     /// Returns a new builder from an existing version.
-    pub(crate) fn from_version(version: VersionRef) -> VersionBuilder {
+    pub(crate) fn from_version(version: VersionRef) -> Self {
         VersionBuilder {
             metadata: version.metadata.clone(),
             memtables: version.memtables.clone(),
@@ -202,23 +203,25 @@ impl VersionBuilder {
     }
 
     /// Sets memtables.
-    pub(crate) fn memtables(mut self, memtables: MemtableVersion) -> VersionBuilder {
+    pub(crate) fn memtables(mut self, memtables: MemtableVersion) -> Self {
         self.memtables = Arc::new(memtables);
         self
     }
 
     /// Sets metadata.
-    pub(crate) fn metadata(mut self, metadata: RegionMetadataRef) -> VersionBuilder {
+    pub(crate) fn metadata(mut self, metadata: RegionMetadataRef) -> Self {
         self.metadata = metadata;
         self
     }
 
+    /// Sets flushed entry id.
+    pub(crate) fn flushed_entry_id(mut self, entry_id: EntryId) -> Self {
+        self.flushed_entry_id = entry_id;
+        self
+    }
+
     /// Apply edit to the builder.
-    pub(crate) fn apply_edit(
-        mut self,
-        edit: RegionEdit,
-        file_purger: FilePurgerRef,
-    ) -> VersionBuilder {
+    pub(crate) fn apply_edit(mut self, edit: RegionEdit, file_purger: FilePurgerRef) -> Self {
         if let Some(flushed_entry_id) = edit.flushed_entry_id {
             self.flushed_entry_id = self.flushed_entry_id.max(flushed_entry_id);
         }
@@ -233,12 +236,25 @@ impl VersionBuilder {
     }
 
     /// Remove memtables from the builder.
-    pub(crate) fn remove_memtables(mut self, ids: &[MemtableId]) -> VersionBuilder {
+    pub(crate) fn remove_memtables(mut self, ids: &[MemtableId]) -> Self {
         if !ids.is_empty() {
             let mut memtables = (*self.memtables).clone();
             memtables.remove_memtables(ids);
             self.memtables = Arc::new(memtables);
         }
+        self
+    }
+
+    /// Add files to the builder.
+    pub(crate) fn add_files(
+        mut self,
+        file_purger: FilePurgerRef,
+        files: impl Iterator<Item = FileMeta>,
+    ) -> Self {
+        let mut ssts = (*self.ssts).clone();
+        ssts.add_files(file_purger, files);
+        self.ssts = Arc::new(ssts);
+
         self
     }
 
