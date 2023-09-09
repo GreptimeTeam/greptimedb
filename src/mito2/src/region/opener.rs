@@ -14,7 +14,7 @@
 
 //! Region opener.
 
-use std::sync::atomic::AtomicI64;
+use std::sync::atomic::{AtomicBool, AtomicI64};
 use std::sync::Arc;
 
 use common_telemetry::info;
@@ -110,10 +110,12 @@ impl RegionOpener {
             manifest_manager,
             file_purger: Arc::new(LocalFilePurger::new(self.scheduler, access_layer)),
             last_flush_millis: AtomicI64::new(current_time_millis()),
+            // Region is writable after it is created.
+            writable: AtomicBool::new(true),
         })
     }
 
-    /// Opens an existing region.
+    /// Opens an existing region in read only mode.
     ///
     /// Returns error if the region doesn't exist.
     pub(crate) async fn open<S: LogStore>(
@@ -165,6 +167,8 @@ impl RegionOpener {
             manifest_manager,
             file_purger,
             last_flush_millis: AtomicI64::new(current_time_millis()),
+            // Region is always opened in read only mode.
+            writable: AtomicBool::new(false),
         };
         Ok(region)
     }

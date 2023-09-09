@@ -18,7 +18,7 @@ pub(crate) mod opener;
 pub(crate) mod version;
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use common_telemetry::info;
@@ -55,6 +55,8 @@ pub(crate) struct MitoRegion {
     pub(crate) file_purger: FilePurgerRef,
     /// Last flush time in millis.
     last_flush_millis: AtomicI64,
+    /// Whether the region is writable.
+    writable: AtomicBool,
 }
 
 pub(crate) type MitoRegionRef = Arc<MitoRegion>;
@@ -93,6 +95,16 @@ impl MitoRegion {
     pub(crate) fn update_flush_millis(&self) {
         let now = current_time_millis();
         self.last_flush_millis.store(now, Ordering::Relaxed);
+    }
+
+    /// Returns whether the region is writable.
+    pub(crate) fn is_writable(&self) -> bool {
+        self.writable.load(Ordering::Relaxed)
+    }
+
+    /// Sets the writable flag.
+    pub(crate) fn set_writable(&self, writable: bool) {
+        self.writable.store(writable, Ordering::Relaxed);
     }
 }
 
