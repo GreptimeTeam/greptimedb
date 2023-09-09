@@ -52,7 +52,7 @@ async fn test_manual_flush() {
     flush_region(&engine, region_id).await;
 
     let request = ScanRequest::default();
-    let scanner = engine.scan(region_id, request).unwrap();
+    let scanner = engine.scanner(region_id, request).unwrap();
     assert_eq!(0, scanner.num_memtables());
     assert_eq!(1, scanner.num_files());
     let stream = scanner.scan().await.unwrap();
@@ -110,7 +110,7 @@ async fn test_flush_engine() {
     listener.wait().await;
 
     let request = ScanRequest::default();
-    let scanner = engine.scan(region_id, request).unwrap();
+    let scanner = engine.scanner(region_id, request).unwrap();
     assert_eq!(1, scanner.num_memtables());
     assert_eq!(1, scanner.num_files());
     let stream = scanner.scan().await.unwrap();
@@ -175,7 +175,7 @@ async fn test_write_stall() {
     put_rows(&engine, region_id, rows).await;
 
     let request = ScanRequest::default();
-    let scanner = engine.scan(region_id, request).unwrap();
+    let scanner = engine.scanner(region_id, request).unwrap();
     assert_eq!(1, scanner.num_memtables());
     assert_eq!(1, scanner.num_files());
     let stream = scanner.scan().await.unwrap();
@@ -211,7 +211,7 @@ async fn test_flush_empty() {
     flush_region(&engine, region_id).await;
 
     let request = ScanRequest::default();
-    let scanner = engine.scan(region_id, request).unwrap();
+    let scanner = engine.scanner(region_id, request).unwrap();
     assert_eq!(0, scanner.num_memtables());
     assert_eq!(0, scanner.num_files());
     let stream = scanner.scan().await.unwrap();

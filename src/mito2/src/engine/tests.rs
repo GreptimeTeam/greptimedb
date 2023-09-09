@@ -125,8 +125,7 @@ async fn test_region_replay() {
     assert_eq!(0, rows);
 
     let request = ScanRequest::default();
-    let scanner = engine.scan(region_id, request).unwrap();
-    let stream = scanner.scan().await.unwrap();
+    let stream = engine.handle_query(region_id, request).await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     assert_eq!(42, batches.iter().map(|b| b.num_rows()).sum::<usize>());
 
@@ -216,8 +215,7 @@ async fn test_put_delete() {
     delete_rows(&engine, region_id, rows).await;
 
     let request = ScanRequest::default();
-    let scanner = engine.scan(region_id, request).unwrap();
-    let stream = scanner.scan().await.unwrap();
+    let stream = engine.handle_query(region_id, request).await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     let expected = "\
 +-------+---------+---------------------+
@@ -274,8 +272,7 @@ async fn test_put_overwrite() {
     put_rows(&engine, region_id, rows).await;
 
     let request = ScanRequest::default();
-    let scanner = engine.scan(region_id, request).unwrap();
-    let stream = scanner.scan().await.unwrap();
+    let stream = engine.handle_query(region_id, request).await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     let expected = "\
 +-------+---------+---------------------+

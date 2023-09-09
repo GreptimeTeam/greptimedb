@@ -78,7 +78,8 @@ impl MitoEngine {
         self.inner.workers.is_region_exists(region_id)
     }
 
-    fn scan(&self, region_id: RegionId, request: ScanRequest) -> Result<Scanner> {
+    /// Returns a scanner to scan for `request`.
+    fn scanner(&self, region_id: RegionId, request: ScanRequest) -> Result<Scanner> {
         self.inner.handle_query(region_id, request)
     }
 
@@ -168,7 +169,7 @@ impl RegionEngine for MitoEngine {
         region_id: RegionId,
         request: ScanRequest,
     ) -> std::result::Result<SendableRecordBatchStream, BoxedError> {
-        self.scan(region_id, request)
+        self.scanner(region_id, request)
             .map_err(BoxedError::new)?
             .scan()
             .await
