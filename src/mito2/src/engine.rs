@@ -204,7 +204,7 @@ impl RegionEngine for MitoEngine {
         self.inner.stop().await.map_err(BoxedError::new)
     }
 
-    async fn set_writable(&self, region_id: RegionId, writable: bool) -> Result<(), BoxedError> {
+    fn set_writable(&self, region_id: RegionId, writable: bool) -> Result<(), BoxedError> {
         self.inner
             .set_writable(region_id, writable)
             .map_err(BoxedError::new)

@@ -53,7 +53,7 @@ pub trait RegionEngine: Send + Sync {
     async fn stop(&self) -> Result<(), BoxedError>;
 
     /// Set writable mode for a region.
-    async fn set_writable(&self, region_id: RegionId, writable: bool) -> Result<(), BoxedError>;
+    fn set_writable(&self, region_id: RegionId, writable: bool) -> Result<(), BoxedError>;
 }
 
 pub type RegionEngineRef = Arc<dyn RegionEngine>;
