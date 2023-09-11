@@ -106,7 +106,7 @@ impl<'a> StatementToRegion<'a> {
         let requests = Partitioner::new(self.partition_manager)
             .partition_insert_requests(table_info.table_id(), Rows { schema, rows })
             .await?;
-        Ok(requests)
+        Ok(RegionInsertRequests { requests })
     }
 
     async fn get_table(&self, catalog: &str, schema: &str, table: &str) -> Result<TableRef> {

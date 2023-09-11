@@ -44,7 +44,6 @@ pub(crate) struct StandaloneRegionRequestHandler {
 }
 
 impl StandaloneRegionRequestHandler {
-    #[allow(dead_code)]
     pub fn arc(region_server: RegionServer) -> Arc<Self> {
         Arc::new(Self { region_server })
     }
@@ -63,16 +62,6 @@ impl StandaloneRegionRequestHandler {
 
 #[async_trait]
 impl RegionRequestHandler for StandaloneRegionRequestHandler {
-    async fn handle(&self, request: RegionRequest) -> ClientResult<AffectedRows> {
-        let response = self
-            .handle_inner(request)
-            .await
-            .map_err(BoxedError::new)
-            .context(HandleRequestSnafu)?;
-        check_response_header(response.header)?;
-        Ok(response.affected_rows)
-    }
-
     async fn do_get(&self, request: QueryRequest) -> ClientResult<SendableRecordBatchStream> {
         self.region_server
             .handle_read(request)

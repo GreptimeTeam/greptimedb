@@ -14,20 +14,17 @@
 
 use std::sync::Arc;
 
-use api::v1::region::{QueryRequest, RegionRequest};
+use api::v1::region::QueryRequest;
 use async_trait::async_trait;
 use client::error::{HandleRequestSnafu, Result as ClientResult};
 use client::region_handler::RegionRequestHandler;
 use common_error::ext::BoxedError;
-use common_meta::datanode_manager::AffectedRows;
 use common_recordbatch::SendableRecordBatchStream;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
 
 use crate::catalog::FrontendCatalogManager;
-use crate::error::{
-    FindDatanodeSnafu, FindTableRouteSnafu, NotSupportedSnafu, RequestQuerySnafu, Result,
-};
+use crate::error::{FindDatanodeSnafu, FindTableRouteSnafu, RequestQuerySnafu, Result};
 
 pub(crate) struct DistRegionRequestHandler {
     catalog_manager: Arc<FrontendCatalogManager>,
@@ -41,13 +38,6 @@ impl DistRegionRequestHandler {
 
 #[async_trait]
 impl RegionRequestHandler for DistRegionRequestHandler {
-    async fn handle(&self, request: RegionRequest) -> ClientResult<AffectedRows> {
-        self.handle_inner(request)
-            .await
-            .map_err(BoxedError::new)
-            .context(HandleRequestSnafu)
-    }
-
     async fn do_get(&self, request: QueryRequest) -> ClientResult<SendableRecordBatchStream> {
         self.do_get_inner(request)
             .await
@@ -57,13 +47,6 @@ impl RegionRequestHandler for DistRegionRequestHandler {
 }
 
 impl DistRegionRequestHandler {
-    async fn handle_inner(&self, _request: RegionRequest) -> Result<AffectedRows> {
-        NotSupportedSnafu {
-            feat: "region request",
-        }
-        .fail()
-    }
-
     async fn do_get_inner(&self, request: QueryRequest) -> Result<SendableRecordBatchStream> {
         let region_id = RegionId::from_u64(request.region_id);
 

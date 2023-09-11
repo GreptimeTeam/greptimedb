@@ -52,7 +52,7 @@ impl<'a> RowToRegion<'a> {
                 .partition_delete_requests(table_id, request.rows.unwrap_or_default())
                 .await?;
 
-            region_request.extend(requests.requests);
+            region_request.extend(requests);
         }
 
         Ok(RegionDeleteRequests {

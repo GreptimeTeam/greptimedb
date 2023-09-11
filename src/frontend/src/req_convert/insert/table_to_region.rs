@@ -44,7 +44,7 @@ impl<'a> TableToRegion<'a> {
         let requests = Partitioner::new(self.partition_manager)
             .partition_insert_requests(self.table_info.table_id(), rows)
             .await?;
-        Ok(requests)
+        Ok(RegionInsertRequests { requests })
     }
 }
 

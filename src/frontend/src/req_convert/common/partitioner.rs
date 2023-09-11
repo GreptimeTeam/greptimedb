@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::region::{DeleteRequest, DeleteRequests, InsertRequest, InsertRequests};
+use api::v1::region::{DeleteRequest, InsertRequest};
 use api::v1::Rows;
 use partition::manager::PartitionRuleManager;
 use snafu::ResultExt;
@@ -33,7 +33,7 @@ impl<'a> Partitioner<'a> {
         &self,
         table_id: TableId,
         rows: Rows,
-    ) -> Result<InsertRequests> {
+    ) -> Result<Vec<InsertRequest>> {
         let requests = self
             .partition_manager
             .split_rows(table_id, rows)
@@ -45,14 +45,14 @@ impl<'a> Partitioner<'a> {
                 rows: Some(rows),
             })
             .collect();
-        Ok(InsertRequests { requests })
+        Ok(requests)
     }
 
     pub async fn partition_delete_requests(
         &self,
         table_id: TableId,
         rows: Rows,
-    ) -> Result<DeleteRequests> {
+    ) -> Result<Vec<DeleteRequest>> {
         let requests = self
             .partition_manager
             .split_rows(table_id, rows)
@@ -64,6 +64,6 @@ impl<'a> Partitioner<'a> {
                 rows: Some(rows),
             })
             .collect();
-        Ok(DeleteRequests { requests })
+        Ok(requests)
     }
 }
