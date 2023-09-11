@@ -21,7 +21,7 @@ use object_store::util::join_path;
 use smallvec::SmallVec;
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{
-    RegionCloseRequest, RegionFlushRequest, RegionOpenRequest, RegionRequest, RegionTruncateRequest,
+    RegionFlushRequest, RegionOpenRequest, RegionRequest, RegionTruncateRequest,
 };
 use store_api::storage::RegionId;
 use tokio::sync::oneshot;
@@ -103,7 +103,7 @@ async fn test_engine_put_data_after_truncate() {
     };
     put_rows(&engine, region_id, rows).await;
 
-    // Scan the region.
+    // Scan the region.mut
     let request = ScanRequest::default();
     let stream = engine.handle_query(region_id, request).await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
@@ -234,19 +234,17 @@ async fn test_engine_truncate_reopen() {
     };
     put_rows(&engine, region_id, rows).await;
 
+    let region = engine.get_region(region_id).unwrap();
+    let last_entry_id = region.version_control.current().last_entry_id;
+
     // Truncate the region
     engine
         .handle_request(region_id, RegionRequest::Truncate(RegionTruncateRequest {}))
         .await
         .unwrap();
 
-    // Close the region.
-    engine
-        .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
-        .await
-        .unwrap();
-
     // Reopen the region again.
+    let engine = env.reopen_engine(engine, MitoConfig::default()).await;
     engine
         .handle_request(
             region_id,
@@ -258,6 +256,9 @@ async fn test_engine_truncate_reopen() {
         )
         .await
         .unwrap();
+
+    let region = engine.get_region(region_id).unwrap();
+    assert_eq!(last_entry_id, region.version().flushed_entry_id);
 
     // Scan the region.
     let request = ScanRequest::default();
