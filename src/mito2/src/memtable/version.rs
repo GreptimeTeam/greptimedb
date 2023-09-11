@@ -99,4 +99,12 @@ impl MemtableVersion {
     pub(crate) fn mutable_usage(&self) -> usize {
         self.mutable.stats().estimated_bytes
     }
+
+    /// Returns true if the memtable version is empty.
+    ///
+    /// The version is empty when mutable memtable is empty and there is no
+    /// immutable memtables.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.mutable.is_empty() && self.immutables.is_empty()
+    }
 }

@@ -49,8 +49,9 @@ impl<S> RegionWorkerLoop<S> {
 
         let version = region.version();
         // Checks whether we can alter the region directly.
-        if !can_alter_directly(&version) {
-            // We need to flush all memtables first.
+        if !version.memtables.is_empty() {
+            // If memtable is not empty, we can't alter it directly and need to flush
+            // all memtables first.
             info!("Flush region: {} before alteration", region_id);
 
             // Try to submit a flush task.
@@ -106,11 +107,6 @@ async fn alter_region_schema(
     // Apply the metadata to region's version.
     region.version_control.alter_schema(new_meta, builder);
     Ok(())
-}
-
-/// Checks whether all memtables are empty.
-fn can_alter_directly(version: &Version) -> bool {
-    version.memtables.mutable.is_empty() && version.memtables.immutables().is_empty()
 }
 
 /// Creates a metadata after applying the alter `request` to the old `metadata`.
