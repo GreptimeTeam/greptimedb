@@ -287,7 +287,11 @@ impl Helper {
                 TimeUnit::Millisecond => {
                     Arc::new(TimeMillisecondVector::try_from_arrow_time_array(array)?)
                 }
-                _ => unimplemented!("Arrow array datatype: {:?}", array.as_ref().data_type()),
+                // Arrow use time32 for second/millisecond.
+                _ => unreachable!(
+                    "unexpected arrow array datatype: {:?}",
+                    array.as_ref().data_type()
+                ),
             },
             ArrowDataType::Time64(unit) => match unit {
                 TimeUnit::Microsecond => {
@@ -296,7 +300,11 @@ impl Helper {
                 TimeUnit::Nanosecond => {
                     Arc::new(TimeNanosecondVector::try_from_arrow_time_array(array)?)
                 }
-                _ => unimplemented!("Arrow array datatype: {:?}", array.as_ref().data_type()),
+                // Arrow use time64 for microsecond/nanosecond.
+                _ => unreachable!(
+                    "unexpected arrow array datatype: {:?}",
+                    array.as_ref().data_type()
+                ),
             },
             ArrowDataType::Interval(unit) => match unit {
                 IntervalUnit::YearMonth => Arc::new(
@@ -320,7 +328,10 @@ impl Helper {
             | ArrowDataType::Decimal256(_, _)
             | ArrowDataType::Map(_, _)
             | ArrowDataType::RunEndEncoded(_, _) => {
-                unimplemented!("Arrow array datatype: {:?}", array.as_ref().data_type())
+                return error::UnsupportedArrowTypeSnafu {
+                    arrow_type: array.as_ref().data_type().clone(),
+                }
+                .fail()
             }
         })
     }
@@ -351,6 +362,7 @@ mod tests {
         TimestampSecondArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
     };
     use arrow::datatypes::{Field, Int32Type};
+    use arrow_array::DictionaryArray;
     use common_time::time::Time;
     use common_time::{Date, DateTime, Interval};
 
@@ -489,6 +501,11 @@ mod tests {
         check_try_into_vector(Time32MillisecondArray::from(vec![1, 2, 3]));
         check_try_into_vector(Time64MicrosecondArray::from(vec![1, 2, 3]));
         check_try_into_vector(Time64NanosecondArray::from(vec![1, 2, 3]));
+
+        let values = StringArray::from_iter_values(["a", "b", "c"]);
+        let keys = Int8Array::from_iter_values([0, 0, 1, 2]);
+        let array: ArrayRef = Arc::new(DictionaryArray::try_new(keys, Arc::new(values)).unwrap());
+        Helper::try_into_vector(array).unwrap_err();
     }
 
     #[test]
