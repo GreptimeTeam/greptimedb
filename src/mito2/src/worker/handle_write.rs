@@ -17,16 +17,14 @@
 use std::collections::{hash_map, HashMap};
 use std::sync::Arc;
 
-use common_query::Output;
 use store_api::logstore::LogStore;
 use store_api::metadata::RegionMetadata;
 use store_api::storage::RegionId;
-use tokio::sync::oneshot::Sender;
 
 use crate::error::{RegionNotFoundSnafu, RejectWriteSnafu, Result};
 use crate::region_write_ctx::RegionWriteCtx;
 use crate::request::{SenderWriteRequest, WriteRequest};
-use crate::worker::RegionWorkerLoop;
+use crate::worker::{send_result, RegionWorkerLoop};
 
 impl<S: LogStore> RegionWorkerLoop<S> {
     /// Takes and handles all write requests.
@@ -92,6 +90,15 @@ impl<S> RegionWorkerLoop<S> {
         let mut region_ctxs = HashMap::new();
         for mut sender_req in write_requests {
             let region_id = sender_req.request.region_id;
+
+            // If region is waiting for alteration, add requests to pending writes.
+            if self.flush_scheduler.has_pending_ddls(region_id) {
+                // TODO(yingwen): consider adding some metrics for this.
+                // Safety: The region has pending ddls.
+                self.flush_scheduler
+                    .add_write_request_to_pending(sender_req);
+                continue;
+            }
 
             // Checks whether the region exists and is it stalling.
             if let hash_map::Entry::Vacant(e) = region_ctxs.entry(region_id) {
@@ -166,12 +173,4 @@ fn maybe_fill_missing_columns(request: &mut WriteRequest, metadata: &RegionMetad
     }
 
     Ok(())
-}
-
-/// Send result to the request.
-fn send_result(sender: Option<Sender<Result<Output>>>, res: Result<Output>) {
-    if let Some(sender) = sender {
-        // Ignore send result.
-        let _ = sender.send(res);
-    }
 }

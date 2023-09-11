@@ -468,6 +468,12 @@ pub enum Error {
         reason: String,
         location: Location,
     },
+
+    #[snafu(display("{}, location: {}", source, location))]
+    InvalidRegionRequest {
+        source: store_api::metadata::MetadataError,
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -537,6 +543,7 @@ impl ErrorExt for Error {
             RejectWrite { .. } => StatusCode::StorageUnavailable,
             CompactRegion { source, .. } => source.status_code(),
             CompatReader { .. } => StatusCode::Unexpected,
+            InvalidRegionRequest { source, .. } => source.status_code(),
         }
     }
 

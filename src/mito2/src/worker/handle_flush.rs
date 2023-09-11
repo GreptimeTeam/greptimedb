@@ -26,7 +26,7 @@ use crate::flush::{FlushReason, RegionFlushTask};
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::region::MitoRegionRef;
 use crate::request::{FlushFailed, FlushFinished};
-use crate::worker::RegionWorkerLoop;
+use crate::worker::{send_result, RegionWorkerLoop};
 
 impl<S: LogStore> RegionWorkerLoop<S> {
     /// On region flush job finished.
@@ -56,9 +56,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         }
 
         // Apply edit to region's version.
-        region
-            .version_control
-            .apply_edit(edit, region.file_purger.clone());
+        region.version_control.apply_edit(
+            edit,
+            &request.memtables_to_remove,
+            region.file_purger.clone(),
+        );
         region.update_flush_millis();
 
         // Delete wal.
@@ -75,9 +77,14 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         // Notifies waiters.
         request.on_success();
 
-        // Handle pending DDL requests for the region.
-        if let Some(ddl_requests) = self.flush_scheduler.on_flush_success(region_id) {
+        // Handle pending requests for the region.
+        if let Some((ddl_requests, write_requests)) =
+            self.flush_scheduler.on_flush_success(region_id)
+        {
+            // Perform DDLs first because they require empty memtables.
             self.handle_ddl_requests(ddl_requests).await;
+            // Handle pending write requests, we don't stall these requests.
+            self.handle_write_requests(write_requests, false).await;
         }
 
         // Handle stalled requests.
@@ -97,9 +104,7 @@ impl<S> RegionWorkerLoop<S> {
         sender: Option<oneshot::Sender<Result<Output>>>,
     ) {
         let Some(region) = self.regions.get_region(region_id) else {
-            if let Some(sender) = sender {
-                let _ = sender.send(RegionNotFoundSnafu { region_id }.fail());
-            }
+            send_result(sender, RegionNotFoundSnafu { region_id }.fail());
             return;
         };
 
@@ -174,7 +179,12 @@ impl<S> RegionWorkerLoop<S> {
         Ok(())
     }
 
-    fn new_flush_task(&self, region: &MitoRegionRef, reason: FlushReason) -> RegionFlushTask {
+    /// Create a flush task with specific `reason` for the `region`.
+    pub(crate) fn new_flush_task(
+        &self,
+        region: &MitoRegionRef,
+        reason: FlushReason,
+    ) -> RegionFlushTask {
         // TODO(yingwen): metrics for flush requested.
         RegionFlushTask {
             region_id: region.region_id,
