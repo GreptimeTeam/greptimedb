@@ -26,7 +26,7 @@ use crate::flush::{FlushReason, RegionFlushTask};
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::region::MitoRegionRef;
 use crate::request::{FlushFailed, FlushFinished};
-use crate::worker::RegionWorkerLoop;
+use crate::worker::{send_result, RegionWorkerLoop};
 
 impl<S: LogStore> RegionWorkerLoop<S> {
     /// On region flush job finished.
@@ -104,9 +104,7 @@ impl<S> RegionWorkerLoop<S> {
         sender: Option<oneshot::Sender<Result<Output>>>,
     ) {
         let Some(region) = self.regions.get_region(region_id) else {
-            if let Some(sender) = sender {
-                let _ = sender.send(RegionNotFoundSnafu { region_id }.fail());
-            }
+            send_result(sender, RegionNotFoundSnafu { region_id }.fail());
             return;
         };
 

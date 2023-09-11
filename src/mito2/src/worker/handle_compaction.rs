@@ -23,7 +23,7 @@ use crate::error::{RegionNotFoundSnafu, Result};
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::region::MitoRegionRef;
 use crate::request::{CompactionFailed, CompactionFinished};
-use crate::worker::RegionWorkerLoop;
+use crate::worker::{send_result, RegionWorkerLoop};
 
 impl<S: LogStore> RegionWorkerLoop<S> {
     /// Handles compaction request submitted to region worker.
@@ -33,9 +33,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         sender: Option<oneshot::Sender<Result<Output>>>,
     ) {
         let Some(region) = self.regions.get_region(region_id) else {
-            if let Some(sender) = sender {
-                let _ = sender.send(RegionNotFoundSnafu { region_id }.fail());
-            }
+            send_result(sender, RegionNotFoundSnafu { region_id }.fail());
             return;
         };
 
